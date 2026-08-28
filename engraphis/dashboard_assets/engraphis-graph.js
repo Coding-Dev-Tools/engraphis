@@ -7989,23 +7989,23 @@
       }
       /* Spacetime-tuned multipliers: the user reaches these via the Galactic gravity, Black hole
          mass, and Local solar gravity sliders. In non-galaxy mode the d3-force simulator is the
-         only consumer, so the multipliers must reach the d3 forces directly. Each map is a
-         bounded monotonic curve so the user can move the slider from end to end and see the
-         intended effect on every node on the next tick.
+         only consumer, so the multipliers must reach the d3 forces directly.
 
-         The default (slider untouched) state must preserve the original force strengths: when a
-         slider is at 0 the multiplier is 0, but the *baseline* force must still apply so the layout
-         is not pinned by a zero-strength d3 force. The `|| 1` on the multiplier fallbacks makes
-         the untouched-slider path a no-op (1.0x), not a force-zeroing path. */
-      const gravityMultiplier = clamp(
-        Number(state.settings.gravitationalConstant || 100) / 100, 0, 2
-      ) || 1;
-      const massMultiplier = clamp(
-        blackHoleMassMultiplier(Number(state.settings.blackHoleMass ?? 160)), 0.25, 4
-      );
-      const localMultiplier = clamp(
-        Number(state.settings.localGravitationalConstant || 100) / 100, 0, 2
-      ) || 1;
+         The dashboard already normalizes these settings in
+         ledger.js::graphSpacetimeEngineSettings() so a visible default of 100 / 160 / 100
+         becomes 2.0 / 1.0 / 2.0 at the engine, and visible 50 / 20 / 50 becomes 0.0 / 0.125 / 0.0.
+         Consume the normalized values directly as the multipliers (no extra /100, no extra
+         clamp-to-1) so the d3 forces scale with the user's actual slider position. The
+         `Number.isFinite` check handles the *missing* case: if ledger.js never supplied a
+         value (the engine was constructed without the dashboard wiring), fall back to the
+         neutral 1.0x multiplier so the layout does not collapse. A user-moved 0 stays 0. */
+      const gcRaw = Number(state.settings.gravitationalConstant);
+      const lgcRaw = Number(state.settings.localGravitationalConstant);
+      const bhmRaw = Number(state.settings.blackHoleMass);
+      const gravityMultiplier = Number.isFinite(gcRaw) ? clamp(gcRaw, 0, 2) : 1;
+      const massMultiplier = Number.isFinite(bhmRaw)
+        ? clamp(blackHoleMassMultiplier(bhmRaw), 0.25, 4) : 1;
+      const localMultiplier = Number.isFinite(lgcRaw) ? clamp(lgcRaw, 0, 2) : 1;
       const baseRepel = mode === 'communities' ? Math.max(10, s.repel * 0.68) : s.repel;
       if (charge && charge.strength) charge.strength(-baseRepel * gravityMultiplier);
       if (link && link.distance) link.distance(s.link);
@@ -8017,12 +8017,27 @@
         ));
         return base * localMultiplier;
       });
-      /* velocityDecay is the d3 equivalent of the space-damping slider: high damping makes the
-         layout settle fast, low damping keeps nodes oscillating. Bounded 0.05..0.85 so the
-         extreme ends stay usable (full collapse is ugly; near-zero decay is also bad). */
-      if (fg.velocityDecay) {
-        const damping = clamp(Number(state.settings.damping ?? 1), 1, 15);
-        fg.velocityDecay(0.05 + (damping - 1) * (0.80 / 14));
+      /* Space friction (the dashboard's "damping" slider) maps onto d3's velocityDecay. The
+         slider's 0..15 visible range must reach the full d3 decay range so the lower quarter
+         is not inert. At the default (slider=1) the size-aware baseline (0.38 small / 0.45
+         large) is the neutral settling behaviour, so the slider's effect is a *multiplier*
+         on that baseline, not a replacement. Above 1 the layout settles harder, below 1
+         it stays more elastic. */
+      if (fg.d3VelocityDecay) {
+        const dampingRaw = Number(state.settings.damping);
+        const damping = Number.isFinite(dampingRaw) ? clamp(dampingRaw, 0, 15) : 1;
+        const baseline = large ? 0.45 : 0.38;
+        /* Linearly interpolate between the d3 velocityDecay floor (0.05) at damping=0,
+           the size-aware baseline at damping=1, and the d3 velocityDecay ceiling (0.85)
+           at damping=15. The full 0..15 visible range is now meaningful, and the default
+           (damping=1) keeps the size-aware settling behaviour the rest of the engine
+           already assumes. */
+        const floor = 0.05;
+        const ceiling = 0.85;
+        const target = damping <= 1
+          ? floor + (baseline - floor) * damping
+          : baseline + (ceiling - baseline) * (damping - 1) / 14;
+        fg.d3VelocityDecay(clamp(target, floor, ceiling));
       }
       if (typeof d3 === 'undefined') {
         installVelocityGuard();
@@ -8079,10 +8094,17 @@
           positions.set(node.id, { x: Math.cos(angle) * radius * 1.18, y: Math.sin(angle) * radius * 0.76 });
         });
         const target = node => positions.get(node.id) || { x: 0, y: 0 };
-        fg.d3Force('x', d3.forceX(node => target(node).x).strength(0.18));
-        fg.d3Force('y', d3.forceY(node => target(node).y).strength(0.18));
+        /* Black-hole mass scales the constellation's anchor strength so the slider is
+           visible in this preset too. */
+        fg.d3Force('x', d3.forceX(node => target(node).x).strength(0.18 * massMultiplier));
+        fg.d3Force('y', d3.forceY(node => target(node).y).strength(0.18 * massMultiplier));
       } else {
-        const centering = mode === 'compact' ? Math.max(0.24, (Number(s.gravity) || 0) / 100) : Math.max(0.06, (Number(s.gravity) || 0) / 100);
+        const baseCentering = mode === 'compact'
+          ? Math.max(0.24, (Number(s.gravity) || 0) / 100)
+          : Math.max(0.06, (Number(s.gravity) || 0) / 100);
+        /* Black-hole mass scales the centering so the slider pulls compact and original
+           layouts toward the origin in proportion to its setting. */
+        const centering = baseCentering * massMultiplier;
         fg.d3Force('x', d3.forceX(0).strength(centering));
         fg.d3Force('y', d3.forceY(0).strength(centering));
       }
@@ -9360,7 +9382,17 @@
          intentionally untouched; the fixed-step clock owns all three physical concerns. */
       if (!galaxyMode && fg.d3AlphaDecay) fg.d3AlphaDecay(staticFullLayout ? 1 : alphaDecay());
       if (!galaxyMode && fg.d3VelocityDecay) {
-        fg.d3VelocityDecay(large ? 0.45 : 0.38);
+        /* applyForces() above already installed the user-facing damping slider value. The
+           size-aware baseline (0.38 small / 0.45 large) is only the *default* when the user
+           has not touched the slider, so this fallback must not clobber a value the user has
+           already set. The proxy in the test harness (and the real force-graph) returns the
+           same function for any property access, so we cannot ask "was the setter called?" —
+           instead we honour the slider's value whenever it is finite, and only fall back to
+           the size-aware baseline when the dashboard never supplied a damping value. */
+        const dampingSetting = Number(state.settings.damping);
+        if (!Number.isFinite(dampingSetting)) {
+          fg.d3VelocityDecay(large ? 0.45 : 0.38);
+        }
       }
       if (fg.linkCurvature) {
         fg.linkCurvature(dense ? 0 : ((PRESETS[state.settings.mode] || PRESETS.compact).curve || 0));

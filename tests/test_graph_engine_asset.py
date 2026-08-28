@@ -10637,7 +10637,7 @@ def test_spacetime_sliders_reach_d3_forces_in_non_galaxy_mode() -> None:
     damping) must reach d3 forces in non-galaxy mode. Earlier they only fed the galaxy-mode
     integrator, so the visible result on the default overview/communities/compact views was a
     settled d3 layout that did not move. The test instruments the d3 force stub and
-    confirms that d3Force('charge'/'link'/'x'/'y') and fg.velocityDecay are all called when
+    confirms that d3Force('charge'/'link'/'x'/'y') and fg.d3VelocityDecay are all called when
     the corresponding spacetime setting is changed.
     """
     report = _run_engine(
@@ -10651,7 +10651,7 @@ def test_spacetime_sliders_reach_d3_forces_in_non_galaxy_mode() -> None:
           velocityDecaySet: 0,
         };
         const f = store.d3Forces || {};
-        if (fg.velocityDecay) before.velocityDecaySet = 1;
+        if (fg.d3VelocityDecay) before.velocityDecaySet = 1;
         const x = f.x, y = f.y, charge = f.charge, link = f.link;
         const beforeX = x && x.strength, beforeY = y && y.strength, beforeCharge = charge && charge.strength;
 
@@ -10669,8 +10669,7 @@ def test_spacetime_sliders_reach_d3_forces_in_non_galaxy_mode() -> None:
               api.setSettings({ [key]: key === 'blackHoleMass' ? 400 : 150 });
               const after = calls.d3Force || 0;
               callResult.reheated = after > before;
-              callResult.velocityDecay = fg.velocityDecay;
-              callResult.storeVelocityDecay = store.velocityDecay;
+              callResult.storeD3VelocityDecay = store.d3VelocityDecay;
               callResult.chargeStrength = snapshotForce('charge');
               callResult.xStrength = snapshotForce('x');
               callResult.yStrength = snapshotForce('y');
@@ -10679,6 +10678,16 @@ def test_spacetime_sliders_reach_d3_forces_in_non_galaxy_mode() -> None:
             }
             result[key] = callResult;
           });
+        // Also exercise the lower end of the damping range so the full 0..15 visible range
+        // reaches the engine (the d700bba fix clamped to 1..15, so damping=0 was inert).
+        const lowDamping = { error: null };
+        try {
+          api.setSettings({ damping: 0 });
+          lowDamping.storeD3VelocityDecay = store.d3VelocityDecay;
+        } catch (error) {
+          lowDamping.error = String(error);
+        }
+        result.dampingLow = lowDamping;
         emit(result);
         """
     )
@@ -10689,17 +10698,26 @@ def test_spacetime_sliders_reach_d3_forces_in_non_galaxy_mode() -> None:
         assert entry['error'] is None, (
             f"setSettings({{{key}: ...}}) raised: {entry['error']}"
         )
-    # velocityDecay must change when damping changes: damping=1 -> 0.05, damping=15 -> 0.85.
-    # The fg Proxy returns the function for property access, so we must call it to
-    # get the stored value.
-    assert report['damping']['storeVelocityDecay'] == pytest.approx(0.85, abs=1e-9), (
-        f"damping=150 (saturated to 15) must yield store.velocityDecay=0.85, "
-        f"got {report['damping']['storeVelocityDecay']}"
+    # damping is a *multiplier* on the size-aware baseline (0.38 small / 0.45 large). At the
+    # upper end of the slider (15) the d3 velocityDecay reaches the 0.85 ceiling. At the lower
+    # end (0) it reaches the 0.05 floor. The fg Proxy returns the function for property access
+    # so we must call it to get the stored value.
+    assert report['damping']['storeD3VelocityDecay'] == pytest.approx(0.85, abs=1e-9), (
+        f"damping=150 (saturated to 15) must yield store.d3VelocityDecay=0.85, "
+        f"got {report['damping']['storeD3VelocityDecay']}"
+    )
+    assert report['dampingLow']['error'] is None, (
+        f"setSettings({{damping: 0}}) raised: {report['dampingLow']['error']}"
+    )
+    assert report['dampingLow']['storeD3VelocityDecay'] == pytest.approx(0.05, abs=1e-9), (
+        f"damping=0 must reach the 0.05 floor of the d3 velocityDecay range; "
+        f"the previous clamp(1, 15) made the lower quarter of the slider inert. "
+        f"got {report['dampingLow']['storeD3VelocityDecay']}"
     )
     # Charge/x/y strengths are not exercised here because the test environment does not stub
     # d3.forceManyBody / d3.forceX / d3.forceY; the absence of those stubs means the engine
     # does not install the charge/link/x/y forces, so the strength assertions would be no-ops.
-    # The velocityDecay path above proves the wire reaches fg.velocityDecay, and the d3Force
+    # The velocityDecay path above proves the wire reaches fg.d3VelocityDecay, and the d3Force
     # call counter (reheated: True) proves the layout-change contract holds for every
     # spacetime key. The real d3 force interaction is covered by the live dashboard and
     # by the offline-gate contract below.
@@ -10744,8 +10762,11 @@ def test_full_graph_within_the_force_budget_keeps_centre_gravity_live() -> None:
         """
     )
     assert report["mode"] == "full"
-    assert report["x"] == {"target": 0, "value": 0.98}
-    assert report["y"] == {"target": 0, "value": 0.98}
+    # The black-hole mass slider is applied to every non-galaxy preset (codex P1 on PR #177),
+    # so the compact-mode centering is now `s.gravity/100 * massMultiplier`. At the engine
+    # default `state.settings.blackHoleMass = 1` the multiplier is 0.25, giving 0.98 * 0.25.
+    assert report["x"] == {"target": 0, "value": pytest.approx(0.245, abs=1e-9)}
+    assert report["y"] == {"target": 0, "value": pytest.approx(0.245, abs=1e-9)}
     assert report["reheat"] == 0, "soft alpha updates must not invoke the unbounded full reheat path"
     assert report["cooldown"] == 1100
     assert report["pinned"] == 0
