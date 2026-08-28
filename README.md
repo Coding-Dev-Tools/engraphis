@@ -748,7 +748,7 @@ environment or the trusted config file above; copying it to an arbitrary `./.env
 Engraphis load it.
 
 > **Reranker benchmark:** model-specific quality and latency numbers (MRR, hit@5,
-> ms/query) are intentionally not published in the README — they depend on the
+> ms/query) are intentionally not published in the README -- they depend on the
 > exact reranker model, revision, hardware, and command. Reproduce them on your
 > own install via `python -m eval.ablation` (or `python -m eval.reinforcement` for
 > retention trajectories) and register the evidence before quoting results.
