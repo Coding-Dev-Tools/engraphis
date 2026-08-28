@@ -1937,7 +1937,7 @@ test('served Ledger wires normalized spacetime controls, overlay, and orbit paus
       };
     });
     expect(rangeResponse.settings).toMatchObject({
-      flowSpeed: 85, repel: 200, link: 32, gravity: 144, size: 5, font: 20,
+      flowSpeed: 65, repel: 200, link: 32, gravity: 144, size: 5, font: 20,
       linkw: 1.28, labelDensity: 56,
     });
     expect(rangeResponse.scope).toEqual({ minDegree: 2, depth: 3 });
