@@ -425,13 +425,15 @@ def resolve(candidate_text: str, neighbors: list[tuple[float, MemoryRecord]], *,
             and evidence.value_swap
             and not evidence.proper_swap
             and not evidence.heavy_swap
-            # A change marker ("now", "switched", ...) accompanied by a
-            # genuine value swap is still a reworded correction of the
-            # same fact even when the texts only share one subject
-            # token (e.g. "Deploys now run on Tuesdays at 7pm" ->
-            # "Deploys run on Fridays at 5pm" share only "Deploys").
-            # The bare "now" leak risk is on heavy_swap / proper_swap
-            # cases, which the other legs of this condition veto.
+            # A bare change marker alone ("now run 5 tasks" ->
+            # "now run 6 tasks") shares only a light verb and no heavy
+            # subject noun — the candidate is not a correction. Require
+            # at least one shared heavy subject token so the marker can
+            # only lift a candidate that already overlaps on the same
+            # subject. shared_subject already excludes light tokens via
+            # _subject_tokens, so the threshold is 1 (any heavy noun
+            # in common) rather than 2.
+            and evidence.shared_subject >= 1
         )
         value_corrected = (
             evidence.value_swap
