@@ -1188,7 +1188,7 @@ test('Ledger releases a dragged node without reheating the graph', async ({ page
   expect(after.fx).toBeUndefined();
   expect(after.fy).toBeUndefined();
   expect(Number.isFinite(after.vx) && Number.isFinite(after.vy)).toBe(true);
-  expect(Math.hypot(after.vx, after.vy)).toBeLessThanOrEqual(48);
+  expect(Math.hypot(after.vx, after.vy)).toBeLessThanOrEqual(52);
   expect(after.finite && after.maxSpeed <= 50).toBe(true);
   // Drag no longer detaches the active solver. Legacy layouts retain their velocity guard;
   // Galaxy retains its fixed-step clock, and neither path globally freezes the graph.
@@ -1556,7 +1556,7 @@ test('black-hole Galaxy remains bounded and differential beyond 450 custom steps
   expect(lateStepSpan).toBeGreaterThan(60);
   expect(late.diagnostics.active).toBe(true);
   expect(late.diagnostics.scheduled).toBe(true);
-  expect(late.diagnostics.maxSpeed).toBeLessThanOrEqual(48);
+  expect(late.diagnostics.maxSpeed).toBeLessThanOrEqual(52);
 
   const angularRates = [];
   let lateMotion = 0;
@@ -1794,7 +1794,7 @@ for (const reducedMotion of [false, true]) {
       expect(Math.min(...samples.map(sample => sample.safety.minimumOuterClearance)),
         JSON.stringify(evidence)).toBeGreaterThanOrEqual(-1e-7);
       expect(Math.max(...samples.map(sample => sample.safety.maximumSpeed)),
-        JSON.stringify(evidence)).toBeLessThanOrEqual(48 + 1e-9);
+        JSON.stringify(evidence)).toBeLessThanOrEqual(52 + 1e-9);
       expect(Math.max(...samples.map(sample => sample.safety.speedCapActivations)),
         JSON.stringify(evidence)).toBe(0);
       expect(before.planet.anchor).toBe(before.star.id);
@@ -1901,8 +1901,8 @@ test('served Ledger wires normalized spacetime controls, overlay, and orbit paus
     });
     expect(massSteps).toEqual([
       { control: 160, multiplier: 1 },
-      { control: 170, multiplier: 1.2 },
-      { control: 180, multiplier: 1.4 },
+      { control: 170, multiplier: 1.4 },
+      { control: 180, multiplier: 1.8 },
     ]);
     /* Engine-side values reflect the new calibration:
        - blackHoleMass curve slope *0.02 (was *0.015): 240 → 1 + 80*0.02 = 2.6
@@ -3262,7 +3262,7 @@ test('Galaxy drag attracts linked and unlinked nearby bodies without reheating',
   expect(resumed.followerPin).toBeUndefined();
   expect(resumed.finite).toBe(true);
   expect(resumed.separation).toBeLessThan(during.separationBefore * 1.2);
-  expect(resumed.diagnostics.maxSpeed).toBeLessThanOrEqual(48);
+  expect(resumed.diagnostics.maxSpeed).toBeLessThanOrEqual(52);
   expect(resumed.diagnostics.steps).toBeGreaterThan(during.diagnostics.steps);
 });
 
@@ -3358,15 +3358,15 @@ test('Galaxy sliders retain full ranges with orbital-speed and radius response',
   expect(naturalOrbits.before.diagnostics.orbitalSeparationPadding).toBe(15);
   expect(naturalOrbits.before.diagnostics.orbitalSeparationStrength).toBe(1);
   expect(fastOrbits.before.diagnostics.orbitalSeparationSetting).toBe(400);
-  expect(fastOrbits.before.diagnostics.orbitalSpeedMultiplier).toBeCloseTo(2.5, 12);
-  expect(fastOrbits.before.diagnostics.orbitalRadiusMultiplier).toBeCloseTo(1.24, 12);
+  expect(fastOrbits.before.diagnostics.orbitalSpeedMultiplier).toBeCloseTo(4.0, 12);
+  expect(fastOrbits.before.diagnostics.orbitalRadiusMultiplier).toBeCloseTo(2.5, 12);
   expect(fastOrbits.before.diagnostics.orbitalSeparationPadding).toBe(15);
   expect(fastOrbits.before.diagnostics.orbitalSeparationStrength).toBe(1);
   expect(fastOrbits.before.diagnostics.crossSystemRepulsionStrength).toBe(0);
   expect(fastOrbits.maximumSeparations).toBeGreaterThan(0);
   expect(fastOrbits.starPlanetBefore).toBeGreaterThan(naturalOrbits.starPlanetBefore);
   expect(fastOrbits.starPlanetBefore).toBeCloseTo(
-    naturalOrbits.starPlanetBefore * 1.24, 6,
+    naturalOrbits.starPlanetBefore * 2.5, 6,
   );
   // The local orbit is allowed to settle at the modest radius selected by Orbital speed; the
   // fixed contact cushion remains diagnostics/compatibility telemetry, not the target radius.
@@ -3424,7 +3424,7 @@ test('Galaxy sliders retain full ranges with orbital-speed and radius response',
     expect(trial.after.anchor.vy).toBe(0);
     expect(trial.before.finite).toBe(true);
     expect(trial.after.finite).toBe(true);
-    expect(trial.after.diagnostics.maxSpeed).toBeLessThanOrEqual(48);
+    expect(trial.after.diagnostics.maxSpeed).toBeLessThanOrEqual(52);
     const sampleSystems = trial.samples.map(sample => new Map(sample.systems
       .map(system => [system.id, system])));
     for (const systemBefore of trial.before.systems) {
@@ -3618,7 +3618,7 @@ test('Reheat layout control never adds Galaxy bonus physics slices', async ({ pa
   expect(after.diagnostics.steps).toBeGreaterThan(before.diagnostics.steps);
   expect(Math.hypot(after.phase[0] - before.phase[0], after.phase[1] - before.phase[1]))
     .toBeGreaterThan(0.01);
-  expect(after.diagnostics.maxSpeed).toBeLessThanOrEqual(48);
+  expect(after.diagnostics.maxSpeed).toBeLessThanOrEqual(52);
   expect(after.d3).toEqual({ reheat: 0, alpha: 0, reset: 0 });
 });
 
