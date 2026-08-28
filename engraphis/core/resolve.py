@@ -90,6 +90,18 @@ _LIGHT_TOKENS = frozenset({
     "use", "used", "using", "run", "ran", "set", "get", "go", "went",
 }) | _CHANGE_MARKERS
 _CHANGE_ONLY_TOKENS = _CHANGE_MARKERS
+# Tokens that introduce a value in a single-noun attribute slot
+# (e.g. "is named master", "is set to INFO", "uses three replicas").
+# When a noun-for-noun swap is flanked by one of these in the same
+# position on both sides, the surrounding context is a value slot and
+# the swap is a name-correction. A bare shared prefix without an
+# attribute introducer is more likely a parallel-subject pair
+# (e.g. "Customer alpha default admin user is root" vs
+# "Customer beta default admin user is admin").
+_ATTRIBUTE_INTRODUCERS = frozenset({
+    "named", "called", "set", "level", "value", "version", "mode",
+    "status", "type", "kind", "state", "role", "tier", "preset",
+})
 _ENV_QUALIFIERS = frozenset({
     "staging", "production", "prod", "development", "dev", "test", "testing",
     "qa", "uat", "preview", "sandbox", "demo", "local",
@@ -592,9 +604,14 @@ def _attribute_anchor_ok(cand: list[tuple[str, bool]], rec: list[tuple[str, bool
     is named" matches on both sides) from a coexisting-fact pair like
     "the docs cover the REST interface" -> "...the GraphQL interface"
     (the swapped tokens are themselves the attribute). The window is
-    +/- 2 around the swap span — tighter than the surrounding sentence but
-    wide enough to capture attribute-introducing verbs ("is named",
-    "covers", "uses").
+    +/- 3 around the swap span — tight enough to ignore the subject
+    noun on the left, wide enough to capture attribute-introducing
+    verbs ("is named", "covers", "uses"). The window must also
+    contain one of ``_ATTRIBUTE_INTRODUCERS`` on both sides so a
+    shared prefix without a value slot ("Customer alpha default
+    admin user is root" vs "Customer beta default admin user is
+    admin") is treated as parallel subjects, not a single-fact
+    correction.
     """
     def _attr_window(seq: list[tuple[str, bool]],
                     span: tuple[int, int]) -> set[str]:
@@ -617,7 +634,15 @@ def _attribute_anchor_ok(cand: list[tuple[str, bool]], rec: list[tuple[str, bool
 
     cand_attr = _attr_window(cand, old_span)
     rec_attr = _attr_window(rec, new_span)
-    return len(cand_attr & rec_attr) >= 1
+    if not (cand_attr & rec_attr):
+        return False
+    # The window must also carry an attribute introducer on both sides
+    # so a parallel-subject pair (different ``Customer alpha`` vs
+    # ``Customer beta`` subjects with a shared predicate) is not
+    # mistaken for a single-fact correction. The introducer is the
+    # bridge between the subject and the value slot.
+    return bool((cand_attr & _ATTRIBUTE_INTRODUCERS)
+                and (rec_attr & _ATTRIBUTE_INTRODUCERS))
 
 
 def _correction_evidence(candidate_text: str, record_text: str) -> CorrectionEvidence:
