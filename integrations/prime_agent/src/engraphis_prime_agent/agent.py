@@ -113,7 +113,13 @@ class EngraphisPrimeAgent:
             self._tools = None  # rebuild bindings with the new session id
             return session_id
 
-    async def end_session(self, *, summary: str = "", outcome: str = "") -> None:
+    async def end_session(
+        self,
+        *,
+        summary: str = "",
+        outcome: str = "",
+        open_threads: list[str] | None = None,
+    ) -> None:
         # Capture the id under the lock so a concurrent start_session can't
         # race us between the "no session" check and the call_tool.
         async with self._session_lock:
@@ -128,17 +134,22 @@ class EngraphisPrimeAgent:
         # spot stranded sessions, but never propagate: end_session() is
         # called from aclose/__aexit__ paths where raising would mask the
         # real shutdown error.
+        end_args: dict[str, Any] = {
+            "action": "end",
+            "agent": self.name,
+            "session_id": session_id,
+            "summary": summary,
+            "outcome": outcome,
+        }
+        if open_threads is not None:
+            # ``open_threads`` is the server's next-session handoff. The
+            # MCP schema treats this field as nullable; we forward the
+            # list as-is so an empty list clears prior follow-ups and a
+            # non-empty list replaces them. Omitting the key entirely
+            # leaves the server's prior threads untouched.
+            end_args["open_threads"] = open_threads
         try:
-            await self.client.call_tool(
-                "engraphis_session",
-                {
-                    "action": "end",
-                    "agent": self.name,
-                    "session_id": session_id,
-                    "summary": summary,
-                    "outcome": outcome,
-                },
-            )
+            await self.client.call_tool("engraphis_session", end_args)
         except Exception as exc:  # noqa: BLE001 — best-effort close
             _logger.warning(
                 "end_session for agent=%r (session_id=%r) failed: %s",
@@ -216,6 +227,14 @@ class EngraphisPrimeAgent:
         return self._ensure_tools()[name]
 
     async def call(self, tool: str, args: dict[str, Any]) -> dict[str, Any]:
+        # Lifecycle calls must route through the agent's own state
+        # machine so the cached ``_session_id`` stays in sync with the
+        # server session; an "end" would otherwise leave the agent
+        # holding a closed id, and a "start" with force_new would
+        # create a new server session whose id is not cached. This
+        # mirrors the registration wrapper's special case.
+        if tool == "engraphis_session":
+            return await self._dispatch_session_lifecycle(args)
         if not self._session_id:
             await self.start_session()
         fn, _schema = self.get_tool(tool)
@@ -299,7 +318,15 @@ class EngraphisPrimeAgent:
         if action == "end":
             summary = args.get("summary", "")
             outcome = args.get("outcome", "")
-            await self.end_session(summary=summary, outcome=outcome)
+            open_threads = args.get("open_threads")
+            # ``open_threads`` is the server's next-session handoff;
+            # dropping it would silently strip the caller-advertised
+            # follow-ups, so always forward it through ``end_session``.
+            await self.end_session(
+                summary=summary,
+                outcome=outcome,
+                open_threads=open_threads,
+            )
             return {"status": "closed"}
         # Default to start. Forward force_new, goal, open_threads so the
         # new session carries the caller's metadata.

@@ -409,3 +409,51 @@ async def test_subagent_status_reflects_session_lifecycle() -> None:
         assert agent.status()["session_id"] is None
     finally:
         await f.aclose()
+
+
+@pytest.mark.asyncio
+async def test_end_session_forwards_open_threads_to_mcp_call(fake_mcp_server) -> None:
+    """`end_session(open_threads=[...])` must include the open_threads list
+    in the underlying MCP call_tool so the server can persist the
+    next-session handoff. Dropping the argument would silently strand
+    advertised follow-ups on the server side."""
+    f = PrimeAgentFleet(workspace="x")
+    await f.client.connect()
+    try:
+        agent = f["researcher"]
+        await agent.start_session()
+        thread = "follow up on the caching decision"
+        await agent.end_session(summary="done", outcome="ok",
+                                open_threads=[thread])
+        # Locate the engraphis_session/end RPC in the call log.
+        end_calls = [
+            (name, args) for name, args in fake_mcp_server.call_log
+            if name == "engraphis_session" and args.get("action") == "end"
+        ]
+        assert end_calls, "expected an engraphis_session/end MCP call"
+        # The most recent end call should carry the open_threads payload.
+        _name, end_args = end_calls[-1]
+        assert end_args.get("open_threads") == [thread]
+    finally:
+        await f.aclose()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_session_lifecycle_end_routes_through_state_machine(fake_mcp_server) -> None:
+    """`agent.call("engraphis_session", {"action": "end"})` must clear the
+    cached session id so subsequent memory calls do not re-inject a
+    closed id. Without the lifecycle routing, the agent would still
+    hold the prior id after the server closed the session."""
+    f = PrimeAgentFleet(workspace="x")
+    await f.client.connect()
+    try:
+        agent = f["researcher"]
+        await agent.start_session()
+        prior = agent.status()["session_id"]
+        assert prior
+        await agent.call("engraphis_session", {"action": "end",
+                                               "summary": "shutdown",
+                                               "outcome": "complete"})
+        assert agent.status()["session_id"] is None
+    finally:
+        await f.aclose()

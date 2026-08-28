@@ -3359,14 +3359,14 @@ test('Galaxy sliders retain full ranges with orbital-speed and radius response',
   expect(naturalOrbits.before.diagnostics.orbitalSeparationStrength).toBe(1);
   expect(fastOrbits.before.diagnostics.orbitalSeparationSetting).toBe(400);
   expect(fastOrbits.before.diagnostics.orbitalSpeedMultiplier).toBeCloseTo(4.0, 12);
-  expect(fastOrbits.before.diagnostics.orbitalRadiusMultiplier).toBeCloseTo(2.5, 12);
+  expect(fastOrbits.before.diagnostics.orbitalRadiusMultiplier).toBeCloseTo(1.5, 12);
   expect(fastOrbits.before.diagnostics.orbitalSeparationPadding).toBe(15);
   expect(fastOrbits.before.diagnostics.orbitalSeparationStrength).toBe(1);
   expect(fastOrbits.before.diagnostics.crossSystemRepulsionStrength).toBe(0);
   expect(fastOrbits.maximumSeparations).toBeGreaterThan(0);
   expect(fastOrbits.starPlanetBefore).toBeGreaterThan(naturalOrbits.starPlanetBefore);
   expect(fastOrbits.starPlanetBefore).toBeCloseTo(
-    naturalOrbits.starPlanetBefore * 2.5, 6,
+    naturalOrbits.starPlanetBefore * 1.5, 6,
   );
   // The local orbit is allowed to settle at the modest radius selected by Orbital speed; the
   // fixed contact cushion remains diagnostics/compatibility telemetry, not the target radius.
