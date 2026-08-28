@@ -162,7 +162,12 @@ def test_arm_candidate_k_cap_reduces_latency_at_k_50(monkeypatch):
         "Project Aurora uses Postgres for durable storage. Authentication uses PASETO. "
         "The deploy pipeline runs unit and integration tests with a canary release."
     )
-    for i in range(49):
+    # Use 300 memories so both arms are clamped to well above 250, the
+    # first-page widening ceiling. The 49-fact corpus in the original
+    # version clamped both k=50 and k=200 to len(ids)==49, making the
+    # two timed paths operationally identical; the 1.5x speedup
+    # assertion was therefore measuring noise/cache order.
+    for i in range(300):
         _add(store, emb, wid, None, f"{base} fact_index={i} workstream={i % 5}")
     flt = SearchFilter(workspace_id=wid)
     query = "What storage and auth systems does Project Aurora use?"
@@ -190,7 +195,7 @@ def test_arm_candidate_k_cap_reduces_latency_at_k_50(monkeypatch):
     eng_capped = RecallEngine(store2, emb2, NumpyVectorIndex(store2),
                               IdentityReranker())
     wid2 = store2.get_or_create_workspace("w")
-    for i in range(49):
+    for i in range(300):
         _add(store2, emb2, wid2, None, f"{base} fact_index={i} workstream={i % 5}")
     flt2 = SearchFilter(workspace_id=wid2)
     capped_ms = mean_ms(eng_capped)
