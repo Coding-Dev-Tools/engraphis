@@ -2453,6 +2453,16 @@
   function graphSliderResponseValue(id, value, baseline) {
     const control = byId(id);
     if (!control) return Number.isFinite(Number(value)) ? Number(value) : baseline;
+    /* Flow speed is a linear control: the 2x response centered at 45 would
+       clamp every visible value in the lower quarter of the slider to
+       0, which the compat engine then treats as "stop" and the user
+       sees an inert slider end. Use the raw value for flow-speed and
+       keep the 2x response for the geometry controls (gravity, repel,
+       link, etc.) where the centered calibration is intentional. */
+    if (id === 'graph-flow-speed') {
+      const rawFlow = graphValueInRange(id, value, baseline);
+      return Number.isFinite(Number(rawFlow)) ? Number(rawFlow) : baseline;
+    }
     const raw = graphValueInRange(id, value, baseline);
     const center = Number.isFinite(Number(baseline)) ? Number(baseline) : raw;
     const min = Number(control.min);
