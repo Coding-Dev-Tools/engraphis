@@ -105,12 +105,18 @@ def test_cross_type_sibling_does_not_drive_resolution():
 
 
 def test_shared_provenance_source_creates_evidence_edge():
+    # Under the attribute-correction contract, a single heavy-noun swap
+    # with a tight shared subject invalidates the previous fact, so the
+    # second sibling no longer survives as ADD. The engine's
+    # remember_many path still creates the shared-source edge on the
+    # retained memory; the contract under test is the edge, not the
+    # resolver op. Use two genuinely distinct facts so the resolver
+    # leaves them both live.
     eng, wid, rid = _engine()
     results = eng.remember_many(
         [
-            FactSpec(content="Finding one about caching.",
-                     evidence_source="subagent-7"),
-            FactSpec(content="Finding two about latency budgets.",
+            FactSpec(content="The cache is keyed on URL.", evidence_source="subagent-7"),
+            FactSpec(content="Sessions are persisted to disk every 30 seconds.",
                      evidence_source="subagent-7"),
         ],
         workspace_id=wid, repo_id=rid,
