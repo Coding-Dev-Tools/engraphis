@@ -513,6 +513,13 @@ async function main() {
       log(`${tag} ${r.id.padEnd(38)} wired=${r.settingsReached?'Y':'N'} engine=${r.engineApplied?'Y':'N'} physics=${r.physicsChanged?'Y':'N'} speedΔ=${(r.highSpeed - r.lowSpeed).toFixed(3)} radiusΔ=${(r.highRadius - r.lowRadius).toFixed(2)}`);
     }
     log(`\nResult: ${passed} alive, ${failed} dead, ${skipped} skipped`);
+    if (skipped > 0) {
+      // A skipped slider means the DOM no longer contains the element
+      // we were supposed to verify. Treat that as a failure: the harness
+      // cannot claim to have verified every slider if some were absent.
+      err(`${skipped} slider(s) skipped because they were absent from the DOM (dashboard changed shape).`);
+      exitCode = 1;
+    }
 
     // Take a screenshot showing the final state
     await page.screenshot({ path: path.join(REPO, 'dashboard_slider_test.png'), fullPage: true });
