@@ -57,6 +57,13 @@ assert len(set(DEFAULT_AGENT_NAMES)) == len(DEFAULT_AGENT_NAMES), (
 #     We keep both for symmetry with the Pi TS implementation.
 _ALLOWED_ENV_KEYS = frozenset({
     "PATH", "Path", "SystemRoot", "ComSpec",
+    # Windows-only home variables. ``Path.home()`` reads USERPROFILE first
+    # and falls back to HOMEDRIVE+HOMEPATH; without them the early
+    # ``_resolve_config_env_path()`` call aborts with FileNotFoundError on
+    # ``~/.engraphis.env`` before the MCP handshake runs. Forward them on
+    # every platform so a wheel installed on Windows does not need a
+    # pre-existing ``ENGRAPHIS_ENV_FILE`` to bootstrap.
+    "USERPROFILE", "HOMEDRIVE", "HOMEPATH",
 })
 _ALLOWED_ENV_PREFIX = "ENGRAPHIS_"
 

@@ -263,10 +263,20 @@ class EngraphisPrimeAgent:
         current binding on every invocation so a session-id refresh in
         ``start_session`` (which invalidates the cached tool map) is
         honoured on the next call, not only the first one.
+
+        The ``engraphis_session`` tool is special-cased to route through
+        ``start_session``/``end_session`` so a framework-driven
+        ``action: "start", force_new: true`` updates the cached
+        ``_session_id``, and an explicit ``action: "end"`` clears it.
+        Without this routing the wrapper would treat the lifecycle
+        call like any other data tool and leave ``_session_id`` pointing
+        to a session the server has already closed.
         """
         agent = self
 
         async def _wrapper(args: dict[str, Any], ctx: Any = None) -> dict[str, Any]:
+            if tool_name == "engraphis_session":
+                return await agent._dispatch_session_lifecycle(args)
             if not agent._session_id:
                 await agent.start_session()
             # Re-fetch on every invocation. start_session() rebuilds the
@@ -277,6 +287,39 @@ class EngraphisPrimeAgent:
             return await fresh_fn(args)
 
         return _wrapper
+
+    async def _dispatch_session_lifecycle(
+        self, args: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Route a framework-driven engraphis_session call through the
+        proper lifecycle methods so ``_session_id`` stays in sync with
+        the server's session state.
+        """
+        action = args.get("action", "start")
+        if action == "end":
+            summary = args.get("summary", "")
+            outcome = args.get("outcome", "")
+            await self.end_session(summary=summary, outcome=outcome)
+            return {"status": "closed"}
+        # Default to start. Forward force_new, goal, open_threads so the
+        # new session carries the caller's metadata.
+        kwargs: dict[str, Any] = {}
+        if args.get("force_new"):
+            kwargs["force_new"] = True
+        if args.get("goal"):
+            # The wrapper exposes ``goal`` via start_session via a
+            # constructor-time attribute; the lifecycle path overrides it
+            # in place so the cached tool map reflects the new goal.
+            self.goal = args["goal"]
+        await self.start_session(**kwargs)
+        # Rebuild tools with the new session id before returning so the
+        # caller's next tool invocation does not see the stale binding.
+        self._tools = None
+        return {
+            "session_id": self._session_id,
+            "action": "start",
+            "agent": self.name,
+        }
 
     def status(self) -> dict[str, Any]:
         return {
