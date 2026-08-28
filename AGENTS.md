@@ -9,6 +9,14 @@ and pluggable.
 This is the canonical operating manual for any AI agent working in this repo. `CLAUDE.md`
 imports it. Read §0 before editing anything.
 
+### Internal subagent delegation
+
+When parallel delegation is appropriate for ChatGPT/Codex tasks, use exactly four bounded
+subagents inside the current task and chat. Keep delegation at one level: workers return bounded
+results and the parent performs the sole integration. Subagents must never be sent to Orca, Orca
+orchestration, or separate user-visible threads. Before finalizing, verify that all four workers
+returned and that no forbidden routing or descendant delegation occurred.
+
 ---
 
 ## 0. Read this first — two architectures live in one package
