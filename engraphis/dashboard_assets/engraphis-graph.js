@@ -7991,10 +7991,21 @@
          mass, and Local solar gravity sliders. In non-galaxy mode the d3-force simulator is the
          only consumer, so the multipliers must reach the d3 forces directly. Each map is a
          bounded monotonic curve so the user can move the slider from end to end and see the
-         intended effect on every node on the next tick. */
-      const gravityMultiplier = clamp(Number(state.settings.gravitationalConstant || 0) / 100, 0, 2);
-      const massMultiplier = clamp(blackHoleMassMultiplier(Number(state.settings.blackHoleMass ?? 160)), 0.25, 4);
-      const localMultiplier = clamp(Number(state.settings.localGravitationalConstant || 0) / 100, 0, 2);
+         intended effect on every node on the next tick.
+
+         The default (slider untouched) state must preserve the original force strengths: when a
+         slider is at 0 the multiplier is 0, but the *baseline* force must still apply so the layout
+         is not pinned by a zero-strength d3 force. The `|| 1` on the multiplier fallbacks makes
+         the untouched-slider path a no-op (1.0x), not a force-zeroing path. */
+      const gravityMultiplier = clamp(
+        Number(state.settings.gravitationalConstant || 100) / 100, 0, 2
+      ) || 1;
+      const massMultiplier = clamp(
+        blackHoleMassMultiplier(Number(state.settings.blackHoleMass ?? 160)), 0.25, 4
+      );
+      const localMultiplier = clamp(
+        Number(state.settings.localGravitationalConstant || 100) / 100, 0, 2
+      ) || 1;
       const baseRepel = mode === 'communities' ? Math.max(10, s.repel * 0.68) : s.repel;
       if (charge && charge.strength) charge.strength(-baseRepel * gravityMultiplier);
       if (link && link.distance) link.distance(s.link);
