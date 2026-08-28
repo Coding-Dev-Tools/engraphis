@@ -9320,12 +9320,15 @@
       fg.linkDirectionalArrowLength(dense ? 0 : 0.625).linkDirectionalArrowRelPos(1);
       applyLinkLabels();
       if (fg.linkDirectionalParticles) {
-        const flowSpeed = Number(state.settings.flowSpeed);
+        const rawFlowSpeed = Number(state.settings.flowSpeed);
         /* flowSpeed=0 means "stop" — particles must not render at all. The every-node engine
            already enforces this via a `moving = speed > 0` check; the compat engine must do
            the same. Otherwise the slider visibly does nothing at the low end (particles keep
-           crawling at the residual 0.002 floor). */
-        const flowActive = Number.isFinite(flowSpeed) ? flowSpeed > 0 : true;
+           crawling at the residual 0.002 floor). When a standalone caller omits flowSpeed
+           (Number(undefined) → NaN), fall back to the historical default of 45 so the
+           speed formula below stays finite and the active check stays meaningful. */
+        const flowSpeed = Number.isFinite(rawFlowSpeed) ? rawFlowSpeed : 45;
+        const flowActive = flowSpeed > 0;
         const flowing = !fullGraph
           && state.settings.flow !== false
           && motion
