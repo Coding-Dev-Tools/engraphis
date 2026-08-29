@@ -30,9 +30,9 @@ _SESSION_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "properties": {
         "action": {"type": "string", "enum": ["start", "end"], "default": "start"},
-        # `agent` is required by the underlying engraphis_session tool —
-        # we never want a silent fallback to a generic "prime-agent"
-        # name, so no `default` is declared.
+        # The wrapper supplies the registered agent name when the caller omits
+        # this optional field. Keeping it optional also lets the framework
+        # invoke the lifecycle tool without duplicating registration metadata.
         "agent": {"type": "string", "minLength": 1, "maxLength": 200},
         "force_new": {"type": "boolean", "default": False},
         "goal": {"type": "string", "maxLength": 1000, "default": ""},
@@ -48,7 +48,7 @@ _SESSION_SCHEMA: dict[str, Any] = {
         "workspace": {"type": "string", "maxLength": 200},
         "repo": {"type": ["string", "null"], "maxLength": 200, "default": None},
     },
-    "required": ["agent"],
+    "required": [],
 }
 
 _RECALL_CONTEXT_SCHEMA: dict[str, Any] = {
@@ -84,8 +84,8 @@ _REMEMBER_SCHEMA: dict[str, Any] = {
         "session_id": {"type": ["string", "null"], "default": None},
         "workspace": {"type": "string", "maxLength": 200},
         "repo": {"type": ["string", "null"], "maxLength": 200, "default": None},
-        "subject_key": {"type": ["string", "null"], "maxLength": 200},
-        "claim_kind": {"type": ["string", "null"], "maxLength": 200},
+        "subject_key": {"type": "string", "maxLength": 1000},
+        "claim_kind": {"type": "string", "maxLength": 200},
     },
     "required": ["content"],
 }

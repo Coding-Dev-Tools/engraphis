@@ -47,6 +47,14 @@ def test_remember_schema_declares_keyed_claim_fields_as_properties() -> None:
     assert {"subject_key", "claim_kind"} <= set(schema["properties"])
     assert "subject_key" not in schema
     assert "claim_kind" not in schema
+    assert schema["properties"]["subject_key"] == {"type": "string", "maxLength": 1000}
+    assert schema["properties"]["claim_kind"] == {"type": "string", "maxLength": 200}
+
+
+def test_session_agent_is_optional_for_registered_lifecycle_calls() -> None:
+    schema = dict(TOOL_SPECS)["engraphis_session"]
+    assert "agent" in schema["properties"]
+    assert "agent" not in schema["required"]
 
 
 def test_build_tool_unknown_name_raises() -> None:
