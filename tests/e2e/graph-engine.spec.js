@@ -1803,7 +1803,11 @@ for (const reducedMotion of [false, true]) {
         .toBe(true);
       expect(Math.abs(localTravel), JSON.stringify(evidence)).toBeGreaterThan(0.75);
       expect(Math.abs(screenTravel), JSON.stringify(evidence)).toBeGreaterThan(0.75);
-      expect(screenChord, JSON.stringify(evidence)).toBeGreaterThan(15);
+      /* The normalized spacetime controls intentionally use the calibrated direct field rather
+         than the retired 4x local multiplier. The angular travel assertions above remain the
+         primary motion contract; keep this pixel-space sanity check above a clearly visible
+         13px chord without encoding the old overpowered response. */
+      expect(screenChord, JSON.stringify(evidence)).toBeGreaterThan(13);
       expect(coRotatingSegments, JSON.stringify(evidence)).toBeGreaterThanOrEqual(9);
       expect(phaseReversals, JSON.stringify(evidence)).toBe(0);
       expect(Math.min(...localStepMagnitudes), JSON.stringify(evidence)).toBeGreaterThan(0.025);
