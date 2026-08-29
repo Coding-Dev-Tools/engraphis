@@ -638,6 +638,14 @@
      remain meaningful at every camera zoom. */
   const MIN_NODE_SPEED = 8;
   const MAX_NODE_SPEED = 48;
+  function galaxyRelativeSpeedBudget(parent, absoluteLimit, requested) {
+    const limit = Math.max(0.01, Number(absoluteLimit) || MAX_NODE_SPEED);
+    const parentSpeed = parent ? Math.hypot(
+      Number.isFinite(parent.vx) ? parent.vx : 0,
+      Number.isFinite(parent.vy) ? parent.vy : 0,
+    ) : 0;
+    return Math.max(0, Math.min(Number(requested) || 0, limit - parentSpeed));
+  }
 
   /* The classic renderer's *dense* signal (`GPERF.dense`, `links>1500` in dashboard.js). Past
      it the classic path turns off the two per-edge costs that scale with the link count and
@@ -1079,6 +1087,7 @@
   function seedGalaxyHierarchicalLocalOrbits(nodes, gravity, softening, options) {
     const opts = options || {};
     const orbitalSpeed = galaxyOrbitalSpeedMultiplier(opts.orbitalSpeed);
+    const absoluteSpeedLimit = Math.max(0.01, Number(opts.speedLimit) || MAX_NODE_SPEED);
     const epsilon = Math.max(0.1, Number(softening) || 8);
     const centers = galaxyOrbitGroups(nodes);
     centers.forEach(center => {
@@ -1106,8 +1115,9 @@
           * radius / Math.max(1e-9, denominator);
         const acceleration = localAccelerationCap > 0
           ? Math.min(localAccelerationCap, rawAcceleration) : rawAcceleration;
-        const targetTangent = Math.min(GALAXY_LOCAL_RELATIVE_SPEED_LIMIT,
-          Math.sqrt(Math.max(0, acceleration * radius)) * orbitalSpeed);
+        const targetTangent = galaxyRelativeSpeedBudget(parent, absoluteSpeedLimit,
+          Math.min(GALAXY_LOCAL_RELATIVE_SPEED_LIMIT,
+            Math.sqrt(Math.max(0, acceleration * radius)) * orbitalSpeed));
         const parentVx = Number.isFinite(parent.vx) ? parent.vx : 0;
         const parentVy = Number.isFinite(parent.vy) ? parent.vy : 0;
         const relativeVx = (Number.isFinite(node.vx) ? node.vx : 0) - parentVx;
@@ -1141,6 +1151,7 @@
   function seedGalaxyOrbits(nodes, layoutSeed, gravity, softening, reducedMotion, options) {
     const opts = options || {};
     const orbitalSpeed = galaxyOrbitalSpeedMultiplier(opts.orbitalSpeed);
+    const absoluteSpeedLimit = Math.max(0.01, Number(opts.speedLimit) || MAX_NODE_SPEED);
     const orbitalRadius = galaxyOrbitalRadiusMultiplier(opts.orbitalSpeed);
     const speedControlEnabled = opts.restorePhase !== true
       && Number.isFinite(Number(opts.orbitalSpeed));
@@ -1377,8 +1388,9 @@
         const inwardAcceleration = localAccelerationCap > 0
           ? Math.min(localAccelerationCap, rawInwardAcceleration) : rawInwardAcceleration;
         const omega = Math.sqrt(Math.max(0, inwardAcceleration / speedRadius));
-        const targetTangent = Math.min(GALAXY_LOCAL_RELATIVE_SPEED_LIMIT,
-          omega * speedRadius * orbitalSpeed);
+        const targetTangent = galaxyRelativeSpeedBudget(anchor, absoluteSpeedLimit,
+          Math.min(GALAXY_LOCAL_RELATIVE_SPEED_LIMIT,
+            omega * speedRadius * orbitalSpeed));
         const relativeVx = (Number.isFinite(satellite.vx) ? satellite.vx : 0) - anchorVx;
         const relativeVy = (Number.isFinite(satellite.vy) ? satellite.vy : 0) - anchorVy;
         const tangent = (-dy * relativeVx + dx * relativeVy) / currentRadius;
@@ -2827,6 +2839,7 @@
   function advanceGalaxyKinematicLocalMembers(members, carrier, carrierTarget, options) {
     const opts = options || {};
     const orbitalSpeed = galaxyOrbitalSpeedMultiplier(opts.orbitalSpeed);
+    const absoluteSpeedLimit = Math.max(0.01, Number(opts.speedLimit) || MAX_NODE_SPEED);
     const orbitalRadius = galaxyOrbitalRadiusMultiplier(opts.orbitalSpeed);
     const localSoftening = Math.max(0.1, Number(opts.localSoftening) || opts.softening || 40);
     const timestep = Math.max(0.001, Math.min(2, Number(opts.timestep) || 1));
@@ -2888,7 +2901,8 @@
         Math.sqrt(Math.max(0, acceleration / localRadius)) * orbitalSpeed,
         GALAXY_LOCAL_RELATIVE_SPEED_LIMIT * orbitalSpeed / localRadius);
       local.angle += local.direction * omega * timestep;
-      const localSpeed = omega * localRadius;
+      const localSpeed = galaxyRelativeSpeedBudget(parentTarget, absoluteSpeedLimit,
+        omega * localRadius);
       const offsetX = Math.cos(local.angle) * localRadius;
       const offsetY = Math.sin(local.angle) * localRadius;
       const target = {
@@ -5693,6 +5707,8 @@
   function applyGalaxyOrbitalSpeedControl(nodes, options) {
     const opts = options || {};
     const orbitalSpeed = galaxyOrbitalSpeedMultiplier(opts.orbitalSpeed);
+    const absoluteSpeedLimit = Number.isFinite(Number(opts.speedLimit))
+      ? Math.max(0.01, Number(opts.speedLimit)) : Number.POSITIVE_INFINITY;
     const orbitalRadius = galaxyOrbitalRadiusMultiplier(opts.orbitalSpeed);
     const bodies = (nodes || []).filter(node => node && !node.ghost
       && Number.isFinite(node.x) && Number.isFinite(node.y));
@@ -5844,10 +5860,12 @@
         const tangentX = -unitY * phase.direction, tangentY = unitX * phase.direction;
         const targetX = parent.x + unitX * targetRadius;
         const targetY = parent.y + unitY * targetRadius;
+        const targetRelativeSpeed = galaxyRelativeSpeedBudget(parent, absoluteSpeedLimit,
+          baseSpeed * orbitalSpeed);
         const targetVx = (Number.isFinite(parent.vx) ? parent.vx : 0)
-          + tangentX * baseSpeed * orbitalSpeed;
+          + tangentX * targetRelativeSpeed;
         const targetVy = (Number.isFinite(parent.vy) ? parent.vy : 0)
-          + tangentY * baseSpeed * orbitalSpeed;
+          + tangentY * targetRelativeSpeed;
         const shiftX = targetX - node.x, shiftY = targetY - node.y;
         const velocityShiftX = targetVx - (Number.isFinite(node.vx) ? node.vx : 0);
         const velocityShiftY = targetVy - (Number.isFinite(node.vy) ? node.vy : 0);

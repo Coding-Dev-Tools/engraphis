@@ -13,7 +13,7 @@ const { test, expect } = require('@playwright/test');
  */
 
 const workspace = 'graph-e2e';
-const stellarOrbitAssetVersion = '20260815-merge-ready-1';
+const stellarOrbitAssetVersion = '20260828-slider-multiplier-fix';
 
 // A small connected store: two clusters joined by one bridge, so communities, the legend and
 // the bridge detector all have something real to work on.
@@ -1843,7 +1843,7 @@ for (const reducedMotion of [false, true]) {
       expect(diagnostics.linkSetting).toBe(8);
       expect(diagnostics.relationOrbitScale).toBeCloseTo(0.25, 12);
       expect(diagnostics.gravitySetting).toBe(96);
-      expect(diagnostics.blackHoleGravity).toBeCloseTo(3230.6848639753507, 12);
+      expect(diagnostics.blackHoleGravity).toBeCloseTo(1615.3424319876754, 12);
       expect(diagnostics.localGravity).toBeCloseTo(240, 12);
       expect(diagnostics.systemOrbitSeedSpeedLimit).toBeCloseTo(23.4, 12);
 
@@ -1901,12 +1901,12 @@ test('served Ledger wires normalized spacetime controls, overlay, and orbit paus
     });
     expect(massSteps).toEqual([
       { control: 160, multiplier: 1 },
-      { control: 170, multiplier: 1.2 },
-      { control: 180, multiplier: 1.4 },
+      { control: 170, multiplier: 1.0294117647058822 },
+      { control: 180, multiplier: 1.0588235294117647 },
     ]);
     await expect.poll(() => page.evaluate(() => window.__engraphisGraph.state().settings))
-      .toMatchObject({ gravitationalConstant: 4, blackHoleMass: 2.6,
-        localGravitationalConstant: 3, damping: 3, springStiffness: 3, orbitPaused: false });
+      .toMatchObject({ gravitationalConstant: 1.5, blackHoleMass: 1.2352941176470589,
+        localGravitationalConstant: 1.25, damping: 2, springStiffness: 2, orbitPaused: false });
     const rangeResponse = await page.evaluate(() => {
       const set = (id, value) => {
         const control = document.getElementById(id);
@@ -2751,13 +2751,13 @@ test('served primary dashboard keeps local stellar orbits independent at Galaxy-
     expect(systemCenterTravel, JSON.stringify(evidence)).toBeGreaterThan(0.25);
     expect(after.anchor).toMatchObject({ id: 'black-hole', x: 0, y: 0, vx: 0, vy: 0 });
     expect(after.settings.gravity).toBe(0);
-    expect(after.diagnostics.blackHoleGravity).toBeCloseTo(344.27076923076925, 8);
+    expect(after.diagnostics.blackHoleGravity).toBeCloseTo(172.13538461538462, 8);
     expect(after.diagnostics.globalGravityFloorSetting).toBe(24);
     expect(after.diagnostics.globalGravityFloorActive).toBe(true);
     expect(after.diagnostics.systemGravity).toMatchObject({
       gravitySetting: 0,
       stellarGravityFloorSetting: 48,
-      stellarGravity: 5070,
+      stellarGravity: 10140,
       eligibleStellarAnchors: 1,
       fallbackAnchors: 0,
       globalAnchors: 0,
