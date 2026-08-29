@@ -2453,6 +2453,22 @@
   function graphSliderResponseValue(id, value, baseline) {
     const control = byId(id);
     if (!control) return Number.isFinite(Number(value)) ? Number(value) : baseline;
+    /* Spacetime multipliers (galactic gravity, local solar gravity, black hole mass,
+       space friction, spring stiffness) are linear controls: the dashboard's
+       graphSpacetimeEngineSettings already normalises them to a clean 0..2 range with
+       the visible default at 1.0. The 2x response gain centred on the slider's fallback
+       would clip the lower quarter of every slider to 0 (e.g. visible 0..50 for the
+       gravitational-constant slider all map to engine 0) and compress the visible
+       50..100 range to engine 0..1.0, so the user couldn't tell the difference between
+       slider=30 and slider=50. Bypass the gain for these controls so the visible slider
+       position maps linearly to the engine value. */
+    if (id === 'graph-gravitational-constant'
+      || id === 'graph-local-gravitational-constant'
+      || id === 'graph-black-hole-mass'
+      || id === 'graph-space-damping'
+      || id === 'graph-spring-stiffness') {
+      return graphValueInRange(id, value, baseline);
+    }
     const raw = graphValueInRange(id, value, baseline);
     const center = Number.isFinite(Number(baseline)) ? Number(baseline) : raw;
     const min = Number(control.min);
