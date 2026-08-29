@@ -19,6 +19,13 @@ from .tools import ToolFn, all_tools, build_tool, TOOL_SPECS
 _logger = logging.getLogger("engraphis_prime_agent.agent")
 
 
+class _UnsetRepo:
+    """Sentinel used to distinguish an omitted repo from an explicit null."""
+
+
+_UNSET_REPO = _UnsetRepo()
+
+
 class EngraphisPrimeAgent:
     """One named sub-agent owning its own Engraphis session.
 
@@ -101,7 +108,7 @@ class EngraphisPrimeAgent:
         *,
         force_new: bool = False,
         workspace: str | None = None,
-        repo: str | None = None,
+        repo: str | None | _UnsetRepo = _UNSET_REPO,
         agent: str | None = None,
         goal: str | None = None,
         token_budget: int | None = None,
@@ -111,14 +118,14 @@ class EngraphisPrimeAgent:
         # (and concurrent get_tool() callers that read self._session_id).
         async with self._session_lock:
             requested_workspace = self.workspace if workspace is None else workspace
-            requested_repo = self.repo if repo is None else repo
+            requested_repo = self.repo if isinstance(repo, _UnsetRepo) else repo
             requested_agent = self._session_agent if agent is None else agent
             requested_goal = self.goal if goal is None else goal
             requested_budget = self.token_budget if token_budget is None else token_budget
             has_overrides = any(
                 value is not None
-                for value in (workspace, repo, agent, goal, token_budget)
-            )
+                for value in (workspace, agent, goal, token_budget)
+            ) or not isinstance(repo, _UnsetRepo)
             request_force_new = force_new or (
                 self._session_id is not None
                 and goal is not None

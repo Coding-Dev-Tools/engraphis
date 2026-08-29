@@ -98,6 +98,14 @@ async def test_force_new_starts_a_fresh_session(fleet) -> None:
 
 
 @pytest.mark.asyncio
+async def test_explicit_null_repo_clears_cached_repo(fleet) -> None:
+    agent = fleet["researcher"]
+    await agent.start_session()
+    await agent.start_session(force_new=True, repo=None)
+    assert agent.repo is None
+
+
+@pytest.mark.asyncio
 async def test_call_lazy_starts_session(fleet) -> None:
     agent = fleet["researcher"]
     assert agent.session_id is None

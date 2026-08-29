@@ -160,7 +160,16 @@ class EngraphisMcpClient:
                         client_info=Implementation(name=self._client_name, version=EXTENSION_VERSION),
                     )
                 )
-                await asyncio.wait_for(session.initialize(), timeout=CONNECT_TIMEOUT_S)
+                _remaining = _connect_budget - (time.monotonic() - _connect_started)
+                if _remaining <= 0:
+                    raise asyncio.TimeoutError(
+                        f"engraphis-mcp connect exceeded {_connect_budget:.0f}s"
+                    )
+                # Initialization shares the same end-to-end budget as the
+                # transport setup. Reusing CONNECT_TIMEOUT_S here could let
+                # a slow stdio handshake consume the full budget and then
+                # grant initialize another full minute.
+                await asyncio.wait_for(session.initialize(), timeout=_remaining)
                 _remaining = _connect_budget - (time.monotonic() - _connect_started)
                 if _remaining <= 0:
                     raise asyncio.TimeoutError(
