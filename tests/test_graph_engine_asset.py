@@ -1953,7 +1953,10 @@ def test_system_velocity_guard_preserves_black_hole_carrier_before_local_motion(
     )
     assert report["afterCarrier"] == pytest.approx(report["beforeCarrier"], abs=1e-12)
     assert report["planetSpeed"] <= 50 + 1e-12
-    assert report["localSpeed"] <= 32 + 1e-12
+    # A vector budget preserves perpendicular local motion instead of subtracting the carrier's
+    # scalar magnitude. Here the carrier and planet velocities oppose each other, so the full
+    # 48-unit local differential remains safely below the 50-unit world-speed ceiling.
+    assert report["localSpeed"] <= 48 + 1e-12
     assert report["guard"]["systems"] == 1
 
 
@@ -10850,6 +10853,42 @@ def test_full_graph_beyond_responsive_force_budget_is_centred_and_responds_to_gr
     assert report["reheat"] == 0
     assert report["pinned"] == report["total"] == 601
     assert report["cooldown"] == 0
+
+
+@requires_node
+def test_oversized_full_layout_consumes_every_spacetime_control() -> None:
+    """The deterministic full-layout fallback must not make advanced controls inert."""
+    report = _run_engine(
+        """
+        const api = G.create(el, {});
+        api.setPreset('compact');
+        api.setRenderMode('full');
+        api.setData(chain(600));
+        const baseline = store.graphData.nodes.map(node => [node.x, node.y]);
+        const settings = {
+          gravitationalConstant: 2,
+          blackHoleMass: 2,
+          localGravitationalConstant: 2,
+          damping: 15,
+          springStiffness: 100 / 32,
+        };
+        const changes = {};
+        Object.entries(settings).forEach(([key, value]) => {
+          api.setSettings({ [key]: value });
+          changes[key] = Math.max(...store.graphData.nodes.map((node, index) =>
+            Math.hypot(node.x - baseline[index][0], node.y - baseline[index][1])));
+        });
+        emit(changes);
+        """
+    )
+    for key in (
+        "gravitationalConstant",
+        "blackHoleMass",
+        "localGravitationalConstant",
+        "damping",
+        "springStiffness",
+    ):
+        assert report[key] > 1e-6, f"static full layout ignored {key}"
 
 
 @requires_node

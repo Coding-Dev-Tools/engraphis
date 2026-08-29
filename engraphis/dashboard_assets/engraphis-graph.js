@@ -638,13 +638,26 @@
      remain meaningful at every camera zoom. */
   const MIN_NODE_SPEED = 8;
   const MAX_NODE_SPEED = 48;
-  function galaxyRelativeSpeedBudget(parent, absoluteLimit, requested) {
+  function galaxyRelativeSpeedBudget(parent, absoluteLimit, requested, directionX, directionY) {
     const limit = Math.max(0.01, Number(absoluteLimit) || MAX_NODE_SPEED);
-    const parentSpeed = parent ? Math.hypot(
-      Number.isFinite(parent.vx) ? parent.vx : 0,
-      Number.isFinite(parent.vy) ? parent.vy : 0,
-    ) : 0;
-    return Math.max(0, Math.min(Number(requested) || 0, limit - parentSpeed));
+    const requestedSpeed = Math.max(0, Number(requested) || 0);
+    const parentVx = parent && Number.isFinite(parent.vx) ? parent.vx : 0;
+    const parentVy = parent && Number.isFinite(parent.vy) ? parent.vy : 0;
+    const directionLength = Math.hypot(Number(directionX) || 0, Number(directionY) || 0);
+    if (!(directionLength > 1e-9)) {
+      return Math.max(0, Math.min(requestedSpeed,
+        limit - Math.hypot(parentVx, parentVy)));
+    }
+    const unitX = directionX / directionLength;
+    const unitY = directionY / directionLength;
+    const projection = parentVx * unitX + parentVy * unitY;
+    /* Solve |parentVelocity + unitTangent * relativeSpeed| <= limit for the largest
+       non-negative relativeSpeed. This preserves a perpendicular local orbit even when
+       the carrier is already close to the absolute speed ceiling. */
+    const discriminant = projection * projection + limit * limit
+      - parentVx * parentVx - parentVy * parentVy;
+    const maximum = -projection + Math.sqrt(Math.max(0, discriminant));
+    return Math.max(0, Math.min(requestedSpeed, maximum));
   }
 
   /* The classic renderer's *dense* signal (`GPERF.dense`, `links>1500` in dashboard.js). Past
@@ -1115,15 +1128,18 @@
           * radius / Math.max(1e-9, denominator);
         const acceleration = localAccelerationCap > 0
           ? Math.min(localAccelerationCap, rawAcceleration) : rawAcceleration;
-        const targetTangent = galaxyRelativeSpeedBudget(parent, absoluteSpeedLimit,
-          Math.min(GALAXY_LOCAL_RELATIVE_SPEED_LIMIT,
-            Math.sqrt(Math.max(0, acceleration * radius)) * orbitalSpeed));
         const parentVx = Number.isFinite(parent.vx) ? parent.vx : 0;
         const parentVy = Number.isFinite(parent.vy) ? parent.vy : 0;
         const relativeVx = (Number.isFinite(node.vx) ? node.vx : 0) - parentVx;
         const relativeVy = (Number.isFinite(node.vy) ? node.vy : 0) - parentVy;
         const tangentX = -dy / radius, tangentY = dx / radius;
         const currentTangent = relativeVx * tangentX + relativeVy * tangentY;
+        const sign = Math.sign(currentTangent)
+          || ((seededHash(opts.layoutSeed, 'system:' + String(parent.id)) & 1) ? 1 : -1);
+        const targetTangent = galaxyRelativeSpeedBudget(parent, absoluteSpeedLimit,
+          Math.min(GALAXY_LOCAL_RELATIVE_SPEED_LIMIT,
+            Math.sqrt(Math.max(0, acceleration * radius)) * orbitalSpeed),
+          tangentX * sign, tangentY * sign);
         const parentId = String(parent.id);
         const previousParent = typeof node.__galaxyOrbitAnchorId === 'string'
           ? node.__galaxyOrbitAnchorId : '';
@@ -1132,8 +1148,6 @@
           || Math.abs(previousSpeed - orbitalSpeed) > 1e-9;
         const needsSeed = previousParent !== parentId || Math.abs(currentTangent) < 1e-8;
         if (needsSeed || speedChanged) {
-          const sign = Math.sign(currentTangent)
-            || ((seededHash(opts.layoutSeed, 'system:' + parentId) & 1) ? 1 : -1);
           node.vx = parentVx + tangentX * targetTangent * sign;
           node.vy = parentVy + tangentY * targetTangent * sign;
         }
@@ -1388,12 +1402,14 @@
         const inwardAcceleration = localAccelerationCap > 0
           ? Math.min(localAccelerationCap, rawInwardAcceleration) : rawInwardAcceleration;
         const omega = Math.sqrt(Math.max(0, inwardAcceleration / speedRadius));
-        const targetTangent = galaxyRelativeSpeedBudget(anchor, absoluteSpeedLimit,
-          Math.min(GALAXY_LOCAL_RELATIVE_SPEED_LIMIT,
-            omega * speedRadius * orbitalSpeed));
         const relativeVx = (Number.isFinite(satellite.vx) ? satellite.vx : 0) - anchorVx;
         const relativeVy = (Number.isFinite(satellite.vy) ? satellite.vy : 0) - anchorVy;
         const tangent = (-dy * relativeVx + dx * relativeVy) / currentRadius;
+        const targetTangent = galaxyRelativeSpeedBudget(anchor, absoluteSpeedLimit,
+          Math.min(GALAXY_LOCAL_RELATIVE_SPEED_LIMIT,
+            omega * speedRadius * orbitalSpeed),
+          -dy / currentRadius * direction,
+          dx / currentRadius * direction);
         const previousAnchorId = typeof satellite.__galaxyOrbitAnchorId === 'string'
           ? satellite.__galaxyOrbitAnchorId : '';
         const anchoredHere = previousAnchorId === anchorId;
@@ -2900,9 +2916,13 @@
       const omega = Math.min(
         Math.sqrt(Math.max(0, acceleration / localRadius)) * orbitalSpeed,
         GALAXY_LOCAL_RELATIVE_SPEED_LIMIT * orbitalSpeed / localRadius);
-      local.angle += local.direction * omega * timestep;
+      const requestedLocalSpeed = omega * localRadius;
+      const localTangentX = -Math.sin(local.angle) * local.direction;
+      const localTangentY = Math.cos(local.angle) * local.direction;
       const localSpeed = galaxyRelativeSpeedBudget(parentTarget, absoluteSpeedLimit,
-        omega * localRadius);
+        requestedLocalSpeed, localTangentX, localTangentY);
+      const cappedOmega = localSpeed / Math.max(1e-9, localRadius);
+      local.angle += local.direction * cappedOmega * timestep;
       const offsetX = Math.cos(local.angle) * localRadius;
       const offsetY = Math.sin(local.angle) * localRadius;
       const target = {
@@ -4657,16 +4677,9 @@
         if (relativeSpeed > limit) scale = Math.min(scale, limit / relativeSpeed);
       });
       maximumRelativeSpeed = Math.max(maximumRelativeSpeed, systemMaximum);
-      /* A planet's local tangent rides on top of the star's galactic carrier velocity. The
-         carrier is the primary orbit: preserve it whenever it is inside the emergency ceiling,
-         and clamp only the local frame to the remaining vector budget. */
       let carrierAdjusted = false;
       if (anchor && Number.isFinite(absoluteLimit)) {
         const carrierSpeed = Math.hypot(referenceVx, referenceVy);
-        const carrierAllowance = Math.max(0, absoluteLimit - carrierSpeed);
-        if (systemMaximum > 1e-12) {
-          scale = Math.min(scale, carrierAllowance / systemMaximum);
-        }
         if (carrierSpeed > absoluteLimit + 1e-12) {
           const carrierScale = carrierSpeed > 1e-12 ? absoluteLimit / carrierSpeed : 0;
           const targetVx = referenceVx * carrierScale;
@@ -4683,18 +4696,34 @@
           minimumScale = Math.min(minimumScale, carrierScale);
         }
       }
-      if (!(scale < 1 - 1e-12) && !carrierAdjusted) return;
+      let systemLimited = carrierAdjusted || scale < 1 - 1e-12;
       members.forEach(node => {
         if (node === anchor) {
           node.vx = referenceVx;
           node.vy = referenceVy;
           return;
         }
-        node.vx = referenceVx + (node.vx - referenceVx) * scale;
-        node.vy = referenceVy + (node.vy - referenceVy) * scale;
+        const relativeVx = node.vx - referenceVx, relativeVy = node.vy - referenceVy;
+        const relativeSpeed = Math.hypot(relativeVx, relativeVy);
+        if (!(relativeSpeed > 1e-12)) return;
+        let localScale = scale;
+        if (Number.isFinite(absoluteLimit)) {
+          const candidateVx = relativeVx * localScale, candidateVy = relativeVy * localScale;
+          const candidateSpeed = Math.hypot(candidateVx, candidateVy);
+          if (candidateSpeed > 1e-12) {
+            const allowed = galaxyRelativeSpeedBudget(
+              { vx: referenceVx, vy: referenceVy }, absoluteLimit, candidateSpeed,
+              candidateVx, candidateVy);
+            localScale = Math.min(localScale, allowed / candidateSpeed);
+          }
+        }
+        if (localScale < 1 - 1e-12) systemLimited = true;
+        minimumScale = Math.min(minimumScale, localScale);
+        node.vx = referenceVx + relativeVx * localScale;
+        node.vy = referenceVy + relativeVy * localScale;
       });
+      if (!systemLimited) return;
       limitedSystems++;
-      minimumScale = Math.min(minimumScale, scale);
     });
     return {
       systems: systems.length, limitedSystems, maximumRelativeSpeed, minimumScale, limit,
@@ -5861,7 +5890,7 @@
         const targetX = parent.x + unitX * targetRadius;
         const targetY = parent.y + unitY * targetRadius;
         const targetRelativeSpeed = galaxyRelativeSpeedBudget(parent, absoluteSpeedLimit,
-          baseSpeed * orbitalSpeed);
+          baseSpeed * orbitalSpeed, tangentX, tangentY);
         const targetVx = (Number.isFinite(parent.vx) ? parent.vx : 0)
           + tangentX * targetRelativeSpeed;
         const targetVy = (Number.isFinite(parent.vy) ? parent.vy : 0)
@@ -6057,7 +6086,10 @@
     ) : { applied: 0, maximumAcceleration: 0, maximumPull: 0 };
     const systemVelocity = stabilizeGalaxySystemVelocities(bodies, {
       limit: opts.localRelativeSpeedLimit,
-      absoluteLimit: speedLimit,
+      /* The integrator applies the world-speed ceiling below as one common scale so the
+         mass-weighted local frame keeps its momentum. The direct helper still accepts an
+         absoluteLimit for callers that need a per-vector projection. */
+      absoluteLimit: Infinity,
       fixedNodeId: opts.fixedNodeId,
     });
     /* Restore the pointer target before the final contacts. The strict horizon and cached outer
@@ -6307,7 +6339,9 @@
     };
     const finalSystemVelocity = stabilizeGalaxySystemVelocities(bodies, {
       limit: opts.localRelativeSpeedLimit,
-      absoluteLimit: speedLimit,
+      /* Keep the final local pass momentum-preserving; the common world-speed projection below
+         is the sole absolute cap for a leapfrog slice. */
+      absoluteLimit: Infinity,
       fixedNodeId: opts.fixedNodeId,
     });
     systemVelocity.limitedSystems += finalSystemVelocity.limitedSystems;
@@ -8183,10 +8217,23 @@
       const link = Math.max(4, Number(s.link) || 4);
       const nodeSize = Math.max(1, Number(s.size) || 3);
       const compactness = galaxyLayoutCompactness(s.gravity);
-      const localGap = (4 + nodeSize * 1.6 + Math.sqrt(repel) * 0.8 + link * 0.16) * compactness;
+      const control = (value, fallback, min, max) => Number.isFinite(Number(value))
+        ? clamp(value, min, max) : fallback;
+      const coreAttraction = control(s.gravitationalConstant, 1, 0, 2);
+      const coreMass = control(s.blackHoleMass, 1, 0, 2);
+      const clusterCohesion = control(s.localGravitationalConstant, 1, 0, 2);
+      const settlingResistance = control(s.damping, 1, 0, 15);
+      const linkSpring = control(s.springStiffness, 1, 0, 100 / 32);
+      const coreScale = 1 / Math.sqrt(Math.max(0.25, coreAttraction * coreMass));
+      const cohesionScale = 1 / Math.sqrt(Math.max(0.25, clusterCohesion * linkSpring));
+      const settlingScale = 1 + (settlingResistance - 1) * 0.02;
+      const layoutPhysicsScale = coreScale * cohesionScale * settlingScale;
+      const localGap = (4 + nodeSize * 1.6 + Math.sqrt(repel) * 0.8 + link * 0.16)
+        * compactness * layoutPhysicsScale;
       const columns = Math.max(1, Math.ceil(Math.sqrt(ordered.length)));
       const largestGroup = ordered.reduce((largest, [, nodes]) => Math.max(largest, nodes.length), 1);
-      const cell = Math.max(90, Math.sqrt(largestGroup) * localGap * 2.4 + link * 3) * compactness;
+      const cell = Math.max(90, Math.sqrt(largestGroup) * localGap * 2.4 + link * 3)
+        * compactness * Math.max(0.5, Math.sqrt(layoutPhysicsScale));
       const golden = Math.PI * (3 - Math.sqrt(5));
       ordered.forEach(([, nodes], groupIndex) => {
         nodes.sort((a, b) => (b.degree || 0) - (a.degree || 0) || String(a.id).localeCompare(String(b.id)));
