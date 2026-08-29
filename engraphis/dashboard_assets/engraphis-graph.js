@@ -5785,6 +5785,21 @@
         node.vx = (Number.isFinite(node.vx) ? node.vx : 0) + tangentX * delta;
         node.vy = (Number.isFinite(node.vy) ? node.vy : 0) + tangentY * delta;
       });
+      if (Number.isFinite(absoluteSpeedLimit) && carrier.id !== opts.fixedNodeId) {
+        const carrierVx = Number.isFinite(carrier.vx) ? carrier.vx : 0;
+        const carrierVy = Number.isFinite(carrier.vy) ? carrier.vy : 0;
+        const carrierSpeed = Math.hypot(carrierVx, carrierVy);
+        if (carrierSpeed > absoluteSpeedLimit) {
+          const scale = absoluteSpeedLimit / carrierSpeed;
+          const correctionX = carrierVx * scale - carrierVx;
+          const correctionY = carrierVy * scale - carrierVy;
+          members.forEach(node => {
+            if (node.id === opts.fixedNodeId) return;
+            node.vx = (Number.isFinite(node.vx) ? node.vx : 0) + correctionX;
+            node.vy = (Number.isFinite(node.vy) ? node.vy : 0) + correctionY;
+          });
+        }
+      }
       stats.systems++;
     };
     field.systems.forEach(item => {
