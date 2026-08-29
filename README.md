@@ -747,11 +747,11 @@ See `.env.example` for the full variable inventory. Supply those values through 
 environment or the trusted config file above; copying it to an arbitrary `./.env` does not make
 Engraphis load it.
 
-> **Reranker benchmark:** model-specific quality and latency numbers (MRR, hit@5,
-> ms/query) are intentionally not published in the README -- they depend on the
-> exact reranker model, revision, hardware, and command. Reproduce them on your
-> own install via `python -m eval.ablation` (or `python -m eval.reinforcement` for
-> retention trajectories) and register the evidence before quoting results.
+> **Ablation fixture:** `python -m eval.ablation` is an offline deterministic check that prints
+> `recall@5` comparisons for vector-only and hybrid retrieval, multi-hop graph arms, and
+> retrieval policies, plus ordinary-recall age and semantic-confidence checks. It does not
+> produce MRR, hit@5, or ms/query results. Use `python -m eval.reinforcement` for retention
+> trajectories, and register evidence before quoting any benchmark results.
 
 ---
 
