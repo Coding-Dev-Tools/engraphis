@@ -282,6 +282,37 @@ async def test_smart_error_envelope_is_parsed_into_message(fake_mcp_server) -> N
         msg = str(exc.value)
         assert "validation_failed" in msg
         assert "missing required field 'query'" in msg
+        assert exc.value.retryable is False
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_smart_retryable_error_preserves_retryability_signal(fake_mcp_server) -> None:
+    import json
+
+    envelope = {
+        "error": {
+            "code": "upstream_unavailable",
+            "message": "temporary gateway failure",
+            "retryable": True,
+        }
+    }
+
+    async def _smart_error_handler(name, args):
+        return {
+            "isError": True,
+            "content": [{"type": "text", "text": json.dumps(envelope)}],
+        }
+
+    fake_mcp_server.tool_handler = _smart_error_handler
+    config = EngraphisRuntimeConfig(command="ignored", environment={})
+    client = EngraphisMcpClient(config)
+    await client.connect()
+    try:
+        with pytest.raises(EngraphisMcpToolError) as exc:
+            await client.call_tool("engraphis_recall_context", {})
+        assert exc.value.retryable is True
     finally:
         await client.close()
 

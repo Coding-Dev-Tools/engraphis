@@ -58,6 +58,19 @@ def test_session_agent_is_optional_for_registered_lifecycle_calls() -> None:
     assert "agent" not in schema["required"]
 
 
+def test_session_schema_advertises_compatibility_action_aliases() -> None:
+    schema = dict(TOOL_SPECS)["engraphis_session"]
+    assert schema["properties"]["action"]["enum"] == [
+        "start",
+        "end",
+        "start_session",
+        "end_session",
+    ]
+    assert validate_args("engraphis_session", {"action": "start_session"})[
+        "action"
+    ] == "start_session"
+
+
 def test_nullable_schema_types_accept_each_union_member() -> None:
     assert validate_args("engraphis_session", {"repo": "api"})["repo"] == "api"
     assert validate_args("engraphis_session", {"repo": None})["repo"] is None
