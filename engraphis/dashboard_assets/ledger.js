@@ -2379,7 +2379,10 @@
       const label = byId(id);
       if (label) label.textContent = labels[index];
     });
-    byId('graph-spacetime-tuning').hidden = !galaxy;
+    // The spacetime multipliers are also wired into the d3 forces for every
+    // non-Galaxy preset. Keep the controls available wherever those settings
+    // have an observable effect; only the labels and summary vary by mode.
+    byId('graph-spacetime-tuning').hidden = false;
     const forceLabels = full
       ? ['Core attraction', 'Core mass', 'Cluster cohesion', 'Settling resistance', 'Link spring']
       : ['Galactic gravity', 'Black hole mass', 'Local solar gravity', 'Space friction', 'Spring stiffness'];
