@@ -382,6 +382,26 @@ def test_numeric_value_after_non_identifier_label_invalidates():
     assert res.target_id == "mem_timeout_30"
 
 
+def test_numeric_subject_identifier_drift_supports_unlisted_entity_labels():
+    neighbor = _rec(
+        "Invoice 100 has status paid with archived receipt and audit metadata.",
+        id="mem_invoice_100",
+    )
+    res = resolve(
+        "Invoice 200 has status paid with archived receipt and audit metadata.",
+        [(0.9, neighbor)],
+    )
+    assert res.op == ResolutionOp.RELATE
+    assert res.target_id == "mem_invoice_100"
+
+
+def test_subject_identifier_label_cannot_be_masked_by_shared_attribute_anchor():
+    neighbor = _rec("User role admin for tenant alpha.", id="mem_tenant_alpha")
+    res = resolve("User role admin for tenant beta.", [(0.9, neighbor)])
+    assert res.op != ResolutionOp.INVALIDATE
+    assert res.target_id == "mem_tenant_alpha"
+
+
 def test_named_identifier_swap_is_not_proven_a_correction_without_marker():
     # ProviderA -> ProviderB beside 4 -> 8 workers could be parallel infrastructure;
     # the hashing embedder cannot prove the same predicate, so both stay live.
