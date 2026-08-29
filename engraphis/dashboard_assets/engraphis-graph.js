@@ -7991,20 +7991,19 @@
          mass, and Local solar gravity sliders. In non-galaxy mode the d3-force simulator is the
          only consumer, so the multipliers must reach the d3 forces directly.
 
-         The dashboard already normalizes these settings in
-         ledger.js::graphSpacetimeEngineSettings() so a visible default of 100 / 160 / 100
-         becomes 2.0 / 1.0 / 2.0 at the engine, and visible 50 / 20 / 50 becomes 0.0 / 0.125 / 0.0.
-         Consume the normalized values directly as the multipliers (no extra /100, no extra
-         clamp-to-1) so the d3 forces scale with the user's actual slider position. The
-         `Number.isFinite` check handles the *missing* case: if ledger.js never supplied a
-         value (the engine was constructed without the dashboard wiring), fall back to the
-         neutral 1.0x multiplier so the layout does not collapse. A user-moved 0 stays 0. */
+         The dashboard normalizes these settings in
+         ledger.js::graphSpacetimeEngineSettings() to a clean 0..2 range with the visible
+         default at 1.0x. Consume the normalized values directly as the multipliers. A
+         user-moved 0 reaches the engine as 0 (no force), the default 1.0 (no change), and
+         the high end 2.0 (double force). The `Number.isFinite` check handles the *missing*
+         case: if ledger.js never supplied a value (the engine was constructed without the
+         dashboard wiring), fall back to the neutral 1.0x multiplier so the layout does
+         not collapse. */
       const gcRaw = Number(state.settings.gravitationalConstant);
       const lgcRaw = Number(state.settings.localGravitationalConstant);
       const bhmRaw = Number(state.settings.blackHoleMass);
       const gravityMultiplier = Number.isFinite(gcRaw) ? clamp(gcRaw, 0, 2) : 1;
-      const massMultiplier = Number.isFinite(bhmRaw)
-        ? clamp(blackHoleMassMultiplier(bhmRaw), 0.25, 4) : 1;
+      const massMultiplier = Number.isFinite(bhmRaw) ? clamp(bhmRaw, 0, 2) : 1;
       const localMultiplier = Number.isFinite(lgcRaw) ? clamp(lgcRaw, 0, 2) : 1;
       const baseRepel = mode === 'communities' ? Math.max(10, s.repel * 0.68) : s.repel;
       if (charge && charge.strength) charge.strength(-baseRepel * gravityMultiplier);

@@ -10763,10 +10763,11 @@ def test_full_graph_within_the_force_budget_keeps_centre_gravity_live() -> None:
     )
     assert report["mode"] == "full"
     # The black-hole mass slider is applied to every non-galaxy preset (codex P1 on PR #177),
-    # so the compact-mode centering is now `s.gravity/100 * massMultiplier`. At the engine
-    # default `state.settings.blackHoleMass = 1` the multiplier is 0.25, giving 0.98 * 0.25.
-    assert report["x"] == {"target": 0, "value": pytest.approx(0.245, abs=1e-9)}
-    assert report["y"] == {"target": 0, "value": pytest.approx(0.245, abs=1e-9)}
+    # so the compact-mode centering is now `s.gravity/100 * massMultiplier`. With the new
+    # normalization in ledger.js the engine receives massMultiplier=1.0 at the visible
+    # default (160), so the centering is the full 0.98 unchanged from the pre-multiplier era.
+    assert report["x"] == {"target": 0, "value": 0.98}
+    assert report["y"] == {"target": 0, "value": 0.98}
     assert report["reheat"] == 0, "soft alpha updates must not invoke the unbounded full reheat path"
     assert report["cooldown"] == 1100
     assert report["pinned"] == 0
