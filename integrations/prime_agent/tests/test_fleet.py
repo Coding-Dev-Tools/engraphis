@@ -228,6 +228,14 @@ async def test_lifecycle_rejects_unknown_action(fleet) -> None:
 
 
 @pytest.mark.asyncio
+async def test_lifecycle_rejects_non_boolean_force_new(fleet) -> None:
+    with pytest.raises(EngraphisMcpToolError, match="force_new must be a boolean"):
+        await fleet["researcher"].call(
+            "engraphis_session", {"force_new": "false"}
+        )
+
+
+@pytest.mark.asyncio
 async def test_aexit_via_context_manager() -> None:
     async with PrimeAgentFleet(workspace="x") as fleet:
         await fleet["researcher"].start_session()

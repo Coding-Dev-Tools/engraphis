@@ -186,6 +186,10 @@ async def test_connect_is_idempotent(fake_mcp_server) -> None:
     cache_id = id(client._tools_cache)
     await client.connect()
     assert id(client._tools_cache) == cache_id
+    async def unexpected_second_discovery(_session):
+        raise AssertionError("list_tools issued a second tools/list request")
+    client._list_tools = unexpected_second_discovery  # type: ignore[method-assign]
+    assert await client.list_tools()
     await client.close()
 
 

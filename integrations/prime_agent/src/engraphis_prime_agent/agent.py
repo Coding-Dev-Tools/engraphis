@@ -404,9 +404,12 @@ class EngraphisPrimeAgent:
         # Default to start. Forward every start argument advertised by the
         # Smart schema. ``start_session`` updates the cached scope/goal and
         # tool bindings only after the gateway returns a session id.
-        start_kwargs: dict[str, Any] = {
-            "force_new": bool(args.get("force_new", False)),
-        }
+        force_new = args.get("force_new", False)
+        if not isinstance(force_new, bool):
+            raise EngraphisMcpToolError(
+                "engraphis_session force_new must be a boolean."
+            )
+        start_kwargs: dict[str, Any] = {"force_new": force_new}
         for key in ("workspace", "repo", "agent", "goal", "token_budget"):
             if key in args:
                 start_kwargs[key] = args[key]
