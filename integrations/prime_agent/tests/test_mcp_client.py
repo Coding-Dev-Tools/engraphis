@@ -243,6 +243,74 @@ async def test_unknown_tool_name_includes_name_in_error_message(mcp_client) -> N
 
 
 @pytest.mark.asyncio
+async def test_smart_error_envelope_is_parsed_into_message(fake_mcp_server) -> None:
+    """The Smart gateway wraps every failure as
+    ``{"error": {"code": ..., "message": ..., "retryable": ...}}``;
+    the client must surface the inner code and message instead of
+    the generic fallback so callers can distinguish validation
+    errors from retryable internal failures.
+    """
+    import json
+
+    envelope = {
+        "error": {
+            "code": "validation_failed",
+            "message": "missing required field 'query'",
+            "retryable": False,
+        }
+    }
+
+    async def _smart_error_handler(name, args):
+        return {
+            "isError": True,
+            "content": [{"type": "text", "text": json.dumps(envelope)}],
+        }
+
+    fake_mcp_server.tool_handler = _smart_error_handler
+    config = EngraphisRuntimeConfig(command="ignored", environment={})
+    client = EngraphisMcpClient(config)
+    await client.connect()
+    try:
+        with pytest.raises(EngraphisMcpToolError) as exc:
+            await client.call_tool("engraphis_recall_context", {})
+        msg = str(exc.value)
+        assert "validation_failed" in msg
+        assert "missing required field 'query'" in msg
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_legacy_flat_error_envelope_is_still_supported(fake_mcp_server) -> None:
+    """The classic gateway emits a flat ``{"code": ..., "message": ...}``
+    envelope for backwards compatibility. The client must keep
+    parsing that shape so the integration does not regress when an
+    older server is in front of the agent."""
+    import json
+
+    envelope = {"code": "not_found", "message": "memory mem_xyz is gone"}
+
+    async def _flat_error_handler(name, args):
+        return {
+            "isError": True,
+            "content": [{"type": "text", "text": json.dumps(envelope)}],
+        }
+
+    fake_mcp_server.tool_handler = _flat_error_handler
+    config = EngraphisRuntimeConfig(command="ignored", environment={})
+    client = EngraphisMcpClient(config)
+    await client.connect()
+    try:
+        with pytest.raises(EngraphisMcpToolError) as exc:
+            await client.call_tool("engraphis_recall_context", {})
+        msg = str(exc.value)
+        assert "not_found" in msg
+        assert "memory mem_xyz is gone" in msg
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_close_is_idempotent(fake_mcp_server) -> None:
     """Calling close() twice must not raise. The second call should be a no-op
     because _stack/_session are already None."""

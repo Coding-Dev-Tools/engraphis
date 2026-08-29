@@ -148,8 +148,13 @@ adapter) if prime-agent's real API differs.
 | `ENGRAPHIS_REPO` | Default repo scope. The fleet's `repo=` overrides this. |
 | `PRIME_AGENT_CONFIG_PATH` | Override the prime-agent config file path used by `scripts/install_prime_agent.py`. |
 
-Only `ENGRAPHIS_*`, `PATH`, `Path`, `SystemRoot`, and `ComSpec` are forwarded to
-the gateway subprocess — never the full environment.
+Only the following variables are forwarded to the gateway subprocess —
+never the full environment:
+- `ENGRAPHIS_*` (any variable prefixed with `ENGRAPHIS_`)
+- `PATH` / `Path` (resolved to the subprocess's PATH conventions)
+- `SystemRoot` / `ComSpec` on Windows
+- `USERPROFILE`, `HOMEDRIVE`, `HOMEPATH` on Windows (so the gateway can
+  resolve the per-user config and log paths)
 
 ## The nine Smart tools
 

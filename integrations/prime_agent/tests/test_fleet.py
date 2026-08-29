@@ -452,8 +452,8 @@ async def test_dispatch_session_lifecycle_end_routes_through_state_machine(fake_
         prior = agent.status()["session_id"]
         assert prior
         await agent.call("engraphis_session", {"action": "end",
-                                               "summary": "shutdown",
-                                               "outcome": "complete"})
+                                                "summary": "shutdown",
+                                                "outcome": "complete"})
         assert agent.status()["session_id"] is None
     finally:
         await f.aclose()
