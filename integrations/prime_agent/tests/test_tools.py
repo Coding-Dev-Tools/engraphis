@@ -41,6 +41,14 @@ def test_each_tool_has_name_description_and_schema() -> None:
         assert "properties" in schema
 
 
+def test_remember_schema_declares_keyed_claim_fields_as_properties() -> None:
+    schema = dict(TOOL_SPECS)["engraphis_remember"]
+
+    assert {"subject_key", "claim_kind"} <= set(schema["properties"])
+    assert "subject_key" not in schema
+    assert "claim_kind" not in schema
+
+
 def test_build_tool_unknown_name_raises() -> None:
     config = EngraphisRuntimeConfig(command="x")
     client = EngraphisMcpClient(config)

@@ -64,6 +64,7 @@ class EngraphisPrimeAgent:
             self.repo = config.default_repo
         else:
             self.repo = self.name
+        self._session_agent = self.name
         self.goal = goal
         self.token_budget = token_budget
         self._session_id: str | None = None
@@ -95,24 +96,47 @@ class EngraphisPrimeAgent:
 
     # --- session lifecycle ------------------------------------------------
 
-    async def start_session(self, *, force_new: bool = False) -> str:
+    async def start_session(
+        self,
+        *,
+        force_new: bool = False,
+        workspace: str | None = None,
+        repo: str | None = None,
+        agent: str | None = None,
+        goal: str | None = None,
+        token_budget: int | None = None,
+    ) -> str:
         # The two state mutations below happen under _session_lock so they
         # are atomic w.r.t. concurrent start_session / end_session callers
         # (and concurrent get_tool() callers that read self._session_id).
         async with self._session_lock:
-            if self._session_id and not force_new:
+            requested_workspace = self.workspace if workspace is None else workspace
+            requested_repo = self.repo if repo is None else repo
+            requested_agent = self._session_agent if agent is None else agent
+            requested_goal = self.goal if goal is None else goal
+            requested_budget = self.token_budget if token_budget is None else token_budget
+            has_overrides = any(
+                value is not None
+                for value in (workspace, repo, agent, goal, token_budget)
+            )
+            request_force_new = force_new or (
+                self._session_id is not None
+                and goal is not None
+                and goal != self.goal
+            )
+            if self._session_id and not force_new and not has_overrides:
                 return self._session_id
             args: dict[str, Any] = {
                 "action": "start",
-                "agent": self.name,
-                "force_new": force_new,
-                "goal": self.goal,
-                "token_budget": self.token_budget,
+                "agent": requested_agent,
+                "force_new": request_force_new,
+                "goal": requested_goal,
+                "token_budget": requested_budget,
             }
-            if self.workspace:
-                args["workspace"] = self.workspace
-            if self.repo:
-                args["repo"] = self.repo
+            if requested_workspace is not None:
+                args["workspace"] = requested_workspace
+            if requested_repo is not None:
+                args["repo"] = requested_repo
             response = await self.client.call_tool("engraphis_session", args)
             session_id = self._extract_session_id(response)
             if not session_id:
@@ -130,6 +154,11 @@ class EngraphisPrimeAgent:
             # goal: "..."})`` would perform a second recall (against
             # the now-cached session) and double the latency.
             self._last_session_response = response
+            self._session_agent = requested_agent
+            self.workspace = requested_workspace
+            self.repo = requested_repo
+            self.goal = requested_goal
+            self.token_budget = requested_budget
             return session_id
 
     async def end_session(
@@ -138,42 +167,48 @@ class EngraphisPrimeAgent:
         summary: str = "",
         outcome: str = "",
         open_threads: list[str] | None = None,
+        session_id: str | None = None,
+        agent: str | None = None,
+        workspace: str | None = None,
+        repo: str | None = None,
     ) -> None:
-        # Capture the id under the lock so a concurrent start_session can't
-        # race us between the "no session" check and the call_tool.
+        # Hold the lock through the close RPC so a concurrent start_session
+        # cannot create a replacement session while the old one is still
+        # being closed.
         async with self._session_lock:
-            session_id = self._session_id
-            if not session_id:
+            active_session_id = self._session_id
+            target_session_id = session_id or active_session_id
+            if not target_session_id:
                 return
             # Always clear local state, even if the gateway call fails, so
             # the sub-agent is not stuck in a half-open state.
-            self._session_id = None
-            self._last_session_response = None
-            self._tools = None
-        # Make the close-call best-effort. Log the error so operators can
-        # spot stranded sessions, but never propagate: end_session() is
-        # called from aclose/__aexit__ paths where raising would mask the
-        # real shutdown error.
-        end_args: dict[str, Any] = {
-            "action": "end",
-            "agent": self.name,
-            "session_id": session_id,
-            "summary": summary,
-            "outcome": outcome,
-        }
-        if open_threads is not None:
-            # ``open_threads`` is the server's next-session handoff. The
-            # MCP schema treats this field as nullable; we forward the
-            # list as-is so an empty list clears prior follow-ups and a
-            # non-empty list replaces them. Omitting the key entirely
-            # leaves the server's prior threads untouched.
-            end_args["open_threads"] = open_threads
-        # Re-raise the gateway error after clearing the cached id. The
-        # lifecycle dispatcher catches this and converts it into a
-        # structured "close_failed" response; the existing end_session
-        # callers from aclose/__aexit__ paths see the same exception
-        # and can choose to log or re-raise at their layer.
-        await self.client.call_tool("engraphis_session", end_args)
+            if target_session_id == active_session_id:
+                self._session_id = None
+                self._last_session_response = None
+                self._tools = None
+            end_args: dict[str, Any] = {
+                "action": "end",
+                "agent": self._session_agent if agent is None else agent,
+                "session_id": target_session_id,
+                "summary": summary,
+                "outcome": outcome,
+            }
+            if open_threads is not None:
+                # ``open_threads`` is the server's next-session handoff. The
+                # MCP schema treats this field as nullable; we forward the
+                # list as-is so an empty list clears prior follow-ups and a
+                # non-empty list replaces them. Omitting the key entirely
+                # leaves the server's prior threads untouched.
+                end_args["open_threads"] = open_threads
+            if workspace is not None:
+                end_args["workspace"] = workspace
+            if repo is not None:
+                end_args["repo"] = repo
+            # Re-raise the gateway error after clearing the cached id. The
+            # lifecycle dispatcher catches this and converts it into a
+            # structured "close_failed" response; direct callers see the
+            # same error shape.
+            await self.client.call_tool("engraphis_session", end_args)
 
     @property
     def session_id(self) -> str | None:
@@ -255,7 +290,7 @@ class EngraphisPrimeAgent:
         if not self._session_id:
             await self.start_session()
         fn, _schema = self.get_tool(tool)
-        return await fn(args)
+        return await fn(args, None)
 
     # --- registration into prime-agent -----------------------------------
 
@@ -320,7 +355,7 @@ class EngraphisPrimeAgent:
             # closure holds a stale session_id and would otherwise leak
             # operations into the wrong agent session.
             fresh_fn, _schema = agent.get_tool(tool_name)
-            return await fresh_fn(args)
+            return await fresh_fn(args, ctx)
 
         return _wrapper
 
@@ -333,40 +368,33 @@ class EngraphisPrimeAgent:
         """
         action = args.get("action", "start")
         if action == "end":
-            summary = args.get("summary", "")
-            outcome = args.get("outcome", "")
-            open_threads = args.get("open_threads")
+            end_kwargs: dict[str, Any] = {
+                "summary": args.get("summary", ""),
+                "outcome": args.get("outcome", ""),
+            }
+            for key in ("open_threads", "session_id", "agent", "workspace", "repo"):
+                if key in args:
+                    end_kwargs[key] = args[key]
             # ``open_threads`` is the server's next-session handoff;
             # dropping it would silently strip the caller-advertised
             # follow-ups, so always forward it through ``end_session``.
             try:
-                await self.end_session(
-                    summary=summary,
-                    outcome=outcome,
-                    open_threads=open_threads,
-                )
+                await self.end_session(**end_kwargs)
                 return {"status": "closed"}
             except EngraphisMcpToolError as exc:
                 return {
                     "status": "close_failed",
                     "error": str(exc),
                 }
-        # Default to start. Forward force_new and goal so the
-        # new session carries the caller's metadata. ``start_session``
-        # only accepts ``force_new``; ``goal`` is propagated by
-        # mutating the constructor attribute in place so the cached
-        # tool map reflects the new goal.
-        start_kwargs: dict[str, Any] = {}
-        if args.get("force_new"):
-            start_kwargs["force_new"] = True
-        if args.get("goal") and args["goal"] != self.goal:
-            # A different goal is a distinct session identity on the Smart
-            # server; the cached id belongs to the previous goal, so force
-            # a new session rather than reusing the stale id.
-            self.goal = args["goal"]
-            start_kwargs["force_new"] = True
-        elif args.get("goal"):
-            self.goal = args["goal"]
+        # Default to start. Forward every start argument advertised by the
+        # Smart schema. ``start_session`` updates the cached scope/goal and
+        # tool bindings only after the gateway returns a session id.
+        start_kwargs: dict[str, Any] = {
+            "force_new": bool(args.get("force_new", False)),
+        }
+        for key in ("workspace", "repo", "agent", "goal", "token_budget"):
+            if key in args:
+                start_kwargs[key] = args[key]
         await self.start_session(**start_kwargs)
         # Rebuild tools with the new session id before returning so the
         # caller's next tool invocation does not see the stale binding.
