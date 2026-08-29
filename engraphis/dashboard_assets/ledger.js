@@ -457,7 +457,7 @@
         graphAssetSource('/v2-assets/vendor/force-graph.min.js?v=20260727-final'),
         'ForceGraph', controller.signal,
       )).then(() => loadScript(
-        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260815-merge-ready-1'),
+        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260828-slider-multiplier-fix'),
         'EngraphisGraph', controller.signal,
       )).then(() => loadScript(
         graphAssetSource('/v2-assets/engraphis-spacetime.js?v=20260812-stable-orbit-lanes-7'),
@@ -2506,9 +2506,15 @@
       return settings;
     }, {});
     return {
-      gravitationalConstant: controls.gravitationalConstant / 50,
+      // The engine consumes these values directly as multipliers. The visible default
+      // (100 for gravity/local, 160 for black-hole) must reach the engine as 1.0 so the
+      // untouched-slider state is a no-op. The earlier / 50 division sent 2.0 at the
+      // default and clamped the upper half of the slider to 2.0x, so the user's
+      // movements from 100..200 produced no visible effect — the "revert to default"
+      // bug. / 100 keeps the default at 1.0x and gives a clean 0..2 range.
+      gravitationalConstant: controls.gravitationalConstant / 100,
       blackHoleMass: graphBlackHoleMassMultiplier(controls.blackHoleMass),
-      localGravitationalConstant: controls.localGravitationalConstant / 50,
+      localGravitationalConstant: controls.localGravitationalConstant / 100,
       damping: controls.damping,
       springStiffness: controls.springStiffness / 32,
       orbitPaused: state.graphOrbitPaused,
@@ -2585,12 +2591,21 @@
   const GRAPH_BLACK_HOLE_MASS_BASELINE = 160;
   function graphBlackHoleMassMultiplier(controlValue) {
     const value = number(controlValue);
-    /* Keep the established lower half and neutral default. Above 160, every +10 slider units
-       adds exactly +0.10 to the compact central-mass multiplier: 160→1.0, 170→1.1, 180→1.2.
-       Local stellar wells remain owned exclusively by Local solar gravity. */
-    return value <= GRAPH_BLACK_HOLE_MASS_BASELINE
-      ? Math.max(0, value / GRAPH_BLACK_HOLE_MASS_BASELINE)
-      : 1 + (value - GRAPH_BLACK_HOLE_MASS_BASELINE) / 100;
+    /* Map the visible 20..500 range to 0.0..2.0 with the default (160) at 1.0.
+       Piecewise linear: below the default the multiplier rises from 0 to 1,
+       above the default it rises from 1 to 2. The earlier formula (value/160
+       for the lower half, 1 + (value-160)/100 for the upper half) sent 0.125
+       at the slider's HTML minimum and 4.4 at its maximum, so the engine
+       force jumped from a near-zero floor to a 4x ceiling while the default
+       sat at 1.0 — a 35x range that made the slider feel "alive" only at the
+       extremes. The new mapping gives a clean 0..2 range with a smooth,
+       predictable response around the default. */
+    if (!Number.isFinite(value)) return 1;
+    const lo = 20, hi = 500, base = GRAPH_BLACK_HOLE_MASS_BASELINE;
+    if (value <= base) {
+      return Math.max(0, (value - lo) / (base - lo));
+    }
+    return 1 + (value - base) / (hi - base);
   }
 
 
