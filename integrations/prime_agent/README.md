@@ -20,7 +20,7 @@ At runtime the integration has three layers:
    it spawns one `engraphis-mcp` process over JSON-RPC stdio. Every tool call
    from every sub-agent goes through that one process.
 2. **A shared `EngraphisMcpClient`.** Owns the subprocess, exposes the
-   `engraphis-mcp-classic` and the new Smart nine-tool surface, and serializes
+   Smart nine-tool surface, and serializes
    concurrent calls through an `asyncio.Lock` at the JSON-RPC frame layer.
 3. **Eight named `EngraphisPrimeAgent` sub-agents.** Each one holds its own
    session id, lazily started on first tool use, and the same nine tool
@@ -99,8 +99,8 @@ async def main():
         )
 
         # 3. The documenter persists the durable decision the coder just made.
-        #    The integration returns the pending review boundary; the memory
-        #    is not prompt-eligible until a human approves it (see "Trust model").
+        #    This is a local-agent write under the normal trust policy; inspect
+        #    it through conflict_review when governance review is needed.
         pending = await fleet["documenter"].call("engraphis_remember", {
             "content": "Prefer sqlite-vec KNN for <=1M vectors; rebuild after model swap.",
             "importance": 0.7,
@@ -197,11 +197,10 @@ The integration runs with your local user permissions. Install only the
 official package or a reviewed checkout. `ENGRAPHIS_MCP_COMMAND` should point
 only to a trusted local executable.
 
-Engraphis MCP writes enter the normal pending-review boundary. A successful
-`engraphis_remember` call does not make unreviewed text prompt-eligible;
-approve it through the Engraphis dashboard or the interactive approval
-command before expecting it in normal recall. This behavior is intentional
-and shared with the Pi and commandcode integrations.
+Engraphis MCP writes use the normal local-agent trust policy. Calls through
+this integration are local-agent writes and may be prompt-eligible immediately;
+treat model-generated content as untrusted input and use `engraphis_conflict_review`
+or the dashboard to inspect or correct it.
 
 ## Testing
 
@@ -245,7 +244,7 @@ else.
 | `ConnectionRefusedError` / `FileNotFoundError` / `OSError: [Errno 2] No such file or directory: 'engraphis-mcp'` when the fleet enters | `engraphis-mcp` is not on `PATH` for the Python that imports the integration | Install `engraphis[mcp]` in the same environment, or set `ENGRAPHIS_MCP_COMMAND` to the absolute path of the `engraphis-mcp` console script (for example `.venv/bin/engraphis-mcp` or `~/.local/bin/engraphis-mcp`) |
 | `engraphis_prime_agent.cli` returns exit code 2 with "binary not on PATH" | Same as above, surfaced by the CLI check | Install `engraphis[mcp]`, or `pipx install "engraphis[mcp]"` if you intentionally keep the integration in a different venv |
 | `pytest` cannot import `engraphis_prime_agent` from the repo checkout | The package was not installed in editable mode | From `integrations/prime_agent/`, run `pip install -e ".[test]"` |
-| `Pending` memories never show up in normal recall | This is expected, not a bug | New writes enter the pending review boundary. Approve them through the Engraphis dashboard or `engraphis-cli review approve` before expecting them in normal recall (see "Trust model") |
+| Memories are not showing up in normal recall | The memory may be outside the active scope or governed by a non-local trust policy | Check the workspace/repo/session scope and inspect `engraphis_conflict_review` or the dashboard for its current governance state |
 
 If a failure is not on this list, run `python -m engraphis_prime_agent check`
 against your environment — it returns one of the documented exit codes
