@@ -580,14 +580,14 @@ test('Ledger cache-busts a graph renderer that fetched but did not register', as
   await expect(page.locator('#graph-empty')).toContainText('Graph unavailable');
   expect(rendererRequests).toHaveLength(1);
   const first = new URL(rendererRequests[0]);
-  expect(first.searchParams.get('v')).toBe('20260815-merge-ready-1');
+  expect(first.searchParams.get('v')).toBe('20260828-slider-multiplier-fix');
   expect(first.searchParams.has('retry')).toBe(false);
 
   await page.getByRole('button', { name: 'Reload data' }).click();
   await expect(page.locator('#graph-count')).toContainText('3 entities · 1 relations');
   expect(rendererRequests).toHaveLength(2);
   const second = new URL(rendererRequests[1]);
-  expect(second.searchParams.get('v')).toBe('20260815-merge-ready-1');
+  expect(second.searchParams.get('v')).toBe('20260828-slider-multiplier-fix');
   expect(second.searchParams.get('retry')).toBe('1');
 });
 
