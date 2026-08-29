@@ -10,6 +10,7 @@ from engraphis_prime_agent.tools import (
     all_tools,
     apply_scope_defaults,
     build_tool,
+    validate_args,
 )
 
 
@@ -55,6 +56,11 @@ def test_session_agent_is_optional_for_registered_lifecycle_calls() -> None:
     schema = dict(TOOL_SPECS)["engraphis_session"]
     assert "agent" in schema["properties"]
     assert "agent" not in schema["required"]
+
+
+def test_nullable_schema_types_accept_each_union_member() -> None:
+    assert validate_args("engraphis_session", {"repo": "api"})["repo"] == "api"
+    assert validate_args("engraphis_session", {"repo": None})["repo"] is None
 
 
 def test_build_tool_unknown_name_raises() -> None:

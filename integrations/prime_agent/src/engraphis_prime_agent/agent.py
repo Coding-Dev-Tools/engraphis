@@ -378,6 +378,10 @@ class EngraphisPrimeAgent:
         the server's session state.
         """
         action = args.get("action", "start")
+        action = {
+            "start_session": "start",
+            "end_session": "end",
+        }.get(action, action)
         if action not in {"start", "end"}:
             raise EngraphisMcpToolError(
                 "engraphis_session action must be 'start' or 'end'."
