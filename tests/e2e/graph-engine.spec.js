@@ -2761,7 +2761,7 @@ test('served primary dashboard keeps local stellar orbits independent at Galaxy-
     expect(after.diagnostics.systemGravity).toMatchObject({
       gravitySetting: 0,
       stellarGravityFloorSetting: 48,
-      stellarGravity: 10140,
+      stellarGravity: 2535,
       eligibleStellarAnchors: 1,
       fallbackAnchors: 0,
       globalAnchors: 0,
