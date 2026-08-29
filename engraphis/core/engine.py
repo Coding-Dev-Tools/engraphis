@@ -2188,7 +2188,7 @@ class MemoryEngine:
         decision = resolve(
             text, neighbors, subject_key=subject_key, claim_kind=claim_kind,
             candidate_content=content,
-            temporal_splice=valid_at is not None and valid_at <= now_ts(),
+            temporal_splice=bool(subject_key) and valid_at is not None and valid_at <= now_ts(),
         )
         # Repair trigger: when the resolver cannot safely supersede (INVALIDATE/NOOP),
         # surface a genuine high-severity contradiction as a persisted relation instead

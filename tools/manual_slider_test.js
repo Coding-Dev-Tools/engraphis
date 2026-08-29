@@ -14,7 +14,7 @@ const { chromium } = require('@playwright/test');
 const { spawn } = require('child_process');
 const path = require('path');
 
-const REPO = __dirname;
+const REPO = path.resolve(__dirname, '..');
 process.chdir(REPO);
 
 const PORT = process.env.ENGRAPHIS_PLAYWRIGHT_PORT || 8700;
@@ -495,7 +495,7 @@ async function main() {
       log(`  centroid shift:    ${centroidShift.toFixed(4)} world units`);
       log(`  physics actually changed: ${physicsChanged ? 'YES' : 'no'}`);
 
-      const alive = r.settingsReached && engineApplied;
+      const alive = r.settingsReached && engineApplied && physicsChanged;
       results.push({...t, ...r, lowSpeed, highSpeed, lowRadius, highRadius,
         engineApplied, physicsChanged, status: alive ? 'alive' : 'DEAD'});
     }
