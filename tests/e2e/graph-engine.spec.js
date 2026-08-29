@@ -2008,6 +2008,13 @@ test('served Galaxy paints complete independent solar envelopes with a visible c
       const audit = window.__carrierPaintAudit;
       return audit && audit.ids.every(id => (audit.counts[id] || 0) > 0);
     }, null, { timeout: 20_000 });
+    /* The dashboard's first fit is asynchronous. Establish the baseline only after every
+       carrier has been painted inside that fitted viewport, otherwise a slow CI frame can
+       sample one edge carrier during the camera transition and report a false escape. */
+    await page.waitForFunction(() => {
+      const audit = window.__carrierPaintAudit;
+      return audit && audit.ids.every(id => audit.last[id] && audit.last[id].insideCanvas);
+    }, null, { timeout: 20_000 });
     const paintBefore = await carrierPaintAuditSnapshot(page);
     const before = await renderedSystemEnvelopeSnapshot(page);
     const steps = await page.evaluate(() => window.__engraphisGraph.physicsDiagnostics().steps + 96);
