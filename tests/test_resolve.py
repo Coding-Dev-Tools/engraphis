@@ -328,23 +328,17 @@ def test_reworded_marker_correction_invalidates_across_phrasings():
     assert res2.target_id == "mem_pilot"
 
 
-def test_reworded_marker_without_value_swap_invalidates():
-    """Under the attribute-correction contract (see P1 review on PR #181),
-    a single nonnumeric noun-for-noun swap with at least 2 shared subject
-    tokens invalidates regardless of marker or predicate. The candidate
-    and neighbour disagree on the API's backing infrastructure (Redis
-    caching for user sessions vs three replicas for high availability);
-    the resolver treats the candidate as the newer fact and supersedes
-    the neighbour. The marker leg alone is intentionally not enough —
-    attribute_corrected covers the case where a marker accompanies a
-    single-attribute restatement.
+def test_reworded_marker_without_value_swap_does_not_invalidate():
+    """A marker cannot turn different backing-infrastructure facts into a
+    proven single-attribute correction. Redis caching and three replicas
+    share the production API subject, but both facts remain live.
     """
     neighbor = _rec("The production API uses Redis caching for user sessions.",
                     id="mem_cache")
     res = resolve("The production API now uses three replicas for high availability.",
                   [(0.45, neighbor)])
-    assert res.op == ResolutionOp.INVALIDATE
-    assert res.target_id == "mem_cache"
+    assert res.op != ResolutionOp.INVALIDATE
+    assert res.target_id != "mem_cache"
 
 
 def test_date_swap_correction_invalidates_when_attribute_is_shared():
@@ -371,16 +365,13 @@ def test_named_identifier_swap_is_not_proven_a_correction_without_marker():
     assert res.op != ResolutionOp.INVALIDATE
 
 
-def test_single_noun_swap_on_tight_subject_invalidates():
-    """A single nonnumeric noun-for-noun swap on a tight shared subject
-    ("the docs cover the REST interface" -> "...the GraphQL interface")
-    is a correction of the same attribute, not two coexisting facts.
-    The surrounding "the docs cover the" matches on both sides, so the
-    attribute anchor holds and the candidate supersedes the neighbour.
+def test_single_noun_swap_without_attribute_anchor_stays_live():
+    """REST versus GraphQL is not proven to be a correction of one
+    attribute merely because both facts concern the docs.
     """
     neighbor = _rec("The docs cover the REST interface.", id="mem_docs_rest")
     res = resolve("The docs cover the GraphQL interface.", [(0.9, neighbor)])
-    assert res.op == ResolutionOp.INVALIDATE
+    assert res.op != ResolutionOp.INVALIDATE
 
 
 def test_default_branch_master_to_main_invalidates():
@@ -410,17 +401,14 @@ def test_log_level_info_to_debug_invalidates():
     assert res.target_id == "mem_loglevel_info"
 
 
-def test_finding_one_about_caching_and_finding_two_about_latency_invalidates():
-    """Under the attribute-correction contract, the +/- 2 anchor check
-    on "Finding ... about" sees "about"/"finding" as shared attribute
-    context, so the single heavy-noun swap (caching vs latency) is a
-    correction. The engine layer still creates a shared-source edge on
-    the retained memory; the resolver's contract is per-pair.
+def test_finding_one_about_caching_and_finding_two_about_latency_stays_live():
+    """A shared sentence frame does not prove that caching and latency
+    describe the same attribute.
     """
     neighbor = _rec("Finding one about caching.", id="mem_a")
     res = resolve("Finding two about latency budgets.", [(0.9, neighbor)])
-    assert res.op == ResolutionOp.INVALIDATE
-    assert res.target_id == "mem_a"
+    assert res.op != ResolutionOp.INVALIDATE
+    assert res.target_id != "mem_a"
 
 
 def test_distinct_attribute_with_numbers_stays_live():
@@ -501,17 +489,13 @@ def test_marker_with_value_swap_invalidates():
     assert res.target_id == "mem_deploy_v"
 
 
-def test_marker_alone_without_value_swap_invalidates():
-    # Under the attribute-correction contract (see P1 review on PR #181),
-    # a single nonnumeric noun-for-noun swap with at least 2 shared
-    # subject tokens invalidates even without a value_swap. The marker
-    # ("We migrated ...") accompanies the single heavy swap (REST ->
-    # GraphQL) and the candidate now says the docs cover the GraphQL
-    # interface in place of REST. The neighbour is superseded.
+def test_marker_alone_without_value_swap_does_not_invalidate():
+    # A migration marker plus a noun swap is still not proof that REST
+    # was corrected to GraphQL as the same attribute.
     neighbor = _rec("The docs cover the REST interface.", id="mem_docs_rest")
     res = resolve("We migrated the docs to cover the GraphQL interface.",
                   [(0.9, neighbor)])
-    assert res.op == ResolutionOp.INVALIDATE
+    assert res.op != ResolutionOp.INVALIDATE
 
 
 def test_closed_predecessor_supersedes_under_strong_evidence_regardless_of_prose():

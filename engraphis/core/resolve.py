@@ -90,8 +90,8 @@ _LIGHT_TOKENS = frozenset({
     "use", "used", "using", "run", "ran", "set", "get", "go", "went",
 }) | _CHANGE_MARKERS
 _CHANGE_ONLY_TOKENS = _CHANGE_MARKERS
-# Tokens that introduce a value in a single-noun attribute slot
-# (e.g. "is named master", "is set to INFO", "uses three replicas").
+# Tokens that introduce or identify a value in a single-noun attribute slot
+# (e.g. "is named master", "is set to INFO", "admin user is root").
 # When a noun-for-noun swap is flanked by one of these in the same
 # position on both sides, the surrounding context is a value slot and
 # the swap is a name-correction. A bare shared prefix without an
@@ -100,7 +100,7 @@ _CHANGE_ONLY_TOKENS = _CHANGE_MARKERS
 # "Customer beta default admin user is admin").
 _ATTRIBUTE_INTRODUCERS = frozenset({
     "named", "called", "set", "level", "value", "version", "mode",
-    "status", "type", "kind", "state", "role", "tier", "preset",
+    "status", "type", "kind", "state", "role", "tier", "preset", "user",
 })
 _ENV_QUALIFIERS = frozenset({
     "staging", "production", "prod", "development", "dev", "test", "testing",
@@ -456,6 +456,7 @@ def resolve(candidate_text: str, neighbors: list[tuple[float, MemoryRecord]], *,
         attribute_corrected = (
             evidence.attribute_swap_count == 1
             and evidence.name_swap
+            and not evidence.heavy_swap
             and not evidence.proper_swap
             and not evidence.env_conflict
             and evidence.shared_subject >= 2
@@ -608,7 +609,7 @@ def _attribute_anchor_ok(cand: list[tuple[str, bool]], rec: list[tuple[str, bool
     (the swapped tokens are themselves the attribute). The window is
     +/- 3 around the swap span — tight enough to ignore the subject
     noun on the left, wide enough to capture attribute-introducing
-    verbs ("is named", "covers", "uses"). The window must also
+    context ("is named", "level", "user"). The window must also
     contain one of ``_ATTRIBUTE_INTRODUCERS`` on both sides so a
     shared prefix without a value slot ("Customer alpha default
     admin user is root" vs "Customer beta default admin user is

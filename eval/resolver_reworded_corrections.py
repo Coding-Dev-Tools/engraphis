@@ -9,7 +9,7 @@ corpus and this script together protect the quality claim made in
     python -m eval.resolver_reworded_corrections
 
 The dataset ships at ``eval/datasets/resolver_reworded_corrections.jsonl``
-and contains 36 positive (reworded-correction) pairs and 8 negative
+and contains 38 positive (reworded-correction) pairs and 6 negative
 (distinct-fact / env-conflict) pairs. Each row is::
 
     {"id", "neighbor", "candidate", "expected", "subject_hint"}
