@@ -340,6 +340,20 @@ class EngraphisMcpClient:
                 continue
             if (
                 isinstance(parsed, dict)
+                and isinstance(parsed.get("error"), dict)
+                and isinstance(parsed["error"].get("code"), str)
+                and isinstance(parsed["error"].get("message"), str)
+            ):
+                # Smart gateway wraps every failure as
+                # ``{"error":{"code":...,"message":...,"retryable":...}}``
+                # (see engraphis/mcp_server.py::_smart_error). Accept the
+                # nested shape so callers can distinguish validation errors
+                # from retryable internal failures as the Smart contract
+                # intends.
+                envelope = parsed["error"]
+                break
+            if (
+                isinstance(parsed, dict)
                 and isinstance(parsed.get("code"), str)
                 and isinstance(parsed.get("message"), str)
             ):

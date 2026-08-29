@@ -64,6 +64,14 @@ class EngraphisPrimeAgent:
         self.goal = goal
         self.token_budget = token_budget
         self._session_id: str | None = None
+        # Raw server response from the most recent successful
+        # ``engraphis_session(start)`` call. Returned (rather than a
+        # second recall) when an external caller invokes the
+        # lifecycle tool via ``agent.call("engraphis_session", ...)``
+        # so the bounded context, sources, usage, and
+        # ``context_status`` survive the round-trip. Reset to None
+        # at the end of every session.
+        self._last_session_response: dict[str, Any] | None = None
         self._session_lock = asyncio.Lock()
         self._tools: dict[str, tuple[ToolFn, dict[str, Any]]] | None = None
         # Protects lazy initialization of the tool-binding cache. The
@@ -111,6 +119,14 @@ class EngraphisPrimeAgent:
             # Atomic state transition: only one writer holds this lock.
             self._session_id = session_id
             self._tools = None  # rebuild bindings with the new session id
+            # Remember the raw server response so the explicit
+            # ``engraphis_session`` callback can return the bounded
+            # recalled context, sources, usage, and ``context_status``
+            # the Smart server computed for this goal. Without this,
+            # ``agent.call("engraphis_session", {action: "start",
+            # goal: "..."})`` would perform a second recall (against
+            # the now-cached session) and double the latency.
+            self._last_session_response = response
             return session_id
 
     async def end_session(
@@ -129,6 +145,7 @@ class EngraphisPrimeAgent:
             # Always clear local state, even if the gateway call fails, so
             # the sub-agent is not stuck in a half-open state.
             self._session_id = None
+            self._last_session_response = None
             self._tools = None
         # Make the close-call best-effort. Log the error so operators can
         # spot stranded sessions, but never propagate: end_session() is
@@ -328,20 +345,32 @@ class EngraphisPrimeAgent:
                 open_threads=open_threads,
             )
             return {"status": "closed"}
-        # Default to start. Forward force_new, goal, open_threads so the
-        # new session carries the caller's metadata.
-        kwargs: dict[str, Any] = {}
+        # Default to start. Forward force_new and goal so the
+        # new session carries the caller's metadata. ``start_session``
+        # only accepts ``force_new``; ``goal`` is propagated by
+        # mutating the constructor attribute in place so the cached
+        # tool map reflects the new goal.
+        start_kwargs: dict[str, Any] = {}
         if args.get("force_new"):
-            kwargs["force_new"] = True
+            start_kwargs["force_new"] = True
         if args.get("goal"):
-            # The wrapper exposes ``goal`` via start_session via a
-            # constructor-time attribute; the lifecycle path overrides it
-            # in place so the cached tool map reflects the new goal.
             self.goal = args["goal"]
-        await self.start_session(**kwargs)
+        await self.start_session(**start_kwargs)
         # Rebuild tools with the new session id before returning so the
         # caller's next tool invocation does not see the stale binding.
         self._tools = None
+        # Prefer the raw server response (carrying bounded recalled
+        # context, sources, usage, and ``context_status`` when the
+        # caller supplied a ``goal``) over a synthetic envelope. The
+        # synthetic envelope would force a second recall against the
+        # just-cached session and double the latency for callers
+        # that already have a session id in hand.
+        if self._last_session_response is not None:
+            response = dict(self._last_session_response)
+            response.setdefault("session_id", self._session_id)
+            response.setdefault("action", "start")
+            response.setdefault("agent", self.name)
+            return response
         return {
             "session_id": self._session_id,
             "action": "start",
