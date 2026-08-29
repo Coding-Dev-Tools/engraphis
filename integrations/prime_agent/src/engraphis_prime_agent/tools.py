@@ -29,7 +29,11 @@ _SESSION_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
     "properties": {
-        "action": {"type": "string", "enum": ["start", "end"], "default": "start"},
+        "action": {
+            "type": "string",
+            "enum": ["start", "end", "start_session", "end_session"],
+            "default": "start",
+        },
         # The wrapper supplies the registered agent name when the caller omits
         # this optional field. Keeping it optional also lets the framework
         # invoke the lifecycle tool without duplicating registration metadata.

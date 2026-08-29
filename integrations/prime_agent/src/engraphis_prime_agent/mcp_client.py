@@ -51,6 +51,14 @@ READ_ONLY_TOOLS = frozenset({
 class EngraphisMcpToolError(RuntimeError):
     """Semantic rejection returned by the MCP server (e.g. invalid args)."""
 
+    def __init__(self, message: str, *, retryable: bool = False) -> None:
+        super().__init__(message)
+        # Preserve the Smart gateway's retryability signal for hosts that want
+        # to apply a policy appropriate to the operation. The client itself
+        # does not retry semantic tool errors because writes may not be safe to
+        # repeat and read-only retry rules are transport-specific.
+        self.retryable = retryable
+
 
 class EngraphisCompatibilityError(RuntimeError):
     """Gateway is reachable but does not expose the Smart 9-tool surface."""
@@ -414,7 +422,12 @@ class EngraphisMcpClient:
                     "Engraphis rejected the request. Verify the parameters and "
                     "inspect the local Engraphis logs."
                 )
-            raise EngraphisMcpToolError(msg)
+            retryable = (
+                bool(envelope.get("retryable", False))
+                if envelope is not None
+                else False
+            )
+            raise EngraphisMcpToolError(msg, retryable=retryable)
         return {"_tool": name, "isError": is_error, "content": content}
 
     # --- status ----------------------------------------------------------
