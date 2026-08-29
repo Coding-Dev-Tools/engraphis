@@ -118,6 +118,10 @@ _SUBJECT_IDENTITY_VERBS = frozenset({
     "has", "have", "contains", "includes", "stores", "owns", "reports",
     "serves", "handles", "tracks", "records", "shows", "uses",
 })
+_SUBJECT_NAME_LABELS = _SUBJECT_IDENTIFIER_LABELS | frozenset({
+    "application", "app", "service", "plan", "organization", "company",
+    "device", "pod", "job", "build", "release", "invoice",
+})
 _ENV_QUALIFIERS = frozenset({
     "staging", "production", "prod", "development", "dev", "test", "testing",
     "qa", "uat", "preview", "sandbox", "demo", "local",
@@ -367,8 +371,13 @@ def resolve(candidate_text: str, neighbors: list[tuple[float, MemoryRecord]], *,
         # envs, not a correction.
         env_conflict = _env_conflict_for_correction(candidate_text, rec_text)
         subject_identifier_drift = _has_subject_identifier_drift(candidate_text, rec_text)
-        if env_conflict or subject_identifier_drift:
-            reason_kind = "environment conflict" if env_conflict else "subject identifier drift"
+        named_subject_drift = _has_named_subject_drift(candidate_text, rec_text)
+        if env_conflict or subject_identifier_drift or named_subject_drift:
+            reason_kind = (
+                "environment conflict" if env_conflict
+                else "subject identifier drift" if subject_identifier_drift
+                else "named subject drift"
+            )
             return Resolution(
                 ResolutionOp.RELATE,
                 target_id=rec.id,
@@ -596,6 +605,12 @@ def _has_subject_identifier_drift(candidate_text: str, record_text: str) -> bool
     """
     candidate = _surface_tokens(candidate_text)
     record = _surface_tokens(record_text)
+    candidate_ids = _numeric_subject_identifiers(candidate_text)
+    record_ids = _numeric_subject_identifiers(record_text)
+    for label, old_values in candidate_ids.items():
+        new_values = record_ids.get(label)
+        if new_values and old_values.isdisjoint(new_values):
+            return True
     candidate_words = [token for token, _ in candidate]
     record_words = [token for token, _ in record]
     for old_span, new_span in _swap_spans(candidate_words, record_words):
@@ -623,17 +638,45 @@ def _subject_identifier_label(
     label = pairs[span[0] - 1][0]
     if label in _SUBJECT_IDENTIFIER_LABELS and label not in _ATTRIBUTE_INTRODUCERS:
         return label
-    # A number immediately after the leading noun is an identity convention
-    # even when the noun is not in our finite label vocabulary. A later
-    # predicate guard extends this to short subject prefixes without turning
-    # ordinary values such as "timeout is 30" into identities.
-    if span[0] == 1 and label not in _ATTRIBUTE_INTRODUCERS and label not in _LIGHT_TOKENS:
-        return label
-    if span[0] <= 2 and label not in _ATTRIBUTE_INTRODUCERS and label not in _LIGHT_TOKENS:
-        following = pairs[span[1]:min(len(pairs), span[1] + 3)]
-        if any(token in _SUBJECT_IDENTITY_VERBS for token, _ in following):
-            return label
     return ""
+
+
+def _numeric_subject_identifiers(text: str) -> dict[str, set[str]]:
+    """Extract explicit or predicate-backed label-number subject identities."""
+    words = re.findall(r"[A-Za-z0-9]+", str(text or ""))
+    identifiers: dict[str, set[str]] = {}
+    for index, raw_label in enumerate(words[:-1]):
+        raw_number = words[index + 1]
+        if not any(character.isdigit() for character in raw_number):
+            continue
+        label = raw_label.casefold()
+        if label in _SUBJECT_IDENTIFIER_LABELS and label not in _ATTRIBUTE_INTRODUCERS:
+            identifiers.setdefault(label, set()).add(raw_number.casefold())
+            continue
+        if (index == 0 and label not in _ATTRIBUTE_INTRODUCERS
+                and label not in _LIGHT_TOKENS
+                and any(word.casefold() in _SUBJECT_IDENTITY_VERBS
+                        for word in words[index + 2:index + 5])):
+            identifiers.setdefault(label, set()).add(raw_number.casefold())
+    return identifiers
+
+
+def _named_subject_key(text: str) -> tuple[str, str] | None:
+    words = re.findall(r"[A-Za-z0-9]+", str(text or ""))
+    for index, raw_label in enumerate(words[:-1]):
+        raw_name = words[index + 1]
+        label = raw_label.casefold()
+        if (label in _SUBJECT_NAME_LABELS and len(raw_name) > 1
+                and raw_name[0].isupper() and raw_name[1:].islower()):
+            return label, raw_name.casefold()
+    return None
+
+
+def _has_named_subject_drift(candidate_text: str, record_text: str) -> bool:
+    candidate = _named_subject_key(candidate_text)
+    record = _named_subject_key(record_text)
+    return bool(candidate and record and candidate[0] == record[0]
+                and candidate[1] != record[1])
 
 
 def _value_kind(token: str) -> str:
