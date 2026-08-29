@@ -11,7 +11,7 @@ from engraphis_prime_agent.config import (
     DEFAULT_AGENT_NAMES,
     EngraphisRuntimeConfig,
 )
-from engraphis_prime_agent.mcp_client import EngraphisMcpClient
+from engraphis_prime_agent.mcp_client import EngraphisMcpClient, EngraphisMcpToolError
 from engraphis_prime_agent.tools import TOOL_SPECS
 
 
@@ -205,6 +205,26 @@ async def test_aclose_ends_sessions_and_closes_client() -> None:
     assert fleet["researcher"].session_id is None
     assert fleet["coder"].session_id is None
     assert fleet._closed is True
+
+
+@pytest.mark.asyncio
+async def test_agents_reject_calls_after_fleet_close() -> None:
+    fleet = PrimeAgentFleet(workspace="x")
+    await fleet.client.connect()
+    agent = fleet["researcher"]
+    await agent.start_session()
+    await fleet.aclose()
+
+    with pytest.raises(RuntimeError, match="is closed"):
+        await agent.call("engraphis_recall_context", {"query": "after close"})
+    with pytest.raises(RuntimeError, match="is closed"):
+        await agent.start_session()
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_rejects_unknown_action(fleet) -> None:
+    with pytest.raises(EngraphisMcpToolError, match="must be 'start' or 'end'"):
+        await fleet["researcher"].call("engraphis_session", {"action": "resume"})
 
 
 @pytest.mark.asyncio

@@ -85,6 +85,7 @@ class EngraphisPrimeAgent:
         self._last_session_response: dict[str, Any] | None = None
         self._session_lock = asyncio.Lock()
         self._tools: dict[str, tuple[ToolFn, dict[str, Any]]] | None = None
+        self._closed = False
         # Protects lazy initialization of the tool-binding cache. The
         # session lock above is *not* enough because get_tool() and tools()
         # are synchronous and can be called from multiple threads (or, in
@@ -117,6 +118,7 @@ class EngraphisPrimeAgent:
         # are atomic w.r.t. concurrent start_session / end_session callers
         # (and concurrent get_tool() callers that read self._session_id).
         async with self._session_lock:
+            self._ensure_open()
             requested_workspace = self.workspace if workspace is None else workspace
             requested_repo = self.repo if isinstance(repo, _UnsetRepo) else repo
             requested_agent = self._session_agent if agent is None else agent
@@ -286,6 +288,7 @@ class EngraphisPrimeAgent:
         return self._ensure_tools()[name]
 
     async def call(self, tool: str, args: dict[str, Any]) -> dict[str, Any]:
+        self._ensure_open()
         # Lifecycle calls must route through the agent's own state
         # machine so the cached ``_session_id`` stays in sync with the
         # server session; an "end" would otherwise leave the agent
@@ -353,6 +356,7 @@ class EngraphisPrimeAgent:
         agent = self
 
         async def _wrapper(args: dict[str, Any], ctx: Any = None) -> dict[str, Any]:
+            agent._ensure_open()
             if tool_name == "engraphis_session":
                 return await agent._dispatch_session_lifecycle(args)
             if not agent._session_id:
@@ -374,6 +378,10 @@ class EngraphisPrimeAgent:
         the server's session state.
         """
         action = args.get("action", "start")
+        if action not in {"start", "end"}:
+            raise EngraphisMcpToolError(
+                "engraphis_session action must be 'start' or 'end'."
+            )
         if action == "end":
             end_kwargs: dict[str, Any] = {
                 "summary": args.get("summary", ""),
@@ -433,6 +441,10 @@ class EngraphisPrimeAgent:
             "session_id": self._session_id,
             "tools_bound": self._tools is not None,
         }
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("EngraphisPrimeAgent is closed")
 
     # --- helpers ----------------------------------------------------------
 
@@ -551,6 +563,8 @@ class PrimeAgentFleet:
         return self
 
     async def __aexit__(self, *exc: Any) -> None:
+        if self._closed:
+            return
         # Best-effort: end every active session, then close the stdio gateway.
         await asyncio.gather(
             *(a.end_session() for a in self._agents.values()),
@@ -559,6 +573,8 @@ class PrimeAgentFleet:
         if self._stack is not None:
             await self._stack.aclose()
             self._stack = None
+        for agent in self._agents.values():
+            agent._closed = True
         self._closed = True
 
     async def aclose(self) -> None:
@@ -575,6 +591,8 @@ class PrimeAgentFleet:
                 return_exceptions=True,
             )
             await self._client.close()
+            for agent in self._agents.values():
+                agent._closed = True
             self._closed = True
             return
         await self.__aexit__(None, None, None)
