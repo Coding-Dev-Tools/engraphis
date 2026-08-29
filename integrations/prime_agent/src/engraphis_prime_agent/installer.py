@@ -25,6 +25,7 @@ import copy
 import datetime
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -81,6 +82,7 @@ def _backup(path: Path) -> Path | None:
     else:
         backup = path.with_name(base_name)
     backup.write_bytes(path.read_bytes())
+    shutil.copymode(path, backup)
     return backup
 
 
@@ -276,7 +278,7 @@ def _resolve_config_path(explicit: str | None) -> Path | None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n", 1)[0])
     parser.add_argument("--uninstall", action="store_true")
     parser.add_argument(
         "--config-path",

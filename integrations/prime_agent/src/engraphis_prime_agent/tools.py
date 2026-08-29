@@ -84,11 +84,11 @@ _REMEMBER_SCHEMA: dict[str, Any] = {
         "session_id": {"type": ["string", "null"], "default": None},
         "workspace": {"type": "string", "maxLength": 200},
         "repo": {"type": ["string", "null"], "maxLength": 200, "default": None},
+        "subject_key": {"type": ["string", "null"], "maxLength": 200},
+        "claim_kind": {"type": ["string", "null"], "maxLength": 200},
     },
     "required": ["content"],
-            "subject_key": {"type": ["string", "null"], "maxLength": 200},
-            "claim_kind": {"type": ["string", "null"], "maxLength": 200},
-        }
+}
 
 _DISCOVER_ACTIONS_SCHEMA: dict[str, Any] = {
     "type": "object",

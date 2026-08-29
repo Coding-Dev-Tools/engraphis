@@ -31,6 +31,8 @@ _logger = logging.getLogger("engraphis_prime_agent.mcp_client")
 TOOL_REQUEST_TIMEOUT_S = 5 * 60
 CONNECT_TIMEOUT_S = 60
 STDERR_BUFFER_BYTES = 4 * 1024
+MAX_TOOL_LIST_PAGES = 100
+MAX_TOOL_LIST_TOOLS = 1_000
 
 # Tools whose server-side contract is idempotent. A transport failure
 # can be safely retried because the server will produce the same result.
@@ -159,12 +161,14 @@ class EngraphisMcpClient:
                     )
                 )
                 await asyncio.wait_for(session.initialize(), timeout=CONNECT_TIMEOUT_S)
-                _elapsed = time.monotonic() - _connect_started
-                if _elapsed > _connect_budget:
+                _remaining = _connect_budget - (time.monotonic() - _connect_started)
+                if _remaining <= 0:
                     raise asyncio.TimeoutError(
                         f"engraphis-mcp connect exceeded {_connect_budget:.0f}s"
                     )
-                tools = await self._list_tools(session)
+                tools = await asyncio.wait_for(
+                    self._list_tools(session), timeout=_remaining
+                )
                 available = {t["name"] for t in tools}
                 missing = [n for n in CORE_DIRECT_TOOLS if n not in available]
                 if missing:
@@ -307,9 +311,20 @@ class EngraphisMcpClient:
     async def _list_tools(self, session: ClientSession) -> list[dict[str, Any]]:
         all_tools: list[dict[str, Any]] = []
         cursor: str | None = None
-        while True:
+        seen_cursors: set[str] = set()
+        for _page_number in range(MAX_TOOL_LIST_PAGES):
+            if cursor is not None:
+                if cursor in seen_cursors:
+                    raise EngraphisCompatibilityError(
+                        "Engraphis tools/list returned a repeated pagination cursor."
+                    )
+                seen_cursors.add(cursor)
             page = await session.list_tools(cursor=cursor)
             for tool in page.tools:
+                if len(all_tools) >= MAX_TOOL_LIST_TOOLS:
+                    raise EngraphisCompatibilityError(
+                        "Engraphis tools/list exceeded the advertised tool limit."
+                    )
                 all_tools.append(
                     {
                         "name": tool.name,
@@ -319,8 +334,10 @@ class EngraphisMcpClient:
                 )
             cursor = page.nextCursor
             if not cursor:
-                break
-        return all_tools
+                return all_tools
+        raise EngraphisCompatibilityError(
+            "Engraphis tools/list exceeded the pagination page limit."
+        )
 
     @staticmethod
     def _format_result(name: str, response: Any) -> dict[str, Any]:

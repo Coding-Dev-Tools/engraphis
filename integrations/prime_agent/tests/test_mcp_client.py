@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
 from engraphis_prime_agent.config import EngraphisRuntimeConfig
 from engraphis_prime_agent.mcp_client import (
     READ_ONLY_TOOLS,
+    MAX_TOOL_LIST_PAGES,
     EngraphisCompatibilityError,
     EngraphisMcpClient,
     EngraphisMcpToolError,
@@ -336,6 +338,23 @@ async def test_list_tools_returns_independent_list(fake_mcp_server) -> None:
     first.clear()
     second = await client.list_tools()
     assert len(second) == len(first) or len(second) >= 9
+
+
+@pytest.mark.asyncio
+async def test_list_tools_rejects_unbounded_pagination() -> None:
+    class _NeverEndingTools:
+        def __init__(self) -> None:
+            self.cursors: list[str | None] = []
+
+        async def list_tools(self, *, cursor: str | None = None):
+            self.cursors.append(cursor)
+            return SimpleNamespace(tools=[], nextCursor=f"cursor-{len(self.cursors)}")
+
+    client = EngraphisMcpClient(EngraphisRuntimeConfig(command="ignored"))
+    session = _NeverEndingTools()
+    with pytest.raises(EngraphisCompatibilityError, match="page limit"):
+        await client._list_tools(session)  # type: ignore[arg-type]
+    assert len(session.cursors) == MAX_TOOL_LIST_PAGES
 
 
 @pytest.mark.asyncio

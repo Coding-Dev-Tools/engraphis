@@ -1,6 +1,9 @@
 """Tests for EngraphisPrimeAgent and PrimeAgentFleet."""
 from __future__ import annotations
 
+import asyncio
+import json
+
 import pytest
 
 from engraphis_prime_agent.agent import EngraphisPrimeAgent, PrimeAgentFleet
@@ -434,6 +437,122 @@ async def test_end_session_forwards_open_threads_to_mcp_call(fake_mcp_server) ->
         # The most recent end call should carry the open_threads payload.
         _name, end_args = end_calls[-1]
         assert end_args.get("open_threads") == [thread]
+    finally:
+        await f.aclose()
+
+
+@pytest.mark.asyncio
+async def test_end_session_holds_lock_until_close_rpc_finishes() -> None:
+    """A replacement start must wait until the previous close is complete."""
+    close_started = asyncio.Event()
+    release_close = asyncio.Event()
+    calls: list[dict[str, object]] = []
+    session_number = 0
+
+    class _BlockingClient:
+        async def call_tool(
+            self, _name: str, args: dict[str, object]
+        ) -> dict[str, object]:
+            nonlocal session_number
+            calls.append(args)
+            if args.get("action") == "end":
+                close_started.set()
+                await release_close.wait()
+            else:
+                session_number += 1
+            session_id = f"ses_blocking_{session_number:04d}"
+            return {
+                "content": [{"text": json.dumps({"session_id": session_id})}]
+            }
+
+    config = EngraphisRuntimeConfig(command="ignored", environment={})
+    agent = EngraphisPrimeAgent("researcher", _BlockingClient(), config, workspace="x")
+    await agent.start_session()
+
+    end_task = asyncio.create_task(agent.end_session())
+    await close_started.wait()
+    start_task = asyncio.create_task(agent.start_session())
+    await asyncio.sleep(0)
+    assert not start_task.done()
+
+    release_close.set()
+    await end_task
+    await start_task
+    assert [call["action"] for call in calls] == ["start", "end", "start"]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_lifecycle_forwards_advertised_arguments(fake_mcp_server) -> None:
+    f = PrimeAgentFleet(workspace="initial")
+    await f.client.connect()
+    try:
+        agent = f["researcher"]
+        await agent.call(
+            "engraphis_session",
+            {
+                "action": "start",
+                "agent": "custom-role",
+                "workspace": "override",
+                "repo": "project",
+                "goal": "inspect integration",
+                "force_new": True,
+                "token_budget": 2048,
+            },
+        )
+        start_args = fake_mcp_server.call_log[-1][1]
+        assert start_args == {
+            "action": "start",
+            "agent": "custom-role",
+            "workspace": "override",
+            "repo": "project",
+            "goal": "inspect integration",
+            "force_new": True,
+            "token_budget": 2048,
+        }
+        assert agent.status()["workspace"] == "override"
+        assert agent.status()["repo"] == "project"
+        assert agent.status()["goal"] == "inspect integration"
+        assert agent.token_budget == 2048
+
+        await agent.end_session()
+        assert fake_mcp_server.call_log[-1][1]["agent"] == "custom-role"
+        await agent.call(
+            "engraphis_session",
+            {
+                "action": "start",
+                "agent": "custom-role",
+                "workspace": "override",
+                "repo": "project",
+                "goal": "inspect integration",
+                "force_new": True,
+                "token_budget": 2048,
+            },
+        )
+        session_id = agent.status()["session_id"]
+        await agent.call(
+            "engraphis_session",
+            {
+                "action": "end",
+                "session_id": session_id,
+                "agent": "custom-role",
+                "workspace": "override",
+                "repo": "project",
+                "summary": "done",
+                "outcome": "shipped",
+                "open_threads": ["none"],
+            },
+        )
+        end_args = fake_mcp_server.call_log[-1][1]
+        assert end_args == {
+            "action": "end",
+            "agent": "custom-role",
+            "session_id": session_id,
+            "workspace": "override",
+            "repo": "project",
+            "summary": "done",
+            "outcome": "shipped",
+            "open_threads": ["none"],
+        }
     finally:
         await f.aclose()
 

@@ -188,7 +188,7 @@ All notable changes to Engraphis are documented here. Format loosely follows
   sub-agents (researcher / coder / reviewer / writer) with one shared memory workspace,
   with fleet-wide configuration via `ENGRAPHIS_REPO` and per-agent override via the
   `repo=` argument; the `engraphis-prime-agent install` subcommand configures a target
-  Codex / Claude Code / OpenCode project and `python -m engraphis_prime_agent install`
+  prime-agent configuration file and `python -m engraphis_prime_agent install`
   works directly from the installed wheel.
 
 ### Fixed

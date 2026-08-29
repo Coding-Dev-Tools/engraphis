@@ -10,6 +10,7 @@ Covers:
 from __future__ import annotations
 
 import json
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -158,6 +159,20 @@ def test_installer_idempotent_install_uninstall_round_trip(
     installer.uninstall(target)
     cfg = json.loads(target.read_text(encoding="utf-8"))
     assert "engraphis" not in cfg.get("tools", {})
+
+
+def test_installer_backup_preserves_source_permissions(tmp_path: Path) -> None:
+    from engraphis_prime_agent import installer
+
+    target = tmp_path / "config.json"
+    target.write_text('{"tools": {"other": {}}}\n', encoding="utf-8")
+    target.chmod(0o640)
+    source_mode = stat.S_IMODE(target.stat().st_mode)
+
+    backup = installer._backup(target)
+
+    assert backup is not None
+    assert stat.S_IMODE(backup.stat().st_mode) == source_mode
 
 
 def test_installer_dry_run_does_not_write(
