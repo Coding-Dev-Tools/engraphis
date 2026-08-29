@@ -10642,6 +10642,43 @@ def test_spacetime_sliders_reach_d3_forces_in_non_galaxy_mode() -> None:
     """
     report = _run_engine(
         """
+        const strengthForce = () => ({
+          strength(value) {
+            if (arguments.length) { this.strengthValue = value; return this; }
+            return this.strengthValue;
+          },
+        });
+        globalThis.d3 = {
+          forceManyBody: strengthForce,
+          forceLink: () => ({
+            id(value) {
+              if (arguments.length) { this.idValue = value; return this; }
+              return this.idValue;
+            },
+            distance(value) {
+              if (arguments.length) { this.distanceValue = value; return this; }
+              return this.distanceValue;
+            },
+            strength(value) {
+              if (arguments.length) { this.strengthValue = value; return this; }
+              return this.strengthValue;
+            },
+          }),
+          forceX: target => {
+            const force = strengthForce();
+            force.target = target;
+            return force;
+          },
+          forceY: target => {
+            const force = strengthForce();
+            force.target = target;
+            return force;
+          },
+          forceCollide: () => ({ iterations(value) {
+            if (arguments.length) { this.iterationsValue = value; return this; }
+            return this.iterationsValue;
+          } }),
+        };
         const api = G.create(el, {});
         api.setPreset('compact');
         api.setData(chain(40));
@@ -10655,10 +10692,11 @@ def test_spacetime_sliders_reach_d3_forces_in_non_galaxy_mode() -> None:
         const x = f.x, y = f.y, charge = f.charge, link = f.link;
         const beforeX = x && x.strength, beforeY = y && y.strength, beforeCharge = charge && charge.strength;
 
-        const snapshotForce = (key) => {
+        const snapshotForce = (key, sample) => {
           const force = (store.d3Forces || {})[key];
           if (!force) return null;
-          return typeof force.strength === 'function' ? force.strength.value : force.strength;
+          const value = typeof force.strength === 'function' ? force.strength() : force.strength;
+          return typeof value === 'function' ? value(sample || { source: 'n0', target: 'n1' }) : value;
         };
         const result = {};
         ['gravitationalConstant', 'blackHoleMass', 'localGravitationalConstant', 'damping']
@@ -10671,6 +10709,7 @@ def test_spacetime_sliders_reach_d3_forces_in_non_galaxy_mode() -> None:
               callResult.reheated = after > before;
               callResult.storeD3VelocityDecay = store.d3VelocityDecay;
               callResult.chargeStrength = snapshotForce('charge');
+              callResult.linkStrength = snapshotForce('link', { source: 'n0', target: 'n1' });
               callResult.xStrength = snapshotForce('x');
               callResult.yStrength = snapshotForce('y');
             } catch (error) {
@@ -10698,10 +10737,19 @@ def test_spacetime_sliders_reach_d3_forces_in_non_galaxy_mode() -> None:
         assert entry['error'] is None, (
             f"setSettings({{{key}: ...}}) raised: {entry['error']}"
         )
+        assert entry['reheated'] is True, f"setSettings({{{key}: ...}}) did not reheat"
+    # These are numeric observations from the stubbed D3 forces, not source-shape checks:
+    # compact's repel is 42, so a saturated gravitational multiplier of 2 yields -84 charge;
+    # a saturated local multiplier of 2 doubles the unit-strength chain link; and a saturated
+    # black-hole multiplier of 2 doubles compact's 0.26 origin-centering strength.
+    assert report['gravitationalConstant']['chargeStrength'] == pytest.approx(-84)
+    assert report['localGravitationalConstant']['linkStrength'] == pytest.approx(2)
+    assert report['blackHoleMass']['xStrength'] == pytest.approx(0.52)
+    assert report['blackHoleMass']['yStrength'] == pytest.approx(0.52)
     # damping is a *multiplier* on the size-aware baseline (0.38 small / 0.45 large). At the
     # upper end of the slider (15) the d3 velocityDecay reaches the 0.85 ceiling. At the lower
-    # end (0) it reaches the 0.05 floor. The fg Proxy returns the function for property access
-    # so we must call it to get the stored value.
+    # end (0) it reaches the 0.05 floor. The D3 stubs expose the normal strength() getter, so
+    # snapshotForce invokes it before evaluating a per-link strength callback.
     assert report['damping']['storeD3VelocityDecay'] == pytest.approx(0.85, abs=1e-9), (
         f"damping=150 (saturated to 15) must yield store.d3VelocityDecay=0.85, "
         f"got {report['damping']['storeD3VelocityDecay']}"
@@ -10714,13 +10762,9 @@ def test_spacetime_sliders_reach_d3_forces_in_non_galaxy_mode() -> None:
         f"the previous clamp(1, 15) made the lower quarter of the slider inert. "
         f"got {report['dampingLow']['storeD3VelocityDecay']}"
     )
-    # Charge/x/y strengths are not exercised here because the test environment does not stub
-    # d3.forceManyBody / d3.forceX / d3.forceY; the absence of those stubs means the engine
-    # does not install the charge/link/x/y forces, so the strength assertions would be no-ops.
-    # The velocityDecay path above proves the wire reaches fg.d3VelocityDecay, and the d3Force
-    # call counter (reheated: True) proves the layout-change contract holds for every
-    # spacetime key. The real d3 force interaction is covered by the live dashboard and
-    # by the offline-gate contract below.
+    # The D3 stand-ins above make the strength assertions exercise the same setter/getter paths
+    # that the browser's force constructors expose, while the velocityDecay assertion covers the
+    # force-graph setting that is not represented in store.d3Forces.
 
 
 @requires_node
