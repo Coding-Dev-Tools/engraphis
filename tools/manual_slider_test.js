@@ -12,13 +12,15 @@
 
 const { chromium } = require('@playwright/test');
 const { spawn } = require('child_process');
+const net = require('net');
 const path = require('path');
 
 const REPO = path.resolve(__dirname, '..');
 process.chdir(REPO);
 
-const PORT = process.env.ENGRAPHIS_PLAYWRIGHT_PORT || 8700;
-const BASE = `http://127.0.0.1:${PORT}`;
+const configuredPort = process.env.ENGRAPHIS_PLAYWRIGHT_PORT;
+let PORT = 0;
+let BASE = '';
 const WORKSPACE = 'graph-manual-test';
 const memoryCount = 8;
 
@@ -37,7 +39,30 @@ async function waitForServer(url, timeoutMs = 60000) {
   return false;
 }
 
+async function reservePort() {
+  const requestedPort = configuredPort === undefined ? 0 : Number(configuredPort);
+  if (!Number.isInteger(requestedPort) || requestedPort < 0 || requestedPort > 65535) {
+    throw new Error(`ENGRAPHIS_PLAYWRIGHT_PORT must be an integer from 0 to 65535; got ${configuredPort}`);
+  }
+  PORT = await new Promise((resolve, reject) => {
+    const probe = net.createServer();
+    probe.once('error', error => reject(new Error(
+      `Dashboard port ${requestedPort} is unavailable: ${error.message}`,
+    )));
+    probe.listen(requestedPort, '127.0.0.1', () => {
+      const address = probe.address();
+      if (!address || typeof address !== 'object') {
+        probe.close(() => reject(new Error('Could not determine the reserved dashboard port')));
+        return;
+      }
+      probe.close(error => error ? reject(error) : resolve(address.port));
+    });
+  });
+  BASE = `http://127.0.0.1:${PORT}`;
+}
+
 async function startServer() {
+  await reservePort();
   log(`Starting dashboard on port ${PORT}...`);
   const proc = spawn('python', ['-m', 'scripts.start_dashboard', '--no-open', '--port', String(PORT)], {
     cwd: REPO, shell: false,
