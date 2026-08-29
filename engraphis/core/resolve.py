@@ -600,15 +600,9 @@ def _has_subject_identifier_drift(candidate_text: str, record_text: str) -> bool
             continue
         if any(_value_kind(value) != "num" for value in [*old_values, *new_values]):
             continue
-        old_prefix = {
-            candidate[index][0]
-            for index in range(max(0, old_span[0] - 2), old_span[0])
-        }
-        new_prefix = {
-            record[index][0]
-            for index in range(max(0, new_span[0] - 2), new_span[0])
-        }
-        if old_prefix & new_prefix & _SUBJECT_IDENTIFIER_LABELS:
+        old_label = candidate[old_span[0] - 1][0] if old_span[0] else ""
+        new_label = record[new_span[0] - 1][0] if new_span[0] else ""
+        if old_label == new_label and old_label in _SUBJECT_IDENTIFIER_LABELS:
             return True
     return False
 
