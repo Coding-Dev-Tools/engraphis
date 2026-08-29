@@ -86,7 +86,9 @@ _REMEMBER_SCHEMA: dict[str, Any] = {
         "repo": {"type": ["string", "null"], "maxLength": 200, "default": None},
     },
     "required": ["content"],
-}
+            "subject_key": {"type": ["string", "null"], "maxLength": 200},
+            "claim_kind": {"type": ["string", "null"], "maxLength": 200},
+        }
 
 _DISCOVER_ACTIONS_SCHEMA: dict[str, Any] = {
     "type": "object",
