@@ -354,7 +354,24 @@ def test_distinct_environment_values_never_invalidate_each_other():
     # Same attribute, different environment qualifier: two coexisting facts.
     neighbor = _rec("Redis cache TTL is 300 seconds in staging.", id="mem_ttl_staging")
     res = resolve("Redis cache TTL is 3600 seconds in production.", [(0.7, neighbor)])
-    assert res.op != ResolutionOp.INVALIDATE
+    assert res.op == ResolutionOp.RELATE
+    assert res.target_id == "mem_ttl_staging"
+
+
+def test_environment_conflict_relates_near_duplicate_records():
+    """Different environments are separate live facts, even at duplicate overlap."""
+    neighbor = _rec("API timeout is 30 seconds in staging.", id="mem_staging")
+    res = resolve("API timeout is 90 seconds in production.", [(0.95, neighbor)])
+    assert res.op == ResolutionOp.RELATE
+    assert res.target_id == "mem_staging"
+
+
+def test_numeric_subject_identifier_drift_does_not_invalidate():
+    """Changing an account id selects another subject; it is not a value correction."""
+    neighbor = _rec("Customer account 100 is active in production.", id="mem_account_100")
+    res = resolve("Customer account 200 is active in production.", [(0.9, neighbor)])
+    assert res.op == ResolutionOp.RELATE
+    assert res.target_id == "mem_account_100"
 
 
 def test_named_identifier_swap_is_not_proven_a_correction_without_marker():
