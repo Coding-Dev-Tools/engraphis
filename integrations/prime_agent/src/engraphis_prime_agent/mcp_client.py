@@ -251,12 +251,16 @@ class EngraphisMcpClient:
     # --- tool surface ----------------------------------------------------
 
     async def list_tools(self) -> list[dict[str, Any]]:
-        if self._tools_cache is not None:
-            return list(self._tools_cache)
-        session = await self.connect()
-        tools = await self._list_tools(session)
-        self._tools_cache = tools
-        return list(tools)
+        if self._tools_cache is None:
+            await self.connect()
+        # connect() performs the bounded discovery once and publishes the
+        # result atomically with the session. Reuse that cache here instead
+        # of issuing a second unbounded tools/list request.
+        if self._tools_cache is None:
+            raise EngraphisMcpToolError(
+                "Engraphis client connected without a tool-list cache."
+            )
+        return list(self._tools_cache)
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if name not in CORE_DIRECT_TOOLS:
