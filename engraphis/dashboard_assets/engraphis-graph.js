@@ -8586,13 +8586,19 @@
           finitePositive(activeDragNode.radius, 2, 160) * 1.5) : GALAXY_DRAG_GRAVITY_SOFTENING,
         gravity: state.settings.gravity,
         localGravitySetting: GALAXY_STELLAR_GRAVITY_FLOOR_SETTING,
+        /* The dashboard normalises the three spacetime sliders to a 0..2 range
+           (default 1.0). The galaxy physics below was calibrated for a 0..8 range
+           (gravitationalConstant/localGravitationalConstant) and a 0..16 range
+           (blackHoleMass). Multiply by 4 and 8 respectively to restore the
+           calibrated scale without disturbing the non-galaxy engine, which still
+           receives the 0..2 value directly and clamps it at [0, 2] in applyForces. */
         gravitationalConstant: galaxyPhysicsMultiplier(
-          state.settings.gravitationalConstant, GALAXY_GRAVITATIONAL_CONSTANT_MULTIPLIER, 8),
+          state.settings.gravitationalConstant, GALAXY_GRAVITATIONAL_CONSTANT_MULTIPLIER, 8) * 4,
         localGravitationalConstant: galaxyPhysicsMultiplier(
           state.settings.localGravitationalConstant,
-          GALAXY_LOCAL_GRAVITATIONAL_CONSTANT_MULTIPLIER, 8),
+          GALAXY_LOCAL_GRAVITATIONAL_CONSTANT_MULTIPLIER, 8) * 4,
         blackHoleMass: galaxyPhysicsMultiplier(
-          state.settings.blackHoleMass, GALAXY_BLACK_HOLE_MASS_MULTIPLIER, 16),
+          state.settings.blackHoleMass, GALAXY_BLACK_HOLE_MASS_MULTIPLIER, 16) * 8,
         softening: galaxyLiveSoftening(),
         centralSoftening: Math.max(36, galaxySoftening() * 5),
         bridgeSoftening: Math.max(24, galaxySoftening() * 4),
