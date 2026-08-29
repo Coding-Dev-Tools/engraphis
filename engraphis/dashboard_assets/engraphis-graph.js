@@ -8605,18 +8605,17 @@
         gravity: state.settings.gravity,
         localGravitySetting: GALAXY_STELLAR_GRAVITY_FLOOR_SETTING,
         /* The dashboard normalises the three spacetime sliders to a 0..2 range
-           (default 1.0). The galaxy physics below was calibrated for a 0..8 range
-           (gravitationalConstant/localGravitationalConstant) and a 0..16 range
-           (blackHoleMass). Multiply by 4 and 8 respectively to restore the
-           calibrated scale without disturbing the non-galaxy engine, which still
-           receives the 0..2 value directly and clamps it at [0, 2] in applyForces. */
+           (default 1.0). Preserve that normalized value at the Galaxy boundary:
+           the downstream multiplier helpers clamp their own direct-call range,
+           and multiplying here made the default field 4x/8x stronger than the
+           value shown by the controls. */
         gravitationalConstant: galaxyPhysicsMultiplier(
-          state.settings.gravitationalConstant, GALAXY_GRAVITATIONAL_CONSTANT_MULTIPLIER, 8) * 4,
+          state.settings.gravitationalConstant, GALAXY_GRAVITATIONAL_CONSTANT_MULTIPLIER, 8),
         localGravitationalConstant: galaxyPhysicsMultiplier(
           state.settings.localGravitationalConstant,
-          GALAXY_LOCAL_GRAVITATIONAL_CONSTANT_MULTIPLIER, 8) * 4,
+          GALAXY_LOCAL_GRAVITATIONAL_CONSTANT_MULTIPLIER, 8),
         blackHoleMass: galaxyPhysicsMultiplier(
-          state.settings.blackHoleMass, GALAXY_BLACK_HOLE_MASS_MULTIPLIER, 16) * 8,
+          state.settings.blackHoleMass, GALAXY_BLACK_HOLE_MASS_MULTIPLIER, 16),
         softening: galaxyLiveSoftening(),
         centralSoftening: Math.max(36, galaxySoftening() * 5),
         bridgeSoftening: Math.max(24, galaxySoftening() * 4),
