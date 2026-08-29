@@ -106,8 +106,7 @@ def post(url, payload, timeout, session_id=None):
     return (responses[-1] if responses else None), response_session_id
 
 
-def rpc(method, params, rpc_id, deadline, session_id=None,
-         url=MCP_URL_DEFAULT):
+def rpc(method, params, rpc_id, deadline, session_id=None, url=None):
     """Issue one JSON-RPC request within the shared time budget.
 
     ``session_id`` is threaded into the Mcp-Session-Id header on every
@@ -116,6 +115,8 @@ def rpc(method, params, rpc_id, deadline, session_id=None,
     is the canonical case), the returned id is propagated so the caller
     threads it into every subsequent request on the same session.
     """
+    if url is None:
+        url = MCP_URL
     remaining = deadline - time.monotonic()
     if remaining <= 0.05:
         raise TimeoutError("time budget exhausted")
@@ -136,9 +137,10 @@ def rpc(method, params, rpc_id, deadline, session_id=None,
     return None, next_session_id
 
 
-def notify_initialized(deadline, session_id=None,
-                     url=MCP_URL_DEFAULT):
+def notify_initialized(deadline, session_id=None, url=None):
     """Best-effort notifications/initialized; stateless servers reply 202/empty."""
+    if url is None:
+        url = MCP_URL
     remaining = deadline - time.monotonic()
     if remaining <= 0.05:
         return session_id
@@ -171,7 +173,7 @@ def extract_context(result):
     return ""
 
 
-def session_context(repo, workspace, deadline, mcp_url=MCP_URL_DEFAULT):
+def session_context(repo, workspace, deadline, mcp_url=None):
     """initialize -> initialized -> tools/call engraphis_session(action=start).
 
     The Mcp-Session-Id returned by initialize is threaded into every
@@ -179,6 +181,8 @@ def session_context(repo, workspace, deadline, mcp_url=MCP_URL_DEFAULT):
     endpoint) keeps the connection open and recognises the tool call as
     part of the same session.
     """
+    if mcp_url is None:
+        mcp_url = MCP_URL
     _, session_id = rpc(
         "initialize",
         {
@@ -243,9 +247,9 @@ def build_additional_context(context, workspace, max_context_chars=None):
 
 
 def main():
-    mcp_url = os.environ.get("ENGRAPHIS_MCP_URL") or MCP_URL_DEFAULT
-    budget_seconds = _env_float("ENGRAPHIS_HOOK_BUDGET_S", BUDGET_SECONDS_DEFAULT)
-    max_context_chars = _env_int("ENGRAPHIS_HOOK_MAX_CHARS", MAX_CONTEXT_CHARS_DEFAULT)
+    mcp_url = os.environ.get("ENGRAPHIS_MCP_URL") or MCP_URL
+    budget_seconds = _env_float("ENGRAPHIS_HOOK_BUDGET_S", BUDGET_SECONDS)
+    max_context_chars = _env_int("ENGRAPHIS_HOOK_MAX_CHARS", MAX_CONTEXT_CHARS)
     deadline = time.monotonic() + budget_seconds
     try:
         payload = json.loads(sys.stdin.read() or "{}")

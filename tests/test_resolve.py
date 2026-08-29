@@ -374,6 +374,14 @@ def test_numeric_subject_identifier_drift_does_not_invalidate():
     assert res.target_id == "mem_account_100"
 
 
+def test_numeric_value_after_non_identifier_label_invalidates():
+    """A changed timeout value must not be mistaken for subject identity drift."""
+    neighbor = _rec("Server timeout is 30 seconds.", id="mem_timeout_30")
+    res = resolve("Server timeout is 60 seconds.", [(0.9, neighbor)])
+    assert res.op == ResolutionOp.INVALIDATE
+    assert res.target_id == "mem_timeout_30"
+
+
 def test_named_identifier_swap_is_not_proven_a_correction_without_marker():
     # ProviderA -> ProviderB beside 4 -> 8 workers could be parallel infrastructure;
     # the hashing embedder cannot prove the same predicate, so both stay live.
