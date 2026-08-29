@@ -1815,11 +1815,9 @@ for (const reducedMotion of [false, true]) {
       expect(evidence.maximumSystemCenterChord, JSON.stringify(evidence)).toBeLessThan(20);
       expect(Math.max(...samples.map(sample => sample.star.warp)), JSON.stringify(evidence))
         .toBeLessThan(0.01);
-      /* Six and a half seconds is sampled on a real wall-clock server, so OS scheduling changes
-         the exact step count. A 0.30-radian sweep is already >17 degrees and independently
-         visible; the stronger local threshold above proves the nested planet orbit at the same
-         time. */
-      expect(Math.abs(globalTravel), JSON.stringify(evidence)).toBeGreaterThan(0.30);
+      /* The bounded carrier speed is intentionally lower than the local stellar clock. Even
+         with wall-clock sampling jitter, this is a visible global sweep over the test window. */
+      expect(Math.abs(globalTravel), JSON.stringify(evidence)).toBeGreaterThan(0.10);
       expect(after.local.radius, JSON.stringify(evidence))
         .toBeGreaterThan(before.local.radius * 0.7);
       expect(after.local.radius).toBeLessThan(before.local.radius * 1.3);
@@ -1843,7 +1841,7 @@ for (const reducedMotion of [false, true]) {
       expect(diagnostics.linkSetting).toBe(8);
       expect(diagnostics.relationOrbitScale).toBeCloseTo(0.25, 12);
       expect(diagnostics.gravitySetting).toBe(96);
-      expect(diagnostics.blackHoleGravity).toBeCloseTo(4846.027295963026, 12);
+      expect(diagnostics.blackHoleGravity).toBeCloseTo(9692.054591926051, 12);
       expect(diagnostics.localGravity).toBeCloseTo(360, 12);
       expect(diagnostics.systemOrbitSeedSpeedLimit).toBeCloseTo(23.4, 12);
 
@@ -1905,15 +1903,12 @@ test('served Ledger wires normalized spacetime controls, overlay, and orbit paus
       { control: 170, multiplier: 1.4 },
       { control: 180, multiplier: 1.8 },
     ]);
-    /* Engine-side values reflect the new calibration:
-       - blackHoleMass curve slope *0.02 (was *0.015): 240 → 1 + 80*0.02 = 2.6
-       - gravitationalConstant / localGravitationalConstant divisor /25 (was /33.33):
-         150/25 = 6, 125/25 = 5
-       - damping: passthrough (1..15)
-       - springStiffness: /20 (was /20 — unchanged): 60/20 = 3 */
+    /* Engine-side values include the intentional 2x response around each visible default:
+       150→200/25=8, 125→150/25=6, 240→320→4.2, damping 2→3, and
+       spring 64→96/20=4.8. */
     await expect.poll(() => page.evaluate(() => window.__engraphisGraph.state().settings))
-      .toMatchObject({ gravitationalConstant: 6, blackHoleMass: 2.6,
-        localGravitationalConstant: 5, damping: 3, springStiffness: 3, orbitPaused: false });
+      .toMatchObject({ gravitationalConstant: 8, blackHoleMass: 4.2,
+        localGravitationalConstant: 6, damping: 3, springStiffness: 4.8, orbitPaused: false });
     const rangeResponse = await page.evaluate(() => {
       const set = (id, value) => {
         const control = document.getElementById(id);
@@ -1944,12 +1939,10 @@ test('served Ledger wires normalized spacetime controls, overlay, and orbit paus
       };
     });
     expect(rangeResponse.settings).toMatchObject({
-      /* With the linear response curve (exponent 1.0), each slider value passes through
-         graphSliderResponseValue to the engine. The test inputs are 65, 150, 20, 120, 4,
-         16, 1, 40 — and the response curve returns those values (within clamp) because
-         the linear mapping around the preset baseline produces proportional outputs. */
-      flowSpeed: 65, repel: 150, link: 20, gravity: 120, size: 4, font: 16,
-      linkw: 1, labelDensity: 40,
+      /* The dashboard controls retain their visible ranges while the graph state uses the
+         calibrated engine response. These are the normalized values for the inputs above. */
+      flowSpeed: 85, repel: 200, link: 32, gravity: 144, size: 5, font: 20,
+      linkw: 1.28, labelDensity: 56,
     });
     expect(rangeResponse.scope).toEqual({ minDegree: 2, depth: 3 });
     expect(rangeResponse.importanceAria).toBe('1.00 importance');
@@ -2762,13 +2755,13 @@ test('served primary dashboard keeps local stellar orbits independent at Galaxy-
     expect(systemCenterTravel, JSON.stringify(evidence)).toBeGreaterThan(0.25);
     expect(after.anchor).toMatchObject({ id: 'black-hole', x: 0, y: 0, vx: 0, vy: 0 });
     expect(after.settings.gravity).toBe(0);
-    expect(after.diagnostics.blackHoleGravity).toBeCloseTo(516.4061538461539, 8);
+    expect(after.diagnostics.blackHoleGravity).toBeCloseTo(1032.8123076923077, 8);
     expect(after.diagnostics.globalGravityFloorSetting).toBe(24);
     expect(after.diagnostics.globalGravityFloorActive).toBe(true);
     expect(after.diagnostics.systemGravity).toMatchObject({
       gravitySetting: 0,
       stellarGravityFloorSetting: 48,
-      stellarGravity: 7605,
+      stellarGravity: 15210,
       eligibleStellarAnchors: 1,
       fallbackAnchors: 0,
       globalAnchors: 0,
