@@ -2973,6 +2973,7 @@
     if (!anchor || !(field.gravitationalConstant > 0)) return empty;
     const timestep = Math.max(0.001, Math.min(2, Number(opts.timestep) || 1));
     const orbitalRadius = galaxyOrbitalRadiusMultiplier(opts.orbitalSpeed);
+    const absoluteSpeedLimit = Math.max(0.01, Number(opts.speedLimit) || MAX_NODE_SPEED);
     const direction = (seededHash(opts.layoutSeed, 'galaxy-spin') & 1) ? 1 : -1;
     const envelope = galaxyFarFieldEnvelope(bodies, opts);
     const nodeRadius = node => finitePositive(node.radius,
@@ -2990,9 +2991,16 @@
       if (Number.isFinite(node.fx)) node.fx = x;
       if (Number.isFinite(node.fy)) node.fy = y;
     };
-    const angularFrequency = (radius, authoredCarrier) => (authoredCarrier
-      ? galaxyAuthoredCarrierTargetSpeed(field, radius, opts.orbitalSpeed)
-      : galaxyCarrierTargetSpeed(field, radius, opts.orbitalSpeed)) / Math.max(1e-6, radius);
+    const angularFrequency = (radius, authoredCarrier) => {
+      const requestedSpeed = authoredCarrier
+        ? galaxyAuthoredCarrierTargetSpeed(field, radius, opts.orbitalSpeed)
+        : galaxyCarrierTargetSpeed(field, radius, opts.orbitalSpeed);
+      /* The carrier is the parent frame for every local orbit. Cap it before
+         constructing that frame, otherwise a high authored clock can make
+         the child speed budget infeasible and scatter the local system. */
+      const speed = Math.min(absoluteSpeedLimit, Math.max(0, requestedSpeed));
+      return speed / Math.max(1e-6, radius);
+    };
     const boundedRadius = (radius, extent) => {
       const inner = nodeRadius(anchor) + Math.max(0, extent)
         + GALAXY_BLACK_HOLE_EXCLUSION_PADDING;
