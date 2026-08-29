@@ -1991,6 +1991,19 @@ test('served Ledger wires normalized spacetime controls, overlay, and orbit paus
     expect(session.pageErrors).toEqual([]);
   });
 
+test('served Ledger exposes spacetime controls for non-Galaxy presets', async ({ page }) => {
+  const session = await openDashboard(page);
+  await page.goto('/');
+  await page.locator('.nav-item[data-view="relations"]').click();
+  await expect(page.locator('#graph-canvas canvas').first()).toBeAttached({ timeout: 20_000 });
+  await page.locator('[data-graph-preset-choice="compact"]').click();
+  await expect(page.locator('[data-graph-preset-choice="compact"]'))
+    .toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('#graph-spacetime-tuning')).toBeVisible();
+  await expect(page.locator('#graph-spacetime-summary')).toHaveText('Spacetime · black-hole orbit controls');
+  expect(session.pageErrors).toEqual([]);
+});
+
 test('served Galaxy paints complete independent solar envelopes with a visible clearance',
   async ({ page }, testInfo) => {
     test.setTimeout(55_000);
