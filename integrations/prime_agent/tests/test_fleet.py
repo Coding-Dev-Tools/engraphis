@@ -228,6 +228,15 @@ async def test_lifecycle_rejects_unknown_action(fleet) -> None:
 
 
 @pytest.mark.asyncio
+async def test_lifecycle_accepts_compatibility_action_aliases(fleet) -> None:
+    agent = fleet["researcher"]
+    await agent.call("engraphis_session", {"action": "start_session"})
+    assert agent.session_id is not None
+    await agent.call("engraphis_session", {"action": "end_session"})
+    assert agent.session_id is None
+
+
+@pytest.mark.asyncio
 async def test_lifecycle_rejects_non_boolean_force_new(fleet) -> None:
     with pytest.raises(EngraphisMcpToolError, match="force_new must be a boolean"):
         await fleet["researcher"].call(

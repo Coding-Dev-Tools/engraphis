@@ -362,10 +362,10 @@ def _coerce_type(value: Any, declared: Any) -> bool:
         if py is None:
             continue
         if t in ("integer", "number") and isinstance(value, bool):
-            return False
-        if not isinstance(value, py):
-            return False
-    return True
+            continue
+        if isinstance(value, py):
+            return True
+    return False
 
 
 def _validate_schema(schema: dict[str, Any], value: Any, path: str = "") -> list[str]:
