@@ -10343,10 +10343,10 @@ def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
     d3 = loader.index("'/v2-assets/vendor/d3.min.js?v=20260727-final'")
     force_graph = loader.index("'/v2-assets/vendor/force-graph.min.js?v=20260727-final'")
     renderer = loader.index(
-        "'/v2-assets/engraphis-graph.js?v=20260815-merge-ready-1'"
+        "'/v2-assets/engraphis-graph.js?v=20260828-slider-multiplier-fix'"
     )
     assert d3 < force_graph < renderer
-    assert '/v2-assets/ledger.js?v=20260815-merge-ready-1' in markup
+    assert '/v2-assets/ledger.js?v=20260828-slider-multiplier-fix' in markup
     assert "if (graphAssetsPromise === attempt) releaseGraphAssetsAttempt(attempt)" in loader
     assert "graphAssetsRetry = Math.min(graphAssetsRetry + 1, 10)" in loader
     all_loader = source[source.index("function ensureGraphAllAsset()"):
