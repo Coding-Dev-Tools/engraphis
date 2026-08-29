@@ -1424,6 +1424,36 @@ def test_orbital_speed_scales_live_carrier_and_kinematic_phase_rates() -> None:
 
 
 @requires_node
+def test_kinematic_carrier_is_capped_before_local_motion_budgeting() -> None:
+    report = _run_node(
+        """
+        const nodes = [
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            system_anchor_id: 'black-hole', gravity_mass: 8, radius: 8,
+            x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'star', anchor_role: 'community', community_id: 'solar',
+            system_anchor_id: 'star', gravity_mass: 4, radius: 5,
+            x: 120, y: 0, vx: 0, vy: 0 },
+          { id: 'planet', community_id: 'solar', system_anchor_id: 'star',
+            orbit_tier: 1, gravity_mass: 1, radius: 2,
+            x: 150, y: 0, vx: 0, vy: 0 },
+        ];
+        I.advanceGalaxyKinematicOrbits(nodes, {
+          gravity: 48, softening: 32, centralSoftening: 40, localSoftening: 12,
+          orbitalSpeed: 400, layoutSeed: 19, timestep: .032,
+        });
+        emit({ carrierSpeed: Math.hypot(nodes[1].vx, nodes[1].vy),
+          localSpeed: Math.hypot(nodes[2].vx - nodes[1].vx,
+            nodes[2].vy - nodes[1].vy), finite: nodes.every(node =>
+              [node.x, node.y, node.vx, node.vy].every(Number.isFinite)) });
+        """
+    )
+    assert report["finite"] is True
+    assert report["carrierSpeed"] <= 48 + 1e-9
+    assert report["localSpeed"] <= 48 + 1e-9
+
+
+@requires_node
 def test_four_hundred_percent_clock_keeps_release_sized_solar_systems_inside_reserved_lanes() -> None:
     """The maximum clock may expand and accelerate 60 systems, never scatter their members."""
     report = _run_node(
