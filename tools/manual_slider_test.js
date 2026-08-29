@@ -40,7 +40,7 @@ async function waitForServer(url, timeoutMs = 60000) {
 async function startServer() {
   log(`Starting dashboard on port ${PORT}...`);
   const proc = spawn('python', ['-m', 'scripts.start_dashboard', '--no-open', '--port', String(PORT)], {
-    cwd: REPO, shell: true,
+    cwd: REPO, shell: false,
     env: {
       ...process.env,
       ENGRAPHIS_DB_PATH: ':memory:',

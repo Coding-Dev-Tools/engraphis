@@ -112,6 +112,12 @@ _SUBJECT_IDENTIFIER_LABELS = frozenset({
     "database", "server", "host", "node", "record", "resource", "id",
     "identifier", "number", "key",
 })
+# Predicate words that make an early, otherwise unknown label plus a number look
+# like an entity identity, rather than a mutable value.
+_SUBJECT_IDENTITY_VERBS = frozenset({
+    "has", "have", "contains", "includes", "stores", "owns", "reports",
+    "serves", "handles", "tracks", "records", "shows", "uses",
+})
 _ENV_QUALIFIERS = frozenset({
     "staging", "production", "prod", "development", "dev", "test", "testing",
     "qa", "uat", "preview", "sandbox", "demo", "local",
@@ -584,8 +590,9 @@ def _has_subject_identifier_drift(candidate_text: str, record_text: str) -> bool
     ``Customer account 100`` -> ``Customer account 200`` has the same shape as
     a mutable numeric correction, but ``account`` identifies which customer is
     being described. Require the identifier label to occur immediately before
-    the changed numeric span on both sides, keeping ordinary values such as
-    ``account balance 100`` on the correction path.
+    the changed numeric span on both sides. For an unknown label, an early
+    numeric span is accepted only when a subject predicate follows it, keeping
+    ordinary values such as ``timeout is 30`` on the correction path.
     """
     candidate = _surface_tokens(candidate_text)
     record = _surface_tokens(record_text)
@@ -600,11 +607,33 @@ def _has_subject_identifier_drift(candidate_text: str, record_text: str) -> bool
             continue
         if any(_value_kind(value) != "num" for value in [*old_values, *new_values]):
             continue
-        old_label = candidate[old_span[0] - 1][0] if old_span[0] else ""
-        new_label = record[new_span[0] - 1][0] if new_span[0] else ""
-        if old_label == new_label and old_label in _SUBJECT_IDENTIFIER_LABELS:
+        old_label = _subject_identifier_label(candidate, old_span)
+        new_label = _subject_identifier_label(record, new_span)
+        if old_label and old_label == new_label:
             return True
     return False
+
+
+def _subject_identifier_label(
+    pairs: list[tuple[str, bool]], span: tuple[int, int]
+) -> str:
+    """Return the stable label immediately before an identity-like number."""
+    if not span[0]:
+        return ""
+    label = pairs[span[0] - 1][0]
+    if label in _SUBJECT_IDENTIFIER_LABELS and label not in _ATTRIBUTE_INTRODUCERS:
+        return label
+    # A number immediately after the leading noun is an identity convention
+    # even when the noun is not in our finite label vocabulary. A later
+    # predicate guard extends this to short subject prefixes without turning
+    # ordinary values such as "timeout is 30" into identities.
+    if span[0] == 1 and label not in _ATTRIBUTE_INTRODUCERS and label not in _LIGHT_TOKENS:
+        return label
+    if span[0] <= 2 and label not in _ATTRIBUTE_INTRODUCERS and label not in _LIGHT_TOKENS:
+        following = pairs[span[1]:min(len(pairs), span[1] + 3)]
+        if any(token in _SUBJECT_IDENTITY_VERBS for token, _ in following):
+            return label
+    return ""
 
 
 def _value_kind(token: str) -> str:
@@ -693,6 +722,14 @@ def _attribute_anchor_ok(cand: list[tuple[str, bool]], rec: list[tuple[str, bool
 
     cand_attr = _attr_window(cand, old_span)
     rec_attr = _attr_window(rec, new_span)
+    # A direct subject label is stronger evidence than a shared attribute
+    # introducer elsewhere in the prefix. This keeps a changed tenant or
+    # account identity from being mistaken for a nearby role correction.
+    if ((old_span[0] and cand[old_span[0] - 1][0] in _SUBJECT_IDENTIFIER_LABELS
+         and cand[old_span[0] - 1][0] not in _ATTRIBUTE_INTRODUCERS)
+            or (new_span[0] and rec[new_span[0] - 1][0] in _SUBJECT_IDENTIFIER_LABELS
+                and rec[new_span[0] - 1][0] not in _ATTRIBUTE_INTRODUCERS)):
+        return False
     if not (cand_attr & rec_attr):
         return False
     # The window must also carry an attribute introducer on both sides
