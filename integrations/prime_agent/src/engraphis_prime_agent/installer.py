@@ -56,9 +56,30 @@ def _backup(path: Path) -> Path | None:
     # on rapid successive runs is avoided.
     if path.stat().st_size == 0:
         return None
-    backup = path.with_name(f"{path.name}.bak-engraphis-{_utc_stamp()}")
-    if backup.exists():
-        return backup
+    # Use a collision-resistant suffix (UTC date + pid + unix-ms) so a
+    # second run on the same UTC date captures the user's other tool
+    # settings too. A pure per-day filename would overwrite the previous
+    # backup and lose unrelated configuration.
+    import os as _os
+    import time as _time
+    _pid = _os.getpid()
+    _now_ms = int(_time.time() * 1000)
+    base_name = (
+        f"{path.name}.bak-engraphis-{_utc_stamp()}.{_pid}.{_now_ms}"
+    )
+    if path.with_name(base_name).exists():
+        # Last-ditch uniqueness: append a counter until the name is free.
+        counter = 0
+        candidate_name = base_name
+        while path.with_name(candidate_name).exists():
+            counter += 1
+            candidate_name = (
+                f"{path.name}.bak-engraphis-{_utc_stamp()}.{_pid}."
+                f"{_now_ms}.{counter}"
+            )
+        backup = path.with_name(candidate_name)
+    else:
+        backup = path.with_name(base_name)
     backup.write_bytes(path.read_bytes())
     return backup
 

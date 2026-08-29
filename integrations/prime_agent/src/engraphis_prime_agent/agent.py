@@ -45,7 +45,10 @@ class EngraphisPrimeAgent:
         self.client = client
         self.config = config
         # Workspace precedence: explicit per-agent kwarg > config default.
-        self.workspace = workspace or config.default_workspace
+        # > the literal "default" placeholder so the Smart server always
+        # sees an explicit workspace (the "default" workspace is the
+        # server's own well-known scope for the Smart MCP gateway).
+        self.workspace = workspace or config.default_workspace or "default"
         # Repo precedence: explicit per-agent kwarg > config default > sub-agent
         # name. A single effective repo must be used for both session creation
         # and the tool-call defaults — a session opened in `researcher` while
@@ -165,15 +168,12 @@ class EngraphisPrimeAgent:
             # non-empty list replaces them. Omitting the key entirely
             # leaves the server's prior threads untouched.
             end_args["open_threads"] = open_threads
-        try:
-            await self.client.call_tool("engraphis_session", end_args)
-        except Exception as exc:  # noqa: BLE001 — best-effort close
-            _logger.warning(
-                "end_session for agent=%r (session_id=%r) failed: %s",
-                self.name,
-                session_id,
-                exc,
-            )
+        # Re-raise the gateway error after clearing the cached id. The
+        # lifecycle dispatcher catches this and converts it into a
+        # structured "close_failed" response; the existing end_session
+        # callers from aclose/__aexit__ paths see the same exception
+        # and can choose to log or re-raise at their layer.
+        await self.client.call_tool("engraphis_session", end_args)
 
     @property
     def session_id(self) -> str | None:
@@ -339,12 +339,18 @@ class EngraphisPrimeAgent:
             # ``open_threads`` is the server's next-session handoff;
             # dropping it would silently strip the caller-advertised
             # follow-ups, so always forward it through ``end_session``.
-            await self.end_session(
-                summary=summary,
-                outcome=outcome,
-                open_threads=open_threads,
-            )
-            return {"status": "closed"}
+            try:
+                await self.end_session(
+                    summary=summary,
+                    outcome=outcome,
+                    open_threads=open_threads,
+                )
+                return {"status": "closed"}
+            except EngraphisMcpToolError as exc:
+                return {
+                    "status": "close_failed",
+                    "error": str(exc),
+                }
         # Default to start. Forward force_new and goal so the
         # new session carries the caller's metadata. ``start_session``
         # only accepts ``force_new``; ``goal`` is propagated by
@@ -353,7 +359,13 @@ class EngraphisPrimeAgent:
         start_kwargs: dict[str, Any] = {}
         if args.get("force_new"):
             start_kwargs["force_new"] = True
-        if args.get("goal"):
+        if args.get("goal") and args["goal"] != self.goal:
+            # A different goal is a distinct session identity on the Smart
+            # server; the cached id belongs to the previous goal, so force
+            # a new session rather than reusing the stale id.
+            self.goal = args["goal"]
+            start_kwargs["force_new"] = True
+        elif args.get("goal"):
             self.goal = args["goal"]
         await self.start_session(**start_kwargs)
         # Rebuild tools with the new session id before returning so the
@@ -515,8 +527,22 @@ class PrimeAgentFleet:
         self._closed = True
 
     async def aclose(self) -> None:
-        if not self._closed:
-            await self.__aexit__(None, None, None)
+        if self._closed:
+            return
+        # When the user constructed the fleet directly without
+        # ``async with``, _stack is None and __aexit__ is a no-op, so
+        # close each sub-agent's session ourselves and then close the
+        # client. Mirror the async-context-manager path so the existing
+        # test that constructs the fleet bare also ends the sessions.
+        if self._stack is None:
+            await asyncio.gather(
+                *(a.end_session() for a in self._agents.values()),
+                return_exceptions=True,
+            )
+            await self._client.close()
+            self._closed = True
+            return
+        await self.__aexit__(None, None, None)
 
     # --- fan-out helpers -------------------------------------------------
 

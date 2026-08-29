@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import tempfile
+import time
 from contextlib import AsyncExitStack
 from typing import Any, TextIO
 
@@ -112,6 +113,12 @@ class EngraphisMcpClient:
         async with self._connect_lock:
             if self._session is not None:
                 return self._session
+            # Bound the entire connect sequence (stdio handshake +
+            # initialize + tools/list) so a subprocess that completes
+            # initialization but never answers tools/list cannot hang
+            # the advertised 60-second connection timeout.
+            _connect_started = time.monotonic()
+            _connect_budget = CONNECT_TIMEOUT_S
             # Capture the generation so a concurrent close() (which bumps
             # _lifecycle) invalidates this connect. The post-await check
             # below closes the freshly-opened stack and discards the session
@@ -152,6 +159,11 @@ class EngraphisMcpClient:
                     )
                 )
                 await asyncio.wait_for(session.initialize(), timeout=CONNECT_TIMEOUT_S)
+                _elapsed = time.monotonic() - _connect_started
+                if _elapsed > _connect_budget:
+                    raise asyncio.TimeoutError(
+                        f"engraphis-mcp connect exceeded {_connect_budget:.0f}s"
+                    )
                 tools = await self._list_tools(session)
                 available = {t["name"] for t in tools}
                 missing = [n for n in CORE_DIRECT_TOOLS if n not in available]
