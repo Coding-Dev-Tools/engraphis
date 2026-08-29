@@ -258,7 +258,6 @@ async function readEngineState(page) {
 async function measureSlider(page, sliderId, lowValue, highValue, settleMs = 2500) {
   // Read the slider output before any change
   const baselineOutput = await getSliderOutput(page, sliderId);
-  const baselineState = await readEngineState(page);
 
   // Drive low (capture the actual settled value because some sliders have non-integer steps)
   const lowActual = await setSlider(page, sliderId, lowValue);
@@ -266,6 +265,10 @@ async function measureSlider(page, sliderId, lowValue, highValue, settleMs = 250
   const lowOutput = await getSliderOutput(page, sliderId);
   const lowState = await readEngineState(page);
   const lowCount = await page.locator('#graph-count').textContent();
+  // Hold the unchanged low setting for one equivalent interval. This gives
+  // the physics engine a control-drift baseline for the high-vs-low sample.
+  await page.waitForTimeout(settleMs);
+  const baselineState = await readEngineState(page);
 
   // Drive high
   const highActual = await setSlider(page, sliderId, highValue);
@@ -427,8 +430,28 @@ async function main() {
       };
       const lowSpeed = meanSpeed(r.lowState.positions);
       const highSpeed = meanSpeed(r.highState.positions);
+      const baselineSpeed = meanSpeed(r.baselineState.positions);
       const lowRadius = meanRadius(r.lowState.positions);
       const highRadius = meanRadius(r.highState.positions);
+      const baselineRadius = meanRadius(r.baselineState.positions);
+      const centroid = arr => {
+        const nonAnchor = (arr || []).filter(n => n.role !== 'global');
+        if (!nonAnchor.length) return { x: 0, y: 0 };
+        return {
+          x: nonAnchor.reduce((s, n) => s + (n.x || 0), 0) / nonAnchor.length,
+          y: nonAnchor.reduce((s, n) => s + (n.y || 0), 0) / nonAnchor.length,
+        };
+      };
+      const distance = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+      const lowCentroid = centroid(r.lowState.positions);
+      const baselineCentroid = centroid(r.baselineState.positions);
+      const highCentroid = centroid(r.highState.positions);
+      const noOpSpeedDrift = Math.abs(baselineSpeed - lowSpeed);
+      const noOpRadiusDrift = Math.abs(baselineRadius - lowRadius);
+      const noOpCentroidDrift = distance(baselineCentroid, lowCentroid);
+      const drivenSpeedDelta = Math.abs(highSpeed - lowSpeed);
+      const drivenRadiusDelta = Math.abs(highRadius - lowRadius);
+      const drivenCentroidShift = distance(highCentroid, lowCentroid);
 
       // Engine state for low / high
       log(`  baseline output: ${r.baselineOutput}`);
@@ -454,8 +477,8 @@ async function main() {
         const h = r.highState.diagnostics;
         log(`  physics.${Object.keys(d)[0] || '?'}: low=${JSON.stringify(d).slice(0, 80)}... high=${JSON.stringify(h).slice(0, 80)}...`);
       }
-      log(`  per-node speed  low=${lowSpeed.toFixed(3)} high=${highSpeed.toFixed(3)} Δ=${Math.abs(highSpeed - lowSpeed).toFixed(3)}`);
-      log(`  mean radius      low=${lowRadius.toFixed(2)} high=${highRadius.toFixed(2)} Δ=${Math.abs(highRadius - lowRadius).toFixed(2)}`);
+      log(`  per-node speed  low=${lowSpeed.toFixed(3)} high=${highSpeed.toFixed(3)} Δ=${drivenSpeedDelta.toFixed(3)} no-op drift=${noOpSpeedDrift.toFixed(3)}`);
+      log(`  mean radius      low=${lowRadius.toFixed(2)} high=${highRadius.toFixed(2)} Δ=${drivenRadiusDelta.toFixed(2)} no-op drift=${noOpRadiusDrift.toFixed(2)}`);
 
       // A slider is "alive" if:
       //   (a) its DOM output reflects the typed value (basic wiring), AND
@@ -477,22 +500,13 @@ async function main() {
         engineApplied = lv !== hv;
         log(`  engine ${settingsKey} differs: ${engineApplied ? 'YES' : 'NO'} (low=${lv} high=${hv})`);
       }
-      // Physics actually changed if speed or radius measurably differs.
-      // In Galaxy mode the d3 simulation is frozen (the integrator runs the
-      // Galaxy physics) so per-node speed is typically 0; we also check the
-      // centroid shift in the diagnostics, which IS visible when the slider
-      // changes the equilibrium layout.
-      let centroidShift = 0;
-      if (r.lowState.diagnostics && r.highState.diagnostics) {
-        const ld = r.lowState.diagnostics, hd = r.highState.diagnostics;
-        if (ld.centerX !== undefined && hd.centerX !== undefined) {
-          centroidShift = Math.hypot((hd.centerX || 0) - (ld.centerX || 0), (hd.centerY || 0) - (ld.centerY || 0));
-        }
-      }
-      const physicsChanged = Math.abs(highSpeed - lowSpeed) > 0.005
-        || Math.abs(highRadius - lowRadius) > 0.5
-        || centroidShift > 0.005;
-      log(`  centroid shift:    ${centroidShift.toFixed(4)} world units`);
+      // Physics changed only when the high-vs-low delta exceeds the drift
+      // measured during an unchanged low-setting interval. This prevents
+      // ordinary simulation evolution from being credited to the slider.
+      const physicsChanged = drivenSpeedDelta > Math.max(0.005, noOpSpeedDrift * 1.25)
+        || drivenRadiusDelta > Math.max(0.5, noOpRadiusDrift * 1.25)
+        || drivenCentroidShift > Math.max(0.005, noOpCentroidDrift * 1.25);
+      log(`  centroid shift:    ${drivenCentroidShift.toFixed(4)} world units (no-op drift=${noOpCentroidDrift.toFixed(4)})`);
       log(`  physics actually changed: ${physicsChanged ? 'YES' : 'no'}`);
 
       const alive = r.settingsReached && engineApplied && physicsChanged;

@@ -382,6 +382,19 @@ def test_numeric_value_after_non_identifier_label_invalidates():
     assert res.target_id == "mem_timeout_30"
 
 
+def test_leading_numeric_attribute_is_not_mistaken_for_subject_identity():
+    neighbor = _rec(
+        "Timeout 30 seconds with retry and circuit breaker enabled.",
+        id="mem_timeout_compact_30",
+    )
+    res = resolve(
+        "Timeout 60 seconds with retry and circuit breaker enabled.",
+        [(0.9, neighbor)],
+    )
+    assert res.op == ResolutionOp.INVALIDATE
+    assert res.target_id == "mem_timeout_compact_30"
+
+
 def test_numeric_subject_identifier_drift_supports_unlisted_entity_labels():
     neighbor = _rec(
         "Invoice 100 has status paid with archived receipt and audit metadata.",
@@ -393,6 +406,36 @@ def test_numeric_subject_identifier_drift_supports_unlisted_entity_labels():
     )
     assert res.op == ResolutionOp.RELATE
     assert res.target_id == "mem_invoice_100"
+
+
+def test_named_subject_drift_does_not_invalidate_near_duplicate():
+    neighbor = _rec(
+        "Premium plan for Customer Alice includes 10 users, 5 projects, "
+        "and production support with annual billing metadata.",
+        id="mem_customer_alice",
+    )
+    res = resolve(
+        "Premium plan for Customer Bob includes 20 users, 5 projects, "
+        "and production support with annual billing metadata.",
+        [(0.9, neighbor)],
+    )
+    assert res.op == ResolutionOp.RELATE
+    assert res.target_id == "mem_customer_alice"
+
+
+def test_near_duplicate_environment_conflict_is_retained_with_same_value():
+    neighbor = _rec(
+        "The primary database connection pool in the staging environment holds "
+        "30 connections per application instance under nominal load.",
+        id="mem_staging_pool_same_value",
+    )
+    res = resolve(
+        "The primary database connection pool in the production environment holds "
+        "30 connections per application instance under nominal load.",
+        [(0.9, neighbor)],
+    )
+    assert res.op == ResolutionOp.RELATE
+    assert res.target_id == "mem_staging_pool_same_value"
 
 
 def test_subject_identifier_label_cannot_be_masked_by_shared_attribute_anchor():
