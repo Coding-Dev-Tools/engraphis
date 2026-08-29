@@ -102,6 +102,16 @@ _ATTRIBUTE_INTRODUCERS = frozenset({
     "named", "called", "set", "level", "value", "version", "mode",
     "status", "type", "kind", "state", "role", "tier", "preset", "user",
 })
+# Numeric tokens immediately following one of these labels are usually the
+# identity of the subject (``account 100`` / ``ticket 42``), not a mutable
+# attribute. Treating a changed subject id as a correction would retire the
+# wrong fact; the two records should remain live and be related instead.
+_SUBJECT_IDENTIFIER_LABELS = frozenset({
+    "account", "customer", "tenant", "user", "member", "order", "request",
+    "ticket", "issue", "case", "project", "workspace", "repository", "repo",
+    "database", "server", "host", "node", "record", "resource", "id",
+    "identifier", "number", "key",
+})
 _ENV_QUALIFIERS = frozenset({
     "staging", "production", "prod", "development", "dev", "test", "testing",
     "qa", "uat", "preview", "sandbox", "demo", "local",
@@ -349,8 +359,17 @@ def resolve(candidate_text: str, neighbors: list[tuple[float, MemoryRecord]], *,
         # (staging/production) are an exception: two near-duplicates that
         # only differ by environment are coexisting facts on different
         # envs, not a correction.
-        if (_has_value_drift(candidate_text, rec_text)
-                and not _env_conflict_for_correction(candidate_text, rec_text)):
+        env_conflict = _env_conflict_for_correction(candidate_text, rec_text)
+        subject_identifier_drift = _has_subject_identifier_drift(candidate_text, rec_text)
+        if env_conflict or subject_identifier_drift:
+            reason_kind = "environment conflict" if env_conflict else "subject identifier drift"
+            return Resolution(
+                ResolutionOp.RELATE,
+                target_id=rec.id,
+                reason=f"retains distinct near-duplicate {rec.id} ({reason_kind}; "
+                       f"token overlap={overlap:.2f}, similarity={sim:.2f})",
+            )
+        if _has_value_drift(candidate_text, rec_text):
             return Resolution(
                 ResolutionOp.INVALIDATE,
                 target_id=rec.id,
@@ -406,6 +425,13 @@ def resolve(candidate_text: str, neighbors: list[tuple[float, MemoryRecord]], *,
         # so a bare "now" can never retire a fact it merely shares surface
         # nouns with.
         assert evidence is not None  # strong => evidence was computed above
+        if _has_subject_identifier_drift(candidate_text, rec_text):
+            return Resolution(
+                ResolutionOp.RELATE,
+                target_id=rec.id,
+                reason=f"retains distinct subject identity {rec.id} (numeric identifier "
+                       f"drift; token overlap={overlap:.2f}, similarity={sim:.2f})",
+            )
         swap_veto = (evidence.heavy_swap
                      or (evidence.proper_swap and not (marker and evidence.value_swap))
                      or evidence.env_conflict)
@@ -549,6 +575,42 @@ def _has_value_drift(candidate_text: str, record_text: str) -> bool:
         if _is_value(token)
     }
     return bool(cand_value_tokens.symmetric_difference(rec_value_tokens))
+
+
+def _has_subject_identifier_drift(candidate_text: str, record_text: str) -> bool:
+    """True when a numeric swap changes the subject identity, not its value.
+
+    Resolver value evidence is intentionally lexical. A phrase such as
+    ``Customer account 100`` -> ``Customer account 200`` has the same shape as
+    a mutable numeric correction, but ``account`` identifies which customer is
+    being described. Require the identifier label to occur immediately before
+    the changed numeric span on both sides, keeping ordinary values such as
+    ``account balance 100`` on the correction path.
+    """
+    candidate = _surface_tokens(candidate_text)
+    record = _surface_tokens(record_text)
+    candidate_words = [token for token, _ in candidate]
+    record_words = [token for token, _ in record]
+    for old_span, new_span in _swap_spans(candidate_words, record_words):
+        old_values = [candidate[index][0] for index in range(*old_span)
+                      if _is_value(candidate[index][0])]
+        new_values = [record[index][0] for index in range(*new_span)
+                      if _is_value(record[index][0])]
+        if not old_values or not new_values:
+            continue
+        if any(_value_kind(value) != "num" for value in [*old_values, *new_values]):
+            continue
+        old_prefix = {
+            candidate[index][0]
+            for index in range(max(0, old_span[0] - 2), old_span[0])
+        }
+        new_prefix = {
+            record[index][0]
+            for index in range(max(0, new_span[0] - 2), new_span[0])
+        }
+        if old_prefix & new_prefix & _SUBJECT_IDENTIFIER_LABELS:
+            return True
+    return False
 
 
 def _value_kind(token: str) -> str:
