@@ -168,6 +168,41 @@ waitForQuiet(0, () => {
     assert report["reheated_streams"] is True
 
 
+def test_worker_settling_resistance_keeps_high_end_distinct() -> None:
+    script = """
+const nodes = [
+  { id: 'a', community_id: 'c' },
+  { id: 'b', community_id: 'c' },
+  { id: 'c', community_id: 'c' },
+];
+send({ type: 'prepare', payload: { nodes, links: [{ source: 'a', target: 'b' }] } });
+const waitForLayouts = (count, callback) => {
+  const tick = () => {
+    if (all('layout').length >= count) return callback();
+    setTimeout(tick, 10);
+  };
+  tick();
+};
+waitForLayouts(1, () => {
+  const samples = {};
+  const next = (resistance, callback) => {
+    const before = all('layout').length;
+    send({ type: 'settings', settings: { damping: resistance }, relayout: true, fit: false });
+    // settings emits the reseeded preview immediately; wait for the first relaxed layout.
+    waitForLayouts(before + 2, () => {
+      samples[resistance] = latest('layout').positions;
+      callback();
+    });
+  };
+  next(13, () => next(14, () => next(15, () => console.log(JSON.stringify({ samples })))));
+});
+"""
+    report = _run_worker(script)
+    samples = report["samples"]
+    assert samples["13"] != samples["14"]
+    assert samples["14"] != samples["15"]
+
+
 def test_renderer_is_webgl2_only_without_live_simulation_or_canvas_fallback() -> None:
     renderer = RENDERER.read_text(encoding="utf-8")
     assert "getContext('webgl2'" in renderer
