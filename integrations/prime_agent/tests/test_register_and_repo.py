@@ -124,6 +124,7 @@ def test_installer_toml_uses_write_text(
             return "[tools.engraphis]\npackage = 'x'\n"
 
     monkeypatch.setattr(installer, "tomli_w", _StubToml, raising=False)
+    monkeypatch.setitem(sys.modules, "tomli_w", _StubToml)
 
     real_write_text = Path.write_text
     real_write_bytes = Path.write_bytes
