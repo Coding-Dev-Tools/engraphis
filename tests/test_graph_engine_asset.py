@@ -1241,7 +1241,7 @@ def test_live_orbit_phase_uses_the_budgeted_relative_speed() -> None:
         emit({ phaseDelta, radius, phaseSpeed: phaseDelta * radius, relativeSpeed });
         """
     )
-    assert report["phaseSpeed"] <= report["relativeSpeed"] + 1e-9, report
+    assert report["phaseSpeed"] == pytest.approx(report["relativeSpeed"], rel=1e-9), report
 
 
 @requires_node
@@ -1553,7 +1553,7 @@ def test_kinematic_carrier_is_capped_before_local_motion_budgeting() -> None:
 
 
 @requires_node
-def test_kinematic_local_velocity_budget_uses_advanced_tangent() -> None:
+def test_kinematic_local_velocity_budget_uses_one_phase_speed() -> None:
     report = _run_node(
         """
         const nodes = [
@@ -1572,13 +1572,22 @@ def test_kinematic_local_velocity_budget_uses_advanced_tangent() -> None:
           orbitalSpeed: 400, layoutSeed: 19, timestep: .032, speedLimit: 48,
         };
         I.advanceGalaxyKinematicOrbits(nodes, options);
+        const before = nodes[2].__galaxyKinematicLocalOrbit.angle;
+        I.advanceGalaxyKinematicOrbits(nodes, options);
+        const after = nodes[2].__galaxyKinematicLocalOrbit.angle;
+        const radius = nodes[2].__galaxyKinematicLocalOrbit.radius;
+        const phaseDelta = Math.abs(Math.atan2(Math.sin(after - before), Math.cos(after - before)));
+        const relativeSpeed = Math.hypot(nodes[2].vx - nodes[1].vx,
+          nodes[2].vy - nodes[1].vy);
         emit({ maximumSpeed: Math.max(...nodes.map(node => Math.hypot(node.vx, node.vy))),
+          phaseSpeed: phaseDelta * radius / options.timestep, relativeSpeed,
           finite: nodes.every(node =>
             [node.x, node.y, node.vx, node.vy].every(Number.isFinite)) });
         """
     )
     assert report["finite"] is True
     assert report["maximumSpeed"] <= 48 + 1e-9
+    assert report["phaseSpeed"] == pytest.approx(report["relativeSpeed"], rel=1e-9), report
 
 
 @requires_node
