@@ -223,7 +223,7 @@ async def test_agents_reject_calls_after_fleet_close() -> None:
 
 @pytest.mark.asyncio
 async def test_lifecycle_rejects_unknown_action(fleet) -> None:
-    with pytest.raises(EngraphisMcpToolError, match="must be 'start' or 'end'"):
+    with pytest.raises(EngraphisMcpToolError, match="args invalid.*action"):
         await fleet["researcher"].call("engraphis_session", {"action": "resume"})
 
 
@@ -238,7 +238,7 @@ async def test_lifecycle_accepts_compatibility_action_aliases(fleet) -> None:
 
 @pytest.mark.asyncio
 async def test_lifecycle_rejects_non_boolean_force_new(fleet) -> None:
-    with pytest.raises(EngraphisMcpToolError, match="force_new must be a boolean"):
+    with pytest.raises(EngraphisMcpToolError, match="args invalid.*force_new"):
         await fleet["researcher"].call(
             "engraphis_session", {"force_new": "false"}
         )
@@ -630,5 +630,23 @@ async def test_dispatch_session_lifecycle_end_routes_through_state_machine(fake_
                                                 "summary": "shutdown",
                                                 "outcome": "complete"})
         assert agent.status()["session_id"] is None
+    finally:
+        await f.aclose()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_session_lifecycle_rejects_unknown_fields(fake_mcp_server) -> None:
+    """Direct lifecycle routing must enforce the advertised JSON schema."""
+    f = PrimeAgentFleet(workspace="x")
+    await f.client.connect()
+    try:
+        with pytest.raises(EngraphisMcpToolError, match="unknown property"):
+            await f["researcher"].call(
+                "engraphis_session",
+                {"action": "start", "workpace": "typo"},
+            )
+        assert not any(
+            name == "engraphis_session" for name, _args in fake_mcp_server.call_log
+        )
     finally:
         await f.aclose()

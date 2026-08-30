@@ -14,7 +14,7 @@ from .config import (
     build_runtime_config,
 )
 from .mcp_client import EngraphisMcpClient, EngraphisMcpToolError
-from .tools import ToolFn, all_tools, build_tool, TOOL_SPECS
+from .tools import ToolFn, all_tools, build_tool, TOOL_SPECS, validate_args
 
 _logger = logging.getLogger("engraphis_prime_agent.agent")
 
@@ -377,6 +377,11 @@ class EngraphisPrimeAgent:
         proper lifecycle methods so ``_session_id`` stays in sync with
         the server's session state.
         """
+        # Lifecycle calls bypass ``build_tool`` because they must update the
+        # agent's cached session state. Validate them at this boundary so a
+        # misspelled or unsupported field cannot be silently dropped while
+        # the hand-written routing below forwards only known arguments.
+        args = validate_args("engraphis_session", args)
         action = args.get("action", "start")
         action = {
             "start_session": "start",
