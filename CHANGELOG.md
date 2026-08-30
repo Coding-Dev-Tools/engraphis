@@ -200,10 +200,10 @@ All notable changes to Engraphis are documented here. Format loosely follows
   the matching `RecallEngine(arm_candidate_k_cap=...)` constructor argument) that clamps both
   the first-page widening (`candidate_k + min(250, candidate_k*3)`) and the second-page
   ceiling, so operators can trade untrusted-scope widening for latency on the new k=50
-  default without code changes. Measured ~1.9x speedup at cap=50 on a 300-fact trusted corpus
-  (the accompanying benchmark test, `test_recall_arm_candidate_k_cap.py`, was enlarged from
-  49 to 300 facts because both requested arm depths clamp to the same 49 rows on the
-  smaller corpus and the timing assertion was unreliable). Default behaviour is unchanged.
+  default without code changes. The accompanying benchmark test,
+  `test_recall_arm_candidate_k_cap.py`, uses a 300-fact trusted corpus because both requested
+  arm depths clamp to the same 49 rows on a smaller corpus and the timing assertion was
+  unreliable. Default behaviour is unchanged.
 - Import previews now page the source manifest exactly like execution, so vaults whose manifest
   outgrew one list page (10k identities) no longer show manifest-only files as silently absent
   from the preview plan; beyond-boundary rows are reported as `missing` instead of dropped.
