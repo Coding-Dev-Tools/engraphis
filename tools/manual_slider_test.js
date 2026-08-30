@@ -292,6 +292,9 @@ async function measureSlider(page, sliderId, lowValue, highValue, settleMs = 250
   const lowCount = await page.locator('#graph-count').textContent();
   // Hold the unchanged low setting for one equivalent interval. This gives
   // the physics engine a control-drift baseline for the high-vs-low sample.
+  // Re-dispatch the unchanged value first so this interval includes the same
+  // reheat that preceded the driven high-setting interval below.
+  await setSlider(page, sliderId, lowActual);
   await page.waitForTimeout(settleMs);
   const baselineState = await readEngineState(page);
 
