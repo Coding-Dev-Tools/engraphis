@@ -86,6 +86,7 @@ class EngraphisPrimeAgent:
         self._session_lock = asyncio.Lock()
         self._tools: dict[str, tuple[ToolFn, dict[str, Any]]] | None = None
         self._closed = False
+        self._closing = False
         # Protects lazy initialization of the tool-binding cache. The
         # session lock above is *not* enough because get_tool() and tools()
         # are synchronous and can be called from multiple threads (or, in
@@ -468,7 +469,7 @@ class EngraphisPrimeAgent:
         }
 
     def _ensure_open(self) -> None:
-        if self._closed:
+        if self._closed or self._closing:
             raise RuntimeError("EngraphisPrimeAgent is closed")
 
     # --- helpers ----------------------------------------------------------
@@ -535,6 +536,7 @@ class PrimeAgentFleet:
         }
         self._stack: AsyncExitStack | None = None
         self._closed = False
+        self._closing = False
 
     # --- collection protocol ---------------------------------------------
 
@@ -583,45 +585,41 @@ class PrimeAgentFleet:
     # --- lifecycle --------------------------------------------------------
 
     async def __aenter__(self) -> "PrimeAgentFleet":
-        if self._closed:
+        if self._closed or self._closing:
             raise RuntimeError("PrimeAgentFleet is closed")
         self._stack = AsyncExitStack()
         await self._stack.enter_async_context(self._client)
         return self
 
     async def __aexit__(self, *exc: Any) -> None:
-        if self._closed:
+        if self._closed or self._closing:
             return
-        # Best-effort: end every active session, then close the stdio gateway.
-        await asyncio.gather(
-            *(a.end_session() for a in self._agents.values()),
-            return_exceptions=True,
-        )
-        if self._stack is not None:
-            await self._stack.aclose()
-            self._stack = None
+        self._closing = True
         for agent in self._agents.values():
-            agent._closed = True
-        self._closed = True
-
-    async def aclose(self) -> None:
-        if self._closed:
-            return
-        # When the user constructed the fleet directly without
-        # ``async with``, _stack is None and __aexit__ is a no-op, so
-        # close each sub-agent's session ourselves and then close the
-        # client. Mirror the async-context-manager path so the existing
-        # test that constructs the fleet bare also ends the sessions.
-        if self._stack is None:
+            agent._closing = True
+        try:
+            # Best-effort: end every active session, then close the stdio gateway.
+            # The closing flag blocks new calls while these end RPCs are in flight.
             await asyncio.gather(
                 *(a.end_session() for a in self._agents.values()),
                 return_exceptions=True,
             )
-            await self._client.close()
+            if self._stack is not None:
+                await self._stack.aclose()
+                self._stack = None
+            else:
+                await self._client.close()
+        finally:
             for agent in self._agents.values():
+                agent._closing = False
                 agent._closed = True
+            self._closing = False
             self._closed = True
-            return
+
+    async def aclose(self) -> None:
+        # Use the same guarded path for bare fleets and async context-managed
+        # fleets. A bare fleet has no exit stack, so __aexit__ closes the
+        # client directly after ending the active sessions.
         await self.__aexit__(None, None, None)
 
     # --- fan-out helpers -------------------------------------------------
