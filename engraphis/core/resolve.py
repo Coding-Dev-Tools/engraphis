@@ -768,9 +768,9 @@ def _attribute_anchor_ok(cand: list[tuple[str, bool]], rec: list[tuple[str, bool
     # A direct subject label is stronger evidence than a shared attribute
     # introducer elsewhere in the prefix. This keeps a changed tenant or
     # account identity from being mistaken for a nearby role correction.
-    if ((old_span[0] and cand[old_span[0] - 1][0] in _SUBJECT_IDENTIFIER_LABELS
+    if ((old_span[0] and cand[old_span[0] - 1][0] in _SUBJECT_NAME_LABELS
          and cand[old_span[0] - 1][0] not in _ATTRIBUTE_INTRODUCERS)
-            or (new_span[0] and rec[new_span[0] - 1][0] in _SUBJECT_IDENTIFIER_LABELS
+            or (new_span[0] and rec[new_span[0] - 1][0] in _SUBJECT_NAME_LABELS
                 and rec[new_span[0] - 1][0] not in _ATTRIBUTE_INTRODUCERS)):
         return False
     if not (cand_attr & rec_attr):
