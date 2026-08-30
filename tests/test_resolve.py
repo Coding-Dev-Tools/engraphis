@@ -640,3 +640,25 @@ def test_unkeyed_facts_with_distinct_subjects_about_same_attribute_both_live():
         assert eng.store.get_memory(beta["id"]).valid_to is None
     finally:
         eng.store.close()
+
+
+def test_unkeyed_facts_with_organization_subjects_both_live():
+    """Recognized organization labels must protect distinct subject names."""
+    from engraphis.core.engine import MemoryEngine
+    eng = MemoryEngine.create(":memory:", auto_evolve=False)
+    try:
+        wid = eng.store.get_or_create_workspace("w")
+        rid = eng.store.get_or_create_repo(wid, "r")
+        alpha = eng.remember_with_resolution(
+            "User role admin for organization alpha.",
+            workspace_id=wid, repo_id=rid,
+        )
+        beta = eng.remember_with_resolution(
+            "User role admin for organization beta.",
+            workspace_id=wid, repo_id=rid,
+        )
+        assert beta["op"] == "relate"
+        assert eng.store.get_memory(alpha["id"]).valid_to is None
+        assert eng.store.get_memory(beta["id"]).valid_to is None
+    finally:
+        eng.store.close()
