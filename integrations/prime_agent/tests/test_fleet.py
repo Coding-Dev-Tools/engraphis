@@ -222,6 +222,39 @@ async def test_agents_reject_calls_after_fleet_close() -> None:
 
 
 @pytest.mark.asyncio
+async def test_fleet_blocks_new_calls_while_sessions_are_ending() -> None:
+    """Shutdown must not let a late data call bootstrap a replacement session."""
+    fleet = PrimeAgentFleet(
+        workspace="x",
+        config=EngraphisRuntimeConfig(command="ignored", environment={}),
+    )
+    await fleet.client.connect()
+    agent = fleet["researcher"]
+    await agent.start_session()
+    end_returned = asyncio.Event()
+    release_shutdown = asyncio.Event()
+    original_end = agent.end_session
+
+    async def delayed_end(*args, **kwargs):
+        await original_end(*args, **kwargs)
+        end_returned.set()
+        await release_shutdown.wait()
+
+    agent.end_session = delayed_end  # type: ignore[method-assign]
+    close_task = asyncio.create_task(fleet.aclose())
+    try:
+        await end_returned.wait()
+        with pytest.raises(RuntimeError, match="is closed"):
+            await agent.call("engraphis_recall_context", {"query": "late"})
+    finally:
+        release_shutdown.set()
+        await close_task
+
+    with pytest.raises(RuntimeError, match="is closed"):
+        await agent.call("engraphis_recall_context", {"query": "after close"})
+
+
+@pytest.mark.asyncio
 async def test_lifecycle_rejects_unknown_action(fleet) -> None:
     with pytest.raises(EngraphisMcpToolError, match="args invalid.*action"):
         await fleet["researcher"].call("engraphis_session", {"action": "resume"})
