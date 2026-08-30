@@ -287,6 +287,29 @@ class EngraphisPrimeAgent:
     def get_tool(self, name: str) -> tuple[ToolFn, dict[str, Any]]:
         return self._ensure_tools()[name]
 
+    async def _call_data_tool(
+        self, tool: str, args: dict[str, Any], ctx: Any = None
+    ) -> dict[str, Any]:
+        """Run a data tool against one stable session generation.
+
+        Session lifecycle calls hold ``_session_lock`` through their gateway
+        RPC. Data calls must use the same lock through binding lookup and the
+        RPC, otherwise a concurrent force-new start can replace the cached
+        session after the binding was captured but before the request is sent.
+        """
+        while True:
+            if not self._session_id:
+                await self.start_session()
+            async with self._session_lock:
+                self._ensure_open()
+                # An end may have acquired the lock between the lazy-start
+                # check and this block. Retry so the next request cannot be
+                # sent without a live session id.
+                if not self._session_id:
+                    continue
+                fresh_fn, _schema = self.get_tool(tool)
+                return await fresh_fn(args, ctx)
+
     async def call(self, tool: str, args: dict[str, Any]) -> dict[str, Any]:
         self._ensure_open()
         # Lifecycle calls must route through the agent's own state
@@ -297,10 +320,7 @@ class EngraphisPrimeAgent:
         # mirrors the registration wrapper's special case.
         if tool == "engraphis_session":
             return await self._dispatch_session_lifecycle(args)
-        if not self._session_id:
-            await self.start_session()
-        fn, _schema = self.get_tool(tool)
-        return await fn(args, None)
+        return await self._call_data_tool(tool, args)
 
     # --- registration into prime-agent -----------------------------------
 
@@ -359,14 +379,7 @@ class EngraphisPrimeAgent:
             agent._ensure_open()
             if tool_name == "engraphis_session":
                 return await agent._dispatch_session_lifecycle(args)
-            if not agent._session_id:
-                await agent.start_session()
-            # Re-fetch on every invocation. start_session() rebuilds the
-            # bound tool map, so the originally-captured ``bound_fn``
-            # closure holds a stale session_id and would otherwise leak
-            # operations into the wrong agent session.
-            fresh_fn, _schema = agent.get_tool(tool_name)
-            return await fresh_fn(args, ctx)
+            return await agent._call_data_tool(tool_name, args, ctx)
 
         return _wrapper
 
