@@ -224,8 +224,7 @@
     const spring = Number.isFinite(Number(settings.springStiffness))
       ? Math.max(0, Math.min(100 / 32, Number(settings.springStiffness))) : 1;
     const springScale = 0.35 + 0.65 * spring;
-    const rest = Math.max(scaledSpacing * 1.9, Number(settings.link) * 1.6 * (MAP_SCALE * 0.55))
-      * (0.5 + 0.5 * spring);
+    const rest = Math.max(scaledSpacing * 1.9, Number(settings.link) * 1.6 * (MAP_SCALE * 0.55));
     for (let edge = 0; edge < model.totalLinks; edge += 1) {
       const a = model.sources[edge], b = model.targets[edge];
       const ddx = pos[b * 2] - pos[a * 2], ddy = pos[b * 2 + 1] - pos[a * 2 + 1];
@@ -251,7 +250,9 @@
     const minDist2 = minDist * minDist;
     const cohesion = Number.isFinite(Number(settings.localGravitationalConstant))
       ? Math.max(0, Math.min(2, Number(settings.localGravitationalConstant))) : 1;
-    const push = Number(settings.repel) / 48 * (0.5 + 0.5 * cohesion);
+    /* Cluster cohesion strengthens the attractive spring network above. Invert its influence
+       on the collision-style push so a higher cohesion setting does not spread clusters apart. */
+    const push = Number(settings.repel) / 48 * (1.5 - 0.5 * cohesion);
     for (let index = 0; index < count; index += 1) {
       const gx = Math.floor(pos[index * 2] / cell), gy = Math.floor(pos[index * 2 + 1] / cell);
       let checked = 0;
