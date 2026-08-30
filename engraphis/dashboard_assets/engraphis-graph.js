@@ -2919,21 +2919,22 @@
       const requestedLocalSpeed = omega * localRadius;
       const localTangentX = -Math.sin(local.angle) * local.direction;
       const localTangentY = Math.cos(local.angle) * local.direction;
-      const phaseSpeed = galaxyRelativeSpeedBudget(parentTarget, absoluteSpeedLimit,
-        requestedLocalSpeed, localTangentX, localTangentY);
+      const phaseSpeed = Math.min(
+        galaxyRelativeSpeedBudget(parentTarget, absoluteSpeedLimit,
+          requestedLocalSpeed, localTangentX, localTangentY),
+        galaxyRelativeSpeedBudget(parentTarget, absoluteSpeedLimit, requestedLocalSpeed),
+      );
       const cappedOmega = phaseSpeed / Math.max(1e-9, localRadius);
       local.angle += local.direction * cappedOmega * timestep;
       const offsetX = Math.cos(local.angle) * localRadius;
       const offsetY = Math.sin(local.angle) * localRadius;
       const advancedTangentX = -Math.sin(local.angle) * local.direction;
       const advancedTangentY = Math.cos(local.angle) * local.direction;
-      const localSpeed = galaxyRelativeSpeedBudget(parentTarget, absoluteSpeedLimit,
-        requestedLocalSpeed, advancedTangentX, advancedTangentY);
       const target = {
         x: parentTarget.x + offsetX,
         y: parentTarget.y + offsetY,
-        vx: parentTarget.vx + advancedTangentX * localSpeed,
-        vy: parentTarget.vy + advancedTangentY * localSpeed,
+        vx: parentTarget.vx + advancedTangentX * phaseSpeed,
+        vy: parentTarget.vy + advancedTangentY * phaseSpeed,
       };
       targets.set(node, target);
       visiting.delete(node);
@@ -5913,23 +5914,24 @@
         const requestedRelativeSpeed = baseSpeed * orbitalSpeed;
         const phaseTangentX = -Math.sin(phase.angle) * phase.direction;
         const phaseTangentY = Math.cos(phase.angle) * phase.direction;
-        /* Use the same vector budget for the phase clock and the emitted velocity. Otherwise
-           a near-limit carrier can advance a child through a large angular step while the
-           capped velocity reports a smaller motion, creating a position/velocity jump. */
-        const phaseSpeed = galaxyRelativeSpeedBudget(parent, absoluteSpeedLimit,
-          requestedRelativeSpeed, phaseTangentX, phaseTangentY);
+        /* Use one scalar for the phase clock and emitted velocity. The final tangent rotates
+           during the step, so also apply the direction-independent residual cap; reusing a
+           pre-step directional budget after that rotation must never exceed the absolute cap. */
+        const phaseSpeed = Math.min(
+          galaxyRelativeSpeedBudget(parent, absoluteSpeedLimit,
+            requestedRelativeSpeed, phaseTangentX, phaseTangentY),
+          galaxyRelativeSpeedBudget(parent, absoluteSpeedLimit, requestedRelativeSpeed),
+        );
         const angularSpeed = phaseSpeed / Math.max(1e-6, targetRadius);
         phase.angle += phase.direction * angularSpeed * timestep;
         const unitX = Math.cos(phase.angle), unitY = Math.sin(phase.angle);
         const tangentX = -unitY * phase.direction, tangentY = unitX * phase.direction;
         const targetX = parent.x + unitX * targetRadius;
         const targetY = parent.y + unitY * targetRadius;
-        const targetRelativeSpeed = galaxyRelativeSpeedBudget(parent, absoluteSpeedLimit,
-          requestedRelativeSpeed, tangentX, tangentY);
         const targetVx = (Number.isFinite(parent.vx) ? parent.vx : 0)
-          + tangentX * targetRelativeSpeed;
+          + tangentX * phaseSpeed;
         const targetVy = (Number.isFinite(parent.vy) ? parent.vy : 0)
-          + tangentY * targetRelativeSpeed;
+          + tangentY * phaseSpeed;
         const shiftX = targetX - node.x, shiftY = targetY - node.y;
         const velocityShiftX = targetVx - (Number.isFinite(node.vx) ? node.vx : 0);
         const velocityShiftY = targetVy - (Number.isFinite(node.vy) ? node.vy : 0);
