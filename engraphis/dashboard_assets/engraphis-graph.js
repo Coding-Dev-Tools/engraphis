@@ -8259,7 +8259,14 @@
       const clusterCohesion = control(s.localGravitationalConstant, 1, 0, 2);
       const settlingResistance = control(s.damping, 1, 0, 15);
       const linkSpring = control(s.springStiffness, 1, 0, 100 / 32);
-      const responseScale = product => 1 / Math.sqrt(Math.max(1e-6, product));
+      /* Keep zero-force endpoints finite without flattening the lower slider range. The 0.5
+         baseline preserves a neutral scale of one at the default product, while the explicit
+         bounded response caps a zero product at sqrt(2) instead of spreading the layout across
+         millions of world units. */
+      const responseScale = product => {
+        const magnitude = Math.max(0, Number(product) || 0);
+        return 1 / Math.sqrt(0.5 + 0.5 * magnitude);
+      };
       const coreScale = responseScale(coreAttraction * coreMass);
       const cohesionScale = responseScale(clusterCohesion * linkSpring);
       const settlingScale = 1 + (settlingResistance - 1) * 0.02;
