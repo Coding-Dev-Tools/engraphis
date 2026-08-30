@@ -2919,17 +2919,21 @@
       const requestedLocalSpeed = omega * localRadius;
       const localTangentX = -Math.sin(local.angle) * local.direction;
       const localTangentY = Math.cos(local.angle) * local.direction;
-      const localSpeed = galaxyRelativeSpeedBudget(parentTarget, absoluteSpeedLimit,
+      const phaseSpeed = galaxyRelativeSpeedBudget(parentTarget, absoluteSpeedLimit,
         requestedLocalSpeed, localTangentX, localTangentY);
-      const cappedOmega = localSpeed / Math.max(1e-9, localRadius);
+      const cappedOmega = phaseSpeed / Math.max(1e-9, localRadius);
       local.angle += local.direction * cappedOmega * timestep;
       const offsetX = Math.cos(local.angle) * localRadius;
       const offsetY = Math.sin(local.angle) * localRadius;
+      const advancedTangentX = -Math.sin(local.angle) * local.direction;
+      const advancedTangentY = Math.cos(local.angle) * local.direction;
+      const localSpeed = galaxyRelativeSpeedBudget(parentTarget, absoluteSpeedLimit,
+        requestedLocalSpeed, advancedTangentX, advancedTangentY);
       const target = {
         x: parentTarget.x + offsetX,
         y: parentTarget.y + offsetY,
-        vx: parentTarget.vx - Math.sin(local.angle) * localSpeed * local.direction,
-        vy: parentTarget.vy + Math.cos(local.angle) * localSpeed * local.direction,
+        vx: parentTarget.vx + advancedTangentX * localSpeed,
+        vy: parentTarget.vy + advancedTangentY * localSpeed,
       };
       targets.set(node, target);
       visiting.delete(node);
@@ -8247,8 +8251,9 @@
       const clusterCohesion = control(s.localGravitationalConstant, 1, 0, 2);
       const settlingResistance = control(s.damping, 1, 0, 15);
       const linkSpring = control(s.springStiffness, 1, 0, 100 / 32);
-      const coreScale = 1 / Math.sqrt(Math.max(0.25, coreAttraction * coreMass));
-      const cohesionScale = 1 / Math.sqrt(Math.max(0.25, clusterCohesion * linkSpring));
+      const responseScale = product => 1 / Math.sqrt(Math.max(1e-6, product));
+      const coreScale = responseScale(coreAttraction * coreMass);
+      const cohesionScale = responseScale(clusterCohesion * linkSpring);
       const settlingScale = 1 + (settlingResistance - 1) * 0.02;
       const layoutPhysicsScale = coreScale * cohesionScale * settlingScale;
       const localGap = (4 + nodeSize * 1.6 + Math.sqrt(repel) * 0.8 + link * 0.16)

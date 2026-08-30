@@ -2379,9 +2379,8 @@
       const label = byId(id);
       if (label) label.textContent = labels[index];
     });
-    // The spacetime multipliers are also wired into the d3 forces for every
-    // non-Galaxy preset. Keep the controls available wherever those settings
-    // have an observable effect; only the labels and summary vary by mode.
+    // The spacetime multipliers are wired into the full worker layout and Galaxy
+    // solver. Hide controls that have no observable effect in other presets.
     byId('graph-spacetime-tuning').hidden = false;
     const forceLabels = full
       ? ['Core attraction', 'Core mass', 'Cluster cohesion', 'Settling resistance', 'Link spring']
@@ -2392,6 +2391,10 @@
       const label = byId(id);
       if (label) label.textContent = forceLabels[index];
     });
+    const springLabel = byId('graph-spring-stiffness-label');
+    if (springLabel && springLabel.parentElement) {
+      springLabel.parentElement.hidden = !(galaxy || full);
+    }
     byId('graph-spacetime-summary').textContent = full
       ? 'All-node force refinement'
       : 'Spacetime · black-hole orbit controls';
@@ -2401,6 +2404,8 @@
     byId('graph-orbits-pause-label').textContent = 'Pause orbits';
     byId('graph-orbits-pause-detail').textContent = 'physics';
     byId('graph-orbits-pause').setAttribute('aria-label', 'Pause orbital physics');
+    const orbitPauseRow = byId('graph-orbit-pause-row');
+    if (orbitPauseRow) orbitPauseRow.hidden = !(galaxy && !full);
   }
 
   function setChoicePressed(selector, dataKey, selected) {
