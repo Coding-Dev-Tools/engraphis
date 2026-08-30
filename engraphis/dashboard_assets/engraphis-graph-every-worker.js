@@ -338,7 +338,9 @@
     /* A tight per-pass step cap keeps the settle from smearing district boundaries. */
     const resistance = Number.isFinite(Number(settings.damping))
       ? Math.max(0, Math.min(15, Number(settings.damping))) : 1;
-    const damp = Math.max(0.2, Math.min(0.95, 0.8 / (0.75 + 0.25 * resistance)));
+    /* Keep the full 0..15 control range responsive: the reciprocal curve reaches 0.2
+       at resistance 13, so a 0.2 floor would make the final two slider units inert. */
+    const damp = Math.max(0.15, Math.min(0.95, 0.8 / (0.75 + 0.25 * resistance)));
     const maxStep = SPACING * MAP_SCALE * 0.7;
     for (let index = 0; index < count; index += 1) {
       let vx = dx[index] * damp, vy = dy[index] * damp;
