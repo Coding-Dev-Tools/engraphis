@@ -565,6 +565,8 @@ class PrimeAgentFleet:
     # --- lifecycle --------------------------------------------------------
 
     async def __aenter__(self) -> "PrimeAgentFleet":
+        if self._closed:
+            raise RuntimeError("PrimeAgentFleet is closed")
         self._stack = AsyncExitStack()
         await self._stack.enter_async_context(self._client)
         return self

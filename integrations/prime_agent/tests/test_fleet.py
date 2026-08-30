@@ -251,6 +251,17 @@ async def test_aexit_via_context_manager() -> None:
     assert fleet._closed is True
 
 
+@pytest.mark.asyncio
+async def test_context_manager_rejects_reentry_after_close() -> None:
+    fleet = PrimeAgentFleet(workspace="x")
+    async with fleet:
+        pass
+
+    with pytest.raises(RuntimeError, match="is closed"):
+        async with fleet:
+            pass
+
+
 # ---- new edge-case tests below ----
 
 
