@@ -1219,7 +1219,7 @@ function loadAllGraphEngine(){
  if(typeof EngraphisEveryGraph!=='undefined')return Promise.resolve();
  if(!ALL_GRAPH_ENGINE_LOADING){
   ALL_GRAPH_ENGINE_LOADING=new Promise((resolve,reject)=>{
-   const script=document.createElement('script');script.src='/v2-assets/engraphis-graph-every.js?v=20260823-every-19';
+   const script=document.createElement('script');script.src='/v2-assets/engraphis-graph-every.js?v=20260830-spacetime-controls-20';
    script.onload=()=>{typeof EngraphisEveryGraph==='undefined'?reject(new Error('Every-node graph asset loaded without registering EngraphisEveryGraph')):resolve()};
    script.onerror=()=>reject(new Error('Every-node graph asset could not load'));
    document.head.appendChild(script);

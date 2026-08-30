@@ -5910,14 +5910,22 @@
            collision, and relation work may translate the whole system, but they cannot turn
            a planet backward or pull it onto a chord through the star. */
         const timestep = Math.max(0.001, Math.min(2, Number(opts.timestep) || 1));
-        const angularSpeed = baseSpeed * orbitalSpeed / Math.max(1e-6, targetRadius);
+        const requestedRelativeSpeed = baseSpeed * orbitalSpeed;
+        const phaseTangentX = -Math.sin(phase.angle) * phase.direction;
+        const phaseTangentY = Math.cos(phase.angle) * phase.direction;
+        /* Use the same vector budget for the phase clock and the emitted velocity. Otherwise
+           a near-limit carrier can advance a child through a large angular step while the
+           capped velocity reports a smaller motion, creating a position/velocity jump. */
+        const phaseSpeed = galaxyRelativeSpeedBudget(parent, absoluteSpeedLimit,
+          requestedRelativeSpeed, phaseTangentX, phaseTangentY);
+        const angularSpeed = phaseSpeed / Math.max(1e-6, targetRadius);
         phase.angle += phase.direction * angularSpeed * timestep;
         const unitX = Math.cos(phase.angle), unitY = Math.sin(phase.angle);
         const tangentX = -unitY * phase.direction, tangentY = unitX * phase.direction;
         const targetX = parent.x + unitX * targetRadius;
         const targetY = parent.y + unitY * targetRadius;
         const targetRelativeSpeed = galaxyRelativeSpeedBudget(parent, absoluteSpeedLimit,
-          baseSpeed * orbitalSpeed, tangentX, tangentY);
+          requestedRelativeSpeed, tangentX, tangentY);
         const targetVx = (Number.isFinite(parent.vx) ? parent.vx : 0)
           + tangentX * targetRelativeSpeed;
         const targetVy = (Number.isFinite(parent.vy) ? parent.vy : 0)
