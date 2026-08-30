@@ -538,6 +538,53 @@ async def test_end_session_holds_lock_until_close_rpc_finishes() -> None:
 
 
 @pytest.mark.asyncio
+async def test_data_call_waits_for_force_new_session_generation() -> None:
+    """A data request must not retain the old id while a replacement starts."""
+    start_started = asyncio.Event()
+    release_start = asyncio.Event()
+    calls: list[tuple[str, dict[str, object]]] = []
+    session_number = 0
+
+    class _BlockingClient:
+        async def call_tool(
+            self, name: str, args: dict[str, object]
+        ) -> dict[str, object]:
+            nonlocal session_number
+            calls.append((name, dict(args)))
+            if name == "engraphis_session":
+                if args.get("action") == "start":
+                    session_number += 1
+                    if args.get("force_new"):
+                        start_started.set()
+                        await release_start.wait()
+                    payload = {"session_id": f"ses_generation_{session_number:04d}"}
+                else:
+                    payload = {"status": "closed"}
+                return {"content": [{"text": json.dumps(payload)}]}
+            return {"content": [{"text": json.dumps(args)}]}
+
+    config = EngraphisRuntimeConfig(command="ignored", environment={})
+    agent = EngraphisPrimeAgent("researcher", _BlockingClient(), config, workspace="x")
+    await agent.start_session()
+
+    start_task = asyncio.create_task(agent.start_session(force_new=True))
+    await start_started.wait()
+    data_task = asyncio.create_task(
+        agent.call("engraphis_recall_context", {"query": "stable generation"})
+    )
+    await asyncio.sleep(0)
+    assert not data_task.done()
+
+    release_start.set()
+    await start_task
+    await data_task
+    assert [name for name, _args in calls] == [
+        "engraphis_session", "engraphis_session", "engraphis_recall_context"
+    ]
+    assert calls[-1][1]["session_id"] == "ses_generation_0002"
+
+
+@pytest.mark.asyncio
 async def test_dispatch_lifecycle_forwards_advertised_arguments(fake_mcp_server) -> None:
     f = PrimeAgentFleet(workspace="initial")
     await f.client.connect()
