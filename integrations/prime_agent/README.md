@@ -126,7 +126,7 @@ fleet's dict interface.
 After the package is installed, register it with prime-agent's tool manager:
 
 ```bash
-python scripts/install_prime_agent.py
+engraphis-prime-agent install
 ```
 
 The installer is idempotent: re-running updates the existing entry instead of
@@ -146,7 +146,7 @@ adapter) if prime-agent's real API differs.
 | `ENGRAPHIS_DB_PATH` | Path to the local Engraphis SQLite database. The integration inherits whatever the gateway sees, so the dashboard and the fleet share one store. |
 | `ENGRAPHIS_WORKSPACE` | Default workspace name. The fleet's `workspace=` overrides this. |
 | `ENGRAPHIS_REPO` | Default repo scope. The fleet's `repo=` overrides this. |
-| `PRIME_AGENT_CONFIG_PATH` | Override the prime-agent config file path used by `scripts/install_prime_agent.py`. |
+| `PRIME_AGENT_CONFIG_PATH` | Override the prime-agent config file path used by `engraphis-prime-agent install`. |
 
 Only the following variables are forwarded to the gateway subprocess —
 never the full environment:

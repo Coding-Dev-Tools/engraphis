@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from engraphis_prime_agent.config import EngraphisRuntimeConfig
+from engraphis_prime_agent.config import CORE_DIRECT_TOOLS, EngraphisRuntimeConfig
 from engraphis_prime_agent.mcp_client import (
     READ_ONLY_TOOLS,
     MAX_TOOL_LIST_PAGES,
@@ -33,6 +33,14 @@ async def test_connect_lists_core_tools(mcp_client) -> None:
         "engraphis_conflict_review",
     }
     assert expected.issubset(names)
+
+
+@pytest.mark.asyncio
+async def test_live_gateway_exposes_smart_tools(live_mcp_client) -> None:
+    """The opt-in live gate must exercise the real gateway's tool contract."""
+    tools = await live_mcp_client.list_tools()
+    names = {tool["name"] for tool in tools}
+    assert set(CORE_DIRECT_TOOLS).issubset(names)
 
 
 @pytest.mark.asyncio
