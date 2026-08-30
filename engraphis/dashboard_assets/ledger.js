@@ -424,7 +424,7 @@
     if (!graphAllAssetsPromise) {
       const controller = new AbortController();
       const attempt = loadScript(
-        graphAssetSource('/v2-assets/engraphis-graph-every.js?v=20260823-every-19'),
+        graphAssetSource('/v2-assets/engraphis-graph-every.js?v=20260830-spacetime-controls-20'),
         'EngraphisEveryGraph', controller.signal,
       );
       graphAllAssetsPromise = attempt;

@@ -22,7 +22,11 @@
   const MAX_CENTROID_GROUPS = 512;
 
   let model = null;
-  let settings = { repel: 48, link: 16, gravity: 48 };
+  let settings = {
+    repel: 48, link: 16, gravity: 48,
+    gravitationalConstant: 1, blackHoleMass: 1, localGravitationalConstant: 1,
+    damping: 1, springStiffness: 1,
+  };
   let generation = 0;
 
   function post(message) { self.postMessage(message); }
@@ -217,14 +221,18 @@
        springs run weak — they are visual routes between districts, not licence to drag
        the districts into one another over the settle passes. */
     const scaledSpacing = SPACING * MAP_SCALE;
-    const rest = Math.max(scaledSpacing * 1.9, Number(settings.link) * 1.6 * (MAP_SCALE * 0.55));
+    const spring = Number.isFinite(Number(settings.springStiffness))
+      ? Math.max(0, Math.min(100 / 32, Number(settings.springStiffness))) : 1;
+    const springScale = 0.35 + 0.65 * spring;
+    const rest = Math.max(scaledSpacing * 1.9, Number(settings.link) * 1.6 * (MAP_SCALE * 0.55))
+      * (0.5 + 0.5 * spring);
     for (let edge = 0; edge < model.totalLinks; edge += 1) {
       const a = model.sources[edge], b = model.targets[edge];
       const ddx = pos[b * 2] - pos[a * 2], ddy = pos[b * 2 + 1] - pos[a * 2 + 1];
       const dist = Math.sqrt(ddx * ddx + ddy * ddy) || 0.0001;
       const crossCommunity =
         model.communities[a] !== model.communities[b] ? 0.02 : 0.07;
-      const force = (dist - rest) / dist * crossCommunity;
+      const force = (dist - rest) / dist * crossCommunity * springScale;
       dx[a] -= ddx * force; dy[a] -= ddy * force;
       dx[b] += ddx * force; dy[b] += ddy * force;
     }
@@ -241,7 +249,9 @@
     }
     const minDist = SPACING * MAP_SCALE * 1.55;
     const minDist2 = minDist * minDist;
-    const push = Number(settings.repel) / 48;
+    const cohesion = Number.isFinite(Number(settings.localGravitationalConstant))
+      ? Math.max(0, Math.min(2, Number(settings.localGravitationalConstant))) : 1;
+    const push = Number(settings.repel) / 48 * (0.5 + 0.5 * cohesion);
     for (let index = 0; index < count; index += 1) {
       const gx = Math.floor(pos[index * 2] / cell), gy = Math.floor(pos[index * 2 + 1] / cell);
       let checked = 0;
@@ -314,14 +324,21 @@
       }
     }
 
-    const gravity = Number(settings.gravity) / 48 * 0.0015;
+    const coreAttraction = Number.isFinite(Number(settings.gravitationalConstant))
+      ? Math.max(0, Math.min(2, Number(settings.gravitationalConstant))) : 1;
+    const coreMass = Number.isFinite(Number(settings.blackHoleMass))
+      ? Math.max(0, Math.min(2, Number(settings.blackHoleMass))) : 1;
+    const gravity = Number(settings.gravity) / 48 * 0.0015 * coreAttraction * coreMass;
     for (let index = 0; index < count; index += 1) {
       dx[index] += (cx - pos[index * 2]) * gravity;
       dy[index] += (cy - pos[index * 2 + 1]) * gravity;
     }
 
     /* A tight per-pass step cap keeps the settle from smearing district boundaries. */
-    const damp = 0.8, maxStep = SPACING * MAP_SCALE * 0.7;
+    const resistance = Number.isFinite(Number(settings.damping))
+      ? Math.max(0, Math.min(15, Number(settings.damping))) : 1;
+    const damp = Math.max(0.2, Math.min(0.95, 0.8 / (0.75 + 0.25 * resistance)));
+    const maxStep = SPACING * MAP_SCALE * 0.7;
     for (let index = 0; index < count; index += 1) {
       let vx = dx[index] * damp, vy = dy[index] * damp;
       const speed = Math.sqrt(vx * vx + vy * vy);
@@ -409,6 +426,15 @@
         repel: Number.isFinite(Number(next.repel)) ? Number(next.repel) : settings.repel,
         link: Number.isFinite(Number(next.link)) ? Number(next.link) : settings.link,
         gravity: Number.isFinite(Number(next.gravity)) ? Number(next.gravity) : settings.gravity,
+        gravitationalConstant: Number.isFinite(Number(next.gravitationalConstant))
+          ? Number(next.gravitationalConstant) : settings.gravitationalConstant,
+        blackHoleMass: Number.isFinite(Number(next.blackHoleMass))
+          ? Number(next.blackHoleMass) : settings.blackHoleMass,
+        localGravitationalConstant: Number.isFinite(Number(next.localGravitationalConstant))
+          ? Number(next.localGravitationalConstant) : settings.localGravitationalConstant,
+        damping: Number.isFinite(Number(next.damping)) ? Number(next.damping) : settings.damping,
+        springStiffness: Number.isFinite(Number(next.springStiffness))
+          ? Number(next.springStiffness) : settings.springStiffness,
       };
       if (data.relayout && model) {
         generation += 1;

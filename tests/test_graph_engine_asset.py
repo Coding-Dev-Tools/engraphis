@@ -32,6 +32,7 @@ ROOT = Path(__file__).resolve().parents[1]
 STATIC = ROOT / "engraphis" / "static"
 ASSET = ROOT / "engraphis" / "dashboard_assets" / "engraphis-graph.js"
 EVERY_ASSET = ROOT / "engraphis" / "dashboard_assets" / "engraphis-graph-every.js"
+EVERY_WORKER = ROOT / "engraphis" / "dashboard_assets" / "engraphis-graph-every-worker.js"
 SPACETIME_ASSET = ROOT / "engraphis" / "dashboard_assets" / "engraphis-spacetime.js"
 LEGACY_ADAPTER = STATIC / "engraphis-graph.js"
 INDEX = STATIC / "index.html"
@@ -158,6 +159,31 @@ const emit = value => console.log(JSON.stringify(value));
     return json.loads(result.stdout.strip().splitlines()[-1])
 
 
+def _run_every_worker(script: str) -> object:
+    """Execute the Every-node layout worker in a tiny VM and return its final message."""
+    prelude = """
+const fs = require('fs');
+const vm = require('vm');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+const messages = [];
+const self = { postMessage(message) { messages.push(message); } };
+vm.runInNewContext(source, {
+  self, console, setTimeout, clearTimeout, Float32Array, Uint32Array,
+  Math, Map, Set, Array, Object, Number, String, Boolean, JSON, Infinity, NaN,
+});
+const emit = value => console.log(JSON.stringify(value));
+"""
+    result = subprocess.run(
+        [NODE, "-e", prelude + script, str(EVERY_WORKER)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
 # ── load order and failure isolation ────────────────────────────────────────────────
 
 
@@ -194,6 +220,46 @@ def test_every_node_visibility_response_refreshes_webgl_node_buffers() -> None:
     assert "uploadNodePositions();" in handler
     assert "uploadEdges();" in handler
     assert handler.index("uploadNodePositions()") < handler.index("uploadEdges()")
+
+
+@requires_node
+def test_every_node_worker_consumes_all_full_mode_spacetime_controls() -> None:
+    """Every-node full mode must visibly consume each control exposed by the dashboard."""
+    report = _run_every_worker(
+        """
+        const nodes = Array.from({ length: 10 }, (_, index) => ({
+          id: `node-${index}`, community_id: index < 5 ? 'a' : 'b',
+          degree: index % 3 + 1,
+        }));
+        const links = nodes.slice(1).map((node, index) => ({
+          source: nodes[index].id, target: node.id, weight: index + 1,
+        }));
+        const waitForFit = start => new Promise(resolve => {
+          const poll = () => {
+            const final = messages.slice(start).find(item => item.type === 'layout' && item.fit === true);
+            if (final) resolve(Array.from(final.positions));
+            else setTimeout(poll, 1);
+          };
+          poll();
+        });
+        (async () => {
+          self.onmessage({ data: { type: 'prepare', payload: { nodes, links } } });
+          const baseline = await waitForFit(0);
+          const changes = {};
+          for (const [key, value] of [
+            ['gravitationalConstant', 1.8], ['blackHoleMass', 1.8],
+            ['localGravitationalConstant', 1.8], ['damping', 8], ['springStiffness', 2.4],
+          ]) {
+            const start = messages.length;
+            self.onmessage({ data: { type: 'settings', settings: { [key]: value }, relayout: true, fit: true } });
+            const positions = await waitForFit(start);
+            changes[key] = Math.max(...positions.map((item, index) => Math.abs(item - baseline[index])));
+          }
+          emit({ changes });
+        })();
+        """
+    )
+    assert all(delta > 1e-5 for delta in report["changes"].values()), report
 
 
 def test_v1_graph_asset_is_only_a_compatibility_adapter() -> None:
@@ -381,7 +447,7 @@ def test_show_all_lazily_loads_its_renderer_after_the_main_engine_is_ready() -> 
     report = _run_routing("all-loaded")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph-every.js?v=20260823-every-19"
+        "/v2-assets/engraphis-graph-every.js?v=20260830-spacetime-controls-20"
     ]
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
     assert report["engine"] == 1
@@ -1143,6 +1209,39 @@ def test_default_orbital_speed_preserves_cached_star_relative_direction() -> Non
     assert report["repairedRadius"] == pytest.approx(report["initialRadius"])
     assert report["stellarSpeedGain"] == pytest.approx(1.8384776310850235)
     assert report["starAfter"] == pytest.approx(report["starBefore"])
+
+
+@requires_node
+def test_live_orbit_phase_uses_the_budgeted_relative_speed() -> None:
+    """Live phase advancement must agree with the capped velocity it emits."""
+    report = _run_node(
+        """
+        const nodes = [
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            system_anchor_id: 'black-hole', gravity_mass: 16, radius: 8,
+            x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'star', anchor_role: 'community', community_id: 'solar',
+            system_anchor_id: 'star', orbit_tier: 0, gravity_mass: 6, radius: 5,
+            x: 120, y: 0, vx: 0, vy: 47 },
+          { id: 'planet', community_id: 'solar', system_anchor_id: 'star',
+            orbit_tier: 1, orbit_radius: 30, gravity_mass: 1, radius: 2,
+            x: 150, y: 0, vx: 0, vy: 47 },
+        ];
+        const options = {
+          gravity: 48, softening: 32, centralSoftening: 40,
+          localGravitySetting: 48, orbitalSpeed: 400,
+          layoutSeed: 19, timestep: 1, speedLimit: 48,
+        };
+        const before = Math.atan2(nodes[2].y - nodes[1].y, nodes[2].x - nodes[1].x);
+        I.applyGalaxyOrbitalSpeedControl(nodes, options);
+        const after = Math.atan2(nodes[2].y - nodes[1].y, nodes[2].x - nodes[1].x);
+        const radius = Math.hypot(nodes[2].x - nodes[1].x, nodes[2].y - nodes[1].y);
+        const relativeSpeed = Math.hypot(nodes[2].vx - nodes[1].vx, nodes[2].vy - nodes[1].vy);
+        const phaseDelta = Math.abs(Math.atan2(Math.sin(after - before), Math.cos(after - before)));
+        emit({ phaseDelta, radius, phaseSpeed: phaseDelta * radius, relativeSpeed });
+        """
+    )
+    assert report["phaseSpeed"] <= report["relativeSpeed"] + 1e-9, report
 
 
 @requires_node
