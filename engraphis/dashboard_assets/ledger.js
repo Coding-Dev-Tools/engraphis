@@ -457,7 +457,7 @@
         graphAssetSource('/v2-assets/vendor/force-graph.min.js?v=20260727-final'),
         'ForceGraph', controller.signal,
       )).then(() => loadScript(
-        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260815-merge-ready-1'),
+        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260831-galaxy-floor-fix-2'),
         'EngraphisGraph', controller.signal,
       )).then(() => loadScript(
         graphAssetSource('/v2-assets/engraphis-spacetime.js?v=20260812-stable-orbit-lanes-7'),
@@ -2437,11 +2437,13 @@
     const max = Number(control.max);
     return Math.min(Number.isFinite(max) ? max : safe, Math.max(Number.isFinite(min) ? min : safe, safe));
   }
-  /* Controls keep their human-readable ranges and defaults, while the engine receives a
-     bounded 2x response away from the selected preset baseline. This makes a drag feel
-     immediate and substantial without changing a saved view's neutral calibration or allowing
-     a slider to bypass its HTML safety bounds. */
-  const GRAPH_SLIDER_RESPONSE_GAIN = 2;
+  /* Controls keep their human-readable ranges and defaults. The engine value is computed by
+     a clamped identity 1:1 mapping: the slider's raw position flows straight to the engine,
+     bounded by the HTML min/max. The earlier 2x response saturated against the HTML bounds
+     for slider values near the loose and tight ends, producing visible plateaus where the
+     user dragged the slider but the engine value didn't change. Identity 1:1 with
+     [min, max] clamping gives every integer tick in the slider's full HTML range a
+     strictly distinct engine value. */
   function graphSliderResponseBaseline(item) {
     if (!item) return 0;
     if (item.id === 'graph-flow-speed') return 45;
@@ -2454,12 +2456,10 @@
     const control = byId(id);
     if (!control) return Number.isFinite(Number(value)) ? Number(value) : baseline;
     const raw = graphValueInRange(id, value, baseline);
-    const center = Number.isFinite(Number(baseline)) ? Number(baseline) : raw;
     const min = Number(control.min);
     const max = Number(control.max);
-    const expanded = center + (raw - center) * GRAPH_SLIDER_RESPONSE_GAIN;
-    return Math.min(Number.isFinite(max) ? max : expanded,
-      Math.max(Number.isFinite(min) ? min : expanded, expanded));
+    return Math.min(Number.isFinite(max) ? max : raw,
+      Math.max(Number.isFinite(min) ? min : raw, raw));
   }
   function graphSliderInputValue(id, value, baseline) {
     const control = byId(id);
@@ -2467,10 +2467,9 @@
     const min = Number(control.min);
     const max = Number(control.max);
     const safe = graphValueInRange(id, value, baseline);
-    const center = Number.isFinite(Number(baseline)) ? Number(baseline) : safe;
-    const compressed = center + (safe - center) / GRAPH_SLIDER_RESPONSE_GAIN;
-    return Math.min(Number.isFinite(max) ? max : compressed,
-      Math.max(Number.isFinite(min) ? min : compressed, compressed));
+    /* Identity inverse of the clamped identity response. */
+    return Math.min(Number.isFinite(max) ? max : safe,
+      Math.max(Number.isFinite(min) ? min : safe, safe));
   }
 
   function graphScopeValue(id, value, fallback) {
