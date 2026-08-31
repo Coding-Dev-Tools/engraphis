@@ -203,6 +203,38 @@ waitForLayouts(1, () => {
     assert samples["14"] != samples["15"]
 
 
+def test_worker_honors_zero_link_spring_stiffness() -> None:
+    """A zero Link spring value must remove pair attraction, not leave a residual floor."""
+    script = """
+const nodes = [
+  { id: 'a', community_id: 'c' },
+  { id: 'b', community_id: 'c' },
+];
+send({ type: 'prepare', payload: { nodes, links: [{ source: 'a', target: 'b' }] } });
+const waitForFit = (start, callback) => {
+  const tick = () => {
+    const fit = messages.slice(start).find(item => item.type === 'layout' && item.fit === true);
+    if (fit) return callback(fit.positions);
+    setTimeout(tick, 10);
+  };
+  tick();
+};
+setTimeout(() => {
+  const seeded = latest('preview').positions.slice();
+  const start = messages.length;
+  send({ type: 'settings', settings: {
+    repel: 0, gravity: 0, springStiffness: 0, damping: 1,
+  }, relayout: true, fit: true });
+  waitForFit(start, positions => {
+    const delta = Math.max(...positions.map((value, index) => Math.abs(value - seeded[index])));
+    console.log(JSON.stringify({ delta }));
+  });
+}, 50);
+"""
+    report = _run_worker(script)
+    assert report["delta"] == 0
+
+
 def test_renderer_is_webgl2_only_without_live_simulation_or_canvas_fallback() -> None:
     renderer = RENDERER.read_text(encoding="utf-8")
     assert "getContext('webgl2'" in renderer
