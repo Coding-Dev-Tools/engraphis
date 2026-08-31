@@ -2299,6 +2299,7 @@
 
   function updateGraphModeControls() {
     const full = state.graphMode === 'full';
+    const galaxy = graphIsGalaxy();
     const repoFilter = byId('graph-repo-filter');
     const repoLabel = document.querySelector('label[for="graph-repo-filter"]');
     if (repoFilter) {
@@ -2339,7 +2340,7 @@
     const freezeRow = byId('graph-freeze-row');
     if (freezeRow) freezeRow.hidden = full;
     const orbitPause = byId('graph-orbit-pause-row');
-    const orbitCapable = full ? state.graphGalaxyQuality : graphIsGalaxy();
+    const orbitCapable = galaxy && (!full || state.graphGalaxyQuality);
     if (orbitPause) orbitPause.hidden = !orbitCapable;
     const style = byId('graph-style').value;
     const styleNotes = full ? GRAPH_LOD_STYLE_NOTES : GRAPH_STYLE_NOTES;
@@ -2361,7 +2362,7 @@
   function updateGraphGalaxyControls() {
     const galaxy = graphIsGalaxy();
     const full = state.graphMode === 'full';
-    const orbitCapable = full ? state.graphGalaxyQuality : galaxy;
+    const orbitCapable = galaxy && (!full || state.graphGalaxyQuality);
     const size = byId('graph-size');
     if (galaxy && !full) {
       if (['degree', 'betweenness'].includes(size.value)) size.dataset.legacyValue = size.value;
