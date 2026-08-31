@@ -2396,8 +2396,9 @@
       if (label) label.textContent = forceLabels[index];
     });
     const springLabel = byId('graph-spring-stiffness-label');
+    const springCapable = galaxy || (full && !state.graphGalaxyQuality);
     if (springLabel && springLabel.parentElement) {
-      springLabel.parentElement.hidden = !(galaxy || full);
+      springLabel.parentElement.hidden = !springCapable;
     }
     byId('graph-spacetime-summary').textContent = full
       ? 'All-node force refinement'

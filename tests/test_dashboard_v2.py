@@ -2032,6 +2032,8 @@ def test_full_mode_hides_freeze_and_orbit_pause_controls(monkeypatch, tmp_path):
             "const orbitCapable = galaxy && (!full || state.graphGalaxyQuality);"
         ) == 2
         assert "orbitPause.hidden = !orbitCapable" in script.text
+        assert "const springCapable = galaxy || (full && !state.graphGalaxyQuality);" in script.text
+        assert "springLabel.parentElement.hidden = !springCapable;" in script.text
         # Relation flow remains visible in full mode (not hidden).
         assert 'id="graph-flow"' in markup.text
 
