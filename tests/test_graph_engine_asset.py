@@ -10896,11 +10896,16 @@ def test_spacetime_sliders_reach_d3_forces_in_non_galaxy_mode() -> None:
           return typeof value === 'function' ? value(sample || { source: 'n0', target: 'n1' }) : value;
         };
         const result = {};
+        const baselineSettings = {
+          gravitationalConstant: 1, blackHoleMass: 1,
+          localGravitationalConstant: 1, damping: 1,
+        };
         ['gravitationalConstant', 'blackHoleMass', 'localGravitationalConstant', 'damping']
           .forEach((key) => {
             const before = calls.d3Force || 0;
             const callResult = { error: null };
             try {
+              api.setSettings(baselineSettings);
               api.setSettings({ [key]: key === 'blackHoleMass' ? 400 : 150 });
               const after = calls.d3Force || 0;
               callResult.reheated = after > before;
@@ -10936,10 +10941,13 @@ def test_spacetime_sliders_reach_d3_forces_in_non_galaxy_mode() -> None:
         )
         assert entry['reheated'] is True, f"setSettings({{{key}: ...}}) did not reheat"
     # These are numeric observations from the stubbed D3 forces, not source-shape checks:
-    # compact's repel is 42, so a saturated gravitational multiplier of 2 yields -84 charge;
-    # a saturated local multiplier of 2 doubles the unit-strength chain link; and a saturated
-    # black-hole multiplier of 2 doubles compact's 0.26 origin-centering strength.
-    assert report['gravitationalConstant']['chargeStrength'] == pytest.approx(-84)
+    # Galactic gravity is attractive, so a saturated multiplier doubles compact's 0.26
+    # origin-centering strength while the separate repel control keeps charge at -42.
+    assert report['gravitationalConstant']['chargeStrength'] == pytest.approx(-42)
+    assert report['gravitationalConstant']['xStrength'] == pytest.approx(0.52)
+    assert report['gravitationalConstant']['yStrength'] == pytest.approx(0.52)
+    # A saturated local multiplier doubles the unit-strength chain link, and a saturated
+    # black-hole multiplier independently doubles compact's 0.26 origin-centering strength.
     assert report['localGravitationalConstant']['linkStrength'] == pytest.approx(2)
     assert report['blackHoleMass']['xStrength'] == pytest.approx(0.52)
     assert report['blackHoleMass']['yStrength'] == pytest.approx(0.52)

@@ -8095,7 +8095,10 @@
       const massMultiplier = Number.isFinite(bhmRaw) ? clamp(bhmRaw, 0, 2) : 1;
       const localMultiplier = Number.isFinite(lgcRaw) ? clamp(lgcRaw, 0, 2) : 1;
       const baseRepel = mode === 'communities' ? Math.max(10, s.repel * 0.68) : s.repel;
-      if (charge && charge.strength) charge.strength(-baseRepel * gravityMultiplier);
+      /* Galactic gravity is an attractive control. Keep the separate Repel slider on the
+         negative many-body charge, and apply this multiplier to the attractive anchor forces
+         below so increasing gravity tightens the layout instead of spreading it apart. */
+      if (charge && charge.strength) charge.strength(-baseRepel);
       if (link && link.distance) link.distance(s.link);
       if (link && link.strength) link.strength(edge => {
         const source = typeof edge.source === 'object' ? edge.source : layoutById.get(linkEndpoint(edge, 'source'));
@@ -8159,18 +8162,21 @@
            drag; the community grid is still visible through the charge/repel and link
            structure installed above. Black-hole mass multiplies the centering strength so
            the slider visibly pulls nodes toward the origin. */
-        const centering = Math.max(0.04, (Number(s.gravity) || 0) / 100) * massMultiplier;
+        const centering = Math.max(0.04, (Number(s.gravity) || 0) / 100)
+          * massMultiplier * gravityMultiplier;
         fg.d3Force('x', d3.forceX(0).strength(centering));
         fg.d3Force('y', d3.forceY(0).strength(centering));
       } else if (mode === 'radial' && d3.forceRadial) {
         const outerRadius = Math.max(180, Math.min(360, Math.sqrt(Math.max(1, layoutNodes.length)) * 18 + (Number(s.link) || 16) * 4));
         const degreeScale = Math.max(1, maxOf(layoutNodes.map(node => node.degree || 0), 1));
-        fg.d3Force('x', d3.forceX(0).strength(Math.max(0.05, (Number(s.gravity) || 0) / 500) * massMultiplier));
-        fg.d3Force('y', d3.forceY(0).strength(Math.max(0.05, (Number(s.gravity) || 0) / 500) * massMultiplier));
+        const centering = Math.max(0.05, (Number(s.gravity) || 0) / 500)
+          * massMultiplier * gravityMultiplier;
+        fg.d3Force('x', d3.forceX(0).strength(centering));
+        fg.d3Force('y', d3.forceY(0).strength(centering));
         fg.d3Force('radial', d3.forceRadial(node => {
           const hubness = Math.max(0, Math.min(1, (node.degree || 0) / degreeScale));
           return 34 + (outerRadius - 34) * (1 - hubness);
-        }).strength(0.72));
+        }).strength(0.72 * gravityMultiplier));
       } else if (mode === 'constellation') {
         const positions = new Map(), total = Math.max(1, layoutNodes.length - 1);
         const reach = Math.max(160, Math.min(330, 80 + Math.sqrt(Math.max(1, layoutNodes.length)) * 10));
@@ -8184,15 +8190,16 @@
         const target = node => positions.get(node.id) || { x: 0, y: 0 };
         /* Black-hole mass scales the constellation's anchor strength so the slider is
            visible in this preset too. */
-        fg.d3Force('x', d3.forceX(node => target(node).x).strength(0.18 * massMultiplier));
-        fg.d3Force('y', d3.forceY(node => target(node).y).strength(0.18 * massMultiplier));
+        const targetStrength = 0.18 * massMultiplier * gravityMultiplier;
+        fg.d3Force('x', d3.forceX(node => target(node).x).strength(targetStrength));
+        fg.d3Force('y', d3.forceY(node => target(node).y).strength(targetStrength));
       } else {
         const baseCentering = mode === 'compact'
           ? Math.max(0.24, (Number(s.gravity) || 0) / 100)
           : Math.max(0.06, (Number(s.gravity) || 0) / 100);
         /* Black-hole mass scales the centering so the slider pulls compact and original
            layouts toward the origin in proportion to its setting. */
-        const centering = baseCentering * massMultiplier;
+        const centering = baseCentering * massMultiplier * gravityMultiplier;
         fg.d3Force('x', d3.forceX(0).strength(centering));
         fg.d3Force('y', d3.forceY(0).strength(centering));
       }
