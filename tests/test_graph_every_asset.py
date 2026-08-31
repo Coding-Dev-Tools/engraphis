@@ -373,6 +373,16 @@ def test_renderer_exposes_capacity_and_every_preset() -> None:
     assert "MAP_SCALE" in worker   # the map-spread constant
 
 
+def test_ledger_keeps_orbit_pause_for_full_quality_galaxy_scenes() -> None:
+    """Full authored Galaxy scenes use the orbital engine and retain their pause control."""
+    ledger = LEDGER.read_text(encoding="utf-8")
+    assert "graphGalaxyQuality: false" in ledger
+    assert "state.graphGalaxyQuality = galaxyQuality;" in ledger
+    assert "const orbitCapable = full ? state.graphGalaxyQuality : graphIsGalaxy();" in ledger
+    assert "const orbitCapable = full ? state.graphGalaxyQuality : galaxy;" in ledger
+    assert "if (orbitPauseRow) orbitPauseRow.hidden = !orbitCapable;" in ledger
+
+
 def test_worker_untagged_nodes_share_one_district_not_n_singletons() -> None:
     """Untagged graphs must not make centroid separation quadratic in node count."""
     script = (
