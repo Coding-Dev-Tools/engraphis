@@ -2028,7 +2028,9 @@ def test_full_mode_hides_freeze_and_orbit_pause_controls(monkeypatch, tmp_path):
         assert 'id="graph-orbit-pause-row"' in markup.text
         # Freeze is quality-only, while authored Galaxy data still needs orbit pause in full mode.
         assert "freezeRow.hidden = full" in script.text
-        assert "orbitCapable = full ? state.graphGalaxyQuality : graphIsGalaxy();" in script.text
+        assert script.text.count(
+            "const orbitCapable = galaxy && (!full || state.graphGalaxyQuality);"
+        ) == 2
         assert "orbitPause.hidden = !orbitCapable" in script.text
         # Relation flow remains visible in full mode (not hidden).
         assert 'id="graph-flow"' in markup.text
