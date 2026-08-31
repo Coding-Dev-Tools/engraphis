@@ -378,8 +378,9 @@ def test_ledger_keeps_orbit_pause_for_full_quality_galaxy_scenes() -> None:
     ledger = LEDGER.read_text(encoding="utf-8")
     assert "graphGalaxyQuality: false" in ledger
     assert "state.graphGalaxyQuality = galaxyQuality;" in ledger
-    assert "const orbitCapable = full ? state.graphGalaxyQuality : graphIsGalaxy();" in ledger
-    assert "const orbitCapable = full ? state.graphGalaxyQuality : galaxy;" in ledger
+    assert ledger.count(
+        "const orbitCapable = galaxy && (!full || state.graphGalaxyQuality);"
+    ) == 2
     assert "if (orbitPauseRow) orbitPauseRow.hidden = !orbitCapable;" in ledger
 
 
