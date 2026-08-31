@@ -382,6 +382,8 @@ def test_ledger_keeps_orbit_pause_for_full_quality_galaxy_scenes() -> None:
         "const orbitCapable = galaxy && (!full || state.graphGalaxyQuality);"
     ) == 2
     assert "if (orbitPauseRow) orbitPauseRow.hidden = !orbitCapable;" in ledger
+    assert "const springCapable = galaxy || (full && !state.graphGalaxyQuality);" in ledger
+    assert "springLabel.parentElement.hidden = !springCapable;" in ledger
 
 
 def test_worker_untagged_nodes_share_one_district_not_n_singletons() -> None:
