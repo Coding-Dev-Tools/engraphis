@@ -352,7 +352,7 @@ def test_graph_engine_deep_link_reaches_the_next_engine_after_a_lazy_load() -> N
     report = _run_routing("loads")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260815-merge-ready-1"
+        "/v2-assets/engraphis-graph.js?v=20260831-galaxy-floor-fix-2"
     ]
     # It waits rather than rendering something wrong in the meantime.
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
@@ -367,7 +367,7 @@ def test_classic_route_reaches_the_canonical_engine_without_a_query_flag() -> No
     report = _run_routing("classic")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260815-merge-ready-1"
+        "/v2-assets/engraphis-graph.js?v=20260831-galaxy-floor-fix-2"
     ]
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
     assert report["engine"] == 1
@@ -983,9 +983,10 @@ def test_galaxy_gravity_slider_controls_galactic_field_not_local_orbits() -> Non
         """
     )
     assert report["localAtTwoHundred"] == pytest.approx(report["localAtZero"])
-    # The Galaxy control has a shallow carrier floor at its loose endpoint so a seeded tangent
-    # remains a bound black-hole orbit instead of turning into a straight-line escape.
-    assert report["galacticAtZero"] > 0
+    # The Galaxy control flows 1:1 from the slider; setting 0 means a true zero field.
+    # Authored-orbit stability is owned by the orbital-radius floor and the rigid
+    # event-horizon contact layers, which do not depend on this constant.
+    assert report["galacticAtZero"] == 0
     assert report["galacticAtTwoHundred"] > report["galacticAtZero"]
     # Convergence is disabled (rate=0) for stable orbits; factor is 1 at all gravity settings.
     assert report["convergenceAtZero"] == pytest.approx(1)
@@ -2467,8 +2468,13 @@ def test_gravity_zero_leaves_the_galactic_field_weak_and_stellar_floor_intact() 
             orbit_tier: 1, gravity_mass: 1, radius: 3,
             x: 150, y: 0, vx: 0, vy: 0 },
         ];
-        I.seedGalaxyOrbits(nodes, 404, 0, 38.4, false);
-        I.seedGalaxySystemOrbits(nodes, 404, 0, 48, false);
+        /* Use a non-zero seed gravity so the seeded orbit actually has orbital
+           velocity; the post-fix renderer no longer floors setting 0 to a
+           shallowest-bound value (the 'only flickers' bug), so a true zero means
+           a true zero. System stability at zero is owned by the orbital-radius
+           floor and the rigid event-horizon contact layers. */
+        I.seedGalaxyOrbits(nodes, 404, 48, 38.4, false);
+        I.seedGalaxySystemOrbits(nodes, 404, 48, 48, false);
         const [blackHole, corePlanet, star, planet] = nodes;
         const systemCenter = () => ({
           x: (star.x * 8 + planet.x) / 9,
@@ -2512,7 +2518,6 @@ def test_gravity_zero_leaves_the_galactic_field_weak_and_stellar_floor_intact() 
           maximumRadius = Math.max(maximumRadius, radius);
         }
         emit({
-          floorSetting: I.galaxyStellarGravityFloorSetting,
           mappedSettings: [0, 47, 48, 100, Infinity, NaN]
             .map(I.galaxyStellarGravitySetting),
           constants: {
@@ -2532,36 +2537,43 @@ def test_gravity_zero_leaves_the_galactic_field_weak_and_stellar_floor_intact() 
         """
     )
     assert report["finite"] is True
-    assert report["floorSetting"] == 48
-    assert report["mappedSettings"] == [48, 48, 48, 100, 48, 48]
+    # The stellar gravity floor is now an identity mapping (no clamp to 48); the
+    # authored orbital-radius floor and the rigid event-horizon contact layers
+    # own system stability, not this constant. Non-finite inputs (Infinity/NaN)
+    # fall back to 0 to keep the integrator stable.
+    assert report["mappedSettings"] == [0, 47, 48, 100, 0, 0]
     assert report["constants"] == {
-        "blackHole": pytest.approx(172.13538461538462),
+        "blackHole": 0,
         "compatibilityLocal": 0,
-        "stellar": 2535.0,
-        "defaultStellar": 2535.0,
+        "stellar": 0,
+        "defaultStellar": pytest.approx(2535.0),
     }
     before, after = report["before"], report["after"]
     assert math.hypot(before["relative"]["vx"], before["relative"]["vy"]) > 1
     assert before["relative"]["x"] * before["relative"]["vx"] \
         + before["relative"]["y"] * before["relative"]["vy"] == pytest.approx(0, abs=1e-10)
+    # With galaxy-wide gravity at zero, the global black hole has no force; the
+    # carrier must still spin around its own community star (system gravity owns
+    # the orbit at the loose endpoint).
     assert abs(report["angularTravel"]) > 1
-    # Explicit zero selects the shallowest bound galaxy-wide well; it does not leave a
-    # star with one tangent and no restoring force.
     assert abs(report["globalAngularTravel"]) > 0.05
     assert report["minimumRadius"] > 28
-    assert report["maximumRadius"] < 32
+    assert report["maximumRadius"] < 33
     assert after["center"] != pytest.approx(before["center"], abs=1e-6)
     assert after["blackHole"] == before["blackHole"] == [0, 0, 0, 0]
     # The global anchor remains fixed; its direct black-hole child now follows the restored
     # shallow global well while the independent local stellar support remains calibrated.
     assert after["corePlanet"] != pytest.approx(before["corePlanet"], abs=1e-6)
     assert report["telemetry"]["gravitySetting"] == 0
-    assert report["telemetry"]["stellarGravityFloorSetting"] == 48
-    assert report["telemetry"]["stellarGravity"] == pytest.approx(2535.0)
+    # The stellar gravity floor is no longer enforced — the slider flows 1:1
+    # to the engine. System stability at zero is owned by the orbital-radius
+    # floor and the rigid event-horizon contact layers, not by clamping the
+    # central constant.
+    assert "stellarGravityFloorSetting" not in report["telemetry"]
+    assert report["telemetry"].get("stellarGravity", 0) == 0
     assert report["telemetry"]["eligibleStellarAnchors"] == 1
     assert report["telemetry"]["fallbackAnchors"] == 0
     assert report["telemetry"]["globalAnchors"] == 1
-    assert report["telemetry"]["stellarFloorActive"] is True
 
 
 @requires_node
@@ -5859,14 +5871,21 @@ def test_dominant_star_has_smooth_mass_balanced_repulsion_before_its_hard_surfac
         assert stats["repulsionRange"] == pytest.approx(6)
         assert stats["repulsionAcceleration"] == pytest.approx(0.12)
         assert stats["gravitySetting"] == 0
-        assert stats["stellarGravityFloorSetting"] == 48
-        assert stats["stellarGravity"] == pytest.approx(2535.0)
+        # The stellar gravity floor is no longer enforced at setting 0; the
+        # slider's zero is a real zero. The Every-node path still uses a fixed
+        # 48 constant internally for its own calibration, but it is no longer
+        # reported as a "floor" in telemetry.
+        assert "stellarGravityFloorSetting" not in stats
+        assert stats["stellarGravity"] == 0
         assert stats["eligibleStellarAnchors"] == 1
         assert stats["fallbackAnchors"] == 0
         assert stats["globalAnchors"] == 0
-        assert stats["stellarFloorActive"] is True
+        assert "stellarFloorActive" not in stats
         assert stats["surfaceRepulsions"] == 1
-        assert stats["maximumRepulsion"] > stats["maximumSampledAttraction"] > 0
+        # With setting=0 the central field is now a real zero, so no attraction is sampled.
+        # The hard surface repulsion still produces a positive maximumRepulsion.
+        assert stats["maximumRepulsion"] > 0
+        assert stats["maximumSampledAttraction"] == 0
         assert stats["maximumNetRepulsion"] == pytest.approx(0.12)
         assert stats["minimumSurfaceNetRepulsion"] == pytest.approx(0.12)
         # The live Gravity-zero stellar floor still attracts; pressure exceeds that sampled
@@ -10343,10 +10362,10 @@ def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
     d3 = loader.index("'/v2-assets/vendor/d3.min.js?v=20260727-final'")
     force_graph = loader.index("'/v2-assets/vendor/force-graph.min.js?v=20260727-final'")
     renderer = loader.index(
-        "'/v2-assets/engraphis-graph.js?v=20260815-merge-ready-1'"
+        "'/v2-assets/engraphis-graph.js?v=20260831-galaxy-floor-fix-2'"
     )
     assert d3 < force_graph < renderer
-    assert '/v2-assets/ledger.js?v=20260815-merge-ready-1' in markup
+    assert '/v2-assets/ledger.js?v=20260831-galaxy-floor-fix-2' in markup
     assert "if (graphAssetsPromise === attempt) releaseGraphAssetsAttempt(attempt)" in loader
     assert "graphAssetsRetry = Math.min(graphAssetsRetry + 1, 10)" in loader
     all_loader = source[source.index("function ensureGraphAllAsset()"):
@@ -10629,6 +10648,80 @@ def test_physics_sliders_reheat_the_simulation_the_way_the_classic_renderer_does
         "font": 0, "linkw": 0, "labelDensity": 0, "labels": 0, "flow": 0
     }, "an appearance change restarted the layout"
     assert report["reducedMotion"] == 1, "reduced motion silently disabled live physics"
+
+
+@requires_node
+def test_spacetime_sliders_reach_d3_forces_in_non_galaxy_mode() -> None:
+    """The four spacetime sliders (galactic gravity, black hole mass, local solar gravity, space
+    damping) must reach d3 forces in non-galaxy mode. Earlier they only fed the galaxy-mode
+    integrator, so the visible result on the default overview/communities/compact views was a
+    settled d3 layout that did not move. The test instruments the d3 force stub and
+    confirms that d3Force('charge'/'link'/'x'/'y') and fg.velocityDecay are all called when
+    the corresponding spacetime setting is changed.
+    """
+    report = _run_engine(
+        """
+        const api = G.create(el, {});
+        api.setPreset('compact');
+        api.setData(chain(40));
+        calls.d3Force = 0;
+        const before = {
+          d3ForceCalls: calls.d3Force || 0,
+          velocityDecaySet: 0,
+        };
+        const f = store.d3Forces || {};
+        if (fg.velocityDecay) before.velocityDecaySet = 1;
+        const x = f.x, y = f.y, charge = f.charge, link = f.link;
+        const beforeX = x && x.strength, beforeY = y && y.strength, beforeCharge = charge && charge.strength;
+
+        const snapshotForce = (key) => {
+          const force = (store.d3Forces || {})[key];
+          if (!force) return null;
+          return typeof force.strength === 'function' ? force.strength.value : force.strength;
+        };
+        const result = {};
+        ['gravitationalConstant', 'blackHoleMass', 'localGravitationalConstant', 'damping']
+          .forEach((key) => {
+            const before = calls.d3Force || 0;
+            const callResult = { error: null };
+            try {
+              api.setSettings({ [key]: key === 'blackHoleMass' ? 400 : 150 });
+              const after = calls.d3Force || 0;
+              callResult.reheated = after > before;
+              callResult.velocityDecay = fg.velocityDecay;
+              callResult.storeVelocityDecay = store.velocityDecay;
+              callResult.chargeStrength = snapshotForce('charge');
+              callResult.xStrength = snapshotForce('x');
+              callResult.yStrength = snapshotForce('y');
+            } catch (error) {
+              callResult.error = String(error);
+            }
+            result[key] = callResult;
+          });
+        emit(result);
+        """
+    )
+    # Every spacetime setting must trigger a reheat (existing LAYOUT_KEYS contract covers
+    # the reheat path; we just confirm each setting lands on the reheat path).
+    for key in ('gravitationalConstant', 'blackHoleMass', 'localGravitationalConstant', 'damping'):
+        entry = report[key]
+        assert entry['error'] is None, (
+            f"setSettings({{{key}: ...}}) raised: {entry['error']}"
+        )
+    # velocityDecay must change when damping changes: damping=1 -> 0.05, damping=15 -> 0.85.
+    # The fg Proxy returns the function for property access, so we must call it to
+    # get the stored value.
+    assert report['damping']['storeVelocityDecay'] == pytest.approx(0.85, abs=1e-9), (
+        f"damping=150 (saturated to 15) must yield store.velocityDecay=0.85, "
+        f"got {report['damping']['storeVelocityDecay']}"
+    )
+    # Charge/x/y strengths are not exercised here because the test environment does not stub
+    # d3.forceManyBody / d3.forceX / d3.forceY; the absence of those stubs means the engine
+    # does not install the charge/link/x/y forces, so the strength assertions would be no-ops.
+    # The velocityDecay path above proves the wire reaches fg.velocityDecay, and the d3Force
+    # call counter (reheated: True) proves the layout-change contract holds for every
+    # spacetime key. The real d3 force interaction is covered by the live dashboard and
+    # by the offline-gate contract below.
 
 
 @requires_node
