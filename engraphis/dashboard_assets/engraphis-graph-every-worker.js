@@ -223,7 +223,9 @@
     const scaledSpacing = SPACING * MAP_SCALE;
     const spring = Number.isFinite(Number(settings.springStiffness))
       ? Math.max(0, Math.min(100 / 32, Number(settings.springStiffness))) : 1;
-    const springScale = 0.35 + 0.65 * spring;
+    // springStiffness is already a normalized multiplier from the dashboard. Preserve its
+    // zero endpoint so the Link spring control can actually disable pair attraction.
+    const springScale = spring;
     const rest = Math.max(scaledSpacing * 1.9, Number(settings.link) * 1.6 * (MAP_SCALE * 0.55));
     for (let edge = 0; edge < model.totalLinks; edge += 1) {
       const a = model.sources[edge], b = model.targets[edge];
