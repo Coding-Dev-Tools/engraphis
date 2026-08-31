@@ -2400,12 +2400,16 @@
     if (springLabel && springLabel.parentElement) {
       springLabel.parentElement.hidden = !springCapable;
     }
-    byId('graph-spacetime-summary').textContent = full
-      ? 'All-node force refinement'
-      : 'Spacetime · black-hole orbit controls';
-    byId('graph-spacetime-note').textContent = full
-      ? 'These values refine the settled worker layout. The High quality orbit model stays unchanged.'
-      : 'Drag and release a node to slingshot it into a new orbit.';
+    const galaxyRenderer = galaxy && (!full || state.graphGalaxyQuality);
+    const everyRenderer = full && !state.graphGalaxyQuality;
+    byId('graph-spacetime-summary').textContent = galaxyRenderer
+      ? 'Spacetime · black-hole orbit controls'
+      : everyRenderer ? 'All-node force refinement' : 'Responsive force controls';
+    byId('graph-spacetime-note').textContent = galaxyRenderer
+      ? 'Drag and release a node to slingshot it into a new orbit.'
+      : everyRenderer
+        ? 'These values refine the settled worker layout.'
+        : 'These values tune the responsive force layout.';
     byId('graph-orbits-pause-label').textContent = 'Pause orbits';
     byId('graph-orbits-pause-detail').textContent = 'physics';
     byId('graph-orbits-pause').setAttribute('aria-label', 'Pause orbital physics');
