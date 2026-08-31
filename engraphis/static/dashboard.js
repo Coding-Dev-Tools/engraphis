@@ -1219,7 +1219,7 @@ function loadAllGraphEngine(){
  if(typeof EngraphisEveryGraph!=='undefined')return Promise.resolve();
  if(!ALL_GRAPH_ENGINE_LOADING){
   ALL_GRAPH_ENGINE_LOADING=new Promise((resolve,reject)=>{
-   const script=document.createElement('script');script.src='/v2-assets/engraphis-graph-every.js?v=20260830-spacetime-controls-20';
+   const script=document.createElement('script');script.src='/v2-assets/engraphis-graph-every.js?v=20260823-every-19';
    script.onload=()=>{typeof EngraphisEveryGraph==='undefined'?reject(new Error('Every-node graph asset loaded without registering EngraphisEveryGraph')):resolve()};
    script.onerror=()=>reject(new Error('Every-node graph asset could not load'));
    document.head.appendChild(script);
@@ -1236,7 +1236,7 @@ function loadGraphEngine(loadAll=false){
    GRAPH_ENGINE_LOADING=new Promise((resolve,reject)=>{
     const script=document.createElement('script');
     const bust=GRAPH_ENGINE_RETRY>0?'&r='+GRAPH_ENGINE_RETRY:'';
-    script.src='/v2-assets/engraphis-graph.js?v=20260815-merge-ready-1'+bust;
+    script.src='/v2-assets/engraphis-graph.js?v=20260831-galaxy-floor-fix-2'+bust;
     /* A 200 that never registers the global is a corrupt/truncated asset, not a success —
        resolving there would hand graphRenderEngine() an undefined EngraphisGraph. Failed
        attempts drop the script node and clear the memo so the next call retries with a

@@ -131,23 +131,27 @@
        upward so the default (and every other position) feels like the reference layout. */
     return base * boost * 4 * galaxyGravityStrengthMultiplier(value) * 2.0;
   }
-  /* Gravity strength is the galaxy-wide black-hole control. Its explicit zero endpoint selects
-     the shallow carrier floor; local stellar wells are supplied independently by the calibrated
-     local setting below. */
-  /* Keep a shallow black-hole well at the loose endpoint. Galaxy is an orbital presentation:
-     zero user gravity means the loosest bound orbit, not a one-time tangent followed by a
-     straight-line escape. Local stellar wells remain independently calibrated below. */
+  /* Gravity strength is the galaxy-wide black-hole control. The dashboard's Gravity slider
+     flows to the explicit global anchor: zero user gravity is a real zero field, and the
+     loose ↔ tight endpoints map to distinct central accelerations. Stability for community
+     systems is owned by the independent local-stellar well and the rigid event-horizon
+     contact layers, neither of which depends on this constant. */
   const GALAXY_GLOBAL_GRAVITY_FLOOR_SETTING = 24;
   function galaxyBlackHoleGravitySetting(setting, explicitGlobal) {
     const raw = Number(setting);
     const value = Number.isFinite(raw) ? Math.max(0, Math.min(GALAXY_GRAVITY_MAXIMUM, raw)) : 0;
-    return explicitGlobal === true ? Math.max(GALAXY_GLOBAL_GRAVITY_FLOOR_SETTING, value) : value;
+    return value;
   }
   function galaxyBlackHoleGravityConstant(setting, explicitGlobal) {
     return galaxyGravityConstant(galaxyBlackHoleGravitySetting(setting, explicitGlobal)) * 2;
   }
   function galaxyLocalGravityConstant(setting) {
-    return galaxyBlackHoleGravityConstant(setting) * 0.5;
+    const raw = Number(setting);
+    const value = Number.isFinite(raw) ? Math.max(0, Math.min(GALAXY_GRAVITY_MAXIMUM, raw)) : 0;
+    /* Routes through galaxyBlackHoleGravityConstant to preserve the canonical
+       2x black-hole-to-local scaling; pre-fix code relied on the alias chain
+       galaxyLocalGravityConstant = galaxyBlackHoleGravityConstant * 0.5. */
+    return galaxyBlackHoleGravityConstant(value) * 0.5;
   }
   /* A fit-to-view galaxy compresses stellar and galactic distances onto one canvas, so using
      one physical clock made a valid planet orbit visually disappear under its system's
@@ -158,15 +162,19 @@
      use the black-hole clock because their carrier seed and live well are the same field. */
   const GALAXY_STELLAR_ORBIT_CLOCK = 3.25;
   const GALAXY_FALLBACK_STELLAR_ORBIT_CLOCK = 2.5;
-  /* The dashboard's Gravity control owns the black-hole well. A saved zero value must not
-     erase either level of the hierarchy: eligible community stars retain the calibrated
-     default stellar well, while the explicit global anchor uses the smaller floor above. */
-  const GALAXY_STELLAR_GRAVITY_FLOOR_SETTING = 48;
+  /* The dashboard's Gravity control owns the black-hole well, and the local stellar setting
+     flows 1:1 from the slider. All callers pass a finite slider value (or an explicit per-star
+     override), so every position 0..200 produces a distinct local well and distinct carrier
+     geometry. Authored system stability is owned by the orbital-radius floor and the rigid
+     event-horizon contact layers, neither of which depends on this constant.
+
+     The Every-node integration path uses a fixed local setting independent of the slider so
+     that mode behaves as a calibrated reference, not as a slider follower. */
+  const GALAXY_FIXED_LOCAL_GRAVITY_SETTING = 48;
   function galaxyStellarGravitySetting(setting) {
     const raw = Number(setting);
-    const value = Number.isFinite(raw)
+    return Number.isFinite(raw)
       ? Math.max(0, Math.min(GALAXY_GRAVITY_MAXIMUM, raw)) : 0;
-    return Math.max(GALAXY_STELLAR_GRAVITY_FLOOR_SETTING, value);
   }
   function galaxyStellarGravityConstant(setting) {
     return galaxyLocalGravityConstant(galaxyStellarGravitySetting(setting))
@@ -495,9 +503,9 @@
      remains 3.6x while the extended range adds the stronger high-end response. */
   function galaxyInwardConvergencePerMinute(gravitySetting) {
     const setting = gravitySetting === undefined ? 48 : gravitySetting;
-    /* The convergence helper is an optional density response, not the orbital well. Keep its
-       zero endpoint neutral even though the Galaxy carrier field retains a shallow floor so
-       stars do not turn into straight-line projectiles at the loosest setting. */
+    /* The convergence helper is an optional density response, not the orbital well. Normalize
+       against the calibrated reference setting (48) so the ratio stays monotonic across the
+       full 0..200 slider span; the rigid event-horizon contact keeps loose-end bodies bound. */
     const relativeGravity = galaxyBlackHoleGravityConstant(setting, false)
       / galaxyBlackHoleGravityConstant(48, true);
     return 1 - Math.pow(1 - GALAXY_INWARD_CONVERGENCE_PER_MINUTE,
@@ -1880,7 +1888,6 @@
       repulsionPadding, repulsionRange, repulsionAcceleration,
       maximumAcceleration: 0, capScale: 1,
       gravitySetting: galaxyAccelerationCapReference(opts.gravity),
-      stellarGravityFloorSetting: GALAXY_STELLAR_GRAVITY_FLOOR_SETTING,
       stellarGravity: galaxyStellarGravityConstant(localGravitySetting)
         * galaxyPhysicsMultiplier(opts.localGravitationalConstant,
           GALAXY_LOCAL_GRAVITATIONAL_CONSTANT_MULTIPLIER, 8),
@@ -1899,7 +1906,7 @@
       if (anchor.anchor_role === 'community') {
         stats.eligibleStellarAnchors++;
         if (Number.isFinite(Number(localGravitySetting))
-          && Number(localGravitySetting) < GALAXY_STELLAR_GRAVITY_FLOOR_SETTING) {
+          && Number(localGravitySetting) < GALAXY_FIXED_LOCAL_GRAVITY_SETTING) {
           stats.stellarFloorActive = true;
         }
       } else if (anchor.anchor_role === 'global') stats.globalAnchors++;
@@ -2528,7 +2535,6 @@
       gravitationalConstant, gravitationalConstantMultiplier,
       blackHoleMassMultiplier,
       gravitySetting: galaxyBlackHoleGravitySetting(opts.gravity, explicitGlobal),
-      floorActive: explicitGlobal && Number(opts.gravity) < GALAXY_GLOBAL_GRAVITY_FLOOR_SETTING,
       traversals: centers.size,
     };
   }
@@ -8702,7 +8708,7 @@
         dragSoftening: activeDragNode ? Math.max(GALAXY_DRAG_GRAVITY_SOFTENING,
           finitePositive(activeDragNode.radius, 2, 160) * 1.5) : GALAXY_DRAG_GRAVITY_SOFTENING,
         gravity: state.settings.gravity,
-        localGravitySetting: GALAXY_STELLAR_GRAVITY_FLOOR_SETTING,
+        localGravitySetting: GALAXY_FIXED_LOCAL_GRAVITY_SETTING,
         /* The dashboard normalises the three spacetime sliders to a 0..2 range
            (default 1.0). Preserve that normalized value at the Galaxy boundary:
            the downstream multiplier helpers clamp their own direct-call range,
@@ -8889,8 +8895,6 @@
         dragFollowers: dragFollowers.map(follower => follower.node.id),
         dragFollowerGravity: { ...dragFollowerGravityReport },
         gravitySetting: state.settings.gravity,
-        globalGravityFloorSetting: GALAXY_GLOBAL_GRAVITY_FLOOR_SETTING,
-        globalGravityFloorActive: state.settings.gravity < GALAXY_GLOBAL_GRAVITY_FLOOR_SETTING,
         gravityStrengthMultiplier: galaxyGravityStrengthMultiplier(state.settings.gravity),
         gravityResponseRateMultiplier: GALAXY_GRAVITY_RESPONSE_RATE_MULTIPLIER,
         /* The two normalized controls are independent: G_center owns black-hole and
@@ -8913,8 +8917,8 @@
           GALAXY_SPRING_STIFFNESS_MULTIPLIER, 8),
         effectiveGravity,
         blackHoleGravity: effectiveGravity,
-        localGravity: galaxyLocalGravityConstant(GALAXY_STELLAR_GRAVITY_FLOOR_SETTING),
-        effectiveLocalGravity: galaxyStellarGravityConstant(GALAXY_STELLAR_GRAVITY_FLOOR_SETTING)
+        localGravity: galaxyLocalGravityConstant(GALAXY_FIXED_LOCAL_GRAVITY_SETTING),
+        effectiveLocalGravity: galaxyStellarGravityConstant(GALAXY_FIXED_LOCAL_GRAVITY_SETTING)
           * galaxyPhysicsMultiplier(state.settings.localGravitationalConstant,
             GALAXY_LOCAL_GRAVITATIONAL_CONSTANT_MULTIPLIER, 8),
         immediateGravityResponse: { ...galaxyLastGravityResponse },
@@ -9257,10 +9261,18 @@
         render(false, true);
         return;
       }
+      /* In galaxy mode the d3 reheat is a no-op for layout: galaxy owns the integrator and
+         setSettings already scaled carriers. The follow-up render still repaints and
+         re-asserts the contact-correction invariant, but those corrections are
+         path-dependent on intermediate slider phase and would undo a burst sweep.
+         Phase-preserve the contact-correction pass on the very next render
+         so the immediate response survives until the live integrator ticks. */
+      const phaseLock = state.settings.mode === 'galaxy';
       physicsFrame = requestFrame(() => {
         physicsFrame = 0;
         if (destroyed || suspended || !physicsReheatPending) return;
         physicsReheatPending = false;
+        if (phaseLock) preserveGalaxyPhaseOnResume = true;
         render(false, true);
       });
     }
@@ -9330,7 +9342,7 @@
                 orbitalSpeed: state.settings.repel,
                 gravitationalConstant: state.settings.gravitationalConstant,
                 localGravitationalConstant: state.settings.localGravitationalConstant,
-                localGravitySetting: GALAXY_STELLAR_GRAVITY_FLOOR_SETTING }
+                localGravitySetting: GALAXY_FIXED_LOCAL_GRAVITY_SETTING }
             );
           } else pinFullGraphLayout(data);
           fullLayoutDirty = false;
@@ -9360,7 +9372,7 @@
               orbitalSpeed: state.settings.repel,
               gravitationalConstant: state.settings.gravitationalConstant,
               localGravitationalConstant: state.settings.localGravitationalConstant,
-              localGravitySetting: GALAXY_STELLAR_GRAVITY_FLOOR_SETTING }
+              localGravitySetting: GALAXY_FIXED_LOCAL_GRAVITY_SETTING }
           );
           seedGalaxySystemOrbits(
             data.nodes, raw.meta && raw.meta.layout_seed,
@@ -9368,7 +9380,7 @@
             { gravitationalConstant: state.settings.gravitationalConstant,
               blackHoleMass: state.settings.blackHoleMass,
               orbitalSpeed: state.settings.repel,
-              localGravitySetting: GALAXY_STELLAR_GRAVITY_FLOOR_SETTING }
+              localGravitySetting: GALAXY_FIXED_LOCAL_GRAVITY_SETTING }
           );
         } else clearPinnedPositions(data);
         /* graphData() may paint synchronously. Enforce the event horizon after every layout
@@ -9438,7 +9450,7 @@
             orbitalSpeed: state.settings.repel,
             gravitationalConstant: state.settings.gravitationalConstant,
             localGravitationalConstant: state.settings.localGravitationalConstant,
-            localGravitySetting: GALAXY_STELLAR_GRAVITY_FLOOR_SETTING }
+            localGravitySetting: GALAXY_FIXED_LOCAL_GRAVITY_SETTING }
         );
         seedGalaxySystemOrbits(
           data.nodes, raw.meta && raw.meta.layout_seed,
@@ -9446,12 +9458,14 @@
           { gravitationalConstant: state.settings.gravitationalConstant,
             blackHoleMass: state.settings.blackHoleMass,
             orbitalSpeed: state.settings.repel,
-            localGravitySetting: GALAXY_STELLAR_GRAVITY_FLOOR_SETTING }
+            localGravitySetting: GALAXY_FIXED_LOCAL_GRAVITY_SETTING }
         );
       }
       /* Reused arrays bypass graphData(); size changes, static repins, and restored phases still
-         receive the same strict painted-edge invariant before the next redraw. */
-      if (reused && galaxyMode) {
+         receive the same strict painted-edge invariant before the next redraw — unless the
+         slider burst just rescaled carriers, in which case the corrections would fold the
+         burst's intermediate ratios into the layout (path dependence). */
+      if (reused && galaxyMode && !skipGalaxyReseed) {
         const prePaintHorizon = applyGalaxyBlackHoleExclusion(
           data.nodes, { padding: GALAXY_BLACK_HOLE_EXCLUSION_PADDING }
         );
@@ -9661,7 +9675,7 @@
         const insertion = galaxySlingshotCapture(node, data.nodes || [],
           dragReleaseVelocity, {
             gravity: state.settings.gravity,
-            localGravitySetting: GALAXY_STELLAR_GRAVITY_FLOOR_SETTING,
+            localGravitySetting: GALAXY_FIXED_LOCAL_GRAVITY_SETTING,
             localGravitationalConstant: state.settings.localGravitationalConstant,
             softening: galaxyLiveSoftening(),
             layoutSeed: raw.meta && raw.meta.layout_seed,
@@ -10149,6 +10163,21 @@
       const gravityChanged = next.gravity !== undefined
         && Number.isFinite(previousGravity) && Number.isFinite(nextGravity)
         && Math.abs(nextGravity - previousGravity) > 1e-12;
+      /* A galaxy slider burst (gravity / black-hole mass / damping / etc.) is a setting change,
+         not a fresh physics seed. Set the phase-preserve flag *before* any render below so the
+         inner immediate-render does not re-seed orbits and overwrite the just-scaled carrier
+         phase with a fresh seed-time correction. Without this, the user sees the carriers jump
+         back outward the moment the radial contraction would have crossed a system-anchor
+         exclusion boundary, and path-independence across a burst breaks. */
+      if (previousMode === 'galaxy' && state.settings.mode === 'galaxy'
+        && next.repel === undefined
+        && (next.gravity !== undefined || next.size !== undefined
+          || next.gravitationalConstant !== undefined || next.G_center !== undefined
+          || next.localGravitationalConstant !== undefined || next.G_star !== undefined
+          || next.blackHoleMass !== undefined || next.damping !== undefined
+          || next.springStiffness !== undefined)) {
+        preserveGalaxyPhaseOnResume = true;
+      }
       if (gravityChanged && previousMode === 'galaxy' && state.settings.mode === 'galaxy') {
         /* Gravity changes need an immediate, legible density response: a range control whose
            visible result is only a slow orbital-velocity correction reads as broken. Scale
@@ -10200,6 +10229,13 @@
                 velocityAdjusted: 0, maximumVelocityShift: 0, anchorId: anchor.id,
               };
               render(false, false);
+              /* Re-arm: the inner render consumed the flag. The outer render below must also
+                 skip the contact-correction pass so the burst's ratios never fold into the
+                 layout (path independence). */
+              if (gravityChanged && previousMode === 'galaxy'
+                && state.settings.mode === 'galaxy') {
+                preserveGalaxyPhaseOnResume = true;
+              }
             }
           }
         }
@@ -10218,16 +10254,10 @@
         api.freeze(false);
         return;
       }
-      /* Gravity, size, and coupling controls change the sampled field or paint geometry on the
-         next fixed slice; they do not authorize a one-shot velocity rewrite in the same task.
-         Preserve the exact current phase while the scheduled clock absorbs the new setting. */
-      if (previousMode === 'galaxy' && state.settings.mode === 'galaxy'
-        && next.repel === undefined
-        && (next.gravity !== undefined || next.size !== undefined
-          || next.gravitationalConstant !== undefined || next.G_center !== undefined
-          || next.localGravitationalConstant !== undefined || next.G_star !== undefined
-          || next.blackHoleMass !== undefined || next.damping !== undefined
-          || next.springStiffness !== undefined)) {
+      /* Re-arm for the outer render + the synchronous physics reheat that schedulePhysicsUpdate
+         may run: both share the render path and would otherwise run the path-dependent
+         contact corrections on the post-scaling layout, undoing the slider's burst response. */
+      if (gravityChanged && previousMode === 'galaxy' && state.settings.mode === 'galaxy') {
         preserveGalaxyPhaseOnResume = true;
       }
       render(false, false);
@@ -10709,12 +10739,10 @@
       galaxyBlackHoleGravityConstant, galaxyBlackHoleGravitySetting,
       galaxyCarrierTargetSpeed, galaxyAuthoredCarrierTargetSpeed,
       galaxyBlackHoleSpinAngle, advanceGalaxyBlackHoleSpin,
-      galaxyGlobalGravityFloorSetting: GALAXY_GLOBAL_GRAVITY_FLOOR_SETTING,
       galaxyLocalGravityConstant,
       galaxyLocalGravityMultiplier,
       galaxyStellarGravityConstant, galaxyFallbackStellarGravityConstant,
       galaxySystemGravityConstant, galaxyStellarGravitySetting,
-      galaxyStellarGravityFloorSetting: GALAXY_STELLAR_GRAVITY_FLOOR_SETTING,
       defaultGalaxyStellarAccelerationCap, defaultGalaxySystemAccelerationCap,
       galaxySceneWithinLiveLimit,
       galaxyRelationOrbitScale, galaxyOrbitalSpeedMultiplier, galaxyOrbitalRadiusMultiplier,

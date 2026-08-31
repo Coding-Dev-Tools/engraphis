@@ -18,7 +18,6 @@
     graphWorkspace: '',
     graphData: null,
     graphDataMode: 'overview',
-    graphGalaxyQuality: false,
     graphDataPreset: 'galaxy',
     graphDataIncludeCode: false,
     graphDataShowUnlinked: false,
@@ -425,7 +424,7 @@
     if (!graphAllAssetsPromise) {
       const controller = new AbortController();
       const attempt = loadScript(
-        graphAssetSource('/v2-assets/engraphis-graph-every.js?v=20260830-spacetime-controls-20'),
+        graphAssetSource('/v2-assets/engraphis-graph-every.js?v=20260823-every-19'),
         'EngraphisEveryGraph', controller.signal,
       );
       graphAllAssetsPromise = attempt;
@@ -458,7 +457,7 @@
         graphAssetSource('/v2-assets/vendor/force-graph.min.js?v=20260727-final'),
         'ForceGraph', controller.signal,
       )).then(() => loadScript(
-        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260828-slider-multiplier-fix'),
+        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260831-galaxy-floor-fix-2'),
         'EngraphisGraph', controller.signal,
       )).then(() => loadScript(
         graphAssetSource('/v2-assets/engraphis-spacetime.js?v=20260812-stable-orbit-lanes-7'),
@@ -2299,7 +2298,6 @@
 
   function updateGraphModeControls() {
     const full = state.graphMode === 'full';
-    const galaxy = graphIsGalaxy();
     const repoFilter = byId('graph-repo-filter');
     const repoLabel = document.querySelector('label[for="graph-repo-filter"]');
     if (repoFilter) {
@@ -2340,8 +2338,7 @@
     const freezeRow = byId('graph-freeze-row');
     if (freezeRow) freezeRow.hidden = full;
     const orbitPause = byId('graph-orbit-pause-row');
-    const orbitCapable = galaxy && (!full || state.graphGalaxyQuality);
-    if (orbitPause) orbitPause.hidden = !orbitCapable;
+    if (orbitPause) orbitPause.hidden = full;
     const style = byId('graph-style').value;
     const styleNotes = full ? GRAPH_LOD_STYLE_NOTES : GRAPH_STYLE_NOTES;
     byId('graph-style-note').textContent = styleNotes[style] || styleNotes.classic;
@@ -2362,7 +2359,6 @@
   function updateGraphGalaxyControls() {
     const galaxy = graphIsGalaxy();
     const full = state.graphMode === 'full';
-    const orbitCapable = galaxy && (!full || state.graphGalaxyQuality);
     const size = byId('graph-size');
     if (galaxy && !full) {
       if (['degree', 'betweenness'].includes(size.value)) size.dataset.legacyValue = size.value;
@@ -2383,9 +2379,7 @@
       const label = byId(id);
       if (label) label.textContent = labels[index];
     });
-    // The spacetime multipliers are wired into the full worker layout and Galaxy
-    // solver. Hide controls that have no observable effect in other presets.
-    byId('graph-spacetime-tuning').hidden = false;
+    byId('graph-spacetime-tuning').hidden = !galaxy;
     const forceLabels = full
       ? ['Core attraction', 'Core mass', 'Cluster cohesion', 'Settling resistance', 'Link spring']
       : ['Galactic gravity', 'Black hole mass', 'Local solar gravity', 'Space friction', 'Spring stiffness'];
@@ -2395,26 +2389,15 @@
       const label = byId(id);
       if (label) label.textContent = forceLabels[index];
     });
-    const springLabel = byId('graph-spring-stiffness-label');
-    const springCapable = galaxy || (full && !state.graphGalaxyQuality);
-    if (springLabel && springLabel.parentElement) {
-      springLabel.parentElement.hidden = !springCapable;
-    }
-    const galaxyRenderer = galaxy && (!full || state.graphGalaxyQuality);
-    const everyRenderer = full && !state.graphGalaxyQuality;
-    byId('graph-spacetime-summary').textContent = galaxyRenderer
-      ? 'Spacetime · black-hole orbit controls'
-      : everyRenderer ? 'All-node force refinement' : 'Responsive force controls';
-    byId('graph-spacetime-note').textContent = galaxyRenderer
-      ? 'Drag and release a node to slingshot it into a new orbit.'
-      : everyRenderer
-        ? 'These values refine the settled worker layout.'
-        : 'These values tune the responsive force layout.';
+    byId('graph-spacetime-summary').textContent = full
+      ? 'All-node force refinement'
+      : 'Spacetime · black-hole orbit controls';
+    byId('graph-spacetime-note').textContent = full
+      ? 'These values refine the settled worker layout. The High quality orbit model stays unchanged.'
+      : 'Drag and release a node to slingshot it into a new orbit.';
     byId('graph-orbits-pause-label').textContent = 'Pause orbits';
     byId('graph-orbits-pause-detail').textContent = 'physics';
     byId('graph-orbits-pause').setAttribute('aria-label', 'Pause orbital physics');
-    const orbitPauseRow = byId('graph-orbit-pause-row');
-    if (orbitPauseRow) orbitPauseRow.hidden = !orbitCapable;
   }
 
   function setChoicePressed(selector, dataKey, selected) {
@@ -2454,11 +2437,13 @@
     const max = Number(control.max);
     return Math.min(Number.isFinite(max) ? max : safe, Math.max(Number.isFinite(min) ? min : safe, safe));
   }
-  /* Controls keep their human-readable ranges and defaults, while the engine receives a
-     bounded 2x response away from the selected preset baseline. This makes a drag feel
-     immediate and substantial without changing a saved view's neutral calibration or allowing
-     a slider to bypass its HTML safety bounds. */
-  const GRAPH_SLIDER_RESPONSE_GAIN = 2;
+  /* Controls keep their human-readable ranges and defaults. The engine value is computed by
+     a clamped identity 1:1 mapping: the slider's raw position flows straight to the engine,
+     bounded by the HTML min/max. The earlier 2x response saturated against the HTML bounds
+     for slider values near the loose and tight ends, producing visible plateaus where the
+     user dragged the slider but the engine value didn't change. Identity 1:1 with
+     [min, max] clamping gives every integer tick in the slider's full HTML range a
+     strictly distinct engine value. */
   function graphSliderResponseBaseline(item) {
     if (!item) return 0;
     if (item.id === 'graph-flow-speed') return 45;
@@ -2470,29 +2455,11 @@
   function graphSliderResponseValue(id, value, baseline) {
     const control = byId(id);
     if (!control) return Number.isFinite(Number(value)) ? Number(value) : baseline;
-    /* Spacetime multipliers (galactic gravity, local solar gravity, black hole mass,
-       space friction, spring stiffness) are linear controls: the dashboard's
-       graphSpacetimeEngineSettings already normalises them to a clean 0..2 range with
-       the visible default at 1.0. The 2x response gain centred on the slider's fallback
-       would clip the lower quarter of every slider to 0 (e.g. visible 0..50 for the
-       gravitational-constant slider all map to engine 0) and compress the visible
-       50..100 range to engine 0..1.0, so the user couldn't tell the difference between
-       slider=30 and slider=50. Bypass the gain for these controls so the visible slider
-       position maps linearly to the engine value. */
-    if (id === 'graph-gravitational-constant'
-      || id === 'graph-local-gravitational-constant'
-      || id === 'graph-black-hole-mass'
-      || id === 'graph-space-damping'
-      || id === 'graph-spring-stiffness') {
-      return graphValueInRange(id, value, baseline);
-    }
     const raw = graphValueInRange(id, value, baseline);
-    const center = Number.isFinite(Number(baseline)) ? Number(baseline) : raw;
     const min = Number(control.min);
     const max = Number(control.max);
-    const expanded = center + (raw - center) * GRAPH_SLIDER_RESPONSE_GAIN;
-    return Math.min(Number.isFinite(max) ? max : expanded,
-      Math.max(Number.isFinite(min) ? min : expanded, expanded));
+    return Math.min(Number.isFinite(max) ? max : raw,
+      Math.max(Number.isFinite(min) ? min : raw, raw));
   }
   function graphSliderInputValue(id, value, baseline) {
     const control = byId(id);
@@ -2500,10 +2467,9 @@
     const min = Number(control.min);
     const max = Number(control.max);
     const safe = graphValueInRange(id, value, baseline);
-    const center = Number.isFinite(Number(baseline)) ? Number(baseline) : safe;
-    const compressed = center + (safe - center) / GRAPH_SLIDER_RESPONSE_GAIN;
-    return Math.min(Number.isFinite(max) ? max : compressed,
-      Math.max(Number.isFinite(min) ? min : compressed, compressed));
+    /* Identity inverse of the clamped identity response. */
+    return Math.min(Number.isFinite(max) ? max : safe,
+      Math.max(Number.isFinite(min) ? min : safe, safe));
   }
 
   function graphScopeValue(id, value, fallback) {
@@ -2539,15 +2505,9 @@
       return settings;
     }, {});
     return {
-      // The engine consumes these values directly as multipliers. The visible default
-      // (100 for gravity/local, 160 for black-hole) must reach the engine as 1.0 so the
-      // untouched-slider state is a no-op. The earlier / 50 division sent 2.0 at the
-      // default and clamped the upper half of the slider to 2.0x, so the user's
-      // movements from 100..200 produced no visible effect — the "revert to default"
-      // bug. / 100 keeps the default at 1.0x and gives a clean 0..2 range.
-      gravitationalConstant: controls.gravitationalConstant / 100,
+      gravitationalConstant: controls.gravitationalConstant / 50,
       blackHoleMass: graphBlackHoleMassMultiplier(controls.blackHoleMass),
-      localGravitationalConstant: controls.localGravitationalConstant / 100,
+      localGravitationalConstant: controls.localGravitationalConstant / 50,
       damping: controls.damping,
       springStiffness: controls.springStiffness / 32,
       orbitPaused: state.graphOrbitPaused,
@@ -2624,21 +2584,12 @@
   const GRAPH_BLACK_HOLE_MASS_BASELINE = 160;
   function graphBlackHoleMassMultiplier(controlValue) {
     const value = number(controlValue);
-    /* Map the visible 20..500 range to 0.0..2.0 with the default (160) at 1.0.
-       Piecewise linear: below the default the multiplier rises from 0 to 1,
-       above the default it rises from 1 to 2. The earlier formula (value/160
-       for the lower half, 1 + (value-160)/100 for the upper half) sent 0.125
-       at the slider's HTML minimum and 4.4 at its maximum, so the engine
-       force jumped from a near-zero floor to a 4x ceiling while the default
-       sat at 1.0 — a 35x range that made the slider feel "alive" only at the
-       extremes. The new mapping gives a clean 0..2 range with a smooth,
-       predictable response around the default. */
-    if (!Number.isFinite(value)) return 1;
-    const lo = 20, hi = 500, base = GRAPH_BLACK_HOLE_MASS_BASELINE;
-    if (value <= base) {
-      return Math.max(0, (value - lo) / (base - lo));
-    }
-    return 1 + (value - base) / (hi - base);
+    /* Keep the established lower half and neutral default. Above 160, every +10 slider units
+       adds exactly +0.10 to the compact central-mass multiplier: 160→1.0, 170→1.1, 180→1.2.
+       Local stellar wells remain owned exclusively by Local solar gravity. */
+    return value <= GRAPH_BLACK_HOLE_MASS_BASELINE
+      ? Math.max(0, value / GRAPH_BLACK_HOLE_MASS_BASELINE)
+      : 1 + (value - GRAPH_BLACK_HOLE_MASS_BASELINE) / 100;
   }
 
 
@@ -3544,7 +3495,6 @@
         state.graphData = data;
         state.graphWorkspace = targetWorkspace;
         state.graphDataMode = targetMode;
-        state.graphGalaxyQuality = galaxyQuality;
         state.graphDataPreset = byId('graph-preset').value;
         state.graphDataIncludeCode = responseIncludeCode;
         state.graphDataShowUnlinked = targetShowUnlinked;
