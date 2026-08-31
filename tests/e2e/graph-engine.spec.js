@@ -2000,12 +2000,13 @@ test('served Ledger exposes spacetime controls for non-Galaxy presets', async ({
   await expect(page.locator('[data-graph-preset-choice="compact"]'))
     .toHaveAttribute('aria-pressed', 'true');
   await expect(page.locator('#graph-spacetime-tuning')).toBeVisible();
-  await expect(page.locator('#graph-spacetime-summary')).toHaveText('Spacetime · black-hole orbit controls');
+  await expect(page.locator('#graph-spacetime-summary')).toHaveText('Responsive force controls');
   await expect(page.locator('#graph-spring-stiffness-label')).toBeHidden();
   await expect(page.locator('#graph-orbit-pause-row')).toBeHidden();
   await page.locator('[data-graph-preset-choice="galaxy"]').click();
   await expect(page.locator('#graph-spring-stiffness-label')).toBeVisible();
   await expect(page.locator('#graph-orbit-pause-row')).toBeVisible();
+  await expect(page.locator('#graph-spacetime-summary')).toHaveText('Spacetime · black-hole orbit controls');
   expect(session.pageErrors).toEqual([]);
 });
 
