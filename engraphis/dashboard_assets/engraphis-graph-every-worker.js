@@ -234,8 +234,11 @@
       const crossCommunity =
         model.communities[a] !== model.communities[b] ? 0.02 : 0.07;
       const force = (dist - rest) / dist * crossCommunity * springScale;
-      dx[a] -= ddx * force; dy[a] -= ddy * force;
-      dx[b] += ddx * force; dy[b] += ddy * force;
+      /* `force` is positive when the pair is beyond rest and negative when it overlaps.
+         Apply equal-and-opposite corrections along a→b so positive force attracts the pair
+         and negative force separates it. */
+      dx[a] += ddx * force; dy[a] += ddy * force;
+      dx[b] -= ddx * force; dy[b] -= ddy * force;
     }
 
     /* Local repulsion through a spatial hash with a per-node visit cap keeps each pass O(n)
