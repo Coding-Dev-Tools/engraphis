@@ -7390,6 +7390,7 @@
        saved phase byte-for-byte after the render's safety projections. */
     let galaxyPhaseRestorePending = false;
     let preserveGalaxyPhaseOnResume = false;
+    let galaxyContactCorrectionDeferred = false;
     let adj = Object.create(null), liveAdj = Object.create(null), hilite = null, hoverSet = null, maxDeg = 1;
     let legacySizeBy = 'degree';
     // The classic renderer treats label density as a hard ranked cap, not merely a looser
@@ -9092,6 +9093,7 @@
          behaviour synchronous while browsers coalesce a burst of range-input events. */
       if (typeof window === 'undefined' || typeof window.requestAnimationFrame !== 'function') {
         physicsReheatPending = false;
+        galaxyContactCorrectionDeferred = false;
         render(false, true);
         return;
       }
@@ -9106,7 +9108,13 @@
         physicsFrame = 0;
         if (destroyed || suspended || !physicsReheatPending) return;
         physicsReheatPending = false;
-        if (phaseLock) preserveGalaxyPhaseOnResume = true;
+        if (phaseLock) {
+          preserveGalaxyPhaseOnResume = true;
+          /* Apply the painted-edge projection once, after the browser has coalesced the
+             complete input burst. Intermediate projections would make the final layout depend
+             on how many range-input events happened before this frame. */
+          galaxyContactCorrectionDeferred = false;
+        }
         render(false, true);
       });
     }
@@ -9340,31 +9348,50 @@
         );
       } else if (reused && galaxyMode && skipGalaxyReseed) {
         /* The slider burst just rescaled carriers and their satellites by a known ratio.
-           Preserve that phase by skipping orbit reseeding, but never skip the final contact
-           invariant. The projections are idempotent when clear and only move a body that the
-           burst actually placed inside a painted boundary, which is required even while the
-           Galaxy clock is frozen or orbit-paused. */
-        const prePaintHorizon = applyGalaxyBlackHoleExclusion(
-          data.nodes, { padding: GALAXY_BLACK_HOLE_EXCLUSION_PADDING }
-        );
-        const preStarExclusion = applyGalaxySystemAnchorExclusion(data.nodes, {
-          padding: GALAXY_SYSTEM_ANCHOR_EXCLUSION_PADDING,
-          fixAnchors: true,
-        });
-        const postStarExclusion = applyGalaxySystemAnchorExclusion(data.nodes, {
-          padding: GALAXY_SYSTEM_ANCHOR_EXCLUSION_PADDING,
-          fixAnchors: true,
-        });
-        const postPaintHorizon = applyGalaxyBlackHoleExclusion(
-          data.nodes, { padding: GALAXY_BLACK_HOLE_EXCLUSION_PADDING }
-        );
+           The phase-preserving contact pass is deferred until the coalesced frame below. */
         const skippedAnchor = galaxyGlobalAnchor(data.nodes);
-        galaxyLastSystemAnchorExclusion = combineGalaxySystemAnchorExclusions(
-          [preStarExclusion, postStarExclusion]
-        );
-        galaxyLastBlackHoleExclusion = combineGalaxyBlackHoleExclusions(
-          [prePaintHorizon, postPaintHorizon]
-        );
+        if (galaxyContactCorrectionDeferred) {
+          /* A range-input burst can issue several synchronous settings updates before the
+             scheduled browser frame. Preserve the complete multiplicative response first, then
+             project once in that final frame. This keeps the painted-edge invariant while
+             making a single jump and an equivalent fine sweep converge to the same state. */
+          galaxyLastSystemAnchorExclusion = combineGalaxySystemAnchorExclusions([{
+            padding: GALAXY_SYSTEM_ANCHOR_EXCLUSION_PADDING,
+            systems: 0, contacts: 0, correctedDistance: 0, maximumShift: 0,
+            inwardVelocityRemoved: 0, tangentialVelocityRemoved: 0,
+            minimumClearance: null, iterations: 0,
+          }]);
+          galaxyLastBlackHoleExclusion = combineGalaxyBlackHoleExclusions([{
+            anchorId: skippedAnchor ? skippedAnchor.id : null,
+            contacts: 0, systems: 0, coreNodes: 0, fixedSystemNodes: 0,
+            repelledNodes: 0, correctedDistance: 0, maximumShift: 0,
+            inwardVelocityRemoved: 0, tangentialVelocityRemoved: 0,
+            minimumClearance: null,
+          }]);
+        } else {
+          /* The final scheduled frame still enforces both painted contact boundaries, including
+             while the Galaxy clock is frozen or orbit-paused. */
+          const prePaintHorizon = applyGalaxyBlackHoleExclusion(
+            data.nodes, { padding: GALAXY_BLACK_HOLE_EXCLUSION_PADDING }
+          );
+          const preStarExclusion = applyGalaxySystemAnchorExclusion(data.nodes, {
+            padding: GALAXY_SYSTEM_ANCHOR_EXCLUSION_PADDING,
+            fixAnchors: true,
+          });
+          const postStarExclusion = applyGalaxySystemAnchorExclusion(data.nodes, {
+            padding: GALAXY_SYSTEM_ANCHOR_EXCLUSION_PADDING,
+            fixAnchors: true,
+          });
+          const postPaintHorizon = applyGalaxyBlackHoleExclusion(
+            data.nodes, { padding: GALAXY_BLACK_HOLE_EXCLUSION_PADDING }
+          );
+          galaxyLastSystemAnchorExclusion = combineGalaxySystemAnchorExclusions(
+            [preStarExclusion, postStarExclusion]
+          );
+          galaxyLastBlackHoleExclusion = combineGalaxyBlackHoleExclusions(
+            [prePaintHorizon, postPaintHorizon]
+          );
+        }
         galaxyLastFarFieldConfinement = galaxyLastFarFieldConfinement || {
           anchorId: skippedAnchor ? skippedAnchor.id : null, envelopeRadius: 0, softRadius: 0,
           acceleratedSystems: 0, boundedSystems: 0, boundedCoreNodes: 0,
@@ -10032,6 +10059,7 @@
           || next.blackHoleMass !== undefined || next.damping !== undefined
           || next.springStiffness !== undefined)) {
         preserveGalaxyPhaseOnResume = true;
+        galaxyContactCorrectionDeferred = true;
       }
       if (gravityChanged && previousMode === 'galaxy' && state.settings.mode === 'galaxy') {
         /* Gravity changes need an immediate, legible density response: a range control whose
