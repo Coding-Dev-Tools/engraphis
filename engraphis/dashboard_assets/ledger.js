@@ -18,6 +18,7 @@
     graphWorkspace: '',
     graphData: null,
     graphDataMode: 'overview',
+    graphGalaxyQuality: false,
     graphDataPreset: 'galaxy',
     graphDataIncludeCode: false,
     graphDataShowUnlinked: false,
@@ -2338,7 +2339,8 @@
     const freezeRow = byId('graph-freeze-row');
     if (freezeRow) freezeRow.hidden = full;
     const orbitPause = byId('graph-orbit-pause-row');
-    if (orbitPause) orbitPause.hidden = full;
+    const orbitCapable = galaxy && (!full || state.graphGalaxyQuality);
+    if (orbitPause) orbitPause.hidden = !orbitCapable;
     const style = byId('graph-style').value;
     const styleNotes = full ? GRAPH_LOD_STYLE_NOTES : GRAPH_STYLE_NOTES;
     byId('graph-style-note').textContent = styleNotes[style] || styleNotes.classic;
@@ -2359,6 +2361,7 @@
   function updateGraphGalaxyControls() {
     const galaxy = graphIsGalaxy();
     const full = state.graphMode === 'full';
+    const orbitCapable = galaxy && (!full || state.graphGalaxyQuality);
     const size = byId('graph-size');
     if (galaxy && !full) {
       if (['degree', 'betweenness'].includes(size.value)) size.dataset.legacyValue = size.value;
@@ -2385,6 +2388,32 @@
       : ['Galactic gravity', 'Black hole mass', 'Local solar gravity', 'Space friction', 'Spring stiffness'];
     ['graph-gravitational-constant-label', 'graph-black-hole-mass-label',
       'graph-local-gravitational-constant-label', 'graph-space-damping-label',
+'graph-spring-stiffness-label'].forEach((id, index) => {
+      const label = byId(id);
+      if (label) label.textContent = forceLabels[index];
+    });
+    const springLabel = byId('graph-spring-stiffness-label');
+    const springCapable = galaxy || (full && !state.graphGalaxyQuality);
+    if (springLabel && springLabel.parentElement) {
+      springLabel.parentElement.hidden = !springCapable;
+    }
+    const galaxyRenderer = galaxy && (!full || state.graphGalaxyQuality);
+    const everyRenderer = full && !state.graphGalaxyQuality;
+    byId('graph-spacetime-summary').textContent = galaxyRenderer
+      ? 'Spacetime · black-hole orbit controls'
+      : everyRenderer ? 'All-node force refinement' : 'Responsive force controls';
+    byId('graph-spacetime-note').textContent = galaxyRenderer
+      ? 'Drag and release a node to slingshot it into a new orbit.'
+      : everyRenderer
+        ? 'These values refine the settled worker layout.'
+        : 'These values tune the responsive force layout.';
+    byId('graph-orbits-pause-label').textContent = 'Pause orbits';
+    byId('graph-orbits-pause-detail').textContent = 'physics';
+    byId('graph-orbits-pause').setAttribute('aria-label', 'Pause orbital physics');
+    const orbitPauseRow = byId('graph-orbit-pause-row');
+    if (orbitPauseRow) orbitPauseRow.hidden = !orbitCapable;
+  }
+
       'graph-spring-stiffness-label'].forEach((id, index) => {
       const label = byId(id);
       if (label) label.textContent = forceLabels[index];
@@ -3495,6 +3524,7 @@
         state.graphData = data;
         state.graphWorkspace = targetWorkspace;
         state.graphDataMode = targetMode;
+        state.graphGalaxyQuality = galaxyQuality;
         state.graphDataPreset = byId('graph-preset').value;
         state.graphDataIncludeCode = responseIncludeCode;
         state.graphDataShowUnlinked = targetShowUnlinked;
