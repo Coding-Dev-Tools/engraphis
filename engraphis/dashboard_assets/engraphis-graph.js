@@ -1888,14 +1888,10 @@
       repulsionPadding, repulsionRange, repulsionAcceleration,
       maximumAcceleration: 0, capScale: 1,
       gravitySetting: galaxyAccelerationCapReference(opts.gravity),
-      stellarGravity: galaxyStellarGravityConstant(localGravitySetting)
-        * galaxyPhysicsMultiplier(opts.localGravitationalConstant,
-          GALAXY_LOCAL_GRAVITATIONAL_CONSTANT_MULTIPLIER, 8),
       localGravitationalConstant: galaxyPhysicsMultiplier(
         opts.localGravitationalConstant,
         GALAXY_LOCAL_GRAVITATIONAL_CONSTANT_MULTIPLIER, 8),
       eligibleStellarAnchors: 0, fallbackAnchors: 0, globalAnchors: 0,
-      stellarFloorActive: false,
     };
     if (!(alphaValue > 0)) return stats;
     groups.forEach(members => {
@@ -1905,10 +1901,6 @@
       stats.anchors++;
       if (anchor.anchor_role === 'community') {
         stats.eligibleStellarAnchors++;
-        if (Number.isFinite(Number(localGravitySetting))
-          && Number(localGravitySetting) < GALAXY_FIXED_LOCAL_GRAVITY_SETTING) {
-          stats.stellarFloorActive = true;
-        }
       } else if (anchor.anchor_role === 'global') stats.globalAnchors++;
       else stats.fallbackAnchors++;
       const gravityMultiplier = galaxyLocalGravityMultiplier(anchor, opts);

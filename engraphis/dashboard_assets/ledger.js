@@ -2339,6 +2339,7 @@
     const freezeRow = byId('graph-freeze-row');
     if (freezeRow) freezeRow.hidden = full;
     const orbitPause = byId('graph-orbit-pause-row');
+    const galaxy = graphIsGalaxy();
     const orbitCapable = galaxy && (!full || state.graphGalaxyQuality);
     if (orbitPause) orbitPause.hidden = !orbitCapable;
     const style = byId('graph-style').value;
@@ -2382,7 +2383,10 @@
       const label = byId(id);
       if (label) label.textContent = labels[index];
     });
-    byId('graph-spacetime-tuning').hidden = !galaxy;
+    /* Keep the shared spacetime controls available for every renderer. Galaxy-specific rows
+       are gated below, while the normalized force controls remain useful to compact and
+       community layouts as well. */
+    byId('graph-spacetime-tuning').hidden = false;
     const forceLabels = full
       ? ['Core attraction', 'Core mass', 'Cluster cohesion', 'Settling resistance', 'Link spring']
       : ['Galactic gravity', 'Black hole mass', 'Local solar gravity', 'Space friction', 'Spring stiffness'];
