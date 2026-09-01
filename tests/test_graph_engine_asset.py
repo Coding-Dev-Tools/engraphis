@@ -5876,7 +5876,7 @@ def test_dominant_star_has_smooth_mass_balanced_repulsion_before_its_hard_surfac
         # 48 constant internally for its own calibration, but it is no longer
         # reported as a "floor" in telemetry.
         assert "stellarGravityFloorSetting" not in stats
-        assert stats["stellarGravity"] == 0
+        assert "stellarGravity" not in stats
         assert stats["eligibleStellarAnchors"] == 1
         assert stats["fallbackAnchors"] == 0
         assert stats["globalAnchors"] == 0

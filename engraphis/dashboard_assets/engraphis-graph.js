@@ -1847,9 +1847,6 @@
       repulsionPadding, repulsionRange, repulsionAcceleration,
       maximumAcceleration: 0, capScale: 1,
       gravitySetting: galaxyAccelerationCapReference(opts.gravity),
-      stellarGravity: galaxyStellarGravityConstant(localGravitySetting)
-        * galaxyPhysicsMultiplier(opts.localGravitationalConstant,
-          GALAXY_LOCAL_GRAVITATIONAL_CONSTANT_MULTIPLIER, 8),
       localGravitationalConstant: galaxyPhysicsMultiplier(
         opts.localGravitationalConstant,
         GALAXY_LOCAL_GRAVITATIONAL_CONSTANT_MULTIPLIER, 8),
