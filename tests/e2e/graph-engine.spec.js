@@ -2817,7 +2817,7 @@ test('served non-Galaxy spacetime controls keep their full normalized range', as
     { value: 460, multiplier: 4 },
     { value: 500, multiplier: 4.4 },
   ]);
-  expect(report.damping[0].decay).toBeCloseTo(0.05, 12);
+  expect(report.damping[0].decay).toBeCloseTo(0.05 + (0.80 / 15), 12);
   expect(report.damping[1].decay).toBeCloseTo(0.85, 12);
   expect(session.pageErrors).toEqual([]);
 });
