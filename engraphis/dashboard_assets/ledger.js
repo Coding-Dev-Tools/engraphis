@@ -2524,20 +2524,31 @@
 
 
   let graphPreferencesSaveScheduled = false;
+  let graphPreferencesSaveCancel = null;
   function scheduleGraphPreferencesSave() {
     if (graphPreferencesSaveScheduled) return;
     graphPreferencesSaveScheduled = true;
     const flush = () => {
+      if (!graphPreferencesSaveScheduled) return;
       graphPreferencesSaveScheduled = false;
+      graphPreferencesSaveCancel = null;
       saveGraphPreferences();
     };
-    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(flush);
-    else setTimeout(flush, 0);
+    if (typeof requestAnimationFrame === 'function') {
+      const frame = requestAnimationFrame(flush);
+      graphPreferencesSaveCancel = () => cancelAnimationFrame(frame);
+    } else {
+      const timer = setTimeout(flush, 0);
+      graphPreferencesSaveCancel = () => clearTimeout(timer);
+    }
   }
 
   function flushGraphPreferencesSave() {
     if (!graphPreferencesSaveScheduled) return;
     graphPreferencesSaveScheduled = false;
+    const cancel = graphPreferencesSaveCancel;
+    graphPreferencesSaveCancel = null;
+    if (cancel) cancel();
     saveGraphPreferences();
   }
 
