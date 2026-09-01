@@ -2414,21 +2414,6 @@
     if (orbitPauseRow) orbitPauseRow.hidden = !orbitCapable;
   }
 
-      'graph-spring-stiffness-label'].forEach((id, index) => {
-      const label = byId(id);
-      if (label) label.textContent = forceLabels[index];
-    });
-    byId('graph-spacetime-summary').textContent = full
-      ? 'All-node force refinement'
-      : 'Spacetime · black-hole orbit controls';
-    byId('graph-spacetime-note').textContent = full
-      ? 'These values refine the settled worker layout. The High quality orbit model stays unchanged.'
-      : 'Drag and release a node to slingshot it into a new orbit.';
-    byId('graph-orbits-pause-label').textContent = 'Pause orbits';
-    byId('graph-orbits-pause-detail').textContent = 'physics';
-    byId('graph-orbits-pause').setAttribute('aria-label', 'Pause orbital physics');
-  }
-
   function setChoicePressed(selector, dataKey, selected) {
     all(selector).forEach(control => {
       const active = control.dataset[dataKey] === selected;
