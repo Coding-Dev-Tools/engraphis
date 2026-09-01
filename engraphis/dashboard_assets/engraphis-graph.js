@@ -2973,7 +2973,8 @@
       Number(opts.localSoftening) || opts.softening || 40);
     const field = galaxyBlackHoleField(bodies, Object.assign({}, opts, { softening: centralSoftening }));
     const anchor = field.anchor && field.anchor.anchor_role === 'global' ? field.anchor : null;
-    if (!anchor || !(field.gravitationalConstant > 0)) return empty;
+    if (!anchor) return empty;
+    const globalFieldActive = field.gravitationalConstant > 0;
     const timestep = Math.max(0.001, Math.min(2, Number(opts.timestep) || 1));
     const orbitalRadius = galaxyOrbitalRadiusMultiplier(opts.orbitalSpeed);
     const absoluteSpeedLimit = Math.max(0.01, Number(opts.speedLimit) || MAX_NODE_SPEED);
@@ -3039,7 +3040,12 @@
       if (!(Number.isFinite(Number(orbit.baseRadius)) && Number(orbit.baseRadius) > 0)) {
         orbit.baseRadius = Number(orbit.radius) || starRadius;
       }
-      orbit.radius = boundedRadius(orbit.baseRadius * orbitalRadius, extent * orbitalRadius);
+      /* At the zero global-gravity endpoint the black-hole carrier is stationary. Preserve its
+         current radius so local stellar members can keep orbiting that fixed carrier instead of
+         receiving a one-time radial resize from the orbital-speed presentation multiplier. */
+      orbit.radius = globalFieldActive
+        ? boundedRadius(orbit.baseRadius * orbitalRadius, extent * orbitalRadius)
+        : boundedRadius(Number(orbit.radius) || starRadius, extent);
       if (!Number.isFinite(orbit.angle)) {
         orbit.angle = seededHash(opts.layoutSeed, 'kinematic-system:' + item.id)
           / 0x100000000 * Math.PI * 2;

@@ -11859,6 +11859,52 @@ def test_kinematic_local_velocity_budget_uses_one_phase_speed() -> None:
 
 
 @requires_node
+def test_kinematic_local_orbits_continue_when_global_gravity_is_zero() -> None:
+    """Zero global gravity must not disable the independent local stellar clock."""
+    report = _run_node(
+        """
+        const nodes = [
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            system_anchor_id: 'black-hole', gravity_mass: 8, radius: 8,
+            x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'star', anchor_role: 'community', community_id: 'solar',
+            system_anchor_id: 'star', gravity_mass: 4, radius: 5,
+            x: 120, y: 0, vx: 0, vy: 0 },
+          { id: 'planet', community_id: 'solar', system_anchor_id: 'star',
+            orbit_tier: 1, gravity_mass: 1, radius: 2,
+            x: 150, y: 0, vx: 0, vy: 0 },
+        ];
+        const options = {
+          gravity: 0, softening: 32, centralSoftening: 40, localSoftening: 12,
+          localGravitySetting: 48, orbitalSpeed: 400, layoutSeed: 19,
+          timestep: .032, speedLimit: 48,
+        };
+        const angle = () => Math.atan2(nodes[2].y - nodes[1].y,
+          nodes[2].x - nodes[1].x);
+        const before = angle();
+        const first = I.advanceGalaxyKinematicOrbits(nodes, options);
+        const afterFirst = angle();
+        const second = I.advanceGalaxyKinematicOrbits(nodes, options);
+        const afterSecond = angle();
+        emit({ first, second,
+          localTravel: Math.atan2(Math.sin(afterSecond - before),
+            Math.cos(afterSecond - before)),
+          carrierTravel: Math.hypot(nodes[1].x - 120, nodes[1].y),
+          finite: nodes.every(node =>
+            [node.x, node.y, node.vx, node.vy].every(Number.isFinite)),
+          firstStepMoved: Math.abs(afterFirst - before) > 1e-8,
+        });
+        """
+    )
+    assert report["finite"] is True
+    assert report["first"]["satellites"] > 0
+    assert report["second"]["satellites"] > 0
+    assert report["firstStepMoved"] is True
+    assert abs(report["localTravel"]) > 1e-5
+    assert report["carrierTravel"] <= 1e-9
+
+
+@requires_node
 def test_live_carrier_is_capped_before_local_motion_budgeting() -> None:
     report = _run_node(
         """
