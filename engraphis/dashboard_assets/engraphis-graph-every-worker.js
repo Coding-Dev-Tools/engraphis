@@ -253,11 +253,16 @@
     }
     const minDist = SPACING * MAP_SCALE * 1.55;
     const minDist2 = minDist * minDist;
+    /* The dashboard maps the 0..200 Cluster cohesion slider to localGravitationalConstant
+       0..4, so clamping at 2 left the entire upper half of the control inert: it is this
+       worker's only consumer of the setting (PR #177 review thread at this site). Accept
+       the full emitted range and floor the inverted push coefficient at zero so a high
+       cohesion cannot turn the collision-style push into an attraction. */
     const cohesion = Number.isFinite(Number(settings.localGravitationalConstant))
-      ? Math.max(0, Math.min(2, Number(settings.localGravitationalConstant))) : 1;
+      ? Math.max(0, Math.min(4, Number(settings.localGravitationalConstant))) : 1;
     /* Cluster cohesion strengthens the attractive spring network above. Invert its influence
        on the collision-style push so a higher cohesion setting does not spread clusters apart. */
-    const push = Number(settings.repel) / 48 * (1.5 - 0.5 * cohesion);
+    const push = Number(settings.repel) / 48 * Math.max(0, 1.5 - 0.5 * cohesion);
     for (let index = 0; index < count; index += 1) {
       const gx = Math.floor(pos[index * 2] / cell), gy = Math.floor(pos[index * 2 + 1] / cell);
       let checked = 0;
