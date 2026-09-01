@@ -10590,7 +10590,9 @@ def test_simulation_time_is_bounded_on_a_large_graph() -> None:
     assert report["big"]["warmup"] == 18
     # A large graph also settles harder, exactly as GPERF.large does on the classic path.
     assert report["big"]["alpha"] > report["small"]["alpha"]
-    assert report["big"]["velocity"] > report["small"]["velocity"]
+    # The damping slider owns the actual ForceGraph decay for both graph sizes; size must not
+    # overwrite the user-selected value with a large-graph constant during render.
+    assert report["big"]["velocity"] == report["small"]["velocity"]
     # Freeze, not the OS visual-motion preference, is the explicit static-layout control.
     assert report["frozen"]["time"] == 0
     assert report["frozen"]["ticks"] == 0
@@ -10656,7 +10658,7 @@ def test_spacetime_sliders_reach_d3_forces_in_non_galaxy_mode() -> None:
     damping) must reach d3 forces in non-galaxy mode. Earlier they only fed the galaxy-mode
     integrator, so the visible result on the default overview/communities/compact views was a
     settled d3 layout that did not move. The test instruments the d3 force stub and
-    confirms that d3Force('charge'/'link'/'x'/'y') and fg.velocityDecay are all called when
+    confirms that d3Force('charge'/'link'/'x'/'y') and fg.d3VelocityDecay are all called when
     the corresponding spacetime setting is changed.
     """
     report = _run_engine(
@@ -10670,7 +10672,7 @@ def test_spacetime_sliders_reach_d3_forces_in_non_galaxy_mode() -> None:
           velocityDecaySet: 0,
         };
         const f = store.d3Forces || {};
-        if (fg.velocityDecay) before.velocityDecaySet = 1;
+        if (fg.d3VelocityDecay) before.velocityDecaySet = 1;
         const x = f.x, y = f.y, charge = f.charge, link = f.link;
         const beforeX = x && x.strength, beforeY = y && y.strength, beforeCharge = charge && charge.strength;
 
@@ -10688,8 +10690,8 @@ def test_spacetime_sliders_reach_d3_forces_in_non_galaxy_mode() -> None:
               api.setSettings({ [key]: key === 'blackHoleMass' ? 400 : 150 });
               const after = calls.d3Force || 0;
               callResult.reheated = after > before;
-              callResult.velocityDecay = fg.velocityDecay;
-              callResult.storeVelocityDecay = store.velocityDecay;
+              callResult.velocityDecay = fg.d3VelocityDecay && fg.d3VelocityDecay();
+              callResult.storeVelocityDecay = store.d3VelocityDecay;
               callResult.chargeStrength = snapshotForce('charge');
               callResult.xStrength = snapshotForce('x');
               callResult.yStrength = snapshotForce('y');
@@ -10709,16 +10711,16 @@ def test_spacetime_sliders_reach_d3_forces_in_non_galaxy_mode() -> None:
             f"setSettings({{{key}: ...}}) raised: {entry['error']}"
         )
     # velocityDecay must change when damping changes: damping=1 -> 0.05, damping=15 -> 0.85.
-    # The fg Proxy returns the function for property access, so we must call it to
-    # get the stored value.
+    # The ForceGraph API names this getter/setter d3VelocityDecay; the value must remain the
+    # slider-derived setting instead of being replaced by a large-graph default.
     assert report['damping']['storeVelocityDecay'] == pytest.approx(0.85, abs=1e-9), (
-        f"damping=150 (saturated to 15) must yield store.velocityDecay=0.85, "
+        f"damping=150 (saturated to 15) must yield store.d3VelocityDecay=0.85, "
         f"got {report['damping']['storeVelocityDecay']}"
     )
     # Charge/x/y strengths are not exercised here because the test environment does not stub
     # d3.forceManyBody / d3.forceX / d3.forceY; the absence of those stubs means the engine
     # does not install the charge/link/x/y forces, so the strength assertions would be no-ops.
-    # The velocityDecay path above proves the wire reaches fg.velocityDecay, and the d3Force
+    # The velocityDecay path above proves the wire reaches fg.d3VelocityDecay, and the d3Force
     # call counter (reheated: True) proves the layout-change contract holds for every
     # spacetime key. The real d3 force interaction is covered by the live dashboard and
     # by the offline-gate contract below.
