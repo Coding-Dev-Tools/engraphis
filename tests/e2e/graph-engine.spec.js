@@ -2783,6 +2783,45 @@ test('served primary dashboard keeps local stellar orbits independent at Galaxy-
     expect(session.pageErrors).toEqual([]);
   });
 
+test('served non-Galaxy spacetime controls keep their full normalized range', async ({ page }) => {
+  const session = await openDashboard(page);
+  await page.goto('/');
+  await page.locator('.nav-item[data-view="relations"]').click();
+  await expect(page.locator('#graph-canvas canvas').first()).toBeAttached({ timeout: 20_000 });
+  await page.locator('[data-graph-preset-choice="compact"]').click();
+  await page.waitForFunction(() => window.__engraphisGraph
+    && window.__engraphisGraph.state().settings.mode === 'compact'
+    && window.__fg);
+
+  const report = await page.evaluate(() => {
+    const set = (id, value) => {
+      const control = document.getElementById(id);
+      control.value = String(value);
+      control.dispatchEvent(new Event('input', { bubbles: true }));
+    };
+    const mass = [20, 40, 160, 460, 500].map(value => {
+      set('graph-black-hole-mass', value);
+      return { value, multiplier: window.__engraphisGraph.state().settings.blackHoleMass };
+    });
+    const damping = [1, 15].map(value => {
+      set('graph-space-damping', value);
+      return { value, decay: window.__fg.d3VelocityDecay() };
+    });
+    return { mass, damping };
+  });
+
+  expect(report.mass).toEqual([
+    { value: 20, multiplier: 0.125 },
+    { value: 40, multiplier: 0.25 },
+    { value: 160, multiplier: 1 },
+    { value: 460, multiplier: 4 },
+    { value: 500, multiplier: 4.4 },
+  ]);
+  expect(report.damping[0].decay).toBeCloseTo(0.05, 12);
+  expect(report.damping[1].decay).toBeCloseTo(0.85, 12);
+  expect(session.pageErrors).toEqual([]);
+});
+
 test('Galaxy motion is 50 percent faster while core perturbation stays bound', async ({ page }) => {
   await openDashboard(page, { query: '?graph-engine=next' });
   await openGraphView(page);

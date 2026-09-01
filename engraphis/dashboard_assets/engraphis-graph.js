@@ -7923,6 +7923,11 @@
       setSimulationBudget(false, true);
     }
 
+    function nonGalaxyVelocityDecay() {
+      const damping = clamp(Number(state.settings.damping ?? 1), 1, 15);
+      return 0.05 + (damping - 1) * (0.80 / 14);
+    }
+
     function applyForces() {
       /* Extremely large complete snapshots use the deterministic fallback, but a normal
          full graph remains a live layout. The previous `renderMode === 'full'` guard removed
@@ -7976,7 +7981,10 @@
          one. Consume those engine values directly; dividing them again interprets a multiplier
          as a raw slider setting and makes every non-Galaxy force nearly inert. */
       const gravityMultiplier = clamp(Number(state.settings.gravitationalConstant ?? 1), 0, 8);
-      const massMultiplier = clamp(Number(state.settings.blackHoleMass ?? 1), 0.25, 4);
+      /* The dashboard maps the advertised 20..500 control to 0.125..4.4. Preserve that
+         complete normalized interval so neither end of the visible mass slider becomes a
+         no-op in compact, community, or radial layouts. */
+      const massMultiplier = clamp(Number(state.settings.blackHoleMass ?? 1), 0.125, 4.4);
       const localMultiplier = clamp(Number(state.settings.localGravitationalConstant ?? 1), 0, 8);
       const baseRepel = mode === 'communities' ? Math.max(10, s.repel * 0.68) : s.repel;
       if (charge && charge.strength) charge.strength(-baseRepel * gravityMultiplier);
@@ -7989,13 +7997,10 @@
         ));
         return base * localMultiplier;
       });
-      /* velocityDecay is the d3 equivalent of the space-damping slider: high damping makes the
-         layout settle fast, low damping keeps nodes oscillating. Bounded 0.05..0.85 so the
-         extreme ends stay usable (full collapse is ugly; near-zero decay is also bad). */
-      if (fg.velocityDecay) {
-        const damping = clamp(Number(state.settings.damping ?? 1), 1, 15);
-        fg.velocityDecay(0.05 + (damping - 1) * (0.80 / 14));
-      }
+      /* ForceGraph exposes the D3 setter as d3VelocityDecay. High damping makes the layout
+         settle fast, low damping keeps nodes oscillating. Bounded 0.05..0.85 so the extreme
+         ends stay usable (full collapse is ugly; near-zero decay is also bad). */
+      if (fg.d3VelocityDecay) fg.d3VelocityDecay(nonGalaxyVelocityDecay());
       if (typeof d3 === 'undefined') {
         installVelocityGuard();
         return;
@@ -9358,9 +9363,7 @@
       /* D3 is only the renderer in Galaxy mode. Its alpha, velocity decay and countdown are
          intentionally untouched; the fixed-step clock owns all three physical concerns. */
       if (!galaxyMode && fg.d3AlphaDecay) fg.d3AlphaDecay(staticFullLayout ? 1 : alphaDecay());
-      if (!galaxyMode && fg.d3VelocityDecay) {
-        fg.d3VelocityDecay(large ? 0.45 : 0.38);
-      }
+      if (!galaxyMode && fg.d3VelocityDecay) fg.d3VelocityDecay(nonGalaxyVelocityDecay());
       if (fg.linkCurvature) {
         fg.linkCurvature(dense ? 0 : ((PRESETS[state.settings.mode] || PRESETS.compact).curve || 0));
       }
