@@ -8063,10 +8063,12 @@
           positions.set(node.id, { x: Math.cos(angle) * radius * 1.18, y: Math.sin(angle) * radius * 0.76 });
         });
         const target = node => positions.get(node.id) || { x: 0, y: 0 };
-        fg.d3Force('x', d3.forceX(node => target(node).x).strength(0.18));
-        fg.d3Force('y', d3.forceY(node => target(node).y).strength(0.18));
+        fg.d3Force('x', d3.forceX(node => target(node).x).strength(0.18 * massMultiplier));
+        fg.d3Force('y', d3.forceY(node => target(node).y).strength(0.18 * massMultiplier));
       } else {
-        const centering = mode === 'compact' ? Math.max(0.24, (Number(s.gravity) || 0) / 100) : Math.max(0.06, (Number(s.gravity) || 0) / 100);
+        const centering = (mode === 'compact'
+          ? Math.max(0.24, (Number(s.gravity) || 0) / 100)
+          : Math.max(0.06, (Number(s.gravity) || 0) / 100)) * massMultiplier;
         fg.d3Force('x', d3.forceX(0).strength(centering));
         fg.d3Force('y', d3.forceY(0).strength(centering));
       }
