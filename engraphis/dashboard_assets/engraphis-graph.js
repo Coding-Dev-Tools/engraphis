@@ -5771,7 +5771,15 @@
         Number.isFinite(node.vx) ? node.vx : 0,
         Number.isFinite(node.vy) ? node.vy : 0,
       ) > 1e-8);
-    if (!globalAnchor || !(field.gravitationalConstant > 0)) return stats;
+    /* A zero global field must not freeze local satellites: the local stellar wells are
+       independent of the black-hole constant, so at Gravity=0 the per-frame phase/radius
+       controller still has to run. Only carrier support below depends on the global
+       field, and `supportCarrier` is skipped per item when the field is inactive.
+       PR #177 review thread at this site. */
+    const globalFieldActive = field.gravitationalConstant > 0;
+    if (!globalAnchor || (!globalFieldActive && !bodies.some(node => node.system_anchor_id != null))) {
+      return stats;
+    }
     const direction = (seededHash(opts.layoutSeed, 'galaxy-spin') & 1) ? 1 : -1;
     const supportCarrier = (members, carrier) => {
       if (!carrier || carrier === globalAnchor) return;
@@ -5818,7 +5826,7 @@
          Keep that frame untouched here, but never skip the local controller: its cached
          direction is what prevents a planet from reversing around its authored star after
          contact or boundary corrections. */
-      if (!neutralPhase) supportCarrier(members, carrier);
+      if (!neutralPhase && globalFieldActive) supportCarrier(members, carrier);
       const localAnchor = carrier;
       if (!localAnchor) return;
       const byId = new Map(members.map(node => [String(node.id), node]));
@@ -8095,9 +8103,12 @@
       const gcRaw = Number(state.settings.gravitationalConstant);
       const lgcRaw = Number(state.settings.localGravitationalConstant);
       const bhmRaw = Number(state.settings.blackHoleMass);
-      const gravityMultiplier = Number.isFinite(gcRaw) ? clamp(gcRaw, 0, 2) : 1;
-      const massMultiplier = Number.isFinite(bhmRaw) ? clamp(bhmRaw, 0, 2) : 1;
-      const localMultiplier = Number.isFinite(lgcRaw) ? clamp(lgcRaw, 0, 2) : 1;
+      /* The dashboard adapter emits 0..4 for gravity/local (raw/50) and up to 4.4 for
+         mass, so clamping at 2 saturated the upper half of all three sliders (PR #177
+         review threads at this site). Accept the full emitted engine ranges. */
+      const gravityMultiplier = Number.isFinite(gcRaw) ? clamp(gcRaw, 0, 4) : 1;
+      const massMultiplier = Number.isFinite(bhmRaw) ? clamp(bhmRaw, 0, 4.4) : 1;
+      const localMultiplier = Number.isFinite(lgcRaw) ? clamp(lgcRaw, 0, 4) : 1;
       const baseRepel = mode === 'communities' ? Math.max(10, s.repel * 0.68) : s.repel;
       /* Galactic gravity is an attractive control. Keep the separate Repel slider on the
          negative many-body charge, and apply this multiplier to the attractive anchor forces

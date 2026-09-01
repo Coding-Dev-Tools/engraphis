@@ -330,10 +330,13 @@
       }
     }
 
+    /* The dashboard emits Core attraction/local cohesion over 0..4 (raw/50) and Core mass
+       up to 4.4; clamping at 2 left the upper half of those controls inert (PR #177 review
+       thread at this site). Accept the full emitted ranges. */
     const coreAttraction = Number.isFinite(Number(settings.gravitationalConstant))
-      ? Math.max(0, Math.min(2, Number(settings.gravitationalConstant))) : 1;
+      ? Math.max(0, Math.min(4, Number(settings.gravitationalConstant))) : 1;
     const coreMass = Number.isFinite(Number(settings.blackHoleMass))
-      ? Math.max(0, Math.min(2, Number(settings.blackHoleMass))) : 1;
+      ? Math.max(0, Math.min(4.4, Number(settings.blackHoleMass))) : 1;
     const gravity = Number(settings.gravity) / 48 * 0.0015 * coreAttraction * coreMass;
     for (let index = 0; index < count; index += 1) {
       dx[index] += (cx - pos[index * 2]) * gravity;

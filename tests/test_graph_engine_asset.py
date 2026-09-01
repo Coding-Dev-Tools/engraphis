@@ -10792,16 +10792,17 @@ def test_spacetime_sliders_reach_d3_forces_in_non_galaxy_mode() -> None:
         )
         assert entry['reheated'] is True, f"setSettings({{{key}: ...}}) did not reheat"
     # These are numeric observations from the stubbed D3 forces, not source-shape checks:
-    # Galactic gravity is attractive, so a saturated multiplier doubles compact's 0.26
-    # origin-centering strength while the separate repel control keeps charge at -42.
+    # Galactic gravity is attractive; the multiplier consumes the adapter's full 0..4 range
+    # (150 raw -> 3.0, no 2.0 plateau), so compact's 0.26 origin-centering strength triples
+    # while the separate repel control keeps charge at -42.
     assert report['gravitationalConstant']['chargeStrength'] == pytest.approx(-42)
-    assert report['gravitationalConstant']['xStrength'] == pytest.approx(0.52)
-    assert report['gravitationalConstant']['yStrength'] == pytest.approx(0.52)
-    # A saturated local multiplier doubles the unit-strength chain link, and a saturated
-    # black-hole multiplier independently doubles compact's 0.26 origin-centering strength.
-    assert report['localGravitationalConstant']['linkStrength'] == pytest.approx(2)
-    assert report['blackHoleMass']['xStrength'] == pytest.approx(0.52)
-    assert report['blackHoleMass']['yStrength'] == pytest.approx(0.52)
+    # Engine value 150 saturates at the 4.0 ceiling (0.26 * 4).
+    assert report['gravitationalConstant']['xStrength'] == pytest.approx(0.26 * 4)
+    assert report['gravitationalConstant']['yStrength'] == pytest.approx(0.26 * 4)
+    # The local multiplier likewise saturates at 4 (unit link strength * 4).
+    assert report['localGravitationalConstant']['linkStrength'] == pytest.approx(4)
+    assert report['blackHoleMass']['xStrength'] == pytest.approx(0.26 * 4.4)
+    assert report['blackHoleMass']['yStrength'] == pytest.approx(0.26 * 4.4)
     # damping is a *multiplier* on the size-aware baseline (0.38 small / 0.45 large). At the
     # upper end of the slider (15) the d3 velocityDecay reaches the 0.85 ceiling. At the lower
     # end (0) it reaches the 0.05 floor. The D3 stubs expose the normal strength() getter, so
