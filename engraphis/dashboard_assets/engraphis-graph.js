@@ -628,19 +628,6 @@
     if (!Number.isFinite(n)) return min;
     return Math.max(min, Math.min(max, n));
   }
-  /* Mirror of graphBlackHoleMassMultiplier in ledger.js — kept inline so the d3-force
-     d3-install path in this file does not need to cross reference the ledger module. The
-     formula is identical: baseline 160 below which the multiplier is value/160, above which
-     it climbs linearly at 0.02/unit (so 500 -> 8.80, 1000 -> 21.80). */
-  const GRAPH_BLACK_HOLE_MASS_BASELINE = 160;
-  function blackHoleMassMultiplier(controlValue) {
-    const value = Number(controlValue);
-    if (!Number.isFinite(value)) return 1;
-    return value <= GRAPH_BLACK_HOLE_MASS_BASELINE
-      ? Math.max(0, value / GRAPH_BLACK_HOLE_MASS_BASELINE)
-      : 1 + (value - GRAPH_BLACK_HOLE_MASS_BASELINE) * 0.02;
-  }
-
   /* Physics is allowed to respond live, but one bad force update must never turn a
      settled graph into a high-speed slingshot. Keep the bounds in world units so they
      remain meaningful at every camera zoom. */
@@ -7988,14 +7975,12 @@
         charge = d3.forceManyBody();
         fg.d3Force('charge', charge);
       }
-      /* Spacetime-tuned multipliers: the user reaches these via the Galactic gravity, Black hole
-         mass, and Local solar gravity sliders. In non-galaxy mode the d3-force simulator is the
-         only consumer, so the multipliers must reach the d3 forces directly. Each map is a
-         bounded monotonic curve so the user can move the slider from end to end and see the
-         intended effect on every node on the next tick. */
-      const gravityMultiplier = clamp(Number(state.settings.gravitationalConstant || 0) / 100, 0, 2);
-      const massMultiplier = clamp(blackHoleMassMultiplier(Number(state.settings.blackHoleMass ?? 160)), 0.25, 4);
-      const localMultiplier = clamp(Number(state.settings.localGravitationalConstant || 0) / 100, 0, 2);
+      /* Spacetime-tuned values arrive here already normalized by the dashboard adapter around
+         one. Consume those engine values directly; dividing them again interprets a multiplier
+         as a raw slider setting and makes every non-Galaxy force nearly inert. */
+      const gravityMultiplier = clamp(Number(state.settings.gravitationalConstant ?? 1), 0, 8);
+      const massMultiplier = clamp(Number(state.settings.blackHoleMass ?? 1), 0.25, 4);
+      const localMultiplier = clamp(Number(state.settings.localGravitationalConstant ?? 1), 0, 8);
       const baseRepel = mode === 'communities' ? Math.max(10, s.repel * 0.68) : s.repel;
       if (charge && charge.strength) charge.strength(-baseRepel * gravityMultiplier);
       if (link && link.distance) link.distance(s.link);
