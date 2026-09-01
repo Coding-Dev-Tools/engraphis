@@ -10844,6 +10844,72 @@ def test_spacetime_sliders_reach_d3_forces_in_non_galaxy_mode() -> None:
     # by the offline-gate contract below.
 
 
+
+@requires_node
+def test_black_hole_mass_reaches_centering_forces_in_every_non_galaxy_layout() -> None:
+    """Black-hole mass must modulate the D3 centering strength in every non-Galaxy layout.
+
+    The normalized engine value arrives in ``applyForces()`` as ``massMultiplier``
+    (clamped to the adapter's full 0.125..4.4 interval). Communities and radial consumed it,
+    but compact/original (the default overview branch) and constellation ignored it, so
+    dragging the Black hole mass slider changed nothing visible in those modes (PR #185,
+    thread 3902779917). This pins the multiplier on the x/y centering forces with the d3
+    stubs the neighboring tests lack.
+    """
+    report = _run_engine(
+        """
+        const bodyForce = () => ({ strength(value) { this.value = value; return this; } });
+        globalThis.d3 = {
+          forceManyBody: bodyForce,
+          forceLink: () => ({
+            id(value) { this.idValue = value; return this; },
+            distance(value) { this.value = value; return this; },
+            strength(fn) { this.strengthValue = fn; return this; },
+          }),
+          forceX: target => ({ target, strength(value) { this.value = value; return this; } }),
+          forceY: target => ({ target, strength(value) { this.value = value; return this; } }),
+          forceCollide: () => ({ iterations(value) { this.value = value; return this; } }),
+          forceRadial: radius => ({ radius, strength(value) { this.value = value; return this; } }),
+        };
+        const api = G.create(el, {});
+        const axes = () => {
+          const f = store.d3Forces || {};
+          return [f.x && f.x.value, f.y && f.y.value];
+        };
+        const sampled = {};
+        for (const mode of ['compact', 'constellation']) {
+          api.setPreset(mode);
+          api.setData(chain(6));
+          api.setSettings({ gravity: 98, blackHoleMass: 1 });
+          sampled[mode] = {
+            weak: axes(),
+            blackHoleMassWeak: api.state().settings.blackHoleMass,
+          };
+          api.setSettings({ blackHoleMass: 400 });
+          sampled[mode].strong = axes();
+          sampled[mode].blackHoleMassStrong = api.state().settings.blackHoleMass;
+        }
+        emit(sampled);
+        """
+    )
+    for mode in ('compact', 'constellation'):
+        entry = report[mode]
+        assert entry['blackHoleMassWeak'] == pytest.approx(1.0)
+        assert entry['blackHoleMassStrong'] == pytest.approx(16.0)
+        weak_x, weak_y = entry['weak']
+        strong_x, strong_y = entry['strong']
+        assert weak_x is not None and weak_y is not None, f"{mode}: x/y forces missing"
+        base = 0.98 if mode == 'compact' else 0.18
+        # The centering strength must carry the mass multiplier: mass 1 -> 1.0x,
+        # mass 400 normalizes to engine setting 16; applyForces clamps the
+        # multiplier at the adapter's 4.4 ceiling, so the response saturates there.
+        assert weak_x == pytest.approx(base)
+        assert weak_y == pytest.approx(base)
+        assert strong_x == pytest.approx(base * 4.4)
+        assert strong_y == pytest.approx(base * 4.4)
+
+
+
 @requires_node
 def test_full_graph_within_the_force_budget_keeps_centre_gravity_live() -> None:
     """Full mode must not turn a normal large workspace into a pinned, inert ring.
