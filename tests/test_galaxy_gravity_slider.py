@@ -20,7 +20,6 @@ offline CI gate.
 from __future__ import annotations
 
 import json
-import math
 import shutil
 import subprocess
 from pathlib import Path
@@ -238,7 +237,6 @@ def test_galaxy_gravity_slider_is_path_independent_across_sweeps() -> None:
     reverse sweep test would be asserting an orbital-mechanics invariant rather
     than the slider contract.
     """
-    ledger_source = LEDGER_ASSET.read_text(encoding="utf-8")
     report = _run(
         """
         const scene = """ + json.dumps(SCENE) + r"""
@@ -249,7 +247,7 @@ def test_galaxy_gravity_slider_is_path_independent_across_sweeps() -> None:
         // returning a real <input id="graph-gravity">-shaped element. This
         // means the test exercises the *actual* shipped function, not a
         // re-implementation, so it pins any regression in the mapping.
-        const ledgerSource = process.env.LEDGER_SOURCE;
+        const ledgerSource = fs.readFileSync(process.env.LEDGER_SOURCE_PATH, 'utf8');
         const fnStart = ledgerSource.indexOf('function graphSliderResponseValue(');
         let depth = 0;
         let i = fnStart;
@@ -358,7 +356,7 @@ def test_galaxy_gravity_slider_is_path_independent_across_sweeps() -> None:
         }
         emit({ coarseEffective, finePath });
         """,
-        env_extra={"LEDGER_SOURCE": ledger_source},
+        env_extra={"LEDGER_SOURCE_PATH": str(LEDGER_ASSET)},
     )
     coarse_effective = report["coarseEffective"]
     fine_path = report["finePath"]
