@@ -5905,15 +5905,11 @@ def test_dominant_star_has_smooth_mass_balanced_repulsion_before_its_hard_surfac
         # 48 constant internally for its own calibration, but it is no longer
         # reported as a "floor" in telemetry.
         assert "stellarGravityFloorSetting" not in stats
-        assert stats["stellarGravity"] == 0
+        assert "stellarGravity" not in stats
         assert stats["eligibleStellarAnchors"] == 1
         assert stats["fallbackAnchors"] == 0
         assert stats["globalAnchors"] == 0
-        # The fixed-local diagnostic field remains (the Every-node worker and the
-        # dominant-star repulsion both consume it); only the *slider* floor was removed.
-        # At setting 0 the effective local setting (0) is below the fixed 48 reference,
-        # so the diagnostic correctly reports the local support as floor-backed.
-        assert stats["stellarFloorActive"] is True
+        assert "stellarFloorActive" not in stats
         assert stats["surfaceRepulsions"] == 1
         # With setting=0 the central field is now a real zero, so no attraction is sampled.
         # The hard surface repulsion still produces a positive maximumRepulsion.
