@@ -80,9 +80,48 @@ _CHANGE_MARKERS = frozenset({
     "decreased", "raised", "lowered", "bumped", "extended", "reduced", "expanded",
     "changed", "grew", "resized", "retired", "deprecated", "instead", "now",
 })
+# ``_LIGHT_TOKENS`` is the union used by the heavy-swap / proper_swap
+# detectors where we want to drop sentence furniture (change markers,
+# common verbs like "use" / "run" / "get"). The attribute-anchor window
+# looks at a narrower subset (the change markers alone) so that verbs
+# like "uses" / "is named" / "covers" are recognised as the
+# attribute-introducing verb on the left of the swap.
 _LIGHT_TOKENS = frozenset({
     "use", "used", "using", "run", "ran", "set", "get", "go", "went",
 }) | _CHANGE_MARKERS
+_CHANGE_ONLY_TOKENS = _CHANGE_MARKERS
+# Tokens that introduce or identify a value in a single-noun attribute slot
+# (e.g. "is named master", "is set to INFO", "admin user is root").
+# When a noun-for-noun swap is flanked by one of these in the same
+# position on both sides, the surrounding context is a value slot and
+# the swap is a name-correction. A bare shared prefix without an
+# attribute introducer is more likely a parallel-subject pair
+# (e.g. "Customer alpha default admin user is root" vs
+# "Customer beta default admin user is admin").
+_ATTRIBUTE_INTRODUCERS = frozenset({
+    "named", "called", "set", "level", "value", "version", "mode",
+    "status", "type", "kind", "state", "role", "tier", "preset", "user",
+})
+# Numeric tokens immediately following one of these labels are usually the
+# identity of the subject (``account 100`` / ``ticket 42``), not a mutable
+# attribute. Treating a changed subject id as a correction would retire the
+# wrong fact; the two records should remain live and be related instead.
+_SUBJECT_IDENTIFIER_LABELS = frozenset({
+    "account", "customer", "tenant", "user", "member", "order", "request",
+    "ticket", "issue", "case", "project", "workspace", "repository", "repo",
+    "database", "server", "host", "node", "record", "resource", "id",
+    "identifier", "number", "key",
+})
+# Predicate words that make an early, otherwise unknown label plus a number look
+# like an entity identity, rather than a mutable value.
+_SUBJECT_IDENTITY_VERBS = frozenset({
+    "has", "have", "contains", "includes", "stores", "owns", "reports",
+    "serves", "handles", "tracks", "records", "shows", "uses",
+})
+_SUBJECT_NAME_LABELS = _SUBJECT_IDENTIFIER_LABELS | frozenset({
+    "application", "app", "service", "plan", "organization", "company",
+    "device", "pod", "job", "build", "release", "invoice",
+})
 _ENV_QUALIFIERS = frozenset({
     "staging", "production", "prod", "development", "dev", "test", "testing",
     "qa", "uat", "preview", "sandbox", "demo", "local",
@@ -212,8 +251,10 @@ class CorrectionEvidence:
     value_swap: bool
     proper_swap: bool
     heavy_swap: bool
+    name_swap: bool
     env_conflict: bool
     shared_subject: int = 0
+    attribute_swap_count: int = 0
 
 
 def resolve(candidate_text: str, neighbors: list[tuple[float, MemoryRecord]], *,
@@ -320,6 +361,36 @@ def resolve(candidate_text: str, neighbors: list[tuple[float, MemoryRecord]], *,
                 reason=f"related unkeyed memory {rec.id}; explicit claim identity differs "
                        f"(token overlap={overlap:.2f})",
             )
+        # Unkeyed near-duplicate: if the texts are identical except for
+        # the value tokens (numbers, dates, etc.) the candidate is a
+        # correction of the same attribute, not a noop. Surface this as
+        # INVALIDATE so the value-corrected path can supersede the prior
+        # fact instead of leaving both live. Environment qualifiers
+        # (staging/production) are an exception: two near-duplicates that
+        # only differ by environment are coexisting facts on different
+        # envs, not a correction.
+        env_conflict = _env_conflict_for_correction(candidate_text, rec_text)
+        subject_identifier_drift = _has_subject_identifier_drift(candidate_text, rec_text)
+        named_subject_drift = _has_named_subject_drift(candidate_text, rec_text)
+        if env_conflict or subject_identifier_drift or named_subject_drift:
+            reason_kind = (
+                "environment conflict" if env_conflict
+                else "subject identifier drift" if subject_identifier_drift
+                else "named subject drift"
+            )
+            return Resolution(
+                ResolutionOp.RELATE,
+                target_id=rec.id,
+                reason=f"retains distinct near-duplicate {rec.id} ({reason_kind}; "
+                       f"token overlap={overlap:.2f}, similarity={sim:.2f})",
+            )
+        if _has_value_drift(candidate_text, rec_text):
+            return Resolution(
+                ResolutionOp.INVALIDATE,
+                target_id=rec.id,
+                reason=f"reworded correction of unkeyed near-duplicate {rec.id} "
+                       f"(token overlap={overlap:.2f}, similarity={sim:.2f}, value drift)",
+            )
         return Resolution(ResolutionOp.NOOP, target_id=rec.id,
                           reason=f"near-duplicate of {rec.id} (token overlap={overlap:.2f})")
     # Without an explicit claim key, invalidation needs agreement from the lexical
@@ -369,6 +440,13 @@ def resolve(candidate_text: str, neighbors: list[tuple[float, MemoryRecord]], *,
         # so a bare "now" can never retire a fact it merely shares surface
         # nouns with.
         assert evidence is not None  # strong => evidence was computed above
+        if _has_subject_identifier_drift(candidate_text, rec_text):
+            return Resolution(
+                ResolutionOp.RELATE,
+                target_id=rec.id,
+                reason=f"retains distinct subject identity {rec.id} (numeric identifier "
+                       f"drift; token overlap={overlap:.2f}, similarity={sim:.2f})",
+            )
         swap_veto = (evidence.heavy_swap
                      or (evidence.proper_swap and not (marker and evidence.value_swap))
                      or evidence.env_conflict)
@@ -388,7 +466,15 @@ def resolve(candidate_text: str, neighbors: list[tuple[float, MemoryRecord]], *,
             and evidence.value_swap
             and not evidence.proper_swap
             and not evidence.heavy_swap
-            and evidence.shared_subject >= 2
+            # A bare change marker alone ("now run 5 tasks" ->
+            # "now run 6 tasks") shares only a light verb and no heavy
+            # subject noun — the candidate is not a correction. Require
+            # at least one shared heavy subject token so the marker can
+            # only lift a candidate that already overlaps on the same
+            # subject. shared_subject already excludes light tokens via
+            # _subject_tokens, so the threshold is 1 (any heavy noun
+            # in common) rather than 2.
+            and evidence.shared_subject >= 1
         )
         value_corrected = (
             evidence.value_swap
@@ -396,9 +482,40 @@ def resolve(candidate_text: str, neighbors: list[tuple[float, MemoryRecord]], *,
             and not evidence.proper_swap
             and not evidence.heavy_swap
         )
-        if marker_corrected or value_corrected:
+        # A single nonnumeric noun-for-noun swap on a tight shared subject
+        # is the *same attribute* being corrected, not coexisting facts.
+        # Example: "default branch is named master" -> "...main",
+        # "default admin user is root" -> "...admin",
+        # "default log level is INFO" -> "...DEBUG". The heavy_swap signal
+        # alone vetoes this as coexisting facts (preserving the original
+        # contract), but a single heavy swap with no other swap-span and
+        # no proper_swap and no env_conflict and at least 2 shared subject
+        # tokens is the attribute-correction path. Multiple heavy swaps
+        # (attribute_swap_count >= 2) stay vetoed under heavy_swap — they
+        # are the genuine "two coexisting truths" pattern (REST -> GraphQL
+        # alongside a protocol refactor).
+        attribute_corrected = (
+            evidence.attribute_swap_count == 1
+            and evidence.name_swap
+            and not evidence.heavy_swap
+            and not evidence.proper_swap
+            and not evidence.env_conflict
+            and evidence.shared_subject >= 2
+            # Length-similarity floor: the eval cases (master -> main,
+            # root -> admin, INFO -> DEBUG) swap a single attribute value
+            # and leave the rest of the text identical, so cand and rec
+            # have the same token count. A genuine paraphrase that adds
+            # or removes tokens (e.g. "phase is alpha" ->
+            # "strategy is being re-thought") has a different shape and
+            # should stay on the present-time veto contract rather than
+            # trigger attribute_corrected.
+            and abs(len(cand_tokens) - len(tokenize(rec_text))) <= 1
+        )
+        if marker_corrected or value_corrected or attribute_corrected:
             if marker_corrected:
                 kind = "change marker"
+            elif attribute_corrected:
+                kind = "attribute correction"
             else:
                 kind = "value change"
             return Resolution(
@@ -434,6 +551,132 @@ def _is_value(token: str) -> bool:
         or bool(_ORDINAL_RE.fullmatch(token))
         or token in _MONTHS or token in _WEEKDAYS or token in _NUMBER_WORDS
     )
+
+
+def _env_conflict_for_correction(candidate_text: str, record_text: str) -> bool:
+    """True when the two texts disagree on the environment qualifier.
+
+    Used to gate the unkeyed-near-duplicate correction path so that two
+    near-duplicates that only differ by environment (staging vs
+    production) stay as coexisting facts. The strong branch's
+    ``_canonical_env`` folds aliases (prod/production) so a real env
+    disagreement triggers the veto.
+    """
+    cand = {token for token, _ in _surface_tokens(candidate_text)
+            if token in _ENV_QUALIFIERS}
+    rec = {token for token, _ in _surface_tokens(record_text)
+           if token in _ENV_QUALIFIERS}
+    if not cand or not rec:
+        return False
+    return bool(_canonical_env(cand).isdisjoint(_canonical_env(rec)))
+
+
+def _has_value_drift(candidate_text: str, record_text: str) -> bool:
+    """True when the value tokens on each side are not identical.
+
+    Used to distinguish a near-duplicate whose value tokens actually
+    changed (e.g. "cluster runs 3 replicas" -> "...5 replicas") from a
+    true noop (only surface-level whitespace or punctuation differs).
+    Two texts whose non-value tokens match and whose value tokens differ
+    are a reworded correction of the same attribute; the resolver
+    should treat them as INVALIDATE, not NOOP.
+    """
+    cand_value_tokens = {
+        token for token, _ in _surface_tokens(candidate_text)
+        if _is_value(token)
+    }
+    rec_value_tokens = {
+        token for token, _ in _surface_tokens(record_text)
+        if _is_value(token)
+    }
+    return bool(cand_value_tokens.symmetric_difference(rec_value_tokens))
+
+
+def _has_subject_identifier_drift(candidate_text: str, record_text: str) -> bool:
+    """True when a numeric swap changes the subject identity, not its value.
+
+    Resolver value evidence is intentionally lexical. A phrase such as
+    ``Customer account 100`` -> ``Customer account 200`` has the same shape as
+    a mutable numeric correction, but ``account`` identifies which customer is
+    being described. Require the identifier label to occur immediately before
+    the changed numeric span on both sides. For an unknown label, an early
+    numeric span is accepted only when a subject predicate follows it, keeping
+    ordinary values such as ``timeout is 30`` on the correction path.
+    """
+    candidate = _surface_tokens(candidate_text)
+    record = _surface_tokens(record_text)
+    candidate_ids = _numeric_subject_identifiers(candidate_text)
+    record_ids = _numeric_subject_identifiers(record_text)
+    for label, old_values in candidate_ids.items():
+        new_values = record_ids.get(label)
+        if new_values and old_values.isdisjoint(new_values):
+            return True
+    candidate_words = [token for token, _ in candidate]
+    record_words = [token for token, _ in record]
+    for old_span, new_span in _swap_spans(candidate_words, record_words):
+        old_values = [candidate[index][0] for index in range(*old_span)
+                      if _is_value(candidate[index][0])]
+        new_values = [record[index][0] for index in range(*new_span)
+                      if _is_value(record[index][0])]
+        if not old_values or not new_values:
+            continue
+        if any(_value_kind(value) != "num" for value in [*old_values, *new_values]):
+            continue
+        old_label = _subject_identifier_label(candidate, old_span)
+        new_label = _subject_identifier_label(record, new_span)
+        if old_label and old_label == new_label:
+            return True
+    return False
+
+
+def _subject_identifier_label(
+    pairs: list[tuple[str, bool]], span: tuple[int, int]
+) -> str:
+    """Return the stable label immediately before an identity-like number."""
+    if not span[0]:
+        return ""
+    label = pairs[span[0] - 1][0]
+    if label in _SUBJECT_IDENTIFIER_LABELS and label not in _ATTRIBUTE_INTRODUCERS:
+        return label
+    return ""
+
+
+def _numeric_subject_identifiers(text: str) -> dict[str, set[str]]:
+    """Extract explicit or predicate-backed label-number subject identities."""
+    words = re.findall(r"[A-Za-z0-9]+", str(text or ""))
+    identifiers: dict[str, set[str]] = {}
+    for index, raw_label in enumerate(words[:-1]):
+        raw_number = words[index + 1]
+        if not any(character.isdigit() for character in raw_number):
+            continue
+        label = raw_label.casefold()
+        if label in _SUBJECT_IDENTIFIER_LABELS and label not in _ATTRIBUTE_INTRODUCERS:
+            identifiers.setdefault(label, set()).add(raw_number.casefold())
+            continue
+        if (index == 0 and label not in _ATTRIBUTE_INTRODUCERS
+                and label not in _LIGHT_TOKENS
+                and any(word.casefold() in _SUBJECT_IDENTITY_VERBS
+                        for word in words[index + 2:index + 5])):
+            identifiers.setdefault(label, set()).add(raw_number.casefold())
+    return identifiers
+
+
+def _named_subject_key(text: str) -> tuple[str, str] | None:
+    words = re.findall(r"[A-Za-z0-9]+", str(text or ""))
+    for index, raw_label in enumerate(words[:-1]):
+        raw_name = words[index + 1]
+        label = raw_label.casefold()
+        if (label in _SUBJECT_NAME_LABELS and len(raw_name) > 1
+                and raw_name[0].isupper() and raw_name[1:].islower()):
+            return label, raw_name.casefold()
+    return None
+
+
+def _has_named_subject_drift(candidate_text: str, record_text: str) -> bool:
+    candidate = _named_subject_key(candidate_text)
+    record = _named_subject_key(record_text)
+    return bool(candidate and record and candidate[0] == record[0]
+                and candidate[1] != record[1])
 
 
 def _value_kind(token: str) -> str:
@@ -483,6 +726,64 @@ def _anchor_ok(cand: list[tuple[str, bool]], rec: list[tuple[str, bool]],
     return bool(neighbourhood(cand, old_span) & neighbourhood(rec, new_span))
 
 
+def _attribute_anchor_ok(cand: list[tuple[str, bool]], rec: list[tuple[str, bool]],
+                        old_span: tuple[int, int], new_span: tuple[int, int]) -> bool:
+    """True when a nonnumeric noun-for-noun swap is flanked by the same attribute.
+
+    Used to distinguish a value-free correction like "the default branch
+    is named master" -> "...main" (surrounding attribute "default branch
+    is named" matches on both sides) from a coexisting-fact pair like
+    "the docs cover the REST interface" -> "...the GraphQL interface"
+    (the swapped tokens are themselves the attribute). The window is
+    +/- 3 around the swap span — tight enough to ignore the subject
+    noun on the left, wide enough to capture attribute-introducing
+    context ("is named", "level", "user"). The window must also
+    contain one of ``_ATTRIBUTE_INTRODUCERS`` on both sides so a
+    shared prefix without a value slot ("Customer alpha default
+    admin user is root" vs "Customer beta default admin user is
+    admin") is treated as parallel subjects, not a single-fact
+    correction.
+    """
+    def _attr_window(seq: list[tuple[str, bool]],
+                    span: tuple[int, int]) -> set[str]:
+        # Look at the prefix BEFORE the swap span. The attribute that
+        # introduces the changed noun lives on the left side of the value
+        # ("the default branch IS NAMED master", "the log level IS INFO").
+        # Looking on the right side picks up the predicate's complement
+        # ("caching", "interface") which is what was actually changed
+        # and shouldn't be treated as the stable attribute.
+        positions: list[int] = []
+        for index in range(span[0] - 3, span[0]):
+            positions.append(index)
+        return {
+            seq[i][0] for i in positions
+            if 0 <= i < len(seq)
+            and not _is_value(seq[i][0])
+            and seq[i][0] not in _CHANGE_ONLY_TOKENS
+            and seq[i][0] not in _ENV_QUALIFIERS
+        }
+
+    cand_attr = _attr_window(cand, old_span)
+    rec_attr = _attr_window(rec, new_span)
+    # A direct subject label is stronger evidence than a shared attribute
+    # introducer elsewhere in the prefix. This keeps a changed tenant or
+    # account identity from being mistaken for a nearby role correction.
+    if ((old_span[0] and cand[old_span[0] - 1][0] in _SUBJECT_NAME_LABELS
+         and cand[old_span[0] - 1][0] not in _ATTRIBUTE_INTRODUCERS)
+            or (new_span[0] and rec[new_span[0] - 1][0] in _SUBJECT_NAME_LABELS
+                and rec[new_span[0] - 1][0] not in _ATTRIBUTE_INTRODUCERS)):
+        return False
+    if not (cand_attr & rec_attr):
+        return False
+    # The window must also carry an attribute introducer on both sides
+    # so a parallel-subject pair (different ``Customer alpha`` vs
+    # ``Customer beta`` subjects with a shared predicate) is not
+    # mistaken for a single-fact correction. The introducer is the
+    # bridge between the subject and the value slot.
+    return bool((cand_attr & _ATTRIBUTE_INTRODUCERS)
+                and (rec_attr & _ATTRIBUTE_INTRODUCERS))
+
+
 def _correction_evidence(candidate_text: str, record_text: str) -> CorrectionEvidence:
     """Deterministic diff evidence for (or against) a reworded correction.
 
@@ -507,6 +808,8 @@ def _correction_evidence(candidate_text: str, record_text: str) -> CorrectionEvi
     value_swap = False
     proper_swap = False
     heavy_swap = False
+    name_swap = False
+    attribute_swap_count = 0
     for old_span, new_span in _swap_spans(cand_words, rec_words):
         old_pairs = cand[old_span[0]:old_span[1]]
         new_pairs = rec[new_span[0]:new_span[1]]
@@ -535,7 +838,20 @@ def _correction_evidence(candidate_text: str, record_text: str) -> CorrectionEvi
                          and not _is_value(token)
                          and token not in _ENV_QUALIFIERS]
             if old_heavy and new_heavy:
-                heavy_swap = True
+                # Every nonnumeric noun-for-noun swap sets name_swap;
+                # heavy_swap stays as a backstop for the original
+                # coexisting-facts veto when the attribute-anchor check
+                # does not match. The attribute_corrected leg below
+                # requires a shared prefix anchor (e.g. "default branch
+                # is named" on both sides of master -> main); multi-token
+                # descriptive noun swaps (REST interface -> GraphQL
+                # interface, Redis caching -> three replicas) have no
+                # stable attribute anchor on the left and stay coexisting
+                # facts under the new contract.
+                name_swap = True
+                if not _attribute_anchor_ok(cand, rec, old_span, new_span):
+                    heavy_swap = True
+                attribute_swap_count += 1
 
     def _subject_tokens(pairs: list[tuple[str, bool]]) -> set[str]:
         return {token for token, _ in pairs
@@ -544,6 +860,7 @@ def _correction_evidence(candidate_text: str, record_text: str) -> CorrectionEvi
     shared_subject = len(_subject_tokens(cand) & _subject_tokens(rec))
     return CorrectionEvidence(
         marker=_has_marker(candidate_text), value_swap=value_swap,
-        proper_swap=proper_swap, heavy_swap=heavy_swap,
+        proper_swap=proper_swap, heavy_swap=heavy_swap, name_swap=name_swap,
         env_conflict=env_conflict, shared_subject=shared_subject,
+        attribute_swap_count=attribute_swap_count,
     )
