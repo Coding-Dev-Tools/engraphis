@@ -168,6 +168,73 @@ waitForQuiet(0, () => {
     assert report["reheated_streams"] is True
 
 
+def test_worker_settling_resistance_keeps_high_end_distinct() -> None:
+    script = """
+const nodes = [
+  { id: 'a', community_id: 'c' },
+  { id: 'b', community_id: 'c' },
+  { id: 'c', community_id: 'c' },
+];
+send({ type: 'prepare', payload: { nodes, links: [{ source: 'a', target: 'b' }] } });
+const waitForLayouts = (count, callback) => {
+  const tick = () => {
+    if (all('layout').length >= count) return callback();
+    setTimeout(tick, 10);
+  };
+  tick();
+};
+waitForLayouts(1, () => {
+  const samples = {};
+  const next = (resistance, callback) => {
+    const before = all('layout').length;
+    send({ type: 'settings', settings: { damping: resistance }, relayout: true, fit: false });
+    // settings emits the reseeded preview immediately; wait for the first relaxed layout.
+    waitForLayouts(before + 2, () => {
+      samples[resistance] = latest('layout').positions;
+      callback();
+    });
+  };
+  next(13, () => next(14, () => next(15, () => console.log(JSON.stringify({ samples })))));
+});
+"""
+    report = _run_worker(script)
+    samples = report["samples"]
+    assert samples["13"] != samples["14"]
+    assert samples["14"] != samples["15"]
+
+
+def test_worker_honors_zero_link_spring_stiffness() -> None:
+    """A zero Link spring value must remove pair attraction, not leave a residual floor."""
+    script = """
+const nodes = [
+  { id: 'a', community_id: 'c' },
+  { id: 'b', community_id: 'c' },
+];
+send({ type: 'prepare', payload: { nodes, links: [{ source: 'a', target: 'b' }] } });
+const waitForFit = (start, callback) => {
+  const tick = () => {
+    const fit = messages.slice(start).find(item => item.type === 'layout' && item.fit === true);
+    if (fit) return callback(fit.positions);
+    setTimeout(tick, 10);
+  };
+  tick();
+};
+setTimeout(() => {
+  const seeded = latest('preview').positions.slice();
+  const start = messages.length;
+  send({ type: 'settings', settings: {
+    repel: 0, gravity: 0, springStiffness: 0, damping: 1,
+  }, relayout: true, fit: true });
+  waitForFit(start, positions => {
+    const delta = Math.max(...positions.map((value, index) => Math.abs(value - seeded[index])));
+    console.log(JSON.stringify({ delta }));
+  });
+}, 50);
+"""
+    report = _run_worker(script)
+    assert report["delta"] == 0
+
+
 def test_renderer_is_webgl2_only_without_live_simulation_or_canvas_fallback() -> None:
     renderer = RENDERER.read_text(encoding="utf-8")
     assert "getContext('webgl2'" in renderer
@@ -304,6 +371,22 @@ def test_renderer_exposes_capacity_and_every_preset() -> None:
     assert "every: {" in renderer  # dedicated preset tuning
     assert "preset: 'Every node · LOD'" in renderer
     assert "MAP_SCALE" in worker   # the map-spread constant
+
+
+def test_ledger_keeps_orbit_pause_for_full_quality_galaxy_scenes() -> None:
+    """Full authored Galaxy scenes use the orbital engine and retain their pause control."""
+    ledger = LEDGER.read_text(encoding="utf-8")
+    assert "graphGalaxyQuality: false" in ledger
+    assert "state.graphGalaxyQuality = galaxyQuality;" in ledger
+    assert ledger.count(
+        "const orbitCapable = galaxy && (!full || state.graphGalaxyQuality);"
+    ) == 2
+    assert "if (orbitPauseRow) orbitPauseRow.hidden = !orbitCapable;" in ledger
+    assert "const springCapable = galaxy || (full && !state.graphGalaxyQuality);" in ledger
+    assert "springLabel.parentElement.hidden = !springCapable;" in ledger
+    assert "const galaxyRenderer = galaxy && (!full || state.graphGalaxyQuality);" in ledger
+    assert "const everyRenderer = full && !state.graphGalaxyQuality;" in ledger
+    assert "'Responsive force controls'" in ledger
 
 
 def test_worker_untagged_nodes_share_one_district_not_n_singletons() -> None:
