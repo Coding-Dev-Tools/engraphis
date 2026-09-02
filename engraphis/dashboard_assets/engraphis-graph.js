@@ -9596,10 +9596,20 @@
       fg.linkDirectionalArrowLength(dense ? 0 : 0.625).linkDirectionalArrowRelPos(1);
       applyLinkLabels();
       if (fg.linkDirectionalParticles) {
+        const rawFlowSpeed = Number(state.settings.flowSpeed);
+        /* flowSpeed=0 means "stop" — particles must not render at all. The every-node engine
+           already enforces this via a `moving = speed > 0` check; the compat engine must do
+           the same. Otherwise the slider visibly does nothing at the low end (particles keep
+           crawling at the residual 0.002 floor). When a standalone caller omits flowSpeed
+           (Number(undefined) → NaN), fall back to the historical default of 45 so the
+           speed formula below stays finite and the active check stays meaningful. */
+        const flowSpeed = Number.isFinite(rawFlowSpeed) ? rawFlowSpeed : 45;
+        const flowActive = flowSpeed > 0;
         const flowing = !fullGraph
           && state.settings.flow !== false
           && motion
           && !reducedMotion
+          && flowActive
           && data.links.length <= PARTICLE_LINK_LIMIT;
         const particles = !flowing
           ? 0
@@ -9608,7 +9618,10 @@
           .linkDirectionalParticleWidth(1)
           .linkDirectionalParticleCanvasObject(paintFlowArrow)
           .linkDirectionalParticleColor(l => alpha(layerColor(l.layer), 0.95))
-          .linkDirectionalParticleSpeed(l => 0.002 + ((state.settings.flowSpeed || 45) / 100) * 0.008);
+          /* Widened from `0.002 + (flowSpeed/100)*0.008` (a 5x range, 0.002..0.01) to
+             `0.0005 + (flowSpeed/100)*0.025` (a ~34x range, 0.00075..0.0255) so the slider
+             is visibly responsive end-to-end. */
+          .linkDirectionalParticleSpeed(l => flowActive ? (0.0005 + (flowSpeed / 100) * 0.025) : 0);
       }
       if (!galaxyMode && reheat && motion && !staticFullLayout && !state.settings.frozen) {
         prepareReheat();
