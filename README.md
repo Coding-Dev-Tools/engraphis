@@ -396,6 +396,51 @@ including `engraphis_check_update`, is in the [MCP tool reference](https://githu
 For installation, configuration, lifecycle commands, and the local trust boundary, see the
 [Pi extension guide](https://github.com/Coding-Dev-Tools/engraphis/blob/main/integrations/pi/README.md).
 
+### Command Code SessionStart hook
+
+`integrations/commandcode/` ships a SessionStart hook that warms up a new
+session with bounded, recalled context from the local Engraphis gateway. Fails
+open on timeout and is installed via `python scripts/install_cc_hook.py`.
+
+### prime-agent fleet
+
+`integrations/prime_agent/` ships a first-party Python package for
+[PrimeIntellect prime-agent](https://github.com/PrimeIntellect-ai/prime-agent)
+that exposes the same nine Smart MCP tools, with a `PrimeAgentFleet` of eight
+named sub-agents (`researcher`, `planner`, `coder`, `reviewer`, `tester`,
+`documenter`, `monitor`, `integrator`) sharing one `engraphis-mcp` stdio
+subprocess. Install via `pip install ./integrations/prime_agent` and register
+with `python scripts/install_prime_agent.py`. See the
+[prime-agent integration guide](https://github.com/Coding-Dev-Tools/engraphis/blob/main/integrations/prime_agent/README.md).
+
+**What the integration is.** A `PrimeAgentFleet` is a thin Python layer
+around the same `engraphis-mcp` Smart gateway every other host uses. At
+runtime the fleet holds one shared `EngraphisMcpClient`, which owns one
+`engraphis-mcp` subprocess over JSON-RPC stdio. Each of the eight named
+sub-agents gets its own Engraphis session (started lazily on first tool use)
+and its own default `repo` scope, so per-role memory is isolated while the
+local gateway stays single-process. The eight sub-agent names
+(`researcher`, `planner`, `coder`, `reviewer`, `tester`, `documenter`,
+`monitor`, `integrator`) are the fixed default; pass `agent_names=[...]` to
+`PrimeAgentFleet(...)` for a custom set. Concurrent tool calls serialize at
+the JSON-RPC frame layer through an `asyncio.Lock`, so framework-level
+parallelism (eight sub-agents reasoning at once) is preserved while the
+underlying MCP transport remains one ordered stream. The only integration
+surface is `EngraphisPrimeAgent.register()` in
+`integrations/prime_agent/src/engraphis_prime_agent/agent.py` -- that is the
+single adapter point to override if prime-agent's tool-registration API
+differs from the assumed `target.register_tool(name, fn, schema=...)`
+contract.
+
+The design -- eight named sub-agents, one shared stdio subprocess,
+per-agent session bootstrap, and `ENGRAPHIS_*`-only environment forwarding
+to the gateway -- is recorded in `~/.commandcode/plans/prime-agent-integration.md`
+on the host where the integration was developed. When that host plan is not
+available (other contributor machines, CI), the same design is summarized in
+the PR description that introduced the integration and in the
+[prime-agent integration guide](https://github.com/Coding-Dev-Tools/engraphis/blob/main/integrations/prime_agent/README.md)
+("Architecture" and "Concurrency model" sections).
+
 ## Quickstart: repository graph
 
 ```bash
@@ -742,6 +787,10 @@ file. It never searches the working directory for `.env`, and explicit process v
 | `ENGRAPHIS_CLOUD_TOKEN_SUBJECT` | `member` | Subject fixed during hosted bootstrap (`device` or `member`); set explicitly with an environment-only refresh credential |
 | `ENGRAPHIS_CLOUD_ACCESS_TOKEN` | Not set | Optional short-lived access token for ephemeral jobs |
 | `ENGRAPHIS_MANAGED_COMPUTE_CONSENT` | *(auto)* | Operator override only; default follows whether a cloud session is configured (connected = allowed, local-only = never). `0` opts a connected installation out; `1` permits local snapshot preparation but does not create a cloud credential or authorize an upload |
+
+The optional cross-encoder reranker is model- and hardware-dependent. Treat its quality and
+latency as deployment-specific until a versioned model identity, exact configuration, and
+reproducible evaluation artifact are available for the comparison being reported.
 
 See `.env.example` for the full variable inventory. Supply those values through the process
 environment or the trusted config file above; copying it to an arbitrary `./.env` does not make

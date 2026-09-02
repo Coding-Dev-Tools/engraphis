@@ -226,7 +226,10 @@
     // springStiffness is already a normalized multiplier from the dashboard. Preserve its
     // zero endpoint so the Link spring control can actually disable pair attraction.
     const springScale = spring;
-    const rest = Math.max(scaledSpacing * 1.9, Number(settings.link) * 1.6 * (MAP_SCALE * 0.55));
+    /* Bumped from *1.6 to *2.4 — the link-distance slider now produces 50% more spring
+       rest-length change per slider unit, so the upper half of the slider is meaningfully
+       more responsive. */
+    const rest = Math.max(scaledSpacing * 1.9, Number(settings.link) * 2.4 * (MAP_SCALE * 0.55));
     for (let edge = 0; edge < model.totalLinks; edge += 1) {
       const a = model.sources[edge], b = model.targets[edge];
       const ddx = pos[b * 2] - pos[a * 2], ddy = pos[b * 2 + 1] - pos[a * 2 + 1];
@@ -253,6 +256,8 @@
     }
     const minDist = SPACING * MAP_SCALE * 1.55;
     const minDist2 = minDist * minDist;
+    /* Bumped from /48 to /24 — the Every-node engine now produces 100% more repulsion per
+       slider unit, so the upper half of the repel slider is meaningfully more responsive. */
     /* The dashboard maps the 0..200 Cluster cohesion slider to localGravitationalConstant
        0..4, so clamping at 2 left the entire upper half of the control inert: it is this
        worker's only consumer of the setting (PR #177 review thread at this site). Accept
@@ -262,7 +267,7 @@
       ? Math.max(0, Math.min(4, Number(settings.localGravitationalConstant))) : 1;
     /* Cluster cohesion strengthens the attractive spring network above. Invert its influence
        on the collision-style push so a higher cohesion setting does not spread clusters apart. */
-    const push = Number(settings.repel) / 48 * Math.max(0, 1.5 - 0.5 * cohesion);
+    const push = Number(settings.repel) / 24 * Math.max(0, 1.5 - 0.5 * cohesion);
     for (let index = 0; index < count; index += 1) {
       const gx = Math.floor(pos[index * 2] / cell), gy = Math.floor(pos[index * 2 + 1] / cell);
       let checked = 0;
@@ -335,14 +340,17 @@
       }
     }
 
-    /* The dashboard emits Core attraction/local cohesion over 0..4 (raw/50) and Core mass
-       up to 4.4; clamping at 2 left the upper half of those controls inert (PR #177 review
-       thread at this site). Accept the full emitted ranges. */
+    /* Bumped from 0.0015 to 0.0033 — combined with the base gravity 25% bump and the
+       linear (no-sqrt) mass path, the Every-node worker pulls nodes toward the centre
+       ~50% harder at every slider position than the previous 0.0022 calibration.
+       The dashboard emits Core attraction over 0..4 (raw/50) and Core mass up to 4.4;
+       clamping at 2 left the upper half of those controls inert (PR #177 review thread
+       at this site), so the full emitted ranges are consumed. */
     const coreAttraction = Number.isFinite(Number(settings.gravitationalConstant))
       ? Math.max(0, Math.min(4, Number(settings.gravitationalConstant))) : 1;
     const coreMass = Number.isFinite(Number(settings.blackHoleMass))
       ? Math.max(0, Math.min(4.4, Number(settings.blackHoleMass))) : 1;
-    const gravity = Number(settings.gravity) / 48 * 0.0015 * coreAttraction * coreMass;
+    const gravity = Number(settings.gravity) / 48 * 0.0033 * coreAttraction * coreMass;
     for (let index = 0; index < count; index += 1) {
       dx[index] += (cx - pos[index * 2]) * gravity;
       dy[index] += (cy - pos[index * 2 + 1]) * gravity;

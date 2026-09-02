@@ -137,6 +137,7 @@
      systems is owned by the independent local-stellar well and the rigid event-horizon
      contact layers, neither of which depends on this constant. */
   const GALAXY_GLOBAL_GRAVITY_FLOOR_SETTING = 24;
+  const GALAXY_STELLAR_GRAVITY_FLOOR_SETTING = 48;
   function galaxyBlackHoleGravitySetting(setting, explicitGlobal) {
     const raw = Number(setting);
     const value = Number.isFinite(raw) ? Math.max(0, Math.min(GALAXY_GRAVITY_MAXIMUM, raw)) : 0;
@@ -10807,6 +10808,8 @@
       galaxyBlackHoleGravityConstant, galaxyBlackHoleGravitySetting,
       galaxyCarrierTargetSpeed, galaxyAuthoredCarrierTargetSpeed,
       galaxyBlackHoleSpinAngle, advanceGalaxyBlackHoleSpin,
+      galaxyGlobalGravityFloorSetting: GALAXY_GLOBAL_GRAVITY_FLOOR_SETTING,
+      galaxyStellarGravityFloorSetting: GALAXY_STELLAR_GRAVITY_FLOOR_SETTING,
       galaxyLocalGravityConstant,
       galaxyLocalGravityMultiplier,
       galaxyStellarGravityConstant, galaxyFallbackStellarGravityConstant,
