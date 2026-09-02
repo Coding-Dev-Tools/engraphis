@@ -8,7 +8,7 @@
 (function () {
   'use strict';
 
-  const WORKER_URL = '/v2-assets/engraphis-graph-every-worker.js?v=20260823-every-19';
+  const WORKER_URL = '/v2-assets/engraphis-graph-every-worker.js?v=20260830-spacetime-controls-20';
   const MAX_NODES = 20000;
   const MAX_LINKS = 200000;
   const LABEL_MAX = 220;
@@ -151,7 +151,9 @@
       totalLinks: 0, edgeVertexCount: 0,
       camera: { x: 0, y: 0, scale: 1 }, baseScale: 1, width: 1, height: 1, dpr: 1,
       styleName: opts.style || 'cyber', colorBy: 'community', typeColors: {}, themeColors: {}, palette: 'theme',
-      settings: { labels: true, flow: false, flowSpeed: 45, frozen: false, mode: 'communities', repel: 48, link: 16, gravity: 48, font: 12, size: 3, linkw: 0.72 },
+      settings: { labels: true, flow: false, flowSpeed: 45, frozen: false, mode: 'communities', repel: 48, link: 16, gravity: 48, font: 12, size: 3, linkw: 0.72,
+        gravitationalConstant: 1, blackHoleMass: 1, localGravitationalConstant: 1,
+        damping: 1, springStiffness: 1 },
       sizeBy: 'degree', bridges: true, ghosts: true,
       scope: { minDegree: 0, showUnlinked: true, depth: 2 },
       collapse: false, collapsed: false,
@@ -1376,7 +1378,10 @@
         const patch = value || {};
         state.settings = { ...state.settings, ...patch };
         state.flowPaintAt = 0;
-        const relayout = Object.keys(patch).some(key => ['mode', 'repel', 'link', 'gravity'].includes(key));
+        const relayout = Object.keys(patch).some(key => [
+          'mode', 'repel', 'link', 'gravity', 'gravitationalConstant', 'blackHoleMass',
+          'localGravitationalConstant', 'damping', 'springStiffness',
+        ].includes(key));
         postSettings(relayout);
         uploadNodeMeta();
         camera();

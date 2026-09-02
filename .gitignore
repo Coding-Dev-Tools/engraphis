@@ -138,3 +138,6 @@ uv.lock
 # mixed-case variants from slipping through on case-insensitive machines.
 /[Pp][Rr][Oo][Mm][Pp][Tt]_[Ss][Ee][Ss][Ss][Ii][Oo][Nn]_[Tt][Rr][Aa][Nn][Ss][Cc][Rr][Ii][Pp][Tt]_[Aa][Nn][Aa][Ll][Yy][Ss][Ii][Ss].md
 /[Ss][Ee][Ss][Ss][Ii][Oo][Nn]_[Tt][Rr][Aa][Nn][Ss][Cc][Rr][Ii][Pp][Tt]_[Qq][Uu][Ee][Rr][Yy]_[Pp][Rr][Oo][Mm][Pp][Tt].md
+
+# Command Code per-session scratchpad (agent working files, never package content).
+/$COMMANDCODE_SCRATCHPAD/

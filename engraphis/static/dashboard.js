@@ -1236,7 +1236,7 @@ function loadGraphEngine(loadAll=false){
    GRAPH_ENGINE_LOADING=new Promise((resolve,reject)=>{
     const script=document.createElement('script');
     const bust=GRAPH_ENGINE_RETRY>0?'&r='+GRAPH_ENGINE_RETRY:'';
-    script.src='/v2-assets/engraphis-graph.js?v=20260815-merge-ready-1'+bust;
+    script.src='/v2-assets/engraphis-graph.js?v=20260902-slider-merge-1'+bust;
     /* A 200 that never registers the global is a corrupt/truncated asset, not a success —
        resolving there would hand graphRenderEngine() an undefined EngraphisGraph. Failed
        attempts drop the script node and clear the memo so the next call retries with a
