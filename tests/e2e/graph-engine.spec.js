@@ -13,7 +13,7 @@ const { test, expect } = require('@playwright/test');
  */
 
 const workspace = 'graph-e2e';
-const stellarOrbitAssetVersion = '20260831-galaxy-floor-fix-2';
+const stellarOrbitAssetVersion = '20260902-slider-merge-1';
 
 // A small connected store: two clusters joined by one bridge, so communities, the legend and
 // the bridge detector all have something real to work on.
@@ -1843,8 +1843,8 @@ for (const reducedMotion of [false, true]) {
       expect(diagnostics.linkSetting).toBe(8);
       expect(diagnostics.relationOrbitScale).toBeCloseTo(0.25, 12);
       expect(diagnostics.gravitySetting).toBe(96);
-      expect(diagnostics.blackHoleGravity).toBeCloseTo(9692.054591926051, 12);
-      expect(diagnostics.localGravity).toBeCloseTo(360, 12);
+      expect(diagnostics.blackHoleGravity).toBeCloseTo(3230.6848639753507, 12);
+      expect(diagnostics.localGravity).toBeCloseTo(240, 12);
       expect(diagnostics.systemOrbitSeedSpeedLimit).toBeCloseTo(23.4, 12);
 
       const assetRequests = fetched(session.requested, '/v2-assets/engraphis-graph.js');
@@ -1856,7 +1856,6 @@ for (const reducedMotion of [false, true]) {
       const servedSource = await servedAsset.text();
       expect(servedSource).toContain('const GALAXY_STELLAR_ORBIT_CLOCK = 3.25;');
       expect(servedSource).toContain('const GALAXY_AUTHORED_CARRIER_ORBIT_CLOCK = 1.3;');
-      expect(servedSource).toContain('const GALAXY_BASE_GRAVITY_MULTIPLIER = 1.5;');
       expect(servedSource).toContain('const BASE_NODE_RADIUS_SCALE = 1.2;');
       expect(servedSource).toContain('preserveSystemRadii: true,');
       expect(session.pageErrors).toEqual([]);
