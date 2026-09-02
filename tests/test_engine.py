@@ -1293,24 +1293,49 @@ def test_titled_keyed_claim_duplicate_is_a_noop_in_temporal_predecessor_path():
 
 
 def test_anchored_unkeyed_resolution_keeps_a_closed_historical_predecessor():
+    # Bi-temporal splice of a KNOWN-ABOUT series: a ``subject_key`` ties the
+    # three values into a single chain and the engine marks the temporal
+    # splice explicitly. Without a key the present-time veto contract applies
+    # (see ``test_anchored_unkeyed_present_time_stays_live`` below if/when added).
     eng = MemoryEngine.create(":memory:")
     wid = eng.store.get_or_create_workspace("w")
     first = eng.remember_with_resolution(
         "The deployment rollout phase is alpha.", workspace_id=wid,
+        subject_key="deploy.phase", claim_kind="stage",
         valid_from=1_000.0,
     )
     eng.remember_with_resolution(
         "The deployment rollout phase is gamma.", workspace_id=wid,
+        subject_key="deploy.phase", claim_kind="stage",
         valid_from=3_000.0,
     )
     backfilled = eng.remember_with_resolution(
         "The deployment rollout phase is beta.", workspace_id=wid,
+        subject_key="deploy.phase", claim_kind="stage",
         valid_from=2_000.0,
     )
 
     assert backfilled["op"] == "invalidate"
     assert backfilled["superseded"] == [first["id"]]
     assert eng.store.get_memory(first["id"]).valid_to == 2_000.0
+
+
+def test_anchored_unkeyed_present_time_stays_live():
+    # Pair to the splice test above: a deliberate ``valid_from`` without a
+    # ``subject_key`` is a scheduled-future write, not a bi-temporal splice,
+    # and must stay on the present-time veto contract (heavy/proper/env
+    # swaps both live).
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    eng.remember_with_resolution(
+        "The deployment rollout phase is alpha.", workspace_id=wid,
+        valid_from=1_000.0,
+    )
+    future = eng.remember_with_resolution(
+        "The deployment rollout phase is gamma.", workspace_id=wid,
+        valid_from=3_000.0,
+    )
+    assert future["op"] in ("add", "relate")
 
 
 def test_recall_proactive_includes_last_session_handoff():

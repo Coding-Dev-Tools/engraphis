@@ -362,6 +362,45 @@ def test_reranker_fallback_logs_only_the_exception_class(monkeypatch, caplog):
     assert "private/reranker" not in caplog.text
 
 
+def test_configured_rerank_model_selects_cross_encoder_for_the_engine(monkeypatch):
+    """The documented ENGRAPHIS_RERANK_MODEL knob must reach the composed engine.
+
+    End-to-end selection proof: MemoryEngine.create(rerank_model=...) composes a live
+    CrossEncoderReranker (heavy loader stubbed so the offline suite never downloads),
+    while an unset selector keeps IdentityReranker (covered above). Retrieval quality
+    of that selection is measured separately by eval.harness runs on the bundled gates.
+    """
+    import engraphis.backends.reranker as reranker_module
+    from engraphis.core.engine import MemoryEngine
+
+    captured = {}
+
+    class _Model:
+        def __init__(self, name, **kwargs):
+            captured.update(name=name, **kwargs)
+
+        def predict(self, pairs, batch_size=32):
+            return [0.0 for _ in pairs]
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sentence_transformers",
+        SimpleNamespace(CrossEncoder=_Model),
+    )
+    monkeypatch.delenv("ENGRAPHIS_REQUIRE_IMMUTABLE_MODELS", raising=False)
+
+    engine = MemoryEngine.create(
+        ":memory:",
+        rerank_model="cross-encoder/ms-marco-MiniLM-L-6-v2",
+    )
+
+    assert isinstance(engine.reranker, reranker_module.CrossEncoderReranker)
+    assert captured == {
+        "name": "cross-encoder/ms-marco-MiniLM-L-6-v2",
+        "trust_remote_code": False,
+    }
+
+
 def test_memory_service_forwards_model_provenance_to_the_engine(monkeypatch):
     import engraphis.service as service_module
 
