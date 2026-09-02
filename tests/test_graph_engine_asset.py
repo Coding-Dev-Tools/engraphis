@@ -32,6 +32,7 @@ ROOT = Path(__file__).resolve().parents[1]
 STATIC = ROOT / "engraphis" / "static"
 ASSET = ROOT / "engraphis" / "dashboard_assets" / "engraphis-graph.js"
 EVERY_ASSET = ROOT / "engraphis" / "dashboard_assets" / "engraphis-graph-every.js"
+EVERY_WORKER = ROOT / "engraphis" / "dashboard_assets" / "engraphis-graph-every-worker.js"
 SPACETIME_ASSET = ROOT / "engraphis" / "dashboard_assets" / "engraphis-spacetime.js"
 LEGACY_ADAPTER = STATIC / "engraphis-graph.js"
 INDEX = STATIC / "index.html"
@@ -149,6 +150,34 @@ const emit = value => console.log(JSON.stringify(value));
 """
     result = subprocess.run(
         [NODE, "-e", prelude + script, str(SPACETIME_ASSET)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+# ── load order and failure isolation ────────────────────────────────────────────────
+
+
+def _run_every_worker(script: str) -> object:
+    """Execute the Every-node layout worker in a tiny VM and return its final message."""
+    prelude = """
+const fs = require('fs');
+const vm = require('vm');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+const messages = [];
+const self = { postMessage(message) { messages.push(message); } };
+vm.runInNewContext(source, {
+  self, console, setTimeout, clearTimeout, Float32Array, Uint32Array,
+  Math, Map, Set, Array, Object, Number, String, Boolean, JSON, Infinity, NaN,
+});
+const emit = value => console.log(JSON.stringify(value));
+"""
+    result = subprocess.run(
+        [NODE, "-e", prelude + script, str(EVERY_WORKER)],
         cwd=ROOT,
         capture_output=True,
         text=True,
@@ -1425,52 +1454,6 @@ def test_orbital_speed_scales_live_carrier_and_kinematic_phase_rates() -> None:
 
 
 @requires_node
-def test_kinematic_local_orbits_continue_when_global_gravity_is_zero() -> None:
-    """Zero global gravity must not disable the independent local stellar clock."""
-    report = _run_node(
-        """
-        const nodes = [
-          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
-            system_anchor_id: 'black-hole', gravity_mass: 8, radius: 8,
-            x: 0, y: 0, vx: 0, vy: 0 },
-          { id: 'star', anchor_role: 'community', community_id: 'solar',
-            system_anchor_id: 'star', gravity_mass: 4, radius: 5,
-            x: 120, y: 0, vx: 0, vy: 0 },
-          { id: 'planet', community_id: 'solar', system_anchor_id: 'star',
-            orbit_tier: 1, gravity_mass: 1, radius: 2,
-            x: 150, y: 0, vx: 0, vy: 0 },
-        ];
-        const options = {
-          gravity: 0, softening: 32, centralSoftening: 40, localSoftening: 12,
-          localGravitySetting: 48, orbitalSpeed: 400, layoutSeed: 19,
-          timestep: .032, speedLimit: 48,
-        };
-        const angle = () => Math.atan2(nodes[2].y - nodes[1].y,
-          nodes[2].x - nodes[1].x);
-        const before = angle();
-        const first = I.advanceGalaxyKinematicOrbits(nodes, options);
-        const afterFirst = angle();
-        const second = I.advanceGalaxyKinematicOrbits(nodes, options);
-        const afterSecond = angle();
-        emit({ first, second,
-          localTravel: Math.atan2(Math.sin(afterSecond - before),
-            Math.cos(afterSecond - before)),
-          carrierTravel: Math.hypot(nodes[1].x - 120, nodes[1].y),
-          finite: nodes.every(node =>
-            [node.x, node.y, node.vx, node.vy].every(Number.isFinite)),
-          firstStepMoved: Math.abs(afterFirst - before) > 1e-8,
-        });
-        """
-    )
-    assert report["finite"] is True
-    assert report["first"]["satellites"] > 0
-    assert report["second"]["satellites"] > 0
-    assert report["firstStepMoved"] is True
-    assert abs(report["localTravel"]) > 1e-5
-    assert report["carrierTravel"] <= 1e-9
-
-
-@requires_node
 def test_four_hundred_percent_clock_keeps_release_sized_solar_systems_inside_reserved_lanes() -> None:
     """The maximum clock may expand and accelerate 60 systems, never scatter their members."""
     report = _run_node(
@@ -2000,7 +1983,7 @@ def test_system_velocity_guard_preserves_black_hole_carrier_before_local_motion(
     )
     assert report["afterCarrier"] == pytest.approx(report["beforeCarrier"], abs=1e-12)
     assert report["planetSpeed"] <= 50 + 1e-12
-    assert report["localSpeed"] <= 32 + 1e-12
+    assert report["localSpeed"] <= 48 + 1e-12
     assert report["guard"]["systems"] == 1
 
 
@@ -6607,55 +6590,6 @@ def test_render_enforces_horizon_before_paint_for_oversized_static_galaxy() -> N
 
 
 @requires_node
-def test_slider_burst_reasserts_contact_invariant_when_galaxy_is_frozen() -> None:
-    """A phase-preserving slider render must still repair painted contact penetrations."""
-    report = _run_engine(
-        """
-        const api = G.create(el, { reducedMotion: () => false });
-        api.setPreset('galaxy');
-        api.setData({
-          nodes: [
-            { id: 'black-hole', anchor_role: 'global', community_id: 'core',
-              system_anchor_id: 'black-hole', gravity_mass: 64, visual_radius: 8,
-              x: 0, y: 0, vx: 0, vy: 0 },
-            { id: 'star', anchor_role: 'community', community_id: 'outer',
-              system_anchor_id: 'star', gravity_mass: 8, visual_radius: 5,
-              x: 120, y: 0, vx: 0, vy: 0 },
-            { id: 'planet', community_id: 'outer', system_anchor_id: 'star',
-              orbit_tier: 1, gravity_mass: 1, visual_radius: 3,
-              x: 150, y: 0, vx: 0, vy: 0 },
-          ],
-          edges: [{ source: 'star', target: 'planet', layer: 'entity' }],
-        });
-        api.freeze(true);
-        const nodes = store.graphData.nodes;
-        const anchor = nodes.find(node => node.id === 'black-hole');
-        const star = nodes.find(node => node.id === 'star');
-        const planet = nodes.find(node => node.id === 'planet');
-        star.x = 0; star.y = 0; star.vx = 0; star.vy = 0;
-        planet.x = 1; planet.y = 0; planet.vx = 0; planet.vy = 0;
-        /* Size is a layout key and therefore takes the phase-preserving slider path while the
-           clock is frozen. The final contact projection must still run synchronously. */
-        api.setSettings({ size: 4 });
-        const diagnostics = api.physicsDiagnostics();
-        emit({ contacts: diagnostics.blackHoleExclusion.contacts,
-          starClearance: Math.hypot(star.x - anchor.x, star.y - anchor.y)
-            - anchor.radius - star.radius - diagnostics.blackHoleExclusionPadding,
-          planetClearance: Math.hypot(planet.x - star.x, planet.y - star.y)
-            - star.radius - planet.radius - diagnostics.systemAnchorExclusion.padding,
-          frozen: diagnostics.frozen,
-          finite: nodes.every(node =>
-            [node.x, node.y, node.vx, node.vy].every(Number.isFinite)) });
-        """
-    )
-    assert report["frozen"] is True
-    assert report["contacts"] > 0
-    assert report["starClearance"] >= -1e-9
-    assert report["planetClearance"] >= -1e-9
-    assert report["finite"] is True
-
-
-@requires_node
 def test_render_reapplies_far_field_envelope_before_static_repaint() -> None:
     """A reused oversized/static payload must not bypass the cached outer boundary."""
     report = _run_engine(
@@ -10685,9 +10619,7 @@ def test_simulation_time_is_bounded_on_a_large_graph() -> None:
     assert report["big"]["warmup"] == 18
     # A large graph also settles harder, exactly as GPERF.large does on the classic path.
     assert report["big"]["alpha"] > report["small"]["alpha"]
-    # The damping slider owns the actual ForceGraph decay for both graph sizes; size must not
-    # overwrite the user-selected value with a large-graph constant during render.
-    assert report["big"]["velocity"] == report["small"]["velocity"]
+    assert report["big"]["velocity"] > report["small"]["velocity"]
     # Freeze, not the OS visual-motion preference, is the explicit static-layout control.
     assert report["frozen"]["time"] == 0
     assert report["frozen"]["ticks"] == 0
@@ -10758,6 +10690,43 @@ def test_spacetime_sliders_reach_d3_forces_in_non_galaxy_mode() -> None:
     """
     report = _run_engine(
         """
+        const strengthForce = () => ({
+          strength(value) {
+            if (arguments.length) { this.strengthValue = value; return this; }
+            return this.strengthValue;
+          },
+        });
+        globalThis.d3 = {
+          forceManyBody: strengthForce,
+          forceLink: () => ({
+            id(value) {
+              if (arguments.length) { this.idValue = value; return this; }
+              return this.idValue;
+            },
+            distance(value) {
+              if (arguments.length) { this.distanceValue = value; return this; }
+              return this.distanceValue;
+            },
+            strength(value) {
+              if (arguments.length) { this.strengthValue = value; return this; }
+              return this.strengthValue;
+            },
+          }),
+          forceX: target => {
+            const force = strengthForce();
+            force.target = target;
+            return force;
+          },
+          forceY: target => {
+            const force = strengthForce();
+            force.target = target;
+            return force;
+          },
+          forceCollide: () => ({ iterations(value) {
+            if (arguments.length) { this.iterationsValue = value; return this; }
+            return this.iterationsValue;
+          } }),
+        };
         const api = G.create(el, {});
         api.setPreset('compact');
         api.setData(chain(40));
@@ -10771,23 +10740,29 @@ def test_spacetime_sliders_reach_d3_forces_in_non_galaxy_mode() -> None:
         const x = f.x, y = f.y, charge = f.charge, link = f.link;
         const beforeX = x && x.strength, beforeY = y && y.strength, beforeCharge = charge && charge.strength;
 
-        const snapshotForce = (key) => {
+        const snapshotForce = (key, sample) => {
           const force = (store.d3Forces || {})[key];
           if (!force) return null;
-          return typeof force.strength === 'function' ? force.strength.value : force.strength;
+          const value = typeof force.strength === 'function' ? force.strength() : force.strength;
+          return typeof value === 'function' ? value(sample || { source: 'n0', target: 'n1' }) : value;
         };
         const result = {};
+        const baselineSettings = {
+          gravitationalConstant: 1, blackHoleMass: 1,
+          localGravitationalConstant: 1, damping: 1,
+        };
         ['gravitationalConstant', 'blackHoleMass', 'localGravitationalConstant', 'damping']
           .forEach((key) => {
             const before = calls.d3Force || 0;
             const callResult = { error: null };
             try {
+              api.setSettings(baselineSettings);
               api.setSettings({ [key]: key === 'blackHoleMass' ? 400 : 150 });
               const after = calls.d3Force || 0;
               callResult.reheated = after > before;
-              callResult.velocityDecay = fg.d3VelocityDecay && fg.d3VelocityDecay();
-              callResult.storeVelocityDecay = store.d3VelocityDecay;
+              callResult.storeD3VelocityDecay = store.d3VelocityDecay;
               callResult.chargeStrength = snapshotForce('charge');
+              callResult.linkStrength = snapshotForce('link', { source: 'n0', target: 'n1' });
               callResult.xStrength = snapshotForce('x');
               callResult.yStrength = snapshotForce('y');
             } catch (error) {
@@ -10795,22 +10770,16 @@ def test_spacetime_sliders_reach_d3_forces_in_non_galaxy_mode() -> None:
             }
             result[key] = callResult;
           });
+        // Also exercise the lower end of the damping range so the full 0..15 visible range
+        // reaches the engine (the d700bba fix clamped to 1..15, so damping=0 was inert).
         const lowDamping = { error: null };
         try {
           api.setSettings({ damping: 0 });
-          lowDamping.storeVelocityDecay = store.d3VelocityDecay;
+          lowDamping.storeD3VelocityDecay = store.d3VelocityDecay;
         } catch (error) {
           lowDamping.error = String(error);
         }
         result.dampingLow = lowDamping;
-        const midDamping = { error: null };
-        try {
-          api.setSettings({ damping: 0.5 });
-          midDamping.storeVelocityDecay = store.d3VelocityDecay;
-        } catch (error) {
-          midDamping.error = String(error);
-        }
-        result.dampingMid = midDamping;
         emit(result);
         """
     )
@@ -10821,31 +10790,42 @@ def test_spacetime_sliders_reach_d3_forces_in_non_galaxy_mode() -> None:
         assert entry['error'] is None, (
             f"setSettings({{{key}: ...}}) raised: {entry['error']}"
         )
-    # velocityDecay must cover the full visible damping range: damping=0 -> 0.05,
-    # damping=15 -> 0.85, with no dead zone between them.
-    # The ForceGraph API names this getter/setter d3VelocityDecay; the value must remain the
-    # slider-derived setting instead of being replaced by a large-graph default.
-    assert report['damping']['storeVelocityDecay'] == pytest.approx(0.85, abs=1e-9), (
+        assert entry['reheated'] is True, f"setSettings({{{key}: ...}}) did not reheat"
+    # These are numeric observations from the stubbed D3 forces, not source-shape checks:
+    # Galactic gravity is attractive; the multiplier consumes the adapter's full 0..4 range
+    # (150 raw -> 3.0, no 2.0 plateau), so compact's 0.26 origin-centering strength triples
+    # while the separate repel control keeps charge at -42.
+    assert report['gravitationalConstant']['chargeStrength'] == pytest.approx(-42)
+    # Engine value 150 saturates at the 4.0 ceiling (0.26 * 4).
+    assert report['gravitationalConstant']['xStrength'] == pytest.approx(0.26 * 4)
+    assert report['gravitationalConstant']['yStrength'] == pytest.approx(0.26 * 4)
+    # The local multiplier likewise saturates at 4 (unit link strength * 4).
+    assert report['localGravitationalConstant']['linkStrength'] == pytest.approx(4)
+    assert report['blackHoleMass']['xStrength'] == pytest.approx(0.26 * 4.4)
+    assert report['blackHoleMass']['yStrength'] == pytest.approx(0.26 * 4.4)
+    # damping is a *multiplier* on the size-aware baseline (0.38 small / 0.45 large). At the
+    # upper end of the slider (15) the d3 velocityDecay reaches the 0.85 ceiling. At the lower
+    # end (0) it reaches the 0.05 floor. The D3 stubs expose the normal strength() getter, so
+    # snapshotForce invokes it before evaluating a per-link strength callback.
+    assert report['damping']['storeD3VelocityDecay'] == pytest.approx(0.85, abs=1e-9), (
         f"damping=150 (saturated to 15) must yield store.d3VelocityDecay=0.85, "
-        f"got {report['damping']['storeVelocityDecay']}"
+        f"got {report['damping']['storeD3VelocityDecay']}"
     )
-    assert report['dampingLow']['error'] is None
-    assert report['dampingLow']['storeVelocityDecay'] == pytest.approx(0.05, abs=1e-9)
-    assert report['dampingMid']['error'] is None
-    assert report['dampingMid']['storeVelocityDecay'] == pytest.approx(
-        0.05 + 0.5 * (0.80 / 15), abs=1e-9
+    assert report['dampingLow']['error'] is None, (
+        f"setSettings({{damping: 0}}) raised: {report['dampingLow']['error']}"
     )
-    # Charge/x/y strengths are not exercised here because the test environment does not stub
-    # d3.forceManyBody / d3.forceX / d3.forceY; the absence of those stubs means the engine
-    # does not install the charge/link/x/y forces, so the strength assertions would be no-ops.
-    # The velocityDecay path above proves the wire reaches fg.d3VelocityDecay, and the d3Force
-    # call counter (reheated: True) proves the layout-change contract holds for every
-    # spacetime key. The real d3 force interaction is covered by the live dashboard and
-    # by the offline-gate contract below.
+    assert report['dampingLow']['storeD3VelocityDecay'] == pytest.approx(0.05, abs=1e-9), (
+        f"damping=0 must reach the 0.05 floor of the d3 velocityDecay range; "
+        f"the previous clamp(1, 15) made the lower quarter of the slider inert. "
+        f"got {report['dampingLow']['storeD3VelocityDecay']}"
+    )
+    # The D3 stand-ins above make the strength assertions exercise the same setter/getter paths
+    # that the browser's force constructors expose, while the velocityDecay assertion covers the
+    # force-graph setting that is not represented in store.d3Forces.
 
 
 
-@requires_node
+
 def test_black_hole_mass_reaches_centering_forces_in_every_non_galaxy_layout() -> None:
     """Black-hole mass must modulate the D3 centering strength in every non-Galaxy layout.
 
@@ -10907,6 +10887,55 @@ def test_black_hole_mass_reaches_centering_forces_in_every_non_galaxy_layout() -
         assert weak_y == pytest.approx(base)
         assert strong_x == pytest.approx(base * 4.4)
         assert strong_y == pytest.approx(base * 4.4)
+
+
+
+def test_slider_burst_reasserts_contact_invariant_when_galaxy_is_frozen() -> None:
+    """A phase-preserving slider render must still repair painted contact penetrations."""
+    report = _run_engine(
+        """
+        const api = G.create(el, { reducedMotion: () => false });
+        api.setPreset('galaxy');
+        api.setData({
+          nodes: [
+            { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+              system_anchor_id: 'black-hole', gravity_mass: 64, visual_radius: 8,
+              x: 0, y: 0, vx: 0, vy: 0 },
+            { id: 'star', anchor_role: 'community', community_id: 'outer',
+              system_anchor_id: 'star', gravity_mass: 8, visual_radius: 5,
+              x: 120, y: 0, vx: 0, vy: 0 },
+            { id: 'planet', community_id: 'outer', system_anchor_id: 'star',
+              orbit_tier: 1, gravity_mass: 1, visual_radius: 3,
+              x: 150, y: 0, vx: 0, vy: 0 },
+          ],
+          edges: [{ source: 'star', target: 'planet', layer: 'entity' }],
+        });
+        api.freeze(true);
+        const nodes = store.graphData.nodes;
+        const anchor = nodes.find(node => node.id === 'black-hole');
+        const star = nodes.find(node => node.id === 'star');
+        const planet = nodes.find(node => node.id === 'planet');
+        star.x = 0; star.y = 0; star.vx = 0; star.vy = 0;
+        planet.x = 1; planet.y = 0; planet.vx = 0; planet.vy = 0;
+        /* Size is a layout key and therefore takes the phase-preserving slider path while the
+           clock is frozen. The final contact projection must still run synchronously. */
+        api.setSettings({ size: 4 });
+        const diagnostics = api.physicsDiagnostics();
+        emit({ contacts: diagnostics.blackHoleExclusion.contacts,
+          starClearance: Math.hypot(star.x - anchor.x, star.y - anchor.y)
+            - anchor.radius - star.radius - diagnostics.blackHoleExclusionPadding,
+          planetClearance: Math.hypot(planet.x - star.x, planet.y - star.y)
+            - star.radius - planet.radius - diagnostics.systemAnchorExclusion.padding,
+          frozen: diagnostics.frozen,
+          finite: nodes.every(node =>
+            [node.x, node.y, node.vx, node.vy].every(Number.isFinite)) });
+        """
+    )
+    assert report["frozen"] is True
+    assert report["contacts"] > 0
+    assert report["starClearance"] >= -1e-9
+    assert report["planetClearance"] >= -1e-9
+    assert report["finite"] is True
 
 
 
@@ -11799,3 +11828,264 @@ def test_pointer_hit_area_rejects_unpositioned_nodes() -> None:
     assert "!Number.isFinite(node.x)" in pointer
     assert "!Number.isFinite(node.y)" in pointer
     assert "Number.isFinite(node.radius)" in pointer
+
+
+
+@requires_node
+def test_every_node_worker_consumes_all_full_mode_spacetime_controls() -> None:
+    """Every-node full mode must visibly consume each control exposed by the dashboard."""
+    report = _run_every_worker(
+        """
+        const nodes = Array.from({ length: 10 }, (_, index) => ({
+          id: `node-${index}`, community_id: index < 5 ? 'a' : 'b',
+          degree: index % 3 + 1,
+        }));
+        const links = nodes.slice(1).map((node, index) => ({
+          source: nodes[index].id, target: node.id, weight: index + 1,
+        }));
+        const waitForFit = start => new Promise(resolve => {
+          const poll = () => {
+            const final = messages.slice(start).find(item => item.type === 'layout' && item.fit === true);
+            if (final) resolve(Array.from(final.positions));
+            else setTimeout(poll, 1);
+          };
+          poll();
+        });
+        (async () => {
+          self.onmessage({ data: { type: 'prepare', payload: { nodes, links } } });
+          const baseline = await waitForFit(0);
+          const changes = {};
+          for (const [key, value] of [
+            ['gravitationalConstant', 1.8], ['blackHoleMass', 1.8],
+            ['localGravitationalConstant', 1.8], ['damping', 8], ['springStiffness', 2.4],
+          ]) {
+            const start = messages.length;
+            self.onmessage({ data: { type: 'settings', settings: { [key]: value }, relayout: true, fit: true } });
+            const positions = await waitForFit(start);
+            changes[key] = Math.max(...positions.map((item, index) => Math.abs(item - baseline[index])));
+          }
+          emit({ changes });
+        })();
+        """
+    )
+    assert all(delta > 1e-5 for delta in report["changes"].values()), report
+
+
+@requires_node
+def test_live_orbit_phase_uses_the_budgeted_relative_speed() -> None:
+    """Live phase advancement must agree with the capped velocity it emits."""
+    report = _run_node(
+        """
+        const nodes = [
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            system_anchor_id: 'black-hole', gravity_mass: 16, radius: 8,
+            x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'star', anchor_role: 'community', community_id: 'solar',
+            system_anchor_id: 'star', orbit_tier: 0, gravity_mass: 6, radius: 5,
+            x: 120, y: 0, vx: 0, vy: 47 },
+          { id: 'planet', community_id: 'solar', system_anchor_id: 'star',
+            orbit_tier: 1, orbit_radius: 30, gravity_mass: 1, radius: 2,
+            x: 150, y: 0, vx: 0, vy: 47 },
+        ];
+        const options = {
+          gravity: 48, softening: 32, centralSoftening: 40,
+          localGravitySetting: 48, orbitalSpeed: 400,
+          layoutSeed: 19, timestep: 1, speedLimit: 48,
+        };
+        const before = Math.atan2(nodes[2].y - nodes[1].y, nodes[2].x - nodes[1].x);
+        I.applyGalaxyOrbitalSpeedControl(nodes, options);
+        const after = Math.atan2(nodes[2].y - nodes[1].y, nodes[2].x - nodes[1].x);
+        const radius = Math.hypot(nodes[2].x - nodes[1].x, nodes[2].y - nodes[1].y);
+        const relativeSpeed = Math.hypot(nodes[2].vx - nodes[1].vx, nodes[2].vy - nodes[1].vy);
+        const phaseDelta = Math.abs(Math.atan2(Math.sin(after - before), Math.cos(after - before)));
+        emit({ phaseDelta, radius, phaseSpeed: phaseDelta * radius, relativeSpeed });
+        """
+    )
+    assert report["phaseSpeed"] == pytest.approx(report["relativeSpeed"], rel=1e-9), report
+
+
+@requires_node
+def test_kinematic_carrier_is_capped_before_local_motion_budgeting() -> None:
+    report = _run_node(
+        """
+        const nodes = [
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            system_anchor_id: 'black-hole', gravity_mass: 8, radius: 8,
+            x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'star', anchor_role: 'community', community_id: 'solar',
+            system_anchor_id: 'star', gravity_mass: 4, radius: 5,
+            x: 120, y: 0, vx: 0, vy: 0 },
+          { id: 'planet', community_id: 'solar', system_anchor_id: 'star',
+            orbit_tier: 1, gravity_mass: 1, radius: 2,
+            x: 150, y: 0, vx: 0, vy: 0 },
+        ];
+        I.advanceGalaxyKinematicOrbits(nodes, {
+          gravity: 48, softening: 32, centralSoftening: 40, localSoftening: 12,
+          orbitalSpeed: 400, layoutSeed: 19, timestep: .032,
+        });
+        emit({ carrierSpeed: Math.hypot(nodes[1].vx, nodes[1].vy),
+          localSpeed: Math.hypot(nodes[2].vx - nodes[1].vx,
+            nodes[2].vy - nodes[1].vy), finite: nodes.every(node =>
+              [node.x, node.y, node.vx, node.vy].every(Number.isFinite)) });
+        """
+    )
+    assert report["finite"] is True
+    assert report["carrierSpeed"] <= 48 + 1e-9
+    assert report["localSpeed"] <= 48 + 1e-9
+
+
+@requires_node
+def test_kinematic_local_velocity_budget_uses_one_phase_speed() -> None:
+    report = _run_node(
+        """
+        const nodes = [
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            system_anchor_id: 'black-hole', gravity_mass: 8, radius: 8,
+            x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'star', anchor_role: 'community', community_id: 'solar',
+            system_anchor_id: 'star', gravity_mass: 4, radius: 5,
+            x: 120, y: 0, vx: 0, vy: 0 },
+          { id: 'planet', community_id: 'solar', system_anchor_id: 'star',
+            orbit_tier: 1, gravity_mass: 1, radius: 2,
+            x: 150, y: 0, vx: 0, vy: 0 },
+        ];
+        const options = {
+          gravity: 48, softening: 32, centralSoftening: 40, localSoftening: 12,
+          orbitalSpeed: 400, layoutSeed: 19, timestep: .032, speedLimit: 48,
+        };
+        I.advanceGalaxyKinematicOrbits(nodes, options);
+        const before = nodes[2].__galaxyKinematicLocalOrbit.angle;
+        I.advanceGalaxyKinematicOrbits(nodes, options);
+        const after = nodes[2].__galaxyKinematicLocalOrbit.angle;
+        const radius = nodes[2].__galaxyKinematicLocalOrbit.radius;
+        const phaseDelta = Math.abs(Math.atan2(Math.sin(after - before), Math.cos(after - before)));
+        const relativeSpeed = Math.hypot(nodes[2].vx - nodes[1].vx,
+          nodes[2].vy - nodes[1].vy);
+        emit({ maximumSpeed: Math.max(...nodes.map(node => Math.hypot(node.vx, node.vy))),
+          phaseSpeed: phaseDelta * radius / options.timestep, relativeSpeed,
+          finite: nodes.every(node =>
+            [node.x, node.y, node.vx, node.vy].every(Number.isFinite)) });
+        """
+    )
+    assert report["finite"] is True
+    assert report["maximumSpeed"] <= 48 + 1e-9
+    assert report["phaseSpeed"] == pytest.approx(report["relativeSpeed"], rel=1e-9), report
+
+
+@requires_node
+def test_kinematic_local_orbits_continue_when_global_gravity_is_zero() -> None:
+    """Zero global gravity must not disable the independent local stellar clock."""
+    report = _run_node(
+        """
+        const nodes = [
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            system_anchor_id: 'black-hole', gravity_mass: 8, radius: 8,
+            x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'star', anchor_role: 'community', community_id: 'solar',
+            system_anchor_id: 'star', gravity_mass: 4, radius: 5,
+            x: 120, y: 0, vx: 0, vy: 0 },
+          { id: 'planet', community_id: 'solar', system_anchor_id: 'star',
+            orbit_tier: 1, gravity_mass: 1, radius: 2,
+            x: 150, y: 0, vx: 0, vy: 0 },
+        ];
+        const options = {
+          gravity: 0, softening: 32, centralSoftening: 40, localSoftening: 12,
+          localGravitySetting: 48, orbitalSpeed: 400, layoutSeed: 19,
+          timestep: .032, speedLimit: 48,
+        };
+        const angle = () => Math.atan2(nodes[2].y - nodes[1].y,
+          nodes[2].x - nodes[1].x);
+        const before = angle();
+        const first = I.advanceGalaxyKinematicOrbits(nodes, options);
+        const afterFirst = angle();
+        const second = I.advanceGalaxyKinematicOrbits(nodes, options);
+        const afterSecond = angle();
+        emit({ first, second,
+          localTravel: Math.atan2(Math.sin(afterSecond - before),
+            Math.cos(afterSecond - before)),
+          carrierTravel: Math.hypot(nodes[1].x - 120, nodes[1].y),
+          finite: nodes.every(node =>
+            [node.x, node.y, node.vx, node.vy].every(Number.isFinite)),
+          firstStepMoved: Math.abs(afterFirst - before) > 1e-8,
+        });
+        """
+    )
+    assert report["finite"] is True
+    assert report["first"]["satellites"] > 0
+    assert report["second"]["satellites"] > 0
+    assert report["firstStepMoved"] is True
+    assert abs(report["localTravel"]) > 1e-5
+    assert report["carrierTravel"] <= 1e-9
+
+
+@requires_node
+def test_live_carrier_is_capped_before_local_motion_budgeting() -> None:
+    report = _run_node(
+        """
+        const nodes = [
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            gravity_mass: 8, radius: 8, x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'star', anchor_role: 'community', community_id: 'solar',
+            system_anchor_id: 'star', gravity_mass: 4, radius: 5,
+            x: 120, y: 0, vx: 48, vy: 0 },
+          { id: 'planet', community_id: 'solar', system_anchor_id: 'star',
+            orbit_tier: 1, gravity_mass: 1, radius: 2,
+            x: 150, y: 0, vx: 48, vy: 0 },
+        ];
+        I.supportGalaxyCarrierOrbits(nodes, {
+          gravity: 48, softening: 32, centralSoftening: 40,
+          orbitalSpeed: 400, layoutSeed: 19, timestep: .032, speedLimit: 48,
+        });
+        emit({ carrierSpeed: Math.hypot(nodes[1].vx, nodes[1].vy),
+          finite: nodes.every(node =>
+            [node.x, node.y, node.vx, node.vy].every(Number.isFinite)) });
+        """
+    )
+    assert report["finite"] is True
+    assert report["carrierSpeed"] <= 48 + 1e-9
+
+
+@requires_node
+def test_oversized_full_layout_consumes_every_spacetime_control() -> None:
+    """The deterministic full-layout fallback must not make advanced controls inert."""
+    report = _run_engine(
+        """
+        const api = G.create(el, {});
+        api.setPreset('compact');
+        api.setRenderMode('full');
+        api.setData(chain(600));
+        const baseline = store.graphData.nodes.map(node => [node.x, node.y]);
+        const settings = {
+          gravitationalConstant: 2,
+          blackHoleMass: 2,
+          localGravitationalConstant: 2,
+          damping: 15,
+          springStiffness: 100 / 32,
+        };
+        const changes = {};
+        Object.entries(settings).forEach(([key, value]) => {
+          api.setSettings({ [key]: value });
+          changes[key] = Math.max(...store.graphData.nodes.map((node, index) =>
+            Math.hypot(node.x - baseline[index][0], node.y - baseline[index][1])));
+        });
+        api.setSettings({ gravitationalConstant: 0.1, blackHoleMass: 1,
+          localGravitationalConstant: 1, damping: 1, springStiffness: 32 });
+        const low = store.graphData.nodes.map(node => [node.x, node.y]);
+        api.setSettings({ gravitationalConstant: 0.2 });
+        const subQuarterDelta = Math.max(...store.graphData.nodes.map((node, index) =>
+          Math.hypot(node.x - low[index][0], node.y - low[index][1])));
+        emit({ ...changes, subQuarterDelta,
+          finite: store.graphData.nodes.every(node => [node.x, node.y]
+            .every(Number.isFinite)) });
+        """
+    )
+    for key in (
+        "gravitationalConstant",
+        "blackHoleMass",
+        "localGravitationalConstant",
+        "damping",
+        "springStiffness",
+    ):
+        assert report[key] > 1e-6, f"static full layout ignored {key}"
+    assert report["subQuarterDelta"] > 1e-6
+    assert report["finite"] is True

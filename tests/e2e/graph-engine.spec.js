@@ -2817,7 +2817,10 @@ test('served non-Galaxy spacetime controls keep their full normalized range', as
     { value: 460, multiplier: 4 },
     { value: 500, multiplier: 4.4 },
   ]);
-  expect(report.damping[0].decay).toBeCloseTo(0.05 + (0.80 / 15), 12);
+  /* The merged engine interpolates damping onto d3's velocityDecay with a size-aware
+     baseline: damping=0 -> 0.05 floor, damping=1 -> the neutral settling baseline
+     (0.38 small / 0.45 large), damping=15 -> 0.85 ceiling. This served graph is small. */
+  expect(report.damping[0].decay).toBeCloseTo(0.38, 12);
   expect(report.damping[1].decay).toBeCloseTo(0.85, 12);
   expect(session.pageErrors).toEqual([]);
 });
@@ -4139,4 +4142,23 @@ test.describe('Opt-in canvas graph engine helper contracts', () => {
     expect(snapshot.anchor).toBeNull();
     expect(snapshot.finite).toBe(false);
   });
+});
+
+test('served Ledger exposes spacetime controls for non-Galaxy presets', async ({ page }) => {
+  const session = await openDashboard(page);
+  await page.goto('/');
+  await page.locator('.nav-item[data-view="relations"]').click();
+  await expect(page.locator('#graph-canvas canvas').first()).toBeAttached({ timeout: 20_000 });
+  await page.locator('[data-graph-preset-choice="compact"]').click();
+  await expect(page.locator('[data-graph-preset-choice="compact"]'))
+    .toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('#graph-spacetime-tuning')).toBeVisible();
+  await expect(page.locator('#graph-spacetime-summary')).toHaveText('Responsive force controls');
+  await expect(page.locator('#graph-spring-stiffness-label')).toBeHidden();
+  await expect(page.locator('#graph-orbit-pause-row')).toBeHidden();
+  await page.locator('[data-graph-preset-choice="galaxy"]').click();
+  await expect(page.locator('#graph-spring-stiffness-label')).toBeVisible();
+  await expect(page.locator('#graph-orbit-pause-row')).toBeVisible();
+  await expect(page.locator('#graph-spacetime-summary')).toHaveText('Spacetime · black-hole orbit controls');
+  expect(session.pageErrors).toEqual([]);
 });
