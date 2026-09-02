@@ -155,8 +155,125 @@ class FailOpenBoundaryTests(unittest.TestCase):
                     with mock.patch.object(sys, "stdout", mock.MagicMock()) as buf:
                         rc = self.hook.main()
         self.assertEqual(rc, 0)
-        # The default 1500-char limit is in effect.
+        # The default cap (300 terse) is in effect, but the substring
+        # still appears because compression preserves the first sentence.
         self.assertIn("ctx", buf.write.call_args.args[0])
+
+
+class TerseCompressionTests(unittest.TestCase):
+    """V12 terse-hook default: 200-char compressed context.
+
+    Empirically validated on Qwen 3.7 Flash (bench_v1/V12): the terse
+    rendering is the only mode that improves quality on every model
+    tested. Prose was actively harmful (-0.067 sub on Qwen 3.7 Flash).
+    """
+
+    def setUp(self):
+        self.hook = _load()
+
+    def test_default_max_context_chars_is_terse(self):
+        """The shipped default is 300 chars (terse), not 1500 (prose)."""
+        self.assertEqual(self.hook.MAX_CONTEXT_CHARS, 300)
+        self.assertEqual(self.hook.MAX_CONTEXT_CHARS_DEFAULT, 300)
+        self.assertEqual(self.hook.MAX_CONTEXT_CHARS_PROSE, 1500)
+
+    def test_terse_compresses_numbered_facts(self):
+        """Numbered upstream facts render as '[n] first-sentence' joined."""
+        prose = (
+            "[1] First fact. This is a long elaboration that should be cut. "
+            "[2] Second fact. Also has trailing detail to drop. "
+            "[3] Third fact."
+        )
+        out = self.hook._compress_prose_to_terse(prose, 200)
+        self.assertIn("[1] First fact.", out)
+        self.assertIn("[2] Second fact.", out)
+        self.assertIn("[3] Third fact.", out)
+        # Trailing elaborations are dropped.
+        self.assertNotIn("elaboration", out)
+        self.assertNotIn("trailing detail", out)
+
+    def test_terse_falls_back_to_period_split(self):
+        """Unnumbered prose splits on sentence boundaries."""
+        prose = "Alpha. Beta. Gamma."
+        out = self.hook._compress_prose_to_terse(prose, 200)
+        self.assertEqual(out, "[1] Alpha.; [2] Beta.; [3] Gamma.")
+
+    def test_terse_respects_budget(self):
+        """The compressed output stays under the max_chars budget."""
+        prose = ". ".join([f"fact {i} with some words" for i in range(20)])
+        budget = 80
+        out = self.hook._compress_prose_to_terse(prose, budget)
+        self.assertLessEqual(len(out), budget)
+        # At least one fact fits in 80 chars.
+        self.assertIn("[1]", out)
+
+    def test_terse_returns_input_on_empty(self):
+        """Empty input returns empty (fails open)."""
+        self.assertEqual(self.hook._compress_prose_to_terse("", 200), "")
+        self.assertEqual(self.hook._compress_prose_to_terse("   ", 200), "   ")
+
+    def test_build_additional_context_terse_default(self):
+        """Default format='terse' produces compressed output under 300 chars."""
+        prose = "First sentence. Second sentence. Third sentence."
+        out = self.hook.build_additional_context(prose, "ws")
+        # Body budget: 300 - len(header) - len(footer).
+        self.assertLessEqual(len(out), 300)
+        self.assertIn("workspace ws", out)
+        # Compressed facts are present.
+        self.assertIn("[1]", out)
+
+    def test_build_additional_context_prose_format(self):
+        """format='prose' keeps the original dense context."""
+        prose = "First sentence. Second sentence. " + ("x" * 500)
+        out = self.hook.build_additional_context(
+            prose, "ws", max_context_chars=1500, format="prose"
+        )
+        # Prose mode: no "[n]" compression markers.
+        self.assertNotIn("[1]", out)
+        # Original text preserved up to body budget.
+        self.assertIn("First sentence.", out)
+
+    def test_env_prose_lifts_cap(self):
+        """ENGRAPHIS_HOOK_FORMAT=prose without ENGRAPHIS_HOOK_MAX_CHARS
+        uses the legacy 1500-char cap."""
+        with mock.patch.dict(
+            os.environ,
+            {
+                "ENGRAPHIS_MCP_URL": "http://127.0.0.1:9/mcp",
+                "ENGRAPHIS_HOOK_FORMAT": "prose",
+            },
+            clear=False,
+        ):
+            with mock.patch.object(self.hook, "session_context",
+                                   return_value="ctx"):
+                with mock.patch.object(sys, "stdin", mock.MagicMock(read=lambda: "{}")):
+                    with mock.patch.object(sys, "stdout", mock.MagicMock()) as buf:
+                        self.hook.main()
+        # The legacy prose cap (1500) is restored, not the 200 terse cap.
+        out = buf.write.call_args.args[0]
+        self.assertLessEqual(len(out), 1500)
+
+    def test_env_format_garbage_falls_back_to_terse(self):
+        """Unknown format values fall back to terse (fail open)."""
+        with mock.patch.dict(
+            os.environ,
+            {
+                "ENGRAPHIS_MCP_URL": "http://127.0.0.1:9/mcp",
+                "ENGRAPHIS_HOOK_FORMAT": "verbose",
+            },
+            clear=False,
+        ):
+            with mock.patch.object(self.hook, "session_context",
+                                   return_value="ctx"):
+                with mock.patch.object(sys, "stdin", mock.MagicMock(read=lambda: "{}")):
+                    with mock.patch.object(sys, "stdout", mock.MagicMock()) as buf:
+                        self.hook.main()
+        out = buf.write.call_args.args[0]
+        # Terse cap is in effect: body + header + footer stays bounded by
+        # 300 (the body budget), and the compressed body is much smaller
+        # than the prose cap (1500).
+        additional = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+        self.assertLessEqual(len(additional), 300)
 
 
 if __name__ == "__main__":
