@@ -18,6 +18,7 @@
     graphWorkspace: '',
     graphData: null,
     graphDataMode: 'overview',
+    graphGalaxyQuality: false,
     graphDataPreset: 'galaxy',
     graphDataIncludeCode: false,
     graphDataShowUnlinked: false,
@@ -457,7 +458,7 @@
         graphAssetSource('/v2-assets/vendor/force-graph.min.js?v=20260727-final'),
         'ForceGraph', controller.signal,
       )).then(() => loadScript(
-        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260828-galaxy-default-gravity-1'),
+        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260831-galaxy-floor-fix-2'),
         'EngraphisGraph', controller.signal,
       )).then(() => loadScript(
         graphAssetSource('/v2-assets/engraphis-spacetime.js?v=20260812-stable-orbit-lanes-7'),
@@ -2338,7 +2339,9 @@
     const freezeRow = byId('graph-freeze-row');
     if (freezeRow) freezeRow.hidden = full;
     const orbitPause = byId('graph-orbit-pause-row');
-    if (orbitPause) orbitPause.hidden = full;
+    const galaxy = graphIsGalaxy();
+    const orbitCapable = galaxy && (!full || state.graphGalaxyQuality);
+    if (orbitPause) orbitPause.hidden = !orbitCapable;
     const style = byId('graph-style').value;
     const styleNotes = full ? GRAPH_LOD_STYLE_NOTES : GRAPH_STYLE_NOTES;
     byId('graph-style-note').textContent = styleNotes[style] || styleNotes.classic;
@@ -2359,6 +2362,7 @@
   function updateGraphGalaxyControls() {
     const galaxy = graphIsGalaxy();
     const full = state.graphMode === 'full';
+    const orbitCapable = galaxy && (!full || state.graphGalaxyQuality);
     const size = byId('graph-size');
     if (galaxy && !full) {
       if (['degree', 'betweenness'].includes(size.value)) size.dataset.legacyValue = size.value;
@@ -2379,25 +2383,39 @@
       const label = byId(id);
       if (label) label.textContent = labels[index];
     });
-    byId('graph-spacetime-tuning').hidden = !galaxy;
+    /* Keep the shared spacetime controls available for every renderer. Galaxy-specific rows
+       are gated below, while the normalized force controls remain useful to compact and
+       community layouts as well. */
+    byId('graph-spacetime-tuning').hidden = false;
     const forceLabels = full
       ? ['Core attraction', 'Core mass', 'Cluster cohesion', 'Settling resistance', 'Link spring']
       : ['Galactic gravity', 'Black hole mass', 'Local solar gravity', 'Space friction', 'Spring stiffness'];
     ['graph-gravitational-constant-label', 'graph-black-hole-mass-label',
       'graph-local-gravitational-constant-label', 'graph-space-damping-label',
-      'graph-spring-stiffness-label'].forEach((id, index) => {
+'graph-spring-stiffness-label'].forEach((id, index) => {
       const label = byId(id);
       if (label) label.textContent = forceLabels[index];
     });
-    byId('graph-spacetime-summary').textContent = full
-      ? 'All-node force refinement'
-      : 'Spacetime · black-hole orbit controls';
-    byId('graph-spacetime-note').textContent = full
-      ? 'These values refine the settled worker layout. The High quality orbit model stays unchanged.'
-      : 'Drag and release a node to slingshot it into a new orbit.';
+    const springLabel = byId('graph-spring-stiffness-label');
+    const springCapable = galaxy || (full && !state.graphGalaxyQuality);
+    if (springLabel && springLabel.parentElement) {
+      springLabel.parentElement.hidden = !springCapable;
+    }
+    const galaxyRenderer = galaxy && (!full || state.graphGalaxyQuality);
+    const everyRenderer = full && !state.graphGalaxyQuality;
+    byId('graph-spacetime-summary').textContent = galaxyRenderer
+      ? 'Spacetime · black-hole orbit controls'
+      : everyRenderer ? 'All-node force refinement' : 'Responsive force controls';
+    byId('graph-spacetime-note').textContent = galaxyRenderer
+      ? 'Drag and release a node to slingshot it into a new orbit.'
+      : everyRenderer
+        ? 'These values refine the settled worker layout.'
+        : 'These values tune the responsive force layout.';
     byId('graph-orbits-pause-label').textContent = 'Pause orbits';
     byId('graph-orbits-pause-detail').textContent = 'physics';
     byId('graph-orbits-pause').setAttribute('aria-label', 'Pause orbital physics');
+    const orbitPauseRow = byId('graph-orbit-pause-row');
+    if (orbitPauseRow) orbitPauseRow.hidden = !orbitCapable;
   }
 
   function setChoicePressed(selector, dataKey, selected) {
@@ -2437,11 +2455,13 @@
     const max = Number(control.max);
     return Math.min(Number.isFinite(max) ? max : safe, Math.max(Number.isFinite(min) ? min : safe, safe));
   }
-  /* Controls keep their human-readable ranges and defaults, while the engine receives a
-     bounded 2x response away from the selected preset baseline. This makes a drag feel
-     immediate and substantial without changing a saved view's neutral calibration or allowing
-     a slider to bypass its HTML safety bounds. */
-  const GRAPH_SLIDER_RESPONSE_GAIN = 2;
+  /* Controls keep their human-readable ranges and defaults. The engine value is computed by
+     a clamped identity 1:1 mapping: the slider's raw position flows straight to the engine,
+     bounded by the HTML min/max. The earlier 2x response saturated against the HTML bounds
+     for slider values near the loose and tight ends, producing visible plateaus where the
+     user dragged the slider but the engine value didn't change. Identity 1:1 with
+     [min, max] clamping gives every integer tick in the slider's full HTML range a
+     strictly distinct engine value. */
   function graphSliderResponseBaseline(item) {
     if (!item) return 0;
     if (item.id === 'graph-flow-speed') return 45;
@@ -2454,12 +2474,10 @@
     const control = byId(id);
     if (!control) return Number.isFinite(Number(value)) ? Number(value) : baseline;
     const raw = graphValueInRange(id, value, baseline);
-    const center = Number.isFinite(Number(baseline)) ? Number(baseline) : raw;
     const min = Number(control.min);
     const max = Number(control.max);
-    const expanded = center + (raw - center) * GRAPH_SLIDER_RESPONSE_GAIN;
-    return Math.min(Number.isFinite(max) ? max : expanded,
-      Math.max(Number.isFinite(min) ? min : expanded, expanded));
+    return Math.min(Number.isFinite(max) ? max : raw,
+      Math.max(Number.isFinite(min) ? min : raw, raw));
   }
   function graphSliderInputValue(id, value, baseline) {
     const control = byId(id);
@@ -2467,10 +2485,9 @@
     const min = Number(control.min);
     const max = Number(control.max);
     const safe = graphValueInRange(id, value, baseline);
-    const center = Number.isFinite(Number(baseline)) ? Number(baseline) : safe;
-    const compressed = center + (safe - center) / GRAPH_SLIDER_RESPONSE_GAIN;
-    return Math.min(Number.isFinite(max) ? max : compressed,
-      Math.max(Number.isFinite(min) ? min : compressed, compressed));
+    /* Identity inverse of the clamped identity response. */
+    return Math.min(Number.isFinite(max) ? max : safe,
+      Math.max(Number.isFinite(min) ? min : safe, safe));
   }
 
   function graphScopeValue(id, value, fallback) {
@@ -2532,20 +2549,31 @@
 
 
   let graphPreferencesSaveScheduled = false;
+  let graphPreferencesSaveCancel = null;
   function scheduleGraphPreferencesSave() {
     if (graphPreferencesSaveScheduled) return;
     graphPreferencesSaveScheduled = true;
     const flush = () => {
+      if (!graphPreferencesSaveScheduled) return;
       graphPreferencesSaveScheduled = false;
+      graphPreferencesSaveCancel = null;
       saveGraphPreferences();
     };
-    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(flush);
-    else setTimeout(flush, 0);
+    if (typeof requestAnimationFrame === 'function') {
+      const frame = requestAnimationFrame(flush);
+      graphPreferencesSaveCancel = () => cancelAnimationFrame(frame);
+    } else {
+      const timer = setTimeout(flush, 0);
+      graphPreferencesSaveCancel = () => clearTimeout(timer);
+    }
   }
 
   function flushGraphPreferencesSave() {
     if (!graphPreferencesSaveScheduled) return;
     graphPreferencesSaveScheduled = false;
+    const cancel = graphPreferencesSaveCancel;
+    graphPreferencesSaveCancel = null;
+    if (cancel) cancel();
     saveGraphPreferences();
   }
 
@@ -3505,6 +3533,7 @@
         state.graphData = data;
         state.graphWorkspace = targetWorkspace;
         state.graphDataMode = targetMode;
+        state.graphGalaxyQuality = galaxyQuality;
         state.graphDataPreset = byId('graph-preset').value;
         state.graphDataIncludeCode = responseIncludeCode;
         state.graphDataShowUnlinked = targetShowUnlinked;
