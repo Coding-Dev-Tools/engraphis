@@ -11562,6 +11562,107 @@ def test_classic_graph_controls_have_no_freeze_or_orbit_pause_in_full_mode() -> 
     assert "graph-show-iso" in source or "Show unlinked" in source
 
 
+def test_classic_gravity_slider_max_covers_every_preset_value() -> None:
+    """The classic gravity slider's ``max`` must be at least the largest preset value.
+
+    The classic dashboard exposes a ``data-graph-setting="gravity"`` range input and a
+    ``GRAPH_PRESETS`` table; ``graphApplyPreset`` writes the preset value into both
+    ``window.GSET`` and the input's ``value``. If the slider's ``max`` is below a preset
+    value, the browser silently clamps the input while the engine receives the full
+    preset value, so the visible slider no longer represents the live state. The
+    ``communities`` preset (``gravity: 48``) was the first to be misrepresented when the
+    slider's ``max`` was 40.
+    """
+    preset_source = CLASSIC_DASHBOARD.read_text(encoding="utf-8")
+    preset_match = re.search(
+        r"const GRAPH_PRESETS\s*=\s*\{(?P<body>.*?)\n\};",
+        preset_source,
+        re.DOTALL,
+    )
+    assert preset_match, "classic GRAPH_PRESETS table not found"
+    preset_entries = re.findall(
+        r"(\w+):\{[^}]*?gravity:([0-9.]+)[^}]*?\}",
+        preset_match.group("body"),
+    )
+    gravity_by_preset = {name: float(value) for name, value in preset_entries}
+    assert gravity_by_preset, "no gravity values parsed from GRAPH_PRESETS"
+    max_preset_gravity = max(gravity_by_preset.values())
+
+    for label, path in (("classic", ROOT / "engraphis" / "classic_assets" / "index.html"),
+                        ("static", INDEX)):
+        markup = path.read_text(encoding="utf-8")
+        slider_match = re.search(
+            r'<input[^>]*data-graph-setting="gravity"[^>]*>',
+            markup,
+        )
+        assert slider_match, f"gravity slider not found in {label} index.html"
+        max_match = re.search(r'\bmax="([0-9.]+)"', slider_match.group(0))
+        assert max_match, (
+            f"{label} gravity slider has no max= attribute: {slider_match.group(0)!r}"
+        )
+        slider_max = float(max_match.group(1))
+        assert slider_max >= max_preset_gravity, (
+            f"{label} gravity slider max={slider_max} is below the highest "
+            f"preset gravity ({max_preset_gravity}); the browser would clamp "
+            "the input away from its preset value."
+        )
+
+
+def test_classic_linkw_slider_does_not_scale_the_engine_value() -> None:
+    """The classic Line-width slider must round-trip ``GRAPH_PRESETS.<name>.linkw`` directly.
+
+    The classic dashboard reads ``GRAPH_PRESETS[*].linkw`` (raw, e.g. ``0.7``) and writes
+    the slider's ``value`` to the engine. The earlier ``data-graph-scale="10"`` attribute
+    multiplied the slider's display range by 10 (``min="2" max="45"``) but the read-back
+    path kept the scaled value, so picking the ``communities`` preset put ``linkw=7.2`` into
+    the engine and rendered edges ten times thicker than the preset intended. The Ledger
+    uses the raw range (``min="0.1" max="2"``) and the classic dashboard now matches it:
+    the slider's ``max`` must be at least the largest preset value, with no
+    ``data-graph-scale`` attribute amplifying the engine value.
+    """
+    preset_source = CLASSIC_DASHBOARD.read_text(encoding="utf-8")
+    preset_match = re.search(
+        r"const GRAPH_PRESETS\s*=\s*\{(?P<body>.*?)\n\};",
+        preset_source,
+        re.DOTALL,
+    )
+    assert preset_match, "classic GRAPH_PRESETS table not found"
+    preset_entries = re.findall(
+        r"(\w+):\{[^}]*?linkw:([0-9.]+)[^}]*?\}",
+        preset_match.group("body"),
+    )
+    linkw_by_preset = {name: float(value) for name, value in preset_entries}
+    assert linkw_by_preset, "no linkw values parsed from GRAPH_PRESETS"
+    max_preset_linkw = max(linkw_by_preset.values())
+
+    for label, path in (("classic", ROOT / "engraphis" / "classic_assets" / "index.html"),
+                        ("static", INDEX)):
+        markup = path.read_text(encoding="utf-8")
+        slider_match = re.search(
+            r'<input[^>]*data-graph-setting="linkw"[^>]*>',
+            markup,
+        )
+        assert slider_match, f"linkw slider not found in {label} index.html"
+        slider_tag = slider_match.group(0)
+        max_match = re.search(r'\bmax="([0-9.]+)"', slider_tag)
+        assert max_match, f"{label} linkw slider has no max= attribute"
+        slider_max = float(max_match.group(1))
+        assert slider_max >= max_preset_linkw, (
+            f"{label} linkw slider max={slider_max} is below the highest "
+            f"preset linkw ({max_preset_linkw}); the browser would clamp "
+            "the input away from its preset value."
+        )
+        # ``data-graph-scale`` rewrites the displayed value into a different unit. The
+        # Ledger ships the raw range; mirror that — the slider's raw value must equal
+        # the engine's linkw, or the engine renders edges at the wrong thickness.
+        assert "data-graph-scale" not in slider_tag, (
+            f"{label} linkw slider still carries data-graph-scale, which causes "
+            "graphSet() to send a 10x-scaled value to the engine. Remove the "
+            "attribute and ship the raw value range so the engine gets the preset's "
+            "intended thickness."
+        )
+
+
 def test_ledger_recovery_copy_names_reload_data_and_real_filters_only() -> None:
     """Recovery UI must say 'Reload data' and name only real, actionable filters."""
     source = PRIMARY_LEDGER.read_text(encoding="utf-8")
