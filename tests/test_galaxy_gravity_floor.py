@@ -185,7 +185,9 @@ def test_gravity_slider_every_integer_changes_carrier_radius_strictly() -> None:
     # Coarse contract: the loose endpoint (s=0) must be substantially looser than the
     # full tight endpoint (s=400, the user's "tight"). The slider's full range is
     # 0..400 (HTML min/max); 96 is the preset baseline, NOT the tight end.
-    # Contract: loose radius ≥ 1.5x tight radius (i.e. at least 33% contraction).
+    # The final painted-edge contact projection can cap the tight endpoint when this
+    # fixture's black-hole horizon intersects a contracted carrier. Keep a substantial
+    # 20% contraction contract after that invariant is enforced.
     report_full = _run(
         """
         const scene = """ + json.dumps(SCENE) + """;
@@ -206,15 +208,10 @@ def test_gravity_slider_every_integer_changes_carrier_radius_strictly() -> None:
     )
     loose = report_full["loose"]
     tight = report_full["tight"]
-    # 1.25x calibration: the merged renderer (PR spacetime feature + main floor removal)
-    # produces ~1.30x loose/tight contraction across the full 0..400 travel. The floor
-    # removal contract is that every tick is distinct AND the full travel produces a
-    # substantial visible contraction; 1.25x leaves regression headroom below the
-    # measured 1.30x while still catching any plateau collapse (the old bug was 1.0x).
     assert loose >= tight * 1.25, (
         f"Slider 0 (loose) vs 400 (tight): radii {loose:.2f} vs {tight:.2f}; "
         f"the slider should contract carriers by at least 20% across its full "
-        f"range (loose >= 1.25x tight), but the ratio is only "
+        f"range (loose >= 1.25x tight) after contact projection, but the ratio is only "
         f"{loose / tight if tight > 0 else float('inf'):.2f}x. The combined "
         f"response-mapping + floor-removal fix should let the slider's full "
         f"0..400 travel produce a substantial visible contraction."
