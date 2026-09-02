@@ -10826,6 +10826,119 @@ def test_spacetime_sliders_reach_d3_forces_in_non_galaxy_mode() -> None:
 
 
 
+def test_black_hole_mass_reaches_centering_forces_in_every_non_galaxy_layout() -> None:
+    """Black-hole mass must modulate the D3 centering strength in every non-Galaxy layout.
+
+    The normalized engine value arrives in ``applyForces()`` as ``massMultiplier``
+    (clamped to the adapter's full 0.125..4.4 interval). Communities and radial consumed it,
+    but compact/original (the default overview branch) and constellation ignored it, so
+    dragging the Black hole mass slider changed nothing visible in those modes (PR #185,
+    thread 3902779917). This pins the multiplier on the x/y centering forces with the d3
+    stubs the neighboring tests lack.
+    """
+    report = _run_engine(
+        """
+        const bodyForce = () => ({ strength(value) { this.value = value; return this; } });
+        globalThis.d3 = {
+          forceManyBody: bodyForce,
+          forceLink: () => ({
+            id(value) { this.idValue = value; return this; },
+            distance(value) { this.value = value; return this; },
+            strength(fn) { this.strengthValue = fn; return this; },
+          }),
+          forceX: target => ({ target, strength(value) { this.value = value; return this; } }),
+          forceY: target => ({ target, strength(value) { this.value = value; return this; } }),
+          forceCollide: () => ({ iterations(value) { this.value = value; return this; } }),
+          forceRadial: radius => ({ radius, strength(value) { this.value = value; return this; } }),
+        };
+        const api = G.create(el, {});
+        const axes = () => {
+          const f = store.d3Forces || {};
+          return [f.x && f.x.value, f.y && f.y.value];
+        };
+        const sampled = {};
+        for (const mode of ['compact', 'constellation']) {
+          api.setPreset(mode);
+          api.setData(chain(6));
+          api.setSettings({ gravity: 98, blackHoleMass: 1 });
+          sampled[mode] = {
+            weak: axes(),
+            blackHoleMassWeak: api.state().settings.blackHoleMass,
+          };
+          api.setSettings({ blackHoleMass: 400 });
+          sampled[mode].strong = axes();
+          sampled[mode].blackHoleMassStrong = api.state().settings.blackHoleMass;
+        }
+        emit(sampled);
+        """
+    )
+    for mode in ('compact', 'constellation'):
+        entry = report[mode]
+        assert entry['blackHoleMassWeak'] == pytest.approx(1.0)
+        assert entry['blackHoleMassStrong'] == pytest.approx(16.0)
+        weak_x, weak_y = entry['weak']
+        strong_x, strong_y = entry['strong']
+        assert weak_x is not None and weak_y is not None, f"{mode}: x/y forces missing"
+        base = 0.98 if mode == 'compact' else 0.18
+        # The centering strength must carry the mass multiplier: mass 1 -> 1.0x,
+        # mass 400 normalizes to engine setting 16; applyForces clamps the
+        # multiplier at the adapter's 4.4 ceiling, so the response saturates there.
+        assert weak_x == pytest.approx(base)
+        assert weak_y == pytest.approx(base)
+        assert strong_x == pytest.approx(base * 4.4)
+        assert strong_y == pytest.approx(base * 4.4)
+
+
+
+def test_slider_burst_reasserts_contact_invariant_when_galaxy_is_frozen() -> None:
+    """A phase-preserving slider render must still repair painted contact penetrations."""
+    report = _run_engine(
+        """
+        const api = G.create(el, { reducedMotion: () => false });
+        api.setPreset('galaxy');
+        api.setData({
+          nodes: [
+            { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+              system_anchor_id: 'black-hole', gravity_mass: 64, visual_radius: 8,
+              x: 0, y: 0, vx: 0, vy: 0 },
+            { id: 'star', anchor_role: 'community', community_id: 'outer',
+              system_anchor_id: 'star', gravity_mass: 8, visual_radius: 5,
+              x: 120, y: 0, vx: 0, vy: 0 },
+            { id: 'planet', community_id: 'outer', system_anchor_id: 'star',
+              orbit_tier: 1, gravity_mass: 1, visual_radius: 3,
+              x: 150, y: 0, vx: 0, vy: 0 },
+          ],
+          edges: [{ source: 'star', target: 'planet', layer: 'entity' }],
+        });
+        api.freeze(true);
+        const nodes = store.graphData.nodes;
+        const anchor = nodes.find(node => node.id === 'black-hole');
+        const star = nodes.find(node => node.id === 'star');
+        const planet = nodes.find(node => node.id === 'planet');
+        star.x = 0; star.y = 0; star.vx = 0; star.vy = 0;
+        planet.x = 1; planet.y = 0; planet.vx = 0; planet.vy = 0;
+        /* Size is a layout key and therefore takes the phase-preserving slider path while the
+           clock is frozen. The final contact projection must still run synchronously. */
+        api.setSettings({ size: 4 });
+        const diagnostics = api.physicsDiagnostics();
+        emit({ contacts: diagnostics.blackHoleExclusion.contacts,
+          starClearance: Math.hypot(star.x - anchor.x, star.y - anchor.y)
+            - anchor.radius - star.radius - diagnostics.blackHoleExclusionPadding,
+          planetClearance: Math.hypot(planet.x - star.x, planet.y - star.y)
+            - star.radius - planet.radius - diagnostics.systemAnchorExclusion.padding,
+          frozen: diagnostics.frozen,
+          finite: nodes.every(node =>
+            [node.x, node.y, node.vx, node.vy].every(Number.isFinite)) });
+        """
+    )
+    assert report["frozen"] is True
+    assert report["contacts"] > 0
+    assert report["starClearance"] >= -1e-9
+    assert report["planetClearance"] >= -1e-9
+    assert report["finite"] is True
+
+
+
 @requires_node
 def test_full_graph_within_the_force_budget_keeps_centre_gravity_live() -> None:
     """Full mode must not turn a normal large workspace into a pinned, inert ring.

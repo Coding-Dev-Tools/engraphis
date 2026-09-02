@@ -7501,6 +7501,7 @@
        saved phase byte-for-byte after the render's safety projections. */
     let galaxyPhaseRestorePending = false;
     let preserveGalaxyPhaseOnResume = false;
+    let galaxyContactCorrectionDeferred = false;
     let adj = Object.create(null), liveAdj = Object.create(null), hilite = null, hoverSet = null, maxDeg = 1;
     let legacySizeBy = 'degree';
     // The classic renderer treats label density as a hard ranked cap, not merely a looser
@@ -8040,6 +8041,7 @@
       setSimulationBudget(false, true);
     }
 
+
     function applyForces() {
       /* Extremely large complete snapshots use the deterministic fallback, but a normal
          full graph remains a live layout. The previous `renderMode === 'full'` guard removed
@@ -8130,15 +8132,16 @@
          large) is the neutral settling behaviour, so the slider's effect is a *multiplier*
          on that baseline, not a replacement. Above 1 the layout settles harder, below 1
          it stays more elastic. */
+      /* Space friction (the dashboard's "damping" slider) maps onto d3's velocityDecay.
+         The slider's 0..15 visible range must reach the full d3 decay range so the lower
+         quarter is not inert. At the default (slider=1) the size-aware baseline (0.38 small
+         / 0.45 large) is the neutral settling behaviour, so the slider's effect is a
+         *multiplier* on that baseline, not a replacement. Above 1 the layout settles
+         harder, below 1 it stays more elastic, down to the d3 floor 0.05 at 0. */
       if (fg.d3VelocityDecay) {
         const dampingRaw = Number(state.settings.damping);
         const damping = Number.isFinite(dampingRaw) ? clamp(dampingRaw, 0, 15) : 1;
         const baseline = large ? 0.45 : 0.38;
-        /* Linearly interpolate between the d3 velocityDecay floor (0.05) at damping=0,
-           the size-aware baseline at damping=1, and the d3 velocityDecay ceiling (0.85)
-           at damping=15. The full 0..15 visible range is now meaningful, and the default
-           (damping=1) keeps the size-aware settling behaviour the rest of the engine
-           already assumes. */
         const floor = 0.05;
         const ceiling = 0.85;
         const target = damping <= 1
@@ -9268,6 +9271,7 @@
          behaviour synchronous while browsers coalesce a burst of range-input events. */
       if (typeof window === 'undefined' || typeof window.requestAnimationFrame !== 'function') {
         physicsReheatPending = false;
+        galaxyContactCorrectionDeferred = false;
         render(false, true);
         return;
       }
@@ -9282,7 +9286,13 @@
         physicsFrame = 0;
         if (destroyed || suspended || !physicsReheatPending) return;
         physicsReheatPending = false;
-        if (phaseLock) preserveGalaxyPhaseOnResume = true;
+        if (phaseLock) {
+          preserveGalaxyPhaseOnResume = true;
+          /* Apply the painted-edge projection once, after the browser has coalesced the
+             complete input burst. Intermediate projections would make the final layout depend
+             on how many range-input events happened before this frame. */
+          galaxyContactCorrectionDeferred = false;
+        }
         render(false, true);
       });
     }
@@ -9494,7 +9504,7 @@
           envelopeRadius: galaxyLastFarFieldConfinement.envelopeRadius,
           softRadius: galaxyLastFarFieldConfinement.softRadius,
           samples: 0, acceleratedSystems: 0, acceleratedCoreNodes: 0,
-          acceleratedFixedFollowers: 0, maximumAcceleration: 0,
+          acceleratedFixedSource: 0, acceleratedFixedFollowers: 0, maximumAcceleration: 0,
         };
         const postOuterHorizon = applyGalaxyBlackHoleExclusion(
           data.nodes, { padding: GALAXY_BLACK_HOLE_EXCLUSION_PADDING }
@@ -9516,6 +9526,60 @@
         galaxyLastBlackHoleExclusion = combineGalaxyBlackHoleExclusions(
           [prePaintHorizon, postOuterHorizon, postStarHorizon]
         );
+      } else if (reused && galaxyMode && skipGalaxyReseed) {
+        /* The slider burst just rescaled carriers and their satellites by a known ratio.
+           The phase-preserving contact pass is deferred until the coalesced frame below. */
+        const skippedAnchor = galaxyGlobalAnchor(data.nodes);
+        if (galaxyContactCorrectionDeferred) {
+          /* A range-input burst can issue several synchronous settings updates before the
+             scheduled browser frame. Preserve the complete multiplicative response first, then
+             project once in that final frame. This keeps the painted-edge invariant while
+             making a single jump and an equivalent fine sweep converge to the same state. */
+          galaxyLastSystemAnchorExclusion = combineGalaxySystemAnchorExclusions([{
+            padding: GALAXY_SYSTEM_ANCHOR_EXCLUSION_PADDING,
+            systems: 0, contacts: 0, correctedDistance: 0, maximumShift: 0,
+            inwardVelocityRemoved: 0, tangentialVelocityRemoved: 0,
+            minimumClearance: null, iterations: 0,
+          }]);
+          galaxyLastBlackHoleExclusion = combineGalaxyBlackHoleExclusions([{
+            anchorId: skippedAnchor ? skippedAnchor.id : null,
+            contacts: 0, systems: 0, coreNodes: 0, fixedSystemNodes: 0,
+            repelledNodes: 0, correctedDistance: 0, maximumShift: 0,
+            inwardVelocityRemoved: 0, tangentialVelocityRemoved: 0,
+            minimumClearance: null,
+          }]);
+        } else {
+          /* The final scheduled frame still enforces both painted contact boundaries, including
+             while the Galaxy clock is frozen or orbit-paused. */
+          const prePaintHorizon = applyGalaxyBlackHoleExclusion(
+            data.nodes, { padding: GALAXY_BLACK_HOLE_EXCLUSION_PADDING }
+          );
+          const preStarExclusion = applyGalaxySystemAnchorExclusion(data.nodes, {
+            padding: GALAXY_SYSTEM_ANCHOR_EXCLUSION_PADDING,
+            fixAnchors: true,
+          });
+          const postStarExclusion = applyGalaxySystemAnchorExclusion(data.nodes, {
+            padding: GALAXY_SYSTEM_ANCHOR_EXCLUSION_PADDING,
+            fixAnchors: true,
+          });
+          const postPaintHorizon = applyGalaxyBlackHoleExclusion(
+            data.nodes, { padding: GALAXY_BLACK_HOLE_EXCLUSION_PADDING }
+          );
+          galaxyLastSystemAnchorExclusion = combineGalaxySystemAnchorExclusions(
+            [preStarExclusion, postStarExclusion]
+          );
+          galaxyLastBlackHoleExclusion = combineGalaxyBlackHoleExclusions(
+            [prePaintHorizon, postPaintHorizon]
+          );
+        }
+        galaxyLastFarFieldConfinement = galaxyLastFarFieldConfinement || {
+          anchorId: skippedAnchor ? skippedAnchor.id : null, envelopeRadius: 0, softRadius: 0,
+          acceleratedSystems: 0, boundedSystems: 0, boundedCoreNodes: 0,
+          boundedFixedSource: 0, boundedFixedFollowers: 0, boundedDeformedSystems: 0,
+          boundedOversizedNodes: 0, correctedDistance: 0, maximumShift: 0,
+          outwardVelocityRemoved: 0, tangentialVelocityRemoved: 0,
+          annulus: { innerCorrectedNodes: 0, outerCorrectedNodes: 0, infeasibleNodes: 0 },
+        };
       }
       applyForces();
       fg.autoPauseRedraw(!needsContinuousFrames());
@@ -9526,19 +9590,6 @@
       /* D3 is only the renderer in Galaxy mode. Its alpha, velocity decay and countdown are
          intentionally untouched; the fixed-step clock owns all three physical concerns. */
       if (!galaxyMode && fg.d3AlphaDecay) fg.d3AlphaDecay(staticFullLayout ? 1 : alphaDecay());
-      if (!galaxyMode && fg.d3VelocityDecay) {
-        /* applyForces() above already installed the user-facing damping slider value. The
-           size-aware baseline (0.38 small / 0.45 large) is only the *default* when the user
-           has not touched the slider, so this fallback must not clobber a value the user has
-           already set. The proxy in the test harness (and the real force-graph) returns the
-           same function for any property access, so we cannot ask "was the setter called?" —
-           instead we honour the slider's value whenever it is finite, and only fall back to
-           the size-aware baseline when the dashboard never supplied a damping value. */
-        const dampingSetting = Number(state.settings.damping);
-        if (!Number.isFinite(dampingSetting)) {
-          fg.d3VelocityDecay(large ? 0.45 : 0.38);
-        }
-      }
       if (fg.linkCurvature) {
         fg.linkCurvature(dense ? 0 : ((PRESETS[state.settings.mode] || PRESETS.compact).curve || 0));
       }
@@ -10187,6 +10238,7 @@
           || next.blackHoleMass !== undefined || next.damping !== undefined
           || next.springStiffness !== undefined)) {
         preserveGalaxyPhaseOnResume = true;
+        galaxyContactCorrectionDeferred = true;
       }
       if (gravityChanged && previousMode === 'galaxy' && state.settings.mode === 'galaxy') {
         /* Gravity changes need an immediate, legible density response: a range control whose
@@ -10271,6 +10323,13 @@
         preserveGalaxyPhaseOnResume = true;
       }
       render(false, false);
+      /* Re-arm the phase-preserve flag for the synchronous physics reheat that follows. That
+         reheat shares the same render path and would otherwise run contact corrections on the
+         post-scaling layout, undoing the slider's burst response and breaking path
+         independence across burst intermediates. */
+      if (gravityChanged && previousMode === 'galaxy' && state.settings.mode === 'galaxy') {
+        preserveGalaxyPhaseOnResume = true;
+      }
       if (layoutChanged) schedulePhysicsUpdate();
     };
     api.setPreset = name => {
