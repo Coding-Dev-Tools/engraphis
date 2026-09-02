@@ -458,7 +458,7 @@
         graphAssetSource('/v2-assets/vendor/force-graph.min.js?v=20260727-final'),
         'ForceGraph', controller.signal,
       )).then(() => loadScript(
-        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260831-galaxy-floor-fix-2'),
+        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260902-slider-merge-1'),
         'EngraphisGraph', controller.signal,
       )).then(() => loadScript(
         graphAssetSource('/v2-assets/engraphis-spacetime.js?v=20260812-stable-orbit-lanes-7'),
