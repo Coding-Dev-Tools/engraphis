@@ -112,5 +112,52 @@ class EndToEndBehavior(unittest.TestCase):
         self.assertEqual(fake.call_args.args[1], "ops")
 
 
+class FailOpenBoundaryTests(unittest.TestCase):
+    """Malformed env overrides must not crash the hook at import time."""
+
+    def setUp(self):
+        self.hook = _load()
+
+    def test_malformed_budget_falls_back_to_default(self):
+        """ENGRAPHIS_HOOK_BUDGET_S=not-a-number must not raise; main()
+        uses the default budget so the hook still fails open.
+        """
+        with mock.patch.dict(
+            os.environ,
+            {
+                "ENGRAPHIS_MCP_URL": "http://127.0.0.1:9/mcp",
+                "ENGRAPHIS_HOOK_BUDGET_S": "not-a-number",
+            },
+            clear=False,
+        ):
+            with mock.patch.object(self.hook, "session_context", return_value="") as fake:
+                with mock.patch.object(sys, "stdin", mock.MagicMock(read=lambda: "{}")):
+                    with mock.patch.object(sys, "stdout", mock.MagicMock()):
+                        rc = self.hook.main()
+        # The hook must not crash; the deadline is computed from the
+        # fallback default (4.0s) so the session_context call still
+        # happens with a valid future deadline.
+        self.assertEqual(rc, 0)
+        self.assertGreater(fake.call_args.args[2], 0)
+
+    def test_malformed_max_chars_falls_back_to_default(self):
+        """ENGRAPHIS_HOOK_MAX_CHARS=not-a-number must not raise."""
+        with mock.patch.dict(
+            os.environ,
+            {
+                "ENGRAPHIS_MCP_URL": "http://127.0.0.1:9/mcp",
+                "ENGRAPHIS_HOOK_MAX_CHARS": "also-not-a-number",
+            },
+            clear=False,
+        ):
+            with mock.patch.object(self.hook, "session_context", return_value="ctx"):
+                with mock.patch.object(sys, "stdin", mock.MagicMock(read=lambda: "{}")):
+                    with mock.patch.object(sys, "stdout", mock.MagicMock()) as buf:
+                        rc = self.hook.main()
+        self.assertEqual(rc, 0)
+        # The default 1500-char limit is in effect.
+        self.assertIn("ctx", buf.write.call_args.args[0])
+
+
 if __name__ == "__main__":
     unittest.main()
