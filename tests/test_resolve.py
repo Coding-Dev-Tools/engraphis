@@ -329,13 +329,9 @@ def test_reworded_marker_correction_invalidates_across_phrasings():
 
 
 def test_reworded_marker_without_value_swap_does_not_invalidate():
-    """A change marker on a candidate that shares only loose subject nouns
-    with the neighbour is not correction evidence. Common words like "now"
-    leak into every sentence, and surface noun overlap ("production API")
-    does not imply predicate agreement ("uses Redis caching" vs "uses
-    three replicas"). The marker leg now requires a value_swap on the
-    same shared subject — predicate and value together, not just
-    predicate and marker.
+    """A marker cannot turn different backing-infrastructure facts into a
+    proven single-attribute correction. Redis caching and three replicas
+    share the production API subject, but both facts remain live.
     """
     neighbor = _rec("The production API uses Redis caching for user sessions.",
                     id="mem_cache")
@@ -358,7 +354,95 @@ def test_distinct_environment_values_never_invalidate_each_other():
     # Same attribute, different environment qualifier: two coexisting facts.
     neighbor = _rec("Redis cache TTL is 300 seconds in staging.", id="mem_ttl_staging")
     res = resolve("Redis cache TTL is 3600 seconds in production.", [(0.7, neighbor)])
+    assert res.op == ResolutionOp.RELATE
+    assert res.target_id == "mem_ttl_staging"
+
+
+def test_environment_conflict_relates_near_duplicate_records():
+    """Different environments are separate live facts, even at duplicate overlap."""
+    neighbor = _rec("API timeout is 30 seconds in staging.", id="mem_staging")
+    res = resolve("API timeout is 90 seconds in production.", [(0.95, neighbor)])
+    assert res.op == ResolutionOp.RELATE
+    assert res.target_id == "mem_staging"
+
+
+def test_numeric_subject_identifier_drift_does_not_invalidate():
+    """Changing an account id selects another subject; it is not a value correction."""
+    neighbor = _rec("Customer account 100 is active in production.", id="mem_account_100")
+    res = resolve("Customer account 200 is active in production.", [(0.9, neighbor)])
+    assert res.op == ResolutionOp.RELATE
+    assert res.target_id == "mem_account_100"
+
+
+def test_numeric_value_after_non_identifier_label_invalidates():
+    """A changed timeout value must not be mistaken for subject identity drift."""
+    neighbor = _rec("Server timeout is 30 seconds.", id="mem_timeout_30")
+    res = resolve("Server timeout is 60 seconds.", [(0.9, neighbor)])
+    assert res.op == ResolutionOp.INVALIDATE
+    assert res.target_id == "mem_timeout_30"
+
+
+def test_leading_numeric_attribute_is_not_mistaken_for_subject_identity():
+    neighbor = _rec(
+        "Timeout 30 seconds with retry and circuit breaker enabled.",
+        id="mem_timeout_compact_30",
+    )
+    res = resolve(
+        "Timeout 60 seconds with retry and circuit breaker enabled.",
+        [(0.9, neighbor)],
+    )
+    assert res.op == ResolutionOp.INVALIDATE
+    assert res.target_id == "mem_timeout_compact_30"
+
+
+def test_numeric_subject_identifier_drift_supports_unlisted_entity_labels():
+    neighbor = _rec(
+        "Invoice 100 has status paid with archived receipt and audit metadata.",
+        id="mem_invoice_100",
+    )
+    res = resolve(
+        "Invoice 200 has status paid with archived receipt and audit metadata.",
+        [(0.9, neighbor)],
+    )
+    assert res.op == ResolutionOp.RELATE
+    assert res.target_id == "mem_invoice_100"
+
+
+def test_named_subject_drift_does_not_invalidate_near_duplicate():
+    neighbor = _rec(
+        "Premium plan for Customer Alice includes 10 users, 5 projects, "
+        "and production support with annual billing metadata.",
+        id="mem_customer_alice",
+    )
+    res = resolve(
+        "Premium plan for Customer Bob includes 20 users, 5 projects, "
+        "and production support with annual billing metadata.",
+        [(0.9, neighbor)],
+    )
+    assert res.op == ResolutionOp.RELATE
+    assert res.target_id == "mem_customer_alice"
+
+
+def test_near_duplicate_environment_conflict_is_retained_with_same_value():
+    neighbor = _rec(
+        "The primary database connection pool in the staging environment holds "
+        "30 connections per application instance under nominal load.",
+        id="mem_staging_pool_same_value",
+    )
+    res = resolve(
+        "The primary database connection pool in the production environment holds "
+        "30 connections per application instance under nominal load.",
+        [(0.9, neighbor)],
+    )
+    assert res.op == ResolutionOp.RELATE
+    assert res.target_id == "mem_staging_pool_same_value"
+
+
+def test_subject_identifier_label_cannot_be_masked_by_shared_attribute_anchor():
+    neighbor = _rec("User role admin for tenant alpha.", id="mem_tenant_alpha")
+    res = resolve("User role admin for tenant beta.", [(0.9, neighbor)])
     assert res.op != ResolutionOp.INVALIDATE
+    assert res.target_id == "mem_tenant_alpha"
 
 
 def test_named_identifier_swap_is_not_proven_a_correction_without_marker():
@@ -369,12 +453,50 @@ def test_named_identifier_swap_is_not_proven_a_correction_without_marker():
     assert res.op != ResolutionOp.INVALIDATE
 
 
-def test_clean_noun_swap_vetoes_strong_joint_invalidation():
-    # Pre-existing false-invalidation class: strong overlap+cosine, but the diff
-    # replaces one plain noun with another and no value changes.
+def test_single_noun_swap_without_attribute_anchor_stays_live():
+    """REST versus GraphQL is not proven to be a correction of one
+    attribute merely because both facts concern the docs.
+    """
     neighbor = _rec("The docs cover the REST interface.", id="mem_docs_rest")
     res = resolve("The docs cover the GraphQL interface.", [(0.9, neighbor)])
-    assert res.op == ResolutionOp.RELATE
+    assert res.op != ResolutionOp.INVALIDATE
+
+
+def test_default_branch_master_to_main_invalidates():
+    """rc06 in eval/datasets/resolver_reworded_corrections.jsonl. Single
+    noun-for-noun swap on a tight shared subject is a correction under
+    the attribute-correction contract.
+    """
+    neighbor = _rec("The default branch is named master.", id="mem_branch_master")
+    res = resolve("The default branch is named main.", [(0.85, neighbor)])
+    assert res.op == ResolutionOp.INVALIDATE
+    assert res.target_id == "mem_branch_master"
+
+
+def test_default_admin_root_to_admin_invalidates():
+    """rc10 in eval/datasets/resolver_reworded_corrections.jsonl."""
+    neighbor = _rec("The default admin user is root.", id="mem_admin_root")
+    res = resolve("The default admin user is now admin.", [(0.85, neighbor)])
+    assert res.op == ResolutionOp.INVALIDATE
+    assert res.target_id == "mem_admin_root"
+
+
+def test_log_level_info_to_debug_invalidates():
+    """rc33 in eval/datasets/resolver_reworded_corrections.jsonl."""
+    neighbor = _rec("Default log level is INFO.", id="mem_loglevel_info")
+    res = resolve("Default log level is DEBUG now.", [(0.85, neighbor)])
+    assert res.op == ResolutionOp.INVALIDATE
+    assert res.target_id == "mem_loglevel_info"
+
+
+def test_finding_one_about_caching_and_finding_two_about_latency_stays_live():
+    """A shared sentence frame does not prove that caching and latency
+    describe the same attribute.
+    """
+    neighbor = _rec("Finding one about caching.", id="mem_a")
+    res = resolve("Finding two about latency budgets.", [(0.9, neighbor)])
+    assert res.op != ResolutionOp.INVALIDATE
+    assert res.target_id != "mem_a"
 
 
 def test_distinct_attribute_with_numbers_stays_live():
@@ -456,10 +578,8 @@ def test_marker_with_value_swap_invalidates():
 
 
 def test_marker_alone_without_value_swap_does_not_invalidate():
-    # "We migrated the docs to cover the GraphQL interface" against
-    # "The docs cover the REST interface" has a marker and a heavy noun
-    # swap but no value_swap — different facts about a similar topic,
-    # not the same fact restated. Stays ADD.
+    # A migration marker plus a noun swap is still not proof that REST
+    # was corrected to GraphQL as the same attribute.
     neighbor = _rec("The docs cover the REST interface.", id="mem_docs_rest")
     res = resolve("We migrated the docs to cover the GraphQL interface.",
                   [(0.9, neighbor)])
@@ -492,3 +612,53 @@ def _memory_obj(id: str, content: str, *, valid_to=None):
         subject_key="", claim_kind="", keywords=(), metadata={},
         provenance={"source": "agent", "trusted": True, "review_state": "approved"},
     )
+
+
+def test_unkeyed_facts_with_distinct_subjects_about_same_attribute_both_live():
+    """Two live facts describing parallel subjects in the same scope
+    must not be collapsed by the strong branch when each one carries
+    its own subject (``Customer alpha`` vs ``Customer beta``). The
+    shared prefix "Customer [subject] default admin user is" makes
+    every replacement pass ``_attribute_anchor_ok``, but the subjects
+    differ, so the two facts are coexisting truths and should both
+    stay live.
+    """
+    from engraphis.core.engine import MemoryEngine
+    eng = MemoryEngine.create(":memory:", auto_evolve=False)
+    try:
+        wid = eng.store.get_or_create_workspace("w")
+        rid = eng.store.get_or_create_repo(wid, "r")
+        alpha = eng.remember_with_resolution(
+            "Customer alpha default admin user is root.",
+            workspace_id=wid, repo_id=rid)
+        beta = eng.remember_with_resolution(
+            "Customer beta default admin user is admin.",
+            workspace_id=wid, repo_id=rid)
+        # Both facts should remain live (no supersession).
+        assert beta["op"] in ("add", "relate")
+        assert eng.store.get_memory(alpha["id"]).valid_to is None
+        assert eng.store.get_memory(beta["id"]).valid_to is None
+    finally:
+        eng.store.close()
+
+
+def test_unkeyed_facts_with_organization_subjects_both_live():
+    """Recognized organization labels must protect distinct subject names."""
+    from engraphis.core.engine import MemoryEngine
+    eng = MemoryEngine.create(":memory:", auto_evolve=False)
+    try:
+        wid = eng.store.get_or_create_workspace("w")
+        rid = eng.store.get_or_create_repo(wid, "r")
+        alpha = eng.remember_with_resolution(
+            "User role admin for organization alpha.",
+            workspace_id=wid, repo_id=rid,
+        )
+        beta = eng.remember_with_resolution(
+            "User role admin for organization beta.",
+            workspace_id=wid, repo_id=rid,
+        )
+        assert beta["op"] == "relate"
+        assert eng.store.get_memory(alpha["id"]).valid_to is None
+        assert eng.store.get_memory(beta["id"]).valid_to is None
+    finally:
+        eng.store.close()

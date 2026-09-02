@@ -181,3 +181,63 @@ def test_uninstall_preserves_sibling_hook_in_same_wrapper(fake_settings) -> None
     entries = payload["hooks"]["SessionStart"]
     assert len(entries) == 1
     assert entries[0]["hooks"] == [sibling]
+
+
+def test_install_preserves_wrapper_level_metadata(fake_settings) -> None:
+    """A SessionStart wrapper that carries wrapper-level config (such as a
+    ``matcher`` filter) must keep those keys when our entry is refreshed
+    in-place. Reinstalling must not silently drop the operator's filter.
+    """
+    module, settings_path = fake_settings
+    settings_path.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "SessionStart": [
+                        {
+                            "matcher": "session_id == 'abc'",
+                            "hooks": [module._hook_entry()],
+                        },
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    module.install()
+    payload = json.loads(settings_path.read_text(encoding="utf-8"))
+    entries = payload["hooks"]["SessionStart"]
+    assert len(entries) == 1
+    assert entries[0]["matcher"] == "session_id == 'abc'"
+    assert entries[0]["hooks"] == [module._hook_entry()]
+
+
+def test_uninstall_preserves_wrapper_level_metadata_with_sibling(fake_settings) -> None:
+    """uninstall() with a sibling present must keep wrapper-level keys."""
+    module, settings_path = fake_settings
+    sibling = {
+        "type": "command",
+        "command": "some-other-tool --flag",
+        "timeout": 5,
+    }
+    settings_path.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "SessionStart": [
+                        {
+                            "matcher": "session_id == 'abc'",
+                            "hooks": [sibling, module._hook_entry()],
+                        },
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    module.uninstall()
+    payload = json.loads(settings_path.read_text(encoding="utf-8"))
+    entries = payload["hooks"]["SessionStart"]
+    assert len(entries) == 1
+    assert entries[0]["matcher"] == "session_id == 'abc'"
+    assert entries[0]["hooks"] == [sibling]

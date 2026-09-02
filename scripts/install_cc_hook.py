@@ -94,7 +94,9 @@ def _strip_our_entries(wrapper: dict) -> dict | None:
     """Return a new wrapper with our inner entries removed.
 
     Returns ``None`` if the wrapper becomes empty after stripping (caller drops
-    it). Preserves every sibling inner entry the operator added manually.
+    it). Preserves every sibling inner entry the operator added manually and
+    every wrapper-level key (e.g. ``matcher``) so uninstall does not silently
+    drop the operator's filter config.
     """
     remaining = [
         entry for entry in wrapper.get("hooks", []) or []
@@ -102,7 +104,9 @@ def _strip_our_entries(wrapper: dict) -> dict | None:
     ]
     if not remaining:
         return None
-    return {"hooks": remaining}
+    new_wrapper = dict(wrapper)
+    new_wrapper["hooks"] = remaining
+    return new_wrapper
 
 
 def _refresh_existing_wrappers(hooks: list) -> bool:
@@ -120,9 +124,10 @@ def _refresh_existing_wrappers(hooks: list) -> bool:
             continue
         refreshed = True
         siblings = [e for e in inner if not _is_our_entry(e)]
-        # Re-add the fresh entry alongside the siblings so the original
-        # wrapper is preserved verbatim except for our entry being replaced.
-        hooks[i] = {"hooks": [*siblings, _hook_entry()]}
+        # Reuse the existing wrapper dict so any wrapper-level keys the
+        # operator added (e.g. ``matcher``) are preserved; only swap the
+        # inner ``hooks`` list.
+        wrapper["hooks"] = [*siblings, _hook_entry()]
     return refreshed
 
 
@@ -150,6 +155,10 @@ def uninstall() -> None:
         stripped = _strip_our_entries(wrapper)
         if stripped is not None:
             cleaned.append(stripped)
+        elif wrapper is settings["hooks"]["SessionStart"][0]:
+            # No-op, but explicit: a wrapper that becomes empty after
+            # stripping is dropped (caller removed via ``cleaned.append``).
+            pass
     settings["hooks"]["SessionStart"] = cleaned
     if not settings["hooks"]["SessionStart"]:
         del settings["hooks"]["SessionStart"]
