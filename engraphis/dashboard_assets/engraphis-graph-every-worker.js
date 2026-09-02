@@ -22,7 +22,11 @@
   const MAX_CENTROID_GROUPS = 512;
 
   let model = null;
-  let settings = { repel: 48, link: 16, gravity: 48 };
+  let settings = {
+    repel: 48, link: 16, gravity: 48,
+    gravitationalConstant: 1, blackHoleMass: 1, localGravitationalConstant: 1,
+    damping: 1, springStiffness: 1,
+  };
   let generation = 0;
 
   function post(message) { self.postMessage(message); }
@@ -217,16 +221,27 @@
        springs run weak — they are visual routes between districts, not licence to drag
        the districts into one another over the settle passes. */
     const scaledSpacing = SPACING * MAP_SCALE;
-    const rest = Math.max(scaledSpacing * 1.9, Number(settings.link) * 1.6 * (MAP_SCALE * 0.55));
+    const spring = Number.isFinite(Number(settings.springStiffness))
+      ? Math.max(0, Math.min(100 / 32, Number(settings.springStiffness))) : 1;
+    // springStiffness is already a normalized multiplier from the dashboard. Preserve its
+    // zero endpoint so the Link spring control can actually disable pair attraction.
+    const springScale = spring;
+    /* Bumped from *1.6 to *2.4 — the link-distance slider now produces 50% more spring
+       rest-length change per slider unit, so the upper half of the slider is meaningfully
+       more responsive. */
+    const rest = Math.max(scaledSpacing * 1.9, Number(settings.link) * 2.4 * (MAP_SCALE * 0.55));
     for (let edge = 0; edge < model.totalLinks; edge += 1) {
       const a = model.sources[edge], b = model.targets[edge];
       const ddx = pos[b * 2] - pos[a * 2], ddy = pos[b * 2 + 1] - pos[a * 2 + 1];
       const dist = Math.sqrt(ddx * ddx + ddy * ddy) || 0.0001;
       const crossCommunity =
         model.communities[a] !== model.communities[b] ? 0.02 : 0.07;
-      const force = (dist - rest) / dist * crossCommunity;
-      dx[a] -= ddx * force; dy[a] -= ddy * force;
-      dx[b] += ddx * force; dy[b] += ddy * force;
+      const force = (dist - rest) / dist * crossCommunity * springScale;
+      /* `force` is positive when the pair is beyond rest and negative when it overlaps.
+         Apply equal-and-opposite corrections along a→b so positive force attracts the pair
+         and negative force separates it. */
+      dx[a] += ddx * force; dy[a] += ddy * force;
+      dx[b] -= ddx * force; dy[b] -= ddy * force;
     }
 
     /* Local repulsion through a spatial hash with a per-node visit cap keeps each pass O(n)
@@ -241,7 +256,18 @@
     }
     const minDist = SPACING * MAP_SCALE * 1.55;
     const minDist2 = minDist * minDist;
-    const push = Number(settings.repel) / 48;
+    /* Bumped from /48 to /24 — the Every-node engine now produces 100% more repulsion per
+       slider unit, so the upper half of the repel slider is meaningfully more responsive. */
+    /* The dashboard maps the 0..200 Cluster cohesion slider to localGravitationalConstant
+       0..4, so clamping at 2 left the entire upper half of the control inert: it is this
+       worker's only consumer of the setting (PR #177 review thread at this site). Accept
+       the full emitted range and floor the inverted push coefficient at zero so a high
+       cohesion cannot turn the collision-style push into an attraction. */
+    const cohesion = Number.isFinite(Number(settings.localGravitationalConstant))
+      ? Math.max(0, Math.min(4, Number(settings.localGravitationalConstant))) : 1;
+    /* Cluster cohesion strengthens the attractive spring network above. Invert its influence
+       on the collision-style push so a higher cohesion setting does not spread clusters apart. */
+    const push = Number(settings.repel) / 24 * Math.max(0, 1.5 - 0.5 * cohesion);
     for (let index = 0; index < count; index += 1) {
       const gx = Math.floor(pos[index * 2] / cell), gy = Math.floor(pos[index * 2 + 1] / cell);
       let checked = 0;
@@ -314,14 +340,29 @@
       }
     }
 
-    const gravity = Number(settings.gravity) / 48 * 0.0015;
+    /* Bumped from 0.0015 to 0.0033 — combined with the base gravity 25% bump and the
+       linear (no-sqrt) mass path, the Every-node worker pulls nodes toward the centre
+       ~50% harder at every slider position than the previous 0.0022 calibration.
+       The dashboard emits Core attraction over 0..4 (raw/50) and Core mass up to 4.4;
+       clamping at 2 left the upper half of those controls inert (PR #177 review thread
+       at this site), so the full emitted ranges are consumed. */
+    const coreAttraction = Number.isFinite(Number(settings.gravitationalConstant))
+      ? Math.max(0, Math.min(4, Number(settings.gravitationalConstant))) : 1;
+    const coreMass = Number.isFinite(Number(settings.blackHoleMass))
+      ? Math.max(0, Math.min(4.4, Number(settings.blackHoleMass))) : 1;
+    const gravity = Number(settings.gravity) / 48 * 0.0033 * coreAttraction * coreMass;
     for (let index = 0; index < count; index += 1) {
       dx[index] += (cx - pos[index * 2]) * gravity;
       dy[index] += (cy - pos[index * 2 + 1]) * gravity;
     }
 
     /* A tight per-pass step cap keeps the settle from smearing district boundaries. */
-    const damp = 0.8, maxStep = SPACING * MAP_SCALE * 0.7;
+    const resistance = Number.isFinite(Number(settings.damping))
+      ? Math.max(0, Math.min(15, Number(settings.damping))) : 1;
+    /* Keep the full 0..15 control range responsive: the reciprocal curve reaches 0.2
+       at resistance 13, so a 0.2 floor would make the final two slider units inert. */
+    const damp = Math.max(0.15, Math.min(0.95, 0.8 / (0.75 + 0.25 * resistance)));
+    const maxStep = SPACING * MAP_SCALE * 0.7;
     for (let index = 0; index < count; index += 1) {
       let vx = dx[index] * damp, vy = dy[index] * damp;
       const speed = Math.sqrt(vx * vx + vy * vy);
@@ -409,6 +450,15 @@
         repel: Number.isFinite(Number(next.repel)) ? Number(next.repel) : settings.repel,
         link: Number.isFinite(Number(next.link)) ? Number(next.link) : settings.link,
         gravity: Number.isFinite(Number(next.gravity)) ? Number(next.gravity) : settings.gravity,
+        gravitationalConstant: Number.isFinite(Number(next.gravitationalConstant))
+          ? Number(next.gravitationalConstant) : settings.gravitationalConstant,
+        blackHoleMass: Number.isFinite(Number(next.blackHoleMass))
+          ? Number(next.blackHoleMass) : settings.blackHoleMass,
+        localGravitationalConstant: Number.isFinite(Number(next.localGravitationalConstant))
+          ? Number(next.localGravitationalConstant) : settings.localGravitationalConstant,
+        damping: Number.isFinite(Number(next.damping)) ? Number(next.damping) : settings.damping,
+        springStiffness: Number.isFinite(Number(next.springStiffness))
+          ? Number(next.springStiffness) : settings.springStiffness,
       };
       if (data.relayout && model) {
         generation += 1;

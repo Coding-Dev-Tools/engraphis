@@ -223,6 +223,13 @@ server, replacing the path with the one from initialization:
 cmd mcp add --scope local --env ENGRAPHIS_DB_PATH=/absolute/path/to/engraphis.db engraphis -- engraphis-mcp
 ```
 
+Windows: `cmd` may resolve to `cmd.exe` (the built-in Windows command interpreter)
+instead of the Command Code CLI. If `cmd mcp list` opens a Windows command-prompt window or
+prints `'mcp' is not recognized`, the wrong `cmd` was found on `PATH`. Run `where cmd` and
+ensure the Command Code CLI's install directory appears before `C:\Windows\System32`;
+otherwise invoke the CLI by its absolute path (e.g.
+`C:\Users\you\AppData\Roaming\Python\Scripts\cmd.exe`).
+
 All Command Code options precede the server name, and `--` separates the name from the stdio
 command. `engraphis-mcp` runs locally over stdio; normal local use needs no HTTP endpoint or
 Engraphis API key.
@@ -243,6 +250,9 @@ Verify the connection:
 cmd mcp list
 cmd mcp get engraphis
 ```
+
+(If these commands open a Windows command prompt instead of listing MCP servers, follow the
+Windows note above -- `cmd` resolved to `cmd.exe`.)
 
 Start a normal Command Code session with `cmd`, open `/mcp`, and confirm that `engraphis` is
 connected and exposes tools. Then ask Command Code: "Call `engraphis_stats` and show me the

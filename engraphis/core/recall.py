@@ -18,6 +18,7 @@ import inspect
 import json
 import logging
 import math
+import os
 import queue
 import re
 import threading
@@ -147,7 +148,8 @@ class RecallEngine:
                  candidate_depth_policy: Optional[CandidateDepthPolicy] = None,
                  graph_traversal_policy: Optional[GraphTraversalPolicy] = None,
                  query_planner: Optional[QueryPlanner] = None,
-                 planner_timeout_s: float = 2.0) -> None:
+                 planner_timeout_s: float = 2.0,
+                 arm_candidate_k_cap: Optional[int] = None) -> None:
         self.store = store
         self.embedder = embedder
         self.index = vector_index
@@ -161,6 +163,23 @@ class RecallEngine:
         self.graph_traversal_policy = graph_traversal_policy or UniformGraphTraversalPolicy()
         self.query_planner = query_planner or DeterministicQueryPlanner()
         self.planner_timeout_s = max(0.0, float(planner_timeout_s))
+        # Latency knob: PR #171 widened the prompt-only first arm to
+        # ``candidate_k + min(250, candidate_k*3)`` so a 49-fact corpus pays
+        # ~5x more matrix-vector cost on the new k=50 default. Operators can
+        # cap that first-page widening via constructor arg or the
+        # ``ENGRAPHIS_RECALL_ARM_CANDIDATE_K`` env var; the escalation loop
+        # still widens to ``candidate_ceiling`` if the narrower first page
+        # did not collect enough prompt-eligible evidence, so trusted-source
+        # recall on the larger k=50 callsite is preserved.
+        env_cap_raw = os.environ.get("ENGRAPHIS_RECALL_ARM_CANDIDATE_K", "").strip()
+        try:
+            env_cap = int(env_cap_raw) if env_cap_raw else None
+        except ValueError:
+            env_cap = None
+        resolved_cap = arm_candidate_k_cap if arm_candidate_k_cap is not None else env_cap
+        self._arm_candidate_k_cap = (
+            max(1, int(resolved_cap)) if resolved_cap is not None else None
+        )
         self._planner_slot = threading.BoundedSemaphore(1)
         # "ppr" (default) = Personalized PageRank over entities+links (multi-hop);
         # "1hop" = the Phase-1 entity expansion, kept for fallback and ablation.
@@ -271,6 +290,23 @@ class RecallEngine:
         arm_candidate_k = candidate_k
         if prompt_only:
             arm_candidate_k = candidate_k + min(250, candidate_k * 3)
+            # Opt-in latency knob (see __init__). When the operator has set
+            # ``ENGRAPHIS_RECALL_ARM_CANDIDATE_K`` (or passed
+            # ``arm_candidate_k_cap=``) we clamp both the first-page widening
+            # and the second-page ceiling. Without the ceiling clamp the
+            # escalation loop would still widen to the untrusted-heavy
+            # PROMPT_ONLY_MIN_CANDIDATES on a second pass and the savings of
+            # narrowing the first page would vanish. Operators who set this
+            # cap are explicitly trading untrusted-scope widening for latency;
+            # the first-arm floor remains ``candidate_k`` so a one-fact scope
+            # still searches at least as deep as the caller's requested depth.
+            if self._arm_candidate_k_cap is not None:
+                # Clamp the widened first arm to the operator cap, but never
+                # below the caller's requested candidate_k so a small scope
+                # still searches at least as deep as requested.
+                arm_candidate_k = max(
+                    candidate_k, min(self._arm_candidate_k_cap, arm_candidate_k)
+                )
             candidate_ceiling = max(
                 arm_candidate_k,
                 min(
@@ -278,6 +314,8 @@ class RecallEngine:
                     max(PROMPT_ONLY_MIN_CANDIDATES, candidate_k * 16),
                 ),
             )
+            if self._arm_candidate_k_cap is not None:
+                candidate_ceiling = min(candidate_ceiling, self._arm_candidate_k_cap)
         run_configs = [
             config if index == 0 and arm_config is not None else profile_config(item.profile)
             for index, item in enumerate(planned_queries)
