@@ -721,8 +721,8 @@ file. It never searches the working directory for `.env`, and explicit process v
 | `ENGRAPHIS_ALLOW_AUTOMATIC_CRITICAL_RETENTION` | `false` | Opt in only when an LLM supervisor may automatically assign the long-lived `critical` class; explicit user-selected critical retention is unaffected |
 | `ENGRAPHIS_WHISPER_MODEL` | Not set | Enables local faster-whisper audio/video transcription |
 | `ENGRAPHIS_POSTGRES_DSN` | Not set | CLI-only PostgreSQL source; used for the connection and never stored |
-| `ENGRAPHIS_POSTGRES_CONNECT_TIMEOUT` | `10` | PostgreSQL introspection connection timeout in seconds (bounded to 1–120) |
-| `ENGRAPHIS_POSTGRES_STATEMENT_TIMEOUT_MS` | `30000` | Per-introspection PostgreSQL statement timeout in milliseconds (bounded to 1–300000) |
+| `ENGRAPHIS_POSTGRES_CONNECT_TIMEOUT` | `10` | PostgreSQL introspection connection timeout in seconds (bounded to 1--120) |
+| `ENGRAPHIS_POSTGRES_STATEMENT_TIMEOUT_MS` | `30000` | Per-introspection PostgreSQL statement timeout in milliseconds (bounded to 1--300000) |
 | `ENGRAPHIS_GRAPH_TOKEN` | Not set | Bearer token for `engraphis-graph-server`; required off-loopback |
 | `ENGRAPHIS_GRAPH_HOST` / `ENGRAPHIS_GRAPH_PORT` | `127.0.0.1` / `8720` | Read-only graph/recall server bind address |
 | `ENGRAPHIS_LLM_PROVIDER` | `openai` | `openai \| anthropic \| google \| openrouter \| custom` |
@@ -746,6 +746,12 @@ file. It never searches the working directory for `.env`, and explicit process v
 See `.env.example` for the full variable inventory. Supply those values through the process
 environment or the trusted config file above; copying it to an arbitrary `./.env` does not make
 Engraphis load it.
+
+> **Ablation fixture:** `python -m eval.ablation` is an offline deterministic check that prints
+> `recall@5` comparisons for vector-only and hybrid retrieval, multi-hop graph arms, and
+> retrieval policies, plus ordinary-recall age and semantic-confidence checks. It does not
+> produce MRR, hit@5, or ms/query results. Use `python -m eval.reinforcement` for retention
+> trajectories, and register evidence before quoting any benchmark results.
 
 ---
 
