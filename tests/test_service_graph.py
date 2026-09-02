@@ -221,8 +221,12 @@ def test_graph_scene_cache_deadline_tracks_memory_and_connector_boundaries():
         "First cache boundary.", workspace="acme", scope="workspace",
         valid_from=150.0,
     ))
+    # Use a clearly distinct fact so the resolver does not treat it as
+    # a reworded correction of the first (the attribute-correction
+    # contract fires on a single heavy-noun swap with a tight shared
+    # subject, and "First" -> "Second" is exactly that shape).
     second = _approve(svc, svc.remember(
-        "Second cache boundary.", workspace="acme", scope="workspace",
+        "Connector boundary condition.", workspace="acme", scope="workspace",
         valid_from=0.0,
     ))
     svc.link(first["id"], second["id"], workspace="acme", relation="causes")
