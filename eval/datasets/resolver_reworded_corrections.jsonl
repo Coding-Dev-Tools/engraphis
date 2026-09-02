@@ -1,0 +1,44 @@
+{"id": "rc01", "neighbor": "The request timeout is 30 seconds.", "candidate": "We raised the request timeout to 90 seconds last sprint.", "expected": "invalidate", "subject_hint": "request timeout"}
+{"id": "rc02", "neighbor": "Deploys run on Fridays at 5pm.", "candidate": "Deploys now run on Tuesdays at 7pm.", "expected": "invalidate", "subject_hint": "deploys"}
+{"id": "rc03", "neighbor": "The pilot cohort has 25 users.", "candidate": "The pilot cohort has 120 users now.", "expected": "invalidate", "subject_hint": "pilot cohort"}
+{"id": "rc04", "neighbor": "Until January the rate limit was 100 requests per minute.", "candidate": "As of February the rate limit is 500 requests per minute.", "expected": "invalidate", "subject_hint": "rate limit"}
+{"id": "rc05", "neighbor": "Database connection pool holds 5 connections per app instance.", "candidate": "Database connection pool holds 8 connections per app instance.", "expected": "invalidate", "subject_hint": "connection pool"}
+{"id": "rc06", "neighbor": "The default branch is named master.", "candidate": "The default branch is named main.", "expected": "invalidate", "subject_hint": "default branch"}
+{"id": "rc07", "neighbor": "The HTTP port is 8080.", "candidate": "We moved the HTTP port to 9090.", "expected": "invalidate", "subject_hint": "HTTP port"}
+{"id": "rc08", "neighbor": "API rate limit is 60 per minute.", "candidate": "API rate limit increased to 120 per minute.", "expected": "invalidate", "subject_hint": "rate limit"}
+{"id": "rc09", "neighbor": "The cluster runs 3 replicas.", "candidate": "The cluster now runs 5 replicas.", "expected": "invalidate", "subject_hint": "cluster replicas"}
+{"id": "rc10", "neighbor": "The default admin user is root.", "candidate": "The default admin user is now admin.", "expected": "invalidate", "subject_hint": "admin user"}
+{"id": "rc11", "neighbor": "Cache TTL is 300 seconds.", "candidate": "Cache TTL is 600 seconds.", "expected": "invalidate", "subject_hint": "cache ttl"}
+{"id": "rc12", "neighbor": "The build takes 4 minutes.", "candidate": "The build takes 7 minutes now.", "expected": "invalidate", "subject_hint": "build time"}
+{"id": "rc13", "neighbor": "Max upload size is 10MB.", "candidate": "Max upload size is 50MB.", "expected": "invalidate", "subject_hint": "upload size"}
+{"id": "rc14", "neighbor": "Workers run on port 5000.", "candidate": "Workers run on port 6000.", "expected": "invalidate", "subject_hint": "worker port"}
+{"id": "rc15", "neighbor": "The SLA is 99.9 percent.", "candidate": "The SLA is 99.99 percent now.", "expected": "invalidate", "subject_hint": "SLA"}
+{"id": "rc16", "neighbor": "Log retention is 7 days.", "candidate": "Log retention is 30 days.", "expected": "invalidate", "subject_hint": "log retention"}
+{"id": "rc17", "neighbor": "The backup window is 02:00 UTC.", "candidate": "The backup window is 04:00 UTC.", "expected": "invalidate", "subject_hint": "backup window"}
+{"id": "rc18", "neighbor": "The S3 bucket holds 100GB.", "candidate": "The S3 bucket now holds 500GB.", "expected": "invalidate", "subject_hint": "S3 bucket"}
+{"id": "rc19", "neighbor": "The CDN serves from us-east-1.", "candidate": "The CDN serves from us-west-2.", "expected": "invalidate", "subject_hint": "CDN region"}
+{"id": "rc20", "neighbor": "The poll interval is 5 seconds.", "candidate": "The poll interval is 10 seconds.", "expected": "invalidate", "subject_hint": "poll interval"}
+{"id": "rc21", "neighbor": "Default page size is 20.", "candidate": "Default page size is 50.", "expected": "invalidate", "subject_hint": "page size"}
+{"id": "rc22", "neighbor": "The search timeout is 3 seconds.", "candidate": "The search timeout is 5 seconds now.", "expected": "invalidate", "subject_hint": "search timeout"}
+{"id": "rc23", "neighbor": "The max payload is 1MB.", "candidate": "The max payload is 5MB.", "expected": "invalidate", "subject_hint": "max payload"}
+{"id": "rc24", "neighbor": "The retry count is 3.", "candidate": "The retry count is 5 now.", "expected": "invalidate", "subject_hint": "retry count"}
+{"id": "rc25", "neighbor": "The session timeout is 30 minutes.", "candidate": "The session timeout is 60 minutes.", "expected": "invalidate", "subject_hint": "session timeout"}
+{"id": "rc26", "neighbor": "The deployment runs in 2 minutes.", "candidate": "The deployment runs in 5 minutes now.", "expected": "invalidate", "subject_hint": "deployment time"}
+{"id": "rc27", "neighbor": "The queue holds 100 messages.", "candidate": "The queue holds 1000 messages.", "expected": "invalidate", "subject_hint": "queue size"}
+{"id": "rc28", "neighbor": "The circuit breaker trips at 5 errors.", "candidate": "The circuit breaker trips at 10 errors.", "expected": "invalidate", "subject_hint": "circuit breaker"}
+{"id": "rc29", "neighbor": "Connection pool is 10 per host.", "candidate": "Connection pool is 20 per host.", "expected": "invalidate", "subject_hint": "connection pool per host"}
+{"id": "rc30", "neighbor": "Default branch protection requires 1 review.", "candidate": "Default branch protection requires 2 reviews.", "expected": "invalidate", "subject_hint": "branch protection"}
+{"id": "rc31", "neighbor": "Job timeout is 1 hour.", "candidate": "Job timeout is 4 hours now.", "expected": "invalidate", "subject_hint": "job timeout"}
+{"id": "rc32", "neighbor": "The retry backoff is 1 second.", "candidate": "The retry backoff is 5 seconds.", "expected": "invalidate", "subject_hint": "retry backoff"}
+{"id": "rc33", "neighbor": "Default log level is INFO.", "candidate": "Default log level is DEBUG now.", "expected": "invalidate", "subject_hint": "log level"}
+{"id": "rc34", "neighbor": "The user agent is engraphis/1.0.", "candidate": "The user agent is engraphis/2.0.", "expected": "invalidate", "subject_hint": "user agent"}
+{"id": "rc35", "neighbor": "The webhook secret rotates every 30 days.", "candidate": "The webhook secret rotates every 90 days.", "expected": "invalidate", "subject_hint": "webhook secret"}
+{"id": "rc36", "neighbor": "API tokens expire after 24 hours.", "candidate": "API tokens expire after 7 days now.", "expected": "invalidate", "subject_hint": "API token expiry"}
+{"id": "df01", "neighbor": "The production API uses Redis caching for user sessions.", "candidate": "The production API now uses three replicas for high availability.", "expected": "add", "subject_hint": "API infra (different facts)"}
+{"id": "df02", "neighbor": "The docs cover the REST interface.", "candidate": "We migrated the docs to cover the GraphQL interface.", "expected": "add", "subject_hint": "docs interface (different facts)"}
+{"id": "df03", "neighbor": "CI runs on ProviderA with 4 workers.", "candidate": "We switched CI to run on ProviderB with 8 workers.", "expected": "add", "subject_hint": "CI infra (different facts)"}
+{"id": "df04", "neighbor": "The staging database holds 300 connections in production environment.", "candidate": "The production database holds 300 connections in staging environment.", "expected": "add", "subject_hint": "staging/production (env conflict)"}
+{"id": "df05", "neighbor": "Production API timeout is 30 seconds.", "candidate": "Production API timeout increased to 90 seconds.", "expected": "invalidate", "subject_hint": "API timeout (value swap)"}
+{"id": "df06", "neighbor": "Prod API timeout is 30 seconds.", "candidate": "Production API timeout increased to 90 seconds.", "expected": "invalidate", "subject_hint": "env alias prod==production"}
+{"id": "df07", "neighbor": "The staging database pool is 5 connections.", "candidate": "The development database pool is 5 connections.", "expected": "add", "subject_hint": "staging vs dev (env conflict)"}
+{"id": "df08", "neighbor": "The primary database pool in staging holds 5 connections per app instance.", "candidate": "The primary database pool in production holds 8 connections per app instance.", "expected": "add", "subject_hint": "staging vs production (env conflict)"}

@@ -9,10 +9,31 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import ipaddress
+import logging
 import os
 import sys
 
 _TRANSPORTS = ("streamable-http", "sse")
+
+
+def _configure_logging() -> None:
+    """Opt-in INFO-level logs for the standalone MCP HTTP launcher.
+
+    The MCP SDK and ``engraphis_recall_context`` use ``logging.getLogger(__name__)``,
+    which falls back to a ``NullHandler`` when no root config is set. Operators who
+    want per-call visibility can set ``ENGRAPHIS_MCP_LOG=info`` (or any non-empty
+    truthy value); the launcher then wires ``logging.basicConfig(level=INFO)`` so
+    logs reach stderr. Default behaviour is silent to preserve the standalone
+    CLI's quietness.
+    """
+    if os.environ.get("ENGRAPHIS_MCP_LOG", "").strip().lower() in {
+        "1", "true", "yes", "info", "on",
+    }:
+        if not logging.getLogger().handlers:
+            logging.basicConfig(
+                level=logging.INFO,
+                format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+            )
 
 
 def _dependency_error() -> str:
@@ -31,7 +52,7 @@ def _dependency_error() -> str:
 
 def _loopback_host(value: str) -> str:
     host = value.strip()
-    # Accept 'localhost' as a synonym for 127.0.0.1 — standard network tool behavior.
+    # Accept 'localhost' as a synonym for 127.0.0.1 - standard network tool behavior.
     if host.lower() == "localhost":
         return "127.0.0.1"
     try:
@@ -110,6 +131,8 @@ def main(argv=None) -> None:
     error = _dependency_error()
     if error:
         raise SystemExit(error)
+
+    _configure_logging()
 
     # Import only after --help and dependency validation: FastMCP registers tools at
     # module import time, so importing it eagerly would make even help unusable.
