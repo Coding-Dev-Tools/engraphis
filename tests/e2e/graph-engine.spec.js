@@ -13,7 +13,7 @@ const { test, expect } = require('@playwright/test');
  */
 
 const workspace = 'graph-e2e';
-const stellarOrbitAssetVersion = '20260831-galaxy-floor-fix-2';
+const stellarOrbitAssetVersion = '20260902-slider-merge-1';
 
 // A small connected store: two clusters joined by one bridge, so communities, the legend and
 // the bridge detector all have something real to work on.

@@ -184,12 +184,26 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - Folder imports report truncation explicitly: a folder with more matching files than the
   ceiling now warns and returns `truncated`/`matched_total`/`unreadable` fields instead of
   silently importing an alphabetically-first slice that looks complete.
+- The `engraphis_prime_agent` integration now ships a fleet wrapper that boots multiple
+  sub-agents (researcher / coder / reviewer / writer) with one shared memory workspace,
+  with fleet-wide configuration via `ENGRAPHIS_REPO` and per-agent override via the
+  `repo=` argument; the `engraphis-prime-agent install` subcommand configures a target
+  prime-agent configuration file and `python -m engraphis_prime_agent install`
+  works directly from the installed wheel.
 
 ### Fixed
 
 - The Every node dashboard view no longer crashes on open: a declaration-order bug in the
   renderer threw during construction before anything painted. The scene canvas also keeps its
   accessible role/label now instead of being hidden from assistive technology.
+- Prompt-only recall now honours an opt-in `ENGRAPHIS_RECALL_ARM_CANDIDATE_K` env var (and
+  the matching `RecallEngine(arm_candidate_k_cap=...)` constructor argument) that clamps both
+  the first-page widening (`candidate_k + min(250, candidate_k*3)`) and the second-page
+  ceiling, so operators can trade untrusted-scope widening for latency on the new k=50
+  default without code changes. The accompanying benchmark test,
+  `test_recall_arm_candidate_k_cap.py`, uses a 300-fact trusted corpus because both requested
+  arm depths clamp to the same 49 rows on a smaller corpus and the timing assertion was
+  unreliable. Default behaviour is unchanged.
 - Import previews now page the source manifest exactly like execution, so vaults whose manifest
   outgrew one list page (10k identities) no longer show manifest-only files as silently absent
   from the preview plan; beyond-boundary rows are reported as `missing` instead of dropped.
