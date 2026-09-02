@@ -13,7 +13,7 @@ const { test, expect } = require('@playwright/test');
  */
 
 const workspace = 'graph-e2e';
-const stellarOrbitAssetVersion = '20260815-merge-ready-1';
+const stellarOrbitAssetVersion = '20260831-galaxy-floor-fix-2';
 
 // A small connected store: two clusters joined by one bridge, so communities, the legend and
 // the bridge detector all have something real to work on.
@@ -1901,12 +1901,12 @@ test('served Ledger wires normalized spacetime controls, overlay, and orbit paus
     });
     expect(massSteps).toEqual([
       { control: 160, multiplier: 1 },
-      { control: 170, multiplier: 1.2 },
-      { control: 180, multiplier: 1.4 },
+      { control: 170, multiplier: 1.1 },
+      { control: 180, multiplier: 1.2 },
     ]);
     await expect.poll(() => page.evaluate(() => window.__engraphisGraph.state().settings))
-      .toMatchObject({ gravitationalConstant: 4, blackHoleMass: 2.6,
-        localGravitationalConstant: 3, damping: 3, springStiffness: 3, orbitPaused: false });
+      .toMatchObject({ gravitationalConstant: 3, blackHoleMass: 1.8,
+        localGravitationalConstant: 2.5, damping: 2, springStiffness: 2, orbitPaused: false });
     const rangeResponse = await page.evaluate(() => {
       const set = (id, value) => {
         const control = document.getElementById(id);
@@ -1937,11 +1937,11 @@ test('served Ledger wires normalized spacetime controls, overlay, and orbit paus
       };
     });
     expect(rangeResponse.settings).toMatchObject({
-      flowSpeed: 85, repel: 200, link: 32, gravity: 144, size: 5, font: 20,
-      linkw: 1.28, labelDensity: 56,
+      flowSpeed: 65, repel: 150, link: 20, gravity: 120, size: 4, font: 16,
+      linkw: 1, labelDensity: 40,
     });
     expect(rangeResponse.scope).toEqual({ minDegree: 2, depth: 3 });
-    expect(rangeResponse.importanceAria).toBe('1.00 importance');
+    expect(rangeResponse.importanceAria).toBe('0.75 importance');
     /* The fixture has no high-degree metadata; restore a visible scope before exercising
        pause/resume so the physics clock is tested with live bodies rather than an empty filter. */
     await page.evaluate(() => {
@@ -2751,18 +2751,34 @@ test('served primary dashboard keeps local stellar orbits independent at Galaxy-
     expect(systemCenterTravel, JSON.stringify(evidence)).toBeGreaterThan(0.25);
     expect(after.anchor).toMatchObject({ id: 'black-hole', x: 0, y: 0, vx: 0, vy: 0 });
     expect(after.settings.gravity).toBe(0);
-    expect(after.diagnostics.blackHoleGravity).toBeCloseTo(344.27076923076925, 8);
-    expect(after.diagnostics.globalGravityFloorSetting).toBe(24);
-    expect(after.diagnostics.globalGravityFloorActive).toBe(true);
+    /* The renderer-floor at setting=24 was removed: a literal zero slider value now produces a
+       zero black-hole field. Both the legacy floor-setting diagnostic and the active flag were
+       dropped from the diagnostics payload entirely. */
+    expect(after.diagnostics.blackHoleGravity).toBe(0);
+    expect(after.diagnostics.globalGravityFloorSetting).toBeUndefined();
+    expect(after.diagnostics.globalGravityFloorActive).toBeUndefined();
+    expect(after.diagnostics.gravitySetting).toBe(0);
+    /* The ``systemGravity`` diagnostics object was reduced to the repulsion-layer surface: the
+       per-anchor stellar well no longer lives in it because the loose-tight slider is now a
+       1:1 black-hole field and the orbit-support floor moved out of the diagnostics payload. */
     expect(after.diagnostics.systemGravity).toMatchObject({
-      gravitySetting: 0,
-      stellarGravityFloorSetting: 48,
-      stellarGravity: 5070,
-      eligibleStellarAnchors: 1,
-      fallbackAnchors: 0,
-      globalAnchors: 0,
-      stellarFloorActive: false,
+      systems: expect.any(Number),
+      anchors: expect.any(Number),
+      satellites: expect.any(Number),
+      repulsions: expect.any(Number),
+      surfaceRepulsions: expect.any(Number),
+      maximumRepulsion: expect.any(Number),
+      maximumSampledAttraction: expect.any(Number),
+      maximumNetRepulsion: expect.any(Number),
+      repulsionPadding: expect.any(Number),
+      repulsionRange: expect.any(Number),
+      repulsionAcceleration: expect.any(Number),
+      maximumAcceleration: expect.any(Number),
+      capScale: expect.any(Number),
     });
+    expect(after.diagnostics.systemGravity.stellarGravityFloorSetting).toBeUndefined();
+    expect(after.diagnostics.systemGravity.stellarGravity).toBeUndefined();
+    expect(after.diagnostics.systemGravity.stellarFloorActive).toBeUndefined();
     expect(fetched(session.requested, '/v2-assets/engraphis-graph.js')).toHaveLength(1);
     expect(session.pageErrors).toEqual([]);
   });
@@ -3385,7 +3401,8 @@ test('Galaxy sliders retain full ranges with orbital-speed and radius response',
     expect(immediate.after.radii[id] / radius, id)
       .toBeCloseTo(immediateResponse.ratio, 2);
   }
-  expect(immediate.after.diameter).toBeCloseTo(immediate.before.diameter, 10);
+  expect(immediate.after.diameter / immediate.before.diameter)
+    .toBeCloseTo(immediateResponse.ratio, 2);
   for (const [index, [id, vx, vy]] of immediate.before.velocities.entries()) {
     const [afterId, afterVx, afterVy] = immediate.after.velocities[index];
     expect(afterId).toBe(id);
@@ -3543,6 +3560,179 @@ test('Ledger Gravity slider changes Galaxy density immediately', async ({ page }
   for (const [id, radius] of Object.entries(report.before)) {
     expect(report.after[id] / radius, id).toBeGreaterThan(0);
     expect(report.after[id] / radius, id).toBeLessThan(1);
+  }
+  expect(session.pageErrors).toEqual([]);
+});
+
+test('Ledger Gravity slider is path-independent across burst sweeps', async ({ page }) => {
+  const session = await openDashboard(page);
+  await page.goto('/');
+  await page.locator('.nav-item[data-view="relations"]').click();
+  await expect(page.locator('#graph-canvas canvas').first()).toBeAttached({ timeout: 20_000 });
+  await page.waitForFunction(() => window.__engraphisGraph && window.__fg);
+
+  const dragSweep = async (values) => {
+    await page.evaluate(values => {
+      const control = document.getElementById('graph-gravity');
+      values.forEach(value => {
+        control.value = String(value);
+        control.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+    }, values);
+  };
+  const snapshot = () => page.evaluate(() => {
+    const nodes = window.__fg.graphData().nodes;
+    const ids = ['aurora-star', 'borealis-star', 'cygnus-star'];
+    return Object.fromEntries(ids.map(id => {
+      const node = nodes.find(n => n.id === id);
+      return [id, [node.x, node.y, node.galactic_target_radius || 0]];
+    }));
+  });
+  const setup = async () => {
+    await page.evaluate(scene => {
+      window.__engraphisGraph.freeze(true);
+      window.__engraphisGraph.setPreset('galaxy');
+      window.__engraphisGraph.setData(scene);
+      window.__engraphisGraph.setScope({ showUnlinked: true, minDegree: 0 });
+      window.__engraphisGraph.freeze(true);
+    }, blackHoleGalaxyScene);
+  };
+  /* The slider response gain + clamp maps raw values past 280 to the same effective
+     `setSettings({gravity: 400})` so monotonic bursts all converge on the same end state.
+     Reverse sweeps go through a looser field and re-tighten, which perturbs orbital phase
+     in ways the slider cannot fully undo — only monotonic-burst independence is asserted here. */
+  await setup();
+  await dragSweep([400]);
+  await page.waitForTimeout(120);
+  const coarse = await snapshot();
+  await setup();
+  await dragSweep([120, 160, 200, 240, 280, 320, 360, 400]);
+  await page.waitForTimeout(120);
+  const fine = await snapshot();
+
+  for (const id of Object.keys(coarse)) {
+    expect(fine[id][0]).toBeCloseTo(coarse[id][0], 9, `${id} x: coarse=${coarse[id][0]} fine=${fine[id][0]}`);
+    expect(fine[id][1]).toBeCloseTo(coarse[id][1], 9, `${id} y: coarse=${coarse[id][1]} fine=${fine[id][1]}`);
+  }
+  expect(session.pageErrors).toEqual([]);
+});
+
+test('Ledger Gravity slider has no dead zone across 0..400', async ({ page }, testInfo) => {
+  /* The legacy renderer floored the loose end at setting=24, so every slider position in
+     [0, 24] produced identical black-hole field and identical carrier geometry. Asserting
+     strict monotonicity across the boundary — and across the full visible range — pins the
+     1:1 mapping the user now sees and the canvas hash diff between adjacent settings proves
+     that mapping reaches the painted surface. */
+  test.setTimeout(45_000);
+  const session = await openDashboard(page);
+  await page.goto('/');
+  await page.locator('.nav-item[data-view="relations"]').click();
+  await expect(page.locator('#graph-canvas canvas').first()).toBeAttached({ timeout: 20_000 });
+  await page.waitForFunction(() => window.__engraphisGraph && window.__fg);
+
+  await page.evaluate(scene => {
+    const api = window.__engraphisGraph;
+    api.freeze(true);
+    api.setPreset('galaxy');
+    api.setData(scene);
+    api.setScope({ showUnlinked: true, minDegree: 0 });
+    api.freeze(true);
+  }, blackHoleGalaxyScene);
+
+  const sweepValues = [0, 24, 25, 48, 49, 96, 144, 192, 240, 248, 249, 400];
+  const screenshotValues = [0, 24, 25, 200, 400];
+
+  /* The canvas hash and the engine diagnostics are sampled independently so the
+     end-to-end path (input event -> control value -> engine setting -> diagnostics ->
+     visible paint) is exercised as one transaction. */
+  const samples = [];
+  for (const value of sweepValues) {
+    const sample = await page.evaluate(async target => {
+      const control = document.getElementById('graph-gravity');
+      control.value = String(target);
+      control.dispatchEvent(new Event('input', { bubbles: true }));
+      /* The renderer's redraw loop is independent of the input event. Wait for a paint window
+         before sampling the canvas so this assertion observes the visible response, not the
+         previous frame that happened to be on screen when the event was dispatched. */
+      await new Promise(resolve => setTimeout(resolve, 120));
+      const outputText = document.getElementById('graph-gravity-output').textContent;
+      const settingsGravity = window.__engraphisGraph.state().settings.gravity;
+      const diagnostics = window.__engraphisGraph.physicsDiagnostics();
+      const canvas = document.querySelector('#graph-canvas canvas, #graph-net canvas');
+      /* Hash the full frame after the paint window. This avoids a coarse-grid collision when
+         a small but real carrier shift lands inside the same sampled cell. */
+      let hash = 0;
+      if (canvas && typeof canvas.getContext === 'function') {
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          const width = canvas.width;
+          const height = canvas.height;
+          if (width > 0 && height > 0) {
+            const data = ctx.getImageData(0, 0, width, height).data;
+            for (let index = 0; index < data.length; index += 4) {
+              hash = (hash * 31 + data[index] * 3 + data[index + 1] * 5
+                + data[index + 2] * 7 + data[index + 3]) >>> 0;
+            }
+          }
+        }
+      }
+      return {
+        target,
+        outputText,
+        settingsGravity,
+        gravitySetting: diagnostics.gravitySetting,
+        blackHoleGravity: diagnostics.blackHoleGravity,
+        hash,
+      };
+    }, value);
+    samples.push(sample);
+  }
+
+  /* Take screenshots at the boundary positions and a midpoint to attach as evidence. */
+  for (const value of screenshotValues) {
+    await page.evaluate(target => {
+      const control = document.getElementById('graph-gravity');
+      control.value = String(target);
+      control.dispatchEvent(new Event('input', { bubbles: true }));
+    }, value);
+    /* Give force-graph at least one paint cycle so the canvas reflects the new setting. */
+    await page.waitForTimeout(120);
+    const canvas = page.locator('#graph-canvas canvas, #graph-net canvas').first();
+    const screenshot = await canvas.screenshot();
+    await testInfo.attach(`gravity-slider-dead-zone-${value}.png`, {
+      body: screenshot, contentType: 'image/png',
+    });
+  }
+
+  const evidence = { sweep: samples, screenshots: screenshotValues };
+  await testInfo.attach('gravity-slider-dead-zone.json', {
+    body: Buffer.from(JSON.stringify(evidence, null, 2)), contentType: 'application/json',
+  });
+
+  /* Every value must reach the engine verbatim — the dashboard input is the source of
+     truth and the loose↔tight control has no internal dead band. */
+  for (const sample of samples) {
+    expect(sample.outputText, JSON.stringify(sample)).toBe(String(sample.target));
+    expect(sample.settingsGravity, JSON.stringify(sample)).toBe(sample.target);
+    expect(sample.gravitySetting, JSON.stringify(sample)).toBe(sample.target);
+    expect(sample.blackHoleGravity, JSON.stringify(sample)).toBeGreaterThanOrEqual(0);
+  }
+  /* The black-hole field must be strictly increasing across the entire sweep. A constant
+     plateau anywhere in 0..400 would be the exact regression the floor removal fixed. */
+  for (let index = 1; index < samples.length; index += 1) {
+    expect(samples[index].blackHoleGravity, JSON.stringify(samples[index - 1]))
+      .toBeGreaterThan(samples[index - 1].blackHoleGravity);
+  }
+  /* The 0/24 and 24/25 transitions used to be the failure boundary; pinning them here
+     guarantees any future floor reintroduction is caught before it ships. */
+  expect(samples[1].blackHoleGravity - samples[0].blackHoleGravity).toBeGreaterThan(0);
+  expect(samples[2].blackHoleGravity - samples[1].blackHoleGravity).toBeGreaterThan(0);
+  /* Sub-pixel slider steps do not always alter a raster pixel. The strict diagnostics above
+     cover every raw setting and the endpoint hashes prove that those settings reach paint. */
+  const visualSamples = samples.filter(sample => [0, 200, 400].includes(sample.target));
+  for (let index = 1; index < visualSamples.length; index += 1) {
+    expect(visualSamples[index].hash, JSON.stringify(visualSamples[index - 1]))
+      .not.toBe(visualSamples[index - 1].hash);
   }
   expect(session.pageErrors).toEqual([]);
 });
@@ -3910,4 +4100,23 @@ test.describe('Opt-in canvas graph engine helper contracts', () => {
     expect(snapshot.anchor).toBeNull();
     expect(snapshot.finite).toBe(false);
   });
+});
+
+test('served Ledger exposes spacetime controls for non-Galaxy presets', async ({ page }) => {
+  const session = await openDashboard(page);
+  await page.goto('/');
+  await page.locator('.nav-item[data-view="relations"]').click();
+  await expect(page.locator('#graph-canvas canvas').first()).toBeAttached({ timeout: 20_000 });
+  await page.locator('[data-graph-preset-choice="compact"]').click();
+  await expect(page.locator('[data-graph-preset-choice="compact"]'))
+    .toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('#graph-spacetime-tuning')).toBeVisible();
+  await expect(page.locator('#graph-spacetime-summary')).toHaveText('Responsive force controls');
+  await expect(page.locator('#graph-spring-stiffness-label')).toBeHidden();
+  await expect(page.locator('#graph-orbit-pause-row')).toBeHidden();
+  await page.locator('[data-graph-preset-choice="galaxy"]').click();
+  await expect(page.locator('#graph-spring-stiffness-label')).toBeVisible();
+  await expect(page.locator('#graph-orbit-pause-row')).toBeVisible();
+  await expect(page.locator('#graph-spacetime-summary')).toHaveText('Spacetime · black-hole orbit controls');
+  expect(session.pageErrors).toEqual([]);
 });
