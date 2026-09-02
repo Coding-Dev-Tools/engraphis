@@ -2019,16 +2019,24 @@ def test_graph_toggle_labels_are_fixed_and_use_aria_pressed(monkeypatch, tmp_pat
 
 
 def test_full_mode_hides_freeze_and_orbit_pause_controls(monkeypatch, tmp_path):
-    """Full-mode quality-only motion controls must be hidden, not merely disabled."""
+    """Full mode hides freeze while preserving orbit pause for Galaxy-quality scenes."""
     with _client(monkeypatch, tmp_path) as client:
         script = client.get("/v2-assets/ledger.js")
         markup = client.get("/")
         # Freeze and orbit-pause rows exist in markup for high-quality mode.
         assert 'id="graph-freeze-row"' in markup.text
         assert 'id="graph-orbit-pause-row"' in markup.text
-        # In full mode, updateGraphModeControls hides both rows.
+        # Freeze is quality-only, while authored Galaxy data still needs orbit pause in full mode.
         assert "freezeRow.hidden = full" in script.text
-        assert "orbitPause.hidden = full" in script.text
+        assert script.text.count(
+            "const orbitCapable = galaxy && (!full || state.graphGalaxyQuality);"
+        ) == 2
+        assert "orbitPause.hidden = !orbitCapable" in script.text
+        assert "const springCapable = galaxy || (full && !state.graphGalaxyQuality);" in script.text
+        assert "springLabel.parentElement.hidden = !springCapable;" in script.text
+        assert "const galaxyRenderer = galaxy && (!full || state.graphGalaxyQuality);" in script.text
+        assert "const everyRenderer = full && !state.graphGalaxyQuality;" in script.text
+        assert "'Responsive force controls'" in script.text
         # Relation flow remains visible in full mode (not hidden).
         assert 'id="graph-flow"' in markup.text
 

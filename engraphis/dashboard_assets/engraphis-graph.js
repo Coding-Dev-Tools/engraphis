@@ -132,15 +132,15 @@
     return base * boost * 4 * galaxyGravityStrengthMultiplier(value) * 2.0;
   }
   /* Gravity strength is the galaxy-wide black-hole control. The dashboard's Gravity slider
-     flows to the explicit global anchor 1:1: zero user gravity is a real zero field, and the
+     flows to the explicit global anchor: zero user gravity is a real zero field, and the
      loose ↔ tight endpoints map to distinct central accelerations. Stability for community
      systems is owned by the independent local-stellar well and the rigid event-horizon
      contact layers, neither of which depends on this constant. */
+  const GALAXY_GLOBAL_GRAVITY_FLOOR_SETTING = 24;
   function galaxyBlackHoleGravitySetting(setting, explicitGlobal) {
     const raw = Number(setting);
-    if (!Number.isFinite(raw)) return 0;
-    if (raw < 0) return 0;
-    return Math.min(GALAXY_GRAVITY_MAXIMUM, raw);
+    const value = Number.isFinite(raw) ? Math.max(0, Math.min(GALAXY_GRAVITY_MAXIMUM, raw)) : 0;
+    return value;
   }
   function galaxyBlackHoleGravityConstant(setting, explicitGlobal) {
     return galaxyGravityConstant(galaxyBlackHoleGravitySetting(setting, explicitGlobal)) * 2;
@@ -164,7 +164,7 @@
   const GALAXY_FALLBACK_STELLAR_ORBIT_CLOCK = 2.5;
   /* The dashboard's Gravity control owns the black-hole well, and the local stellar setting
      flows 1:1 from the slider. All callers pass a finite slider value (or an explicit per-star
-     override), so every position 0..400 produces a distinct local well and distinct carrier
+     override), so every position 0..200 produces a distinct local well and distinct carrier
      geometry. Authored system stability is owned by the orbital-radius floor and the rigid
      event-horizon contact layers, neither of which depends on this constant.
 
@@ -505,7 +505,7 @@
     const setting = gravitySetting === undefined ? 48 : gravitySetting;
     /* The convergence helper is an optional density response, not the orbital well. Normalize
        against the calibrated reference setting (48) so the ratio stays monotonic across the
-       full 0..400 slider span; the rigid event-horizon contact keeps loose-end bodies bound. */
+       full 0..200 slider span; the rigid event-horizon contact keeps loose-end bodies bound. */
     const relativeGravity = galaxyBlackHoleGravityConstant(setting, false)
       / galaxyBlackHoleGravityConstant(48, true);
     return 1 - Math.pow(1 - GALAXY_INWARD_CONVERGENCE_PER_MINUTE,
@@ -628,11 +628,45 @@
     if (!Number.isFinite(n)) return min;
     return Math.max(min, Math.min(max, n));
   }
+  /* Mirror of graphBlackHoleMassMultiplier in ledger.js — kept inline so the d3-force
+     d3-install path in this file does not need to cross reference the ledger module. The
+     formula is identical: baseline 160 below which the multiplier is value/160, above which
+     it climbs linearly at 0.02/unit (so 500 -> 8.80, 1000 -> 21.80). */
+  const GRAPH_BLACK_HOLE_MASS_BASELINE = 160;
+  function blackHoleMassMultiplier(controlValue) {
+    const value = Number(controlValue);
+    if (!Number.isFinite(value)) return 1;
+    return value <= GRAPH_BLACK_HOLE_MASS_BASELINE
+      ? Math.max(0, value / GRAPH_BLACK_HOLE_MASS_BASELINE)
+      : 1 + (value - GRAPH_BLACK_HOLE_MASS_BASELINE) * 0.02;
+  }
+
   /* Physics is allowed to respond live, but one bad force update must never turn a
      settled graph into a high-speed slingshot. Keep the bounds in world units so they
      remain meaningful at every camera zoom. */
   const MIN_NODE_SPEED = 8;
   const MAX_NODE_SPEED = 48;
+  function galaxyRelativeSpeedBudget(parent, absoluteLimit, requested, directionX, directionY) {
+    const limit = Math.max(0.01, Number(absoluteLimit) || MAX_NODE_SPEED);
+    const requestedSpeed = Math.max(0, Number(requested) || 0);
+    const parentVx = parent && Number.isFinite(parent.vx) ? parent.vx : 0;
+    const parentVy = parent && Number.isFinite(parent.vy) ? parent.vy : 0;
+    const directionLength = Math.hypot(Number(directionX) || 0, Number(directionY) || 0);
+    if (!(directionLength > 1e-9)) {
+      return Math.max(0, Math.min(requestedSpeed,
+        limit - Math.hypot(parentVx, parentVy)));
+    }
+    const unitX = directionX / directionLength;
+    const unitY = directionY / directionLength;
+    const projection = parentVx * unitX + parentVy * unitY;
+    /* Solve |parentVelocity + unitTangent * relativeSpeed| <= limit for the largest
+       non-negative relativeSpeed. This preserves a perpendicular local orbit even when
+       the carrier is already close to the absolute speed ceiling. */
+    const discriminant = projection * projection + limit * limit
+      - parentVx * parentVx - parentVy * parentVy;
+    const maximum = -projection + Math.sqrt(Math.max(0, discriminant));
+    return Math.max(0, Math.min(requestedSpeed, maximum));
+  }
 
   /* The classic renderer's *dense* signal (`GPERF.dense`, `links>1500` in dashboard.js). Past
      it the classic path turns off the two per-edge costs that scale with the link count and
@@ -1074,6 +1108,7 @@
   function seedGalaxyHierarchicalLocalOrbits(nodes, gravity, softening, options) {
     const opts = options || {};
     const orbitalSpeed = galaxyOrbitalSpeedMultiplier(opts.orbitalSpeed);
+    const absoluteSpeedLimit = Math.max(0.01, Number(opts.speedLimit) || MAX_NODE_SPEED);
     const epsilon = Math.max(0.1, Number(softening) || 8);
     const centers = galaxyOrbitGroups(nodes);
     centers.forEach(center => {
@@ -1101,14 +1136,18 @@
           * radius / Math.max(1e-9, denominator);
         const acceleration = localAccelerationCap > 0
           ? Math.min(localAccelerationCap, rawAcceleration) : rawAcceleration;
-        const targetTangent = Math.min(GALAXY_LOCAL_RELATIVE_SPEED_LIMIT,
-          Math.sqrt(Math.max(0, acceleration * radius)) * orbitalSpeed);
         const parentVx = Number.isFinite(parent.vx) ? parent.vx : 0;
         const parentVy = Number.isFinite(parent.vy) ? parent.vy : 0;
         const relativeVx = (Number.isFinite(node.vx) ? node.vx : 0) - parentVx;
         const relativeVy = (Number.isFinite(node.vy) ? node.vy : 0) - parentVy;
         const tangentX = -dy / radius, tangentY = dx / radius;
         const currentTangent = relativeVx * tangentX + relativeVy * tangentY;
+        const sign = Math.sign(currentTangent)
+          || ((seededHash(opts.layoutSeed, 'system:' + String(parent.id)) & 1) ? 1 : -1);
+        const targetTangent = galaxyRelativeSpeedBudget(parent, absoluteSpeedLimit,
+          Math.min(GALAXY_LOCAL_RELATIVE_SPEED_LIMIT,
+            Math.sqrt(Math.max(0, acceleration * radius)) * orbitalSpeed),
+          tangentX * sign, tangentY * sign);
         const parentId = String(parent.id);
         const previousParent = typeof node.__galaxyOrbitAnchorId === 'string'
           ? node.__galaxyOrbitAnchorId : '';
@@ -1117,8 +1156,6 @@
           || Math.abs(previousSpeed - orbitalSpeed) > 1e-9;
         const needsSeed = previousParent !== parentId || Math.abs(currentTangent) < 1e-8;
         if (needsSeed || speedChanged) {
-          const sign = Math.sign(currentTangent)
-            || ((seededHash(opts.layoutSeed, 'system:' + parentId) & 1) ? 1 : -1);
           node.vx = parentVx + tangentX * targetTangent * sign;
           node.vy = parentVy + tangentY * targetTangent * sign;
         }
@@ -1136,6 +1173,7 @@
   function seedGalaxyOrbits(nodes, layoutSeed, gravity, softening, reducedMotion, options) {
     const opts = options || {};
     const orbitalSpeed = galaxyOrbitalSpeedMultiplier(opts.orbitalSpeed);
+    const absoluteSpeedLimit = Math.max(0.01, Number(opts.speedLimit) || MAX_NODE_SPEED);
     const orbitalRadius = galaxyOrbitalRadiusMultiplier(opts.orbitalSpeed);
     const speedControlEnabled = opts.restorePhase !== true
       && Number.isFinite(Number(opts.orbitalSpeed));
@@ -1372,11 +1410,14 @@
         const inwardAcceleration = localAccelerationCap > 0
           ? Math.min(localAccelerationCap, rawInwardAcceleration) : rawInwardAcceleration;
         const omega = Math.sqrt(Math.max(0, inwardAcceleration / speedRadius));
-        const targetTangent = Math.min(GALAXY_LOCAL_RELATIVE_SPEED_LIMIT,
-          omega * speedRadius * orbitalSpeed);
         const relativeVx = (Number.isFinite(satellite.vx) ? satellite.vx : 0) - anchorVx;
         const relativeVy = (Number.isFinite(satellite.vy) ? satellite.vy : 0) - anchorVy;
         const tangent = (-dy * relativeVx + dx * relativeVy) / currentRadius;
+        const targetTangent = galaxyRelativeSpeedBudget(anchor, absoluteSpeedLimit,
+          Math.min(GALAXY_LOCAL_RELATIVE_SPEED_LIMIT,
+            omega * speedRadius * orbitalSpeed),
+          -dy / currentRadius * direction,
+          dx / currentRadius * direction);
         const previousAnchorId = typeof satellite.__galaxyOrbitAnchorId === 'string'
           ? satellite.__galaxyOrbitAnchorId : '';
         const anchoredHere = previousAnchorId === anchorId;
@@ -2812,6 +2853,7 @@
   function advanceGalaxyKinematicLocalMembers(members, carrier, carrierTarget, options) {
     const opts = options || {};
     const orbitalSpeed = galaxyOrbitalSpeedMultiplier(opts.orbitalSpeed);
+    const absoluteSpeedLimit = Math.max(0.01, Number(opts.speedLimit) || MAX_NODE_SPEED);
     const orbitalRadius = galaxyOrbitalRadiusMultiplier(opts.orbitalSpeed);
     const localSoftening = Math.max(0.1, Number(opts.localSoftening) || opts.softening || 40);
     const timestep = Math.max(0.001, Math.min(2, Number(opts.timestep) || 1));
@@ -2872,15 +2914,25 @@
       const omega = Math.min(
         Math.sqrt(Math.max(0, acceleration / localRadius)) * orbitalSpeed,
         GALAXY_LOCAL_RELATIVE_SPEED_LIMIT * orbitalSpeed / localRadius);
-      local.angle += local.direction * omega * timestep;
-      const localSpeed = omega * localRadius;
+      const requestedLocalSpeed = omega * localRadius;
+      const localTangentX = -Math.sin(local.angle) * local.direction;
+      const localTangentY = Math.cos(local.angle) * local.direction;
+      const phaseSpeed = Math.min(
+        galaxyRelativeSpeedBudget(parentTarget, absoluteSpeedLimit,
+          requestedLocalSpeed, localTangentX, localTangentY),
+        galaxyRelativeSpeedBudget(parentTarget, absoluteSpeedLimit, requestedLocalSpeed),
+      );
+      const cappedOmega = phaseSpeed / Math.max(1e-9, localRadius);
+      local.angle += local.direction * cappedOmega * timestep;
       const offsetX = Math.cos(local.angle) * localRadius;
       const offsetY = Math.sin(local.angle) * localRadius;
+      const advancedTangentX = -Math.sin(local.angle) * local.direction;
+      const advancedTangentY = Math.cos(local.angle) * local.direction;
       const target = {
         x: parentTarget.x + offsetX,
         y: parentTarget.y + offsetY,
-        vx: parentTarget.vx - Math.sin(local.angle) * localSpeed * local.direction,
-        vy: parentTarget.vy + Math.cos(local.angle) * localSpeed * local.direction,
+        vx: parentTarget.vx + advancedTangentX * phaseSpeed,
+        vy: parentTarget.vy + advancedTangentY * phaseSpeed,
       };
       targets.set(node, target);
       visiting.delete(node);
@@ -2925,6 +2977,7 @@
     const globalFieldActive = field.gravitationalConstant > 0;
     const timestep = Math.max(0.001, Math.min(2, Number(opts.timestep) || 1));
     const orbitalRadius = galaxyOrbitalRadiusMultiplier(opts.orbitalSpeed);
+    const absoluteSpeedLimit = Math.max(0.01, Number(opts.speedLimit) || MAX_NODE_SPEED);
     const direction = (seededHash(opts.layoutSeed, 'galaxy-spin') & 1) ? 1 : -1;
     const envelope = galaxyFarFieldEnvelope(bodies, opts);
     const nodeRadius = node => finitePositive(node.radius,
@@ -2942,9 +2995,16 @@
       if (Number.isFinite(node.fx)) node.fx = x;
       if (Number.isFinite(node.fy)) node.fy = y;
     };
-    const angularFrequency = (radius, authoredCarrier) => (authoredCarrier
-      ? galaxyAuthoredCarrierTargetSpeed(field, radius, opts.orbitalSpeed)
-      : galaxyCarrierTargetSpeed(field, radius, opts.orbitalSpeed)) / Math.max(1e-6, radius);
+    const angularFrequency = (radius, authoredCarrier) => {
+      const requestedSpeed = authoredCarrier
+        ? galaxyAuthoredCarrierTargetSpeed(field, radius, opts.orbitalSpeed)
+        : galaxyCarrierTargetSpeed(field, radius, opts.orbitalSpeed);
+      /* The carrier is the parent frame for every local orbit. Cap it before
+         constructing that frame, otherwise a high authored clock can make
+         the child speed budget infeasible and scatter the local system. */
+      const speed = Math.min(absoluteSpeedLimit, Math.max(0, requestedSpeed));
+      return speed / Math.max(1e-6, radius);
+    };
     const boundedRadius = (radius, extent) => {
       const inner = nodeRadius(anchor) + Math.max(0, extent)
         + GALAXY_BLACK_HOLE_EXCLUSION_PADDING;
@@ -4634,16 +4694,9 @@
         if (relativeSpeed > limit) scale = Math.min(scale, limit / relativeSpeed);
       });
       maximumRelativeSpeed = Math.max(maximumRelativeSpeed, systemMaximum);
-      /* A planet's local tangent rides on top of the star's galactic carrier velocity. The
-         carrier is the primary orbit: preserve it whenever it is inside the emergency ceiling,
-         and clamp only the local frame to the remaining vector budget. */
       let carrierAdjusted = false;
       if (anchor && Number.isFinite(absoluteLimit)) {
         const carrierSpeed = Math.hypot(referenceVx, referenceVy);
-        const carrierAllowance = Math.max(0, absoluteLimit - carrierSpeed);
-        if (systemMaximum > 1e-12) {
-          scale = Math.min(scale, carrierAllowance / systemMaximum);
-        }
         if (carrierSpeed > absoluteLimit + 1e-12) {
           const carrierScale = carrierSpeed > 1e-12 ? absoluteLimit / carrierSpeed : 0;
           const targetVx = referenceVx * carrierScale;
@@ -4660,18 +4713,34 @@
           minimumScale = Math.min(minimumScale, carrierScale);
         }
       }
-      if (!(scale < 1 - 1e-12) && !carrierAdjusted) return;
+      let systemLimited = carrierAdjusted || scale < 1 - 1e-12;
       members.forEach(node => {
         if (node === anchor) {
           node.vx = referenceVx;
           node.vy = referenceVy;
           return;
         }
-        node.vx = referenceVx + (node.vx - referenceVx) * scale;
-        node.vy = referenceVy + (node.vy - referenceVy) * scale;
+        const relativeVx = node.vx - referenceVx, relativeVy = node.vy - referenceVy;
+        const relativeSpeed = Math.hypot(relativeVx, relativeVy);
+        if (!(relativeSpeed > 1e-12)) return;
+        let localScale = scale;
+        if (Number.isFinite(absoluteLimit)) {
+          const candidateVx = relativeVx * localScale, candidateVy = relativeVy * localScale;
+          const candidateSpeed = Math.hypot(candidateVx, candidateVy);
+          if (candidateSpeed > 1e-12) {
+            const allowed = galaxyRelativeSpeedBudget(
+              { vx: referenceVx, vy: referenceVy }, absoluteLimit, candidateSpeed,
+              candidateVx, candidateVy);
+            localScale = Math.min(localScale, allowed / candidateSpeed);
+          }
+        }
+        if (localScale < 1 - 1e-12) systemLimited = true;
+        minimumScale = Math.min(minimumScale, localScale);
+        node.vx = referenceVx + relativeVx * localScale;
+        node.vy = referenceVy + relativeVy * localScale;
       });
+      if (!systemLimited) return;
       limitedSystems++;
-      minimumScale = Math.min(minimumScale, scale);
     });
     return {
       systems: systems.length, limitedSystems, maximumRelativeSpeed, minimumScale, limit,
@@ -5684,6 +5753,8 @@
   function applyGalaxyOrbitalSpeedControl(nodes, options) {
     const opts = options || {};
     const orbitalSpeed = galaxyOrbitalSpeedMultiplier(opts.orbitalSpeed);
+    const absoluteSpeedLimit = Number.isFinite(Number(opts.speedLimit))
+      ? Math.max(0.01, Number(opts.speedLimit)) : Number.POSITIVE_INFINITY;
     const orbitalRadius = galaxyOrbitalRadiusMultiplier(opts.orbitalSpeed);
     const bodies = (nodes || []).filter(node => node && !node.ghost
       && Number.isFinite(node.x) && Number.isFinite(node.y));
@@ -5700,7 +5771,15 @@
         Number.isFinite(node.vx) ? node.vx : 0,
         Number.isFinite(node.vy) ? node.vy : 0,
       ) > 1e-8);
-    if (!globalAnchor || !(field.gravitationalConstant > 0)) return stats;
+    /* A zero global field must not freeze local satellites: the local stellar wells are
+       independent of the black-hole constant, so at Gravity=0 the per-frame phase/radius
+       controller still has to run. Only carrier support below depends on the global
+       field, and `supportCarrier` is skipped per item when the field is inactive.
+       PR #177 review thread at this site. */
+    const globalFieldActive = field.gravitationalConstant > 0;
+    if (!globalAnchor || (!globalFieldActive && !bodies.some(node => node.system_anchor_id != null))) {
+      return stats;
+    }
     const direction = (seededHash(opts.layoutSeed, 'galaxy-spin') & 1) ? 1 : -1;
     const supportCarrier = (members, carrier) => {
       if (!carrier || carrier === globalAnchor) return;
@@ -5723,6 +5802,21 @@
         node.vx = (Number.isFinite(node.vx) ? node.vx : 0) + tangentX * delta;
         node.vy = (Number.isFinite(node.vy) ? node.vy : 0) + tangentY * delta;
       });
+      if (Number.isFinite(absoluteSpeedLimit) && carrier.id !== opts.fixedNodeId) {
+        const carrierVx = Number.isFinite(carrier.vx) ? carrier.vx : 0;
+        const carrierVy = Number.isFinite(carrier.vy) ? carrier.vy : 0;
+        const carrierSpeed = Math.hypot(carrierVx, carrierVy);
+        if (carrierSpeed > absoluteSpeedLimit) {
+          const scale = absoluteSpeedLimit / carrierSpeed;
+          const correctionX = carrierVx * scale - carrierVx;
+          const correctionY = carrierVy * scale - carrierVy;
+          members.forEach(node => {
+            if (node.id === opts.fixedNodeId) return;
+            node.vx = (Number.isFinite(node.vx) ? node.vx : 0) + correctionX;
+            node.vy = (Number.isFinite(node.vy) ? node.vy : 0) + correctionY;
+          });
+        }
+      }
       stats.systems++;
     };
     field.systems.forEach(item => {
@@ -5732,7 +5826,7 @@
          Keep that frame untouched here, but never skip the local controller: its cached
          direction is what prevents a planet from reversing around its authored star after
          contact or boundary corrections. */
-      if (!neutralPhase) supportCarrier(members, carrier);
+      if (!neutralPhase && globalFieldActive) supportCarrier(members, carrier);
       const localAnchor = carrier;
       if (!localAnchor) return;
       const byId = new Map(members.map(node => [String(node.id), node]));
@@ -5829,16 +5923,27 @@
            collision, and relation work may translate the whole system, but they cannot turn
            a planet backward or pull it onto a chord through the star. */
         const timestep = Math.max(0.001, Math.min(2, Number(opts.timestep) || 1));
-        const angularSpeed = baseSpeed * orbitalSpeed / Math.max(1e-6, targetRadius);
+        const requestedRelativeSpeed = baseSpeed * orbitalSpeed;
+        const phaseTangentX = -Math.sin(phase.angle) * phase.direction;
+        const phaseTangentY = Math.cos(phase.angle) * phase.direction;
+        /* Use one scalar for the phase clock and emitted velocity. The final tangent rotates
+           during the step, so also apply the direction-independent residual cap; reusing a
+           pre-step directional budget after that rotation must never exceed the absolute cap. */
+        const phaseSpeed = Math.min(
+          galaxyRelativeSpeedBudget(parent, absoluteSpeedLimit,
+            requestedRelativeSpeed, phaseTangentX, phaseTangentY),
+          galaxyRelativeSpeedBudget(parent, absoluteSpeedLimit, requestedRelativeSpeed),
+        );
+        const angularSpeed = phaseSpeed / Math.max(1e-6, targetRadius);
         phase.angle += phase.direction * angularSpeed * timestep;
         const unitX = Math.cos(phase.angle), unitY = Math.sin(phase.angle);
         const tangentX = -unitY * phase.direction, tangentY = unitX * phase.direction;
         const targetX = parent.x + unitX * targetRadius;
         const targetY = parent.y + unitY * targetRadius;
         const targetVx = (Number.isFinite(parent.vx) ? parent.vx : 0)
-          + tangentX * baseSpeed * orbitalSpeed;
+          + tangentX * phaseSpeed;
         const targetVy = (Number.isFinite(parent.vy) ? parent.vy : 0)
-          + tangentY * baseSpeed * orbitalSpeed;
+          + tangentY * phaseSpeed;
         const shiftX = targetX - node.x, shiftY = targetY - node.y;
         const velocityShiftX = targetVx - (Number.isFinite(node.vx) ? node.vx : 0);
         const velocityShiftY = targetVy - (Number.isFinite(node.vy) ? node.vy : 0);
@@ -6030,7 +6135,10 @@
     ) : { applied: 0, maximumAcceleration: 0, maximumPull: 0 };
     const systemVelocity = stabilizeGalaxySystemVelocities(bodies, {
       limit: opts.localRelativeSpeedLimit,
-      absoluteLimit: speedLimit,
+      /* The integrator applies the world-speed ceiling below as one common scale so the
+         mass-weighted local frame keeps its momentum. The direct helper still accepts an
+         absoluteLimit for callers that need a per-vector projection. */
+      absoluteLimit: Infinity,
       fixedNodeId: opts.fixedNodeId,
     });
     /* Restore the pointer target before the final contacts. The strict horizon and cached outer
@@ -6280,7 +6388,9 @@
     };
     const finalSystemVelocity = stabilizeGalaxySystemVelocities(bodies, {
       limit: opts.localRelativeSpeedLimit,
-      absoluteLimit: speedLimit,
+      /* Keep the final local pass momentum-preserving; the common world-speed projection below
+         is the sole absolute cap for a leapfrog slice. */
+      absoluteLimit: Infinity,
       fixedNodeId: opts.fixedNodeId,
     });
     systemVelocity.limitedSystems += finalSystemVelocity.limitedSystems;
@@ -7930,10 +8040,6 @@
       setSimulationBudget(false, true);
     }
 
-    function nonGalaxyVelocityDecay() {
-      const damping = clamp(Number(state.settings.damping ?? 1), 0, 15);
-      return 0.05 + damping * (0.80 / 15);
-    }
 
     function applyForces() {
       /* Extremely large complete snapshots use the deterministic fallback, but a normal
@@ -7984,17 +8090,32 @@
         charge = d3.forceManyBody();
         fg.d3Force('charge', charge);
       }
-      /* Spacetime-tuned values arrive here already normalized by the dashboard adapter around
-         one. Consume those engine values directly; dividing them again interprets a multiplier
-         as a raw slider setting and makes every non-Galaxy force nearly inert. */
-      const gravityMultiplier = clamp(Number(state.settings.gravitationalConstant ?? 1), 0, 8);
-      /* The dashboard maps the advertised 20..500 control to 0.125..4.4. Preserve that
-         complete normalized interval so neither end of the visible mass slider becomes a
-         no-op in compact, community, or radial layouts. */
-      const massMultiplier = clamp(Number(state.settings.blackHoleMass ?? 1), 0.125, 4.4);
-      const localMultiplier = clamp(Number(state.settings.localGravitationalConstant ?? 1), 0, 8);
+      /* Spacetime-tuned multipliers: the user reaches these via the Galactic gravity, Black hole
+         mass, and Local solar gravity sliders. In non-galaxy mode the d3-force simulator is the
+         only consumer, so the multipliers must reach the d3 forces directly.
+
+         The dashboard normalizes these settings in
+         ledger.js::graphSpacetimeEngineSettings() to a clean 0..2 range with the visible
+         default at 1.0x. Consume the normalized values directly as the multipliers. A
+         user-moved 0 reaches the engine as 0 (no force), the default 1.0 (no change), and
+         the high end 2.0 (double force). The `Number.isFinite` check handles the *missing*
+         case: if ledger.js never supplied a value (the engine was constructed without the
+         dashboard wiring), fall back to the neutral 1.0x multiplier so the layout does
+         not collapse. */
+      const gcRaw = Number(state.settings.gravitationalConstant);
+      const lgcRaw = Number(state.settings.localGravitationalConstant);
+      const bhmRaw = Number(state.settings.blackHoleMass);
+      /* The dashboard adapter emits 0..4 for gravity/local (raw/50) and up to 4.4 for
+         mass, so clamping at 2 saturated the upper half of all three sliders (PR #177
+         review threads at this site). Accept the full emitted engine ranges. */
+      const gravityMultiplier = Number.isFinite(gcRaw) ? clamp(gcRaw, 0, 4) : 1;
+      const massMultiplier = Number.isFinite(bhmRaw) ? clamp(bhmRaw, 0, 4.4) : 1;
+      const localMultiplier = Number.isFinite(lgcRaw) ? clamp(lgcRaw, 0, 4) : 1;
       const baseRepel = mode === 'communities' ? Math.max(10, s.repel * 0.68) : s.repel;
-      if (charge && charge.strength) charge.strength(-baseRepel * gravityMultiplier);
+      /* Galactic gravity is an attractive control. Keep the separate Repel slider on the
+         negative many-body charge, and apply this multiplier to the attractive anchor forces
+         below so increasing gravity tightens the layout instead of spreading it apart. */
+      if (charge && charge.strength) charge.strength(-baseRepel);
       if (link && link.distance) link.distance(s.link);
       if (link && link.strength) link.strength(edge => {
         const source = typeof edge.source === 'object' ? edge.source : layoutById.get(linkEndpoint(edge, 'source'));
@@ -8004,10 +8125,29 @@
         ));
         return base * localMultiplier;
       });
-      /* ForceGraph exposes the D3 setter as d3VelocityDecay. High damping makes the layout
-         settle fast, low damping keeps nodes oscillating. Bounded 0.05..0.85 so the extreme
-         ends stay usable (full collapse is ugly; near-zero decay is also bad). */
-      if (fg.d3VelocityDecay) fg.d3VelocityDecay(nonGalaxyVelocityDecay());
+      /* Space friction (the dashboard's "damping" slider) maps onto d3's velocityDecay. The
+         slider's 0..15 visible range must reach the full d3 decay range so the lower quarter
+         is not inert. At the default (slider=1) the size-aware baseline (0.38 small / 0.45
+         large) is the neutral settling behaviour, so the slider's effect is a *multiplier*
+         on that baseline, not a replacement. Above 1 the layout settles harder, below 1
+         it stays more elastic. */
+      /* Space friction (the dashboard's "damping" slider) maps onto d3's velocityDecay.
+         The slider's 0..15 visible range must reach the full d3 decay range so the lower
+         quarter is not inert. At the default (slider=1) the size-aware baseline (0.38 small
+         / 0.45 large) is the neutral settling behaviour, so the slider's effect is a
+         *multiplier* on that baseline, not a replacement. Above 1 the layout settles
+         harder, below 1 it stays more elastic, down to the d3 floor 0.05 at 0. */
+      if (fg.d3VelocityDecay) {
+        const dampingRaw = Number(state.settings.damping);
+        const damping = Number.isFinite(dampingRaw) ? clamp(dampingRaw, 0, 15) : 1;
+        const baseline = large ? 0.45 : 0.38;
+        const floor = 0.05;
+        const ceiling = 0.85;
+        const target = damping <= 1
+          ? floor + (baseline - floor) * damping
+          : baseline + (ceiling - baseline) * (damping - 1) / 14;
+        fg.d3VelocityDecay(clamp(target, floor, ceiling));
+      }
       if (typeof d3 === 'undefined') {
         installVelocityGuard();
         return;
@@ -8040,18 +8180,21 @@
            drag; the community grid is still visible through the charge/repel and link
            structure installed above. Black-hole mass multiplies the centering strength so
            the slider visibly pulls nodes toward the origin. */
-        const centering = Math.max(0.04, (Number(s.gravity) || 0) / 100) * massMultiplier;
+        const centering = Math.max(0.04, (Number(s.gravity) || 0) / 100)
+          * massMultiplier * gravityMultiplier;
         fg.d3Force('x', d3.forceX(0).strength(centering));
         fg.d3Force('y', d3.forceY(0).strength(centering));
       } else if (mode === 'radial' && d3.forceRadial) {
         const outerRadius = Math.max(180, Math.min(360, Math.sqrt(Math.max(1, layoutNodes.length)) * 18 + (Number(s.link) || 16) * 4));
         const degreeScale = Math.max(1, maxOf(layoutNodes.map(node => node.degree || 0), 1));
-        fg.d3Force('x', d3.forceX(0).strength(Math.max(0.05, (Number(s.gravity) || 0) / 500) * massMultiplier));
-        fg.d3Force('y', d3.forceY(0).strength(Math.max(0.05, (Number(s.gravity) || 0) / 500) * massMultiplier));
+        const centering = Math.max(0.05, (Number(s.gravity) || 0) / 500)
+          * massMultiplier * gravityMultiplier;
+        fg.d3Force('x', d3.forceX(0).strength(centering));
+        fg.d3Force('y', d3.forceY(0).strength(centering));
         fg.d3Force('radial', d3.forceRadial(node => {
           const hubness = Math.max(0, Math.min(1, (node.degree || 0) / degreeScale));
           return 34 + (outerRadius - 34) * (1 - hubness);
-        }).strength(0.72));
+        }).strength(0.72 * gravityMultiplier));
       } else if (mode === 'constellation') {
         const positions = new Map(), total = Math.max(1, layoutNodes.length - 1);
         const reach = Math.max(160, Math.min(330, 80 + Math.sqrt(Math.max(1, layoutNodes.length)) * 10));
@@ -8063,12 +8206,18 @@
           positions.set(node.id, { x: Math.cos(angle) * radius * 1.18, y: Math.sin(angle) * radius * 0.76 });
         });
         const target = node => positions.get(node.id) || { x: 0, y: 0 };
-        fg.d3Force('x', d3.forceX(node => target(node).x).strength(0.18 * massMultiplier));
-        fg.d3Force('y', d3.forceY(node => target(node).y).strength(0.18 * massMultiplier));
+        /* Black-hole mass scales the constellation's anchor strength so the slider is
+           visible in this preset too. */
+        const targetStrength = 0.18 * massMultiplier * gravityMultiplier;
+        fg.d3Force('x', d3.forceX(node => target(node).x).strength(targetStrength));
+        fg.d3Force('y', d3.forceY(node => target(node).y).strength(targetStrength));
       } else {
-        const centering = (mode === 'compact'
+        const baseCentering = mode === 'compact'
           ? Math.max(0.24, (Number(s.gravity) || 0) / 100)
-          : Math.max(0.06, (Number(s.gravity) || 0) / 100)) * massMultiplier;
+          : Math.max(0.06, (Number(s.gravity) || 0) / 100);
+        /* Black-hole mass scales the centering so the slider pulls compact and original
+           layouts toward the origin in proportion to its setting. */
+        const centering = baseCentering * massMultiplier * gravityMultiplier;
         fg.d3Force('x', d3.forceX(0).strength(centering));
         fg.d3Force('y', d3.forceY(0).strength(centering));
       }
@@ -8130,10 +8279,31 @@
       const link = Math.max(4, Number(s.link) || 4);
       const nodeSize = Math.max(1, Number(s.size) || 3);
       const compactness = galaxyLayoutCompactness(s.gravity);
-      const localGap = (4 + nodeSize * 1.6 + Math.sqrt(repel) * 0.8 + link * 0.16) * compactness;
+      const control = (value, fallback, min, max) => Number.isFinite(Number(value))
+        ? clamp(value, min, max) : fallback;
+      const coreAttraction = control(s.gravitationalConstant, 1, 0, 2);
+      const coreMass = control(s.blackHoleMass, 1, 0, 2);
+      const clusterCohesion = control(s.localGravitationalConstant, 1, 0, 2);
+      const settlingResistance = control(s.damping, 1, 0, 15);
+      const linkSpring = control(s.springStiffness, 1, 0, 100 / 32);
+      /* Keep zero-force endpoints finite without flattening the lower slider range. The 0.5
+         baseline preserves a neutral scale of one at the default product, while the explicit
+         bounded response caps a zero product at sqrt(2) instead of spreading the layout across
+         millions of world units. */
+      const responseScale = product => {
+        const magnitude = Math.max(0, Number(product) || 0);
+        return 1 / Math.sqrt(0.5 + 0.5 * magnitude);
+      };
+      const coreScale = responseScale(coreAttraction * coreMass);
+      const cohesionScale = responseScale(clusterCohesion * linkSpring);
+      const settlingScale = 1 + (settlingResistance - 1) * 0.02;
+      const layoutPhysicsScale = coreScale * cohesionScale * settlingScale;
+      const localGap = (4 + nodeSize * 1.6 + Math.sqrt(repel) * 0.8 + link * 0.16)
+        * compactness * layoutPhysicsScale;
       const columns = Math.max(1, Math.ceil(Math.sqrt(ordered.length)));
       const largestGroup = ordered.reduce((largest, [, nodes]) => Math.max(largest, nodes.length), 1);
-      const cell = Math.max(90, Math.sqrt(largestGroup) * localGap * 2.4 + link * 3) * compactness;
+      const cell = Math.max(90, Math.sqrt(largestGroup) * localGap * 2.4 + link * 3)
+        * compactness * Math.max(0.5, Math.sqrt(layoutPhysicsScale));
       const golden = Math.PI * (3 - Math.sqrt(5));
       ordered.forEach(([, nodes], groupIndex) => {
         nodes.sort((a, b) => (b.degree || 0) - (a.degree || 0) || String(a.id).localeCompare(String(b.id)));
@@ -8551,6 +8721,11 @@
           finitePositive(activeDragNode.radius, 2, 160) * 1.5) : GALAXY_DRAG_GRAVITY_SOFTENING,
         gravity: state.settings.gravity,
         localGravitySetting: GALAXY_FIXED_LOCAL_GRAVITY_SETTING,
+        /* The dashboard normalises the three spacetime sliders to a 0..2 range
+           (default 1.0). Preserve that normalized value at the Galaxy boundary:
+           the downstream multiplier helpers clamp their own direct-call range,
+           and multiplying here made the default field 4x/8x stronger than the
+           value shown by the controls. */
         gravitationalConstant: galaxyPhysicsMultiplier(
           state.settings.gravitationalConstant, GALAXY_GRAVITATIONAL_CONSTANT_MULTIPLIER, 8),
         localGravitationalConstant: galaxyPhysicsMultiplier(
@@ -9102,8 +9277,8 @@
       /* In galaxy mode the d3 reheat is a no-op for layout: galaxy owns the integrator and
          setSettings already scaled carriers. The follow-up render still repaints and
          re-asserts the contact-correction invariant, but those corrections are
-         path-dependent on intermediate slider phase and would undo a burst sweep
-         (memory #5). Phase-preserve the contact-correction pass on the very next render
+         path-dependent on intermediate slider phase and would undo a burst sweep.
+         Phase-preserve the contact-correction pass on the very next render
          so the immediate response survives until the live integrator ticks. */
       const phaseLock = state.settings.mode === 'galaxy';
       physicsFrame = requestFrame(() => {
@@ -9306,7 +9481,9 @@
         );
       }
       /* Reused arrays bypass graphData(); size changes, static repins, and restored phases still
-         receive the same strict painted-edge invariant before the next redraw. */
+         receive the same strict painted-edge invariant before the next redraw — unless the
+         slider burst just rescaled carriers, in which case the corrections would fold the
+         burst's intermediate ratios into the layout (path dependence). */
       if (reused && galaxyMode && !skipGalaxyReseed) {
         const prePaintHorizon = applyGalaxyBlackHoleExclusion(
           data.nodes, { padding: GALAXY_BLACK_HOLE_EXCLUSION_PADDING }
@@ -9412,7 +9589,6 @@
       /* D3 is only the renderer in Galaxy mode. Its alpha, velocity decay and countdown are
          intentionally untouched; the fixed-step clock owns all three physical concerns. */
       if (!galaxyMode && fg.d3AlphaDecay) fg.d3AlphaDecay(staticFullLayout ? 1 : alphaDecay());
-      if (!galaxyMode && fg.d3VelocityDecay) fg.d3VelocityDecay(nonGalaxyVelocityDecay());
       if (fg.linkCurvature) {
         fg.linkCurvature(dense ? 0 : ((PRESETS[state.settings.mode] || PRESETS.compact).curve || 0));
       }
@@ -10114,6 +10290,13 @@
                 velocityAdjusted: 0, maximumVelocityShift: 0, anchorId: anchor.id,
               };
               render(false, false);
+              /* Re-arm: the inner render consumed the flag. The outer render below must also
+                 skip the contact-correction pass so the burst's ratios never fold into the
+                 layout (path independence). */
+              if (gravityChanged && previousMode === 'galaxy'
+                && state.settings.mode === 'galaxy') {
+                preserveGalaxyPhaseOnResume = true;
+              }
             }
           }
         }
@@ -10132,10 +10315,9 @@
         api.freeze(false);
         return;
       }
-      /* A galaxy slider burst sets the phase-preserve flag for the inner render, which
-         consumes it. Re-arm so the outer render below also skips the contact-correction
-         pass for the same reason — that pass folds burst intermediates into the layout and
-         breaks path independence across slider sweeps. */
+      /* Re-arm for the outer render + the synchronous physics reheat that schedulePhysicsUpdate
+         may run: both share the render path and would otherwise run the path-dependent
+         contact corrections on the post-scaling layout, undoing the slider's burst response. */
       if (gravityChanged && previousMode === 'galaxy' && state.settings.mode === 'galaxy') {
         preserveGalaxyPhaseOnResume = true;
       }
