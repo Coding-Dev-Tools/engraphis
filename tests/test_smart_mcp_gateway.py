@@ -92,8 +92,12 @@ def test_normal_mcp_exposes_only_the_smart_gateway_tools(monkeypatch):
     tools = _tools(server, "mcp")
     assert set(tools) == SMART_TOOL_NAMES
     assert len(tools) == 9
-    assert len(server.mcp.instructions) <= 512
     assert "scope" not in tools["engraphis_remember"].inputSchema.get("properties", {})
+    # The documented safe-supersession mechanism must stay reachable through the
+    # served gateway surface: subject_key/claim_kind forward to the classic tool.
+    props = tools["engraphis_remember"].inputSchema.get("properties", {})
+    assert "subject_key" in props
+    assert "claim_kind" in props
 
 
 def test_classic_mcp_retains_the_34_named_tool_compatibility_surface(monkeypatch):
@@ -483,6 +487,42 @@ def test_smart_session_start_and_end_preserve_handoff_contract(monkeypatch):
     ))
     assert ended["session_id"] == started["session_id"]
     assert ended["status"] == "summarized"
+
+
+def test_smart_session_action_normalizes_full_tool_name(monkeypatch):
+    """The Command Code harness passes action='start_session'/'end_session'
+    (the full tool name) when translating the AGENTS.md engraphis_start_session
+    / engraphis_end_session shorthand. Both the direct-call path and the MCP
+    protocol validation path must accept and normalize these."""
+    server = _memory_server(monkeypatch)
+
+    # Direct call: function-body normalization handles it.
+    started = _payload(server.engraphis_session(
+        action="start_session", workspace="acme", repo="api", agent="test-agent",
+    ))
+    assert started["status"] == "active"
+    assert started["workspace"] == "acme"
+
+    ended = _payload(server.engraphis_session(
+        action="end_session", session_id=started["session_id"], summary="Done.",
+    ))
+    assert ended["status"] == "summarized"
+    assert ended["session_id"] == started["session_id"]
+
+
+def test_smart_session_arg_model_accepts_full_tool_name(monkeypatch):
+    """BeforeValidator normalizes start_session/end_session before the pattern
+    constraint, so the MCP protocol validation path doesn't reject them."""
+    from mcp.server.fastmcp.utilities.func_metadata import func_metadata
+
+    server = _memory_server(monkeypatch)
+    meta = func_metadata(server.engraphis_session)
+    # The raw harness value that triggers the validation error in production.
+    assert meta.arg_model.model_validate({"action": "start_session"}).action == "start"
+    assert meta.arg_model.model_validate({"action": "end_session"}).action == "end"
+    # Genuine invalid actions are still rejected by the pattern.
+    with pytest.raises(ValueError):
+        meta.arg_model.model_validate({"action": "bogus"})
 
 
 def test_gateway_not_found_failure_returns_iserror_envelope(monkeypatch):

@@ -296,3 +296,199 @@ def test_resolve_moderate_cosine_low_overlap_still_adds():
                  "stock decrement.")
     res = resolve(candidate, [(0.6, neighbor)])
     assert res.op == ResolutionOp.ADD
+
+
+# ── reworded corrections without a claim key (benchmark cc0825) ────────────────
+
+def test_reworded_number_correction_invalidates_without_claim_key():
+    # Same fact, changed value, reworded prose: the aligned diff finds the
+    # 30 -> 90 swap anchored by the shared "timeout/seconds" attribute.
+    neighbor = _rec("The request timeout is 30 seconds.", id="mem_old_timeout")
+    res = resolve("We raised the request timeout to 90 seconds last sprint.",
+                  [(0.5, neighbor)])
+    assert res.op == ResolutionOp.INVALIDATE
+    assert res.target_id == "mem_old_timeout"
+
+
+def test_reworded_marker_correction_invalidates_across_phrasings():
+    # A bare change marker ("moved", "grew") is not sufficient on its own
+    # — common words leak into every sentence. The marker leg now requires
+    # the candidate to also exhibit a value_swap on the same shared
+    # subject, so the rewrite is "same fact, new value" rather than a
+    # different fact about a similar topic.
+    neighbor = _rec("Deploy schedule runs at 5pm on Fridays.", id="mem_deploy_slot")
+    res = resolve("Deploy schedule now runs at 6pm on Fridays.", [(0.6, neighbor)])
+    assert res.op == ResolutionOp.INVALIDATE
+    assert res.target_id == "mem_deploy_slot"
+
+    neighbor2 = _rec("The pilot cohort has 25 users.", id="mem_pilot")
+    res2 = resolve("The pilot cohort has 120 users.", [(0.5, neighbor2)])
+    # No marker, but a clear value swap on the same subject.
+    assert res2.op == ResolutionOp.INVALIDATE
+    assert res2.target_id == "mem_pilot"
+
+
+def test_reworded_marker_without_value_swap_does_not_invalidate():
+    """A change marker on a candidate that shares only loose subject nouns
+    with the neighbour is not correction evidence. Common words like "now"
+    leak into every sentence, and surface noun overlap ("production API")
+    does not imply predicate agreement ("uses Redis caching" vs "uses
+    three replicas"). The marker leg now requires a value_swap on the
+    same shared subject — predicate and value together, not just
+    predicate and marker.
+    """
+    neighbor = _rec("The production API uses Redis caching for user sessions.",
+                    id="mem_cache")
+    res = resolve("The production API now uses three replicas for high availability.",
+                  [(0.45, neighbor)])
+    assert res.op != ResolutionOp.INVALIDATE
+    assert res.target_id != "mem_cache"
+
+
+def test_date_swap_correction_invalidates_when_attribute_is_shared():
+    neighbor = _rec("Until January the rate limit was 100 requests per minute.",
+                    id="mem_old_rate")
+    res = resolve("As of February the rate limit is 500 requests per minute.",
+                  [(0.55, neighbor)])
+    assert res.op == ResolutionOp.INVALIDATE
+    assert res.target_id == "mem_old_rate"
+
+
+def test_distinct_environment_values_never_invalidate_each_other():
+    # Same attribute, different environment qualifier: two coexisting facts.
+    neighbor = _rec("Redis cache TTL is 300 seconds in staging.", id="mem_ttl_staging")
+    res = resolve("Redis cache TTL is 3600 seconds in production.", [(0.7, neighbor)])
+    assert res.op != ResolutionOp.INVALIDATE
+
+
+def test_named_identifier_swap_is_not_proven_a_correction_without_marker():
+    # ProviderA -> ProviderB beside 4 -> 8 workers could be parallel infrastructure;
+    # the hashing embedder cannot prove the same predicate, so both stay live.
+    neighbor = _rec("CI runs on ProviderA with 4 workers.", id="mem_ci_workers")
+    res = resolve("CI runs on ProviderB with 8 workers.", [(0.65, neighbor)])
+    assert res.op != ResolutionOp.INVALIDATE
+
+
+def test_clean_noun_swap_vetoes_strong_joint_invalidation():
+    # Pre-existing false-invalidation class: strong overlap+cosine, but the diff
+    # replaces one plain noun with another and no value changes.
+    neighbor = _rec("The docs cover the REST interface.", id="mem_docs_rest")
+    res = resolve("The docs cover the GraphQL interface.", [(0.9, neighbor)])
+    assert res.op == ResolutionOp.RELATE
+
+
+def test_distinct_attribute_with_numbers_stays_live():
+    # "refreshes every 5 minutes" vs "holds about 2 million documents": numbers
+    # change but they belong to different attributes (no shared value anchor).
+    neighbor = _rec("The search index refreshes every 5 minutes.", id="mem_index_refresh")
+    res = resolve("The search index holds about 2 million documents.", [(0.6, neighbor)])
+    assert res.op != ResolutionOp.INVALIDATE
+
+
+def test_engine_reworded_correction_closes_the_stale_fact_end_to_end():
+    from engraphis.core.engine import MemoryEngine
+    eng = MemoryEngine.create(":memory:", auto_evolve=False)
+    try:
+        wid = eng.store.get_or_create_workspace("w")
+        rid = eng.store.get_or_create_repo(wid, "r")
+        old = eng.remember_with_resolution(
+            "The request timeout is 30 seconds.", workspace_id=wid, repo_id=rid)
+        new = eng.remember_with_resolution(
+            "We raised the request timeout to 90 seconds last sprint.",
+            workspace_id=wid, repo_id=rid)
+        assert new["op"] == "invalidate"
+        assert new["superseded"] == [old["id"]]
+        assert eng.store.get_memory(old["id"]).valid_to is not None
+        assert eng.store.get_memory(new["id"]).valid_to is None
+    finally:
+        eng.store.close()
+
+
+def test_engine_distinct_facts_about_one_topic_both_stay_live():
+    from engraphis.core.engine import MemoryEngine
+    eng = MemoryEngine.create(":memory:", auto_evolve=False)
+    try:
+        wid = eng.store.get_or_create_workspace("w")
+        rid = eng.store.get_or_create_repo(wid, "r")
+        budget = eng.remember_with_resolution(
+            "The data migration budget is 50 thousand dollars.",
+            workspace_id=wid, repo_id=rid)
+        deadline = eng.remember_with_resolution(
+            "The data migration deadline is March 15.",
+            workspace_id=wid, repo_id=rid)
+        assert deadline["op"] in ("add", "relate")
+        assert eng.store.get_memory(budget["id"]).valid_to is None
+        assert eng.store.get_memory(deadline["id"]).valid_to is None
+    finally:
+        eng.store.close()
+
+
+# ── R1 review: additional safety-class tests for reworded-correction paths ──────
+
+
+def test_distinct_environment_values_never_invalidate_via_strong_branch_long_form():
+    # The short-form env-conflict test (Redis TTL 300 -> 3600 in staging/production)
+    # happened to split into two diff spans; this long-form variant collapses to a
+    # single replace span. R1 review found the strong branch's swap_veto did not
+    # honour env_conflict, so the strong path would incorrectly supersede.
+    neighbor = _rec(
+        "The primary database connection pool in the staging environment holds "
+        "5 connections per application instance under nominal load.",
+        id="mem_staging_pool",
+    )
+    res = resolve(
+        "The primary database connection pool in the production environment holds "
+        "8 connections per application instance under nominal load.",
+        [(0.7, neighbor)],
+    )
+    assert res.op != ResolutionOp.INVALIDATE
+
+
+def test_marker_with_value_swap_invalidates():
+    # The marker leg now requires a value_swap on the same shared subject
+    # — marker + value is a real correction ("now runs 6pm" rewrites
+    # "runs 5pm"). A bare marker without a value change stays ADD.
+    neighbor = _rec("Deploy schedule runs at 5pm on Fridays.", id="mem_deploy_v")
+    res = resolve("Deploy schedule now runs at 6pm on Fridays.",
+                  [(0.6, neighbor)])
+    assert res.op == ResolutionOp.INVALIDATE
+    assert res.target_id == "mem_deploy_v"
+
+
+def test_marker_alone_without_value_swap_does_not_invalidate():
+    # "We migrated the docs to cover the GraphQL interface" against
+    # "The docs cover the REST interface" has a marker and a heavy noun
+    # swap but no value_swap — different facts about a similar topic,
+    # not the same fact restated. Stays ADD.
+    neighbor = _rec("The docs cover the REST interface.", id="mem_docs_rest")
+    res = resolve("We migrated the docs to cover the GraphQL interface.",
+                  [(0.9, neighbor)])
+    assert res.op != ResolutionOp.INVALIDATE
+
+
+def test_closed_predecessor_supersedes_under_strong_evidence_regardless_of_prose():
+    # A closed (valid_to set) predecessor is historical chain membership: even
+    # the strong path's swap_vetoes should not protect a closed record. This
+    # is the backfill-and-supersede contract: "the chain wants this rewrite".
+    closed = _memory_obj(
+        id="mem_closed_old",
+        content="Deploy schedule runs at 5pm on Fridays.",
+        valid_to=1_000.0,
+    )
+    res = resolve("Deploy schedule now runs at 6pm on Fridays.",
+                  [(0.9, closed)])
+    assert res.op == ResolutionOp.INVALIDATE
+    assert res.target_id == "mem_closed_old"
+
+
+def _memory_obj(id: str, content: str, *, valid_to=None):
+    """Minimal in-memory MemoryRecord with the fields _rec doesn't expose."""
+    from engraphis.core.interfaces import MemoryRecord
+    return MemoryRecord(
+        id=id, workspace_id="w", repo_id=None, session_id=None,
+        title="", content=content, mtype="semantic", scope="workspace",
+        importance=0.0, confidence=1.0, valid_from=0.0, valid_to=valid_to,
+        ingested_at=0.0, expired_at=None,
+        subject_key="", claim_kind="", keywords=(), metadata={},
+        provenance={"source": "agent", "trusted": True, "review_state": "approved"},
+    )
