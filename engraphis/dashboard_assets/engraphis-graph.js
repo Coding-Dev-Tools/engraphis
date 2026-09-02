@@ -93,9 +93,6 @@
   const GALAXY_GRAVITY_MAXIMUM = 400;
   const GALAXY_GRAVITY_MAX_STRENGTH_GAIN = 1.5;
   const GALAXY_GRAVITY_STRENGTH_GAIN_START = 200;
-  /* Keep the visible Galaxy gravity setting at its established default (96), but make the
-     resting base field 50% stronger so the default scene carries less empty space. */
-  const GALAXY_BASE_GRAVITY_MULTIPLIER = 1.5;
   /* The emergency acceleration cap follows the full visible strength range. Direct callers can
      still pass pathological values, but those values clamp to the same 0..400 physics ceiling. */
   const GALAXY_GRAVITY_CAP_REFERENCE = GALAXY_GRAVITY_MAXIMUM;
@@ -130,10 +127,9 @@
       + 0.25 * galaxySmoothstep((value - 48) / 52);
     /* Gravity was tuned against the v8-era compact layout, where a 48 setting produced
        comfortable orbital spacing. The galaxy-v12 compact-orbits algorithm places systems
-       tighter, so the calibrated field remains doubled before the independent 1.5x base
-       default-density multiplier is applied. */
-    return base * boost * 4 * galaxyGravityStrengthMultiplier(value) * 2.0
-      * GALAXY_BASE_GRAVITY_MULTIPLIER;
+       tighter, so the same setting now reads as too loose. Scale the final constant 20%
+       upward so the default (and every other position) feels like the reference layout. */
+    return base * boost * 4 * galaxyGravityStrengthMultiplier(value) * 2.0;
   }
   /* Gravity strength is the galaxy-wide black-hole control. The dashboard's Gravity slider
      flows to the explicit global anchor: zero user gravity is a real zero field, and the
@@ -141,6 +137,7 @@
      systems is owned by the independent local-stellar well and the rigid event-horizon
      contact layers, neither of which depends on this constant. */
   const GALAXY_GLOBAL_GRAVITY_FLOOR_SETTING = 24;
+  const GALAXY_STELLAR_GRAVITY_FLOOR_SETTING = 48;
   function galaxyBlackHoleGravitySetting(setting, explicitGlobal) {
     const raw = Number(setting);
     const value = Number.isFinite(raw) ? Math.max(0, Math.min(GALAXY_GRAVITY_MAXIMUM, raw)) : 0;
@@ -319,13 +316,9 @@
   const GALAXY_ORBITAL_SPEED_DEFAULT = 100;
   const GALAXY_ORBITAL_SPEED_MAXIMUM_SETTING = 400;
   const GALAXY_ORBITAL_SPEED_MINIMUM = 0.25;
-  /* The orbital-speed slider's high-end gain. Bumped from 0.5 to 1.0 so the upper half of
-     the slider is fully proportional: at repel=200 the multiplier is 2.0 (was 1.5), and at
-     repel=400 the multiplier is 4.0 (was 2.5, capped to 4.6). */
-  const GALAXY_ORBITAL_SPEED_RESPONSE_GAIN = 1.0;
+  const GALAXY_ORBITAL_SPEED_RESPONSE_GAIN = 0.5;
   const GALAXY_ORBITAL_SPEED_MAXIMUM = 4.6;
-  /* Bumped from 1.24 to 1.5 so the orbital-radius response is more visible. */
-  const GALAXY_ORBITAL_RADIUS_MAXIMUM = 1.5;
+  const GALAXY_ORBITAL_RADIUS_MAXIMUM = 1.24;
   function galaxyOrbitalSpeedMultiplier(setting) {
     const raw = Number(setting);
     const value = Number.isFinite(raw)
@@ -450,10 +443,7 @@
      the integrator. */
   const GALAXY_REHEAT_STEPS = 0;
   const GALAXY_REHEAT_LARGE_STEPS = 0;
-  /* Bumped from 0.00005 to 0.0005 — the damping slider (1..15) now has visibly stronger
-     effect: at slider=1 the per-tick velocity multiplier is 0.0005; at slider=15 it climbs
-     to 0.0075 (50% stronger than the previous 0.0015 cap). */
-  const GALAXY_VELOCITY_DECAY = 0.0005;
+  const GALAXY_VELOCITY_DECAY = 0.00005;
   /* Developer-facing spacetime controls are normalized multipliers around the calibrated
      dashboard physics. Keeping them separate from the established Gravity/Link controls makes
      the advanced panel reversible and avoids changing saved-layout semantics. */
@@ -2507,20 +2497,13 @@
     const explicitGlobal = anchor.anchor_role === 'global';
     const gravitationalConstantMultiplier = galaxyPhysicsMultiplier(opts.gravitationalConstant,
       GALAXY_GRAVITATIONAL_CONSTANT_MULTIPLIER, 8);
-    /* Black-hole mass is now a LINEAR multiplier on the gravitational field — the user
-       expects that dragging the mass slider to 500 visibly doubles/triples the central
-       pull. The previous sqrt(blackHoleMassMultiplier) flattened the response so a 4x
-       slider change produced only a 2x force change, which made the slider feel dead. */
     const gravitationalConstant = galaxyBlackHoleGravityConstant(opts.gravity, explicitGlobal)
-      * gravitationalConstantMultiplier * blackHoleMassMultiplier;
+      * gravitationalConstantMultiplier * Math.sqrt(Math.max(0.25, blackHoleMassMultiplier));
     const accelerationCap = Math.max(0, Number.isFinite(Number(opts.accelerationCap))
       ? Number(opts.accelerationCap)
       : defaultGalaxyBlackHoleAccelerationCap(opts.gravity, explicitGlobal)
-        /* Linear in blackHoleMassMultiplier (was Math.max(1, ...)) so the acceleration
-           cap scales with the same linear response as gravitationalConstant. The 0.25
-           floor keeps the lower half of the slider from collapsing the cap. */
         * Math.max(0.25, Math.min(8,
-          gravitationalConstantMultiplier * Math.max(0.25, blackHoleMassMultiplier))));
+          gravitationalConstantMultiplier * Math.max(1, blackHoleMassMultiplier))));
     const haloVelocitySquared = haloMass > 0
       ? gravitationalConstant * haloMass / (Math.SQRT2 * haloScale) : 0;
     const model = {
@@ -5958,8 +5941,6 @@
         const tangentX = -unitY * phase.direction, tangentY = unitX * phase.direction;
         const targetX = parent.x + unitX * targetRadius;
         const targetY = parent.y + unitY * targetRadius;
-        const targetRelativeSpeed = galaxyRelativeSpeedBudget(parent, absoluteSpeedLimit,
-          baseSpeed * orbitalSpeed);
         const targetVx = (Number.isFinite(parent.vx) ? parent.vx : 0)
           + tangentX * phaseSpeed;
         const targetVy = (Number.isFinite(parent.vy) ? parent.vy : 0)
@@ -8895,12 +8876,10 @@
          a constant gravity amount. */
       const diagnosticMass = galaxyPhysicsMultiplier(state.settings.blackHoleMass,
         GALAXY_BLACK_HOLE_MASS_MULTIPLIER, 16);
-      /* Linear in diagnosticMass (was sqrt) so the diagnostic matches the new linear field
-         equation in galaxyBlackHoleField. */
       const effectiveGravity = galaxyBlackHoleGravityConstant(state.settings.gravity, true)
         * galaxyPhysicsMultiplier(state.settings.gravitationalConstant,
           GALAXY_GRAVITATIONAL_CONSTANT_MULTIPLIER, 8)
-        * diagnosticMass;
+        * Math.sqrt(Math.max(0.25, diagnosticMass));
       return Object.assign(galaxyMotionDiagnostics(data.nodes || []), {
         mode: state.settings.mode,
         running,
@@ -10770,6 +10749,8 @@
       galaxyBlackHoleGravityConstant, galaxyBlackHoleGravitySetting,
       galaxyCarrierTargetSpeed, galaxyAuthoredCarrierTargetSpeed,
       galaxyBlackHoleSpinAngle, advanceGalaxyBlackHoleSpin,
+      galaxyGlobalGravityFloorSetting: GALAXY_GLOBAL_GRAVITY_FLOOR_SETTING,
+      galaxyStellarGravityFloorSetting: GALAXY_STELLAR_GRAVITY_FLOOR_SETTING,
       galaxyLocalGravityConstant,
       galaxyLocalGravityMultiplier,
       galaxyStellarGravityConstant, galaxyFallbackStellarGravityConstant,

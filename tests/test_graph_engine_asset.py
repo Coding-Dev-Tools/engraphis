@@ -381,7 +381,7 @@ def test_graph_engine_deep_link_reaches_the_next_engine_after_a_lazy_load() -> N
     report = _run_routing("loads")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260831-galaxy-floor-fix-2"
+        "/v2-assets/engraphis-graph.js?v=20260902-slider-merge-1"
     ]
     # It waits rather than rendering something wrong in the meantime.
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
@@ -396,7 +396,7 @@ def test_classic_route_reaches_the_canonical_engine_without_a_query_flag() -> No
     report = _run_routing("classic")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260831-galaxy-floor-fix-2"
+        "/v2-assets/engraphis-graph.js?v=20260902-slider-merge-1"
     ]
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
     assert report["engine"] == 1
@@ -941,23 +941,23 @@ def test_gravity_slider_response_has_exact_endpoints_and_scales_every_physics_la
     assert report["endpoints"][2] == pytest.approx(2743.3846153846152)
     assert report["endpoints"][3] == pytest.approx(14322.461538461538)
     assert report["split"]["blackHole"] == pytest.approx(
-        [720, 2592, 8230.153846153846, 42967.38461538462]
+        [480, 1728, 5486.7692307692305, 28644.923076923076]
     )
     assert report["split"]["local"] == pytest.approx(
-        [360, 1296, 4115.076923076923, 21483.69230769231]
+        [240, 864, 2743.3846153846152, 14322.461538461538]
     )
     assert report["split"]["local"] == [
         value * 0.5 for value in report["split"]["blackHole"]
     ]
-    assert report["clamps"] == pytest.approx([0, 21483.69230769231, 0, 0])
+    assert report["clamps"] == pytest.approx([0, 14322.461538461538, 0, 0])
     assert report["layoutCompactness"] == pytest.approx([1.75, 1.5616, 0.965, 0.18])
     assert all(
         right < left
         for left, right in zip(report["layoutCompactness"], report["layoutCompactness"][1:])
     )
-    assert report["caps"] == pytest.approx([75, 270, 1])
-    assert report["compatibilityCaps"] == pytest.approx([75, 270])
-    assert report["localCaps"] == pytest.approx([37.5, 135])
+    assert report["caps"] == pytest.approx([50, 180, 1])
+    assert report["compatibilityCaps"] == pytest.approx([50, 180])
+    assert report["localCaps"] == pytest.approx([25, 90])
     assert report["response"][0] == 0
     assert all(
         right > left
@@ -8502,10 +8502,10 @@ def test_galaxy_is_default_and_consumes_the_complete_scene_contract() -> None:
     assert report["radii"]["c"] == pytest.approx(radius(2))
     assert report["d3Budget"] == [0, 0, 0]
     assert report["diagnostics"]["timestep"] == pytest.approx(0.032)
-    assert report["diagnostics"]["velocityDecay"] == pytest.approx(0.0005)
+    assert report["diagnostics"]["velocityDecay"] == pytest.approx(0.00005)
     assert report["diagnostics"]["gravitySetting"] == 96
-    assert report["diagnostics"]["blackHoleGravity"] == pytest.approx(2423.013647981513)
-    assert report["diagnostics"]["localGravity"] == pytest.approx(360)
+    assert report["diagnostics"]["blackHoleGravity"] == pytest.approx(1615.3424319876754)
+    assert report["diagnostics"]["localGravity"] == pytest.approx(240)
     assert report["diagnostics"]["linkSetting"] == 8
     assert report["diagnostics"]["relationOrbitScale"] == pytest.approx(0.25)
     assert report["diagnostics"]["orbitalSeparationSetting"] == 100
@@ -10010,7 +10010,7 @@ def test_persistent_galaxy_clock_is_fixed_bounded_and_lifecycle_safe() -> None:
           timestep: 0.032,
           inwardConvergence: true,
           wallClockSeconds: 1 / 30,
-          velocityDecay: 0.0001,
+          velocityDecay: 0.00005,
           speedLimit: 48,
           includeCollisions: false,
           collisionPadding: 1.5,
@@ -10117,7 +10117,7 @@ def test_persistent_galaxy_clock_is_fixed_bounded_and_lifecycle_safe() -> None:
     assert report["first"]["d3ForcesOff"] is True
     assert first["frames"] == first["steps"] == first["lastSubsteps"] == 1
     assert first["timestep"] == pytest.approx(0.032)
-    assert first["velocityDecay"] == pytest.approx(0.0005)
+    assert first["velocityDecay"] == pytest.approx(0.00005)
     assert first["reducedMotion"] is False
     assert first["kineticEnergy"] > 0
     assert first["speedCapActivations"] == 0
@@ -10391,10 +10391,10 @@ def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
     d3 = loader.index("'/v2-assets/vendor/d3.min.js?v=20260727-final'")
     force_graph = loader.index("'/v2-assets/vendor/force-graph.min.js?v=20260727-final'")
     renderer = loader.index(
-        "'/v2-assets/engraphis-graph.js?v=20260831-galaxy-floor-fix-2'"
+        "'/v2-assets/engraphis-graph.js?v=20260902-slider-merge-1'"
     )
     assert d3 < force_graph < renderer
-    assert '/v2-assets/ledger.js?v=20260831-galaxy-floor-fix-2' in markup
+    assert '/v2-assets/ledger.js?v=20260902-slider-merge-1' in markup
     assert "if (graphAssetsPromise === attempt) releaseGraphAssetsAttempt(attempt)" in loader
     assert "graphAssetsRetry = Math.min(graphAssetsRetry + 1, 10)" in loader
     all_loader = source[source.index("function ensureGraphAllAsset()"):
