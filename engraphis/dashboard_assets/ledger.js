@@ -458,7 +458,7 @@
         graphAssetSource('/v2-assets/vendor/force-graph.min.js?v=20260727-final'),
         'ForceGraph', controller.signal,
       )).then(() => loadScript(
-        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260902-slider-merge-1'),
+        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260903-rotation-balance-1'),
         'EngraphisGraph', controller.signal,
       )).then(() => loadScript(
         graphAssetSource('/v2-assets/engraphis-spacetime.js?v=20260812-stable-orbit-lanes-7'),
@@ -1542,11 +1542,24 @@
   let documentExtensions = null;
 
   async function obsidianApi(path, options = {}) {
-    const csrf = await reviewCsrfToken();
-    return api(path, {
-      ...options,
-      headers: { ...(options.headers || {}), 'X-Engraphis-Review-CSRF': csrf },
-    });
+    const attempt = async () => {
+      const csrf = await reviewCsrfToken();
+      return api(path, {
+        ...options,
+        headers: { ...(options.headers || {}), 'X-Engraphis-Review-CSRF': csrf },
+      });
+    };
+    try {
+      return await attempt();
+    } catch (error) {
+      if (error && error.status === 403) {
+        // A dashboard restart or re-login invalidates the cached process-local
+        // nonce. Refresh it once so the wizard recovers without a page reload.
+        state.reviewCsrf = '';
+        return attempt();
+      }
+      throw error;
+    }
   }
 
   function obsidianSelection() {

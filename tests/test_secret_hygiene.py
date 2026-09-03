@@ -129,7 +129,7 @@ def test_secure_erase_removes_local_memory_indexes_and_links(tmp_path, monkeypat
         return original_maintenance(conn, durable=durable)
 
     monkeypatch.setattr(Store, "_checkpoint_and_vacuum", staticmethod(observe_maintenance))
-    erased = service.secure_erase(mid, workspace="acme")
+    erased = service.secure_erase(mid, workspace="acme", confirmed=True)
     assert erased["status"] == "securely_erased"
     assert erased["vector_index_cleanup"] == "deleted"
     assert service.store.get_memory(mid) is None
@@ -147,7 +147,9 @@ def test_secure_erase_removes_local_memory_indexes_and_links(tmp_path, monkeypat
         "SELECT action, detail FROM audit WHERE target=?", (mid,)
     ).fetchall()
     assert [(row["action"], row["detail"]) for row in audit_rows] == [
-        ("secure_erase", "per-memory secure erasure completed; content intentionally omitted")
+        ("secure_erase", "per-memory secure erasure completed; content intentionally omitted"),
+        ("secure_erase", "explicit local-operator confirmation; rotate the credential and "
+         "remediate external copies separately")
     ]
     assert _LEAK.encode("utf-8") not in db_path.read_bytes()
     wal_path = db_path.with_name(db_path.name + "-wal")

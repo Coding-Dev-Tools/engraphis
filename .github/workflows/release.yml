@@ -60,7 +60,7 @@ jobs:
 
       - name: Full release gate
         run: |
-          python scripts/check_commercial_manifest.py
+          if [ -d website ]; then python scripts/check_commercial_manifest.py --website-root website; else python scripts/check_commercial_manifest.py; fi
           python scripts/externalize_dashboard_assets.py
           ruff check .
           pyright

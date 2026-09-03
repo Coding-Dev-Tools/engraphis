@@ -444,6 +444,24 @@
   const GALAXY_REHEAT_STEPS = 0;
   const GALAXY_REHEAT_LARGE_STEPS = 0;
   const GALAXY_VELOCITY_DECAY = 0.00005;
+  /* Space friction (the dashboard's damping slider, 0..15) maps onto the Galaxy clock's
+     per-tick velocity decay. The bare neutral base (0.00005) kept a slingshot's speed
+     indistinguishable from permanent, so the upper half of the slider read as inert. The
+     interpolation keeps damping <= 1 at the calibrated persistent-orbit baseline, then rises
+     linearly so damping 15 sheds roughly 47% of a flung node's speed every second while
+     damping 0 remains an exact zero-friction vacuum. */
+  const GALAXY_DAMPING_VELOCITY_DECAY_MAXIMUM = 0.02;
+  function galaxyDampingVelocityDecay(damping) {
+    const raw = Number(damping);
+    const value = Number.isFinite(raw) ? Math.max(0, Math.min(15, raw)) : 1;
+    /* Every tenth of the 0..1 span is distinct: 0 is the exact vacuum, 1 is the
+       calibrated persistent-orbit baseline, and values between interpolate so no
+       lower-quarter drag reads as inert. 1 and 15 map exactly as before. */
+    if (value <= 1) return GALAXY_VELOCITY_DECAY * value;
+    return GALAXY_VELOCITY_DECAY
+      + (GALAXY_DAMPING_VELOCITY_DECAY_MAXIMUM - GALAXY_VELOCITY_DECAY)
+        * (value - 1) / 14;
+  }
   /* Developer-facing spacetime controls are normalized multipliers around the calibrated
      dashboard physics. Keeping them separate from the established Gravity/Link controls makes
      the advanced panel reversible and avoids changing saved-layout semantics. */
@@ -518,15 +536,31 @@
      system-radius scale, then apply only the ratio between the old and new settings. This is
      path-independent across a burst of input events, preserves every solar system's internal
      geometry and velocity, and never wakes D3. Lowering gravity is an explicit user-requested
-     loosening action; automatic dynamics remain inward-only. */
-  function galaxyImmediateGravityRadiusScale(setting) {
+     loosening action; automatic dynamics remain inward-only.
+
+     ``centralMultipliers`` carries the spacetime panel's normalized values (G_center,
+     black-hole mass) so a mass or Galactic-gravity slider change can express itself through
+     the same immediate ratio response as the primary Gravity slider. They normalize around
+     the calibrated 1.0 defaults, so the scale is unchanged when both sliders sit neutral. */
+  function galaxyImmediateGravityRadiusScale(setting, centralMultipliers) {
+    const extra = centralMultipliers && typeof centralMultipliers === 'object'
+      ? centralMultipliers : {};
+    const gCenter = Math.max(0, Number.isFinite(Number(extra.gravitationalConstant))
+      ? Number(extra.gravitationalConstant) : 1);
+    const mass = Math.max(0, Number.isFinite(Number(extra.blackHoleMass))
+      ? Number(extra.blackHoleMass) : 1);
+    /* Field strength follows G * sqrt(mass) (the same law the live integrator uses), so the
+       density response stays physically consistent with the acceleration it previews. The
+       normalization keeps the raw gravity-slider endpoint ratio identical to the pre-spacetime
+       behavior (0.6 at setting 400, 1.0 at setting 0 with neutral multipliers); the central
+       multipliers then rescale the normalized fraction without clipping the slider's own span. */
+    const effective = Math.max(0, galaxyBlackHoleGravityConstant(setting, true)
+      * gCenter * Math.sqrt(mass));
     const maximum = Math.max(1e-9,
       galaxyBlackHoleGravityConstant(GALAXY_GRAVITY_MAXIMUM, true));
-    const normalized = Math.max(0, Math.min(1,
-      galaxyBlackHoleGravityConstant(setting, true) / maximum));
+    const normalized = Math.max(0, Math.min(1.25, effective / maximum));
     return Math.exp(Math.log(0.6) * normalized);
   }
-
   /* The oversized-scene fallback has no live integrator, so its grid must map the complete
      slider range directly. Keeping the old `setting / 100` scale made compactness hit its
      minimum near 112 and left every higher gravity value visually identical. */
@@ -632,14 +666,14 @@
   /* Mirror of graphBlackHoleMassMultiplier in ledger.js — kept inline so the d3-force
      d3-install path in this file does not need to cross reference the ledger module. The
      formula is identical: baseline 160 below which the multiplier is value/160, above which
-     it climbs linearly at 0.02/unit (so 500 -> 8.80, 1000 -> 21.80). */
+     it climbs linearly at 0.01/unit (so 500 -> 4.4). */
   const GRAPH_BLACK_HOLE_MASS_BASELINE = 160;
   function blackHoleMassMultiplier(controlValue) {
     const value = Number(controlValue);
     if (!Number.isFinite(value)) return 1;
     return value <= GRAPH_BLACK_HOLE_MASS_BASELINE
       ? Math.max(0, value / GRAPH_BLACK_HOLE_MASS_BASELINE)
-      : 1 + (value - GRAPH_BLACK_HOLE_MASS_BASELINE) * 0.02;
+      : 1 + (value - GRAPH_BLACK_HOLE_MASS_BASELINE) / 100;
   }
 
   /* Physics is allowed to respond live, but one bad force update must never turn a
@@ -2436,9 +2470,27 @@
 
   function galaxyCarrierTargetSpeed(field, radius, orbitalSpeed) {
     const multiplier = galaxyOrbitalSpeedMultiplier(orbitalSpeed);
-    return Math.min(GALAXY_CARRIER_FRAME_SPEED_LIMIT * multiplier,
-      galaxyCarrierOrbitCurve(field, radius).circularSpeed
-        * multiplier);
+    /* The presentation cap must follow the spacetime controls. The flat 18-unit limit made
+       the Black hole mass and Galactic gravity sliders visually inert whenever the neutral
+       field already saturated it: the physical circular speed at typical carrier radii is
+       30-100 units/s, so clamping to 18 reported the same speed for every mass and every
+       G multiplier at or above the neutral default. Scale the headroom with the same central
+       multipliers that govern the field so the cap only bounds presentation speed, never
+       the slider response itself.
+       Both terms use sqrt: the live field scales G as G_center*sqrt(mass), so a linear
+       mass term in the cap outruns the physics it bounds (circularSpeed ~ mass^0.75)
+       and injects ever-larger tangential speed at high mass (explosive rotation).
+       Normalization is around the LIVE dashboard defaults (G=2 from spacetime slider
+       100/50, mass=1 from 160), not the engine unit (1,1): at shipped defaults the cap
+       is exactly the calibrated 18 (authored 23.4, e2e-pinned), and the G/mass sliders
+       open headroom from there. The 4x ceiling keeps direct engine values
+       (up to 8xG/16x mass) presentable. */
+    const liveDefaultG = 2;
+    const centralScale = Math.min(4, Math.sqrt(Math.max(0.25,
+      Number(field.gravitationalConstantMultiplier) || 1) / liveDefaultG)
+      * Math.sqrt(Math.max(0.25, Number(field.blackHoleMassMultiplier) || 1)));
+    return Math.min(GALAXY_CARRIER_FRAME_SPEED_LIMIT * centralScale * multiplier,
+      galaxyCarrierOrbitCurve(field, radius).circularSpeed * multiplier);
   }
   /* Authored external systems retain their established lane clock while the physical target
      remains mass- and gravity-aware. The explicit Orbital speed control is calibrated separately
@@ -2503,7 +2555,7 @@
       ? Number(opts.accelerationCap)
       : defaultGalaxyBlackHoleAccelerationCap(opts.gravity, explicitGlobal)
         * Math.max(0.25, Math.min(8,
-          gravitationalConstantMultiplier * Math.max(1, blackHoleMassMultiplier))));
+          gravitationalConstantMultiplier * Math.sqrt(Math.max(1, blackHoleMassMultiplier)))));
     const haloVelocitySquared = haloMass > 0
       ? gravitationalConstant * haloMass / (Math.SQRT2 * haloScale) : 0;
     const model = {
@@ -8844,9 +8896,15 @@
         /* Live Galaxy owns the carrier position phase even when a filtered payload skipped
            one-shot lane admission. Low-level helper callers retain force-only semantics unless
            they opt into this browser clock contract. */
-        wallClockSeconds: GALAXY_FRAME_INTERVAL_MS / 1000,
-        velocityDecay: GALAXY_VELOCITY_DECAY
-          * galaxyPhysicsMultiplier(state.settings.damping, 1, 100),
+        /* Space friction must be a real control in Galaxy mode, not a diagnostic-only value.
+           The bare base (0.00005 per second) retained 99.9% of a slingshot's speed after ten
+           seconds at damping 1 and 99.3% at damping 15 — indistinguishable on screen. The
+           interpolation keeps damping <= 1 at the calibrated persistent-orbit baseline, then
+           rises linearly so damping 15 decays ~2% of a flung node's speed per second, while
+           damping 0 stays an exact zero-friction vacuum and orbits persist at the default. */
+        velocityDecay: Number(state.settings.damping) === 0
+          ? 0
+          : galaxyDampingVelocityDecay(state.settings.damping),
         includeSpacetime: true,
         frameDraggingFraction: GALAXY_FRAME_DRAGGING_FRACTION,
         frameDraggingMaxAcceleration: GALAXY_FRAME_DRAGGING_MAX_ACCELERATION,
@@ -8999,8 +9057,9 @@
         reheatStepsRemaining: galaxyReheatStepsRemaining,
         reheatStepsApplied: galaxyReheatStepsApplied,
         lastReheatSubsteps: galaxyLastReheatSubsteps,
-        velocityDecay: GALAXY_VELOCITY_DECAY
-          * galaxyPhysicsMultiplier(state.settings.damping, 1, 100),
+        velocityDecay: Number(state.settings.damping) === 0
+          ? 0
+          : galaxyDampingVelocityDecay(state.settings.damping),
         frames: galaxyFrames,
         steps: galaxySteps,
         kinematicSteps: galaxyKinematicSteps,
@@ -10194,6 +10253,7 @@
       'gravitationalConstant', 'G_center', 'localGravitationalConstant', 'G_star',
       'blackHoleMass', 'damping', 'springStiffness',
     ];
+    const PAINT_KEYS = ['font', 'linkw', 'labelDensity'];
     api.setSettings = patch => {
       const next = patch && typeof patch === 'object' ? { ...patch } : {};
       if (next.gravitationalConstant === undefined && next.G_center !== undefined) {
@@ -10227,6 +10287,11 @@
         fullLayoutDirty = true;
         cancelAutoFit();
       }
+      /* Capture the pre-patch central multipliers BEFORE Object.assign applies the patch:
+         the immediate-response ratio needs the old values, and reading them after the assign
+         always yields previous == next (ratio 1, no visible response). */
+      const previousGCenter = Number(state.settings.gravitationalConstant);
+      const previousBlackHoleMass = Number(state.settings.blackHoleMass);
       Object.assign(state.settings, next);
       if (next.orbitPaused !== undefined && previousMode === 'galaxy') {
         if (state.settings.orbitPaused) cancelGalaxyDynamics(true);
@@ -10237,6 +10302,15 @@
       const gravityChanged = next.gravity !== undefined
         && Number.isFinite(previousGravity) && Number.isFinite(nextGravity)
         && Math.abs(nextGravity - previousGravity) > 1e-12;
+      /* The spacetime panel's central controls must produce the same immediate, legible
+         density response. G_center and black-hole mass scale the physical field (G * sqrt(m))
+         but nothing else — without this ratio response their sliders only whisper through the
+         slow orbital integrator and read as broken on a settled scene. */
+      const centralChanged = (next.gravitationalConstant !== undefined
+          || next.G_center !== undefined
+          || next.blackHoleMass !== undefined)
+        && previousMode === 'galaxy' && state.settings.mode === 'galaxy';
+      const spacetimeChanged = gravityChanged || centralChanged;
       /* A galaxy slider burst (gravity / black-hole mass / damping / etc.) is a setting change,
          not a fresh physics seed. Set the phase-preserve flag *before* any render below so the
          inner immediate-render does not re-seed orbits and overwrite the just-scaled carrier
@@ -10253,18 +10327,30 @@
         preserveGalaxyPhaseOnResume = true;
         galaxyContactCorrectionDeferred = true;
       }
-      if (gravityChanged && previousMode === 'galaxy' && state.settings.mode === 'galaxy') {
-        /* Gravity changes need an immediate, legible density response: a range control whose
-           visible result is only a slow orbital-velocity correction reads as broken. Scale
-           every carrier's radial position toward/away from the black hole by the ratio of the
-           new and old galaxyImmediateGravityRadiusScale values. The mapping is path-independent
-           across a burst of input events (each event applies only its own ratio), preserves
-           each solar system's internal geometry, and never touches the fixed anchor. */
+      if (spacetimeChanged && previousMode === 'galaxy'
+        && state.settings.mode === 'galaxy'
+        && !state.settings.orbitPaused) {
+        /* While orbits are paused the user asked for a still scene: a hidden radial rescale
+           would fight that request (and every authored/saved coordinate). The immediate
+           response below is the slider's visible feedback, so it runs only on a live clock. */
+        /* Central-field changes need an immediate, legible density response: a range control
+           whose visible result is only a slow orbital-velocity correction reads as broken.
+           Scale every carrier's radial position toward/away from the black hole by the ratio
+           of the new and old galaxyImmediateGravityRadiusScale values. The mapping is
+           path-independent across a burst of input events (each event applies only its own
+           ratio), preserves each solar system's internal geometry, and never touches the
+           fixed anchor. */
         const graph = fg.graphData ? fg.graphData() : null;
         const nodes = graph && graph.nodes ? graph.nodes : null;
         if (nodes) {
-          const previousScale = galaxyImmediateGravityRadiusScale(previousGravity);
-          const nextScale = galaxyImmediateGravityRadiusScale(nextGravity);
+          const previousScale = galaxyImmediateGravityRadiusScale(previousGravity, {
+            gravitationalConstant: previousGCenter,
+            blackHoleMass: previousBlackHoleMass,
+          });
+          const nextScale = galaxyImmediateGravityRadiusScale(nextGravity, {
+            gravitationalConstant: state.settings.gravitationalConstant,
+            blackHoleMass: state.settings.blackHoleMass,
+          });
           if (previousScale > 0 && nextScale > 0) {
             const ratio = nextScale / previousScale;
             const anchor = galaxyGlobalAnchor(nodes);
@@ -10285,6 +10371,12 @@
                     node.x = nx;
                     node.y = ny;
                   }
+                  /* Velocities stay untouched here by contract (e2e pins exact
+                     preservation): the response preserves each system's internal
+                     geometry and velocity, and the live carrier support plus
+                     damping re-circularize gradually. Runaway is bounded instead
+                     by the sqrt-mass carrier/acceleration caps, which now bind
+                     at high mass instead of outrunning the physics. */
                   /* The carrier-orbit support treats the server-authored
                      galactic_target_radius as a hard minimum floor. Without scaling the
                      floor with the position, the next fixed slice immediately pulls the
@@ -10307,7 +10399,7 @@
               /* Re-arm: the inner render consumed the flag. The outer render below must also
                  skip the contact-correction pass so the burst's ratios never fold into the
                  layout (path independence). */
-              if (gravityChanged && previousMode === 'galaxy'
+              if (spacetimeChanged && previousMode === 'galaxy'
                 && state.settings.mode === 'galaxy') {
                 preserveGalaxyPhaseOnResume = true;
               }
@@ -10332,15 +10424,21 @@
       /* Re-arm for the outer render + the synchronous physics reheat that schedulePhysicsUpdate
          may run: both share the render path and would otherwise run the path-dependent
          contact corrections on the post-scaling layout, undoing the slider's burst response. */
-      if (gravityChanged && previousMode === 'galaxy' && state.settings.mode === 'galaxy') {
+      if (spacetimeChanged && previousMode === 'galaxy' && state.settings.mode === 'galaxy') {
         preserveGalaxyPhaseOnResume = true;
       }
+      /* Paint-only settings (font, linkw, labelDensity) change the canvas appearance without
+         affecting layout. The force-graph material cache must be cleared so the next render
+         repaints nodes/links with the new text size, line width, or label density — without
+         this, the cached material sprites keep the old paint and the slider reads as inert. */
+      const paintChanged = PAINT_KEYS.some(k => next[k] !== undefined);
+      if (paintChanged) clearMaterialCache();
       render(false, false);
       /* Re-arm the phase-preserve flag for the synchronous physics reheat that follows. That
          reheat shares the same render path and would otherwise run contact corrections on the
          post-scaling layout, undoing the slider's burst response and breaking path
          independence across burst intermediates. */
-      if (gravityChanged && previousMode === 'galaxy' && state.settings.mode === 'galaxy') {
+      if (spacetimeChanged && previousMode === 'galaxy' && state.settings.mode === 'galaxy') {
         preserveGalaxyPhaseOnResume = true;
       }
       if (layoutChanged) schedulePhysicsUpdate();

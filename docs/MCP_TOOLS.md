@@ -25,6 +25,17 @@ class, and execution revalidates availability, scope, authorization, and argumen
 The Smart gateway exposes these nine tools directly; advanced capabilities remain available through
 discovery and the validated executors.
 
+### Smart routine schemas are reduced by design
+
+The two routine Smart tools deliberately accept smaller allow-lists than their Classic
+namesakes; advanced controls are discoverable rather than routine:
+
+| Smart tool | Accepted parameters |
+|---|---|
+| `engraphis_remember` | `content`, `workspace`, `repo`, `session_id`, `mtype`, `importance`, `subject_key`, `claim_kind`; safe provenance is fixed internally |
+| `engraphis_recall_context` | `query`, `workspace`, `repo`, `session_id`, `k`, `token_budget`; always compact, no `response_mode` |
+
+
 No user profile choice or tool switching is required. The dashboard `/mcp` endpoint and
 `engraphis-mcp-http` use this Smart surface by default. `engraphis-mcp-classic` (or
 `engraphis-mcp-http --classic`) preserves the 35 direct tools below for integrations that pin
@@ -84,7 +95,7 @@ the [memory write trust model](WRITE_REVIEW.md) and [recall recovery guide](RECA
 | Write | `engraphis_ingest` | Applies the configured extractor (`chunk`, `llm`, or `llm_structured`). With `none`, it stores one verbatim memory. |
 | Write | `engraphis_ingest_postgres_schema` | Stores a PostgreSQL schema snapshot and typed graph. The DSN is never stored. |
 | Write | `engraphis_consolidate` | Runs a dry-run or live consolidation sweep. A live call can write resolved facts and receipts. |
-| Stateful read | `engraphis_recall_context` | Returns hard-budget context, compact sources, token usage, and optional diagnostics. Recommended for agent prompts. |
+| Stateful read | `engraphis_recall_context` | Returns hard-budget context, compact sources, token usage, and optional diagnostics. Recommended for agent prompts. Compact-only: it never accepts `response_mode` and never returns full memory bodies. |
 | Stateful read | `engraphis_recall` | Runs hybrid vector, lexical, and graph recall. It records a receipt without strengthening weak matches. |
 | Stateful read | `engraphis_recall_grounded` | Returns a cited answer or abstains when the evidence is too weak. It records a receipt and reinforces cited memories. |
 | Stateful read | `engraphis_answer` | Backward-compatible alias for `engraphis_recall_grounded`. |
@@ -108,7 +119,8 @@ the [memory write trust model](WRITE_REVIEW.md) and [recall recovery guide](RECA
 | Governance | `engraphis_pin` | Prevents future automatic decay or pruning. |
 | Governance | `engraphis_correct` | Replaces memory content without losing the previous version; governed provenance remains pending unless separately approved. |
 | Governance | `engraphis_promote` | Widens an explicitly approved memory's scope while preserving and linking its narrower history. |
-| Session | `engraphis_start_session` / `engraphis_end_session` | Starts or closes a work session. Exact retries are safe; `force_new=true` creates another session. |
+| Session | `engraphis_start_session` | Starts a work session. Exact retries are safe; `force_new=true` creates another session. |
+| Session | `engraphis_end_session` | Closes a work session with a summary and open threads. |
 | Operations | `engraphis_stats` | Returns memory counts for health checks. |
 | Operations | `engraphis_check_update` | Refreshes the release cache and reports whether a newer version is available. Update checks are OFF unless `ENGRAPHIS_UPDATE_CHECK` is set to an affirmative value; `=0` keeps them off. |
 

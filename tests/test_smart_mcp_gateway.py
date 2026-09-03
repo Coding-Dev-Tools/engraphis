@@ -428,7 +428,7 @@ def test_gateway_preserves_safe_classic_handler_errors(monkeypatch):
         task="Retire a stale memory in workspace acme.",
     ))["actions"][0]
 
-    arguments = {"memory_id": "mem_missing", "workspace": "acme"}
+    arguments = {"memory_id": "mem_missing", "workspace": "acme", "confirmed": True}
     direct = server.engraphis_retire(**arguments)
     gateway = server.engraphis_execute_action(
         capability_id=action["capability_id"], schema_digest=action["schema_digest"],
@@ -535,7 +535,7 @@ def test_gateway_not_found_failure_returns_iserror_envelope(monkeypatch):
 
     gateway = server.engraphis_execute_action(
         capability_id=action["capability_id"], schema_digest=action["schema_digest"],
-        arguments={"memory_id": "mem_missing", "workspace": "acme"},
+        arguments={"memory_id": "mem_missing", "workspace": "acme", "confirmed": True},
     )
     code, message, retryable = _error_envelope(gateway)
     assert code == "E_NOT_FOUND"

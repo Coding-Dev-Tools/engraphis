@@ -196,7 +196,7 @@ def test_workspace_graph_filters_layers_before_edge_cap():
     # nonmatching rows ahead of the requested causal edge.
     for index in range(2001):
         svc.store.upsert_edge(Edge(
-            id=f"a-nonmatching-{index:04d}",
+            id=f"edg_nonmatching_{index:04d}",
             src=source,
             dst=target,
             relation="related",
@@ -204,7 +204,7 @@ def test_workspace_graph_filters_layers_before_edge_cap():
             workspace_id=wid,
         ))
     svc.store.upsert_edge(Edge(
-        id="z-matching",
+        id="edg_matching",
         src=source,
         dst=target,
         relation="causes",

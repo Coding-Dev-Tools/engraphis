@@ -185,19 +185,19 @@ def test_delete_removes_normalized_evidence_without_orphaning_shared_edge():
     removed = svc.remember("Source evidence.", workspace="a", scope="workspace")["id"]
     retained = svc.remember("Other evidence.", workspace="b", scope="workspace")["id"]
     svc.store.upsert_edge(Edge(
-        id="edge_global", src="x", dst="y", relation="related", workspace_id=None,
+        id="edg_global", src="x", dst="y", relation="related", workspace_id=None,
         provenance={"memory_id": removed, "memory_ids": [removed, retained]},
     ))
 
     svc.delete_workspace("a")
 
     edge = svc.store.conn.execute(
-        "SELECT valid_to, provenance FROM edges WHERE id='edge_global'"
+        "SELECT valid_to, provenance FROM edges WHERE id='edg_global'"
     ).fetchone()
     assert edge is not None and edge["valid_to"] is None
     assert json.loads(edge["provenance"])["memory_ids"] == [retained]
     supports = [dict(row) for row in svc.store.conn.execute(
-        "SELECT memory_id, valid_to FROM edge_supports WHERE edge_id='edge_global'"
+        "SELECT memory_id, valid_to FROM edge_supports WHERE edge_id='edg_global'"
     )]
     assert supports == [{"memory_id": retained, "valid_to": None}]
 
@@ -543,12 +543,12 @@ def test_merge_deduplicates_colliding_live_edges():
     svc.store.upsert_entity(Node(id="ent_b_beta", name="Beta", ntype="concept", workspace_id=wid_b))
     # Identical live workspace-level edges (repo_id=None) in both workspaces.
     svc.store.upsert_edge(Edge(
-        id="edge_from_a", src="ent_a_alpha", dst="ent_a_beta", relation="related",
+        id="edg_from_a", src="ent_a_alpha", dst="ent_a_beta", relation="related",
         workspace_id=wid_a,
         provenance={"memory_id": "mem_a", "memory_ids": ["mem_a"]},
     ))
     svc.store.upsert_edge(Edge(
-        id="edge_from_b", src="ent_b_alpha", dst="ent_b_beta", relation="related",
+        id="edg_from_b", src="ent_b_alpha", dst="ent_b_beta", relation="related",
         workspace_id=wid_b,
         provenance={"memory_id": "mem_b", "memory_ids": ["mem_b"]},
     ))
@@ -574,7 +574,7 @@ def test_merge_deduplicates_colliding_live_edges():
     # The duplicate edge is soft-closed, not deleted: the row survives with
     # valid_to/expired_at set and a canonical_deduplicated_into provenance marker.
     dup = c.execute(
-        "SELECT valid_to, expired_at, provenance FROM edges WHERE id='edge_from_a'"
+        "SELECT valid_to, expired_at, provenance FROM edges WHERE id='edg_from_a'"
     ).fetchone()
     assert dup is not None
     assert dup["valid_to"] is not None
@@ -605,12 +605,12 @@ def test_merge_deduplicates_colliding_live_edges_with_colliding_support():
     # the target already holds a live (edge_id, memory_id, source_kind) triple
     # identical to what moving the source's support would try to create.
     svc.store.upsert_edge(Edge(
-        id="edge_from_a", src="ent_a_alpha", dst="ent_a_beta", relation="related",
+        id="edg_from_a", src="ent_a_alpha", dst="ent_a_beta", relation="related",
         workspace_id=wid_a,
         provenance={"memory_id": "mem_shared", "memory_ids": ["mem_shared"]},
     ))
     svc.store.upsert_edge(Edge(
-        id="edge_from_b", src="ent_b_alpha", dst="ent_b_beta", relation="related",
+        id="edg_from_b", src="ent_b_alpha", dst="ent_b_beta", relation="related",
         workspace_id=wid_b,
         provenance={"memory_id": "mem_shared", "memory_ids": ["mem_shared"]},
     ))
@@ -635,7 +635,7 @@ def test_merge_deduplicates_colliding_live_edges_with_colliding_support():
     # The retired source edge is soft-closed with the canonical marker, same as the
     # non-colliding-support case.
     dup = c.execute(
-        "SELECT valid_to, expired_at, provenance FROM edges WHERE id='edge_from_a'"
+        "SELECT valid_to, expired_at, provenance FROM edges WHERE id='edg_from_a'"
     ).fetchone()
     assert dup is not None
     assert dup["valid_to"] is not None
@@ -645,7 +645,7 @@ def test_merge_deduplicates_colliding_live_edges_with_colliding_support():
     # Its own copy of the colliding support -- the one UPDATE OR IGNORE could not
     # move -- is soft-closed too, not left live and orphaned on a closed edge.
     dup_supports = [dict(r) for r in c.execute(
-        "SELECT valid_to, expired_at FROM edge_supports WHERE edge_id='edge_from_a'"
+        "SELECT valid_to, expired_at FROM edge_supports WHERE edge_id='edg_from_a'"
     )]
     assert len(dup_supports) == 1
     assert dup_supports[0]["valid_to"] is not None
@@ -987,7 +987,7 @@ def test_copy_remaps_graph_evidence_history_and_event_references():
         workspace_id=source_workspace, repo_id=repo_two,
     ))
     svc.store.upsert_edge(Edge(
-        id="edge_source", src=entity_one, dst=entity_two, relation="supports",
+        id="edg_source", src=entity_one, dst=entity_two, relation="supports",
         workspace_id=source_workspace,
         provenance={"memory_id": first, "memory_ids": [first, second]},
     ))

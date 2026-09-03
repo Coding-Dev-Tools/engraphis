@@ -1023,14 +1023,15 @@ def test_governance_tools_forget_pin_correct(monkeypatch):
     assert corrected["superseded"] == [out["id"]]
 
     retired = json.loads(srv.engraphis_retire(memory_id=corrected["id"], workspace="acme",
-                                              reason="no longer needed"))
+                                              reason="no longer needed", confirmed=True))
     assert retired["status"] == "retired"
 
     alias = json.loads(srv.engraphis_forget(memory_id=corrected["id"], workspace="acme",
-                                            reason="legacy retry"))
+                                            reason="legacy retry", confirmed=True))
     assert alias["status"] == "forgotten" and alias["deprecated"] is True
 
-    err = srv.engraphis_forget(memory_id="mem_does_not_exist", workspace="acme")
+    err = srv.engraphis_forget(memory_id="mem_does_not_exist", workspace="acme",
+                               confirmed=True)
     assert err.startswith("Error:")
 
 
@@ -1058,7 +1059,7 @@ def test_governance_tools_reject_wrong_workspace(monkeypatch):
     json.loads(srv.engraphis_remember(content="anchor", workspace="beta"))
 
     assert srv.engraphis_pin(memory_id=out["id"], workspace="beta").startswith("Error:")
-    assert srv.engraphis_forget(memory_id=out["id"], workspace="beta").startswith("Error:")
+    assert srv.engraphis_forget(memory_id=out["id"], workspace="beta", confirmed=True).startswith("Error:")
     assert srv.engraphis_correct(memory_id=out["id"], new_content="tampered",
                                  workspace="beta").startswith("Error:")
 

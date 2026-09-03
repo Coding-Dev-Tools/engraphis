@@ -23,6 +23,25 @@ FACTS = [
     ("Application secrets are stored in Vault, never in the repository.", "secrets"),
 ]
 
+# Lexical-overlap distractors: live memories that share query vocabulary without
+# supporting any answerable claim. The sourdough probe in UNANSWERABLE must still
+# abstain with this memory present, proving the gate follows the absolute support
+# signal rather than "a memory matched".
+DISTRACTOR_FACTS = [
+    ("The office kitchen orders sourdough every Friday.", "kitchen"),
+]
+
+# Quarantined-only evidence: the sole memory containing the probe's answer is
+# retained for inspection but excluded from prompt-visible recall, so each probe
+# must abstain despite exact lexical overlap.
+QUARANTINED_FACTS = [
+    ("The staging reset code is BLUEBIRD.", "reset-code"),
+]
+
+QUARANTINE_PROBES = [
+    "what is the staging reset code?",
+]
+
 ANSWERABLE = [
     "which auth scheme did we standardise on?",
     "what package manager do we use for the frontend?",
@@ -46,6 +65,17 @@ def _engine():
     rid = eng.store.get_or_create_repo(wid, "grounded")
     for text, title in FACTS:
         eng.remember(text, workspace_id=wid, repo_id=rid, title=title)
+    for text, title in DISTRACTOR_FACTS:
+        eng.remember(text, workspace_id=wid, repo_id=rid, title=title)
+    for text, title in QUARANTINED_FACTS:
+        eng.remember(
+            text,
+            workspace_id=wid,
+            repo_id=rid,
+            title=title,
+            metadata={"quarantine": {"state": "quarantined"}},
+            resolve_conflicts=False,
+        )
     return eng, wid, rid
 
 
@@ -53,14 +83,18 @@ def run() -> dict:
     eng, wid, rid = _engine()
     grounded_hits = sum(
         eng.grounded_recall(q, workspace_id=wid, repo_id=rid).grounded for q in ANSWERABLE)
+    abstain_queries = [*UNANSWERABLE, *QUARANTINE_PROBES]
     abstain_hits = sum(
-        eng.grounded_recall(q, workspace_id=wid, repo_id=rid).abstained for q in UNANSWERABLE)
-    n_ans, n_un = len(ANSWERABLE), len(UNANSWERABLE)
+        eng.grounded_recall(q, workspace_id=wid, repo_id=rid).abstained for q in abstain_queries)
+    quarantine_hits = sum(
+        eng.grounded_recall(q, workspace_id=wid, repo_id=rid).abstained for q in QUARANTINE_PROBES)
+    n_ans, n_un = len(ANSWERABLE), len(abstain_queries)
     return {
         "answer_rate": grounded_hits / n_ans,
         "abstain_rate": abstain_hits / n_un,
         "accuracy": (grounded_hits + abstain_hits) / (n_ans + n_un),
         "grounded_hits": grounded_hits, "abstain_hits": abstain_hits,
+        "quarantine_hits": quarantine_hits, "n_quarantine": len(QUARANTINE_PROBES),
         "n_answerable": n_ans, "n_unanswerable": n_un,
     }
 

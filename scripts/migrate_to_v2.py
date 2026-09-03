@@ -197,25 +197,67 @@ def _has_table(conn: sqlite3.Connection, table: str) -> bool:
     return row is not None
 
 
+def _vector_dim_histogram(src: sqlite3.Connection) -> tuple[dict[int, int], list]:
+    """Scan v1 vectors into a ``{dim: count}`` histogram plus a re-embed queue.
+
+    The queue holds raw v1 ``id`` values whose vectors are missing, undecodable,
+    or non-finite — rows the v2 embedder must re-embed after migration.
+    """
+    histogram: dict[int, int] = {}
+    queue: list = []
+    if not _has_table(src, "memories"):
+        return histogram, queue
+    if "vector" not in _columns(src, "memories"):
+        return histogram, queue
+    for row in src.execute("SELECT id, vector FROM memories").fetchall():
+        raw = row["vector"]
+        if raw is None:
+            queue.append(row["id"])
+            continue
+        if not isinstance(raw, (bytes, bytearray, memoryview)):
+            queue.append(row["id"])
+            continue
+        try:
+            vector = np.frombuffer(raw, dtype=np.float32)
+        except (TypeError, ValueError):
+            queue.append(row["id"])
+            continue
+        if int(vector.size) == 0 or not bool(np.isfinite(vector).all()):
+            queue.append(row["id"])
+            continue
+        dim = int(vector.size)
+        histogram[dim] = histogram.get(dim, 0) + 1
+    return histogram, queue
+
+
+def _write_reembed_queue(path: str, queue: list) -> None:
+    """Persist one raw v1 id per line for post-migration re-embedding."""
+    target = Path(path).expanduser()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("w", encoding="utf-8") as handle:
+        for item in queue:
+            handle.write(f"{item}\n")
+
+
 def _migrate_to_path(
     old_path: str,
     new_path: str,
     *,
     workspace: str = "default",
     dry_run: bool = False,
+    resume: bool = False,
+    reembed_queue: Optional[str] = None,
     _precreated_target: bool = False,
 ) -> dict:
     source_path = Path(old_path).expanduser().resolve()
     target_path = Path(new_path).expanduser().resolve()
-    if not source_path.is_file():
-        raise FileNotFoundError(f"v1 migration source is not a file: {source_path}")
     if not dry_run:
         if source_path == target_path:
             raise ValueError("v1 migration requires --new to differ from --old")
-        if target_path.exists() and not _precreated_target:
+        if target_path.exists() and not (_precreated_target or resume):
             raise FileExistsError(
                 "v1 migration requires a fresh --new path; refusing existing target "
-                f"{target_path}"
+                f"{target_path} (pass --resume to continue into it)"
             )
     else:
         # A read-only SQLite connection may need to materialize shared-memory state for
@@ -243,7 +285,10 @@ def _migrate_to_path(
         if not dry_run:
             store = Store(str(target_path))
             wid = store.get_or_create_workspace(workspace)
-        return _migrate_rows(src, store, wid=wid, target_path=target_path)
+        return _migrate_rows(
+            src, store, wid=wid, target_path=target_path,
+            resume=resume, reembed_queue=reembed_queue,
+        )
     finally:
         try:
             if store is not None:
@@ -261,6 +306,8 @@ def _migrate_rows(
     *,
     wid: str,
     target_path: Path,
+    resume: bool = False,
+    reembed_queue: Optional[str] = None,
 ) -> dict:
     counts = {
         "memories": 0,
@@ -271,7 +318,52 @@ def _migrate_rows(
         "repos": 0,
         "quarantined": 0,
         "repaired_fields": 0,
+        "resumed_skipped": 0,
+        "reembed_queued": 0,
     }
+    # Dim-histogram preflight: report every legacy embedding width before any
+    # write, so a mixed-dim source is visible instead of silently carried.
+    dim_histogram, reembed_ids = _vector_dim_histogram(src)
+    counts["reembed_queued"] = len(reembed_ids)
+    if reembed_queue and reembed_ids:
+        _write_reembed_queue(reembed_queue, reembed_ids)
+    # Resume support: skip v1 source ids already carried into this target.
+    migrated_memory_ids: set = set()
+    migrated_thought_ids: set = set()
+    migrated_event_ids: set = set()
+    if resume and store is not None:
+        try:
+            for prow in store.conn.execute(
+                "SELECT provenance FROM memories"
+            ).fetchall():
+                try:
+                    penv = json.loads(prow["provenance"] or "{}")
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(penv, dict):
+                    continue
+                if "v1_memory_id" in penv:
+                    migrated_memory_ids.add(json.dumps(
+                        penv["v1_memory_id"], sort_keys=True, ensure_ascii=True))
+                if "v1_thought_id" in penv:
+                    migrated_thought_ids.add(json.dumps(
+                        penv["v1_thought_id"], sort_keys=True, ensure_ascii=True))
+        except Exception:
+            pass
+        try:
+            for erow in store.conn.execute("SELECT refs FROM events").fetchall():
+                try:
+                    refs = json.loads(erow["refs"] or "[]")
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(refs, list):
+                    continue
+                for ref in refs:
+                    if isinstance(ref, dict) and ref.get("kind") == "v1_event_id":
+                        migrated_event_ids.add(json.dumps(
+                            ref.get("id"), sort_keys=True, ensure_ascii=True))
+        except Exception:
+            pass
     migration_time = now_ts()
     repo_ids: dict[str, str] = {}
     entity_ids: dict[tuple[str, str, str], str] = {}
@@ -339,6 +431,12 @@ def _migrate_rows(
     mcols = _columns(src, "memories")
     for row in src.execute("SELECT * FROM memories").fetchall():
         counts["memories"] += 1
+        if resume:
+            resume_key = json.dumps(
+                _legacy_scalar(_source_id(row, mcols)), sort_keys=True, ensure_ascii=True)
+            if resume_key in migrated_memory_ids:
+                counts["resumed_skipped"] += 1
+                continue
         repairs: list[str] = []
         ns = namespace_value(
             row["namespace"] if "namespace" in mcols else "default"
@@ -537,6 +635,12 @@ def _migrate_rows(
         vcols = _columns(src, "events")
         for row in src.execute("SELECT * FROM events").fetchall():
             counts["events"] += 1
+            if resume:
+                event_key = json.dumps(
+                    _legacy_scalar(_source_id(row, vcols)), sort_keys=True, ensure_ascii=True)
+                if event_key in migrated_event_ids:
+                    counts["resumed_skipped"] += 1
+                    continue
             ns = namespace_value(
                 row["namespace"] if "namespace" in vcols else "default"
             )
@@ -587,6 +691,12 @@ def _migrate_rows(
         tcols = _columns(src, "thoughts")
         for row in src.execute("SELECT * FROM thoughts").fetchall():
             counts["thoughts"] += 1
+            if resume:
+                thought_key = json.dumps(
+                    _legacy_scalar(_source_id(row, tcols)), sort_keys=True, ensure_ascii=True)
+                if thought_key in migrated_thought_ids:
+                    counts["resumed_skipped"] += 1
+                    continue
             repairs = []
             ns = namespace_value(
                 row["namespace"] if "namespace" in tcols else "default"
@@ -601,7 +711,20 @@ def _migrate_rows(
             if "source_memory_ids" in tcols and row["source_memory_ids"]:
                 decoded_refs = _decode_metadata(row["source_memory_ids"])
                 if isinstance(decoded_refs, list):
-                    source_refs = [_legacy_scalar(item) for item in decoded_refs]
+                    validated_refs = []
+                    for item in decoded_refs:
+                        scalar = _legacy_scalar(item)
+                        # A thought's source links must be non-empty JSON-safe
+                        # scalars; anything else is a legacy encoding bug, not a
+                        # lineage pointer. Drop it and record the repair.
+                        if scalar is None or scalar == "" or scalar == [] or scalar == {}:
+                            repairs.append("source_memory_ids")
+                            continue
+                        if type(scalar) not in (int, str, float):
+                            repairs.append("source_memory_ids")
+                            continue
+                        validated_refs.append(scalar)
+                    source_refs = validated_refs
                 else:
                     repairs.append("source_memory_ids")
             title = "synthesized thought"
@@ -666,6 +789,7 @@ def _migrate_rows(
                         commit=False,
                     )
 
+    counts["dim_histogram"] = {str(dim): count for dim, count in sorted(dim_histogram.items())}
     if store is not None:
         store.audit(
             "migration",
@@ -706,8 +830,15 @@ def _cleanup_stage(path: Path) -> None:
 
 
 def migrate(old_path: str, new_path: str, *, workspace: str = "default",
-            dry_run: bool = False) -> dict:
-    """Migrate through a same-directory stage and publish only a verified database."""
+            dry_run: bool = False, resume: bool = False,
+            reembed_queue: Optional[str] = None) -> dict:
+    """Migrate through a same-directory stage and publish only a verified database.
+
+    ``resume`` continues a previously interrupted migration into the existing
+    ``--new`` database, skipping v1 source ids already carried across.
+    ``reembed_queue`` names a file receiving one raw v1 id per line for every
+    memory whose legacy vector is missing or undecodable.
+    """
     source_path = Path(old_path).expanduser().resolve()
     target_path = Path(new_path).expanduser().resolve()
     if not source_path.is_file():
@@ -715,13 +846,21 @@ def migrate(old_path: str, new_path: str, *, workspace: str = "default",
     if dry_run:
         return _migrate_to_path(
             str(source_path), str(target_path), workspace=workspace, dry_run=True,
+            resume=resume, reembed_queue=reembed_queue,
         )
     if source_path == target_path:
         raise ValueError("v1 migration requires --new to differ from --old")
-    if target_path.exists():
+    if target_path.exists() and not resume:
         raise FileExistsError(
             "v1 migration requires a fresh --new path; refusing existing target "
-            f"{target_path}"
+            f"{target_path} (pass --resume to continue into it)"
+        )
+    if resume and target_path.exists():
+        # Continue directly into the existing database: staging plus publish
+        # would abandon the already-migrated rows the resume set was built from.
+        return _migrate_to_path(
+            str(source_path), str(target_path), workspace=workspace,
+            resume=True, reembed_queue=reembed_queue,
         )
 
     target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -735,6 +874,7 @@ def migrate(old_path: str, new_path: str, *, workspace: str = "default",
     try:
         counts = _migrate_to_path(
             str(source_path), str(stage_path), workspace=workspace,
+            resume=resume, reembed_queue=reembed_queue,
             _precreated_target=True,
         )
         _validate_and_flush_stage(stage_path)
@@ -751,16 +891,21 @@ def main() -> None:
     ap.add_argument("--old", default=str(_PROJECT_ROOT / "engraphis_v1.db"))
     ap.add_argument(
         "--new", default=str(_PROJECT_ROOT / "engraphis_v2.db"),
-        help="fresh v2 output path (must not already exist unless --dry-run)",
+        help="fresh v2 output path (must not already exist unless --dry-run/--resume)",
     )
     ap.add_argument("--workspace", default="default")
     ap.add_argument("--dry-run", action="store_true", help="report counts, write nothing")
+    ap.add_argument("--resume", action="store_true",
+                    help="continue an interrupted migration into the existing --new database")
+    ap.add_argument("--reembed-queue", default=None,
+                    help="write one raw v1 id per line for memories needing re-embedding")
     args = ap.parse_args()
 
     if not Path(args.old).exists():
         raise SystemExit(f"Old DB not found: {args.old}")
 
-    counts = migrate(args.old, args.new, workspace=args.workspace, dry_run=args.dry_run)
+    counts = migrate(args.old, args.new, workspace=args.workspace, dry_run=args.dry_run,
+                     resume=args.resume, reembed_queue=args.reembed_queue)
     mode = "DRY RUN - nothing written" if args.dry_run else f"written -> {args.new}"
     print(f"Engraphis migration ({mode})")
     for k, v in counts.items():
