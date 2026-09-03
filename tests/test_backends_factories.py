@@ -116,7 +116,6 @@ def test_embedder_factory_forwards_an_immutable_model_revision(monkeypatch):
 
 
 def test_get_embedder_prefers_local_cache(monkeypatch):
-    import sentence_transformers
     calls = []
 
     class FakeST:
@@ -126,7 +125,11 @@ def test_get_embedder_prefers_local_cache(monkeypatch):
         def get_embedding_dimension(self):
             return 384
 
-    monkeypatch.setattr(sentence_transformers, "SentenceTransformer", FakeST)
+    monkeypatch.setitem(
+        sys.modules,
+        "sentence_transformers",
+        SimpleNamespace(SentenceTransformer=FakeST),
+    )
     emb = get_embedder("sentence-transformers/all-MiniLM-L6-v2", 384)
     assert emb.dim == 384
     assert len(calls) == 1
@@ -134,7 +137,6 @@ def test_get_embedder_prefers_local_cache(monkeypatch):
 
 
 def test_get_embedder_falls_back_when_not_cached(monkeypatch):
-    import sentence_transformers
     calls = []
 
     class FakeST:
@@ -146,7 +148,11 @@ def test_get_embedder_falls_back_when_not_cached(monkeypatch):
         def get_embedding_dimension(self):
             return 384
 
-    monkeypatch.setattr(sentence_transformers, "SentenceTransformer", FakeST)
+    monkeypatch.setitem(
+        sys.modules,
+        "sentence_transformers",
+        SimpleNamespace(SentenceTransformer=FakeST),
+    )
     emb = get_embedder("sentence-transformers/all-MiniLM-L6-v2", 384)
     assert emb.dim == 384
     assert len(calls) == 2
