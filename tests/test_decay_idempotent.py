@@ -67,10 +67,18 @@ def test_reinforced_memory_is_not_decayed_that_interval(monkeypatch, tmp_path):
     decayed = _stability("ns", "hot")
     assert decayed < 5.0
     # Simulate reinforcement: the memory is accessed now (last_access moves past the anchor).
+    # Bump one second past the pass's anchor: time.time() can return the SAME
+    # value as the anchor on coarse-clock hosts (observed on Windows), and a
+    # last_access equal to the anchor makes the subsequent pass legitimately
+    # decay one tick's interval — a race, not the regression this pins.
     conn = get_conn()
     conn.execute("UPDATE memories SET last_access=? WHERE namespace=? AND document_id=?",
-                 (now_ts(), "ns", "hot"))
+                 (now + 1.0, "ns", "hot"))
     conn.commit()
     # A subsequent pass must NOT decay it further — it was just accessed.
     mem_store.apply_decay_to_all("ns", 7.0)
+    assert abs(_stability("ns", "hot") - decayed) < 1e-9
+    # And the guard must hold across many rapid passes, not just one.
+    for _ in range(50):
+        mem_store.apply_decay_to_all("ns", 7.0)
     assert abs(_stability("ns", "hot") - decayed) < 1e-9
