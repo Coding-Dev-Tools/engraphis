@@ -10,7 +10,9 @@ def test_prefix_and_shape():
 
 
 def test_unknown_kind_falls_back_to_kind_as_prefix():
-    assert ids.new_id("widget").startswith("widget_")
+    with pytest.raises(ValueError):
+        ids.new_id("widget")
+    assert ids.new_id("widget", allow_unsafe=True).startswith("widget_")
 
 
 def test_ulid_is_time_sortable():

@@ -58,11 +58,29 @@ def ulid(timestamp_ms: Optional[int] = None) -> str:
     return _encode(ts, 10) + _encode(rand, 16)
 
 
-def new_id(kind: str) -> str:
+def new_id(kind: str, *, allow_unsafe: bool = False, unsafe: bool | None = None) -> str:
     """Return a prefixed id, e.g. ``new_id("memory") -> 'mem_01J...'``.
 
-    Unknown kinds fall back to using the kind itself as the prefix, so callers
-    are never blocked by a missing entry in ``PREFIXES``.
+    Known kinds (the keys of ``PREFIXES``) always work. Unknown kinds raise
+    ``ValueError`` unless explicitly opted out with ``allow_unsafe=True`` (or
+    the ``unsafe=True`` alias), in which case the kind itself is used as the
+    prefix for forward compatibility.
     """
-    prefix = PREFIXES.get(kind, kind)
-    return f"{prefix}_{ulid()}"
+    if unsafe is not None:
+        allow_unsafe = allow_unsafe or bool(unsafe)
+    if kind not in PREFIXES:
+        if not allow_unsafe:
+            raise ValueError(
+                f"unknown id kind {kind!r} (expected one of {sorted(PREFIXES)}; "
+                "pass allow_unsafe=True to use it as a literal prefix)"
+            )
+        return f"{kind}_{ulid()}"
+    return f"{PREFIXES[kind]}_{ulid()}"
+
+
+def assert_id_kind(value: str, kind: str) -> str:
+    """Return *value* if it carries the prefix for *kind*, else raise."""
+    expected = PREFIXES[kind]
+    if not isinstance(value, str) or not value.startswith(expected + "_"):
+        raise ValueError(f"id for kind {kind!r} must start with {expected + '_'!r}")
+    return value

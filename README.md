@@ -79,7 +79,7 @@ its counting boundary explicit.
 These values are evidence IDs `offline-chunking` and `offline-performance` in
 [`offline-fixtures-v1.json`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/benchmark-evidence/offline-fixtures-v1.json),
 SHA-256
-`0f60b0868444f676fe14c5f94d7db2c475e22669930c4d760881d0842eaa6800`.
+`8a74e9f48e25f33d625d4cc5c1b14fec3055891944adccf615c440e84e4b0255`.
 [`BENCHMARKS.md`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/BENCHMARKS.md#public-numeric-evidence-registry)
 records the matching suite digest, exact commands, and per-command config digests. External,
 model-dependent, consolidation, productivity, and latency results remain unpublished until the
@@ -347,6 +347,15 @@ engraphis-dashboard                   # → http://127.0.0.1:8700
 engraphis-dashboard --install-shortcuts   # → Desktop + Start Menu icons
 ```
 
+> **Offline first run:** the first launch downloads the `all-MiniLM-L6-v2` embedding model
+> (~80 MB), then runs fully offline. To stay offline-only, set
+> `ENGRAPHIS_EMBED_MODEL=local:/absolute/model/path` (never downloads; unknown local models
+> enter lexical degraded mode instead of faking semantic scores). Extraction defaults to
+> `ENGRAPHIS_EXTRACTOR=none` (verbatim writes), the vector backend defaults to `auto` (native
+> acceleration when installed, otherwise NumPy), and recall without a usable semantic space
+> reports `degraded_mode=true` with lexical/graph recall. Run `engraphis-init --check` to
+> verify the install, extras, and database writability.
+
 ### Docker
 
 ```bash
@@ -376,6 +385,15 @@ claude mcp add engraphis -- engraphis-mcp
 codex mcp add engraphis -- engraphis-mcp  # Codex subscription
 
 ```
+
+> **Offline first run:** the first tool call lazily loads the `all-MiniLM-L6-v2` embedding
+> model (~80 MB, same download as the dashboard), then memory runs fully offline with no API
+> key. To stay offline-only, set `ENGRAPHIS_EMBED_MODEL=local:/absolute/model/path` (never
+> downloads); extraction defaults to `ENGRAPHIS_EXTRACTOR=none`, the vector backend `auto`
+> falls back to NumPy without the `vector` extra, and recall without a usable semantic space
+> reports `degraded_mode=true` with lexical/graph recall. Run `engraphis-init --check` to
+> verify the install and database path before registering the server.
+
 For Codex subscription setup and verification, see the [agent connection guide](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/AGENT_CONNECT.md)
 and the [LLM provider guide](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/LLM_PROVIDERS.md).
 
@@ -745,7 +763,7 @@ file. It never searches the working directory for `.env`, and explicit process v
 | `ENGRAPHIS_ENV_FILE` | `~/.engraphis/config.env` | Optional trusted config leaf selected before trusted values load. Its bounded dependency-free parser performs no interpolation. An explicit value must be an absolute path to an owner-private regular file; arbitrary working-directory `.env` files are ignored. |
 | `ENGRAPHIS_DB_PATH` | Source: `<repo>/engraphis.db`; installed: platform user-data directory | SQLite database file. Installed defaults are `%LOCALAPPDATA%\engraphis\engraphis.db` (Windows), `~/Library/Application Support/engraphis/engraphis.db` (macOS), and `$XDG_DATA_HOME/engraphis/engraphis.db` or `~/.local/share/engraphis/engraphis.db` (Linux). The environment variable overrides every default; a relative value is resolved from the trusted `~/.engraphis/config.env` directory so launch CWD cannot select a different workspace database. |
 | `ENGRAPHIS_HOST` | `127.0.0.1` | Server bind address |
-| `ENGRAPHIS_PORT` | `8700` | Dashboard port |
+| `ENGRAPHIS_PORT` | `8700` | Dashboard port. A platform-injected `$PORT` (Railway/Fly/Heroku) takes precedence over this value for the dashboard bind; Compose pins both to `ENGRAPHIS_COMPOSE_PORT` so the mapping stays in sync |
 | `ENGRAPHIS_SERVICE_MODE` | `customer` | The public package supports only `customer`; hosted vendor, relay, compute, and worker roles are not distributed here |
 | `ENGRAPHIS_API_TOKEN` | Not set | Optional bearer credential for this single-user local customer node; never reuse a hosted credential |
 | `ENGRAPHIS_CORS_ORIGINS` | loopback on `ENGRAPHIS_PORT` | Comma-separated REST CORS allow-list; defaults to `127.0.0.1` and `localhost` on the configured port |

@@ -50,6 +50,7 @@ class _GovernBody(BaseModel):
     repo: Optional[str] = Field(default=None, max_length=200)
     reason: str = Field(default="", max_length=1_000)
     pinned: bool = True
+    confirmed: bool = False
 
 
 class _PromoteBody(BaseModel):
@@ -391,6 +392,7 @@ def create_app(
             workspace=body.workspace,
             repo=body.repo,
             actor="inspector-local",
+            confirmed=body.confirmed,
         )
 
     @app.post("/api/correct")

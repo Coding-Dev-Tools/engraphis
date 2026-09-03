@@ -7,7 +7,8 @@ entry point that delegates to this provider.
 from __future__ import annotations
 
 import logging
-from typing import Optional
+import os
+from typing import Any, Optional
 
 from engraphis.backends.codegraph import (
     SourceWalkLimitExceeded,
@@ -26,10 +27,46 @@ from engraphis.backends.graph_extractor import (
 from engraphis.backends.reranker import get_reranker
 from engraphis.backends.retention import get_retention_supervisor
 from engraphis.backends.vector_sqlitevec import get_vector_index
+from engraphis.config import resolve_vector_backend
 from engraphis.core.interfaces import GraphTraversalPolicy, QueryPlanner
 from engraphis.core.store import Store
 
 _logger = logging.getLogger("engraphis.factory")
+
+
+def _is_prod_env() -> bool:
+    """Return True when the process runs in the production deployment environment."""
+    return os.environ.get("ENGRAPHIS_ENV", "").strip().lower() == "prod"
+
+
+def _backend_identity(backend: Any, *, configured: str = "") -> dict:
+    """Return the configured vs resolved identity for one constructed backend."""
+    resolved = type(backend).__name__ if backend is not None else "none"
+    identity = str(getattr(backend, "embedding_identity", "") or "") if backend is not None else ""
+    info: dict = {"configured": configured, "resolved": resolved}
+    if identity:
+        info["identity"] = identity
+    return info
+
+
+def backend_health(engine: Any = None, *, vector_backend: str = "numpy") -> dict:
+    """Return the resolved backend identities served by one engine (or selector)."""
+    if engine is None:
+        return {
+            "vector_backend": {
+                "configured": vector_backend,
+                "resolved": resolve_vector_backend(vector_backend),
+            },
+        }
+    index = getattr(engine, "index", None)
+    return {
+        "vector_backend": _backend_identity(
+            index, configured=str(getattr(engine, "vector_backend", vector_backend) or vector_backend),
+        ),
+        "embedder": _backend_identity(getattr(engine, "embedder", None)),
+        "reranker": _backend_identity(getattr(engine, "reranker", None)),
+        "extractor": _backend_identity(getattr(engine, "extractor", None)),
+    }
 
 
 def _feed_graph(
@@ -100,7 +137,17 @@ def create_memory_engine(
         require_exact_backends: When True, raise an error if any configured backend
             is unavailable instead of falling back to degraded alternatives. Use this
             for production deployments where silent degradation is unacceptable.
+            ``ENGRAPHIS_ENV=prod`` forces this on regardless of the argument.
     """
+    if _is_prod_env():
+        require_exact_backends = True
+    # In exact mode "auto" must not silently degrade to the portable reference:
+    # require the native backend so a missing extension fails closed instead.
+    effective_vector_backend = (
+        "sqlite-vec"
+        if (require_exact_backends and (vector_backend or "").strip().lower() == "auto")
+        else vector_backend
+    )
     if engine_cls is None:
         from engraphis.core.engine import MemoryEngine
 
@@ -119,7 +166,7 @@ def create_memory_engine(
         owned.append(embedder)
 
         index = get_vector_index(
-            store, dim=embedder.dim, prefer=vector_backend,
+            store, dim=embedder.dim, prefer=effective_vector_backend,
         )
         owned.append(index)
 
@@ -186,6 +233,10 @@ def create_memory_engine(
                 )
         else:
             engine._rebuild_versioned_embeddings()
+        engine.vector_backend = effective_vector_backend
+        engine.backend_identities = backend_health(
+            engine, vector_backend=effective_vector_backend,
+        )
         engine._adopt_resources([store, *owned])
         return engine
     except BaseException:

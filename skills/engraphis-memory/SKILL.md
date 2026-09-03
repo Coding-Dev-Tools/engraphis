@@ -167,18 +167,34 @@ state in the URL hash, so filters and selected IDs are not sent to the server as
 
 ## Setup
 
-The skill needs the Engraphis MCP server running. Install and register it once:
+The skill needs the Engraphis MCP server running. Install, pin the database, and register it once:
 
 ```bash
 pip install "engraphis[mcp]"
-claude mcp add engraphis -- engraphis-mcp        # Claude Code
-# Cursor / Cline / Zed / Windsurf: add an MCP server with command `engraphis-mcp` (stdio).
+engraphis-init                                   # writes ~/.engraphis/config.env with an absolute DB path
+claude mcp add engraphis --env ENGRAPHIS_DB_PATH="<absolute path printed by engraphis-init>" -- engraphis-mcp
+# Cursor / Cline / Zed / Windsurf: add an MCP server with command `engraphis-mcp` (stdio)
+# and the same `ENGRAPHIS_DB_PATH` in its environment.
 ```
 
-Verify with `engraphis_discover_actions(task="check local memory store health")`. The engine is
-fully local (SQLite + local embeddings); no API key is needed for the memory layer. Legacy clients
-that pin every direct tool can use `engraphis-mcp-classic`; normal agents should use the Smart
-default. Details: the repo `README.md` "Quickstart: MCP server".
+> **One store, one path.** The MCP server and the dashboard must point at the *same*
+> `ENGRAPHIS_DB_PATH`, or memories stored in one will be invisible in the other. A DB-path
+> mismatch is the #1 cause of "I remembered something but can't see it." For the
+> pinned-`environment` pattern per platform, see the repo's `docs/KILO_CODE_INTEGRATION.md`
+> ("Install the Engraphis MCP server").
+
+Verify with discovery, then the returned read executor (which surfaces store health/counts):
+
+```text
+engraphis_discover_actions(task="check local memory store health")
+  → {capability_id, schema_digest, ...} for the stats/health action
+engraphis_execute_read(capability_id=..., schema_digest=..., arguments={...exact schema...})
+  → memory counts: the pipe, the DB path, and the store are all working
+```
+
+The engine is fully local (SQLite + local embeddings); no API key is needed for the memory
+layer. Legacy clients that pin every direct tool can use `engraphis-mcp-classic`; normal agents
+should use the Smart default. Details: the repo `README.md` "Quickstart: MCP server".
 
 ## References
 

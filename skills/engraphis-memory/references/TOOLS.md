@@ -262,7 +262,9 @@ Returns `{id, superseded:[old_id], reason}`. Prefer this over retire-then-rememb
 ### `engraphis_retire`
 Retire a memory: it stops appearing in recall, history preserved.
 
-- `memory_id (str)`, `workspace (str)`, `repo (str, None)`, `reason (str, "")`.
+- `memory_id (str)`, `workspace (str)`, `repo (str, None)`, `reason (str, "")`,
+  `confirmed (bool, false)`: explicit local-operator confirmation, must be true; retirement
+  closes history and every request is audited, including retries.
 
 Returns `{id, status:"retired", reason}`. Use `correct` instead when you have replacement content.
 
@@ -273,7 +275,10 @@ WAL checkpoint, and VACUUM, and scans recognised local SQLite recovery backups. 
 exports, snapshots, remote peers, unknown backups, or content already read by an agent; rotate the
 credential. This is destructive and intentionally does not preserve history.
 
-- `memory_id (str)`, `workspace (str)`, `repo (str, None)`.
+- `memory_id (str)`, `workspace (str)`, `repo (str, None)`,
+  `confirmed (bool, false)`: explicit local-operator confirmation, must be true; this
+  irreversibly destroys the memory, its history, and local indexed derivatives. Rotate the
+  credential first.
 
 Returns `{id, status:"securely_erased", maintenance, recognised_backups_erased,
 backup_limitations}`. The `vector_index_cleanup` result must be `deleted` before an injected
@@ -283,7 +288,9 @@ external vector backend can be considered remediated.
 Compatibility alias for `engraphis_retire`. It retains the old `status:"forgotten"` result for
 existing clients, but new integrations must use `engraphis_retire`.
 
-- `memory_id (str)`, `workspace (str)`, `repo (str, None)`, `reason (str, "")`.
+- `memory_id (str)`, `workspace (str)`, `repo (str, None)`, `reason (str, "")`,
+  `confirmed (bool, false)`: explicit local-operator confirmation, must be true, as for
+  `engraphis_retire`.
 
 ### `engraphis_promote`
 Widen a live memory's visibility without editing it in place. The wider record is stored first;
@@ -456,7 +463,9 @@ With `profiles=true` it also rolls every live memory mentioning an entity into o
 semantic *profile* digest, a per-subject knowledge profile linked via `profiles` that grows with use.
 
 - `workspace (str, required)`; `repo (str, None)`; `dry_run (bool, true)`;
-  `profiles (bool, false)`; `structured (bool, false)`.
+  `profiles (bool, false)`; `structured (bool, false)`. `confirmed (bool, false)` must be
+  true for a real (non-dry-run) sweep, which archives and distills governed state; dry runs
+  need no confirmation.
 
 Returns `{clusters_found, digests_created, archived, skipped_already_consolidated, compaction, dry_run}`.
 The `compaction` field is the context tokens the sweep saved (before → after). With `profiles=true` a

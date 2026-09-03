@@ -85,9 +85,9 @@ def _check_repository(manifest: dict, errors: list[str]) -> None:
         if plan_data.get("billing_unit") != expected_unit:
             _fail(errors, "%s billing unit must be %s" % (plan, expected_unit))
 
-    # GA pricing. These ran only inside _check_website(), which is reachable solely via
-    # --website-root and is never passed in CI -- so every published price was unguarded:
-    # the manifest could say $99,999 and both this check and the full test suite passed.
+    # GA pricing. The website branch of this check runs only when --website-root
+    # is passed (release CI passes it when a website checkout is present) -- without
+    # the flag published prices would be unguarded.
     expected_prices = {"free": (0, 0), "pro": (10, 100), "team": (20, 200)}
     for plan, (monthly, annual) in expected_prices.items():
         plan_data = manifest.get("plans", {}).get(plan, {})

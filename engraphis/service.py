@@ -4424,23 +4424,52 @@ class MemoryService:
 
     def forget(self, memory_id: str, *, workspace: str, repo: Optional[str] = None,
                reason: str = "", actor: str = "user") -> dict:
-        """Deprecated compatibility alias for :meth:`retire`."""
+        """Retire-with-history (deprecated compatibility alias for :meth:`retire`).
+
+        The record stops appearing in recall but its history is preserved, never
+        deleted. For irreversible removal of an accidentally stored secret, use
+        :meth:`secure_erase` with explicit confirmation instead.
+        """
+        logger.warning(
+            "forget() is deprecated; use retire() for retire-with-history or "
+            "secure_erase(confirmed=True) for irreversible erasure",
+        )
         result = self.retire(memory_id, workspace=workspace, repo=repo,
                              reason=reason, actor=actor)
         return {**result, "status": "forgotten", "deprecated": True}
 
     def secure_erase(self, memory_id: str, *, workspace: str, repo: Optional[str] = None,
-                     actor: str = "user") -> dict:
-        """Irreversibly remove one leaked record; unlike retire, history is destroyed."""
+                     actor: str = "user", confirmed: bool = False) -> dict:
+        """Irreversibly remove one leaked record; unlike retire, history is destroyed.
+
+        Requires ``confirmed=True``: an explicit local-operator attestation that the
+        record must be destroyed rather than retired with history. Rotate the
+        credential first — erasure cannot recall copied exports, snapshots, remote
+        peers, or data an agent already read (see the docs/SYNC.md rotation runbook).
+        The response carries the Store's ``impact`` report (receipt/event refs,
+        backup note, WAL/vacuum status) alongside the erase result.
+        """
+        if confirmed is not True:
+            raise ValidationError(
+                "secure_erase requires explicit confirmation (pass confirmed=True); "
+                "use retire() for reversible retire-with-history",
+            )
         mid = _clean_text(memory_id, field="memory_id", max_chars=MAX_NAME_CHARS)
         actor = _clean_text(actor, field="actor", max_chars=MAX_NAME_CHARS,
                             required=False) or "user"
         wid, rid = self._require_scope(workspace, repo)
         self._check_owns(mid, wid, rid)
         try:
-            return self.engine.secure_erase(mid, actor=actor)
+            result = self.engine.secure_erase(mid, actor=actor)
         except (KeyError, ValueError) as exc:
             raise ValidationError(str(exc))
+        result["impact"] = self.store.secure_erase_impact(mid)
+        self.store.audit(
+            actor, "secure_erase", mid,
+            "explicit local-operator confirmation; rotate the credential and "
+            "remediate external copies separately",
+        )
+        return result
 
     def pin(self, memory_id: str, *, workspace: str, repo: Optional[str] = None,
            pinned: bool = True, actor: str = "user") -> dict:

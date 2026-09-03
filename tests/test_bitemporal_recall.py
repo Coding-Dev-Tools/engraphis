@@ -214,7 +214,7 @@ def test_retroactive_edge_closure_does_not_leak_before_it_was_known():
     engine, workspace_id, repo_id, memory_id = _engine_with_historical_memory()
     store = engine.store
     edge_id = store.upsert_edge(Edge(
-        id="edge_history",
+        id="edg_history",
         src="alpha",
         dst="beta",
         relation="depends_on",
