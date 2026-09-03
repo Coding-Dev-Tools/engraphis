@@ -12,6 +12,7 @@ Code / Cursor / Cline / Zed.
     engraphis-init --encrypted     # require SQLCipher and provision a private DB key file
     engraphis-init --force         # overwrite the trusted config file
     engraphis-init --check         # doctor: verify install, extras, DB writability
+    engraphis-init --prefetch      # pre-cache embedding model weights for instant MCP startup
 
 Non-interactive by design (no prompts): safe in scripts, CI, and agent shells.
 """
@@ -104,8 +105,36 @@ def cmd_check() -> int:
     except Exception:
         _miss("Engraphis Cloud", "saved session unavailable; reconnect if needed")
 
+    try:
+        from engraphis.backends.embedder_st import get_embedder
+        emb = get_embedder(settings.embed_model or None, dim=settings.embed_dim or 384)
+        emb.embed(["engraphis doctor check"])
+        _ok("embedder functional", f"{type(emb).__name__} ({getattr(emb, 'dim', 384)}d)")
+    except Exception as exc:
+        _fail("embedder functional", f"{type(exc).__name__}: {exc}")
+        failures += 1
+
     print("all good" if failures == 0 else f"{failures} problem(s) found")
     return 0 if failures == 0 else 1
+
+
+def cmd_prefetch() -> int:
+    """Download and warm up the configured embedding model ahead of time."""
+    from engraphis.config import settings
+    model_name = (settings.embed_model or "").strip()
+    if not model_name:
+        print("  [--] No remote embedding model configured; deterministic offline embedder is active.")
+        return 0
+    print(f"engraphis prefetch - model '{model_name}'")
+    try:
+        from engraphis.backends.embedder_st import get_embedder
+        emb = get_embedder(model_name, dim=settings.embed_dim or 384, require_exact=True)
+        emb.embed(["engraphis prefetch warmup"])
+        _ok("model prefetch", f"{type(emb).__name__} ({getattr(emb, 'dim', 384)}d) ready")
+        return 0
+    except Exception as exc:
+        _fail("model prefetch", f"{type(exc).__name__}: {exc}")
+        return 1
 
 
 def _env_content(db_path: Path, token: str, key_path: Optional[Path] = None) -> str:
@@ -243,10 +272,14 @@ def main(argv=None) -> int:
     )
     ap.add_argument("--check", action="store_true",
                     help="doctor mode: verify the installation without writing config")
+    ap.add_argument("--prefetch", action="store_true",
+                    help="pre-cache the configured embedding model for instant MCP startup")
     args = ap.parse_args(argv)
 
     if args.check:
         return cmd_check()
+    if args.prefetch:
+        return cmd_prefetch()
 
     db_path = Path(args.db).expanduser().resolve()
     try:
