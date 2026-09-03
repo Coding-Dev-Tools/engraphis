@@ -319,6 +319,18 @@ def get_embedder(
             }
             if local_files_only:
                 factory_kwargs["local_files_only"] = True
+            else:
+                # Optimize cold start: if the model is already in local Hugging Face cache,
+                # loading with local_files_only=True avoids network roundtrips to huggingface.co.
+                # If cached, it returns immediately; if not, it seamlessly falls through to download.
+                try:
+                    cached_kwargs = dict(factory_kwargs)
+                    cached_kwargs["local_files_only"] = True
+                    emb = SentenceTransformerEmbedder(resolved_model_name, **cached_kwargs)
+                    LAST_EMBEDDER_ERROR = ""
+                    return emb
+                except Exception:
+                    pass
             emb = SentenceTransformerEmbedder(resolved_model_name, **factory_kwargs)
             LAST_EMBEDDER_ERROR = ""
             return emb
