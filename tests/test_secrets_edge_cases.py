@@ -34,3 +34,11 @@ def test_redaction_removes_an_entire_pem_private_key_block():
     assert private_key not in redacted
     assert "abc123secret" not in redacted
     assert secret_kind(redacted) is None
+
+
+def test_redaction_linear_time_on_repeated_pem_headers():
+    malicious = "-----BEGIN PRIVATE KEY----- " * 1000
+    res = redact_secrets(malicious)
+    assert "-----BEGIN PRIVATE KEY-----" not in res
+    assert "<redacted>" in res
+

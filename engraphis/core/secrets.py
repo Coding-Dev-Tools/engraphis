@@ -73,12 +73,45 @@ _SENSITIVE_MAPPING_KEY = re.compile(
     """,
 )
 _REDACTION = re.compile(r"^<?(?:redacted|removed|withheld|not[_ -]?set)>?$", re.I)
-_PEM_BLOCK = re.compile(
-    r"-----BEGIN(?: [A-Z0-9]+)? PRIVATE KEY-----[\s\S]*?"
-    r"-----END(?: [A-Z0-9]+)? PRIVATE KEY-----",
-    re.I,
-)
 _REDACTED = "<redacted>"
+
+
+def _redact_pem(text: str) -> str:
+    """Safely redact PEM private key blocks in O(N) linear time without regex backtracking."""
+    out: list[str] = []
+    pos = 0
+    upper = text.upper()
+    while True:
+        begin = upper.find("-----BEGIN", pos)
+        if begin == -1:
+            out.append(text[pos:])
+            break
+        header_end = upper.find("-----", begin + 10)
+        if header_end == -1:
+            out.append(text[pos:])
+            break
+        header = upper[begin:header_end + 5]
+        if "PRIVATE KEY" not in header:
+            out.append(text[pos:header_end + 5])
+            pos = header_end + 5
+            continue
+        end = upper.find("-----END", header_end + 5)
+        if end == -1:
+            out.append(text[pos:])
+            break
+        footer_end = upper.find("-----", end + 8)
+        if footer_end == -1:
+            out.append(text[pos:])
+            break
+        footer = upper[end:footer_end + 5]
+        if "PRIVATE KEY" not in footer:
+            out.append(text[pos:footer_end + 5])
+            pos = footer_end + 5
+            continue
+        out.append(text[pos:begin])
+        out.append(_REDACTED)
+        pos = footer_end + 5
+    return "".join(out)
 
 
 def _text(value: Any) -> str:
@@ -157,7 +190,7 @@ def redact_secrets(text: str) -> str:
     """
     if not isinstance(text, str) or not text:
         return text
-    safe = _PEM_BLOCK.sub(_REDACTED, text)
+    safe = _redact_pem(text)
     for _kind, pattern in _PATTERNS:
         safe = pattern.sub(_REDACTED, safe)
     safe = _DSN.sub(_REDACTED, safe)
