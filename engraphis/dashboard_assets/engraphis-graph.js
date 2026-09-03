@@ -3599,7 +3599,7 @@
       bodies.forEach((node, index) => {
         const x = node.x, y = node.y;
         const cellX = Math.floor(x / cellSize), cellY = Math.floor(y / cellSize);
-        const key = cellX + ',' + cellY;
+        const key = (cellX * 73856093) ^ (cellY * 19349663);
         if (!grid.has(key)) grid.set(key, []);
         grid.get(key).push({ node, index, x, y, radius: bodyRadius(node), cellX, cellY });
       });
@@ -3607,9 +3607,8 @@
       grid.forEach(bucket => bucket.forEach(left => {
         for (let offsetX = -1; offsetX <= 1; offsetX++) {
           for (let offsetY = -1; offsetY <= 1; offsetY++) {
-            const candidates = grid.get(
-              (left.cellX + offsetX) + ',' + (left.cellY + offsetY)
-            ) || [];
+            const candidateKey = ((left.cellX + offsetX) * 73856093) ^ ((left.cellY + offsetY) * 19349663);
+            const candidates = grid.get(candidateKey) || [];
             candidates.forEach(right => {
               if (right.index <= left.index) return;
               if (opts.sameCommunityOnly === true
@@ -3748,7 +3747,7 @@
       group.fixed = group.fixed || node.anchor_role === 'global' || node.id === opts.fixedNodeId;
       groupForNode.set(node, group);
       const cellX = Math.floor(node.x / cellSize), cellY = Math.floor(node.y / cellSize);
-      const key = cellX + ',' + cellY;
+      const key = (cellX * 73856093) ^ (cellY * 19349663);
       if (!grid.has(key)) grid.set(key, []);
       grid.get(key).push({
         node, index, x: node.x, y: node.y, radius: bodyRadius(node), cellX, cellY,
@@ -3759,9 +3758,8 @@
     grid.forEach(bucket => bucket.forEach(left => {
       for (let offsetX = -1; offsetX <= 1; offsetX++) {
         for (let offsetY = -1; offsetY <= 1; offsetY++) {
-          const candidates = grid.get(
-            (left.cellX + offsetX) + ',' + (left.cellY + offsetY)
-          ) || [];
+          const candidateKey = ((left.cellX + offsetX) * 73856093) ^ ((left.cellY + offsetY) * 19349663);
+          const candidates = grid.get(candidateKey) || [];
           candidates.forEach(right => {
             if (right.index <= left.index) return;
             const crossCommunity = communityKey(left.node) !== communityKey(right.node);
@@ -8773,7 +8771,11 @@
         dragSoftening: activeDragNode ? Math.max(GALAXY_DRAG_GRAVITY_SOFTENING,
           finitePositive(activeDragNode.radius, 2, 160) * 1.5) : GALAXY_DRAG_GRAVITY_SOFTENING,
         gravity: state.settings.gravity,
-        localGravitySetting: GALAXY_FIXED_LOCAL_GRAVITY_SETTING,
+        localGravitySetting: state.settings.localGravitySetting !== undefined
+          ? state.settings.localGravitySetting
+          : (state.settings.localGravitationalConstant !== undefined
+            ? GALAXY_FIXED_LOCAL_GRAVITY_SETTING * (state.settings.localGravitationalConstant / GALAXY_LOCAL_GRAVITATIONAL_CONSTANT_MULTIPLIER)
+            : GALAXY_FIXED_LOCAL_GRAVITY_SETTING),
         /* The dashboard normalises the three spacetime sliders to a 0..2 range
            (default 1.0). Preserve that normalized value at the Galaxy boundary:
            the downstream multiplier helpers clamp their own direct-call range,
