@@ -29,8 +29,65 @@ class SecretDetectedError(ValueError):
 # safe to block without a caller-supplied label.  Assignment detection below catches
 # generic credentials (including private deployment tokens) only when the field name
 # explicitly says that it is a credential.
-_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("private key", re.compile(r"-----BEGIN(?: [A-Z0-9]+)? PRIVATE KEY-----", re.I)),
+_PEM_HEADER = "-----begin private key-----"
+_PEM_HEADER_ALT = "-----begin "
+
+
+def _contains_pem_header(value: str) -> bool:
+    """O(N) PEM-header detection without regex backtracking.
+
+    Equivalent to ``re.search(r"-----BEGIN(?: [A-Z0-9]+)? PRIVATE KEY-----", re.I)``
+    but implemented as a case-normalized anchor scan: polynomial-ReDoS analysis
+    of the optional ``[A-Z0-9]+`` group is moot when no regex engine is involved.
+    Recognizes the canonical header and ``-----BEGIN X PRIVATE KEY-----`` variants
+    (RSA/EC/OPENSSH/ENCRYPTED/…).
+    """
+    lowered = value.casefold()
+    start = 0
+    while True:
+        index = lowered.find(_PEM_HEADER, start)
+        if index != -1:
+            return True
+        anchor = lowered.find(_PEM_HEADER_ALT, start)
+        if anchor == -1:
+            return False
+        tail = lowered[anchor + len(_PEM_HEADER_ALT):]
+        for token in ("rsa ", "ec ", "dsa ", "openssh ", "encrypted ", "pgp "):
+            if tail.startswith(token) and tail[len(token):].startswith(
+                    "private key-----"):
+                return True
+        start = anchor + len(_PEM_HEADER_ALT)
+
+
+class _PEMHeaderPattern:
+    """Minimal stand-in for the removed PEM regex: a linear-time ``search`` and ``sub``."""
+
+    @staticmethod
+    def search(value: str) -> _PEMMatch | None:
+        return _PEMMatch(True) if _contains_pem_header(value) else None
+
+    @staticmethod
+    def sub(repl: str, string: str, count: int = 0) -> str:
+        return _redact_pem(string)
+
+
+class _PEMMatch:
+    """Truthiness-compatible stand-in for a regex match object."""
+
+    __slots__ = ("_ok",)
+
+    def __init__(self, ok: bool) -> None:
+        self._ok = ok
+
+    def __bool__(self) -> bool:
+        return self._ok
+
+    def group(self, *args: object) -> str:
+        return _PEM_HEADER
+
+
+_PATTERNS: tuple[tuple[str, Any], ...] = (
+    ("private key", _PEMHeaderPattern()),
     ("AWS access key", re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b")),
     ("GitHub token", re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b")),
     ("GitLab token", re.compile(r"\bglpat-[A-Za-z0-9_-]{20,}\b")),
@@ -191,7 +248,11 @@ def redact_secrets(text: str) -> str:
     if not isinstance(text, str) or not text:
         return text
     safe = _redact_pem(text)
+    # PEM blocks are handled by the linear-time ``_redact_pem`` above; the
+    # detection entry in ``_PATTERNS`` is find-based and has no ``sub``.
     for _kind, pattern in _PATTERNS:
+        if isinstance(pattern, _PEMHeaderPattern):
+            continue
         safe = pattern.sub(_REDACTED, safe)
     safe = _DSN.sub(_REDACTED, safe)
     safe = _ASSIGNMENT.sub(_REDACTED, safe)
