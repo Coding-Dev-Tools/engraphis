@@ -44,19 +44,39 @@ def _contains_pem_header(value: str) -> bool:
     """
     lowered = value.casefold()
     start = 0
-    while True:
-        index = lowered.find(_PEM_HEADER, start)
-        if index != -1:
-            return True
+    limit = len(lowered)
+    header_exhausted = False
+    header_pos = -1
+    while start <= limit:
+        # Walk both needles forward without ever rescanning earlier positions:
+        # whichever of the two anchors occurs first is the only candidate that
+        # can start a header there, so advance past it after inspection.
+        # ``find`` results are monotone in ``start``: a miss is final for every
+        # later start, and a hit at ``h`` is the answer for every start <= h.
+        # Caching both avoids re-scanning to a far-away hit (or to end-of-string
+        # on a miss) at every anchor — O(N) total instead of O(N*M).
+        if not header_exhausted:
+            if header_pos == -1 or start > header_pos:
+                header_pos = lowered.find(_PEM_HEADER, start)
+                if header_pos == -1:
+                    header_exhausted = True
+        header = header_pos if (header_pos != -1 and start <= header_pos) else -1
         anchor = lowered.find(_PEM_HEADER_ALT, start)
+        if header != -1 and (anchor == -1 or header <= anchor):
+            return True
         if anchor == -1:
             return False
-        tail = lowered[anchor + len(_PEM_HEADER_ALT):]
-        for token in ("rsa ", "ec ", "dsa ", "openssh ", "encrypted ", "pgp "):
+        tail_start = anchor + len(_PEM_HEADER_ALT)
+        if header == tail_start:
+            return True
+        tail = lowered[tail_start:tail_start + 40]
+        for token in ("rsa ", "ec ", "dsa ", "openssh ", "encrypted ",
+                      "pgp ", "pkcs8 "):
             if tail.startswith(token) and tail[len(token):].startswith(
                     "private key-----"):
                 return True
-        start = anchor + len(_PEM_HEADER_ALT)
+        start = tail_start
+    return False
 
 
 class _PEMHeaderPattern:
