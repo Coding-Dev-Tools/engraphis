@@ -115,6 +115,52 @@ def test_embedder_factory_forwards_an_immutable_model_revision(monkeypatch):
     }
 
 
+def test_get_embedder_prefers_local_cache(monkeypatch):
+    calls = []
+
+    class FakeST:
+        def __init__(self, model_name, **kwargs):
+            calls.append((model_name, kwargs))
+
+        def get_embedding_dimension(self):
+            return 384
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sentence_transformers",
+        SimpleNamespace(SentenceTransformer=FakeST),
+    )
+    emb = get_embedder("sentence-transformers/all-MiniLM-L6-v2", 384)
+    assert emb.dim == 384
+    assert len(calls) == 1
+    assert calls[0][1].get("local_files_only") is True
+
+
+def test_get_embedder_falls_back_when_not_cached(monkeypatch):
+    calls = []
+
+    class FakeST:
+        def __init__(self, model_name, **kwargs):
+            calls.append((model_name, kwargs))
+            if kwargs.get("local_files_only") is True:
+                raise OSError("not in cache")
+
+        def get_embedding_dimension(self):
+            return 384
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sentence_transformers",
+        SimpleNamespace(SentenceTransformer=FakeST),
+    )
+    emb = get_embedder("sentence-transformers/all-MiniLM-L6-v2", 384)
+    assert emb.dim == 384
+    assert len(calls) == 2
+    assert calls[0][1].get("local_files_only") is True
+    assert not calls[1][1].get("local_files_only")
+
+
+
 @pytest.mark.parametrize("revision", [None, "main", "A" * 40, "a" * 39])
 def test_embedder_strict_mode_rejects_mutable_remote_revision_before_load(monkeypatch, revision):
     import engraphis.backends.embedder_st as embedder_st

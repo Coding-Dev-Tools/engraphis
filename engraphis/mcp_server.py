@@ -27,10 +27,13 @@ import hashlib
 import hmac
 import json
 import logging
-import re
-import time
-import secrets
 import math
+import os
+import re
+import secrets
+import sys
+import threading
+import time
 
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -103,22 +106,27 @@ def set_service(svc: MemoryService) -> None:
     _service = svc
 
 
+_service_lock = threading.Lock()
+
+
 def service() -> MemoryService:
     """Lazily build the service so server startup is instant (model loads on first use)."""
     global _service
     if _service is None:
-        _service = MemoryService.create(
-            settings.db_path,
-            embed_model=settings.embed_model or None,
-            embed_revision=getattr(settings, "embed_revision", "") or None,
-            require_immutable_models=bool(getattr(settings, "require_immutable_models", False)),
-            require_exact_backends=bool(getattr(settings, "require_exact_backends", False)),
-            embed_dim=settings.embed_dim if settings.embed_dim is not None else 384,
-            vector_backend=settings.vector_backend,
-            rerank_model=getattr(settings, "rerank_model", "") or None,
-            rerank_revision=getattr(settings, "rerank_revision", "") or None,
-            extractor=settings.extractor,
-        )
+        with _service_lock:
+            if _service is None:
+                _service = MemoryService.create(
+                    settings.db_path,
+                    embed_model=settings.embed_model or None,
+                    embed_revision=getattr(settings, "embed_revision", "") or None,
+                    require_immutable_models=bool(getattr(settings, "require_immutable_models", False)),
+                    require_exact_backends=bool(getattr(settings, "require_exact_backends", False)),
+                    embed_dim=settings.embed_dim if settings.embed_dim is not None else 384,
+                    vector_backend=settings.vector_backend,
+                    rerank_model=getattr(settings, "rerank_model", "") or None,
+                    rerank_revision=getattr(settings, "rerank_revision", "") or None,
+                    extractor=settings.extractor,
+                )
     return _service
 
 
@@ -3033,10 +3041,59 @@ def _eager_exact_backend_check() -> None:
         service()
 
 
+def _start_background_warmup() -> None:
+    """Warm up the memory service in a background daemon thread.
+
+    Allows the initial MCP handshake (initialize, tools/list) to respond in
+    milliseconds while warming SQLite and the embedding model before the agent's
+    first tool invocation. Can be disabled via ENGRAPHIS_MCP_WARMUP=0.
+    """
+    warmup_env = os.environ.get("ENGRAPHIS_MCP_WARMUP", "1").strip().lower()
+    if warmup_env in {"0", "false", "no", "off"}:
+        return
+    thread = threading.Thread(target=service, name="engraphis-warmup", daemon=True)
+    thread.start()
+
+
+async def _safe_run_stdio_async(server: FastMCP) -> None:
+    """Run stdio transport with pure wire protocol isolation.
+
+    In stdio MCP, standard output is exclusively the JSON-RPC wire. Redirect
+    Python's global `sys.stdout` to `sys.stderr` so that any prints, warnings,
+    or dependency output (PyTorch, transformers, tqdm, pydantic) flow safely to
+    stderr without corrupting JSON-RPC messages on the client pipe.
+    """
+    import anyio
+    from io import TextIOWrapper
+    from mcp.server.stdio import stdio_server
+
+    real_stdout_buffer = getattr(sys.stdout, "buffer", None)
+    real_stdin_buffer = getattr(sys.stdin, "buffer", None)
+    if real_stdout_buffer is not None and real_stdin_buffer is not None:
+        sys.stdout = sys.stderr
+        wrapped_stdout = anyio.wrap_file(TextIOWrapper(real_stdout_buffer, encoding="utf-8"))
+        wrapped_stdin = anyio.wrap_file(TextIOWrapper(real_stdin_buffer, encoding="utf-8", errors="replace"))
+        async with stdio_server(stdin=wrapped_stdin, stdout=wrapped_stdout) as (read_stream, write_stream):
+            await server._mcp_server.run(
+                read_stream,
+                write_stream,
+                server._mcp_server.create_initialization_options(),
+            )
+    else:
+        async with stdio_server() as (read_stream, write_stream):
+            await server._mcp_server.run(
+                read_stream,
+                write_stream,
+                server._mcp_server.create_initialization_options(),
+            )
+
+
 def main() -> None:
     """Console entry point (``engraphis-mcp``). Runs Smart MCP over stdio."""
     _eager_exact_backend_check()
-    mcp.run()
+    _start_background_warmup()
+    import anyio
+    anyio.run(lambda: _safe_run_stdio_async(mcp))
 
 
 if __name__ == "__main__":
