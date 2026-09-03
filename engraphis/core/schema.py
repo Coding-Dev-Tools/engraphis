@@ -480,13 +480,17 @@ CREATE TABLE IF NOT EXISTS audit (
     actor  TEXT,
     action TEXT,
     target TEXT,
-    detail TEXT
+    detail TEXT,
+    prev_hash TEXT DEFAULT ''
 );
 -- Every audit read is keyed on target and ordered by ts: MemoryService.inspect() and
 -- _chain_entry() ("WHERE target=? ORDER BY ts"), audit_log()/export()/analytics
 -- ("JOIN memories m ON m.id = a.target"). The table had no index at all, so each of
 -- those was a full scan that grows without bound as the audit trail accumulates.
 CREATE INDEX IF NOT EXISTS idx_audit_target ON audit(target, ts);
+-- The hash-chained ledger head ("ORDER BY ts DESC, rowid DESC LIMIT 1" in
+-- Store.audit) needs the same treatment: without it every audit write scans.
+CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit(ts);
 
 CREATE TABLE IF NOT EXISTS operation_receipts (
     id             TEXT PRIMARY KEY,

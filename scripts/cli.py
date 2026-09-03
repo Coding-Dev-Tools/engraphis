@@ -168,9 +168,13 @@ def cmd_list(args: argparse.Namespace) -> None:
 
 
 def cmd_delete_ns(args: argparse.Namespace) -> None:
+    ns = args.namespace or args.namespace_flag
+    if not ns:
+        print("Error: delete-namespace requires a namespace (positional or --namespace/--workspace).")
+        sys.exit(2)
     if not args.force:
         print(
-            f"This will retire ALL memories in namespace '{args.namespace}'. "
+            f"This will retire ALL memories in namespace '{ns}'. "
             "Use --force to confirm."
         )
         sys.exit(1)
@@ -179,7 +183,7 @@ def cmd_delete_ns(args: argparse.Namespace) -> None:
     try:
         connection.execute("BEGIN IMMEDIATE")
         try:
-            wid, _ = svc._require_scope(args.namespace, None)
+            wid, _ = svc._require_scope(ns, None)
             retired_at = now_ts()
             rows = connection.execute(
                 "SELECT id FROM memories "
@@ -206,7 +210,7 @@ def cmd_delete_ns(args: argparse.Namespace) -> None:
             connection.rollback()
             raise
         print(
-            f"Retired {len(rows)} memories from '{args.namespace}' "
+            f"Retired {len(rows)} memories from '{ns}' "
             "(audited soft-retirement)"
         )
     finally:
@@ -373,41 +377,47 @@ def main() -> None:
         prog="engraphis-cli", description="Engraphis CLI",
         epilog="Works offline against ENGRAPHIS_DB_PATH via the v2 MemoryService — no server "
                "needed. The old --server URL mode (v1 REST /memory/insert|/memory/query) was "
-               "removed; point ENGRAPHIS_DB_PATH at the server's database to share its memory.")
+               "removed; point ENGRAPHIS_DB_PATH at the server's database to share its memory. "
+               "Defaults matrix: ingest defaults to workspace 'default'; ingest-file defaults "
+               "to workspace 'vault'; recall and chat default to all workspaces when no "
+               "--namespace/--workspace is given; list defaults to workspace 'default'; "
+               "delete-namespace takes the namespace positionally or via --namespace/--workspace.")
     sub = parser.add_subparsers(dest="command", required=True)
-
     p = sub.add_parser("ingest", help="Store a text memory")
     p.add_argument("content", help="Memory content text")
-    p.add_argument("--namespace", "-n", default="default", help="Namespace")
+    p.add_argument("--namespace", "--workspace", "-n", dest="namespace", default="default",
+                   help="Workspace/namespace (default: default)")
     p.add_argument("--key", "-k", help="Document key/ID")
     p.add_argument("--metadata", type=_metadata_object,
                    help="JSON metadata object", default=None)
     p.set_defaults(func=cmd_ingest)
-
     p = sub.add_parser("ingest-file", help="Store a file as a memory")
     p.add_argument("file", help="Path to file")
-    p.add_argument("--namespace", "-n", default="vault", help="Namespace")
+    p.add_argument("--namespace", "--workspace", "-n", dest="namespace", default="vault",
+                   help="Workspace/namespace (default: vault)")
     p.add_argument("--key", "-k", help="Document key/ID")
     p.set_defaults(func=cmd_ingest_file)
-
     p = sub.add_parser("recall", help="Recall memories for a prompt")
     p.add_argument("prompt", help="Query prompt")
-    p.add_argument("--namespace", "-n", default=None, help="Namespace")
+    p.add_argument("--namespace", "--workspace", "-n", dest="namespace", default=None,
+                   help="Workspace/namespace (default: all workspaces)")
     p.add_argument("--num-chunks", "-c", type=int, default=5)
     p.set_defaults(func=cmd_recall)
-
     p = sub.add_parser("chat", help="Grounded answer from memory (offline, cited)")
     p.add_argument("prompt", help="Your question")
-    p.add_argument("--namespace", "-n", default=None, help="Namespace")
+    p.add_argument("--namespace", "--workspace", "-n", dest="namespace", default=None,
+                   help="Workspace/namespace (default: all workspaces)")
     p.set_defaults(func=cmd_chat)
-
     p = sub.add_parser("list", help="List documents in a namespace")
-    p.add_argument("--namespace", "-n", default="default")
+    p.add_argument("--namespace", "--workspace", "-n", dest="namespace", default="default",
+                   help="Workspace/namespace (default: default)")
     p.add_argument("--limit", "-l", type=int, default=20)
     p.set_defaults(func=cmd_list)
-
     p = sub.add_parser("delete-namespace", help="Retire every memory in a namespace")
-    p.add_argument("namespace", help="Namespace whose memories will be retired")
+    p.add_argument("namespace", nargs="?", default=None,
+                   help="Namespace whose memories will be retired (or pass --namespace/--workspace)")
+    p.add_argument("--namespace", "--workspace", "-n", dest="namespace_flag", default=None,
+                   help="Workspace/namespace flag alternative to the positional")
     p.add_argument("--force", action="store_true", help="Confirm retirement")
     p.set_defaults(func=cmd_delete_ns)
 
@@ -419,7 +429,8 @@ def main() -> None:
     p = review_sub.add_parser(
         "list", help="List pending candidates without displaying memory content"
     )
-    p.add_argument("--namespace", "-n", default="default")
+    p.add_argument("--namespace", "--workspace", "-n", dest="namespace", default="default",
+                   help="Workspace/namespace (default: default)")
     p.add_argument("--repo")
     p.add_argument("--source", action="append")
     p.add_argument("--legacy-agent-only", action="store_true")
@@ -431,7 +442,8 @@ def main() -> None:
     )
     p.add_argument("memory_ids", nargs="*")
     p.add_argument("--all", action="store_true")
-    p.add_argument("--namespace", "-n", default="default")
+    p.add_argument("--namespace", "--workspace", "-n", dest="namespace", default="default",
+                   help="Workspace/namespace (default: default)")
     p.add_argument("--repo")
     p.add_argument("--source", action="append")
     p.add_argument("--legacy-agent-only", action="store_true")

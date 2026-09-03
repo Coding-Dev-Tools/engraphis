@@ -500,6 +500,11 @@ class MemoryEngine:
         self._code_matchers: dict = {}
         self._resource_lock = threading.Lock()
         self._owned_resources: tuple[Any, ...] = (store,)
+        # Resolved backend identities are attached by the composition root
+        # (factory.py) after construction; declared here so the attributes are
+        # part of the class contract, not ad-hoc instance state.
+        self.vector_backend: str = ""
+        self.backend_identities: dict = {}
         self._closed = False
 
     def _adopt_resources(self, resources: list[Any]) -> None:

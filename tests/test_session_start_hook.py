@@ -171,11 +171,11 @@ class TerseCompressionTests(unittest.TestCase):
     def setUp(self):
         self.hook = _load()
 
-    def test_default_max_context_chars_is_terse(self):
-        """The shipped default is 300 chars (terse), not 1500 (prose)."""
-        self.assertEqual(self.hook.MAX_CONTEXT_CHARS, 300)
-        self.assertEqual(self.hook.MAX_CONTEXT_CHARS_DEFAULT, 300)
-        self.assertEqual(self.hook.MAX_CONTEXT_CHARS_PROSE, 1500)
+    def test_default_max_context_chars_is_prose(self):
+        """The shipped default is 1500 chars (prose), not 300 (terse)."""
+        self.assertEqual(self.hook.MAX_CONTEXT_CHARS, 1500)
+        self.assertEqual(self.hook.MAX_CONTEXT_CHARS_DEFAULT, 1500)
+        self.assertEqual(self.hook.MAX_CONTEXT_CHARS_TERSE, 300)
 
     def test_terse_compresses_numbered_facts(self):
         """Numbered upstream facts render as '[n] first-sentence' joined."""
@@ -212,15 +212,17 @@ class TerseCompressionTests(unittest.TestCase):
         self.assertEqual(self.hook._compress_prose_to_terse("", 200), "")
         self.assertEqual(self.hook._compress_prose_to_terse("   ", 200), "   ")
 
-    def test_build_additional_context_terse_default(self):
-        """Default format='terse' produces compressed output under 300 chars."""
+    def test_build_additional_context_default_prose(self):
+        """Default format='prose' returns the full context up to the cap."""
         prose = "First sentence. Second sentence. Third sentence."
-        out = self.hook.build_additional_context(prose, "ws")
-        # Body budget: 300 - len(header) - len(footer).
-        self.assertLessEqual(len(out), 300)
+        out = self.hook.build_additional_context(
+            prose, "ws", max_context_chars=1500
+        )
+        self.assertLessEqual(len(out), 1500)
         self.assertIn("workspace ws", out)
-        # Compressed facts are present.
-        self.assertIn("[1]", out)
+        # Prose mode: original text preserved, no "[n]" compression markers.
+        self.assertIn("First sentence.", out)
+        self.assertNotIn("[1]", out)
 
     def test_build_additional_context_prose_format(self):
         """format='prose' keeps the original dense context."""

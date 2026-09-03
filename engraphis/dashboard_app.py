@@ -34,6 +34,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from engraphis import licensing
 from engraphis.config import settings
+from engraphis.netutil import is_local_request
 from engraphis.core.documents import supported_document_extensions
 from engraphis.http_security import wants_https
 from engraphis.local_auth import (
@@ -314,6 +315,8 @@ class _DashboardApprovalReq(BaseModel):
 _REVIEW_CSRF_HEADER = "X-Engraphis-Review-CSRF"
 _DOCUMENT_REVIEW_TTL_SECONDS = 5 * 60
 _DOCUMENT_REVIEW_LIMIT = 256
+
+_OPEN_MODE_CSRF_KEY = "\0open-mode"
 
 
 def _embedder_status(embedder, configured_model: str) -> str:
@@ -705,22 +708,32 @@ def create_app() -> FastAPI:
 
     @app.get("/dashboard/review/csrf", include_in_schema=False)
     def dashboard_review_csrf(request: Request):
-        """Return the in-memory CSRF value for an already-authenticated dashboard."""
+        """Return the in-memory CSRF value for an already-authenticated dashboard.
 
-        if not settings.api_token:
-            return JSONResponse(
-                {"error": "dashboard approval requires ENGRAPHIS_API_TOKEN"},
-                status_code=409,
-            )
+        Token deployments bind the nonce to the signed browser session.  The
+        zero-config loopback runtime has no session to bind, so it serves a
+        process-local nonce from a dedicated pool key instead: the same-origin
+        custom-header check (and the middleware's loopback confinement) still
+        keep cross-site multipart uploads and reviews out.
+        """
+
         session_value = request.cookies.get(BROWSER_SESSION_COOKIE)
-        if not browser_session_ok(session_value, settings.api_token):
-            return JSONResponse({"error": "browser session required"}, status_code=401)
-        if request.headers.get("X-Engraphis-Browser-Session") != "1":
-            return JSONResponse({"error": "browser session header required"}, status_code=403)
-        token = app.state.review_csrf_tokens.get(session_value)
+        if settings.api_token:
+            if not browser_session_ok(session_value, settings.api_token):
+                return JSONResponse({"error": "browser session required"}, status_code=401)
+            if request.headers.get("X-Engraphis-Browser-Session") != "1":
+                return JSONResponse({"error": "browser session header required"}, status_code=403)
+            pool_key = session_value
+        else:
+            if not is_local_request(request):
+                return JSONResponse({"error": "browser session required"}, status_code=401)
+            if request.headers.get("X-Engraphis-Browser-Session") != "1":
+                return JSONResponse({"error": "browser session header required"}, status_code=403)
+            pool_key = _OPEN_MODE_CSRF_KEY
+        token = app.state.review_csrf_tokens.get(pool_key)
         if not token:
             token = secrets.token_urlsafe(32)
-            app.state.review_csrf_tokens[session_value] = token
+            app.state.review_csrf_tokens[pool_key] = token
         response = JSONResponse({"review_csrf_token": token})
         response.headers["Cache-Control"] = "no-store"
         return response
@@ -732,18 +745,24 @@ def create_app() -> FastAPI:
         process-local CSRF nonce.  The general API middleware deliberately accepts a
         bearer for automation clients; that authority is insufficient to upload a
         selected local documents or make their imported content trusted.
+
+        The zero-config loopback runtime has no token to sign a session with, but its
+        API is already confined to loopback requests without forwarding headers.  There
+        the wizard still must echo the open-mode CSRF nonce, so a random website cannot
+        ride the user's browser into a local multipart upload.
         """
-        if not settings.api_token:
-            raise HTTPException(
-                status_code=409,
-                detail={"error": "document import requires ENGRAPHIS_API_TOKEN"},
-            )
         session_value = request.cookies.get(BROWSER_SESSION_COOKIE)
-        if not browser_session_ok(session_value, settings.api_token):
-            raise HTTPException(status_code=401, detail={"error": "browser session required"})
-        if request.headers.get("X-Engraphis-Browser-Session") != "1":
-            raise HTTPException(status_code=403, detail={"error": "browser session header required"})
-        expected = app.state.review_csrf_tokens.get(session_value)
+        if settings.api_token:
+            if not browser_session_ok(session_value, settings.api_token):
+                raise HTTPException(status_code=401, detail={"error": "browser session required"})
+            if request.headers.get("X-Engraphis-Browser-Session") != "1":
+                raise HTTPException(status_code=403, detail={"error": "browser session header required"})
+            pool_key = session_value
+        else:
+            if not is_local_request(request):
+                raise HTTPException(status_code=401, detail={"error": "browser session required"})
+            pool_key = _OPEN_MODE_CSRF_KEY
+        expected = app.state.review_csrf_tokens.get(pool_key)
         supplied = request.headers.get(_REVIEW_CSRF_HEADER, "")
         if not expected or not hmac.compare_digest(supplied, expected):
             raise HTTPException(status_code=403, detail={"error": "owner confirmation required"})
@@ -752,8 +771,9 @@ def create_app() -> FastAPI:
         # deterministic cookie value. Rotating the owner confirmation must also
         # invalidate any outstanding import review minted by the earlier login.
         return hashlib.sha256(
-            f"{session_value}\0{expected}".encode("utf-8"),
+            f"{pool_key}\0{expected}".encode("utf-8"),
         ).hexdigest()
+
 
     def _document_review_digest(
         *, uploads: list[tuple[str, bytes]], attachments: list[dict],
@@ -1260,7 +1280,6 @@ def create_app() -> FastAPI:
     # at call time, so including earlier would mount an empty router.
     app.include_router(bounded_router)
 
-    from engraphis.netutil import is_local_request
 
     @app.middleware("http")
     async def _auth_gate(request: Request, call_next):

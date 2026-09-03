@@ -332,7 +332,10 @@ def test_opt_in_semantic_confidence_calibration_rejects_weak_singleton_distracto
         _FixedScoreIndex([(weak_id, 0.01)]),
         IdentityReranker(),
     )
-    base_config = ProfileConfig("vector_lexical", True, True, False, False)
+    base_config = ProfileConfig(
+        "vector_lexical", True, True, False, False,
+        semantic_confidence_calibration=False,
+    )
 
     default_result = engine.recall(
         "PASETO", SearchFilter(workspace_id=wid), k=1, arm_config=base_config,
@@ -812,13 +815,13 @@ def test_prompt_overfetch_never_reduces_the_requested_candidate_depth():
     result = eng.recall(
         "candidate depth", SearchFilter(workspace_id=wid), k=1, candidate_k=500,
     )
-
     assert result.candidate_k_requested == 500
     # Diagnostics expose the actual post-overfetch page depth, not the policy
     # starting depth, so operators can distinguish an ordinary recall from one
-    # that searched further for approved evidence.
-    assert result.candidate_k_used == 750
-    assert requested[0] == 750
+    # that searched further for approved evidence. The default arm cap (profile
+    # ``arm_candidate_k_default``) bounds the prompt-only widening.
+    assert result.candidate_k_used == 500
+    assert requested[0] == 500
 
 
 def test_prompt_only_overfetch_stays_bounded_for_large_untrusted_scopes():
@@ -849,6 +852,9 @@ def test_prompt_only_overfetch_stays_bounded_for_large_untrusted_scopes():
     )
 
     assert result.chunks == []
+    # First page honors the 200 arm cap; the escalation ceiling keeps the
+    # pre-existing PROMPT_ONLY_MIN_CANDIDATES bound (256) so a saturated first
+    # page can still reach past it — bounded, never a full-scope scan.
     assert index.requested == [4, 256]
     assert result.candidate_k_used == 256
     assert max(index.requested) < len(untrusted_ids)
@@ -955,7 +961,9 @@ def test_entity_seed_cap_prioritizes_exact_names_deterministically(tmp_path):
 
 def test_recall_resolves_candidates_in_one_batched_lookup(monkeypatch):
     """Candidates used to be resolved with a get_memory() per unique id across the
-    vec/lex/graph arms — ~150 single-row queries per recall."""
+    vec/lex/graph arms — ~150 single-row queries per recall. The graph-seed
+    fallback additionally fetches its lexical-hit records in ONE bounded batch
+    (mention gate), so at most two batched resolves happen and never per-id."""
     store, emb, eng = _engine()
     wid = store.get_or_create_workspace("w")
     rid = store.get_or_create_repo(wid, "r")
@@ -973,7 +981,7 @@ def test_recall_resolves_candidates_in_one_batched_lookup(monkeypatch):
 
     assert res.count >= 1
     assert single == []                       # no per-id query on the recall path
-    assert len(batched) == 1                  # exactly one batched resolve
+    assert 1 <= len(batched) <= 2             # main resolve (+ optional fallback batch)
 
 
 def test_recall_tie_order_is_deterministic():

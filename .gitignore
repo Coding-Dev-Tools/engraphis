@@ -88,6 +88,9 @@ internal/
 # tracked _smoke*.mjs / _measure_*.mjs must be removed with `git rm` (see audit handoff).
 /_*.mjs
 
+# Generated screenshot from tools/manual_slider_test.js — throwaway test artifact.
+/dashboard_slider_test.png
+
 # Local machine-specific launchers (absolute user paths / PM2 deploy specifics — not portable)
 /Start-Engraphis-Dashboard.bat
 /Engraphis Dashboard.lnk

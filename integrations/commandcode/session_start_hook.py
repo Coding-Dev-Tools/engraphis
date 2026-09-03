@@ -15,14 +15,14 @@ import urllib.request
 
 MCP_URL_DEFAULT = "http://127.0.0.1:8711/mcp"
 BUDGET_SECONDS_DEFAULT = 4.0
-# Terse default: 300 chars. Empirically validated on Qwen 3.7 Flash and
-# m3/m2.7/laguna in bench_v1/V12: a compressed "[n] fact" context is the
-# only mode that improves quality on every model tested AND keeps the
-# cost well under 0.5% of a 25k-token turn. Prose was actively harmful
-# (-0.067 sub on Qwen 3.7 Flash). Override with ENGRAPHIS_HOOK_FORMAT=prose
-# to get the original 1500-char prose context.
-MAX_CONTEXT_CHARS_DEFAULT = 300
-MAX_CONTEXT_CHARS_PROSE = 1500
+# Prose is the default: 1500 chars. The full upstream context is preserved so
+# the agent has every durable fact available on the first turn. Set
+# ENGRAPHIS_HOOK_FORMAT=terse to opt into a 300-char "[n] first-sentence"
+# compression (the V4 terse path; useful when the prompt is huge or the
+# model gets distracted by dense context). Set
+# ENGRAPHIS_HOOK_MAX_CHARS=N to override the cap without changing format.
+MAX_CONTEXT_CHARS_DEFAULT = 1500
+MAX_CONTEXT_CHARS_TERSE = 300
 # Backwards-compatible aliases. The module-level constants previously
 # crashed import when these env vars held malformed values; both are now
 # resolved lazily inside main() so the hook keeps its fail-open
@@ -290,7 +290,7 @@ def _compress_prose_to_terse(context: str, max_chars: int) -> str:
     return "; ".join(out_parts) if out_parts else context
 
 
-def build_additional_context(context, workspace, max_context_chars=None, format="terse"):
+def build_additional_context(context, workspace, max_context_chars=None, format="prose"):
     if max_context_chars is None:
         max_context_chars = MAX_CONTEXT_CHARS
     header = CONTEXT_HEADER.format(workspace=workspace)
@@ -312,14 +312,16 @@ def main():
     mcp_url = os.environ.get("ENGRAPHIS_MCP_URL") or MCP_URL
     budget_seconds = _env_float("ENGRAPHIS_HOOK_BUDGET_S", BUDGET_SECONDS)
     env_max = _env_int("ENGRAPHIS_HOOK_MAX_CHARS", MAX_CONTEXT_CHARS)
-    # Format selection: "terse" (default, validated) or "prose" (legacy 1500).
-    # ENGRAPHIS_HOOK_FORMAT=prose restores the original dense context.
-    fmt = (os.environ.get("ENGRAPHIS_HOOK_FORMAT") or "terse").strip().lower()
+    # Format selection: "prose" (default, full 1500-char context) or
+    # "terse" (300-char "[n] first-sentence" compression, opt-in for users
+    # on huge prompts or models that get distracted by dense context).
+    # ENGRAPHIS_HOOK_FORMAT=terse flips the default.
+    fmt = (os.environ.get("ENGRAPHIS_HOOK_FORMAT") or "prose").strip().lower()
     if fmt not in ("terse", "prose"):
-        fmt = "terse"
-    if fmt == "prose" and env_max == MAX_CONTEXT_CHARS:
-        # User opted into prose mode without overriding the cap; lift the cap.
-        max_context_chars = MAX_CONTEXT_CHARS_PROSE
+        fmt = "prose"
+    if fmt == "terse" and env_max == MAX_CONTEXT_CHARS:
+        # User opted into terse mode without overriding the cap; tighten it.
+        max_context_chars = MAX_CONTEXT_CHARS_TERSE
     else:
         max_context_chars = env_max
     deadline = time.monotonic() + budget_seconds

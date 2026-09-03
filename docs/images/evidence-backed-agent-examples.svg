@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1693" height="929" viewBox="0 0 1693 929" role="img" aria-labelledby="title desc">
   <title id="title">Three evidence-backed Engraphis agent behaviors</title>
-  <desc id="desc">A three-card summary of deterministic offline fixtures. Focused context returns 740.3 to 214.3 tokens while retaining Recall at 5 of 1.000. A grounded answer returns support for 5/5 answerable questions. An unsupported question safely abstains for 5/5 off-topic questions. Reproduce with eval.chunking_eval and eval.grounded. Exact commands and config digests are registered in BENCHMARKS.md. Public-safe artifact SHA-256: 0f60b0868444f676fe14c5f94d7db2c475e22669930c4d760881d0842eaa6800.</desc>
+  <desc id="desc">A three-card summary of deterministic offline fixtures. Focused context returns 740.3 to 214.3 tokens while retaining Recall at 5 of 1.000. A grounded answer returns support for 5/5 answerable questions. An unsupported question safely abstains for 6/6 off-topic questions. Reproduce with eval.chunking_eval and eval.grounded. Exact commands and config digests are registered in BENCHMARKS.md. Public-safe artifact SHA-256: 8a74e9f48e25f33d625d4cc5c1b14fec3055891944adccf615c440e84e4b0255.</desc>
   <defs>
     <linearGradient id="page" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#f8fbff"/><stop offset="1" stop-color="#eef4fb"/></linearGradient>
     <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%"><feDropShadow dx="0" dy="5" stdDeviation="8" flood-opacity=".12"/></filter>
@@ -41,11 +41,11 @@
     <text x="1178" y="483" font-family="Inter, Arial, sans-serif" font-size="49" font-weight="700" fill="#061a43">No support,</text>
     <text x="1178" y="541" font-family="Inter, Arial, sans-serif" font-size="49" font-weight="700" fill="#061a43">no answer</text>
     <rect x="1178" y="590" width="410" height="76" rx="15" fill="#fff7ee" stroke="#ffdab9" stroke-width="2"/>
-    <text x="1209" y="640" font-family="Inter, Arial, sans-serif" font-size="30" font-weight="700" fill="#0a1b44">5/5 abstained</text>
+    <text x="1209" y="640" font-family="Inter, Arial, sans-serif" font-size="30" font-weight="700" fill="#0a1b44">6/6 abstained</text>
     <rect x="1178" y="681" width="410" height="76" rx="15" fill="#fff7ee" stroke="#ffdab9" stroke-width="2"/>
     <text x="1209" y="731" font-family="Inter, Arial, sans-serif" font-size="30" font-weight="700" fill="#0a1b44">explicitly says why</text>
   </g>
   <line x1="70" y1="832" x2="1623" y2="832" stroke="#ced8e7" stroke-width="2"/>
   <text x="846" y="875" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="24" font-weight="600" fill="#53627b">Reproduce: eval.chunking_eval + eval.grounded</text>
-  <text x="846" y="910" text-anchor="middle" font-family="ui-monospace, monospace" font-size="15" font-weight="600" fill="#53627b">SHA256 0f60b0868444f676fe14c5f94d7db2c475e22669930c4d760881d0842eaa6800</text>
+  <text x="846" y="910" text-anchor="middle" font-family="ui-monospace, monospace" font-size="15" font-weight="600" fill="#53627b">SHA256 8a74e9f48e25f33d625d4cc5c1b14fec3055891944adccf615c440e84e4b0255</text>
 </svg>

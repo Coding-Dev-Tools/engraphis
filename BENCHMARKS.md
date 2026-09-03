@@ -11,7 +11,7 @@ For the locked operator sequence for a public canonical run, see
 Every exact public aggregate retained below comes from the checked-in, public-safe
 [`offline-fixtures-v1.json`](docs/benchmark-evidence/offline-fixtures-v1.json) artifact. Its
 SHA-256 is
-`0f60b0868444f676fe14c5f94d7db2c475e22669930c4d760881d0842eaa6800`, also recorded in the
+`8a74e9f48e25f33d625d4cc5c1b14fec3055891944adccf615c440e84e4b0255`, also recorded in the
 adjacent `.sha256` file. The artifact contains no raw questions, answers, prompts, customer data,
 or per-record content fingerprints.
 

@@ -103,6 +103,17 @@ CONSOLIDATION_SOURCES = frozenset({
 # preference signal, not a relevance substitute — a raw episode that actually matches
 # the query keeps outranking a digest the query merely grazes.
 CONSOLIDATION_BONUS = 0.05
+# Default per-arm candidate depth when the operator sets neither
+# ``arm_candidate_k_cap=`` nor ``ENGRAPHIS_RECALL_ARM_CANDIDATE_K``. The selected
+# retrieval profile carries the same value as ``arm_candidate_k_default`` and wins
+# over this module default; an explicit operator cap wins over both. The caller's
+# requested candidate_k always stays a floor, never a victim of the cap.
+ARM_CANDIDATE_K_DEFAULT = 200
+# Floor for the raw-cosine confidence multiplier (see ``_fuse_query_runs``). A
+# singleton vector result min-max normalizes to 1.0 even when its raw cosine is
+# near zero; calibration multiplies rank evidence by the clamped cosine so the
+# singleton keeps its measured support instead of a false 1.0.
+SEMANTIC_CONFIDENCE_FLOOR = 0.0
 
 
 @dataclass
@@ -165,12 +176,15 @@ class RecallEngine:
         self.planner_timeout_s = max(0.0, float(planner_timeout_s))
         # Latency knob: PR #171 widened the prompt-only first arm to
         # ``candidate_k + min(250, candidate_k*3)`` so a 49-fact corpus pays
-        # ~5x more matrix-vector cost on the new k=50 default. Operators can
-        # cap that first-page widening via constructor arg or the
-        # ``ENGRAPHIS_RECALL_ARM_CANDIDATE_K`` env var; the escalation loop
-        # still widens to ``candidate_ceiling`` if the narrower first page
-        # did not collect enough prompt-eligible evidence, so trusted-source
-        # recall on the larger k=50 callsite is preserved.
+        # ~5x more matrix-vector cost on the new k=50 default. The selected
+        # profile's ``arm_candidate_k_default`` (200) bounds that widening and
+        # the escalation ceiling by default; operators can still cap
+        # first-page widening via constructor arg or the
+        # ``ENGRAPHIS_RECALL_ARM_CANDIDATE_K`` env var (stored here as the
+        # explicit override — ``None`` means "follow the profile default").
+        # The escalation loop still widens to the effective ceiling if the
+        # narrower first page did not collect enough prompt-eligible evidence,
+        # so trusted-source recall on the larger k=50 callsite is preserved.
         env_cap_raw = os.environ.get("ENGRAPHIS_RECALL_ARM_CANDIDATE_K", "").strip()
         try:
             env_cap = int(env_cap_raw) if env_cap_raw else None
@@ -286,36 +300,45 @@ class RecallEngine:
         # into repeated full-scope scans when a large import is untrusted.
         prompt_only = bool(prompt_only or not include_untrusted)
         prompt_target = max(1, int(k))
+        # Effective per-arm cap: an explicit operator override (``arm_candidate_k_cap=``
+        # or ``ENGRAPHIS_RECALL_ARM_CANDIDATE_K``) wins; otherwise the selected
+        # profile's ``arm_candidate_k_default`` keeps prompt-only escalation bounded.
+        # The caller's requested candidate_k always stays a floor.
+        _profile_default = getattr(config, "arm_candidate_k_default", None)
+        if _profile_default is None:
+            _profile_default = ARM_CANDIDATE_K_DEFAULT
+        arm_cap = (
+            self._arm_candidate_k_cap
+            if self._arm_candidate_k_cap is not None
+            else max(1, int(_profile_default))
+        )
         candidate_ceiling = candidate_k
         arm_candidate_k = candidate_k
         if prompt_only:
             arm_candidate_k = candidate_k + min(250, candidate_k * 3)
-            # Opt-in latency knob (see __init__). When the operator has set
-            # ``ENGRAPHIS_RECALL_ARM_CANDIDATE_K`` (or passed
-            # ``arm_candidate_k_cap=``) we clamp both the first-page widening
-            # and the second-page ceiling. Without the ceiling clamp the
-            # escalation loop would still widen to the untrusted-heavy
-            # PROMPT_ONLY_MIN_CANDIDATES on a second pass and the savings of
-            # narrowing the first page would vanish. Operators who set this
-            # cap are explicitly trading untrusted-scope widening for latency;
-            # the first-arm floor remains ``candidate_k`` so a one-fact scope
-            # still searches at least as deep as the caller's requested depth.
-            if self._arm_candidate_k_cap is not None:
-                # Clamp the widened first arm to the operator cap, but never
-                # below the caller's requested candidate_k so a small scope
-                # still searches at least as deep as requested.
-                arm_candidate_k = max(
-                    candidate_k, min(self._arm_candidate_k_cap, arm_candidate_k)
-                )
-            candidate_ceiling = max(
-                arm_candidate_k,
-                min(
-                    PROMPT_ONLY_MAX_CANDIDATES,
-                    max(PROMPT_ONLY_MIN_CANDIDATES, candidate_k * 16),
-                ),
+            # Latency knob (see __init__ and ``ARM_CANDIDATE_K_DEFAULT``).
+            # The effective cap clamps the widened first page so the common
+            # case stays cheap; the escalation ceiling below is intentionally
+            # NOT clamped by it. Escalation only fires when the first page came
+            # back saturated yet short on prompt-eligible records (the
+            # untrusted-heavy vault), so the extra scan is paid only when the
+            # trusted evidence would otherwise be unreachable. The ceiling
+            # itself stays bounded by PROMPT_ONLY_MAX_CANDIDATES.
+            # Clamp the widened first arm to the effective cap, but never
+            # below the caller's requested candidate_k so a small scope
+            # still searches at least as deep as requested.
+            arm_candidate_k = max(
+                candidate_k, min(arm_cap, arm_candidate_k)
+            )
+            ceiling_bound = min(
+                PROMPT_ONLY_MAX_CANDIDATES,
+                max(PROMPT_ONLY_MIN_CANDIDATES, candidate_k * 16),
             )
             if self._arm_candidate_k_cap is not None:
-                candidate_ceiling = min(candidate_ceiling, self._arm_candidate_k_cap)
+                # Explicit operator override: every index query, including the
+                # escalation pass, respects it.
+                ceiling_bound = min(ceiling_bound, self._arm_candidate_k_cap)
+            candidate_ceiling = max(arm_candidate_k, ceiling_bound)
         run_configs = [
             config if index == 0 and arm_config is not None else profile_config(item.profile)
             for index, item in enumerate(planned_queries)
@@ -423,6 +446,7 @@ class RecallEngine:
                         candidate_k=arm_candidate_k,
                         traversal_plan=graph_plan,
                         prompt_only=prompt_only,
+                        seed_fallback=run_config.graph_seed_fallback,
                     )
                     if run_config.graph else {}
                 )
@@ -499,6 +523,12 @@ class RecallEngine:
                 break
             arm_candidate_k = candidate_ceiling
         if not recs:
+            # Telemetry is logged regardless of ``diagnostics`` so operators can
+            # see page depth and drop counts without paying for full traces.
+            logger.info(
+                "recall candidate_k_used=%d rerank_changed=%s type_limit_drops=%d",
+                arm_candidate_k, False, 0,
+            )
             context, packed, usage = self.context_packer.pack(query, [], budget)
             return RecallResult(
                 context=context,
@@ -528,6 +558,10 @@ class RecallEngine:
                         getattr(self.query_planner, "identity", type(self.query_planner).__name__),
                         rerank_pool_size=0,
                         available_candidates=0,
+                        candidate_k_used=arm_candidate_k,
+                        arm_counts=_arm_counts(query_runs),
+                        rerank_changed=False,
+                        scoring=_scoring_summary(config),
                     ) if diagnostics else None
                 ),
                 graph_traversal_details=(
@@ -546,6 +580,23 @@ class RecallEngine:
         consolidated_ids: set[str] = set()
         consolidation_evidence_cache: dict[str, tuple[str, ...]] = {}
         _CACHE_MAX = 1000
+        # Profile-driven scoring knobs. The selected retrieval profile owns the
+        # rerank blend and the consolidation preference; the module constants
+        # remain validated fallbacks for foreign configs that lack the fields.
+        consolidation_bonus = getattr(config, "consolidation_bonus", CONSOLIDATION_BONUS)
+        try:
+            consolidation_bonus = float(consolidation_bonus)
+        except (TypeError, ValueError, OverflowError):
+            consolidation_bonus = CONSOLIDATION_BONUS
+        if not math.isfinite(consolidation_bonus) or consolidation_bonus < 0.0:
+            consolidation_bonus = CONSOLIDATION_BONUS
+        rerank_blend = getattr(config, "rerank_blend", (0.7, 0.3))
+        try:
+            fusion_weight, rerank_weight = float(rerank_blend[0]), float(rerank_blend[1])
+        except (TypeError, ValueError, IndexError, OverflowError):
+            fusion_weight, rerank_weight = 0.7, 0.3
+        if not math.isfinite(fusion_weight) or not math.isfinite(rerank_weight):
+            fusion_weight, rerank_weight = 0.7, 0.3
 
         def consolidation_evidence_for(record: MemoryRecord) -> tuple[str, ...]:
             cached = consolidation_evidence_cache.get(record.id)
@@ -581,9 +632,10 @@ class RecallEngine:
             if is_consolidated:
                 consolidated_ids.add(mid)
                 # Small deterministic preference for consolidated digests/profiles
-                # (post-normalization constant; see CONSOLIDATION_BONUS).  Kept out
-                # of the base score so raw evidence comparisons stay untouched.
-                fusion_score += CONSOLIDATION_BONUS
+                # (post-normalization profile value; see ``consolidation_bonus``).
+                # Kept out of the base score so raw evidence comparisons stay
+                # untouched.
+                fusion_score += consolidation_bonus
             evidence = (
                 list(consolidation_evidence_for(rec))
                 if diagnostics and is_consolidated else []
@@ -622,7 +674,7 @@ class RecallEngine:
                 "arm_agreement": len(arms),
                 "arms": arms,
                 "consolidation_bonus": (
-                    CONSOLIDATION_BONUS if is_consolidated else 0.0
+                    consolidation_bonus if is_consolidated else 0.0
                 ),
                 "consolidation_source_ids": evidence,
             }
@@ -636,6 +688,7 @@ class RecallEngine:
         # from every eligible memory type; with four types this remains <= 8k.
         pool = _type_aware_rerank_pool(scored, effective_limits, k=max(0, int(k)))
         rerank_k = len(pool) if effective_limits else k
+        rerank_changed = False
         if self.reranker:
             fused_before = {candidate.id: candidate.score for candidate in pool}
             # Rerankers are injected provider boundaries. Give them Candidate copies so
@@ -696,11 +749,12 @@ class RecallEngine:
                 rerank_norm = scoring.normalize(rerank_raw)
                 for candidate in reranked:
                     candidate.score = (
-                        0.7 * fusion_norm.get(candidate.id, 0.0)
-                        + 0.3 * rerank_norm.get(candidate.id, 0.0)
+                        fusion_weight * fusion_norm.get(candidate.id, 0.0)
+                        + rerank_weight * rerank_norm.get(candidate.id, 0.0)
                     )
                 reranked.sort(key=lambda candidate: (-candidate.score, candidate.id))
             ranked_final = reranked
+            rerank_changed = changed
             for candidate in ranked_final:
                 detail = score_details[candidate.id]
                 detail["rerank_score"] = rerank_raw.get(candidate.id)
@@ -710,6 +764,12 @@ class RecallEngine:
 
         final, type_limit_drops = _apply_mtype_limits(
             ranked_final, effective_limits, k=max(0, int(k))
+        )
+        # Telemetry is logged regardless of ``diagnostics`` so operators can see
+        # page depth, rerank movement, and drop counts without full traces.
+        logger.info(
+            "recall candidate_k_used=%d rerank_changed=%s type_limit_drops=%d",
+            arm_candidate_k, rerank_changed, len(type_limit_drops),
         )
         # _apply_mtype_limits excludes candidates without a record. Keep that
         # invariant explicit at this interface boundary so injected rerankers
@@ -813,6 +873,13 @@ class RecallEngine:
                     getattr(self.query_planner, "identity", type(self.query_planner).__name__),
                     rerank_pool_size=len(pool),
                     available_candidates=len(scored),
+                    candidate_k_used=arm_candidate_k,
+                    arm_counts=_arm_counts(query_runs),
+                    rerank_changed=rerank_changed,
+                    scoring={
+                        "rerank_blend": [fusion_weight, rerank_weight],
+                        "consolidation_bonus": consolidation_bonus,
+                    },
                 ) if diagnostics else None
             ),
             graph_traversal_details=(
@@ -1144,12 +1211,14 @@ class RecallEngine:
         candidate_k: int = 50,
         traversal_plan: Optional[GraphTraversalPlan] = None,
         prompt_only: bool = False,
+        seed_fallback: bool = False,
     ) -> dict[str, float]:
         if flt.graph_layers is not None and not flt.graph_layers:
             return {}
         if self.graph_mode == "1hop":
             return self._graph_arm_1hop(
                 query, flt, now, candidate_k=candidate_k, prompt_only=prompt_only,
+                seed_fallback=seed_fallback,
             )
         return self._graph_arm_ppr(
             query,
@@ -1158,6 +1227,7 @@ class RecallEngine:
             candidate_k=candidate_k,
             traversal_plan=traversal_plan,
             prompt_only=prompt_only,
+            seed_fallback=seed_fallback,
         )
 
     def _prompt_eligible_memory_ids(
@@ -1227,6 +1297,86 @@ class RecallEngine:
             if needle in query_folded and pattern.search(query)
         ]
 
+    def _graph_seed_fallback(
+        self, query: str, flt: SearchFilter, *, m: int = 8, prompt_only: bool = False,
+    ) -> list[str]:
+        """Lexical top-m entity projection for queries with no name seed.
+
+        When :meth:`_query_entity_seeds` finds no entity name in ``query`` (a
+        paraphrase, a description without proper nouns), the graph arms would
+        otherwise return nothing. This fallback takes the top-m lexical hits
+        for the query and projects them onto their linked entities, giving PPR
+        and 1-hop a scoped, bounded seed set. Both the lexical lookup and the
+        entity projection honor the caller's filter, so scoping is preserved.
+        """
+        try:
+            hits = self.store.fts_search(query, max(1, int(m)), filter=flt)
+        except Exception:
+            return []
+        memory_ids = sorted({
+            str(mid) for mid, _score in hits
+            if isinstance(mid, str) and mid
+        })
+        if not memory_ids:
+            return []
+        # The seeds must stay query-directed: an entity linked to a lexical hit
+        # but whose name shares no significant token with the query describes a
+        # *different* topic (whole-doc corpora share common words like
+        # "service" or "deploy"), and seeding it would inject cross-topic graph
+        # walks that displace on-topic ranks 2..k. Require the entity name to
+        # overlap the query's significant tokens; aliases resolve through the
+        # same canonical groups as direct seeding.
+        entity_rows = self.store.list_entities(flt, limit=max(1, int(m) * 16))
+        names = {node.id: node.name for node in entity_rows}
+        # Mention gate: the entity's folded name must occur in the content of a
+        # memory this query's own lexical arm retrieved. That memory is the
+        # topical bridge; entities linked to other topics only through generic
+        # words ("service", "deploy") never enter the seed set.
+        hit_records = self.store.get_memories(memory_ids)
+        mention_memory_ids: dict[str, int] = {}
+        def _normalize(text: str) -> str:
+            return re.sub(r"[\s_\-+/]+", " ", str(text or "").casefold()).strip()
+
+        for entity_id, name in names.items():
+            needle = _normalize(name)
+            if len(needle) < 3:
+                continue
+            for memory_id in memory_ids:
+                record = hit_records.get(memory_id)
+                if record is None:
+                    continue
+                haystack = _normalize(
+                    f"{record.title or ''}\n{record.content or ''}"
+                )
+                if needle in haystack:
+                    mention_memory_ids[entity_id] = (
+                        mention_memory_ids.get(entity_id, 0) + 1
+                    )
+                    break
+        rows = self.store.list_memory_entities(
+            flt, memory_ids=memory_ids,
+            limit=max(1, len(memory_ids) * 4), prompt_only=prompt_only,
+        )
+        linked: dict[str, int] = {}
+        for row in rows:
+            if not isinstance(row, dict) or not row.get("entity_id"):
+                continue
+            entity_id = str(row["entity_id"])
+            linked[entity_id] = linked.get(entity_id, 0) + 1
+        # Seeds = mentioned by lexical evidence AND linked to it, ranked by
+        # (mention support, link support, id) for determinism.
+        seeds = [
+            entity_id
+            for entity_id in mention_memory_ids
+            if entity_id in linked
+        ]
+        return sorted(
+            seeds,
+            key=lambda entity_id: (
+                -mention_memory_ids[entity_id], -linked[entity_id], entity_id,
+            ),
+        )[:max(1, int(m))]
+
     def _graph_arm_ppr(
         self,
         query: str,
@@ -1236,6 +1386,7 @@ class RecallEngine:
         candidate_k: int = 50,
         traversal_plan: Optional[GraphTraversalPlan] = None,
         prompt_only: bool = False,
+        seed_fallback: bool = False,
     ) -> dict[str, float]:
         """Personalized PageRank arm: build the scoped
         entity/memory graph — entity↔entity edges (bi-temporal), memory↔entity
@@ -1244,6 +1395,8 @@ class RecallEngine:
         expanding an explicit hop count; entity nodes are prefixed so names can
         never collide with memory ids."""
         seeds = self._query_entity_seeds(query, flt)
+        if not seeds and seed_fallback:
+            seeds = self._graph_seed_fallback(query, flt, prompt_only=prompt_only)
         if not seeds:
             return {}
 
@@ -1401,8 +1554,11 @@ class RecallEngine:
         *,
         candidate_k: int = 50,
         prompt_only: bool = False,
+        seed_fallback: bool = False,
     ) -> dict[str, float]:
         seed_ids = self._query_entity_seeds(query, flt)
+        if not seed_ids and seed_fallback:
+            seed_ids = self._graph_seed_fallback(query, flt, prompt_only=prompt_only)
         if not seed_ids:
             return {}
         related_ids = set(seed_ids)
@@ -1804,15 +1960,15 @@ def _fuse_query_runs(
                 # VectorIndex returns cosine similarity, unlike the opaque score
                 # scales used by lexical, graph, and code adapters. A singleton
                 # vector result min-max normalizes to 1.0 even when its raw cosine
-                # is near zero. Controlled callers can opt into cosine confidence
-                # calibration of rank evidence; an optional presence bonus remains
-                # a separate explicit signal. Existing profiles retain rank-only
-                # behavior.
+                # is near zero. Calibration multiplies rank evidence by the
+                # clamped raw cosine (floored at SEMANTIC_CONFIDENCE_FLOOR), so the
+                # singleton keeps its measured support instead of a false 1.0; an
+                # optional presence bonus remains a separate explicit signal.
                 if (
                     output_name == "semantic"
                     and bool(getattr(config, "semantic_confidence_calibration", False))
                 ):
-                    adjusted *= max(0.0, min(1.0, value))
+                    adjusted *= max(SEMANTIC_CONFIDENCE_FLOOR, min(1.0, value))
                 adjusted += bonus
                 adjusted *= priority_weight
                 state["adjusted"][output_name][mid] = max(
@@ -1920,6 +2076,46 @@ def _context_revision(
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _arm_counts(query_runs: list[dict[str, Any]]) -> dict[str, int]:
+    """Count unique finite candidate ids per retrieval arm across planned queries.
+
+    Diagnostic telemetry for capacity planning: how much of the fused candidate
+    universe each arm contributed. Counts raw arm output before filtering, so an
+    arm that fires but contributes no surviving evidence is still visible.
+    """
+    counts: dict[str, int] = {}
+    for source in ("vector", "lexical", "graph", "code"):
+        seen: set[str] = set()
+        for run in query_runs or []:
+            for mid, _score in _finite_arm_items(run.get(source)):
+                if isinstance(mid, str) and mid:
+                    seen.add(mid)
+        counts[source] = len(seen)
+    return counts
+
+
+def _scoring_summary(config: Any) -> dict[str, Any]:
+    """Inspectable view of the profile-driven scoring knobs for diagnostics."""
+    bonus = getattr(config, "consolidation_bonus", CONSOLIDATION_BONUS)
+    try:
+        bonus = float(bonus)
+    except (TypeError, ValueError, OverflowError):
+        bonus = CONSOLIDATION_BONUS
+    if not math.isfinite(bonus) or bonus < 0.0:
+        bonus = CONSOLIDATION_BONUS
+    blend = getattr(config, "rerank_blend", (0.7, 0.3))
+    try:
+        fusion_weight, rerank_weight = float(blend[0]), float(blend[1])
+    except (TypeError, ValueError, IndexError, OverflowError):
+        fusion_weight, rerank_weight = 0.7, 0.3
+    if not math.isfinite(fusion_weight) or not math.isfinite(rerank_weight):
+        fusion_weight, rerank_weight = 0.7, 0.3
+    return {
+        "rerank_blend": [fusion_weight, rerank_weight],
+        "consolidation_bonus": bonus,
+    }
+
+
 def _planning_details(
     plan: RetrievalPlan,
     query_runs: list[dict[str, Any]],
@@ -1931,6 +2127,10 @@ def _planning_details(
     *,
     rerank_pool_size: int,
     available_candidates: int,
+    candidate_k_used: int = 0,
+    arm_counts: Optional[dict[str, int]] = None,
+    rerank_changed: bool = False,
+    scoring: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     rankings = []
     for run in query_runs:
@@ -1957,6 +2157,10 @@ def _planning_details(
         "mtype_limits": {key.value: value for key, value in limits.items()},
         "type_limit_drops": drops,
         "fallback_reason": fallback or None,
+        "candidate_k_used": candidate_k_used,
+        "arm_counts": dict(arm_counts or {}),
+        "rerank_changed": bool(rerank_changed),
+        "scoring": dict(scoring or {}),
         "rerank_pool": {
             "strategy": "type_aware_bounded" if limits else "top_4k",
             "size": rerank_pool_size,
@@ -2134,6 +2338,21 @@ def _absolute_retrieval_support(
 def _entity_pattern(name: str) -> re.Pattern[str]:
     """Match an entity as a complete token/phrase, not inside unrelated words."""
     return re.compile(r"(?<!\w)" + re.escape(name) + r"(?!\w)", re.IGNORECASE)
+
+
+def _significant_tokens(text: str) -> set[str]:
+    """Casefolded significant tokens: separator-split sub-tokens of length >= 3,
+    so "sync-job" yields {"sync", "job"}; plus the full folded token when it is
+    at least 3 characters (ids like "paseto" or "c++" stay matchable)."""
+    tokens: set[str] = set()
+    for raw in re.findall(r"[\w@#.+-]+", text):
+        folded = raw.casefold()
+        if len(folded) >= 3:
+            tokens.add(folded)
+        for part in re.split(r"[\s_\-@#.+/]+", raw):
+            if len(part) >= 3:
+                tokens.add(part.casefold())
+    return tokens
 
 
 def _finite_arm_items(arm: object) -> list[tuple[object, float]]:

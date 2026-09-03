@@ -290,6 +290,7 @@ def test_dashboard_exposes_accessible_document_import_preview_and_job_contract(m
             "obsidian-memory-type", "obsidian-vault-label", "obsidian-conflict",
         ):
             assert material_control in script
+        assert "state.reviewCsrf = '';" in script
 
 
 def test_document_dashboard_endpoints_use_generic_service_and_reject_unknown_binary_uploads(
@@ -693,6 +694,134 @@ def test_obsidian_dashboard_endpoints_require_browser_owner_csrf_and_preserve_re
         )
         assert cancelled.status_code == 200
         assert cancelled.json()["cancel_requested"] is True
+
+
+
+def test_open_mode_document_wizard_works_without_api_token(monkeypatch, tmp_path):
+    """The zero-config local runtime (no ENGRAPHIS_API_TOKEN) must still import
+    documents: its API is loopback-confined by the middleware, and the wizard
+    surfaces keep their browser-session header plus per-process CSRF nonce.
+    Regression: every wizard endpoint returned 409 here, dead-ending the dialog."""
+    with _client(monkeypatch, tmp_path) as client:
+        assert client.get("/api/auth/state").json()["mode"] == "open"
+
+        # The nonce is minted without any session cookie. In open mode, loopback
+        # requests are allowed without the browser session header (the API is
+        # already confined to loopback by the middleware).
+        minted = client.get(
+            "/dashboard/review/csrf", headers={"X-Engraphis-Browser-Session": "1"},
+        )
+        assert minted.status_code == 200
+        csrf = minted.json()["review_csrf_token"]
+        # Same-origin requests without the browser marker header fail closed (403);
+        # a non-loopback peer must not mint a nonce at all (401). Both checks run
+        # against the same ASGI app with a different transport client address.
+        assert client.get("/dashboard/review/csrf").status_code == 403
+        remote = TestClient(client.app, client=("203.0.113.9", 51234))
+        assert remote.get(
+            "/dashboard/review/csrf", headers={"X-Engraphis-Browser-Session": "1"},
+        ).status_code == 401
+
+        headers = {
+            "X-Engraphis-Browser-Session": "1",
+            "X-Engraphis-Review-CSRF": csrf,
+        }
+        assert client.get(
+            "/api/workspaces/import-documents/formats", headers=headers,
+        ).status_code == 200
+        assert client.get(
+            "/api/workspaces/import-documents/sources?workspace=demo", headers=headers,
+        ).status_code == 200
+
+        upload = [("files", ("notes/Welcome.md", b"# Welcome", "text/markdown"))]
+        payload = {
+            "workspace": "demo", "source_mode": "obsidian",
+            "source_label": "Open Vault", "attachment_manifest": "[]",
+            "confirmed": "false",
+        }
+        # A wrong or missing nonce must still fail closed.
+        assert client.post(
+            "/api/workspaces/import-documents/preview", data=payload, files=upload,
+            headers={"X-Engraphis-Browser-Session": "1",
+                     "X-Engraphis-Review-CSRF": "wrong"},
+        ).status_code == 403
+        assert client.post(
+            "/api/workspaces/import-documents/preview", data=payload, files=upload,
+        ).status_code == 403
+
+        preview = client.post(
+            "/api/workspaces/import-documents/preview", data=payload,
+            files=upload, headers=headers,
+        )
+        assert preview.status_code == 200
+        review_token = preview.json()["review_token"]
+        run = client.post(
+            "/api/workspaces/import-documents/run",
+            data={**payload, "confirmed": "true", "review_token": review_token},
+            files=upload, headers=headers,
+        )
+        assert run.status_code == 200
+        assert run.json()["job_id"]
+
+
+def test_open_mode_document_import_writes_memories_end_to_end(monkeypatch, tmp_path):
+    with _client(monkeypatch, tmp_path) as client:
+        csrf = client.get(
+            "/dashboard/review/csrf", headers={"X-Engraphis-Browser-Session": "1"},
+        ).json()["review_csrf_token"]
+        headers = {
+            "X-Engraphis-Browser-Session": "1",
+            "X-Engraphis-Review-CSRF": csrf,
+        }
+        payload = {
+            "workspace": "demo", "source_mode": "documents",
+            "source_label": "Open Docs", "attachment_manifest": "[]",
+            "confirmed": "true",
+        }
+        upload = [
+            ("files", ("readme.md", b"# Readme\nOpen mode import.", "text/markdown")),
+        ]
+        # The documents adapter runs synchronously through its preview; the run
+        # schedules a job thread, so only assert the accepted contract here.
+        run = client.post(
+            "/api/workspaces/import-documents/run", data=payload,
+            files=upload, headers=headers,
+        )
+        assert run.status_code == 403  # run requires a fresh preview review token
+        preview = client.post(
+            "/api/workspaces/import-documents/preview",
+            data={**payload, "confirmed": "false"}, files=upload, headers=headers,
+        )
+        assert preview.status_code == 200
+        review_token = preview.json()["review_token"]
+        run = client.post(
+            "/api/workspaces/import-documents/run",
+            data={**payload, "review_token": review_token},
+            files=upload, headers=headers,
+        )
+        assert run.status_code == 200
+        job_id = run.json()["job_id"]
+        deadline = 10.0
+        import time as _time
+        started = _time.monotonic()
+        state = ""
+        while _time.monotonic() - started < deadline:
+            job = client.get(
+                f"/api/workspaces/import-documents/jobs/{job_id}",
+                params={"workspace": "demo"}, headers=headers,
+            )
+            state = job.json().get("state", "")
+            if state in {"completed", "failed", "partial"}:
+                break
+            _time.sleep(0.1)
+        assert state == "completed", state
+        memories = client.get(
+            "/api/memories", params={"workspace": "demo"}, headers=headers,
+        )
+        assert any(
+            "Open mode import." in (m.get("content") or "")
+            for m in memories.json()["memories"]
+        )
 
 
 def test_dashboard_assets_revalidate_instead_of_pinning_old_visuals(monkeypatch, tmp_path):

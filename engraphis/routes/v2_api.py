@@ -1673,6 +1673,7 @@ class _IdReq(BaseModel):
     pinned: bool = True
     content: str = ""
     target_scope: str = ""
+    confirmed: bool = False
 
 
 @router.post("/pin")
@@ -1698,7 +1699,8 @@ def forget(req: _IdReq):
 def secure_erase(req: _IdReq):
     """Irreversibly erase one leaked record and its local indexed derivatives."""
     ws = req.workspace or _default_ws()
-    return _run(service().secure_erase, req.id, workspace=ws, repo=req.repo)
+    return _run(service().secure_erase, req.id, workspace=ws, repo=req.repo,
+                confirmed=req.confirmed)
 
 
 @router.post("/correct")

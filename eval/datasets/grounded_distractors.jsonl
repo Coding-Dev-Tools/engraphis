@@ -1,0 +1,6 @@
+# Grounded-recall distractor and quarantine probes (offline-friendly).
+# Mirrors the DISTRACTOR_FACTS / QUARANTINED_FACTS cases in eval/grounded.py in
+# the harness case shape used by eval/datasets/sample.jsonl: memories carry a
+# tag, questions name supporting tags, and abstain probes name none.
+{"id": "case-lexical-distractor", "memories": [{"tag": "d1", "text": "The office kitchen orders sourdough every Friday."}], "questions": [{"q": "How do I bake sourdough bread?", "answer": "", "supporting": [], "expect": "abstain"}]}
+{"id": "case-quarantined-only-evidence", "memories": [{"tag": "q1", "text": "The staging reset code is BLUEBIRD.", "quarantine": {"state": "quarantined"}}], "questions": [{"q": "What is the staging reset code?", "answer": "", "supporting": [], "expect": "abstain"}]}

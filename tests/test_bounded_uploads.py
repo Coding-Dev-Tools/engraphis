@@ -17,13 +17,13 @@ from engraphis.config import settings  # noqa: E402
 from engraphis.service import MAX_IMPORT_FILES  # noqa: E402
 
 
-def _client(monkeypatch, tmp_path):
+def _client(monkeypatch, tmp_path, *, api_token=""):
     db_path = str(tmp_path / "bounded.db")
     monkeypatch.setattr(settings, "db_path", db_path)
     monkeypatch.setattr(settings, "embed_model", "")
     monkeypatch.setattr(settings, "embed_dim", 384)
     monkeypatch.setattr(settings, "allowed_workspaces", [])
-    monkeypatch.setattr(settings, "api_token", "")
+    monkeypatch.setattr(settings, "api_token", api_token)
     from engraphis.dashboard_app import create_app
     from fastapi.testclient import TestClient
     return TestClient(create_app(), client=("127.0.0.1", 50000))
@@ -38,7 +38,8 @@ def _wizard_upload(files: int):
 
 def test_bounded_route_rejects_over_ceiling_with_413(monkeypatch, tmp_path):
     """MAX_IMPORT_FILES + 1 parts must reach our handler as a clean 413 — not
-    Starlette's raw 'Too many files' failure."""
+    Starlette's raw 'Too many files' failure.  Multipart parsing (route class)
+    runs before the owner gate, so this holds in open mode too."""
     with _client(monkeypatch, tmp_path) as client:
         response = client.post(
             "/api/workspaces/import-documents/preview",
@@ -53,18 +54,16 @@ def test_bounded_route_rejects_over_ceiling_with_413(monkeypatch, tmp_path):
 
 def test_bounded_route_accepts_full_ceiling(monkeypatch, tmp_path):
     """Exactly MAX_IMPORT_FILES parts must pass multipart parsing; the response
-    then comes from the route's owner gate (409 — no API token configured),
-    never from Starlette's 1,000-part default ceiling."""
-    with _client(monkeypatch, tmp_path) as client:
+    then comes from the route's owner gate (401 — no browser session), never
+    from Starlette's 1,000-part default ceiling."""
+    with _client(monkeypatch, tmp_path, api_token="dashboard-owner-token") as client:
         response = client.post(
             "/api/workspaces/import-documents/preview",
             data={"workspace": "demo", "source_label": "Notes"},
             files=_wizard_upload(MAX_IMPORT_FILES),
         )
-        assert response.status_code == 409
-        assert response.json()["detail"]["error"] == (
-            "document import requires ENGRAPHIS_API_TOKEN"
-        )
+        assert response.status_code == 401
+        assert response.json()["error"] == "unauthorized"
 
 
 def test_bounded_route_maps_too_many_fields(monkeypatch, tmp_path):

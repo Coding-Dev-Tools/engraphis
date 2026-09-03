@@ -416,17 +416,17 @@ def test_replacing_edge_closes_removed_normalized_support(store):
     second = store.add_memory(MemoryRecord(id="mem_second", content="second",
                                            workspace_id=wid))
     store.upsert_edge(Edge(
-        id="edge_replace", src="a", dst="b", relation="rel", workspace_id=wid,
+        id="edg_replace", src="a", dst="b", relation="rel", workspace_id=wid,
         provenance={"memory_id": first, "memory_ids": [first]},
     ))
     store.upsert_edge(Edge(
-        id="edge_replace", src="a", dst="b", relation="rel", workspace_id=wid,
+        id="edg_replace", src="a", dst="b", relation="rel", workspace_id=wid,
         provenance={"memory_id": second, "memory_ids": [second]},
     ))
 
     rows = [dict(row) for row in store.conn.execute(
         "SELECT memory_id, valid_to FROM edge_supports "
-        "WHERE edge_id='edge_replace' ORDER BY id"
+        "WHERE edge_id='edg_replace' ORDER BY id"
     )]
     assert [row["memory_id"] for row in rows] == [first, second]
     assert rows[0]["valid_to"] is not None
@@ -436,20 +436,20 @@ def test_replacing_edge_closes_removed_normalized_support(store):
 def test_edge_provenance_preserves_declared_primary_memory_order(store):
     wid = store.get_or_create_workspace("w")
     store.upsert_edge(Edge(
-        id="edge_order", src="a", dst="b", relation="rel", workspace_id=wid,
+        id="edg_order", src="a", dst="b", relation="rel", workspace_id=wid,
         provenance={"memory_id": "mem_z", "memory_ids": ["mem_z", "mem_a"]},
     ))
 
     provenance = json.loads(store.conn.execute(
-        "SELECT provenance FROM edges WHERE id='edge_order'"
+        "SELECT provenance FROM edges WHERE id='edg_order'"
     ).fetchone()["provenance"])
     assert provenance["memory_id"] == "mem_z"
     assert provenance["memory_ids"] == ["mem_z", "mem_a"]
 
 def test_upsert_edge_support_failure_rolls_back_edge_and_releases_lock(store, monkeypatch):
     edge = Edge(
-        id="edge-support-failure", src="source", dst="target", relation="related",
-        provenance={"memory_id": "mem-support"},
+        id="edg_support_failure", src="source", dst="target", relation="related",
+        provenance={"memory_id": "mem_support"},
     )
 
     def fail_support(*args, **kwargs):
@@ -501,7 +501,7 @@ def test_close_validity_rolls_back_fact_and_audit_on_graph_failure(store, monkey
 
 def test_upsert_entity_backfill_failure_rolls_back_entity(store, monkeypatch):
     wid = store.get_or_create_workspace("w")
-    node = Node(id="entity-backfill-failure", name="Failure Entity",
+    node = Node(id="ent_backfill_failure", name="Failure Entity",
                 ntype="person", workspace_id=wid)
 
     def fail_backfill(*args, **kwargs):
@@ -523,7 +523,7 @@ def test_upsert_entity_failure_after_waiting_for_other_transaction_releases_lock
 ):
     wid = store.get_or_create_workspace("w")
     node = Node(
-        id="entity-waiting-failure", name="Waiting Failure",
+        id="ent_waiting_failure", name="Waiting Failure",
         ntype="person", workspace_id=wid,
     )
     entered = threading.Event()
@@ -586,7 +586,7 @@ def _add_link_test_memories(store, *memory_ids):
 def test_link_writes_release_transaction_after_waiting_for_other_thread(
     store, monkeypatch, method_name,
 ):
-    _add_link_test_memories(store, "link-a", "link-b")
+    _add_link_test_memories(store, "mem_link_a", "mem_link_b")
     entered = threading.Event()
     release = threading.Event()
     outcome = []
@@ -608,7 +608,7 @@ def test_link_writes_release_transaction_after_waiting_for_other_thread(
 
     def attempt_link():
         try:
-            getattr(store, method_name)("link-a", "link-b", relation="related")
+            getattr(store, method_name)("mem_link_a", "mem_link_b", relation="related")
         except BaseException as exc:  # communicate the worker failure to the test thread
             outcome.append(exc)
 
@@ -628,38 +628,38 @@ def test_link_writes_release_transaction_after_waiting_for_other_thread(
     assert store.conn.transaction_owned_by_current_thread() is False
     assert store.conn.execute(
         "SELECT 1 FROM mem_links WHERE a=? AND b=?",
-        ("link-a", "link-b"),
+        ("mem_link_a", "mem_link_b"),
     ).fetchone() is None
 
     if method_name == "add_link_version":
-        assert store.add_link_version("link-a", "link-b", relation="related") is True
+        assert store.add_link_version("mem_link_a", "mem_link_b", relation="related") is True
     else:
-        store.add_link("link-a", "link-b", relation="related")
-    assert store.get_links("link-a")
+        store.add_link("mem_link_a", "mem_link_b", relation="related")
+    assert store.get_links("mem_link_a")
 
 
 @pytest.mark.parametrize("method_name", ("add_link", "add_link_version"))
 def test_link_writes_preserve_caller_owned_transaction(store, method_name):
-    _add_link_test_memories(store, "link-outer-a", "link-outer-b")
+    _add_link_test_memories(store, "mem_link_outer_a", "mem_link_outer_b")
     store.conn.execute("BEGIN IMMEDIATE")
 
     with pytest.raises(ValueError, match="endpoints must exist"):
         getattr(store, method_name)(
-            "link-outer-a", "link-missing", relation="related"
+            "mem_link_outer_a", "mem_link_missing", relation="related"
         )
     assert store.conn.in_transaction
 
     getattr(store, method_name)(
-        "link-outer-a", "link-outer-b", relation="related"
+        "mem_link_outer_a", "mem_link_outer_b", relation="related"
     )
     assert store.conn.in_transaction
-    assert store.has_link("link-outer-a", "link-outer-b")
+    assert store.has_link("mem_link_outer_a", "mem_link_outer_b")
     store.conn.rollback()
-    assert not store.has_link("link-outer-a", "link-outer-b")
+    assert not store.has_link("mem_link_outer_a", "mem_link_outer_b")
 
 
 def test_add_edge_support_failure_rolls_back_edge_provenance(store, monkeypatch):
-    edge = Edge(id="edge-existing", src="source", dst="target", relation="related")
+    edge = Edge(id="edg_existing", src="source", dst="target", relation="related")
     store.upsert_edge(edge)
 
     def fail_support(*args, **kwargs):
@@ -667,17 +667,17 @@ def test_add_edge_support_failure_rolls_back_edge_provenance(store, monkeypatch)
 
     monkeypatch.setattr(store, "_write_edge_supports", fail_support)
     with pytest.raises(RuntimeError, match="support unavailable"):
-        store.add_edge_support(edge.id, {"memory_id": "mem-support"})
+        store.add_edge_support(edge.id, {"memory_id": "mem_support"})
     row = store.conn.execute(
         "SELECT provenance FROM edges WHERE id=?", (edge.id,)
     ).fetchone()
     assert json.loads(row["provenance"]) == {}
 
     monkeypatch.undo()
-    store.add_edge_support(edge.id, {"memory_id": "mem-support"})
+    store.add_edge_support(edge.id, {"memory_id": "mem_support"})
     assert store.conn.execute(
         "SELECT 1 FROM edge_supports WHERE edge_id=? AND memory_id=?",
-        (edge.id, "mem-support"),
+        (edge.id, "mem_support"),
     ).fetchone() is not None
 
 def test_concurrent_writes_do_not_corrupt_or_lose_data(tmp_path):
@@ -960,7 +960,7 @@ def test_pin_transitions_record_latest_effective_marker(store, monkeypatch):
 
 def test_add_memory_mirror_failure_rolls_back_row_and_releases_lock(store, monkeypatch):
     wid = store.get_or_create_workspace("w")
-    rec = MemoryRecord(id="mirror-failure", content="mirror failure", workspace_id=wid)
+    rec = MemoryRecord(id="mem_mirror_failure", content="mirror failure", workspace_id=wid)
 
     def fail_mirror(*args, **kwargs):
         raise RuntimeError("FTS unavailable")
@@ -1013,7 +1013,7 @@ def test_empty_scope_and_type_filters_match_nothing(store):
 
 def test_add_memory_rejects_inverted_validity_interval(store):
     wid = store.get_or_create_workspace("w")
-    with pytest.raises(ValueError, match="validity interval would be empty"):
+    with pytest.raises(ValueError, match="cannot predate"):
         store.add_memory(MemoryRecord(
             id="", content="A fact with an impossible window.",
             workspace_id=wid, valid_from=2000.0, valid_to=1000.0,
@@ -1070,7 +1070,7 @@ def test_graph_neighbors(store):
 def test_edge_visibility_requires_a_timestamp_paired_support(store):
     wid = store.get_or_create_workspace("w")
     edge_id = store.upsert_edge(Edge(
-        id="edge_pair", src="a", dst="b", relation="uses", workspace_id=wid,
+        id="edg_pair", src="a", dst="b", relation="uses", workspace_id=wid,
         valid_from=100.0, ingested_at=100.0,
         provenance={"memory_id": "mem_initial"},
     ))
@@ -1712,7 +1712,7 @@ def test_iter_vectors_tolerates_concurrent_writes(tmp_path):
         try:
             i = 0
             while not stop.is_set():
-                s.add_memory(MemoryRecord(id="zzz_%03d" % i, content="new",
+                s.add_memory(MemoryRecord(id="mem_new_%03d" % i, content="new",
                                           workspace_id=wid,
                                           embedding=np.ones(4, dtype=np.float32)))
                 i += 1
@@ -1747,17 +1747,17 @@ def test_invalidate_edges_is_scoped_to_the_owning_workspace(store):
     w2 = store.get_or_create_workspace("w2")
     mid = "mem_shared_id"
     store.add_memory(MemoryRecord(id=mid, content="x", workspace_id=w1))
-    _edge_with_support(store, eid="edge_w1", workspace_id=w1, memory_id=mid)
-    _edge_with_support(store, eid="edge_w2", workspace_id=w2, memory_id=mid)
-    _edge_with_support(store, eid="edge_global", workspace_id=None, memory_id=mid)
+    _edge_with_support(store, eid="edg_w1", workspace_id=w1, memory_id=mid)
+    _edge_with_support(store, eid="edg_w2", workspace_id=w2, memory_id=mid)
+    _edge_with_support(store, eid="edg_global", workspace_id=None, memory_id=mid)
 
     store.invalidate_edges_for_memory(mid)
 
     closed = {r["id"] for r in store.conn.execute(
         "SELECT id FROM edges WHERE valid_to IS NOT NULL").fetchall()}
-    assert "edge_w1" in closed          # the owning workspace's edge is closed
-    assert "edge_global" in closed      # unscoped edges stay in scope (unchanged behaviour)
-    assert "edge_w2" not in closed      # another tenant's edge is never touched
+    assert "edg_w1" in closed          # the owning workspace's edge is closed
+    assert "edg_global" in closed      # unscoped edges stay in scope (unchanged behaviour)
+    assert "edg_w2" not in closed      # another tenant's edge is never touched
 
 
 def test_invalidate_edges_escapes_like_wildcards(store):
@@ -1766,13 +1766,13 @@ def test_invalidate_edges_escapes_like_wildcards(store):
     other = "mem_other"
     store.add_memory(MemoryRecord(id=wild, content="x", workspace_id=wid))
     store.add_memory(MemoryRecord(id=other, content="x", workspace_id=wid))
-    _edge_with_support(store, eid="edge_other", workspace_id=wid, memory_id=other)
+    _edge_with_support(store, eid="edg_other", workspace_id=wid, memory_id=other)
 
     store.invalidate_edges_for_memory(wild)
 
     # 'mem_%' must not behave as a LIKE pattern matching every mem_* id.
     row = store.conn.execute(
-        "SELECT valid_to FROM edges WHERE id='edge_other'").fetchone()
+        "SELECT valid_to FROM edges WHERE id='edg_other'").fetchone()
     assert row["valid_to"] is None
 
 
@@ -1780,14 +1780,14 @@ def test_invalidate_edges_keeps_edges_with_remaining_support(store):
     wid = store.get_or_create_workspace("w")
     a = store.add_memory(MemoryRecord(id="mem_a", content="a", workspace_id=wid))
     b = store.add_memory(MemoryRecord(id="mem_b", content="b", workspace_id=wid))
-    store.upsert_edge(Edge(id="edge_two", src="s", dst="d", relation="rel",
+    store.upsert_edge(Edge(id="edg_two", src="s", dst="d", relation="rel",
                            workspace_id=wid,
                            provenance={"memory_id": a, "memory_ids": [a, b]}))
 
     store.invalidate_edges_for_memory(a)
 
     row = store.conn.execute(
-        "SELECT valid_to, provenance FROM edges WHERE id='edge_two'").fetchone()
+        "SELECT valid_to, provenance FROM edges WHERE id='edg_two'").fetchone()
     assert row["valid_to"] is None
     assert b in row["provenance"] and a not in row["provenance"]
 
@@ -1833,12 +1833,12 @@ def test_edge_supports_scoped_lookup_drives_from_requested_edge_ids(store, monke
     other_workspace = store.get_or_create_workspace("other-support-lookup")
     for index in range(5):
         store.upsert_edge(Edge(
-            id=f"edge_{index}", src=f"source_{index}", dst=f"target_{index}",
+            id=f"edg_{index}", src=f"source_{index}", dst=f"target_{index}",
             relation="related", workspace_id=workspace_id,
             provenance={"memory_id": f"mem_{index}"},
         ))
     store.upsert_edge(Edge(
-        id="other_edge", src="other_source", dst="other_target",
+        id="edg_other", src="other_source", dst="other_target",
         relation="related", workspace_id=other_workspace,
         provenance={"memory_id": "mem_other"},
     ))
@@ -1854,12 +1854,12 @@ def test_edge_supports_scoped_lookup_drives_from_requested_edge_ids(store, monke
     monkeypatch.setattr(store_mod._SerializedConnection, "execute", capture_execute)
 
     supports = store.edge_supports_in_scope(
-        ["edge_0", "edge_1", "edge_2", "edge_3", "edge_4", "other_edge"],
+        ["edg_0", "edg_1", "edg_2", "edg_3", "edg_4", "edg_other"],
         flt=SearchFilter(workspace_id=workspace_id),
     )
 
     assert [row["edge_id"] for row in supports] == [
-        "edge_0", "edge_1", "edge_2", "edge_3", "edge_4",
+        "edg_0", "edg_1", "edg_2", "edg_3", "edg_4",
     ]
     assert len(calls) == 3
     assert all("CROSS JOIN edges e ON e.id=s.edge_id" in statement for statement in calls)
@@ -1966,7 +1966,11 @@ def test_fts_fallback_prioritizes_literal_punctuation_before_token_variants(
     store.add_memory(MemoryRecord(id="mem_exact", content=exact_match, workspace_id=wid))
     store.has_fts5 = False
 
-    assert store.fts_search(query, 1) == [("mem_exact", 0.5)]
+    # The LIKE fallback scores (literal-phrase boost + term coverage) instead of
+    # returning the old constant: the literal-punctuation row still ranks first.
+    hits = store.fts_search(query, 2)
+    assert [mid for mid, _score in hits] == ["mem_exact", "mem_broad"]
+    assert all(score > 0 for _mid, score in hits)
 
 
 # ── regression: indexes exist, and are added to pre-existing databases ────────
@@ -2076,7 +2080,7 @@ def test_temporal_mutators_reject_invalid_values_before_persisting(
         id="ent_time", name="Time", workspace_id=wid,
     ))
     edge_id = store.upsert_edge(Edge(
-        id="edge_time", src="ent_time", dst="ent_other", relation="related",
+        id="edg_time", src="ent_time", dst="ent_other", relation="related",
         workspace_id=wid,
     ))
     rows_before = store.conn.execute(
@@ -2092,7 +2096,7 @@ def test_temporal_mutators_reject_invalid_values_before_persisting(
             store.add_memory(record)
         elif operation == "upsert_edge":
             edge = Edge(
-                id="edge_invalid_time", src="a", dst="b", relation="related",
+                id="edg_invalid_time", src="a", dst="b", relation="related",
                 workspace_id=wid,
             )
             edge.valid_from = bad_value

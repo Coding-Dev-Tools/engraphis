@@ -653,9 +653,13 @@ def test_direct_apply_persists_snapshot_high_water_mark():
     target = Store(":memory:")
     target_sync = SyncEngine(target)
     target_sync.apply_bundle(generation_one, into_workspace="w")
-    target_sync.apply_bundle(generation_two, into_workspace="w")
+    report = target_sync.apply_bundle(generation_two, into_workspace="w")
 
-    assert target.get_memory("mem_replay") is None
+    # The target's row arrived via sync (pending review), so the erasure is held
+    # for operator review — marker recorded, bytes retained — while the
+    # generation high-water mark still advances and rollback still fails.
+    assert report["tombstones_held"] == 1
+    assert target.get_memory("mem_replay") is not None
     with pytest.raises(SyncError, match="generation rolled back"):
         target_sync.apply_bundle(generation_one, into_workspace="w")
 
@@ -2763,7 +2767,7 @@ def test_hlc_conflict_variant_publishes_external_vector():
             "workspace_name": "w",
             "repos": {},
             "memories": [{
-                "id": "same-hlc-id",
+                "id": "mem_same_hlc",
                 "content": content,
                 "ingested_at": 42.0,
                 "valid_from": 42.0,
@@ -2782,7 +2786,7 @@ def test_hlc_conflict_variant_publishes_external_vector():
     syncer.apply_bundle(bundle("higher-node edit", higher_node), into_workspace="w")
 
     conflict_id = engine.store.conn.execute(
-        "SELECT id FROM memories WHERE id <> 'same-hlc-id'"
+        "SELECT id FROM memories WHERE id <> 'mem_same_hlc'"
     ).fetchone()["id"]
     assert conflict_id in publications
 
@@ -2809,7 +2813,7 @@ def test_hlc_conflict_successor_external_vector_matches_store_vector():
             "workspace_name": "w",
             "repos": {},
             "memories": [{
-                "id": "same-hlc-id",
+                "id": "mem_same_hlc",
                 "content": content,
                 "ingested_at": 42.0,
                 "valid_from": 42.0,
@@ -2828,7 +2832,7 @@ def test_hlc_conflict_successor_external_vector_matches_store_vector():
     syncer.apply_bundle(bundle("higher-node edit", higher_node), into_workspace="w")
 
     conflict_id = engine.store.conn.execute(
-        "SELECT id FROM memories WHERE id <> 'same-hlc-id'"
+        "SELECT id FROM memories WHERE id <> 'mem_same_hlc'"
     ).fetchone()["id"]
     # The preserved successor must be published to the separately-backed index with
     # exactly the canonical vector the Store committed for its id.
@@ -3239,7 +3243,7 @@ def test_apply_converges_independent_of_bundle_arrival_order():
             "format": SYNC_FORMAT, "version": 2, "device_id": "peer-a",
             "workspace_name": "w", "repos": {},
             "memories": [{
-                "id": "same-id", "content": "alpha", "scope": "workspace",
+                "id": "mem_same_id", "content": "alpha", "scope": "workspace",
                 "valid_from": 1.0, "last_access": 100.0, "ingested_at": 10.0,
             }],
             "mem_links": [],
@@ -3248,7 +3252,7 @@ def test_apply_converges_independent_of_bundle_arrival_order():
             "format": SYNC_FORMAT, "version": 2, "device_id": "peer-b",
             "workspace_name": "w", "repos": {},
             "memories": [{
-                "id": "same-id", "content": "bravo", "scope": "workspace",
+                "id": "mem_same_id", "content": "bravo", "scope": "workspace",
                 "valid_from": 1.0, "last_access": 100.0, "ingested_at": 10.0,
             }],
             "mem_links": [],
@@ -3263,7 +3267,7 @@ def test_apply_converges_independent_of_bundle_arrival_order():
         syncer = SyncEngine(store)
         for bundle in order:
             syncer.apply_bundle(bundle, into_workspace="w")
-        result = store.get_memory("same-id")
+        result = store.get_memory("mem_same_id")
         assert result is not None
         signatures.append(_signature(result))
         contents.append(result.content)
@@ -3284,7 +3288,7 @@ def test_equal_logical_hlc_preserves_one_convergent_untrusted_conflict():
             "workspace_name": "w",
             "repos": {},
             "memories": [{
-                "id": "same-hlc-id",
+                "id": "mem_same_hlc",
                 "content": content,
                 "scope": "workspace",
                 "valid_from": 1.0,
@@ -3314,11 +3318,11 @@ def test_equal_logical_hlc_preserves_one_convergent_untrusted_conflict():
                 replay, into_workspace="w"
             )["conflicts_preserved"] == 0
 
-        winner = store.get_memory("same-hlc-id")
+        winner = store.get_memory("mem_same_hlc")
         assert winner is not None
         assert winner.content == "higher-node edit"
         rows = store.conn.execute(
-            "SELECT id FROM memories WHERE id <> 'same-hlc-id'"
+            "SELECT id FROM memories WHERE id <> 'mem_same_hlc'"
         ).fetchall()
         assert len(rows) == 1
         conflict_id = rows[0]["id"]
@@ -3328,8 +3332,8 @@ def test_equal_logical_hlc_preserves_one_convergent_untrusted_conflict():
         assert conflict.provenance["source"] == "sync_conflict"
         assert conflict.provenance["trusted"] is False
         assert conflict.provenance["review_state"] == "pending"
-        assert conflict.provenance["conflict_of"] == "same-hlc-id"
-        assert conflict.metadata["sync_conflict"]["memory_id"] == "same-hlc-id"
+        assert conflict.provenance["conflict_of"] == "mem_same_hlc"
+        assert conflict.metadata["sync_conflict"]["memory_id"] == "mem_same_hlc"
         audit_row = store.conn.execute(
             "SELECT COUNT(*) FROM audit "
             "WHERE action='sync_conflict_preserved'"
@@ -3353,7 +3357,7 @@ def test_local_equal_hlc_conflict_provenance_converges_across_peers():
     left_workspace = left.get_or_create_workspace("w")
     right_workspace = right.get_or_create_workspace("w")
     left.add_memory(MemoryRecord(
-        id="same-local-id",
+        id="mem_same_local",
         content="lower-node edit",
         workspace_id=left_workspace,
         scope=Scope.WORKSPACE,
@@ -3364,7 +3368,7 @@ def test_local_equal_hlc_conflict_provenance_converges_across_peers():
         provenance={"source": "local-left", "trusted": False},
     ))
     right.add_memory(MemoryRecord(
-        id="same-local-id",
+        id="mem_same_local",
         content="higher-node edit",
         workspace_id=right_workspace,
         scope=Scope.WORKSPACE,
@@ -3386,7 +3390,7 @@ def test_local_equal_hlc_conflict_provenance_converges_across_peers():
 
     def conflict_record(store):
         row = store.conn.execute(
-            "SELECT id FROM memories WHERE id <> 'same-local-id'"
+            "SELECT id FROM memories WHERE id <> 'mem_same_local'"
         ).fetchone()
         assert row is not None
         record = store.get_memory(row["id"])
@@ -3418,7 +3422,7 @@ def test_local_equal_hlc_conflict_provenance_converges_across_peers():
     fresh_conflict = fresh.get_memory(left_conflict.id)
     assert fresh_conflict is not None
     assert fresh_conflict.provenance["source"] == "sync_conflict"
-    assert fresh_conflict.provenance["conflict_of"] == "same-local-id"
+    assert fresh_conflict.provenance["conflict_of"] == "mem_same_local"
 
 
 

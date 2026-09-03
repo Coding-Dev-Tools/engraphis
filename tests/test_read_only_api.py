@@ -132,13 +132,13 @@ def test_read_only_graph_applies_layer_filter_before_connected_only():
     svc = MemoryService.create(":memory:", graph_extractor="none")
     wid = svc.store.get_or_create_workspace("w")
     svc.store.upsert_entity(Node(
-        id="entity-a", name="A", ntype="concept", workspace_id=wid,
+        id="ent_a", name="A", ntype="concept", workspace_id=wid,
     ))
     svc.store.upsert_entity(Node(
-        id="entity-b", name="B", ntype="concept", workspace_id=wid,
+        id="ent_b", name="B", ntype="concept", workspace_id=wid,
     ))
     svc.store.upsert_edge(Edge(
-        id="semantic-edge", src="entity-a", dst="entity-b", relation="related",
+        id="edg_semantic", src="ent_a", dst="ent_b", relation="related",
         layer=GraphLayer.SEMANTIC, workspace_id=wid,
     ))
     svc.store.conn.commit()

@@ -374,7 +374,7 @@ def test_graph_scene_history_scopes_supports_to_requested_repo():
             valid_from=0.0, valid_to=100.0, ingested_at=0.0,
         ))
         edge_id = svc.store.upsert_edge(Edge(
-            id="history-repo-scope", src="history-source", dst="history-target",
+            id="edg_history_repo_scope", src="history-source", dst="history-target",
             relation="related", workspace_id=wid, valid_from=0.0, ingested_at=0.0,
         ))
         svc.store.add_edge_support(edge_id, {"memory_id": workspace_memory})
@@ -414,7 +414,7 @@ def test_complete_history_marks_closed_support_connectors_as_ghosts():
             scope=Scope.WORKSPACE, valid_from=0.0, valid_to=100.0, ingested_at=0.0,
         ))
         edge_id = svc.store.upsert_edge(Edge(
-            id="history-live-edge", src="history-live-source", dst="history-live-target",
+            id="edg_history_live", src="history-live-source", dst="history-live-target",
             relation="related", workspace_id=wid, valid_from=0.0, ingested_at=0.0,
         ))
         svc.store.add_edge_support(edge_id, {"memory_id": live_memory})
@@ -463,7 +463,7 @@ def test_graph_scene_history_does_not_restore_filtered_support_from_provenance()
             valid_from=0.0, valid_to=100.0, ingested_at=0.0,
         ))
         edge_id = svc.store.upsert_edge(Edge(
-            id="history-provenance-leak", src="provenance-source",
+            id="edg_history_provenance_leak", src="provenance-source",
             dst="provenance-target", relation="related", workspace_id=wid,
             valid_from=0.0, ingested_at=0.0,
             provenance={"memory_id": foreign_memory},

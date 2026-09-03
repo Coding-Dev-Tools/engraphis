@@ -32,6 +32,7 @@ import time
 import secrets
 import math
 
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Annotated, Callable, List, Optional
 
@@ -1079,6 +1080,28 @@ def engraphis_proactive_context(
         return _err(exc)
 
 
+_DESTRUCTIVE_CLASSIC_TOOLS = frozenset({
+    "engraphis_retire", "engraphis_forget", "engraphis_secure_erase",
+    "engraphis_consolidate",
+})
+
+
+def _require_local_operator_attestation(tool_name: str, confirmed: bool) -> Optional[str]:
+    """Refuse a destructive classic tool over stdio without explicit confirmation.
+
+    The stdio transport carries no role boundary (see ``minimum_role``), so every
+    destructive classic tool requires the local operator's explicit attestation
+    (``confirmed=true``). Returns an ``"Error: ..."`` refusal — preserving the
+    classic surface contract — or ``None`` when attested.
+    """
+    if confirmed is not True:
+        return (
+            "Error: %s requires explicit local-operator confirmation "
+            "(pass confirmed=true)." % tool_name
+        )
+    return None
+
+
 @mcp.tool(
     name="engraphis_retire",
     annotations={"title": "Retire a memory", "readOnlyHint": False,
@@ -1097,17 +1120,25 @@ def engraphis_retire(
                                          max_length=200)] = None,
     reason: Annotated[str, Field(description="Why this is being retired (recorded in the "
                       "audit trail).", max_length=1_000)] = "",
+    confirmed: Annotated[bool, Field(description="Explicit local-operator confirmation: "
+                       "must be true — retirement closes history and every request is "
+                       "audited, including retries.")] = False,
 ) -> str:
     """Retire a memory: it stops appearing in recall, but history is preserved, not
     deleted (bi-temporal close, never a hard delete) — use ``engraphis_correct`` instead
     if you have replacement content, since that keeps the "why" chain intact.
     Every request appends an audit record, including an identical retry, so the MCP call
-    is deliberately annotated as non-idempotent.
+    is deliberately annotated as non-idempotent. Requires explicit local-operator
+    confirmation (``confirmed=true``) because the stdio transport carries no role
+    boundary.
 
     Returns:
         str: JSON ``{"id","status":"retired","reason"}`` or an actionable error if the
         id is unknown or doesn't belong to ``workspace``/``repo``.
     """
+    refused = _require_local_operator_attestation("engraphis_retire", confirmed)
+    if refused is not None:
+        return refused
     try:
         return _ok(service().retire(memory_id, workspace=workspace, repo=repo, reason=reason))
     except Exception as exc:  # noqa: BLE001
@@ -1120,20 +1151,28 @@ def engraphis_retire(
                  "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
 )
 def engraphis_forget(
-    memory_id: Annotated[str, Field(description="Deprecated alias for memory_id in "
-                         "engraphis_retire.", min_length=1, max_length=200)],
+    memory_id: Annotated[str, Field(description="Retire-with-history id (from a prior "
+                         "remember/recall result, e.g. 'mem_01J...'). Deprecated alias for "
+                         "memory_id in engraphis_retire.", min_length=1, max_length=200)],
     workspace: Annotated[str, Field(description="Workspace that owns this memory.",
                                     min_length=1, max_length=200)],
     repo: Annotated[Optional[str], Field(description="Optional owning repo.",
                                          max_length=200)] = None,
     reason: Annotated[str, Field(description="Retirement reason recorded in the audit trail.",
                                  max_length=1_000)] = "",
+    confirmed: Annotated[bool, Field(description="Explicit local-operator confirmation: "
+                       "must be true, as for engraphis_retire.")] = False,
 ) -> str:
-    """Deprecated compatibility alias for ``engraphis_retire``.
+    """Retire-with-history (deprecated compatibility alias for ``engraphis_retire``).
 
-    It preserves the legacy ``status: \"forgotten\"`` response for existing clients;
-    it still performs a temporal retirement and never deletes the memory.
+    It preserves the legacy ``status: "forgotten"`` response for existing clients;
+    it still performs a temporal retirement and never deletes the memory. For
+    irreversible removal of a leaked secret use ``engraphis_secure_erase`` with
+    explicit confirmation instead.
     """
+    refused = _require_local_operator_attestation("engraphis_forget", confirmed)
+    if refused is not None:
+        return refused
     try:
         return _ok(service().forget(memory_id, workspace=workspace, repo=repo, reason=reason))
     except Exception as exc:  # noqa: BLE001
@@ -1152,6 +1191,9 @@ def engraphis_secure_erase(
                                     min_length=1, max_length=200)],
     repo: Annotated[Optional[str], Field(description="Optional owning repo.",
                                          max_length=200)] = None,
+    confirmed: Annotated[bool, Field(description="Explicit local-operator confirmation: "
+                       "must be true — this irreversibly destroys the memory, its history, "
+                       "and local indexed derivatives. Rotate the credential first.")] = False,
 ) -> str:
     """Irreversibly remove one accidentally stored secret from local persistence.
 
@@ -1159,9 +1201,17 @@ def engraphis_secure_erase(
     rows, performs SQLite secure-delete/WAL/VACUUM maintenance, and scans recognised
     local SQLite recovery backups. It cannot erase copied exports, snapshots, remote
     peers, or data already read by a compromised/running agent; rotate the credential.
+    Requires explicit local-operator confirmation (``confirmed=true``); the response
+    carries the Store's ``impact`` report (receipt/event refs, backup note,
+    WAL/vacuum status) for the rotation runbook (see docs/SYNC.md).
     """
+    refused = _require_local_operator_attestation("engraphis_secure_erase", confirmed)
+    if refused is not None:
+        return refused
     try:
-        return _ok(service().secure_erase(memory_id, workspace=workspace, repo=repo))
+        return _ok(service().secure_erase(
+            memory_id, workspace=workspace, repo=repo, confirmed=confirmed,
+        ))
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
 
@@ -1908,6 +1958,9 @@ def engraphis_consolidate(
     structured: Annotated[bool, Field(description="If true, use configured LLM for "
                           "schema-validated consolidation facts/entities/relations; "
                           "falls back to deterministic digest on any failure.")] = False,
+    confirmed: Annotated[bool, Field(description="Explicit local-operator confirmation: "
+                       "must be true for a real (non-dry-run) sweep, which archives and "
+                       "distills governed state. Dry runs need no confirmation.")] = False,
 ) -> str:
     """Run one sleep-time consolidation sweep: recurring episodic memories on the same
     subject are distilled into one durable semantic digest (linked to its sources), and
@@ -1918,7 +1971,9 @@ def engraphis_consolidate(
     facts/entities/relations; provider/schema failure falls back to the deterministic
     digest. A structured result may cite only part of a large cluster, allowing an
     identical later call to process the remainder, so the overall tool is conservatively
-    non-idempotent. Good moments to call it: session end, or on a schedule.
+    non-idempotent. Good moments to call it: session end, or on a schedule. A real sweep
+    requires explicit local-operator confirmation (``confirmed=true``); a ``dry_run``
+    report does not mutate and needs none.
 
     Returns:
         str: JSON report ``{"clusters_found","digests_created","archived",
@@ -1926,6 +1981,10 @@ def engraphis_consolidate(
         the context tokens the sweep saved. With ``profiles=True`` a ``profiles`` block is
         added (``entities_considered``, ``profiles_created``, ``compaction``).
     """
+    if not dry_run:
+        refused = _require_local_operator_attestation("engraphis_consolidate", confirmed)
+        if refused is not None:
+            return refused
     try:
         return _ok(service().consolidate(
             workspace=workspace, repo=repo, dry_run=dry_run,
@@ -1971,10 +2030,14 @@ _SMART_SESSION_PROTOCOL = (
 _CAPABILITY_SECRET = secrets.token_bytes(32)
 _CAPABILITY_VERSION = "smart-mcp/1"
 _DEPLOYMENT_POLICY = "local-default"
-# Store the full binding as well as the opaque ID.  The HMAC prevents forgery,
-# while the values below make a capability stale across a policy or registry
-# change even when a long-lived development process has not restarted yet.
-_CAPABILITY_INDEX: dict[str, tuple[str, str, str, str]] = {}
+_CAPABILITY_TTL_SECONDS = 900  # capabilities expire 15 minutes after issue
+_CAPABILITY_MAX_ENTRIES = 256  # hard cap: oldest entries evict first (LRU)
+# Store the full binding as well as the opaque ID, plus the issue time. The HMAC
+# prevents forgery, while the values below make a capability stale across a policy
+# or registry change even when a long-lived development process has not restarted
+# yet. The TTL and size cap bound a long-lived stdio process's memory and stop a
+# leaked capability id from remaining usable indefinitely.
+_CAPABILITY_INDEX: "OrderedDict[str, tuple[str, str, str, str, float]]" = OrderedDict()
 _GATEWAY_RESULT_COUNTER = RegexTokenCounter()
 
 
@@ -2203,14 +2266,29 @@ def _rank_actions(task: str, *, category: str = "", intent: str = "") -> list[Ac
     return [spec for _score, _name, spec in ranked]
 
 
+def _prune_capabilities(now: float) -> None:
+    """Drop expired capabilities so a leaked id stops resolving after its TTL."""
+    expired = [
+        capability_id for capability_id, entry in _CAPABILITY_INDEX.items()
+        if now - entry[4] > _CAPABILITY_TTL_SECONDS
+    ]
+    for capability_id in expired:
+        del _CAPABILITY_INDEX[capability_id]
+
+
 def _issue_capability(spec: ActionSpec) -> str:
     body = (
         f"{_CAPABILITY_VERSION}:{_DEPLOYMENT_POLICY}:{spec.canonical_id}:{spec.schema_digest}"
     ).encode("utf-8")
     signature = hmac.new(_CAPABILITY_SECRET, body, hashlib.sha256).hexdigest()[:24]
     capability_id = f"cap_{signature}"
+    now = time.time()
+    _prune_capabilities(now)
+    while len(_CAPABILITY_INDEX) >= _CAPABILITY_MAX_ENTRIES:
+        _CAPABILITY_INDEX.popitem(last=False)  # evict oldest first (LRU)
     _CAPABILITY_INDEX[capability_id] = (
         spec.canonical_id, spec.schema_digest, _CAPABILITY_VERSION, _DEPLOYMENT_POLICY,
+        now,
     )
     return capability_id
 
@@ -2400,7 +2478,12 @@ def _resolve_capability(capability_id: str, schema_digest: str) -> Optional[Acti
     entry = _CAPABILITY_INDEX.get(str(capability_id or ""))
     if entry is None:
         return None
-    action_id, issued_digest, issued_version, issued_policy = entry
+    action_id, issued_digest, issued_version, issued_policy, issued_at = entry
+    if time.time() - issued_at > _CAPABILITY_TTL_SECONDS:
+        # Expired: forget the id so it can never resolve again, even within a
+        # long-lived stdio process that outlives the TTL.
+        del _CAPABILITY_INDEX[str(capability_id or "")]
+        return None
     spec = ACTION_SPECS.get(action_id)
     expected_body = (
         f"{_CAPABILITY_VERSION}:{_DEPLOYMENT_POLICY}:{action_id}:{schema_digest}"
@@ -2418,6 +2501,7 @@ def _resolve_capability(capability_id: str, schema_digest: str) -> Optional[Acti
         or not spec.availability_predicate()
     ):
         return None
+    _CAPABILITY_INDEX.move_to_end(str(capability_id or ""))  # LRU refresh
     return spec
 
 

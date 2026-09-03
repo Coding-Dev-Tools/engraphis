@@ -68,6 +68,7 @@ from engraphis.core.interfaces import (
     vector_index_shares_store_transaction,
 )
 from engraphis.core.poisoning import (
+    REVIEW_PENDING,
     PoisoningDecision,
     apply_quarantine_metadata,
     assess_untrusted_payload,
@@ -768,6 +769,21 @@ def dict_to_record(d: Any) -> Optional[MemoryRecord]:
 
 # ── the engine ────────────────────────────────────────────────────────────────
 
+def _tombstone_target_is_held(existing: MemoryRecord) -> bool:
+    """Whether a peer erasure for a local row must be held for operator review.
+
+    Quarantine-first: a locally held (quarantined or pending-review) row keeps its
+    bytes until an operator dispositions it through the review queue, instead of
+    being hard-deleted by a peer assertion. The hold is reported (``tombstones_held``)
+    and audited (``sync_tombstone_held``), never silently dropped.
+    """
+    metadata = getattr(existing, "metadata", None) or {}
+    provenance = getattr(existing, "provenance", None) or {}
+    if metadata_is_quarantined(metadata) or bool(provenance.get("quarantined")):
+        return True
+    return provenance.get("review_state") == REVIEW_PENDING
+
+
 class SyncEngine:
     """Convergent sync over a ``Store``. Transport-agnostic and offline-testable.
 
@@ -780,7 +796,8 @@ class SyncEngine:
 
     def __init__(self, store: Store, *, embedder=None, vector_index=None,
                  device_id: Optional[str] = None,
-                 allowed_workspaces: Optional[frozenset] = None) -> None:
+                 allowed_workspaces: Optional[frozenset] = None,
+                 erase_device_allowlist: Optional[frozenset] = None) -> None:
         self.store = store
         self.embedder = embedder
         self.embedding_space = (
@@ -794,6 +811,13 @@ class SyncEngine:
         # never be steered into writing a workspace the operator never authorized.
         self.allowed_workspaces = (frozenset(allowed_workspaces)
                                    if allowed_workspaces else None)
+        # Destructive-apply gate for peer erasures: when set, a ``remote_erasure``
+        # tombstone asserted by any other device is held for operator review instead
+        # of hard-deleting local rows. Unset means any authenticated bundle device may
+        # assert erasures (still subject to the quarantine-first hold below and the
+        # per-device generation/hash-chain rollback gate).
+        self.erase_device_allowlist = (frozenset(erase_device_allowlist)
+                                       if erase_device_allowlist else None)
 
     @staticmethod
     def _checkpoint_key(workspace_id: str, repo_id: Optional[str],
@@ -985,7 +1009,7 @@ class SyncEngine:
         report = {
             "added": 0, "updated": 0, "unchanged": 0, "rejected": 0,
             "conflicts_preserved": 0, "links_added": 0, "links_updated": 0,
-            "tombstones_applied": 0,
+            "tombstones_applied": 0, "tombstones_held": 0,
                   "workspace": ws_name, "from_device": src_device,
                   "dry_run": bool(dry_run)}
 
@@ -1117,6 +1141,23 @@ class SyncEngine:
                     )
                     tombstone_state_changed = True
                 continue
+            # Device-allowlist gate: when configured, erasures asserted by any other
+            # device are held for operator review instead of destructively applied.
+            # Nothing is recorded or deleted; the peer re-offers its snapshot state
+            # on the next round, so the hold retries naturally after review.
+            if (self.erase_device_allowlist is not None
+                    and src_device not in self.erase_device_allowlist):
+                report["tombstones_held"] += 1
+                if not dry_run:
+                    self.store.audit(
+                        "sync:%s" % _clamp_str(src_device or "peer", 128),
+                        "sync_tombstone_held",
+                        tomb["id"],
+                        "peer erasure held: device not in erase allowlist",
+                        commit=False,
+                    )
+                    tombstone_state_changed = True
+                continue
             # Preserve an already-known repository identity, but never infer one
             # from the live row for a legacy marker: doing so narrows a global marker
             # and permits a same-id row from a sibling repository to resurrect.
@@ -1132,6 +1173,31 @@ class SyncEngine:
             accepted_tombstones.append({
                 **tomb, "_mapped_repo_id": stored_tomb_repo,
             })
+            # Quarantine-first: a peer erasure for a locally held
+            # (quarantined/pending-review) row records its marker but keeps the local
+            # bytes for operator review instead of hard-deleting them immediately.
+            # The marker blocks same-id resurrection and propagates convergence;
+            # the retained bytes stay quarantined and therefore visible in the review
+            # queue. The hold (not a rejection) is reported and audited so the peer's
+            # intent is never silently dropped.
+            if existing is not None and _tombstone_target_is_held(existing):
+                report["tombstones_held"] += 1
+                if not dry_run:
+                    self.store.add_memory_tombstone(
+                        tomb["id"], deleted_at=tomb["deleted_at"],
+                        device_id=tomb["device"], workspace_id=local_ws,
+                        repo_id=stored_tomb_repo,
+                        export_class=TOMBSTONE_REMOTE_ERASURE,
+                    )
+                    self.store.audit(
+                        "sync:%s" % _clamp_str(src_device or "peer", 128),
+                        "sync_tombstone_held",
+                        existing.id,
+                        "peer erasure held: local record is quarantined/pending review",
+                        commit=False,
+                    )
+                    tombstone_state_changed = True
+                continue
             if not dry_run:
                 self.store.add_memory_tombstone(
                     tomb["id"], deleted_at=tomb["deleted_at"],
@@ -2092,7 +2158,7 @@ class SyncEngine:
         totals = {
             "added": 0, "updated": 0, "unchanged": 0, "rejected": 0,
             "conflicts_preserved": 0, "links_added": 0, "links_updated": 0,
-            "tombstones_applied": 0,
+            "tombstones_applied": 0, "tombstones_held": 0,
         }
         received_bytes = 0
         peers_applied = 0
