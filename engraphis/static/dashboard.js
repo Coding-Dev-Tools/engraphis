@@ -1157,7 +1157,7 @@ function graphApplyForces(){
    const keys=[],seen=new Set();layoutNodes.forEach(node=>{const key=Number.isFinite(node.community)?node.community:0;if(!seen.has(key)){seen.add(key);keys.push(key)}});keys.sort((a,b)=>a-b);
    const cols=Math.max(1,Math.ceil(Math.sqrt(keys.length))),rows=Math.max(1,Math.ceil(keys.length/cols)),gap=Math.max(180,(Number(settings.link)||16)*10),targets=new Map();
    keys.forEach((key,index)=>{const col=index%cols,row=Math.floor(index/cols);targets.set(key,{x:(col-(cols-1)/2)*gap,y:(row-(rows-1)/2)*gap*.72})});
-   const centering=Math.max(.04,(Number(settings.gravity)||0)/100);FG.d3Force('x',d3.forceX(0).strength(centering));FG.d3Force('y',d3.forceY(0).strength(centering));
+   const centering=Math.max(.04,(Number(settings.gravity)||0)/100),target=node=>targets.get(Number.isFinite(node.community)?node.community:0)||{x:0,y:0};FG.d3Force('x',d3.forceX(node=>target(node).x).strength(centering));FG.d3Force('y',d3.forceY(node=>target(node).y).strength(centering));
   }else if(mode==='radial'&&d3.forceRadial){
    const outer=Math.max(180,Math.min(360,Math.sqrt(Math.max(1,layoutNodes.length))*18+(Number(settings.link)||16)*4)),maxDegree=Math.max(1,layoutNodes.reduce((max,node)=>Math.max(max,node.degree||0),1));
    FG.d3Force('x',d3.forceX(0).strength(Math.max(.05,(Number(settings.gravity)||0)/500)));FG.d3Force('y',d3.forceY(0).strength(Math.max(.05,(Number(settings.gravity)||0)/500)));
@@ -1403,6 +1403,7 @@ function graphRender(fit=true,reheat=true){
   else window.__gfit=setTimeout(()=>{if(FG)FG.zoomToFit(420,72)},GPERF.large?650:950);
  }
 }
+let GSET_FRAME=0;
 function graphSet(key,value){
  window.GSET[key]=Number(value);
  const rd=document.querySelector('[data-graph-val="'+key+'"]');
@@ -1411,11 +1412,18 @@ function graphSet(key,value){
  if(GRAPH_ENGINE){GRAPH_ENGINE.setSettings({[key]:Number(value)});return}
  if(!FG)return;
  const layout=key==='repel'||key==='link'||key==='gravity'||key==='size';
- if(key==='size')graphRefreshNodeMetrics();
- if(key==='link'&&GACTIVE_DATA)graphRefreshComponentCenters(GACTIVE_DATA.nodes);
- if(layout)graphApplyForces();
- if(key==='linkw'){FG.linkWidth(FG.linkWidth());FG.linkColor(FG.linkColor())}else graphRedraw();
- if(layout){graphSetSimulationStatus('Updating layout',true);FG.d3ReheatSimulation()}
+ if(key==='linkw'){FG.linkWidth(FG.linkWidth());FG.linkColor(FG.linkColor())}else if(!layout)graphRedraw();
+ if(layout){
+  if(GSET_FRAME)return;
+  GSET_FRAME=requestAnimationFrame(()=>{
+   GSET_FRAME=0;
+   if(key==='size')graphRefreshNodeMetrics();
+   if(key==='link'&&GACTIVE_DATA)graphRefreshComponentCenters(GACTIVE_DATA.nodes);
+   graphApplyForces();
+   graphSetSimulationStatus('Updating layout',true);
+   FG.d3ReheatSimulation();
+  });
+ }
 }
 function graphApplyPreset(name){
  const preset=GRAPH_PRESETS[name]||GRAPH_PRESETS.compact;
