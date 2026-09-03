@@ -229,3 +229,22 @@ def test_doctor_reports_connected_cloud_install(tmp_path, monkeypatch, capsys):
     assert main(["--check"]) == 0
     out = capsys.readouterr().out
     assert "Engraphis Cloud - installation connected" in out
+
+
+def test_doctor_reports_functional_embedder(tmp_path, monkeypatch, capsys):
+    _fresh_settings(monkeypatch, tmp_path)
+    assert main(["--check"]) == 0
+    out = capsys.readouterr().out
+    assert "embedder functional" in out
+
+
+def test_prefetch_command_reports_ready_or_offline(tmp_path, monkeypatch, capsys):
+    _fresh_settings(monkeypatch, tmp_path)
+    # Test prefetch with offline deterministic model
+    monkeypatch.setenv("ENGRAPHIS_EMBED_MODEL", "")
+    import engraphis.config as cfg
+    monkeypatch.setattr(cfg, "settings", cfg.Settings())
+    assert main(["--prefetch"]) == 0
+    out = capsys.readouterr().out
+    assert "deterministic offline embedder is active" in out
+

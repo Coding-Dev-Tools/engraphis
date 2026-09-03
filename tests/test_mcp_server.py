@@ -1267,3 +1267,42 @@ def test_classic_remember_persists_subject_key_and_claim_kind_to_chain(monkeypat
     assert head["id"] == payload["id"]
     assert head["subject_key"] == "deploy.timeout"
     assert head["claim_kind"] == "configured_value"
+
+
+def test_service_singleton_is_thread_safe():
+    import engraphis.mcp_server as srv
+    from concurrent.futures import ThreadPoolExecutor
+    # Concurrently call srv.service() across 5 threads
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        instances = list(executor.map(lambda _: srv.service(), range(5)))
+    assert len(instances) == 5
+    for inst in instances[1:]:
+        assert inst is instances[0]
+
+
+def test_background_warmup_honors_env(monkeypatch):
+    import engraphis.mcp_server as server
+    called = []
+    monkeypatch.setattr(server, "service", lambda: called.append(True))
+
+    # Disabled by env
+    monkeypatch.setenv("ENGRAPHIS_MCP_WARMUP", "0")
+    server._start_background_warmup()
+    assert not called
+
+    # Enabled by default or env
+    started_threads = []
+    real_thread = server.threading.Thread
+
+    def fake_thread(*args, **kwargs):
+        t = real_thread(*args, **kwargs)
+        started_threads.append(t)
+        return t
+
+    monkeypatch.setattr(server.threading, "Thread", fake_thread)
+    monkeypatch.setenv("ENGRAPHIS_MCP_WARMUP", "1")
+    server._start_background_warmup()
+    assert len(started_threads) == 1
+    assert started_threads[0].daemon is True
+    assert started_threads[0].name == "engraphis-warmup"
+
