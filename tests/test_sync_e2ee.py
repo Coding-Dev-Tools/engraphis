@@ -185,7 +185,9 @@ def test_authenticated_snapshot_replay_is_rejected_after_newer_tombstone():
     receiver_sync.sync(
         EncryptedRelayTransport(relay, key), receiver_workspace
     )
-    assert receiver.store.get_memory(memory_id) is None
+    # The receiver's row arrived via sync (pending review), so the peer erasure is
+    # held for operator review: marker recorded, bytes retained quarantined.
+    assert receiver.store.get_memory(memory_id) is not None
 
     # A relay replaying a valid old ciphertext must not resurrect or roll back the
     # authenticated tombstone checkpoint.
@@ -196,7 +198,7 @@ def test_authenticated_snapshot_replay_is_rejected_after_newer_tombstone():
 
     assert rollback["complete"] is False
     assert rollback["errors"][0]["error"] == "bundle rejected"
-    assert receiver.store.get_memory(memory_id) is None
+    assert receiver.store.get_memory(memory_id) is not None
     decrypted = [
         json.loads(data)
         for _, data in EncryptedRelayTransport(relay, key).pull()
@@ -242,5 +244,5 @@ def test_restored_device_merges_own_newer_snapshot_before_replacing_it():
         EncryptedRelayTransport(relay, key), restored_workspace
     )
 
-    assert report["totals"]["tombstones_applied"] == 1
-    assert restored.store.get_memory(memory_id) is None
+    assert report["totals"]["tombstones_held"] == 1
+    assert restored.store.get_memory(memory_id) is not None

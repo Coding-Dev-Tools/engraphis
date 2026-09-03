@@ -3,7 +3,7 @@
 All notable changes to Engraphis are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions use SemVer.
 
-## [Unreleased]
+## [1.7] - 2026-09-03
 
 ### Added
 

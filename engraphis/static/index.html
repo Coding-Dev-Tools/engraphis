@@ -164,11 +164,11 @@
 <div class="gx-h">Forces<button class="btn btn-ghost btn-sm" id="graph-reset-preset" data-csp-style="s27" data-onclick="h33">↺ Reset</button></div>
 <div class="gslider"><label>Repel force</label><input type="range" min="10" max="500" value="42" data-graph-setting="repel" data-oninput="h34"><span class="gslider-val" data-graph-val="repel" data-csp-style="s28">42</span></div>
 <div class="gslider"><label>Link distance</label><input type="range" min="8" max="150" value="20" data-graph-setting="link" data-oninput="h35"><span class="gslider-val" data-graph-val="link" data-csp-style="s28">20</span></div>
-<div class="gslider"><label>Center gravity</label><input type="range" min="0" max="40" value="26" data-graph-setting="gravity" data-oninput="h36"><span class="gslider-val" data-graph-val="gravity" data-csp-style="s28">26</span></div>
+<div class="gslider"><label>Center gravity</label><input type="range" min="0" max="60" value="26" data-graph-setting="gravity" data-oninput="h36"><span class="gslider-val" data-graph-val="gravity" data-csp-style="s28">26</span></div>
 <div class="gx-h">Appearance</div>
 <div class="gslider"><label>Node size</label><input type="range" min="1.2" max="8" step="0.2" value="3" data-graph-setting="size" data-oninput="h37"><span class="gslider-val" data-graph-val="size" data-csp-style="s28">3</span></div>
 <div class="gslider"><label>Text size</label><input type="range" min="6" max="28" value="12" data-graph-setting="font" data-oninput="h38"><span class="gslider-val" data-graph-val="font" data-csp-style="s28">12</span></div>
-<div class="gslider"><label>Line width</label><input type="range" min="2" max="45" value="7" data-graph-setting="linkw" data-graph-scale="10" data-oninput="h39"><span class="gslider-val" data-graph-val="linkw" data-csp-style="s28">0.7</span></div>
+<div class="gslider"><label>Line width</label><input type="range" min="0.1" max="2" step="0.01" value="0.7" data-graph-setting="linkw" data-oninput="h39"><span class="gslider-val" data-graph-val="linkw" data-csp-style="s28">0.7</span></div>
 <div class="gslider" title="Controls how many node labels appear at a given zoom level — lower it to declutter a large graph when zoomed in"><label>Label density</label><input type="range" min="5" max="200" value="30" step="5" data-graph-setting="labelDensity" data-oninput="h40"><span class="gslider-val" data-graph-val="labelDensity" data-csp-style="s28">30</span></div>
 <div class="gx-h">Color by</div>
 <div class="gx-seg" data-csp-style="s29">
@@ -349,6 +349,6 @@
      graph view. dashboard.js fetches both on demand from graphRender(); see loadForceGraph()
      and loadGraphEngine(). scripts/externalize_dashboard_assets.py enforces both halves:
      they stay out of this file, and the lazy references still have to resolve. -->
-<script src="/static/dashboard.js?v=20260902-slider-merge-1"></script>
+<script src="/static/dashboard.js?v=20260902-classic-linkw-slider-1"></script>
 </body>
 </html>

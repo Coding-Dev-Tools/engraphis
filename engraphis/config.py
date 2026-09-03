@@ -707,6 +707,32 @@ def _parse_vector_backend(value: str) -> str:
     return "numpy"
 
 
+def _sqlite_vec_available() -> bool:
+    """Return True when the optional native sqlite-vec extension imports."""
+    try:
+        import importlib as _importlib
+        _importlib.import_module("sqlite_vec")
+        return True
+    except Exception:
+        return False
+
+
+def resolve_vector_backend(selector: str) -> str:
+    """Return the effective vector backend identity for one configured selector.
+
+    ``"auto"`` resolves to the concrete backend that would actually serve
+    traffic (``"sqlite-vec"`` when the optional native extension is installed,
+    else the portable ``"numpy"`` reference). Explicit selectors resolve to
+    themselves; unknown values fail closed to ``"numpy"``.
+    """
+    normalized = (selector or "").strip().lower()
+    if normalized == "auto":
+        return "sqlite-vec" if _sqlite_vec_available() else "numpy"
+    if normalized in {"numpy", "sqlite-vec"}:
+        return normalized
+    return "numpy"
+
+
 def _parse_llm_provider(value: str) -> str:
     """Use the documented provider default when an env entry is blank."""
     return (value or "").strip().lower() or "openai"
@@ -1011,6 +1037,16 @@ class Settings:
     @property
     def customer_service(self) -> bool:
         return self.service_mode == "customer"
+
+    @property
+    def resolved_vector_backend(self) -> str:
+        """Return the effective vector backend identity for the configured selector."""
+        return resolve_vector_backend(self.vector_backend)
+
+    @property
+    def vector_backend_identity(self) -> dict:
+        """Return the configured vs resolved vector backend identities for health."""
+        return {"configured": self.vector_backend, "resolved": self.resolved_vector_backend}
 
     def __post_init__(self) -> None:
         """Validate critical settings and fail fast on configuration errors."""

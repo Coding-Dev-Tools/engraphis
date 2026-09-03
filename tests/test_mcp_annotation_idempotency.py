@@ -110,11 +110,11 @@ def test_pin_and_forget_retries_append_audit_rows(monkeypatch):
     assert pin.readOnlyHint is False
     assert pin.idempotentHint is False
 
-    server.engraphis_forget(memory_id=stored["id"], workspace="acme", reason="retired")
+    server.engraphis_forget(memory_id=stored["id"], workspace="acme", reason="retired", confirmed=True)
     assert _count(
         server, "audit", where="target=? AND action='invalidate'", params=(stored["id"],),
     ) == 1
-    server.engraphis_forget(memory_id=stored["id"], workspace="acme", reason="retired")
+    server.engraphis_forget(memory_id=stored["id"], workspace="acme", reason="retired", confirmed=True)
     assert _count(
         server, "audit", where="target=? AND action='invalidate'", params=(stored["id"],),
     ) == 2
@@ -226,12 +226,12 @@ def test_consolidate_dry_run_is_pure_and_default_live_retry_is_stable(monkeypatc
     assert _database_dump(server) == before_dry_run
 
     live = json.loads(server.engraphis_consolidate(
-        workspace="acme", repo="api", dry_run=False,
+        workspace="acme", repo="api", dry_run=False, confirmed=True,
     ))
     assert live["digests_created"]
     after_live = _database_dump(server)
     retry = json.loads(server.engraphis_consolidate(
-        workspace="acme", repo="api", dry_run=False,
+        workspace="acme", repo="api", dry_run=False, confirmed=True,
     ))
     assert retry["digests_created"] == []
     assert _database_dump(server) == after_live
@@ -267,12 +267,12 @@ def test_structured_consolidate_can_process_remaining_sources_on_retry(monkeypat
         )
 
     first = json.loads(server.engraphis_consolidate(
-        workspace="acme", repo="api", dry_run=False, structured=True,
+        workspace="acme", repo="api", dry_run=False, structured=True, confirmed=True,
     ))
     assert first["digests_created"]
     after_first = _database_dump(server)
     second = json.loads(server.engraphis_consolidate(
-        workspace="acme", repo="api", dry_run=False, structured=True,
+        workspace="acme", repo="api", dry_run=False, structured=True, confirmed=True,
     ))
     assert second["digests_created"]
     assert _database_dump(server) != after_first

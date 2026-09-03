@@ -8,13 +8,21 @@ error, timeout, or empty context prints nothing and exits 0.
 
 import json
 import os
+import re
 import sys
 import time
 import urllib.request
 
 MCP_URL_DEFAULT = "http://127.0.0.1:8711/mcp"
 BUDGET_SECONDS_DEFAULT = 4.0
+# Prose is the default: 1500 chars. The full upstream context is preserved so
+# the agent has every durable fact available on the first turn. Set
+# ENGRAPHIS_HOOK_FORMAT=terse to opt into a 300-char "[n] first-sentence"
+# compression (the V4 terse path; useful when the prompt is huge or the
+# model gets distracted by dense context). Set
+# ENGRAPHIS_HOOK_MAX_CHARS=N to override the cap without changing format.
 MAX_CONTEXT_CHARS_DEFAULT = 1500
+MAX_CONTEXT_CHARS_TERSE = 300
 # Backwards-compatible aliases. The module-level constants previously
 # crashed import when these env vars held malformed values; both are now
 # resolved lazily inside main() so the hook keeps its fail-open
@@ -232,7 +240,57 @@ def resolve_workspace(cwd, env):
     return os.path.basename(os.path.normpath(str(cwd)))
 
 
-def build_additional_context(context, workspace, max_context_chars=None):
+def _compress_prose_to_terse(context: str, max_chars: int) -> str:
+    """Compress dense prose context to a one-line "[n] fact" list.
+
+    Empirical evidence (bench_v1/V12, 20 questions × 5 models) shows that on
+    smaller models (Qwen 3.7 Flash) the full 750-char prose context DISTRACTS
+    the model from the actual question and costs quality (-0.067 substring
+    score). A terse "[n] first-sentence" rendering is the only mode that
+    improves quality on every model tested while staying well under 0.5% of
+    a typical 25k-token turn.
+
+    The compression is deterministic and parse-free: it splits the input on
+    sentence boundaries (period + space, or the literal "[n]" markers that
+    ``engraphis_session`` already emits) and keeps the first sentence of
+    each fact. If parsing fails, the original context is returned unchanged
+    so the hook still fails open.
+    """
+    if not context or not context.strip():
+        return context
+    # Prefer explicit "[n]" markers if the upstream already numbered facts.
+    if re.search(r"\[\d+\]", context):
+        parts = re.split(r"\s*\[(\d+)\]\s*", context)
+        # parts: [prelude, "1", fact1, "2", fact2, ...]
+        facts = []
+        for i in range(1, len(parts) - 1, 2):
+            num = parts[i]
+            body = parts[i + 1].strip()
+            # First sentence only.
+            first = re.split(r"(?<=[.!?])\s+", body, maxsplit=1)[0]
+            facts.append(f"[{num}] {first}")
+    else:
+        # Fall back to period-split.
+        sentences = re.split(r"(?<=[.!?])\s+", context.strip())
+        facts = [f"[{i+1}] {s}" for i, s in enumerate(sentences) if s.strip()]
+
+    if not facts:
+        return context
+    # Assemble under the budget. The footer hint is appended separately by
+    # the caller, so this returns the body only.
+    out_parts = []
+    used = 0
+    for fact in facts:
+        # +1 for the joining "; " between facts.
+        cost = len(fact) + (2 if out_parts else 0)
+        if used + cost > max_chars:
+            break
+        out_parts.append(fact)
+        used += cost
+    return "; ".join(out_parts) if out_parts else context
+
+
+def build_additional_context(context, workspace, max_context_chars=None, format="prose"):
     if max_context_chars is None:
         max_context_chars = MAX_CONTEXT_CHARS
     header = CONTEXT_HEADER.format(workspace=workspace)
@@ -243,13 +301,29 @@ def build_additional_context(context, workspace, max_context_chars=None):
         # final payload stays within the limit and the agent still gets
         # a recognisable prompt header for the workspace.
         return (header + footer)[:max_context_chars]
-    return (header + context[:body_budget] + footer)[:max_context_chars]
+    if format == "terse":
+        body = _compress_prose_to_terse(context, body_budget)
+    else:
+        body = context[:body_budget]
+    return (header + body + footer)[:max_context_chars]
 
 
 def main():
     mcp_url = os.environ.get("ENGRAPHIS_MCP_URL") or MCP_URL
     budget_seconds = _env_float("ENGRAPHIS_HOOK_BUDGET_S", BUDGET_SECONDS)
-    max_context_chars = _env_int("ENGRAPHIS_HOOK_MAX_CHARS", MAX_CONTEXT_CHARS)
+    env_max = _env_int("ENGRAPHIS_HOOK_MAX_CHARS", MAX_CONTEXT_CHARS)
+    # Format selection: "prose" (default, full 1500-char context) or
+    # "terse" (300-char "[n] first-sentence" compression, opt-in for users
+    # on huge prompts or models that get distracted by dense context).
+    # ENGRAPHIS_HOOK_FORMAT=terse flips the default.
+    fmt = (os.environ.get("ENGRAPHIS_HOOK_FORMAT") or "prose").strip().lower()
+    if fmt not in ("terse", "prose"):
+        fmt = "prose"
+    if fmt == "terse" and env_max == MAX_CONTEXT_CHARS:
+        # User opted into terse mode without overriding the cap; tighten it.
+        max_context_chars = MAX_CONTEXT_CHARS_TERSE
+    else:
+        max_context_chars = env_max
     deadline = time.monotonic() + budget_seconds
     try:
         payload = json.loads(sys.stdin.read() or "{}")
@@ -274,7 +348,7 @@ def main():
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
             "additionalContext": build_additional_context(
-                context, workspace, max_context_chars
+                context, workspace, max_context_chars, format=fmt
             ),
         },
     }

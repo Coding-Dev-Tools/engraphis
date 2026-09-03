@@ -25,6 +25,11 @@ ENGRAPHIS_COMPOSE_PORT=8787
 
 Then open `http://127.0.0.1:8787`. License issuance, trials, leases, and revocations remain on the private control plane.
 
+> Port precedence: the dashboard binds `$PORT` when the platform injects one, falling back
+> to `ENGRAPHIS_PORT` (then `8700`). Compose sets both from `ENGRAPHIS_COMPOSE_PORT` so the
+> published host port and the in-container bind stay in sync; a stray desktop `ENGRAPHIS_PORT`
+> cannot desynchronise them.
+
 ## LAN exposure and HTTP MCP
 
 Compose publishes only on loopback by default. To expose it on a LAN, set a strong API token and

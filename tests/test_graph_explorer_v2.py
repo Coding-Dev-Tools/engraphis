@@ -1393,11 +1393,11 @@ def _seed_service() -> tuple[MemoryService, str, str, str]:
         id="", name="Gamma", ntype="concept", workspace_id=workspace_id,
     ))
     service.store.upsert_edge(Edge(
-        id="edge_ab", src=alpha, dst=beta, relation="uses", workspace_id=workspace_id,
+        id="edg_ab", src=alpha, dst=beta, relation="uses", workspace_id=workspace_id,
         provenance={"source": "structured_extractor", "memory_id": memory_a},
     ))
     service.store.upsert_edge(Edge(
-        id="edge_bg", src=beta, dst=gamma, relation="causes", workspace_id=workspace_id,
+        id="edg_bg", src=beta, dst=gamma, relation="causes", workspace_id=workspace_id,
         provenance={"source": "manual", "memory_id": memory_b},
     ))
     return service, alpha, beta, gamma
@@ -1418,8 +1418,8 @@ def test_graph_entity_evidence_avoids_rebuilding_the_workspace_graph(monkeypatch
     ]
 
     service.store.conn.execute("UPDATE memories SET valid_from=1")
-    service.store.conn.execute("UPDATE edges SET valid_from=100 WHERE id='edge_ab'")
-    service.store.conn.execute("UPDATE edge_supports SET valid_from=100 WHERE edge_id='edge_ab'")
+    service.store.conn.execute("UPDATE edges SET valid_from=100 WHERE id='edg_ab'")
+    service.store.conn.execute("UPDATE edge_supports SET valid_from=100 WHERE edge_id='edg_ab'")
     service.store.conn.commit()
     assert service.graph_entity_evidence(alpha, workspace="acme", as_of=99)["evidence"] == []
     visible = service.graph_entity_evidence(alpha, workspace="acme", as_of=101)
@@ -1430,10 +1430,10 @@ def test_graph_entity_evidence_avoids_rebuilding_the_workspace_graph(monkeypatch
         "UPDATE memories SET ingested_at=200 WHERE content='Alpha uses Beta.'"
     )
     service.store.conn.execute(
-        "UPDATE edges SET ingested_at=200 WHERE id='edge_ab'"
+        "UPDATE edges SET ingested_at=200 WHERE id='edg_ab'"
     )
     service.store.conn.execute(
-        "UPDATE edge_supports SET ingested_at=200 WHERE edge_id='edge_ab'"
+        "UPDATE edge_supports SET ingested_at=200 WHERE edge_id='edg_ab'"
     )
     service.store.conn.commit()
     assert service.graph_entity_evidence(
@@ -1466,7 +1466,7 @@ def test_graph_scene_applies_independent_world_and_system_anchors():
     )
 
     assert unknown["nodes"] == [] and unknown["edges"] == []
-    assert {edge["id"] for edge in known["edges"]} == {"edge_ab", "edge_bg"}
+    assert {edge["id"] for edge in known["edges"]} == {"edg_ab", "edg_bg"}
     assert known["meta"]["filters"]["valid_at"] == 150
     assert known["meta"]["filters"]["known_at"] == 200
     with pytest.raises(ValidationError, match="as_of and valid_at"):
@@ -1478,7 +1478,7 @@ def test_graph_scene_applies_independent_world_and_system_anchors():
 def test_graph_scene_keeps_support_metadata_when_closure_was_recorded_later():
     service, _alpha, _beta, _gamma = _seed_service()
     support = service.store.conn.execute(
-        "SELECT memory_id FROM edge_supports WHERE edge_id='edge_ab'"
+        "SELECT memory_id FROM edge_supports WHERE edge_id='edg_ab'"
     ).fetchone()
     assert support is not None
     service.store.conn.execute(
@@ -1488,11 +1488,11 @@ def test_graph_scene_keeps_support_metadata_when_closure_was_recorded_later():
     )
     service.store.conn.execute(
         "UPDATE edge_supports SET valid_from=0, ingested_at=0, valid_to=50, "
-        "valid_to_recorded_at=100 WHERE edge_id='edge_ab'"
+        "valid_to_recorded_at=100 WHERE edge_id='edg_ab'"
     )
     service.store.conn.execute(
         "UPDATE edges SET valid_from=0, ingested_at=0, valid_to=50, "
-        "valid_to_recorded_at=100 WHERE id='edge_ab'"
+        "valid_to_recorded_at=100 WHERE id='edg_ab'"
     )
     service.store.conn.execute("UPDATE entities SET created_at=0")
     service.store.conn.commit()
@@ -1501,7 +1501,7 @@ def test_graph_scene_keeps_support_metadata_when_closure_was_recorded_later():
         workspace="acme", valid_at=75, known_at=25,
     )
 
-    edge = next(edge for edge in scene["edges"] if edge["id"] == "edge_ab")
+    edge = next(edge for edge in scene["edges"] if edge["id"] == "edg_ab")
     assert support["memory_id"] in edge["support_memory_ids"]
 
 
@@ -1549,7 +1549,7 @@ def test_graph_explorer_endpoints_and_legacy_graph_gets_are_read_only():
         "workspace": "acme", "source": alpha, "target": gamma,
     }).json()
     assert path["found"] is True
-    assert path["edge_ids"] == ["edge_ab", "edge_bg"]
+    assert path["edge_ids"] == ["edg_ab", "edg_bg"]
 
     # A pre-existing memory with extraction subsequently enabled must not be lazily
     # materialized by either the compatibility GET or the new scene GET.
@@ -1629,7 +1629,7 @@ def test_complete_scene_api_returns_all_scoped_memories_and_connector_kinds():
     assert {node["id"] for node in scene["nodes"] if node["node_kind"] == "memory"} \
         == {*existing, third}
     assert {edge["id"] for edge in scene["edges"]
-            if edge["connector_kind"] == "entity_relation"} == {"edge_ab", "edge_bg"}
+            if edge["connector_kind"] == "entity_relation"} == {"edg_ab", "edg_bg"}
     assert all(bridge["edge_ids_truncated"] is False
                for bridge in scene["community_bridges"])
 
@@ -1755,12 +1755,12 @@ def test_graph_scene_filters_supporting_memory_type_and_time_window():
         id="", name="Gamma", ntype="concept", workspace_id=workspace_id,
     ))
     service.store.upsert_edge(Edge(
-        id="edge_semantic", src=alpha, dst=beta, relation="uses",
+        id="edg_semantic", src=alpha, dst=beta, relation="uses",
         workspace_id=workspace_id, valid_from=100, ingested_at=100,
         provenance={"source": "structured", "memory_id": semantic},
     ))
     service.store.upsert_edge(Edge(
-        id="edge_procedural", src=beta, dst=gamma, relation="deploys",
+        id="edg_procedural", src=beta, dst=gamma, relation="deploys",
         workspace_id=workspace_id, valid_from=200, ingested_at=200,
         provenance={"source": "manual", "memory_id": procedural},
     ))
@@ -1776,7 +1776,7 @@ def test_graph_scene_filters_supporting_memory_type_and_time_window():
 
     assert response.status_code == 200
     scene = response.json()
-    assert {edge["id"] for edge in scene["edges"]} == {"edge_procedural"}
+    assert {edge["id"] for edge in scene["edges"]} == {"edg_procedural"}
     assert {node["label"] for node in scene["nodes"]} == {"Beta", "Gamma"}
     assert scene["meta"]["filters"]["memory_types"] == ["procedural"]
     assert scene["meta"]["filters"]["time_from"] == 150
@@ -1796,7 +1796,7 @@ def test_graph_scene_filters_supporting_memory_type_and_time_window():
     assert [item["id"] for item in suggestions["groups"]["entities"]] == [alpha]
     assert suggestions["groups"]["memories"] == []
     detail = client.get(f"/api/graph/entities/{beta}", params=context).json()
-    assert {edge["id"] for edge in detail["relations"]} == {"edge_procedural"}
+    assert {edge["id"] for edge in detail["relations"]} == {"edg_procedural"}
     path = client.get("/api/graph/path", params={
         **context, "source": alpha, "target": gamma,
     }).json()
@@ -1954,7 +1954,7 @@ def test_graph_scene_hash_changes_when_public_repo_metadata_changes():
 def test_graph_scene_history_is_zero_physics_and_does_not_change_live_mass():
     service, alpha, beta, _gamma = _seed_service()
     closed_at = time.time() + 10.0
-    service.store.invalidate_edge("edge_ab", at=closed_at)
+    service.store.invalidate_edge("edg_ab", at=closed_at)
 
     live = service.graph_scene(
         workspace="acme", valid_at=closed_at + 1.0, known_at=closed_at + 1.0,
@@ -1964,8 +1964,8 @@ def test_graph_scene_history_is_zero_physics_and_does_not_change_live_mass():
         include_history=True,
     )
 
-    assert {edge["id"] for edge in live["edges"]} == {"edge_bg"}
-    ghost = next(edge for edge in history["edges"] if edge["id"] == "edge_ab")
+    assert {edge["id"] for edge in live["edges"]} == {"edg_bg"}
+    ghost = next(edge for edge in history["edges"] if edge["id"] == "edg_ab")
     assert ghost["ghost"] is True
     assert ghost["valid_to"] == closed_at
     assert ghost["strength"] == 0.0
@@ -1991,7 +1991,7 @@ def test_graph_scene_history_is_zero_physics_and_does_not_change_live_mass():
         include_memory_nodes=False, valid_at=closed_at + 1.0,
         known_at=closed_at + 1.0,
     )
-    complete_ghost = next(edge for edge in complete["edges"] if edge["id"] == "edge_ab")
+    complete_ghost = next(edge for edge in complete["edges"] if edge["id"] == "edg_ab")
     assert complete_ghost["connector_kind"] == "entity_relation"
     assert complete_ghost["ghost"] is True
     assert complete_ghost["strength"] == 0.0
@@ -2060,16 +2060,16 @@ def test_live_graph_excludes_edges_supported_only_by_session_memories():
         workspace_id=workspace_id, repo_id=repo_id,
         session_id=session["session_id"], scope=Scope.SESSION,
     ))
-    service.store.conn.execute("DELETE FROM edge_supports WHERE edge_id='edge_ab'")
+    service.store.conn.execute("DELETE FROM edge_supports WHERE edge_id='edg_ab'")
     service.store.conn.execute(
         "INSERT INTO edge_supports(edge_id, memory_id, source_kind, confidence) "
-        "VALUES ('edge_ab', ?, 'manual', 1.0)", (private_id,),
+        "VALUES ('edg_ab', ?, 'manual', 1.0)", (private_id,),
     )
     service.store.conn.commit()
 
     live = service.graph_scene(workspace="acme")
 
-    assert {edge["id"] for edge in live["edges"]} == {"edge_bg"}
+    assert {edge["id"] for edge in live["edges"]} == {"edg_bg"}
     assert alpha not in {edge["source"] for edge in live["edges"]}
     assert beta in {edge["source"] for edge in live["edges"]}
 
@@ -2085,7 +2085,7 @@ def test_history_graph_excludes_session_supports_alongside_public_evidence():
         session_id=session["session_id"], scope=Scope.SESSION,
     ))
     service.store.add_edge_support(
-        "edge_ab", {"source": "manual", "memory_id": private_id},
+        "edg_ab", {"source": "manual", "memory_id": private_id},
     )
     service.store.conn.commit()
 
@@ -2094,7 +2094,7 @@ def test_history_graph_excludes_session_supports_alongside_public_evidence():
         valid_at=time.time() + 20.0, known_at=time.time() + 20.0,
     )
 
-    relation = next(edge for edge in history["edges"] if edge["id"] == "edge_ab")
+    relation = next(edge for edge in history["edges"] if edge["id"] == "edg_ab")
     assert private_id not in relation["support_memory_ids"]
     assert relation["support_count"] == 1
 
@@ -2102,7 +2102,7 @@ def test_history_graph_excludes_session_supports_alongside_public_evidence():
 def test_history_edge_metadata_counts_appended_ghost_relations():
     service, _alpha, _beta, _gamma = _seed_service()
     closed_at = time.time() + 10.0
-    service.store.invalidate_edge("edge_ab", at=closed_at)
+    service.store.invalidate_edge("edg_ab", at=closed_at)
 
     history = service.graph_scene(
         workspace="acme", include_history=True,
@@ -2117,7 +2117,7 @@ def test_history_edge_metadata_counts_appended_ghost_relations():
 def test_graph_scene_history_reserves_edge_cap_for_historical_relations():
     service, _alpha, _beta, _gamma = _seed_service()
     closed_at = time.time() + 10.0
-    service.store.invalidate_edge("edge_ab", at=closed_at)
+    service.store.invalidate_edge("edg_ab", at=closed_at)
 
     history = service.graph_scene(
         workspace="acme", valid_at=closed_at + 1.0, known_at=closed_at + 1.0,
@@ -2125,7 +2125,7 @@ def test_graph_scene_history_reserves_edge_cap_for_historical_relations():
     )
 
     assert len(history["edges"]) == 1
-    assert history["edges"][0]["id"] == "edge_ab"
+    assert history["edges"][0]["id"] == "edg_ab"
     assert history["edges"][0]["ghost"] is True
 
 
@@ -2186,11 +2186,11 @@ def test_graph_scene_history_binds_edge_support_to_the_edge_workspace():
         workspace_id=other_workspace_id, scope=Scope.WORKSPACE,
     ))
     service.store.conn.execute(
-        "DELETE FROM edge_supports WHERE edge_id='edge_ab'"
+        "DELETE FROM edge_supports WHERE edge_id='edg_ab'"
     )
     service.store.conn.execute(
         "INSERT INTO edge_supports(edge_id, memory_id, source_kind, confidence) "
-        "VALUES ('edge_ab', ?, 'manual', 1.0)", (other_memory,)
+        "VALUES ('edg_ab', ?, 'manual', 1.0)", (other_memory,)
     )
     service.store.conn.commit()
 
@@ -2199,7 +2199,7 @@ def test_graph_scene_history_binds_edge_support_to_the_edge_workspace():
         valid_at=time.time() + 20.0, known_at=time.time() + 20.0,
     )
 
-    assert "edge_ab" not in {edge["id"] for edge in history["edges"]}
+    assert "edg_ab" not in {edge["id"] for edge in history["edges"]}
 
 
 def test_graph_scene_history_facets_keep_invalidated_supports_visible():
@@ -2212,12 +2212,12 @@ def test_graph_scene_history_facets_keep_invalidated_supports_visible():
     )
     service.store.conn.execute(
         "UPDATE edges SET valid_from=0, valid_to=?, valid_to_recorded_at=? "
-        "WHERE id='edge_ab'",
+        "WHERE id='edg_ab'",
         (closed_at, closed_at),
     )
     service.store.conn.execute(
         "UPDATE edge_supports SET valid_from=0, valid_to=?, valid_to_recorded_at=? "
-        "WHERE edge_id='edge_ab'",
+        "WHERE edge_id='edg_ab'",
         (closed_at, closed_at),
     )
     service.store.conn.commit()
@@ -2227,7 +2227,7 @@ def test_graph_scene_history_facets_keep_invalidated_supports_visible():
         valid_at=closed_at + 1.0, known_at=closed_at + 1.0,
     )
 
-    edge = next(edge for edge in history["edges"] if edge["id"] == "edge_ab")
+    edge = next(edge for edge in history["edges"] if edge["id"] == "edg_ab")
     assert edge["ghost"] is True
     assert edge["support_memory_ids"]
 
@@ -2376,18 +2376,18 @@ def test_graph_scene_history_honors_known_at_for_expired_code_rows():
 def test_graph_history_does_not_expose_support_learned_after_known_at():
     service, _alpha, _beta, _gamma = _seed_service()
     support = service.store.conn.execute(
-        "SELECT memory_id FROM edge_supports WHERE edge_id='edge_ab'"
+        "SELECT memory_id FROM edge_supports WHERE edge_id='edg_ab'"
     ).fetchone()
     assert support is not None
     service.store.conn.execute(
-        "UPDATE edges SET valid_from=0, ingested_at=0 WHERE id='edge_ab'"
+        "UPDATE edges SET valid_from=0, ingested_at=0 WHERE id='edg_ab'"
     )
     service.store.conn.execute(
         "UPDATE memories SET valid_from=0, ingested_at=0 WHERE id=?",
         (support["memory_id"],),
     )
     service.store.conn.execute(
-        "UPDATE edge_supports SET valid_from=0, ingested_at=200 WHERE edge_id='edge_ab'"
+        "UPDATE edge_supports SET valid_from=0, ingested_at=200 WHERE edge_id='edg_ab'"
     )
     service.store.conn.commit()
 
@@ -2395,18 +2395,18 @@ def test_graph_history_does_not_expose_support_learned_after_known_at():
         workspace="acme", valid_at=1.0, known_at=100.0, include_history=True,
     )
 
-    assert "edge_ab" not in {edge["id"] for edge in scene["edges"]}
+    assert "edg_ab" not in {edge["id"] for edge in scene["edges"]}
 
 
 def test_graph_history_keeps_evidence_expired_after_known_at():
     service, _alpha, _beta, _gamma = _seed_service()
     support = service.store.conn.execute(
-        "SELECT memory_id FROM edge_supports WHERE edge_id='edge_ab'"
+        "SELECT memory_id FROM edge_supports WHERE edge_id='edg_ab'"
     ).fetchone()
     assert support is not None
     service.store.conn.execute(
         "UPDATE edges SET valid_from=0, ingested_at=0, expired_at=200 "
-        "WHERE id='edge_ab'"
+        "WHERE id='edg_ab'"
     )
     service.store.conn.execute("UPDATE entities SET created_at=0")
     service.store.conn.execute(
@@ -2416,7 +2416,7 @@ def test_graph_history_keeps_evidence_expired_after_known_at():
     )
     service.store.conn.execute(
         "UPDATE edge_supports SET valid_from=0, ingested_at=0, expired_at=200 "
-        "WHERE edge_id='edge_ab'"
+        "WHERE edge_id='edg_ab'"
     )
     service.store.conn.commit()
 
@@ -2425,7 +2425,7 @@ def test_graph_history_keeps_evidence_expired_after_known_at():
         include_history=True,
     )
 
-    edge = next(edge for edge in scene["edges"] if edge["id"] == "edge_ab")
+    edge = next(edge for edge in scene["edges"] if edge["id"] == "edg_ab")
     assert edge["ghost"] is False
 
 
@@ -2819,7 +2819,7 @@ def test_edge_support_delete_advances_graph_generation():
     workspace_id = service.store.get_or_create_workspace("acme")
     before = service._graph_index_info(workspace_id)["generation"]
 
-    service.store.conn.execute("DELETE FROM edge_supports WHERE edge_id='edge_ab'")
+    service.store.conn.execute("DELETE FROM edge_supports WHERE edge_id='edg_ab'")
     service.store.conn.commit()
 
     assert service._graph_index_info(workspace_id)["generation"] > before
@@ -2993,7 +2993,7 @@ def test_current_graph_scene_cache_expires_at_next_temporal_boundary(monkeypatch
     service, _alpha, _beta, _gamma = _seed_service()
     now = time.time()
     service.store.conn.execute(
-        "UPDATE edges SET valid_to=? WHERE id='edge_bg'", (now + 1.0,)
+        "UPDATE edges SET valid_to=? WHERE id='edg_bg'", (now + 1.0,)
     )
     service.store.conn.commit()
     clock = {"now": now}
@@ -3065,12 +3065,12 @@ def test_history_cache_expires_when_known_time_is_unanchored(monkeypatch):
     )
     service.store.conn.execute(
         "UPDATE edge_supports SET valid_from=0, ingested_at=0, valid_to=5, "
-        "valid_to_recorded_at=? WHERE edge_id='edge_ab'",
+        "valid_to_recorded_at=? WHERE edge_id='edg_ab'",
         (recorded_at,),
     )
     service.store.conn.execute(
         "UPDATE edges SET valid_from=0, ingested_at=0, valid_to=5, "
-        "valid_to_recorded_at=? WHERE id='edge_ab'",
+        "valid_to_recorded_at=? WHERE id='edg_ab'",
         (recorded_at,),
     )
     service.store.conn.execute(
@@ -3091,8 +3091,8 @@ def test_history_cache_expires_when_known_time_is_unanchored(monkeypatch):
         workspace="acme", level="complete", include_history=True, valid_at=10.0,
     )
 
-    before_edge = next(edge for edge in before_recording["edges"] if edge["id"] == "edge_ab")
-    after_edge = next(edge for edge in after_recording["edges"] if edge["id"] == "edge_ab")
+    before_edge = next(edge for edge in before_recording["edges"] if edge["id"] == "edg_ab")
+    after_edge = next(edge for edge in after_recording["edges"] if edge["id"] == "edg_ab")
     assert before_edge["ghost"] is False
     assert after_recording["meta"]["cache_hit"] is False
     assert after_edge["ghost"] is True
@@ -3276,7 +3276,7 @@ def test_entity_evidence_rechecks_workspace_on_forged_memory_pointer():
     # Edge provenance is untrusted/syncable data. Even if it names a valid foreign
     # memory id, the second-hop evidence lookup must remain inside the requested scope.
     service.store.upsert_edge(Edge(
-        id="edge_forged", src=alpha, dst=decoy, relation="mentions",
+        id="edg_forged", src=alpha, dst=decoy, relation="mentions",
         workspace_id=acme_workspace,
         provenance={"source": "manual", "memory_id": secret},
     ))
@@ -3292,16 +3292,16 @@ def test_entity_inspector_bounds_history_and_reports_complete_counts(monkeypatch
     service, alpha, _beta, gamma = _seed_service()
     workspace_id = service.store.get_or_create_workspace("acme")
     service.store.upsert_edge(Edge(
-        id="edge_old_one", src=alpha, dst=gamma, relation="preceded",
+        id="edg_old_one", src=alpha, dst=gamma, relation="preceded",
         workspace_id=workspace_id,
     ))
     service.store.upsert_edge(Edge(
-        id="edge_old_two", src=gamma, dst=alpha, relation="replaced",
+        id="edg_old_two", src=gamma, dst=alpha, relation="replaced",
         workspace_id=workspace_id,
     ))
     closed_at = time.time()
-    service.store.invalidate_edge("edge_old_one", at=closed_at)
-    service.store.invalidate_edge("edge_old_two", at=closed_at + 0.001)
+    service.store.invalidate_edge("edg_old_one", at=closed_at)
+    service.store.invalidate_edge("edg_old_two", at=closed_at + 0.001)
     monkeypatch.setattr(service_module, "GRAPH_ENTITY_HISTORY_LIMIT", 1)
 
     detail = service.graph_entity(alpha, workspace="acme")
@@ -3334,7 +3334,7 @@ def test_private_only_edges_do_not_consume_graph_candidate_cap(monkeypatch):
             id="", name=f"Private B {index}", ntype="concept",
             workspace_id=workspace_id,
         ))
-        edge_id = f"private-edge-{index}"
+        edge_id = f"edg_private_{index}"
         service.store.upsert_edge(Edge(
             id=edge_id, src=private_a, dst=private_b, relation="uses",
             workspace_id=workspace_id,
@@ -3365,7 +3365,7 @@ def test_graph_scene_all_profile_filters_entity_types_before_candidate_cap(monke
         id="", name="Person B", ntype="person", workspace_id=workspace_id,
     ))
     service.store.upsert_edge(Edge(
-        id="edge_people", src=person_a, dst=person_b, relation="knows",
+        id="edg_people", src=person_a, dst=person_b, relation="knows",
         workspace_id=workspace_id,
     ))
     monkeypatch.setattr(service_module, "MAX_GRAPH_ALL_NODES", 3)
@@ -3445,25 +3445,25 @@ def test_graph_entity_evidence_resolves_history_for_nested_ghost_and_live_endpoi
         scope=Scope.WORKSPACE,
     ))
     archived = service.store.upsert_entity(Node(
-        id="archived-member", name="Archived Origin", ntype="concept",
+        id="ent_archived_member", name="Archived Origin", ntype="concept",
         workspace_id=workspace_id, canonical_id="canon",
     ))
     current = service.store.upsert_entity(Node(
-        id="current-member", name="Current Primary", ntype="concept",
+        id="ent_current_member", name="Current Primary", ntype="concept",
         workspace_id=workspace_id, canonical_id="canon",
     ))
     literal = service.store.upsert_entity(Node(
-        id="literal-member", name="Literal Suffix", ntype="concept",
+        id="ent_literal_member", name="Literal Suffix", ntype="concept",
         workspace_id=workspace_id, canonical_id="canon:ghost",
     ))
     shared = service.store.upsert_entity(Node(
-        id="shared-member", name="Shared Target", ntype="concept",
+        id="ent_shared_member", name="Shared Target", ntype="concept",
         workspace_id=workspace_id,
     ))
     for edge_id, source, memory_id in (
-        ("archived-edge", archived, archived_memory),
-        ("current-edge", current, current_memory),
-        ("literal-edge", literal, literal_memory),
+        ("edg_archived", archived, archived_memory),
+        ("edg_current", current, current_memory),
+        ("edg_literal", literal, literal_memory),
     ):
         service.store.upsert_edge(Edge(
             id=edge_id, src=source, dst=shared, relation="uses",
@@ -3471,7 +3471,7 @@ def test_graph_entity_evidence_resolves_history_for_nested_ghost_and_live_endpoi
             provenance={"source": "manual", "memory_id": memory_id},
         ))
     closed_at = time.time() + 10.0
-    service.store.invalidate_edge("archived-edge", at=closed_at)
+    service.store.invalidate_edge("edg_archived", at=closed_at)
 
     scene = service.graph_scene(
         workspace="acme", include_history=True,
@@ -3534,24 +3534,24 @@ def test_graph_entity_evidence_history_includes_closed_support_on_live_relation(
     service = MemoryService.create(":memory:", graph_extractor="none")
     workspace_id = service.store.get_or_create_workspace("acme")
     source = service.store.upsert_entity(Node(
-        id="live-history-source", name="Live History Source", ntype="concept",
+        id="ent_live_history_source", name="Live History Source", ntype="concept",
         workspace_id=workspace_id,
     ))
     target = service.store.upsert_entity(Node(
-        id="live-history-target", name="Live History Target", ntype="concept",
+        id="ent_live_history_target", name="Live History Target", ntype="concept",
         workspace_id=workspace_id,
     ))
     current_memory = service.store.add_memory(MemoryRecord(
-        id="live-history-current", content="Current support.", workspace_id=workspace_id,
+        id="mem_live-history-current", content="Current support.", workspace_id=workspace_id,
         scope=Scope.WORKSPACE, valid_from=0.0, ingested_at=0.0,
     ))
     closed_memory = service.store.add_memory(MemoryRecord(
-        id="live-history-closed", content="Closed support.", workspace_id=workspace_id,
+        id="mem_live-history-closed", content="Closed support.", workspace_id=workspace_id,
         scope=Scope.WORKSPACE, valid_from=0.0, valid_to=100.0,
         valid_to_recorded_at=100.0, ingested_at=0.0,
     ))
     edge_id = service.store.upsert_edge(Edge(
-        id="live-history-edge", src=source, dst=target, relation="relates",
+        id="edg_live_history", src=source, dst=target, relation="relates",
         workspace_id=workspace_id, valid_from=0.0, ingested_at=0.0,
     ))
     service.store.add_edge_support(
@@ -3601,13 +3601,13 @@ def test_graph_scene_history_visibility_scopes_to_requested_repo(monkeypatch):
     # Edge in repo_b touching a shared entity — should be invisible when
     # filtering to repo_a.
     service.store.upsert_edge(Edge(
-        id="edge_b", src=entity_b_only, dst=entity_shared, relation="uses",
+        id="edg_b", src=entity_b_only, dst=entity_shared, relation="uses",
         workspace_id=workspace_id, repo_id=repo_b,
         provenance={"source": "manual", "memory_id": memory_a},
     ))
     # Repo-less shared edge between two shared entities — must remain visible.
     service.store.upsert_edge(Edge(
-        id="edge_shared", src=entity_shared, dst=entity_shared2, relation="relates",
+        id="edg_shared", src=entity_shared, dst=entity_shared2, relation="relates",
         workspace_id=workspace_id,
         provenance={"source": "manual", "memory_id": memory_a},
     ))
@@ -3623,9 +3623,9 @@ def test_graph_scene_history_visibility_scopes_to_requested_repo(monkeypatch):
 
     assert entity_shared in node_ids
     assert entity_shared2 in node_ids
-    assert "edge_shared" in edge_ids
+    assert "edg_shared" in edge_ids
     assert entity_b_only not in node_ids
-    assert "edge_b" not in edge_ids
+    assert "edg_b" not in edge_ids
 
 
 def test_graph_entity_evidence_history_scopes_to_requested_repo():
@@ -3634,33 +3634,33 @@ def test_graph_entity_evidence_history_scopes_to_requested_repo():
     repo_a = service.store.get_or_create_repo(workspace_id, "alpha")
     repo_b = service.store.get_or_create_repo(workspace_id, "beta")
     shared = service.store.upsert_entity(Node(
-        id="shared-evidence", name="Shared", ntype="concept", workspace_id=workspace_id,
+        id="ent_shared_evidence", name="Shared", ntype="concept", workspace_id=workspace_id,
     ))
     target = service.store.upsert_entity(Node(
-        id="target-evidence", name="Target", ntype="concept", workspace_id=workspace_id,
+        id="ent_target_evidence", name="Target", ntype="concept", workspace_id=workspace_id,
     ))
     memory_a = service.store.add_memory(MemoryRecord(
-        id="memory-alpha", content="Alpha-only history.", workspace_id=workspace_id,
+        id="mem_memory-alpha", content="Alpha-only history.", workspace_id=workspace_id,
         repo_id=repo_a, scope=Scope.REPO,
     ))
     memory_shared = service.store.add_memory(MemoryRecord(
-        id="memory-shared", content="Shared history.", workspace_id=workspace_id,
+        id="mem_memory-shared", content="Shared history.", workspace_id=workspace_id,
         scope=Scope.WORKSPACE,
     ))
     memory_b = service.store.add_memory(MemoryRecord(
-        id="memory-beta", content="Beta history.", workspace_id=workspace_id,
+        id="mem_memory-beta", content="Beta history.", workspace_id=workspace_id,
         repo_id=repo_b, scope=Scope.REPO,
     ))
     service.store.upsert_edge(Edge(
-        id="edge-history-evidence", src=shared, dst=target, relation="relates",
+        id="edg_history_evidence", src=shared, dst=target, relation="relates",
         workspace_id=workspace_id,
     ))
     for memory_id in (memory_a, memory_shared, memory_b):
         service.store.add_edge_support(
-            "edge-history-evidence", {"source": "manual", "memory_id": memory_id},
+            "edg_history_evidence", {"source": "manual", "memory_id": memory_id},
         )
     closed_at = time.time() + 10.0
-    service.store.invalidate_edge("edge-history-evidence", at=closed_at)
+    service.store.invalidate_edge("edg_history_evidence", at=closed_at)
 
     detail = service.graph_entity_evidence(
         shared, workspace="acme", repo="beta", include_history=True,
@@ -3696,7 +3696,7 @@ def test_graph_scene_history_support_scopes_to_requested_repo():
         workspace_id=workspace_id, repo_id=repo_b,
     ))
     service.store.upsert_edge(Edge(
-        id="edge_shared_support", src=entity_shared, dst=entity_shared2,
+        id="edg_shared_support", src=entity_shared, dst=entity_shared2,
         relation="relates", workspace_id=workspace_id,
         provenance={"source": "manual", "memory_id": memory_a},
     ))
@@ -3709,10 +3709,10 @@ def test_graph_scene_history_support_scopes_to_requested_repo():
         repo_id=repo_b, scope=Scope.REPO,
     ))
     service.store.add_edge_support(
-        "edge_shared_support", {"source": "manual", "memory_id": memory_shared},
+        "edg_shared_support", {"source": "manual", "memory_id": memory_shared},
     )
     service.store.add_edge_support(
-        "edge_shared_support", {"source": "manual", "memory_id": memory_b},
+        "edg_shared_support", {"source": "manual", "memory_id": memory_b},
     )
     closed_at = time.time() + 1.0
     service.store.conn.execute(
@@ -3722,7 +3722,7 @@ def test_graph_scene_history_support_scopes_to_requested_repo():
     )
     service.store.conn.execute(
         "UPDATE edges SET valid_from=0, valid_to=?, valid_to_recorded_at=? "
-        "WHERE id='edge_shared_support'",
+        "WHERE id='edg_shared_support'",
         (closed_at, closed_at),
     )
     service.store.conn.commit()
@@ -3733,7 +3733,7 @@ def test_graph_scene_history_support_scopes_to_requested_repo():
     )
 
     shared_edge = next(
-        (edge for edge in scene["edges"] if edge["id"] == "edge_shared_support"),
+        (edge for edge in scene["edges"] if edge["id"] == "edg_shared_support"),
         None,
     )
     assert shared_edge is not None
@@ -3767,7 +3767,7 @@ def test_graph_repo_filter_keeps_legacy_workspace_memory_ancestors():
         ))
         service.store.conn.execute("PRAGMA ignore_check_constraints=OFF")
         edge_id = service.store.upsert_edge(Edge(
-            id="edge_legacy_workspace_ancestor", src="legacy-ancestor-source",
+            id="edg_legacy_workspace_ancestor", src="legacy-ancestor-source",
             dst="legacy-ancestor-target", relation="relates", workspace_id=workspace_id,
             valid_from=0.0, valid_to=100.0, valid_to_recorded_at=100.0,
             ingested_at=0.0,
@@ -3810,11 +3810,11 @@ def test_graph_scene_connected_only_uses_filtered_relations():
         id="ent_excluded", name="Excluded", ntype="concept", workspace_id=workspace_id,
     ))
     service.store.upsert_edge(Edge(
-        id="edge_excluded", src=source, dst=shared, relation="uses",
+        id="edg_excluded", src=source, dst=shared, relation="uses",
         workspace_id=workspace_id,
     ))
     service.store.upsert_edge(Edge(
-        id="edge_selected", src=shared, dst=excluded, relation="likes",
+        id="edg_selected", src=shared, dst=excluded, relation="likes",
         workspace_id=workspace_id,
     ))
 
@@ -3825,7 +3825,7 @@ def test_graph_scene_connected_only_uses_filtered_relations():
     node_ids = {node["id"] for node in scene["nodes"]}
     assert source not in node_ids
     assert {shared, excluded} <= node_ids
-    assert {edge["id"] for edge in scene["edges"]} == {"edge_selected"}
+    assert {edge["id"] for edge in scene["edges"]} == {"edg_selected"}
 
 
 def test_graph_entity_preserves_literal_ghost_suffix():
@@ -3840,14 +3840,13 @@ def test_graph_entity_preserves_literal_ghost_suffix():
     workspace_id = service.store.get_or_create_workspace("acme")
     service.store.upsert_entity(
         Node(
-            id="canon:ghost", name="Literal Ghost", ntype="concept",
+            id="ent_canon:ghost", name="Literal Ghost", ntype="concept",
             workspace_id=workspace_id,
         )
     )
 
-    result = service.graph_entity("canon:ghost", workspace="acme")
-    assert result["canonical_id"] == "canon:ghost"
-    assert result["label"] == "Literal Ghost"
+    result = service.graph_entity("ent_canon:ghost", workspace="acme")
+    assert result["canonical_id"] == "ent_canon:ghost"
 
 
 def test_complete_scene_excludes_pending_memory_nodes():
@@ -3986,7 +3985,7 @@ def test_visibility_classification_caps_edge_scan_without_giant_allocation(monke
         id="ent_delta", name="Delta", ntype="concept", workspace_id=workspace_id,
     ))
     service.store.upsert_edge(Edge(
-        id="edge_ad", src=_alpha, dst=delta, relation="links",
+        id="edg_ad", src=_alpha, dst=delta, relation="links",
         workspace_id=workspace_id,
     ))
     with pytest.raises(GraphSceneCapacityExceeded, match="visibility relation rows"):
@@ -3996,14 +3995,14 @@ def test_visibility_classification_caps_edge_scan_without_giant_allocation(monke
 def test_live_visibility_cap_ignores_closed_relations(monkeypatch):
     """Closed history must not consume the ordinary live visibility budget."""
     service, _alpha, _beta, _gamma = _seed_service()
-    service.store.invalidate_edge("edge_ab", at=time.time())
+    service.store.invalidate_edge("edg_ab", at=time.time())
     monkeypatch.setattr(service_module, "MAX_GRAPH_ANALYSIS_EDGES", 1)
 
     scene = service.graph_scene(
         workspace="acme", level="complete", include_memory_nodes=False,
     )
 
-    assert {edge["id"] for edge in scene["edges"]} == {"edge_bg"}
+    assert {edge["id"] for edge in scene["edges"]} == {"edg_bg"}
 
 
 def test_history_visibility_cap_ignores_edges_learned_after_known_at(monkeypatch):
@@ -4011,27 +4010,27 @@ def test_history_visibility_cap_ignores_edges_learned_after_known_at(monkeypatch
     service, alpha, beta, _gamma = _seed_service()
     workspace_id = service.store.get_or_create_workspace("acme")
     old_target = service.store.upsert_entity(Node(
-        id="history-old-target", name="History Old Target", ntype="concept",
+        id="ent_history_old_target", name="History Old Target", ntype="concept",
         workspace_id=workspace_id,
     ))
     future_target = service.store.upsert_entity(Node(
-        id="history-future-target", name="History Future Target", ntype="concept",
+        id="ent_history_future_target", name="History Future Target", ntype="concept",
         workspace_id=workspace_id,
     ))
     service.store.upsert_edge(Edge(
-        id="history-old-edge", src=alpha, dst=old_target, relation="old",
+        id="edg_history_old", src=alpha, dst=old_target, relation="old",
         workspace_id=workspace_id,
     ))
     service.store.upsert_edge(Edge(
-        id="history-future-edge", src=beta, dst=future_target, relation="future",
+        id="edg_history_future", src=beta, dst=future_target, relation="future",
         workspace_id=workspace_id,
     ))
     service.store.conn.execute("UPDATE entities SET created_at=0")
     service.store.conn.execute(
-        "UPDATE edges SET valid_from=0, ingested_at=0 WHERE id='history-old-edge'"
+        "UPDATE edges SET valid_from=0, ingested_at=0 WHERE id='edg_history_old'"
     )
     service.store.conn.execute(
-        "UPDATE edges SET valid_from=0, ingested_at=200 WHERE id='history-future-edge'"
+        "UPDATE edges SET valid_from=0, ingested_at=200 WHERE id='edg_history_future'"
     )
     service.store.conn.commit()
     monkeypatch.setattr(service_module, "MAX_GRAPH_ANALYSIS_EDGES", 1)
@@ -4042,8 +4041,8 @@ def test_history_visibility_cap_ignores_edges_learned_after_known_at(monkeypatch
     )
 
     edge_ids = {edge["id"] for edge in scene["edges"]}
-    assert "history-old-edge" in edge_ids
-    assert "history-future-edge" not in edge_ids
+    assert "edg_history_old" in edge_ids
+    assert "edg_history_future" not in edge_ids
 
 
 def test_history_entity_visibility_ignores_edges_learned_after_known_at():
@@ -4051,28 +4050,28 @@ def test_history_entity_visibility_ignores_edges_learned_after_known_at():
     service = MemoryService.create(":memory:", graph_extractor="none")
     workspace_id = service.store.get_or_create_workspace("acme")
     source = service.store.upsert_entity(Node(
-        id="history-future-source", name="History Future Source", ntype="concept",
+        id="ent_history_future_source", name="History Future Source", ntype="concept",
         workspace_id=workspace_id,
     ))
     target = service.store.upsert_entity(Node(
-        id="history-future-target", name="History Future Target", ntype="concept",
+        id="ent_history_future_target", name="History Future Target", ntype="concept",
         workspace_id=workspace_id,
     ))
     service.store.upsert_edge(Edge(
-        id="history-future-entity-edge", src=source, dst=target,
+        id="edg_history_future_entity", src=source, dst=target,
         relation="future", workspace_id=workspace_id,
     ))
     memory_id = service.store.add_memory(MemoryRecord(
-        id="history-future-private-memory", content="future private evidence",
+        id="mem_history-future-private-memory", content="future private evidence",
         workspace_id=workspace_id, scope=Scope.SESSION, session_id="future-session",
     ))
     service.store.add_edge_support(
-        "history-future-entity-edge", {"source": "manual", "memory_id": memory_id},
+        "edg_history_future_entity", {"source": "manual", "memory_id": memory_id},
     )
     service.store.conn.execute("UPDATE entities SET created_at=0")
     service.store.conn.execute(
         "UPDATE edges SET valid_from=0, ingested_at=200 "
-        "WHERE id='history-future-entity-edge'"
+        "WHERE id='edg_history_future_entity'"
     )
     service.store.conn.execute(
         "UPDATE memories SET valid_from=0, ingested_at=200 "
@@ -4098,15 +4097,15 @@ def test_live_scene_keeps_entities_before_future_edge_known_at():
     service = MemoryService.create(":memory:", graph_extractor="none")
     workspace_id = service.store.get_or_create_workspace("acme")
     source = service.store.upsert_entity(Node(
-        id="known-source", name="Known Source", ntype="concept",
+        id="ent_known_source", name="Known Source", ntype="concept",
         workspace_id=workspace_id,
     ))
     target = service.store.upsert_entity(Node(
-        id="known-target", name="Known Target", ntype="concept",
+        id="ent_known_target", name="Known Target", ntype="concept",
         workspace_id=workspace_id,
     ))
     service.store.upsert_edge(Edge(
-        id="future-edge", src=source, dst=target, relation="future",
+        id="edg_future", src=source, dst=target, relation="future",
         workspace_id=workspace_id,
     ))
     service.store.conn.execute("UPDATE entities SET created_at=0")
@@ -4122,7 +4121,7 @@ def test_live_scene_keeps_entities_before_future_edge_known_at():
 
     node_ids = {node["id"] for node in scene["nodes"]}
     assert {source, target} <= node_ids
-    assert "future-edge" not in {edge["id"] for edge in scene["edges"]}
+    assert "edg_future" not in {edge["id"] for edge in scene["edges"]}
 
 
 def test_live_entity_cap_ignores_closed_edge_only_entities(monkeypatch):
@@ -4130,24 +4129,24 @@ def test_live_entity_cap_ignores_closed_edge_only_entities(monkeypatch):
     service, _alpha, _beta, _gamma = _seed_service()
     workspace_id = service.store.get_or_create_workspace("acme")
     old_source = service.store.upsert_entity(Node(
-        id="old-source", name="Old Source", ntype="concept",
+        id="ent_old_source", name="Old Source", ntype="concept",
         workspace_id=workspace_id,
     ))
     old_target = service.store.upsert_entity(Node(
-        id="old-target", name="Old Target", ntype="concept",
+        id="ent_old_target", name="Old Target", ntype="concept",
         workspace_id=workspace_id,
     ))
     service.store.upsert_edge(Edge(
-        id="edge_old", src=old_source, dst=old_target, relation="old",
+        id="edg_old", src=old_source, dst=old_target, relation="old",
         workspace_id=workspace_id,
     ))
-    service.store.invalidate_edge("edge_old", at=time.time())
+    service.store.invalidate_edge("edg_old", at=time.time())
     monkeypatch.setattr(service_module, "MAX_GRAPH_ANALYSIS_ENTITIES", 3)
 
     scene = service.graph_scene(workspace="acme")
 
     assert {node["label"] for node in scene["nodes"]} == {"Alpha", "Beta", "Gamma"}
-    assert {edge["id"] for edge in scene["edges"]} == {"edge_ab", "edge_bg"}
+    assert {edge["id"] for edge in scene["edges"]} == {"edg_ab", "edg_bg"}
 
 
 def test_private_only_edges_do_not_consume_visibility_cap(monkeypatch):
@@ -4155,34 +4154,34 @@ def test_private_only_edges_do_not_consume_visibility_cap(monkeypatch):
     service = MemoryService.create(":memory:", graph_extractor="none")
     workspace_id = service.store.get_or_create_workspace("acme")
     private_source = service.store.upsert_entity(Node(
-        id="private-source", name="Private Source", ntype="concept",
+        id="ent_private_source", name="Private Source", ntype="concept",
         workspace_id=workspace_id,
     ))
     private_target = service.store.upsert_entity(Node(
-        id="private-target", name="Private Target", ntype="concept",
+        id="ent_private_target", name="Private Target", ntype="concept",
         workspace_id=workspace_id,
     ))
     public_source = service.store.upsert_entity(Node(
-        id="public-source", name="Public Source", ntype="concept",
+        id="ent_public_source", name="Public Source", ntype="concept",
         workspace_id=workspace_id,
     ))
     public_target = service.store.upsert_entity(Node(
-        id="public-target", name="Public Target", ntype="concept",
+        id="ent_public_target", name="Public Target", ntype="concept",
         workspace_id=workspace_id,
     ))
     service.store.upsert_edge(Edge(
-        id="edge_private", src=private_source, dst=private_target, relation="private",
+        id="edg_private", src=private_source, dst=private_target, relation="private",
         workspace_id=workspace_id,
     ))
     private_memory = service.store.add_memory(MemoryRecord(
-        id="memory_private", content="session-only evidence", workspace_id=workspace_id,
+        id="mem_private", content="session-only evidence", workspace_id=workspace_id,
         scope=Scope.SESSION, session_id="private-session",
     ))
     service.store.add_edge_support(
-        "edge_private", {"source": "manual", "memory_id": private_memory},
+        "edg_private", {"source": "manual", "memory_id": private_memory},
     )
     service.store.upsert_edge(Edge(
-        id="edge_public", src=public_source, dst=public_target, relation="public",
+        id="edg_public", src=public_source, dst=public_target, relation="public",
         workspace_id=workspace_id,
     ))
     service.store.conn.commit()
@@ -4192,8 +4191,8 @@ def test_private_only_edges_do_not_consume_visibility_cap(monkeypatch):
         workspace="acme", level="complete", include_memory_nodes=False,
     )
 
-    assert "edge_public" in {edge["id"] for edge in scene["edges"]}
-    assert "edge_private" not in {edge["id"] for edge in scene["edges"]}
+    assert "edg_public" in {edge["id"] for edge in scene["edges"]}
+    assert "edg_private" not in {edge["id"] for edge in scene["edges"]}
 
 
 def test_visibility_cap_scopes_touching_edges_to_requested_repo(monkeypatch):
@@ -4207,7 +4206,7 @@ def test_visibility_cap_scopes_touching_edges_to_requested_repo(monkeypatch):
         workspace_id=workspace_id, repo_id=noisy_repo,
     ))
     service.store.upsert_edge(Edge(
-        id="edge_noisy", src=gamma, dst=noisy, relation="mentions",
+        id="edg_noisy", src=gamma, dst=noisy, relation="mentions",
         workspace_id=workspace_id, repo_id=noisy_repo,
     ))
 
@@ -4217,7 +4216,7 @@ def test_visibility_cap_scopes_touching_edges_to_requested_repo(monkeypatch):
     )
 
     assert noisy not in {node["id"] for node in scene["nodes"]}
-    assert "edge_noisy" not in {edge["id"] for edge in scene["edges"]}
+    assert "edg_noisy" not in {edge["id"] for edge in scene["edges"]}
 
 
 def test_history_support_cap_counts_unique_evidence_keys(monkeypatch):
@@ -4234,7 +4233,7 @@ def test_history_support_cap_counts_unique_evidence_keys(monkeypatch):
         workspace_id=workspace_id,
     ))
     service.store.upsert_edge(Edge(
-        id="edge_zz_history", src=gamma, dst=delta, relation="uses",
+        id="edg_zz_history", src=gamma, dst=delta, relation="uses",
         workspace_id=workspace_id,
         provenance={"source": "manual", "memory_id": history_memory},
     ))
@@ -4252,11 +4251,11 @@ def test_history_support_cap_counts_unique_evidence_keys(monkeypatch):
     )
     service.store.conn.execute(
         "UPDATE edges SET valid_to=100, valid_to_recorded_at=100 "
-        "WHERE id='edge_zz_history'"
+        "WHERE id='edg_zz_history'"
     )
     service.store.conn.execute(
         "UPDATE edge_supports SET valid_to=100, valid_to_recorded_at=100 "
-        "WHERE edge_id='edge_zz_history'"
+        "WHERE edge_id='edg_zz_history'"
     )
     live_supports = service.store.conn.execute(
         "SELECT support.edge_id, support.memory_id, support.source_kind, "
@@ -4290,7 +4289,7 @@ def test_history_support_cap_counts_unique_evidence_keys(monkeypatch):
 
     assert len(support_keys) == 3
     assert any(
-        edge_id == "edge_zz_history" and memory_id == history_memory
+        edge_id == "edg_zz_history" and memory_id == history_memory
         for edge_id, memory_id, _source_kind in support_keys
     )
 

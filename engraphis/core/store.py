@@ -139,6 +139,62 @@ USER_SCOPE_UNSUPPORTED = (
     "user scope is not supported until owner-aware memories are implemented; "
     "use workspace, repo, or session"
 )
+#: Actors permitted to write the audit ledger. Fixed first-party writers are
+#: listed explicitly; per-device sync writers use the ``sync:<device>`` prefix
+#: and end-user flows use the cleaned service actor (default ``"user"``).
+#: Anything else must still be a safe, bounded principal string.
+AUDIT_ACTORS = frozenset({
+    "system",
+    "user",
+    "agent",
+    "service",
+    "migration",
+    "v1_migration",
+    "schema_migration",
+    "consolidation",
+    "resolver",
+    "engine",
+    "poisoning_policy",
+    "retention",
+    "human_review",
+    "sync",
+    "api",
+    "admin",
+    "owner",
+    "dashboard",
+    "dashboard_browser_session",
+    "local_cli_operator",
+    "local_store",
+    "secure_erase",
+    "background",
+    "loop",
+    "importer",
+    "obsidian_import",
+    "document_import",
+    "test",
+    "tester",
+})
+_AUDIT_ACTOR_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.:@/-]{0,127}$")
+
+
+def _validate_audit_actor(actor: str) -> str:
+    """Return *actor* if it is an allowed audit principal, else raise."""
+    if not isinstance(actor, str) or not actor:
+        raise ValueError("audit actor must be a non-empty string")
+    if actor in AUDIT_ACTORS:
+        return actor
+    if actor.startswith("sync:") and _AUDIT_ACTOR_RE.fullmatch(actor):
+        return actor
+    if _AUDIT_ACTOR_RE.fullmatch(actor):
+        return actor
+    raise ValueError(f"audit actor {actor!r} is not allowed")
+
+
+def _audit_entry_hash(prev_hash: str, ts: float, actor: str, action: str,
+                      target: str, detail: str) -> str:
+    """Return the one-way chain digest for one audit entry."""
+    body = "\x1f".join((prev_hash or "", f"{ts!r}", actor, action, target, detail))
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
 
@@ -2277,6 +2333,10 @@ class Store:
             raise
 
     def _apply_schema(self, previous_version: int) -> None:
+        # One migration clock: NULL-anchor backfills must anchor to the moment the
+        # migration started, not to a fresh now_ts() per table. Per-call clocks
+        # drift across tables and make historical views irreproducible.
+        migration_time = now_ts()
         mem_links_need_temporal_backfill = bool(
             getattr(self, "_mem_links_need_temporal_backfill", False)
         )
@@ -2368,6 +2428,7 @@ class Store:
             "ALTER TABLE edge_supports ADD COLUMN valid_to_recorded_at REAL",
             "ALTER TABLE memory_entities ADD COLUMN valid_to_recorded_at REAL",
             "ALTER TABLE code_memory_links ADD COLUMN valid_to_recorded_at REAL",
+            "ALTER TABLE audit ADD COLUMN prev_hash TEXT DEFAULT ''",
             "ALTER TABLE receipt_chain_heads ADD COLUMN integrity_error TEXT DEFAULT ''",
             "ALTER TABLE operation_receipts ADD COLUMN sequence INTEGER",
             "ALTER TABLE jobs ADD COLUMN runner_id TEXT",
@@ -2496,13 +2557,13 @@ class Store:
         # row is written in the same transaction below, so an interrupted migration
         # remains < v5 and safely retries all three transforms.
         if previous_version < 5:
-            self._migrate_code_history_v5()
+            self._migrate_code_history_v5(stamp=migration_time)
             self._backfill_claim_identity_v5()
             self._backfill_memory_entities_v5()
         if previous_version < 5 or mem_links_need_temporal_backfill:
-            self._migrate_mem_link_history_v5()
+            self._migrate_mem_link_history_v5(stamp=migration_time)
         if previous_version < 6:
-            self._migrate_code_file_history_v6()
+            self._migrate_code_file_history_v6(stamp=migration_time)
         if previous_version < 7:
             # v6 deterministic vectors predate aliases and measurement features.
             # ``MemoryEngine.create`` owns the actual re-embed because only it has
@@ -2511,7 +2572,7 @@ class Store:
             self.conn.execute(
                 "INSERT OR IGNORE INTO embedding_state(identity, version, updated_at) "
                 "VALUES (?,?,?)",
-                ("deterministic_hashing", "v1_legacy", now_ts()),
+                ("deterministic_hashing", "v1_legacy", migration_time),
             )
         if previous_version < 8:
             # v7 memories predate first-class confidence. ``confidence`` is a
@@ -2563,7 +2624,7 @@ class Store:
                 self.conn.execute(
                     "INSERT OR REPLACE INTO embedding_state(identity, version, updated_at) "
                     "VALUES (?,?,?)",
-                    ("__active__", "legacy-unverified", now_ts()),
+                    ("__active__", "legacy-unverified", migration_time),
                 )
             self.conn.execute(
                 "DELETE FROM embedding_state WHERE identity='__rebuilding__'"
@@ -2654,7 +2715,7 @@ class Store:
             "INSERT OR IGNORE INTO graph_index_state "
             "(workspace_id, generation, state, active_job_id, updated_at, last_error) "
             "SELECT id, 1, 'ready', NULL, ?, '' FROM workspaces",
-            (now_ts(),),
+            (migration_time,),
         )
         # Backfill the independent receipt anchor for databases created before the
         # anchor table existed. From this point onward every append updates it atomically,
@@ -2684,10 +2745,13 @@ class Store:
                     ),
                 )
 
-        self.conn.execute(
-            "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?,?)",
-            (SCHEMA_VERSION, now_ts()),
-        )
+        # One row per applied version: fresh installs record every version up to
+        # current, upgrades record each crossed version. Reads stay on MAX(version).
+        for version in range(int(previous_version or 0) + 1, SCHEMA_VERSION + 1):
+            self.conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?,?)",
+                (version, migration_time),
+            )
 
     def _migrate_prompt_review_state_v11(self) -> None:
         """Classify memories created before explicit prompt review existed.
@@ -2957,15 +3021,18 @@ class Store:
             commit=False,
         )
 
-    def _migrate_code_history_v5(self) -> None:
+    def _migrate_code_history_v5(self, *, stamp: Optional[float] = None) -> None:
         """Give pre-v5 code graph rows open bi-temporal intervals.
 
         ``code_memory_links`` formerly had a table-level uniqueness constraint, which
         made it impossible to retain a closed link and later create the same live link.
         SQLite cannot drop that constraint in place, so rebuild that one narrow table
         transactionally before installing the partial live-uniqueness index.
+
+        NULL anchors resolve to *migration time* (the ``stamp`` captured once per
+        ``_apply_schema`` run), never to a fresh clock per table.
         """
-        stamp = now_ts()
+        stamp = now_ts() if stamp is None else float(stamp)
         self.conn.execute(
             "UPDATE symbols SET valid_from=COALESCE(valid_from, updated_at, ?), "
             "ingested_at=COALESCE(ingested_at, updated_at, ?) "
@@ -3011,14 +3078,14 @@ class Store:
                 (stamp, stamp),
             )
 
-    def _migrate_mem_link_history_v5(self) -> None:
+    def _migrate_mem_link_history_v5(self, *, stamp: Optional[float] = None) -> None:
         """Give legacy direct memory links an open bi-temporal interval.
 
         ``created_at`` was the only historical signal on old rows, so it is both
         the best available world-time and system-time start. Rows without a clock
         start at migration time rather than being projected into every past view.
         """
-        stamp = now_ts()
+        stamp = now_ts() if stamp is None else float(stamp)
         self.conn.execute(
             "UPDATE mem_links SET valid_from=COALESCE(valid_from, created_at, ?), "
             "ingested_at=COALESCE(ingested_at, created_at, ?) "
@@ -3026,9 +3093,9 @@ class Store:
             (stamp, stamp),
         )
 
-    def _migrate_code_file_history_v6(self) -> None:
+    def _migrate_code_file_history_v6(self, *, stamp: Optional[float] = None) -> None:
         """Seed temporal file manifests from the v5 current-file snapshot."""
-        stamp = now_ts()
+        stamp = now_ts() if stamp is None else float(stamp)
         rows = self.conn.execute("SELECT * FROM code_files").fetchall()
         for row in rows:
             existing = self.conn.execute(
@@ -4372,11 +4439,18 @@ class Store:
         if (
             rec.valid_from is not None
             and rec.valid_to is not None
-            and rec.valid_to < rec.valid_from
+            and rec.valid_to <= rec.valid_from
         ):
-            raise ValueError(
-                "valid_to cannot predate valid_from; the validity interval would be empty"
+            quarantined_marker = (
+                (rec.provenance or {}).get("quarantined") is True
+                or ((rec.metadata or {}).get("provenance") or {}).get("quarantined") is True
+                or ((rec.metadata or {}).get("quarantine") or {}).get("state") == "quarantined"
             )
+            if rec.valid_to < rec.valid_from or not quarantined_marker:
+                raise ValueError(
+                    "valid_to cannot predate valid_from; an empty interval is only "
+                    "valid as an explicit quarantine marker"
+                )
         # This is the last common write boundary.  Check every persisted text-bearing
         # field *before* the main row, FTS mirror, or vector are written, including
         # direct Store callers that do not go through MemoryEngine/MemoryService.
@@ -4480,10 +4554,19 @@ class Store:
                 # because the caller reconstructed an otherwise-identical record.
                 rec.modified_hlc = previous_hlc
         if (valid_from_was_explicit and rec.valid_to is not None
-                and rec.valid_to < rec.valid_from):
-            raise ValueError(
-                "valid_to cannot predate valid_from; the validity interval would be empty"
+                and rec.valid_to <= rec.valid_from):
+            quarantined_marker = (
+                (rec.provenance or {}).get("quarantined") is True
+                or ((rec.metadata or {}).get("provenance") or {}).get("quarantined") is True
+                or ((rec.metadata or {}).get("quarantine") or {}).get("state") == "quarantined"
             )
+            if rec.valid_to < rec.valid_from or not quarantined_marker:
+                raise ValueError(
+                    "valid_to cannot predate valid_from; an empty interval is only "
+                    "valid as an explicit quarantine marker"
+                )
+        if rec.id:
+            ids.assert_id_kind(rec.id, "memory")
         self.conn.execute(
             """INSERT INTO memories
                (id, workspace_id, repo_id, session_id, scope, mtype, title, content, summary,
@@ -5246,6 +5329,74 @@ class Store:
         """
         return self._secure_erase_targets(self.conn, memory_id)
 
+    def secure_erase_impact(self, memory_id: str) -> dict:
+        """Preview what :meth:`secure_erase_memory` would remove, without mutating state.
+
+        Returns ``{"receipt_refs": int, "event_refs": int, "backup_note": str,
+        "wal_vacuum_status": dict}``: counts of operation-receipt and event rows
+        referencing the erase target set, a human-readable note about recognised
+        local backups, and the WAL/vacuum maintenance that erasure would attempt.
+        """
+        targets = self._secure_erase_targets(self.conn, memory_id)
+        receipt_refs = 0
+        if self._has_table(self.conn, "operation_receipts"):
+            for target_id in targets:
+                try:
+                    row = self.conn.execute(
+                        "SELECT COUNT(*) AS n FROM operation_receipts WHERE payload LIKE ?",
+                        (f"%{_escape_like(target_id)}%",),
+                    ).fetchone()
+                    receipt_refs += int(row["n"] or 0) if row is not None else 0
+                except sqlite3.OperationalError:
+                    break
+        event_refs = 0
+        if self._has_table(self.conn, "events"):
+            for target_id in targets:
+                try:
+                    row = self.conn.execute(
+                        "SELECT COUNT(*) AS n FROM events WHERE refs LIKE ?",
+                        (f"%{_escape_like(target_id)}%",),
+                    ).fetchone()
+                    event_refs += int(row["n"] or 0) if row is not None else 0
+                except sqlite3.OperationalError:
+                    break
+        backups = self._recognised_local_backups()
+        if backups:
+            backup_note = (
+                f"{len(backups)} recognised local backup(s) would also be erased: "
+                + ", ".join(str(path) for path in backups)
+            )
+        else:
+            backup_note = (
+                "No recognised local SQLite recovery backups found. Filesystem "
+                "snapshots, copied/exported databases, remote sync peers, and any "
+                "other backups must still be erased or rotated separately."
+            )
+        durable = bool(self.path) and not _is_memory_database_path(self.path)
+        if durable:
+            try:
+                journal = self.conn.execute("PRAGMA journal_mode").fetchone()
+                journal_mode = str(journal[0]).lower() if journal is not None else "unknown"
+            except Exception:
+                journal_mode = "unknown"
+            wal_vacuum_status: dict = {
+                "wal": f"checkpoint_truncate_pending (journal_mode={journal_mode})",
+                "vacuum": "rebuild_pending",
+                "secure_delete": True,
+            }
+        else:
+            wal_vacuum_status = {
+                "wal": "not_applicable",
+                "vacuum": "not_applicable",
+                "secure_delete": True,
+            }
+        return {
+            "receipt_refs": receipt_refs,
+            "event_refs": event_refs,
+            "backup_note": backup_note,
+            "wal_vacuum_status": wal_vacuum_status,
+        }
+
     @classmethod
     def _erase_memory_rows(cls, conn, memory_id: str, *, actor: str = "user") -> dict:
         """Remove a memory and all known local derivatives from one SQLite database.
@@ -5400,11 +5551,43 @@ class Store:
             conn.execute("DELETE FROM audit WHERE target=?", (memory_id,))
         conn.execute("DELETE FROM memories WHERE id=?", (memory_id,))
         if "audit" in tables:
-            conn.execute(
-                "INSERT INTO audit(id, ts, actor, action, target, detail) VALUES (?,?,?,?,?,?)",
-                (ids.new_id("audit"), now_ts(), actor, "secure_erase", memory_id,
-                 "per-memory secure erasure completed; content intentionally omitted"),
-            )
+            try:
+                actor = _validate_audit_actor(actor)
+            except ValueError:
+                actor = "user"
+            marker_ts = now_ts()
+            marker_prev = ""
+            try:
+                latest = conn.execute(
+                    "SELECT prev_hash, ts, actor, action, target, detail FROM audit "
+                    "ORDER BY ts DESC, rowid DESC LIMIT 1"
+                ).fetchone()
+                if latest is not None:
+                    ancestor = latest["prev_hash"] if "prev_hash" in latest.keys() else ""
+                    marker_prev = _audit_entry_hash(
+                        str(ancestor or ""),
+                        float(latest["ts"] or 0.0),
+                        str(latest["actor"] or ""),
+                        str(latest["action"] or ""),
+                        str(latest["target"] or ""),
+                        str(latest["detail"] or ""),
+                    )
+            except Exception:
+                marker_prev = ""
+            try:
+                conn.execute(
+                    "INSERT INTO audit(id, ts, actor, action, target, detail, prev_hash) "
+                    "VALUES (?,?,?,?,?,?,?)",
+                    (ids.new_id("audit"), marker_ts, actor, "secure_erase", memory_id,
+                     "per-memory secure erasure completed; content intentionally omitted",
+                     marker_prev),
+                )
+            except sqlite3.OperationalError:
+                conn.execute(
+                    "INSERT INTO audit(id, ts, actor, action, target, detail) VALUES (?,?,?,?,?,?)",
+                    (ids.new_id("audit"), marker_ts, actor, "secure_erase", memory_id,
+                     "per-memory secure erasure completed; content intentionally omitted"),
+                )
         return {
             "present": True,
             "removed": True,
@@ -5634,39 +5817,37 @@ class Store:
         # ``_fts_terms`` intentionally removes punctuation for FTS syntax.  In the
         # LIKE fallback, retain the literal query first: C++ and v1.2 must not be
         # reduced to broad C/v1/2 matches that consume the caller's result limit.
-        def search_like(
-            search_terms: list[str], limit: int, excluded: Optional[list[str]] = None
-        ) -> list[str]:
-            clauses = []
-            query_params: list[Any] = []
-            for term in search_terms:
-                like = f"%{_escape_like(term)}%"
-                clauses.append(
-                    "(f.content LIKE ? ESCAPE '\\' OR f.title LIKE ? ESCAPE '\\' "
-                    "OR f.keywords LIKE ? ESCAPE '\\')"
-                )
-                query_params.extend((like, like, like))
-            if not clauses or limit <= 0:
-                return []
-            exclusions = ""
-            if excluded:
-                marks = ",".join("?" for _ in excluded)
-                exclusions = f" AND f.id NOT IN ({marks})"
-            rows = self.conn.execute(
-                "SELECT f.id FROM mem_fts f JOIN memories m ON m.id = f.id "
-                "WHERE (" + " OR ".join(clauses) + ")" + extra + exclusions + " LIMIT ?",
-                (*query_params, *params, *(excluded or []), limit),
-            ).fetchall()
-            return [row["id"] for row in rows]
-
-        literal_ids = search_like([q], k)
-        if len(literal_ids) >= k:
-            return [(memory_id, 0.5) for memory_id in literal_ids]
-        # Add the ordinary token/inflection matches only after literal results, and
-        # avoid repeating a literal term for simple punctuation-free queries.
-        variants = [term for term in terms if term.casefold() != q.casefold()]
-        variant_ids = search_like(variants, k - len(literal_ids), literal_ids)
-        return [(memory_id, 0.5) for memory_id in [*literal_ids, *variant_ids]]
+        # Scores approximate BM25 order without FTS5: every matched term contributes
+        # (title counts double, like a field boost), the literal query counts double
+        # again (like an exact-phrase boost), and more matched terms outrank fewer.
+        scored_terms = [q] + [t for t in terms if t.casefold() != q.casefold()]
+        if not scored_terms or k <= 0:
+            return []
+        score_parts: list[str] = []
+        where_parts: list[str] = []
+        like_params: list[Any] = []
+        for index, term in enumerate(scored_terms):
+            like = f"%{_escape_like(term)}%"
+            boost = 2 if index == 0 else 1
+            score_parts.append(
+                f"((CASE WHEN f.title LIKE ? ESCAPE '\\' THEN {2 * boost} ELSE 0 END)"
+                f" + (CASE WHEN f.content LIKE ? ESCAPE '\\' THEN {boost} ELSE 0 END)"
+                f" + (CASE WHEN f.keywords LIKE ? ESCAPE '\\' THEN {boost} ELSE 0 END))"
+            )
+            where_parts.append(
+                "(f.content LIKE ? ESCAPE '\\' OR f.title LIKE ? ESCAPE '\\' "
+                "OR f.keywords LIKE ? ESCAPE '\\')"
+            )
+            like_params.extend((like, like, like))
+        score_expr = " + ".join(score_parts)
+        rows = self.conn.execute(
+            f"SELECT f.id, ({score_expr}) AS score FROM mem_fts f "
+            f"JOIN memories m ON m.id = f.id "
+            f"WHERE ({' OR '.join(where_parts)})" + extra +
+            " ORDER BY score DESC, f.id LIMIT ?",
+            (*like_params, *like_params, *params, k),
+        ).fetchall()
+        return [(row["id"], float(row["score"])) for row in rows]
 
     # ── graph ─────────────────────────────────────────────────────────────────
     def upsert_entity(self, node: Node, *, commit: bool = True) -> str:
@@ -5675,6 +5856,8 @@ class Store:
             return self._upsert_entity_impl(node)
 
     def _upsert_entity_impl(self, node: Node) -> str:
+        if node.id:
+            ids.assert_id_kind(node.id, "entity")
         normalized = normalize_entity_name(node.name)
         existing = self.conn.execute(
             "SELECT id FROM entities WHERE workspace_id=? AND repo_id IS ? "
@@ -5874,8 +6057,8 @@ class Store:
                     valid_to_recorded_at, requested_known, expired_at,
                 ),
             ).fetchone()
-        if valid_to is not None and valid_to < requested_valid:
-            raise ValueError("memory-entity valid_to cannot predate valid_from")
+        if valid_to is not None and valid_to <= requested_valid:
+            raise ValueError("memory-entity valid_to cannot predate or equal valid_from")
         if existing is not None:
             if valid_to is None and expired_at is None:
                 desired_confidence = max(
@@ -6042,10 +6225,14 @@ class Store:
         ):
             setattr(edge, name, _finite_timestamp(getattr(edge, name), name))
         edge.weight = _finite_number(edge.weight, "weight")
+        if edge.id:
+            ids.assert_id_kind(edge.id, "edge")
         eid = edge.id or ids.new_id("edge")
+        edge_valid_from_was_explicit = edge.valid_from is not None
         edge_valid_from = edge.valid_from if edge.valid_from is not None else now_ts()
-        if edge.valid_to is not None and edge.valid_to < edge_valid_from:
-            raise ValueError("edge valid_to cannot predate valid_from")
+        if (edge.valid_to is not None and edge_valid_from_was_explicit
+                and edge.valid_to <= edge_valid_from):
+            raise ValueError("edge valid_to cannot predate or equal valid_from")
         layer = normalize_graph_layer(edge.layer, edge.relation).value
         source, target = edge.src, edge.dst
         if edge.relation in {"co_occurs", "related", "associated_with"} and target < source:
@@ -6256,8 +6443,8 @@ class Store:
         timestamp = now_ts()
         support_valid_from = valid_from if valid_from is not None else timestamp
         support_ingested_at = ingested_at if ingested_at is not None else timestamp
-        if valid_to is not None and valid_to < support_valid_from:
-            raise ValueError("edge support valid_to cannot predate valid_from")
+        if valid_to is not None and valid_to <= support_valid_from:
+            raise ValueError("edge support valid_to cannot predate or equal valid_from")
         for memory_id in _provenance_memory_ids(provenance):
             if valid_to is None and expired_at is None:
                 current = self.conn.execute(
@@ -6797,8 +6984,8 @@ class Store:
         stamp = now_ts()
         world_start = stamp if valid_from is None else valid_from
         system_start = stamp if ingested_at is None else ingested_at
-        if valid_to is not None and valid_to < world_start:
-            raise ValueError("link valid_to cannot predate valid_from")
+        if valid_to is not None and valid_to <= world_start:
+            raise ValueError("link valid_to cannot predate or equal valid_from")
         owns_transaction = not self.conn.transaction_owned_by_current_thread()
         savepoint = ""
         if owns_transaction:
@@ -6941,8 +7128,8 @@ class Store:
         stamp = now_ts()
         world_start = stamp if valid_from is None else valid_from
         system_start = stamp if ingested_at is None else ingested_at
-        if valid_to is not None and valid_to < world_start:
-            raise ValueError("link valid_to cannot predate valid_from")
+        if valid_to is not None and valid_to <= world_start:
+            raise ValueError("link valid_to cannot predate or equal valid_from")
         owns_transaction = not self.conn.transaction_owned_by_current_thread()
         savepoint = ""
         if owns_transaction:
@@ -7909,10 +8096,44 @@ class Store:
 
     def audit(self, actor: str, action: str, target: str, detail: str = "",
               *, commit: bool = True) -> None:
-        self.conn.execute(
-            "INSERT INTO audit(id, ts, actor, action, target, detail) VALUES (?,?,?,?,?,?)",
-            (ids.new_id("audit"), now_ts(), actor, action, target, detail),
-        )
+        actor = _validate_audit_actor(actor)
+        ts = now_ts()
+        prev_hash = ""
+        try:
+            latest = self.conn.execute(
+                "SELECT prev_hash, ts, actor, action, target, detail FROM audit "
+                "ORDER BY ts DESC, rowid DESC LIMIT 1"
+            ).fetchone()
+        except sqlite3.OperationalError:
+            latest = None
+        if latest is not None:
+            try:
+                ancestor = latest["prev_hash"] if "prev_hash" in latest.keys() else ""
+            except Exception:
+                ancestor = ""
+            try:
+                prev_hash = _audit_entry_hash(
+                    str(ancestor or ""),
+                    float(latest["ts"] or 0.0),
+                    str(latest["actor"] or ""),
+                    str(latest["action"] or ""),
+                    str(latest["target"] or ""),
+                    str(latest["detail"] or ""),
+                )
+            except Exception:
+                prev_hash = ""
+        try:
+            self.conn.execute(
+                "INSERT INTO audit(id, ts, actor, action, target, detail, prev_hash) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (ids.new_id("audit"), ts, actor, action, target, detail, prev_hash),
+            )
+        except sqlite3.OperationalError:
+            # Pre-migration database without the additive prev_hash column.
+            self.conn.execute(
+                "INSERT INTO audit(id, ts, actor, action, target, detail) VALUES (?,?,?,?,?,?)",
+                (ids.new_id("audit"), ts, actor, action, target, detail),
+            )
         if commit:
             self.conn.commit()
 

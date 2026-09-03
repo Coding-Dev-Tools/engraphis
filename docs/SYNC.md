@@ -121,6 +121,41 @@ chain verification. Watch their size in the database file (for example with
 the supported path for long-lived installations is archiving or rotating the whole database,
 not deleting rows.
 
+### Secure erasure, confirmation, and rotation
+
+`MemoryService.secure_erase()` (and `engraphis_secure_erase` / `POST /api/secure-erase`)
+is confirm-gated: it requires explicit local-operator confirmation
+(`confirmed=True`; `confirmed=true` over MCP). Without it the call fails closed with a
+validation error. `engraphis_forget` remains a deprecated retire-with-history alias: it never deletes,
+and its responses now say so and point at `secure_erase`.
+
+On success the response carries the Store's `impact` report alongside the erase result:
+`receipt_refs` / `event_refs` (content-free references touched by the erasure),
+`backup_note` (which recognised local recovery backups were scanned), and
+`wal_vacuum_status` (whether secure-delete/WAL/VACUUM maintenance completed). The
+erasure itself is recorded in the hash-chained audit trail.
+
+Rotation runbook for a leaked credential (erasure is local-only remediation, not
+universal deletion):
+
+1. Rotate or revoke the credential first: erasure cannot recall data an agent
+   already read.
+2. Run the confirmed `secure_erase` and read the `impact` report: confirm
+   `wal_vacuum_status`, note `receipt_refs` / `event_refs`, and follow `backup_note`.
+3. Remediate separately everything Engraphis cannot erase: filesystem snapshots,
+   copied/exported databases, cloud backups, and remote sync peers that have not yet
+   accepted an eligible `remote_erasure` marker. `never_export` markers (secret,
+   session, reserved user-scope, migrated legacy) stay local and never notify peers.
+
+Peer erasures are never applied blindly. A `remote_erasure` tombstone for a locally
+quarantined or pending-review row is *held* for operator review: local bytes stay
+quarantined (visible in the review queue), nothing is deleted, and the hold is
+reported as `tombstones_held` with a `sync_tombstone_held` audit event, never
+silently dropped. Operators may additionally configure `SyncEngine(...,
+erase_device_allowlist={...})` so erasures asserted by any other device are held the
+same way. These holds complement the per-device generation/hash-chain rollback gate,
+which still rejects stale or forked snapshots before anything is applied.
+
 ## Merge semantics
 
 Sync exchanges bounded workspace snapshots and merges them deterministically. Existing

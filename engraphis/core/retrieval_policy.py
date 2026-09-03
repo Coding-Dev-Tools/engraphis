@@ -44,10 +44,29 @@ class ProfileConfig:
     code_scale: float = 1.0
     graph_presence_bonus: float = 0.0
     code_presence_bonus: float = 0.0
-    # Controlled ablations may use the vector backend's raw cosine as an
-    # additional confidence signal. Keep this opt-in: established profiles
-    # preserve rank-only semantic fusion by default.
-    semantic_confidence_calibration: bool = False
+    # The vector backend returns cosine similarity while the other arms use opaque
+    # scores, so a singleton vector result min-max normalizes to 1.0 even when its
+    # raw cosine is near zero. Calibration multiplies rank evidence by the clamped
+    # raw cosine, killing that false 1.0. Enabled by default on every profile.
+    semantic_confidence_calibration: bool = True
+    # Blend between fused retrieval evidence and cross-encoder rerank evidence,
+    # applied after per-source normalization: (fusion_weight, rerank_weight).
+    rerank_blend: tuple[float, float] = (0.7, 0.3)
+    # Deterministic post-normalization preference for consolidated digests and
+    # entity profiles over the raw episodes they summarize. Small by design: a
+    # raw episode that actually matches the query still outranks a digest the
+    # query merely grazes.
+    consolidation_bonus: float = 0.05
+    # Default per-arm candidate depth when the operator sets neither
+    # ``arm_candidate_k_cap=`` nor ``ENGRAPHIS_RECALL_ARM_CANDIDATE_K``. Keeps
+    # the prompt-only escalation loop bounded without touching the caller's
+    # requested candidate_k floor.
+    arm_candidate_k_default: int = 200
+    # Opt-in graph-seed fallback: when the query names no known entity, project
+    # lexical top-m hits onto entities they mention and link (paraphrase rescue
+    # for the graph arm). Off by default so published retrieval-evidence numbers
+    # stay byte-stable; enable via ProfileConfig or per-recall arm_config.
+    graph_seed_fallback: bool = False
 
 
 _CONFIGS = {
@@ -57,8 +76,9 @@ _CONFIGS = {
     "fast": ProfileConfig("fast", True, True, False, False),
     "lexical": ProfileConfig("lexical", False, True, False, False),
     # Specialized profiles retain supporting arms but make their declared
-    # evidence type decisive. ``balanced`` stays byte-for-byte equivalent to
-    # the established scoring behavior, and ``auto`` remains opt-in.
+    # evidence type decisive. Scoring knobs (calibration, rerank blend,
+    # consolidation bonus, arm depth) are shared profile defaults; only the
+    # arm scales and presence bonuses above specialize behavior.
     "graph": ProfileConfig(
         "graph", True, True, True, False,
         graph_scale=3.0, graph_presence_bonus=1.5,
