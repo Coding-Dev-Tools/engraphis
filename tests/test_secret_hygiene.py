@@ -513,3 +513,21 @@ def test_sync_drops_secret_bearing_rows_before_store_upsert():
     assert workspace
     assert report["rejected"] == 1
     assert store.count_memories() == 0
+
+
+def test_service_and_engine_redact_secrets_when_opted_in():
+    service = MemoryService.create(":memory:")
+    # By default, storing an API key raises ValidationError
+    with pytest.raises(ValidationError, match="potential OpenAI API key"):
+        service.remember(f"Debugging log with key {_LEAK}", workspace="acme")
+
+    # With redact_secrets=True, it succeeds and masks the credential safely
+    result = service.remember(
+        f"Debugging log with key {_LEAK}", workspace="acme", redact_secrets=True
+    )
+    assert result["stored"] is True
+    mem = service.store.get_memory(result["id"])
+    assert mem is not None
+    assert _LEAK not in mem.content
+    assert "<redacted>" in mem.content
+

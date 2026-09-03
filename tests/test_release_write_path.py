@@ -88,3 +88,27 @@ def test_keyed_number_change_invalidates_predecessor():
         for record in eng.store.list_memories(SearchFilter(workspace_id=wid))
     }
     assert old_id not in live and new_id in live
+
+
+def test_remember_with_resolution_provides_superseded_detail():
+    eng, wid, _rid = _engine()
+    key = {"subject_key": "api.rate_limit", "claim_kind": "configured_value"}
+    old_id = eng.remember(
+        "The API rate limit is 100 requests per minute per API key.",
+        workspace_id=wid, **key,
+    )
+    eng.store.reinforce(old_id)
+
+    res = eng.remember_with_resolution(
+        "The API rate limit is now 500 requests per minute per API key.",
+        workspace_id=wid, **key,
+    )
+    assert res["op"] == "invalidate"
+    assert res["superseded"] == [old_id]
+    assert "superseded_detail" in res
+    detail = res["superseded_detail"]
+    assert detail["id"] == old_id
+    assert "100 requests" in detail["content_preview"]
+    assert detail["access_count"] >= 1
+    assert detail["stability_days"] > 0
+
