@@ -423,6 +423,26 @@
       gl.bufferData(gl.ARRAY_BUFFER, visibility, gl.STATIC_DRAW);
       state.edgeVertexCount = links * 2;
     }
+    function uploadEdgePositions() {
+      if (!gl || !edgeProgram || !state.totalLinks || !state.edgeSources) return;
+      const links = state.totalLinks;
+      if (!state.edgePositions || state.edgePositions.length !== links * 4) {
+        state.edgePositions = new Float32Array(links * 4);
+      }
+      const positions = state.edgePositions;
+      const pos = state.positions;
+      const sources = state.edgeSources, targets = state.edgeTargets;
+      for (let index = 0; index < links; index += 1) {
+        const source = sources[index], target = targets[index];
+        const s = source * 2, t = target * 2, p = index * 4;
+        positions[p] = pos[s];
+        positions[p + 1] = pos[s + 1];
+        positions[p + 2] = pos[t];
+        positions[p + 3] = pos[t + 1];
+      }
+      gl.bindBuffer(gl.ARRAY_BUFFER, edgeBuffers.position);
+      gl.bufferData(gl.ARRAY_BUFFER, positions, gl.DYNAMIC_DRAW);
+    }
 
     /* ── Community regions: soft district outlines that make the scene read as a map ── */
     function computeCommunityRegions() {
@@ -793,11 +813,12 @@
         const top = Math.floor((point[1] - 6 - fontPx / 2) / cell), bottom = Math.ceil((point[1] - 6 + fontPx / 2) / cell);
         for (let gx = left; gx <= right; gx += 1) {
           for (let gy = top; gy <= bottom; gy += 1) {
-            if (occupied.has(`${gx}:${gy}`)) return;
+            const key = ((gx + 32768) << 16) | ((gy + 32768) & 0xFFFF);
+            if (occupied.has(key)) return;
           }
         }
         for (let gx = left; gx <= right; gx += 1) {
-          for (let gy = top; gy <= bottom; gy += 1) occupied.add(`${gx}:${gy}`);
+          for (let gy = top; gy <= bottom; gy += 1) occupied.add(((gx + 32768) << 16) | ((gy + 32768) & 0xFFFF));
         }
         labelContext.fillText(text, point[0] + 6, point[1] - 6);
         state.labelLayout.push({ text, x: point[0] + 6, y: point[1] - 6 });
@@ -956,7 +977,7 @@
         }
       });
       uploadNodePositions();
-      uploadEdges();
+      if (state.edgeVertexCount) uploadEdgePositions(); else uploadEdges();
       state.pickDirty = true;
       state.lastLabelKey = '';
       if (doFit) fit(); else camera();
@@ -1055,7 +1076,9 @@
       }
       if (message.type === 'progress') {
         state.layoutPending = Number(message.pass) < Number(message.total);
-        stats({ layoutPending: state.layoutPending });
+        if (Number(message.pass) % 4 === 0 || !state.layoutPending) {
+          stats({ layoutPending: state.layoutPending });
+        }
         return;
       }
       if (message.type === 'layout') {

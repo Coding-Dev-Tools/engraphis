@@ -3599,7 +3599,7 @@
       bodies.forEach((node, index) => {
         const x = node.x, y = node.y;
         const cellX = Math.floor(x / cellSize), cellY = Math.floor(y / cellSize);
-        const key = cellX + ',' + cellY;
+        const key = (cellX * 73856093) ^ (cellY * 19349663);
         if (!grid.has(key)) grid.set(key, []);
         grid.get(key).push({ node, index, x, y, radius: bodyRadius(node), cellX, cellY });
       });
@@ -3607,9 +3607,8 @@
       grid.forEach(bucket => bucket.forEach(left => {
         for (let offsetX = -1; offsetX <= 1; offsetX++) {
           for (let offsetY = -1; offsetY <= 1; offsetY++) {
-            const candidates = grid.get(
-              (left.cellX + offsetX) + ',' + (left.cellY + offsetY)
-            ) || [];
+            const candidateKey = ((left.cellX + offsetX) * 73856093) ^ ((left.cellY + offsetY) * 19349663);
+            const candidates = grid.get(candidateKey) || [];
             candidates.forEach(right => {
               if (right.index <= left.index) return;
               if (opts.sameCommunityOnly === true
@@ -3748,7 +3747,7 @@
       group.fixed = group.fixed || node.anchor_role === 'global' || node.id === opts.fixedNodeId;
       groupForNode.set(node, group);
       const cellX = Math.floor(node.x / cellSize), cellY = Math.floor(node.y / cellSize);
-      const key = cellX + ',' + cellY;
+      const key = (cellX * 73856093) ^ (cellY * 19349663);
       if (!grid.has(key)) grid.set(key, []);
       grid.get(key).push({
         node, index, x: node.x, y: node.y, radius: bodyRadius(node), cellX, cellY,
@@ -3759,9 +3758,8 @@
     grid.forEach(bucket => bucket.forEach(left => {
       for (let offsetX = -1; offsetX <= 1; offsetX++) {
         for (let offsetY = -1; offsetY <= 1; offsetY++) {
-          const candidates = grid.get(
-            (left.cellX + offsetX) + ',' + (left.cellY + offsetY)
-          ) || [];
+          const candidateKey = ((left.cellX + offsetX) * 73856093) ^ ((left.cellY + offsetY) * 19349663);
+          const candidates = grid.get(candidateKey) || [];
           candidates.forEach(right => {
             if (right.index <= left.index) return;
             const crossCommunity = communityKey(left.node) !== communityKey(right.node);
