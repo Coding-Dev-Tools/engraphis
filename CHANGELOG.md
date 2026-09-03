@@ -3,6 +3,29 @@
 All notable changes to Engraphis are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions use SemVer.
 
+## [1.7.1] - 2026-09-03
+
+### Fixed
+
+- Isolated stdio transport wire in `engraphis.mcp_server`: redirected `sys.stdout`
+  to `sys.stderr` while preserving the raw binary stream for JSON-RPC wire
+  communication, preventing external library stdout chatter (e.g. PyTorch,
+  Hugging Face, tqdm) from corrupting the wire and triggering `write EOF` stream
+  disconnection errors in Node.js harnesses (Command Code, Cursor, Claude Code, Cline).
+- Added thread-safe singleton initialization with `threading.Lock()` to
+  `engraphis.mcp_server.service()`.
+- Added non-blocking background daemon warmup (`_start_background_warmup()`) in
+  `engraphis.mcp_server` to pre-warm the database and embedder, eliminating
+  cold-start latency and timeout disconnects on the first MCP tool call. Can be
+  bypassed with `ENGRAPHIS_MCP_WARMUP=0`.
+- Added cache-first fast path (`local_files_only=True`) in
+  `SentenceTransformerEmbedder` (`engraphis/backends/embedder_st.py`), allowing
+  locally cached models to initialize in ~0.3s without network calls or remote
+  registry checks.
+- Added embedder forward-pass diagnostic check to `engraphis-init --check` and
+  added `engraphis-init --prefetch` command to download and cache model weights
+  during setup.
+
 ## [1.7] - 2026-09-03
 
 ### Added
