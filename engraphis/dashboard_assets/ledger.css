@@ -505,13 +505,19 @@ body[data-theme="paper"] .theme-switcher select { color-scheme: light; }
 
 label { color: var(--c-mid); font-size: 12px; }
 label:not(.check-row, .workspace-switcher, .billing-toggle) { display: grid; gap: 6px; }
-input, select, textarea {
+input:not([type="range"]), select, textarea {
   min-width: 0;
   padding: 9px 10px;
   border: 1px solid var(--c-line2);
   border-radius: 4px;
   background: var(--c-inset);
   color: var(--c-fg);
+}
+input[type="range"] {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
 }
 textarea { resize: vertical; line-height: 1.5; }
 input::placeholder, textarea::placeholder { color: var(--c-dim); opacity: 1; }
