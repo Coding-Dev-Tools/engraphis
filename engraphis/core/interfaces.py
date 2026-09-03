@@ -245,11 +245,13 @@ class SearchFilter:
     # Appended after every 1.x field so positional construction remains compatible.
     valid_at: Optional[float] = None
     known_at: Optional[float] = None
+    modified_since: Optional[float] = None
 
     def __post_init__(self) -> None:
         self.as_of = _finite_timestamp(self.as_of, "as_of")
         self.valid_at = _finite_timestamp(self.valid_at, "valid_at")
         self.known_at = _finite_timestamp(self.known_at, "known_at")
+        self.modified_since = _finite_timestamp(self.modified_since, "modified_since")
         if self.as_of is not None and self.valid_at is not None:
             if self.as_of != self.valid_at:
                 raise ValueError("as_of and valid_at must match when both are supplied")

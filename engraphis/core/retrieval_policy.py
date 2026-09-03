@@ -17,12 +17,12 @@ RETRIEVAL_PROFILES = frozenset({"balanced", "auto", "fast", "lexical", "graph", 
 CANDIDATE_DEPTH_MODES = frozenset({"fixed", "adaptive"})
 
 _CODE_RE = re.compile(
-    r"(?:\w+[./\\])+\w+|::|->|\b(?:class|def|function|import|module)\b|"
+    r"(?:\w+[./\\])+\w+|::|->|\b(?:class|def|function|import|interface|module|struct)\b|"
     r"\b[A-Za-z_]\w*\([^)]*\)",
     re.IGNORECASE,
 )
 _GRAPH_RE = re.compile(
-    r"\b(?:calls?|causes?|depends?|impact|path|related|relationship|why)\b",
+    r"\b(?:calls?|causes?|connected|connections?|depends?|impact|path|related|relationship|superseded|supersedes|why)\b",
     re.IGNORECASE,
 )
 _LEXICAL_RE = re.compile(

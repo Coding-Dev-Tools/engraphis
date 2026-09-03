@@ -67,7 +67,7 @@ from engraphis.core.poisoning import (
 )
 from engraphis.core.query_planner import PLANNING_MODES
 from engraphis.core.retrieval_policy import CANDIDATE_DEPTH_MODES, RETRIEVAL_PROFILES
-from engraphis.core.secrets import SecretDetectedError, reject_secrets
+from engraphis.core.secrets import SecretDetectedError, redact_secrets as _redact_secrets, reject_secrets
 from engraphis.core.store import (
     _loads,
     _merge_edge_provenance,
@@ -1718,13 +1718,18 @@ class MemoryService:
                  subject_key: str = "", claim_kind: str = "",
                  _local_cli_operator: bool = False,
                  _local_agent_operator: bool = False,
-                 _ingress: str = "service") -> dict:
+                 _ingress: str = "service",
+                 redact_secrets: bool = False) -> dict:
         """Store one memory. Returns its id, resolved scope, and the resolution
         outcome (``op``: add/noop/invalidate/relate — see
         ``MemoryEngine.remember_with_resolution``).
         """
         content = _clean_text(content, field="content", max_chars=MAX_CONTENT_CHARS)
         title = _clean_text(title, field="title", max_chars=MAX_TITLE_CHARS, required=False)
+        if redact_secrets:
+            content = _redact_secrets(content)
+            if title:
+                title = _redact_secrets(title)
         _reject_secret_capture((
             ("content", content), ("title", title), ("keywords", keywords),
             ("metadata", metadata), ("subject_key", subject_key), ("claim_kind", claim_kind),
@@ -1805,6 +1810,7 @@ class MemoryService:
                 valid_from=valid_from,
                 subject_key=subject_key, claim_kind=claim_kind,
                 resolve_conflicts=bool(resolve_conflicts),
+                redact_secrets=redact_secrets,
             )
         except ValueError as exc:
             if str(exc).startswith("valid_from "):
@@ -1824,6 +1830,8 @@ class MemoryService:
             out["resolution"] = result.get("reason", "")
         if result["op"] == "invalidate":
             out["superseded"] = result["superseded"]
+            if "superseded_detail" in result:
+                out["superseded_detail"] = result["superseded_detail"]
         if result["op"] == "relate":
             out["related_to"] = result.get("related_to")
         if result["op"] == "quarantined":

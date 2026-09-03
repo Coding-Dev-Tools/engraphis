@@ -63,6 +63,9 @@ def test_fast_profile_skips_graph_traversal_for_latency_sensitive_recalls() -> N
         ('Find the exact "RATE_LIMIT" identifier.', "lexical"),
         ("What did we decide for the launch?", "balanced"),
         ("Why does Handler.handle() call the API_KEY module?", "code"),
+        ("How is auth connected to billing?", "graph"),
+        ("Find the struct definition", "code"),
+        ("What was superseded by the v2 migration?", "graph"),
     ],
 )
 def test_auto_routing_is_deterministic_and_uses_specific_signals_first(
