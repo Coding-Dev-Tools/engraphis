@@ -1885,7 +1885,7 @@ test('served Ledger wires normalized spacetime controls, overlay, and orbit paus
     await expect.poll(() => page.evaluate(() => {
       const control = document.getElementById('graph-black-hole-mass');
       const previous = control.value;
-      control.value = '161';
+      control.value = '170';
       control.dispatchEvent(new Event('input', { bubbles: true }));
       const applied = window.__engraphisGraph.state().settings.blackHoleMass;
       control.value = previous;
