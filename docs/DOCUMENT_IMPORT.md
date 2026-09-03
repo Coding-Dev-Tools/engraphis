@@ -55,8 +55,10 @@ name. This label is part of the local source identity, so unrelated collections 
 share a re-import lineage. Select a saved source when resuming or re-importing that collection.
 
 The browser processes selected bytes locally and does not retain a dashboard upload copy. The
-trusted dashboard flow requires its local owner-browser/CSRF boundary and an
-`ENGRAPHIS_API_TOKEN`; in zero-token loopback mode, use the CLI.
+wizard always runs behind the local owner-browser/CSRF boundary. In token deployments that
+boundary is bound to the browser session minted from `ENGRAPHIS_API_TOKEN`; in zero-token
+loopback mode the same CSRF confirmation applies to the loopback-only runtime, so the wizard
+works without configuration.
 
 ## Supported formats
 
