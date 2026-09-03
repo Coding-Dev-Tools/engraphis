@@ -837,6 +837,10 @@ def memory_matches_filter(rec: MemoryRecord, flt: Optional[SearchFilter], *,
             return False
         if flt.mtypes is not None and rec.mtype not in flt.mtypes:
             return False
+        if flt.modified_since is not None:
+            mod_ts = max(rec.ingested_at or 0.0, getattr(rec, "updated_at", 0.0) or 0.0)
+            if mod_ts < flt.modified_since:
+                return False
     if include_invalid:
         return True
     valid_at, known_at = _temporal_anchors(flt, valid_at=at)
@@ -9471,6 +9475,9 @@ class Store:
                     marks = ",".join("?" for _ in flt.mtypes)
                     where.append(f"{p}mtype IN ({marks})")
                     params.extend(_enum(m) for m in flt.mtypes)
+            if flt.modified_since is not None:
+                where.append(f"{p}ingested_at>=?")
+                params.append(flt.modified_since)
         if not include_invalid:
             valid_at, known_at = _temporal_anchors(flt)
             where.append(f"({p}valid_from IS NULL OR {p}valid_from<=?)")

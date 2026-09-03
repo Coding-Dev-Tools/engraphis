@@ -68,7 +68,7 @@ from engraphis.core.resolve import (
     ResolutionOp,
     resolve,
 )
-from engraphis.core.secrets import reject_secrets
+from engraphis.core.secrets import redact_secrets as _redact_secrets, reject_secrets
 from engraphis.core.store import (
     Store,
     _is_memory_database_path,
@@ -829,7 +829,8 @@ class MemoryEngine:
                  valid_from: Optional[float] = None, resolve_conflicts: bool = True,
                  candidate_k: int = 5, subject_key: str = "", claim_kind: str = "",
                  _trusted_graph_keys: Optional[frozenset] = None,
-                 _transactional_finalizer: Optional[Callable[[str], None]] = None) -> str:
+                 _transactional_finalizer: Optional[Callable[[str], None]] = None,
+                 redact_secrets: bool = False) -> str:
         """Store one memory. Returns the resulting record id: a new id for ADD/
         INVALIDATE/quarantine, or the existing memory's id if this was resolved as a
         NOOP (near-duplicate). See ``remember_with_resolution`` for decision detail.
@@ -842,6 +843,7 @@ class MemoryEngine:
             candidate_k=candidate_k, subject_key=subject_key, claim_kind=claim_kind,
             _trusted_graph_keys=_trusted_graph_keys,
             _transactional_finalizer=_transactional_finalizer,
+            redact_secrets=redact_secrets,
         )["id"]
 
     def remember_with_resolution(self, content: str, *, workspace_id: str,
@@ -855,7 +857,8 @@ class MemoryEngine:
                  _trusted_graph_keys: Optional[frozenset] = None,
                  _approval_override: bool = False,
                  _transactional_finalizer: Optional[Callable[[str], None]] = None,
-                 extra_neighbors: Optional[list] = None) -> dict:
+                 extra_neighbors: Optional[list] = None,
+                 redact_secrets: bool = False) -> dict:
         """Store one memory with deterministic conflict resolution.
 
         Returns ``{"id", "op", ...}`` where ``op`` is one of:
@@ -871,6 +874,10 @@ class MemoryEngine:
         * ``"quarantined"`` — an explicitly untrusted payload matched the deterministic
           poisoning policy; retained only for governed historical inspection.
         """
+        if redact_secrets:
+            content = _redact_secrets(content)
+            if title:
+                title = _redact_secrets(title)
         # Reject credentials before embedding, conflict resolution, graph extraction, or
         # any SQLite mirror sees them. Store.add_memory repeats this for direct callers.
         reject_secrets((("title", title), ("content", content), ("keywords", keywords),
@@ -1576,6 +1583,7 @@ class MemoryEngine:
             embedding=None if poisoning.quarantined else vec,
         )
         invalidating = decision is not None and decision.op == ResolutionOp.INVALIDATE
+        predecessor: Optional[MemoryRecord] = None
         try:
             # A replacement and the predecessor interval it closes are one authoritative
             # state transition. Portable vector/FTS mirrors participate in the same
@@ -1725,6 +1733,13 @@ class MemoryEngine:
             ) if trusted_write else []
             out = {"id": mid, "op": "invalidate", "superseded": [decision.target_id],
                    "reason": decision.reason}
+            if predecessor is not None:
+                out["superseded_detail"] = {
+                    "id": predecessor.id,
+                    "content_preview": predecessor.content[:120],
+                    "stability_days": predecessor.stability,
+                    "access_count": predecessor.access_count,
+                }
             if linked:
                 out["linked"] = linked
             return out
