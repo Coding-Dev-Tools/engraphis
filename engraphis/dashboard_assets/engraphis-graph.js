@@ -8771,11 +8771,7 @@
         dragSoftening: activeDragNode ? Math.max(GALAXY_DRAG_GRAVITY_SOFTENING,
           finitePositive(activeDragNode.radius, 2, 160) * 1.5) : GALAXY_DRAG_GRAVITY_SOFTENING,
         gravity: state.settings.gravity,
-        localGravitySetting: state.settings.localGravitySetting !== undefined
-          ? state.settings.localGravitySetting
-          : (state.settings.localGravitationalConstant !== undefined
-            ? GALAXY_FIXED_LOCAL_GRAVITY_SETTING * (state.settings.localGravitationalConstant / GALAXY_LOCAL_GRAVITATIONAL_CONSTANT_MULTIPLIER)
-            : GALAXY_FIXED_LOCAL_GRAVITY_SETTING),
+        localGravitySetting: GALAXY_FIXED_LOCAL_GRAVITY_SETTING,
         /* The dashboard normalises the three spacetime sliders to a 0..2 range
            (default 1.0). Preserve that normalized value at the Galaxy boundary:
            the downstream multiplier helpers clamp their own direct-call range,

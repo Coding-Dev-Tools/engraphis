@@ -2546,9 +2546,9 @@
       return settings;
     }, {});
     return {
-      gravitationalConstant: controls.gravitationalConstant / 100,
+      gravitationalConstant: controls.gravitationalConstant / 50,
       blackHoleMass: graphBlackHoleMassMultiplier(controls.blackHoleMass),
-      localGravitationalConstant: controls.localGravitationalConstant / 100,
+      localGravitationalConstant: controls.localGravitationalConstant / 50,
       damping: controls.damping,
       springStiffness: controls.springStiffness / 32,
       orbitPaused: state.graphOrbitPaused,
@@ -2575,8 +2575,13 @@
       graphPreferencesSaveCancel = null;
       saveGraphPreferences();
     };
-    const timer = setTimeout(flush, 250);
-    graphPreferencesSaveCancel = () => clearTimeout(timer);
+    if (typeof requestAnimationFrame === 'function') {
+      const frame = requestAnimationFrame(flush);
+      graphPreferencesSaveCancel = () => cancelAnimationFrame(frame);
+    } else {
+      const timer = setTimeout(flush, 0);
+      graphPreferencesSaveCancel = () => clearTimeout(timer);
+    }
   }
 
   function flushGraphPreferencesSave() {
@@ -4879,63 +4884,27 @@
     clearGraphSavedView();
     scheduleGraphPreferencesSave();
   });
-  let pendingGraphSettings = null;
-  let graphSettingsRafId = 0;
-  function flushGraphSettings() {
-    graphSettingsRafId = 0;
-    if (!pendingGraphSettings || !state.graphEngine) return;
-    state.graphEngine.setSettings(pendingGraphSettings);
-    pendingGraphSettings = null;
-  }
-  function queueGraphSetting(key, value) {
-    if (!pendingGraphSettings) pendingGraphSettings = {};
-    pendingGraphSettings[key] = value;
-    if (!graphSettingsRafId) {
-      if (typeof requestAnimationFrame === 'function') {
-        graphSettingsRafId = requestAnimationFrame(flushGraphSettings);
-      } else {
-        flushGraphSettings();
-      }
+  GRAPH_TUNING.forEach(item => byId(item.id).addEventListener('input', event => {
+    const value = setGraphTuningControl(item, event.target.value);
+    const effectiveValue = graphSliderResponseValue(
+      item.id, value, graphSliderResponseBaseline(item),
+    );
+    if (state.graphEngine) state.graphEngine.setSettings({ [item.key]: effectiveValue });
+    clearGraphSavedView();
+    scheduleGraphPreferencesSave();
+  }));
+  GRAPH_SPACETIME_TUNING.forEach(item => byId(item.id).addEventListener('input', event => {
+    setGraphSpacetimeControl(item, event.target.value);
+    /* Controls use human-scale values (G=100, mass=160, spring=32), while the engine API is
+       normalized around 1. Apply the same conversion used during graph creation on every live
+       input event; passing the raw slider value would immediately clamp G to 8 and mass to 16. */
+    if (state.graphEngine) {
+      const settings = graphSpacetimeEngineSettings();
+      state.graphEngine.setSettings({ [item.key]: settings[item.key] });
     }
-  }
-
-  GRAPH_TUNING.forEach(item => {
-    const el = byId(item.id);
-    if (!el) return;
-    el.addEventListener('input', event => {
-      const value = setGraphTuningControl(item, event.target.value);
-      const effectiveValue = graphSliderResponseValue(
-        item.id, value, graphSliderResponseBaseline(item),
-      );
-      queueGraphSetting(item.key, effectiveValue);
-      clearGraphSavedView();
-      scheduleGraphPreferencesSave();
-    });
-    el.addEventListener('change', () => {
-      flushGraphSettings();
-      flushGraphPreferencesSave();
-    });
-  });
-  GRAPH_SPACETIME_TUNING.forEach(item => {
-    const el = byId(item.id);
-    if (!el) return;
-    el.addEventListener('input', event => {
-      setGraphSpacetimeControl(item, event.target.value);
-      /* Controls use human-scale values (G=100, mass=160, spring=32), while the engine API is
-         normalized around 1. Apply the same conversion used during graph creation on every live
-         input event; passing the raw slider value would immediately clamp G to 8 and mass to 16. */
-      if (state.graphEngine) {
-        const settings = graphSpacetimeEngineSettings();
-        queueGraphSetting(item.key, settings[item.key]);
-      }
-      clearGraphSavedView();
-      scheduleGraphPreferencesSave();
-    });
-    el.addEventListener('change', () => {
-      flushGraphSettings();
-      flushGraphPreferencesSave();
-    });
-  });
+    clearGraphSavedView();
+    scheduleGraphPreferencesSave();
+  }));
   byId('graph-orbits-pause').addEventListener('click', event => {
     state.graphOrbitPaused = event.currentTarget.getAttribute('aria-checked') !== 'true';
     setGraphSwitch('graph-orbits-pause', state.graphOrbitPaused);
