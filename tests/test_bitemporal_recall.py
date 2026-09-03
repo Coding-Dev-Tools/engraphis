@@ -307,8 +307,28 @@ def test_as_of_is_the_valid_at_compatibility_alias_and_conflicts_are_rejected():
         SearchFilter(as_of=100.0, valid_at=101.0)
 
 
-@pytest.mark.parametrize("field", ["as_of", "valid_at", "known_at"])
+@pytest.mark.parametrize("field", ["as_of", "valid_at", "known_at", "modified_since"])
 def test_temporal_filter_anchors_must_be_finite(field):
     for invalid in (float("nan"), True):
         with pytest.raises(ValueError, match=field + " must be a finite timestamp"):
             SearchFilter(**{field: invalid})
+
+
+def test_modified_since_filters_memories_for_delta_recall():
+    engine, workspace_id, repo_id, _ = _engine_with_historical_memory()
+    m1 = engine.remember("First memory created at t1", workspace_id=workspace_id, repo_id=repo_id)
+    rec1 = engine.store.get_memory(m1)
+    assert rec1 is not None
+
+    # artificially set ingested_at for deterministic separation
+    engine.store.conn.execute("UPDATE memories SET ingested_at=100.0 WHERE id=?", (m1,))
+    m2 = engine.remember("Second memory created at t2", workspace_id=workspace_id, repo_id=repo_id)
+    engine.store.conn.execute("UPDATE memories SET ingested_at=200.0 WHERE id=?", (m2,))
+    engine.store.conn.commit()
+
+    delta_filter = SearchFilter(workspace_id=workspace_id, repo_id=repo_id, modified_since=150.0)
+    memories = engine.store.list_memories(delta_filter)
+    ids = [m.id for m in memories]
+    assert m2 in ids
+    assert m1 not in ids
+
