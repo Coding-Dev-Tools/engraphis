@@ -2532,6 +2532,10 @@ class Store:
             "ON mem_links(a, valid_to, expired_at)"
         )
         self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_mem_links_b_valid "
+            "ON mem_links(b, valid_to, expired_at)"
+        )
+        self.conn.execute(
             "UPDATE operation_receipts SET workspace_id='' WHERE workspace_id IS NULL"
         )
         self.conn.execute(

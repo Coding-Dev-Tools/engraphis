@@ -33,7 +33,7 @@ namesakes; advanced controls are discoverable rather than routine:
 | Smart tool | Accepted parameters |
 |---|---|
 | `engraphis_remember` | `content`, `workspace`, `repo`, `session_id`, `mtype`, `importance`, `subject_key`, `claim_kind`; safe provenance is fixed internally |
-| `engraphis_recall_context` | `query`, `workspace`, `repo`, `session_id`, `k`, `token_budget`; always compact, no `response_mode` |
+| `engraphis_recall_context` | `query`, `workspace`, `repo`, `session_id`, `k`, `token_budget`, `format`; always compact, no `response_mode` |
 
 
 No user profile choice or tool switching is required. The dashboard `/mcp` endpoint and
