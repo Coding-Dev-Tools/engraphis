@@ -51,7 +51,7 @@ All notable changes to Engraphis are documented here. Format loosely follows
   regressions, MRR@5 lifts 0.889 -> 0.944 (sample) and 0.962 -> 0.981 (codemem),
   with ~15 ms per query added. Not the default; set the value in the trusted
   config file (`~/.engraphis/config.env` on the operator account, or as a
-  process environment variable) — Engraphis deliberately does not read the
+  process environment variable); Engraphis deliberately does not read the
   CWD `.env`, so editing `./.env` and restarting leaves the identity
   reranker active. Restart the MCP server and dashboard after the change.
 
