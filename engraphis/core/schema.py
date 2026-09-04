@@ -362,10 +362,6 @@ CREATE INDEX IF NOT EXISTS idx_mem_links_ab ON mem_links(a, b);
 -- Links are undirected: Store.get_links()/has_link()/add_link() all match "a=? OR b=?".
 -- idx_mem_links_ab only serves the `a` branch, so the `b` branch was a full table scan.
 CREATE INDEX IF NOT EXISTS idx_mem_links_b ON mem_links(b);
-CREATE INDEX IF NOT EXISTS idx_mem_links_a_valid
-    ON mem_links(a, valid_to, expired_at);
-CREATE INDEX IF NOT EXISTS idx_mem_links_b_valid
-    ON mem_links(b, valid_to, expired_at);
 
 -- ── Code symbol graph ──────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS symbols (
