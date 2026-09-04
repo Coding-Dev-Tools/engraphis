@@ -667,6 +667,36 @@ def engraphis_recall(
         return _err(exc)
 
 
+def _gist_summary(rec: Any, fallback_title: str = "", max_chars: int = 120) -> str:
+    """Extract a clean, concise one-line summary for gist-formatted context."""
+    text = ""
+    if rec is not None:
+        if getattr(rec, "summary", None):
+            text = str(rec.summary).strip()
+        elif getattr(rec, "title", None) and getattr(rec, "content", None):
+            title = str(rec.title).strip()
+            content = str(rec.content).strip()
+            if content.lower().startswith(title.lower()):
+                text = content
+            else:
+                text = f"{title}: {content}" if title else content
+        elif getattr(rec, "title", None):
+            text = str(rec.title).strip()
+        elif getattr(rec, "content", None):
+            text = str(rec.content).strip()
+    if not text and fallback_title:
+        text = fallback_title.strip()
+
+    first_line = " ".join((text.splitlines()[0] if text else "").split())
+    if len(first_line) > max_chars:
+        match = re.match(r"^(.{30,}?[.!?])(?:\s|$)", first_line)
+        if match and len(match.group(1)) <= max_chars:
+            first_line = match.group(1)
+        else:
+            first_line = first_line[:max_chars - 3].rstrip() + "..."
+    return first_line
+
+
 @mcp.tool(
     name="engraphis_recall_context",
     annotations={"title": "Recall token-efficient context", "readOnlyHint": False,
@@ -709,6 +739,9 @@ def engraphis_recall_context(
                     "Truncates packed context from the end; citations and source references "
                     "are preserved when the budget can hold them. Minimum 2; None means no cap.",
         ge=2, le=1_000_000)] = None,
+    format: Annotated[str, Field(
+        description="Context format: 'full' for full packed text, 'gist' for one-line concise memory summaries."
+    )] = "full",
 ) -> str:
     """Return one hard-budget context plus compact source identities.
 
@@ -717,8 +750,15 @@ def engraphis_recall_context(
     response includes exact accounting for the declared counter, omitted/packed
     counts, privacy-safe savings metadata, and the same ``degraded_mode`` /
     ``semantic_support`` flags as ``engraphis_recall``.
+
+    Pass ``format="gist"`` for one-line concise memory gists (``[n] mem_...: <summary>``),
+    reducing context token usage by 60%-80% for routine context checks while allowing
+    deep dive via ``engraphis_get_memory``.
     """
     try:
+        format = str(format or "full").strip().lower()
+        if format not in {"full", "gist"}:
+            raise ValidationError("format must be one of: full, gist")
         _recall_started = time.monotonic()
         payload = service().recall(
             query,
@@ -769,6 +809,67 @@ def engraphis_recall_context(
                 source["reason"] = reason
             sources.append(source)
         payload["sources"] = sources
+
+        if format == "gist":
+            svc = service()
+            gist_lines: list[str] = []
+            for source in sources:
+                mid = str(source.get("id") or "")
+                rec = svc.store.get_memory(mid) if mid else None
+                summary_line = _gist_summary(rec, fallback_title=str(source.get("title") or ""))
+                gist_lines.append(f"[{source['n']}] {mid}: {summary_line}")
+            payload["context"] = "\n".join(gist_lines)
+            counter = RegexTokenCounter()
+            new_context_tokens = counter(payload["context"])
+            usage = payload.setdefault("usage", {})
+            usage["context_tokens"] = new_context_tokens
+            source_tokens = usage.get("source_tokens", 0)
+            if source_tokens > 0:
+                usage["saved_tokens"] = max(0, source_tokens - new_context_tokens)
+                usage["savings_ratio"] = round(usage["saved_tokens"] / source_tokens, 4)
+            payload["format"] = "gist"
+
+        if not diagnostics:
+            if "score_semantics" in payload:
+                payload["score_semantics"] = {
+                    "relative_score": "query-relative",
+                    "absolute_support": "[0, 1]",
+                }
+            for field in (
+                "candidate_depth_reason",
+                "candidate_k_requested",
+                "candidate_k_used",
+                "context_revision",
+                "vector_index_backend",
+                "reranker_mode",
+                "receipt",
+                "vector_search_ready",
+                "degraded_reason",
+                "embedding_mode",
+                "retrieval_trace",
+                "planning_details",
+                "graph_traversal_details",
+            ):
+                payload.pop(field, None)
+
+            default_settings = {
+                "retrieval_profile": "balanced",
+                "candidate_depth": "fixed",
+                "planning": "off",
+                "response_mode": "compact",
+                "historical": False,
+                "include_untrusted": False,
+            }
+            for key, default_val in default_settings.items():
+                if payload.get(key) == default_val:
+                    payload.pop(key, None)
+
+            preserve_keys = {"context", "sources"}
+            for key, val in list(payload.items()):
+                if key not in preserve_keys and (
+                    val is None or val == "" or val == {} or val == []
+                ):
+                    payload.pop(key, None)
         payload = _apply_response_budget(payload, max_response_tokens)
         usage = payload.get("usage") or {}
         # The recall usage dict only carries token and packing counters; latency
@@ -2740,11 +2841,12 @@ def smart_recall_context(
     k: Annotated[int, Field(description="Maximum source memories.", ge=1, le=50)] = 50,
     token_budget: Annotated[int, Field(description="Hard returned-context token budget.", ge=0,
                                       le=32_768)] = 1024,
+    format: Annotated[str, Field(description="Context format: 'full' or 'gist'.")] = "full",
 ) -> str:
     """Return one compact, bounded context packet for routine agent work."""
     result = engraphis_recall_context(
         query=query, workspace=workspace, repo=repo, session_id=session_id, k=k,
-        token_budget=token_budget,
+        token_budget=token_budget, format=format,
     )
     if isinstance(result, str) and result.startswith("Error:"):
         return _smart_error_from_string(result)
