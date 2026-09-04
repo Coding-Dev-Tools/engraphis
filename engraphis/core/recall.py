@@ -1488,6 +1488,8 @@ class RecallEngine:
             str(row.get("memory_id") or "")
             for row in incidence if row.get("memory_id")
         }
+        if not incidence_memory_ids:
+            return {}
         frontier_links = self.store.links_touching(
             sorted(incidence_memory_ids),
             layers=flt.graph_layers,
@@ -1503,7 +1505,7 @@ class RecallEngine:
             for link in frontier_links
             for endpoint in (link["a"], link["b"])
         } | set(self.store.list_memory_ids(
-            flt, limit=12_000, prompt_only=prompt_only,
+            flt, limit=500, prompt_only=prompt_only,
         ))
         if prompt_only:
             memory_ids = self._prompt_eligible_memory_ids(memory_ids, flt)

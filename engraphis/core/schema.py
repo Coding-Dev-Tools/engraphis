@@ -167,6 +167,8 @@ CREATE TABLE IF NOT EXISTS entities (
     created_at   REAL,
     UNIQUE(workspace_id, repo_id, name, etype)
 );
+CREATE INDEX IF NOT EXISTS idx_entities_workspace_created
+    ON entities(workspace_id, created_at);
 
 CREATE TABLE IF NOT EXISTS edges (
     id           TEXT PRIMARY KEY,
@@ -186,6 +188,8 @@ CREATE TABLE IF NOT EXISTS edges (
 );
 CREATE INDEX IF NOT EXISTS idx_edge_src ON edges(workspace_id, src, valid_to, expired_at);
 CREATE INDEX IF NOT EXISTS idx_edge_dst ON edges(workspace_id, dst);
+CREATE INDEX IF NOT EXISTS idx_edge_dst_visibility
+    ON edges(workspace_id, dst, valid_to, expired_at);
 -- Store.edges_in_scope() (the PPR retrieval arm) filters workspace_id + repo_id + the
 -- bi-temporal window; the two indexes above lead on workspace_id but then key on src/dst,
 -- so a repo-scoped graph read had to scan the whole workspace. Also bounds the
@@ -358,6 +362,10 @@ CREATE INDEX IF NOT EXISTS idx_mem_links_ab ON mem_links(a, b);
 -- Links are undirected: Store.get_links()/has_link()/add_link() all match "a=? OR b=?".
 -- idx_mem_links_ab only serves the `a` branch, so the `b` branch was a full table scan.
 CREATE INDEX IF NOT EXISTS idx_mem_links_b ON mem_links(b);
+CREATE INDEX IF NOT EXISTS idx_mem_links_a_valid
+    ON mem_links(a, valid_to, expired_at);
+CREATE INDEX IF NOT EXISTS idx_mem_links_b_valid
+    ON mem_links(b, valid_to, expired_at);
 
 -- ── Code symbol graph ──────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS symbols (

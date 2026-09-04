@@ -7,10 +7,12 @@ token counters at the composition boundary.
 """
 from __future__ import annotations
 
+import copy
+import dataclasses
 import math
 import re
 from collections.abc import Callable
-from typing import Optional
+from typing import NamedTuple, Optional
 
 from engraphis.core.interfaces import (
     Candidate,
@@ -21,6 +23,7 @@ from engraphis.core.interfaces import (
 
 _TOKEN_RE = re.compile(r"\w+|[^\w\s]", re.UNICODE)
 _SENTENCE_RE = re.compile(r"(?<=[.!?])(?:[\"')\]]*)\s+|\n+")
+_CLAUSE_SPLIT_RE = re.compile(r"(?<=[.!?;])(?:[\"')\]]*)\s+|\n+")
 _WORD_RE = re.compile(r"\w+", re.UNICODE)
 _BRIDGE_TERMS = frozenset({
     "call", "calls", "called", "caller", "dependency", "depends", "flow",
@@ -30,6 +33,113 @@ _QUALIFIER_TERMS = frozenset({
     "cannot", "except", "if", "must", "never", "no", "not", "only",
     "unless", "until", "when", "without",
 })
+
+
+class ContextPackResult(NamedTuple):
+    """Result of deterministic context packing.
+
+    Exposes the canonical 3-tuple contract ``(context, chunks, usage)`` with
+    named attribute accessors and aliases for agent prompt composers.
+    """
+
+    context: str
+    chunks: list[PackedChunk]
+    usage: ContextUsage
+
+    @property
+    def packed_chunks(self) -> list[PackedChunk]:
+        return self.chunks
+
+    @property
+    def packed(self) -> list[PackedChunk]:
+        return self.chunks
+
+
+def _extract_shingles(text: str, n: int = 4) -> set[tuple[str, ...]]:
+    """Extract case-folded n-gram token shingles from text."""
+    words = [match.group(0).casefold() for match in _WORD_RE.finditer(text or "")]
+    if not words:
+        return set()
+    if len(words) < n:
+        return {tuple(words)}
+    return {tuple(words[i : i + n]) for i in range(len(words) - n + 1)}
+
+
+def _split_clauses(text: str) -> list[str]:
+    """Split text into sentence/clause units while preserving text content."""
+    source = (text or "").strip()
+    if not source:
+        return []
+    parts = [part.strip() for part in _CLAUSE_SPLIT_RE.split(source) if part.strip()]
+    return parts if parts else [source]
+
+
+def _normalize_clause(clause: str) -> str:
+    """Case-folded normalized word sequence for exact clause matching."""
+    return " ".join(_WORD_RE.findall(clause.casefold()))
+
+
+def _is_clause_redundant(
+    clause: str,
+    admitted_shingles: set[tuple[str, ...]],
+    admitted_clauses: set[str],
+    admitted_qualifiers: set[str],
+    *,
+    shingle_size: int = 4,
+    duplication_threshold: float = 0.6,
+) -> bool:
+    """Whether a candidate clause has significant verbatim overlap with admitted evidence."""
+    norm = _normalize_clause(clause)
+    if not norm:
+        return True
+
+    words = [match.group(0).casefold() for match in _WORD_RE.finditer(clause)]
+    if not words:
+        return True
+
+    # 1. Exact verbatim match against already admitted clauses
+    if norm in admitted_clauses:
+        return True
+
+    # Check semantic safety for qualifiers: never prune a clause that introduces
+    # an exception or restriction not already covered
+    clause_qualifiers = _terms(clause) & _QUALIFIER_TERMS
+    if not clause_qualifiers.issubset(admitted_qualifiers):
+        return False
+
+    # 2. For short clauses (< shingle_size words), check exact clause containment
+    if len(words) < shingle_size:
+        return any(norm == ac for ac in admitted_clauses)
+
+    # 3. For multi-word clauses, check token shingle duplication ratio
+    shingles = _extract_shingles(clause, n=shingle_size)
+    if not shingles:
+        return False
+
+    overlap = len(shingles & admitted_shingles)
+    duplication_ratio = overlap / len(shingles)
+    return duplication_ratio >= duplication_threshold
+
+
+def _with_pruned_content(
+    candidate: Candidate, content: str, summary: str
+) -> Candidate:
+    """Create a shallow clone of candidate with pruned delta content/summary."""
+    record = candidate.record
+    if record is None:
+        return candidate
+    if dataclasses.is_dataclass(record):
+        new_record = dataclasses.replace(record, content=content, summary=summary)
+    else:
+        new_record = copy.copy(record)
+        new_record.content = content
+        new_record.summary = summary
+    if dataclasses.is_dataclass(candidate):
+        return dataclasses.replace(candidate, record=new_record)
+    else:
+        new_candidate = copy.copy(candidate)
+        new_candidate.record = new_record
+        return new_candidate
 
 
 class RegexTokenCounter:
@@ -55,6 +165,12 @@ class DeterministicContextPacker:
         token_counter: Optional[Callable[[str], int]] = None,
         *,
         token_counter_identity: Optional[str] = None,
+        redundancy_pruning: bool = True,
+        score_elbow_gating: bool = True,
+        elbow_ratio: float = 0.5,
+        tail_confidence_floor: float = 0.35,
+        shingle_size: int = 4,
+        clause_duplication_threshold: float = 0.6,
     ) -> None:
         self._count = token_counter or RegexTokenCounter()
         self.token_counter_identity = (
@@ -63,18 +179,28 @@ class DeterministicContextPacker:
             or getattr(self._count, "__name__", None)
             or type(self._count).__name__
         )
+        self.redundancy_pruning = bool(redundancy_pruning)
+        self.score_elbow_gating = bool(score_elbow_gating)
+        self.elbow_ratio = float(elbow_ratio)
+        self.tail_confidence_floor = float(tail_confidence_floor)
+        self.shingle_size = max(2, int(shingle_size))
+        self.clause_duplication_threshold = float(clause_duplication_threshold)
 
     def pack(
         self,
         query: str,
         candidates: list[Candidate],
         token_budget: int,
-    ) -> tuple[str, list[PackedChunk], ContextUsage]:
+    ) -> ContextPackResult:
         budget = max(0, int(token_budget))
         source_tokens = sum(self._source_tokens(candidate) for candidate in candidates)
         if budget == 0 or not candidates:
-            return "", [], self._usage(
-                budget, 0, source_tokens, 0, len(candidates)
+            return ContextPackResult(
+                context="",
+                chunks=[],
+                usage=self._usage(
+                    budget, 0, source_tokens, 0, len(candidates)
+                ),
             )
 
         representatives, duplicate_count = _family_representatives(candidates)
@@ -90,6 +216,12 @@ class DeterministicContextPacker:
         packed: list[PackedChunk] = []
         covered: set[str] = set()
         remaining = list(ordered)
+
+        top_score = max((float(c.score) for c in ordered), default=0.0)
+        admitted_scores: list[float] = []
+        admitted_shingles: set[tuple[str, ...]] = set()
+        admitted_clauses: set[str] = set()
+        admitted_qualifiers: set[str] = set()
 
         while remaining:
             # Re-evaluate novelty after every selection.  This gives compact,
@@ -108,9 +240,54 @@ class DeterministicContextPacker:
             if record is None:
                 continue
 
+            # Elastic score-elbow gating: gate candidate if scores drop steeply
+            # into a low-confidence tail after evidence has been admitted.
+            if self.score_elbow_gating and admitted_scores:
+                if self._is_score_elbow(
+                    candidate,
+                    top_score=top_score,
+                    last_admitted_score=admitted_scores[-1],
+                    admitted_count=len(packed),
+                    needs_bridge=needs_bridge,
+                ):
+                    continue
+
+            # Inter-candidate clause redundancy pruning:
+            # If higher-priority memories have already been admitted, prune
+            # duplicate clauses to retain and pack only novel delta content.
+            candidate_to_pack = candidate
+            is_delta = False
+            if self.redundancy_pruning and admitted_shingles:
+                full_content = record.content or ""
+                summary_content = record.summary or ""
+
+                pruned_content, content_pruned = self._prune_redundant_clauses(
+                    full_content,
+                    admitted_shingles,
+                    admitted_clauses,
+                    admitted_qualifiers,
+                )
+                pruned_summary, summary_pruned = self._prune_redundant_clauses(
+                    summary_content,
+                    admitted_shingles,
+                    admitted_clauses,
+                    admitted_qualifiers,
+                )
+
+                has_original_text = bool(full_content.strip() or summary_content.strip())
+                has_novel_text = bool(pruned_content.strip() or pruned_summary.strip())
+                if has_original_text and not has_novel_text:
+                    continue
+
+                if content_pruned or summary_pruned:
+                    is_delta = True
+                    candidate_to_pack = _with_pruned_content(
+                        candidate, pruned_content, pruned_summary
+                    )
+
             prefix = "\n\n" if context else ""
             ordinal = len(packed) + 1
-            header = self._header(candidate, ordinal)
+            header = self._header(candidate_to_pack, ordinal)
             base = f"{context}{prefix}{header}\n"
             excerpt = ""
             truncated = False
@@ -118,7 +295,7 @@ class DeterministicContextPacker:
             available = max(0, budget - self._count(base))
             if available:
                 excerpt, truncated, reason = self._excerpt(
-                    query, candidate, available
+                    query, candidate_to_pack, available
                 )
 
             # Keep the established single-pass behavior for ordinary sources.
@@ -126,20 +303,27 @@ class DeterministicContextPacker:
             # excerpt already starts with the exact displayed title (or the titled
             # header left no room). This removes prompt duplication without deleting
             # evidence or weakening the stable ``[n]`` citation bridge.
-            if not excerpt or _starts_with_title(excerpt, record.title):
+            rec = candidate_to_pack.record or record
+            if not excerpt or _starts_with_title(excerpt, rec.title):
                 compact_base = (
                     f"{context}{prefix}"
-                    f"{self._header(candidate, ordinal, include_title=False)}\n"
+                    f"{self._header(candidate_to_pack, ordinal, include_title=False)}\n"
                 )
                 if self._count(compact_base) < budget:
                     compact_available = budget - self._count(compact_base)
-                    compact = self._excerpt(query, candidate, compact_available)
-                    if compact[0] and _starts_with_title(compact[0], record.title):
+                    compact = self._excerpt(query, candidate_to_pack, compact_available)
+                    if compact[0] and _starts_with_title(compact[0], rec.title):
                         base = compact_base
                         available = compact_available
                         excerpt, truncated, reason = compact
             if not excerpt:
                 continue
+
+            if is_delta:
+                truncated = True
+                if not reason or reason in ("full", "summary"):
+                    reason = "novel_delta"
+
             proposed = f"{base}{excerpt}"
             if self._count(proposed) > budget:
                 # A custom tokenizer need not be additive.  Fit against the
@@ -167,14 +351,101 @@ class DeterministicContextPacker:
             ))
             covered.update(_terms(excerpt) & query_terms)
 
+            # Track admitted evidence for subsequent redundancy pruning and elbow gating
+            admitted_scores.append(float(candidate.score))
+            admitted_shingles.update(_extract_shingles(excerpt, n=self.shingle_size))
+            for cl in _split_clauses(excerpt):
+                norm_cl = _normalize_clause(cl)
+                if norm_cl:
+                    admitted_clauses.add(norm_cl)
+            admitted_qualifiers.update(_terms(excerpt) & _QUALIFIER_TERMS)
+
         context_tokens = self._count(context)
         omitted = len(candidates) - len(packed)
         # ``duplicate_count`` is intentionally folded into omitted_count; keep
         # the local name to make the family-diversity policy explicit.
         omitted = max(omitted, duplicate_count)
-        return context, packed, self._usage(
-            budget, context_tokens, source_tokens, len(packed), omitted
+        return ContextPackResult(
+            context=context,
+            chunks=packed,
+            usage=self._usage(
+                budget, context_tokens, source_tokens, len(packed), omitted
+            ),
         )
+
+    pack_context = pack
+
+    def _prune_redundant_clauses(
+        self,
+        text: str,
+        admitted_shingles: set[tuple[str, ...]],
+        admitted_clauses: set[str],
+        admitted_qualifiers: set[str],
+    ) -> tuple[str, bool]:
+        """Prune redundant clauses from text, returning (novel_delta_text, was_pruned)."""
+        if not text or not self.redundancy_pruning:
+            return text, False
+
+        clauses = _split_clauses(text)
+        if not clauses:
+            return "", False
+
+        novel_clauses: list[str] = []
+        pruned_any = False
+
+        for clause in clauses:
+            if _is_clause_redundant(
+                clause,
+                admitted_shingles,
+                admitted_clauses,
+                admitted_qualifiers,
+                shingle_size=self.shingle_size,
+                duplication_threshold=self.clause_duplication_threshold,
+            ):
+                pruned_any = True
+            else:
+                novel_clauses.append(clause)
+
+        if not novel_clauses:
+            return "", True
+
+        if not pruned_any:
+            return text, False
+
+        delta_text = " ".join(novel_clauses)
+        return delta_text, True
+
+    def _is_score_elbow(
+        self,
+        candidate: Candidate,
+        *,
+        top_score: float,
+        last_admitted_score: float,
+        admitted_count: int,
+        needs_bridge: bool,
+    ) -> bool:
+        """Elastic score-elbow gating for low-confidence candidate retrieval tails."""
+        if not self.score_elbow_gating or admitted_count < 1 or top_score <= 0.0:
+            return False
+
+        if needs_bridge and candidate.arm in {"graph", "code"}:
+            return candidate.score <= 0.0
+
+        score = float(candidate.score)
+        if score <= 0.0:
+            return True
+
+        rel_to_top = score / top_score
+        rel_to_last = score / max(last_admitted_score, 1e-9)
+
+        elastic_tail_floor = min(
+            0.40, self.tail_confidence_floor + 0.03 * (admitted_count - 1)
+        )
+        elastic_elbow_ratio = min(
+            0.60, self.elbow_ratio + 0.03 * (admitted_count - 1)
+        )
+
+        return rel_to_top < elastic_tail_floor and rel_to_last < elastic_elbow_ratio
 
     def count_tokens(self, text: str) -> int:
         """Count answer text with the exact counter declared by this packer."""
@@ -575,3 +846,19 @@ def pack_response_text(
             return excerpt, count(excerpt)
         limit -= 1
     return "", 0
+
+
+def pack_context(
+    query: str,
+    candidates: list[Candidate],
+    token_budget: int,
+    *,
+    packer: Optional[DeterministicContextPacker] = None,
+    **kwargs,
+) -> ContextPackResult:
+    """Pack budgeted context from candidate memories into a ContextPackResult.
+
+    Convenience functional API wrapping :class:`DeterministicContextPacker`.
+    """
+    p = packer or DeterministicContextPacker(**kwargs)
+    return p.pack(query, candidates, token_budget)

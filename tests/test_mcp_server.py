@@ -1306,3 +1306,41 @@ def test_background_warmup_honors_env(monkeypatch):
     assert started_threads[0].daemon is True
     assert started_threads[0].name == "engraphis-warmup"
 
+
+def test_recall_context_prunes_default_diagnostics_when_disabled(monkeypatch):
+    import engraphis.mcp_server as srv
+    from engraphis.service import MemoryService
+    srv.set_service(MemoryService.create(":memory:"))
+    srv.service().remember("Production deploy via tag v1.0", workspace="acme")
+    res = json.loads(srv.engraphis_recall_context("deploy", workspace="acme", diagnostics=False))
+    assert "candidate_depth_reason" not in res
+    assert "planning" not in res
+    assert "retrieval_profile" not in res
+    assert "candidate_depth" not in res
+    assert "score_semantics" in res
+    assert res["score_semantics"]["relative_score"] == "query-relative"
+    assert res["score_semantics"]["absolute_support"] == "[0, 1]"
+    assert "context" in res
+    assert "sources" in res
+
+
+def test_recall_context_gist_format_saves_tokens(monkeypatch):
+    import engraphis.mcp_server as srv
+    from engraphis.service import MemoryService
+    srv.set_service(MemoryService.create(":memory:"))
+    long_content = (
+        "Deploy rule 1: Always verify preflight checks before triggering production deploy. "
+        "All integration tests must pass in staging environment with zero failures. "
+        "Database migrations must be executed in backward-compatible transactions. "
+        "The on-call release engineer must monitor metrics for at least fifteen minutes post-rollout."
+    )
+    srv.service().remember(long_content, workspace="acme")
+    full_res = json.loads(srv.engraphis_recall_context("deploy", workspace="acme", format="full"))
+    gist_res = json.loads(srv.engraphis_recall_context("deploy", workspace="acme", format="gist"))
+    assert gist_res["format"] == "gist"
+    assert gist_res["usage"]["context_tokens"] < full_res["usage"]["context_tokens"]
+    assert "[1]" in gist_res["context"]
+    assert "mem_" in gist_res["context"]
+
+
+
