@@ -36,9 +36,8 @@ All notable changes to Engraphis are documented here. Format loosely follows
   (savings_ratio 0.0 -> 0.4975) with no caller-side arguments. The packer is the
   existing 1.6 contract; the change just makes it the default fast path.
 - Smart MCP `engraphis_remember` now accepts and forwards `subject_key` and
-  `claim_kind` to the classic tool. Without this, every keyed write silently stored
-  empty keys because the served gateway surface dropped the parameters; the
-  documented safe-supersession mechanism is now reachable through MCP.
+  `claim_kind` to the classic tool, so the documented safe-supersession
+  mechanism is reachable through MCP.
 - A new integration at `integrations/commandcode/session_start_hook.py` (with
   `scripts/install_cc_hook.py` for idempotent user-scope install/uninstall) wires
   durable-memory recall into Command Code's SessionStart lifecycle: each new
@@ -50,7 +49,11 @@ All notable changes to Engraphis are documented here. Format loosely follows
   / `ENGRAPHIS_RERANK_MODEL`). Evaluated offline on the bundled retrieval gates
   (sample.jsonl, codemem.jsonl, k=5): hit@5 stays at 1.0 with zero per-question
   regressions, MRR@5 lifts 0.889 -> 0.944 (sample) and 0.962 -> 0.981 (codemem),
-  with ~15 ms per query added. Not the default; flip with a one-line config.
+  with ~15 ms per query added. Not the default; set the value in the trusted
+  config file (`~/.engraphis/config.env` on the operator account, or as a
+  process environment variable) — Engraphis deliberately does not read the
+  CWD `.env`, so editing `./.env` and restarting leaves the identity
+  reranker active. Restart the MCP server and dashboard after the change.
 
 ### Changed
 
@@ -78,10 +81,8 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ### Fixed
 
-- The Smart MCP gateway `engraphis_remember` binding was silently dropping
-  `subject_key` and `claim_kind`; this is the underlying cause of the
-  benchmark correction-miss pattern that the reworded-correction detector
-  then had to compensate for.
+- The Smart MCP gateway `engraphis_remember` now forwards `subject_key` and
+  `claim_kind` end to end, matching the **Added** entry above.
 
 ### Operational
 
