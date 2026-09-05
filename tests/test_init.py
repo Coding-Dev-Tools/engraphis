@@ -27,6 +27,8 @@ def _write_private(path: Path, content: str) -> None:
 def _select_trusted_config(tmp_path, monkeypatch):
     path = _config_env(tmp_path)
     monkeypatch.setattr(init_script, "_trusted_env_file", lambda: path)
+    # Fresh Settings instances must keep the offline test configuration.
+    monkeypatch.setenv("ENGRAPHIS_EMBED_MODEL", "")
     return path
 
 

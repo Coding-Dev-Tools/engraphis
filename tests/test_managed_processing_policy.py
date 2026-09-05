@@ -10,6 +10,12 @@ from engraphis.service import MemoryService
 
 
 @pytest.fixture
+def _http_stack():
+    pytest.importorskip("fastapi")
+    pytest.importorskip("httpx")
+
+
+@pytest.fixture
 def svc(tmp_path, monkeypatch):
     monkeypatch.delenv("ENGRAPHIS_MANAGED_COMPUTE_CONSENT", raising=False)
     service = MemoryService.create(str(tmp_path / "policy.db"))
@@ -61,6 +67,7 @@ def test_corrupt_state_fails_closed_and_can_be_reconfirmed(svc, revision):
     assert svc.set_managed_processing_policy("a", enabled=True, confirmed=True)["enabled"]
 
 
+@pytest.mark.usefixtures("_http_stack")
 def test_http_acknowledgement_and_failed_optout(svc, monkeypatch):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
@@ -112,6 +119,7 @@ def test_http_acknowledgement_and_failed_optout(svc, monkeypatch):
         assert "may continue" in disabled["notice"]
 
 
+@pytest.mark.usefixtures("_http_stack")
 def test_delayed_enable_acknowledgement_cannot_overwrite_newer_optout(svc, monkeypatch):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
@@ -158,6 +166,7 @@ def test_delayed_enable_acknowledgement_cannot_overwrite_newer_optout(svc, monke
 
 
 @pytest.mark.parametrize("delay_at", ["get", "put"])
+@pytest.mark.usefixtures("_http_stack")
 def test_newer_optout_fences_delayed_cloud_enable(svc, monkeypatch, delay_at):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
@@ -214,6 +223,7 @@ def test_newer_optout_fences_delayed_cloud_enable(svc, monkeypatch, delay_at):
     assert sum(call["enabled"] for call in cloud.puts) == (delay_at == "put")
 
 
+@pytest.mark.usefixtures("_http_stack")
 def test_optout_retries_remote_conflict_while_local_intent_is_current(svc, monkeypatch):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
@@ -273,6 +283,7 @@ def test_optout_retries_remote_conflict_while_local_intent_is_current(svc, monke
     assert svc.managed_processing_policy("a")["remote_revision"] == 3
 
 
+@pytest.mark.usefixtures("_http_stack")
 def test_optout_does_not_retry_after_newer_local_approval(svc, monkeypatch):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
@@ -319,6 +330,7 @@ def test_cloud_client_sends_required_revision(monkeypatch):
     assert len(calls) == 1
 
 
+@pytest.mark.usefixtures("_http_stack")
 def test_expired_cloud_session_stops_local_uploads_with_remote_pending(svc, monkeypatch):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient

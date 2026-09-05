@@ -45,6 +45,10 @@
       "sha256": "389291bb867e5e1c63c45c1f704079de49afbe91d8e9f05cb21f64cec41a2bc1",
       "bytes": 4732
     },
+    "public-ci-test-isolation.json": {
+      "sha256": "49af657e197634d622a0b7cc5b160394bcc3355a6590f8d6ea3be78b9b88fa13",
+      "bytes": 2287
+    },
     "public-complete-source-before-trial-test-correction.json": {
       "sha256": "9378843f71b39317a192673089fed1f2904581873f454824d7f3eeb6b6355404",
       "bytes": 18931
@@ -153,5 +157,8 @@
       "sha256": "a9cfbb5f18426cfd2a63f6b014498fc79b268b22d114ad05335e711b16f80901",
       "bytes": 97
     }
-  }
+  },
+  "source_overlays": [
+    "public-ci-test-isolation.json"
+  ]
 }
