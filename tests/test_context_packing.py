@@ -75,7 +75,7 @@ def test_unfit_header_does_not_block_a_later_compact_source() -> None:
     assert usage.context_tokens <= 6
 
 
-def test_compact_header_retries_use_the_compact_budget_with_non_additive_counter() -> None:
+def test_nonadditive_counter_omits_a_claim_that_cannot_fit_whole() -> None:
     class NonAdditiveCounter:
         identity = "test.non_additive"
 
@@ -101,7 +101,8 @@ def test_compact_header_retries_use_the_compact_budget_with_non_additive_counter
         "titled evidence", [candidate], token_budget=7,
     )
 
-    assert chunks
+    assert context == ""
+    assert chunks == []
     assert usage.context_tokens == packer.count_tokens(context)
     assert usage.context_tokens <= usage.budget_tokens == 7
 
@@ -168,8 +169,8 @@ def test_compact_header_respects_nonadditive_counter_budget() -> None:
 
     context, chunks, usage = packer.pack("alpha", [candidate], token_budget=3)
 
-    assert context.startswith("[1]\nAlpha")
-    assert chunks[0].excerpt.startswith("Alpha")
+    assert context == ""
+    assert chunks == []
     assert usage.context_tokens <= usage.budget_tokens == 3
 
 
@@ -215,8 +216,10 @@ def test_sentence_aligned_summary_excerpt_leaves_room_for_more_evidence() -> Non
         _candidate(
             "mem_rollout",
             "The release ledger records extensive historical rollout details. "
-            "Platform Reliability owns deployment evidence and maintains the signed "
-            "release ledger with the complete verification record for every rollout.",
+            "Platform Reliability owns deployment evidence. "
+            "The signed release ledger keeps the complete verification record for "
+            "every production rollout and post-release review, including approvals, "
+            "rollbacks, and independently signed audit receipts.",
             score=1.0,
             title="",
             summary=(
@@ -314,7 +317,7 @@ def test_tight_budget_does_not_strip_other_negative_qualifiers(qualifier: str) -
     assert usage.packed_count == 0
 
 
-def test_custom_counter_can_truncate_inside_one_regex_token() -> None:
+def test_custom_counter_cannot_truncate_inside_one_evidence_unit() -> None:
     class CharacterCounter:
         identity = "test.characters"
 
@@ -335,9 +338,10 @@ def test_custom_counter_can_truncate_inside_one_regex_token() -> None:
         token_budget=24,
     )
 
-    assert chunks and chunks[0].truncated
+    assert chunks == []
     assert usage.context_tokens == counter(context)
-    assert 0 < usage.context_tokens <= usage.budget_tokens == 24
+    assert usage.context_tokens == 0
+    assert usage.budget_tokens == 24
 
 
 def test_supersession_and_claim_family_deduplication_keep_best_candidate() -> None:

@@ -1417,6 +1417,9 @@
           : { minDegree: 0, showUnlinked: true, depth: 2 };
         refreshVisibility();
         camera();
+        // Scope changes do not wake the layout worker. Publish the new count now,
+        // including after a settled graph moves from zero visible nodes back to some.
+        stats();
         return api;
       },
       setLayers(value) {
@@ -1440,7 +1443,7 @@
         stats();
         return api;
       },
-      setGhosts(value) { state.ghosts = value !== false; refreshVisibility(); camera(); return api; },
+      setGhosts(value) { state.ghosts = value !== false; refreshVisibility(); camera(); stats(); return api; },
       setHighlight(id) {
         const index = state.idIndex.get(String(id));
         state.focus = index === undefined ? -1 : index;
