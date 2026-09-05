@@ -1,0 +1,157 @@
+{
+  "schema": "engraphis-reliability-evidence-catalog/v1",
+  "date": "2026-09-05",
+  "source_manifest": "source-manifest.json",
+  "validation": "validation.json",
+  "public_base_commit": "cb03dbe104394b7760ef402a2b1917eac5e8accc",
+  "files": {
+    "fts-insert-counterfactual-20260905.json": {
+      "sha256": "b0a4603e983246790682ee5db4b5d5fab65b8ffb72dce002c85049f5112bff16",
+      "bytes": 7397
+    },
+    "fts-insert-counterfactual-20260905.json.sha256": {
+      "sha256": "adefc02066e41db9e30feb70104db80b705060564680788679f3017f3f8ff149",
+      "bytes": 106
+    },
+    "line-ending-equivalence.json": {
+      "sha256": "30af49759315c1cff0fa622799671219ddcff1ab0b13c4ee73de2e79ce69fc9f",
+      "bytes": 2933
+    },
+    "native-coverage-counterfactual-20260905.json": {
+      "sha256": "df0eec12c370c5ee06ec2125e5e8b275ef6c654dab820f25427211cede3faa17",
+      "bytes": 6155
+    },
+    "native-coverage-counterfactual-20260905.json.sha256": {
+      "sha256": "985b3025e03ca5eab40d4c08965076cf6dacb41c2b24cec900595bbf3fb38e9c",
+      "bytes": 111
+    },
+    "offline-gates-final.json": {
+      "sha256": "882d34b85fe3600b6c90b72eac6007d93d52e8c8e25c2e529faa75538766bddf",
+      "bytes": 27299
+    },
+    "offline-gates-pr-final.json": {
+      "sha256": "1dd10fe157fc656bdb43785598362f02c6a657a2f9de006670b92e6e1f637c18",
+      "bytes": 27300
+    },
+    "offline-gates.json": {
+      "sha256": "aa2f2e3e0312491d57e6d6571dbb92a96570c8655f55bfe7b63a3dc6ca2fc2dc",
+      "bytes": 3663
+    },
+    "pr-benchmark-source-check.json": {
+      "sha256": "08886c2f7afb7fcb51513ce23b3234dc9ab46362e6349706248f9a0a84f00db1",
+      "bytes": 1164
+    },
+    "pr-review.json": {
+      "sha256": "389291bb867e5e1c63c45c1f704079de49afbe91d8e9f05cb21f64cec41a2bc1",
+      "bytes": 4732
+    },
+    "public-complete-source-before-trial-test-correction.json": {
+      "sha256": "9378843f71b39317a192673089fed1f2904581873f454824d7f3eeb6b6355404",
+      "bytes": 18931
+    },
+    "public-complete-source-final.json": {
+      "sha256": "71ca7b0f6da0c701a0bcf81da5c797a26d01d5d791bc7b3656f4244b16b83d86",
+      "bytes": 25781
+    },
+    "public-pr-source-before-contract-correction.json": {
+      "sha256": "b09090d618b2b996e9d7ff178a61f6f84dacc911b76a1bf6d4f426319f58aedf",
+      "bytes": 27470
+    },
+    "public-pr-source-final.json": {
+      "sha256": "f5683a78cb71e70810ea2bcde046e8c9a428159f0ab92c8cdcc4b5f151f8449d",
+      "bytes": 27677
+    },
+    "resolver-unit-20260905.json": {
+      "sha256": "7559397b4d0a003f32d0a0eae5b7925dd3cd4109de05c63f8c24c34583e82a76",
+      "bytes": 3173
+    },
+    "resolver-unit-20260905.json.sha256": {
+      "sha256": "535027bd5f60e5fdf8adb19da3c1cae910f06a5ef4cc87552171fc66b1e31443",
+      "bytes": 95
+    },
+    "resolver-write-acceptance-20260905.json": {
+      "sha256": "f13920bddd4e89adad64a156faf5f2914e57856df71d5479a0abb5f21bbfe977",
+      "bytes": 3570
+    },
+    "resolver-write-acceptance-20260905.json.sha256": {
+      "sha256": "c661a88a839417967b7b97fe6884d6a595a53563a054ac8a4c4a2c3c308caa57",
+      "bytes": 107
+    },
+    "source-manifest.json": {
+      "sha256": "9b7c713ad5cb39222c59563897f21069e8f4848c32e6b401670dfc2c1f10b66a",
+      "bytes": 20106
+    },
+    "validation.json": {
+      "sha256": "54b8ef400f488ce3c9aa5cca93e6684341b77e36b35d6bf0e855ab6364ff9e78",
+      "bytes": 21607
+    },
+    "vector-scale-incomplete-baseline-20260905.json": {
+      "sha256": "45c4f61518012e35e09b6d274dec3015d00d4948f2b8279c0f56760dec080544",
+      "bytes": 4438
+    },
+    "vector-scale-incomplete-baseline-20260905.json.sha256": {
+      "sha256": "ba9188ce9f46df741b5e9bb44f4b061e089bc63b03523c1a93c2f0f9ed6a23db",
+      "bytes": 113
+    },
+    "vector-scale-native-incomplete-20260905.json": {
+      "sha256": "1b73068e071f4e39b644522a25512282fe986fda9ad5724ad44369eb25a3ceb1",
+      "bytes": 4931
+    },
+    "vector-scale-native-incomplete-20260905.json.sha256": {
+      "sha256": "2f8b0955d3370f0bde4655a81bcde602a8a649f1d2ce9d7dfecb4cf0b3cc1160",
+      "bytes": 111
+    },
+    "vector-scale-numpy-20260905.json": {
+      "sha256": "049d22200d0e088f03f42a13c8a0ae4031c3c9c3c12113c3f6196855e2f0d479",
+      "bytes": 15216
+    },
+    "vector-scale-numpy-20260905.json.sha256": {
+      "sha256": "c3319574d704e22c140d50842ffd96957b1cac108550de43c59a5c79b6323d40",
+      "bytes": 99
+    },
+    "vector-scale-numpy-corrected-20260905.json": {
+      "sha256": "ab4ba40faad58b7ecd3aff96a50ac45742f78f670ed79bed32b1802162d54e6b",
+      "bytes": 15171
+    },
+    "vector-scale-numpy-corrected-20260905.json.checkpoint.json": {
+      "sha256": "c4412e0638afdf876e12484fd69bab40db7addbbcbcb6b26852ba82ba2a2ce66",
+      "bytes": 196
+    },
+    "vector-scale-numpy-corrected-20260905.json.sha256": {
+      "sha256": "08c5916bb64fea4a6153657e1caa5bf2ed91c8ecd815e3aa176f5cfd3e0f9dc5",
+      "bytes": 109
+    },
+    "vector-scale-sqlite-vec-corrected-20260905.json": {
+      "sha256": "3cae847fcff2a1c0c5c680b2b050912ff2eb35e488a55be10f23832a4e6c787c",
+      "bytes": 15228
+    },
+    "vector-scale-sqlite-vec-corrected-20260905.json.checkpoint.json": {
+      "sha256": "ac00bab59242a7ca4c7f1a25fddf523591f17598bae85598d1a57413e80f14d4",
+      "bytes": 201
+    },
+    "vector-scale-sqlite-vec-corrected-20260905.json.sha256": {
+      "sha256": "5ef3e419537c839243ad0298222f11019c06740339f924aaa0e6f969b412cc58",
+      "bytes": 114
+    },
+    "vector-scale-summary-20260905.md": {
+      "sha256": "270a71a3ec891189ae90c02be0dbd8ef5c32f75c2cca04452c8f2b65929dd645",
+      "bytes": 13636
+    },
+    "vector-scan-adaptive-20260905.json": {
+      "sha256": "a421a8e73180104f0f5612780dfc929b678083e59494beab66a6bb621ebcc6e7",
+      "bytes": 15312
+    },
+    "vector-scan-adaptive-20260905.json.sha256": {
+      "sha256": "45d0f2c0a75c62583854927f2c9ff49de3077290aa6c6438e44504a454a8c180",
+      "bytes": 101
+    },
+    "vector-scan-plan-20260905.json": {
+      "sha256": "bb4f15d60d89e9e153456fb238acc3ea13fec68cfc673fdffb922a8f4e6ed63b",
+      "bytes": 8558
+    },
+    "vector-scan-plan-20260905.json.sha256": {
+      "sha256": "a9cfbb5f18426cfd2a63f6b014498fc79b268b22d114ad05335e711b16f80901",
+      "bytes": 97
+    }
+  }
+}

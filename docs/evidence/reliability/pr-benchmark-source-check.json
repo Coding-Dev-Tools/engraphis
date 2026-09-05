@@ -1,0 +1,37 @@
+{
+  "schema": "engraphis-benchmark-source-check/v1",
+  "checks": [
+    {
+      "artifact": "vector-scale-numpy-corrected-20260905.json",
+      "source_files": [
+        "eval/vector_scale.py",
+        "eval/vector_scale_storage.py",
+        "eval/benchmark.py",
+        "engraphis/backends/vector_numpy.py",
+        "engraphis/backends/vector_sqlitevec.py",
+        "engraphis/core/vector_search.py",
+        "engraphis/core/store.py",
+        "engraphis/core/schema.py",
+        "engraphis/core/interfaces.py"
+      ],
+      "all_measured_source_hashes_match": true,
+      "cells": 6
+    },
+    {
+      "artifact": "vector-scale-sqlite-vec-corrected-20260905.json",
+      "source_files": [
+        "eval/vector_scale.py",
+        "eval/vector_scale_storage.py",
+        "eval/benchmark.py",
+        "engraphis/backends/vector_numpy.py",
+        "engraphis/backends/vector_sqlitevec.py",
+        "engraphis/core/vector_search.py",
+        "engraphis/core/store.py",
+        "engraphis/core/schema.py",
+        "engraphis/core/interfaces.py"
+      ],
+      "all_measured_source_hashes_match": true,
+      "cells": 6
+    }
+  ]
+}

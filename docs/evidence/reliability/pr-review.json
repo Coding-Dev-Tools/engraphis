@@ -1,0 +1,98 @@
+{
+  "schema": "engraphis-pr-review/v1",
+  "date": "2026-09-05",
+  "scope": "Complete original public feature branch relative to released main plus all non-ignored local candidates in the public, private cloud and private website repositories.",
+  "workers": {
+    "count": 4,
+    "depth": 1,
+    "areas": [
+      "architecture/storage",
+      "retrieval/interfaces/experience",
+      "historical branch and stash reconciliation",
+      "security/private cloud"
+    ],
+    "routing": "internal workers in the current task; parent integration only; no descendants or separate tasks"
+  },
+  "reconciliation": {
+    "historical_noncurrent_branches": 16,
+    "already_merged_exact_trees": 9,
+    "ancestors_of_merged_heads": 3,
+    "all_changed_blobs_in_main": 2,
+    "superseded_drafts": 2,
+    "stashes": 1,
+    "stash_unique_blobs": 0,
+    "auxiliary_worktree_clean": true,
+    "preserved": true,
+    "private_details": "retained in the private repository and local review inventory, not copied here"
+  },
+  "confirmed_review_repairs": [
+    "No cross-memory clause pruning: identical text can have distinct title, source, subject, pronoun or condition bindings.",
+    "Native store-sharing batch vectors commit or roll back with canonical state.",
+    "Keep the established 12000-memory graph window; a 500 cutoff loses older two-hop evidence.",
+    "MCP gist retains canonical packed context within its budget; response caps retain or omit complete context and refresh accounting.",
+    "Classic workspace approval controls and failure messages consistently disclose explicit opt-in.",
+    "Website structured data, plan durations, MCP interface claims and release smoke version follow authoritative contracts.",
+    "Private SQLite policy revision updates reject stale enable races, including concurrent creation.",
+    "Encoded auth routes share the canonical upstream authentication abuse budget.",
+    "Original manual graph diagnostic reserves its own port and private in-memory server before any request."
+  ],
+  "parent_integration_corrections": {
+    "failed_full_run": "public-pr-source-before-contract-correction.json",
+    "isolated_reproduction": {
+      "failed": 2,
+      "passed_after_correction": 2
+    },
+    "cause": "Old automatic-processing copy and pinned Ledger cache version in two existing assertions; production consent-error toasts were also corrected.",
+    "line_ending_proof": "line-ending-equivalence.json"
+  },
+  "checks": {
+    "core_focused": [
+      {
+        "passed": 324,
+        "skipped": 2
+      },
+      {
+        "passed": 186,
+        "overlaps_previous": true
+      }
+    ],
+    "ui_python": 119,
+    "ui_browser_chromium": 9,
+    "website_unit": 24,
+    "website_browser_chromium_axe": 11,
+    "pi_unit": 21,
+    "pi_process_restart": 1,
+    "pi_typescript_package": "passed",
+    "prime_unit": 136,
+    "prime_skipped": 1,
+    "manual_probe": 1,
+    "manual_owned_server_smoke": "passed; full physics diagnostic not run",
+    "cloud_unit": 1157,
+    "cloud_skipped": 2,
+    "edge_total": 13,
+    "edge_real_workerd_included": 4,
+    "cross_repository_policy_races": 3,
+    "static_contracts": "Ruff, Pyright, MCP export, CSP, commercial public/cloud/site checks passed",
+    "offline_gates": "offline-gates-pr-final.json"
+  },
+  "candidate_scan": {
+    "high_specificity_credential_candidates": 2,
+    "disposition": "Both are deliberate non-live URL-validation fixtures in tests/test_hosted_plan_resolution.py and tests/test_storage_concurrency_repair.py; no real credential found. Ignored data and credentials are excluded."
+  },
+  "final_reviewed_source": {
+    "engraphis/core/context.py": "3fbc5341adb353ad9b57c9b6368cdf166d1a116876af012214078d89eb53ddef",
+    "engraphis/core/engine.py": "0d76a5f028234933933aff7adb7078455051086ae1db9d0b41360540ed7e83e3",
+    "engraphis/core/recall.py": "7eaabf69a1c3f4555a307fc6e294562edb5c6c15e4df627daf09187b25f8fb15",
+    "engraphis/mcp_server.py": "ad49631bcc7ef9dede5d2b8b1182f27eb8d01fd103be4dfeb13014bbbd84081d",
+    "engraphis/classic_assets/dashboard.js": "5b2f8e6bdcef718b481ceee77687440b5814b89b95483858246f56a19a03496d",
+    "engraphis/static/dashboard.js": "5b2f8e6bdcef718b481ceee77687440b5814b89b95483858246f56a19a03496d",
+    "engraphis/dashboard_assets/ledger.js": "9a7abb256636302ec5970fbfcfc96ea8e961e49b26d3a01389c2b51d0a0b8c4f"
+  },
+  "limitations": [
+    "local validation is not release approval",
+    "PostgreSQL and supported remote CI gates are separate",
+    "no paid evaluation or user study",
+    "no production restore or credential rotation",
+    "website main-contract check depends on public change merging"
+  ]
+}

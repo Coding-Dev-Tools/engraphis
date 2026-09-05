@@ -1,0 +1,383 @@
+{
+  "schema": "engraphis-validation-source/v1",
+  "command": [
+    "python",
+    "-m",
+    "pytest",
+    "tests/",
+    "-q",
+    "-o",
+    "addopts=",
+    "--tb=short",
+    "--junitxml",
+    "<temporary-output.xml>"
+  ],
+  "environment": {
+    "ENGRAPHIS_EXTRACTOR": "none",
+    "sqlite_vec": "0.1.9 isolated installation"
+  },
+  "elapsed_seconds": 395.1142165000201,
+  "exit_code": 0,
+  "source_before": {
+    ".claude-plugin/skill-assets.sha256": "ec68564272a1fa5dc1e7bef660d777faf13881fd1d7662bdc5cd2d5c6eaec0b8",
+    ".github/workflows/ci.yml": "368fdd94d2e8b45995301b45f5771cce2a127fec9b0774d8e86a736fa8e02317",
+    "AGENTS.md": "77571f62390e516b445849eef4e9aa9ea7b6292efc7143868e38785f46e1f50a",
+    "CHANGELOG.md": "bdbb14b215401efcd08e4009f6ee9ca8eaa8ad1180ea0541ee4e0ffd8b4d07c9",
+    "README.md": "34975b33dda2e51e167793f78041d918e993589bf688d0d1013e71cf4210d3c3",
+    "docs/HOSTED_PLANS.md": "676fe44c6bf7bffdbd926eb269090004eff28cd00fc61501018588ab52e1df24",
+    "docs/HOSTING_RAILWAY.md": "81e530eea41b85f43b3746535db8bd5d16c2c45df39ad2fb1ebf3bf09e3b24bc",
+    "docs/MCP_CONTRACT.json": "b6db612c7660ddab19a4ad0786a7c94c9a660ab3c53aecc0130813a5ccba0259",
+    "docs/MCP_TOOLS.md": "604132977e2ade2e2b4dbb09c42197ee044b184724f745f8e1d3f0ed70c0f6fb",
+    "docs/PAID_EVALUATION_PROPOSAL.md": "dbdc3d91305df86c26365962044ed481d7f1f980afa0c526b3feafa08d007de4",
+    "docs/RAILWAY_TEMPLATE.md": "3a4cef99ad95b7a2c78e1dffc8fe860230d59c39d3e3267b727c51d792988546",
+    "docs/SYNC.md": "fe2f5ff8158ca4aa505684d9ee6b077108195b3e8cfd75dd9d5d5b77c40a11e7",
+    "engraphis/backends/vector_numpy.py": "c598831bea547824cfe08844816fa79857d3617cb0631238f95dad955a424f72",
+    "engraphis/backends/vector_sqlitevec.py": "6148e14ceaacc19239b64c642a3fba0e98797c78cec356210157afadf475a08b",
+    "engraphis/classic_assets/dashboard.js": "5b2f8e6bdcef718b481ceee77687440b5814b89b95483858246f56a19a03496d",
+    "engraphis/classic_assets/index.html": "bd7f37e88cf9bf21be2490906e2f620b251d1d3db787e41793d4c8a898392089",
+    "engraphis/cloud_features.py": "a1bec76216d4f1276a3313dabc1d29a1666378e11863d05d1a02e695cf6d7293",
+    "engraphis/commercial.py": "184f312066a9e682e51a0abeff042f1c0e8eed2d47470157b23930b5a17633aa",
+    "engraphis/commercial_manifest.json": "27dfb332a5b4f3ceeed22aef37e1f55e1c051ab69cc9eedc4f826ddf4c752162",
+    "engraphis/core/browsing.py": "9adce7bbe8791fe4e76b892977d22cc72958c5d8ef3f98c58f50efdc1bb2fd36",
+    "engraphis/core/context.py": "3fbc5341adb353ad9b57c9b6368cdf166d1a116876af012214078d89eb53ddef",
+    "engraphis/core/engine.py": "0d76a5f028234933933aff7adb7078455051086ae1db9d0b41360540ed7e83e3",
+    "engraphis/core/interfaces.py": "5f0ace8f64472100f31b591b0b3822e7fb21eae84813d69325bcb4b9108d4d22",
+    "engraphis/core/recall.py": "7eaabf69a1c3f4555a307fc6e294562edb5c6c15e4df627daf09187b25f8fb15",
+    "engraphis/core/resolve.py": "ffc17dd39331bf0c6881fa2efa9bcca73f0b7c968135fffaa4dbb025bb32c674",
+    "engraphis/core/schema.py": "99f3647602e2659035d5977e9d9814b378e58c2849483821e6e01d777b668686",
+    "engraphis/core/store.py": "007272ec42011faaae25bdbaf8905cf0d2945bf6f451b60aa7a90fff0550debd",
+    "engraphis/core/vector_repair.py": "425901615d3b602e3310af1611ebb3c0b78f3d793694c4ca8fffb55f00d07904",
+    "engraphis/core/vector_search.py": "75800052e573e9af01c6fd098eaf8647c3c45cd7eb2601dae05d42359e19b234",
+    "engraphis/dashboard_assets/engraphis-graph-every.js": "ca84b13d1b6ccb72f347d726b977a8e19f51423e8beff7b072f73788f7cd086f",
+    "engraphis/dashboard_assets/index.html": "86b8f1935ece771523506d3410dd08294edb8183c2abaecd091418f37f17f00b",
+    "engraphis/dashboard_assets/ledger.js": "9a7abb256636302ec5970fbfcfc96ea8e961e49b26d3a01389c2b51d0a0b8c4f",
+    "engraphis/dashboard_assets/managed-processing.js": "9508c6b6dacab08304e3c08fd65871758b3043180840e5a8d9d64f6f8b3f000e",
+    "engraphis/managed_processing.py": "6a04b90ccf62dcd2f70cec1c8994b62e8242638ff0430dc20dca1cb42ac8792b",
+    "engraphis/mcp_server.py": "ad49631bcc7ef9dede5d2b8b1182f27eb8d01fd103be4dfeb13014bbbd84081d",
+    "engraphis/routes/v2_api.py": "e01e196ea087d61a7fbad770f7b2c9dcebb968a30b55c82e46040b6af2210a10",
+    "engraphis/service.py": "572e61628fbd1d8a9e5ce3e21c6feaf15bf915e52027366edeca6b7cee314aba",
+    "engraphis/static/dashboard.js": "5b2f8e6bdcef718b481ceee77687440b5814b89b95483858246f56a19a03496d",
+    "engraphis/static/index.html": "4f79a3266ddab53a4ef407fc31393295a0d5991a8f72431b2b958be114ac8f7e",
+    "eval/datasets/resolver_write_acceptance.jsonl": "e8db06aa41a93e4892e81d60bb71f06e656088f3eba36ebe37710850a97db6f7",
+    "eval/fts_insert_scaling.py": "a8ecfbe19695f6d4659c3edf389b007c965b214b64fdd58d5ee86635fa766144",
+    "eval/native_coverage_scaling.py": "0c7c3f5c80570c7ab02310f14927eb82399d1a624d65df895e937ed87339fe9c",
+    "eval/resolver_reworded_corrections.py": "f89e0920986efecd736380f0b8021aae553cfb304761f489d49828e6ffec537e",
+    "eval/vector_scale.py": "3f9c327d9eca1a857512ddc208e972933be1a7d4fa7fa0017aca0cbf8fe7bb6d",
+    "eval/vector_scale_storage.py": "bda0c1139596eb9232cd75c826fc941101b6116bae32ad7895525d43f9d35484",
+    "eval/vector_scan_plan.py": "92de2f3b41aa457dcfee11998936ce35e023fe61596ed98f3836c998a6e9a1cd",
+    "integrations/pi/index.ts": "454ab9d7b095d76cd138404dba45bdbe627c1f8cd6b5284881cd910f64e05a0c",
+    "integrations/pi/src/generated-contract.ts": "906711cba159d75b8c5440f12796be78cd2f8f4b423971e4009bb3c0d61223c6",
+    "integrations/pi/src/tool-schemas.ts": "daf238df8a1541a2b61590a3281f65f206fb5fe8d9af2bbb292ec4794453fd2c",
+    "integrations/pi/test/mcp-client.integration.ts": "45bee1e9e9bb33b3199f1df1ecad93b9f8f95a972ab26b1fc3c3f13b3bdec512",
+    "integrations/prime_agent/src/engraphis_prime_agent/_contract.py": "4b868447886cc7f6708c1667b5807882c822728db2b0efb4860283ba4fac400b",
+    "integrations/prime_agent/src/engraphis_prime_agent/tools.py": "b126532c8740f4a93c76abbfa701fb35a50fe1bc6dc45da06b33ecfaeaa7472d",
+    "integrations/prime_agent/tests/test_tools.py": "36e905860667343ccd2bd97ed5ff05a63fc32e247dbf5b73dfc07796dcc3fec5",
+    "playwright.config.js": "89aaaece6f36ba55fa35406983f0eb1f2695e4872e6793b44a53604120a06ee9",
+    "scripts/check_commercial_manifest.py": "2eace66d9e9870f70dd804eb3b62766f34d75add314631bccc3d1ee6b482c1b3",
+    "scripts/export_mcp_contract.py": "65d177342aa3bef63fb5d9f6c687fd1c3e72dcc85154dcd8108d0d887ac2e9ff",
+    "scripts/init.py": "5435ad275bf76a564d9ecdd3122a7bc3b84d18e56e0ec828757f4400c20fb735",
+    "scripts/installation_profile.py": "994da94a696c1eb06b83683735fdafb6235b562465800f1b98f3df63b14d523c",
+    "scripts/update.py": "5f28d0eeab28dd321084ad0f88aa6aff521016ac1056c12031b977371f9e333d",
+    "skills/engraphis-memory/references/TOOLS.md": "33874c7c7a1c0911b0e73c7d22addc9828963d5436cb315fe7c6c5587c6b911d",
+    "tests/e2e/commercial.spec.js": "c9e080d5807ab7484e1738cd731dba98871afe6dc8af6ad720dfd1cd34c9d6e0",
+    "tests/e2e/ledger.spec.js": "e895543ebd03fd80ce19f2678e0a0231f4ae3401dff475f6d781613dfdf4d213",
+    "tests/e2e/workspace-smoke.spec.js": "01f63458123e824bcf1e14d6505ecf7c776fe6ffd9e0bdc556b65e34880b22e4",
+    "tests/test_cloud_features.py": "951f4ae8775a1f99eff89d2fd18d227c16fdcc24f892532118fe6fb83d085ef2",
+    "tests/test_context_economy.py": "891102b713a04ff34dedfccab4ebc0d51fe6c7617b469d30794cce7970f9e41d",
+    "tests/test_context_evidence_preservation.py": "6121a71511c25a302f6fed5912d9e70d1f783765b88701edf0994b8d6c714d0c",
+    "tests/test_context_packer.py": "bb2cbf4615cbd5aca678da60eac79b3a6c6eb16265830ea645627a024601304e",
+    "tests/test_context_packing.py": "e19938d0f9beaba4c3919f10e6eb2d2625cb00f6cf11ef8bf0595423026f8fdf",
+    "tests/test_dashboard_auth_placement.py": "aba4826b85aae1fbb367bfee7ffbd2133c947eefbdb5a0512a9f9821fd22d1cb",
+    "tests/test_dashboard_v2.py": "114f3d104f73761d7032987d8e57dd3d5354e73a86ee787105a1930d1086732b",
+    "tests/test_documentation_contracts.py": "aee709f8b77e01a1792ce0b16532401b2bb00371a3a1915b12f1c01bdaf2946f",
+    "tests/test_engine.py": "3afe96d40007ae4c16de9ea89be8cbd318c4aa03fd266264e232da764d83aeaa",
+    "tests/test_fts_insert_scaling.py": "7f1168828c73f2f07e1c31419a581dd42784752767f74b8fcbc78e10815c8a14",
+    "tests/test_graph_engine_asset.py": "f3bf92600abb069c95c354b04ee973d9c37ac758348052b001fe443ebb36a00c",
+    "tests/test_hosted_plan_resolution.py": "f71a3f00fccb1fa9cd2b69a35912a565ba06ffa789059f9943d2e6a749a6ba0e",
+    "tests/test_init.py": "3fbced7c627bd590a75015e07608ac10138d835d2fd0bf7938de3bc1bf3fb121",
+    "tests/test_installation_profile.py": "61de0f3235600310ca77b900dcdf5f9b2d8a78bd5425f0fd3c35b680e6250301",
+    "tests/test_managed_processing_policy.py": "7c65bb7547b29e28ce04b835574bb2cd2bc7b97d2f3a38bccb81014dcfb27d35",
+    "tests/test_manual_graph_probe.py": "9d27578e5df38c892e60b56360952fbf77ce2292a52f64d5b137962f6dfb40cd",
+    "tests/test_mcp_contract.py": "da34ca5d4303e112fb55168ad112de340b178d388038fd31dd4256da45d47fb1",
+    "tests/test_mcp_server.py": "fca4d0663ea5d2d5bcfb8494a73dc553638d77eb5bd755b98c6793c819716f65",
+    "tests/test_memory_browsing.py": "85128315f486d8287db99de857c2b96142f7c46de289c25dfa0ad5f4ee3b743d",
+    "tests/test_native_coverage_equivalence.py": "b4aea900361794c73526139363bd4435c843a6ab90e14d3912730009c909f351",
+    "tests/test_obsidian_import_schema.py": "0461e02a9543dac685bc1f8e09f0f7194f7f0a8df15cc5d5f46887c1c1e41381",
+    "tests/test_pro_cta.py": "ec692d6f2bfcea3726a3eaa819b4495c2312faa9746f8bd0e6b6e90e887378f2",
+    "tests/test_recall.py": "8035ff3959d956f600d6ff13ad14f6a5e4602f9167407d6bb11dcb7d63187152",
+    "tests/test_resolver_acceptance.py": "2115f5ab530f10e78544da94bf0dce138a23edf9cc64c0b441e971fbda1705af",
+    "tests/test_storage_concurrency_repair.py": "3040e01d5481e0d28fad43e57f74c01d4244f91bf2127628b322d60e0c098490",
+    "tests/test_store_fts_insert.py": "195dc8c7118f6b1f1a98e6e38c3f71cbc3f5568601b4022022660f31ed09f6c4",
+    "tests/test_sync.py": "58f434afae95141610b87ec2656105d8daae4e61eca46a9b57972b3cbe475ee8",
+    "tests/test_update.py": "b95c0a9cba23997c608b823eafc397027011a9c873bedde7ae95b7e6cf442f8d",
+    "tests/test_vector_numpy.py": "5fba0cbba8e94a3e2f24925ac8554db7998ef17e3577d1b8ee6842b740ead54a",
+    "tests/test_vector_scale_storage.py": "efb23b7748d327b0dce9b102ea581f7cf38fd96b233c8be798834bf78e99686b",
+    "tests/test_vector_scan_plan.py": "9312e44f73fe619ce64b73a5b1d8b637b45cd78fe7f408a174d786d6f34aec39",
+    "tests/test_vector_snapshot_plan.py": "83c49c621d4570c2a61a35c304665c27db80cf9da1c60ecabc670cfc9e7f9ad0",
+    "tests/test_vector_sqlitevec_backend.py": "2ff0682c9050d4ee30a052d6a7820ca55091234ef96c7e9ab2b7c052abcc7347",
+    "tools/galaxy_mode_test.js": "2f70a633c3b9cd902903cecaadf7c84cb3ab61e71db1702d88da14e18fc69bfc"
+  },
+  "source_after": {
+    ".claude-plugin/skill-assets.sha256": "ec68564272a1fa5dc1e7bef660d777faf13881fd1d7662bdc5cd2d5c6eaec0b8",
+    ".github/workflows/ci.yml": "368fdd94d2e8b45995301b45f5771cce2a127fec9b0774d8e86a736fa8e02317",
+    "AGENTS.md": "77571f62390e516b445849eef4e9aa9ea7b6292efc7143868e38785f46e1f50a",
+    "CHANGELOG.md": "bdbb14b215401efcd08e4009f6ee9ca8eaa8ad1180ea0541ee4e0ffd8b4d07c9",
+    "README.md": "34975b33dda2e51e167793f78041d918e993589bf688d0d1013e71cf4210d3c3",
+    "docs/HOSTED_PLANS.md": "676fe44c6bf7bffdbd926eb269090004eff28cd00fc61501018588ab52e1df24",
+    "docs/HOSTING_RAILWAY.md": "81e530eea41b85f43b3746535db8bd5d16c2c45df39ad2fb1ebf3bf09e3b24bc",
+    "docs/MCP_CONTRACT.json": "b6db612c7660ddab19a4ad0786a7c94c9a660ab3c53aecc0130813a5ccba0259",
+    "docs/MCP_TOOLS.md": "604132977e2ade2e2b4dbb09c42197ee044b184724f745f8e1d3f0ed70c0f6fb",
+    "docs/PAID_EVALUATION_PROPOSAL.md": "dbdc3d91305df86c26365962044ed481d7f1f980afa0c526b3feafa08d007de4",
+    "docs/RAILWAY_TEMPLATE.md": "3a4cef99ad95b7a2c78e1dffc8fe860230d59c39d3e3267b727c51d792988546",
+    "docs/SYNC.md": "fe2f5ff8158ca4aa505684d9ee6b077108195b3e8cfd75dd9d5d5b77c40a11e7",
+    "engraphis/backends/vector_numpy.py": "c598831bea547824cfe08844816fa79857d3617cb0631238f95dad955a424f72",
+    "engraphis/backends/vector_sqlitevec.py": "6148e14ceaacc19239b64c642a3fba0e98797c78cec356210157afadf475a08b",
+    "engraphis/classic_assets/dashboard.js": "5b2f8e6bdcef718b481ceee77687440b5814b89b95483858246f56a19a03496d",
+    "engraphis/classic_assets/index.html": "bd7f37e88cf9bf21be2490906e2f620b251d1d3db787e41793d4c8a898392089",
+    "engraphis/cloud_features.py": "a1bec76216d4f1276a3313dabc1d29a1666378e11863d05d1a02e695cf6d7293",
+    "engraphis/commercial.py": "184f312066a9e682e51a0abeff042f1c0e8eed2d47470157b23930b5a17633aa",
+    "engraphis/commercial_manifest.json": "27dfb332a5b4f3ceeed22aef37e1f55e1c051ab69cc9eedc4f826ddf4c752162",
+    "engraphis/core/browsing.py": "9adce7bbe8791fe4e76b892977d22cc72958c5d8ef3f98c58f50efdc1bb2fd36",
+    "engraphis/core/context.py": "3fbc5341adb353ad9b57c9b6368cdf166d1a116876af012214078d89eb53ddef",
+    "engraphis/core/engine.py": "0d76a5f028234933933aff7adb7078455051086ae1db9d0b41360540ed7e83e3",
+    "engraphis/core/interfaces.py": "5f0ace8f64472100f31b591b0b3822e7fb21eae84813d69325bcb4b9108d4d22",
+    "engraphis/core/recall.py": "7eaabf69a1c3f4555a307fc6e294562edb5c6c15e4df627daf09187b25f8fb15",
+    "engraphis/core/resolve.py": "ffc17dd39331bf0c6881fa2efa9bcca73f0b7c968135fffaa4dbb025bb32c674",
+    "engraphis/core/schema.py": "99f3647602e2659035d5977e9d9814b378e58c2849483821e6e01d777b668686",
+    "engraphis/core/store.py": "007272ec42011faaae25bdbaf8905cf0d2945bf6f451b60aa7a90fff0550debd",
+    "engraphis/core/vector_repair.py": "425901615d3b602e3310af1611ebb3c0b78f3d793694c4ca8fffb55f00d07904",
+    "engraphis/core/vector_search.py": "75800052e573e9af01c6fd098eaf8647c3c45cd7eb2601dae05d42359e19b234",
+    "engraphis/dashboard_assets/engraphis-graph-every.js": "ca84b13d1b6ccb72f347d726b977a8e19f51423e8beff7b072f73788f7cd086f",
+    "engraphis/dashboard_assets/index.html": "86b8f1935ece771523506d3410dd08294edb8183c2abaecd091418f37f17f00b",
+    "engraphis/dashboard_assets/ledger.js": "9a7abb256636302ec5970fbfcfc96ea8e961e49b26d3a01389c2b51d0a0b8c4f",
+    "engraphis/dashboard_assets/managed-processing.js": "9508c6b6dacab08304e3c08fd65871758b3043180840e5a8d9d64f6f8b3f000e",
+    "engraphis/managed_processing.py": "6a04b90ccf62dcd2f70cec1c8994b62e8242638ff0430dc20dca1cb42ac8792b",
+    "engraphis/mcp_server.py": "ad49631bcc7ef9dede5d2b8b1182f27eb8d01fd103be4dfeb13014bbbd84081d",
+    "engraphis/routes/v2_api.py": "e01e196ea087d61a7fbad770f7b2c9dcebb968a30b55c82e46040b6af2210a10",
+    "engraphis/service.py": "572e61628fbd1d8a9e5ce3e21c6feaf15bf915e52027366edeca6b7cee314aba",
+    "engraphis/static/dashboard.js": "5b2f8e6bdcef718b481ceee77687440b5814b89b95483858246f56a19a03496d",
+    "engraphis/static/index.html": "4f79a3266ddab53a4ef407fc31393295a0d5991a8f72431b2b958be114ac8f7e",
+    "eval/datasets/resolver_write_acceptance.jsonl": "e8db06aa41a93e4892e81d60bb71f06e656088f3eba36ebe37710850a97db6f7",
+    "eval/fts_insert_scaling.py": "a8ecfbe19695f6d4659c3edf389b007c965b214b64fdd58d5ee86635fa766144",
+    "eval/native_coverage_scaling.py": "0c7c3f5c80570c7ab02310f14927eb82399d1a624d65df895e937ed87339fe9c",
+    "eval/resolver_reworded_corrections.py": "f89e0920986efecd736380f0b8021aae553cfb304761f489d49828e6ffec537e",
+    "eval/vector_scale.py": "3f9c327d9eca1a857512ddc208e972933be1a7d4fa7fa0017aca0cbf8fe7bb6d",
+    "eval/vector_scale_storage.py": "bda0c1139596eb9232cd75c826fc941101b6116bae32ad7895525d43f9d35484",
+    "eval/vector_scan_plan.py": "92de2f3b41aa457dcfee11998936ce35e023fe61596ed98f3836c998a6e9a1cd",
+    "integrations/pi/index.ts": "454ab9d7b095d76cd138404dba45bdbe627c1f8cd6b5284881cd910f64e05a0c",
+    "integrations/pi/src/generated-contract.ts": "906711cba159d75b8c5440f12796be78cd2f8f4b423971e4009bb3c0d61223c6",
+    "integrations/pi/src/tool-schemas.ts": "daf238df8a1541a2b61590a3281f65f206fb5fe8d9af2bbb292ec4794453fd2c",
+    "integrations/pi/test/mcp-client.integration.ts": "45bee1e9e9bb33b3199f1df1ecad93b9f8f95a972ab26b1fc3c3f13b3bdec512",
+    "integrations/prime_agent/src/engraphis_prime_agent/_contract.py": "4b868447886cc7f6708c1667b5807882c822728db2b0efb4860283ba4fac400b",
+    "integrations/prime_agent/src/engraphis_prime_agent/tools.py": "b126532c8740f4a93c76abbfa701fb35a50fe1bc6dc45da06b33ecfaeaa7472d",
+    "integrations/prime_agent/tests/test_tools.py": "36e905860667343ccd2bd97ed5ff05a63fc32e247dbf5b73dfc07796dcc3fec5",
+    "playwright.config.js": "89aaaece6f36ba55fa35406983f0eb1f2695e4872e6793b44a53604120a06ee9",
+    "scripts/check_commercial_manifest.py": "2eace66d9e9870f70dd804eb3b62766f34d75add314631bccc3d1ee6b482c1b3",
+    "scripts/export_mcp_contract.py": "65d177342aa3bef63fb5d9f6c687fd1c3e72dcc85154dcd8108d0d887ac2e9ff",
+    "scripts/init.py": "5435ad275bf76a564d9ecdd3122a7bc3b84d18e56e0ec828757f4400c20fb735",
+    "scripts/installation_profile.py": "994da94a696c1eb06b83683735fdafb6235b562465800f1b98f3df63b14d523c",
+    "scripts/update.py": "5f28d0eeab28dd321084ad0f88aa6aff521016ac1056c12031b977371f9e333d",
+    "skills/engraphis-memory/references/TOOLS.md": "33874c7c7a1c0911b0e73c7d22addc9828963d5436cb315fe7c6c5587c6b911d",
+    "tests/e2e/commercial.spec.js": "c9e080d5807ab7484e1738cd731dba98871afe6dc8af6ad720dfd1cd34c9d6e0",
+    "tests/e2e/ledger.spec.js": "e895543ebd03fd80ce19f2678e0a0231f4ae3401dff475f6d781613dfdf4d213",
+    "tests/e2e/workspace-smoke.spec.js": "01f63458123e824bcf1e14d6505ecf7c776fe6ffd9e0bdc556b65e34880b22e4",
+    "tests/test_cloud_features.py": "951f4ae8775a1f99eff89d2fd18d227c16fdcc24f892532118fe6fb83d085ef2",
+    "tests/test_context_economy.py": "891102b713a04ff34dedfccab4ebc0d51fe6c7617b469d30794cce7970f9e41d",
+    "tests/test_context_evidence_preservation.py": "6121a71511c25a302f6fed5912d9e70d1f783765b88701edf0994b8d6c714d0c",
+    "tests/test_context_packer.py": "bb2cbf4615cbd5aca678da60eac79b3a6c6eb16265830ea645627a024601304e",
+    "tests/test_context_packing.py": "e19938d0f9beaba4c3919f10e6eb2d2625cb00f6cf11ef8bf0595423026f8fdf",
+    "tests/test_dashboard_auth_placement.py": "aba4826b85aae1fbb367bfee7ffbd2133c947eefbdb5a0512a9f9821fd22d1cb",
+    "tests/test_dashboard_v2.py": "114f3d104f73761d7032987d8e57dd3d5354e73a86ee787105a1930d1086732b",
+    "tests/test_documentation_contracts.py": "aee709f8b77e01a1792ce0b16532401b2bb00371a3a1915b12f1c01bdaf2946f",
+    "tests/test_engine.py": "3afe96d40007ae4c16de9ea89be8cbd318c4aa03fd266264e232da764d83aeaa",
+    "tests/test_fts_insert_scaling.py": "7f1168828c73f2f07e1c31419a581dd42784752767f74b8fcbc78e10815c8a14",
+    "tests/test_graph_engine_asset.py": "f3bf92600abb069c95c354b04ee973d9c37ac758348052b001fe443ebb36a00c",
+    "tests/test_hosted_plan_resolution.py": "f71a3f00fccb1fa9cd2b69a35912a565ba06ffa789059f9943d2e6a749a6ba0e",
+    "tests/test_init.py": "3fbced7c627bd590a75015e07608ac10138d835d2fd0bf7938de3bc1bf3fb121",
+    "tests/test_installation_profile.py": "61de0f3235600310ca77b900dcdf5f9b2d8a78bd5425f0fd3c35b680e6250301",
+    "tests/test_managed_processing_policy.py": "7c65bb7547b29e28ce04b835574bb2cd2bc7b97d2f3a38bccb81014dcfb27d35",
+    "tests/test_manual_graph_probe.py": "9d27578e5df38c892e60b56360952fbf77ce2292a52f64d5b137962f6dfb40cd",
+    "tests/test_mcp_contract.py": "da34ca5d4303e112fb55168ad112de340b178d388038fd31dd4256da45d47fb1",
+    "tests/test_mcp_server.py": "fca4d0663ea5d2d5bcfb8494a73dc553638d77eb5bd755b98c6793c819716f65",
+    "tests/test_memory_browsing.py": "85128315f486d8287db99de857c2b96142f7c46de289c25dfa0ad5f4ee3b743d",
+    "tests/test_native_coverage_equivalence.py": "b4aea900361794c73526139363bd4435c843a6ab90e14d3912730009c909f351",
+    "tests/test_obsidian_import_schema.py": "0461e02a9543dac685bc1f8e09f0f7194f7f0a8df15cc5d5f46887c1c1e41381",
+    "tests/test_pro_cta.py": "ec692d6f2bfcea3726a3eaa819b4495c2312faa9746f8bd0e6b6e90e887378f2",
+    "tests/test_recall.py": "8035ff3959d956f600d6ff13ad14f6a5e4602f9167407d6bb11dcb7d63187152",
+    "tests/test_resolver_acceptance.py": "2115f5ab530f10e78544da94bf0dce138a23edf9cc64c0b441e971fbda1705af",
+    "tests/test_storage_concurrency_repair.py": "3040e01d5481e0d28fad43e57f74c01d4244f91bf2127628b322d60e0c098490",
+    "tests/test_store_fts_insert.py": "195dc8c7118f6b1f1a98e6e38c3f71cbc3f5568601b4022022660f31ed09f6c4",
+    "tests/test_sync.py": "58f434afae95141610b87ec2656105d8daae4e61eca46a9b57972b3cbe475ee8",
+    "tests/test_update.py": "b95c0a9cba23997c608b823eafc397027011a9c873bedde7ae95b7e6cf442f8d",
+    "tests/test_vector_numpy.py": "5fba0cbba8e94a3e2f24925ac8554db7998ef17e3577d1b8ee6842b740ead54a",
+    "tests/test_vector_scale_storage.py": "efb23b7748d327b0dce9b102ea581f7cf38fd96b233c8be798834bf78e99686b",
+    "tests/test_vector_scan_plan.py": "9312e44f73fe619ce64b73a5b1d8b637b45cd78fe7f408a174d786d6f34aec39",
+    "tests/test_vector_snapshot_plan.py": "83c49c621d4570c2a61a35c304665c27db80cf9da1c60ecabc670cfc9e7f9ad0",
+    "tests/test_vector_sqlitevec_backend.py": "2ff0682c9050d4ee30a052d6a7820ca55091234ef96c7e9ab2b7c052abcc7347",
+    "tools/galaxy_mode_test.js": "2f70a633c3b9cd902903cecaadf7c84cb3ab61e71db1702d88da14e18fc69bfc"
+  },
+  "source_stable": true,
+  "changed_files": [],
+  "exclusions": [
+    "docs/evidence/**",
+    "docs/RELIABILITY_PROGRAM.md: final report assembled separately"
+  ],
+  "tests": {
+    "tests": 4789,
+    "errors": 0,
+    "failures": 0,
+    "skipped": 37,
+    "passed": 4752,
+    "reported_seconds": 386.654
+  },
+  "skipped_cases": [
+    {
+      "test": "tests.test_code_index_route_security::test_code_index_rejects_symlink_escape",
+      "reason": "directory symlinks are unavailable in this environment"
+    },
+    {
+      "test": "tests.test_codegraph::test_symlinked_file_is_not_followed_out_of_root",
+      "reason": "symlinks not supported on this platform"
+    },
+    {
+      "test": "tests.test_commercial_hardening::test_the_credential_state_directory_is_owner_only",
+      "reason": "POSIX permission semantics"
+    },
+    {
+      "test": "tests.test_config::test_explicit_env_file_must_be_owner_private_on_posix",
+      "reason": "POSIX permission bits are not authoritative on Windows"
+    },
+    {
+      "test": "tests.test_engine::test_index_repo_rejects_root_symlink_that_resolves_outside_approved_root",
+      "reason": "symlinks not supported in this environment"
+    },
+    {
+      "test": "tests.test_engine::test_index_repo_never_reads_a_symlink_that_escapes_root",
+      "reason": "symlinks not supported in this environment"
+    },
+    {
+      "test": "tests.test_hosted_ledger::test_private_ledger_enforces_owner_only_directory_and_file_modes",
+      "reason": "POSIX permission contract"
+    },
+    {
+      "test": "tests.test_hosted_ledger::test_private_ledger_rejects_symlink_leaves_without_touching_target[ledger]",
+      "reason": "symlink creation unavailable"
+    },
+    {
+      "test": "tests.test_hosted_ledger::test_private_ledger_rejects_symlink_leaves_without_touching_target[lock]",
+      "reason": "symlink creation unavailable"
+    },
+    {
+      "test": "tests.test_hosted_ledger::test_private_ledger_rejects_public_existing_leaves[ledger]",
+      "reason": "POSIX permission contract"
+    },
+    {
+      "test": "tests.test_hosted_ledger::test_private_ledger_rejects_public_existing_leaves[lock]",
+      "reason": "POSIX permission contract"
+    },
+    {
+      "test": "tests.test_hosted_luna::test_worker_timeout_terminates_sdk_descendants",
+      "reason": "POSIX process groups are required"
+    },
+    {
+      "test": "tests.test_init::test_init_rejects_an_insecure_existing_trusted_env",
+      "reason": "POSIX permission bits do not apply on Windows"
+    },
+    {
+      "test": "tests.test_init::test_generated_trusted_env_and_parent_are_private",
+      "reason": "POSIX permission bits do not apply on Windows"
+    },
+    {
+      "test": "tests.test_init::test_generated_encryption_key_is_private",
+      "reason": "POSIX permission bits do not apply on Windows"
+    },
+    {
+      "test": "tests.test_llm_config::test_persist_project_env_preserves_the_existing_project_directory_mode",
+      "reason": "POSIX permission semantics"
+    },
+    {
+      "test": "tests.test_memory_routes_fixes::test_legacy_folder_import_skips_symlink_escape",
+      "reason": "symlinks not supported in this environment"
+    },
+    {
+      "test": "tests.test_obsidian_parser::test_vault_scan_skips_hidden_config_symlinks_and_rejects_secrets",
+      "reason": "symlinks unavailable on this platform"
+    },
+    {
+      "test": "tests.test_obsidian_parser::test_vault_root_symlink_is_rejected",
+      "reason": "directory symlinks unavailable on this platform"
+    },
+    {
+      "test": "tests.test_release_evidence::test_release_environment_command_emits_a_cyclonedx_sbom",
+      "reason": "release-only CycloneDX tool"
+    },
+    {
+      "test": "tests.test_service::test_import_folder_symlink_escape_blocked",
+      "reason": "symlinks not supported in this environment"
+    },
+    {
+      "test": "tests.test_store_fts_insert::test_update_cleans_existing_duplicate_mirrors[fallback]",
+      "reason": "plain-table primary key already prevents duplicates"
+    },
+    {
+      "test": "tests.test_store_v4_migration::test_v4_backup_is_owner_only_even_under_permissive_umask",
+      "reason": "POSIX permission-bit contract"
+    },
+    {
+      "test": "tests.test_sync::test_folder_transport_safe_named_symlink_marks_pull_incomplete",
+      "reason": "symlinks unavailable (e.g. unprivileged Windows)"
+    },
+    {
+      "test": "tests.test_sync::test_folder_transport_push_never_writes_through_planted_symlinks",
+      "reason": "symlinks unavailable (e.g. unprivileged Windows)"
+    },
+    {
+      "test": "tests.test_update_check::test_default_cache_directory_is_owner_private",
+      "reason": "POSIX permission bits are not authoritative on Windows"
+    },
+    {
+      "test": "tests.test_encrypted_store::test_encrypts_at_rest_unreadable_without_key",
+      "reason": "encryption extra not installed"
+    },
+    {
+      "test": "tests.test_encrypted_store::test_recall_and_reopen_work_encrypted",
+      "reason": "encryption extra not installed"
+    },
+    {
+      "test": "tests.test_encrypted_store::test_wrong_key_is_rejected",
+      "reason": "encryption extra not installed"
+    },
+    {
+      "test": "tests.test_encrypted_store::test_existing_encrypted_database_opens_read_only_without_sidecar_mutation",
+      "reason": "encryption extra not installed"
+    },
+    {
+      "test": "tests.test_encrypted_store::test_encrypted_read_only_open_rejects_wrong_key",
+      "reason": "encryption extra not installed"
+    },
+    {
+      "test": "tests.test_encrypted_store::test_encrypted_read_only_open_rejects_active_wal_before_connector",
+      "reason": "encryption extra not installed"
+    },
+    {
+      "test": "tests.test_encrypted_store::test_key_from_file",
+      "reason": "encryption extra not installed"
+    },
+    {
+      "test": "tests.test_encrypted_store::test_encrypted_manifest_snapshot_is_immutable_and_read_only",
+      "reason": "encryption extra not installed"
+    },
+    {
+      "test": "tests.test_encrypted_store::test_passphrase_key_non_hex",
+      "reason": "encryption extra not installed"
+    },
+    {
+      "test": "tests.test_encrypted_store::test_no_key_is_plaintext_and_backward_compatible",
+      "reason": "encryption extra not installed"
+    },
+    {
+      "test": "tests.test_encrypted_store::test_key_pragma_escapes_quotes",
+      "reason": "encryption extra not installed"
+    }
+  ]
+}
