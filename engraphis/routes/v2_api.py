@@ -25,10 +25,11 @@ from typing import Optional
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel, Field, StrictInt
+from pydantic import BaseModel, Field, StrictBool, StrictInt
 from starlette.concurrency import run_in_threadpool
 
 from engraphis import licensing
+from engraphis.commercial import trial_days_by_plan
 from engraphis.config import DEFAULT_RELAY_URL, canonicalize_relay_url, settings
 from engraphis.core.poisoning import prompt_eligible
 from engraphis.core.scoring import normalize
@@ -163,6 +164,8 @@ def release_service(svc: MemoryService) -> None:
 
 def _run(fn, *a, **k):
     """Call a service method, mapping validation errors to 400 and the rest to 500."""
+    from engraphis.core.browsing import BrowseCursorStale
+    from engraphis.managed_processing import ProcessingPolicyChanged
     try:
         return fn(*a, **k)
     except GraphIndexRebuilding as exc:
@@ -196,6 +199,16 @@ def _run(fn, *a, **k):
     except ValidationError:
         logger.info("dashboard request rejected")
         raise _invalid_request() from None
+    except ProcessingPolicyChanged:
+        raise HTTPException(status_code=409, detail={
+            "error": "Processing controls changed while Cloud was responding. Reload and retry.",
+            "code": "processing_policy_changed",
+        }) from None
+    except BrowseCursorStale:
+        raise HTTPException(status_code=409, detail={
+            "error": "Memory listing changed. Restart from the first page.",
+            "code": "cursor_stale",
+        }) from None
     except ValueError as exc:
         if _is_embedder_mismatch(exc):
             raise HTTPException(status_code=409, detail={
@@ -1388,60 +1401,109 @@ def answer(req: _AnswerReq):
 
 @router.get("/memories")
 def memories(workspace: Optional[str] = None, q: Optional[str] = Query(default=None, max_length=10_000),
-             limit: int = Query(default=200, ge=1, le=1_000)):
-    """List memories directly from the store (no embedding) so browsing works even
-    without sentence-transformers. Live memories only (not superseded/expired)."""
-    import json as _json
-    import sqlite3 as _sql
-    current_service = service()
+             limit: int = Query(default=200, ge=1, le=1_000),
+             mtype: Optional[str] = Query(default=None),
+             cursor: Optional[str] = Query(default=None, max_length=4096),
+             repo: Optional[str] = Query(default=None),
+             valid_at: Optional[float] = Query(default=None),
+             known_at: Optional[float] = Query(default=None)):
+    """Browse a bounded page through the canonical scope and temporal boundary."""
+    from engraphis.core.browsing import BrowseCursorStale
+
     ws = workspace or _default_ws()
     if not ws:
-        # No workspace exists yet (fresh install) — nothing to list. Return an empty
-        # result instead of letting _clean_ws(None) raise a 500.
-        return {"workspace": "", "count": 0, "memories": []}
+        return {"workspace": "", "count": 0, "total_count": 0,
+                "memories": [], "next_cursor": None}
     try:
-        ws = current_service._clean_ws(ws)
-    except (ValidationError, ValueError):
-        logger.info("dashboard memories request rejected")
-        raise _invalid_request() from None
-    # Keep this read on the live service store. A second sqlite3 connection points at
-    # a different database for :memory: stores and bypasses SQLCipher/custom connector
-    # semantics, which made the dashboard report no memories even while stats and writes
-    # used the populated active store.
-    conn = current_service.store.conn
-    try:
-        row = conn.execute("SELECT id FROM workspaces WHERE name=?", (ws,)).fetchone()
-        if row is None:
-            return {"workspace": ws, "count": 0, "memories": []}
-        sql = ("SELECT id, scope, mtype, title, content, summary, importance, pinned, "
-               "valid_from, valid_to, provenance FROM memories WHERE workspace_id=? "
-               "AND COALESCE(scope, 'workspace')!='session' "
-               "AND valid_to IS NULL AND expired_at IS NULL")
-        args = [row["id"]]
-        if q:
-            sql += " AND (title LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\')"
-            like = "%" + _escape_like(q) + "%"
-            args += [like, like]
-        # Manually dragged rows (sort_order set) come first, in the order they were
-        # dropped in; everything never touched by drag-to-reorder falls back to recency.
-        sql += " ORDER BY (sort_order IS NULL), sort_order ASC, COALESCE(last_access, valid_from) DESC LIMIT ?"
-        args.append(limit)
-        rows = conn.execute(sql, args).fetchall()
-    except _sql.Error as exc:
-        logger.error("dashboard memory listing failed (%s)", type(exc).__name__)
-        raise HTTPException(status_code=500, detail={"error": "internal server error"}) from None
+        return _run(service().list_memories, workspace=ws, q=q or "", mtype=mtype,
+                    limit=limit, cursor=cursor or "", repo=repo,
+                    valid_at=valid_at, known_at=known_at)
+    except BrowseCursorStale:
+        raise HTTPException(status_code=409, detail={
+            "error": "Memory listing changed. Restart from the first page.",
+            "code": "cursor_stale",
+        }) from None
 
-    def _prov(p):
-        try:
-            return _json.loads(p) if isinstance(p, str) and p else (p or {})
-        except Exception:  # noqa: BLE001
-            return {}
-    mems = [{"id": r["id"], "document_id": r["id"], "title": r["title"] or "",
-             "content": r["content"] or r["summary"] or "", "memory_type": r["mtype"] or "semantic",
-             "scope": r["scope"] or "", "pinned": bool(r["pinned"]),
-             "importance": r["importance"], "valid_from": r["valid_from"],
-             "valid_to": r["valid_to"], "provenance": _prov(r["provenance"])} for r in rows]
-    return {"workspace": ws, "count": len(mems), "memories": mems}
+
+class _ManagedProcessingReq(BaseModel):
+    workspace: str
+    enabled: StrictBool
+    confirmed: StrictBool = False
+
+
+@router.get("/managed-processing")
+def managed_processing_get(workspace: str):
+    return _run(service().managed_processing_policy, workspace)
+
+
+@router.post("/managed-processing")
+def managed_processing_set(req: _ManagedProcessingReq):
+    """Enable only after cloud acknowledgement; disable local uploads immediately."""
+    from engraphis.cloud_features import CloudFeatureClient, CloudFeatureError
+    from engraphis.managed_processing import ProcessingPolicyChanged
+
+    current_service = service()
+    ws = _run(current_service._clean_ws, req.workspace)
+    _run(current_service._authorize_workspace_control, ws)
+    local = _run(current_service.managed_processing_policy, ws)
+    if req.enabled and not req.confirmed:
+        raise _invalid_request()
+    if req.enabled and local["operator_disabled"]:
+        raise HTTPException(status_code=403, detail={
+            "error": "Managed processing is disabled by this installation's configuration.",
+            "code": "processing_operator_disabled",
+        })
+    if not req.enabled:
+        local = _run(current_service.set_managed_processing_policy, ws, enabled=False,
+                     remote_sync_pending=True)
+    def ensure_current_local_intent():
+        current = current_service.managed_processing_policy(ws)
+        if (current["revision"] != local["revision"]
+                or (req.enabled and current["operator_disabled"])):
+            raise ProcessingPolicyChanged(
+                "Processing controls changed while Cloud was responding. Reload and retry.")
+
+    try:
+        cloud = CloudFeatureClient.from_environment(local["workspace_id"])
+        # Enabling never refreshes a stale command into a new approval. Optout may
+        # retry a raced remote revision, but only while this local intent is current.
+        for attempt in range(3 if not req.enabled else 1):
+            before = cloud.get_processing_policy(local["workspace_id"])
+            remote_revision = before.get("revision")
+            if (isinstance(remote_revision, bool) or not isinstance(remote_revision, int)
+                    or remote_revision < 1 or not isinstance(before.get("enabled"), bool)):
+                raise CloudFeatureError("Cloud processing policy was not acknowledged.", status=503)
+            _run(ensure_current_local_intent)
+            try:
+                remote = cloud.set_processing_policy(
+                    local["workspace_id"], enabled=req.enabled, confirmed=req.confirmed,
+                    revision=remote_revision)
+            except CloudFeatureError as exc:
+                _run(ensure_current_local_intent)
+                if not req.enabled and exc.status == 409 and attempt < 2:
+                    continue
+                raise
+            break
+        _run(ensure_current_local_intent)
+        revision = remote.get("revision")
+        if (isinstance(revision, bool) or not isinstance(revision, int)
+                or revision != remote_revision + 1 or remote.get("enabled") is not req.enabled):
+            raise CloudFeatureError("Cloud processing policy was not acknowledged.", status=503)
+    except CloudFeatureError as exc:
+        _run(ensure_current_local_intent)
+        if not req.enabled:
+            return {**local, "remote_sync_pending": True,
+                    "notice": "Local uploads are stopped. Cloud confirmation is pending; "
+                              "already submitted work may continue until Cloud responds."}
+        def rejected(error=exc):
+            raise error
+        return _managed_call(rejected)
+    # Do not hold a database write lock over the network call. Compare the local
+    # revision atomically when applying its acknowledgement instead, so a late
+    # enable cannot undo an opt-out from another tab or process.
+    return _run(current_service.set_managed_processing_policy, ws, enabled=req.enabled,
+                confirmed=req.confirmed, remote_revision=revision,
+                expected_revision=local["revision"])
 
 
 @router.get("/memory/{memory_id}")
@@ -3670,6 +3732,7 @@ def get_license():
                 and summary["plan_source"] == "local"
             ),
             "trial_days": licensing.TRIAL_DAYS,
+            "days_by_plan": trial_days_by_plan(),
         },
         "cloud_managed": True,
         "trial_seconds": licensing.TRIAL_SECONDS,

@@ -166,11 +166,27 @@ def _apply_response_budget(payload: dict, max_response_tokens: Optional[int]) ->
     counter = RegexTokenCounter()
     usage = payload.get("usage") or {}
     payload["usage"] = usage
+    packed_count = int(usage.get("packed_count") or 0)
+    candidate_count = packed_count + int(usage.get("omitted_count") or 0)
 
     if max_response_tokens is not None and max_response_tokens > 0:
         usage["response_budget"] = max_response_tokens
 
     def measure() -> int:
+        # Transport omission happens after packing. Keep evidence accounting
+        # truthful under the declared tokenizer, including the savings aliases.
+        if "context" in payload and usage.get("token_counter") == counter.identity:
+            emitted = counter(str(payload.get("context") or ""))
+            baseline = int(usage.get("source_tokens") or 0)
+            saved = max(0, baseline - emitted)
+            ratio = saved / baseline if baseline else 0.0
+            usage.update(context_tokens=emitted, saved_tokens=saved, savings_ratio=ratio,
+                         packed_count=packed_count if emitted else 0,
+                         omitted_count=candidate_count - (packed_count if emitted else 0))
+            for name, value in (("emitted_tokens", emitted), ("estimated_saved_tokens", saved),
+                                ("estimated_savings_ratio", ratio)):
+                if name in usage:
+                    usage[name] = value
         # Include the accounting fields themselves in the reported total.  The
         # regex counter treats every integer as one token, so one correction is
         # sufficient even when the numeric value changes width.
@@ -252,14 +268,22 @@ def _apply_response_budget(payload: dict, max_response_tokens: Optional[int]) ->
         container[key] = best
         current_tokens = measure()
 
-    # --- over budget: truncate body content from the end -----------------
-    # 1. Shrink the packed ``context`` string chunk-by-chunk (last first).
-    context = payload.get("context", "")
-    context_parts = context.split("\n\n") if context else []
-
-    while current_tokens > max_response_tokens and context_parts:
-        context_parts.pop()
-        payload["context"] = "\n\n".join(context_parts)
+    # --- over budget: omit complete evidence before reducing envelopes -----
+    # Blank lines and apparent citation headers can occur inside untrusted source
+    # text. Without structured chunk boundaries, splitting that text can detach a
+    # condition from its claim. Keep the admitted context intact or omit it whole.
+    if current_tokens > max_response_tokens and payload.get("context"):
+        payload["context"] = ""
+        if usage.get("token_counter") != counter.identity:
+            # Empty text has no evidence tokens under any supported counter.
+            baseline = int(usage.get("source_tokens") or 0)
+            usage.update(context_tokens=0, saved_tokens=baseline,
+                         savings_ratio=1.0 if baseline else 0.0,
+                         packed_count=0, omitted_count=candidate_count)
+            for name, value in (("emitted_tokens", 0), ("estimated_saved_tokens", baseline),
+                                ("estimated_savings_ratio", 1.0 if baseline else 0.0)):
+                if name in usage:
+                    usage[name] = value
         current_tokens = measure()
 
     # 2. Reduce full-mode memory bodies. Grounded answers are handled after their
@@ -626,7 +650,7 @@ def engraphis_recall(
                     "relevance.")] = None,
     max_response_tokens: Annotated[Optional[int], Field(
         description="Cap the total serialized response to this many tokens (regex counter). "
-                    "Truncates packed context and memory bodies from the end; citations and "
+                    "Omits packed context whole and reduces memory bodies; citations and "
                     "source references are preserved when the budget can hold them. "
                     "Minimum 2 (the JSON object floor); None means no cap.",
         ge=2, le=1_000_000)] = None,
@@ -706,9 +730,12 @@ def engraphis_recall_context(
         description="Optional maximum returned count per memory type.")] = None,
     max_response_tokens: Annotated[Optional[int], Field(
         description="Cap the total serialized response to this many tokens (regex counter). "
-                    "Truncates packed context from the end; citations and source references "
+                    "Omits packed context whole when it cannot fit; citations and source references "
                     "are preserved when the budget can hold them. Minimum 2; None means no cap.",
         ge=2, le=1_000_000)] = None,
+    format: Annotated[str, Field(
+        description="Context format: 'full' or compatibility alias 'gist'; both preserve budgeted, cited evidence."
+    )] = "full",
 ) -> str:
     """Return one hard-budget context plus compact source identities.
 
@@ -717,8 +744,16 @@ def engraphis_recall_context(
     response includes exact accounting for the declared counter, omitted/packed
     counts, privacy-safe savings metadata, and the same ``degraded_mode`` /
     ``semantic_support`` flags as ``engraphis_recall``.
+
+    ``format="gist"`` remains an accepted compatibility option. It returns the same
+    evidence-safe packed context, including complete conditions and code whitespace,
+    with a format marker. It does not apply another summary or claim extra savings.
+    Use ``engraphis_get_memory`` for the full source behind a citation.
     """
     try:
+        format = str(format or "full").strip().lower()
+        if format not in {"full", "gist"}:
+            raise ValidationError("format must be one of: full, gist")
         _recall_started = time.monotonic()
         payload = service().recall(
             query,
@@ -769,6 +804,54 @@ def engraphis_recall_context(
                 source["reason"] = reason
             sources.append(source)
         payload["sources"] = sources
+
+        if format == "gist":
+            # The packer already selected the admissible evidence within the budget.
+            # A raw reread or prefix summary here can revive excluded content, lose a
+            # qualification, or exceed that budget. Keep its text and accounting.
+            payload["format"] = "gist"
+
+        if not diagnostics:
+            if "score_semantics" in payload:
+                payload["score_semantics"] = {
+                    "relative_score": "query-relative",
+                    "absolute_support": "[0, 1]",
+                }
+            for field in (
+                "candidate_depth_reason",
+                "candidate_k_requested",
+                "candidate_k_used",
+                "context_revision",
+                "vector_index_backend",
+                "reranker_mode",
+                "receipt",
+                "vector_search_ready",
+                "degraded_reason",
+                "embedding_mode",
+                "retrieval_trace",
+                "planning_details",
+                "graph_traversal_details",
+            ):
+                payload.pop(field, None)
+
+            default_settings = {
+                "retrieval_profile": "balanced",
+                "candidate_depth": "fixed",
+                "planning": "off",
+                "response_mode": "compact",
+                "historical": False,
+                "include_untrusted": False,
+            }
+            for key, default_val in default_settings.items():
+                if payload.get(key) == default_val:
+                    payload.pop(key, None)
+
+            preserve_keys = {"context", "sources"}
+            for key, val in list(payload.items()):
+                if key not in preserve_keys and (
+                    val is None or val == "" or val == {} or val == []
+                ):
+                    payload.pop(key, None)
         payload = _apply_response_budget(payload, max_response_tokens)
         usage = payload.get("usage") or {}
         # The recall usage dict only carries token and packing counters; latency
@@ -839,7 +922,7 @@ def engraphis_recall_grounded(
         description="Optional maximum returned count per memory type.")] = None,
     max_response_tokens: Annotated[Optional[int], Field(
         description="Cap the total serialized response to this many tokens (regex counter). "
-                    "Truncates packed context and citation bodies from the end; source references "
+                    "Omits packed context whole and reduces citation bodies; source references "
                     "are preserved when the budget can hold them. Minimum 2; None means no cap.",
         ge=2, le=1_000_000)] = None,
 ) -> str:
@@ -2740,11 +2823,12 @@ def smart_recall_context(
     k: Annotated[int, Field(description="Maximum source memories.", ge=1, le=50)] = 50,
     token_budget: Annotated[int, Field(description="Hard returned-context token budget.", ge=0,
                                       le=32_768)] = 1024,
+    format: Annotated[str, Field(description="Context format: 'full' or 'gist'.")] = "full",
 ) -> str:
     """Return one compact, bounded context packet for routine agent work."""
     result = engraphis_recall_context(
         query=query, workspace=workspace, repo=repo, session_id=session_id, k=k,
-        token_budget=token_budget,
+        token_budget=token_budget, format=format,
     )
     if isinstance(result, str) and result.startswith("Error:"):
         return _smart_error_from_string(result)

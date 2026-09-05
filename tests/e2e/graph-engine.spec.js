@@ -312,7 +312,9 @@ const servedCompleteGalaxyScene = completeGalaxyScene();
  * a Node harness cannot: which scripts were fetched, which CSP rules fired, and what the page
  * logged.  Returns the recorders so each test can assert on them.
  */
-async function openDashboard(page, { query = '', graphScene = graphScenePayload } = {}) {
+async function openDashboard(page, {
+  query = '', graphScene = graphScenePayload, capturePhysics = false,
+} = {}) {
   const requested = [];
   const consoleErrors = [];
   const pageErrors = [];
@@ -321,7 +323,7 @@ async function openDashboard(page, { query = '', graphScene = graphScenePayload 
   // Report CSP violations from the page itself.  A blocked inline style is not a request
   // failure and not a console error Playwright surfaces reliably, so the only trustworthy
   // source is the document event the browser fires.
-  await page.addInitScript(() => {
+  await page.addInitScript(({ capturePhysics }) => {
     window.__cspViolations = [];
     document.addEventListener('securitypolicyviolation', event => {
       window.__cspViolations.push({
@@ -373,6 +375,15 @@ async function openDashboard(page, { query = '', graphScene = graphScenePayload 
                     return originalNodeClick(node);
                   } };
                 }
+                if (capturePhysics) {
+                  const originalPhysics = args[1] && args[1].onPhysics;
+                  args[1] = { ...args[1], onPhysics: diagnostics => {
+                    if (typeof originalPhysics === 'function') originalPhysics(diagnostics);
+                    if (typeof window.__sampleGalaxyFrame === 'function') {
+                      window.__sampleGalaxyFrame();
+                    }
+                  } };
+                }
                 const instance = Reflect.apply(target.create, target, args);
                 window.__engraphisGraph = instance;
                 return instance;
@@ -383,7 +394,7 @@ async function openDashboard(page, { query = '', graphScene = graphScenePayload 
         });
       },
     });
-  });
+  }, { capturePhysics });
 
   page.on('request', request => requested.push(request.url()));
   page.on('console', message => {
@@ -446,9 +457,27 @@ async function openGraphView(page) {
 }
 
 /* Measure the hierarchy in graph space, where zoom-to-fit cannot fake orbital motion. System
-   centres are evidence-mass weighted, matching the runtime force and server scene contract. */
-async function galaxySystemSnapshot(page) {
-  return page.evaluate(() => {
+   centres are evidence-mass weighted, matching the runtime force and server scene contract.
+   A positive stepCount collects live frame snapshots, then freezes at that step budget. */
+async function galaxySystemSnapshot(page, stepCount = 0) {
+  return page.evaluate(function snapshot(steps = 0) {
+    if (steps > 0) {
+      // Observe completed frames in the browser before another frame can overwrite its
+      // contact counters. Polling from Node can miss a frame or read the same step twice.
+      const samples = [snapshot()];
+      return new Promise(resolve => {
+        window.__sampleGalaxyFrame = () => {
+          const sample = snapshot();
+          samples.push(sample);
+          if (sample.diagnostics.steps >= samples[0].diagnostics.steps + steps) {
+            window.__sampleGalaxyFrame = null;
+            window.__engraphisGraph.freeze(true);
+            resolve(samples);
+          }
+        };
+        window.__engraphisGraph.freeze(false);
+      });
+    }
     const graph = window.__fg;
     const nodes = graph && typeof graph.graphData === 'function'
       ? graph.graphData().nodes.filter(node => !node.ghost)
@@ -525,7 +554,7 @@ async function galaxySystemSnapshot(page) {
       finite: nodes.every(node => [node.x, node.y, node.vx, node.vy]
         .every(value => Number.isFinite(value))),
     };
-  });
+  }, stepCount);
 }
 
 /* Envelope clearance is a paint-space requirement: node centres can be distinct while complete
@@ -936,15 +965,7 @@ async function gravityTrial(page, gravity, stepCount = 8) {
     localBaseline: window.EngraphisGraph._internals.galaxyLocalGravityConstant(48),
     localMaximum: window.EngraphisGraph._internals.galaxyLocalGravityConstant(200),
   }));
-  await page.evaluate(() => window.__engraphisGraph.freeze(false));
-  const samples = [before];
-  for (let step = 1; step <= stepCount; step += 1) {
-    await page.waitForFunction(({ start, minimum }) =>
-      window.__engraphisGraph.physicsDiagnostics().steps >= start + minimum,
-    { start: before.diagnostics.steps, minimum: step });
-    samples.push(await galaxySystemSnapshot(page));
-  }
-  await page.evaluate(() => window.__engraphisGraph.freeze(true));
+  const samples = await galaxySystemSnapshot(page, stepCount);
   const after = samples.at(-1);
   return {
     before, after, curve,
@@ -991,15 +1012,7 @@ async function orbitalSeparationTrial(page, separation, stepCount = 8) {
   await page.waitForFunction(() => window.__fg.graphData().nodes.length === 9
     && window.__engraphisGraph.physicsDiagnostics().frozen);
   const before = await galaxySystemSnapshot(page);
-  await page.evaluate(() => window.__engraphisGraph.freeze(false));
-  const samples = [];
-  for (let step = 1; step <= stepCount; step += 1) {
-    await page.waitForFunction(({ start, minimum }) =>
-      window.__engraphisGraph.physicsDiagnostics().steps >= start + minimum,
-    { start: before.diagnostics.steps, minimum: step });
-    samples.push(await galaxySystemSnapshot(page));
-  }
-  await page.evaluate(() => window.__engraphisGraph.freeze(true));
+  const samples = (await galaxySystemSnapshot(page, stepCount)).slice(1);
   const after = samples.at(-1);
   const meanDiameter = snapshot => snapshot.systems.reduce(
     (sum, system) => sum + system.internalDiameter, 0,
@@ -1038,6 +1051,7 @@ async function orbitalSeparationTrial(page, separation, stepCount = 8) {
       sample.diagnostics.lastRelationCorrectionDistance
         + sample.diagnostics.lastOrbitalCorrectionDistance),
     contactTrace: samples.map(sample => ({
+      step: sample.diagnostics.steps,
       relation: sample.diagnostics.lastRelationCorrectionDistance,
       orbital: sample.diagnostics.lastOrbitalCorrectionDistance,
       overlaps: sample.diagnostics.lastOrbitalSeparations,
@@ -3350,11 +3364,15 @@ test('Galaxy sliders retain full ranges with orbital-speed and radius response',
   // Use normal motion for this tuning sweep; the dedicated reduced-motion regression proves
   // that the same fixed solver and hierarchical orbits remain live under that preference.
   await page.emulateMedia({ reducedMotion: 'no-preference' });
-  await openDashboard(page, { query: '?graph-engine=next' });
+  await openDashboard(page, { query: '?graph-engine=next', capturePhysics: true });
   await openGraphView(page);
   await page.waitForFunction(() => window.__engraphisGraph && window.__fg);
   const baseline = await gravityTrial(page, 48);
   const strong = await gravityTrial(page, 200);
+  await testInfo.attach('gravity-step-samples.json', {
+    body: Buffer.from(JSON.stringify({ baseline, strong }, null, 2)),
+    contentType: 'application/json',
+  });
   const naturalOrbits = await orbitalSeparationTrial(page, 100);
   const fastOrbits = await orbitalSeparationTrial(page, 400, 16);
   await testInfo.attach('orbital-speed-convergence.json', {

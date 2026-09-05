@@ -1,0 +1,3592 @@
+{
+  "schema": "engraphis-mcp-contract/v1",
+  "sha256": "1f0b4351e3a3d10b4404a86f47e30dfa85922f3aa08a86ce723e64aba6c793a3",
+  "surfaces": {
+    "classic": [
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false,
+          "title": "Grounded answer (compatibility alias)"
+        },
+        "description": "Backward-compatible alias for ``engraphis_recall_grounded``.\n\nKept so existing agent configs that adopted the answer tool continue to work; new\nintegrations should prefer ``engraphis_recall_grounded`` for the clearer name.",
+        "inputSchema": {
+          "properties": {
+            "as_of": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional Unix timestamp for a point-in-time grounded answer. Omit for now.",
+              "title": "As Of"
+            },
+            "candidate_depth": {
+              "default": "fixed",
+              "description": "fixed preserves the legacy pool; adaptive is profile-aware and opt-in.",
+              "title": "Candidate Depth",
+              "type": "string"
+            },
+            "diagnostics": {
+              "default": false,
+              "description": "Include detailed retrieval scoring trace.",
+              "title": "Diagnostics",
+              "type": "boolean"
+            },
+            "k": {
+              "default": 8,
+              "description": "Max memories to consider (1-50).",
+              "maximum": 50,
+              "minimum": 1,
+              "title": "K",
+              "type": "integer"
+            },
+            "known_at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional system-time Unix timestamp.",
+              "title": "Known At"
+            },
+            "max_response_tokens": {
+              "anyOf": [
+                {
+                  "maximum": 1000000,
+                  "minimum": 2,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Cap the total serialized response to this many tokens (minimum 2).",
+              "title": "Max Response Tokens"
+            },
+            "min_support": {
+              "default": 0.25,
+              "description": "Absolute support floor 0..1. Memories below this don't count as evidence.",
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "title": "Min Support",
+              "type": "number"
+            },
+            "mtype_limits": {
+              "anyOf": [
+                {
+                  "additionalProperties": {
+                    "type": "integer"
+                  },
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional maximum returned count per memory type.",
+              "title": "Mtype Limits"
+            },
+            "planning": {
+              "default": "off",
+              "description": "off preserves single-query recall; auto enables bounded planning.",
+              "title": "Planning",
+              "type": "string"
+            },
+            "query": {
+              "description": "The question to answer from memory.",
+              "maxLength": 10000,
+              "minLength": 1,
+              "title": "Query",
+              "type": "string"
+            },
+            "repo": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Repository scope within the workspace.",
+              "title": "Repo"
+            },
+            "response_mode": {
+              "default": "full",
+              "description": "full includes citation bodies; compact omits them.",
+              "title": "Response Mode",
+              "type": "string"
+            },
+            "retrieval_profile": {
+              "default": "balanced",
+              "description": "balanced, fast, auto, lexical, graph, or code.",
+              "title": "Retrieval Profile",
+              "type": "string"
+            },
+            "synthesize": {
+              "default": false,
+              "description": "If true, ask configured LLM for cited prose; otherwise deterministic/extractive.",
+              "title": "Synthesize",
+              "type": "boolean"
+            },
+            "token_budget": {
+              "anyOf": [
+                {
+                  "maximum": 32768,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Hard packed-context budget (0-32768).",
+              "title": "Token Budget"
+            },
+            "valid_at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional world-time Unix timestamp (must match as_of if both are set).",
+              "title": "Valid At"
+            },
+            "workspace": {
+              "default": "default",
+              "description": "Workspace to search.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Workspace",
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "title": "engraphis_answerArguments",
+          "type": "object"
+        },
+        "name": "engraphis_answer"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": true,
+          "readOnlyHint": false,
+          "title": "Check for an Engraphis update"
+        },
+        "description": "Report whether a newer Engraphis release is available, so an agent can proactively\nremind the user to upgrade.\n\nCached ~24h and fail-silent; honors ``ENGRAPHIS_UPDATE_CHECK=0`` (then ``enabled`` is\nfalse). The default GitHub source is overridable via ``ENGRAPHIS_UPDATE_URL``. A stale\nlookup refreshes the persistent cache, and ``force=true`` rewrites it on every call,\nso this open-world tool is neither read-only nor idempotent.\n\nReturns:\n    str: JSON ``{\"enabled\",\"current\",\"latest\",\"update_available\",\"url\",\"notice\"}``.",
+        "inputSchema": {
+          "properties": {
+            "force": {
+              "default": false,
+              "description": "Bypass the ~24h cache and re-check the release source now.",
+              "title": "Force",
+              "type": "boolean"
+            }
+          },
+          "title": "engraphis_check_updateArguments",
+          "type": "object"
+        },
+        "name": "engraphis_check_update"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "Estimate change impact from the code graph"
+        },
+        "description": "Estimate affected symbols, callers, memories, graph communities, and risk.",
+        "inputSchema": {
+          "properties": {
+            "as_of": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Compatibility alias for valid_at.",
+              "title": "As Of"
+            },
+            "changed_files": {
+              "description": "Repo-relative files changed by a diff or pull request.",
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 2000,
+              "minItems": 1,
+              "title": "Changed Files",
+              "type": "array"
+            },
+            "known_at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional system-time Unix timestamp.",
+              "title": "Known At"
+            },
+            "repo": {
+              "description": "Indexed repo to analyze.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Repo",
+              "type": "string"
+            },
+            "valid_at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional world-time Unix timestamp.",
+              "title": "Valid At"
+            },
+            "workspace": {
+              "description": "Workspace the repo belongs to.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Workspace",
+              "type": "string"
+            }
+          },
+          "required": [
+            "changed_files",
+            "workspace",
+            "repo"
+          ],
+          "title": "engraphis_code_impactArguments",
+          "type": "object"
+        },
+        "name": "engraphis_code_impact"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "Find a path through the code graph"
+        },
+        "description": "Return the shortest best-effort path between two code nodes.\n\nThe path can cross definition, call, import, and symbol-alias edges. It is structural\nand name-based rather than type-resolved, so treat it as impact evidence rather than\na compiler proof.",
+        "inputSchema": {
+          "properties": {
+            "as_of": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Compatibility alias for valid_at.",
+              "title": "As Of"
+            },
+            "known_at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional system-time Unix timestamp.",
+              "title": "Known At"
+            },
+            "max_depth": {
+              "default": 8,
+              "description": "Maximum graph hops (1-32).",
+              "maximum": 32,
+              "minimum": 1,
+              "title": "Max Depth",
+              "type": "integer"
+            },
+            "repo": {
+              "description": "Indexed repo to traverse.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Repo",
+              "type": "string"
+            },
+            "source": {
+              "description": "Source symbol, qualified name, or indexed file.",
+              "maxLength": 500,
+              "minLength": 1,
+              "title": "Source",
+              "type": "string"
+            },
+            "target": {
+              "description": "Target symbol, qualified name, or indexed file.",
+              "maxLength": 500,
+              "minLength": 1,
+              "title": "Target",
+              "type": "string"
+            },
+            "valid_at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional world-time Unix timestamp.",
+              "title": "Valid At"
+            },
+            "workspace": {
+              "description": "Workspace the repo belongs to.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Workspace",
+              "type": "string"
+            }
+          },
+          "required": [
+            "source",
+            "target",
+            "workspace",
+            "repo"
+          ],
+          "title": "engraphis_code_pathArguments",
+          "type": "object"
+        },
+        "name": "engraphis_code_path"
+      },
+      {
+        "annotations": {
+          "destructiveHint": true,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false,
+          "title": "Consolidate memories (sleep-time sweep)"
+        },
+        "description": "Run one sleep-time consolidation sweep: recurring episodic memories on the same\nsubject are distilled into one durable semantic digest (linked to its sources), and\nfully-decayed transient memories are archived (bi-temporally closed \u2014 never deleted,\nalways audited, pinned memories exempt). Already-consolidated sources are skipped on\nretries. With ``profiles=True`` each entity's memories are also rolled into one durable\nprofile digest. With ``structured=True`` a configured LLM may produce schema-validated\nfacts/entities/relations; provider/schema failure falls back to the deterministic\ndigest. A structured result may cite only part of a large cluster, allowing an\nidentical later call to process the remainder, so the overall tool is conservatively\nnon-idempotent. Good moments to call it: session end, or on a schedule. A real sweep\nrequires explicit local-operator confirmation (``confirmed=true``); a ``dry_run``\nreport does not mutate and needs none.\n\nReturns:\n    str: JSON report ``{\"clusters_found\",\"digests_created\",\"archived\",\n    \"skipped_already_consolidated\",\"compaction\",\"dry_run\"}`` \u2014 ``compaction`` reports\n    the context tokens the sweep saved. With ``profiles=True`` a ``profiles`` block is\n    added (``entities_considered``, ``profiles_created``, ``compaction``).",
+        "inputSchema": {
+          "properties": {
+            "confirmed": {
+              "default": false,
+              "description": "Explicit local-operator confirmation: must be true for a real (non-dry-run) sweep, which archives and distills governed state. Dry runs need no confirmation.",
+              "title": "Confirmed",
+              "type": "boolean"
+            },
+            "dry_run": {
+              "default": true,
+              "description": "If true (default), only report what would happen \u2014 recommended before the first real run.",
+              "title": "Dry Run",
+              "type": "boolean"
+            },
+            "profiles": {
+              "default": false,
+              "description": "Also roll each entity's scattered memories into one durable profile digest (needs graph entities). Report lands under 'profiles'.",
+              "title": "Profiles",
+              "type": "boolean"
+            },
+            "repo": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Restrict to this repo.",
+              "title": "Repo"
+            },
+            "structured": {
+              "default": false,
+              "description": "If true, use configured LLM for schema-validated consolidation facts/entities/relations; falls back to deterministic digest on any failure.",
+              "title": "Structured",
+              "type": "boolean"
+            },
+            "workspace": {
+              "description": "Workspace to consolidate.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Workspace",
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace"
+          ],
+          "title": "engraphis_consolidateArguments",
+          "type": "object"
+        },
+        "name": "engraphis_consolidate"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "Summarize context savings"
+        },
+        "description": "Summarize receipt-backed context savings with optional time/release filters.",
+        "inputSchema": {
+          "properties": {
+            "format": {
+              "anyOf": [
+                {
+                  "maxLength": 16,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Output format: 'json' (default) or 'csv'.",
+              "title": "Format"
+            },
+            "from_ts": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional inclusive Unix timestamp.",
+              "title": "From Ts"
+            },
+            "group_by": {
+              "anyOf": [
+                {
+                  "maxLength": 32,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Group results by dimension: workspace, repo, agent, or day.",
+              "title": "Group By"
+            },
+            "release_version": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional semantic release filter.",
+              "title": "Release Version"
+            },
+            "repo": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional repo scope within the workspace.",
+              "title": "Repo"
+            },
+            "to_ts": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional exclusive Unix timestamp.",
+              "title": "To Ts"
+            },
+            "workspace": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional workspace whose receipt usage to summarize. Omit to aggregate all visible workspaces.",
+              "title": "Workspace"
+            }
+          },
+          "title": "engraphis_context_savingsArguments",
+          "type": "object"
+        },
+        "name": "engraphis_context_savings"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false,
+          "title": "Correct a memory"
+        },
+        "description": "Replace a memory's content without losing history: the old content is closed\n(bi-temporal invalidate, not deleted) and the correction is stored as a new memory\nthat records what it corrects \u2014 so the audit trail and ``engraphis_why`` both still\nwork afterward. Prefer this over retire+remember for fixes.\n\nReturns:\n    str: JSON ``{\"id\",\"superseded\":[old_id],\"reason\"}`` or an actionable error if the\n    id is unknown or doesn't belong to ``workspace``/``repo``.",
+        "inputSchema": {
+          "properties": {
+            "memory_id": {
+              "description": "The memory id to correct.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Memory Id",
+              "type": "string"
+            },
+            "new_content": {
+              "description": "The corrected content.",
+              "maxLength": 100000,
+              "minLength": 1,
+              "title": "New Content",
+              "type": "string"
+            },
+            "reason": {
+              "default": "",
+              "description": "Why this is being corrected (e.g. 'typo', 'the user clarified').",
+              "maxLength": 1000,
+              "title": "Reason",
+              "type": "string"
+            },
+            "repo": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Repo that owns this memory, if it's repo-scoped; also checked.",
+              "title": "Repo"
+            },
+            "workspace": {
+              "description": "Workspace that owns this memory \u2014 checked against the memory's actual workspace before anything is changed.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Workspace",
+              "type": "string"
+            }
+          },
+          "required": [
+            "memory_id",
+            "new_content",
+            "workspace"
+          ],
+          "title": "engraphis_correctArguments",
+          "type": "object"
+        },
+        "name": "engraphis_correct"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false,
+          "title": "End a memory session"
+        },
+        "description": "Close a session with a summary/outcome so the next session can pick up the thread.\nAn identical retry is an atomic no-op; a retry with a conflicting handoff is rejected,\nso this tool remains idempotent.\n\nReturns:\n    str: JSON ``{\"session_id\",\"status\":\"summarized\",\"summary\",\"open_threads\"}`` or\n    ``\"Error: ...\"`` if the session id is unknown.",
+        "inputSchema": {
+          "properties": {
+            "open_threads": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Unresolved items to carry into the next session for the same user and agent in this repo (e.g. 'tests 3-5 still failing').",
+              "title": "Open Threads"
+            },
+            "outcome": {
+              "default": "",
+              "description": "Short outcome label (e.g. 'shipped', 'blocked').",
+              "maxLength": 1000,
+              "title": "Outcome",
+              "type": "string"
+            },
+            "session_id": {
+              "description": "Session id from engraphis_start_session.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Session Id",
+              "type": "string"
+            },
+            "summary": {
+              "default": "",
+              "description": "Summary of what happened, stored for resume.",
+              "maxLength": 100000,
+              "title": "Summary",
+              "type": "string"
+            }
+          },
+          "required": [
+            "session_id"
+          ],
+          "title": "engraphis_end_sessionArguments",
+          "type": "object"
+        },
+        "name": "engraphis_end_session"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "Export the indexed code graph"
+        },
+        "description": "Export portable graph JSON plus a human-readable Markdown report.",
+        "inputSchema": {
+          "properties": {
+            "as_of": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Compatibility alias for valid_at.",
+              "title": "As Of"
+            },
+            "known_at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional system-time Unix timestamp.",
+              "title": "Known At"
+            },
+            "repo": {
+              "description": "Indexed repo to export.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Repo",
+              "type": "string"
+            },
+            "valid_at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional world-time Unix timestamp.",
+              "title": "Valid At"
+            },
+            "workspace": {
+              "description": "Workspace the repo belongs to.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Workspace",
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace",
+            "repo"
+          ],
+          "title": "engraphis_export_code_graphArguments",
+          "type": "object"
+        },
+        "name": "engraphis_export_code_graph"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "Export operation receipts"
+        },
+        "description": "Export the complete public receipt payload and its verification result.",
+        "inputSchema": {
+          "properties": {
+            "workspace": {
+              "description": "Workspace whose receipts to export.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Workspace",
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace"
+          ],
+          "title": "engraphis_export_receiptsArguments",
+          "type": "object"
+        },
+        "name": "engraphis_export_receipts"
+      },
+      {
+        "annotations": {
+          "destructiveHint": true,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false,
+          "title": "Forget a memory (deprecated; use retire)"
+        },
+        "description": "Retire-with-history (deprecated compatibility alias for ``engraphis_retire``).\n\nIt preserves the legacy ``status: \"forgotten\"`` response for existing clients;\nit still performs a temporal retirement and never deletes the memory. For\nirreversible removal of a leaked secret use ``engraphis_secure_erase`` with\nexplicit confirmation instead.",
+        "inputSchema": {
+          "properties": {
+            "confirmed": {
+              "default": false,
+              "description": "Explicit local-operator confirmation: must be true, as for engraphis_retire.",
+              "title": "Confirmed",
+              "type": "boolean"
+            },
+            "memory_id": {
+              "description": "Retire-with-history id (from a prior remember/recall result, e.g. 'mem_01J...'). Deprecated alias for memory_id in engraphis_retire.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Memory Id",
+              "type": "string"
+            },
+            "reason": {
+              "default": "",
+              "description": "Retirement reason recorded in the audit trail.",
+              "maxLength": 1000,
+              "title": "Reason",
+              "type": "string"
+            },
+            "repo": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional owning repo.",
+              "title": "Repo"
+            },
+            "workspace": {
+              "description": "Workspace that owns this memory.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Workspace",
+              "type": "string"
+            }
+          },
+          "required": [
+            "memory_id",
+            "workspace"
+          ],
+          "title": "engraphis_forgetArguments",
+          "type": "object"
+        },
+        "name": "engraphis_forget"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false,
+          "title": "Index a repository's code graph"
+        },
+        "description": "Parse a repository into the code symbol graph: function/class/method definitions\nplus best-effort calls/imports edges. Run this once when you start working in a repo\n(or after large changes) so ``engraphis_search_code`` has something to search \u2014 uses\nAST parsing (tree-sitter) when available, a dependency-free regex fallback otherwise.\nSupported languages: Python, JavaScript, TypeScript, C#, C, and C++.\n\nBuild/dependency directories (node_modules, bin, obj, target, .venv, \u2026) are skipped\nwhile walking, so a large non-Python repo indexes quickly instead of appearing to\nhang; add a ``.engraphisignore`` file (gitignore-style) at the repo root to skip\nproject-specific generated files.\n\nCreates the workspace/repo if you haven't named them before (like\nengraphis_remember). Re-indexing is safe to call again; each file's symbols are\nreplaced, not duplicated. Reads files from ``root_path`` on the local filesystem \u2014\nthe same trust boundary as any other local tool you have, nothing is sent anywhere.\nSet ``ENGRAPHIS_INDEX_ROOTS`` to a path-separator-delimited absolute-path allow-list when\nrepositories live outside the working, home, or temporary directories, or to narrow the\ndefaults. Each completed scan appends a fresh operation receipt, so the MCP call is\nnon-idempotent even when the code graph itself is unchanged.\n\nReturns:\n    str: JSON ``{\"files_indexed\",\"symbols\",\"edges\",\"backend\"}``.",
+        "inputSchema": {
+          "properties": {
+            "languages": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Restrict to these languages (e.g. ['python','csharp']). Names are normalised ('C#'->csharp, 'cpp'/'c++'->cpp). An unsupported name returns an error listing what's supported, instead of silently indexing nothing. Omit to index every supported language found.",
+              "title": "Languages"
+            },
+            "repo": {
+              "description": "Repo name to index.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Repo",
+              "type": "string"
+            },
+            "root_path": {
+              "description": "Local filesystem path to the repo root to parse (e.g. '/home/user/projects/myrepo'). The path must be inside the local defaults or ENGRAPHIS_INDEX_ROOTS allow-list.",
+              "maxLength": 4000,
+              "minLength": 1,
+              "title": "Root Path",
+              "type": "string"
+            },
+            "workspace": {
+              "description": "Workspace the repo belongs to.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Workspace",
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace",
+            "repo",
+            "root_path"
+          ],
+          "title": "engraphis_index_repoArguments",
+          "type": "object"
+        },
+        "name": "engraphis_index_repo"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false,
+          "title": "Ingest raw text (extract facts first)"
+        },
+        "description": "Store raw text without hand-distilling it first \u2014 the extract-then-remember path.\n\nPrefer ``engraphis_remember`` when you already have a crisp fact; use this when you\nhave a blob (transcript, notes, long status update) and want Engraphis to break it\ninto separate, individually-recallable memories. Each extracted fact goes through\nthe same conflict resolution and evolution as a normal remember.\n\nReturns:\n    str: JSON ``{\"workspace\",\"repo\",\"count\",\"extracted\",\"facts\":[{\"id\",\"op\",...}]}``\n    where ``extracted`` is false when no extractor is configured (passthrough).",
+        "inputSchema": {
+          "properties": {
+            "content": {
+              "description": "Raw, undistilled text: a conversation excerpt, meeting notes, a log, a long update. Engraphis extracts the discrete facts worth keeping (when an extractor is configured via ENGRAPHIS_EXTRACTOR=llm or llm_structured) and stores each one; otherwise stores the text as one memory.",
+              "maxLength": 100000,
+              "minLength": 1,
+              "title": "Content",
+              "type": "string"
+            },
+            "mtype": {
+              "default": "semantic",
+              "description": "Default memory type for facts the extractor doesn't classify: semantic/episodic/procedural/working.",
+              "title": "Mtype",
+              "type": "string"
+            },
+            "repo": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Repository scope within the workspace.",
+              "title": "Repo"
+            },
+            "scope": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Visibility: session, repo, workspace, or user. Omit to infer the compatible default: repo when repo or a repo-backed session_id is present, otherwise workspace. Session visibility must be explicit.",
+              "title": "Scope"
+            },
+            "session_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Session id from engraphis_start_session, if any.",
+              "title": "Session Id"
+            },
+            "workspace": {
+              "description": "Top-level scope, e.g. an org or product name ('acme').",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Workspace",
+              "type": "string"
+            }
+          },
+          "required": [
+            "content",
+            "workspace"
+          ],
+          "title": "engraphis_ingestArguments",
+          "type": "object"
+        },
+        "name": "engraphis_ingest"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": true,
+          "readOnlyHint": false,
+          "title": "Ingest a live PostgreSQL schema"
+        },
+        "description": "Convert tables, columns, constraints, and foreign keys into a schema memory and\nentity graph. Requires the optional psycopg backend. An exact retry reuses its live\npoint-in-time schema snapshot, but every invocation appends audit/receipt records,\nso the tool as a whole is not idempotent.",
+        "inputSchema": {
+          "properties": {
+            "dsn": {
+              "description": "PostgreSQL connection string. It is used for this connection only and is never stored or returned.",
+              "maxLength": 4000,
+              "minLength": 1,
+              "title": "Dsn",
+              "type": "string"
+            },
+            "repo": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional repository scope for an application-owned database.",
+              "title": "Repo"
+            },
+            "schemas": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional schema allow-list; omit to inspect all non-system schemas.",
+              "title": "Schemas"
+            },
+            "workspace": {
+              "description": "Workspace for the schema memory.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Workspace",
+              "type": "string"
+            }
+          },
+          "required": [
+            "dsn",
+            "workspace"
+          ],
+          "title": "engraphis_ingest_postgres_schemaArguments",
+          "type": "object"
+        },
+        "name": "engraphis_ingest_postgres_schema"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false,
+          "title": "Link two memories"
+        },
+        "description": "Explicitly connect two memories (A-MEM-style linking) \u2014 use when you notice two\nstored facts are related but a plain recall wouldn't surface that connection, e.g. a\nbug report and the memory describing its fix.\n\nReturns:\n    str: JSON ``{\"a\",\"b\",\"relation\",\"layer\",\"reason\",\"linked\":true,\"receipt\":...}``\n    or an actionable error if either id is unknown or doesn't belong to\n    ``workspace``/``repo``.",
+        "inputSchema": {
+          "properties": {
+            "a": {
+              "description": "First memory id.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "A",
+              "type": "string"
+            },
+            "b": {
+              "description": "Second memory id.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "B",
+              "type": "string"
+            },
+            "layer": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional logical graph layer: temporal, entity, causal, or semantic. Omit to infer it from the relationship label.",
+              "title": "Layer"
+            },
+            "reason": {
+              "default": "",
+              "description": "Optional rationale or context for why this relationship exists.",
+              "maxLength": 500,
+              "title": "Reason",
+              "type": "string"
+            },
+            "relation": {
+              "default": "related",
+              "description": "Relationship label, e.g. 'related', 'caused_by', 'fixed_by'.",
+              "maxLength": 200,
+              "title": "Relation",
+              "type": "string"
+            },
+            "repo": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Repo that owns both memories, if repo-scoped; also checked.",
+              "title": "Repo"
+            },
+            "workspace": {
+              "description": "Workspace that owns both memories \u2014 checked against each memory's actual workspace before linking.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Workspace",
+              "type": "string"
+            }
+          },
+          "required": [
+            "a",
+            "b",
+            "workspace"
+          ],
+          "title": "engraphis_linkArguments",
+          "type": "object"
+        },
+        "name": "engraphis_link"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false,
+          "title": "Link a code symbol to a memory"
+        },
+        "description": "Manually create a link between a code symbol and a memory.\n\nUse this when automatic indexing misses a relationship you know about \u2014 for example,\nlinking a deployment function to the incident memory it resolved, or connecting a\nconfig constant to the decision that set its value. The link is idempotent: repeating\nthe same call returns the existing link without duplication.\n\nReturns:\n    str: JSON ``{\"link_id\",\"symbol_id\",\"memory_id\",\"relation\",\"workspace\",\"repo\",\"receipt\"}``.",
+        "inputSchema": {
+          "properties": {
+            "confidence": {
+              "default": 1.0,
+              "description": "Link confidence 0..1.",
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "title": "Confidence",
+              "type": "number"
+            },
+            "memory_id": {
+              "description": "Memory ID to link to the symbol.",
+              "maxLength": 500,
+              "minLength": 1,
+              "title": "Memory Id",
+              "type": "string"
+            },
+            "reason": {
+              "default": "",
+              "description": "Optional reason or context for this link.",
+              "maxLength": 500,
+              "title": "Reason",
+              "type": "string"
+            },
+            "relation": {
+              "default": "mentions",
+              "description": "Relationship type (e.g. 'mentions', 'implements', 'fixes'). Defaults to 'mentions'.",
+              "maxLength": 100,
+              "title": "Relation",
+              "type": "string"
+            },
+            "repo": {
+              "description": "Indexed repo containing the symbol.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Repo",
+              "type": "string"
+            },
+            "symbol_id": {
+              "description": "Symbol ID, short name, or fully-qualified name from an indexed repo.",
+              "maxLength": 500,
+              "minLength": 1,
+              "title": "Symbol Id",
+              "type": "string"
+            },
+            "workspace": {
+              "description": "Workspace the repo belongs to.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Workspace",
+              "type": "string"
+            }
+          },
+          "required": [
+            "symbol_id",
+            "memory_id",
+            "workspace",
+            "repo"
+          ],
+          "title": "engraphis_link_symbolArguments",
+          "type": "object"
+        },
+        "name": "engraphis_link_symbol"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false,
+          "title": "Pin or unpin a memory"
+        },
+        "description": "Mark a memory as important enough to exempt from automatic decay/pruning \u2014 use for\ndurable conventions or identity facts that must never silently fade.\nEvery pin/unpin request is audited, including an identical retry, so the MCP call is\ndeliberately annotated as non-idempotent even when the boolean value is unchanged.\n\nReturns:\n    str: JSON ``{\"id\",\"pinned\"}`` or an actionable error if the id is unknown or doesn't\n    belong to ``workspace``/``repo``.",
+        "inputSchema": {
+          "properties": {
+            "memory_id": {
+              "description": "The memory id to pin/unpin.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Memory Id",
+              "type": "string"
+            },
+            "pinned": {
+              "default": true,
+              "description": "True to pin (protect from future automatic decay/pruning), false to unpin.",
+              "title": "Pinned",
+              "type": "boolean"
+            },
+            "repo": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Repo that owns this memory, if it's repo-scoped; also checked.",
+              "title": "Repo"
+            },
+            "workspace": {
+              "description": "Workspace that owns this memory \u2014 checked against the memory's actual workspace before anything is changed.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Workspace",
+              "type": "string"
+            }
+          },
+          "required": [
+            "memory_id",
+            "workspace"
+          ],
+          "title": "engraphis_pinArguments",
+          "type": "object"
+        },
+        "name": "engraphis_pin"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false,
+          "title": "Agent-ready proactive context"
+        },
+        "description": "Return an agent-ready context packet before the agent knows what to ask.\n\nCombines proactive recall, optional task-specific recall, and last-session handoff\ninto a cited ``context_summary`` plus ``suggested_queries``. Deterministic by\ndefault; LLM synthesis is opt-in and accepted only when it cites source memories.\nWhen ``task`` or ``agent_state`` is supplied, the task-specific recall appends a\nprivacy-safe receipt (without reinforcing memories), so the tool is conservatively\nannotated as mutating and non-idempotent.",
+        "inputSchema": {
+          "properties": {
+            "agent_state": {
+              "default": "",
+              "description": "Optional current agent state: plan, open files, errors, partial findings.",
+              "maxLength": 20000,
+              "title": "Agent State",
+              "type": "string"
+            },
+            "k": {
+              "default": 10,
+              "description": "Max memories to consider (1-50).",
+              "maximum": 50,
+              "minimum": 1,
+              "title": "K",
+              "type": "integer"
+            },
+            "repo": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Repo scope within the workspace.",
+              "title": "Repo"
+            },
+            "response_mode": {
+              "default": "full",
+              "description": "full preserves the Classic response; compact returns one packed context packet.",
+              "pattern": "^(full|compact)$",
+              "title": "Response Mode",
+              "type": "string"
+            },
+            "synthesize": {
+              "default": false,
+              "description": "If true and an LLM is configured, synthesize a concise cited context summary; otherwise deterministic/offline.",
+              "title": "Synthesize",
+              "type": "boolean"
+            },
+            "task": {
+              "default": "",
+              "description": "Current task/goal. Used to bias recall and frame the summary.",
+              "maxLength": 10000,
+              "title": "Task",
+              "type": "string"
+            },
+            "token_budget": {
+              "anyOf": [
+                {
+                  "maximum": 32768,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Hard context budget in compact mode.",
+              "title": "Token Budget"
+            },
+            "workspace": {
+              "description": "Workspace to surface context from.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Workspace",
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace"
+          ],
+          "title": "engraphis_proactive_contextArguments",
+          "type": "object"
+        },
+        "name": "engraphis_proactive_context"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false,
+          "title": "Promote a memory to a wider scope"
+        },
+        "description": "Widen a memory's visibility without losing its narrow-scope history.\n\nThe wider record is stored first, inherits the source's protection,\nconfidentiality, provenance, and learned stability, and is linked back to the\nbi-temporally closed source. Promotion must be strictly wider (session\u2192repo/workspace\nor repo\u2192workspace); it never edits scope in place. User-scope promotion is not yet\nsupported because records remain workspace-bound.\n\nReturns:\n    str: JSON ``{\"id\",\"promoted_from\",\"from_scope\",\"scope\",\"op\",\"reason\"}``\n    plus a privacy receipt, or an actionable validation error.",
+        "inputSchema": {
+          "properties": {
+            "memory_id": {
+              "description": "The live memory id to promote.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Memory Id",
+              "type": "string"
+            },
+            "reason": {
+              "default": "",
+              "description": "Why the learning now applies more broadly; recorded in audit history.",
+              "maxLength": 1000,
+              "title": "Reason",
+              "type": "string"
+            },
+            "repo": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Repo that owns the source memory, when applicable.",
+              "title": "Repo"
+            },
+            "target_scope": {
+              "description": "A strictly wider supported visibility: repo or workspace.",
+              "title": "Target Scope",
+              "type": "string"
+            },
+            "workspace": {
+              "description": "Workspace that owns the source memory; verified before mutation.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Workspace",
+              "type": "string"
+            }
+          },
+          "required": [
+            "memory_id",
+            "target_scope",
+            "workspace"
+          ],
+          "title": "engraphis_promoteArguments",
+          "type": "object"
+        },
+        "name": "engraphis_promote"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false,
+          "title": "Recall relevant memories"
+        },
+        "description": "Retrieve the memories most relevant to a query (semantic vector + lexical + graph).\n\nCall this before answering or acting when prior context would help \u2014 to avoid re-asking\nthe user, to recover decisions/conventions, or to resume earlier work.\nSuccessful calls append a privacy-safe recall receipt but do not strengthen weak\nneighbors merely because they were returned. Grounded recall reinforces cited\nevidence; an explicit-use caller can opt into reinforcement through the Python API.\nBecause the receipt is stateful, this surface is neither read-only nor idempotent.\n\nReturns:\n    str: JSON with ``{\"query\",\"count\",\"context\",\"degraded_mode\",\"semantic_support\",\n    \"embedding_mode\",\"score_semantics\",\"memories\":[{\"id\",\n    \"title\",\"content\",\"scope\",\"mtype\",\"repo_id\",\"score\",\"relative_score\",\n    \"absolute_support\",\"arm\",\"retention\",\"provenance\"}]}``. ``score`` is a compatibility\n    alias for the query-relative rank; use ``absolute_support`` (0..1) for an evidence floor.\n    ``degraded_mode=true`` and ``semantic_support=false`` mean semantic vector retrieval\n    was disabled because the active embedder is not declared semantic.\n    Returns count 0 with a \"note\" if the workspace/repo isn't known yet.",
+        "inputSchema": {
+          "properties": {
+            "as_of": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Compatibility alias for valid_at. If both are supplied they must match.",
+              "title": "As Of"
+            },
+            "candidate_depth": {
+              "default": "fixed",
+              "description": "Candidate depth: fixed preserves the legacy pool; adaptive is an opt-in profile-aware performance experiment.",
+              "title": "Candidate Depth",
+              "type": "string"
+            },
+            "diagnostics": {
+              "default": false,
+              "description": "Include per-arm raw/normalized/fusion/rerank diagnostics.",
+              "title": "Diagnostics",
+              "type": "boolean"
+            },
+            "k": {
+              "default": 8,
+              "description": "Max memories to return (1-50).",
+              "maximum": 50,
+              "minimum": 1,
+              "title": "K",
+              "type": "integer"
+            },
+            "known_at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional system-time Unix timestamp: return only facts Engraphis had learned and not retired then.",
+              "title": "Known At"
+            },
+            "max_response_tokens": {
+              "anyOf": [
+                {
+                  "maximum": 1000000,
+                  "minimum": 2,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Cap the total serialized response to this many tokens (regex counter). Omits packed context whole and reduces memory bodies; citations and source references are preserved when the budget can hold them. Minimum 2 (the JSON object floor); None means no cap.",
+              "title": "Max Response Tokens"
+            },
+            "mtype_limits": {
+              "anyOf": [
+                {
+                  "additionalProperties": {
+                    "type": "integer"
+                  },
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional maximum returned count per memory type; limits never boost relevance.",
+              "title": "Mtype Limits"
+            },
+            "mtypes": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Restrict to these memory types (semantic/episodic/procedural/working).",
+              "title": "Mtypes"
+            },
+            "planning": {
+              "default": "off",
+              "description": "Query planning: off preserves the single-query path; auto enables bounded offline or injected planning.",
+              "title": "Planning",
+              "type": "string"
+            },
+            "query": {
+              "description": "What you want to remember, in natural language (e.g. 'how do we handle auth?').",
+              "maxLength": 100000,
+              "minLength": 1,
+              "title": "Query",
+              "type": "string"
+            },
+            "repo": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Restrict to this repo (requires workspace).",
+              "title": "Repo"
+            },
+            "response_mode": {
+              "default": "full",
+              "description": "full preserves legacy memory bodies; compact omits bodies already represented in the packed context.",
+              "title": "Response Mode",
+              "type": "string"
+            },
+            "retrieval_profile": {
+              "default": "balanced",
+              "description": "Retrieval profile: balanced (hybrid), fast (vector + lexical, no graph), auto, lexical, graph, or code. Auto is opt-in until benchmarks demonstrate a win.",
+              "title": "Retrieval Profile",
+              "type": "string"
+            },
+            "session_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional active session context. Includes that exact session plus its repo/workspace ancestors; requires workspace.",
+              "title": "Session Id"
+            },
+            "token_budget": {
+              "anyOf": [
+                {
+                  "maximum": 32768,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Hard packed-context budget under the named token counter (0-32768).",
+              "title": "Token Budget"
+            },
+            "valid_at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional world-time Unix timestamp: return facts true then.",
+              "title": "Valid At"
+            },
+            "workspace": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Restrict to this workspace.",
+              "title": "Workspace"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "title": "engraphis_recallArguments",
+          "type": "object"
+        },
+        "name": "engraphis_recall"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false,
+          "title": "Recall token-efficient context"
+        },
+        "description": "Return one hard-budget context plus compact source identities.\n\nThis is the recommended agent path: unlike legacy full recall, it does not\nrepeat every complete memory body alongside the already-packed context.  The\nresponse includes exact accounting for the declared counter, omitted/packed\ncounts, privacy-safe savings metadata, and the same ``degraded_mode`` /\n``semantic_support`` flags as ``engraphis_recall``.\n\n``format=\"gist\"`` remains an accepted compatibility option. It returns the same\nevidence-safe packed context, including complete conditions and code whitespace,\nwith a format marker. It does not apply another summary or claim extra savings.\nUse ``engraphis_get_memory`` for the full source behind a citation.",
+        "inputSchema": {
+          "properties": {
+            "as_of": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Compatibility alias for valid_at.",
+              "title": "As Of"
+            },
+            "candidate_depth": {
+              "default": "fixed",
+              "description": "fixed preserves the legacy pool; adaptive is profile-aware and opt-in.",
+              "title": "Candidate Depth",
+              "type": "string"
+            },
+            "diagnostics": {
+              "default": false,
+              "description": "Include detailed retrieval scoring trace.",
+              "title": "Diagnostics",
+              "type": "boolean"
+            },
+            "format": {
+              "default": "full",
+              "description": "Context format: 'full' or compatibility alias 'gist'; both preserve budgeted, cited evidence.",
+              "title": "Format",
+              "type": "string"
+            },
+            "k": {
+              "default": 50,
+              "description": "Max candidate memories (1-50).",
+              "maximum": 50,
+              "minimum": 1,
+              "title": "K",
+              "type": "integer"
+            },
+            "known_at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional system-time Unix timestamp.",
+              "title": "Known At"
+            },
+            "max_response_tokens": {
+              "anyOf": [
+                {
+                  "maximum": 1000000,
+                  "minimum": 2,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Cap the total serialized response to this many tokens (regex counter). Omits packed context whole when it cannot fit; citations and source references are preserved when the budget can hold them. Minimum 2; None means no cap.",
+              "title": "Max Response Tokens"
+            },
+            "mtype_limits": {
+              "anyOf": [
+                {
+                  "additionalProperties": {
+                    "type": "integer"
+                  },
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional maximum returned count per memory type.",
+              "title": "Mtype Limits"
+            },
+            "mtypes": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional memory types: semantic/episodic/procedural/working.",
+              "title": "Mtypes"
+            },
+            "planning": {
+              "default": "off",
+              "description": "off preserves single-query recall; auto enables bounded planning.",
+              "title": "Planning",
+              "type": "string"
+            },
+            "query": {
+              "description": "What prior context is needed.",
+              "maxLength": 100000,
+              "minLength": 1,
+              "title": "Query",
+              "type": "string"
+            },
+            "repo": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Restrict to this repo (requires workspace).",
+              "title": "Repo"
+            },
+            "retrieval_profile": {
+              "default": "balanced",
+              "description": "balanced, fast, auto, lexical, graph, or code.",
+              "title": "Retrieval Profile",
+              "type": "string"
+            },
+            "session_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional active session; includes its repo/workspace ancestors.",
+              "title": "Session Id"
+            },
+            "token_budget": {
+              "default": 1024,
+              "description": "Hard packed-context budget under the reported token counter.",
+              "maximum": 32768,
+              "minimum": 0,
+              "title": "Token Budget",
+              "type": "integer"
+            },
+            "valid_at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional world-time Unix timestamp.",
+              "title": "Valid At"
+            },
+            "workspace": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Restrict to this workspace.",
+              "title": "Workspace"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "title": "engraphis_recall_contextArguments",
+          "type": "object"
+        },
+        "name": "engraphis_recall_context"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false,
+          "title": "Grounded recall (cited answer, or abstain)"
+        },
+        "description": "Answer a question *strictly from* stored memories, with citations \u2014 or abstain.\n\nUnlike ``engraphis_recall`` (which returns memories and leaves synthesis to you),\nthis returns an answer assembled only from the retrieved memories, each claim tied\nto a ``[n]`` citation, and \u2014 crucially \u2014 refuses to answer when nothing in scope\nactually supports the query (``grounded: false``). Use it when you want a grounded,\nnon-hallucinated answer and would rather get \"insufficient evidence\" than a guess.\nThe deterministic default never introduces a claim that is not in a cited memory.\nWhen ``degraded_mode`` is true, its feature-hashing fallback is treated as lexical-only:\nsemantic vector retrieval and semantic cosine support are disabled.\nWith ``synthesize=True``, configured LLM prose is accepted only when citations hold.\nEvery resolved call appends a privacy-safe receipt (including abstentions), and a\ngrounded answer reinforces cited memories.\n\nReturns:\n    str: JSON ``{\"query\",\"grounded\",\"abstained\",\"answer\",\"support\",\"reason\",\n    \"degraded_mode\",\"semantic_support\",\"embedding_mode\",\n    \"synthesized\":false,\"citations\":[{\"n\",\"id\",\"title\",\"content\",\"score\",\"support\",\n    \"provenance\"}]}``. When ``grounded`` is false, ``answer`` is empty and ``reason``\n    explains why (insufficient evidence, or unknown workspace/repo).",
+        "inputSchema": {
+          "properties": {
+            "as_of": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Compatibility alias for valid_at.",
+              "title": "As Of"
+            },
+            "candidate_depth": {
+              "default": "fixed",
+              "description": "fixed preserves the legacy pool; adaptive is profile-aware and opt-in.",
+              "title": "Candidate Depth",
+              "type": "string"
+            },
+            "diagnostics": {
+              "default": false,
+              "description": "Include detailed retrieval scoring trace.",
+              "title": "Diagnostics",
+              "type": "boolean"
+            },
+            "k": {
+              "default": 8,
+              "description": "Max memories to consider (1-50).",
+              "maximum": 50,
+              "minimum": 1,
+              "title": "K",
+              "type": "integer"
+            },
+            "known_at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional system-time Unix timestamp.",
+              "title": "Known At"
+            },
+            "max_response_tokens": {
+              "anyOf": [
+                {
+                  "maximum": 1000000,
+                  "minimum": 2,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Cap the total serialized response to this many tokens (regex counter). Omits packed context whole and reduces citation bodies; source references are preserved when the budget can hold them. Minimum 2; None means no cap.",
+              "title": "Max Response Tokens"
+            },
+            "min_support": {
+              "anyOf": [
+                {
+                  "maximum": 1.0,
+                  "minimum": 0.0,
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Absolute support floor 0..1 below which the tool abstains instead of answering. Omit for the default; raise it to demand stronger evidence (0 disables the abstain gate).",
+              "title": "Min Support"
+            },
+            "mtype_limits": {
+              "anyOf": [
+                {
+                  "additionalProperties": {
+                    "type": "integer"
+                  },
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional maximum returned count per memory type.",
+              "title": "Mtype Limits"
+            },
+            "mtypes": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Restrict to these memory types (semantic/episodic/procedural/working).",
+              "title": "Mtypes"
+            },
+            "planning": {
+              "default": "off",
+              "description": "off preserves single-query recall; auto enables bounded planning.",
+              "title": "Planning",
+              "type": "string"
+            },
+            "query": {
+              "description": "The question to answer from memory, in natural language (e.g. 'which auth scheme did we standardise on?').",
+              "maxLength": 100000,
+              "minLength": 1,
+              "title": "Query",
+              "type": "string"
+            },
+            "repo": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Restrict to this repo (requires workspace).",
+              "title": "Repo"
+            },
+            "response_mode": {
+              "default": "full",
+              "description": "full includes citation bodies; compact omits bodies already present in the cited answer.",
+              "title": "Response Mode",
+              "type": "string"
+            },
+            "retrieval_profile": {
+              "default": "balanced",
+              "description": "balanced, fast, auto, lexical, graph, or code.",
+              "title": "Retrieval Profile",
+              "type": "string"
+            },
+            "session_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional active session context. Includes that exact session plus its repo/workspace ancestors; requires workspace.",
+              "title": "Session Id"
+            },
+            "synthesize": {
+              "default": false,
+              "description": "If true and an LLM is configured, synthesize cited prose; otherwise return the deterministic extractive answer.",
+              "title": "Synthesize",
+              "type": "boolean"
+            },
+            "token_budget": {
+              "anyOf": [
+                {
+                  "maximum": 32768,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Hard packed-context budget (0-32768).",
+              "title": "Token Budget"
+            },
+            "valid_at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional world-time Unix timestamp.",
+              "title": "Valid At"
+            },
+            "workspace": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Restrict to this workspace.",
+              "title": "Workspace"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "title": "engraphis_recall_groundedArguments",
+          "type": "object"
+        },
+        "name": "engraphis_recall_grounded"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "What should I know right now"
+        },
+        "description": "Conscious/proactive recall: high-importance, recent, well-reinforced memories with\nno query needed \u2014 call this at the start of a task to load context before you've\nfigured out what to ask for. When ``repo`` is given, also returns the most recent\n*ended* session's summary and unresolved ``open_threads`` for that repo, so you can\npick up exactly where the last session left off. Authenticated callers only receive\nhandoffs owned by their own user identity.\n\nUnlike query-based recall, this queryless ranking does not reinforce memories or append\nan operation receipt, so repeated calls are read-only and idempotent.\n\nReturns:\n    str: JSON ``{\"memories\":[...], \"last_session\":{\"summary\",\"open_threads\",\"outcome\"}\n    or {} if there is no prior session}``.",
+        "inputSchema": {
+          "properties": {
+            "k": {
+              "default": 10,
+              "description": "Max memories to return (1-50).",
+              "maximum": 50,
+              "minimum": 1,
+              "title": "K",
+              "type": "integer"
+            },
+            "repo": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Repo to surface memories from; also enables the last-session handoff.",
+              "title": "Repo"
+            },
+            "workspace": {
+              "description": "Workspace to surface memories from.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Workspace",
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace"
+          ],
+          "title": "engraphis_recall_proactiveArguments",
+          "type": "object"
+        },
+        "name": "engraphis_recall_proactive"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "List privacy-safe operation receipts"
+        },
+        "description": "List content-free, hash-chained remember/recall/link/index receipts.",
+        "inputSchema": {
+          "properties": {
+            "limit": {
+              "default": 100,
+              "description": "Maximum receipts to return (1-10000).",
+              "maximum": 10000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            },
+            "workspace": {
+              "description": "Workspace whose receipt chain to inspect.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Workspace",
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace"
+          ],
+          "title": "engraphis_receiptsArguments",
+          "type": "object"
+        },
+        "name": "engraphis_receipts"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false,
+          "title": "Log an episodic event"
+        },
+        "description": "Append a lightweight episodic log entry \u2014 lower ceremony than ``engraphis_remember``,\nfor raw events you may later want consolidated into a durable fact (e.g. \"tried X, it\ndeadlocked\" \u2014 three of these about the same thing is a signal worth promoting).\n\nReturns:\n    str: JSON ``{\"id\",\"kind\"}``.",
+        "inputSchema": {
+          "properties": {
+            "content": {
+              "description": "What happened.",
+              "maxLength": 100000,
+              "minLength": 1,
+              "title": "Content",
+              "type": "string"
+            },
+            "kind": {
+              "description": "Event kind, e.g. 'decision', 'bug', 'fix', 'tried_and_failed', 'review_comment'.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Kind",
+              "type": "string"
+            },
+            "repo": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Repo this event belongs to.",
+              "title": "Repo"
+            },
+            "session_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Session this event belongs to, if any.",
+              "title": "Session Id"
+            },
+            "workspace": {
+              "default": "default",
+              "description": "Workspace this event belongs to. Defaults to 'default' if omitted.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Workspace",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "content"
+          ],
+          "title": "engraphis_record_eventArguments",
+          "type": "object"
+        },
+        "name": "engraphis_record_event"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false,
+          "title": "Remember a fact"
+        },
+        "description": "Store a memory so it can be recalled in later turns, sessions, or repos.\n\nUse this whenever you learn something worth keeping: a convention, a decision and its\nrationale, a bug's cause and fix, a user preference, or a reusable procedure.\n\nReturns:\n    str: JSON ``{\"id\",\"workspace\",\"repo\",\"scope\",\"mtype\",\"stored\":true,\"op\"}`` where\n    ``op`` is ``\"add\"`` (new), ``\"noop\"`` (matched an existing memory almost exactly \u2014\n    that one was reinforced, ``id`` points to it), or ``\"invalidate\"`` (superseded an\n    existing memory on the same subject \u2014 see ``superseded`` for the old id(s); history\n    is preserved, never deleted), ``\"relate\"`` (kept both uncertain neighboring claims and\n    linked them), or ``\"quarantined\"`` (a suspicious explicitly untrusted payload was\n    retained for governance inspection but excluded from normal recall). Quarantine returns\n    content-free ``policy`` and ``reasons`` codes. Returns ``\"Error: <reason>\"`` if\n    validation fails.",
+        "inputSchema": {
+          "properties": {
+            "claim_kind": {
+              "default": "",
+              "description": "Optional claim predicate/category (for example 'configured_value').",
+              "maxLength": 200,
+              "title": "Claim Kind",
+              "type": "string"
+            },
+            "content": {
+              "description": "The fact, decision, convention, or note to store (e.g. 'We use pnpm for all frontend repos').",
+              "maxLength": 100000,
+              "minLength": 1,
+              "title": "Content",
+              "type": "string"
+            },
+            "dedupe": {
+              "default": true,
+              "description": "If true (default), check this against similar existing memories first: an exact restatement reinforces the existing one instead of duplicating it; a shared subject_key or strong joint evidence can supersede the old one, while uncertain neighbors are related without discarding either fact. Set false to force a plain insert (e.g. for recurring episodic log entries where repeats are meaningful).",
+              "title": "Dedupe",
+              "type": "boolean"
+            },
+            "importance": {
+              "default": 0.0,
+              "description": "Salience 0..1; higher resists decay.",
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "title": "Importance",
+              "type": "number"
+            },
+            "keywords": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional keywords to aid lexical recall.",
+              "title": "Keywords"
+            },
+            "kind": {
+              "anyOf": [
+                {
+                  "maxLength": 100,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional artifact kind for filtering: 'plan', 'diff', 'review', 'task_summary', 'council_verdict', ...",
+              "title": "Kind"
+            },
+            "mtype": {
+              "default": "semantic",
+              "description": "Memory type: 'semantic' (facts/conventions), 'episodic' (events/decisions), 'procedural' (how-tos), or 'working' (transient).",
+              "title": "Mtype",
+              "type": "string"
+            },
+            "repo": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Repository scope within the workspace ('backend'). Omit for workspace-wide memories.",
+              "title": "Repo"
+            },
+            "retention_class": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional host-LLM retention decision: ephemeral, normal, or critical. The write is never silently discarded; this adjusts bounded importance/stability and records the supervision signal.",
+              "title": "Retention Class"
+            },
+            "retention_reason": {
+              "default": "",
+              "description": "Short explanation for the retention classification; do not repeat sensitive memory contents.",
+              "maxLength": 1000,
+              "title": "Retention Reason",
+              "type": "string"
+            },
+            "scope": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Visibility: session, repo, workspace, or user. Omit to infer the compatible default: repo when repo or a repo-backed session_id is present, otherwise workspace. Session visibility must be explicit.",
+              "title": "Scope"
+            },
+            "session_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Session id from engraphis_start_session, if this memory belongs to one.",
+              "title": "Session Id"
+            },
+            "source": {
+              "default": "agent",
+              "description": "Origin of the content. Web, import, sync, and other external origins are always untrusted even if trusted=true; use the default agent only for a fact the connected local agent authored or independently verified.",
+              "maxLength": 200,
+              "title": "Source",
+              "type": "string"
+            },
+            "subject_key": {
+              "default": "",
+              "description": "Optional stable claim subject (for example 'api.rate_limit'). Matching keys make supersession safer and deterministic.",
+              "maxLength": 1000,
+              "title": "Subject Key",
+              "type": "string"
+            },
+            "title": {
+              "default": "",
+              "description": "Optional short title.",
+              "maxLength": 1000,
+              "title": "Title",
+              "type": "string"
+            },
+            "trusted": {
+              "default": true,
+              "description": "Local-agent confidence label. External origins cannot elevate themselves with this field.",
+              "title": "Trusted",
+              "type": "boolean"
+            },
+            "valid_from": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional Unix timestamp for when this fact became true in world time. Omit to use ingestion time.",
+              "title": "Valid From"
+            },
+            "workspace": {
+              "default": "default",
+              "description": "Top-level scope, e.g. an org or product name ('acme'). Defaults to 'default' if omitted.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Workspace",
+              "type": "string"
+            }
+          },
+          "required": [
+            "content"
+          ],
+          "title": "engraphis_rememberArguments",
+          "type": "object"
+        },
+        "name": "engraphis_remember"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false,
+          "title": "Remember a batch of facts"
+        },
+        "description": "Store a batch of facts from parallel agents in one atomic, deduplicated write.\n\nUse this instead of many ``engraphis_remember`` calls when one turn produced a\nset of findings (fan-out sub-agents, a research sweep, a review council): the\nwhole batch lands in a single transaction, each fact is resolved against the\nothers (duplicates reinforce, keyed claims supersede), and facts sharing a\n``subject_key`` or an explicit per-fact ``evidence_source`` get\nevidence-labeled graph edges so the merge is a growing graph rather than a\npile of prose.\n\nReturns:\n    str: JSON ``{\"workspace\",\"repo\",\"scope\",\"stored\":true,\"total\",\"ops\",\n    \"results\":[{\"id\",\"op\",...}]}`` with one entry per input fact, in order.\n    Returns ``\"Error: <reason>\"`` if validation fails or any fact cannot be\n    stored (the whole batch rolls back in that case).",
+        "inputSchema": {
+          "properties": {
+            "facts": {
+              "description": "The facts collected from a fan-out (parallel sub-agents, research, a review council), as a list of objects: each needs 'content' and optionally 'title', 'importance' (0..1), 'keywords', 'subject_key' (stable claim subject like 'api.rate_limit'), 'claim_kind', 'evidence_source' (per-fact origin label; facts sharing one get evidence-labeled links), and 'valid_from' (Unix timestamp). All facts are stored in one transaction; each is deduplicated against the others, and facts that share a subject_key or evidence_source are linked with evidence-labeled edges.",
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "maxItems": 500,
+              "minItems": 1,
+              "title": "Facts",
+              "type": "array"
+            },
+            "mtype": {
+              "default": "semantic",
+              "description": "Default memory type for facts without their own: 'semantic' (facts/conventions), 'episodic' (events/decisions), 'procedural' (how-tos), or 'working' (transient).",
+              "title": "Mtype",
+              "type": "string"
+            },
+            "repo": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Repository scope within the workspace ('backend'). Omit for workspace-wide memories.",
+              "title": "Repo"
+            },
+            "scope": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Visibility: session, repo, workspace, or user. Omit to infer the compatible default: repo when repo or a repo-backed session_id is present, otherwise workspace. Session visibility must be explicit.",
+              "title": "Scope"
+            },
+            "session_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Session id from engraphis_start_session, if this batch belongs to one.",
+              "title": "Session Id"
+            },
+            "source": {
+              "default": "agent",
+              "description": "Origin of the content. Web, import, sync, and other external origins are always untrusted even if trusted=true; use the default agent only for facts the connected local agent authored or independently verified.",
+              "maxLength": 200,
+              "title": "Source",
+              "type": "string"
+            },
+            "trusted": {
+              "default": true,
+              "description": "Local-agent confidence label. External origins cannot elevate themselves with this field.",
+              "title": "Trusted",
+              "type": "boolean"
+            },
+            "workspace": {
+              "default": "default",
+              "description": "Top-level scope, e.g. an org or product name ('acme'). Defaults to 'default' if omitted.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Workspace",
+              "type": "string"
+            }
+          },
+          "required": [
+            "facts"
+          ],
+          "title": "engraphis_remember_manyArguments",
+          "type": "object"
+        },
+        "name": "engraphis_remember_many"
+      },
+      {
+        "annotations": {
+          "destructiveHint": true,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false,
+          "title": "Retire a memory"
+        },
+        "description": "Retire a memory: it stops appearing in recall, but history is preserved, not\ndeleted (bi-temporal close, never a hard delete) \u2014 use ``engraphis_correct`` instead\nif you have replacement content, since that keeps the \"why\" chain intact.\nEvery request appends an audit record, including an identical retry, so the MCP call\nis deliberately annotated as non-idempotent. Requires explicit local-operator\nconfirmation (``confirmed=true``) because the stdio transport carries no role\nboundary.\n\nReturns:\n    str: JSON ``{\"id\",\"status\":\"retired\",\"reason\"}`` or an actionable error if the\n    id is unknown or doesn't belong to ``workspace``/``repo``.",
+        "inputSchema": {
+          "properties": {
+            "confirmed": {
+              "default": false,
+              "description": "Explicit local-operator confirmation: must be true \u2014 retirement closes history and every request is audited, including retries.",
+              "title": "Confirmed",
+              "type": "boolean"
+            },
+            "memory_id": {
+              "description": "The memory id to retire (from a prior remember/recall result, e.g. 'mem_01J...').",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Memory Id",
+              "type": "string"
+            },
+            "reason": {
+              "default": "",
+              "description": "Why this is being retired (recorded in the audit trail).",
+              "maxLength": 1000,
+              "title": "Reason",
+              "type": "string"
+            },
+            "repo": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Repo that owns this memory, if it's repo-scoped; also checked.",
+              "title": "Repo"
+            },
+            "workspace": {
+              "description": "Workspace that owns this memory \u2014 checked against the memory's actual workspace before anything is changed, so you can't retire a memory in a workspace you weren't already given.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Workspace",
+              "type": "string"
+            }
+          },
+          "required": [
+            "memory_id",
+            "workspace"
+          ],
+          "title": "engraphis_retireArguments",
+          "type": "object"
+        },
+        "name": "engraphis_retire"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "Search the code symbol graph"
+        },
+        "description": "Find function/class/method definitions by name, with their callers \u2014 structural\ncode search that costs far fewer tokens than grepping/reading whole files, and\ndirectly answers \"what calls this\" / \"what might break if I change it\".\n\nReturns:\n    str: JSON ``{\"query\",\"symbols\":[{\"name\",\"fqname\",\"kind\",\"file\",\"span\",\n    \"signature\",\"called_by\":[{\"src\",\"file\",\"line\"}]}]}``.",
+        "inputSchema": {
+          "properties": {
+            "as_of": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Compatibility alias for valid_at.",
+              "title": "As Of"
+            },
+            "known_at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional system-time Unix timestamp.",
+              "title": "Known At"
+            },
+            "limit": {
+              "default": 20,
+              "description": "Max symbols to return (1-50).",
+              "maximum": 50,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            },
+            "query": {
+              "description": "A symbol name or partial name to find, e.g. 'Calculator' or 'add'.",
+              "maxLength": 500,
+              "minLength": 1,
+              "title": "Query",
+              "type": "string"
+            },
+            "repo": {
+              "description": "Repo to search (must have been indexed with engraphis_index_repo first).",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Repo",
+              "type": "string"
+            },
+            "valid_at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional world-time Unix timestamp.",
+              "title": "Valid At"
+            },
+            "workspace": {
+              "description": "Workspace the repo belongs to.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Workspace",
+              "type": "string"
+            }
+          },
+          "required": [
+            "query",
+            "workspace",
+            "repo"
+          ],
+          "title": "engraphis_search_codeArguments",
+          "type": "object"
+        },
+        "name": "engraphis_search_code"
+      },
+      {
+        "annotations": {
+          "destructiveHint": true,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false,
+          "title": "Securely erase a leaked memory"
+        },
+        "description": "Irreversibly remove one accidentally stored secret from local persistence.\n\nUnlike retirement, this removes the memory, FTS/vector-index and derived graph/link\nrows, performs SQLite secure-delete/WAL/VACUUM maintenance, and scans recognised\nlocal SQLite recovery backups. It cannot erase copied exports, snapshots, remote\npeers, or data already read by a compromised/running agent; rotate the credential.\nRequires explicit local-operator confirmation (``confirmed=true``); the response\ncarries the Store's ``impact`` report (receipt/event refs, backup note,\nWAL/vacuum status) for the rotation runbook (see docs/SYNC.md).",
+        "inputSchema": {
+          "properties": {
+            "confirmed": {
+              "default": false,
+              "description": "Explicit local-operator confirmation: must be true \u2014 this irreversibly destroys the memory, its history, and local indexed derivatives. Rotate the credential first.",
+              "title": "Confirmed",
+              "type": "boolean"
+            },
+            "memory_id": {
+              "description": "Leaked memory id to erase irreversibly.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Memory Id",
+              "type": "string"
+            },
+            "repo": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional owning repo.",
+              "title": "Repo"
+            },
+            "workspace": {
+              "description": "Workspace that owns the memory.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Workspace",
+              "type": "string"
+            }
+          },
+          "required": [
+            "memory_id",
+            "workspace"
+          ],
+          "title": "engraphis_secure_eraseArguments",
+          "type": "object"
+        },
+        "name": "engraphis_secure_erase"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false,
+          "title": "Start a memory session"
+        },
+        "description": "Open a session to group this work's memories and enable cross-session resume.\n\nCall this at the start of a task in a repo you've worked in before \u2014 if a previous\nsession for the same authenticated user and agent was ended with a summary or open\nthreads, they come back in ``bootstrap`` so you can resume without crossing another\nuser or agent's handoff boundary.\n\nExact retries are reused by default for the same ``(workspace, repo, authenticated\nuser, agent, goal)`` identity. Different users, agents, or goals start distinct\nsessions automatically, and ``force_new=true`` always branches another session.\nBecause that valid option creates a new row on every call, the tool as a whole is\nconservatively annotated as non-idempotent.\n\nReturns:\n    str: JSON ``{\"session_id\",\"workspace\",\"repo\",\"goal\",\"status\":\"active\",\"reused\",\n    \"bootstrap\":{\"summary\",\"open_threads\",\"outcome\"} or {} if there is no prior\n    session}``. Pass ``session_id`` to engraphis_remember and engraphis_end_session.",
+        "inputSchema": {
+          "properties": {
+            "agent": {
+              "default": "",
+              "description": "Agent/tool name (e.g. 'claude-code').",
+              "maxLength": 200,
+              "title": "Agent",
+              "type": "string"
+            },
+            "force_new": {
+              "default": false,
+              "description": "Force a brand-new session even if one is already active for this exact workspace/repo/user/agent/goal identity. Default false: an exact retry returns the existing active session (reused=true). Set true only to branch a second session for the same task identity.",
+              "title": "Force New",
+              "type": "boolean"
+            },
+            "goal": {
+              "default": "",
+              "description": "What this session is trying to accomplish.",
+              "maxLength": 1000,
+              "title": "Goal",
+              "type": "string"
+            },
+            "repo": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Repo scope, if any.",
+              "title": "Repo"
+            },
+            "workspace": {
+              "default": "default",
+              "description": "Workspace the session belongs to. Defaults to 'default' if omitted (cron jobs often omit it).",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Workspace",
+              "type": "string"
+            }
+          },
+          "title": "engraphis_start_sessionArguments",
+          "type": "object"
+        },
+        "name": "engraphis_start_session"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "Memory store stats"
+        },
+        "description": "Report memory counts (overall or for one workspace) \u2014 handy for onboarding/health.\n\nReturns:\n    str: JSON ``{\"memories\",\"by_type\",\"workspaces\",\"sessions\",\"schema_version\"}``.",
+        "inputSchema": {
+          "properties": {
+            "workspace": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Limit counts to this workspace.",
+              "title": "Workspace"
+            }
+          },
+          "title": "engraphis_statsArguments",
+          "type": "object"
+        },
+        "name": "engraphis_stats"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "Bi-temporal history of a fact"
+        },
+        "description": "Return every version of a fact in chronological order, including superseded ones.\n\nUse this for \"what did we believe and when\" / \"how has X changed over time\" \u2014 each\nentry carries ``valid_from``/``valid_to`` so you can see exactly when it was true.\n\nReturns:\n    str: JSON ``{\"query\",\"history\":[{...memory fields..., \"valid_from\",\"valid_to\"}]}``\n    oldest first. Raises an actionable error if the workspace/repo is unknown.",
+        "inputSchema": {
+          "properties": {
+            "limit": {
+              "default": 20,
+              "description": "Max history entries (1-50).",
+              "maximum": 50,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            },
+            "query": {
+              "description": "The fact/entity to trace, e.g. 'rate limit' or 'default branch name'.",
+              "maxLength": 100000,
+              "minLength": 1,
+              "title": "Query",
+              "type": "string"
+            },
+            "repo": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Restrict to this repo.",
+              "title": "Repo"
+            },
+            "workspace": {
+              "description": "Workspace to search.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Workspace",
+              "type": "string"
+            }
+          },
+          "required": [
+            "query",
+            "workspace"
+          ],
+          "title": "engraphis_timelineArguments",
+          "type": "object"
+        },
+        "name": "engraphis_timeline"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "Verify an operation receipt chain"
+        },
+        "description": "Verify hashes, predecessor links, the local anchor, and optional external anchor.",
+        "inputSchema": {
+          "properties": {
+            "expected_count": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Previously saved receipt count to compare against.",
+              "title": "Expected Count"
+            },
+            "expected_head": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Previously saved chain head to compare against (detects replacement or truncation even if the local anchor was also altered).",
+              "title": "Expected Head"
+            },
+            "workspace": {
+              "description": "Workspace whose receipt chain to verify.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Workspace",
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace"
+          ],
+          "title": "engraphis_verify_receiptsArguments",
+          "type": "object"
+        },
+        "name": "engraphis_verify_receipts"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "Explain the rationale behind a fact"
+        },
+        "description": "Surface the current answer *and* what it superseded, if anything.\n\nUse this for \"why is it like this\" / \"what did we used to do\" questions \u2014 it\ndeliberately looks past the live view into bi-temporal history, which plain recall\ndoes not. The \"supersedes\" list is what makes this different from a vector search:\nthose memories are no longer current but are not deleted, so the rationale chain\n(\"we used to do X, then switched to Y because Z\") stays answerable.\n\nReturns:\n    str: JSON ``{\"query\",\"answer\":[...live memories...],\"supersedes\":[...what they\n    replaced, if anything...]}``. Raises an actionable error if the workspace/repo\n    is unknown.",
+        "inputSchema": {
+          "properties": {
+            "k": {
+              "default": 5,
+              "description": "Max results (1-50).",
+              "maximum": 50,
+              "minimum": 1,
+              "title": "K",
+              "type": "integer"
+            },
+            "query": {
+              "description": "The decision or fact to explain, e.g. 'why did we migrate to PASETO?' or just 'rate limit'.",
+              "maxLength": 100000,
+              "minLength": 1,
+              "title": "Query",
+              "type": "string"
+            },
+            "repo": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Restrict to this repo.",
+              "title": "Repo"
+            },
+            "workspace": {
+              "description": "Workspace to search.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Workspace",
+              "type": "string"
+            }
+          },
+          "required": [
+            "query",
+            "workspace"
+          ],
+          "title": "engraphis_whyArguments",
+          "type": "object"
+        },
+        "name": "engraphis_why"
+      }
+    ],
+    "smart": [
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "List pending/quarantined/conflicting memories"
+        },
+        "description": "Read-only inbox of pending/quarantined/conflicting memories for a reviewer.\n\nScope and personal-folder authorization are enforced by ``MemoryService``. Pending\nand quarantined bodies are never returned to an agent; only approved conflict\nrecords may include a short excerpt.",
+        "inputSchema": {
+          "properties": {
+            "limit": {
+              "default": 50,
+              "description": "Max items to return.",
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            },
+            "repo": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional repository scope.",
+              "title": "Repo"
+            },
+            "workspace": {
+              "default": "default",
+              "description": "Workspace to review.",
+              "maxLength": 200,
+              "title": "Workspace",
+              "type": "string"
+            }
+          },
+          "title": "engraphis_conflict_reviewArguments",
+          "type": "object"
+        },
+        "name": "engraphis_conflict_review"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "Discover an advanced Engraphis capability"
+        },
+        "description": "Return only the exact schemas needed for a small set of matching advanced actions.",
+        "inputSchema": {
+          "properties": {
+            "category": {
+              "default": "",
+              "description": "Optional area: memory, governance, code, audit, or ops.",
+              "maxLength": 100,
+              "title": "Category",
+              "type": "string"
+            },
+            "intent": {
+              "default": "any",
+              "description": "Optional side effect: any, read, write, admin, or destructive.",
+              "pattern": "^(any|read|write|admin|destructive)$",
+              "title": "Intent",
+              "type": "string"
+            },
+            "limit": {
+              "default": 1,
+              "description": "Number of ranked actions to return.",
+              "maximum": 3,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            },
+            "task": {
+              "description": "Describe the capability needed, without pasting memory content.",
+              "maxLength": 2000,
+              "minLength": 1,
+              "title": "Task",
+              "type": "string"
+            }
+          },
+          "required": [
+            "task"
+          ],
+          "title": "engraphis_discover_actionsArguments",
+          "type": "object"
+        },
+        "name": "engraphis_discover_actions"
+      },
+      {
+        "annotations": {
+          "destructiveHint": true,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false,
+          "title": "Execute a discovered stateful action"
+        },
+        "description": "Execute a discovered write, admin, or destructive-capable action safely.",
+        "inputSchema": {
+          "properties": {
+            "arguments": {
+              "additionalProperties": true,
+              "description": "Arguments matching the discovered schema.",
+              "title": "Arguments",
+              "type": "object"
+            },
+            "capability_id": {
+              "description": "Capability id returned by discover_actions.",
+              "maxLength": 128,
+              "minLength": 8,
+              "title": "Capability Id",
+              "type": "string"
+            },
+            "schema_digest": {
+              "description": "Schema digest returned by discovery.",
+              "maxLength": 128,
+              "minLength": 8,
+              "title": "Schema Digest",
+              "type": "string"
+            }
+          },
+          "required": [
+            "capability_id",
+            "schema_digest",
+            "arguments"
+          ],
+          "title": "engraphis_execute_actionArguments",
+          "type": "object"
+        },
+        "name": "engraphis_execute_action"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "Execute a discovered read action"
+        },
+        "description": "Execute only a discovered action that is truthfully read-only and idempotent.",
+        "inputSchema": {
+          "properties": {
+            "arguments": {
+              "additionalProperties": true,
+              "description": "Arguments matching the discovered schema.",
+              "title": "Arguments",
+              "type": "object"
+            },
+            "capability_id": {
+              "description": "Capability id returned by discover_actions.",
+              "maxLength": 128,
+              "minLength": 8,
+              "title": "Capability Id",
+              "type": "string"
+            },
+            "schema_digest": {
+              "description": "Schema digest returned by discovery.",
+              "maxLength": 128,
+              "minLength": 8,
+              "title": "Schema Digest",
+              "type": "string"
+            }
+          },
+          "required": [
+            "capability_id",
+            "schema_digest",
+            "arguments"
+          ],
+          "title": "engraphis_execute_readArguments",
+          "type": "object"
+        },
+        "name": "engraphis_execute_read"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "Read one memory's governed record"
+        },
+        "description": "Return one memory's governed record (content, provenance, scope, temporal fields).\n\nRead-only and never reinforces. Pending/quarantined content is NOT returned to an\nagent \u2014 the tool answers ``not_prompt_eligible`` instead, so untrusted content never\nreaches model context through this surface.",
+        "inputSchema": {
+          "properties": {
+            "memory_id": {
+              "description": "Memory id to read.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Memory Id",
+              "type": "string"
+            },
+            "repo": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional repository scope.",
+              "title": "Repo"
+            },
+            "workspace": {
+              "default": "default",
+              "description": "Workspace containing the memory.",
+              "maxLength": 200,
+              "title": "Workspace",
+              "type": "string"
+            }
+          },
+          "required": [
+            "memory_id"
+          ],
+          "title": "engraphis_get_memoryArguments",
+          "type": "object"
+        },
+        "name": "engraphis_get_memory"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false,
+          "title": "Recall compact project context"
+        },
+        "description": "Return one compact, bounded context packet for routine agent work.",
+        "inputSchema": {
+          "properties": {
+            "format": {
+              "default": "full",
+              "description": "Context format: 'full' or 'gist'.",
+              "title": "Format",
+              "type": "string"
+            },
+            "k": {
+              "default": 50,
+              "description": "Maximum source memories.",
+              "maximum": 50,
+              "minimum": 1,
+              "title": "K",
+              "type": "integer"
+            },
+            "query": {
+              "description": "Question or task needing prior context.",
+              "maxLength": 100000,
+              "minLength": 1,
+              "title": "Query",
+              "type": "string"
+            },
+            "repo": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional repository.",
+              "title": "Repo"
+            },
+            "session_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional active session.",
+              "title": "Session Id"
+            },
+            "token_budget": {
+              "default": 1024,
+              "description": "Hard returned-context token budget.",
+              "maximum": 32768,
+              "minimum": 0,
+              "title": "Token Budget",
+              "type": "integer"
+            },
+            "workspace": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional workspace.",
+              "title": "Workspace"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "title": "smart_recall_contextArguments",
+          "type": "object"
+        },
+        "name": "engraphis_recall_context"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false,
+          "title": "Remember a durable fact"
+        },
+        "description": "Store a routine durable memory with safe default provenance and deduplication.",
+        "inputSchema": {
+          "properties": {
+            "claim_kind": {
+              "default": "",
+              "description": "Optional claim predicate/category (for example 'configured_value').",
+              "maxLength": 200,
+              "title": "Claim Kind",
+              "type": "string"
+            },
+            "content": {
+              "description": "Durable fact, decision, preference, or procedure.",
+              "maxLength": 100000,
+              "minLength": 1,
+              "title": "Content",
+              "type": "string"
+            },
+            "importance": {
+              "default": 0.0,
+              "description": "Salience from 0 to 1.",
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "title": "Importance",
+              "type": "number"
+            },
+            "mtype": {
+              "default": "semantic",
+              "description": "semantic, episodic, procedural, or working.",
+              "title": "Mtype",
+              "type": "string"
+            },
+            "repo": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional repository.",
+              "title": "Repo"
+            },
+            "session_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional active session.",
+              "title": "Session Id"
+            },
+            "subject_key": {
+              "default": "",
+              "description": "Optional stable claim subject (for example 'api.rate_limit'). Matching keys make supersession safer and deterministic.",
+              "maxLength": 1000,
+              "title": "Subject Key",
+              "type": "string"
+            },
+            "workspace": {
+              "default": "default",
+              "description": "Workspace for the memory.",
+              "maxLength": 200,
+              "title": "Workspace",
+              "type": "string"
+            }
+          },
+          "required": [
+            "content"
+          ],
+          "title": "smart_rememberArguments",
+          "type": "object"
+        },
+        "name": "engraphis_remember"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false,
+          "title": "Start or end a memory session"
+        },
+        "description": "Start/resume a session or end it with its next-session handoff.",
+        "inputSchema": {
+          "properties": {
+            "action": {
+              "default": "start",
+              "description": "start to resume work, or end to save its handoff.",
+              "title": "Action",
+              "type": "string"
+            },
+            "agent": {
+              "default": "",
+              "description": "Optional agent name.",
+              "maxLength": 200,
+              "title": "Agent",
+              "type": "string"
+            },
+            "force_new": {
+              "default": false,
+              "description": "Start only: branch a new session instead of reusing an exact active task.",
+              "title": "Force New",
+              "type": "boolean"
+            },
+            "goal": {
+              "default": "",
+              "description": "Task goal; start returns bounded relevant context.",
+              "maxLength": 1000,
+              "title": "Goal",
+              "type": "string"
+            },
+            "open_threads": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Unresolved follow-ups.",
+              "title": "Open Threads"
+            },
+            "outcome": {
+              "default": "",
+              "description": "Optional outcome label.",
+              "maxLength": 1000,
+              "title": "Outcome",
+              "type": "string"
+            },
+            "repo": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional repository scope.",
+              "title": "Repo"
+            },
+            "session_id": {
+              "default": "",
+              "description": "Session id required to end a session.",
+              "maxLength": 200,
+              "title": "Session Id",
+              "type": "string"
+            },
+            "summary": {
+              "default": "",
+              "description": "Short final handoff.",
+              "maxLength": 100000,
+              "title": "Summary",
+              "type": "string"
+            },
+            "token_budget": {
+              "default": 512,
+              "description": "Goal-context budget when starting.",
+              "maximum": 32768,
+              "minimum": 0,
+              "title": "Token Budget",
+              "type": "integer"
+            },
+            "workspace": {
+              "default": "default",
+              "description": "Workspace for a started session.",
+              "maxLength": 200,
+              "title": "Workspace",
+              "type": "string"
+            }
+          },
+          "title": "engraphis_sessionArguments",
+          "type": "object"
+        },
+        "name": "engraphis_session"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false,
+          "title": "Edit a memory's metadata fields"
+        },
+        "description": "Edit a memory's metadata fields (title/type/importance). An identical retry is an\natomic no-op. Content edits must go through the governed correction path so bi-temporal\nhistory is preserved. Secret capture is rejected; provenance/trust/sensitivity are never\neditable here.",
+        "inputSchema": {
+          "properties": {
+            "actor": {
+              "default": "user",
+              "description": "Optional local-mode actor label; authenticated team mode uses the caller identity.",
+              "maxLength": 200,
+              "title": "Actor",
+              "type": "string"
+            },
+            "importance": {
+              "anyOf": [
+                {
+                  "maximum": 1.0,
+                  "minimum": 0.0,
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional importance 0..1.",
+              "title": "Importance"
+            },
+            "memory_id": {
+              "description": "Memory id to update.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Memory Id",
+              "type": "string"
+            },
+            "mtype": {
+              "anyOf": [
+                {
+                  "maxLength": 50,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional memory type (working|episodic|semantic|procedural).",
+              "title": "Mtype"
+            },
+            "repo": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional repository scope.",
+              "title": "Repo"
+            },
+            "title": {
+              "anyOf": [
+                {
+                  "maxLength": 500,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional new title.",
+              "title": "Title"
+            },
+            "workspace": {
+              "default": "default",
+              "description": "Workspace containing the memory.",
+              "maxLength": 200,
+              "title": "Workspace",
+              "type": "string"
+            }
+          },
+          "required": [
+            "memory_id"
+          ],
+          "title": "engraphis_update_memoryArguments",
+          "type": "object"
+        },
+        "name": "engraphis_update_memory"
+      }
+    ]
+  }
+}
