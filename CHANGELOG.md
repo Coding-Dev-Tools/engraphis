@@ -3,7 +3,30 @@
 All notable changes to Engraphis are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions use SemVer.
 
-## [Unreleased]
+## [1.7.2] - 2026-09-05
+
+### Added
+
+- Added `idx_vector_index_repairs_queue` composite index on `(identity, generation, memory_id)`
+  in `engraphis/core/schema.py` to prevent table scans during external vector repair queue dequeue.
+- Added explicit operator opt-out verification with `403 Forbidden` (`processing_operator_disabled`)
+  for authenticated direct POST requests to `/managed-processing` in `engraphis/routes/v2_api.py`.
+- Added `_only_environment_title_order_changed` in `engraphis/core/resolve.py` ensuring unkeyed
+  facts with permuted environment titles resolve to `NOOP` rather than false conflicts.
+- Added comprehensive reliability regression coverage covering storage concurrency, vector index
+  repair indexing, and managed processing policy enforcement.
+
+### Fixed
+
+- Preserved `[all]` extras fallback for legacy editable installations in `scripts/update.py`
+  when no installation profile is recorded.
+- Fixed external vector index hydration on physical index recreation and rebuilds.
+- Fixed docstring dedenting and contract normalization across Python 3.9 through 3.14.
+
+### Changed
+
+- Bumped `tree-sitter-language-pack` to 1.16.1.
+- Updated `codeql-action`, `anchore/scan-action`, and `anchore/sbom-action` GitHub Actions dependencies.
 
 ### Reliability and privacy
 
