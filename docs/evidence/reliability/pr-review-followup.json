@@ -1,0 +1,124 @@
+{
+  "schema": "engraphis-pr-review-followup/v1",
+  "recorded_at": "2026-09-05T11:12:04.101400+00:00",
+  "pull_request": "https://github.com/Coding-Dev-Tools/engraphis/pull/201",
+  "baseline": "b3bab7b7f1d7a9737090eec2a8d1d541a6cec741",
+  "committed_review_checkpoint": "b48850a9cfe38d02b38b1563961700ab534372f4",
+  "source_boundary": "Working-tree bytes, including line endings, at the final local review. This overlays source-manifest.json and public-ci-test-isolation.json; it does not relabel earlier complete-suite or benchmark measurements.",
+  "source_sha256": {
+    "docs/MCP_CONTRACT.json": "302bd4b23fce0921439b78362b0295f6d176465322e216cdaf2d86ef6adfec84",
+    "docs/RELIABILITY_PROGRAM.md": "201b8476ec355bc1965fda43ce7d465489897450030c84ec9f47796ee1d7957b",
+    "engraphis/core/engine.py": "5307b6492c8c2ec7852ed490c99ef366061b4ea2c9325ff5abb1c51aac8db9b8",
+    "engraphis/core/resolve.py": "f01a6f55e44320ab04b97e516342f20155668863b2fc4765305e066d87586524",
+    "engraphis/core/schema.py": "88b2643f3905a4b27907a13dcb9379525a7cb4cf844b57aa6ef14d610b6cb312",
+    "engraphis/core/store.py": "4d5670a8e1a1d13c84db572f7598a4511c7804df4a26da28bede6d587d0454c5",
+    "engraphis/core/vector_repair.py": "0483a25ab21880479087d0e75d3d63887e0b1bed9f439c8650b8028c1294305f",
+    "engraphis/service.py": "5fc307739c238bbf646a549b1545f1759588b7dbd621019b41201662c039c675",
+    "eval/datasets/resolver_write_acceptance.jsonl": "757eb8aa46f691d11db700c4908419dce2044bb55a0b89158c2c6880d66dcaeb",
+    "eval/resolver_reworded_corrections.py": "a9054778a37b2175b46f04b674b4779e358931eee5d2ae52bbc5f953d234fb9e",
+    "integrations/pi/src/generated-contract.ts": "906711cba159d75b8c5440f12796be78cd2f8f4b423971e4009bb3c0d61223c6",
+    "integrations/prime_agent/src/engraphis_prime_agent/_contract.py": "4b868447886cc7f6708c1667b5807882c822728db2b0efb4860283ba4fac400b",
+    "scripts/export_mcp_contract.py": "5ddbd51fa9e1e2604b75596af532584ecb6ab775eabb39f428c7001e6580c336",
+    "scripts/update.py": "739bc1550aebf9209a07ab5a4ab56794adab2f4a01c3577bac2e1e08b7b17f23",
+    "tests/test_mcp_contract.py": "bdb06750dcbcc75f20ca106274a0df66abf7153059656a139bb2d0f6019bc36b",
+    "tests/test_resolve.py": "b748526cd931ddee6bb659c3dccc431b93725883af71f723f21eedd58e867c75",
+    "tests/test_storage_concurrency_repair.py": "5a42bc5883667695c3a8dc0b7e7e757b0576ce5ee6deb685a525f9768baa00c6",
+    "tests/test_update.py": "29f68743db2426df193fb1ef74e3e7f31fc4f8842f668ac2c97faea39369b092"
+  },
+  "review": {
+    "coordination": "Exactly four bounded internal reviewers, one level, with parent integration. No Orca or separate user-visible task delegation.",
+    "result": "Scoped follow-up changes reviewed and accepted for PR submission. This is engineering review, not production verification or authorization to merge.",
+    "fixes": [
+      "Acknowledge successful direct publication by captured generation; replay current canonical state after title edits and keep newer repairs.",
+      "Serialize external cleanup and canonical erasure; preserve repair on rollback and cleanup failure. Reject caller-owned external-index erase transactions before provider side effects.",
+      "Use an indexed repair dequeue order; existing schema-17 databases gain the index on reopen without a version bump.",
+      "Honor requires_rebuild on recreated same-identity external indexes, including historical vectors, and use immediate canonical fallback until ready.",
+      "Preserve unknown legacy editable-install capabilities through the existing extras selector, including preview and rollback.",
+      "Normalize only MCP description indentation across Python versions; preserve meaningful description, schema and annotation drift detection.",
+      "Deduplicate permutations of bare environment labels only when content is identical; retain factual title and body bindings."
+    ],
+    "title_counterexample": "An intermediate body-only environment check lost different source/destination relationships stated in titles. It was rejected before commit; final regressions and two real-write corpus cases preserve these differences."
+  },
+  "validation": [
+    {
+      "name": "repair, recall, service, secret hygiene, native vector and batch writes",
+      "command": "$env:ENGRAPHIS_EXTRACTOR='none'; $env:PYTHONPATH='C:/Users/jomie/AppData/Local/Temp/engraphis-review-sqlitevec-c37ba0e'; python -m pytest tests/test_storage_concurrency_repair.py tests/test_service.py tests/test_secret_hygiene.py tests/test_recall_recovery.py tests/test_remember_many.py tests/test_vector_sqlitevec_backend.py tests/test_recall.py tests/test_retrieval_policy.py -q -rs -o addopts= --tb=short",
+      "result": {
+        "exit_code": 0,
+        "passed": 281,
+        "skipped": 1,
+        "warnings": 1,
+        "seconds": 72.48
+      },
+      "skip": "tests/test_service.py:1674: symlinks not supported in this environment",
+      "raw_log_sha256": "f419e20dd6b4a904d0b275df88836dec2d1da9c9ec1e24e01025c45313ecc9d3"
+    },
+    {
+      "name": "resolver and engine focused gate",
+      "command": "ENGRAPHIS_EXTRACTOR=none python -m pytest tests/test_resolve.py tests/test_resolver_acceptance.py tests/test_engine.py -q -rs -o addopts= --tb=short",
+      "passed": 185,
+      "skipped": 2,
+      "seconds": 7.36,
+      "skip_reason": "Windows symlink support unavailable in the two engine cases.",
+      "tool_output_chunk": "c7a3f5"
+    },
+    {
+      "name": "editable updater and installation profile",
+      "passed": 64,
+      "new_behavior_cases": 18,
+      "before": "3 failed and 15 passed in the profile matrix",
+      "boundary": "Capability matrix mocks package and git mutation; no actual user installation upgraded."
+    },
+    {
+      "name": "MCP contract supported-runtime comparison",
+      "python": [
+        "3.12.10",
+        "3.13.13",
+        "3.14.7"
+      ],
+      "mcp": "1.29.0",
+      "pydantic": "2.13.4",
+      "passed_each": 7,
+      "byte_identical": true,
+      "contract_digest": "1f0b4351e3a3d10b4404a86f47e30dfa85922f3aa08a86ce723e64aba6c793a3"
+    },
+    {
+      "name": "offline evaluation",
+      "required_gates_passed": 7,
+      "additional_resolver_gates_passed": 2,
+      "receipt": "offline-gates-review-followup.json",
+      "unit_rows": 44,
+      "real_write_rows": 12,
+      "false_invalidations": 0,
+      "false_noops": 0,
+      "lost_distinct_facts": 0
+    },
+    {
+      "name": "static and contract gates",
+      "checks": [
+        "ruff check .",
+        "pyright",
+        "MCP contract --check",
+        "commercial manifest",
+        "strict-CSP external assets",
+        "git diff --check"
+      ],
+      "result": "passed",
+      "warning": "Installed MCP/Pydantic emits an existing unresolved lifespan annotation warning; typecheck reports zero errors and warnings."
+    }
+  ],
+  "compatibility": {
+    "schema_version": 17,
+    "additional_version_bump": false,
+    "migration": "The existing schema-17 migration and backup instructions still apply. The repair-order index is installed idempotently for existing version-17 databases.",
+    "external_erase_transaction": "An injected separate-index erasure must own its transaction. Finish a caller-opened SQLite transaction before erasing; this prevents rolling back durable compensation after provider deletion.",
+    "rollback": "Use the documented pre-migration backup and restoration procedure for rollout reversal. These incremental repair changes retain the schema and canonical history; reverting their fixes reintroduces the recorded defects."
+  },
+  "boundaries": [
+    "Final-head remote checks are separate from these local receipts and must be checked after push.",
+    "Earlier complete-suite and browser counts remain tied to their recorded commits.",
+    "The two backend benchmark artifacts contain twelve cells in total and remain historical measurements; Store and schema hashes changed after measurement, as recorded in pr-benchmark-source-check.json.",
+    "No independent user study, full 100000-memory agent workload, paid model evaluation or production recovery exercise is claimed.",
+    "No merge, deployment, credential rotation, stash removal or review-thread resolution was performed."
+  ]
+}

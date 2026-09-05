@@ -33,13 +33,21 @@
       "sha256": "1dd10fe157fc656bdb43785598362f02c6a657a2f9de006670b92e6e1f637c18",
       "bytes": 27300
     },
+    "offline-gates-review-followup.json": {
+      "sha256": "dc6dcc75d293f6becaf42411ee2ca6c50c5f31bf2d354d9a5d9887223a37122d",
+      "bytes": 5972
+    },
     "offline-gates.json": {
       "sha256": "aa2f2e3e0312491d57e6d6571dbb92a96570c8655f55bfe7b63a3dc6ca2fc2dc",
       "bytes": 3663
     },
     "pr-benchmark-source-check.json": {
-      "sha256": "08886c2f7afb7fcb51513ce23b3234dc9ab46362e6349706248f9a0a84f00db1",
-      "bytes": 1164
+      "sha256": "af6a1ecc06f933227dc07d3fb19ae184790afd40b639ca4226f77086246ed670",
+      "bytes": 1795
+    },
+    "pr-review-followup.json": {
+      "sha256": "dc63ca917127732d239ac60ea5ee1aa66dc44b6992db15a2f3ca5ca7e4aa802d",
+      "bytes": 8320
     },
     "pr-review.json": {
       "sha256": "389291bb867e5e1c63c45c1f704079de49afbe91d8e9f05cb21f64cec41a2bc1",
@@ -65,6 +73,14 @@
       "sha256": "f5683a78cb71e70810ea2bcde046e8c9a428159f0ab92c8cdcc4b5f151f8449d",
       "bytes": 27677
     },
+    "resolver-title-unit-final.json": {
+      "sha256": "4f7139c874e16c2eca6e58a57be478d34b99283b2972ce307c183533755f8c47",
+      "bytes": 3171
+    },
+    "resolver-title-write-final.json": {
+      "sha256": "d837833fbd181916ebb299ca7bdcb9846433af23db4428c995816ecc0a76493f",
+      "bytes": 3676
+    },
     "resolver-unit-20260905.json": {
       "sha256": "7559397b4d0a003f32d0a0eae5b7925dd3cd4109de05c63f8c24c34583e82a76",
       "bytes": 3173
@@ -86,8 +102,8 @@
       "bytes": 20106
     },
     "validation.json": {
-      "sha256": "54b8ef400f488ce3c9aa5cca93e6684341b77e36b35d6bf0e855ab6364ff9e78",
-      "bytes": 21607
+      "sha256": "b1352fbac30794374084073ab2703cda7e3b15fbe3afe462a98b75bc670c57a4",
+      "bytes": 21616
     },
     "vector-scale-incomplete-baseline-20260905.json": {
       "sha256": "45c4f61518012e35e09b6d274dec3015d00d4948f2b8279c0f56760dec080544",
@@ -159,6 +175,7 @@
     }
   },
   "source_overlays": [
-    "public-ci-test-isolation.json"
+    "public-ci-test-isolation.json",
+    "pr-review-followup.json"
   ]
 }

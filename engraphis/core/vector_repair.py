@@ -34,6 +34,9 @@ def canonical_search_required(index, store: "Store", *,
     identity = index_repair_identity(index, store)
     if identity is None:
         return False
+    # Physical loss can be reported before startup has reseeded the durable queue.
+    if getattr(index, "requires_rebuild", False) is True:
+        return True
     pending = store.vector_index_pending(identity)
     # A standalone RecallEngine may use a read-only/testing retrieval adapter
     # which has never participated in MemoryEngine's durable write lifecycle.

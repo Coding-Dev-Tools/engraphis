@@ -5327,16 +5327,17 @@ class Store:
         ).fetchone()
         return int(row[0]) if row is not None else 0
 
-    def register_vector_index(self, identity: str) -> None:
-        """Register a durable external target and seed its initial repair backlog."""
+    def register_vector_index(self, identity: str, *, rebuild: bool = False) -> None:
+        """Register a target; reseed canonical rows when its physical index was lost."""
         with self.write_transaction():
             inserted = self.conn.execute(
                 "INSERT OR IGNORE INTO vector_index_targets(identity) VALUES (?)", (identity,)
             ).rowcount
-            if inserted:
+            if inserted or rebuild:
                 self.conn.execute(
                     "INSERT INTO vector_index_repairs(identity, memory_id, generation) "
-                    "SELECT ?, id, ? FROM mem_vectors",
+                    "SELECT ?, id, ? FROM mem_vectors WHERE 1 "
+                    "ON CONFLICT(identity,memory_id) DO UPDATE SET generation=excluded.generation",
                     (identity, self.vector_generation()),
                 )
 

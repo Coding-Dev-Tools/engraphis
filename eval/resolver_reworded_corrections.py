@@ -38,10 +38,10 @@ from engraphis.core.resolve import resolve
 DATASET = Path(__file__).resolve().parent / "datasets" / "resolver_reworded_corrections.jsonl"
 
 
-def _memory_record(text: str, record_id: str) -> MemoryRecord:
+def _memory_record(text: str, record_id: str, *, title: str = "") -> MemoryRecord:
     return MemoryRecord(
         id=record_id, workspace_id="w", repo_id=None, session_id=None,
-        title="", content=text, mtype="semantic", scope="workspace",
+        title=title, content=text, mtype="semantic", scope="workspace",
         importance=0.0, confidence=1.0, valid_from=0.0, valid_to=None,
         ingested_at=0.0, expired_at=None,
         subject_key="", claim_kind="", keywords=(), metadata={},
@@ -54,8 +54,12 @@ def _write_pair(row: dict, engine) -> tuple[str, str, bool, bool]:
     repo_id = engine.store.get_or_create_repo(workspace_id, str(row["id"]))
     shared = {"workspace_id": workspace_id, "repo_id": repo_id}
     shared.update({key: row[key] for key in ("subject_key", "claim_kind") if key in row})
-    before = engine.remember_with_resolution(row["neighbor"], **shared)
-    after = engine.remember_with_resolution(row["candidate"], **shared)
+    before = engine.remember_with_resolution(
+        row["neighbor"], title=row.get("neighbor_title", ""), **shared,
+    )
+    after = engine.remember_with_resolution(
+        row["candidate"], title=row.get("candidate_title", ""), **shared,
+    )
     old_record = engine.store.get_memory(before["id"])
     new_record = engine.store.get_memory(after["id"])
     old_survives = bool(old_record and old_record.valid_to is None)
@@ -89,7 +93,9 @@ def evaluate(dataset: Path = DATASET, *, end_to_end: bool = False) -> dict[str, 
             seen_ids.add(case_id)
             total += 1
             expected = row["expected"]
-            neighbor = _memory_record(row["neighbor"], f"mem_{row['id']}_n")
+            neighbor = _memory_record(
+                row["neighbor"], f"mem_{row['id']}_n", title=row.get("neighbor_title", ""),
+            )
             # Use a high similarity so the resolver's strong/rewrite gates
             # are exercised for every row. The labeled ground truth tells
             # us whether the resolver should INVALIDATE or ADD.
@@ -105,9 +111,13 @@ def evaluate(dataset: Path = DATASET, *, end_to_end: bool = False) -> dict[str, 
                 finally:
                     engine.store.close()
             else:
+                candidate = row["candidate"]
+                if row.get("candidate_title"):
+                    candidate = f"{row['candidate_title']}\n{candidate}"
                 resolution = resolve(
-                    row["candidate"],
+                    candidate,
                     [(0.9, neighbor)],
+                    candidate_content=row["candidate"],
                 )
                 actual, reason = resolution.op.value, resolution.reason
             if expected == "invalidate":

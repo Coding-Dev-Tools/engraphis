@@ -662,3 +662,71 @@ def test_unkeyed_facts_with_organization_subjects_both_live():
         assert eng.store.get_memory(beta["id"]).valid_to is None
     finally:
         eng.store.close()
+
+
+def test_duplicate_content_ignores_reordered_display_environments():
+    content = "Atlas stores memory in SQLite."
+    prior = _rec(content, title="Staging production", id="mem_display")
+    result = resolve(
+        "Production staging " + content, [(0.99, prior)],
+        candidate_content=content,
+    )
+    assert result.op == ResolutionOp.NOOP
+    assert result.target_id == "mem_display"
+
+
+def test_real_writes_distinguish_display_order_from_environment_bindings():
+    from engraphis.core.engine import MemoryEngine
+
+    engine = MemoryEngine.create(":memory:", auto_evolve=False)
+    try:
+        workspace = engine.store.get_or_create_workspace("title-order")
+        content = "The staging database is mirrored in production."
+        first = engine.remember_with_resolution(
+            content, title="Staging production", workspace_id=workspace,
+        )
+        duplicate = engine.remember_with_resolution(
+            content, title="Production staging", workspace_id=workspace,
+        )
+        assert first["op"] == "add"
+        assert duplicate["op"] == "noop"
+        assert duplicate["id"] == first["id"]
+
+        distinct = engine.remember_with_resolution(
+            "The production database is mirrored in staging.",
+            title="Production staging", workspace_id=workspace,
+        )
+        assert distinct["op"] == "relate"
+        assert distinct["id"] != first["id"]
+        assert engine.store.get_memory(first["id"]).valid_to is None
+        assert engine.store.get_memory(distinct["id"]).valid_to is None
+    finally:
+        engine.close()
+
+
+
+def test_environment_bindings_in_titles_survive_identical_content():
+    from engraphis.core.engine import MemoryEngine
+
+    title_pairs = [
+        ("Staging database is mirrored in production", "Production database is mirrored in staging"),
+        ("Staging -> production", "Production -> staging"),
+        ("Staging to production", "Production to staging"),
+    ]
+    engine = MemoryEngine.create(":memory:", auto_evolve=False)
+    try:
+        for case, (old_title, new_title) in enumerate(title_pairs):
+            workspace = engine.store.get_or_create_workspace(f"title-fact-{case}")
+            first = engine.remember_with_resolution(
+                "Replication runs every 30 minutes.", title=old_title, workspace_id=workspace,
+            )
+            second = engine.remember_with_resolution(
+                "Replication runs every 30 minutes.", title=new_title, workspace_id=workspace,
+            )
+            assert second["op"] == "relate", (old_title, new_title, second)
+            assert second["id"] != first["id"]
+            assert engine.store.get_memory(first["id"]).valid_to is None
+            assert engine.store.get_memory(first["id"]).title == old_title
+            assert engine.store.get_memory(second["id"]).title == new_title
+    finally:
+        engine.close()
