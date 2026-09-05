@@ -1,0 +1,44 @@
+[
+  {
+    "command": "python -m eval.harness --dataset eval/datasets/sample.jsonl --k 5",
+    "exit_code": 0,
+    "output": "\nEngraphis eval - 9 questions @ k=5\n  recall@k            : 1.000\n  hit@k               : 1.000\n  mrr@k               : 0.889\n  ndcg@k              : 0.918\n  answer_token_recall : 1.000\n\n",
+    "error": ""
+  },
+  {
+    "command": "python -m eval.harness --dataset eval/datasets/codemem.jsonl --k 5",
+    "exit_code": 0,
+    "output": "\nEngraphis eval - 26 questions @ k=5\n  recall@k            : 1.000\n  hit@k               : 1.000\n  mrr@k               : 0.962\n  ndcg@k              : 0.972\n  answer_token_recall : 1.000\n\n",
+    "error": ""
+  },
+  {
+    "command": "python -m eval.ablation",
+    "exit_code": 0,
+    "output": "Engraphis ablation - recall@5\n  vector-only  : 1.0\n  hybrid-1hop  : 1.0\n  hybrid-ppr   : 1.0\n\nEngraphis ordinary-recall age ablation\n  equal-reinforcement score delta (recent - 1y old): 0.00000000  (expected 0.00000000)\n\nEngraphis semantic-confidence micro-ablation (not a benchmark)\n  default weak singleton wins : False\n  opt-in calibrated lexical wins: True\n\nEngraphis ablation (multi-hop graph dataset) - arm-level recall@5\n  (answers sit 2 entity-hops from the query; which arm can REACH them?)\n  vector arm   : 0.6667\n  graph 1-hop  : 0.0   (reaches 1 hop only)\n  graph PPR    : 1.0   (multi-hop walk)\n\nEngraphis retrieval-policy fixture - recall@5\n  balanced     : 0.6667\n  auto         : 1.0 (opt-in graph specialization)\n",
+    "error": ""
+  },
+  {
+    "command": "python -m eval.reinforcement",
+    "exit_code": 0,
+    "output": "{\n  \"checks\": {\n    \"create_1000_under_10_days\": true,\n    \"diminishing_create_gain\": true,\n    \"diminishing_recall_gain\": true,\n    \"finite\": true,\n    \"nonnegative_create_gain\": true,\n    \"nonnegative_recall_gain\": true,\n    \"recall_1000_under_5_days\": true,\n    \"recall_burst_90d_retention_below_1e_6\": true,\n    \"within_policy_cap\": true\n  },\n  \"create_1000_stability_days\": 9.981381213109778,\n  \"passed\": true,\n  \"recall_1000_retention_after_90d\": 3.072187294081352e-10,\n  \"recall_1000_stability_days\": 4.108939650691841,\n  \"schema\": \"engraphis-reinforcement-eval/v1\"\n}\n",
+    "error": ""
+  },
+  {
+    "command": "python -m eval.adversarial_memory_security",
+    "exit_code": 0,
+    "output": "Engraphis adversarial memory-security gate (offline deterministic fixture)\n  instruction_content_quarantined: 1.000 (1/1)\n  pending_content_review_gated: 1.000 (1/1)\n  external_self_approval_downgraded: 1.000 (1/1)\n  poisoned_content_absent_from_prompt_context: 1.000 (1/1)\n  poisoned_direct_edge_absent_from_prompt_graph: 1.000 (1/1)\n  poisoned_supported_edge_absent_from_prompt_graph: 1.000 (1/1)\n  self_asserted_edge_absent_from_prompt_graph: 1.000 (1/1)\n  trusted_memory_available_in_prompt_graph: 1.000 (1/1)\n  result: PASS\n",
+    "error": ""
+  },
+  {
+    "command": "python -m eval.grounded",
+    "exit_code": 0,
+    "output": "\nEngraphis grounded-recall eval (deterministic embedder)\n  answerable -> grounded  : 1.000  (5/5)\n  off-topic  -> abstained : 1.000  (6/6)\n  decision accuracy      : 1.000  (11/11)\n\n",
+    "error": ""
+  },
+  {
+    "command": "python -m eval.code_arm",
+    "exit_code": 0,
+    "output": "code arm eval (recall@5, offline deterministic fixture)\n  arm-isolated recall@5:\n    vector   0.0000\n    lexical  0.0000\n    code     1.0000\n  full-pipeline recall@5:\n    balanced 0.0000\n    code     1.0000\n  strict lift (code arm reaches what vector/lexical miss): PASS\n",
+    "error": ""
+  }
+]

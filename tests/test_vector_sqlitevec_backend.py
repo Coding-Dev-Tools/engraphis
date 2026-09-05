@@ -60,6 +60,40 @@ def test_knn_search_returns_ranked_hits():
     store.close()
 
 
+def test_unchanged_engine_reopen_does_not_replay_native_vectors(tmp_path, monkeypatch):
+    path = str(tmp_path / "unchanged-native.db")
+    engine = MemoryEngine.create(path, embed_dim=DIM, vector_backend="sqlite-vec", auto_evolve=False)
+    workspace = engine.store.get_or_create_workspace("unchanged")
+    engine.remember("Atlas stores memory in SQLite.", workspace_id=workspace)
+    engine.close()
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("a verified unchanged index must not replay its vectors")
+
+    monkeypatch.setattr(SqliteVecVectorIndex, "upsert", unexpected)
+    reopened = MemoryEngine.create(path, embed_dim=DIM, vector_backend="sqlite-vec", auto_evolve=False)
+    try:
+        assert reopened.index.can_skip_hydration()
+    finally:
+        reopened.close()
+
+
+def test_canonical_change_invalidates_native_hydration_shortcut():
+    store, wid, rid, emb, index = _fixture()
+    try:
+        _make(store, index, emb, wid, rid, "original indexed memory")
+        index.mark_rebuild_complete()
+        assert index.can_skip_hydration()
+        vec = emb.embed(["later canonical-only memory"])[0]
+        store.add_memory(MemoryRecord(
+            id="", content="later canonical-only memory", scope=Scope.REPO,
+            workspace_id=wid, repo_id=rid, embedding=vec,
+        ))
+        assert not index.can_skip_hydration()
+    finally:
+        store.close()
+
+
 def test_k_larger_than_index_is_capped_not_an_error():
     store, wid, rid, emb, index = _fixture()
     only = _make(store, index, emb, wid, rid, "single resident vector")
@@ -551,6 +585,78 @@ def test_session_failure_rolls_back_native_row_in_store_transaction(monkeypatch)
     ) == []
     assert eng.store.conn.in_transaction is False
     eng.store.close()
+
+
+@pytest.mark.parametrize("failure_at", [1, 2])
+def test_remember_many_native_failure_rolls_back_the_entire_batch(monkeypatch, failure_at):
+    engine = MemoryEngine.create(
+        ":memory:", embed_dim=DIM, vector_backend="sqlite-vec", auto_evolve=False,
+    )
+    workspace_id = engine.store.get_or_create_workspace("native-batch-rollback")
+    original_id = engine.remember("Original retained evidence.", workspace_id=workspace_id)
+    original_upsert = engine.index.upsert
+    publications = 0
+
+    def fail_publication(*args, **kwargs):
+        nonlocal publications
+        publications += 1
+        if publications == failure_at:
+            raise RuntimeError("injected native batch failure")
+        return original_upsert(*args, **kwargs)
+
+    monkeypatch.setattr(engine.index, "upsert", fail_publication)
+    try:
+        with pytest.raises(RuntimeError, match="injected native batch failure"):
+            engine.remember_many(
+                ["Whales sing underwater.", "Atlas stores memory in SQLite."],
+                workspace_id=workspace_id,
+            )
+        assert publications == failure_at
+        for table in ("memories", "mem_vectors", "mem_fts", "mem_vec_ann"):
+            assert [row[0] for row in engine.store.conn.execute(
+                f"SELECT id FROM {table}",
+            ).fetchall()] == [original_id]
+        assert not engine.store.conn.in_transaction
+    finally:
+        engine.close()
+
+
+def test_remember_many_publishes_native_and_canonical_rows_in_one_commit(tmp_path, monkeypatch):
+    path = str(tmp_path / "native-batch.db")
+    engine = MemoryEngine.create(
+        path, embed_dim=DIM, vector_backend="sqlite-vec", auto_evolve=False,
+    )
+    workspace_id = engine.store.get_or_create_workspace("native-batch-visible")
+    observer = MemoryEngine.create(
+        path, embed_dim=DIM, vector_backend="sqlite-vec", auto_evolve=False,
+    )
+    original_upsert = engine.index.upsert
+    publications = []
+
+    def observe_publication(memory_ids, *args, **kwargs):
+        assert engine.store.conn.transaction_owned_by_current_thread()
+        original_upsert(memory_ids, *args, **kwargs)
+        publications.extend(memory_ids)
+        assert observer.store.count_memories() == 0
+        assert observer.store.conn.execute("SELECT COUNT(*) FROM mem_vec_ann").fetchone()[0] == 0
+
+    monkeypatch.setattr(engine.index, "upsert", observe_publication)
+    try:
+        results = engine.remember_many(
+            ["Whales sing underwater.", "Atlas stores memory in SQLite."],
+            workspace_id=workspace_id,
+        )
+        expected_ids = {item["id"] for item in results}
+        assert len(publications) == len(expected_ids) == 2
+        assert set(publications) == expected_ids
+        for table in ("memories", "mem_vectors", "mem_vec_ann"):
+            assert {row[0] for row in observer.store.conn.execute(
+                f"SELECT id FROM {table}",
+            ).fetchall()} == expected_ids
+        assert not engine.store.conn.in_transaction
+    finally:
+        observer.close()
+        engine.close()
 
 
 def test_filtered_search_widens_past_invisible_rows_to_full_scan():

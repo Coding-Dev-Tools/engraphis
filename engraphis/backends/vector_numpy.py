@@ -15,6 +15,13 @@ import numpy as np
 
 from engraphis.core.interfaces import SearchFilter
 from engraphis.core.store import Store
+from engraphis.core.vector_search import (
+    canonical_vector_search,
+    top_k_indices,
+)
+
+# Retain the reference helper import used by backend contract tests/adapters.
+_top_k_indices = top_k_indices
 
 
 def _validated_dimension(dim: int) -> int:
@@ -52,34 +59,6 @@ def _vector_query(vec: np.ndarray) -> np.ndarray:
         raise ValueError("query vector must contain only finite values")
     return values
 
-
-def _top_k_indices(scores: np.ndarray, ids: list[str], k: int) -> list[int]:
-    """Select the exact stable top-k without sorting an entire finite corpus.
-
-    Search results promise descending cosine score with the memory id as the
-    deterministic tie-breaker. ``partition`` finds the score cutoff in linear
-    time, then we sort only scores above it plus the (usually tiny) tie boundary.
-    A corpus made entirely of equal scores intentionally sorts that boundary,
-    because every id participates in the observable ordering.
-    """
-    if k <= 0:
-        return []
-    if k >= len(ids) or not np.isfinite(scores).all():
-        # A legacy caller can write non-finite vectors directly through Store. Keep
-        # the prior Python ordering for that unsupported data rather than assigning
-        # it new semantics in this hot-path optimization.
-        return sorted(
-            range(len(ids)), key=lambda index: (-float(scores[index]), ids[index])
-        )[:k]
-
-    cutoff_position = len(ids) - k
-    cutoff = float(np.partition(scores, cutoff_position)[cutoff_position])
-    above = np.flatnonzero(scores > cutoff).tolist()
-    needed = k - len(above)
-    boundary = np.flatnonzero(scores == cutoff).tolist()
-    above.extend(sorted(boundary, key=ids.__getitem__)[:needed])
-    above.sort(key=lambda index: (-float(scores[index]), ids[index]))
-    return above
 
 
 class NumpyVectorIndex:
@@ -174,27 +153,4 @@ class NumpyVectorIndex:
             raise ValueError(
                 f"query dimension {q.shape[0]} does not match the index dimension {self.dim}"
             )
-        with np.errstate(over="ignore", invalid="ignore"):
-            n = float(np.linalg.norm(q))
-        if not np.isfinite(n):
-            raise ValueError("query vector norm must be finite")
-        if n == 0:
-            return []
-        q = q / n
-        ids, mat = self.store.vector_matrix(
-            filter, dim=self.dim if self.dim is not None else int(q.shape[0])
-        )
-        if not ids:
-            return []
-        # Store filters by both the declared dimension and blob width, so legacy
-        # rows from another embedding space cannot break this exact matrix scan.
-        nonzero = np.any(mat != 0, axis=1)
-        if not np.all(nonzero):
-            ids = [memory_id for memory_id, keep in zip(ids, nonzero) if keep]
-            mat = mat[nonzero]
-            if not ids:
-                return []
-        scores = mat @ q                                # cosine == dot for unit vectors
-        k = min(k, len(ids))
-        top = _top_k_indices(scores, ids, k)
-        return [(ids[index], float(scores[index])) for index in top]
+        return canonical_vector_search(self.store, q, k, filter=filter)
