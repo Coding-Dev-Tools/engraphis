@@ -5,6 +5,10 @@
   "validation": "validation.json",
   "public_base_commit": "cb03dbe104394b7760ef402a2b1917eac5e8accc",
   "files": {
+    "browser-followup-review.json": {
+      "sha256": "d23954313775d96eca8816bdd3d9f2637453302dabafa99ec864373d57eb69ca",
+      "bytes": 4466
+    },
     "fts-insert-counterfactual-20260905.json": {
       "sha256": "b0a4603e983246790682ee5db4b5d5fab65b8ffb72dce002c85049f5112bff16",
       "bytes": 7397
@@ -40,6 +44,10 @@
     "offline-gates.json": {
       "sha256": "aa2f2e3e0312491d57e6d6571dbb92a96570c8655f55bfe7b63a3dc6ca2fc2dc",
       "bytes": 3663
+    },
+    "operator-policy-review.json": {
+      "sha256": "ab46e034964fa18aefa9c3088d8371ba9a4acb753dd35a20faa40b12933c84c8",
+      "bytes": 3298
     },
     "pr-benchmark-source-check.json": {
       "sha256": "af6a1ecc06f933227dc07d3fb19ae184790afd40b639ca4226f77086246ed670",
@@ -102,8 +110,8 @@
       "bytes": 20106
     },
     "validation.json": {
-      "sha256": "b1352fbac30794374084073ab2703cda7e3b15fbe3afe462a98b75bc670c57a4",
-      "bytes": 21616
+      "sha256": "577d6837b21217c88cd53ad0e8a36c6c79fef013310d930018704b7383ed9e1d",
+      "bytes": 21689
     },
     "vector-scale-incomplete-baseline-20260905.json": {
       "sha256": "45c4f61518012e35e09b6d274dec3015d00d4948f2b8279c0f56760dec080544",
@@ -176,6 +184,8 @@
   },
   "source_overlays": [
     "public-ci-test-isolation.json",
-    "pr-review-followup.json"
+    "pr-review-followup.json",
+    "operator-policy-review.json",
+    "browser-followup-review.json"
   ]
 }
