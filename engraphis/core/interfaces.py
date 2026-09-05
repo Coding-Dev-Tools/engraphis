@@ -534,6 +534,11 @@ class VectorIndex(Protocol):
     A separate table on the same Store connection may instead expose
     ``shares_store_transaction = True``. Its explicit sync then remains inside the
     canonical transaction rather than being deferred as an external side effect.
+
+    Independently persisted adapters should expose a stable ``index_identity``
+    unique to the physical index (never credentials). Canonical mutations queue
+    durable, content-free repair work for it. Pending or unidentified indexes
+    use canonical exact search until completeness is established.
     """
     def upsert(self, ids: list[str], vecs: np.ndarray, meta: Optional[list[dict]] = None,
                *, commit: bool = True) -> None: ...

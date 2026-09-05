@@ -1,5 +1,7 @@
 """engraphis-init — onboarding command. Runs on the numpy-only gate (stdlib only)."""
 import os
+import json
+import sqlite3
 from pathlib import Path
 import subprocess
 import sys
@@ -34,9 +36,12 @@ def test_init_writes_trusted_env_with_absolute_db_path(tmp_path, monkeypatch, ca
     env = _config_env(tmp_path).read_text()
     out = capsys.readouterr().out
     assert "ENGRAPHIS_DB_PATH=" in env
+    assert "ENGRAPHIS_API_TOKEN=" in env
     assert str((tmp_path / "mem" / "engraphis.db").resolve()) in env
     assert not (tmp_path / ".env").exists()
     assert "engraphis-mcp" in out and "mcpServers" in out
+    generated_token = next(line.split("=", 1)[1] for line in env.splitlines() if line.startswith("ENGRAPHIS_API_TOKEN="))
+    assert len(generated_token) >= 24 and generated_token not in out
     out.encode("ascii")
 
 
@@ -238,6 +243,17 @@ def test_doctor_reports_functional_embedder(tmp_path, monkeypatch, capsys):
     assert "embedder functional" in out
 
 
+def test_doctor_explains_tokenless_review_setup(tmp_path, monkeypatch, capsys):
+    _fresh_settings(monkeypatch, tmp_path)
+    import engraphis.config as cfg
+    monkeypatch.setattr(cfg.settings, "api_token", "")
+    assert main(["--check", "--json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    review = next(check for check in report["checks"] if check["code"] == "browser_approval")
+    assert review["status"] == "optional"
+    assert "private config" in review["detail"] and "engraphis-dashboard" in review["detail"]
+
+
 def test_prefetch_command_reports_ready_or_offline(tmp_path, monkeypatch, capsys):
     _fresh_settings(monkeypatch, tmp_path)
     # Test prefetch with offline deterministic model
@@ -248,3 +264,101 @@ def test_prefetch_command_reports_ready_or_offline(tmp_path, monkeypatch, capsys
     out = capsys.readouterr().out
     assert "deterministic offline embedder is active" in out
 
+
+def test_doctor_json_probes_writes_without_leaving_schema_or_rows(tmp_path, monkeypatch, capsys):
+    _fresh_settings(monkeypatch, tmp_path)
+    path = tmp_path / "doc.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE preserved (value TEXT)")
+        conn.execute("INSERT INTO preserved VALUES ('existing record')")
+    assert main(["--check", "--json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["schema_version"] == 1 and report["ok"]
+    assert any(check["code"] == "database_writable" for check in report["checks"])
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall() == [("preserved",)]
+        assert conn.execute("SELECT value FROM preserved").fetchall() == [("existing record",)]
+
+
+def test_doctor_rejects_readable_but_read_only_database(tmp_path, monkeypatch, capsys):
+    _fresh_settings(monkeypatch, tmp_path)
+    path = tmp_path / "doc.db"
+    connect = sqlite3.connect
+    with connect(path) as conn:
+        conn.execute("CREATE TABLE preserved (value TEXT)")
+    monkeypatch.setattr(init_script, "connector_from_env", lambda: None)
+    monkeypatch.setattr(init_script.sqlite3, "connect", lambda *_args, **_kwargs: connect(path.as_uri() + "?mode=ro", uri=True))
+    assert main(["--check", "--json"]) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert not report["ok"]
+    checks = {check["code"]: check for check in report["checks"]}
+    assert checks["database_readable"]["status"] == "ok"
+    assert checks["database_unwritable"]["status"] == "fail"
+    assert "database_writable" not in checks
+
+
+def test_doctor_rejects_a_newer_database_schema(tmp_path, monkeypatch, capsys):
+    _fresh_settings(monkeypatch, tmp_path)
+    from engraphis.core.schema import SCHEMA_VERSION
+    with sqlite3.connect(tmp_path / "doc.db") as conn:
+        conn.execute("CREATE TABLE schema_migrations (version INTEGER)")
+        conn.execute("INSERT INTO schema_migrations VALUES (?)", (SCHEMA_VERSION + 1,))
+    assert main(["--check", "--json"]) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert any(check["code"] == "schema_newer" for check in report["checks"])
+
+
+def test_doctor_reports_lock_contention_without_leaving_probe_state(tmp_path, monkeypatch, capsys):
+    _fresh_settings(monkeypatch, tmp_path)
+    path = tmp_path / "doc.db"
+    blocker = sqlite3.connect(path)
+    try:
+        blocker.execute("CREATE TABLE preserved (value TEXT)")
+        blocker.execute("BEGIN EXCLUSIVE")
+        assert main(["--check", "--json"]) == 1
+        report = json.loads(capsys.readouterr().out)
+        assert any(check["code"] == "database_locked" for check in report["checks"])
+    finally:
+        blocker.rollback()
+        blocker.close()
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall() == [("preserved",)]
+
+
+def test_doctor_does_not_mask_a_broken_configured_embedder_or_echo_its_error(tmp_path, monkeypatch, capsys):
+    _fresh_settings(monkeypatch, tmp_path)
+    import engraphis.config as cfg
+    import engraphis.backends.embedder_st as backend
+    monkeypatch.setattr(cfg.settings, "embed_model", "missing-configured-model")
+
+    def fail(*_args, **kwargs):
+        assert kwargs["require_exact"] is True
+        raise RuntimeError("private-provider-secret")
+
+    monkeypatch.setattr(backend, "get_embedder", fail)
+    assert main(["--check", "--json"]) == 1
+    output = capsys.readouterr().out
+    assert "private-provider-secret" not in output
+    report = json.loads(output)
+    assert any(check["code"] == "embedder" and check["status"] == "fail" for check in report["checks"])
+
+
+def test_init_records_only_explicit_installation_intent(tmp_path, monkeypatch, capsys):
+    from scripts import installation_profile
+    monkeypatch.chdir(tmp_path)
+    path = installation_profile.profile_path(_config_env(tmp_path))
+    assert main(["--no-encryption"]) == 0
+    assert not path.exists()
+    assert main(["--extras", "server,mcp", "--no-encryption"]) == 0
+    assert json.loads(path.read_text())["extras"] == ["mcp", "server"]
+    output = capsys.readouterr().out
+    assert "codex mcp add engraphis" in output
+    assert "save one project decision" in output
+
+
+def test_init_rejects_invalid_extras_before_writing_config(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit) as exc:
+        main(["--extras", "server;owned"])
+    assert exc.value.code == 2
+    assert not _config_env(tmp_path).exists()

@@ -762,6 +762,47 @@ def test_graph_arm_expands_an_older_unmentioned_link_endpoint_from_incidence(mon
     assert older_unmentioned in scores
 
 
+def test_graph_arm_keeps_older_two_hop_link_evidence_beyond_500_newer_memories():
+    from engraphis.core.interfaces import Node
+
+    store, emb, eng = _engine()
+    wid = store.get_or_create_workspace("older-two-hop")
+    rid = store.get_or_create_repo(wid, "repo")
+    redis = store.upsert_entity(Node(
+        id="", name="Redis", ntype="technology", workspace_id=wid, repo_id=rid,
+    ))
+    attached = _add(store, emb, wid, rid, "The cache migration is attached evidence.",
+                    valid_from=1000, ingested_at=1000)
+    intermediate = _add(store, emb, wid, rid, "The migration requires a staged rollout.",
+                        valid_from=1000, ingested_at=1000)
+    older_evidence = _add(store, emb, wid, rid, "The rollout needs a signed backup first.",
+                         valid_from=1000, ingested_at=1000)
+    store.link_memory_entity(
+        memory_id=attached, entity_id=redis, workspace_id=wid, repo_id=rid,
+        source_kind="test", confidence=1.0,
+    )
+    store.add_link(attached, intermediate, relation="supports")
+    store.add_link(intermediate, older_evidence, relation="supports")
+    try:
+        with store.write_transaction():
+            for index in range(501):
+                store.add_memory(MemoryRecord(
+                    id="", content=f"Unrelated filler number {index}.",
+                    workspace_id=wid, repo_id=rid,
+                    valid_from=2000 + index, ingested_at=2000 + index,
+                ))
+        flt = SearchFilter(workspace_id=wid, repo_id=rid)
+        assert older_evidence not in store.list_memory_ids(flt, limit=500)
+
+        scores = eng._graph_arm_ppr(
+            "How does Redis relate to the rollout?", flt, now=10**12,
+        )
+
+        assert {attached, intermediate, older_evidence}.issubset(scores)
+    finally:
+        store.close()
+
+
 def test_entity_backfill_preserves_closed_workspace_memory_history():
     from engraphis.core.interfaces import Node
 

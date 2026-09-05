@@ -98,7 +98,7 @@ bodies already represented in `context`.
 - `query (str)`; `workspace (str, None)`; `repo (str, None)`; `session_id (str, None)`;
   `mtypes (list[str], None)`; `k (int, 50)`.
 - `token_budget (int, 1024)`: hard packed-context budget, `0..32768`.
-- `format (str, "full")`: context format; `full` for full packed text, `gist` for one-line concise memory summaries.
+- `format (str, "full")`: `full` or compatibility alias `gist`; both return the same budgeted, cited evidence with complete conditions and code whitespace. `gist` adds a format marker without another summary or an extra savings claim.
 - `retrieval_profile (str, "balanced")`: `balanced` is the default legacy hybrid; `auto` is
   explicit opt-in, with `fast`, `lexical`, `graph`, and `code` available for deliberate routing. The
   specialized graph/code profiles prioritize their named evidence while retaining supporting

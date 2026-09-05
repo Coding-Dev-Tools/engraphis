@@ -77,6 +77,8 @@ from engraphis.core.store import (
     now_ts,
 )
 from engraphis.core.textutil import jaccard, tokenize
+from engraphis.core.vector_repair import canonical_search_required, index_repair_identity
+from engraphis.core.vector_search import canonical_vector_search
 
 
 logger = logging.getLogger("engraphis.core.recall")
@@ -148,6 +150,8 @@ class RecallResult:
     embedding_mode: str = "semantic"
     degraded_reason: str = ""
     vector_search_ready: bool = True
+    vector_index_repairs_pending: Optional[int] = None
+    vector_search_source: str = "configured"
 
 
 class RecallEngine:
@@ -417,11 +421,28 @@ class RecallEngine:
                 vec = {}
                 if qvec is not None and not vector_runtime_failed:
                     try:
-                        vec = dict(
-                            self.index.search(
-                                qvec, arm_candidate_k, filter=query_filter
-                            )
-                        )
+                        if canonical_search_required(
+                            self.index, self.store, unregistered_is_uncertain=False,
+                        ):
+                            target = index_repair_identity(self.index, self.store)
+                            capabilities.update({
+                                "degraded_mode": True,
+                                "degraded_reason": (
+                                    "external vector index completeness is uncertain; "
+                                    "canonical exact search is active"
+                                ),
+                                "vector_index_repairs_pending": (
+                                    self.store.vector_index_pending(target) if target else None
+                                ),
+                                "vector_search_source": "canonical",
+                            })
+                            vec = dict(canonical_vector_search(
+                                self.store, qvec, arm_candidate_k, filter=query_filter,
+                            ))
+                        else:
+                            vec = dict(self.index.search(
+                                qvec, arm_candidate_k, filter=query_filter,
+                            ))
                     except Exception as exc:  # optional backend; preserve other arms
                         vector_runtime_failed = True
                         capabilities.update({
@@ -1505,7 +1526,10 @@ class RecallEngine:
             for link in frontier_links
             for endpoint in (link["a"], link["b"])
         } | set(self.store.list_memory_ids(
-            flt, limit=500, prompt_only=prompt_only,
+            # Retain the established window: the incidence frontier expands
+            # only one memory-link hop, so a smaller window drops older
+            # multi-hop evidence before PageRank can consider it.
+            flt, limit=12_000, prompt_only=prompt_only,
         ))
         if prompt_only:
             memory_ids = self._prompt_eligible_memory_ids(memory_ids, flt)

@@ -1324,23 +1324,101 @@ def test_recall_context_prunes_default_diagnostics_when_disabled(monkeypatch):
     assert "sources" in res
 
 
-def test_recall_context_gist_format_saves_tokens(monkeypatch):
-    import engraphis.mcp_server as srv
-    from engraphis.service import MemoryService
-    srv.set_service(MemoryService.create(":memory:"))
-    long_content = (
-        "Deploy rule 1: Always verify preflight checks before triggering production deploy. "
-        "All integration tests must pass in staging environment with zero failures. "
-        "Database migrations must be executed in backward-compatible transactions. "
-        "The on-call release engineer must monitor metrics for at least fifteen minutes post-rollout."
+@pytest.mark.parametrize("budget", [0, 10, 1000])
+def test_gist_preserves_packed_evidence_and_exact_usage(monkeypatch, budget):
+    from engraphis.core.context import RegexTokenCounter
+
+    srv = _module_with_memory_db(monkeypatch)
+    srv.service().remember(
+        "Regular weekly operations require review of every configured monitoring alert "
+        "and all scheduled maintenance windows before allocation. Deploy is frozen.",
+        workspace="acme",
     )
-    srv.service().remember(long_content, workspace="acme")
-    full_res = json.loads(srv.engraphis_recall_context("deploy", workspace="acme", format="full"))
-    gist_res = json.loads(srv.engraphis_recall_context("deploy", workspace="acme", format="gist"))
-    assert gist_res["format"] == "gist"
-    assert gist_res["usage"]["context_tokens"] < full_res["usage"]["context_tokens"]
-    assert "[1]" in gist_res["context"]
-    assert "mem_" in gist_res["context"]
+    full = json.loads(srv.engraphis_recall_context(
+        "Deploy", workspace="acme", token_budget=budget,
+    ))
+    gist = json.loads(srv.engraphis_recall_context(
+        "Deploy", workspace="acme", token_budget=budget, format="gist",
+    ))
+    assert gist["format"] == "gist"
+    assert gist["context"] == full["context"]
+    assert gist["sources"] == full["sources"]
+    emitted = RegexTokenCounter()(gist["context"])
+    usage = gist["usage"]
+    assert emitted == usage["context_tokens"] == usage["emitted_tokens"] <= budget
+    assert usage["saved_tokens"] == usage["estimated_saved_tokens"] == max(
+        0, usage["source_tokens"] - emitted,
+    )
+    assert usage["savings_ratio"] == usage["estimated_savings_ratio"]
+    if budget == 10:
+        assert "Deploy is frozen." in gist["context"]
+        assert "Regular weekly operations" not in gist["context"]
 
 
+@pytest.mark.parametrize("budget", [10, 1000])
+def test_gist_never_removes_a_qualified_claims_condition(monkeypatch, budget):
+    srv = _module_with_memory_db(monkeypatch)
+    content = (
+        "Production deployment is allowed after the release engineer completes the "
+        "operational validation checklist and verifies every prepared rollback procedure "
+        "unless the incident commander declares a freeze."
+    )
+    written = srv.service().remember(content, workspace="acme")
+    # A stored summary that drops the condition must not bypass packer validation.
+    srv.service().store.conn.execute("UPDATE memories SET summary=? WHERE id=?", (
+        "Production deployment is allowed.", written["id"],
+    ))
+    srv.service().store.conn.commit()
+    result = json.loads(srv.engraphis_recall_context(
+        "Production deployment allowed", workspace="acme", token_budget=budget, format="gist",
+    ))
+    assert result["context"] == ("[1]\n" + content if budget == 1000 else "")
+
+
+def test_gist_does_not_reread_records_after_the_recall_snapshot(monkeypatch):
+    from copy import deepcopy
+
+    srv = _module_with_memory_db(monkeypatch)
+    svc = srv.service()
+    svc.remember("Deploy is frozen.", workspace="acme")
+    snapshot = svc.recall("Deploy", workspace="acme", token_budget=32, response_mode="compact")
+    monkeypatch.setattr(svc, "recall", lambda *args, **kwargs: deepcopy(snapshot))
+
+    def forbidden_reread(*args, **kwargs):
+        raise AssertionError("The formatter must not reread records outside the snapshot")
+
+    monkeypatch.setattr(svc.store, "get_memory", forbidden_reread)
+    result = json.loads(srv.engraphis_recall_context(
+        "Deploy", workspace="acme", token_budget=32, format="gist",
+    ))
+    assert result["context"] == snapshot["context"]
+    assert result["sources"][0]["id"] == snapshot["packed_sources"][0]["id"]
+
+
+@pytest.mark.parametrize("format", ["full", "gist"])
+def test_context_response_cap_omits_whole_evidence_and_updates_usage(monkeypatch, format):
+    from engraphis.core.context import RegexTokenCounter
+
+    srv = _module_with_memory_db(monkeypatch)
+    srv.service().remember(
+        "Production deployment is allowed.\n\n"
+        "Unless the incident commander declares a freeze, in which case every release is blocked.",
+        workspace="acme",
+    )
+    full = json.loads(srv.engraphis_recall_context(
+        "Production deployment allowed", workspace="acme", token_budget=1000, format=format,
+    ))
+    assert "Unless the incident commander" in full["context"]
+    cap = full["usage"]["actual_response_tokens"] - 5
+    bounded = json.loads(srv.engraphis_recall_context(
+        "Production deployment allowed", workspace="acme", token_budget=1000,
+        format=format, max_response_tokens=cap,
+    ))
+    assert bounded["context"] == ""
+    usage = bounded["usage"]
+    assert usage["context_tokens"] == usage["emitted_tokens"] == 0
+    assert usage["packed_count"] == 0
+    assert usage["omitted_count"] == full["usage"]["packed_count"] + full["usage"]["omitted_count"]
+    assert usage["saved_tokens"] == usage["estimated_saved_tokens"] == usage["source_tokens"]
+    assert RegexTokenCounter()(json.dumps(bounded, ensure_ascii=False)) == usage["actual_response_tokens"] <= cap
 

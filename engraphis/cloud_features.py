@@ -10,7 +10,6 @@ from __future__ import annotations
 import http.client
 import hashlib
 import json
-import os
 import re
 import time
 import urllib.error
@@ -128,26 +127,18 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 _DRAIN_FAILURES = (OSError, ValueError, http.client.HTTPException)
 
 
-def managed_compute_consent() -> bool:
-    """Return whether this installation may upload workspace content for managed work.
+def managed_compute_consent(service: Any = None, workspace: Optional[str] = None) -> bool:
+    """Return explicit approval for this workspace; account connection never grants it.
 
-    Consent travels with the cloud account: connecting an installation to Engraphis Cloud
-    accepts the terms that cover managed compute, so a connected installation is allowed by
-    default and the customer is never asked to hand-edit an environment variable.
-
-    A local installation with no cloud session is never allowed — there is no account, so
-    there is no agreement to rely on.
-
-    ``ENGRAPHIS_MANAGED_COMPUTE_CONSENT`` remains an explicit override for operators who want
-    to force the answer either way; ``=0`` opts a connected installation back out.
+    The legacy environment variable may disable uploads, but cannot grant approval.
+    Calls without a workspace fail closed for compatibility with older callers.
     """
-    override = os.environ.get("ENGRAPHIS_MANAGED_COMPUTE_CONSENT")
-    if override is not None and override.strip() != "":
-        return _truthy(override)
+    if service is None or not workspace:
+        return False
+    from engraphis.managed_processing import processing_policy
     try:
-        return bool(cloud_session_configured(require_compute=False))
-    except Exception:
-        # Consent must never be the reason a dashboard fails to render.
+        return bool(processing_policy(service, workspace)["enabled"])
+    except (ValueError, TypeError, OSError):
         return False
 
 
@@ -333,24 +324,26 @@ def _build_managed_snapshot_locked(service: Any, workspace: str, *,
                                     generation: Optional[int] = None) -> tuple[str, dict]:
     """Build the bounded client-side transport document for one local workspace.
 
-    Secret-classified rows are omitted before serialization. ``consent`` allows an
-    already-confirmed caller to pass its decision explicitly; otherwise
-    :func:`managed_compute_consent` decides, which allows cloud-connected installations and
-    denies purely local ones.
+    Secret-classified rows are omitted before serialization. Persisted workspace
+    approval is always required. The legacy ``consent`` argument can veto processing,
+    but cannot override a missing or disabled workspace policy.
     """
 
     clean_workspace = service._clean_ws(workspace)
     workspace_id = service._lookup_workspace(clean_workspace)
     if not workspace_id:
         raise CloudFeatureError("The selected workspace does not exist.", status=404)
-    allowed = managed_compute_consent() if consent is None else bool(consent)
+    allowed = managed_compute_consent(service, clean_workspace) and consent is not False
     if not allowed:
         raise CloudFeatureError(
-            "Managed compute is turned off for this installation, so no workspace content "
-            "was uploaded. Connect this installation to Engraphis Cloud to use it.",
+            "Managed processing requires approval for this workspace. No workspace content "
+            "was uploaded. Review the workspace processing controls to enable it.",
             status=409,
             code="consent_required",
         )
+    from engraphis.managed_processing import processing_policy
+    local_policy = processing_policy(service, clean_workspace)
+    processing_revision = local_policy["remote_revision"] or local_policy["revision"]
     snapshot_generation = _reserve_snapshot_generation(
         service, workspace_id, requested=generation
     )
@@ -381,6 +374,7 @@ def _build_managed_snapshot_locked(service: Any, workspace: str, *,
         # ``false`` is one byte longer than ``true``. Budget the larger encoding so
         # protocol variants cannot cross the client cap at the exact boundary.
         "managed_compute_consent": False,
+        "processing_policy_revision": 9_223_372_036_854_775_807,
         "excluded_secret_count": MAX_MEMORIES,
         "memories": [],
     }))
@@ -440,6 +434,7 @@ def _build_managed_snapshot_locked(service: Any, workspace: str, *,
         "schema": SNAPSHOT_SCHEMA,
         "generation": int(snapshot_generation),
         "managed_compute_consent": True,
+        "processing_policy_revision": processing_revision,
         "excluded_secret_count": excluded_secrets,
         "memories": memories,
     }
@@ -547,6 +542,16 @@ class CloudFeatureClient:
     def _workspace_path(self, workspace_id: str) -> str:
         return "/v1/organizations/%s/workspaces/%s" % (
             quote(self.organization_id, safe=""), quote(workspace_id, safe=""))
+
+    def get_processing_policy(self, workspace_id: str) -> dict:
+        return self._request("GET", self._workspace_path(workspace_id) + "/processing-policy")
+
+    def set_processing_policy(self, workspace_id: str, *, enabled: bool,
+                              revision: int, confirmed: bool = False) -> dict:
+        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+            raise CloudFeatureError("Invalid Cloud processing policy revision.", status=409)
+        return self._request("PUT", self._workspace_path(workspace_id) + "/processing-policy",
+                             {"enabled": enabled, "confirmed": confirmed, "revision": revision})
 
     def upload_snapshot(self, workspace_id: str, snapshot: dict) -> dict:
         return self._request("POST", self._workspace_path(workspace_id) + "/snapshot", snapshot)

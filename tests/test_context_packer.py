@@ -1,4 +1,4 @@
-"""Focused contracts for DeterministicContextPacker, clause redundancy pruning, and score-elbow gating."""
+"""Focused contracts for cited evidence preservation and score-elbow gating."""
 
 from __future__ import annotations
 
@@ -68,7 +68,7 @@ def test_pack_context_functional_api_and_method_alias() -> None:
     assert res1 == res2
 
 
-def test_inter_candidate_clause_redundancy_pruning_packs_novel_delta() -> None:
+def test_shared_clause_keeps_its_own_citation_and_surrounding_evidence() -> None:
     packer = DeterministicContextPacker()
     # Candidate 1 establishes the rule
     c1 = _candidate_item(
@@ -97,15 +97,15 @@ def test_inter_candidate_clause_redundancy_pruning_packs_novel_delta() -> None:
     assert "Database migrations must run" in chunks[0].excerpt
 
     assert "Canary analysis must run for 30 minutes" in chunks[1].excerpt
-    assert "Production deployments require approval" not in chunks[1].excerpt
-    assert chunks[1].truncated is True
-    assert chunks[1].reason == "novel_delta"
+    assert chunks[1].excerpt == c2.record.content
+    assert chunks[1].truncated is False
+    assert chunks[1].reason == "full"
 
-    assert context.count("Production deployments require approval") == 1
-    assert "[2] Release Checklist\nCanary analysis must run" in context
+    assert context.count("Production deployments require approval") == 2
+    assert "[2] Release Checklist\nProduction deployments require approval" in context
 
 
-def test_completely_redundant_candidate_is_omitted() -> None:
+def test_identical_text_with_distinct_titles_keeps_both_sources() -> None:
     packer = DeterministicContextPacker()
     c1 = _candidate_item(
         "mem_first",
@@ -122,11 +122,10 @@ def test_completely_redundant_candidate_is_omitted() -> None:
 
     context, chunks, usage = packer.pack("deployment approval", [c1, c2], token_budget=100)
 
-    assert len(chunks) == 1
-    assert chunks[0].id == "mem_first"
-    assert "[2]" not in context
-    assert usage.packed_count == 1
-    assert usage.omitted_count == 1
+    assert [chunk.id for chunk in chunks] == ["mem_first", "mem_second"]
+    assert "[2] Duplicate Rule" in context
+    assert usage.packed_count == 2
+    assert usage.omitted_count == 0
 
 
 def test_redundancy_pruning_preserves_qualifier_modifications() -> None:
@@ -233,6 +232,12 @@ def test_toggling_redundancy_pruning_and_elbow_gating_flags() -> None:
 
     _, chunks_unpruned, _ = unpruned_packer.pack("deploy checks", [c1, c2], token_budget=100)
     assert len(chunks_unpruned) == 2
+    # The legacy pruning flag remains accepted, but never removes evidence
+    # from a distinct cited source merely because its text is identical.
+    _, chunks_compatible, _ = DeterministicContextPacker(redundancy_pruning=True).pack(
+        "deploy checks", [c1, c2], token_budget=100,
+    )
+    assert chunks_compatible == chunks_unpruned
 
     ungated_packer = DeterministicContextPacker(score_elbow_gating=False)
     c_high = _candidate_item("mem_h", "High relevance fact.", score=0.95)

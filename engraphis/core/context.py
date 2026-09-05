@@ -7,8 +7,6 @@ token counters at the composition boundary.
 """
 from __future__ import annotations
 
-import copy
-import dataclasses
 import math
 import re
 from collections.abc import Callable
@@ -23,7 +21,6 @@ from engraphis.core.interfaces import (
 
 _TOKEN_RE = re.compile(r"\w+|[^\w\s]", re.UNICODE)
 _SENTENCE_RE = re.compile(r"(?<=[.!?])(?:[\"')\]]*)\s+|\n+")
-_CLAUSE_SPLIT_RE = re.compile(r"(?<=[.!?;])(?:[\"')\]]*)\s+|\n+")
 _WORD_RE = re.compile(r"\w+", re.UNICODE)
 _BRIDGE_TERMS = frozenset({
     "call", "calls", "called", "caller", "dependency", "depends", "flow",
@@ -55,91 +52,9 @@ class ContextPackResult(NamedTuple):
         return self.chunks
 
 
-def _extract_shingles(text: str, n: int = 4) -> set[tuple[str, ...]]:
-    """Extract case-folded n-gram token shingles from text."""
-    words = [match.group(0).casefold() for match in _WORD_RE.finditer(text or "")]
-    if not words:
-        return set()
-    if len(words) < n:
-        return {tuple(words)}
-    return {tuple(words[i : i + n]) for i in range(len(words) - n + 1)}
-
-
-def _split_clauses(text: str) -> list[str]:
-    """Split text into sentence/clause units while preserving text content."""
-    source = (text or "").strip()
-    if not source:
-        return []
-    parts = [part.strip() for part in _CLAUSE_SPLIT_RE.split(source) if part.strip()]
-    return parts if parts else [source]
-
-
-def _normalize_clause(clause: str) -> str:
-    """Case-folded normalized word sequence for exact clause matching."""
-    return " ".join(_WORD_RE.findall(clause.casefold()))
-
-
-def _is_clause_redundant(
-    clause: str,
-    admitted_shingles: set[tuple[str, ...]],
-    admitted_clauses: set[str],
-    admitted_qualifiers: set[str],
-    *,
-    shingle_size: int = 4,
-    duplication_threshold: float = 0.6,
-) -> bool:
-    """Whether a candidate clause has significant verbatim overlap with admitted evidence."""
-    norm = _normalize_clause(clause)
-    if not norm:
-        return True
-
-    words = [match.group(0).casefold() for match in _WORD_RE.finditer(clause)]
-    if not words:
-        return True
-
-    # 1. Exact verbatim match against already admitted clauses
-    if norm in admitted_clauses:
-        return True
-
-    # Check semantic safety for qualifiers: never prune a clause that introduces
-    # an exception or restriction not already covered
-    clause_qualifiers = _terms(clause) & _QUALIFIER_TERMS
-    if not clause_qualifiers.issubset(admitted_qualifiers):
-        return False
-
-    # 2. For short clauses (< shingle_size words), check exact clause containment
-    if len(words) < shingle_size:
-        return any(norm == ac for ac in admitted_clauses)
-
-    # 3. For multi-word clauses, check token shingle duplication ratio
-    shingles = _extract_shingles(clause, n=shingle_size)
-    if not shingles:
-        return False
-
-    overlap = len(shingles & admitted_shingles)
-    duplication_ratio = overlap / len(shingles)
-    return duplication_ratio >= duplication_threshold
-
-
-def _with_pruned_content(
-    candidate: Candidate, content: str, summary: str
-) -> Candidate:
-    """Create a shallow clone of candidate with pruned delta content/summary."""
-    record = candidate.record
-    if record is None:
-        return candidate
-    if dataclasses.is_dataclass(record):
-        new_record = dataclasses.replace(record, content=content, summary=summary)
-    else:
-        new_record = copy.copy(record)
-        new_record.content = content
-        new_record.summary = summary
-    if dataclasses.is_dataclass(candidate):
-        return dataclasses.replace(candidate, record=new_record)
-    else:
-        new_candidate = copy.copy(candidate)
-        new_candidate.record = new_record
-        return new_candidate
+def _protected_sentence(text: str) -> bool:
+    """Conditions and numerical claims must retain their complete bindings."""
+    return bool(_terms(text) & _QUALIFIER_TERMS) or bool(re.search(r"\d", text))
 
 
 class RegexTokenCounter:
@@ -157,7 +72,7 @@ class DeterministicContextPacker:
     Selection is stable for identical inputs.  A supersession/consolidation
     family contributes at most one member, summaries are preferred when they
     retain query evidence, and oversized sources are reduced at sentence
-    boundaries before a final token-boundary fallback.
+    boundaries. A complete evidence unit that cannot fit is omitted.
     """
 
     def __init__(
@@ -179,6 +94,10 @@ class DeterministicContextPacker:
             or getattr(self._count, "__name__", None)
             or type(self._count).__name__
         )
+        # Keep legacy pruning options accepted for caller compatibility. Shared
+        # text across distinct records does not establish equivalent evidence:
+        # titles, scope, provenance and neighboring sentences bind its meaning.
+        # Only the established identity/family selection deduplicates sources.
         self.redundancy_pruning = bool(redundancy_pruning)
         self.score_elbow_gating = bool(score_elbow_gating)
         self.elbow_ratio = float(elbow_ratio)
@@ -219,9 +138,6 @@ class DeterministicContextPacker:
 
         top_score = max((float(c.score) for c in ordered), default=0.0)
         admitted_scores: list[float] = []
-        admitted_shingles: set[tuple[str, ...]] = set()
-        admitted_clauses: set[str] = set()
-        admitted_qualifiers: set[str] = set()
 
         while remaining:
             # Re-evaluate novelty after every selection.  This gives compact,
@@ -252,42 +168,9 @@ class DeterministicContextPacker:
                 ):
                     continue
 
-            # Inter-candidate clause redundancy pruning:
-            # If higher-priority memories have already been admitted, prune
-            # duplicate clauses to retain and pack only novel delta content.
-            candidate_to_pack = candidate
-            is_delta = False
-            if self.redundancy_pruning and admitted_shingles:
-                full_content = record.content or ""
-                summary_content = record.summary or ""
-
-                pruned_content, content_pruned = self._prune_redundant_clauses(
-                    full_content,
-                    admitted_shingles,
-                    admitted_clauses,
-                    admitted_qualifiers,
-                )
-                pruned_summary, summary_pruned = self._prune_redundant_clauses(
-                    summary_content,
-                    admitted_shingles,
-                    admitted_clauses,
-                    admitted_qualifiers,
-                )
-
-                has_original_text = bool(full_content.strip() or summary_content.strip())
-                has_novel_text = bool(pruned_content.strip() or pruned_summary.strip())
-                if has_original_text and not has_novel_text:
-                    continue
-
-                if content_pruned or summary_pruned:
-                    is_delta = True
-                    candidate_to_pack = _with_pruned_content(
-                        candidate, pruned_content, pruned_summary
-                    )
-
             prefix = "\n\n" if context else ""
             ordinal = len(packed) + 1
-            header = self._header(candidate_to_pack, ordinal)
+            header = self._header(candidate, ordinal)
             base = f"{context}{prefix}{header}\n"
             excerpt = ""
             truncated = False
@@ -295,7 +178,7 @@ class DeterministicContextPacker:
             available = max(0, budget - self._count(base))
             if available:
                 excerpt, truncated, reason = self._excerpt(
-                    query, candidate_to_pack, available
+                    query, candidate, available
                 )
 
             # Keep the established single-pass behavior for ordinary sources.
@@ -303,26 +186,20 @@ class DeterministicContextPacker:
             # excerpt already starts with the exact displayed title (or the titled
             # header left no room). This removes prompt duplication without deleting
             # evidence or weakening the stable ``[n]`` citation bridge.
-            rec = candidate_to_pack.record or record
-            if not excerpt or _starts_with_title(excerpt, rec.title):
+            if not excerpt or _starts_with_title(excerpt, record.title):
                 compact_base = (
                     f"{context}{prefix}"
-                    f"{self._header(candidate_to_pack, ordinal, include_title=False)}\n"
+                    f"{self._header(candidate, ordinal, include_title=False)}\n"
                 )
                 if self._count(compact_base) < budget:
                     compact_available = budget - self._count(compact_base)
-                    compact = self._excerpt(query, candidate_to_pack, compact_available)
-                    if compact[0] and _starts_with_title(compact[0], rec.title):
+                    compact = self._excerpt(query, candidate, compact_available)
+                    if compact[0] and _starts_with_title(compact[0], record.title):
                         base = compact_base
                         available = compact_available
                         excerpt, truncated, reason = compact
             if not excerpt:
                 continue
-
-            if is_delta:
-                truncated = True
-                if not reason or reason in ("full", "summary"):
-                    reason = "novel_delta"
 
             proposed = f"{base}{excerpt}"
             if self._count(proposed) > budget:
@@ -351,14 +228,8 @@ class DeterministicContextPacker:
             ))
             covered.update(_terms(excerpt) & query_terms)
 
-            # Track admitted evidence for subsequent redundancy pruning and elbow gating
+            # Track admitted scores for subsequent elbow gating.
             admitted_scores.append(float(candidate.score))
-            admitted_shingles.update(_extract_shingles(excerpt, n=self.shingle_size))
-            for cl in _split_clauses(excerpt):
-                norm_cl = _normalize_clause(cl)
-                if norm_cl:
-                    admitted_clauses.add(norm_cl)
-            admitted_qualifiers.update(_terms(excerpt) & _QUALIFIER_TERMS)
 
         context_tokens = self._count(context)
         omitted = len(candidates) - len(packed)
@@ -374,46 +245,6 @@ class DeterministicContextPacker:
         )
 
     pack_context = pack
-
-    def _prune_redundant_clauses(
-        self,
-        text: str,
-        admitted_shingles: set[tuple[str, ...]],
-        admitted_clauses: set[str],
-        admitted_qualifiers: set[str],
-    ) -> tuple[str, bool]:
-        """Prune redundant clauses from text, returning (novel_delta_text, was_pruned)."""
-        if not text or not self.redundancy_pruning:
-            return text, False
-
-        clauses = _split_clauses(text)
-        if not clauses:
-            return "", False
-
-        novel_clauses: list[str] = []
-        pruned_any = False
-
-        for clause in clauses:
-            if _is_clause_redundant(
-                clause,
-                admitted_shingles,
-                admitted_clauses,
-                admitted_qualifiers,
-                shingle_size=self.shingle_size,
-                duplication_threshold=self.clause_duplication_threshold,
-            ):
-                pruned_any = True
-            else:
-                novel_clauses.append(clause)
-
-        if not novel_clauses:
-            return "", True
-
-        if not pruned_any:
-            return text, False
-
-        delta_text = " ".join(novel_clauses)
-        return delta_text, True
 
     def _is_score_elbow(
         self,
@@ -543,12 +374,25 @@ class DeterministicContextPacker:
     ) -> bool:
         if not full:
             return True
+        source_sentences = {
+            part.strip() for part in _SENTENCE_RE.split(full) if part.strip()
+        }
+        summary_sentences = {
+            part.strip() for part in _SENTENCE_RE.split(summary)
+            if part.strip() and part.strip() != "[…]"
+        }
+        # A summary's shared vocabulary is not proof of source entailment.
+        # Admit extractive sentences only, preserving complete conditions and
+        # numerical claims rather than merely their qualifier/value tokens.
+        if not summary_sentences or not summary_sentences.issubset(source_sentences):
+            return False
+        protected = {part for part in source_sentences if _protected_sentence(part)}
+        if not protected.issubset(summary_sentences):
+            return False
         full_overlap = _terms(full) & query_terms
         summary_terms = _terms(summary)
         preserves_query = not full_overlap or bool(summary_terms & full_overlap)
-        qualifiers = _terms(full) & _QUALIFIER_TERMS
-        preserves_qualifiers = qualifiers.issubset(summary_terms)
-        return preserves_query and preserves_qualifiers
+        return preserves_query
 
     def _sentence_excerpt(
         self,
@@ -607,59 +451,17 @@ class DeterministicContextPacker:
     ) -> str:
         if max_tokens <= 0:
             return ""
-        required_qualifiers = _terms(text) & _QUALIFIER_TERMS
-
-        def semantically_safe(excerpt: str) -> bool:
-            return required_qualifiers.issubset(_terms(excerpt))
-
-        tokens = list(_TOKEN_RE.finditer(text))
-        if not tokens:
+        # Neither a token nor a character prefix proves a complete claim. An
+        # English qualifier list cannot protect French, Chinese, identifiers,
+        # or a value/scope at the end of a sentence. Sentence selection happens
+        # before this fallback; here the whole selected evidence unit fits or
+        # is omitted, including with context-sensitive custom token counters.
+        text = text.strip()
+        if self._count(text) > max_tokens:
             return ""
-        limit = min(len(tokens), max_tokens)
-        while limit > 0:
-            end = tokens[limit - 1].end()
-            excerpt = text[:end].rstrip()
-            if limit < len(tokens) and max_tokens > 1:
-                marked = f"{excerpt} […]"
-                if self._count(marked) <= max_tokens:
-                    excerpt = marked
-            within_local = self._count(excerpt) <= max_tokens
-            within_total = (
-                total_budget is None
-                or self._count(f"{prefix}{excerpt}") <= total_budget
-            )
-            if within_local and within_total and semantically_safe(excerpt):
-                return excerpt
-            limit -= 1
-        # A custom token counter may split a single regex token (for example a
-        # character counter or provider tokenizer). In that case there is no
-        # shorter regex boundary to try, even though a character prefix fits.
-        # Find the longest safe prefix against the declared counter so tight
-        # budgets are still used without violating the hard ceiling.
-        low, high = 1, len(text)
-        best = ""
-        while low <= high:
-            middle = (low + high) // 2
-            excerpt = text[:middle].rstrip()
-            if not excerpt:
-                low = middle + 1
-                continue
-            marked = f"{excerpt} […]" if middle < len(text) else excerpt
-            candidate = marked if self._count(marked) <= max_tokens else excerpt
-            fits = (
-                self._count(candidate) <= max_tokens
-                and (
-                    total_budget is None
-                    or self._count(f"{prefix}{candidate}") <= total_budget
-                )
-            )
-            if fits:
-                if semantically_safe(candidate):
-                    best = candidate
-                low = middle + 1
-            else:
-                high = middle - 1
-        return best
+        if total_budget is not None and self._count(f"{prefix}{text}") > total_budget:
+            return ""
+        return text
 
     def _header(
         self,

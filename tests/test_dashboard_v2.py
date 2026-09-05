@@ -1821,10 +1821,13 @@ def test_dashboard_automation_uses_active_workspace_and_discloses_upload_boundar
     assert "/maintenance/run?workspace=" in source
     assert "Preview snapshot" not in source
     assert "uploads the selected workspace’s normal and sensitive memory content" in source
-    # The upload boundary is still disclosed, but consent now travels with the cloud
-    # account: the dashboard must not name the operator override anywhere.
+    # Processing requires a separate workspace choice; never imply an account or plan
+    # enables it, and do not expose the operator override as the user control.
     assert "ENGRAPHIS_MANAGED_COMPUTE_CONSENT" not in source
-    assert "Hosted work is automatic with Pro." in source
+    assert "Readable processing requires your workspace approval." in source
+    assert "Approve workspace processing in Manage > Settings" in source
+    assert "Hosted work is automatic with Pro." not in source
+    assert "starts automatically with Pro" not in source
 
 
 def test_portfolio_and_report_analytics_are_hosted_only(monkeypatch, tmp_path):

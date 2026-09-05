@@ -256,7 +256,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[test]" "uvicorn[standard]>=0.29"
           npm ci --ignore-scripts --omit=optional
-          npx playwright install --with-deps chromium
+          npx playwright install --with-deps chromium firefox webkit
       - name: Audit the root browser dependency lock
         run: npm audit --audit-level=high
       - name: Playwright desktop/mobile, keyboard, CSP, console, and axe checks

@@ -1,13 +1,16 @@
 """9 Smart tool factories, each a (args, ctx) -> dict callable.
 
-Schema and semantics are translated 1:1 from
-integrations/pi/src/tool-schemas.ts. The resulting callables work with
+Schemas are generated from the registered Smart MCP tools. The resulting callables work with
 both EngraphisPrimeAgent and any prime-agent tool-registration surface that
 matches the (args: dict, ctx: dict | None) -> dict contract.
 """
 from __future__ import annotations
 
 from typing import Any, Awaitable, Callable
+from copy import deepcopy
+import re
+
+from ._contract import SMART_SCHEMAS
 
 from .config import EngraphisRuntimeConfig
 from .mcp_client import EngraphisMcpClient, EngraphisMcpToolError
@@ -21,163 +24,32 @@ ToolFn = Callable[
     [dict[str, Any], dict[str, Any] | None], Awaitable[dict[str, Any]]
 ]
 
-# --- JSON Schemas (translated from tool-schemas.ts) -------------------------
-# The same defaults, bounds, and descriptions; identical behaviour across Pi
-# and prime-agent integrations.
+# Generated fields, types, nullability, bounds and defaults follow the runtime.
+# These local semantic checks preserve documented aliases and enum validation.
 
-_SESSION_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "action": {
-            "type": "string",
-            "enum": ["start", "end", "start_session", "end_session"],
-            "default": "start",
-        },
-        # The wrapper supplies the registered agent name when the caller omits
-        # this optional field. Keeping it optional also lets the framework
-        # invoke the lifecycle tool without duplicating registration metadata.
-        "agent": {"type": "string", "minLength": 1, "maxLength": 200},
-        "force_new": {"type": "boolean", "default": False},
-        "goal": {"type": "string", "maxLength": 1000, "default": ""},
-        "session_id": {"type": "string", "maxLength": 200, "default": ""},
-        "summary": {"type": "string", "maxLength": 100000, "default": ""},
-        "outcome": {"type": "string", "maxLength": 1000, "default": ""},
-        "open_threads": {
-            "type": ["array", "null"],
-            "items": {"type": "string"},
-            "default": None,
-        },
-        "token_budget": {"type": "integer", "minimum": 0, "maximum": 32768, "default": 512},
-        "workspace": {"type": "string", "maxLength": 200},
-        "repo": {"type": ["string", "null"], "maxLength": 200, "default": None},
-    },
-    "required": [],
-}
+_SCHEMAS = deepcopy(SMART_SCHEMAS)
+for _schema in _SCHEMAS.values():
+    _schema["additionalProperties"] = False
+    _schema.setdefault("required", [])
+_SCHEMAS["engraphis_session"]["properties"]["action"]["enum"] = [
+    "start", "end", "start_session", "end_session",
+]
+_SCHEMAS["engraphis_remember"]["properties"]["mtype"]["enum"] = [
+    "semantic", "episodic", "procedural", "working",
+]
+_SCHEMAS["engraphis_discover_actions"]["properties"]["category"]["enum"] = [
+    "memory", "governance", "code", "audit", "ops", "",
+]
+_SESSION_SCHEMA = _SCHEMAS["engraphis_session"]
+_RECALL_CONTEXT_SCHEMA = _SCHEMAS["engraphis_recall_context"]
+_REMEMBER_SCHEMA = _SCHEMAS["engraphis_remember"]
+_GET_MEMORY_SCHEMA = _SCHEMAS["engraphis_get_memory"]
+_UPDATE_MEMORY_SCHEMA = _SCHEMAS["engraphis_update_memory"]
+_CONFLICT_REVIEW_SCHEMA = _SCHEMAS["engraphis_conflict_review"]
+_DISCOVER_ACTIONS_SCHEMA = _SCHEMAS["engraphis_discover_actions"]
+_EXECUTE_READ_SCHEMA = _SCHEMAS["engraphis_execute_read"]
+_EXECUTE_ACTION_SCHEMA = _SCHEMAS["engraphis_execute_action"]
 
-_RECALL_CONTEXT_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "query": {"type": "string", "minLength": 1, "maxLength": 100000},
-        "k": {"type": "integer", "minimum": 1, "maximum": 50, "default": 50},
-        "session_id": {"type": ["string", "null"], "default": None},
-        "token_budget": {
-            "type": "integer",
-            "minimum": 0,
-            "maximum": 32768,
-            "default": 1024,
-        },
-        "workspace": {"type": ["string", "null"], "maxLength": 200, "default": None},
-        "repo": {"type": ["string", "null"], "maxLength": 200, "default": None},
-    },
-    "required": ["query"],
-}
-
-_REMEMBER_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "content": {"type": "string", "minLength": 1, "maxLength": 100000},
-        "mtype": {
-            "type": "string",
-            "enum": ["semantic", "episodic", "procedural", "working"],
-            "default": "semantic",
-        },
-        "importance": {"type": "number", "minimum": 0, "maximum": 1, "default": 0},
-        "session_id": {"type": ["string", "null"], "default": None},
-        "workspace": {"type": "string", "maxLength": 200},
-        "repo": {"type": ["string", "null"], "maxLength": 200, "default": None},
-        "subject_key": {"type": "string", "maxLength": 1000},
-        "claim_kind": {"type": "string", "maxLength": 200},
-    },
-    "required": ["content"],
-}
-
-_DISCOVER_ACTIONS_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "task": {"type": "string", "minLength": 1, "maxLength": 2000},
-        "category": {
-            "type": "string",
-            "enum": ["memory", "governance", "code", "audit", "ops", ""],
-            "maxLength": 100,
-            "default": "",
-        },
-        "intent": {
-            "type": "string",
-            "enum": ["any", "read", "write", "admin", "destructive"],
-            "default": "any",
-        },
-        "limit": {"type": "integer", "minimum": 1, "maximum": 3, "default": 1},
-    },
-    "required": ["task"],
-}
-
-_EXECUTE_PARAM_PROPS = {
-    "capability_id": {"type": "string", "minLength": 8, "maxLength": 128},
-    "schema_digest": {"type": "string", "minLength": 8, "maxLength": 128},
-    "arguments": {"type": "object", "additionalProperties": True},
-}
-
-_EXECUTE_READ_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": _EXECUTE_PARAM_PROPS,
-    "required": ["capability_id", "schema_digest", "arguments"],
-}
-
-_EXECUTE_ACTION_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": _EXECUTE_PARAM_PROPS,
-    "required": ["capability_id", "schema_digest", "arguments"],
-}
-
-_GET_MEMORY_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "memory_id": {"type": "string", "minLength": 1, "maxLength": 200},
-        "workspace": {"type": "string", "maxLength": 200},
-        "repo": {"type": ["string", "null"], "maxLength": 200, "default": None},
-    },
-    "required": ["memory_id"],
-}
-
-_UPDATE_MEMORY_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "memory_id": {"type": "string", "minLength": 1, "maxLength": 200},
-        "title": {"type": ["string", "null"], "maxLength": 500, "default": None},
-        "mtype": {
-            "type": ["string", "null"],
-            "enum": ["semantic", "episodic", "procedural", "working", None],
-            "default": None,
-        },
-        "importance": {"type": ["number", "null"], "minimum": 0, "maximum": 1, "default": None},
-        "actor": {"type": "string", "maxLength": 200, "default": "user"},
-        "workspace": {"type": "string", "maxLength": 200},
-        "repo": {"type": ["string", "null"], "maxLength": 200, "default": None},
-    },
-    "required": ["memory_id"],
-}
-
-_CONFLICT_REVIEW_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 50},
-        "workspace": {"type": "string", "maxLength": 200},
-        "repo": {"type": ["string", "null"], "maxLength": 200, "default": None},
-    },
-    # All three parameters are optional; the empty list documents that
-    # explicitly so consumers don't have to guess whether the missing
-    # `required` key means "all fields implicit" or "no fields required".
-    "required": [],
-}
 
 _DESC: dict[str, str] = {
     "engraphis_session": (
@@ -374,6 +246,11 @@ def _coerce_type(value: Any, declared: Any) -> bool:
 
 def _validate_schema(schema: dict[str, Any], value: Any, path: str = "") -> list[str]:
     errors: list[str] = []
+    if "anyOf" in schema:
+        if not any(not _validate_schema(branch, value, path) for branch in schema["anyOf"]):
+            return [f"{path or 'value'}: does not match any allowed type"]
+    if "pattern" in schema and isinstance(value, str) and re.search(schema["pattern"], value) is None:
+        errors.append(f"{path or 'value'}: does not match required pattern")
     declared_type = schema.get("type")
     if declared_type is not None:
         if not _coerce_type(value, declared_type):
