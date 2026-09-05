@@ -535,6 +535,8 @@
   },
   "source_overlays": [
     "public-ci-test-isolation.json",
-    "pr-review-followup.json"
+    "pr-review-followup.json",
+    "operator-policy-review.json",
+    "browser-followup-review.json"
   ]
 }

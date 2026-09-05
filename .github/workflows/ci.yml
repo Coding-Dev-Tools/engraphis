@@ -261,6 +261,14 @@ jobs:
         run: npm audit --audit-level=high
       - name: Playwright desktop/mobile, keyboard, CSP, console, and axe checks
         run: npx playwright test
+      - name: Retain browser failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: browser-failure-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: test-results/
+          if-no-files-found: ignore
+          retention-days: 14
 
   docker-gate:
     # Keeps CI fast: the docker job always runs on push to main, but on PRs only

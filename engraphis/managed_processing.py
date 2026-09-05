@@ -81,6 +81,8 @@ def set_processing_policy(service: Any, workspace: str, *, enabled: bool,
         if owns:
             conn.execute("BEGIN IMMEDIATE")
         previous = processing_policy(service, ws)
+        if enabled and previous["operator_disabled"]:
+            raise ValueError("managed processing is disabled by this installation's configuration")
         if expected_revision is not None and previous["revision"] != expected_revision:
             raise ProcessingPolicyChanged("Processing controls changed while Cloud was responding. Reload and retry.")
         value = {"schema": SCHEMA, "enabled": enabled, "confirmed": True,

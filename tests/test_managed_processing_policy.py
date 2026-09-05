@@ -165,6 +165,128 @@ def test_delayed_enable_acknowledgement_cannot_overwrite_newer_optout(svc, monke
         build_managed_snapshot(svc, "a")
 
 
+@pytest.mark.parametrize("override", ["0", "false", "no", " OFF ", "not-valid"])
+@pytest.mark.usefixtures("_http_stack")
+def test_operator_optout_rejects_http_enable_before_cloud_access(svc, monkeypatch, override):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from engraphis.cloud_features import CloudFeatureClient
+    from engraphis.routes import v2_api
+
+    calls = []
+
+    class Cloud:
+        def get_processing_policy(self, wid):
+            calls.append("get")
+            return {"enabled": False, "revision": 1}
+
+        def set_processing_policy(self, wid, **kwargs):
+            calls.append("put")
+            return {"enabled": kwargs["enabled"], "revision": 2}
+
+    def configured(_):
+        calls.append("construct")
+        return Cloud()
+
+    monkeypatch.setenv("ENGRAPHIS_MANAGED_COMPUTE_CONSENT", override)
+    monkeypatch.setattr(CloudFeatureClient, "from_environment", configured)
+    monkeypatch.setattr(v2_api, "service", lambda: svc)
+    before = svc.managed_processing_policy("a")
+    app = FastAPI()
+    app.include_router(v2_api.router)
+    with TestClient(app) as client:
+        response = client.post("/api/managed-processing", json={
+            "workspace": "a", "enabled": True, "confirmed": True,
+        })
+    assert response.status_code == 403
+    assert response.json()["detail"]["code"] == "processing_operator_disabled"
+    assert calls == []
+    assert svc.managed_processing_policy("a") == before
+
+
+@pytest.mark.usefixtures("_http_stack")
+def test_operator_optout_during_cloud_read_prevents_enable_submission(svc, monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from engraphis.cloud_features import CloudFeatureClient
+    from engraphis.routes import v2_api
+
+    calls = []
+
+    class Cloud:
+        def get_processing_policy(self, wid):
+            calls.append("get")
+            monkeypatch.setenv("ENGRAPHIS_MANAGED_COMPUTE_CONSENT", "0")
+            return {"enabled": False, "revision": 1}
+
+        def set_processing_policy(self, wid, **kwargs):
+            calls.append("put")
+            return {"enabled": True, "revision": 2}
+
+    monkeypatch.setattr(CloudFeatureClient, "from_environment", lambda _: Cloud())
+    monkeypatch.setattr(v2_api, "service", lambda: svc)
+    app = FastAPI()
+    app.include_router(v2_api.router)
+    with TestClient(app) as client:
+        response = client.post("/api/managed-processing", json={
+            "workspace": "a", "enabled": True, "confirmed": True,
+        })
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "processing_policy_changed"
+    assert calls == ["get"]
+    policy = svc.managed_processing_policy("a")
+    assert not policy["confirmed"] and policy["revision"] == 0
+
+
+def test_operator_optout_rejects_latent_local_approval(svc, monkeypatch):
+    before = svc.managed_processing_policy("a")
+    monkeypatch.setenv("ENGRAPHIS_MANAGED_COMPUTE_CONSENT", "0")
+    with pytest.raises(ValueError, match="disabled by this installation"):
+        svc.set_managed_processing_policy("a", enabled=True, confirmed=True, remote_revision=2)
+    monkeypatch.delenv("ENGRAPHIS_MANAGED_COMPUTE_CONSENT")
+    assert svc.managed_processing_policy("a") == before
+
+
+@pytest.mark.parametrize("cloud_fails", [False, True])
+@pytest.mark.usefixtures("_http_stack")
+def test_operator_optout_still_allows_remote_disable(svc, monkeypatch, cloud_fails):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from engraphis.cloud_features import CloudFeatureClient
+    from engraphis.routes import v2_api
+
+    svc.set_managed_processing_policy("a", enabled=True, confirmed=True, remote_revision=2)
+    monkeypatch.setenv("ENGRAPHIS_MANAGED_COMPUTE_CONSENT", "0")
+    calls = []
+
+    class Cloud:
+        def get_processing_policy(self, wid):
+            return {"enabled": True, "revision": 2}
+
+        def set_processing_policy(self, wid, **kwargs):
+            calls.append(kwargs)
+            if cloud_fails:
+                raise CloudFeatureError("unavailable", status=503)
+            return {"enabled": False, "revision": 3}
+
+    monkeypatch.setattr(CloudFeatureClient, "from_environment", lambda _: Cloud())
+    monkeypatch.setattr(v2_api, "service", lambda: svc)
+    app = FastAPI()
+    app.include_router(v2_api.router)
+    with TestClient(app) as client:
+        response = client.post("/api/managed-processing", json={
+            "workspace": "a", "enabled": False,
+        })
+    assert response.status_code == 200
+    policy = response.json()
+    assert not policy["enabled"] and policy["operator_disabled"]
+    assert policy["remote_sync_pending"] is cloud_fails
+    assert calls == [{"enabled": False, "confirmed": False, "revision": 2}]
+    monkeypatch.delenv("ENGRAPHIS_MANAGED_COMPUTE_CONSENT")
+    assert not svc.managed_processing_policy("a")["enabled"]
+
+
+
 @pytest.mark.parametrize("delay_at", ["get", "put"])
 @pytest.mark.usefixtures("_http_stack")
 def test_newer_optout_fences_delayed_cloud_enable(svc, monkeypatch, delay_at):

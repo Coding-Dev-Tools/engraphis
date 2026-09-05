@@ -1448,11 +1448,18 @@ def managed_processing_set(req: _ManagedProcessingReq):
     local = _run(current_service.managed_processing_policy, ws)
     if req.enabled and not req.confirmed:
         raise _invalid_request()
+    if req.enabled and local["operator_disabled"]:
+        raise HTTPException(status_code=403, detail={
+            "error": "Managed processing is disabled by this installation's configuration.",
+            "code": "processing_operator_disabled",
+        })
     if not req.enabled:
         local = _run(current_service.set_managed_processing_policy, ws, enabled=False,
                      remote_sync_pending=True)
     def ensure_current_local_intent():
-        if current_service.managed_processing_policy(ws)["revision"] != local["revision"]:
+        current = current_service.managed_processing_policy(ws)
+        if (current["revision"] != local["revision"]
+                or (req.enabled and current["operator_disabled"])):
             raise ProcessingPolicyChanged(
                 "Processing controls changed while Cloud was responding. Reload and retry.")
 
