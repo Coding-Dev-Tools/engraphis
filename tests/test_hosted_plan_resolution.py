@@ -1959,6 +1959,32 @@ def test_an_unconnected_installation_is_the_one_place_a_trial_is_offered() -> No
     assert payload["trial"]["used"] is False
 
 
+def test_license_discloses_manifest_trial_days_by_plan_and_retains_legacy_days(monkeypatch) -> None:
+    from engraphis import commercial
+
+    payload = v2_api.get_license()
+    assert payload["trial"]["days_by_plan"] == {"pro": 3, "team": 10}
+    assert payload["trial"]["trial_days"] == 3
+    assert payload["trial_seconds"] == 3 * 24 * 60 * 60
+    monkeypatch.setattr(commercial, "manifest", lambda: {
+        "trial": {"days_by_plan": {"pro": 5, "team": 17}},
+    })
+    assert v2_api.get_license()["trial"]["days_by_plan"] == {"pro": 5, "team": 17}
+    assert v2_api.get_license()["trial"]["trial_days"] == 3
+
+
+@pytest.mark.parametrize("trial", [{}, None, {"days_by_plan": {"pro": 3, "team": "10"}},
+                                    {"days_by_plan": {"pro": 3, "team": True}},
+                                    {"days_by_plan": {"pro": 3, "team": 0}}])
+def test_unknown_team_trial_duration_is_never_inferred_from_legacy_days(monkeypatch, trial) -> None:
+    from engraphis import commercial
+
+    monkeypatch.setattr(commercial, "manifest", lambda: {"trial": trial})
+    payload = v2_api.get_license()
+    assert "team" not in payload["trial"]["days_by_plan"]
+    assert payload["trial"]["trial_days"] == 3
+
+
 def test_a_connected_but_unanswered_installation_offers_no_trial(monkeypatch) -> None:
     """First boot after onboarding: the plan is inferred, the trial must not be.
 
@@ -2207,12 +2233,13 @@ def test_the_dashboard_never_offers_a_trial_it_was_not_told_is_available() -> No
     assert "LIC.trial.used" not in script
     hosted_cta = script[script.index("function hostedCta("):]
     hosted_cta = hosted_cta[:hosted_cta.index("\n")]
-    assert "Start ${TRIAL_DAYS}-day ${name} trial" in hosted_cta
+    assert "days=licTrialDays(plan)" in hosted_cta
+    assert "Start ${days?`${days}-day `:''}${name} trial" in hosted_cta
     assert "licTrialAvailable()&&state==='inactive'" in hosted_cta
     team = script[script.index("async function loadTeam()"):
                   script.index("/* health + settings */")]
     assert "hostedCta('team','team_tab')" in team
-    marker = "Start exactly '+TRIAL_DAYS+' days free"
+    marker = "esc(hostedCta('pro','analytics').label)"
     index = script.index(marker)
     window = script[max(0, index - 400):index]
     assert "licTrialAvailable()" in window, marker

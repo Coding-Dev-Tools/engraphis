@@ -3,6 +3,28 @@
 All notable changes to Engraphis are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions use SemVer.
 
+## [Unreleased]
+
+### Reliability and privacy
+
+- Preserve distinct context claims, qualified sentences and complete units under tight budgets;
+  measure false NOOP outcomes through real write sequences.
+- Preserve separate sources during packing and keep MCP gist responses within the canonical
+  context budget. Response caps retain or omit complete context and report accurate usage.
+- Canonical temporal browsing, server-side Library filtering/pagination, independent Ask states,
+  actionable setup diagnostics and retained installation capabilities.
+- Cross-process write resolution and schema 17 durable vector-index repair, with canonical
+  fallback and bounded NumPy scans. Public engine entrypoints remain compatible.
+- Commit native batch indexing with canonical memory state and roll back both on failure.
+  Retain the established 12,000-memory graph window pending quality evidence for a smaller one.
+- Explicit workspace managed-processing approval; missing legacy policy pauses readable uploads.
+  Requires the compatible cloud migration before rollout. Encrypted sync remains separate.
+- Generated Smart/Classic MCP contract and integration inputs; Pro three-day and Team ten-day
+  trial copy aligned with cloud authority. Real browser and Workers evidence remains distinct
+  from production verification. See `docs/RELIABILITY_PROGRAM.md`.
+- Isolate the manual graph diagnostic on an available local port with a private in-memory
+  server; fail before contacting an existing service when the requested port is occupied.
+
 ## [1.7.1] - 2026-09-03
 
 ### Fixed

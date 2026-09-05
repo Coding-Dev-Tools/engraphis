@@ -3938,6 +3938,8 @@ class MemoryService:
             "semantic_support": result.semantic_support,
             "embedding_mode": result.embedding_mode,
             "degraded_reason": result.degraded_reason,
+            "vector_index_repairs_pending": result.vector_index_repairs_pending,
+            "vector_search_source": result.vector_search_source,
             "vector_search_ready": result.vector_search_ready,
             "vector_index_backend": _vector_index_backend_label(self.engine.index),
             "reranker_mode": _reranker_mode_label(self.engine.reranker),
@@ -5096,6 +5098,64 @@ class MemoryService:
                 "receipt": receipt}
 
     # ── inspection (powers the Memory Inspector UI) ─────────────────────────────
+    def list_memories(self, *, workspace: str, q: str = "", mtype: Optional[str] = None,
+                      limit: int = 200, cursor: str = "", repo: Optional[str] = None,
+                      valid_at: Optional[float] = None,
+                      known_at: Optional[float] = None) -> dict:
+        """Browse all matching non-session memories without embedding or reinforcement.
+
+        Every transport shares the store's scope and bi-temporal predicates. Cursors
+        expire when the database changes; clients then restart with the same filters.
+        """
+        from engraphis.core.browsing import browse_memories
+
+        ws = self._clean_ws(workspace)
+        q = _clean_text(q, field="q", max_chars=10_000, required=False)
+        try:
+            mtypes = [MemoryType(mtype)] if mtype else None
+        except (ValueError, TypeError) as exc:
+            raise ValidationError("invalid memory type") from exc
+        wid = self._lookup_workspace(ws)
+        empty = {"workspace": ws, "count": 0, "total_count": 0,
+                 "memories": [], "next_cursor": None}
+        if wid is None:
+            return empty
+        rid = None
+        if repo is not None:
+            rid = self._lookup_repo(wid, _clean_name(repo, field="repo"))
+            if rid is None:
+                return empty
+        page = browse_memories(self.store, SearchFilter(
+            workspace_id=wid, repo_id=rid, include_ancestors=True,
+            mtypes=mtypes, valid_at=valid_at, known_at=known_at,
+        ), q=q, limit=limit, cursor=cursor)
+        records = [{
+            "id": row["id"], "document_id": row["id"], "title": row["title"] or "",
+            "content": row["content"] or row["summary"] or "",
+            "memory_type": row["mtype"] or "semantic", "scope": row["scope"] or "",
+            "pinned": bool(row["pinned"]), "importance": row["importance"],
+            "valid_from": row["valid_from"], "valid_to": row["valid_to"],
+            "provenance": _loads(row["provenance"], {}),
+        } for row in page["rows"]]
+        return {"workspace": ws, "count": len(records), "memories": records,
+                "total_count": page["total_count"], "next_cursor": page["next_cursor"],
+                "valid_at": page["valid_at"], "known_at": page["known_at"]}
+
+    def managed_processing_policy(self, workspace: str) -> dict:
+        from engraphis.managed_processing import processing_policy
+        return processing_policy(self, workspace)
+
+    def set_managed_processing_policy(self, workspace: str, *, enabled: bool,
+                                      confirmed: bool = False,
+                                      remote_revision: Optional[int] = None,
+                                      remote_sync_pending: bool = False,
+                                      expected_revision: Optional[int] = None) -> dict:
+        from engraphis.managed_processing import set_processing_policy
+        return set_processing_policy(self, workspace, enabled=enabled, confirmed=confirmed,
+                                     remote_revision=remote_revision,
+                                     remote_sync_pending=remote_sync_pending,
+                                     expected_revision=expected_revision)
+
     def list_workspaces(self) -> dict:
         """Workspace/repo names with live-memory counts. On a bound instance only the
         permitted workspaces are listed — same boundary as every other read.

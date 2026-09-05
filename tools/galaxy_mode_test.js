@@ -10,15 +10,17 @@
 //    capture the engine's settings + diagnostics at each point.
 //  - We print a per-mode summary block at the end.
 
-const { chromium } = require('@playwright/test');
 const { spawn } = require('child_process');
 const path = require('path');
+const net = require('net');
+const { randomBytes } = require('crypto');
 
-const REPO = __dirname;
-process.chdir(REPO);
+const REPO = path.resolve(__dirname, '..');
 
-const PORT = process.env.ENGRAPHIS_PLAYWRIGHT_PORT || 8801;
-const BASE = `http://127.0.0.1:${PORT}`;
+const configuredPort = process.env.ENGRAPHIS_PLAYWRIGHT_PORT;
+let PORT = 0;
+let BASE = '';
+const TEST_TOKEN = randomBytes(24).toString('hex');
 const WORKSPACE = 'graph-manual-test';
 const memoryCount = 8;
 
@@ -35,11 +37,15 @@ const SPACETIME_SLIDERS = [
 function log(msg) { console.log(`[${new Date().toISOString().slice(11, 19)}] ${msg}`); }
 function err(msg) { console.error(`[ERR] ${msg}`); }
 
-async function waitForServer(url, timeoutMs = 60000) {
+async function waitForServer(url, proc, timeoutMs = 60000) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
+    if (proc.exitCode !== null || proc.signalCode || proc.spawnError) return false;
     try {
-      const res = await fetch(url);
+      const res = await fetch(url, {
+        headers: { Authorization: `Bearer ${TEST_TOKEN}` },
+        signal: AbortSignal.timeout(1000),
+      });
       if (res.ok) return true;
     } catch (_) { /* not ready */ }
     await new Promise(r => setTimeout(r, 500));
@@ -47,13 +53,38 @@ async function waitForServer(url, timeoutMs = 60000) {
   return false;
 }
 
+async function reservePort() {
+  const requestedPort = configuredPort === undefined ? 0 : Number(configuredPort);
+  if (!Number.isInteger(requestedPort) || requestedPort < 0 || requestedPort > 65535) {
+    throw new Error(`ENGRAPHIS_PLAYWRIGHT_PORT must be an integer from 0 to 65535; got ${configuredPort}`);
+  }
+  PORT = await new Promise((resolve, reject) => {
+    const probe = net.createServer();
+    probe.once('error', error => reject(new Error(
+      `Dashboard port ${requestedPort} is unavailable: ${error.message}`,
+    )));
+    probe.listen(requestedPort, '127.0.0.1', () => {
+      const address = probe.address();
+      if (!address || typeof address !== 'object') {
+        probe.close(() => reject(new Error('Could not determine the reserved dashboard port')));
+        return;
+      }
+      probe.close(error => error ? reject(error) : resolve(address.port));
+    });
+  });
+  BASE = `http://127.0.0.1:${PORT}`;
+}
+
 async function startServer() {
+  await reservePort();
   log(`Starting dashboard on port ${PORT}...`);
   const proc = spawn('python', ['-m', 'scripts.start_dashboard', '--no-open', '--port', String(PORT)], {
-    cwd: REPO, shell: true,
+    cwd: REPO, shell: false, windowsHide: true,
     env: {
       ...process.env,
       ENGRAPHIS_DB_PATH: ':memory:',
+      ENGRAPHIS_API_TOKEN: TEST_TOKEN,
+      ENGRAPHIS_EXTRACTOR: 'none',
       ENGRAPHIS_EMBED_MODEL: '',
       ENGRAPHIS_LOOP_INTERVAL: '0',
       ENGRAPHIS_HOST: '127.0.0.1',
@@ -61,9 +92,10 @@ async function startServer() {
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+  proc.once('error', error => { proc.spawnError = error; });
   proc.stdout.on('data', d => process.stdout.write(`[srv] ${d}`));
   proc.stderr.on('data', d => process.stderr.write(`[srv-err] ${d}`));
-  const ready = await waitForServer(`${BASE}/api/health`);
+  const ready = await waitForServer(`${BASE}/api/workspaces`, proc);
   if (!ready) { proc.kill(); throw new Error('Server failed to start'); }
   log('Server ready');
   return proc;
@@ -269,6 +301,7 @@ function meanRadius(arr) {
 }
 
 async function main() {
+  const { chromium } = require('@playwright/test');
   let serverProc = null;
   let browser = null;
   const allResults = [];
@@ -469,4 +502,5 @@ async function main() {
   process.exit(exitCode);
 }
 
-main();
+module.exports = { REPO, reservePort, startServer };
+if (require.main === module) main();

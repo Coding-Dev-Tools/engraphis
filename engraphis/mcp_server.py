@@ -166,11 +166,27 @@ def _apply_response_budget(payload: dict, max_response_tokens: Optional[int]) ->
     counter = RegexTokenCounter()
     usage = payload.get("usage") or {}
     payload["usage"] = usage
+    packed_count = int(usage.get("packed_count") or 0)
+    candidate_count = packed_count + int(usage.get("omitted_count") or 0)
 
     if max_response_tokens is not None and max_response_tokens > 0:
         usage["response_budget"] = max_response_tokens
 
     def measure() -> int:
+        # Transport omission happens after packing. Keep evidence accounting
+        # truthful under the declared tokenizer, including the savings aliases.
+        if "context" in payload and usage.get("token_counter") == counter.identity:
+            emitted = counter(str(payload.get("context") or ""))
+            baseline = int(usage.get("source_tokens") or 0)
+            saved = max(0, baseline - emitted)
+            ratio = saved / baseline if baseline else 0.0
+            usage.update(context_tokens=emitted, saved_tokens=saved, savings_ratio=ratio,
+                         packed_count=packed_count if emitted else 0,
+                         omitted_count=candidate_count - (packed_count if emitted else 0))
+            for name, value in (("emitted_tokens", emitted), ("estimated_saved_tokens", saved),
+                                ("estimated_savings_ratio", ratio)):
+                if name in usage:
+                    usage[name] = value
         # Include the accounting fields themselves in the reported total.  The
         # regex counter treats every integer as one token, so one correction is
         # sufficient even when the numeric value changes width.
@@ -252,14 +268,22 @@ def _apply_response_budget(payload: dict, max_response_tokens: Optional[int]) ->
         container[key] = best
         current_tokens = measure()
 
-    # --- over budget: truncate body content from the end -----------------
-    # 1. Shrink the packed ``context`` string chunk-by-chunk (last first).
-    context = payload.get("context", "")
-    context_parts = context.split("\n\n") if context else []
-
-    while current_tokens > max_response_tokens and context_parts:
-        context_parts.pop()
-        payload["context"] = "\n\n".join(context_parts)
+    # --- over budget: omit complete evidence before reducing envelopes -----
+    # Blank lines and apparent citation headers can occur inside untrusted source
+    # text. Without structured chunk boundaries, splitting that text can detach a
+    # condition from its claim. Keep the admitted context intact or omit it whole.
+    if current_tokens > max_response_tokens and payload.get("context"):
+        payload["context"] = ""
+        if usage.get("token_counter") != counter.identity:
+            # Empty text has no evidence tokens under any supported counter.
+            baseline = int(usage.get("source_tokens") or 0)
+            usage.update(context_tokens=0, saved_tokens=baseline,
+                         savings_ratio=1.0 if baseline else 0.0,
+                         packed_count=0, omitted_count=candidate_count)
+            for name, value in (("emitted_tokens", 0), ("estimated_saved_tokens", baseline),
+                                ("estimated_savings_ratio", 1.0 if baseline else 0.0)):
+                if name in usage:
+                    usage[name] = value
         current_tokens = measure()
 
     # 2. Reduce full-mode memory bodies. Grounded answers are handled after their
@@ -626,7 +650,7 @@ def engraphis_recall(
                     "relevance.")] = None,
     max_response_tokens: Annotated[Optional[int], Field(
         description="Cap the total serialized response to this many tokens (regex counter). "
-                    "Truncates packed context and memory bodies from the end; citations and "
+                    "Omits packed context whole and reduces memory bodies; citations and "
                     "source references are preserved when the budget can hold them. "
                     "Minimum 2 (the JSON object floor); None means no cap.",
         ge=2, le=1_000_000)] = None,
@@ -665,36 +689,6 @@ def engraphis_recall(
         return _ok(payload)
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
-
-
-def _gist_summary(rec: Any, fallback_title: str = "", max_chars: int = 120) -> str:
-    """Extract a clean, concise one-line summary for gist-formatted context."""
-    text = ""
-    if rec is not None:
-        if getattr(rec, "summary", None):
-            text = str(rec.summary).strip()
-        elif getattr(rec, "title", None) and getattr(rec, "content", None):
-            title = str(rec.title).strip()
-            content = str(rec.content).strip()
-            if content.lower().startswith(title.lower()):
-                text = content
-            else:
-                text = f"{title}: {content}" if title else content
-        elif getattr(rec, "title", None):
-            text = str(rec.title).strip()
-        elif getattr(rec, "content", None):
-            text = str(rec.content).strip()
-    if not text and fallback_title:
-        text = fallback_title.strip()
-
-    first_line = " ".join((text.splitlines()[0] if text else "").split())
-    if len(first_line) > max_chars:
-        match = re.match(r"^(.{30,}?[.!?])(?:\s|$)", first_line)
-        if match and len(match.group(1)) <= max_chars:
-            first_line = match.group(1)
-        else:
-            first_line = first_line[:max_chars - 3].rstrip() + "..."
-    return first_line
 
 
 @mcp.tool(
@@ -736,11 +730,11 @@ def engraphis_recall_context(
         description="Optional maximum returned count per memory type.")] = None,
     max_response_tokens: Annotated[Optional[int], Field(
         description="Cap the total serialized response to this many tokens (regex counter). "
-                    "Truncates packed context from the end; citations and source references "
+                    "Omits packed context whole when it cannot fit; citations and source references "
                     "are preserved when the budget can hold them. Minimum 2; None means no cap.",
         ge=2, le=1_000_000)] = None,
     format: Annotated[str, Field(
-        description="Context format: 'full' for full packed text, 'gist' for one-line concise memory summaries."
+        description="Context format: 'full' or compatibility alias 'gist'; both preserve budgeted, cited evidence."
     )] = "full",
 ) -> str:
     """Return one hard-budget context plus compact source identities.
@@ -751,9 +745,10 @@ def engraphis_recall_context(
     counts, privacy-safe savings metadata, and the same ``degraded_mode`` /
     ``semantic_support`` flags as ``engraphis_recall``.
 
-    Pass ``format="gist"`` for one-line concise memory gists (``[n] mem_...: <summary>``),
-    reducing context token usage by 60%-80% for routine context checks while allowing
-    deep dive via ``engraphis_get_memory``.
+    ``format="gist"`` remains an accepted compatibility option. It returns the same
+    evidence-safe packed context, including complete conditions and code whitespace,
+    with a format marker. It does not apply another summary or claim extra savings.
+    Use ``engraphis_get_memory`` for the full source behind a citation.
     """
     try:
         format = str(format or "full").strip().lower()
@@ -811,22 +806,9 @@ def engraphis_recall_context(
         payload["sources"] = sources
 
         if format == "gist":
-            svc = service()
-            gist_lines: list[str] = []
-            for source in sources:
-                mid = str(source.get("id") or "")
-                rec = svc.store.get_memory(mid) if mid else None
-                summary_line = _gist_summary(rec, fallback_title=str(source.get("title") or ""))
-                gist_lines.append(f"[{source['n']}] {mid}: {summary_line}")
-            payload["context"] = "\n".join(gist_lines)
-            counter = RegexTokenCounter()
-            new_context_tokens = counter(payload["context"])
-            usage = payload.setdefault("usage", {})
-            usage["context_tokens"] = new_context_tokens
-            source_tokens = usage.get("source_tokens", 0)
-            if source_tokens > 0:
-                usage["saved_tokens"] = max(0, source_tokens - new_context_tokens)
-                usage["savings_ratio"] = round(usage["saved_tokens"] / source_tokens, 4)
+            # The packer already selected the admissible evidence within the budget.
+            # A raw reread or prefix summary here can revive excluded content, lose a
+            # qualification, or exceed that budget. Keep its text and accounting.
             payload["format"] = "gist"
 
         if not diagnostics:
@@ -940,7 +922,7 @@ def engraphis_recall_grounded(
         description="Optional maximum returned count per memory type.")] = None,
     max_response_tokens: Annotated[Optional[int], Field(
         description="Cap the total serialized response to this many tokens (regex counter). "
-                    "Truncates packed context and citation bodies from the end; source references "
+                    "Omits packed context whole and reduces citation bodies; source references "
                     "are preserved when the budget can hold them. Minimum 2; None means no cap.",
         ge=2, le=1_000_000)] = None,
 ) -> str:

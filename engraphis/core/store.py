@@ -1207,6 +1207,7 @@ class Store:
             self, _close_connection_quietly, self.conn
         )
         self.has_fts5 = False
+        self._fts_orphan_ids: Optional[set[str]] = None
         self._receipt_lock = threading.Lock()
         self.allowed_workspaces: Optional[frozenset] = (
             frozenset(allowed_workspaces) if allowed_workspaces else None
@@ -1329,6 +1330,9 @@ class Store:
             "sessions",
             "memories",
             "mem_vectors",
+            "vector_store_state",
+            "vector_index_targets",
+            "vector_index_repairs",
             "entities",
             "edges",
             "mem_links",
@@ -3661,6 +3665,43 @@ class Store:
                 self.conn.execute(f"RELEASE SAVEPOINT {savepoint}")
             raise
 
+    @contextmanager
+    def write_transaction(self):
+        """Reserve the writer before a read/decide/write operation.
+
+        Nested Store commits cannot settle this boundary. A caller's transaction
+        remains caller-owned, including when an operation fails.
+        """
+        with self._write_operation("engine", commit=True):
+            with self.conn.defer_commits():
+                yield
+
+    @contextmanager
+    def read_snapshot(self):
+        """Keep paginated reads on one snapshot without adopting another thread's work."""
+        owns_transaction = not self.conn.transaction_owned_by_current_thread()
+        try:
+            if owns_transaction:
+                self.conn.execute("BEGIN")
+            yield
+        finally:
+            if owns_transaction and self.conn.transaction_owned_by_current_thread():
+                self.conn.rollback()
+
+    @contextmanager
+    def write_savepoint(self):
+        """Isolate a best-effort sub-operation inside an authoritative transaction."""
+        name = f"engraphis_optional_{threading.get_ident()}_{time.monotonic_ns()}"
+        self.conn.execute(f"SAVEPOINT {name}")
+        try:
+            yield
+        except BaseException:
+            self.conn.execute(f"ROLLBACK TO SAVEPOINT {name}")
+            self.conn.execute(f"RELEASE SAVEPOINT {name}")
+            raise
+        else:
+            self.conn.execute(f"RELEASE SAVEPOINT {name}")
+
     # ── local source-import manifest ─────────────────────────────────────────
     def _authorize_source_workspace_id(self, workspace_id: str) -> str:
         row = self.conn.execute(
@@ -4575,6 +4616,20 @@ class Store:
                 )
         if rec.id:
             ids.assert_id_kind(rec.id, "memory")
+        replace_fts_existing = existing_record is not None
+        if not replace_fts_existing:
+            if self._fts_orphan_ids is None:
+                # Inventory legacy/corrupt orphan mirrors once, while holding the
+                # writer reservation and before this ID becomes canonical. Healthy
+                # stores retain an empty set, rather than all memory IDs. Keep IDs
+                # after repair so an outer rollback cannot make the cache unsafe.
+                self._fts_orphan_ids = {
+                    str(row["id"]) for row in self.conn.execute(
+                        "SELECT DISTINCT f.id FROM mem_fts f WHERE NOT EXISTS "
+                        "(SELECT 1 FROM memories m WHERE m.id=f.id)"
+                    ).fetchall()
+                }
+            replace_fts_existing = rec.id in self._fts_orphan_ids
         self.conn.execute(
             """INSERT INTO memories
                (id, workspace_id, repo_id, session_id, scope, mtype, title, content, summary,
@@ -4612,7 +4667,10 @@ class Store:
         )
         # The method-level transaction/savepoint keeps the row, FTS mirror, and
         # vector mirror atomic without settling a caller-owned transaction.
-        self._fts_upsert(rec.id, rec.title, rec.content, " ".join(rec.keywords))
+        self._fts_upsert(
+            rec.id, rec.title, rec.content, " ".join(rec.keywords),
+            replace_existing=replace_fts_existing,
+        )
         if rec.embedding is not None:
             self.put_vector(
                 rec.id,
@@ -5218,7 +5276,7 @@ class Store:
             where.append("v.dim=?")
             params.append(int(dim))
         sql = ("SELECT v.id AS id, v.vector AS vector FROM mem_vectors v "
-               "JOIN memories m ON m.id = v.id WHERE "
+               "CROSS JOIN memories m ON m.id = v.id WHERE "
                + " AND ".join([*where, "v.id > ?"])
                + " ORDER BY v.id LIMIT ?")
         cursor_id = ""
@@ -5231,6 +5289,64 @@ class Store:
             if len(rows) < VECTOR_SCAN_BATCH:
                 return
             cursor_id = rows[-1]["id"]
+
+    def iter_vector_matrices(self, flt: Optional[SearchFilter] = None, *,
+                             include_invalid: bool = False, dim: int):
+        """Yield bounded fixed-width batches from one consistent vector snapshot."""
+        if dim < 1:
+            raise ValueError("vector matrix dimension must be a positive integer")
+        where, params = self._where(flt, include_invalid, alias="m")
+        where.extend(("v.dim=?", "length(v.vector)=?", "v.id>?"))
+        params.extend((int(dim), int(dim) * np.dtype(np.float32).itemsize))
+        sql = (
+            "SELECT v.id, v.vector FROM mem_vectors v CROSS JOIN memories m ON m.id=v.id WHERE "
+            + " AND ".join(where) + " ORDER BY v.id LIMIT ?"
+        )
+        # Let the scope index produce the first ordered batch: narrow scopes then
+        # finish cheaply, and the last ID advances selective scans through the
+        # global keyspace. Later batches use the vector primary-key range so broad
+        # scopes do not repeatedly sort all remaining candidates.
+        first_sql = sql.replace("CROSS JOIN", "JOIN", 1)
+        after_id = ""
+        with self.read_snapshot():
+            while True:
+                selected_sql = first_sql if not after_id else sql
+                rows = self.conn.fetchall(selected_sql, (*params, after_id, VECTOR_SCAN_BATCH))
+                if not rows:
+                    return
+                ids = [str(row["id"]) for row in rows]
+                payload = b"".join(row["vector"] for row in rows)
+                yield ids, np.frombuffer(payload, dtype=np.float32).reshape(len(ids), dim)
+                if len(rows) < VECTOR_SCAN_BATCH:
+                    return
+                after_id = ids[-1]
+
+    def vector_generation(self) -> int:
+        row = self.conn.execute(
+            "SELECT generation FROM vector_store_state WHERE singleton=1"
+        ).fetchone()
+        return int(row[0]) if row is not None else 0
+
+    def register_vector_index(self, identity: str) -> None:
+        """Register a durable external target and seed its initial repair backlog."""
+        with self.write_transaction():
+            inserted = self.conn.execute(
+                "INSERT OR IGNORE INTO vector_index_targets(identity) VALUES (?)", (identity,)
+            ).rowcount
+            if inserted:
+                self.conn.execute(
+                    "INSERT INTO vector_index_repairs(identity, memory_id, generation) "
+                    "SELECT ?, id, ? FROM mem_vectors",
+                    (identity, self.vector_generation()),
+                )
+
+    def vector_index_pending(self, identity: str) -> Optional[int]:
+        """Return pending work, or None when the target has never been registered."""
+        row = self.conn.execute(
+            "SELECT (SELECT COUNT(*) FROM vector_index_repairs r WHERE r.identity=t.identity) "
+            "FROM vector_index_targets t WHERE t.identity=?", (identity,),
+        ).fetchone()
+        return int(row[0]) if row is not None else None
 
     def vector_matrix(self, flt: Optional[SearchFilter] = None,
                       *, include_invalid: bool = False, dim: int) -> tuple[list[str], np.ndarray]:
@@ -5263,8 +5379,20 @@ class Store:
         return ids, np.frombuffer(payload, dtype=np.float32).reshape(len(ids), dim)
 
     # ── full text ─────────────────────────────────────────────────────────────
-    def _fts_upsert(self, mid: str, title: str, content: str, keywords: str) -> None:
-        self.conn.execute("DELETE FROM mem_fts WHERE id=?", (mid,))
+    def _fts_upsert(self, mid: str, title: str, content: str, keywords: str, *,
+                    replace_existing: bool = True) -> None:
+        # FTS5's id column is UNINDEXED, so deleting by id scans the entire mirror.
+        # A successful new canonical insert has no mirror under Store's atomic
+        # write/erase contract, except IDs in the one-time orphan inventory. Updates
+        # and explicit repair retain duplicate cleanup.
+        if replace_existing:
+            # A direct repair call can also create an orphan after the inventory.
+            # Remember it before writing; retaining the ID is rollback-safe.
+            if self._fts_orphan_ids is not None and self.conn.execute(
+                "SELECT 1 FROM memories WHERE id=?", (mid,),
+            ).fetchone() is None:
+                self._fts_orphan_ids.add(mid)
+            self.conn.execute("DELETE FROM mem_fts WHERE id=?", (mid,))
         self.conn.execute(
             "INSERT INTO mem_fts(id, title, content, keywords) VALUES (?,?,?,?)",
             (mid, title, content, keywords),

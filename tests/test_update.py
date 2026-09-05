@@ -13,6 +13,12 @@ import pytest
 from scripts import update
 
 
+@pytest.fixture(autouse=True)
+def isolate_installation_profile(tmp_path, monkeypatch):
+    from scripts import installation_profile
+    monkeypatch.setattr(installation_profile, "profile_path", lambda _config_path=None: tmp_path / "profile.json")
+
+
 class _FakeProcess:
     """A ``Popen`` stand-in: the updater reads ``pid``/``returncode`` and drains once.
 
