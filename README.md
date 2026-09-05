@@ -804,7 +804,7 @@ file. It never searches the working directory for `.env`, and explicit process v
 | `ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL` | Not set | Bootstrap-only rotating hosted credential; after first use the owner-only cloud session replacement takes precedence |
 | `ENGRAPHIS_CLOUD_TOKEN_SUBJECT` | `member` | Subject fixed during hosted bootstrap (`device` or `member`); set explicitly with an environment-only refresh credential |
 | `ENGRAPHIS_CLOUD_ACCESS_TOKEN` | Not set | Optional short-lived access token for ephemeral jobs |
-| `ENGRAPHIS_MANAGED_COMPUTE_CONSENT` | *(auto)* | Operator override only; default follows whether a cloud session is configured (connected = allowed, local-only = never). `0` opts a connected installation out; `1` permits local snapshot preparation but does not create a cloud credential or authorize an upload |
+| `ENGRAPHIS_MANAGED_COMPUTE_CONSENT` | *(unset)* | Deny-only operator override: `0` pauses readable managed processing. A truthy value cannot grant approval. Each workspace requires explicit confirmation in Manage → Settings; encrypted sync is separate |
 
 The optional cross-encoder reranker is model- and hardware-dependent. Treat its quality and
 latency as deployment-specific until a versioned model identity, exact configuration, and
@@ -869,3 +869,16 @@ under Apache-2.0 keeps that grant; later releases cannot retroactively withdraw 
 official hosted control plane, its production credentials and records, managed operations,
 support, and future separately delivered commercial modules are outside the public source
 grant. See [`docs/LICENSING.md`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/LICENSING.md) for the complete boundary.
+
+### Reliability implementation candidate
+
+The current source uses schema 17 for durable, content-free vector-index repair.
+See [the reliability program](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/RELIABILITY_PROGRAM.md) for exact implementation,
+validation, migration and release boundaries. Managed processing now requires explicit
+workspace approval in Manage → Settings. Existing installations start with readable
+uploads paused until confirmed; connecting an account does not grant approval.
+
+For setup diagnostics use `engraphis-init --check --json`. New configurations get an
+owner-private local API token. Existing configs are preserved. Record selected install
+capabilities with `engraphis-init --extras server,mcp` or `--extras none`; future updates
+preserve that choice. `ENGRAPHIS_UPDATE_EXTRAS` remains an explicit override.

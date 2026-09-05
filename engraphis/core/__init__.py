@@ -8,6 +8,11 @@ swapped — including Python → Rust hot paths — without rearchitecting.
 from __future__ import annotations
 
 from engraphis.core.adaptive_context import AdaptiveContextResult
+from engraphis.core.context import (
+    ContextPackResult,
+    DeterministicContextPacker,
+    pack_context,
+)
 from engraphis.core.ids import new_id, ulid
 from engraphis.core.interfaces import (
     Candidate,
@@ -31,6 +36,9 @@ __all__ = [
     "ulid",
     "AdaptiveContextResult",
     "Candidate",
+    "ContextPackResult",
+    "DeterministicContextPacker",
+    "pack_context",
     "Edge",
     "Embedder",
     "GraphReader",

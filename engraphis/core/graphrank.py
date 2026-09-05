@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
+
 
 DAMPING = 0.85
 ITERATIONS = 30
@@ -94,50 +96,58 @@ def personalized_pagerank(
     # Aggregate duplicate destinations before applying a source's mass. This
     # matches the old dense matrix's ``M[dst, src] += ...`` semantics while
     # keeping the storage and each iteration O(nodes + edges).
-    outgoing: list[list[tuple[int, float]]] = [[] for _ in range(n_nodes)]
-    for source in ordered_nodes:
+    src_list: list[int] = []
+    dst_list: list[int] = []
+    weight_list: list[float] = []
+    dangling_list: list[int] = []
+
+    for source_id, source in enumerate(ordered_nodes):
         neighbors = adjacency.get(source, [])
-        total = sum(max(float(weight), 0.0) for _, weight in neighbors)
+        total = sum(weight for _, weight in neighbors)
         if total <= 0.0 or not math.isfinite(total):
+            dangling_list.append(source_id)
             continue
         destination_weights: dict[int, float] = {}
         for destination, weight in neighbors:
-            if weight > 0.0:
-                destination_id = node_index[destination]
-                destination_weights[destination_id] = (
-                    destination_weights.get(destination_id, 0.0) + float(weight) / total
-                )
-        outgoing[node_index[source]] = list(destination_weights.items())
+            destination_id = node_index[destination]
+            destination_weights[destination_id] = (
+                destination_weights.get(destination_id, 0.0) + weight / total
+            )
+        if not destination_weights:
+            dangling_list.append(source_id)
+            continue
+        for destination_id, weight in destination_weights.items():
+            src_list.append(source_id)
+            dst_list.append(destination_id)
+            weight_list.append(weight)
 
-    restart = [0.0] * n_nodes
-    for seed_id in seed_ids:
-        restart[seed_id] = 1.0 / len(seed_ids)
-    dangling = [index for index, neighbors in enumerate(outgoing) if not neighbors]
-    probability = restart[:]
+    src_arr = np.array(src_list, dtype=np.intp)
+    dst_arr = np.array(dst_list, dtype=np.intp)
+    weight_arr = np.array(weight_list, dtype=np.float64)
+    dangling_arr = np.array(dangling_list, dtype=np.intp)
+
+    restart = np.zeros(n_nodes, dtype=np.float64)
+    restart[seed_ids] = 1.0 / len(seed_ids)
+    probability = restart.copy()
+    spread = np.zeros(n_nodes, dtype=np.float64)
     iteration_limit = max(0, min(int(iterations), MAX_ITERATIONS))
-    for _ in range(iteration_limit):
-        spread = [0.0] * n_nodes
-        for source_id, edges in enumerate(outgoing):
-            if probability[source_id] == 0.0:
-                continue
-            for destination_id, weight in edges:
-                spread[destination_id] += probability[source_id] * weight
-        dangling_mass = sum(probability[index] for index in dangling)
-        if dangling_mass:
-            for index, weight in enumerate(restart):
-                if weight:
-                    spread[index] += dangling_mass * weight
-        next_probability = [
-            (1.0 - damping) * restart[index] + damping * spread[index]
-            for index in range(n_nodes)
-        ]
-        if sum(abs(after - before) for after, before in zip(next_probability, probability)) < tol:
-            probability = next_probability
-            break
-        probability = next_probability
 
+    for _ in range(iteration_limit):
+        spread.fill(0.0)
+        if src_arr.size > 0:
+            np.add.at(spread, dst_arr, probability[src_arr] * weight_arr)
+        if dangling_arr.size > 0:
+            dangling_mass = float(np.sum(probability[dangling_arr]))
+            if dangling_mass:
+                spread += dangling_mass * restart
+        next_probability = (1.0 - damping) * restart + damping * spread
+        diff = float(np.sum(np.abs(next_probability - probability)))
+        probability = next_probability
+        if diff < tol:
+            break
+
+    pos = np.flatnonzero(probability > 0.0)
     return {
-        ordered_nodes[index]: score
-        for index, score in enumerate(probability)
-        if score > 0.0
+        ordered_nodes[index]: float(probability[index])
+        for index in pos
     }

@@ -196,14 +196,14 @@ def test_search_uses_fresh_filtered_vector_matrix(monkeypatch):
         raise AssertionError("search must not hydrate vectors row by row")
 
     calls = []
-    original_matrix = store.vector_matrix
+    original_matrix = store.iter_vector_matrices
 
     def traced_matrix(*args, **kwargs):
         calls.append((args, kwargs))
         return original_matrix(*args, **kwargs)
 
     monkeypatch.setattr(store, "iter_vectors", unexpected_iter)
-    monkeypatch.setattr(store, "vector_matrix", traced_matrix)
+    monkeypatch.setattr(store, "iter_vector_matrices", traced_matrix)
     flt = SearchFilter(workspace_id=wid, repo_id=allowed_repo)
     query = np.array([1.0, 0.0, 0.0], dtype=np.float32)
 

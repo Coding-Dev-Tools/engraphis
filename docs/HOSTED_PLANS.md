@@ -23,7 +23,7 @@ implementations are not part of this repository.
 
 Start or manage a hosted subscription in the [Engraphis account portal](https://api.engraphis.com/account?plan=pro&interval=monthly&utm_source=engraphis&utm_medium=docs&utm_campaign=pro_conversion&utm_content=hosted_plans_pricing#billing).
 
-The email-confirmed, no-card trial lasts three active days. If hosted entitlement expires,
+The email-confirmed, no-card trial lasts three active days for Pro and ten active days for Team. If hosted entitlement expires,
 `workspace_write_grace` can retain only approved hosted-account continuity operations for up to
 24 hours. It does not extend a trial or subscription, grant cloud access, or affect the free
 local tools. `recovery_read_only` supports hosted account recovery and export after grace.

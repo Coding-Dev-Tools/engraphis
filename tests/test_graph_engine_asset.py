@@ -410,7 +410,7 @@ def test_show_all_lazily_loads_its_renderer_after_the_main_engine_is_ready() -> 
     report = _run_routing("all-loaded")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph-every.js?v=20260823-every-19"
+        "/v2-assets/engraphis-graph-every.js?v=20260905-every-20"
     ]
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
     assert report["engine"] == 1
@@ -10394,7 +10394,7 @@ def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
         "'/v2-assets/engraphis-graph.js?v=20260903-rotation-balance-1'"
     )
     assert d3 < force_graph < renderer
-    assert '/v2-assets/ledger.js?v=20260903-rotation-balance-1' in markup
+    assert '/v2-assets/ledger.js?v=20260905-processing-review-1' in markup
     assert "if (graphAssetsPromise === attempt) releaseGraphAssetsAttempt(attempt)" in loader
     assert "graphAssetsRetry = Math.min(graphAssetsRetry + 1, 10)" in loader
     all_loader = source[source.index("function ensureGraphAllAsset()"):

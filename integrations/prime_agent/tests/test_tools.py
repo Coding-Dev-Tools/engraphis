@@ -48,8 +48,9 @@ def test_remember_schema_declares_keyed_claim_fields_as_properties() -> None:
     assert {"subject_key", "claim_kind"} <= set(schema["properties"])
     assert "subject_key" not in schema
     assert "claim_kind" not in schema
-    assert schema["properties"]["subject_key"] == {"type": "string", "maxLength": 1000}
-    assert schema["properties"]["claim_kind"] == {"type": "string", "maxLength": 200}
+    from engraphis_prime_agent._contract import SMART_SCHEMAS
+    for key in ("subject_key", "claim_kind"):
+        assert schema["properties"][key] == SMART_SCHEMAS["engraphis_remember"]["properties"][key]
 
 
 def test_session_agent_is_optional_for_registered_lifecycle_calls() -> None:
@@ -371,3 +372,11 @@ def test_all_tool_schemas_have_unique_property_names_within_tool() -> None:
         assert len(props) == len(set(props)), (
             f"{name} schema has duplicate property names: {list(props)}"
         )
+
+
+def test_generated_recall_fields_and_nullable_constraints():
+    schema = dict(TOOL_SPECS)["engraphis_recall_context"]
+    assert schema["properties"]["format"]["default"] == "full"
+    assert validate_args("engraphis_recall_context", {"query": "fact", "format": "gist", "workspace": None})
+    with pytest.raises(Exception, match="allowed type"):
+        validate_args("engraphis_recall_context", {"query": "fact", "workspace": "x" * 201})

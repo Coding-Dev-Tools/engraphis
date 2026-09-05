@@ -19,6 +19,19 @@ def manifest() -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def trial_days_by_plan() -> dict[str, int]:
+    """Return disclosed plan durations; missing or invalid durations stay unknown."""
+    try:
+        days = manifest().get("trial", {}).get("days_by_plan", {})
+    except (OSError, ValueError, TypeError, AttributeError):
+        return {}
+    if not isinstance(days, dict):
+        return {}
+    return {plan: value for plan, value in days.items()
+            if plan in {"pro", "team"} and isinstance(value, int)
+            and not isinstance(value, bool) and value > 0}
+
+
 def expected_checkout_targets() -> dict:
     """Return public onboarding targets without exposing provider-side price identifiers."""
     # Read defensively: the release check calls this *after* collecting its own structural

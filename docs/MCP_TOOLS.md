@@ -33,7 +33,11 @@ namesakes; advanced controls are discoverable rather than routine:
 | Smart tool | Accepted parameters |
 |---|---|
 | `engraphis_remember` | `content`, `workspace`, `repo`, `session_id`, `mtype`, `importance`, `subject_key`, `claim_kind`; safe provenance is fixed internally |
-| `engraphis_recall_context` | `query`, `workspace`, `repo`, `session_id`, `k`, `token_budget`; always compact, no `response_mode` |
+| `engraphis_recall_context` | `query`, `workspace`, `repo`, `session_id`, `k`, `token_budget`, `format`; always compact, no `response_mode` |
+
+`format="gist"` is a compatibility option for the same budgeted, cited evidence as
+`full`. It preserves complete conditions and code whitespace; it does not apply an
+additional summary or promise extra token savings. Source IDs remain in `sources`.
 
 
 No user profile choice or tool switching is required. The dashboard `/mcp` endpoint and
@@ -141,3 +145,13 @@ the original query.
 For parameter details and return shapes, see the tool descriptions exposed by the MCP server. The
 [agent connection guide](AGENT_CONNECT.md) explains local and hosted connections, and the
 [Kilo Code guide](KILO_CODE_INTEGRATION.md) shows a complete editor integration.
+
+## Versioned integration contract
+
+[The generated MCP contract](MCP_CONTRACT.json) exports the registered Smart and
+Classic input schemas, descriptions and annotations with a content digest.
+Regenerate it with `python scripts/export_mcp_contract.py`; CI verifies the JSON
+and the generated Pi/Prime Agent schemas with `--check` and the contract tests.
+Host-specific session agent names and configured scope defaults are supplied by
+integration adapters. Prime Agent also retains strict unknown-field validation
+and documented action aliases and enum checks. Runtime authorization is unchanged.

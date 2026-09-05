@@ -1,0 +1,59 @@
+{
+  "schema": "engraphis-operator-policy-review/v1",
+  "date": "2026-09-05T11:28:28.722616+00:00",
+  "base_commit": "7148b72fe3d8976951124b622a354b89e0da1f0b",
+  "finding": "https://github.com/Coding-Dev-Tools/engraphis/pull/201#discussion_r3940422778",
+  "source_sha256": {
+    "engraphis/managed_processing.py": "6d33cdfd10800d9552fcfae3c2b071d2b39fe10fb69d1a8e5d9ed6026882197e",
+    "engraphis/routes/v2_api.py": "0ba2c5b190af5b82a0cc0fb30ed1c688dad5a8be926151f509e576e5c96803b8",
+    "tests/test_managed_processing_policy.py": "ce690a56dbbe4f51b4525189e0b7e15e0fb179d37cde32fb640017e3e813e0a8",
+    "docs/RELIABILITY_PROGRAM.md": "e05df8656f9e6086935fbed18415dcfd95e05e903ee67e29d93b4764ace734e5"
+  },
+  "behavior": [
+    "An enable request under the operator veto receives a static 403 before Cloud client construction, credential lookup or network access.",
+    "The existing local-intent fence rechecks the veto after reading Cloud policy and before submitting enable; changed intent returns 409.",
+    "The service transaction rejects enabled approval while the operator veto is active, before persistence or audit, so removing the veto cannot reveal latent approval.",
+    "Explicit disable still persists local opt-out immediately and seeks remote acknowledgement; an outage retains the existing truthful pending notice."
+  ],
+  "reproduction": {
+    "command": "ENGRAPHIS_EXTRACTOR=none python -m pytest tests/test_managed_processing_policy.py -q -o addopts= --tb=short -k operator_optout",
+    "before": {
+      "failed": 7,
+      "passed": 2,
+      "deselected": 14
+    },
+    "tool_output_chunk": "47760d",
+    "observed": "Five disabling values and a veto appearing during the Cloud read returned HTTP 200 and allowed the cloud call. Direct local approval did not raise. The final changed-intent response uses the existing 409 contract."
+  },
+  "validation": [
+    {
+      "command": "ENGRAPHIS_EXTRACTOR=none python -m pytest tests/test_managed_processing_policy.py tests/test_cloud_features.py tests/test_dashboard_v2.py -q -rs -o addopts= --tb=short",
+      "passed": 124,
+      "skipped": 0,
+      "seconds": 16.72,
+      "warnings": 1,
+      "tool_output_chunk": "27b7d4"
+    },
+    {
+      "name": "independent security review",
+      "passed": 23,
+      "review_result": "approved; no scoped security blocker; reviewer made no edits",
+      "test_module": "tests/test_managed_processing_policy.py"
+    },
+    {
+      "name": "static and contract checks",
+      "result": "Ruff, Pyright, generated MCP contract, commercial manifest, strict-CSP asset check and whitespace checks passed."
+    }
+  ],
+  "environment": {
+    "python": "3.12.10",
+    "platform": "Windows AMD64",
+    "ENGRAPHIS_EXTRACTOR": "none"
+  },
+  "limitations": [
+    "Cloud responses are controlled test doubles exercising the real local HTTP route; no production cloud operation ran.",
+    "Changing a process environment variable does not itself acknowledge remote cancellation of already submitted work.",
+    "No schema migration, dependency change or change to encrypted-sync policy.",
+    "Final GitHub checks must be bound to the subsequent commit; the base revision had 22 passing checks and one reproduced browser sampling failure."
+  ]
+}

@@ -13,7 +13,7 @@ module.exports = defineConfig({
   retries: 0,
   use: {
     baseURL: playwrightBaseURL,
-    trace: 'on-first-retry',
+    trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
   },
   webServer: {
@@ -27,8 +27,12 @@ module.exports = defineConfig({
       // The single Playwright web server owns this process-local database for the run.
       ENGRAPHIS_DB_PATH: ':memory:',
       ENGRAPHIS_EMBED_MODEL: '',
+      ENGRAPHIS_EXTRACTOR: 'none',
       ENGRAPHIS_LOOP_INTERVAL: '0',
       ENGRAPHIS_HOST: '127.0.0.1',
+      // Public test fixture, never the owner's configured credential. The real
+      // browser smoke uses this to exercise governed source approval.
+      ENGRAPHIS_API_TOKEN: 'engraphis-playwright-local-only',
       ENGRAPHIS_SERVICE_MODE: 'customer',
     },
   },
@@ -36,6 +40,16 @@ module.exports = defineConfig({
     {
       name: 'chromium',
       use: { browserName: 'chromium' },
+    },
+    {
+      name: 'firefox-smoke',
+      testMatch: '**/workspace-smoke.spec.js',
+      use: { browserName: 'firefox' },
+    },
+    {
+      name: 'webkit-smoke',
+      testMatch: '**/workspace-smoke.spec.js',
+      use: { browserName: 'webkit' },
     },
   ],
 });

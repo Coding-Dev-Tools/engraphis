@@ -29,7 +29,7 @@ function license() {
     cloud_access_active: false,
     access_state: 'inactive',
     plan_source: 'local',
-    trial: { used: false, active: false, available: true, trial_days: 3 },
+    trial: { used: false, active: false, available: true, trial_days: 3, days_by_plan: { pro: 3, team: 10 } },
     pro_upgrade_url: 'https://cloud.engraphis.test/pro',
     team_upgrade_url: 'https://cloud.engraphis.test/team',
     pro_monthly_upgrade_url: 'https://cloud.engraphis.test/account?plan=pro&interval=monthly#billing',
@@ -49,6 +49,7 @@ async function mockApi(page, options = {}) {
   requests.documentImports = [];
   requests.contextSavingsQueries = [];
   requests.graphQueries = [];
+  requests.libraryQueries = [];
   const audit = options.audit || [];
   const receipts = options.receipts || [];
   const workspaceList = options.workspaces || [{ name: workspace, memories: memories.length }];
@@ -101,16 +102,26 @@ async function mockApi(page, options = {}) {
     }
     if (path === '/stats') {
       return ok({
-        memories: memories.length,
-        total_rows: memories.length,
+        memories: memoriesFor(requestUrl).length,
+        total_rows: memoriesFor(requestUrl).length,
         workspaces: 1,
         sessions: 1,
         by_type: { semantic: 1, procedural: 1 },
       });
     }
     if (path === '/memories') {
+      requests.libraryQueries.push(Object.fromEntries(requestUrl.searchParams));
+      const search = (requestUrl.searchParams.get('q') || '').toLowerCase();
+      const type = requestUrl.searchParams.get('mtype');
+      const matches = memoriesFor(requestUrl).filter(memory =>
+        (!search || `${memory.title || ''} ${memory.content || ''}`.toLowerCase().includes(search))
+        && (!type || (memory.memory_type || memory.mtype || 'semantic') === type));
+      const offset = Number((requestUrl.searchParams.get('cursor') || 'page-0').replace('page-', ''));
+      const limit = Number(requestUrl.searchParams.get('limit') || 200);
+      const result = matches.slice(offset, offset + limit);
       return ok({ workspace: requestUrl.searchParams.get('workspace') || workspace,
-        memories: memoriesFor(requestUrl) });
+        memories: result, count: result.length, total_count: matches.length,
+        next_cursor: offset + limit < matches.length ? `page-${offset + limit}` : null });
     }
     if (path.startsWith('/memory/')) {
       const id = path.split('/').pop();
@@ -302,6 +313,246 @@ function browserErrors(page) {
   page.on('pageerror', error => errors.push(error.message));
   return errors;
 }
+
+async function openProcessingSettings(page) {
+  await page.goto('/?view=manage');
+  await page.locator('#manage-settings-tab').click();
+}
+
+test('A processing-controls link opens the named authorized workspace without enabling it', async ({ page }) => {
+  const selected = 'second workspace & review';
+  const requests = await mockApi(page, { workspaces: [
+    { name: workspace, memories: 20 }, { name: selected, memories: 1 },
+  ] });
+  await page.route('**/api/managed-processing**', route => route.fulfill({
+    json: { enabled: false, confirmation_required: true },
+  }));
+  await page.goto(`/?view=manage&tab=settings&workspace=${encodeURIComponent(selected)}`);
+  await expect(page.locator('#workspace-select')).toHaveValue(selected);
+  await expect(page.locator('#manage-settings-tab')).toHaveAttribute('aria-selected', 'true');
+  await expect(page.locator('#managed-processing-status')).toContainText(`Managed processing is off for ${selected}.`);
+  await expect(page.locator('#managed-processing-approval')).not.toBeChecked();
+  await expect(page.locator('#managed-processing-enable')).toBeDisabled();
+  expect(requests.details.filter(item => item.method === 'POST')).toEqual([]);
+
+  // An unknown name from a URL cannot select an unauthorized workspace.
+  await page.goto('/?view=manage&tab=settings&workspace=not-permitted');
+  await expect(page.locator('#workspace-select')).not.toHaveValue('not-permitted');
+  await expect(page.locator('#managed-processing-enable')).toBeDisabled();
+});
+
+test('Managed processing stays off until explicit approval receives a backend acknowledgement', async ({ page }) => {
+  await mockApi(page);
+  let releaseApproval;
+  const writes = [];
+  await page.route('**/api/managed-processing**', async route => {
+    if (route.request().method() === 'POST') {
+      writes.push(route.request().postDataJSON());
+      await new Promise(resolve => { releaseApproval = resolve; });
+      return route.fulfill({ json: { enabled: true, remote_revision: 1, remote_sync_pending: false } });
+    }
+    return route.fulfill({ json: { enabled: false, confirmation_required: true, operator_disabled: false } });
+  });
+  await openProcessingSettings(page);
+  await expect(page.locator('#managed-processing-status')).toContainText('Managed processing is off');
+  await expect(page.locator('#managed-processing-enable')).toBeDisabled();
+  expect(writes).toEqual([]);
+  await page.locator('#managed-processing-approval').check();
+  await page.locator('#managed-processing-enable').click();
+  await expect.poll(() => writes.length).toBe(1);
+  expect(writes[0]).toEqual({ workspace, enabled: true, confirmed: true });
+  await expect(page.locator('#managed-processing-status')).toHaveText('Requesting workspace approval…');
+  await page.locator('#managed-processing-approval').uncheck();
+  await page.locator('#managed-processing-approval').check();
+  await expect(page.locator('#managed-processing-enable')).toBeDisabled();
+  await expect(page.locator('#managed-processing-disable')).toBeDisabled();
+  releaseApproval();
+  await expect(page.locator('#managed-processing-status')).toHaveText(`Managed processing is enabled for ${workspace}.`);
+  await expect(page.locator('#managed-processing-approval')).not.toBeChecked();
+});
+
+test('Managed processing opt-out remains visibly pending until its retry is acknowledged', async ({ page }) => {
+  await mockApi(page);
+  const writes = [];
+  await page.route('**/api/managed-processing**', route => {
+    if (route.request().method() === 'POST') {
+      writes.push(route.request().postDataJSON());
+      return route.fulfill({ json: { enabled: false, remote_sync_pending: writes.length === 1, remote_revision: 2 } });
+    }
+    return route.fulfill({ json: { enabled: true, remote_sync_pending: false } });
+  });
+  await openProcessingSettings(page);
+  await page.locator('#managed-processing-disable').click();
+  await expect(page.locator('#managed-processing-status')).toContainText('Uploads are paused locally. Cloud confirmation is pending');
+  await expect(page.locator('#managed-processing-disable')).toBeEnabled();
+  await page.locator('#managed-processing-disable').click();
+  await expect(page.locator('#managed-processing-status')).toContainText('Managed processing is off');
+  expect(writes).toEqual([{ workspace, enabled: false, confirmed: false }, { workspace, enabled: false, confirmed: false }]);
+});
+
+test('Managed processing ignores a previous workspace policy that arrives late', async ({ page }) => {
+  const next = 'processing-next';
+  await mockApi(page, { workspaces: [{ name: workspace, memories: 2 }, { name: next, memories: 1 }] });
+  let releasePrevious;
+  let previousDelivered = false;
+  await page.route('**/api/managed-processing**', async route => {
+    const selected = new URL(route.request().url()).searchParams.get('workspace');
+    if (selected === workspace) {
+      await new Promise(resolve => { releasePrevious = resolve; });
+      await route.fulfill({ json: { enabled: true } }).catch(() => {});
+      previousDelivered = true;
+      return;
+    }
+    return route.fulfill({ json: { enabled: false, confirmation_required: true } });
+  });
+  await openProcessingSettings(page);
+  await expect.poll(() => typeof releasePrevious).toBe('function');
+  await page.locator('#workspace-select').selectOption(next);
+  await expect(page.locator('#managed-processing-status')).toContainText(`Managed processing is off for ${next}.`);
+  releasePrevious();
+  await expect.poll(() => previousDelivered).toBe(true);
+  await expect(page.locator('#managed-processing-status')).toContainText(`Managed processing is off for ${next}.`);
+  await expect(page.locator('#managed-processing-approval')).not.toBeChecked();
+});
+
+test('Managed processing reload recovers from an unknown write outcome without silently retrying', async ({ page }) => {
+  await mockApi(page);
+  let writes = 0;
+  let reads = 0;
+  await page.route('**/api/managed-processing**', route => {
+    if (route.request().method() === 'POST') {
+      writes += 1;
+      return route.fulfill({ status: 503, json: { detail: 'Cloud acknowledgement unavailable' } });
+    }
+    reads += 1;
+    return route.fulfill({ json: { enabled: false, confirmation_required: true } });
+  });
+  await openProcessingSettings(page);
+  await page.locator('#managed-processing-approval').check();
+  await page.locator('#managed-processing-enable').click();
+  await expect(page.locator('#managed-processing-status')).toContainText('Reload the policy to verify the outcome');
+  await expect(page.locator('#managed-processing-enable')).toBeDisabled();
+  await page.locator('#managed-processing-reload').click();
+  await expect(page.locator('#managed-processing-status')).toContainText('Managed processing is off');
+  expect(writes).toBe(1);
+  expect(reads).toBe(2);
+});
+
+test('Library searches beyond its first page and keeps server-side type filters while paging', async ({ page }) => {
+  const large = Array.from({ length: 1201 }, (_, index) => ({
+    id: `mem_page_${index}`, title: `Project decision ${index}`,
+    content: index === 1200 ? 'The oldest unique migration decision' : `Decision ${index}`,
+    memory_type: index % 2 ? 'procedural' : 'semantic',
+  }));
+  const requests = await mockApi(page, { memoriesByWorkspace: { [workspace]: large } });
+  await page.goto('/?view=library');
+  await expect(page.locator('#library-list [role="option"]')).toHaveCount(100);
+  await expect(page.locator('#library-count')).toHaveText('1–100 of 1,201 memories');
+  await page.locator('#library-next').click();
+  await expect(page.locator('#library-count')).toHaveText('101–200 of 1,201 memories');
+  await expect(page.locator('#library-list')).toContainText('Project decision 100');
+  await page.locator('#library-previous').click();
+  await expect(page.locator('#library-count')).toHaveText('1–100 of 1,201 memories');
+  await page.locator('#library-filter').fill('oldest unique');
+  await expect(page.locator('#library-count')).toHaveText('1 memory');
+  await expect(page.locator('#library-list')).toContainText('Project decision 1200');
+  await page.locator('#library-filter').fill('');
+  await page.locator('#library-type').selectOption('procedural');
+  await expect(page.locator('#library-count')).toHaveText('1–100 of 600 memories');
+  await page.locator('#library-next').click();
+  await expect(page.locator('#library-count')).toHaveText('101–200 of 600 memories');
+  expect(requests.libraryQueries.at(-1).mtype).toBe('procedural');
+  expect(requests.libraryQueries.at(-1).cursor).toBe('page-100');
+});
+
+test('Library ignores a superseded server search even when it finishes last', async ({ page }) => {
+  await mockApi(page);
+  let releaseSlow;
+  let delivered = false;
+  await page.route('**/api/memories?**', async route => {
+    const search = new URL(route.request().url()).searchParams.get('q');
+    if (search !== 'slow') return route.fallback();
+    await new Promise(resolve => { releaseSlow = resolve; });
+    await route.fulfill({ json: { memories: [memories[0]], total_count: 1, next_cursor: null } }).catch(() => {});
+    delivered = true;
+  });
+  await page.goto('/?view=library');
+  await page.locator('#library-filter').fill('slow');
+  await expect.poll(() => typeof releaseSlow).toBe('function');
+  await page.locator('#library-filter').fill('safe');
+  await expect(page.locator('#library-list')).toContainText('Safe rendering');
+  releaseSlow();
+  await expect.poll(() => delivered).toBe(true);
+  await expect(page.locator('#library-list')).not.toContainText('Database choice');
+  await expect(page.locator('#library-list')).toContainText('Safe rendering');
+});
+
+test('Library restarts a stale page without dropping its search', async ({ page }) => {
+  const large = Array.from({ length: 120 }, (_, index) => ({
+    id: `mem_stale_${index}`, title: `Scoped decision ${index}`, content: 'Keep this query',
+  }));
+  await mockApi(page, { memoriesByWorkspace: { [workspace]: large } });
+  await page.route('**/api/memories?**', route => {
+    if (!new URL(route.request().url()).searchParams.has('cursor')) return route.fallback();
+    return route.fulfill({ status: 409, contentType: 'application/json',
+      body: JSON.stringify({ detail: { code: 'cursor_stale', error: 'Memory changed' } }) });
+  });
+  await page.goto('/?view=library');
+  await page.locator('#library-filter').fill('Keep this query');
+  await expect(page.locator('#library-next')).toBeEnabled();
+  await page.locator('#library-next').click();
+  await expect(page.locator('#notice-banner')).toContainText('Showing the first page');
+  await expect(page.locator('#library-count')).toHaveText('1–100 of 120 memories');
+  await expect(page.locator('#library-filter')).toHaveValue('Keep this query');
+  await expect(page.locator('#library-previous')).toBeDisabled();
+});
+
+for (const failed of ['answer', 'recall']) {
+  test(`Ask preserves the successful panel when ${failed} fails`, async ({ page }) => {
+    await mockApi(page);
+    await page.route(`**/api/${failed}${failed === 'recall' ? '?**' : ''}`, route =>
+      route.fulfill({ status: 503, contentType: 'application/json', body: '{"detail":"Temporarily unavailable"}' }));
+    await page.goto('/?view=ask');
+    await page.locator('#ask-input').fill('Which database?');
+    await page.getByRole('button', { name: 'Grounded answer', exact: true }).click();
+    if (failed === 'recall') {
+      await expect(page.locator('#answer-panel')).toContainText('Postgres 16 is the main database. [1]');
+      await expect(page.locator('#retrieval-list')).toContainText('Raw retrieval is unavailable');
+    } else {
+      await expect(page.locator('#answer-panel')).toContainText('Grounded Ask is unavailable');
+      await expect(page.locator('#retrieval-list')).toContainText('Postgres 16 is the main database.');
+    }
+  });
+}
+
+test('Ask paints a completed answer while its preview stalls, then reports the deadline', async ({ page }) => {
+  await page.clock.install();
+  await mockApi(page);
+  let previewRequested = false;
+  await page.route('**/api/recall?**', () => { previewRequested = true; });
+  await page.goto('/?view=ask');
+  await page.locator('#ask-input').fill('Which database?');
+  await page.getByRole('button', { name: 'Grounded answer', exact: true }).click();
+  await expect.poll(() => previewRequested).toBe(true);
+  await expect(page.locator('#answer-panel')).toContainText('Postgres 16 is the main database. [1]');
+  await page.clock.fastForward(31_000);
+  await expect(page.locator('#retrieval-list')).toContainText('The request timed out');
+  await expect(page.locator('#answer-panel')).toContainText('Postgres 16 is the main database. [1]');
+});
+
+test('First-run guidance opens workspace creation and the first memory editor', async ({ page }) => {
+  await mockApi(page, { workspaces: [] });
+  await page.goto('/');
+  await expect(page.locator('#first-memory-add')).toHaveText('Create your first workspace');
+  await page.locator('#first-memory-add').click();
+  await expect(page.locator('#new-workspace-name')).toBeFocused();
+  await page.unroute('**/api/**');
+  await mockApi(page, { memoriesByWorkspace: { [workspace]: [] }, workspaces: [{ name: workspace, memories: 0 }] });
+  await page.goto('/?view=today');
+  await expect(page.locator('#first-memory-add')).toHaveText('Add your first memory');
+  await page.locator('#first-memory-add').click();
+  await expect(page.locator('#editor-memory-title')).toBeFocused();
+});
 
 test('Ledger is live, safe, lazy, accessible, and responsive', async ({ page }) => {
   const errors = browserErrors(page);
@@ -1801,8 +2052,8 @@ test('Ledger exposes local LLM setup and extraction controls', async ({ page }) 
   await expect(provider).toHaveValue('openai');
   await expect(model).toHaveValue('gpt-4o-mini');
   await expect(page.getByLabel('Local .env setup')).toHaveValue(/ENGRAPHIS_LLM_PROVIDER=openai/);
-  await expect(page.getByRole('button', { name: 'Turn on' })).toBeDisabled();
-  await expect(page.getByRole('button', { name: 'Turn off' })).toBeDisabled();
+  await expect(page.locator('#llm-connection').getByRole('button', { name: 'Turn on' })).toBeDisabled();
+  await expect(page.locator('#llm-connection').getByRole('button', { name: 'Turn off' })).toBeDisabled();
 
   await provider.selectOption('anthropic');
   await expect(model).toHaveValue('claude-3-5-sonnet-20241022');
@@ -1826,7 +2077,7 @@ test('Ledger applies the configured LLM extraction toggle', async ({ page }) => 
   await page.getByRole('button', { name: 'Manage' }).click();
   await page.getByRole('tab', { name: 'Settings' }).click();
 
-  const turnOn = page.getByRole('button', { name: 'Turn on' });
+  const turnOn = page.locator('#llm-connection').getByRole('button', { name: 'Turn on' });
   await expect(turnOn).toBeEnabled();
   await expect(page.getByText(/Retention supervision is ON/)).toBeVisible();
   await expect(page.getByText(/bounded excerpt/)).toBeVisible();
@@ -1837,9 +2088,9 @@ test('Ledger applies the configured LLM extraction toggle', async ({ page }) => 
   });
   await turnOn.click();
   await expect(page.getByText('ON', { exact: true })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Turn off' })).toBeEnabled();
+  await expect(page.locator('#llm-connection').getByRole('button', { name: 'Turn off' })).toBeEnabled();
 
-  await page.getByRole('button', { name: 'Turn off' }).click();
+  await page.locator('#llm-connection').getByRole('button', { name: 'Turn off' }).click();
   await expect(page.getByText('OFF', { exact: true })).toBeVisible();
   await expect(page.getByText(/Retention supervision is ON/)).toBeVisible();
   await expect(turnOn).toBeEnabled();
@@ -1921,6 +2172,18 @@ test('Ledger gives active Pro members direct Cloud access and saves hosted polic
   expect(errors).toEqual([]);
 });
 
+test('Ledger omits unknown Team trial duration from an older license response', async ({ page }) => {
+  const legacy = license();
+  delete legacy.trial.days_by_plan;
+  await mockApi(page, { license: legacy });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Manage' }).click();
+  await page.getByRole('tab', { name: 'Plans & billing' }).click();
+  await expect(page.locator('#plan-cards [data-pro-cta="team"]')).toHaveText('Start Team trial');
+  await expect(page.locator('#plan-cards [data-pro-cta="pro"]')).toHaveText('Start 3-day Pro trial');
+  await expect(page.locator('#plan-cards [data-pro-cta="team"]')).toHaveAttribute('href', /trial=team/);
+});
+
 test('billing cadence selects the exact Pro and Team checkout target', async ({ page }) => {
   await mockApi(page);
   await page.goto('/');
@@ -1953,6 +2216,8 @@ test('billing cadence selects the exact Pro and Team checkout target', async ({ 
 
   const pro = page.locator('#plan-cards [data-pro-cta="pro"]');
   const team = page.locator('#plan-cards [data-pro-cta="team"]');
+  await expect(pro).toHaveText('Start 3-day Pro trial');
+  await expect(team).toHaveText('Start 10-day Team trial');
   await expect(pro).toHaveAttribute(
     'href',
     'https://cloud.engraphis.test/account?plan=pro&interval=monthly&trial=pro&utm_source=engraphis&utm_medium=product&utm_campaign=pro_conversion&utm_content=plans#billing',

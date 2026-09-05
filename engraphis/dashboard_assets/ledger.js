@@ -7,6 +7,11 @@
     workspaces: [],
     stats: {},
     memories: [],
+    libraryTotal: 0,
+    libraryNextCursor: null,
+    libraryCursors: [null],
+    libraryPage: 0,
+    libraryLoading: false,
     selectedMemory: '',
     editorMemory: null,
     editorReturnFocus: null,
@@ -51,6 +56,7 @@
     reviewCsrf: '',
     hostedLoaded: new Set(),
     scopedRequests: Object.create(null),
+    scopedControllers: Object.create(null),
     syncStatus: null,
     license: null,
     releaseVersion: '',
@@ -63,6 +69,7 @@
   const NOTICE_DURATION_MS = 3000;
   let noticeTimer = null;
   let graphRepoLoadTimer = null;
+  let librarySearchTimer = null;
   const CLOUD_SYNC_PRIVACY_NOTICE = 'Cloud Sync encrypts eligible shared-workspace changes end-to-end before they leave this device. Engraphis Cloud cannot read their contents; secret and session-scoped memories stay local.';
   const EXTERNAL_LLM_PRIVACY_NOTICE = 'Memory text is sent to your configured LLM provider for processing under that provider’s terms. The provider must read that text to return extracted facts.';
   const truncate = (value, length = 260) => {
@@ -95,6 +102,9 @@
   };
   const query = (name = state.workspace) => `workspace=${encodeURIComponent(name || '')}`;
   const beginScopedRequest = kind => {
+    if (state.scopedControllers[kind]) state.scopedControllers[kind].abort();
+    const controller = new AbortController();
+    state.scopedControllers[kind] = controller;
     const generation = number(state.scopedRequests[kind]) + 1;
     state.scopedRequests[kind] = generation;
     return {
@@ -102,6 +112,7 @@
       generation,
       workspace: state.workspace,
       epoch: state.refreshEpoch,
+      signal: controller.signal,
     };
   };
   const isCurrentScopedRequest = request => Boolean(request
@@ -109,6 +120,8 @@
     && request.epoch === state.refreshEpoch
     && state.scopedRequests[request.kind] === request.generation);
   const invalidateScopedRequests = () => {
+    Object.values(state.scopedControllers).forEach(controller => controller.abort());
+    state.scopedControllers = Object.create(null);
     Object.keys(state.scopedRequests).forEach(kind => {
       state.scopedRequests[kind] = number(state.scopedRequests[kind]) + 1;
     });
@@ -221,20 +234,41 @@
   };
 
   async function api(path, options = {}) {
-    const init = { ...options, headers: { ...(options.headers || {}) } };
+    const { timeoutMs = 30_000, signal, ...requestOptions } = options;
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    if (signal) {
+      if (signal.aborted) abort();
+      else signal.addEventListener('abort', abort, { once: true });
+    }
+    let timedOut = false;
+    const timer = window.setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
+    const init = { ...requestOptions, signal: controller.signal, headers: { ...(options.headers || {}) } };
     init.headers['X-Engraphis-Browser-Session'] = '1';
     if (init.body && !(init.body instanceof FormData) && typeof init.body !== 'string') {
       init.headers['Content-Type'] = 'application/json';
       init.body = JSON.stringify(init.body);
     }
-    const response = await fetch(`${apiRoot}${path}`, init);
-    const payload = await response.json().catch(() => null);
-    if (!response.ok) {
-      const error = new Error(errorMessage(payload, response.status));
-      error.status = response.status;
+    try {
+      const response = await fetch(`${apiRoot}${path}`, init);
+      const payload = await response.json().catch(error => {
+        if (controller.signal.aborted) throw error;
+        return null;
+      });
+      if (!response.ok) {
+        const error = new Error(errorMessage(payload, response.status));
+        error.status = response.status;
+        error.code = payload && ((payload.detail && payload.detail.code) || payload.code);
+        throw error;
+      }
+      return payload;
+    } catch (error) {
+      if (timedOut) throw new Error('The request timed out. Please try again.');
       throw error;
+    } finally {
+      window.clearTimeout(timer);
+      if (signal) signal.removeEventListener('abort', abort);
     }
-    return payload;
   }
 
   function promptBrowserToken(message = '') {
@@ -425,7 +459,7 @@
     if (!graphAllAssetsPromise) {
       const controller = new AbortController();
       const attempt = loadScript(
-        graphAssetSource('/v2-assets/engraphis-graph-every.js?v=20260823-every-19'),
+        graphAssetSource('/v2-assets/engraphis-graph-every.js?v=20260905-every-20'),
         'EngraphisEveryGraph', controller.signal,
       );
       graphAllAssetsPromise = attempt;
@@ -608,6 +642,12 @@
     return withCtaAttribution(license.account_url || license.upgrade_url, content);
   }
 
+  function licenseTrialDays(plan = 'pro') {
+    const trial = (state.license && state.license.trial) || {};
+    const days = (trial.days_by_plan || {})[plan] ?? (plan === 'pro' ? trial.trial_days : null);
+    return Number.isSafeInteger(days) && days > 0 ? days : null;
+  }
+
   function hostedCta(plan = 'pro', content = 'plans', interval = 'monthly') {
     const stateName = licenseAccessState();
     const currentPlan = licensePlanKey();
@@ -624,8 +664,9 @@
       };
     }
     const trial = licenseTrialAvailable() && stateName === 'inactive';
+    const days = licenseTrialDays(plan);
     return {
-      label: trial ? `Start 3-day ${name} trial` : `Subscribe to ${name}`,
+      label: trial ? `Start ${days ? `${days}-day ` : ''}${name} trial` : `Subscribe to ${name}`,
       href: hostedPlanUrl(plan, trial, interval, content),
       kind: trial ? 'trial' : 'subscribe',
     };
@@ -644,7 +685,7 @@
     badge.hidden = access === 'inactive' && trial;
     const aria = licenseHasHostedAccess() ? 'Open Engraphis Cloud account'
       : access === 'lapsed' ? 'Update billing in Plans and billing'
-        : trial ? 'Start the 3-day Pro trial in Plans and billing'
+        : trial ? `${hostedCta('pro', 'header').label} in Plans and billing`
           : 'Subscribe to Pro in Plans and billing';
     badge.textContent = label;
     badge.setAttribute('aria-label', aria);
@@ -1063,6 +1104,7 @@
     state.stats = stats;
     renderMetricValues(stats);
     renderTypeBars(stats);
+    renderFirstMemoryJourney();
   }
 
   async function loadSavings(epoch) {
@@ -1081,11 +1123,63 @@
     }
   }
 
-  async function loadMemories(workspace, epoch) {
-    const payload = await api(`/memories?${query(workspace)}&limit=500`);
-    if (epoch !== state.refreshEpoch) return;
-    state.memories = payload.memories || [];
-    renderLibrary();
+  async function loadMemories(workspace, epoch, page = 0) {
+    const request = beginScopedRequest('library');
+    const params = new URLSearchParams({ workspace, limit: '100' });
+    const search = byId('library-filter').value.trim();
+    const type = byId('library-type').value;
+    if (search) params.set('q', search);
+    if (type) params.set('mtype', type);
+    const cursor = state.libraryCursors[page];
+    if (cursor) params.set('cursor', cursor);
+    state.libraryLoading = true;
+    renderLibraryPaging();
+    try {
+      const payload = await api(`/memories?${params}`, { signal: request.signal });
+      if (epoch !== state.refreshEpoch || !isCurrentScopedRequest(request)) return;
+      state.memories = payload.memories || [];
+      state.libraryTotal = number(payload.total_count == null ? state.memories.length : payload.total_count);
+      state.libraryNextCursor = payload.next_cursor || null;
+      state.libraryPage = page;
+      if (!page) state.libraryCursors = [null];
+      if (state.libraryNextCursor) state.libraryCursors[page + 1] = state.libraryNextCursor;
+      renderLibrary();
+      renderFirstMemoryJourney();
+    } catch (error) {
+      if (!isCurrentScopedRequest(request)) return;
+      if (cursor && error.status === 409 && error.code === 'cursor_stale') {
+        state.libraryCursors = [null];
+        showNotice('Memory changed. Showing the first page with your filters preserved.');
+        return await loadMemories(workspace, epoch);
+      }
+      byId('library-list').replaceChildren(empty(`Library is unavailable: ${error.message}`));
+      throw error;
+    } finally {
+      if (isCurrentScopedRequest(request)) {
+        state.libraryLoading = false;
+        renderLibraryPaging();
+      }
+    }
+  }
+
+  function renderLibraryPaging() {
+    byId('library-previous').disabled = state.libraryLoading || state.libraryPage === 0;
+    byId('library-next').disabled = state.libraryLoading || !state.libraryNextCursor;
+    byId('library-refresh').disabled = state.libraryLoading || !state.workspace;
+    byId('library-list').setAttribute('aria-busy', String(state.libraryLoading));
+  }
+
+  function refreshLibrary(page = 0) {
+    window.clearTimeout(librarySearchTimer);
+    if (!state.workspace) return;
+    loadMemories(state.workspace, state.refreshEpoch, page).catch(error => showNotice(error.message));
+  }
+
+  function renderFirstMemoryJourney() {
+    const journey = byId('first-memory-journey');
+    if (!journey) return;
+    journey.hidden = number(state.stats.memories) > 0 || state.libraryTotal > 0;
+    byId('first-memory-add').textContent = state.workspace ? 'Add your first memory' : 'Create your first workspace';
   }
 
   async function loadToday(workspace, epoch) {
@@ -1135,13 +1229,24 @@
     });
   }
 
+  const processingControls = window.EngraphisProcessingControls.create(api);
+
   async function selectWorkspace(name) {
     if (!name) return;
     invalidateConsolidationReview();
     const epoch = ++state.refreshEpoch;
     invalidateScopedRequests();
+    window.clearTimeout(librarySearchTimer);
+    state.libraryCursors = [null];
+    state.libraryPage = 0;
+    state.libraryNextCursor = null;
+    state.libraryTotal = 0;
+    state.memories = [];
+    renderLibrary();
+    renderLibraryPaging();
     closeGraphConnections();
     state.workspace = name;
+    void processingControls.selectWorkspace(name);
     state.graphWorkspace = '';
     state.graphData = null;
     state.graphDataPreset = 'galaxy';
@@ -1211,15 +1316,7 @@
   }
 
   function filteredMemories() {
-    const filterEl = byId('library-filter');
-    const typeEl = byId('library-type');
-    const filter = filterEl ? filterEl.value.trim().toLowerCase() : '';
-    const type = typeEl ? typeEl.value : '';
-    return state.memories.filter(memory => {
-      const matchesText = !filter || `${memory.title || ''} ${memory.content || ''} ${memory.summary || ''}`
-        .toLowerCase().includes(filter);
-      return matchesText && (!type || memoryType(memory) === type);
-    });
+    return state.memories;
   }
 
   function renderLibrary() {
@@ -1243,9 +1340,14 @@
     }
     target.replaceChildren();
     const memories = filteredMemories();
-    byId('library-count').textContent = `${memories.length.toLocaleString()} ${memories.length === 1 ? 'memory' : 'memories'}`;
+    const total = state.libraryTotal;
+    const start = state.libraryPage * 100 + (memories.length ? 1 : 0);
+    byId('library-count').textContent = total > memories.length
+      ? `${start.toLocaleString()}–${(start + memories.length - 1).toLocaleString()} of ${total.toLocaleString()} memories`
+      : `${total.toLocaleString()} ${total === 1 ? 'memory' : 'memories'}`;
     if (!memories.length) {
-      target.append(empty(state.memories.length ? 'No memories match these filters.' : 'No active memories in this workspace.'));
+      target.append(empty(byId('library-filter').value.trim() || byId('library-type').value
+        ? 'No memories match these filters.' : 'No active memories in this workspace. Add a fact or import local documents to begin.'));
       return;
     }
     memories.forEach(memory => target.append(memoryCard(memory)));
@@ -1277,9 +1379,11 @@
       if (!memory || state.selectedMemory !== id) return;
       state.editorMemory = memory;
       target.replaceChildren();
+      const title = node('h2', '', memory.title || memory.id || 'Untitled memory');
+      title.id = 'memory-detail-title';
       target.append(
         node('p', 'eyebrow', `${memoryType(memory)} · ${memory.scope || 'workspace'}`),
-        node('h2', '', memory.title || memory.id || 'Untitled memory'),
+        title,
         node('p', '', memory.content || memory.summary || 'No content.'),
         memoryMeta(memory),
         definitionList([
@@ -1380,6 +1484,9 @@
   async function saveMemory(event) {
     event.preventDefault();
     const current = state.editorMemory;
+    let savedId = current && current.id;
+    const workspace = state.workspace;
+    const epoch = state.refreshEpoch;
     const title = byId('editor-memory-title').value.trim();
     const memoryTypeValue = byId('editor-memory-type').value;
     const content = byId('editor-memory-content').value.trim();
@@ -1406,8 +1513,9 @@
         if (content !== (current.content || current.summary || '')) {
           const corrected = await api('/correct', {
             method: 'POST',
-            body: { id: current.id, workspace: state.workspace, content, reason: 'revised in Ledger' },
+            body: { id: current.id, workspace, content, reason: 'revised in Ledger' },
           });
+          savedId = corrected.id;
           // A correction intentionally creates a replacement.  The core inherits the
           // source importance; carry any label edits to that replacement rather than
           // accidentally applying them to the historical source record.
@@ -1417,7 +1525,7 @@
               method: 'POST',
               body: {
                 id: corrected.id,
-                workspace: state.workspace,
+                workspace,
                 title,
                 memory_type: memoryTypeValue,
                 importance,
@@ -1430,19 +1538,21 @@
             method: 'POST',
             body: {
               id: current.id,
-              workspace: state.workspace,
+              workspace,
               title,
               memory_type: memoryTypeValue,
               importance,
             },
           });
         }
-        showNotice('Memory revision recorded with temporal history preserved.');
+        if (workspace === state.workspace && epoch === state.refreshEpoch) {
+          showNotice('Memory revision recorded with temporal history preserved.');
+        }
       } else {
-        await api('/remember', {
+        const saved = await api('/remember', {
           method: 'POST',
           body: {
-            workspace: state.workspace,
+            workspace,
             content,
             title,
             mtype: memoryTypeValue,
@@ -1452,12 +1562,17 @@
             trusted: true,
           },
         });
-        showNotice('Memory saved locally.');
+        savedId = saved && saved.id;
+        if (workspace === state.workspace && epoch === state.refreshEpoch) {
+          showNotice('Memory saved locally. Review its source before approving it for model context.');
+        }
       }
+      if (workspace !== state.workspace || epoch !== state.refreshEpoch) return;
       closeEditor();
-      await selectWorkspace(state.workspace);
+      await selectWorkspace(workspace);
+      if (savedId && workspace === state.workspace && state.refreshEpoch === epoch + 1) await selectMemory(savedId);
     } catch (error) {
-      showNotice(`Could not save memory: ${error.message}`);
+      if (workspace === state.workspace && epoch === state.refreshEpoch) showNotice(`Could not save memory: ${error.message}`);
     }
   }
 
@@ -1985,29 +2100,31 @@
     const k = number(byId('ask-k').value) || 5;
     byId('answer-panel').replaceChildren(empty('Searching, checking support and building citations…'));
     byId('retrieval-list').replaceChildren(empty('Retrieving candidate memories…'));
-    try {
-      const [answer, retrieval] = await Promise.all([
-        api('/answer', {
-          method: 'POST',
-          body: { query: question, workspace, k: Math.max(8, k), max_citations: k },
-        }),
-        // The dashboard /recall route is deliberately read-only (reinforce=False).
-        // Keep it alongside /answer for uncited raw candidates without a second
-        // reinforcement of the memories that answer already cited.
-        api(`/recall?q=${encodeURIComponent(question)}&${query(workspace)}&k=${Math.max(8, k)}`),
-      ]);
+    const showFailure = (id, label, error) => {
       if (!isCurrentScopedRequest(request)) return;
-      renderAnswer(answer);
-      const target = byId('retrieval-list');
-      target.replaceChildren();
-      const memories = retrieval.memories || [];
-      if (!memories.length) target.append(empty('No raw candidates were returned.'));
-      else memories.forEach(memory => target.append(simpleMemoryCard(memory)));
-    } catch (error) {
-      if (!isCurrentScopedRequest(request)) return;
-      byId('answer-panel').replaceChildren(empty(`Grounded Ask is unavailable: ${error.message}`));
-      byId('retrieval-list').replaceChildren(empty('Raw retrieval did not complete.'));
-    }
+      byId(id).replaceChildren(empty(`${label} is unavailable: ${error.message}`));
+    };
+    // Render each result as soon as it arrives. The optional raw preview must never
+    // hide a grounded answer, including when one response stalls until its deadline.
+    await Promise.allSettled([
+      api('/answer', {
+        method: 'POST', signal: request.signal,
+        body: { query: question, workspace, k: Math.max(8, k), max_citations: k },
+      }).then(answer => {
+        if (isCurrentScopedRequest(request)) renderAnswer(answer);
+      }).catch(error => showFailure('answer-panel', 'Grounded Ask', error)),
+      // /recall is read-only (reinforce=False): uncited candidates add no second
+      // reinforcement of memories cited by the grounded answer.
+      api(`/recall?q=${encodeURIComponent(question)}&${query(workspace)}&k=${Math.max(8, k)}`,
+        { signal: request.signal }).then(retrieval => {
+        if (!isCurrentScopedRequest(request)) return;
+        const target = byId('retrieval-list');
+        target.replaceChildren();
+        const memories = retrieval.memories || [];
+        if (!memories.length) target.append(empty('No raw candidates were returned.'));
+        else memories.forEach(memory => target.append(simpleMemoryCard(memory)));
+      }).catch(error => showFailure('retrieval-list', 'Raw retrieval', error)),
+    ]);
   }
 
   function graphCommunityIndex(value) {
@@ -4559,6 +4676,9 @@
       select.disabled = true;
       setConnection('Local engine connected · no workspace');
       state.workspace = '';
+      state.stats = {};
+      state.libraryTotal = 0;
+      renderFirstMemoryJourney();
       renderWorkspaceNames();
       renderWorkspaceList();
       renderMetricValues({ memories: 0, total_rows: 0, workspaces: 0, sessions: 0 });
@@ -4595,7 +4715,10 @@
     } catch (_) {}
     applyTheme(theme);
     try {
-      await refreshBootstrap();
+      const entry = new URL(location.href);
+      // Classic links to this workspace's approval controls. Bootstrap still
+      // validates the name against the authorized workspace list.
+      await refreshBootstrap(entry.searchParams.get('workspace') || '');
       let view = 'today';
       try {
         const saved = localStorage.getItem('engraphis-ledger-view');
@@ -4603,6 +4726,9 @@
       } catch (_) {}
       const urlView = new URL(location.href).searchParams.get('view');
       switchView(['today', 'ask', 'library', 'relations', 'provenance', 'manage'].includes(urlView) ? urlView : view, { pushHistory: false });
+      if (urlView === 'manage' && entry.searchParams.get('tab') === 'settings') {
+        switchManageTab('settings');
+      }
     } catch (error) {
       if (error.status === 401 && await authenticateBrowser()) {
         location.reload();
@@ -4665,8 +4791,27 @@
 
   byId('workspace-select').addEventListener('change', event => selectWorkspace(event.target.value));
   byId('ask-form').addEventListener('submit', askMemory);
-  byId('library-filter').addEventListener('input', renderLibrary);
-  byId('library-type').addEventListener('change', renderLibrary);
+  byId('library-filter').addEventListener('input', () => {
+    window.clearTimeout(librarySearchTimer);
+    // Invalidate immediately: an earlier query must not paint while the new one debounces.
+    beginScopedRequest('library');
+    librarySearchTimer = window.setTimeout(() => refreshLibrary(), 250);
+  });
+  byId('library-type').addEventListener('change', () => refreshLibrary());
+  byId('library-previous').addEventListener('click', () => refreshLibrary(state.libraryPage - 1));
+  byId('library-next').addEventListener('click', () => refreshLibrary(state.libraryPage + 1));
+  byId('library-refresh').addEventListener('click', () => refreshLibrary());
+  byId('first-memory-add').addEventListener('click', () => {
+    if (!state.workspace) {
+      switchView('manage');
+      switchManageTab('workspaces');
+      byId('create-workspace-form').hidden = false;
+      byId('new-workspace-name').focus();
+      return;
+    }
+    switchView('library');
+    openEditor();
+  });
   byId('new-memory-button').addEventListener('click', () => openEditor());
   byId('editor-close').addEventListener('click', closeEditor);
   byId('editor-cancel').addEventListener('click', closeEditor);

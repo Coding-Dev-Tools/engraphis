@@ -3048,10 +3048,10 @@ def test_apply_bundle_rolls_back_a_failed_inflight_store_write(monkeypatch):
     monkeypatch.setattr(sync_mod, "APPLY_BATCH", 2)
     real_fts_upsert = store._fts_upsert
 
-    def exploding_fts_upsert(mid, title, content, keywords):
+    def exploding_fts_upsert(mid, title, content, keywords, **kwargs):
         if mid == "mem_2":
             raise RuntimeError("fts on fire")
-        return real_fts_upsert(mid, title, content, keywords)
+        return real_fts_upsert(mid, title, content, keywords, **kwargs)
 
     monkeypatch.setattr(store, "_fts_upsert", exploding_fts_upsert)
     with pytest.raises(RuntimeError, match="fts on fire"):

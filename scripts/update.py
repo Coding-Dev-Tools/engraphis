@@ -595,7 +595,12 @@ def _git_update(check_only: bool = False) -> None:
         print("Nothing to update.")
         return
 
+    # Resolve intent before switching the source tree, since an older release may
+    # not contain the installation-profile module used by this updater.
+    editable_extras = _installed_extras()
+    install_target = str(project_dir) + editable_extras
     print(f"Update available: {local[:8]} -> {remote_sha[:8]} ({tag})")
+    print(f"Editable install target: {install_target}")
     if check_only:
         return
 
@@ -628,7 +633,7 @@ def _git_update(check_only: bool = False) -> None:
         stage = "reinstall"
         print(f"Reinstalling from {project_dir}...")
         _run(
-            [sys.executable, "-m", "pip", "install", "-e", str(project_dir)],
+            [sys.executable, "-m", "pip", "install", "-e", install_target],
             "Reinstalling the editable checkout",
             _PIP_INSTALL_TIMEOUT_S,
             check=True,
@@ -649,7 +654,7 @@ def _git_update(check_only: bool = False) -> None:
         manual = "Run `%s` and `%s` to restore the previous installation." % (
             subprocess.list2cmdline([git, "-C", str(project_dir), "checkout", original_ref]),
                 subprocess.list2cmdline(
-                    [sys.executable, "-m", "pip", "install", "-e", str(project_dir)]
+                    [sys.executable, "-m", "pip", "install", "-e", install_target]
                 ),
             )
         try:
@@ -662,7 +667,7 @@ def _git_update(check_only: bool = False) -> None:
                 env=_git_env(),
             )
             _run(
-                [sys.executable, "-m", "pip", "install", "-e", str(project_dir)],
+                [sys.executable, "-m", "pip", "install", "-e", install_target],
                 "Reinstalling the previous checkout",
                 _PIP_INSTALL_TIMEOUT_S,
                 check=True,
@@ -683,13 +688,13 @@ def _git_update(check_only: bool = False) -> None:
     print(f"Updated to {tag}.")
 
 
-def _installed_extras() -> str:
+def _explicit_installation_extras() -> Optional[str]:
     """Return a safe extras suffix for update targets.
 
     Wheel metadata records which extras *could* install a requirement, not which
     extras the user selected. Treating every ``extra ==`` marker as installed
     therefore turned a core or server install into an arbitrary combination of
-    extras. Use the explicit override when supplied; otherwise install ``all`` so an
+    extras. Use the explicit override, then the setup profile; otherwise install ``all`` so an
     update never silently drops an existing optional surface. Set
     ``ENGRAPHIS_UPDATE_EXTRAS=none`` for a deliberate base-only update.
     """
@@ -704,12 +709,22 @@ def _installed_extras() -> str:
                 "ENGRAPHIS_UPDATE_EXTRAS must be a comma-separated list of package extras or 'none'"
             )
         return "[" + ",".join(sorted(set(names))) + "]"
-    return "[all]"
+    from scripts.installation_profile import read_profile
+    selected = read_profile()
+    if selected is not None:
+        return "[" + ",".join(selected) + "]" if selected else ""
+    return None
+
+
+def _installed_extras() -> str:
+    selected = _explicit_installation_extras()
+    return selected if selected is not None else "[all]"
 
 
 def _pip_update(method: str, check_only: bool = False) -> None:
     """Update a pip install (PyPI or git)."""
     extras = _installed_extras()
+    print(f"Update capabilities: {extras or 'base package only'}")
     if method == "git":
         git = shutil.which("git")
         remote = _installed_git_url()
@@ -764,6 +779,7 @@ def _pip_update(method: str, check_only: bool = False) -> None:
 def _pipx_update(check_only: bool = False) -> None:
     """Update a pipx install."""
     extras = _installed_extras()
+    print(f"Update capabilities: {extras or 'base package only'}")
     if check_only:
         target = "engraphis" + extras + (
             "==" + LATEST_TAG[1:] if LATEST_TAG else ""

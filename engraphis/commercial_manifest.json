@@ -14,14 +14,23 @@
   "trial": {
     "days": 3,
     "card_required": false,
-    "plans": ["pro", "team"]
+    "plans": [
+      "pro",
+      "team"
+    ],
+    "days_by_plan": {
+      "pro": 3,
+      "team": 10
+    }
   },
   "entitlement_lifecycle": {
     "max_grace_hours": 24,
     "grace_mode": "workspace_write_grace",
     "enforced_by": "private_control_plane",
     "grace_for": "already_authorized_hosted_accounts",
-    "grace_allows": ["authenticated_existing_user_hosted_account_continuity"],
+    "grace_allows": [
+      "authenticated_existing_user_hosted_account_continuity"
+    ],
     "live_authorization_still_required_for": [
       "paid_or_cost_bearing_features",
       "hosted_mcp_or_agent_writes"

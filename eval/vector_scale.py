@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+from pathlib import Path
 import platform
 import statistics
 import sys
@@ -198,8 +199,52 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--k", type=int, default=10)
     parser.add_argument("--seed", type=int, default=20260731)
     parser.add_argument("--backend", choices=BACKENDS, default="numpy")
+    parser.add_argument("--file-backed", action="store_true",
+                        help="Measure disposable persistent storage and a concurrency matrix.")
+    parser.add_argument("--concurrencies", default="1,4,16")
+    parser.add_argument("--mixed-writes", type=int, default=4)
+    parser.add_argument("--batch-size", type=int, default=500)
+    parser.add_argument("--tenants", type=int, default=4)
+    parser.add_argument("--output", help="Immutable redacted evidence artifact (file-backed mode).")
+    parser.add_argument("--progress", action="store_true",
+                        help="Emit content-free corpus/cell progress on stderr.")
     parser.add_argument("--json", action="store_true", help="print the complete JSON report")
     args = parser.parse_args(argv)
+    if args.file_backed:
+        from eval.vector_scale_storage import run_file_backed, write_scale_checkpoint
+
+        checkpoint_path = Path(str(args.output) + ".checkpoint.json") if args.output else None
+        if args.output and (Path(args.output).exists() or checkpoint_path.exists()):
+            parser.error("choose a new output path; an artifact or checkpoint already exists")
+
+        report = run_file_backed(
+            parse_sizes(args.sizes), dim=args.dim, queries=args.queries,
+            iterations=args.iterations, warmups=args.warmups, k=args.k,
+            seed=args.seed, backend=args.backend,
+            concurrencies=parse_sizes(args.concurrencies), mixed_writes=args.mixed_writes,
+            batch_size=args.batch_size, tenants=args.tenants,
+            progress=(lambda event: print(json.dumps(event), file=sys.stderr, flush=True))
+            if args.progress else None,
+            checkpoint=(lambda payload: write_scale_checkpoint(checkpoint_path, payload))
+            if checkpoint_path else None,
+        )
+        if args.output:
+            from eval.benchmark import write_canonical_artifact
+
+            written = write_canonical_artifact(report, args.output)
+            if checkpoint_path:
+                write_scale_checkpoint(checkpoint_path, {
+                    "schema": "engraphis-scale-checkpoint/v1", "status": "complete",
+                    "artifact": Path(args.output).name, "sha256": written["sha256"],
+                })
+            print(json.dumps({"sha256": written["sha256"],
+                              "cells": len(report["metrics"]["cells"]),
+                              "source_stable": report["metrics"]["source_stable"]}))
+        else:
+            print(json.dumps(report, indent=2))
+        return 0 if report["metrics"]["source_stable"] else 1
+    if args.output:
+        parser.error("--output requires --file-backed")
     report = run(
         parse_sizes(args.sizes),
         dim=args.dim,

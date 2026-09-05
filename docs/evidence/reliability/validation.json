@@ -1,0 +1,542 @@
+{
+  "schema": "engraphis-reliability-validation/v1",
+  "prepared_date": "2026-09-05",
+  "status": "reviewed PR candidate; release and deployment approval remain separate",
+  "source_manifest": "source-manifest.json",
+  "source_boundary": "Initial PR review checkpoint. The complete public suite in public-pr-source-final.json is bound to its original before/after source hashes. Later fixes use explicit source overlays and their own validation, rather than rebinding old results. Report/evidence files are assembled separately. Results overlap and must not be added into a unique-test total.",
+  "environment": {
+    "os": "Windows 11 build 26100",
+    "python": "3.12.10",
+    "sqlite": "3.49.1",
+    "numpy": "2.4.5",
+    "fastapi": "0.141.1",
+    "mcp": "1.29.0",
+    "pydantic": "2.13.4",
+    "pytest": "9.0.3",
+    "ruff": "0.16.4",
+    "pyright": "1.1.411",
+    "offline_environment": {
+      "ENGRAPHIS_EXTRACTOR": "none"
+    },
+    "native_backend": "sqlite-vec 0.1.9, isolated temporary installation"
+  },
+  "checks": [
+    {
+      "id": "public-full-suite",
+      "repository": "engraphis",
+      "command": "python -m pytest tests/ -q",
+      "passed": 4649,
+      "failed": 5,
+      "skipped": 40,
+      "warnings": 2,
+      "seconds": 384.32,
+      "result": "failures corrected and all five rerun successfully; not a clean monolithic run",
+      "failures": [
+        "tests/test_benchmark_evidence.py::test_public_facing_docs_do_not_use_em_dashes",
+        "tests/test_commercial_hardening.py::test_both_dashboard_bundles_strip_control_characters_before_the_scheme_test",
+        "tests/test_dashboard_v2.py::test_classic_dashboard_script_mirrors_the_static_compatibility_asset",
+        "tests/test_graph_engine_asset.py::test_classic_dashboard_copies_share_the_canonical_route_gate",
+        "tests/test_graph_engine_asset.py::test_classic_graph_hides_implicit_co_occurrence_edge_labels"
+      ],
+      "correction": "Removed a forbidden em dash from the proposal and synchronized Classic compatibility assets/cache references.",
+      "superseded_by": "public-final-complete-suite"
+    },
+    {
+      "id": "public-failure-rerun",
+      "repository": "engraphis",
+      "command": "python -m pytest tests/ --lf -q -o addopts='--strict-markers'",
+      "passed": 5,
+      "failed": 0,
+      "result": "passed at the corrective checkpoint; --lf is cache-dependent, use the five explicit node IDs above to reproduce later"
+    },
+    {
+      "id": "graph-regression",
+      "repository": "engraphis",
+      "command": "python -m pytest tests/test_graph_engine_asset.py -q",
+      "passed": 238,
+      "failed": 0,
+      "seconds": 70.4
+    },
+    {
+      "id": "offline-evaluation",
+      "repository": "engraphis",
+      "artifact": "offline-gates.json",
+      "passed_commands": 7,
+      "result": "passed",
+      "boundary": "deterministic authored fixtures; not independent semantic or agent-task evidence"
+    },
+    {
+      "id": "storage-fts-scale",
+      "repository": "engraphis",
+      "passed": 443,
+      "skipped": 4,
+      "failed": 0,
+      "result": "passed",
+      "boundary": "worker's focused storage/sync/security/scale collection after FTS insertion change"
+    },
+    {
+      "id": "native-fts-focused",
+      "repository": "engraphis",
+      "passed": 24,
+      "skipped": 1,
+      "failed": 0,
+      "result": "passed",
+      "boundary": "isolated sqlite-vec 0.1.9; intentional FTS-fallback skip"
+    },
+    {
+      "id": "pi-integration-unit",
+      "repository": "engraphis/integrations/pi",
+      "command": "npm test",
+      "passed": 21,
+      "failed": 0,
+      "result": "passed"
+    },
+    {
+      "id": "pi-integration-restart",
+      "repository": "engraphis/integrations/pi",
+      "command": "npm run test:integration",
+      "passed": 1,
+      "failed": 0,
+      "result": "passed",
+      "boundary": "real MCP process, isolated temporary database; save, close process, reopen, recall with sources"
+    },
+    {
+      "id": "pi-type-package",
+      "repository": "engraphis/integrations/pi",
+      "commands": [
+        "npm run typecheck",
+        "npm run pack:check"
+      ],
+      "result": "passed"
+    },
+    {
+      "id": "prime-integration",
+      "repository": "engraphis/integrations/prime_agent",
+      "command": "python -m pytest tests/ -q",
+      "passed": 136,
+      "skipped": 1,
+      "failed": 0,
+      "result": "passed"
+    },
+    {
+      "id": "browser-ledger-and-journey",
+      "repository": "engraphis",
+      "command": "npx playwright test tests/e2e/ledger.spec.js tests/e2e/workspace-smoke.spec.js",
+      "passed": 47,
+      "failed": 2,
+      "total": 49,
+      "result": "two ambiguous locators fixed; targeted five-case rerun passed",
+      "boundary": "Chromium coverage plus real save/recall/correct/history/reload journeys on Firefox and WebKit on Windows; isolated local test token and database"
+    },
+    {
+      "id": "browser-corrective-rerun",
+      "repository": "engraphis",
+      "passed": 5,
+      "failed": 0,
+      "result": "passed"
+    },
+    {
+      "id": "browser-processing-controls",
+      "repository": "engraphis",
+      "passed": 4,
+      "failed": 0,
+      "result": "passed",
+      "boundary": "fixture-backed cloud acknowledgements; waiting, optout retry, stale workspace and failure states"
+    },
+    {
+      "id": "trial-api-regression",
+      "repository": "engraphis",
+      "passed": 35,
+      "failed": 0,
+      "result": "passed",
+      "boundary": "canonical days_by_plan additive API and compatible legacy fields"
+    },
+    {
+      "id": "trial-browser-regression",
+      "repository": "engraphis",
+      "passed": 4,
+      "failed": 0,
+      "result": "passed",
+      "boundary": "Team 10, Pro 3, billing cadence, unknown-duration fallback"
+    },
+    {
+      "id": "website",
+      "repository": "engraphis.com",
+      "command": "npm test",
+      "passed": 24,
+      "failed": 0,
+      "result": "passed",
+      "boundary": "source tests; existing website work preserved; unpublished"
+    },
+    {
+      "id": "cloud-first-complete-suite",
+      "repository": "engraphis-cloud",
+      "command": "python -m pytest tests/ -q",
+      "passed": 1150,
+      "skipped": 2,
+      "failed": 0,
+      "result": "passed before final policy-revision race tests; final run recorded separately",
+      "superseded_by": "cloud-final-complete-suite"
+    },
+    {
+      "id": "edge-runtime",
+      "repository": "engraphis-cloud/team_edge",
+      "command": "npm test",
+      "passed": 12,
+      "failed": 0,
+      "result": "passed",
+      "boundary": "nine unit checks plus three actual workerd runtime checks; no production bindings or rotation verified"
+    },
+    {
+      "id": "edge-typecheck",
+      "repository": "engraphis-cloud/team_edge",
+      "command": "npm run typecheck",
+      "result": "passed"
+    },
+    {
+      "id": "public-policy-race-final",
+      "repository": "engraphis",
+      "command": "python -m pytest tests/test_managed_processing_policy.py tests/test_cloud_features.py -q -o addopts= --tb=short",
+      "passed": 48,
+      "failed": 0,
+      "seconds": 3.68,
+      "result": "passed",
+      "boundary": "required remote revision, local intent guards, delayed GET/PUT, optout-only conflict retry"
+    },
+    {
+      "id": "cross-repository-processing",
+      "repository": "engraphis-cloud",
+      "command": "python scripts/check_processing_policy_compatibility.py --public-checkout ../engraphis",
+      "passed": 3,
+      "failed": 0,
+      "result": "passed",
+      "boundary": "actual public client/local API and private compute API using generated test keys/disposable databases and in-process ASGI transport; no production network"
+    },
+    {
+      "id": "cloud-final-complete-suite",
+      "repository": "engraphis-cloud",
+      "command": "python -m pytest tests -q -o addopts= --tb=short",
+      "passed": 1155,
+      "skipped": 2,
+      "failed": 0,
+      "warnings": 8,
+      "seconds": 287.32,
+      "result": "passed",
+      "boundary": "includes policy revision races and expiry pre-read/pre-publication/scheduler/API regressions; two isolated-PostgreSQL integration gates skipped"
+    },
+    {
+      "id": "integrated-final-static",
+      "repository": "engraphis",
+      "commands": [
+        "ruff check .",
+        "pyright",
+        "python scripts/export_mcp_contract.py --check",
+        "python scripts/externalize_dashboard_assets.py",
+        "python scripts/check_commercial_manifest.py --website-root ../engraphis.com --cloud-contract <secret-free-cloud-export.json>"
+      ],
+      "result": "passed",
+      "boundary": "contract generation emitted one Pydantic IncompleteFieldDefinitionWarning; exit code was zero"
+    },
+    {
+      "id": "integrated-correctness",
+      "repository": "engraphis",
+      "command": "python -m pytest tests/test_resolver_acceptance.py tests/test_context_evidence_preservation.py tests/test_memory_browsing.py tests/test_storage_concurrency_repair.py -q -o addopts= --tb=short",
+      "passed": 65,
+      "failed": 0,
+      "seconds": 6.03,
+      "result": "passed"
+    },
+    {
+      "id": "resolver-evidence",
+      "repository": "engraphis",
+      "artifacts": [
+        "resolver-unit-20260905.json",
+        "resolver-write-acceptance-20260905.json"
+      ],
+      "result": "passed",
+      "boundary": "44 resolver unit pairs inject similarity; 10 real-write pairs do not. Both report zero false NOOPs/false invalidations; authored fixtures, not held-out semantic quality."
+    },
+    {
+      "id": "pi-final-process-restart",
+      "repository": "engraphis/integrations/pi",
+      "command": "npm run test:integration",
+      "passed": 1,
+      "failed": 0,
+      "seconds": 5.37,
+      "result": "passed"
+    },
+    {
+      "id": "final-storage-native-checkpoint",
+      "repository": "engraphis",
+      "passed": 494,
+      "skipped": 3,
+      "failed": 0,
+      "seconds": 21.03,
+      "result": "passed",
+      "boundary": "Store/sync/NumPy/native/FTS/checkpoint/method-ablation/snapshot checks on frozen final storage implementation; Ruff/Pyright and whitespace passed"
+    },
+    {
+      "id": "public-final-source-complete-before-trial-test-correction",
+      "repository": "engraphis",
+      "command": "python -m pytest tests/ -q --tb=short",
+      "passed": 4718,
+      "failed": 16,
+      "skipped": 37,
+      "warnings": 2,
+      "seconds": 448.2978430999792,
+      "result": "all 16 failures reproduced immediately; obsolete test harnesses/assertions corrected, both complete modules now pass",
+      "artifact": "public-complete-source-before-trial-test-correction.json",
+      "count_method": "Counted all 4771 outcome symbols across all 67 complete pytest progress lines; double quiet mode suppressed final totals. No other progress lines or error/xfail symbols.",
+      "boundary": "Frozen final production source, isolated sqlite-vec 0.1.9; obsolete trial test extraction/expected templates only.",
+      "superseded_by": "public-final-complete-suite"
+    },
+    {
+      "id": "final-scale-matrix",
+      "repository": "engraphis",
+      "artifacts": [
+        "vector-scale-numpy-corrected-20260905.json",
+        "vector-scale-sqlite-vec-corrected-20260905.json",
+        "vector-scale-summary-20260905.md"
+      ],
+      "result": "both backends completed all six cells with exact matching result IDs, durable mixed writes and reopen; native rebuild passed",
+      "cells": 12,
+      "boundary": "10k/100k synthetic precomputed 256-dimensional vectors, 25 percent scoped eligibility, concurrency 1/4/16, 32 timed search samples per cell; index/store measurements, not full agent/semantic results. Native reopen and concurrent search remain substantial costs; 5 percent scope diagnostic regression retained."
+    },
+    {
+      "id": "trial-test-harness-reproduction",
+      "repository": "engraphis",
+      "command": "python -m pytest -o addopts='' tests/test_dashboard_auth_placement.py tests/test_pro_cta.py -q",
+      "passed": 34,
+      "failed": 16,
+      "result": "all 16 prior failures reproduced before edits"
+    },
+    {
+      "id": "trial-test-harness-corrected",
+      "repository": "engraphis",
+      "command": "python -m pytest -o addopts='' tests/test_dashboard_auth_placement.py tests/test_pro_cta.py -q",
+      "passed": 52,
+      "failed": 0,
+      "result": "passed",
+      "boundary": "Only these two test modules changed. Extracted JS now includes the real helper; two added tests each exercise seven duration payloads against the real Classic and Ledger helpers. Production source unchanged."
+    },
+    {
+      "id": "trial-correction-adjacent-regression",
+      "repository": "engraphis",
+      "passed": 35,
+      "deselected": 114,
+      "failed": 0,
+      "result": "passed"
+    },
+    {
+      "id": "trial-correction-asset-buttons",
+      "repository": "engraphis",
+      "passed": 22,
+      "failed": 0,
+      "result": "passed"
+    },
+    {
+      "id": "evidence-integrity",
+      "repository": "engraphis",
+      "result": "passed",
+      "checksum_receipts_verified": 11,
+      "paired_scale_cells_verified": 12,
+      "boundary": "SHA-256 receipts verified and corresponding size/concurrency/result-ID hashes compared; source hashes are retained in each benchmark report."
+    },
+    {
+      "id": "offline-evaluation-final-source",
+      "repository": "engraphis",
+      "artifact": "offline-gates-final.json",
+      "passed_commands": 7,
+      "failed_commands": 0,
+      "seconds": 5.639012700004969,
+      "result": "passed",
+      "boundary": "Every required offline evaluation gate rerun on stable final core/backend/eval source with before/after SHA-256 maps; deterministic authored fixtures only."
+    },
+    {
+      "id": "public-final-complete-suite",
+      "repository": "engraphis",
+      "command": "python -m pytest tests/ -q -o addopts= --tb=short --junitxml <temporary-output.xml>",
+      "passed": 4736,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 37,
+      "total": 4773,
+      "warnings": 2,
+      "seconds": 372.44,
+      "wrapper_elapsed_seconds": 380.7047358000418,
+      "result": "passed",
+      "artifact": "public-complete-source-final.json",
+      "boundary": "All final public production/test source stable throughout; native sqlite-vec 0.1.9 available in isolated installation. Final documentation/evidence assembly excluded from source snapshot."
+    },
+    {
+      "id": "pr-core-review",
+      "repository": "engraphis",
+      "result": "approved after three reproduced defects were fixed",
+      "artifact": "pr-review.json",
+      "boundary": "Packing/source bindings, atomic native batch publication and 12000-memory graph-window regression. Focused runs overlap."
+    },
+    {
+      "id": "pr-public-before-contract-correction",
+      "repository": "engraphis",
+      "passed": 4750,
+      "failed": 2,
+      "skipped": 37,
+      "warnings": 2,
+      "seconds": 392.47,
+      "artifact": "public-pr-source-before-contract-correction.json",
+      "result": "two obsolete consent/caching expectations reproduced in isolation and corrected; superseded by clean full rerun",
+      "superseded_by": "pr-public-complete"
+    },
+    {
+      "id": "pr-public-complete",
+      "repository": "engraphis",
+      "command": "python -m pytest tests/ -q -o addopts= --tb=short --junitxml <temporary-output.xml>",
+      "passed": 4752,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 37,
+      "total": 4789,
+      "warnings": 2,
+      "seconds": 386.98,
+      "wrapper_elapsed_seconds": 395.1142165000201,
+      "artifact": "public-pr-source-final.json",
+      "result": "passed",
+      "boundary": "Final production and test source stable throughout; sqlite-vec 0.1.9 isolated installation."
+    },
+    {
+      "id": "pr-offline-complete",
+      "repository": "engraphis",
+      "artifact": "offline-gates-pr-final.json",
+      "passed_commands": 7,
+      "failed_commands": 0,
+      "result": "passed",
+      "boundary": "Stable final core/backend/eval source; deterministic authored fixtures, not held-out task evidence."
+    },
+    {
+      "id": "pr-ui-review",
+      "repository": "engraphis",
+      "passed": 119,
+      "failed": 0,
+      "result": "passed",
+      "browser_chromium": 9,
+      "boundary": "MCP budgets, Classic consent and workspace-specific settings; targeted review cases."
+    },
+    {
+      "id": "pr-integration-final",
+      "repository": "engraphis",
+      "result": "passed",
+      "pi_unit": 21,
+      "pi_restart": 1,
+      "pi_typescript_and_package": "passed",
+      "prime_passed": 136,
+      "prime_skipped": 1
+    },
+    {
+      "id": "pr-cloud-complete",
+      "repository": "engraphis-cloud",
+      "passed": 1157,
+      "failed": 0,
+      "skipped": 2,
+      "warnings": 8,
+      "seconds": 216.66,
+      "result": "passed",
+      "boundary": "Private proof remains in its repository; SQLite concurrency, migration, authorization and cleanup; PostgreSQL tests skipped."
+    },
+    {
+      "id": "pr-edge-final",
+      "repository": "engraphis-cloud/team_edge",
+      "passed": 13,
+      "failed": 0,
+      "actual_workerd_included": 4,
+      "typescript": "passed",
+      "dependency_audit": "zero vulnerabilities at review time",
+      "result": "passed",
+      "boundary": "Repeated after restoring original line endings. No production binding/rotation verification."
+    },
+    {
+      "id": "pr-website-review",
+      "repository": "engraphis.com",
+      "unit_passed": 24,
+      "browser_chromium_axe_passed": 11,
+      "result": "local gates passed",
+      "boundary": "Existing remote canonical-main manifest gate requires public change to merge first; website is a dependent draft."
+    },
+    {
+      "id": "pr-static-contracts",
+      "repository": "engraphis",
+      "commands": [
+        "ruff check .",
+        "pyright",
+        "python scripts/export_mcp_contract.py --check",
+        "python scripts/externalize_dashboard_assets.py",
+        "python scripts/check_commercial_manifest.py --website-root ../engraphis.com --cloud-contract <secret-free-cloud-export.json>"
+      ],
+      "result": "passed"
+    },
+    {
+      "id": "pr-scale-source-binding",
+      "repository": "engraphis",
+      "artifact": "pr-benchmark-source-check.json",
+      "result": "passed",
+      "source_files_per_backend": 9,
+      "paired_cells": 12,
+      "boundary": "All measured storage/index source files still exactly match the completed benchmark artifacts; unrelated review fixes do not imply new performance measurements."
+    }
+  ],
+  "pending": [],
+  "unverified": [
+    "paid model evaluations",
+    "independent held-out coding-agent corpus",
+    "full 100000-memory remember/recall agent workload",
+    "one-million stress track",
+    "production configuration, credential rotation and staging restore drill",
+    "PostgreSQL integration gates",
+    "complete supported Python/platform CI matrix and Docker smoke",
+    "target-user usability measurements",
+    "bounded pilot and operational ownership"
+  ],
+  "authorizations": {
+    "paid_runs_executed": false,
+    "deployments": false,
+    "merges": false,
+    "pushes": "authorized for reviewed PR branches; submission receipts are in GitHub",
+    "external_messages": false,
+    "tests_used_production_data": false,
+    "credential_rotation": false,
+    "pr_submission_authorized": true
+  },
+  "notes": [
+    "Skipped tests are not passes.",
+    "Browser engines were exercised on Windows; this is not macOS Safari or the full operating-system matrix.",
+    "Benchmark reports define their own source hashes, hardware, dataset and measurement boundaries. The incomplete baseline is retained as failed measurement evidence.",
+    "Optional cleanup of two cancelled-run synthetic temporary benchmark directories was blocked by automatic approval review with the stated reason 'blocked by policy'. No deletion occurred; exact paths/action are recorded in vector-scale-summary-20260905.md.",
+    "The initial combined PR complete run reports exact JUnit outcomes in public-pr-source-final.json, including its 37 skipped cases.",
+    "The initial combined PR suite followed two obsolete trial-UI assertion corrections. Subsequent GitHub feedback and platform CI repairs are recorded separately in source overlays.",
+    "All 16 historical noncurrent branches and one stash were reconciled; no unique recovery candidate remains. Private details stay private. Branches, stash and auxiliary worktree were preserved."
+  ],
+  "latest_results": {
+    "public_complete": "pr-public-complete",
+    "cloud_complete": "pr-cloud-complete",
+    "offline_gates": "pr-offline-complete",
+    "static_and_contracts": "pr-static-contracts",
+    "integrations": [
+      "pr-integration-final"
+    ],
+    "browser": [
+      "browser-ledger-and-journey",
+      "browser-corrective-rerun",
+      "browser-processing-controls",
+      "trial-browser-regression",
+      "pr-ui-review"
+    ],
+    "edge": "pr-edge-final",
+    "website": "pr-website-review",
+    "scale": "final-scale-matrix"
+  },
+  "source_overlays": [
+    "public-ci-test-isolation.json",
+    "pr-review-followup.json",
+    "operator-policy-review.json",
+    "browser-followup-review.json"
+  ]
+}
