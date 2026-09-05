@@ -1,0 +1,53 @@
+{
+  "schema": "engraphis-ci-followup/v1",
+  "date": "2026-09-05",
+  "parent_commit": "696aa07c8493c07e5c10c1fa60f2639b8ae45f57",
+  "initial_ci_run": "https://github.com/Coding-Dev-Tools/engraphis/actions/runs/33959397465",
+  "scope": "Two test-isolation corrections only; production sources are unchanged.",
+  "causes": [
+    "Fresh Settings instances bypass the session fixture and selected a model absent in the offline Linux CI environment.",
+    "HTTP-only policy tests imported optional FastAPI/httpx dependencies in the NumPy-only Python 3.9 job."
+  ],
+  "repairs": [
+    "Select empty ENGRAPHIS_EMBED_MODEL explicitly in the doctor test fixture. Preserve the explicit broken-model regression and strict production doctor.",
+    "Skip only HTTP cases when their optional stack is absent; keep core policy tests active on the minimum installation."
+  ],
+  "files": {
+    "tests/test_init.py": {
+      "sha256": "dc2d8ffc715007c57ef1bd299573ecba7dfe050d3c753117ee02ce8df3e67180",
+      "bytes": 14742
+    },
+    "tests/test_managed_processing_policy.py": {
+      "sha256": "d89a61d933a14d19a1be1f5488217a90cb2aa70030e8240d953fe2c432593ccf",
+      "bytes": 14604
+    }
+  },
+  "local_validation": {
+    "floor_before": "13 failed, 23 passed, 3 skipped",
+    "floor_after": "29 passed, 10 skipped",
+    "fullstack_after": "36 passed, 3 skipped",
+    "ruff": "pass",
+    "diff_check": "pass"
+  },
+  "environments": {
+    "floor": {
+      "python": "3.9.25",
+      "numpy": "2.0.2",
+      "pytest": "8.4.2",
+      "os": "Windows"
+    },
+    "full_stack": {
+      "python": "3.12",
+      "os": "Windows",
+      "http_policy_cases_run": 7
+    }
+  },
+  "initial_remote_evidence": {
+    "browser_scenarios_passed": 112,
+    "coverage_percent": 85.02,
+    "note": "Coverage and matrix jobs failed on the reproduced test setup cases; this is not a green complete run."
+  },
+  "prior_full_suite_receipt": "public-pr-source-final.json",
+  "binding": "This file is a source overlay on source-manifest.json for the two changed tests. Earlier complete-suite evidence remains bound to its original source bytes.",
+  "limitations": "Both local runs use Windows. POSIX-only permission tests were skipped. Remote Linux CI remains parent followup."
+}

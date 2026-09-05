@@ -245,7 +245,8 @@ def test_codemem_public_break_even_baseline_is_reproducible() -> None:
     }
     assert tight["methods"]["full_history"]["cumulative_query_context_tokens"] == 1180
     assert tight["methods"]["recency_window"]["cumulative_query_context_tokens"] == 1180
-    assert tight["methods"]["engraphis"]["cumulative_query_context_tokens"] == 1064
+    # Complete-unit omission no longer spends the final tokens on partial claims.
+    assert tight["methods"]["engraphis"]["cumulative_query_context_tokens"] == 1031
     assert roomy["methods"]["engraphis"]["cumulative_query_context_tokens"] == 1066
     for report in (tight, roomy):
         for method in report["methods"].values():
@@ -263,5 +264,5 @@ def test_codemem_public_break_even_baseline_is_reproducible() -> None:
             report["methods"]["engraphis"]["quality"]
             == report["methods"]["full_history"]["quality"]
         )
-    assert tight["engraphis_vs_full_history"]["break_even_query_count"] == 142
+    assert tight["engraphis_vs_full_history"]["break_even_query_count"] == 111
     assert roomy["engraphis_vs_full_history"]["break_even_query_count"] == 144

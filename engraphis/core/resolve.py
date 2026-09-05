@@ -160,6 +160,44 @@ def _canonical_env(tokens: set[str]) -> set[str]:
     return {_ENV_ALIASES.get(token, token) for token in tokens}
 
 
+def _has_reordered_environments(candidate_text: str, record_text: str) -> bool:
+    """Equal environment sets can still bind different environments to a subject.
+
+    ``staging database ... in production`` and ``production database ... in
+    staging`` have identical bags of words. Without a claim key, reordered
+    environment mentions are ambiguous and must preserve both writes.
+    """
+    def mentions(text: str) -> list[str]:
+        tokens = (match.group(0) for match in re.finditer(r"\w+", text.casefold()))
+        return [
+            _ENV_ALIASES.get(token, token)
+            for token in tokens
+            if token in _ENV_QUALIFIERS
+        ]
+
+    candidate, record = mentions(candidate_text), mentions(record_text)
+    return len(set(candidate)) > 1 and set(candidate) == set(record) and candidate != record
+
+
+def _only_environment_title_order_changed(candidate_text: str,
+                                         candidate_content: Optional[str],
+                                         record: MemoryRecord) -> bool:
+    """Ignore permutations of bare display labels, never facts carried by titles."""
+    if (not candidate_content or candidate_content != record.content
+            or not candidate_text.endswith(candidate_content)):
+        return False
+    # The engine supplies title + newline + content. Unrecognized caller layouts
+    # stay conservative; punctuation, arrows and predicate words are not labels.
+    prefix = candidate_text[:-len(candidate_content)]
+    if not prefix or not prefix[-1].isspace():
+        return False
+    title = prefix.strip()
+    candidate, previous = title.casefold().split(), record.title.casefold().split()
+    return (len(candidate) > 1 and candidate != previous
+            and sorted(candidate) == sorted(previous)
+            and all(token in _ENV_QUALIFIERS for token in candidate))
+
+
 _MONTHS = frozenset({
     "january", "february", "march", "april", "may", "june", "july",
     "august", "september", "october", "november", "december",
@@ -369,7 +407,13 @@ def resolve(candidate_text: str, neighbors: list[tuple[float, MemoryRecord]], *,
         # (staging/production) are an exception: two near-duplicates that
         # only differ by environment are coexisting facts on different
         # envs, not a correction.
-        env_conflict = _env_conflict_for_correction(candidate_text, rec_text)
+        env_conflict = (
+            _env_conflict_for_correction(candidate_text, rec_text)
+            or (_has_reordered_environments(candidate_text, rec_text)
+                and not _only_environment_title_order_changed(
+                    candidate_text, candidate_content, rec,
+                ))
+        )
         subject_identifier_drift = _has_subject_identifier_drift(candidate_text, rec_text)
         named_subject_drift = _has_named_subject_drift(candidate_text, rec_text)
         if env_conflict or subject_identifier_drift or named_subject_drift:

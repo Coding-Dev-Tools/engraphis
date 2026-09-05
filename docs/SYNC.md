@@ -30,8 +30,7 @@ for pricing and included services.
 
 ## Trial and grace
 
-The no-card Pro or Team trial begins after email confirmation and lasts **exactly 3 active
-days**.
+The no-card Pro or Team trial begins after email confirmation and lasts **3 active days for Pro or 10 active days for Team**.
 
 `workspace_write_grace` is separate and private-service enforced. It may preserve bounded
 hosted-account continuity operations for at most **24 hours** following an authoritative
@@ -207,8 +206,9 @@ replica; a peer cannot attach graph edges to locally approved memories.
 - Local-only installations send no memory content to Engraphis. **Cloud Sync encrypts eligible
   shared-workspace changes end-to-end before they leave this device. Engraphis Cloud cannot read
   their contents; secret and session-scoped memories stay local.** Managed compute is separate:
-  connecting an installation to Engraphis Cloud accepts its terms and enables it by default;
-  operators may opt out with `ENGRAPHIS_MANAGED_COMPUTE_CONSENT=0`. It sends a readable, bounded
+  explicit workspace approval in Manage → Settings is required before readable uploads;
+  connecting an account does not grant it. A deny-only operator override is available with
+  `ENGRAPHIS_MANAGED_COMPUTE_CONSENT=0`. Approved processing sends a readable, bounded
   snapshot over TLS because Engraphis Cloud must process that snapshot to produce results.
 - Treat cloud session and refresh files as credentials; keep their directory owner-only.
 - `secret` memories are excluded from managed uploads. Managed compute also rejects secret rows

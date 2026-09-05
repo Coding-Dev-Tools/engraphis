@@ -106,7 +106,8 @@ def _check_repository(manifest: dict, errors: list[str]) -> None:
         if monthly and not (10 * monthly <= annual <= 12 * monthly):
             _fail(errors, "%s annual price is not a sane multiple of monthly" % plan)
 
-    expected_trial = {"days": 3, "card_required": False, "plans": ["pro", "team"]}
+    expected_trial = {"days": 3, "card_required": False, "plans": ["pro", "team"],
+                      "days_by_plan": {"pro": 3, "team": 10}}
     trial = manifest.get("trial", {})
     for key, value in expected_trial.items():
         if trial.get(key) != value:
@@ -213,6 +214,11 @@ def _check_website(manifest: dict, website: Path, errors: list[str]) -> None:
     for claim in required:
         if claim not in text:
             _fail(errors, "website is missing manifest claim: %s" % claim)
+    for plan, days in manifest["trial"]["days_by_plan"].items():
+        if not re.search(r'plan=' + plan + r'&interval=monthly#billing[^>]*>\s*' + str(days) + r'-day free trial', text):
+            _fail(errors, "website trial copy does not match " + plan)
+    if re.search(r"<strong>29</strong>\s*<span>tools", text):
+        _fail(errors, "website advertises a stale MCP tool count")
     for plan in ("pro", "team"):
         for interval, product in manifest["plans"][plan]["products"].items():
             if product["checkout_url"] not in text:
@@ -222,10 +228,15 @@ def _check_website(manifest: dict, website: Path, errors: list[str]) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--website-root", type=Path)
+    parser.add_argument("--cloud-contract", type=Path, help="Secret-free cloud product contract JSON")
     args = parser.parse_args()
     manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
     errors: list[str] = []
     _check_repository(manifest, errors)
+    if args.cloud_contract:
+        cloud = json.loads(args.cloud_contract.read_text(encoding="utf-8-sig"))
+        if cloud.get("schema_version") != 1 or cloud.get("trial", {}).get("days_by_plan") != manifest["trial"]["days_by_plan"]:
+            _fail(errors, "cloud trial authority differs from the public per-plan contract")
     if args.website_root:
         _check_website(manifest, args.website_root.resolve(), errors)
     if errors:

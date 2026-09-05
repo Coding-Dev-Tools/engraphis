@@ -132,6 +132,14 @@
               <p class="eyebrow">Memory composition</p>
               <div id="type-bars" class="type-bars"><p class="empty-state">Loading types…</p></div>
             </section>
+            <section id="first-memory-journey" class="rail-section rail-action" hidden aria-labelledby="first-memory-title">
+              <p class="eyebrow">Your first memory</p>
+              <h2 id="first-memory-title">Save one useful fact</h2>
+              <p>Start with a project decision you want your agent to remember. Open the saved record, review its source and choose Approve for prompt. Then ask about it and edit the record when the decision changes.</p>
+              <button id="first-memory-add" class="primary-button" type="button">Add your first memory</button>
+              <button class="text-button" type="button" data-go="library">Or import local documents</button>
+              <p>To connect your coding agent, run <code>engraphis-init</code> for connection instructions. No account is needed for local memory.</p>
+            </section>
             <section class="rail-section rail-action">
               <p class="eyebrow">Local-first</p>
               <h2>Ask before assuming</h2>
@@ -197,7 +205,10 @@
             <label>Type
               <select id="library-type"><option value="">All types</option><option>working</option><option>episodic</option><option>semantic</option><option>procedural</option></select>
             </label>
-            <span id="library-count" class="count-label">0 memories</span>
+            <span id="library-count" class="count-label" role="status" aria-live="polite">0 memories</span>
+            <button id="library-refresh" class="text-button" type="button">Refresh results</button>
+            <button id="library-previous" class="secondary-button" type="button" disabled>Previous page</button>
+            <button id="library-next" class="secondary-button" type="button" disabled>Next page</button>
           </div>
 
           <div class="library-layout">
@@ -599,6 +610,17 @@
               </div>
               <div class="settings-intro-status"><span class="status-dot" aria-hidden="true"></span><span>Local-first runtime</span></div>
             </div>
+            <section class="setting-card" aria-labelledby="managed-processing-title">
+              <h2 id="managed-processing-title">Managed processing</h2>
+              <p>Encrypted Cloud Sync has its own controls. Managed processing lets hosted services read an eligible snapshot to generate insights and run automation. Secret and session-scoped records stay local.</p>
+              <form id="managed-processing-form">
+                <p id="managed-processing-status" role="status">Select a workspace.</p>
+                <label><input id="managed-processing-approval" type="checkbox"> I approve readable managed processing for the selected workspace.</label>
+                <button id="managed-processing-enable" class="primary-button" type="submit" disabled>Enable for this workspace</button>
+                <button id="managed-processing-disable" class="secondary-button" type="button" disabled>Turn off</button>
+                <button id="managed-processing-reload" class="secondary-button" type="button">Reload policy</button>
+              </form>
+            </section>
             <div class="settings-grid">
               <section class="setting-card">
                 <p class="eyebrow">Interface</p>
@@ -708,6 +730,7 @@
     </form>
   </dialog>
 
-  <script src="/v2-assets/ledger.js?v=20260903-rotation-balance-1"></script>
+  <script src="/v2-assets/managed-processing.js?v=20260905-policy-1"></script>
+  <script src="/v2-assets/ledger.js?v=20260905-processing-review-1"></script>
 </body>
 </html>
