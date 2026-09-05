@@ -8,7 +8,7 @@ with a plain-table fallback so the schema initializes on any SQLite build).
 """
 from __future__ import annotations
 
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -144,6 +144,49 @@ CREATE TABLE IF NOT EXISTS mem_vectors (
 );
 CREATE INDEX IF NOT EXISTS idx_mem_vectors_model ON mem_vectors(model);
 
+-- Content-free, transactionally maintained work for independently persisted indexes.
+-- No memory foreign key: erasure must retain a pending external DELETE by id.
+CREATE TABLE IF NOT EXISTS vector_store_state (
+    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+    generation INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO vector_store_state(singleton, generation) VALUES (1, 0);
+CREATE TABLE IF NOT EXISTS vector_index_targets (
+    identity TEXT PRIMARY KEY
+);
+CREATE TABLE IF NOT EXISTS vector_index_repairs (
+    identity TEXT NOT NULL REFERENCES vector_index_targets(identity) ON DELETE CASCADE,
+    memory_id TEXT NOT NULL,
+    generation INTEGER NOT NULL,
+    PRIMARY KEY(identity, memory_id)
+);
+CREATE INDEX IF NOT EXISTS idx_vector_index_repairs_queue
+    ON vector_index_repairs(identity, generation, memory_id);
+CREATE TRIGGER IF NOT EXISTS trg_vector_repair_insert AFTER INSERT ON mem_vectors
+BEGIN
+    UPDATE vector_store_state SET generation=generation+1 WHERE singleton=1;
+    INSERT INTO vector_index_repairs(identity, memory_id, generation)
+    SELECT t.identity, NEW.id, s.generation FROM vector_index_targets t, vector_store_state s
+    WHERE s.singleton=1
+    ON CONFLICT(identity, memory_id) DO UPDATE SET generation=excluded.generation;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_vector_repair_update AFTER UPDATE ON mem_vectors
+BEGIN
+    UPDATE vector_store_state SET generation=generation+1 WHERE singleton=1;
+    INSERT INTO vector_index_repairs(identity, memory_id, generation)
+    SELECT t.identity, NEW.id, s.generation FROM vector_index_targets t, vector_store_state s
+    WHERE s.singleton=1
+    ON CONFLICT(identity, memory_id) DO UPDATE SET generation=excluded.generation;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_vector_repair_delete AFTER DELETE ON mem_vectors
+BEGIN
+    UPDATE vector_store_state SET generation=generation+1 WHERE singleton=1;
+    INSERT INTO vector_index_repairs(identity, memory_id, generation)
+    SELECT t.identity, OLD.id, s.generation FROM vector_index_targets t, vector_store_state s
+    WHERE s.singleton=1
+    ON CONFLICT(identity, memory_id) DO UPDATE SET generation=excluded.generation;
+END;
+
 -- Versioned embedding mappings. Reserved identities __active__ and __rebuilding__
 -- describe the one vector space currently stored and any in-progress replacement.
 -- Backend-specific rows remain as an operator-facing history only.
@@ -167,6 +210,8 @@ CREATE TABLE IF NOT EXISTS entities (
     created_at   REAL,
     UNIQUE(workspace_id, repo_id, name, etype)
 );
+CREATE INDEX IF NOT EXISTS idx_entities_workspace_created
+    ON entities(workspace_id, created_at);
 
 CREATE TABLE IF NOT EXISTS edges (
     id           TEXT PRIMARY KEY,
@@ -186,6 +231,8 @@ CREATE TABLE IF NOT EXISTS edges (
 );
 CREATE INDEX IF NOT EXISTS idx_edge_src ON edges(workspace_id, src, valid_to, expired_at);
 CREATE INDEX IF NOT EXISTS idx_edge_dst ON edges(workspace_id, dst);
+CREATE INDEX IF NOT EXISTS idx_edge_dst_visibility
+    ON edges(workspace_id, dst, valid_to, expired_at);
 -- Store.edges_in_scope() (the PPR retrieval arm) filters workspace_id + repo_id + the
 -- bi-temporal window; the two indexes above lead on workspace_id but then key on src/dst,
 -- so a repo-scoped graph read had to scan the whole workspace. Also bounds the

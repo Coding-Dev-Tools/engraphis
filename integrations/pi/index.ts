@@ -194,6 +194,9 @@ export default function engraphisPiExtension(pi: ExtensionAPI) {
 		executionMode: "sequential",
 		parameters: EXECUTE_ACTION_PARAMETERS,
 		execute: async (_toolCallId, params, signal, _onUpdate, ctx) => {
+			if (typeof params.capability_id !== "string" || typeof params.schema_digest !== "string") {
+				throw new Error("Rediscover the action before executing it.");
+			}
 			const key = actionKey(params.capability_id, params.schema_digest);
 			const action = discoveredActions.get(key);
 			if (!action) {

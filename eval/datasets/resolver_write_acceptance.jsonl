@@ -1,0 +1,12 @@
+{"id":"write-ttl","neighbor":"The production cache expires after 30 seconds.","candidate":"The production cache expires after 90 seconds.","expected":"invalidate"}
+{"id":"write-window","neighbor":"The release window begins at 03:00 UTC.","candidate":"The release window begins at 05:00 UTC.","expected":"invalidate","subject_key":"release-window","claim_kind":"start"}
+{"id":"write-reworded","neighbor":"Use the north regional artifact mirror.","candidate":"Build artifacts now come from the southern mirror.","expected":"invalidate","subject_key":"artifact-source","claim_kind":"mirror"}
+{"id":"write-keyed-limit","neighbor":"The compiler worker accepts 8 jobs concurrently.","candidate":"The compiler worker accepts 16 jobs concurrently.","expected":"invalidate","subject_key":"compiler-worker","claim_kind":"concurrency"}
+{"id":"keep-environments","neighbor":"The production worker retries after 30 seconds.","candidate":"The staging worker retries after 30 seconds.","expected":"add"}
+{"id":"keep-environment-binding","neighbor":"The staging database holds 300 connections in production environment.","candidate":"The production database holds 300 connections in staging environment.","expected":"add"}
+{"id":"keep-backup-binding","neighbor":"The production backup restores the staging database during recovery.","candidate":"The staging backup restores the production database during recovery.","expected":"add"}
+{"id":"keep-account-identity","neighbor":"Customer account 100 has 30 days of audit retention.","candidate":"Customer account 200 has 30 days of audit retention.","expected":"add"}
+{"id":"keep-subjects","neighbor":"ServiceAlpha uses the regional mirror for every production deployment.","candidate":"ServiceBeta uses the regional mirror for every production deployment.","expected":"add"}
+{"id":"keep-different-attributes","neighbor":"The primary worker stores source artifacts in the package registry.","candidate":"The primary worker executes integration tests in the isolated sandbox.","expected":"add"}
+{"id":"keep-titled-environment-binding","neighbor":"The staging database is mirrored in production.","candidate":"The production database is mirrored in staging.","neighbor_title":"Production staging","candidate_title":"Staging production","expected":"add"}
+{"id":"keep-title-only-environment-binding","neighbor":"Replication runs every 30 minutes.","candidate":"Replication runs every 30 minutes.","neighbor_title":"Staging database is mirrored in production","candidate_title":"Production database is mirrored in staging","expected":"add"}
