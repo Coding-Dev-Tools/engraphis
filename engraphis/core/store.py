@@ -5348,6 +5348,43 @@ class Store:
         ).fetchone()
         return int(row[0]) if row is not None else None
 
+    def queue_vector_index_repairs(self, identity: str, memory_ids: Iterable[str]) -> None:
+        """Queue explicit cleanup even when an orphan has no canonical vector row."""
+        with self.write_transaction():
+            self.register_vector_index(identity)
+            generation = self.vector_generation()
+            self.conn.executemany(
+                "INSERT INTO vector_index_repairs(identity,memory_id,generation) VALUES (?,?,?) "
+                "ON CONFLICT(identity,memory_id) DO UPDATE SET generation=excluded.generation",
+                [(identity, memory_id, generation) for memory_id in memory_ids],
+            )
+
+    def vector_index_repair_generations(self, identity: str,
+                                       memory_ids: Iterable[str]) -> dict[str, int]:
+        """Capture the debt generation before publishing under a writer reservation."""
+        selected = list(memory_ids)
+        generations: dict[str, int] = {}
+        for offset in range(0, len(selected), 500):
+            batch = selected[offset:offset + 500]
+            marks = ",".join("?" for _ in batch)
+            for row in self.conn.execute(
+                "SELECT memory_id,generation FROM vector_index_repairs "
+                f"WHERE identity=? AND memory_id IN ({marks})", (identity, *batch),
+            ).fetchall():
+                generations[str(row["memory_id"])] = int(row["generation"])
+        return generations
+
+    def acknowledge_vector_index_repairs(self, identity: str,
+                                          generations: dict[str, int]) -> None:
+        """Settle only confirmed generations; a newer canonical mutation stays queued."""
+        with self.write_transaction():
+            self.conn.executemany(
+                "DELETE FROM vector_index_repairs "
+                "WHERE identity=? AND memory_id=? AND generation=?",
+                [(identity, memory_id, generation)
+                 for memory_id, generation in generations.items()],
+            )
+
     def vector_matrix(self, flt: Optional[SearchFilter] = None,
                       *, include_invalid: bool = False, dim: int) -> tuple[list[str], np.ndarray]:
         """Materialize one filtered, fixed-width vector matrix for an exact scan.

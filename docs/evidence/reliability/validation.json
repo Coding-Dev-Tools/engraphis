@@ -3,7 +3,7 @@
   "prepared_date": "2026-09-05",
   "status": "reviewed PR candidate; release and deployment approval remain separate",
   "source_manifest": "source-manifest.json",
-  "source_boundary": "The final candidate manifest identifies source relative to released main. The final PR public suite passed on stable production and test source; public-pr-source-final.json records the exact before/after hashes. Earlier failed checkpoints and corrections remain retained. Final report/evidence files are assembled separately. Results overlap and must not be added into a unique-test total.",
+  "source_boundary": "Initial PR review checkpoint. The complete public suite in public-pr-source-final.json is bound to its original before/after source hashes. Later fixes use explicit source overlays and their own validation, rather than rebinding old results. Report/evidence files are assembled separately. Results overlap and must not be added into a unique-test total.",
   "environment": {
     "os": "Windows 11 build 26100",
     "python": "3.12.10",
@@ -510,8 +510,8 @@
     "Browser engines were exercised on Windows; this is not macOS Safari or the full operating-system matrix.",
     "Benchmark reports define their own source hashes, hardware, dataset and measurement boundaries. The incomplete baseline is retained as failed measurement evidence.",
     "Optional cleanup of two cancelled-run synthetic temporary benchmark directories was blocked by automatic approval review with the stated reason 'blocked by policy'. No deletion occurred; exact paths/action are recorded in vector-scale-summary-20260905.md.",
-    "The final complete public run reports exact JUnit outcome counts. Its 37 skipped cases/reasons are recorded in public-complete-source-final.json.",
-    "After final production code froze, only two obsolete trial-UI test modules were corrected; the final complete public gate then passed. Source/report assembly afterward is independently recorded in the final manifest.",
+    "The initial combined PR complete run reports exact JUnit outcomes in public-pr-source-final.json, including its 37 skipped cases.",
+    "The initial combined PR suite followed two obsolete trial-UI assertion corrections. Subsequent GitHub feedback and platform CI repairs are recorded separately in source overlays.",
     "All 16 historical noncurrent branches and one stash were reconciled; no unique recovery candidate remains. Private details stay private. Branches, stash and auxiliary worktree were preserved."
   ],
   "latest_results": {
@@ -532,5 +532,9 @@
     "edge": "pr-edge-final",
     "website": "pr-website-review",
     "scale": "final-scale-matrix"
-  }
+  },
+  "source_overlays": [
+    "public-ci-test-isolation.json",
+    "pr-review-followup.json"
+  ]
 }

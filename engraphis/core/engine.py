@@ -722,20 +722,33 @@ class MemoryEngine:
                     raise RuntimeError(
                         "embedding rebuild was superseded by another process"
                     )
+                repair_target = index_repair_identity(self.index, self.store)
+                if repair_target is not None:
+                    self.store.queue_vector_index_repairs(repair_target, excluded_ids)
                 if excluded_ids:
-                    if vector_index_requires_sync(self.index, self.store):
-                        self.index.delete(excluded_ids, commit=False)
                     marks = ",".join("?" for _ in excluded_ids)
                     self.store.conn.execute(
                         f"DELETE FROM mem_vectors WHERE id IN ({marks})", excluded_ids
                     )
+                    if vector_index_requires_sync(self.index, self.store):
+                        generations = self.store.vector_index_repair_generations(
+                            repair_target, excluded_ids,
+                        ) if repair_target is not None else {}
+                        self.index.delete(excluded_ids, commit=False)
+                        if repair_target is not None:
+                            self.store.acknowledge_vector_index_repairs(repair_target, generations)
                 # Keep the portable mirror current even when the active index is
                 # sqlite-vec. A later NumPy fallback must see the same vector space.
                 if vectors is not None:
                     for record, vector in zip(eligible, vectors):
                         self.store.put_vector(record.id, vector, model=fingerprint)
                     if vector_index_requires_sync(self.index, self.store):
+                        generations = self.store.vector_index_repair_generations(
+                            repair_target, ids,
+                        ) if repair_target is not None else {}
                         _safe_upsert(self.index, ids, vectors, metadata, commit=False)
+                        if repair_target is not None:
+                            self.store.acknowledge_vector_index_repairs(repair_target, generations)
                 self.store.conn.commit()
                 removed += len(excluded_ids)
                 rebuilt += len(eligible)
@@ -2947,7 +2960,15 @@ class MemoryEngine:
         returned status explicitly reports that incomplete external cleanup.
         """
         with self._write_lock:
-            target_ids = self.store.secure_erase_target_ids(memory_id)
+            repair_target = index_repair_identity(self.index, self.store)
+            transaction_started = not self.store.conn.transaction_owned_by_current_thread()
+            if repair_target is not None and not transaction_started:
+                raise RuntimeError(
+                    "caller-owned transactions cannot erase through a separate vector "
+                    "index; commit or roll back before erasing"
+                )
+            attempted_ids: set[str] = set()
+            confirmed_ids: set[str] = set()
             index_cleanup = "not_configured"
 
             def delete_vectors(ids: list[str], *, in_store_transaction: bool = False) -> None:
@@ -2961,43 +2982,48 @@ class MemoryEngine:
                     self.index.delete(ids)
 
             try:
-                delete_vectors(target_ids)
-                index_cleanup = "deleted"
-            except Exception:  # noqa: BLE001 - must still erase the authoritative local copy
-                index_cleanup = "failed"
-
-            # Serialize the final successor scan with the authoritative erase. Any
-            # successor that commits before BEGIN IMMEDIATE is acquired is included;
-            # a successor cannot commit between this scan and secure_erase_memory's
-            # destructive transaction. The external delete is intentionally performed
-            # while the Store transaction is held, so its final target set cannot go
-            # stale before the local rows are removed.
-            transaction_started = False
-            try:
-                if not self.store.conn.transaction_owned_by_current_thread():
-                    self.store.conn.execute("BEGIN IMMEDIATE")
-                    transaction_started = True
-                refreshed = self.store.secure_erase_target_ids(memory_id)
-                new_ids = set(refreshed) - set(target_ids)
-                cleanup_ids = list(new_ids) if index_cleanup == "deleted" else []
-                if cleanup_ids:
+                # Hold the writer through every provider delete and canonical
+                # erase. A competing repair cannot republish between them.
+                with self.store.write_transaction():
+                    target_ids = self.store.secure_erase_target_ids(memory_id)
+                    if repair_target is not None:
+                        self.store.queue_vector_index_repairs(repair_target, target_ids)
+                    attempted_ids.update(target_ids)
                     try:
-                        delete_vectors(cleanup_ids, in_store_transaction=True)
+                        delete_vectors(target_ids, in_store_transaction=True)
+                        confirmed_ids.update(target_ids)
+                        index_cleanup = "deleted"
                     except Exception:  # noqa: BLE001
-                        index_cleanup = "partial"
-                target_ids = refreshed
-                result = self.store.secure_erase_memory(
-                    memory_id, actor=actor, _target_ids=target_ids,
-                    _defer_maintenance=transaction_started,
-                )
-                if transaction_started and self.store.conn.transaction_owned_by_current_thread():
-                    self.store.conn.commit()
+                        index_cleanup = "failed"
+                    refreshed = self.store.secure_erase_target_ids(memory_id)
+                    if repair_target is not None:
+                        self.store.queue_vector_index_repairs(repair_target, refreshed)
+                    cleanup_ids = sorted(set(refreshed) - set(target_ids)) if index_cleanup == "deleted" else []
+                    if cleanup_ids:
+                        attempted_ids.update(cleanup_ids)
+                        try:
+                            delete_vectors(cleanup_ids, in_store_transaction=True)
+                            confirmed_ids.update(cleanup_ids)
+                        except Exception:  # noqa: BLE001
+                            index_cleanup = "partial"
+                    result = self.store.secure_erase_memory(
+                        memory_id, actor=actor, _target_ids=refreshed,
+                        _defer_maintenance=transaction_started,
+                    )
+                    if repair_target is not None:
+                        self.store.acknowledge_vector_index_repairs(
+                            repair_target,
+                            self.store.vector_index_repair_generations(repair_target, confirmed_ids),
+                        )
+                if transaction_started:
                     # Physical maintenance must run after the engine-owned transaction
                     # commits; VACUUM is invalid while the erase transaction is active.
                     result["maintenance"] = self.store.run_secure_erase_maintenance()
             except BaseException:
-                if transaction_started and self.store.conn.transaction_owned_by_current_thread():
-                    self.store.conn.rollback()
+                # Provider deletion cannot roll back with SQLite. Persist work
+                # for the restored canonical rows after the failed transaction.
+                if repair_target is not None and attempted_ids:
+                    self.store.queue_vector_index_repairs(repair_target, attempted_ids)
                 raise
         result["vector_index_cleanup"] = index_cleanup
         if index_cleanup in {"failed", "partial"}:

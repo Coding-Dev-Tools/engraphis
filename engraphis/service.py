@@ -50,6 +50,7 @@ from engraphis.core.graph_scene import (
 )
 from engraphis.core.graph_layers import normalize_graph_layer
 from engraphis.core.context import RegexTokenCounter
+from engraphis.core.vector_repair import index_repair_identity
 from engraphis.core.ids import new_id as make_id
 from engraphis.core.savings import annotate_usage, normalize_release_version
 from engraphis.core.interfaces import (
@@ -6508,16 +6509,14 @@ class MemoryService:
         runs.  A provider failure therefore becomes explicit repair debt; it must never
         be raised as though the canonical edit had rolled back.
         """
-        operation, memory_id, vector, model = action
+        operation, memory_id, vector, _model = action
         try:
-            if operation == "delete":
-                self.engine.index.delete([memory_id])
-            elif operation == "upsert" and vector is not None:
-                self.engine.index.upsert(
-                    [memory_id], vector.reshape(1, -1), [{"model": model}],
-                )
-            else:  # pragma: no cover - action is constructed locally
+            if operation not in {"delete", "upsert"} or (operation == "upsert" and vector is None):
                 raise RuntimeError("invalid deferred vector-index action")
+            # The captured payload may predate a later title edit or erasure.
+            # Replay current canonical state while holding the writer, and
+            # acknowledge only the generation actually published.
+            self.engine.repair_vector_index(limit=1, memory_id=memory_id)
         except Exception as exc:  # noqa: BLE001 - canonical Store state is committed
             failure_type = type(exc).__name__
             logger.warning(
@@ -6597,6 +6596,9 @@ class MemoryService:
                 pass
             if title_changed:
                 text = f"{row['title']}\n{row['content']}" if row["title"] else row["content"]
+                repair_target = index_repair_identity(self.engine.index, self.store)
+                if repair_target is not None:
+                    self.store.queue_vector_index_repairs(repair_target, [mid])
                 # Quarantined records and explicitly secret records are retained for
                 # local governance only. A metadata edit must not turn either into a
                 # semantic candidate or send its payload to an embedder.

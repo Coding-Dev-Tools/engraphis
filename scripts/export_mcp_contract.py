@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import inspect
 import json
 from pathlib import Path
 from pprint import pformat
@@ -18,7 +19,9 @@ def build_contract() -> dict:
     surfaces = {}
     for name, server in (("smart", smart_mcp), ("classic", classic_mcp)):
         surfaces[name] = [
-            {"name": tool.name, "description": tool.description,
+            # Python 3.13+ removes common indentation from compiled docstrings.
+            # Normalize only that margin, retaining nested examples and all schema data.
+            {"name": tool.name, "description": inspect.cleandoc(tool.description),
              "inputSchema": tool.parameters,
              "annotations": tool.annotations.model_dump(mode="json", exclude_none=True)
              if tool.annotations else {}}
@@ -50,7 +53,7 @@ def main() -> int:
     for path, expected in artifacts(build_contract()).items():
         if args.check:
             if not path.exists() or path.read_text(encoding="utf-8") != expected:
-                stale.append(str(path.relative_to(ROOT)))
+                stale.append(path.relative_to(ROOT).as_posix())
         else:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(expected, encoding="utf-8", newline="\n")

@@ -160,6 +160,8 @@ CREATE TABLE IF NOT EXISTS vector_index_repairs (
     generation INTEGER NOT NULL,
     PRIMARY KEY(identity, memory_id)
 );
+CREATE INDEX IF NOT EXISTS idx_vector_index_repairs_queue
+    ON vector_index_repairs(identity, generation, memory_id);
 CREATE TRIGGER IF NOT EXISTS trg_vector_repair_insert AFTER INSERT ON mem_vectors
 BEGIN
     UPDATE vector_store_state SET generation=generation+1 WHERE singleton=1;

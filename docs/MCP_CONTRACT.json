@@ -1,6 +1,6 @@
 {
   "schema": "engraphis-mcp-contract/v1",
-  "sha256": "47af699b0c207132da7b663caa085d5579d573ee8d06e5ce06d4b16a2681002b",
+  "sha256": "1f0b4351e3a3d10b4404a86f47e30dfa85922f3aa08a86ce723e64aba6c793a3",
   "surfaces": {
     "classic": [
       {
@@ -11,7 +11,7 @@
           "readOnlyHint": false,
           "title": "Grounded answer (compatibility alias)"
         },
-        "description": "Backward-compatible alias for ``engraphis_recall_grounded``.\n\n    Kept so existing agent configs that adopted the answer tool continue to work; new\n    integrations should prefer ``engraphis_recall_grounded`` for the clearer name.\n    ",
+        "description": "Backward-compatible alias for ``engraphis_recall_grounded``.\n\nKept so existing agent configs that adopted the answer tool continue to work; new\nintegrations should prefer ``engraphis_recall_grounded`` for the clearer name.",
         "inputSchema": {
           "properties": {
             "as_of": {
@@ -197,7 +197,7 @@
           "readOnlyHint": false,
           "title": "Check for an Engraphis update"
         },
-        "description": "Report whether a newer Engraphis release is available, so an agent can proactively\n    remind the user to upgrade.\n\n    Cached ~24h and fail-silent; honors ``ENGRAPHIS_UPDATE_CHECK=0`` (then ``enabled`` is\n    false). The default GitHub source is overridable via ``ENGRAPHIS_UPDATE_URL``. A stale\n    lookup refreshes the persistent cache, and ``force=true`` rewrites it on every call,\n    so this open-world tool is neither read-only nor idempotent.\n\n    Returns:\n        str: JSON ``{\"enabled\",\"current\",\"latest\",\"update_available\",\"url\",\"notice\"}``.\n    ",
+        "description": "Report whether a newer Engraphis release is available, so an agent can proactively\nremind the user to upgrade.\n\nCached ~24h and fail-silent; honors ``ENGRAPHIS_UPDATE_CHECK=0`` (then ``enabled`` is\nfalse). The default GitHub source is overridable via ``ENGRAPHIS_UPDATE_URL``. A stale\nlookup refreshes the persistent cache, and ``force=true`` rewrites it on every call,\nso this open-world tool is neither read-only nor idempotent.\n\nReturns:\n    str: JSON ``{\"enabled\",\"current\",\"latest\",\"update_available\",\"url\",\"notice\"}``.",
         "inputSchema": {
           "properties": {
             "force": {
@@ -305,7 +305,7 @@
           "readOnlyHint": true,
           "title": "Find a path through the code graph"
         },
-        "description": "Return the shortest best-effort path between two code nodes.\n\n    The path can cross definition, call, import, and symbol-alias edges. It is structural\n    and name-based rather than type-resolved, so treat it as impact evidence rather than\n    a compiler proof.\n    ",
+        "description": "Return the shortest best-effort path between two code nodes.\n\nThe path can cross definition, call, import, and symbol-alias edges. It is structural\nand name-based rather than type-resolved, so treat it as impact evidence rather than\na compiler proof.",
         "inputSchema": {
           "properties": {
             "as_of": {
@@ -403,7 +403,7 @@
           "readOnlyHint": false,
           "title": "Consolidate memories (sleep-time sweep)"
         },
-        "description": "Run one sleep-time consolidation sweep: recurring episodic memories on the same\n    subject are distilled into one durable semantic digest (linked to its sources), and\n    fully-decayed transient memories are archived (bi-temporally closed \u2014 never deleted,\n    always audited, pinned memories exempt). Already-consolidated sources are skipped on\n    retries. With ``profiles=True`` each entity's memories are also rolled into one durable\n    profile digest. With ``structured=True`` a configured LLM may produce schema-validated\n    facts/entities/relations; provider/schema failure falls back to the deterministic\n    digest. A structured result may cite only part of a large cluster, allowing an\n    identical later call to process the remainder, so the overall tool is conservatively\n    non-idempotent. Good moments to call it: session end, or on a schedule. A real sweep\n    requires explicit local-operator confirmation (``confirmed=true``); a ``dry_run``\n    report does not mutate and needs none.\n\n    Returns:\n        str: JSON report ``{\"clusters_found\",\"digests_created\",\"archived\",\n        \"skipped_already_consolidated\",\"compaction\",\"dry_run\"}`` \u2014 ``compaction`` reports\n        the context tokens the sweep saved. With ``profiles=True`` a ``profiles`` block is\n        added (``entities_considered``, ``profiles_created``, ``compaction``).\n    ",
+        "description": "Run one sleep-time consolidation sweep: recurring episodic memories on the same\nsubject are distilled into one durable semantic digest (linked to its sources), and\nfully-decayed transient memories are archived (bi-temporally closed \u2014 never deleted,\nalways audited, pinned memories exempt). Already-consolidated sources are skipped on\nretries. With ``profiles=True`` each entity's memories are also rolled into one durable\nprofile digest. With ``structured=True`` a configured LLM may produce schema-validated\nfacts/entities/relations; provider/schema failure falls back to the deterministic\ndigest. A structured result may cite only part of a large cluster, allowing an\nidentical later call to process the remainder, so the overall tool is conservatively\nnon-idempotent. Good moments to call it: session end, or on a schedule. A real sweep\nrequires explicit local-operator confirmation (``confirmed=true``); a ``dry_run``\nreport does not mutate and needs none.\n\nReturns:\n    str: JSON report ``{\"clusters_found\",\"digests_created\",\"archived\",\n    \"skipped_already_consolidated\",\"compaction\",\"dry_run\"}`` \u2014 ``compaction`` reports\n    the context tokens the sweep saved. With ``profiles=True`` a ``profiles`` block is\n    added (``entities_considered``, ``profiles_created``, ``compaction``).",
         "inputSchema": {
           "properties": {
             "confirmed": {
@@ -581,7 +581,7 @@
           "readOnlyHint": false,
           "title": "Correct a memory"
         },
-        "description": "Replace a memory's content without losing history: the old content is closed\n    (bi-temporal invalidate, not deleted) and the correction is stored as a new memory\n    that records what it corrects \u2014 so the audit trail and ``engraphis_why`` both still\n    work afterward. Prefer this over retire+remember for fixes.\n\n    Returns:\n        str: JSON ``{\"id\",\"superseded\":[old_id],\"reason\"}`` or an actionable error if the\n        id is unknown or doesn't belong to ``workspace``/``repo``.\n    ",
+        "description": "Replace a memory's content without losing history: the old content is closed\n(bi-temporal invalidate, not deleted) and the correction is stored as a new memory\nthat records what it corrects \u2014 so the audit trail and ``engraphis_why`` both still\nwork afterward. Prefer this over retire+remember for fixes.\n\nReturns:\n    str: JSON ``{\"id\",\"superseded\":[old_id],\"reason\"}`` or an actionable error if the\n    id is unknown or doesn't belong to ``workspace``/``repo``.",
         "inputSchema": {
           "properties": {
             "memory_id": {
@@ -645,7 +645,7 @@
           "readOnlyHint": false,
           "title": "End a memory session"
         },
-        "description": "Close a session with a summary/outcome so the next session can pick up the thread.\n    An identical retry is an atomic no-op; a retry with a conflicting handoff is rejected,\n    so this tool remains idempotent.\n\n    Returns:\n        str: JSON ``{\"session_id\",\"status\":\"summarized\",\"summary\",\"open_threads\"}`` or\n        ``\"Error: ...\"`` if the session id is unknown.\n    ",
+        "description": "Close a session with a summary/outcome so the next session can pick up the thread.\nAn identical retry is an atomic no-op; a retry with a conflicting handoff is rejected,\nso this tool remains idempotent.\n\nReturns:\n    str: JSON ``{\"session_id\",\"status\":\"summarized\",\"summary\",\"open_threads\"}`` or\n    ``\"Error: ...\"`` if the session id is unknown.",
         "inputSchema": {
           "properties": {
             "open_threads": {
@@ -803,7 +803,7 @@
           "readOnlyHint": false,
           "title": "Forget a memory (deprecated; use retire)"
         },
-        "description": "Retire-with-history (deprecated compatibility alias for ``engraphis_retire``).\n\n    It preserves the legacy ``status: \"forgotten\"`` response for existing clients;\n    it still performs a temporal retirement and never deletes the memory. For\n    irreversible removal of a leaked secret use ``engraphis_secure_erase`` with\n    explicit confirmation instead.\n    ",
+        "description": "Retire-with-history (deprecated compatibility alias for ``engraphis_retire``).\n\nIt preserves the legacy ``status: \"forgotten\"`` response for existing clients;\nit still performs a temporal retirement and never deletes the memory. For\nirreversible removal of a leaked secret use ``engraphis_secure_erase`` with\nexplicit confirmation instead.",
         "inputSchema": {
           "properties": {
             "confirmed": {
@@ -865,7 +865,7 @@
           "readOnlyHint": false,
           "title": "Index a repository's code graph"
         },
-        "description": "Parse a repository into the code symbol graph: function/class/method definitions\n    plus best-effort calls/imports edges. Run this once when you start working in a repo\n    (or after large changes) so ``engraphis_search_code`` has something to search \u2014 uses\n    AST parsing (tree-sitter) when available, a dependency-free regex fallback otherwise.\n    Supported languages: Python, JavaScript, TypeScript, C#, C, and C++.\n\n    Build/dependency directories (node_modules, bin, obj, target, .venv, \u2026) are skipped\n    while walking, so a large non-Python repo indexes quickly instead of appearing to\n    hang; add a ``.engraphisignore`` file (gitignore-style) at the repo root to skip\n    project-specific generated files.\n\n    Creates the workspace/repo if you haven't named them before (like\n    engraphis_remember). Re-indexing is safe to call again; each file's symbols are\n    replaced, not duplicated. Reads files from ``root_path`` on the local filesystem \u2014\n    the same trust boundary as any other local tool you have, nothing is sent anywhere.\n    Set ``ENGRAPHIS_INDEX_ROOTS`` to a path-separator-delimited absolute-path allow-list when\n    repositories live outside the working, home, or temporary directories, or to narrow the\n    defaults. Each completed scan appends a fresh operation receipt, so the MCP call is\n    non-idempotent even when the code graph itself is unchanged.\n\n    Returns:\n        str: JSON ``{\"files_indexed\",\"symbols\",\"edges\",\"backend\"}``.\n    ",
+        "description": "Parse a repository into the code symbol graph: function/class/method definitions\nplus best-effort calls/imports edges. Run this once when you start working in a repo\n(or after large changes) so ``engraphis_search_code`` has something to search \u2014 uses\nAST parsing (tree-sitter) when available, a dependency-free regex fallback otherwise.\nSupported languages: Python, JavaScript, TypeScript, C#, C, and C++.\n\nBuild/dependency directories (node_modules, bin, obj, target, .venv, \u2026) are skipped\nwhile walking, so a large non-Python repo indexes quickly instead of appearing to\nhang; add a ``.engraphisignore`` file (gitignore-style) at the repo root to skip\nproject-specific generated files.\n\nCreates the workspace/repo if you haven't named them before (like\nengraphis_remember). Re-indexing is safe to call again; each file's symbols are\nreplaced, not duplicated. Reads files from ``root_path`` on the local filesystem \u2014\nthe same trust boundary as any other local tool you have, nothing is sent anywhere.\nSet ``ENGRAPHIS_INDEX_ROOTS`` to a path-separator-delimited absolute-path allow-list when\nrepositories live outside the working, home, or temporary directories, or to narrow the\ndefaults. Each completed scan appends a fresh operation receipt, so the MCP call is\nnon-idempotent even when the code graph itself is unchanged.\n\nReturns:\n    str: JSON ``{\"files_indexed\",\"symbols\",\"edges\",\"backend\"}``.",
         "inputSchema": {
           "properties": {
             "languages": {
@@ -924,7 +924,7 @@
           "readOnlyHint": false,
           "title": "Ingest raw text (extract facts first)"
         },
-        "description": "Store raw text without hand-distilling it first \u2014 the extract-then-remember path.\n\n    Prefer ``engraphis_remember`` when you already have a crisp fact; use this when you\n    have a blob (transcript, notes, long status update) and want Engraphis to break it\n    into separate, individually-recallable memories. Each extracted fact goes through\n    the same conflict resolution and evolution as a normal remember.\n\n    Returns:\n        str: JSON ``{\"workspace\",\"repo\",\"count\",\"extracted\",\"facts\":[{\"id\",\"op\",...}]}``\n        where ``extracted`` is false when no extractor is configured (passthrough).\n    ",
+        "description": "Store raw text without hand-distilling it first \u2014 the extract-then-remember path.\n\nPrefer ``engraphis_remember`` when you already have a crisp fact; use this when you\nhave a blob (transcript, notes, long status update) and want Engraphis to break it\ninto separate, individually-recallable memories. Each extracted fact goes through\nthe same conflict resolution and evolution as a normal remember.\n\nReturns:\n    str: JSON ``{\"workspace\",\"repo\",\"count\",\"extracted\",\"facts\":[{\"id\",\"op\",...}]}``\n    where ``extracted`` is false when no extractor is configured (passthrough).",
         "inputSchema": {
           "properties": {
             "content": {
@@ -1005,7 +1005,7 @@
           "readOnlyHint": false,
           "title": "Ingest a live PostgreSQL schema"
         },
-        "description": "Convert tables, columns, constraints, and foreign keys into a schema memory and\n    entity graph. Requires the optional psycopg backend. An exact retry reuses its live\n    point-in-time schema snapshot, but every invocation appends audit/receipt records,\n    so the tool as a whole is not idempotent.",
+        "description": "Convert tables, columns, constraints, and foreign keys into a schema memory and\nentity graph. Requires the optional psycopg backend. An exact retry reuses its live\npoint-in-time schema snapshot, but every invocation appends audit/receipt records,\nso the tool as a whole is not idempotent.",
         "inputSchema": {
           "properties": {
             "dsn": {
@@ -1070,7 +1070,7 @@
           "readOnlyHint": false,
           "title": "Link two memories"
         },
-        "description": "Explicitly connect two memories (A-MEM-style linking) \u2014 use when you notice two\n    stored facts are related but a plain recall wouldn't surface that connection, e.g. a\n    bug report and the memory describing its fix.\n\n    Returns:\n        str: JSON ``{\"a\",\"b\",\"relation\",\"layer\",\"reason\",\"linked\":true,\"receipt\":...}``\n        or an actionable error if either id is unknown or doesn't belong to\n        ``workspace``/``repo``.\n    ",
+        "description": "Explicitly connect two memories (A-MEM-style linking) \u2014 use when you notice two\nstored facts are related but a plain recall wouldn't surface that connection, e.g. a\nbug report and the memory describing its fix.\n\nReturns:\n    str: JSON ``{\"a\",\"b\",\"relation\",\"layer\",\"reason\",\"linked\":true,\"receipt\":...}``\n    or an actionable error if either id is unknown or doesn't belong to\n    ``workspace``/``repo``.",
         "inputSchema": {
           "properties": {
             "a": {
@@ -1154,7 +1154,7 @@
           "readOnlyHint": false,
           "title": "Link a code symbol to a memory"
         },
-        "description": "Manually create a link between a code symbol and a memory.\n\n    Use this when automatic indexing misses a relationship you know about \u2014 for example,\n    linking a deployment function to the incident memory it resolved, or connecting a\n    config constant to the decision that set its value. The link is idempotent: repeating\n    the same call returns the existing link without duplication.\n\n    Returns:\n        str: JSON ``{\"link_id\",\"symbol_id\",\"memory_id\",\"relation\",\"workspace\",\"repo\",\"receipt\"}``.\n    ",
+        "description": "Manually create a link between a code symbol and a memory.\n\nUse this when automatic indexing misses a relationship you know about \u2014 for example,\nlinking a deployment function to the incident memory it resolved, or connecting a\nconfig constant to the decision that set its value. The link is idempotent: repeating\nthe same call returns the existing link without duplication.\n\nReturns:\n    str: JSON ``{\"link_id\",\"symbol_id\",\"memory_id\",\"relation\",\"workspace\",\"repo\",\"receipt\"}``.",
         "inputSchema": {
           "properties": {
             "confidence": {
@@ -1227,7 +1227,7 @@
           "readOnlyHint": false,
           "title": "Pin or unpin a memory"
         },
-        "description": "Mark a memory as important enough to exempt from automatic decay/pruning \u2014 use for\n    durable conventions or identity facts that must never silently fade.\n    Every pin/unpin request is audited, including an identical retry, so the MCP call is\n    deliberately annotated as non-idempotent even when the boolean value is unchanged.\n\n    Returns:\n        str: JSON ``{\"id\",\"pinned\"}`` or an actionable error if the id is unknown or doesn't\n        belong to ``workspace``/``repo``.\n    ",
+        "description": "Mark a memory as important enough to exempt from automatic decay/pruning \u2014 use for\ndurable conventions or identity facts that must never silently fade.\nEvery pin/unpin request is audited, including an identical retry, so the MCP call is\ndeliberately annotated as non-idempotent even when the boolean value is unchanged.\n\nReturns:\n    str: JSON ``{\"id\",\"pinned\"}`` or an actionable error if the id is unknown or doesn't\n    belong to ``workspace``/``repo``.",
         "inputSchema": {
           "properties": {
             "memory_id": {
@@ -1282,7 +1282,7 @@
           "readOnlyHint": false,
           "title": "Agent-ready proactive context"
         },
-        "description": "Return an agent-ready context packet before the agent knows what to ask.\n\n    Combines proactive recall, optional task-specific recall, and last-session handoff\n    into a cited ``context_summary`` plus ``suggested_queries``. Deterministic by\n    default; LLM synthesis is opt-in and accepted only when it cites source memories.\n    When ``task`` or ``agent_state`` is supplied, the task-specific recall appends a\n    privacy-safe receipt (without reinforcing memories), so the tool is conservatively\n    annotated as mutating and non-idempotent.\n    ",
+        "description": "Return an agent-ready context packet before the agent knows what to ask.\n\nCombines proactive recall, optional task-specific recall, and last-session handoff\ninto a cited ``context_summary`` plus ``suggested_queries``. Deterministic by\ndefault; LLM synthesis is opt-in and accepted only when it cites source memories.\nWhen ``task`` or ``agent_state`` is supplied, the task-specific recall appends a\nprivacy-safe receipt (without reinforcing memories), so the tool is conservatively\nannotated as mutating and non-idempotent.",
         "inputSchema": {
           "properties": {
             "agent_state": {
@@ -1373,7 +1373,7 @@
           "readOnlyHint": false,
           "title": "Promote a memory to a wider scope"
         },
-        "description": "Widen a memory's visibility without losing its narrow-scope history.\n\n    The wider record is stored first, inherits the source's protection,\n    confidentiality, provenance, and learned stability, and is linked back to the\n    bi-temporally closed source. Promotion must be strictly wider (session\u2192repo/workspace\n    or repo\u2192workspace); it never edits scope in place. User-scope promotion is not yet\n    supported because records remain workspace-bound.\n\n    Returns:\n        str: JSON ``{\"id\",\"promoted_from\",\"from_scope\",\"scope\",\"op\",\"reason\"}``\n        plus a privacy receipt, or an actionable validation error.\n    ",
+        "description": "Widen a memory's visibility without losing its narrow-scope history.\n\nThe wider record is stored first, inherits the source's protection,\nconfidentiality, provenance, and learned stability, and is linked back to the\nbi-temporally closed source. Promotion must be strictly wider (session\u2192repo/workspace\nor repo\u2192workspace); it never edits scope in place. User-scope promotion is not yet\nsupported because records remain workspace-bound.\n\nReturns:\n    str: JSON ``{\"id\",\"promoted_from\",\"from_scope\",\"scope\",\"op\",\"reason\"}``\n    plus a privacy receipt, or an actionable validation error.",
         "inputSchema": {
           "properties": {
             "memory_id": {
@@ -1435,7 +1435,7 @@
           "readOnlyHint": false,
           "title": "Recall relevant memories"
         },
-        "description": "Retrieve the memories most relevant to a query (semantic vector + lexical + graph).\n\n    Call this before answering or acting when prior context would help \u2014 to avoid re-asking\n    the user, to recover decisions/conventions, or to resume earlier work.\n    Successful calls append a privacy-safe recall receipt but do not strengthen weak\n    neighbors merely because they were returned. Grounded recall reinforces cited\n    evidence; an explicit-use caller can opt into reinforcement through the Python API.\n    Because the receipt is stateful, this surface is neither read-only nor idempotent.\n\n    Returns:\n        str: JSON with ``{\"query\",\"count\",\"context\",\"degraded_mode\",\"semantic_support\",\n        \"embedding_mode\",\"score_semantics\",\"memories\":[{\"id\",\n        \"title\",\"content\",\"scope\",\"mtype\",\"repo_id\",\"score\",\"relative_score\",\n        \"absolute_support\",\"arm\",\"retention\",\"provenance\"}]}``. ``score`` is a compatibility\n        alias for the query-relative rank; use ``absolute_support`` (0..1) for an evidence floor.\n        ``degraded_mode=true`` and ``semantic_support=false`` mean semantic vector retrieval\n        was disabled because the active embedder is not declared semantic.\n        Returns count 0 with a \"note\" if the workspace/repo isn't known yet.\n    ",
+        "description": "Retrieve the memories most relevant to a query (semantic vector + lexical + graph).\n\nCall this before answering or acting when prior context would help \u2014 to avoid re-asking\nthe user, to recover decisions/conventions, or to resume earlier work.\nSuccessful calls append a privacy-safe recall receipt but do not strengthen weak\nneighbors merely because they were returned. Grounded recall reinforces cited\nevidence; an explicit-use caller can opt into reinforcement through the Python API.\nBecause the receipt is stateful, this surface is neither read-only nor idempotent.\n\nReturns:\n    str: JSON with ``{\"query\",\"count\",\"context\",\"degraded_mode\",\"semantic_support\",\n    \"embedding_mode\",\"score_semantics\",\"memories\":[{\"id\",\n    \"title\",\"content\",\"scope\",\"mtype\",\"repo_id\",\"score\",\"relative_score\",\n    \"absolute_support\",\"arm\",\"retention\",\"provenance\"}]}``. ``score`` is a compatibility\n    alias for the query-relative rank; use ``absolute_support`` (0..1) for an evidence floor.\n    ``degraded_mode=true`` and ``semantic_support=false`` mean semantic vector retrieval\n    was disabled because the active embedder is not declared semantic.\n    Returns count 0 with a \"note\" if the workspace/repo isn't known yet.",
         "inputSchema": {
           "properties": {
             "as_of": {
@@ -1642,7 +1642,7 @@
           "readOnlyHint": false,
           "title": "Recall token-efficient context"
         },
-        "description": "Return one hard-budget context plus compact source identities.\n\n    This is the recommended agent path: unlike legacy full recall, it does not\n    repeat every complete memory body alongside the already-packed context.  The\n    response includes exact accounting for the declared counter, omitted/packed\n    counts, privacy-safe savings metadata, and the same ``degraded_mode`` /\n    ``semantic_support`` flags as ``engraphis_recall``.\n\n    ``format=\"gist\"`` remains an accepted compatibility option. It returns the same\n    evidence-safe packed context, including complete conditions and code whitespace,\n    with a format marker. It does not apply another summary or claim extra savings.\n    Use ``engraphis_get_memory`` for the full source behind a citation.\n    ",
+        "description": "Return one hard-budget context plus compact source identities.\n\nThis is the recommended agent path: unlike legacy full recall, it does not\nrepeat every complete memory body alongside the already-packed context.  The\nresponse includes exact accounting for the declared counter, omitted/packed\ncounts, privacy-safe savings metadata, and the same ``degraded_mode`` /\n``semantic_support`` flags as ``engraphis_recall``.\n\n``format=\"gist\"`` remains an accepted compatibility option. It returns the same\nevidence-safe packed context, including complete conditions and code whitespace,\nwith a format marker. It does not apply another summary or claim extra savings.\nUse ``engraphis_get_memory`` for the full source behind a citation.",
         "inputSchema": {
           "properties": {
             "as_of": {
@@ -1842,7 +1842,7 @@
           "readOnlyHint": false,
           "title": "Grounded recall (cited answer, or abstain)"
         },
-        "description": "Answer a question *strictly from* stored memories, with citations \u2014 or abstain.\n\n    Unlike ``engraphis_recall`` (which returns memories and leaves synthesis to you),\n    this returns an answer assembled only from the retrieved memories, each claim tied\n    to a ``[n]`` citation, and \u2014 crucially \u2014 refuses to answer when nothing in scope\n    actually supports the query (``grounded: false``). Use it when you want a grounded,\n    non-hallucinated answer and would rather get \"insufficient evidence\" than a guess.\n    The deterministic default never introduces a claim that is not in a cited memory.\n    When ``degraded_mode`` is true, its feature-hashing fallback is treated as lexical-only:\n    semantic vector retrieval and semantic cosine support are disabled.\n    With ``synthesize=True``, configured LLM prose is accepted only when citations hold.\n    Every resolved call appends a privacy-safe receipt (including abstentions), and a\n    grounded answer reinforces cited memories.\n\n    Returns:\n        str: JSON ``{\"query\",\"grounded\",\"abstained\",\"answer\",\"support\",\"reason\",\n        \"degraded_mode\",\"semantic_support\",\"embedding_mode\",\n        \"synthesized\":false,\"citations\":[{\"n\",\"id\",\"title\",\"content\",\"score\",\"support\",\n        \"provenance\"}]}``. When ``grounded`` is false, ``answer`` is empty and ``reason``\n        explains why (insufficient evidence, or unknown workspace/repo).\n    ",
+        "description": "Answer a question *strictly from* stored memories, with citations \u2014 or abstain.\n\nUnlike ``engraphis_recall`` (which returns memories and leaves synthesis to you),\nthis returns an answer assembled only from the retrieved memories, each claim tied\nto a ``[n]`` citation, and \u2014 crucially \u2014 refuses to answer when nothing in scope\nactually supports the query (``grounded: false``). Use it when you want a grounded,\nnon-hallucinated answer and would rather get \"insufficient evidence\" than a guess.\nThe deterministic default never introduces a claim that is not in a cited memory.\nWhen ``degraded_mode`` is true, its feature-hashing fallback is treated as lexical-only:\nsemantic vector retrieval and semantic cosine support are disabled.\nWith ``synthesize=True``, configured LLM prose is accepted only when citations hold.\nEvery resolved call appends a privacy-safe receipt (including abstentions), and a\ngrounded answer reinforces cited memories.\n\nReturns:\n    str: JSON ``{\"query\",\"grounded\",\"abstained\",\"answer\",\"support\",\"reason\",\n    \"degraded_mode\",\"semantic_support\",\"embedding_mode\",\n    \"synthesized\":false,\"citations\":[{\"n\",\"id\",\"title\",\"content\",\"score\",\"support\",\n    \"provenance\"}]}``. When ``grounded`` is false, ``answer`` is empty and ``reason``\n    explains why (insufficient evidence, or unknown workspace/repo).",
         "inputSchema": {
           "properties": {
             "as_of": {
@@ -2070,7 +2070,7 @@
           "readOnlyHint": true,
           "title": "What should I know right now"
         },
-        "description": "Conscious/proactive recall: high-importance, recent, well-reinforced memories with\n    no query needed \u2014 call this at the start of a task to load context before you've\n    figured out what to ask for. When ``repo`` is given, also returns the most recent\n    *ended* session's summary and unresolved ``open_threads`` for that repo, so you can\n    pick up exactly where the last session left off. Authenticated callers only receive\n    handoffs owned by their own user identity.\n\n    Unlike query-based recall, this queryless ranking does not reinforce memories or append\n    an operation receipt, so repeated calls are read-only and idempotent.\n\n    Returns:\n        str: JSON ``{\"memories\":[...], \"last_session\":{\"summary\",\"open_threads\",\"outcome\"}\n        or {} if there is no prior session}``.\n    ",
+        "description": "Conscious/proactive recall: high-importance, recent, well-reinforced memories with\nno query needed \u2014 call this at the start of a task to load context before you've\nfigured out what to ask for. When ``repo`` is given, also returns the most recent\n*ended* session's summary and unresolved ``open_threads`` for that repo, so you can\npick up exactly where the last session left off. Authenticated callers only receive\nhandoffs owned by their own user identity.\n\nUnlike query-based recall, this queryless ranking does not reinforce memories or append\nan operation receipt, so repeated calls are read-only and idempotent.\n\nReturns:\n    str: JSON ``{\"memories\":[...], \"last_session\":{\"summary\",\"open_threads\",\"outcome\"}\n    or {} if there is no prior session}``.",
         "inputSchema": {
           "properties": {
             "k": {
@@ -2154,7 +2154,7 @@
           "readOnlyHint": false,
           "title": "Log an episodic event"
         },
-        "description": "Append a lightweight episodic log entry \u2014 lower ceremony than ``engraphis_remember``,\n    for raw events you may later want consolidated into a durable fact (e.g. \"tried X, it\n    deadlocked\" \u2014 three of these about the same thing is a signal worth promoting).\n\n    Returns:\n        str: JSON ``{\"id\",\"kind\"}``.\n    ",
+        "description": "Append a lightweight episodic log entry \u2014 lower ceremony than ``engraphis_remember``,\nfor raw events you may later want consolidated into a durable fact (e.g. \"tried X, it\ndeadlocked\" \u2014 three of these about the same thing is a signal worth promoting).\n\nReturns:\n    str: JSON ``{\"id\",\"kind\"}``.",
         "inputSchema": {
           "properties": {
             "content": {
@@ -2224,7 +2224,7 @@
           "readOnlyHint": false,
           "title": "Remember a fact"
         },
-        "description": "Store a memory so it can be recalled in later turns, sessions, or repos.\n\n    Use this whenever you learn something worth keeping: a convention, a decision and its\n    rationale, a bug's cause and fix, a user preference, or a reusable procedure.\n\n    Returns:\n        str: JSON ``{\"id\",\"workspace\",\"repo\",\"scope\",\"mtype\",\"stored\":true,\"op\"}`` where\n        ``op`` is ``\"add\"`` (new), ``\"noop\"`` (matched an existing memory almost exactly \u2014\n        that one was reinforced, ``id`` points to it), or ``\"invalidate\"`` (superseded an\n        existing memory on the same subject \u2014 see ``superseded`` for the old id(s); history\n        is preserved, never deleted), ``\"relate\"`` (kept both uncertain neighboring claims and\n        linked them), or ``\"quarantined\"`` (a suspicious explicitly untrusted payload was\n        retained for governance inspection but excluded from normal recall). Quarantine returns\n        content-free ``policy`` and ``reasons`` codes. Returns ``\"Error: <reason>\"`` if\n        validation fails.\n    ",
+        "description": "Store a memory so it can be recalled in later turns, sessions, or repos.\n\nUse this whenever you learn something worth keeping: a convention, a decision and its\nrationale, a bug's cause and fix, a user preference, or a reusable procedure.\n\nReturns:\n    str: JSON ``{\"id\",\"workspace\",\"repo\",\"scope\",\"mtype\",\"stored\":true,\"op\"}`` where\n    ``op`` is ``\"add\"`` (new), ``\"noop\"`` (matched an existing memory almost exactly \u2014\n    that one was reinforced, ``id`` points to it), or ``\"invalidate\"`` (superseded an\n    existing memory on the same subject \u2014 see ``superseded`` for the old id(s); history\n    is preserved, never deleted), ``\"relate\"`` (kept both uncertain neighboring claims and\n    linked them), or ``\"quarantined\"`` (a suspicious explicitly untrusted payload was\n    retained for governance inspection but excluded from normal recall). Quarantine returns\n    content-free ``policy`` and ``reasons`` codes. Returns ``\"Error: <reason>\"`` if\n    validation fails.",
         "inputSchema": {
           "properties": {
             "claim_kind": {
@@ -2416,7 +2416,7 @@
           "readOnlyHint": false,
           "title": "Remember a batch of facts"
         },
-        "description": "Store a batch of facts from parallel agents in one atomic, deduplicated write.\n\n    Use this instead of many ``engraphis_remember`` calls when one turn produced a\n    set of findings (fan-out sub-agents, a research sweep, a review council): the\n    whole batch lands in a single transaction, each fact is resolved against the\n    others (duplicates reinforce, keyed claims supersede), and facts sharing a\n    ``subject_key`` or an explicit per-fact ``evidence_source`` get\n    evidence-labeled graph edges so the merge is a growing graph rather than a\n    pile of prose.\n\n    Returns:\n        str: JSON ``{\"workspace\",\"repo\",\"scope\",\"stored\":true,\"total\",\"ops\",\n        \"results\":[{\"id\",\"op\",...}]}`` with one entry per input fact, in order.\n        Returns ``\"Error: <reason>\"`` if validation fails or any fact cannot be\n        stored (the whole batch rolls back in that case).\n    ",
+        "description": "Store a batch of facts from parallel agents in one atomic, deduplicated write.\n\nUse this instead of many ``engraphis_remember`` calls when one turn produced a\nset of findings (fan-out sub-agents, a research sweep, a review council): the\nwhole batch lands in a single transaction, each fact is resolved against the\nothers (duplicates reinforce, keyed claims supersede), and facts sharing a\n``subject_key`` or an explicit per-fact ``evidence_source`` get\nevidence-labeled graph edges so the merge is a growing graph rather than a\npile of prose.\n\nReturns:\n    str: JSON ``{\"workspace\",\"repo\",\"scope\",\"stored\":true,\"total\",\"ops\",\n    \"results\":[{\"id\",\"op\",...}]}`` with one entry per input fact, in order.\n    Returns ``\"Error: <reason>\"`` if validation fails or any fact cannot be\n    stored (the whole batch rolls back in that case).",
         "inputSchema": {
           "properties": {
             "facts": {
@@ -2514,7 +2514,7 @@
           "readOnlyHint": false,
           "title": "Retire a memory"
         },
-        "description": "Retire a memory: it stops appearing in recall, but history is preserved, not\n    deleted (bi-temporal close, never a hard delete) \u2014 use ``engraphis_correct`` instead\n    if you have replacement content, since that keeps the \"why\" chain intact.\n    Every request appends an audit record, including an identical retry, so the MCP call\n    is deliberately annotated as non-idempotent. Requires explicit local-operator\n    confirmation (``confirmed=true``) because the stdio transport carries no role\n    boundary.\n\n    Returns:\n        str: JSON ``{\"id\",\"status\":\"retired\",\"reason\"}`` or an actionable error if the\n        id is unknown or doesn't belong to ``workspace``/``repo``.\n    ",
+        "description": "Retire a memory: it stops appearing in recall, but history is preserved, not\ndeleted (bi-temporal close, never a hard delete) \u2014 use ``engraphis_correct`` instead\nif you have replacement content, since that keeps the \"why\" chain intact.\nEvery request appends an audit record, including an identical retry, so the MCP call\nis deliberately annotated as non-idempotent. Requires explicit local-operator\nconfirmation (``confirmed=true``) because the stdio transport carries no role\nboundary.\n\nReturns:\n    str: JSON ``{\"id\",\"status\":\"retired\",\"reason\"}`` or an actionable error if the\n    id is unknown or doesn't belong to ``workspace``/``repo``.",
         "inputSchema": {
           "properties": {
             "confirmed": {
@@ -2576,7 +2576,7 @@
           "readOnlyHint": true,
           "title": "Search the code symbol graph"
         },
-        "description": "Find function/class/method definitions by name, with their callers \u2014 structural\n    code search that costs far fewer tokens than grepping/reading whole files, and\n    directly answers \"what calls this\" / \"what might break if I change it\".\n\n    Returns:\n        str: JSON ``{\"query\",\"symbols\":[{\"name\",\"fqname\",\"kind\",\"file\",\"span\",\n        \"signature\",\"called_by\":[{\"src\",\"file\",\"line\"}]}]}``.\n    ",
+        "description": "Find function/class/method definitions by name, with their callers \u2014 structural\ncode search that costs far fewer tokens than grepping/reading whole files, and\ndirectly answers \"what calls this\" / \"what might break if I change it\".\n\nReturns:\n    str: JSON ``{\"query\",\"symbols\":[{\"name\",\"fqname\",\"kind\",\"file\",\"span\",\n    \"signature\",\"called_by\":[{\"src\",\"file\",\"line\"}]}]}``.",
         "inputSchema": {
           "properties": {
             "as_of": {
@@ -2666,7 +2666,7 @@
           "readOnlyHint": false,
           "title": "Securely erase a leaked memory"
         },
-        "description": "Irreversibly remove one accidentally stored secret from local persistence.\n\n    Unlike retirement, this removes the memory, FTS/vector-index and derived graph/link\n    rows, performs SQLite secure-delete/WAL/VACUUM maintenance, and scans recognised\n    local SQLite recovery backups. It cannot erase copied exports, snapshots, remote\n    peers, or data already read by a compromised/running agent; rotate the credential.\n    Requires explicit local-operator confirmation (``confirmed=true``); the response\n    carries the Store's ``impact`` report (receipt/event refs, backup note,\n    WAL/vacuum status) for the rotation runbook (see docs/SYNC.md).\n    ",
+        "description": "Irreversibly remove one accidentally stored secret from local persistence.\n\nUnlike retirement, this removes the memory, FTS/vector-index and derived graph/link\nrows, performs SQLite secure-delete/WAL/VACUUM maintenance, and scans recognised\nlocal SQLite recovery backups. It cannot erase copied exports, snapshots, remote\npeers, or data already read by a compromised/running agent; rotate the credential.\nRequires explicit local-operator confirmation (``confirmed=true``); the response\ncarries the Store's ``impact`` report (receipt/event refs, backup note,\nWAL/vacuum status) for the rotation runbook (see docs/SYNC.md).",
         "inputSchema": {
           "properties": {
             "confirmed": {
@@ -2721,7 +2721,7 @@
           "readOnlyHint": false,
           "title": "Start a memory session"
         },
-        "description": "Open a session to group this work's memories and enable cross-session resume.\n\n    Call this at the start of a task in a repo you've worked in before \u2014 if a previous\n    session for the same authenticated user and agent was ended with a summary or open\n    threads, they come back in ``bootstrap`` so you can resume without crossing another\n    user or agent's handoff boundary.\n\n    Exact retries are reused by default for the same ``(workspace, repo, authenticated\n    user, agent, goal)`` identity. Different users, agents, or goals start distinct\n    sessions automatically, and ``force_new=true`` always branches another session.\n    Because that valid option creates a new row on every call, the tool as a whole is\n    conservatively annotated as non-idempotent.\n\n    Returns:\n        str: JSON ``{\"session_id\",\"workspace\",\"repo\",\"goal\",\"status\":\"active\",\"reused\",\n        \"bootstrap\":{\"summary\",\"open_threads\",\"outcome\"} or {} if there is no prior\n        session}``. Pass ``session_id`` to engraphis_remember and engraphis_end_session.\n    ",
+        "description": "Open a session to group this work's memories and enable cross-session resume.\n\nCall this at the start of a task in a repo you've worked in before \u2014 if a previous\nsession for the same authenticated user and agent was ended with a summary or open\nthreads, they come back in ``bootstrap`` so you can resume without crossing another\nuser or agent's handoff boundary.\n\nExact retries are reused by default for the same ``(workspace, repo, authenticated\nuser, agent, goal)`` identity. Different users, agents, or goals start distinct\nsessions automatically, and ``force_new=true`` always branches another session.\nBecause that valid option creates a new row on every call, the tool as a whole is\nconservatively annotated as non-idempotent.\n\nReturns:\n    str: JSON ``{\"session_id\",\"workspace\",\"repo\",\"goal\",\"status\":\"active\",\"reused\",\n    \"bootstrap\":{\"summary\",\"open_threads\",\"outcome\"} or {} if there is no prior\n    session}``. Pass ``session_id`` to engraphis_remember and engraphis_end_session.",
         "inputSchema": {
           "properties": {
             "agent": {
@@ -2780,7 +2780,7 @@
           "readOnlyHint": true,
           "title": "Memory store stats"
         },
-        "description": "Report memory counts (overall or for one workspace) \u2014 handy for onboarding/health.\n\n    Returns:\n        str: JSON ``{\"memories\",\"by_type\",\"workspaces\",\"sessions\",\"schema_version\"}``.\n    ",
+        "description": "Report memory counts (overall or for one workspace) \u2014 handy for onboarding/health.\n\nReturns:\n    str: JSON ``{\"memories\",\"by_type\",\"workspaces\",\"sessions\",\"schema_version\"}``.",
         "inputSchema": {
           "properties": {
             "workspace": {
@@ -2811,7 +2811,7 @@
           "readOnlyHint": true,
           "title": "Bi-temporal history of a fact"
         },
-        "description": "Return every version of a fact in chronological order, including superseded ones.\n\n    Use this for \"what did we believe and when\" / \"how has X changed over time\" \u2014 each\n    entry carries ``valid_from``/``valid_to`` so you can see exactly when it was true.\n\n    Returns:\n        str: JSON ``{\"query\",\"history\":[{...memory fields..., \"valid_from\",\"valid_to\"}]}``\n        oldest first. Raises an actionable error if the workspace/repo is unknown.\n    ",
+        "description": "Return every version of a fact in chronological order, including superseded ones.\n\nUse this for \"what did we believe and when\" / \"how has X changed over time\" \u2014 each\nentry carries ``valid_from``/``valid_to`` so you can see exactly when it was true.\n\nReturns:\n    str: JSON ``{\"query\",\"history\":[{...memory fields..., \"valid_from\",\"valid_to\"}]}``\n    oldest first. Raises an actionable error if the workspace/repo is unknown.",
         "inputSchema": {
           "properties": {
             "limit": {
@@ -2923,7 +2923,7 @@
           "readOnlyHint": true,
           "title": "Explain the rationale behind a fact"
         },
-        "description": "Surface the current answer *and* what it superseded, if anything.\n\n    Use this for \"why is it like this\" / \"what did we used to do\" questions \u2014 it\n    deliberately looks past the live view into bi-temporal history, which plain recall\n    does not. The \"supersedes\" list is what makes this different from a vector search:\n    those memories are no longer current but are not deleted, so the rationale chain\n    (\"we used to do X, then switched to Y because Z\") stays answerable.\n\n    Returns:\n        str: JSON ``{\"query\",\"answer\":[...live memories...],\"supersedes\":[...what they\n        replaced, if anything...]}``. Raises an actionable error if the workspace/repo\n        is unknown.\n    ",
+        "description": "Surface the current answer *and* what it superseded, if anything.\n\nUse this for \"why is it like this\" / \"what did we used to do\" questions \u2014 it\ndeliberately looks past the live view into bi-temporal history, which plain recall\ndoes not. The \"supersedes\" list is what makes this different from a vector search:\nthose memories are no longer current but are not deleted, so the rationale chain\n(\"we used to do X, then switched to Y because Z\") stays answerable.\n\nReturns:\n    str: JSON ``{\"query\",\"answer\":[...live memories...],\"supersedes\":[...what they\n    replaced, if anything...]}``. Raises an actionable error if the workspace/repo\n    is unknown.",
         "inputSchema": {
           "properties": {
             "k": {
@@ -2982,7 +2982,7 @@
           "readOnlyHint": true,
           "title": "List pending/quarantined/conflicting memories"
         },
-        "description": "Read-only inbox of pending/quarantined/conflicting memories for a reviewer.\n\n    Scope and personal-folder authorization are enforced by ``MemoryService``. Pending\n    and quarantined bodies are never returned to an agent; only approved conflict\n    records may include a short excerpt.\n    ",
+        "description": "Read-only inbox of pending/quarantined/conflicting memories for a reviewer.\n\nScope and personal-folder authorization are enforced by ``MemoryService``. Pending\nand quarantined bodies are never returned to an agent; only approved conflict\nrecords may include a short excerpt.",
         "inputSchema": {
           "properties": {
             "limit": {
@@ -3161,7 +3161,7 @@
           "readOnlyHint": true,
           "title": "Read one memory's governed record"
         },
-        "description": "Return one memory's governed record (content, provenance, scope, temporal fields).\n\n    Read-only and never reinforces. Pending/quarantined content is NOT returned to an\n    agent \u2014 the tool answers ``not_prompt_eligible`` instead, so untrusted content never\n    reaches model context through this surface.\n    ",
+        "description": "Return one memory's governed record (content, provenance, scope, temporal fields).\n\nRead-only and never reinforces. Pending/quarantined content is NOT returned to an\nagent \u2014 the tool answers ``not_prompt_eligible`` instead, so untrusted content never\nreaches model context through this surface.",
         "inputSchema": {
           "properties": {
             "memory_id": {
@@ -3497,7 +3497,7 @@
           "readOnlyHint": false,
           "title": "Edit a memory's metadata fields"
         },
-        "description": "Edit a memory's metadata fields (title/type/importance). An identical retry is an\n    atomic no-op. Content edits must go through the governed correction path so bi-temporal\n    history is preserved. Secret capture is rejected; provenance/trust/sensitivity are never\n    editable here.",
+        "description": "Edit a memory's metadata fields (title/type/importance). An identical retry is an\natomic no-op. Content edits must go through the governed correction path so bi-temporal\nhistory is preserved. Secret capture is rejected; provenance/trust/sensitivity are never\neditable here.",
         "inputSchema": {
           "properties": {
             "actor": {
