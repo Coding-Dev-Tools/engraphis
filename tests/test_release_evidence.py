@@ -1261,8 +1261,8 @@ def test_release_workflow_publishes_complete_captured_evidence():
     assert "os: [windows-latest, macos-latest]" in platform_smoke
     assert '"pip", "check"' in platform_smoke
     assert "scripts.smoke_entry_points" in platform_smoke
-    assert "anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610" in docker_job
-    assert "anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2" in docker_job
+    assert "anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26" in docker_job
+    assert "anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439" in docker_job
     assert "docker buildx build --pull --load" in docker_job
     assert '"containerimage.digest"' in docker_job
     assert "engraphis:image-digest" in docker_job

@@ -288,7 +288,7 @@ jobs:
           if [ "${{ github.event_name }}" != "pull_request" ]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           elif git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.sha }}" \
-              | grep -qE '^(Dockerfile|docker-entrypoint\.sh|docker-compose(\.lan)?\.yml|railway\.json|deploy/|\.dockerignore|engraphis/|scripts/|pyproject\.toml|\.github/workflows/ci\.yml)'; then
+              | grep -qE '^(Dockerfile|docker-entrypoint\.sh|docker-compose(\.lan)?\.yml|railway\.json|deploy/|\.dockerignore|engraphis/|scripts/|pyproject\.toml|\.github/workflows/)'; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
