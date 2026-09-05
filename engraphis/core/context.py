@@ -10,7 +10,7 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Callable
-from typing import Optional
+from typing import NamedTuple, Optional
 
 from engraphis.core.interfaces import (
     Candidate,
@@ -32,6 +32,31 @@ _QUALIFIER_TERMS = frozenset({
 })
 
 
+class ContextPackResult(NamedTuple):
+    """Result of deterministic context packing.
+
+    Exposes the canonical 3-tuple contract ``(context, chunks, usage)`` with
+    named attribute accessors and aliases for agent prompt composers.
+    """
+
+    context: str
+    chunks: list[PackedChunk]
+    usage: ContextUsage
+
+    @property
+    def packed_chunks(self) -> list[PackedChunk]:
+        return self.chunks
+
+    @property
+    def packed(self) -> list[PackedChunk]:
+        return self.chunks
+
+
+def _protected_sentence(text: str) -> bool:
+    """Conditions and numerical claims must retain their complete bindings."""
+    return bool(_terms(text) & _QUALIFIER_TERMS) or bool(re.search(r"\d", text))
+
+
 class RegexTokenCounter:
     """Exact counter for Engraphis' dependency-free tokenization contract."""
 
@@ -47,7 +72,7 @@ class DeterministicContextPacker:
     Selection is stable for identical inputs.  A supersession/consolidation
     family contributes at most one member, summaries are preferred when they
     retain query evidence, and oversized sources are reduced at sentence
-    boundaries before a final token-boundary fallback.
+    boundaries. A complete evidence unit that cannot fit is omitted.
     """
 
     def __init__(
@@ -55,6 +80,12 @@ class DeterministicContextPacker:
         token_counter: Optional[Callable[[str], int]] = None,
         *,
         token_counter_identity: Optional[str] = None,
+        redundancy_pruning: bool = True,
+        score_elbow_gating: bool = True,
+        elbow_ratio: float = 0.5,
+        tail_confidence_floor: float = 0.35,
+        shingle_size: int = 4,
+        clause_duplication_threshold: float = 0.6,
     ) -> None:
         self._count = token_counter or RegexTokenCounter()
         self.token_counter_identity = (
@@ -63,18 +94,32 @@ class DeterministicContextPacker:
             or getattr(self._count, "__name__", None)
             or type(self._count).__name__
         )
+        # Keep legacy pruning options accepted for caller compatibility. Shared
+        # text across distinct records does not establish equivalent evidence:
+        # titles, scope, provenance and neighboring sentences bind its meaning.
+        # Only the established identity/family selection deduplicates sources.
+        self.redundancy_pruning = bool(redundancy_pruning)
+        self.score_elbow_gating = bool(score_elbow_gating)
+        self.elbow_ratio = float(elbow_ratio)
+        self.tail_confidence_floor = float(tail_confidence_floor)
+        self.shingle_size = max(2, int(shingle_size))
+        self.clause_duplication_threshold = float(clause_duplication_threshold)
 
     def pack(
         self,
         query: str,
         candidates: list[Candidate],
         token_budget: int,
-    ) -> tuple[str, list[PackedChunk], ContextUsage]:
+    ) -> ContextPackResult:
         budget = max(0, int(token_budget))
         source_tokens = sum(self._source_tokens(candidate) for candidate in candidates)
         if budget == 0 or not candidates:
-            return "", [], self._usage(
-                budget, 0, source_tokens, 0, len(candidates)
+            return ContextPackResult(
+                context="",
+                chunks=[],
+                usage=self._usage(
+                    budget, 0, source_tokens, 0, len(candidates)
+                ),
             )
 
         representatives, duplicate_count = _family_representatives(candidates)
@@ -90,6 +135,9 @@ class DeterministicContextPacker:
         packed: list[PackedChunk] = []
         covered: set[str] = set()
         remaining = list(ordered)
+
+        top_score = max((float(c.score) for c in ordered), default=0.0)
+        admitted_scores: list[float] = []
 
         while remaining:
             # Re-evaluate novelty after every selection.  This gives compact,
@@ -107,6 +155,18 @@ class DeterministicContextPacker:
             record = candidate.record
             if record is None:
                 continue
+
+            # Elastic score-elbow gating: gate candidate if scores drop steeply
+            # into a low-confidence tail after evidence has been admitted.
+            if self.score_elbow_gating and admitted_scores:
+                if self._is_score_elbow(
+                    candidate,
+                    top_score=top_score,
+                    last_admitted_score=admitted_scores[-1],
+                    admitted_count=len(packed),
+                    needs_bridge=needs_bridge,
+                ):
+                    continue
 
             prefix = "\n\n" if context else ""
             ordinal = len(packed) + 1
@@ -140,6 +200,7 @@ class DeterministicContextPacker:
                         excerpt, truncated, reason = compact
             if not excerpt:
                 continue
+
             proposed = f"{base}{excerpt}"
             if self._count(proposed) > budget:
                 # A custom tokenizer need not be additive.  Fit against the
@@ -167,14 +228,55 @@ class DeterministicContextPacker:
             ))
             covered.update(_terms(excerpt) & query_terms)
 
+            # Track admitted scores for subsequent elbow gating.
+            admitted_scores.append(float(candidate.score))
+
         context_tokens = self._count(context)
         omitted = len(candidates) - len(packed)
         # ``duplicate_count`` is intentionally folded into omitted_count; keep
         # the local name to make the family-diversity policy explicit.
         omitted = max(omitted, duplicate_count)
-        return context, packed, self._usage(
-            budget, context_tokens, source_tokens, len(packed), omitted
+        return ContextPackResult(
+            context=context,
+            chunks=packed,
+            usage=self._usage(
+                budget, context_tokens, source_tokens, len(packed), omitted
+            ),
         )
+
+    pack_context = pack
+
+    def _is_score_elbow(
+        self,
+        candidate: Candidate,
+        *,
+        top_score: float,
+        last_admitted_score: float,
+        admitted_count: int,
+        needs_bridge: bool,
+    ) -> bool:
+        """Elastic score-elbow gating for low-confidence candidate retrieval tails."""
+        if not self.score_elbow_gating or admitted_count < 1 or top_score <= 0.0:
+            return False
+
+        if needs_bridge and candidate.arm in {"graph", "code"}:
+            return candidate.score <= 0.0
+
+        score = float(candidate.score)
+        if score <= 0.0:
+            return True
+
+        rel_to_top = score / top_score
+        rel_to_last = score / max(last_admitted_score, 1e-9)
+
+        elastic_tail_floor = min(
+            0.40, self.tail_confidence_floor + 0.03 * (admitted_count - 1)
+        )
+        elastic_elbow_ratio = min(
+            0.60, self.elbow_ratio + 0.03 * (admitted_count - 1)
+        )
+
+        return rel_to_top < elastic_tail_floor and rel_to_last < elastic_elbow_ratio
 
     def count_tokens(self, text: str) -> int:
         """Count answer text with the exact counter declared by this packer."""
@@ -272,12 +374,25 @@ class DeterministicContextPacker:
     ) -> bool:
         if not full:
             return True
+        source_sentences = {
+            part.strip() for part in _SENTENCE_RE.split(full) if part.strip()
+        }
+        summary_sentences = {
+            part.strip() for part in _SENTENCE_RE.split(summary)
+            if part.strip() and part.strip() != "[…]"
+        }
+        # A summary's shared vocabulary is not proof of source entailment.
+        # Admit extractive sentences only, preserving complete conditions and
+        # numerical claims rather than merely their qualifier/value tokens.
+        if not summary_sentences or not summary_sentences.issubset(source_sentences):
+            return False
+        protected = {part for part in source_sentences if _protected_sentence(part)}
+        if not protected.issubset(summary_sentences):
+            return False
         full_overlap = _terms(full) & query_terms
         summary_terms = _terms(summary)
         preserves_query = not full_overlap or bool(summary_terms & full_overlap)
-        qualifiers = _terms(full) & _QUALIFIER_TERMS
-        preserves_qualifiers = qualifiers.issubset(summary_terms)
-        return preserves_query and preserves_qualifiers
+        return preserves_query
 
     def _sentence_excerpt(
         self,
@@ -336,59 +451,17 @@ class DeterministicContextPacker:
     ) -> str:
         if max_tokens <= 0:
             return ""
-        required_qualifiers = _terms(text) & _QUALIFIER_TERMS
-
-        def semantically_safe(excerpt: str) -> bool:
-            return required_qualifiers.issubset(_terms(excerpt))
-
-        tokens = list(_TOKEN_RE.finditer(text))
-        if not tokens:
+        # Neither a token nor a character prefix proves a complete claim. An
+        # English qualifier list cannot protect French, Chinese, identifiers,
+        # or a value/scope at the end of a sentence. Sentence selection happens
+        # before this fallback; here the whole selected evidence unit fits or
+        # is omitted, including with context-sensitive custom token counters.
+        text = text.strip()
+        if self._count(text) > max_tokens:
             return ""
-        limit = min(len(tokens), max_tokens)
-        while limit > 0:
-            end = tokens[limit - 1].end()
-            excerpt = text[:end].rstrip()
-            if limit < len(tokens) and max_tokens > 1:
-                marked = f"{excerpt} […]"
-                if self._count(marked) <= max_tokens:
-                    excerpt = marked
-            within_local = self._count(excerpt) <= max_tokens
-            within_total = (
-                total_budget is None
-                or self._count(f"{prefix}{excerpt}") <= total_budget
-            )
-            if within_local and within_total and semantically_safe(excerpt):
-                return excerpt
-            limit -= 1
-        # A custom token counter may split a single regex token (for example a
-        # character counter or provider tokenizer). In that case there is no
-        # shorter regex boundary to try, even though a character prefix fits.
-        # Find the longest safe prefix against the declared counter so tight
-        # budgets are still used without violating the hard ceiling.
-        low, high = 1, len(text)
-        best = ""
-        while low <= high:
-            middle = (low + high) // 2
-            excerpt = text[:middle].rstrip()
-            if not excerpt:
-                low = middle + 1
-                continue
-            marked = f"{excerpt} […]" if middle < len(text) else excerpt
-            candidate = marked if self._count(marked) <= max_tokens else excerpt
-            fits = (
-                self._count(candidate) <= max_tokens
-                and (
-                    total_budget is None
-                    or self._count(f"{prefix}{candidate}") <= total_budget
-                )
-            )
-            if fits:
-                if semantically_safe(candidate):
-                    best = candidate
-                low = middle + 1
-            else:
-                high = middle - 1
-        return best
+        if total_budget is not None and self._count(f"{prefix}{text}") > total_budget:
+            return ""
+        return text
 
     def _header(
         self,
@@ -575,3 +648,19 @@ def pack_response_text(
             return excerpt, count(excerpt)
         limit -= 1
     return "", 0
+
+
+def pack_context(
+    query: str,
+    candidates: list[Candidate],
+    token_budget: int,
+    *,
+    packer: Optional[DeterministicContextPacker] = None,
+    **kwargs,
+) -> ContextPackResult:
+    """Pack budgeted context from candidate memories into a ContextPackResult.
+
+    Convenience functional API wrapping :class:`DeterministicContextPacker`.
+    """
+    p = packer or DeterministicContextPacker(**kwargs)
+    return p.pack(query, candidates, token_budget)

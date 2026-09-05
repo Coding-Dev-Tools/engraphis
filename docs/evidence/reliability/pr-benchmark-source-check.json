@@ -1,0 +1,48 @@
+{
+  "schema": "engraphis-benchmark-source-check/v1",
+  "checks": [
+    {
+      "artifact": "vector-scale-numpy-corrected-20260905.json",
+      "source_files": [
+        "eval/vector_scale.py",
+        "eval/vector_scale_storage.py",
+        "eval/benchmark.py",
+        "engraphis/backends/vector_numpy.py",
+        "engraphis/backends/vector_sqlitevec.py",
+        "engraphis/core/vector_search.py",
+        "engraphis/core/store.py",
+        "engraphis/core/schema.py",
+        "engraphis/core/interfaces.py"
+      ],
+      "all_measured_source_hashes_match": false,
+      "cells": 6,
+      "changed_since_measurement": [
+        "engraphis/core/store.py",
+        "engraphis/core/schema.py"
+      ]
+    },
+    {
+      "artifact": "vector-scale-sqlite-vec-corrected-20260905.json",
+      "source_files": [
+        "eval/vector_scale.py",
+        "eval/vector_scale_storage.py",
+        "eval/benchmark.py",
+        "engraphis/backends/vector_numpy.py",
+        "engraphis/backends/vector_sqlitevec.py",
+        "engraphis/core/vector_search.py",
+        "engraphis/core/store.py",
+        "engraphis/core/schema.py",
+        "engraphis/core/interfaces.py"
+      ],
+      "all_measured_source_hashes_match": false,
+      "cells": 6,
+      "changed_since_measurement": [
+        "engraphis/core/store.py",
+        "engraphis/core/schema.py"
+      ]
+    }
+  ],
+  "checked_checkpoint": "b48850a9cfe38d02b38b1563961700ab534372f4 plus follow-up source overlay",
+  "earlier_matching_checkpoint": "b3bab7b7f1d7a9737090eec2a8d1d541a6cec741",
+  "interpretation": "Measured artifacts remain intact and reproducible at their recorded source hashes. The schema/Store repair changes were not benchmarked; old timings do not characterize the later PR head."
+}

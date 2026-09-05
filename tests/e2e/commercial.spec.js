@@ -51,7 +51,7 @@ function licenseFor(plan, features, overrides = {}) {
     // The control plane refuses a second trial for any organization that already holds an
     // entitlement, so a connected customer is never offered one — only an installation
     // that belongs to no organization is.
-    trial: { used: false, active: false, ends_at: 0, available: !paid, trial_days: 3 },
+    trial: { used: false, active: false, ends_at: 0, available: !paid, trial_days: 3, days_by_plan: { pro: 3, team: 10 } },
     ...overrides,
   };
 }
@@ -291,6 +291,20 @@ async function openView(page, name) {
   await expect(page.locator(`#view-${name}`)).toHaveClass(/\bactive\b/);
 }
 
+test('Classic omits unknown Team trial duration from an older license response', async ({ page }) => {
+  const legacy = licenseFor('local', []);
+  delete legacy.trial.days_by_plan;
+  await mockLocalClient(page, 402, null, null, legacy);
+  await page.goto('/classic');
+  await openView(page, 'team');
+  const team = page.locator('#team-body');
+  await expect(team.getByRole('link', { name: 'Start Team trial', exact: true })).toHaveAttribute('href', /trial=team/);
+  await expect(team).toContainText('review its duration in Cloud');
+  await expect(team).not.toContainText('3 active days');
+  await openView(page, 'settings');
+  await expect(page.locator('.settings-license-panel').getByRole('link', { name: 'Start 3-day Pro trial' })).toBeVisible();
+});
+
 test('local dashboard keeps generic Pro and Team CTAs out of settings', async ({ page }) => {
   const errors = recordBrowserErrors(page);
   const calls = await mockLocalClient(page);
@@ -305,19 +319,19 @@ test('local dashboard keeps generic Pro and Team CTAs out of settings', async ({
   const licensePanel = page.locator('.settings-license-panel');
   await expect(licensePanel.getByText('LOCAL CORE', { exact: true })).toBeVisible();
   await expect(licensePanel.getByRole('link', { name: 'Start 3-day Pro trial' })).toBeVisible();
-  await expect(licensePanel.getByRole('link', { name: 'Start 3-day Team trial' })).toHaveCount(0);
+  await expect(licensePanel.getByRole('link', { name: 'Start 10-day Team trial' })).toHaveCount(0);
   await expect(licensePanel).not.toContainText('Support continued Engraphis development with Pro.');
 
   await openView(page, 'team');
   const team = page.locator('#team-body');
   await expect(team.getByText('Engraphis Team Cloud', { exact: false })).toBeVisible();
-  await expect(team.getByRole('link', { name: 'Start 3-day Team trial' }))
+  await expect(team.getByRole('link', { name: 'Start 10-day Team trial' }))
     .toHaveAttribute(
       'href',
       'https://cloud.engraphis.test/team?plan=team&interval=monthly&trial=team&utm_source=engraphis&utm_medium=product&utm_campaign=pro_conversion&utm_content=team_tab#billing',
     );
   await expect(team.getByRole('link', { name: 'Open Team Cloud' })).toHaveCount(0);
-  await expect(team).toContainText('exactly 3 active days');
+  await expect(team).toContainText('exactly 10 active days');
   await expect(team).toContainText(
     'Private-service account grace is capped at 24 hours, never extends Team access, and never restricts the free local core.',
   );
@@ -396,7 +410,7 @@ test('a paying Team customer sees TEAM with Team administration unlocked', async
   // A paying customer is offered the account portal, never another trial.
   await expect(licensePanel.getByRole('link', { name: 'Open Engraphis Cloud' }))
     .toHaveAttribute('href', 'https://cloud.engraphis.test/account?utm_source=engraphis&utm_medium=product&utm_campaign=pro_conversion&utm_content=license');
-  await expect(licensePanel.getByRole('link', { name: 'Start 3-day Team trial' }))
+  await expect(licensePanel.getByRole('link', { name: 'Start 10-day Team trial' }))
     .toHaveCount(0);
   await expect(licensePanel.getByRole('link', { name: 'Start 3-day Pro trial' }))
     .toHaveCount(0);
@@ -408,7 +422,7 @@ test('a paying Team customer sees TEAM with Team administration unlocked', async
   const team = page.locator('#team-body');
   await expect(team).toContainText('Your TEAM subscription includes this');
   await expect(team).not.toContainText('does not include');
-  await expect(team.getByRole('link', { name: 'Start 3-day Team trial' })).toHaveCount(0);
+  await expect(team.getByRole('link', { name: 'Start 10-day Team trial' })).toHaveCount(0);
   expect(errors).toEqual([]);
 });
 
@@ -456,7 +470,7 @@ test('a lapsed Team subscription is sent to billing, not to a spent trial', asyn
   await expect(licensePanel.getByRole('link', { name: 'Update billing' }))
     .toHaveAttribute('href', 'https://cloud.engraphis.test/account?utm_source=engraphis&utm_medium=product&utm_campaign=pro_conversion&utm_content=license');
   // A lapsed subscription is a billing problem, not an unspent trial.
-  await expect(licensePanel.getByRole('link', { name: 'Start 3-day Team trial' }))
+  await expect(licensePanel.getByRole('link', { name: 'Start 10-day Team trial' }))
     .toHaveCount(0);
   await expect(licensePanel.getByRole('link', { name: 'Start 3-day Pro trial' }))
     .toHaveCount(0);
@@ -580,7 +594,7 @@ test('An unconfigured local install starts the Cloud trial directly from either 
   await openView(page, 'analytics');
   const analytics = page.locator('#analytics-body');
   await expect(analytics).toContainText(
-    'Hosted insights and maintenance come on automatically—no settings, toggles, or worker setup.',
+    'After connecting, explicitly approve each workspace in Manage > Settings.',
   );
   await expect(analytics).not.toContainText('Connect this installation to Engraphis Cloud');
   await expect(analytics.getByRole('link', { name: 'Start 3-day Pro trial' }))
@@ -592,7 +606,7 @@ test('An unconfigured local install starts the Cloud trial directly from either 
   await openView(page, 'automation');
   const automation = page.locator('#automation-body');
   await expect(automation).toContainText(
-    'Hosted insights and maintenance come on automatically—no settings, toggles, or worker setup.',
+    'After connecting, explicitly approve each workspace in Manage > Settings.',
   );
   await expect(automation).not.toContainText('Connect this installation to Engraphis Cloud');
   await expect(automation.getByRole('link', { name: 'Start 3-day Pro trial' }))
@@ -614,7 +628,7 @@ test('Analytics turns an unconnected local installation into a Pro opportunity',
   const analytics = page.locator('#analytics-body');
   await expect(analytics).toContainText('See the memory your team is about to lose.');
   await expect(analytics).toContainText(
-    'Hosted insights and maintenance come on automatically—no settings, toggles, or worker setup.'
+    'After connecting, explicitly approve each workspace in Manage > Settings.'
   );
   await expect(analytics).toContainText('Secret and session-scoped memories stay local.');
   await expect(analytics).not.toContainText('ENGRAPHIS_MANAGED_COMPUTE_CONSENT');
@@ -645,7 +659,7 @@ test('Automation policy save presents the hosted-maintenance value when Cloud is
   const result = page.locator('#au-result');
   await expect(result).toContainText('Let your memory improve after you log off.');
   await expect(result).toContainText(
-    'Hosted insights and maintenance come on automatically—no settings, toggles, or worker setup.'
+    'After connecting, explicitly approve each workspace in Manage > Settings.'
   );
   await expect(result).not.toContainText('ENGRAPHIS_MANAGED_COMPUTE_CONSENT');
   await expect(result.getByRole('link', { name: 'Start 3-day Pro trial' }))
@@ -669,8 +683,10 @@ test('A subscribed customer sees included hosted features, never a repurchase pr
 
   const analytics = page.locator('#analytics-body');
   await expect(analytics).toContainText(
-    'Hosted insights and maintenance are on by default—nothing else to configure.'
+    'Readable managed processing is paused until you approve this workspace in Manage > Settings.'
   );
+  await expect(analytics.getByRole('link', { name: 'Review workspace processing' }))
+    .toHaveAttribute('href', /\/\?view=manage&tab=settings&workspace=/);
   await expect(analytics.getByRole('link', { name: 'Open Engraphis Cloud' }))
     .toHaveAttribute('href', 'https://cloud.engraphis.test/account?utm_source=engraphis&utm_medium=product&utm_campaign=pro_conversion&utm_content=managed_analytics');
   await expect(analytics.getByRole('link', { name: 'Subscribe to Pro' })).toHaveCount(0);

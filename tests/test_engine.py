@@ -453,7 +453,7 @@ def test_resolution_aborts_before_write_when_index_and_canonical_scan_fail(
         raise sqlite3.DatabaseError("database-secret")
 
     monkeypatch.setattr(eng.index, "search", fail_search)
-    monkeypatch.setattr(eng.store, "iter_vectors", fail_scan)
+    monkeypatch.setattr(eng.store, "iter_vector_matrices", fail_scan)
     before = eng.store.conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
 
     with caplog.at_level("WARNING"):

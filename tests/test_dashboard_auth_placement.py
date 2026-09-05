@@ -22,7 +22,7 @@ def test_dashboard_has_no_local_team_auth_or_license_activation_ui():
         assert removed not in html
     assert "activateLicense" not in script
     assert "'/license/activate'" not in script
-    assert "Start ${TRIAL_DAYS}-day ${name} trial" in script
+    assert "days=licTrialDays(plan)" in script
     assert "hostedCta('team','team_tab')" in script
     # ``plan: local`` is the free customer runtime, not a paid local plan.
     assert "raw==='pro'||raw==='team'" in script
@@ -190,9 +190,8 @@ def test_hosted_transfer_and_llm_consents_distinguish_sync_from_compute():
 
 # ── a paying customer must never be sold the plan they already own ────────────
 # The hosted views route a failed request to one of three answers. A 409 is a conflict,
-# and ``consent_required`` means hosted work has not reached the installation yet. The consent
-# panel can explain Pro to a local customer, while an existing subscriber sees their included
-# feature rather than a second purchase or setup prompt.
+# and ``consent_required`` means readable processing lacks workspace approval. The consent
+# panel links to the selected workspace controls while retaining honest Cloud account actions.
 #
 # ``_route`` below executes the shipped routing rather than asserting on its source: the
 # regression it guards (409 folded into ``hostedFeatureUnavailable``) kept every string
@@ -201,7 +200,7 @@ _ROUTED_FUNCTIONS = (
     # The access-state readers the panel copy is now derived from. They are bundled as the
     # real shipped functions rather than stubbed, so "does this customer get offered a
     # trial" is answered here by the code that answers it in the browser.
-    "licAccessState", "licAccessLive", "licTrialActive", "licTrialAvailable",
+    "licAccessState", "licAccessLive", "licTrialActive", "licTrialAvailable", "licTrialDays",
     "licPlanName", "licPlanKey", "licTrialEnds", "fmtDay", "lockReason",
     "withCtaAttribution", "hostedAccountUrl", "hostedPlanUrl", "hostedCta", "ctaLinkHtml",
     "unlockHtml", "managedConsentHtml",
@@ -224,7 +223,7 @@ function showAs(el,on,disp){if(el)el.style.display=on?(disp||'block'):'none'}
 function renderAnalytics(){return '<div id="rendered-analytics"></div>'}
 function fmtRel(){return 'just now'}
 function toast(){}
-const TRIAL_DAYS = 3, WS = 'workspace';
+const WS = 'workspace';
 let CURRENT_VIEW = 'overview';
 // The default is an unconnected installation: no hosted plan, unspent trial, and the
 // control plane says a trial may still be started. A case can replace ``access_state`` and
@@ -233,7 +232,8 @@ const LIC_BASE = {pro_upgrade_url:'https://engraphis.com/pricing',
              team_upgrade_url:'https://engraphis.com/pricing?plan=team',
              upgrade_url:'https://engraphis.com/pricing',
              plan:'local', access_state:'inactive',
-             trial:{used:false, active:false, available:true, ends_at:0}};
+             trial:{used:false, active:false, available:true, ends_at:0,
+                    trial_days:3, days_by_plan:{pro:3, team:10}}};
 let LIC = LIC_BASE;
 const location = {href:'https://127.0.0.1:8077/'};
 let THROWN = null;
@@ -310,16 +310,16 @@ def test_a_trial_eligible_local_installation_is_answered_with_the_consent_panel(
             "See the memory your team is about to lose.") in rendered["html"]
     assert "Start 3-day Pro trial" in rendered["html"]
     assert "Annual Pro option" in rendered["html"]
-    assert "Hosted insights and maintenance come on automatically" in rendered["html"]
+    assert "explicitly approve each workspace in Manage &gt; Settings" in rendered["html"]
     assert "Secret and session-scoped memories stay local." in rendered["html"]
-    # Consent travels with the cloud account; the customer is never sent to edit .env.
+    # Workspace approval is separate from Cloud access; no .env edit is needed.
     assert "ENGRAPHIS_MANAGED_COMPUTE_CONSENT" not in rendered["html"]
     assert rendered["pill"] == "CLOUD"
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is required to run the UI")
 @pytest.mark.parametrize("view", ["analytics", "automation"])
-def test_a_consent_panel_sends_an_existing_subscriber_to_cloud_not_checkout(tmp_path, view):
+def test_a_consent_panel_links_subscribers_to_workspace_approval_without_checkout(tmp_path, view):
     rendered = _route(tmp_path, [{
         "name": "subscriber", "view": view,
         "error": {"status": 409, "detail": {"code": "consent_required"}},
@@ -330,15 +330,18 @@ def test_a_consent_panel_sends_an_existing_subscriber_to_cloud_not_checkout(tmp_
     }])["subscriber"]
 
     assert "Open Engraphis Cloud" in rendered["html"]
-    assert "Hosted insights and maintenance are on by default" in rendered["html"]
+    assert "paused until you approve this workspace in Manage &gt; Settings" in rendered["html"]
+    assert 'href="/?view=manage&amp;tab=settings&amp;workspace=workspace"' in rendered["html"]
+    assert "on by default" not in rendered["html"]
+    assert "Encrypted Cloud Sync is a separate choice" in rendered["html"]
     assert "Purchase Pro license" not in rendered["html"]
     assert "Start 3-day Pro trial" not in rendered["html"]
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is required to run the UI")
 @pytest.mark.parametrize("view", ["analytics", "automation"])
-def test_classic_hosted_tabs_offer_the_local_trial_without_a_setup_step(tmp_path, view):
-    """Classic keeps the automatic three-day Cloud entry, not a local setup workflow."""
+def test_classic_hosted_tabs_distinguish_trial_access_from_workspace_approval(tmp_path, view):
+    """Classic offers Pro access and links to the independent workspace controls."""
 
     rendered = _route(tmp_path, [{
         "name": "classic-trial", "view": view,
@@ -347,11 +350,12 @@ def test_classic_hosted_tabs_offer_the_local_trial_without_a_setup_step(tmp_path
 
     html = rendered["html"]
     assert "Start 3-day Pro trial" in html
-    assert "Hosted insights and maintenance come on automatically" in html
-    assert "no settings, toggles, or worker setup" in html
-    # The two Cloud links are the complete unconnected path: trial or purchase. The
-    # Classic tab must not add a local button for connecting, enabling, or configuring.
-    assert html.count("<a ") == 2
+    assert "explicitly approve each workspace in Manage &gt; Settings" in html
+    assert "come on automatically" not in html
+    assert 'href="/?view=manage&amp;tab=settings&amp;workspace=workspace"' in html
+    # Account access does not enable processing: the third link leads to local
+    # workspace controls without performing an approval.
+    assert html.count("<a ") == 3
     assert "<button" not in html
     assert "Connect this installation" not in html
     assert rendered["pill"] == "CLOUD"
@@ -469,7 +473,7 @@ def test_a_transient_hosted_conflict_is_not_answered_with_a_purchase_panel(
 # action, and the one a lapsed customer actually clicks. Running it is the only way to see
 # which URL each button really carries.
 _ACTION_FUNCTIONS = (
-    "licAccessState", "licAccessLive", "licTrialAvailable", "licPlanName", "licPlanKey",
+    "licAccessState", "licAccessLive", "licTrialAvailable", "licTrialDays", "licPlanName", "licPlanKey",
     "licTrialEnds", "fmtDay", "lockReason", "teamTeaserNote",
     "withCtaAttribution", "hostedAccountUrl", "hostedPlanUrl", "hostedCta", "ctaLinkHtml",
     "licActionsHtml",
@@ -480,7 +484,6 @@ _ACTION_STUBS = """
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g, c=>(
   {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function safeUrl(u){return (u && typeof u === 'string') ? u : '#'}
-const TRIAL_DAYS = 3;
 // Three distinct hosted targets, so a button carrying the wrong one is visible rather
 // than hidden behind a shared URL.
 // ``upgrade_url`` is deliberately the Pro checkout here: that is what
@@ -491,7 +494,8 @@ const LIC_BASE = {pro_upgrade_url:'https://engraphis.example/checkout/pro',
                   upgrade_url:'https://engraphis.example/checkout/pro',
                   account_url:'https://engraphis.example/account',
                   plan:'local', access_state:'inactive',
-                  trial:{used:false, active:false, available:false, ends_at:0}};
+                  trial:{used:false, active:false, available:false, ends_at:0,
+                         trial_days:3, days_by_plan:{pro:3, team:10}}};
 let LIC = LIC_BASE;
 const location = {href:'https://127.0.0.1:8700/'};
 """
@@ -572,7 +576,8 @@ def test_each_access_state_offers_the_one_action_that_can_succeed(
         "name": state,
         "lic": {"plan": "pro", "access_state": state,
                 "trial": {"used": state != "inactive", "active": state == "trial",
-                          "available": state == "inactive", "ends_at": 0}},
+                          "available": state == "inactive", "ends_at": 0,
+                          "trial_days": 3, "days_by_plan": {"pro": 3, "team": 10}}},
     }])[state]["html"]
 
     if expected:
@@ -604,7 +609,8 @@ def test_a_paying_team_customer_is_not_told_team_is_excluded(tmp_path):
         {"name": "team-expired", "lic": {"plan": "team", "access_state": "trial_expired"}},
         {"name": "free", "lic": {"plan": "local", "access_state": "inactive",
                                  "trial": {"used": False, "active": False,
-                                           "available": True, "ends_at": 0}}},
+                                           "available": True, "ends_at": 0,
+                                           "trial_days": 3, "days_by_plan": {"pro": 3, "team": 10}}}},
     ])
 
     assert rows["team-active"]["teamNote"] == (
@@ -623,7 +629,7 @@ def test_a_paying_team_customer_is_not_told_team_is_excluded(tmp_path):
     assert rows["pro-active"]["teamNote"] == "Your PRO subscription does not include this."
     assert "no longer active" in rows["team-lapsed"]["teamNote"]
     assert "free trial has ended" in rows["team-expired"]["teamNote"]
-    assert "exactly 3 active days" in rows["free"]["teamNote"]
+    assert "exactly 10 active days" in rows["free"]["teamNote"]
 
 
 def test_only_an_entitlement_status_may_draw_the_purchase_panel():
@@ -684,7 +690,7 @@ def test_pro_upgrade_panel_lists_every_pro_benefit_and_state_specific_cta():
     styles = STYLES.read_text(encoding="utf-8")
 
     assert 'class="upgrade-panel"' in script
-    assert "Start ${TRIAL_DAYS}-day ${name} trial" in script
+    assert "days=licTrialDays(plan)" in script
     assert "Subscribe to ${name}" in script
     for benefit in (
         "Hosted Cloud Sync across your installations",

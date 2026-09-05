@@ -143,11 +143,12 @@ def _native_vector_matches(
 def _native_mirror_covers_canonical(conn, dimension: int) -> bool:
     """Whether vec0 exactly mirrors every same-dimension canonical vector.
 
-    Both scans are keyset-paginated and all counterpart lookups stay below SQLite's
+    The scan is keyset-paginated and all counterpart lookups stay below SQLite's
     conservative variable limit. The caller supplies the transaction: writable callers
     hold ``BEGIN IMMEDIATE`` while publishing, and read-only callers hold one snapshot.
     """
     after_id = ""
+    expected_native_count = 0
     while True:
         canonical_rows = conn.execute(
             "SELECT v.id, v.vector FROM mem_vectors v "
@@ -175,48 +176,18 @@ def _native_mirror_covers_canonical(conn, dimension: int) -> bool:
                 native.get(memory_id), expected, dimension,
             ):
                 return False
+            else:
+                expected_native_count += 1
         after_id = ids[-1]
         if len(canonical_rows) < _COVERAGE_BATCH_SIZE:
             break
 
-    # The forward scan proves that nothing canonical is missing or stale. This reverse
-    # scan rejects orphaned native rows and rows whose canonical vector became zero or
-    # changed dimension after another backend wrote the portable mirror.
-    after_id = ""
-    while True:
-        native_rows = conn.execute(
-            "SELECT id, embedding FROM mem_vec_ann "
-            "WHERE id>? ORDER BY id LIMIT ?",
-            (after_id, _COVERAGE_BATCH_SIZE),
-        ).fetchall()
-        if not native_rows:
-            break
-        ids = [str(row["id"]) for row in native_rows]
-        marks = ",".join("?" for _ in ids)
-        canonical_rows = conn.execute(
-            "SELECT v.id, v.vector FROM mem_vectors v "
-            "JOIN memories m ON m.id=v.id "
-            f"WHERE v.dim=? AND v.id IN ({marks})",
-            (dimension, *ids),
-        ).fetchall()
-        canonical = {str(row["id"]): row["vector"] for row in canonical_rows}
-        for row in native_rows:
-            memory_id = str(row["id"])
-            valid, expected = _expected_native_vector(
-                canonical.get(memory_id), dimension,
-            )
-            if (
-                not valid
-                or expected is None
-                or not _native_vector_matches(
-                    row["embedding"], expected, dimension,
-                )
-            ):
-                return False
-        after_id = ids[-1]
-        if len(native_rows) < _COVERAGE_BATCH_SIZE:
-            break
-    return True
+    # Every expected nonzero ID and its full vector content was verified above.
+    # vec0 IDs are unique, so matching total cardinality now excludes every extra
+    # orphan/zero/wrong-dimension row. Repeated ORDER BY id on vec0 is not an indexed
+    # range scan and needlessly sorts the full native table for each reverse batch.
+    native_total = conn.execute("SELECT COUNT(*) AS n FROM mem_vec_ann").fetchone()
+    return native_total is not None and int(native_total["n"]) == expected_native_count
 
 
 def _native_index_status(conn, dimension: int):
@@ -305,6 +276,7 @@ class SqliteVecVectorIndex:
                 if owns_transaction:
                     conn.execute("BEGIN")
                 _, current = _native_index_status(conn, dimension)
+                self._verified_generation = store.vector_generation()
             except Exception:
                 raise RuntimeError(_READ_ONLY_STALE_ERROR) from None
             finally:
@@ -325,6 +297,7 @@ class SqliteVecVectorIndex:
                 "format_version INTEGER NOT NULL, dimension INTEGER NOT NULL)"
             )
             existing, current = _native_index_status(conn, dimension)
+            self._verified_generation = store.vector_generation() if current else -1
             # The composition root can inspect this capability before replaying the
             # canonical mem_vectors mirror after a table creation or format change.
             self.requires_rebuild = not current
@@ -355,6 +328,12 @@ class SqliteVecVectorIndex:
                 conn.rollback()
             raise
 
+    def can_skip_hydration(self) -> bool:
+        """Skip replay only when no canonical mutation followed verified coverage."""
+        with self.store.read_snapshot():
+            return (not self.requires_rebuild
+                    and self._verified_generation == self.store.vector_generation())
+
     def mark_rebuild_complete(self) -> None:
         """Publish native readiness only after the canonical mirror is fully hydrated."""
         if self.store.read_only:
@@ -378,12 +357,14 @@ class SqliteVecVectorIndex:
             )
             if updated.rowcount != 1:
                 raise RuntimeError("sqlite-vec rebuild state is missing or stale")
+            generation = self.store.vector_generation()
             conn.commit()
         except BaseException:
             if conn.transaction_owned_by_current_thread():
                 conn.rollback()
             raise
         self.requires_rebuild = False
+        self._verified_generation = generation
 
     def upsert(self, ids: list[str], vecs: np.ndarray, meta: Optional[list[dict]] = None,
                *, commit: bool = True) -> None:

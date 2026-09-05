@@ -1,0 +1,145 @@
+{
+  "schema": "engraphis-browser-followup-review/v1",
+  "date": "2026-09-05T11:42:27.941990+00:00",
+  "base_commit": "7148b72fe3d8976951124b622a354b89e0da1f0b",
+  "github_failure": {
+    "run": 33962732785,
+    "job": 101297342277,
+    "passed": 111,
+    "failed": 1,
+    "uploaded_artifacts": 0,
+    "url": "https://github.com/Coding-Dev-Tools/engraphis/actions/runs/33962732785/job/101297342277"
+  },
+  "finding": "Node-side polling duplicated a completed step and could miss the first contact correction even when live browser physics advanced correctly.",
+  "fix": "The single slider test opts into the existing renderer onPhysics callback. It synchronously captures completed frames and freezes at the original solver budget, retaining all original motion, contact, radius, direction and overshoot assertions.",
+  "changed_source_sha256": {
+    "tests/e2e/graph-engine.spec.js": "a3fbae8d48741c9f2bddf7141af8054e7a67d228ff3d7a6274e9c420d9574e7b",
+    ".github/workflows/ci.yml": "629f8f786c3a2b9c964162b8fc451a16ea22dd0a18ff8005a116f28c708460c8"
+  },
+  "unchanged_runtime_sha256": {
+    "engraphis/dashboard_assets/engraphis-graph.js": "a76d482781de76bccdf8e3955fadf6e8b2de71129511e90f3832b30de78bbde0",
+    "playwright.config.js": "89aaaece6f36ba55fa35406983f0eb1f2695e4872e6793b44a53604120a06ee9"
+  },
+  "before": {
+    "command": [
+      "node",
+      "node_modules/@playwright/test/cli.js",
+      "test",
+      "tests/e2e/graph-engine.spec.js:3349",
+      "--project=chromium",
+      "--workers=1",
+      "--reporter=line"
+    ],
+    "ENGRAPHIS_PLAYWRIGHT_PORT": 58432,
+    "exit_code": 1,
+    "log_sha256": "78581ee942273f15cbbdb256cc7b8fe97f36b28bf4e417578b33b7f641c7928b"
+  },
+  "intermediate": {
+    "passed": 7,
+    "failed": 1,
+    "source_sha256": "70a5177b197735599b6342d01858438218f92f990f102d0054f58f6f8d9f918c",
+    "cause": "Node polling missed transient first-step contact diagnostic"
+  },
+  "after": {
+    "command": [
+      "node",
+      "node_modules/@playwright/test/cli.js",
+      "test",
+      "tests/e2e/graph-engine.spec.js",
+      "-g",
+      "Galaxy sliders retain full ranges with orbital-speed and radius response",
+      "--project=chromium",
+      "--workers=2",
+      "--repeat-each=8",
+      "--reporter=json"
+    ],
+    "ENGRAPHIS_PLAYWRIGHT_PORT": 57264,
+    "exit_code": 0,
+    "log_sha256": "451af1d2f3bdb11a9f550f6cea8d01d522111e812e61a8139cce2a665d83c497",
+    "passed": 8,
+    "skipped": 0,
+    "failed": 0,
+    "retries": 0,
+    "workers": 2,
+    "seconds": 20.407974999999997
+  },
+  "observed_each_run": {
+    "gravity_baseline_and_strong_steps": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8
+    ],
+    "contact_natural_steps": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8
+    ],
+    "contact_fast_steps": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16
+    ],
+    "first_contact": {
+      "naturalOrbits": {
+        "step": 1,
+        "overlaps": 1,
+        "correction": 13.19073521045847
+      },
+      "fastOrbits": {
+        "step": 1,
+        "overlaps": 1,
+        "correction": 12.072017095014512
+      }
+    }
+  },
+  "ci_diagnostics": {
+    "action": "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+    "condition": "failure()",
+    "path": "test-results/",
+    "retention_days": 14,
+    "existing_release_infrastructure_tests_passed": 22,
+    "actual_failure_upload_verified": false
+  },
+  "environment": {
+    "platform": "Windows AMD64",
+    "python": "3.12.10",
+    "node": "24.15.0",
+    "playwright": "1.62.1",
+    "browser": "Chromium",
+    "server": "isolated disposable in-memory dashboard; configured test credentials; no production data"
+  },
+  "review": {
+    "worker": "approved",
+    "parent": "reviewed complete test and workflow diffs; verified source hashes and eight per-run step/contact observations"
+  },
+  "limitations": [
+    "Local Windows Chromium; next remote CI has not run.",
+    "Graph API fixture is mocked; real browser assets and renderer run.",
+    "GitHub prior run uploaded no artifacts; local failure traces retained.",
+    "Parent CI failure artifact upload statically reviewed, future failed run required to exercise actual upload."
+  ]
+}

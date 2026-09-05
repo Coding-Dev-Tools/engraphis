@@ -1,0 +1,149 @@
+{
+  "schema": "engraphis-followup-offline-gates/v1",
+  "date": "2026-09-05T11:04:39.101189+00:00",
+  "base": "b48850a9cfe38d02b38b1563961700ab534372f4",
+  "environment": {
+    "python": "3.12.10",
+    "ENGRAPHIS_EXTRACTOR": "none"
+  },
+  "source_before": {
+    "engraphis/core/engine.py": "5307b6492c8c2ec7852ed490c99ef366061b4ea2c9325ff5abb1c51aac8db9b8",
+    "engraphis/core/resolve.py": "f01a6f55e44320ab04b97e516342f20155668863b2fc4765305e066d87586524",
+    "engraphis/core/schema.py": "88b2643f3905a4b27907a13dcb9379525a7cb4cf844b57aa6ef14d610b6cb312",
+    "engraphis/core/store.py": "4d5670a8e1a1d13c84db572f7598a4511c7804df4a26da28bede6d587d0454c5",
+    "engraphis/core/vector_repair.py": "0483a25ab21880479087d0e75d3d63887e0b1bed9f439c8650b8028c1294305f",
+    "engraphis/service.py": "5fc307739c238bbf646a549b1545f1759588b7dbd621019b41201662c039c675",
+    "eval/datasets/resolver_write_acceptance.jsonl": "757eb8aa46f691d11db700c4908419dce2044bb55a0b89158c2c6880d66dcaeb",
+    "eval/resolver_reworded_corrections.py": "a9054778a37b2175b46f04b674b4779e358931eee5d2ae52bbc5f953d234fb9e",
+    "scripts/export_mcp_contract.py": "5ddbd51fa9e1e2604b75596af532584ecb6ab775eabb39f428c7001e6580c336",
+    "scripts/update.py": "739bc1550aebf9209a07ab5a4ab56794adab2f4a01c3577bac2e1e08b7b17f23",
+    "tests/test_mcp_contract.py": "bdb06750dcbcc75f20ca106274a0df66abf7153059656a139bb2d0f6019bc36b",
+    "tests/test_resolve.py": "b748526cd931ddee6bb659c3dccc431b93725883af71f723f21eedd58e867c75",
+    "tests/test_storage_concurrency_repair.py": "5a42bc5883667695c3a8dc0b7e7e757b0576ce5ee6deb685a525f9768baa00c6",
+    "tests/test_update.py": "29f68743db2426df193fb1ef74e3e7f31fc4f8842f668ac2c97faea39369b092"
+  },
+  "source_after": {
+    "engraphis/core/engine.py": "5307b6492c8c2ec7852ed490c99ef366061b4ea2c9325ff5abb1c51aac8db9b8",
+    "engraphis/core/resolve.py": "f01a6f55e44320ab04b97e516342f20155668863b2fc4765305e066d87586524",
+    "engraphis/core/schema.py": "88b2643f3905a4b27907a13dcb9379525a7cb4cf844b57aa6ef14d610b6cb312",
+    "engraphis/core/store.py": "4d5670a8e1a1d13c84db572f7598a4511c7804df4a26da28bede6d587d0454c5",
+    "engraphis/core/vector_repair.py": "0483a25ab21880479087d0e75d3d63887e0b1bed9f439c8650b8028c1294305f",
+    "engraphis/service.py": "5fc307739c238bbf646a549b1545f1759588b7dbd621019b41201662c039c675",
+    "eval/datasets/resolver_write_acceptance.jsonl": "757eb8aa46f691d11db700c4908419dce2044bb55a0b89158c2c6880d66dcaeb",
+    "eval/resolver_reworded_corrections.py": "a9054778a37b2175b46f04b674b4779e358931eee5d2ae52bbc5f953d234fb9e",
+    "scripts/export_mcp_contract.py": "5ddbd51fa9e1e2604b75596af532584ecb6ab775eabb39f428c7001e6580c336",
+    "scripts/update.py": "739bc1550aebf9209a07ab5a4ab56794adab2f4a01c3577bac2e1e08b7b17f23",
+    "tests/test_mcp_contract.py": "bdb06750dcbcc75f20ca106274a0df66abf7153059656a139bb2d0f6019bc36b",
+    "tests/test_resolve.py": "b748526cd931ddee6bb659c3dccc431b93725883af71f723f21eedd58e867c75",
+    "tests/test_storage_concurrency_repair.py": "5a42bc5883667695c3a8dc0b7e7e757b0576ce5ee6deb685a525f9768baa00c6",
+    "tests/test_update.py": "29f68743db2426df193fb1ef74e3e7f31fc4f8842f668ac2c97faea39369b092"
+  },
+  "source_stable": true,
+  "checks": [
+    {
+      "command": [
+        "python",
+        "-m",
+        "eval.harness",
+        "--dataset",
+        "eval/datasets/sample.jsonl",
+        "--k",
+        "5"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 0.56,
+      "log_sha256": "7fc4615bab013ff30f1b3b5815d071e029b755e24988f15388b44900fc0b861d"
+    },
+    {
+      "command": [
+        "python",
+        "-m",
+        "eval.harness",
+        "--dataset",
+        "eval/datasets/codemem.jsonl",
+        "--k",
+        "5"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 0.775,
+      "log_sha256": "9f7b0d7d8446b8cb5c145fc1170a17cebfc9ef5e09dd5d1631950fa81d40b793"
+    },
+    {
+      "command": [
+        "python",
+        "-m",
+        "eval.ablation"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 1.078,
+      "log_sha256": "cb618538f9de2fa1bc0f2c2f27b5e6779c6b51901bf43fc1deb2c6b53aafb240"
+    },
+    {
+      "command": [
+        "python",
+        "-m",
+        "eval.reinforcement"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 0.438,
+      "log_sha256": "a1a4bac6e675f9492c5a350d57aeabaaed11b1e0ff8bace6a7260b4395e5ece4"
+    },
+    {
+      "command": [
+        "python",
+        "-m",
+        "eval.adversarial_memory_security"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 0.758,
+      "log_sha256": "001a236fa8db72e086a608eb2adfc58caae129f9e48645c21a7e0de735da2b8e"
+    },
+    {
+      "command": [
+        "python",
+        "-m",
+        "eval.grounded"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 0.776,
+      "log_sha256": "b523a71e90eb48d476edf3aa76dc14a82879037ece43d62f4bb24a389f7a8bd2"
+    },
+    {
+      "command": [
+        "python",
+        "-m",
+        "eval.code_arm"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 1.069,
+      "log_sha256": "1650f56a85ccf130f8e42d0b386cce4afaa2287d45807e68f884ffda42f020d0"
+    },
+    {
+      "command": [
+        "python",
+        "-m",
+        "eval.resolver_reworded_corrections",
+        "--json",
+        "--dataset",
+        "eval/datasets/resolver_reworded_corrections.jsonl"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 0.652,
+      "log_sha256": "4f7139c874e16c2eca6e58a57be478d34b99283b2972ce307c183533755f8c47"
+    },
+    {
+      "command": [
+        "python",
+        "-m",
+        "eval.resolver_reworded_corrections",
+        "--json",
+        "--end-to-end",
+        "--dataset",
+        "eval/datasets/resolver_write_acceptance.jsonl"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 1.145,
+      "log_sha256": "d837833fbd181916ebb299ca7bdcb9846433af23db4428c995816ecc0a76493f"
+    }
+  ]
+}

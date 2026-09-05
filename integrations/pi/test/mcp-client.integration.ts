@@ -13,7 +13,7 @@ const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", ".."
 test("discovers and calls the installed Engraphis MCP server", { timeout: 30_000 }, async () => {
 	const database = join(tmpdir(), `engraphis-pi-${randomUUID()}.db`);
 	const publicCommand = process.env.ENGRAPHIS_PI_TEST_COMMAND;
-	const client = new EngraphisMcpClient({
+	const config = {
 		// Exercise the same public console entry that a published Pi package launches.
 		// Release/CI sets the override after installing this checkout. Local development
 		// uses the checkout module so an older globally installed console script cannot
@@ -25,8 +25,10 @@ test("discovers and calls the installed Engraphis MCP server", { timeout: 30_000
 			ENGRAPHIS_DB_PATH: database,
 			// Keep CI deterministic and avoid downloading/loading the optional embedding model.
 			ENGRAPHIS_EMBED_MODEL: "",
+			ENGRAPHIS_EXTRACTOR: "none",
 		},
-	});
+	};
+	const client = new EngraphisMcpClient(config);
 
 	try {
 		const status = await client.status();
@@ -71,6 +73,26 @@ test("discovers and calls the installed Engraphis MCP server", { timeout: 30_000
 		});
 		assert.equal(result.isError, false);
 		assert.match(result.content?.[0]?.text ?? "", /"memories"/);
+
+        const saved = await client.callTool("engraphis_remember", {
+            workspace: "default", content: "The Atlas deployment target is staging.",
+            subject_key: "atlas.deployment", claim_kind: "deployment_target",
+        });
+        assert.equal(saved.isError, false);
+        await client.close();
+        const reconnected = new EngraphisMcpClient(config);
+        try {
+            const recalled = await reconnected.callTool("engraphis_recall_context", {
+                workspace: "default", query: "Atlas deployment target", format: "gist",
+                token_budget: 512,
+            });
+            assert.equal(recalled.isError, false);
+            const packet = JSON.parse(recalled.content?.[0]?.text ?? "{}");
+            assert.match(packet.context, /staging/);
+            assert.ok(packet.sources.length > 0, "restart recall must retain source provenance");
+        } finally {
+            await reconnected.close();
+        }
 	} finally {
 		await client.close();
 		await Promise.all([database, `${database}-wal`, `${database}-shm`].map((path) => rm(path, { force: true })));

@@ -1,0 +1,55 @@
+{
+  "schema": "engraphis-line-ending-equivalence/v1",
+  "content_unchanged_except_line_endings": true,
+  "reason": "retain pure tracked baseline convention and remove unrelated whole-file diff noise before final suite",
+  "files": [
+    {
+      "path": "engraphis/core/context.py",
+      "before_sha256": "34320c44f96be4bf4e7260264621902c598b8c49a6df27a1c28f3ebed55201ac",
+      "after_sha256": "3fbc5341adb353ad9b57c9b6368cdf166d1a116876af012214078d89eb53ddef",
+      "normalized_sha256": "3fbc5341adb353ad9b57c9b6368cdf166d1a116876af012214078d89eb53ddef"
+    },
+    {
+      "path": "engraphis/core/engine.py",
+      "before_sha256": "942de6672902b9b19d8d86fe45984533ced0d1fcd3b857d8bf3eec8bc60a792d",
+      "after_sha256": "0d76a5f028234933933aff7adb7078455051086ae1db9d0b41360540ed7e83e3",
+      "normalized_sha256": "0d76a5f028234933933aff7adb7078455051086ae1db9d0b41360540ed7e83e3"
+    },
+    {
+      "path": "engraphis/core/recall.py",
+      "before_sha256": "fb77fb97d5c9e6e6d14d9d3d5b074c894cbd7c2472b7a25fa84b280343b13625",
+      "after_sha256": "7eaabf69a1c3f4555a307fc6e294562edb5c6c15e4df627daf09187b25f8fb15",
+      "normalized_sha256": "7eaabf69a1c3f4555a307fc6e294562edb5c6c15e4df627daf09187b25f8fb15"
+    },
+    {
+      "path": "tests/test_recall.py",
+      "before_sha256": "345799aea86d0ec0500e31b8fd2ebd7b50a89ae09cc22e470b617b199aec9354",
+      "after_sha256": "8035ff3959d956f600d6ff13ad14f6a5e4602f9167407d6bb11dcb7d63187152",
+      "normalized_sha256": "8035ff3959d956f600d6ff13ad14f6a5e4602f9167407d6bb11dcb7d63187152"
+    },
+    {
+      "path": "tests/test_vector_sqlitevec_backend.py",
+      "before_sha256": "68411784738ef6fc8a7c19d08d7903296629c2958a2f966fd3cbec3bb11fb5bf",
+      "after_sha256": "2ff0682c9050d4ee30a052d6a7820ca55091234ef96c7e9ab2b7c052abcc7347",
+      "normalized_sha256": "2ff0682c9050d4ee30a052d6a7820ca55091234ef96c7e9ab2b7c052abcc7347"
+    },
+    {
+      "path": "CHANGELOG.md",
+      "before_sha256": "de0bfc1c527d0c163a177e449e94f3b6fcb935ba4b8a07bc793c88a598230561",
+      "after_sha256": "bdbb14b215401efcd08e4009f6ee9ca8eaa8ad1180ea0541ee4e0ffd8b4d07c9",
+      "normalized_sha256": "f057badf154df63cd68ce009005d03ec3a8e37589113be3582008455d0f30263"
+    },
+    {
+      "path": "scripts/update.py",
+      "before_sha256": "a2e68c1ccb0a746efb369d26e3309069bd1e87cde0b087d3cda4783fda52b489",
+      "after_sha256": "5f28d0eeab28dd321084ad0f88aa6aff521016ac1056c12031b977371f9e333d",
+      "normalized_sha256": "e3599e8269f92cd0c4af17002c29633840afcd12005de6afaa811cf77cf7aadf"
+    },
+    {
+      "path": "tests/test_graph_engine_asset.py",
+      "before_sha256": "f3bf92600abb069c95c354b04ee973d9c37ac758348052b001fe443ebb36a00c",
+      "after_sha256": "f3bf92600abb069c95c354b04ee973d9c37ac758348052b001fe443ebb36a00c",
+      "normalized_sha256": "f3bf92600abb069c95c354b04ee973d9c37ac758348052b001fe443ebb36a00c"
+    }
+  ]
+}
