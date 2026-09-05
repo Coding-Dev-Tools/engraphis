@@ -522,7 +522,7 @@ def test_v13_writable_upgrade_creates_durable_current_manifest_schema(tmp_path):
     workspace_id = _prepare_v13_database(db)
     upgraded = Store(str(db))
     try:
-        assert upgraded.schema_version == SCHEMA_VERSION == 16
+        assert upgraded.schema_version == SCHEMA_VERSION
         assert upgraded.conn.execute(
             "SELECT id FROM workspaces WHERE id=?", (workspace_id,)
         ).fetchone() is not None
@@ -575,7 +575,7 @@ def test_v13_read_only_refuses_without_writing_then_accepts_upgraded_db(tmp_path
     writable.close()
     readonly = Store(str(db), read_only=True)
     try:
-        assert readonly.schema_version == 16
+        assert readonly.schema_version == SCHEMA_VERSION
         with pytest.raises(sqlite3.OperationalError):
             readonly.conn.execute(
                 "INSERT INTO workspaces(id,name) VALUES ('ws_nope','nope')"
@@ -645,7 +645,7 @@ def test_v14_manifest_upgrade_preserves_lineage_and_accepts_documents(tmp_path):
 
     upgraded = Store(str(db))
     try:
-        assert upgraded.schema_version == 16
+        assert upgraded.schema_version == SCHEMA_VERSION
         assert upgraded.conn.execute(
             "SELECT session_id FROM jobs WHERE id=?", (job_id,)
         ).fetchone()["session_id"] == session_id
@@ -685,7 +685,7 @@ def test_v15_upgrade_adds_nullable_job_session_scope(tmp_path):
 
     upgraded = Store(str(db))
     try:
-        assert upgraded.schema_version == 16
+        assert upgraded.schema_version == SCHEMA_VERSION
         assert "session_id" in {
             row["name"] for row in upgraded.conn.execute("PRAGMA table_info(jobs)")
         }
