@@ -8,3 +8,5 @@
 {"id":"keep-account-identity","neighbor":"Customer account 100 has 30 days of audit retention.","candidate":"Customer account 200 has 30 days of audit retention.","expected":"add"}
 {"id":"keep-subjects","neighbor":"ServiceAlpha uses the regional mirror for every production deployment.","candidate":"ServiceBeta uses the regional mirror for every production deployment.","expected":"add"}
 {"id":"keep-different-attributes","neighbor":"The primary worker stores source artifacts in the package registry.","candidate":"The primary worker executes integration tests in the isolated sandbox.","expected":"add"}
+{"id":"keep-titled-environment-binding","neighbor":"The staging database is mirrored in production.","candidate":"The production database is mirrored in staging.","neighbor_title":"Production staging","candidate_title":"Staging production","expected":"add"}
+{"id":"keep-title-only-environment-binding","neighbor":"Replication runs every 30 minutes.","candidate":"Replication runs every 30 minutes.","neighbor_title":"Staging database is mirrored in production","candidate_title":"Production database is mirrored in staging","expected":"add"}

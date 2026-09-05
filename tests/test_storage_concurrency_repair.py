@@ -4,7 +4,7 @@ import multiprocessing
 import shutil
 import sqlite3
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 
 import numpy as np
 import pytest
@@ -12,6 +12,7 @@ import pytest
 from engraphis.core.interfaces import MemoryRecord, Scope, SearchFilter
 from engraphis.core.vector_repair import canonical_search_required, index_repair_identity
 from engraphis.factory import create_memory_engine
+from engraphis.service import MemoryService
 
 
 class ExternalIndex:
@@ -417,3 +418,338 @@ def test_repair_dequeue_uses_covering_order_index_without_sorting():
         assert tuple(engine.store.conn.execute(sql, (target,)).fetchone()) == ("mem_09998", 0)
     finally:
         engine.close()
+
+
+def test_title_publication_acknowledges_repair_and_keeps_configured_search():
+    engine = create_memory_engine(auto_evolve=False)
+    index = ExternalIndex()
+    _use_external(engine, index)
+    service = MemoryService(engine)
+    workspace = engine.store.get_or_create_workspace("title-repair")
+    try:
+        memory = engine.remember("Atlas stores memory in SQLite.", workspace_id=workspace)
+        service.update_memory(memory, workspace="title-repair", title="Current title")
+        np.testing.assert_allclose(index.rows[memory], engine.store.get_vectors([memory])[memory])
+        assert engine.store.vector_index_pending(index_repair_identity(index, engine.store)) == 0
+        assert not canonical_search_required(index, engine.store)
+    finally:
+        engine.close()
+
+
+@pytest.mark.parametrize("erase", [False, True])
+def test_delayed_title_publication_never_replays_old_payload(monkeypatch, erase):
+    engine = create_memory_engine(auto_evolve=False)
+    index = ExternalIndex()
+    _use_external(engine, index)
+    service = MemoryService(engine)
+    workspace = engine.store.get_or_create_workspace("delayed-title")
+    publish = service._publish_memory_index_action
+    actions = []
+    monkeypatch.setattr(service, "_publish_memory_index_action", actions.append)
+    try:
+        memory = engine.remember("Atlas stores memory in SQLite.", workspace_id=workspace)
+        service.update_memory(memory, workspace="delayed-title", title="Old delayed title")
+        service.update_memory(memory, workspace="delayed-title", title="Latest canonical title")
+        if erase:
+            engine.secure_erase(memory)
+        else:
+            publish(actions[1])
+        publications = len(index.published)
+        publish(actions[0])
+        assert len(index.published) == publications
+        if erase:
+            assert memory not in index.rows
+        else:
+            np.testing.assert_allclose(index.rows[memory], engine.store.get_vectors([memory])[memory])
+        assert engine.store.vector_index_pending(index_repair_identity(index, engine.store)) == 0
+    finally:
+        engine.close()
+
+
+def test_secret_title_cleanup_queues_absent_canonical_vector_until_external_retry():
+    engine = create_memory_engine(auto_evolve=False)
+    index = ExternalIndex()
+    _use_external(engine, index)
+    service = MemoryService(engine)
+    workspace = engine.store.get_or_create_workspace("secret-title")
+    try:
+        memory = engine.store.add_memory(MemoryRecord(
+            id="", content="Private local record.", sensitivity="secret",
+            scope=Scope.WORKSPACE, workspace_id=workspace,
+        ))
+        # An old external copy can survive even after its canonical vector is gone.
+        index.rows[memory] = np.zeros(engine.embedder.dim, dtype=np.float32)
+        index.fail = True
+        service.update_memory(memory, workspace="secret-title", title="Review label")
+        target = index_repair_identity(index, engine.store)
+        assert engine.store.vector_index_pending(target) == 1
+        assert memory in index.rows
+        index.fail = False
+        assert engine.repair_vector_index()["repaired"] == 1
+        assert memory not in index.rows
+        assert engine.store.vector_index_pending(target) == 0
+    finally:
+        engine.close()
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_secure_erase_acknowledges_only_confirmed_external_cleanup(fail):
+    engine = create_memory_engine(auto_evolve=False)
+    index = ExternalIndex()
+    _use_external(engine, index)
+    workspace = engine.store.get_or_create_workspace("erase-repair")
+    try:
+        memory = engine.remember("Atlas stores memory in SQLite.", workspace_id=workspace)
+        index.fail = fail
+        result = engine.secure_erase(memory)
+        assert result["vector_index_cleanup"] == ("failed" if fail else "deleted")
+        assert engine.store.get_memory(memory) is None
+        target = index_repair_identity(index, engine.store)
+        assert engine.store.vector_index_pending(target) == int(fail)
+        assert canonical_search_required(index, engine.store) is fail
+        index.fail = False
+        engine.repair_vector_index()
+        assert memory not in index.rows
+        assert engine.store.vector_index_pending(target) == 0
+    finally:
+        engine.close()
+
+
+def test_secure_erase_serializes_external_delete_against_concurrent_repair(tmp_path, monkeypatch):
+    path = str(tmp_path / "erase-race.db")
+    first = create_memory_engine(path, auto_evolve=False)
+    second = create_memory_engine(path, auto_evolve=False)
+    index = ExternalIndex()
+    _use_external(first, index)
+    _use_external(second, index)
+    deleted = threading.Event()
+    release = threading.Event()
+    try:
+        workspace = first.store.get_or_create_workspace("erase-race")
+        memory = first.remember("Atlas stores memory in SQLite.", workspace_id=workspace)
+        first.store.put_vector(memory, first.store.get_vectors([memory])[memory], model=first.embedding_space)
+        first.store.conn.commit()
+        delete = index.delete
+
+        def pause_after_delete(ids, *, commit=True):
+            delete(ids, commit=commit)
+            deleted.set()
+            assert release.wait(10), "erasure synchronization timed out"
+
+        monkeypatch.setattr(index, "delete", pause_after_delete)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            erasure = pool.submit(first.secure_erase, memory)
+            try:
+                assert deleted.wait(10), "external deletion did not run"
+                replay = pool.submit(second.repair_vector_index, memory_id=memory)
+                with pytest.raises(TimeoutError):
+                    replay.result(timeout=0.1)
+            finally:
+                release.set()
+            assert erasure.result(timeout=10)["vector_index_cleanup"] == "deleted"
+            assert replay.result(timeout=10)["pending"] == 0
+        assert memory not in index.rows
+        assert first.store.get_memory(memory) is None
+    finally:
+        release.set()
+        first.close()
+        second.close()
+
+
+def test_rebuild_publication_acknowledges_its_confirmed_generation(tmp_path):
+    from tests.test_recall_recovery import _engine_for, _VersionedSemanticEmbedder
+
+    path = tmp_path / "rebuild-publication.db"
+    index = ExternalIndex()
+    first = _engine_for(path, _VersionedSemanticEmbedder("A"))
+    _use_external(first, index)
+    try:
+        first._rebuild_versioned_embeddings()
+        workspace = first.store.get_or_create_workspace("rebuild-publication")
+        memory = first.remember("Atlas stores memory in SQLite.", workspace_id=workspace)
+    finally:
+        first.close()
+    second = _engine_for(path, _VersionedSemanticEmbedder("B"))
+    _use_external(second, index)
+    try:
+        second._rebuild_versioned_embeddings()
+        np.testing.assert_allclose(index.rows[memory], second.store.get_vectors([memory])[memory])
+        assert second.store.vector_index_pending(index_repair_identity(index, second.store)) == 0
+    finally:
+        second.close()
+
+
+def test_publication_acknowledgement_preserves_newer_canonical_generation():
+    engine = create_memory_engine(auto_evolve=False)
+    index = ExternalIndex()
+    _use_external(engine, index)
+    workspace = engine.store.get_or_create_workspace("newer-generation")
+    try:
+        memory = engine.remember("Atlas stores memory in SQLite.", workspace_id=workspace)
+        target = index_repair_identity(index, engine.store)
+        for text in ("Earlier title", "Later canonical title"):
+            with engine.store.write_transaction():
+                engine.store.put_vector(memory, engine.embedder.embed([text])[0], model=engine.embedding_space)
+            if text == "Earlier title":
+                captured = engine.store.vector_index_repair_generations(target, [memory])
+        engine.store.acknowledge_vector_index_repairs(target, captured)
+        assert engine.store.vector_index_pending(target) == 1
+        assert engine.store.vector_index_repair_generations(target, [memory])[memory] > captured[memory]
+        assert canonical_search_required(index, engine.store)
+        assert engine.repair_vector_index()["repaired"] == 1
+        np.testing.assert_allclose(index.rows[memory], engine.store.get_vectors([memory])[memory])
+        assert engine.store.vector_index_pending(target) == 0
+    finally:
+        engine.close()
+
+
+@pytest.mark.parametrize("repair_fails", [False, True])
+def test_secure_erase_rollback_restores_repair_debt_or_reports_compensation_failure(monkeypatch, repair_fails):
+    engine = create_memory_engine(auto_evolve=False)
+    index = ExternalIndex()
+    _use_external(engine, index)
+    workspace = engine.store.get_or_create_workspace("erase-rollback")
+    try:
+        memory = engine.remember("Atlas stores memory in SQLite.", workspace_id=workspace)
+        erase = engine.store.secure_erase_memory
+        queue = engine.store.queue_vector_index_repairs
+
+        def fail_after_erase(*args, **kwargs):
+            erase(*args, **kwargs)
+            assert engine.store.get_memory(memory) is None
+            raise RuntimeError("injected canonical erase failure")
+
+        def fail_compensation(*args, **kwargs):
+            if not engine.store.conn.transaction_owned_by_current_thread():
+                raise RuntimeError("injected repair persistence failure")
+            return queue(*args, **kwargs)
+
+        monkeypatch.setattr(engine.store, "secure_erase_memory", fail_after_erase)
+        if repair_fails:
+            monkeypatch.setattr(engine.store, "queue_vector_index_repairs", fail_compensation)
+        expected = "injected repair persistence failure" if repair_fails else "injected canonical erase failure"
+        with pytest.raises(RuntimeError, match=expected) as failure:
+            engine.secure_erase(memory)
+        assert engine.store.get_memory(memory) is not None
+        assert memory not in index.rows
+        target = index_repair_identity(index, engine.store)
+        if repair_fails:
+            assert isinstance(failure.value.__cause__, RuntimeError)
+            assert str(failure.value.__cause__) == "injected canonical erase failure"
+        else:
+            assert engine.store.vector_index_pending(target) == 1
+            assert canonical_search_required(index, engine.store)
+            assert engine.repair_vector_index()["repaired"] == 1
+            np.testing.assert_allclose(index.rows[memory], engine.store.get_vectors([memory])[memory])
+            assert engine.store.vector_index_pending(target) == 0
+    finally:
+        engine.close()
+
+
+def test_external_secure_erase_rejects_caller_transaction_before_provider_deletion(monkeypatch):
+    engine = create_memory_engine(auto_evolve=False)
+    index = ExternalIndex()
+    _use_external(engine, index)
+    workspace = engine.store.get_or_create_workspace("caller-erase")
+    try:
+        memory = engine.remember("Atlas stores memory in SQLite.", workspace_id=workspace)
+        deleted = []
+        monkeypatch.setattr(index, "delete", lambda ids: deleted.extend(ids))
+        engine.store.conn.execute("BEGIN IMMEDIATE")
+        with pytest.raises(RuntimeError, match="caller-owned transactions cannot erase"):
+            engine.secure_erase(memory)
+        assert engine.store.conn.transaction_owned_by_current_thread()
+        assert not deleted
+        assert memory in index.rows
+        engine.store.conn.rollback()
+        assert engine.store.get_memory(memory) is not None
+        assert engine.store.vector_index_pending(index_repair_identity(index, engine.store)) == 0
+    finally:
+        engine.close()
+
+
+def test_existing_v17_database_gains_repair_queue_index_without_losing_debt(tmp_path):
+    from engraphis.core.store import Store
+
+    path = tmp_path / "v17-queue-index.db"
+    with Store(str(path)) as store:
+        store.queue_vector_index_repairs("upgrade-target", ["mem_cleanup"])
+    with sqlite3.connect(str(path)) as previous:
+        previous.execute("DROP INDEX idx_vector_index_repairs_queue")
+    with Store(str(path)) as upgraded:
+        assert upgraded.schema_version == 17
+        assert upgraded.vector_index_pending("upgrade-target") == 1
+        plan = " ".join(str(row[3]) for row in upgraded.conn.execute(
+            "EXPLAIN QUERY PLAN SELECT memory_id,generation FROM vector_index_repairs "
+            "WHERE identity=? ORDER BY generation,memory_id LIMIT 1", ("upgrade-target",),
+        ).fetchall()).upper()
+        assert "USE TEMP B-TREE" not in plan
+        assert "COVERING INDEX IDX_VECTOR_INDEX_REPAIRS_QUEUE" in plan
+
+
+@pytest.mark.parametrize("startup_state", ["healthy", "recreated", "failed_rebuild"])
+def test_external_startup_honors_rebuild_signal_with_existing_target(tmp_path, startup_state):
+    from tests.test_recall_recovery import _engine_for, _VersionedSemanticEmbedder
+
+    class RestartableIndex(ExternalIndex):
+        requires_rebuild = False
+
+        def __init__(self):
+            super().__init__()
+            self.completed = 0
+
+        def mark_rebuild_complete(self):
+            self.completed += 1
+            self.requires_rebuild = False
+
+    path = tmp_path / "external-startup.db"
+    index = RestartableIndex()
+    first = _engine_for(path, _VersionedSemanticEmbedder("A"))
+    _use_external(first, index)
+    try:
+        first._rebuild_versioned_embeddings()
+        workspace = first.store.get_or_create_workspace("external-startup")
+        historical = first.remember("Atlas stores memory in SQLite.", workspace_id=workspace)
+        current = first.remember("Whales sing underwater.", workspace_id=workspace)
+        first.store.close_validity(historical)
+        target = index_repair_identity(index, first.store)
+        assert first.store.vector_index_pending(target) == 0
+        assert set(index.rows) == {historical, current}
+    finally:
+        first.close()
+
+    if startup_state != "healthy":
+        index = RestartableIndex()
+        index.requires_rebuild = True
+        assert not index.rows
+    index.published.clear()
+    second = _engine_for(path, _VersionedSemanticEmbedder("A"))
+    _use_external(second, index)
+    try:
+        assert index_repair_identity(index, second.store) == target
+        assert second.store.vector_index_pending(target) == 0
+        assert canonical_search_required(index, second.store) is index.requires_rebuild
+        if startup_state == "failed_rebuild":
+            index.fail = True
+            with pytest.raises(RuntimeError, match="external vector index repair is incomplete"):
+                second._rebuild_versioned_embeddings()
+            assert second.store.vector_index_pending(target) == 2
+            assert canonical_search_required(index, second.store)
+            assert index.requires_rebuild
+            assert index.completed == 0
+            index.fail = False
+        second._rebuild_versioned_embeddings()
+        assert set(index.rows) == {historical, current}
+        for memory in (historical, current):
+            np.testing.assert_allclose(index.rows[memory], second.store.get_vectors([memory])[memory])
+        assert second.store.vector_index_pending(target) == 0
+        assert not index.requires_rebuild
+        assert not canonical_search_required(index, second.store)
+        if startup_state == "healthy":
+            assert not index.published
+            assert index.completed == 0
+        else:
+            assert set(index.published) == {historical, current}
+            assert index.completed == 1
+    finally:
+        second.close()

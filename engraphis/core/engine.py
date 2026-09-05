@@ -805,11 +805,16 @@ class MemoryEngine:
             return
         target = index_repair_identity(self.index, self.store)
         if target is not None:
-            self.store.register_vector_index(target)
+            # A durable target can outlive a recreated physical index. Its empty
+            # queue proves completeness only while the adapter remains healthy.
+            self.store.register_vector_index(
+                target, rebuild=getattr(self.index, "requires_rebuild", False) is True,
+            )
             while self.store.vector_index_pending(target):
                 repaired = self.repair_vector_index(limit=EMBEDDING_REBUILD_BATCH)
                 if repaired["repaired"] == 0:
                     raise RuntimeError("external vector index repair is incomplete")
+            self._mark_separate_vector_index_rebuild_complete()
             return
         can_skip = getattr(self.index, "can_skip_hydration", None)
         if callable(can_skip) and can_skip():
@@ -2958,6 +2963,9 @@ class MemoryEngine:
         ``VectorIndex`` may be an injected external backend. Request its deletion first,
         but do not leave the local SQLite copy intact if that backend is unavailable; the
         returned status explicitly reports that incomplete external cleanup.
+
+        Separate indexes require an engine-owned transaction so a caller cannot later
+        roll back the durable repair debt after an irreversible provider deletion.
         """
         with self._write_lock:
             repair_target = index_repair_identity(self.index, self.store)
@@ -3019,11 +3027,14 @@ class MemoryEngine:
                     # Physical maintenance must run after the engine-owned transaction
                     # commits; VACUUM is invalid while the erase transaction is active.
                     result["maintenance"] = self.store.run_secure_erase_maintenance()
-            except BaseException:
+            except BaseException as erase_exc:
                 # Provider deletion cannot roll back with SQLite. Persist work
                 # for the restored canonical rows after the failed transaction.
                 if repair_target is not None and attempted_ids:
-                    self.store.queue_vector_index_repairs(repair_target, attempted_ids)
+                    try:
+                        self.store.queue_vector_index_repairs(repair_target, attempted_ids)
+                    except BaseException as repair_exc:
+                        raise repair_exc from erase_exc
                 raise
         result["vector_index_cleanup"] = index_cleanup
         if index_cleanup in {"failed", "partial"}:

@@ -35,7 +35,7 @@ capacity, production readiness, or a completed user study.
 | R04 | Reproduced: auxiliary Ask failure discarded a successful answer | Independent answer and preview state, deadlines and cancellation | Browser partial-success, timeout and stale-workspace cases |
 | R05 | Reproduced: concurrent engines could insert duplicate writes; native batch publication could fail after canonical commit | Embed before writer reservation; discover/resolve/persist under SQLite transaction; store-sharing native batch publication joins that transaction | Separate-instance/process and native batch rollback tests in `test_storage_concurrency_repair.py` |
 | R06 | Reproduced: incomplete derived index could miss canonical truth | Durable content-free repair work, idempotent retries, canonical fallback and readiness diagnostics | Outage, restart, erase and interrupted-repair tests; external adapters need stable index identity |
-| R07 | Reproduced: resolver evaluation missed false NOOP loss | Real write-path acceptance and false-NOOP/distinct-survival metrics; environment-role resolver correction | Original unit fixture: 44 pairs (38 corrections, six distinct facts). New real-write fixture: 10 pairs. Neither is independent held-out user evidence. JSON commands identify the actual dataset and retain input/source hashes. |
+| R07 | Reproduced: resolver evaluation missed false NOOP loss | Real write-path acceptance and false-NOOP/distinct-survival metrics; environment-role resolver correction | Original unit fixture: 44 pairs (38 corrections, six distinct facts). Initial real-write fixture: 10 pairs; the reviewed title-binding extension brings it to 12. Neither is independent held-out user evidence. JSON commands identify the actual dataset and retain input/source hashes. |
 | R08 | Reproduced quadratic fresh-insert work and measured candidate scan/verification costs | Fresh FTS inserts avoid full mirror scans while retaining orphan repair. Bounded scans sort the scoped first batch, then use vector-first keysets. Native verification checks every expected vector and exact unique-row cardinality | Controlled 10,000-row insertion comparison: 16.65 s with the former delete forced, 2.50 s corrected. Both final 10k/100k matrices completed. Concurrency, native restart and intermediate-scope latency remain material limits; details below. |
 | R09 | Reproduced diagnostic gaps | Real rolled-back write probe; JSON doctor; private tokens for new setup; installation intent profiles | Setup/update regression tests; live Windows evidence only |
 | R10 | Reproduced Windows long-path object-store failure | Confined extended paths and short unique staging filenames | Cloud object-store long-path regression and full suite |
@@ -51,6 +51,8 @@ capacity, production readiness, or a completed user study.
 | R20 | Query-plan reproduction: each large-backlog dequeue sorted remaining repairs | Cover the dequeue order with `(identity, generation, memory_id)` | Query-plan and existing-v17 reopen checks; no claim of a measured end-to-end speedup |
 | R21 | Reproduced: editable upgrades treated unknown legacy installation intent as explicit base-only intent | Use the common extras selector for preview, install and rollback | 18 profile/override scenarios; updater and installation-profile suite |
 | R22 | Reproduced on Python 3.13/3.14: MCP export changed because docstring indentation differed | Normalize tool descriptions with `inspect.cleandoc`; preserve schema/annotation and meaningful-description drift checks | Matched MCP/Pydantic runtimes; only 32 description fields and the digest differed |
+| R23 | Reproduced: a recreated external index with the same identity could be treated as complete | Honor the adapter rebuild signal, reseed canonical rows and retain repair on failure; keep healthy startup incremental | Same-identity restart cases include historical vectors, failed rebuild/retry and healthy startup |
+| R24 | Reproduced: reordered display-title environments caused identical writes to be stored twice | Ignore only permutations of bare environment labels on identical content; preserve factual title and content bindings | Duplicate-label regressions plus real-write factual-title, arrow and body-binding protection; two titled acceptance cases |
 
 ## Architecture and compatibility decisions
 
@@ -60,7 +62,9 @@ capacity, production readiness, or a completed user study.
 2. Derived vectors remain repairable. `MemoryEngine.repair_vector_index(limit=100)`
    explicitly retries durable work. A stable per-index `index_identity` is required for
    trustworthy completeness. Unidentified external adapters use canonical search conservatively.
-   No background repair scheduler was added.
+   No background repair scheduler was added. External-index erasure requires an engine-owned
+   transaction: callers must finish a manually opened transaction before erasing, so a later
+   rollback cannot discard repair debt after provider deletion. Ordinary engine calls remain unchanged.
 3. Schema 17 is additive: vector generation, index targets and pending memory IDs contain
    no memory text or credentials. Existing transactional migration and verified pre-migration
    backup behavior remain intact. Dirty native startup retains a full verification/rebuild;
