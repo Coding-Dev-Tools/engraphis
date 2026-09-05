@@ -230,6 +230,72 @@ def test_non_git_pep610_install_is_not_misclassified(monkeypatch):
     assert update._detect_install() == "pypi"
 
 
+@pytest.mark.parametrize(("profile", "override", "extras"), [
+    pytest.param(None, None, "[all]", id="unknown-legacy"),
+    pytest.param([], None, "", id="explicit-base"),
+    pytest.param(["server", "code"], None, "[code,server]", id="selected-profile"),
+    pytest.param(["code"], "server", "[server]", id="override-profile"),
+    pytest.param(["all"], "none", "", id="override-base"),
+    pytest.param(None, "code,server,code", "[code,server]", id="override-legacy"),
+])
+@pytest.mark.parametrize("mode", ["check", "update", "rollback"])
+def test_editable_update_preserves_installation_capabilities(
+    monkeypatch, tmp_path, capsys, profile, override, extras, mode,
+):
+    from scripts import installation_profile
+
+    monkeypatch.delenv("ENGRAPHIS_UPDATE_EXTRAS", raising=False)
+    if profile is not None:
+        installation_profile.write_profile(profile)
+    if override is not None:
+        monkeypatch.setenv("ENGRAPHIS_UPDATE_EXTRAS", override)
+    project = tmp_path / "clone with spaces"
+    (project / ".git").mkdir(parents=True)
+    monkeypatch.setattr(update.shutil, "which", lambda _name: "git")
+    monkeypatch.setattr(update, "LATEST_TAG", "v1.2.3")
+    calls = []
+    install_attempts = 0
+
+    def handler(command):
+        nonlocal install_attempts
+        if command[:4] == [sys.executable, "-m", "pip", "show"]:
+            return _FakeProcess(stdout=f"Editable project location: {project}\n")
+        if "rev-parse" in command:
+            return _FakeProcess(stdout="old-sha\n")
+        if "symbolic-ref" in command:
+            return _FakeProcess(stdout="main\n")
+        if "rev-list" in command:
+            return _FakeProcess(stdout="new-sha\n")
+        if command[:4] == [sys.executable, "-m", "pip", "install"]:
+            install_attempts += 1
+            if mode == "rollback" and install_attempts == 1:
+                return _FakeProcess(returncode=1)
+        return _FakeProcess()
+
+    monkeypatch.setattr(update.subprocess, "Popen", _spawner(handler, calls))
+    if mode == "rollback":
+        with pytest.raises(subprocess.CalledProcessError):
+            update._git_update()
+    else:
+        update._git_update(check_only=mode == "check")
+
+    target = str(project) + extras
+    assert f"Editable install target: {target}\n" in capsys.readouterr().out
+    commands = [command for command, _kwargs, _proc in calls]
+    installs = [
+        command for command in commands
+        if command[:4] == [sys.executable, "-m", "pip", "install"]
+    ]
+    expected_count = {"check": 0, "update": 1, "rollback": 2}[mode]
+    assert installs == [
+        [sys.executable, "-m", "pip", "install", "-e", target]
+    ] * expected_count
+    if mode == "check":
+        assert not any("checkout" in command for command in commands)
+    if mode == "rollback":
+        assert ["git", "-C", str(project), "checkout", "main"] in commands
+
+
 def test_failed_editable_reinstall_restores_original_branch(monkeypatch, tmp_path):
     project = tmp_path / "clone"
     (project / ".git").mkdir(parents=True)

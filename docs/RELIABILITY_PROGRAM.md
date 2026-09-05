@@ -13,15 +13,17 @@ capacity, production readiness, or a completed user study.
   `feat/context-packing-and-perf-v2`. Delivery branch: `codex/reliable-agent-memory`.
   Released v1.7.1 and the PR base are `cb03dbe104394b7760ef402a2b1917eac5e8accc`.
 - Private cloud base: `8cd1f3cb819c4bfb55ac44a74aa009a8b709efac`.
-- Website changes are local to the adjacent `engraphis.com` repository.
+- Review submissions: [public #201](https://github.com/Coding-Dev-Tools/engraphis/pull/201),
+  private Cloud #67, and dependent private website draft #12. Private source remains private.
 - The authorized PR review includes the four original unmerged commits, the existing gist
   documentation edit and website changes. Gist behavior and its documentation were corrected
   together. No merge, deployment, credential rotation or release is authorized by PR submission.
 - Exactly four internal workers contributed bounded implementation work, followed by a separate
   four-worker review of core, interfaces, private cloud and historical local work. The parent integrated both batches.
   No descendant delegation, Orca routing or separate user-visible tasks were used.
-- Current working-tree source hashes and results are recorded in [the evidence directory](evidence/reliability/).
-  A base commit alone does not identify the uncommitted implementation.
+- Review checkpoint hashes and follow-up source overlays are recorded in [the evidence directory](evidence/reliability/).
+  Earlier receipts identify the bytes actually tested; they are not silently rebound to later changes.
+  The remaining public PR work uses an isolated checkout after the primary checkout moved to main.
 
 ## Findings register
 
@@ -45,6 +47,10 @@ capacity, production readiness, or a completed user study.
 | R16 | Reproduced: the unmerged 500-memory graph window excluded older two-hop evidence | Restore the established 12,000-memory window | Graph regression includes 501 newer unrelated memories; smaller windows require independent quality evidence |
 | R17 | Reproduced: Classic consent copy described processing as enabled by default | Explain explicit workspace approval and link to the selected workspace's Ledger controls | Browser and authorization-placement tests; opening controls does not enable processing |
 | R18 | Reproduced: concurrent SQLite cloud policy updates accepted stale enables; encoded auth paths escaped the stricter abuse budget | Conditional revision update with checked rowcount and first-row race handling; classify the upstream-equivalent decoded path | Independent SQLite policy writers and actual workerd regression; production deployment remains unverified |
+| R19 | Reproduced during GitHub review: successful title edits, erasure and embedding rebuilds could leave false index repair debt; late title publication could replay stale data | Publish title changes from canonical state and acknowledge only confirmed generations under the writer reservation; retain repair after failures | Delayed title, erasure/rebuild, rollback, generation and readiness regressions in `test_storage_concurrency_repair.py` |
+| R20 | Query-plan reproduction: each large-backlog dequeue sorted remaining repairs | Cover the dequeue order with `(identity, generation, memory_id)` | Query-plan and existing-v17 reopen checks; no claim of a measured end-to-end speedup |
+| R21 | Reproduced: editable upgrades treated unknown legacy installation intent as explicit base-only intent | Use the common extras selector for preview, install and rollback | 18 profile/override scenarios; updater and installation-profile suite |
+| R22 | Reproduced on Python 3.13/3.14: MCP export changed because docstring indentation differed | Normalize tool descriptions with `inspect.cleandoc`; preserve schema/annotation and meaningful-description drift checks | Matched MCP/Pydantic runtimes; only 32 description fields and the digest differed |
 
 ## Architecture and compatibility decisions
 
@@ -103,11 +109,11 @@ See [validation.json](evidence/reliability/validation.json) for commands, enviro
 counts, skips and source hashes. The deterministic tests do not stand in for user or
 paid-model evaluations. Browser approval controls use an isolated test token.
 
-The final combined PR review suite passed **4,752 public tests**, with **37 skipped** and two warnings.
+The initial combined local PR review suite passed **4,752 public tests**, with **37 skipped** and two warnings.
 Production and test source stayed unchanged throughout that run; the before/after hashes and
 skip reasons are in [the PR source receipt](evidence/reliability/public-pr-source-final.json).
 The private suite passed **1,157 tests**, with **two PostgreSQL integration tests skipped**.
-All seven required offline evaluation commands passed on the final public core/backend source.
+All seven required offline evaluation commands passed on that recorded core/backend checkpoint.
 Pi's 21 unit tests and actual MCP restart journey passed; Prime passed 136 tests with one skip.
 The reviewed UI passed nine focused Chromium scenarios; the website passed 24 unit tests and
 11 Chromium/axe scenarios. The edge passed 13 tests, including four actual workerd scenarios.
@@ -124,7 +130,7 @@ The [paid evaluation proposal](PAID_EVALUATION_PROPOSAL.md) specifies a 720-call
 proposed $31 API limit. Its five-arm runner, frozen input selection and exact execution binding
 remain prerequisites; no paid run is authorized or recorded by this implementation.
 
-Current local environment: Windows 11 build 26100, Python 3.12.10, SQLite 3.49.1,
+Initial local validation environment: Windows 11 build 26100, Python 3.12.10, SQLite 3.49.1,
 NumPy 2.4.5, FastAPI 0.141.1, MCP 1.29.0, Pydantic 2.13.4.
 Native SQLite-vector checks use an isolated sqlite-vec 0.1.9 installation.
 Tests force `ENGRAPHIS_EXTRACTOR=none`.
@@ -148,8 +154,13 @@ python -m eval.code_arm
 
 Run Pi and Prime tests from their own integration directories; their Python test
 package names otherwise collide with the root suite. Browser CI installs Chromium,
-Firefox and WebKit. The full supported Python/platform CI matrix, remote PR checks,
-PostgreSQL integration, Docker smoke and production restore remain separate evidence.
+Firefox and WebKit. Remote checks are bound to each PR head and its tested merge tree.
+Public checkpoint `b3bab7b7` passed Python 3.9 through 3.12, all 112 browser scenarios
+and 85.02% coverage; Python 3.13/3.14 exposed the contract indentation issue in R22.
+Cloud `25b5c8e` passed all three checks, including 82.50% branch coverage, real PostgreSQL
+migration round trips and least-privilege roles, artifact/image gates and Team edge checks.
+Production restore and production configuration remain unverified.
+The follow-up receipts describe the later repairs; use the current PR checks for their remote status.
 
 ## Measured storage scale
 
@@ -157,6 +168,9 @@ PostgreSQL integration, Docker smoke and production restore remain separate evid
 checksummed JSON artifacts include all 12 final backend/size/concurrency cells, mixed writes,
 reopen/rebuild checks, hardware, exact commands, source hashes and retained incomplete runs.
 Both final backends returned matching result IDs for identical synthetic inputs.
+These measurements belong to the recorded pre-follow-up source checkpoint. Later repair-queue
+schema/Store changes invalidate whole-file identity with that checkpoint; the old timings are
+retained as historical evidence and are not measurements of the later PR head.
 
 At 100,000 total records, with 25% eligible for each scoped search:
 

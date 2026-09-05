@@ -395,3 +395,25 @@ def test_v16_upgrade_adds_durable_repair_without_changing_memories(tmp_path):
     with sqlite3.connect(path) as original:
         assert original.execute("SELECT valid_to FROM memories WHERE id=?", (memory,)).fetchone()[0] is None
         assert original.execute("SELECT count(*) FROM memories").fetchone()[0] == 1
+
+
+def test_repair_dequeue_uses_covering_order_index_without_sorting():
+    engine = create_memory_engine(auto_evolve=False)
+    target = "query-plan-review"
+    try:
+        engine.store.register_vector_index(target)
+        engine.store.conn.executemany(
+            "INSERT INTO vector_index_repairs(identity,memory_id,generation) VALUES (?,?,?)",
+            [(target, f"mem_{index:05d}", (10_000 - index) // 3) for index in range(10_000)],
+        )
+        engine.store.conn.commit()
+        sql = ("SELECT memory_id,generation FROM vector_index_repairs WHERE identity=? "
+               "ORDER BY generation,memory_id LIMIT 1")
+        plan = " ".join(str(row[3]) for row in engine.store.conn.execute(
+            "EXPLAIN QUERY PLAN " + sql, (target,),
+        ).fetchall()).upper()
+        assert "USE TEMP B-TREE" not in plan
+        assert "COVERING INDEX IDX_VECTOR_INDEX_REPAIRS_QUEUE" in plan
+        assert tuple(engine.store.conn.execute(sql, (target,)).fetchone()) == ("mem_09998", 0)
+    finally:
+        engine.close()

@@ -597,7 +597,7 @@ def _git_update(check_only: bool = False) -> None:
 
     # Resolve intent before switching the source tree, since an older release may
     # not contain the installation-profile module used by this updater.
-    editable_extras = _explicit_installation_extras() or ""
+    editable_extras = _installed_extras()
     install_target = str(project_dir) + editable_extras
     print(f"Update available: {local[:8]} -> {remote_sha[:8]} ({tag})")
     print(f"Editable install target: {install_target}")
