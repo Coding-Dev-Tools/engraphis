@@ -9,10 +9,8 @@ from engraphis.service_context import bind_service, bound_service, require_servi
 
 
 def test_required_context_cannot_fall_back_to_local_service():
-    from engraphis.routes.v2_api import service
-
     with require_service_context(), pytest.raises(RuntimeError, match="context is required"):
-        service()
+        bound_service()
     assert bound_service() is None
 
 
@@ -21,14 +19,12 @@ def test_contexts_keep_identical_workspace_names_isolated():
     barrier = Barrier(2)
 
     def work(index):
-        from engraphis.routes.v2_api import service
-
         principal = {"id": "member_%d" % index, "email": "u%d@example.test" % index,
                      "role": "member"}
         with bind_service(services[index], principal=principal):
-            service().remember("Only tenant %d" % index, workspace="shared")
+            bound_service().remember("Only tenant %d" % index, workspace="shared")
             barrier.wait(timeout=5)
-            assert service() is services[index]
+            assert bound_service() is services[index]
             assert current_user()["id"] == principal["id"]
         assert bound_service() is None
         assert current_user() is None
@@ -39,6 +35,21 @@ def test_contexts_keep_identical_workspace_names_isolated():
     finally:
         for instance in services:
             instance.close()
+
+
+def test_http_adapter_requires_explicit_context_when_requested():
+    pytest.importorskip("fastapi", reason="HTTP adapter requires the optional server extra")
+    from engraphis.routes.v2_api import service
+
+    with require_service_context(), pytest.raises(RuntimeError, match="context is required"):
+        service()
+    instance = MemoryService.create(":memory:", extractor="none")
+    principal = {"id": "member_http", "email": "http@example.test", "role": "member"}
+    try:
+        with bind_service(instance, principal=principal):
+            assert service() is instance
+    finally:
+        instance.close()
 
 
 def test_exception_and_nested_binding_restore_outer_identity():
