@@ -6765,7 +6765,7 @@ class MemoryService:
 
         mid = _clean_text(memory_id, field="memory_id", max_chars=MAX_NAME_CHARS)
         wid, rid = self._require_scope(workspace, repo)
-        self._check_owns(mid, wid, rid)
+        self._check_owns(mid, wid, None)
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 200:
             raise ValidationError("history limit must be between 1 and 200")
         identity = hashlib.sha256(json.dumps([mid, wid, rid, valid_at, known_at]).encode()).hexdigest()
@@ -6800,6 +6800,14 @@ class MemoryService:
             root = self.store.get_memory(mid)
             if root is None:
                 raise MemoryConflict("memory was erased while opening history")
+            # History is a scoped read: project views include broader roots,
+            # while governance continues to require exact repository ownership.
+            if root.workspace_id != wid or (
+                rid is not None and root.repo_id != rid
+                and root.scope not in (Scope.WORKSPACE, Scope.USER)
+            ):
+                raise ValidationError(f"memory '{mid}' does not belong to that workspace/repo")
+            self._authorize_memory_session(root)
             # Explicit promotion broadens lineage visibility. Preserve workspace/user
             # ancestors, while narrow records still require the selected repository
             # and the existing caller/session authorization below.

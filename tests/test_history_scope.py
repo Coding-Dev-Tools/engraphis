@@ -114,7 +114,8 @@ def test_legacy_broader_scope_is_an_ancestor_even_with_a_stored_repo_id(svc, anc
     assert page["count"] == page["total_count"] == len(identities)
 
 
-def test_rest_repo_history_returns_the_promoted_successor_on_its_next_page(svc, monkeypatch):
+@pytest.mark.parametrize("root_index", [1, 2])
+def test_rest_repo_history_returns_the_promoted_successor_on_its_next_page(svc, monkeypatch, root_index):
     pytest.importorskip("fastapi")
     pytest.importorskip("httpx")
     from fastapi import FastAPI
@@ -126,7 +127,7 @@ def test_rest_repo_history_returns_the_promoted_successor_on_its_next_page(svc, 
     app = FastAPI()
     app.include_router(v2_api.router)
     with TestClient(app) as client:
-        url = f"/api/memory/{identities[1]}/history"
+        url = f"/api/memory/{identities[root_index]}/history"
         params = {"workspace": "w", "repo": "api", "limit": 2}
         response = client.get(url, params=params)
         assert response.status_code == 200, response.text
@@ -139,3 +140,43 @@ def test_rest_repo_history_returns_the_promoted_successor_on_its_next_page(svc, 
         assert last["count"] == 1 and last["total_count"] == 3
         assert last["next_cursor"] is None
         assert last["versions"][0]["scope"] == "workspace"
+
+
+@pytest.mark.parametrize("scope", ["workspace", "user"])
+def test_project_history_can_open_broader_root_without_widening_governance(svc, scope):
+    identities = promoted_lineage(svc)
+    root = identities[-1]
+    sibling = svc.remember(
+        "Sibling repository lineage claim.", workspace="w", repo="web",
+        metadata={"corrects": root}, resolve_conflicts=False,
+    )["id"]
+    foreign = svc.remember(
+        "Foreign workspace lineage claim.", workspace="other",
+        metadata={"corrects": root}, resolve_conflicts=False,
+    )["id"]
+    if scope == "user":
+        # Imported broader roots may retain an obsolete repository id. Read
+        # eligibility follows scope; governance still verifies exact ownership.
+        svc.store.conn.execute(
+            "UPDATE memories SET scope=?, repo_id=? WHERE id=?",
+            (scope, svc.store.get_memory(sibling).repo_id, root),
+        )
+        svc.store.conn.commit()
+    for repo in ("api", svc.store.get_memory(identities[0]).repo_id):
+        first = svc.memory_history(root, workspace="w", repo=repo, limit=1)
+        seen, page = [], first
+        while True:
+            seen.extend(row["id"] for row in page["versions"])
+            assert page["total_count"] == len(identities)
+            if not page["next_cursor"]:
+                break
+            page = svc.memory_history(
+                root, workspace="w", repo=repo, limit=1, cursor=page["next_cursor"],
+            )
+        assert seen == identities
+    assert {row["id"] for row in svc.memory_history(root, workspace="w")["versions"]} == set(identities) | {sibling}
+    for rejected in (sibling, foreign):
+        with pytest.raises(ValidationError, match="does not belong"):
+            svc.memory_history(rejected, workspace="w", repo="api")
+    with pytest.raises(ValidationError, match="does not belong"):
+        svc.correct(root, "A project cannot edit a broader memory as its own.", workspace="w", repo="api")
