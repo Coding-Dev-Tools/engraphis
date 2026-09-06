@@ -153,6 +153,55 @@ def test_history_pages_by_lineage_and_survives_unrelated_activity(svc):
     assert seen == identities
 
 
+@pytest.mark.parametrize("field", ["supersedes", "promoted_from"])
+@pytest.mark.parametrize("kind", ["integer", "boolean", "string", "mapping", "invalid-list"])
+def test_history_and_inspection_ignore_malformed_lineage(svc, field, kind):
+    mid, _ = seed(svc)
+    malformed = {"integer": 1, "boolean": True, "string": f"prefix-{mid}-suffix",
+                 "mapping": {mid: True}, "invalid-list": [1, None, {}]}[kind]
+    unrelated = svc.remember(
+        "An unrelated record mentions an identifier.", workspace="w", repo="api",
+        metadata={"note": mid, field: malformed},
+    )["id"]
+    for target in (mid, unrelated):
+        assert [row["id"] for row in svc.inspect(target, workspace="w")["chain"]] == [target]
+        assert [row["id"] for row in svc.memory_history(target, workspace="w")["versions"]] == [target]
+
+
+@pytest.mark.parametrize("field", ["supersedes", "promoted_from"])
+def test_history_preserves_exact_ids_in_mixed_lineage_lists(svc, field):
+    mid, _ = seed(svc)
+    successor = svc.remember(
+        "A recorded successor.", workspace="w", repo="api",
+        metadata={field: [1, None, mid, {}]},
+    )["id"]
+    for target in (mid, successor):
+        assert {row["id"] for row in svc.inspect(target, workspace="w")["chain"]} == {mid, successor}
+        assert {row["id"] for row in svc.memory_history(target, workspace="w")["versions"]} == {mid, successor}
+
+
+def test_unrelated_non_object_metadata_cannot_break_rest_history(svc, monkeypatch):
+    import json
+    pytest.importorskip("fastapi")
+    pytest.importorskip("httpx")
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from engraphis.routes import v2_api
+
+    mid, _ = seed(svc)
+    other = svc.remember("Unrelated legacy metadata.", workspace="w")["id"]
+    svc.store.conn.execute("UPDATE memories SET metadata=? WHERE id=?", (json.dumps([mid]), other))
+    svc.store.conn.commit()
+    monkeypatch.setattr(v2_api, "service", lambda: svc)
+    app = FastAPI()
+    app.include_router(v2_api.router)
+    with TestClient(app) as client:
+        for suffix, key in (("", "chain"), ("/history", "versions")):
+            response = client.get(f"/api/memory/{mid}{suffix}", params={"workspace": "w"})
+            assert response.status_code == 200, response.text
+            assert [row["id"] for row in response.json()[key]] == [mid]
+
+
 def test_mcp_correct_uses_atomic_guard_and_typed_conflict(svc, monkeypatch):
     pytest.importorskip("mcp")
     from engraphis import mcp_server

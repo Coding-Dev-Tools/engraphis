@@ -3143,6 +3143,13 @@ class MemoryEngine:
         reason = str(reason or "").strip()
         if not reason:
             raise ValueError("approval reason is required")
+
+        def stored_reviewer(record: MemoryRecord) -> str:
+            approval = record.metadata.get("approval") if isinstance(record.metadata, dict) else None
+            value = approval.get("reviewer") if isinstance(approval, dict) else None
+            # A retry cannot supply the identity missing from a legacy record.
+            return value if isinstance(value, str) else ""
+
         # Keep lookup and insert in the engine's write critical section. Without it two
         # retries of the same pending source could each observe no successor and create
         # duplicate prompt-visible records. The normal remember path re-enters this RLock.
@@ -3158,9 +3165,7 @@ class MemoryEngine:
                 return {
                     "id": old.id,
                     "approved_from": old.provenance.get("approved_from"),
-                    "reviewer": str(
-                        old.metadata.get("approval", {}).get("reviewer", reviewer)
-                    ),
+                    "reviewer": stored_reviewer(old),
                 }
 
             content = str(replacement_content if replacement_content is not None else old.content)
@@ -3211,6 +3216,7 @@ class MemoryEngine:
                         return {
                             "id": candidate.id,
                             "approved_from": old.id,
+                            "reviewer": stored_reviewer(candidate),
                             "op": "noop",
                         }
 
@@ -3272,7 +3278,8 @@ class MemoryEngine:
                 _transactional_finalizer=finalize_approval,
                 _transactional_validator=validate_approval,
             )
-            return {"id": result["id"], "approved_from": old.id, "reviewer": reviewer}
+            return {"id": result["id"], "approved_from": old.id,
+                    "reviewer": result.get("reviewer", reviewer[:200])}
 
     def promote(self, memory_id: str, target_scope: Scope, *, reason: str = "",
                 actor: str = "user") -> dict:
