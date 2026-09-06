@@ -148,7 +148,7 @@ def test_failed_transition_rolls_back_receipt_and_source_claim(tmp_path, monkeyp
 
 
 @pytest.mark.parametrize("reviewer", ["original-owner", "owner-" + "a" * 220])
-def test_approval_retry_reports_original_reviewer_after_reopening(tmp_path, reviewer):
+def test_approval_retry_reports_original_reviewer_after_reopening(tmp_path, monkeypatch, reviewer):
     path = str(tmp_path / "reviewer.db")
     _, sources = _prepare(path, "approve")
     engine = create_memory_engine(path, auto_evolve=False)
@@ -156,6 +156,10 @@ def test_approval_retry_reports_original_reviewer_after_reopening(tmp_path, revi
     engine.close()
     engine = create_memory_engine(path, auto_evolve=False)
     try:
+        def unavailable(*args, **kwargs):
+            raise RuntimeError("embedding provider unavailable after approval")
+
+        monkeypatch.setattr(engine.embedder, "embed", unavailable)
         retry = engine.approve_for_prompt(sources[0], reviewer="different-owner", reason="lost response")
         direct = engine.approve_for_prompt(first["id"], reviewer="third-owner", reason="repeat")
         stored = engine.store.get_memory(first["id"]).metadata["approval"]["reviewer"]
@@ -166,6 +170,36 @@ def test_approval_retry_reports_original_reviewer_after_reopening(tmp_path, revi
         ).fetchall()
         assert len(rows) == 1
         assert f"reviewer={stored}" in rows[0]["detail"]
+    finally:
+        engine.close()
+
+
+@pytest.mark.parametrize("removal", [None, "retire", "secure_erase"])
+def test_approval_retry_preserves_result_guards_without_embeddings(tmp_path, monkeypatch, removal):
+    path = str(tmp_path / "approval-outage.db")
+    _, sources = _prepare(path, "approve")
+    engine = create_memory_engine(path, auto_evolve=False)
+    try:
+        command = {"reviewer": "owner", "reason": "verified"}
+        result = engine.approve_for_prompt(sources[0], **command)
+        if removal:
+            getattr(engine, removal)(result["id"])
+
+        def unavailable(*args, **kwargs):
+            raise RuntimeError("embedding provider unavailable after approval")
+
+        monkeypatch.setattr(engine.embedder, "embed", unavailable)
+        before = engine.store.conn.total_changes
+        if removal:
+            with pytest.raises(ValueError, match="retired|erased"):
+                engine.approve_for_prompt(sources[0], **command)
+        else:
+            assert engine.approve_for_prompt(sources[0], **command) == result
+            with pytest.raises(MemoryConflict, match="different content"):
+                engine.approve_for_prompt(
+                    sources[0], **command, replacement_content="A contradictory approval.",
+                )
+        assert engine.store.conn.total_changes == before
     finally:
         engine.close()
 

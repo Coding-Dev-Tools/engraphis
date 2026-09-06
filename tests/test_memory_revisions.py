@@ -19,7 +19,7 @@ def seed(svc):
     return record.id, memory_version(record)
 
 
-def test_complete_revision_and_retry_after_reopening(svc):
+def test_complete_revision_and_retry_after_reopening(svc, monkeypatch):
     mid, version = seed(svc)
     kwargs = dict(workspace="w", repo="api", expected_version=version,
                   operation_id="edit-1", content="The cache expires after 90 days.",
@@ -36,10 +36,45 @@ def test_complete_revision_and_retry_after_reopening(svc):
     assert memory_version(replacement) == result["version"]
     second = MemoryService.create(svc.store.path, extractor="none")
     try:
+        def unavailable(*args, **kwargs):
+            raise RuntimeError("embedding provider unavailable after committed edit")
+
+        monkeypatch.setattr(second.engine.embedder, "embed", unavailable)
         assert second.revise_memory(mid, **kwargs) == result
     finally:
         second.close()
     assert svc.store.conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == 2
+
+
+@pytest.mark.parametrize("operation", ["correct", "revise"])
+@pytest.mark.parametrize("removal", [None, "retire", "secure_erase"])
+def test_committed_edit_retry_does_not_depend_on_embedding(svc, monkeypatch, operation, removal):
+    mid, version = seed(svc)
+
+    def edit():
+        if operation == "correct":
+            return svc.correct(mid, "The cache expires after 90 days.", workspace="w")
+        return svc.revise_memory(
+            mid, workspace="w", expected_version=version, operation_id="offline-retry",
+            content="The cache expires after 90 days.", title="Retention policy",
+        )
+
+    committed = edit()
+    if removal:
+        getattr(svc.engine, removal)(committed["id"])
+
+    def unavailable(*args, **kwargs):
+        raise RuntimeError("embedding provider unavailable after committed edit")
+
+    monkeypatch.setattr(svc.engine.embedder, "embed", unavailable)
+    before = svc.store.conn.total_changes
+    if removal:
+        with pytest.raises(MemoryConflict) as caught:
+            edit()
+        assert caught.value.code == "result_unavailable"
+    else:
+        assert edit() == committed
+    assert svc.store.conn.total_changes == before
 
 
 def test_conflicting_operation_reuse_and_stale_edit_do_not_mutate(svc):
