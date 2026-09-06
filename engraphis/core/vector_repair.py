@@ -67,14 +67,19 @@ def _repair_candidates(store: "Store", target: str, memory_id: Optional[str],
     """
     after: Optional[tuple[int, str]] = None
     while True:
+        # Match get_memory's instance boundary, including for historical rows.
+        # Keep the predicate on the LEFT JOIN so hidden/orphaned queue entries
+        # remain cleanup candidates instead of disappearing from discovery.
+        scope_where, scope_params = store._where(None, include_invalid=True, alias="m")
+        memory_join = " AND ".join(["m.id=r.memory_id", *scope_where])
         sql = (
             "SELECT r.memory_id,r.generation,m.id AS canonical_id,v.id AS vector_id,"
             "m.provenance,m.metadata FROM vector_index_repairs r "
-            "LEFT JOIN memories m ON m.id=r.memory_id "
+            f"LEFT JOIN memories m ON {memory_join} "
             "LEFT JOIN mem_vectors v ON v.id=r.memory_id "
             "WHERE r.identity=? AND (r.generation,r.memory_id)<=(?,?)"
         )
-        params: list[Any] = [target, *ceiling]
+        params: list[Any] = [*scope_params, target, *ceiling]
         if memory_id is not None:
             sql += " AND r.memory_id=?"
             params.append(memory_id)

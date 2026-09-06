@@ -17,6 +17,10 @@ and provenance/metadata. It avoids memory text and vector payloads. Canonical JS
 decoding and quarantine rules remain shared with the store. Each page is fetched
 before yielding; no read transaction or reader lease spans publication. The keyset
 advances past the last scanned row even if the page yields no matching candidate.
+The store's canonical workspace predicate applies to the memory join, with temporal
+filtering disabled. Out-of-binding and missing records remain cleanup candidates;
+allowed historical records remain indexable. This matches publication's `get_memory`
+view without exposing another workspace's metadata during discovery.
 
 Classification is a hint. Publication still reserves the writer, verifies the
 selected generation, rereads current canonical existence, eligibility and vector
@@ -34,6 +38,8 @@ last permitted attempt.
 - Erasure, same-generation quarantine, vector replacement and restoration between
   discovery and publication, without stale publication or lost repair debt.
 - Canonical decoding of malformed and legacy metadata/provenance.
+- Workspace-bound cleanup, multiple allowed workspaces and retained historical
+  canonical records; external cleanup does not erase the canonical memory.
 - Early cleanup, both successful and failing, without scanning newer updates after
   the provider budget is exhausted.
 

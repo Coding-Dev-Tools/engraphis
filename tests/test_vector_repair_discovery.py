@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 from engraphis.core.sync import SyncEngine
+from engraphis.core.store import Store
 from engraphis.core import vector_repair
 from engraphis.factory import create_memory_engine
 from tests.test_sync_index_repair import ExternalIndex, _bundle, _queue_blocked_upserts_and_cleanup
@@ -213,3 +214,62 @@ def test_discovery_uses_canonical_legacy_metadata_decoding(queued_index, column,
     )
     assert result == {"attempted": 1, "repaired": 1, "pending": 0}
     assert (mid not in index.rows) == cleanup
+
+
+@pytest.mark.parametrize("allowed", [{"sync-index"}, {"unrelated"}, {"sync-index", "unrelated"}])
+@pytest.mark.parametrize("temporal_column", ["valid_from", "valid_to", "expired_at"])
+def test_discovery_matches_bound_store_visibility_without_hiding_history(
+    queued_index, allowed, temporal_column,
+):
+    engine, index, sync = queued_index
+    sync.apply_bundle(_bundle())
+    mid = "mem_sync_0"
+    target = vector_repair.index_repair_identity(index, engine.store)
+    # Historical canonical vectors remain indexable; only the instance binding
+    # determines whether this target is allowed to retain the row.
+    anchor = 4_000_000_000 if temporal_column == "valid_from" else 1
+    engine.store.conn.execute(
+        f"UPDATE memories SET {temporal_column}=? WHERE id=?", (anchor, mid),
+    )
+    engine.store.conn.commit()
+    engine.store.queue_vector_index_repairs(target, [mid])
+    bound = Store(engine.store.path, allowed_workspaces=allowed)
+    try:
+        visible = bound.get_memory(mid) is not None
+        result = vector_repair.repair_vector_index(
+            bound, index, embedding_space=engine.embedding_space, dim=engine.embedder.dim,
+        )
+        assert result == {"attempted": 1, "repaired": 1, "pending": 0}
+        assert (mid in index.rows) == visible
+        assert bound.vector_index_repair_generations(target, [mid]) == {}
+        assert engine.store.get_memory(mid) is not None  # Cleanup never erases canonical data.
+    finally:
+        bound.close()
+
+
+def test_bound_cleanup_preserves_allowed_work_until_embedding_recovers(queued_index):
+    engine, index, sync = queued_index
+    sync.apply_bundle(_bundle(count=2))
+    allowed = engine.store.get_or_create_workspace("allowed")
+    engine.store.conn.execute(
+        "UPDATE memories SET workspace_id=? WHERE id=?", (allowed, "mem_sync_1"),
+    )
+    engine.store.conn.commit()
+    target = vector_repair.index_repair_identity(index, engine.store)
+    engine.store.queue_vector_index_repairs(target, ["mem_sync_0", "mem_sync_1"])
+    bound = Store(engine.store.path, allowed_workspaces={"allowed"})
+    try:
+        result = vector_repair.repair_vector_index(
+            bound, index, embedding_space="unavailable-space", dim=0, limit=1,
+        )
+        assert result == {"attempted": 1, "repaired": 1, "pending": 1}
+        assert "mem_sync_0" not in index.rows and "mem_sync_1" in index.rows
+        assert engine.store.get_memory("mem_sync_0") is not None
+        assert "mem_sync_0" in engine.store.get_vectors(["mem_sync_0"])
+        result = vector_repair.repair_vector_index(
+            bound, index, embedding_space=engine.embedding_space, dim=engine.embedder.dim,
+        )
+        assert result == {"attempted": 1, "repaired": 1, "pending": 0}
+        assert "mem_sync_0" not in index.rows and "mem_sync_1" in index.rows
+    finally:
+        bound.close()
