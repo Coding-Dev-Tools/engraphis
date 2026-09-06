@@ -3048,6 +3048,24 @@ class MemoryEngine:
             "expected_version": expected_version,
         }, operation_id=operation_id)
 
+        def correction_result(new_id: str) -> dict:
+            result = {"id": new_id, "superseded": [memory_id], "reason": reason}
+            if operation_id is not None:
+                receipt = self.store.conn.execute(
+                    "SELECT result_version FROM memory_commands WHERE workspace_id=? AND operation_id=?",
+                    (old.workspace_id, operation_id),
+                ).fetchone()
+                if receipt is None:
+                    raise RuntimeError("committed revision receipt is missing")
+                result.update({"version": receipt["result_version"], "receipt": {
+                    "operation_id": operation_id, "operation": "revise", "status": "committed",
+                }})
+            return result
+
+        replay = command.replay()
+        if replay is not None:
+            return correction_result(replay["id"])
+
         def validate_correction() -> Optional[dict]:
             replay = command.validate()
             if replay is not None:
@@ -3115,18 +3133,7 @@ class MemoryEngine:
         )
         # The old vector is historical evidence; temporal filtering hides it from
         # current recall while keeping semantic time travel complete.
-        result = {"id": new_id, "superseded": [memory_id], "reason": reason}
-        if operation_id is not None:
-            receipt = self.store.conn.execute(
-                "SELECT result_version FROM memory_commands WHERE workspace_id=? AND operation_id=?",
-                (old.workspace_id, operation_id),
-            ).fetchone()
-            if receipt is None:
-                raise RuntimeError("committed revision receipt is missing")
-            result.update({"version": receipt["result_version"], "receipt": {
-                "operation_id": operation_id, "operation": "revise", "status": "committed",
-            }})
-        return result
+        return correction_result(new_id)
 
     def approve_for_prompt(self, memory_id: str, *, reviewer: str,
                            reason: str = "", replacement_content: Optional[str] = None) -> dict:
@@ -3173,7 +3180,7 @@ class MemoryEngine:
                 "content": content, "reviewer": reviewer, "reason": reason,
             })
 
-            def validate_approval() -> Optional[dict]:
+            def approval_replay() -> Optional[dict]:
                 current = self.store.get_memory(old.id)
                 if current is None or memory_version(current) != memory_version(old):
                     raise MemoryConflict("pending memory changed during approval preparation")
@@ -3220,7 +3227,24 @@ class MemoryEngine:
                             "op": "noop",
                         }
 
-                return command.validate()
+                return command.replay()
+
+            def validate_approval() -> Optional[dict]:
+                replay = approval_replay()
+                return replay if replay is not None else command.validate()
+
+            def approval_result(result: dict) -> dict:
+                approved = self.store.get_memory(result["id"])
+                if approved is None:
+                    raise MemoryConflict("approved result was erased", code="result_unavailable")
+                return {"id": approved.id, "approved_from": old.id,
+                        "reviewer": stored_reviewer(approved)}
+
+            # Existing approval is a read: retain its recorded reviewer even when
+            # a later ceremony supplies another reason or embeddings are unavailable.
+            replay = approval_replay()
+            if replay is not None:
+                return approval_result(replay)
 
             metadata = {
                 "approved_from": old.id,
@@ -3278,8 +3302,7 @@ class MemoryEngine:
                 _transactional_finalizer=finalize_approval,
                 _transactional_validator=validate_approval,
             )
-            return {"id": result["id"], "approved_from": old.id,
-                    "reviewer": result.get("reviewer", reviewer[:200])}
+            return approval_result(result)
 
     def promote(self, memory_id: str, target_scope: Scope, *, reason: str = "",
                 actor: str = "user") -> dict:
