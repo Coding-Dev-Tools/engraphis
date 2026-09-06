@@ -6800,8 +6800,12 @@ class MemoryService:
             root = self.store.get_memory(mid)
             if root is None:
                 raise MemoryConflict("memory was erased while opening history")
+            # Explicit promotion broadens lineage visibility. Preserve workspace/user
+            # ancestors, while narrow records still require the selected repository
+            # and the existing caller/session authorization below.
             members = [record for record in self._chain_for(root, wid)
-                       if (rid is None or record.repo_id == rid)
+                       if (rid is None or record.repo_id == rid
+                           or record.scope in (Scope.WORKSPACE, Scope.USER))
                        and self._memory_visible_to_caller(record)
                        and (record.ingested_at or 0) <= anchors[1]]
             sequences = {}
