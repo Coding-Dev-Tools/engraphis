@@ -8,7 +8,7 @@
     return item;
   }
 
-  function create({ api, id, workspace, isCurrent, onOpen, onUseBase, original }) {
+  function create({ api, id, workspace, repo, isCurrent, onOpen, onUseBase, original }) {
     const root = element('section', 'record-history');
     root.setAttribute('aria-label', 'Record history');
     root.append(element('h3', '', 'Record history'));
@@ -74,6 +74,7 @@
       status.textContent = 'Loading saved versions…';
       try {
         const params = new URLSearchParams({ workspace, limit: '50' });
+        if (repo) params.set('repo', repo);
         if (selectedCursor) params.set('cursor', selectedCursor);
         const result = await api('/memory/' + encodeURIComponent(id) + '/history?' + params, { signal: controller.signal });
         if (!current() || request !== generation) return;
