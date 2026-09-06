@@ -872,10 +872,13 @@ grant. See [`docs/LICENSING.md`](https://github.com/Coding-Dev-Tools/engraphis/b
 
 ### Reliability implementation candidate
 
-The current source uses schema 18 for durable, content-free vector-index repair and atomic memory-command receipts. Upgrades use the existing verified-backup migration path.
+The current source uses schema 18 for durable, content-free vector-index repair and
+atomic memory-command receipts. Upgrades use the existing verified-backup migration path.
+The [rework execution register](docs/REWORK_EXECUTION.md) records the current findings,
+compatibility decisions, acceptance evidence, remaining work and recovery procedure.
 See [the reliability program](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/RELIABILITY_PROGRAM.md) for exact implementation,
 validation, migration and release boundaries. Managed processing now requires explicit
-workspace approval in Manage → Settings. Existing installations start with readable
+workspace approval in Settings. Existing installations start with readable
 uploads paused until confirmed; connecting an account does not grant approval.
 
 For setup diagnostics use `engraphis-init --check --json`. New configurations get an
