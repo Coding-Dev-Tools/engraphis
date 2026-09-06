@@ -134,7 +134,7 @@
   const GRAPH_FULL_LOAD_TIMEOUT_MS = 30_000;
   const GRAPH_CONNECTION_MEMORIES_TIMEOUT_MS = 8_000;
   const GRAPH_PREFERENCES_KEY = 'engraphis-ledger-graph-preferences-v1';
-  const GRAPH_PHYSICS_VERSION = 4;
+  const GRAPH_PHYSICS_VERSION = 5;
   const GRAPH_CUSTOM_VIEW_KEY = 'engraphis-ledger-graph-custom-view-v1';
   const GRAPH_LAYERS = ['temporal', 'entity', 'causal', 'semantic', 'code'];
   const GRAPH_DEFAULT_LAYERS = { temporal: true, entity: true, causal: true, semantic: true, code: false };
@@ -2949,6 +2949,11 @@
     if (legacyPhysics && preset === 'galaxy'
       && [48, 60].includes(Number(effectiveTuning.repel))) {
       effectiveTuning.repel = 100;
+    }
+    /* Physics v5 makes 120 the Galaxy gravity default. Migrate only the exact retired default;
+       a saved 96 in an already-versioned v5 snapshot remains an intentional user choice. */
+    if (legacyPhysics && preset === 'galaxy' && Number(effectiveTuning.gravity) === 96) {
+      effectiveTuning.gravity = 120;
     }
     syncGraphTuning({
       ...graphPresetTuning(preset),

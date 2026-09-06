@@ -776,7 +776,7 @@ def _community_positions(
         tier_step = max(spacing * 0.65, 2.0 * avg_sys_radius + GALAXY_SYSTEM_MIN_GAP * 0.35)
 
         tiers: list[dict[str, float | int]] = []
-        curr_radius = core_clearance_radius + avg_sys_radius * 0.25
+        curr_radius = core_clearance_radius + avg_sys_radius
         remaining = non_global_count
         while remaining > 0:
             circ = 2.0 * math.pi * curr_radius
@@ -877,7 +877,7 @@ def _community_positions(
                 # The radius_scale compactness pass may shrink preferred targets inside
                 # the core; clamp the walk's starting radius to the clearance floor so
                 # the collision search never considers orbits inside the black hole.
-                minimum_orbital_radius = core_outer_extent + GALAXY_SYSTEM_MIN_GAP
+                minimum_orbital_radius = core_outer_extent + system_radius + GALAXY_SYSTEM_MIN_GAP
                 axis_radius = max(axis_radius, minimum_orbital_radius)
                 # Radial-only walk preserves the even angular distribution. Moving only
                 # the system centre outward (not angularly) keeps every local star/planet
