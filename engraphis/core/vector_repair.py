@@ -12,7 +12,7 @@ from engraphis.core.interfaces import (
     vector_index_shares_store_transaction,
 )
 from engraphis.core.poisoning import inspection_eligible
-from engraphis.core.store import _is_memory_database_path
+from engraphis.core.store import _is_memory_database_path, _loads
 
 if TYPE_CHECKING:
     from engraphis.core.store import Store
@@ -57,29 +57,45 @@ def canonical_search_required(index, store: "Store", *,
 
 
 def _repair_candidates(store: "Store", target: str, memory_id: Optional[str],
-                       ceiling: tuple[int, str]) -> Iterator[tuple[str, int]]:
-    """Page queue identities without loading vectors or revisiting failed work."""
+                       ceiling: tuple[int, str], *,
+                       cleanup_only: bool) -> Iterator[tuple[str, int]]:
+    """Read bounded header pages; classification is only a publication hint.
+
+    Materialize each page before yielding, without retaining a read transaction.
+    No vector payload or memory text is needed to skip work for the other phase.
+    The publisher still revalidates current canonical state under the writer.
+    """
     after: Optional[tuple[int, str]] = None
     while True:
         sql = (
-            "SELECT memory_id,generation FROM vector_index_repairs WHERE identity=? "
-            "AND (generation,memory_id)<=(?,?)"
+            "SELECT r.memory_id,r.generation,m.id AS canonical_id,v.id AS vector_id,"
+            "m.provenance,m.metadata FROM vector_index_repairs r "
+            "LEFT JOIN memories m ON m.id=r.memory_id "
+            "LEFT JOIN mem_vectors v ON v.id=r.memory_id "
+            "WHERE r.identity=? AND (r.generation,r.memory_id)<=(?,?)"
         )
         params: list[Any] = [target, *ceiling]
         if memory_id is not None:
-            sql += " AND memory_id=?"
+            sql += " AND r.memory_id=?"
             params.append(memory_id)
         if after is not None:
-            sql += " AND (generation,memory_id)>(?,?)"
+            sql += " AND (r.generation,r.memory_id)>(?,?)"
             params.extend(after)
         rows = store.conn.execute(
-            sql + " ORDER BY generation,memory_id LIMIT 100", params,
+            sql + " ORDER BY r.generation,r.memory_id LIMIT 100", params,
         ).fetchall()
         if not rows:
             return
         after = (int(rows[-1]["generation"]), str(rows[-1]["memory_id"]))
         for row in rows:
-            yield str(row["memory_id"]), int(row["generation"])
+            needs_upsert = (
+                row["canonical_id"] is not None and row["vector_id"] is not None
+                and inspection_eligible(
+                    _loads(row["provenance"], {}), _loads(row["metadata"], {}),
+                )
+            )
+            if needs_upsert != cleanup_only:
+                yield str(row["memory_id"]), int(row["generation"])
 
 
 def repair_vector_index(store: "Store", index: Any, *, embedding_space: str,
@@ -93,7 +109,8 @@ def repair_vector_index(store: "Store", index: Any, *, embedding_space: str,
     public engine's compatibility adapter without coupling this coordinator to it.
     Cleanup precedes upserts, including when ``limit=1``. The limit bounds provider
     attempts; finding cleanup may inspect the whole pending queue in 100-row
-    pages. Repeated calls can rescan pending upserts; this is not a latency bound.
+    read-only header pages. Skipped candidates do not acquire writer reservations.
+    Repeated calls can rescan pending upserts; this is not a latency bound.
     """
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
         raise ValueError("repair limit must be an integer between 1 and 1000")
@@ -125,7 +142,9 @@ def repair_vector_index(store: "Store", index: Any, *, embedding_space: str,
     for cleanup_only in (True, False):
         if attempted >= limit or (not cleanup_only and not vector_writes_ready):
             break
-        for selected_id, generation in _repair_candidates(store, target, memory_id, ceiling):
+        for selected_id, generation in _repair_candidates(
+            store, target, memory_id, ceiling, cleanup_only=cleanup_only,
+        ):
             if attempted >= limit:
                 break
             operation = "delete" if cleanup_only else "upsert"
@@ -176,5 +195,9 @@ def repair_vector_index(store: "Store", index: Any, *, embedding_space: str,
                     # Cleanup has already had its turn; retain fail-fast publication
                     # during an upsert outage instead of repeatedly calling the provider.
                     break
+            # A filtered iterator may scan a long tail before yielding again. Stop
+            # here after success or failure, before asking for another candidate.
+            if attempted >= limit:
+                break
     return {"attempted": attempted, "repaired": repaired,
             "pending": store.vector_index_pending(target) or 0}
