@@ -856,7 +856,7 @@ test('Ledger narrowly migrates only the legacy Galaxy spacing default', async ({
   await page.goto('/');
   await expect(page.locator('#graph-repel')).toHaveValue('100');
   await expect(page.locator('#graph-link')).toHaveValue('8');
-  await expect(page.locator('#graph-gravity')).toHaveValue('96');
+  await expect(page.locator('#graph-gravity')).toHaveValue('120');
   // A first-time dashboard may use the new HTML default without manufacturing preferences.
   expect(await readPreferences()).toBeNull();
 
@@ -871,7 +871,7 @@ test('Ledger narrowly migrates only the legacy Galaxy spacing default', async ({
   });
   await expect(page.locator('#graph-repel')).toHaveValue('100');
   await expect(page.locator('#graph-link')).toHaveValue('8');
-  await expect(page.locator('#graph-gravity')).toHaveValue('96');
+  await expect(page.locator('#graph-gravity')).toHaveValue('120');
 
   await writePreferences({
     preset: 'galaxy', style: 'solar', tuning: { repel: 48, link: 8, gravity: 0 },
@@ -1548,7 +1548,7 @@ test('Graph & Relationships uses the visual explorer controls and applies their 
   await expect(page.locator('#graph-link-label')).toHaveText('Link distance · tight ↔ loose');
   await expect(page.locator('#graph-link')).toHaveValue('8');
   await expect(page.locator('#graph-gravity-label')).toHaveText('Galactic gravity · loose ↔ tight');
-  await expect(page.locator('#graph-gravity')).toHaveValue('96');
+  await expect(page.locator('#graph-gravity')).toHaveValue('120');
   await expect(page.getByRole('button', { name: 'Schema drift' })).toHaveAttribute('aria-pressed', 'true');
   await expect(page.getByRole('button', { name: 'Operations' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'People' })).toBeVisible();
