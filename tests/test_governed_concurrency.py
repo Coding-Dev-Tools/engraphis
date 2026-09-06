@@ -181,3 +181,93 @@ def test_approval_without_recorded_reviewer_does_not_invent_one(tmp_path, approv
         assert result["reviewer"] == ""
     finally:
         engine.close()
+
+
+def _session_sources(engine):
+    workspace = engine.store.get_or_create_workspace("governance")
+    repo = engine.store.get_or_create_repo(workspace, "project")
+    session = engine.start_session(workspace, repo)
+    sources = [engine.remember(
+        content, workspace_id=workspace, repo_id=repo, session_id=session,
+        scope=Scope.SESSION, resolve_conflicts=False,
+    ) for content in ("The cache expires after 30 days.", "Backups are encrypted.")]
+    return session, sources
+
+
+def _session_operation(engine, kind, sources, *, reason="verified"):
+    if kind == "promote":
+        return engine.promote(sources[0], Scope.REPO, reason=reason)
+    return engine.merge(sources, "Encrypted backups expire after 30 days.", reason=reason)
+
+
+@pytest.mark.parametrize("kind", ["promote", "merge"])
+def test_session_transition_replays_after_close_and_restart(tmp_path, monkeypatch, kind):
+    path = str(tmp_path / "session-retry.db")
+    engine = create_memory_engine(path, auto_evolve=False)
+    session, sources = _session_sources(engine)
+    first = _session_operation(engine, kind, sources)
+    engine.end_session(session, summary="Work complete.")
+    engine.close()
+    engine = create_memory_engine(path, auto_evolve=False)
+    try:
+        before = engine.store.conn.total_changes
+
+        def unavailable(*args, **kwargs):
+            raise RuntimeError("embedding provider is unavailable")
+
+        monkeypatch.setattr(engine.embedder, "embed", unavailable)
+        replay = _session_operation(engine, kind, sources)
+        assert replay["id"] == first["id"]
+        assert {k: v for k, v in replay.items() if k != "op"} == {
+            k: v for k, v in first.items() if k != "op"
+        }
+        assert engine.store.conn.total_changes == before
+        assert engine.store.conn.execute("SELECT COUNT(*) FROM memory_commands").fetchone()[0] == 1
+        with pytest.raises(ValueError, match="closed session|active session"):
+            _session_operation(engine, kind, sources, reason="a different operation")
+        assert engine.store.conn.total_changes == before
+    finally:
+        engine.close()
+
+
+@pytest.mark.parametrize("kind", ["promote", "merge"])
+@pytest.mark.parametrize("removal", ["retire", "secure_erase"])
+def test_closed_session_retry_does_not_recreate_removed_successor(tmp_path, kind, removal):
+    engine = create_memory_engine(str(tmp_path / "removed-result.db"), auto_evolve=False)
+    try:
+        session, sources = _session_sources(engine)
+        first = _session_operation(engine, kind, sources)
+        engine.end_session(session)
+        getattr(engine, removal)(first["id"])
+        before = engine.store.conn.total_changes
+        with pytest.raises(MemoryConflict) as caught:
+            _session_operation(engine, kind, sources)
+        assert caught.value.code == "result_unavailable"
+        assert engine.store.conn.total_changes == before
+    finally:
+        engine.close()
+
+
+@pytest.mark.parametrize("kind", ["promote", "merge"])
+def test_new_session_transition_rechecks_close_during_preparation(tmp_path, monkeypatch, kind):
+    path = str(tmp_path / "session-race.db")
+    engine = create_memory_engine(path, auto_evolve=False)
+    session, sources = _session_sources(engine)
+    closer = create_memory_engine(path, auto_evolve=False)
+    original = engine.embedder.embed
+
+    def close_during_embed(texts, *, kind="text"):
+        assert not engine.store.conn.transaction_owned_by_current_thread()
+        closer.end_session(session)
+        return original(texts, kind=kind)
+
+    monkeypatch.setattr(engine.embedder, "embed", close_during_embed)
+    try:
+        with pytest.raises(ValueError, match="closed session|not active"):
+            _session_operation(engine, kind, sources)
+        assert engine.store.conn.execute("SELECT COUNT(*) FROM memory_commands").fetchone()[0] == 0
+        assert engine.store.conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == 2
+        assert all(engine.store.get_memory(mid).valid_to is None for mid in sources)
+    finally:
+        closer.close()
+        engine.close()
