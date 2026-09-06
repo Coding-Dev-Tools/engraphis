@@ -74,6 +74,7 @@ from engraphis.core.resolve import (
 )
 from engraphis.core.secrets import redact_secrets as _redact_secrets, reject_secrets
 from engraphis.core.store import (
+    SavepointError,
     Store,
     _is_memory_database_path,
     memory_matches_filter,
@@ -1758,6 +1759,10 @@ class MemoryEngine:
                         "UPDATE memories SET confidence=MIN(confidence, ?) WHERE id=?",
                         (round(CONFLICT_CONFIDENCE_FACTOR, 4), conflicted_with),
                     )
+            except SavepointError:
+                # A failed rollback/release cannot be treated as an optional repair
+                # failure: it may leave partial writes in the enclosing transaction.
+                raise
             except Exception as exc:  # noqa: BLE001 - derived repair must not discard the memory
                 self._warn_redacted_failure("conflict repair", exc)
         out: dict[str, object]
