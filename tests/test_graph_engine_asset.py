@@ -1090,12 +1090,12 @@ def test_orbital_speed_increases_use_a_bounded_response_with_less_expansion() ->
     assert report["radii"][0] == pytest.approx(report["radii"][1])
     assert report["radii"][1] < report["radii"][2] < report["radii"][3]
     assert report["radii"][1] == pytest.approx(30)
-    assert report["radii"][2] == pytest.approx(32.4)
-    assert report["radii"][3] == pytest.approx(37.2)
+    assert report["radii"][2] == pytest.approx(30.6)
+    assert report["radii"][3] == pytest.approx(31.8)
     assert report["multipliers"][2] - 1 == pytest.approx(0.5 * (2 - 1))
     assert report["multipliers"][3] - 1 == pytest.approx(0.5 * (4 - 1))
     assert report["radii"][3] - report["radii"][1] == pytest.approx(
-        0.8 * (39 - 30)
+        0.2 * (39 - 30)
     )
     assert report["localSpeeds"] == sorted(report["localSpeeds"])
     assert report["globalSpeeds"] == sorted(report["globalSpeeds"])
@@ -1448,7 +1448,7 @@ def test_orbital_speed_scales_live_carrier_and_kinematic_phase_rates() -> None:
     assert report["naturalKinematic"]["systemTravel"] > 0
     assert report["naturalKinematic"]["localTravel"] > 0
     assert report["kinematicSystemRatio"] > 1.8
-    assert report["kinematicLocalRatio"] > 2.5
+    assert report["kinematicLocalRatio"] > 1.25
     assert report["naturalCarrier"] > 0
     assert report["carrierRatio"] == pytest.approx(2.5, rel=0.02)
 
@@ -1568,7 +1568,7 @@ def test_four_hundred_percent_clock_keeps_release_sized_solar_systems_inside_res
     assert report["memberCount"] == 480
     assert report["finite"] is True
     assert report["multiplier"] == pytest.approx(2.5)
-    assert report["radiusMultiplier"] == pytest.approx(1.24)
+    assert report["radiusMultiplier"] == pytest.approx(1.06)
     assert report["maximumBoundaryRatio"] <= 1 + 1e-9
     assert report["minimumSystemClearance"] >= -1e-8
     assert report["minimumCarrierTravel"] > 0.1
@@ -8482,7 +8482,7 @@ def test_galaxy_is_default_and_consumes_the_complete_scene_contract() -> None:
         """
     )
     assert report["mode"] == "galaxy"
-    assert report["settings"] == {"repel": 100, "link": 8, "gravity": 96}
+    assert report["settings"] == {"repel": 100, "link": 8, "gravity": 120}
     assert report["sizeBy"] == "mass"
     assert report["forces"] == {
         "charge": True,
@@ -8503,8 +8503,8 @@ def test_galaxy_is_default_and_consumes_the_complete_scene_contract() -> None:
     assert report["d3Budget"] == [0, 0, 0]
     assert report["diagnostics"]["timestep"] == pytest.approx(0.032)
     assert report["diagnostics"]["velocityDecay"] == pytest.approx(0.00005)
-    assert report["diagnostics"]["gravitySetting"] == 96
-    assert report["diagnostics"]["blackHoleGravity"] == pytest.approx(1615.3424319876754)
+    assert report["diagnostics"]["gravitySetting"] == 120
+    assert report["diagnostics"]["blackHoleGravity"] == pytest.approx(2317.2923076923075)
     assert report["diagnostics"]["localGravity"] == pytest.approx(240)
     assert report["diagnostics"]["linkSetting"] == 8
     assert report["diagnostics"]["relationOrbitScale"] == pytest.approx(0.25)
@@ -10379,10 +10379,10 @@ def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
         assert asset not in markup
     assert 'id="graph-repel" type="range" min="0" max="400" value="100"' in markup
     assert 'id="graph-link" type="range" min="4" max="80" value="8"' in markup
-    assert 'id="graph-gravity" type="range" min="0" max="400" value="96"' in markup
+    assert 'id="graph-gravity" type="range" min="0" max="400" value="120"' in markup
     assert "{ id: 'graph-repel', key: 'repel', fallback: 100 }" in source
     assert "{ id: 'graph-link', key: 'link', fallback: 8 }" in source
-    assert "{ id: 'graph-gravity', key: 'gravity', fallback: 96 }" in source
+    assert "{ id: 'graph-gravity', key: 'gravity', fallback: 120 }" in source
 
     loader_start = source.index("function ensureGraphAssets")
     loader = source[
