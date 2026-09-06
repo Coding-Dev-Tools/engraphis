@@ -1476,6 +1476,7 @@
 
   async function selectMemory(id) {
     const workspace = state.workspace;
+    const project = state.project;
     const request = beginScopedRequest('memory-detail');
     state.selectedMemory = id;
     resetEditorSession();
@@ -1524,7 +1525,7 @@
       );
       target.append(actions);
       state.memoryHistory = window.EngraphisMemoryHistory.create({
-        api, id, workspace,
+        api, id, workspace, repo: project,
         isCurrent: () => isCurrentScopedRequest(request) && state.selectedMemory === id,
         onOpen: openMemory,
       });
@@ -1634,13 +1635,15 @@
   function refreshEditorVersions() {
     const session = state.editorSession;
     const original = state.editorMemory;
+    const workspace = state.workspace;
+    const project = state.project;
     if (!session || !original || session.busy) return;
     if (session.history) session.history.destroy();
     const target = byId('editor-history');
     target.hidden = false;
     session.history = window.EngraphisMemoryHistory.create({
-      api, id: original.id, workspace: state.workspace, original,
-      isCurrent: () => state.editorSession === session,
+      api, id: original.id, workspace, repo: project, original,
+      isCurrent: () => state.editorSession === session && state.workspace === workspace && state.project === project,
       onUseBase: record => {
         state.editorMemory = record;
         session.revision = window.EngraphisMemoryRevision.create(record);

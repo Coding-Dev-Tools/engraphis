@@ -387,15 +387,19 @@ test('server-owned revision eligibility guides recovery without changing origina
 
 test('record history pages by lineage and recovers visibly from a stale continuation', async ({ page }) => {
   await workflowFixture(page);
+  await page.locator('#project-select').selectOption('alpha');
   const versions = Array.from({ length: 51 }, (_, index) => ({
     id: 'mem_history_' + index, title: 'Saved version ' + index, content: 'Version evidence ' + index,
     valid_from: index, valid_to: index + 1, provenance: { source: 'fixture' },
   }));
   let stale = true;
   const cursors = [];
+  const scopes = [];
   await page.route('**/api/memory/*/history?*', async route => {
-    const cursor = new URL(route.request().url()).searchParams.get('cursor');
+    const params = new URL(route.request().url()).searchParams;
+    const cursor = params.get('cursor');
     cursors.push(cursor);
+    scopes.push({ workspace: params.get('workspace'), repo: params.get('repo') });
     if (cursor && stale) {
       stale = false;
       return route.fulfill({ status: 409, json: { detail: { code: 'cursor_stale' } } });
@@ -413,6 +417,7 @@ test('record history pages by lineage and recovers visibly from a stale continua
   await expect(page.locator('.record-history [data-history-id]')).toHaveCount(51);
   await expect(page.locator('.record-history [role="status"]')).toHaveText('51 of 51 saved versions.');
   expect(cursors).toEqual([null, 'history-continuation', null, 'history-continuation']);
+  expect(scopes).toEqual(Array(4).fill({ workspace: 'work-one', repo: 'alpha' }));
 });
 
 test('a real project memory is scoped, discoverable, revised atomically, and retained after reload', async ({ page }) => {
