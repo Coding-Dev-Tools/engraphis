@@ -3306,10 +3306,6 @@ class MemoryEngine:
             raise ValueError("untrusted memory cannot be promoted; create a fresh approved local memory")
         now = now_ts()
 
-        if old.scope == Scope.SESSION:
-            source_session = self.store.get_session(str(old.session_id or ""))
-            if source_session is None or source_session.get("status") != "active":
-                raise ValueError("cannot promote memory from a closed session")
         target_scope = Scope(target_scope)
         if target_scope == Scope.USER:
             raise ValueError(
@@ -3323,6 +3319,27 @@ class MemoryEngine:
         target_repo_id = old.repo_id if target_scope == Scope.REPO else None
         if target_scope == Scope.REPO and not target_repo_id:
             raise ValueError("cannot promote to repo scope: source has no repo")
+
+        command = MemoryCommand(self.store, "promote", [old], {
+            "target_scope": target_scope.value, "reason": reason, "actor": actor,
+        })
+
+        def promotion_result(result: dict) -> dict:
+            return {
+                "id": result["id"], "promoted_from": old.id,
+                "from_scope": old.scope.value, "scope": target_scope.value,
+                "op": result["op"], "reason": reason,
+            }
+
+        # A committed retry is a read, including after the source session closes.
+        # Recheck the receipt under the writer as well when preparation is needed.
+        replay = command.replay()
+        if replay is not None:
+            return promotion_result(replay)
+        if old.scope == Scope.SESSION:
+            source_session = self.store.get_session(str(old.session_id or ""))
+            if source_session is None or source_session.get("status") != "active":
+                raise ValueError("cannot promote memory from a closed session")
 
         metadata = dict(old.metadata)
         raw_promoted_from = metadata.get("promoted_from")
@@ -3345,10 +3362,6 @@ class MemoryEngine:
                 "trust_origin": "derived_unapproved",
             }
         )
-
-        command = MemoryCommand(self.store, "promote", [old], {
-            "target_scope": target_scope.value, "reason": reason, "actor": actor,
-        })
 
         def validate_promotion() -> Optional[dict]:
             replay = command.validate()
@@ -3464,15 +3477,7 @@ class MemoryEngine:
             _transactional_finalizer=finalize_promotion,
             _transactional_validator=validate_promotion,
         )
-        promoted_id = result["id"]
-        return {
-            "id": promoted_id,
-            "promoted_from": old.id,
-            "from_scope": old.scope.value,
-            "scope": target_scope.value,
-            "op": result["op"],
-            "reason": reason,
-        }
+        return promotion_result(result)
 
     def merge(self, source_ids: list, merged_content: str, *,
               title: Optional[str] = None, mtype: Optional[MemoryType] = None,
@@ -3528,7 +3533,7 @@ class MemoryEngine:
                 )
             target_session_id = str(next(iter(session_ids)))
             session = self.store.get_session(target_session_id)
-            if session is None or session.get("status") != "active":
+            if session is None:
                 raise ValueError("session-scoped merge requires one active session")
             if (
                 session.get("workspace_id") != primary.workspace_id
@@ -3630,6 +3635,17 @@ class MemoryEngine:
                 },
             }
 
+        command = MemoryCommand(self.store, "merge", sources, {
+            "merge_key": merge_key, "reason": reason, "actor": actor,
+        })
+        replay = command.replay()
+        if replay is not None:
+            return merge_result(replay["id"])
+        if target_session_id:
+            session = self.store.get_session(target_session_id)
+            if session is None or session.get("status") != "active":
+                raise ValueError("session-scoped merge requires one active session")
+
         retry_links = self.store.conn.execute(
             "SELECT a, b FROM mem_links "
             "WHERE relation='merges' AND reason=? "
@@ -3664,10 +3680,6 @@ class MemoryEngine:
                 and list(candidate.keywords or []) == list(keywords or [])
             ):
                 return merge_result(candidate.id)
-
-        command = MemoryCommand(self.store, "merge", sources, {
-            "merge_key": merge_key, "reason": reason, "actor": actor,
-        })
 
         def validate_merge() -> Optional[dict]:
             replay = command.validate()
