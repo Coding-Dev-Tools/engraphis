@@ -11,10 +11,23 @@ from typing import Iterable, Optional
 
 
 REQUIRED_COMMON = frozenset({
+    "engraphis/core/mutations.py",
+    "engraphis/core/vector_repair.py",
+    "engraphis/dashboard_assets/ask-requests.js",
+    "engraphis/dashboard_assets/graph-lifecycle.js",
+    "engraphis/dashboard_assets/memory-history.js",
+    "engraphis/dashboard_assets/memory-revision.js",
+    "engraphis/dashboard_assets/memory-workflow.css",
+    "engraphis/dashboard_assets/workflow-context.js",
     "scripts/smoke_entry_points.py",
     "eval/__init__.py",
     "eval/ablation.py",
     "eval/benchmark.py",
+    "eval/capacity_matrix.py",
+    "eval/coding_acceptance.py",
+    "eval/engine_capacity.py",
+    "eval/rework_statistics.py",
+    "eval/task_pairs.py",
     "eval/chunking_eval.py",
     "eval/external.py",
     "eval/grounded.py",
@@ -34,6 +47,10 @@ REQUIRED_COMMON = frozenset({
     "eval/datasets/sample.jsonl",
 })
 REQUIRED_SDIST = REQUIRED_COMMON | frozenset({
+    "docs/REWORK_EXECUTION.md",
+    "docs/ENGINE_CAPACITY_PROTOCOL.md",
+    "docs/CODING_ACCEPTANCE_CORPUS.md",
+    "docs/PAID_EVALUATION_PROPOSAL.md",
     "BENCHMARKS.md",
     "docs/DOCUMENT_IMPORT.md",
     "docs/OBSIDIAN_IMPORT.md",
