@@ -4550,7 +4550,8 @@
     const bodyRadius = node => finitePositive(
       node.radius, evidenceNodeRadius(node, 3), 160
     );
-    const anchorRadius = bodyRadius(anchor);
+    const anchorRadius = bodyRadius(anchor)
+      * (anchor.anchor_role === 'global' ? GALAXY_BLACK_HOLE_PAINT_SCALE : 1);
     const anchorX = anchor.x, anchorY = anchor.y;
     const anchorVx = Number.isFinite(anchor.vx) ? anchor.vx : 0;
     const anchorVy = Number.isFinite(anchor.vy) ? anchor.vy : 0;
@@ -4661,7 +4662,8 @@
     });
 
     bodies.forEach(node => {
-      if (node === anchor) return;
+      if (node === anchor || node.ghost) return;
+      projectIndividualNode(node);
       const clearance = Math.hypot(node.x - anchorX, node.y - anchorY)
         - anchorRadius - bodyRadius(node) - padding;
       stats.minimumClearance = stats.minimumClearance === null
@@ -5995,8 +5997,19 @@
         phase.angle += phase.direction * angularSpeed * timestep;
         const unitX = Math.cos(phase.angle), unitY = Math.sin(phase.angle);
         const tangentX = -unitY * phase.direction, tangentY = unitX * phase.direction;
-        const targetX = parent.x + unitX * targetRadius;
-        const targetY = parent.y + unitY * targetRadius;
+        let targetX = parent.x + unitX * targetRadius;
+        let targetY = parent.y + unitY * targetRadius;
+        if (globalAnchor && parent !== globalAnchor) {
+          const minBhDist = (finitePositive(globalAnchor.radius, evidenceNodeRadius(globalAnchor, 3), 160) * GALAXY_BLACK_HOLE_PAINT_SCALE)
+            + nodeRadius + GALAXY_BLACK_HOLE_EXCLUSION_PADDING;
+          const bhDx = targetX - globalAnchor.x;
+          const bhDy = targetY - globalAnchor.y;
+          const bhDist = Math.hypot(bhDx, bhDy);
+          if (bhDist < minBhDist && bhDist > 1e-9) {
+            targetX = globalAnchor.x + (bhDx / bhDist) * minBhDist;
+            targetY = globalAnchor.y + (bhDy / bhDist) * minBhDist;
+          }
+        }
         const targetVx = (Number.isFinite(parent.vx) ? parent.vx : 0)
           + tangentX * phaseSpeed;
         const targetVy = (Number.isFinite(parent.vy) ? parent.vy : 0)
@@ -6255,7 +6268,7 @@
       padding: opts.systemAnchorExclusionPadding,
     });
     let boundaryIterations = 0;
-    for (let iteration = 0; iteration < 24; iteration++) {
+    for (let iteration = 0; iteration < 6; iteration++) {
       stellarPasses.push(applyGalaxySystemAnchorExclusion(bodies, {
         padding: opts.systemAnchorExclusionPadding,
         fixedNodeId: opts.fixedNodeId,
@@ -6314,7 +6327,7 @@
          no kinetic energy; pointer-owned systems remain fixed and any genuinely infeasible
          fixed/boundary conflict is reported rather than moved. */
       const packingClosureLimit = Math.max(1,
-        Math.min(256, galaxySystemEnvelopes(bodies, opts).length + 1));
+        Math.min(4, galaxySystemEnvelopes(bodies, opts).length + 1));
       for (let passIndex = 0; passIndex < packingClosureLimit; passIndex++) {
         const packingPass = applyGalaxySystemPacking(bodies, Object.assign({}, opts, {
           gap: opts.systemPackingGap,
@@ -9106,11 +9119,11 @@
         ));
         galaxyLastFrameTime = now;
         galaxyAccumulator = Math.min(
-          GALAXY_FRAME_INTERVAL_MS * GALAXY_MAX_SUBSTEPS,
+          GALAXY_FRAME_INTERVAL_MS * 1.5,
           galaxyAccumulator + elapsed
         );
       }
-      const ordinarySubsteps = Math.min(GALAXY_MAX_SUBSTEPS,
+      const ordinarySubsteps = Math.min(1,
         Math.floor((galaxyAccumulator + 1e-9) / GALAXY_FRAME_INTERVAL_MS));
       /* Galaxy is already live. Reheat must never add fixed slices or fast-forward time, even
          if a future caller accidentally leaves a stale non-zero budget in the telemetry slot. */
@@ -9131,6 +9144,8 @@
             );
           if (!kinematicFallback) {
             report.orbitalSpeed = applyGalaxyOrbitalSpeedControl(
+              data.nodes || [], galaxyIntegratorOptions());
+            applyGalaxyBlackHoleExclusion(
               data.nodes || [], galaxyIntegratorOptions());
           }
           galaxySteps++;
@@ -10409,16 +10424,6 @@
                       }
                     });
                 });
-                if (item.carrier) {
-                  ['__galaxyCarrierLaneRadius', '__galaxyCarrierLaneBaseRadius',
-                   '__galaxyCoreLaneRadius', '__galaxyCoreLaneBaseRadius']
-                    .forEach(key => {
-                      const target = Number(item.carrier[key]);
-                      if (Number.isFinite(target) && target > 0) {
-                        item.carrier[key] = target * ratio;
-                      }
-                    });
-                }
                 moved++;
               });
               galaxyLastGravityResponse = {
@@ -10648,10 +10653,23 @@
       const point = fg.graph2ScreenCoords(Number(x) || 0, Number(y) || 0);
       return { x: point.x, y: point.y };
     };
+    let cachedPhysicsSnapshot = null;
+    let cachedPhysicsSnapshotStep = -1;
     api.getPhysicsSnapshot = () => {
       const data = fg.graphData() || {};
       const nodes = Array.isArray(data.nodes) ? data.nodes : [];
       const center = galaxyGlobalAnchor(nodes);
+      const isPaused = state.settings.orbitPaused === true || state.settings.frozen === true
+        || !running || pageHidden();
+      if (cachedPhysicsSnapshot && cachedPhysicsSnapshotStep === galaxySteps && cachedPhysicsSnapshotStep >= 0) {
+        cachedPhysicsSnapshot.paused = isPaused;
+        if (center && cachedPhysicsSnapshot.center) {
+          const centerPoint = api.graphToScreen(center.x, center.y);
+          cachedPhysicsSnapshot.center.screenX = centerPoint.x;
+          cachedPhysicsSnapshot.center.screenY = centerPoint.y;
+        }
+        return cachedPhysicsSnapshot;
+      }
       const centerPoint = center ? api.graphToScreen(center.x, center.y) : null;
       const systemAnchors = [];
       communityCenters(nodes).forEach(system => {
@@ -10696,11 +10714,13 @@
           warp: Number(node.__galaxySpacetimeWarp) || 0,
         })),
         systemAnchors,
-        paused: state.settings.orbitPaused === true || state.settings.frozen === true
-          || !running || pageHidden(),
+        paused: isPaused,
         diagnostics: physicsDiagnostics(),
         slingshot: lastSlingshotRelease ? { ...lastSlingshotRelease } : null,
       };
+      cachedPhysicsSnapshot = snapshot;
+      cachedPhysicsSnapshotStep = galaxySteps;
+      return snapshot;
     };
     api.reheat = () => {
       if (destroyed || state.settings.frozen

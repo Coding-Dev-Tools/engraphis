@@ -1962,6 +1962,17 @@ def test_live_carrier_support_rotates_without_a_preseeded_lane_cache() -> None:
 
 
 @requires_node
+def test_central_slider_scales_each_carrier_lane_cache_once() -> None:
+    """Central-field feedback must not apply a carrier lane-cache ratio twice."""
+    source = ASSET.read_text(encoding="utf-8")
+    start = source.index("const targetCarrierX")
+    end = source.index("moved++;", start)
+    response = source[start:end]
+    assert "item.carrier[key]" not in response
+    assert response.count("__galaxyCarrierLaneRadius") == 1
+
+
+@requires_node
 def test_system_velocity_guard_preserves_black_hole_carrier_before_local_motion() -> None:
     report = _run_node(
         """
@@ -5582,9 +5593,10 @@ def test_dragging_connected_core_node_over_black_hole_keeps_the_annulus_stable(
           dragPull = Math.max(dragPull, tick.dragGravity.maximumPull);
           fixedSystemNodes += tick.blackHoleExclusion.fixedSystemNodes;
           skippedFixedEndpoint += tick.relationConstraint.skippedFixedEndpoint;
+          const anchorRadius = nodes[0].radius * (nodes[0].anchor_role === 'global' ? 2 : 1);
           nodes.slice(1).forEach(node => {
             minimumClearance = Math.min(minimumClearance,
-              Math.hypot(node.x, node.y) - nodes[0].radius - node.radius
+              Math.hypot(node.x, node.y) - anchorRadius - node.radius
                 - options.blackHoleExclusionPadding);
           });
           nodes.slice(2, 4).forEach((node, index) => {
@@ -5611,7 +5623,8 @@ def test_dragging_connected_core_node_over_black_hole_keeps_the_annulus_stable(
            drag. This is the former 400-slice runaway: a skipped fixed system let followers
            drift hundreds of units out, then snap back only after release. */
         if (externalSystem) {
-          const startRadius = nodes[0].radius + dragged.radius + options.blackHoleExclusionPadding;
+          const anchorRadius = nodes[0].radius * (nodes[0].anchor_role === 'global' ? 2 : 1);
+          const startRadius = anchorRadius + dragged.radius + options.blackHoleExclusionPadding;
           const endRadius = envelope + 320;
           for (let step = 0; step < 400; step++) {
             const before = nodes.slice(2, 4).map(node => [node.x, node.y]);
@@ -5629,7 +5642,7 @@ def test_dragging_connected_core_node_over_black_hole_keeps_the_annulus_stable(
             skippedFixedEndpoint += tick.relationConstraint.skippedFixedEndpoint;
             nodes.slice(1).forEach(node => {
               minimumClearance = Math.min(minimumClearance,
-                Math.hypot(node.x, node.y) - nodes[0].radius - node.radius
+                Math.hypot(node.x, node.y) - anchorRadius - node.radius
                   - options.blackHoleExclusionPadding);
             });
             nodes.slice(2, 4).forEach((node, index) => {
@@ -5666,7 +5679,8 @@ def test_dragging_connected_core_node_over_black_hole_keeps_the_annulus_stable(
           centreHeld, held, released: [dragged.x, dragged.y],
           anchor: [nodes[0].x, nodes[0].y, nodes[0].vx, nodes[0].vy],
           draggedRadius: Math.hypot(centreHeld[0], centreHeld[1]),
-          paintedHorizon: nodes[0].radius + dragged.radius + options.blackHoleExclusionPadding,
+          paintedHorizon: (nodes[0].radius * (nodes[0].anchor_role === 'global' ? 2 : 1))
+            + dragged.radius + options.blackHoleExclusionPadding,
         });
         """
     )

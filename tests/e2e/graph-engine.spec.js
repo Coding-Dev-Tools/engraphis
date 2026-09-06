@@ -1852,7 +1852,7 @@ for (const reducedMotion of [false, true]) {
       expect(diagnostics.renderedNodes).toBe(542);
       expect(before.collapsed).toBe(false);
       expect(before.settings).toMatchObject({
-        mode: 'galaxy', frozen: false, gravity: 96, repel: 100, link: 8,
+        mode: 'galaxy', frozen: false, gravity: 120, repel: 100, link: 8,
       });
       expect(diagnostics.orbitalSeparationSetting).toBe(100);
       expect(diagnostics.orbitalSeparationPadding).toBe(15);
@@ -1860,8 +1860,8 @@ for (const reducedMotion of [false, true]) {
       expect(diagnostics.crossSystemRepulsionStrength).toBe(0);
       expect(diagnostics.linkSetting).toBe(8);
       expect(diagnostics.relationOrbitScale).toBeCloseTo(0.25, 12);
-      expect(diagnostics.gravitySetting).toBe(96);
-      expect(diagnostics.blackHoleGravity).toBeCloseTo(3230.6848639753507, 12);
+      expect(diagnostics.gravitySetting).toBe(120);
+      expect(diagnostics.blackHoleGravity).toBeCloseTo(4624.615384615385, 12);
       expect(diagnostics.localGravity).toBeCloseTo(240, 12);
       expect(diagnostics.systemOrbitSeedSpeedLimit).toBeCloseTo(23.4, 12);
 
@@ -3493,8 +3493,9 @@ test('Galaxy sliders retain full ranges with orbital-speed and radius response',
     expect(immediate.after.radii[id] / radius, id)
       .toBeCloseTo(immediateResponse.ratio, 2);
   }
-  expect(immediate.after.diameter / immediate.before.diameter)
-    .toBeCloseTo(immediateResponse.ratio, 2);
+  // The central response translates each solar system as a rigid carrier; its local orbit
+  // geometry remains unchanged while the system moves radially around the black hole.
+  expect(immediate.after.diameter / immediate.before.diameter).toBeCloseTo(1, 12);
   for (const [index, [id, vx, vy]] of immediate.before.velocities.entries()) {
     const [afterId, afterVx, afterVy] = immediate.after.velocities[index];
     expect(afterId).toBe(id);

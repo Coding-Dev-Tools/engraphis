@@ -346,7 +346,7 @@ test.describe('Ledger Dashboard Sliders, Gravity Physics, Themes, and Options', 
     }));
     expect(defaults.repel).toBe(100);
     expect(defaults.link).toBe(8);
-    expect(defaults.gravity).toBe(96);
+    expect(defaults.gravity).toBe(120);
 
     // 9. Test Memory Importance Slider in Library View
     await page.locator('.nav-item[data-view="library"]').click();
