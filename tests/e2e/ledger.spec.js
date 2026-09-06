@@ -150,6 +150,7 @@ async function mockApi(page, options = {}) {
       });
     }
     if (path === '/proactive') return ok({ workspace, memories });
+    if (path === '/review-inbox') return ok({ workspace, items: [{ id: memories[0].id, review_state: 'pending', quarantined: false, conflict_with: null, excerpt: '' }], count: 1, has_more: false, truncated: false, count_semantics: 'returned_sample' });
     if (path === '/audit') return ok({ workspace, audit });
     if (path === '/receipts') return ok({ workspace, receipts });
     if (path === '/graph/scene') {
@@ -317,6 +318,13 @@ function browserErrors(page) {
 async function openProcessingSettings(page) {
   await page.goto('/?view=manage');
   await page.locator('#manage-settings-tab').click();
+}
+
+async function revealAdvancedGraphControls(page) {
+  const advanced = page.locator('#graph-advanced');
+  if (!await advanced.evaluate(element => element.open)) {
+    await advanced.locator(':scope > summary').click();
+  }
 }
 
 test('A processing-controls link opens the named authorized workspace without enabling it', async ({ page }) => {
@@ -576,24 +584,26 @@ test('Ledger is live, safe, lazy, accessible, and responsive', async ({ page }) 
   const response = await page.goto('/');
 
   expect(response.headers()['content-security-policy']).not.toContain("'unsafe-inline'");
-  await expect(page.getByRole('heading', { name: `What changed in ${workspace}` })).toBeVisible();
+  await expect(page.getByRole('heading', { name: `Home for ${workspace}` })).toBeVisible();
   await expect(page.locator('#context-savings-summary')).toHaveCount(0);
   await expect(page.locator('#context-savings-persistent')).not.toBeVisible();
   expect(requests.contextSavingsQueries).toEqual([]);
-  await expect(page.locator('#decision-list').getByText('Postgres 16 is the main database.'))
+  await expect(page.locator('#decision-list').getByText('Source review pending'))
     .toBeVisible();
+  await expect(page.locator('#decision-list')).not.toContainText('Postgres 16 is the main database.');
   await expect(page.locator('#proactive-list').getByText(/<img src=x onerror=/)).toBeVisible();
   expect(await page.evaluate(() => window.__ledgerXss)).toBeUndefined();
   expect(requests).not.toContain('/graph/scene');
   expect(assetRequests).toEqual([]);
 
-  await page.getByRole('button', { name: 'Manage' }).click();
+  await page.getByRole('button', { name: 'Settings' }).click();
   await expect(page.locator('#context-savings-persistent')).toBeVisible();
   await expect(page.locator('#context-savings-persistent-value')).toHaveText('2,048');
   await expect(page.locator('#context-savings-persistent-rate')).toHaveText('50.0% estimated reduction');
   expect(requests.contextSavingsQueries.every(query => !Object.hasOwn(query, 'workspace'))).toBe(true);
 
   await page.locator('.nav-item[data-view="relations"]').click();
+  await revealAdvancedGraphControls(page);
   await expect(page.locator('#graph-count')).toContainText('3 entities · 1 relations');
   expect(requests).toContain('/graph/scene');
   expect(assetRequests).toEqual([
@@ -614,8 +624,12 @@ test('Ledger is live, safe, lazy, accessible, and responsive', async ({ page }) 
   await expect(page.getByRole('heading', { name: 'Database choice' })).toBeHidden();
 
   await page.setViewportSize({ width: 375, height: 812 });
-  await expect(page.getByRole('button', { name: 'Manage' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Settings' })).toBeVisible();
   await expect(page.locator('#workspace-select')).toBeVisible();
+  await expect(page.locator('#sidebar-options')).not.toHaveAttribute('open');
+  await expect(page.locator('#sidebar-pro-cta')).not.toBeVisible();
+  await page.locator('#sidebar-options > summary').focus();
+  await page.keyboard.press('Enter');
   await expect(page.locator('#sidebar-pro-cta')).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 
@@ -636,6 +650,7 @@ test('Ledger retries a failed lazy graph load and opens search evidence by keybo
   await page.goto('/');
 
   await page.locator('.nav-item[data-view="relations"]').click();
+  await revealAdvancedGraphControls(page);
   await expect(page.locator('#graph-empty')).toContainText('Graph unavailable');
   await page.getByRole('button', { name: 'Reload data' }).click();
   await expect(page.locator('#graph-count')).toContainText('3 entities · 1 relations');
@@ -664,6 +679,7 @@ test('Ledger enters Every node from a loaded overview without losing its scope',
   const requests = await mockApi(page);
   await page.goto('/');
   await page.locator('.nav-item[data-view="relations"]').click();
+  await revealAdvancedGraphControls(page);
   await expect(page.locator('#graph-count')).toContainText('entities');
   await expect(page.locator('.graph-spacetime-overlay')).toHaveCount(1);
   expect(allAssetRequests).toEqual([]);
@@ -765,6 +781,7 @@ test('Ledger keeps authored Galaxy coordinates on the orbit renderer in Every-no
   });
   await page.goto('/');
   await page.locator('.nav-item[data-view="relations"]').click();
+  await revealAdvancedGraphControls(page);
   await expect(page.locator('#graph-count')).toContainText('3 entities');
 
   await page.locator('[data-graph-preset-choice="every"]').click();
@@ -790,6 +807,7 @@ test('Ledger keeps the committed Every-node renderer visible when a superseded l
   });
   await page.goto('/');
   await page.locator('.nav-item[data-view="relations"]').click();
+  await revealAdvancedGraphControls(page);
   await page.locator('[data-graph-preset-choice="every"]').click();
   await expect(page.locator('#graph-canvas')).toHaveAttribute('aria-busy', 'true');
   await expect.poll(() => deferredAllScenes).toBe(1);
@@ -828,6 +846,7 @@ test('Ledger cache-busts a graph renderer that fetched but did not register', as
   });
   await page.goto('/');
   await page.locator('.nav-item[data-view="relations"]').click();
+  await revealAdvancedGraphControls(page);
   await expect(page.locator('#graph-empty')).toContainText('Graph unavailable');
   expect(rendererRequests).toHaveLength(1);
   const first = new URL(rendererRequests[0]);
@@ -937,6 +956,7 @@ test('Ledger deadline includes stalled graph assets and Reload data starts a fre
   });
   await page.goto('/');
   await page.locator('.nav-item[data-view="relations"]').click();
+  await revealAdvancedGraphControls(page);
   await expect(page.locator('#graph-empty')).toContainText('High-quality graph loading timed out');
 
   await page.getByRole('button', { name: 'Reload data' }).click();
@@ -990,7 +1010,7 @@ test('Ledger requests a remote token in a masked retryable dialog', async ({ pag
     page.waitForNavigation(),
     dialog.getByRole('button', { name: 'Connect', exact: true }).click(),
   ]);
-  await expect(page.getByRole('heading', { name: `What changed in ${workspace}` })).toBeVisible();
+  await expect(page.getByRole('heading', { name: `Home for ${workspace}` })).toBeVisible();
   expect(page.url()).not.toContain('token');
 });
 
@@ -1011,7 +1031,7 @@ test('Ledger exposes Cloud Sync status and reports partial runs as incomplete', 
     },
   });
   await page.goto('/');
-  await page.getByRole('button', { name: 'Manage' }).click();
+  await page.getByRole('button', { name: 'Settings' }).click();
   await page.getByRole('tab', { name: 'Cloud Sync' }).click();
 
   const result = page.locator('#sync-result');
@@ -1032,7 +1052,7 @@ test('Ledger treats a Cloud Sync ok:false response as incomplete', async ({ page
     },
   });
   await page.goto('/');
-  await page.getByRole('button', { name: 'Manage' }).click();
+  await page.getByRole('button', { name: 'Settings' }).click();
   await page.getByRole('tab', { name: 'Cloud Sync' }).click();
   await page.getByRole('button', { name: 'Sync now' }).click();
 
@@ -1064,7 +1084,7 @@ test('Ledger initializes hosted automation only after an explicit upload action'
     },
   });
   await page.goto('/');
-  await page.getByRole('button', { name: 'Manage' }).click();
+  await page.getByRole('button', { name: 'Settings' }).click();
   await page.getByRole('tab', { name: 'Automation' }).click();
 
   const result = page.locator('#automation-result');
@@ -1083,7 +1103,7 @@ test('provenance merges audit seconds and receipt milliseconds chronologically',
   });
   await page.goto('/');
 
-  await page.getByRole('button', { name: 'Provenance why, timeline, receipts' }).click();
+  await page.getByRole('button', { name: 'Activity history, sources and receipts' }).click();
   await page.getByRole('tab', { name: 'Audit & receipts' }).click();
 
   const cards = page.locator('#audit-list .audit-card');
@@ -1102,7 +1122,7 @@ test('memory listings open the editable Library detail from every dashboard view
   await expect(libraryOptions.nth(1)).toHaveAttribute('tabindex', '-1');
   await libraryOptions.first().press('ArrowDown');
   await expect(libraryOptions.nth(1)).toHaveAttribute('tabindex', '0');
-  await page.getByRole('button', { name: 'Today changes and decisions' }).click();
+  await page.getByRole('button', { name: 'Home setup, reviews and activity' }).click();
 
   await page.locator('#proactive-list [data-memory-id="mem_database"]').click();
   await expect(page.locator('#memory-detail h2')).toHaveText('Database choice');
@@ -1115,13 +1135,13 @@ test('memory listings open the editable Library detail from every dashboard view
   await page.locator('#answer-panel [data-memory-id="mem_database"]').click();
   await expect(page.locator('#memory-detail h2')).toHaveText('Database choice');
 
-  await page.getByRole('button', { name: 'Provenance why, timeline, receipts' }).click();
+  await page.getByRole('button', { name: 'Activity history, sources and receipts' }).click();
   await page.getByLabel('Claim or topic').fill('Which database?');
   await page.getByRole('button', { name: 'Trace belief' }).click();
   await page.locator('#why-result [data-memory-id="mem_safety"]').click();
   await expect(page.locator('#memory-detail h2')).toHaveText('Safe rendering');
 
-  await page.getByRole('button', { name: 'Provenance why, timeline, receipts' }).click();
+  await page.getByRole('button', { name: 'Activity history, sources and receipts' }).click();
   await page.getByRole('tab', { name: 'Timeline' }).click();
   await page.locator('#timeline-input').fill('database');
   await page.getByRole('button', { name: 'Show history' }).click();
@@ -1324,7 +1344,7 @@ test('late Ask, audit, and automation responses cannot cross workspace boundarie
   await page.getByRole('button', { name: 'Grounded answer', exact: true }).click();
   await askStarted;
   await page.getByLabel('Active workspace').selectOption(otherWorkspace);
-  await expect(page.locator('#today-title')).toHaveText(`What changed in ${otherWorkspace}`);
+  await expect(page.locator('#today-title')).toHaveText(`Home for ${otherWorkspace}`);
   await page.getByRole('textbox', { name: 'Question' }).fill('Workspace boundary?');
   await page.getByRole('button', { name: 'Grounded answer', exact: true }).click();
   await expect(page.locator('#answer-panel')).toContainText(`${otherWorkspace} grounded answer`);
@@ -1334,9 +1354,9 @@ test('late Ask, audit, and automation responses cannot cross workspace boundarie
   await expect(page.locator('#answer-panel')).not.toContainText(`${workspace} grounded answer`);
 
   await page.getByLabel('Active workspace').selectOption(workspace);
-  await expect(page.locator('#today-title')).toHaveText(`What changed in ${workspace}`);
+  await expect(page.locator('#today-title')).toHaveText(`Home for ${workspace}`);
   delayAudit = true;
-  await page.getByRole('button', { name: 'Provenance why, timeline, receipts' }).click();
+  await page.getByRole('button', { name: 'Activity history, sources and receipts' }).click();
   await page.getByRole('tab', { name: 'Audit & receipts' }).click();
   await auditStarted;
   await page.getByLabel('Active workspace').selectOption(otherWorkspace);
@@ -1351,7 +1371,7 @@ test('late Ask, audit, and automation responses cannot cross workspace boundarie
 
   await page.getByLabel('Active workspace').selectOption(workspace);
   delayAutomation = true;
-  await page.getByRole('button', { name: 'Manage' }).click();
+  await page.getByRole('button', { name: 'Settings' }).click();
   await page.getByRole('tab', { name: 'Automation' }).click();
   await automationStarted;
   await page.getByLabel('Active workspace').selectOption(otherWorkspace);
@@ -1450,7 +1470,7 @@ test('late provenance and plan responses cannot cross workspace boundaries', asy
 
   try {
     await page.goto('/');
-    await page.getByRole('button', { name: 'Provenance why, timeline, receipts' }).click();
+    await page.getByRole('button', { name: 'Activity history, sources and receipts' }).click();
     delayWhy = true;
     await page.getByLabel('Claim or topic').fill('Workspace boundary');
     await page.getByRole('button', { name: 'Trace belief' }).click();
@@ -1478,7 +1498,7 @@ test('late provenance and plan responses cannot cross workspace boundaries', asy
     await expect(page.locator('#timeline-result')).not.toContainText(`${workspace} timeline`);
 
     await page.getByLabel('Active workspace').selectOption(workspace);
-    await page.getByRole('button', { name: 'Manage' }).click();
+    await page.getByRole('button', { name: 'Settings' }).click();
     delayPlans = true;
     await page.getByRole('tab', { name: 'Plans & billing' }).click();
     await plansStarted;
@@ -1521,7 +1541,7 @@ test('Ask keeps the raw retrieval preview alongside its single grounded answer',
   expect(requests.filter(path => path === '/recall')).toHaveLength(1);
 });
 
-test('Graph & Relationships uses the visual explorer controls and applies their state', async ({ page }) => {
+test('Explore uses the visual explorer controls and applies their state', async ({ page }) => {
   await mockApi(page);
   await page.goto('/');
   const initialGraphRequest = page.waitForRequest(request => {
@@ -1533,6 +1553,7 @@ test('Graph & Relationships uses the visual explorer controls and applies their 
       && !url.searchParams.has('connected_only');
   });
   await page.locator('.nav-item[data-view="relations"]').click();
+  await revealAdvancedGraphControls(page);
   await initialGraphRequest;
   await expect(page.locator('#graph-count')).toContainText('3 entities · 1 relations');
 
@@ -1682,6 +1703,7 @@ test('Graph & Relationships uses the visual explorer controls and applies their 
 
   await page.reload();
   await page.locator('.nav-item[data-view="relations"]').click();
+  await revealAdvancedGraphControls(page);
   await expect(page.getByRole('button', { name: 'Galaxy', exact: true })).toHaveAttribute('aria-pressed', 'true');
   await expect(page.getByRole('button', { name: 'Compact' })).toHaveAttribute('aria-pressed', 'true');
   await expect(page.getByRole('button', { name: 'Type' })).toHaveAttribute('aria-pressed', 'true');
@@ -1694,6 +1716,7 @@ test('degraded code overlay clears its control and subsequent reload request', a
   await mockApi(page, { degradeCodeOverlay: true });
   await page.goto('/');
   await page.locator('.nav-item[data-view="relations"]').click();
+  await revealAdvancedGraphControls(page);
   const codeControl = page.getByRole('button', { name: 'Code ↔ memory' });
   const degradedResponse = page.waitForResponse(response => {
     const url = new URL(response.url());
@@ -1721,6 +1744,7 @@ test('graph node connections expose linked memory evidence without leaving the g
   await mockApi(page);
   await page.goto('/');
   await page.locator('.nav-item[data-view="relations"]').click();
+  await revealAdvancedGraphControls(page);
   await page.getByRole('tab', { name: 'Analyse' }).click();
   await expect(page.locator('#graph-top button')).toHaveCount(3);
 
@@ -1775,6 +1799,7 @@ test('historical connections request ghost-edge evidence for live and ghost endp
   });
   await page.goto('/');
   await page.locator('.nav-item[data-view="relations"]').click();
+  await revealAdvancedGraphControls(page);
   await page.getByRole('tab', { name: 'Analyse' }).click();
   await page.locator('#graph-top button').filter({ hasText: 'Origin Node' }).click();
   await expect(page.locator('#graph-connections-list')).toContainText('Archived Node');
@@ -1817,6 +1842,7 @@ test('changing the time anchor replaces a pending graph request', async ({ page 
   });
   await page.goto('/');
   await page.locator('.nav-item[data-view="relations"]').click();
+  await revealAdvancedGraphControls(page);
   await waitForInitial;
 
   await page.getByRole('tab', { name: 'Time' }).click();
@@ -1857,6 +1883,7 @@ test('Reload data replaces an identical pending graph request once', async ({ pa
   });
   await page.goto('/');
   await page.locator('.nav-item[data-view="relations"]').click();
+  await revealAdvancedGraphControls(page);
   await waitForFirst;
 
   await page.getByRole('button', { name: 'Reload data' }).click();
@@ -1898,6 +1925,7 @@ test('a custom graph view restores every saved control and server filter', async
   await mockApi(page);
   await page.goto('/');
   await page.locator('.nav-item[data-view="relations"]').click();
+  await revealAdvancedGraphControls(page);
 
   const restored = page.waitForRequest(request => {
     const url = new URL(request.url());
@@ -1958,6 +1986,7 @@ test('a saved code view reloads when only its repository changes', async ({ page
   });
   await page.goto('/');
   await page.locator('.nav-item[data-view="relations"]').click();
+  await revealAdvancedGraphControls(page);
   await expect(page.locator('#graph-count')).toContainText('3 entities');
 
   const before = page.waitForRequest(request => {
@@ -2002,7 +2031,7 @@ test('themes persist and both visible interface selectors round-trip', async ({ 
   };
   await mockApi(page);
   await page.goto('/');
-  await page.getByRole('button', { name: 'Manage' }).click();
+  await page.getByRole('button', { name: 'Settings' }).click();
   await page.getByRole('tab', { name: 'Settings' }).click();
 
   const theme = page.locator('#theme-select');
@@ -2042,7 +2071,7 @@ test('themes persist and both visible interface selectors round-trip', async ({ 
 test('Ledger exposes local LLM setup and extraction controls', async ({ page }) => {
   await mockApi(page);
   await page.goto('/');
-  await page.getByRole('button', { name: 'Manage' }).click();
+  await page.getByRole('button', { name: 'Settings' }).click();
   await page.getByRole('tab', { name: 'Settings' }).click();
 
   await expect(page.getByRole('heading', { name: 'Connect an LLM' })).toBeVisible();
@@ -2074,7 +2103,7 @@ test('Ledger applies the configured LLM extraction toggle', async ({ page }) => 
     default_models: { openai: 'gpt-4o-mini' },
   } });
   await page.goto('/');
-  await page.getByRole('button', { name: 'Manage' }).click();
+  await page.getByRole('button', { name: 'Settings' }).click();
   await page.getByRole('tab', { name: 'Settings' }).click();
 
   const turnOn = page.locator('#llm-connection').getByRole('button', { name: 'Turn on' });
@@ -2132,7 +2161,7 @@ test('Ledger gives active Pro members direct Cloud access and saves hosted polic
   );
   await expect(page.locator('#plan-badge')).toHaveText('PRO');
 
-  await page.getByRole('button', { name: 'Manage' }).click();
+  await page.getByRole('button', { name: 'Settings' }).click();
   await page.getByRole('tab', { name: 'Settings' }).click();
   const cloudSettings = page.locator('#cloud-account-settings');
   await expect(cloudSettings.getByRole('link', { name: 'Open Engraphis Cloud' })).toHaveAttribute(
@@ -2177,7 +2206,7 @@ test('Ledger omits unknown Team trial duration from an older license response', 
   delete legacy.trial.days_by_plan;
   await mockApi(page, { license: legacy });
   await page.goto('/');
-  await page.getByRole('button', { name: 'Manage' }).click();
+  await page.getByRole('button', { name: 'Settings' }).click();
   await page.getByRole('tab', { name: 'Plans & billing' }).click();
   await expect(page.locator('#plan-cards [data-pro-cta="team"]')).toHaveText('Start Team trial');
   await expect(page.locator('#plan-cards [data-pro-cta="pro"]')).toHaveText('Start 3-day Pro trial');
@@ -2193,7 +2222,7 @@ test('billing cadence selects the exact Pro and Team checkout target', async ({ 
     'href',
     'https://cloud.engraphis.test/account?plan=pro&interval=monthly&trial=pro&utm_source=engraphis&utm_medium=product&utm_campaign=pro_conversion&utm_content=sidebar#billing',
   );
-  await page.getByRole('button', { name: 'Manage' }).click();
+  await page.getByRole('button', { name: 'Settings' }).click();
   await page.getByRole('tab', { name: 'Analytics' }).click();
   await expect(page.locator('#analytics-pro-cta')).toHaveText('Start 3-day Pro trial');
   await expect(page.locator('#analytics-pro-cta')).toHaveAttribute(
@@ -2258,6 +2287,7 @@ test('overview→Every-node readiness failure preserves the committed overview r
   });
   await page.goto('/');
   await page.locator('.nav-item[data-view="relations"]').click();
+  await revealAdvancedGraphControls(page);
   await expect(page.locator('#graph-count')).toContainText('entities');
   await expect(page.locator('[data-graph-preset-choice="every"]')).toHaveAttribute('aria-pressed', 'false');
 
@@ -2280,6 +2310,7 @@ test('Every-node→quality readiness failure preserves the committed renderer an
   await mockApi(page);
   await page.goto('/');
   await page.locator('.nav-item[data-view="relations"]').click();
+  await revealAdvancedGraphControls(page);
   await expect(page.locator('#graph-count')).toContainText('entities');
 
   // Enter all mode successfully first
@@ -2342,6 +2373,7 @@ test('successful retry after readiness failure commits exactly one new renderer'
   });
   await page.goto('/');
   await page.locator('.nav-item[data-view="relations"]').click();
+  await revealAdvancedGraphControls(page);
   await expect(page.locator('#graph-count')).toContainText('entities');
 
   // First attempt fails; mode reverts to overview
@@ -2362,6 +2394,7 @@ test('renderer construction failure removes its candidate host', async ({ page }
   await mockApi(page);
   await page.goto('/');
   await page.locator('.nav-item[data-view="relations"]').click();
+  await revealAdvancedGraphControls(page);
   await expect(page.locator('#graph-count')).toContainText('entities');
 
   await page.waitForFunction(() => typeof (window.EngraphisGraph || {}).create === 'function');
