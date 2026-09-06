@@ -6,7 +6,11 @@ import pytest
 
 from engraphis.core.interfaces import MemoryRecord, Scope
 from engraphis.core.sync import SYNC_FORMAT, SyncEngine
-from engraphis.core.vector_repair import canonical_search_required, index_repair_identity
+from engraphis.core.vector_repair import (
+    canonical_search_required,
+    index_repair_identity,
+    repair_vector_index,
+)
 from engraphis.factory import create_memory_engine
 
 
@@ -33,6 +37,144 @@ class ExternalIndex:
             raise RuntimeError("injected external outage")
         for memory in ids:
             self.rows.pop(memory, None)
+
+
+def _queue_blocked_upserts_and_cleanup(engine, index, sync, *, cleanup, count=3):
+    workspace = engine.store.get_or_create_workspace("sync-index")
+    victim = "mem_cleanup_after_upserts"
+    sync._write(MemoryRecord(
+        id=victim, content="Previously indexed evidence.", workspace_id=workspace,
+        scope=Scope.WORKSPACE,
+        provenance={"source": "sync", "trusted": False, "review_state": ""},
+    ))
+    assert victim in index.rows
+    index.fail = True
+    sync.apply_bundle(_bundle(count=count))
+    if cleanup == "erase":
+        bundle = {**_bundle(count=0), "device_id": "peer", "tombstones": [{
+            "id": victim, "deleted_at": 10.0, "device": "peer",
+            "export_class": "remote_erasure",
+        }]}
+        assert sync.apply_bundle(bundle)["tombstones_applied"] == 1
+        assert engine.store.get_memory(victim) is None
+    else:
+        record = engine.store.get_memory(victim)
+        record.metadata["quarantine"] = {"state": "quarantined"}
+        sync._write(record)
+    assert victim in index.rows  # The original delete also failed during the outage.
+    index.fail = False
+    target = index_repair_identity(index, engine.store)
+    queued = engine.store.conn.execute(
+        "SELECT memory_id FROM vector_index_repairs WHERE identity=? "
+        "ORDER BY generation,memory_id", (target,),
+    ).fetchall()
+    assert [row["memory_id"] for row in queued][-1] == victim
+    assert len(queued) == count + 1
+    return target, victim
+
+
+@pytest.mark.parametrize("cleanup", ["erase", "quarantine"])
+@pytest.mark.parametrize("blocker", ["no_embedder", "incompatible_space", "upsert_failure"])
+@pytest.mark.parametrize("limit", [1, 100])
+def test_bulk_cleanup_is_not_starved_by_older_blocked_upserts(
+    tmp_path, monkeypatch, cleanup, blocker, limit,
+):
+    engine = create_memory_engine(str(tmp_path / "cleanup.db"), auto_evolve=False)
+    index = ExternalIndex()
+    sync = SyncEngine(engine.store, embedder=engine.embedder, vector_index=index)
+    try:
+        target, victim = _queue_blocked_upserts_and_cleanup(
+            engine, index, sync, cleanup=cleanup,
+        )
+        blocked_ids = [f"mem_sync_{number}" for number in range(3)]
+        generations = engine.store.vector_index_repair_generations(target, blocked_ids)
+        original_upsert = index.upsert
+        space = engine.embedding_space
+        dim = engine.embedder.dim
+        if blocker == "no_embedder":
+            space, dim = "", 0
+        elif blocker == "incompatible_space":
+            space = "unavailable-embedding-space"
+        else:
+            def unavailable_upsert(*_args, **_kwargs):
+                raise RuntimeError("upserts unavailable; deletes still work")
+            monkeypatch.setattr(index, "upsert", unavailable_upsert)
+        result = repair_vector_index(
+            engine.store, index, embedding_space=space, dim=dim, limit=limit,
+        )
+        assert victim not in index.rows
+        assert result["repaired"] == 1
+        assert 1 <= result["attempted"] <= limit
+        assert result["pending"] == 3
+        assert engine.store.vector_index_repair_generations(target, [victim]) == {}
+        assert engine.store.vector_index_repair_generations(target, blocked_ids) == generations
+        assert canonical_search_required(index, engine.store)
+        monkeypatch.setattr(index, "upsert", original_upsert)
+        recovered = repair_vector_index(
+            engine.store, index, embedding_space=engine.embedding_space, dim=engine.embedder.dim,
+        )
+        assert recovered == {"attempted": 3, "repaired": 3, "pending": 0}
+        assert victim not in index.rows
+        for mid in blocked_ids:
+            np.testing.assert_array_equal(index.rows[mid], engine.store.get_vectors([mid])[mid])
+    finally:
+        engine.close()
+
+
+def test_cleanup_limit_one_advances_past_more_than_one_candidate_batch(external_sync):
+    engine, index, sync = external_sync
+    target, victim = _queue_blocked_upserts_and_cleanup(
+        engine, index, sync, cleanup="erase", count=105,
+    )
+    result = repair_vector_index(
+        engine.store, index, embedding_space="unavailable-space", dim=0, limit=1,
+    )
+    assert victim not in index.rows
+    assert result == {"attempted": 1, "repaired": 1, "pending": 105}
+    assert engine.store.vector_index_repair_generations(target, [victim]) == {}
+
+
+def test_startup_hydration_cleans_up_before_reporting_upsert_failure(external_sync, monkeypatch):
+    engine, index, sync = external_sync
+    target, victim = _queue_blocked_upserts_and_cleanup(engine, index, sync, cleanup="erase")
+    engine.index = engine.recall_engine.index = index
+
+    def unavailable_upsert(*_args, **_kwargs):
+        raise RuntimeError("upserts unavailable; deletes still work")
+
+    monkeypatch.setattr(index, "upsert", unavailable_upsert)
+    with pytest.raises(RuntimeError, match="external vector index repair is incomplete"):
+        engine._hydrate_separate_vector_index(engine.embedding_space)
+    assert victim not in index.rows
+    assert engine.store.vector_index_pending(target) == 3
+
+
+def test_cleanup_acknowledgement_retains_a_newer_canonical_generation(external_sync, monkeypatch):
+    engine, index, sync = external_sync
+    target, victim = _queue_blocked_upserts_and_cleanup(
+        engine, index, sync, cleanup="quarantine",
+    )
+    generation = engine.store.vector_index_repair_generations(target, [victim])[victim]
+    original = index.delete
+    replacement = engine.embedder.embed(["New canonical evidence."])[0]
+
+    def publish_new_generation_after_delete(ids, *, commit=True):
+        original(ids, commit=commit)
+        engine.store.put_vector(ids[0], replacement, model=engine.embedding_space)
+
+    monkeypatch.setattr(index, "delete", publish_new_generation_after_delete)
+    result = repair_vector_index(
+        engine.store, index, embedding_space="unavailable-space", dim=0, limit=1,
+    )
+    assert result == {"attempted": 1, "repaired": 1, "pending": 4}
+    assert victim not in index.rows
+    assert engine.store.vector_index_repair_generations(target, [victim])[victim] > generation
+    monkeypatch.setattr(index, "delete", original)
+    result = repair_vector_index(
+        engine.store, index, embedding_space="unavailable-space", dim=0, limit=1,
+    )
+    assert result == {"attempted": 1, "repaired": 1, "pending": 3}
+    assert victim not in index.rows  # A retained quarantined row is never republished.
 
 
 def _bundle(content="Original synced evidence.", *, stamp=1.0, count=1):
