@@ -7003,6 +7003,22 @@ class MemoryService:
         d["events"] = [dict(r) for r in rows]
         return d
 
+    @staticmethod
+    def _lineage_predecessors(metadata: Any) -> list[str]:
+        """Read exact lineage references; malformed caller metadata is not a link."""
+        if not isinstance(metadata, dict):
+            return []
+        ids = []
+        for key in ("supersedes", "promoted_from"):
+            values = metadata.get(key)
+            if isinstance(values, list):
+                ids.extend(value for value in values if isinstance(value, str))
+        for key in ("corrects", "approved_from"):
+            value = metadata.get(key)
+            if isinstance(value, str):
+                ids.append(value)
+        return ids
+
     def _chain_for(self, rec, wid: str) -> list:
         """Collect the full supersession component around ``rec`` and return its
         closed history oldest→newest, followed by the live record. It follows
@@ -7019,22 +7035,12 @@ class MemoryService:
         is dropped unless it is itself in ``wid``, so a foreign-workspace record can
         never ride a forged pointer into this response; the walk does not continue past
         a dropped candidate (its own predecessors/successors are never visited)."""
-        def predecessors(r):
-            ids = list(r.metadata.get("supersedes") or [])
-            for key in ("corrects", "approved_from"):
-                if r.metadata.get(key):
-                    ids.append(r.metadata[key])
-            promoted = r.metadata.get("promoted_from")
-            if isinstance(promoted, list):
-                ids.extend(promoted)
-            return [value for value in ids if isinstance(value, str)]
-
         seen = {rec.id}
         members = {rec.id: rec}
         frontier = [rec]
         while frontier:
             cur = frontier.pop()
-            for pid in predecessors(cur):
+            for pid in self._lineage_predecessors(cur.metadata):
                 if pid in seen:
                     continue
                 seen.add(pid)
@@ -7073,9 +7079,7 @@ class MemoryService:
                 meta = _json.loads(r["metadata"] or "{}")
             except ValueError:
                 continue
-            if (memory_id in (meta.get("supersedes") or [])
-                    or meta.get("corrects") == memory_id or meta.get("approved_from") == memory_id
-                    or memory_id in (meta.get("promoted_from") or [])):
+            if memory_id in self._lineage_predecessors(meta):
                 candidate = self.store.get_memory(r["id"])
                 if candidate is not None and self._memory_visible_to_caller(candidate):
                     return candidate

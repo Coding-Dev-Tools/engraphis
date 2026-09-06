@@ -145,3 +145,39 @@ def test_failed_transition_rolls_back_receipt_and_source_claim(tmp_path, monkeyp
         assert result["id"] != sources[0]
     finally:
         engine.close()
+
+
+@pytest.mark.parametrize("reviewer", ["original-owner", "owner-" + "a" * 220])
+def test_approval_retry_reports_original_reviewer_after_reopening(tmp_path, reviewer):
+    path = str(tmp_path / "reviewer.db")
+    _, sources = _prepare(path, "approve")
+    engine = create_memory_engine(path, auto_evolve=False)
+    first = engine.approve_for_prompt(sources[0], reviewer=reviewer, reason="verified")
+    engine.close()
+    engine = create_memory_engine(path, auto_evolve=False)
+    try:
+        retry = engine.approve_for_prompt(sources[0], reviewer="different-owner", reason="lost response")
+        direct = engine.approve_for_prompt(first["id"], reviewer="third-owner", reason="repeat")
+        stored = engine.store.get_memory(first["id"]).metadata["approval"]["reviewer"]
+        assert first == retry == direct
+        assert retry["reviewer"] == stored == reviewer[:200]
+        rows = engine.store.conn.execute(
+            "SELECT detail FROM audit WHERE action='approve' AND target=?", (first["id"],)
+        ).fetchall()
+        assert len(rows) == 1
+        assert f"reviewer={stored}" in rows[0]["detail"]
+    finally:
+        engine.close()
+
+
+@pytest.mark.parametrize("approval", [None, 1, "legacy", {"reviewer": None}])
+def test_approval_without_recorded_reviewer_does_not_invent_one(tmp_path, approval):
+    engine = create_memory_engine(str(tmp_path / "legacy-reviewer.db"), auto_evolve=False)
+    try:
+        wid = engine.store.get_or_create_workspace("governance")
+        mid = engine.remember("A local fact.", workspace_id=wid, metadata={"approval": approval})
+        result = engine.approve_for_prompt(mid, reviewer="later-owner", reason="repeat")
+        assert result["id"] == mid
+        assert result["reviewer"] == ""
+    finally:
+        engine.close()
