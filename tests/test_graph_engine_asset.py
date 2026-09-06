@@ -1973,6 +1973,52 @@ def test_central_slider_scales_each_carrier_lane_cache_once() -> None:
 
 
 @requires_node
+def test_local_gravity_zero_endpoint_is_finite_and_scales_kinematic_cache() -> None:
+    """Local gravity's zero endpoint must remain reversible in both live and fallback paths."""
+    report = _run_node(
+        """
+        const scale = I.galaxyImmediateLocalGravityRadiusScale;
+        emit({ zero: scale(0), quarter: scale(.25), one: scale(1), two: scale(2),
+          zeroToOne: scale(1) / scale(0), oneToZero: scale(0) / scale(1) });
+        """
+    )
+    assert all(math.isfinite(report[key]) for key in ("zero", "quarter", "one", "two"))
+    assert report["zero"] == pytest.approx(report["quarter"])
+    assert report["zero"] > report["one"] > report["two"]
+    assert report["zeroToOne"] * report["oneToZero"] == pytest.approx(1)
+
+    source = ASSET.read_text(encoding="utf-8")
+    start = source.index("if (localGChanged")
+    end = source.index("if (state.settings.mode === 'galaxy')", start)
+    response = source[start:end]
+    assert "__galaxyKinematicLocalOrbit" in response
+    assert "__galaxyKinematicCoreLocalOrbit" in response
+    assert "baseRadius" in response and "radius" in response
+
+
+@requires_node
+def test_physics_snapshot_is_cached_after_build() -> None:
+    """The first built physics snapshot must populate the same-step cache."""
+    report = _run_engine(
+        """
+        const api = G.create(el, {});
+        api.setPreset('galaxy');
+        api.setData({ nodes: [
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            system_anchor_id: 'black-hole', gravity_mass: 8, radius: 8, x: 0, y: 0 },
+          { id: 'star', anchor_role: 'community', community_id: 'solar',
+            system_anchor_id: 'star', gravity_mass: 4, radius: 5, x: 120, y: 0 },
+        ], edges: [] });
+        const first = api.getPhysicsSnapshot();
+        const second = api.getPhysicsSnapshot();
+        emit({ same: first === second, center: second.center && second.center.id,
+          nodes: second.nodes.length });
+        """
+    )
+    assert report == {"same": True, "center": "black-hole", "nodes": 2}
+
+
+@requires_node
 def test_system_velocity_guard_preserves_black_hole_carrier_before_local_motion() -> None:
     report = _run_node(
         """
