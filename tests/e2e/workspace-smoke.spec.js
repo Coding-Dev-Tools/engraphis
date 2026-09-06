@@ -38,11 +38,23 @@ test('a real local workspace saves, recalls, and corrects a memory with history'
   await page.locator('#memory-editor button[type="submit"]').click();
   await expect(page.locator('#library-list')).toContainText('retains verified temporal history');
   await page.locator('#library-list [role="option"]').filter({ hasText: 'retains verified temporal history' }).press('Enter');
-  await expect(page.locator('#memory-detail')).toContainText('Supersession chain');
+  const history = page.getByRole('region', { name: 'Record history' });
+  await expect(history.locator('.history-content')).toContainText([
+    'The smoke database retains temporal history.',
+    'The smoke database retains verified temporal history.',
+  ]);
+  await expect(page.locator('#memory-detail').getByRole('button', { name: 'Edit', exact: true })).toBeVisible();
+  await history.locator('.timeline-card').first().getByRole('button', { name: 'Inspect version' }).click();
+  await expect(page.locator('#memory-detail').getByRole('button', { name: 'Review saved versions', exact: true })).toBeVisible();
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.reload();
   await expect(page.locator('#workspace-select')).toHaveValue(workspace);
   await expect(page.locator('#library-list')).toContainText('retains verified temporal history');
+  await page.locator('#library-list [role="option"]').filter({ hasText: 'retains verified temporal history' }).press('Enter');
+  await expect(history.locator('.history-content')).toContainText([
+    'The smoke database retains temporal history.',
+    'The smoke database retains verified temporal history.',
+  ]);
   expect(errors).toEqual([]);
 });

@@ -8,6 +8,7 @@
   <title>Engraphis Ledger</title>
   <link rel="icon" type="image/png" sizes="32x32" href="/v2-assets/favicon-32.png">
   <link rel="stylesheet" href="/v2-assets/ledger.css?v=20260903-rotation-balance-1">
+  <link rel="stylesheet" href="/v2-assets/memory-workflow.css?v=20260906-lifecycle-1">
 </head>
 <body data-theme="slate">
   <a class="skip-link" href="#main-content">Skip to main content</a>
@@ -15,7 +16,6 @@
     <aside class="sidebar" aria-label="Ledger navigation">
       <div class="brand-row">
         <a class="brand" href="/" aria-label="Engraphis Ledger home">Engraphis</a>
-        <a id="plan-badge" class="plan-badge" href="#" aria-label="Subscribe to Pro in Plans and billing">GET PRO</a>
       </div>
 
       <label class="workspace-switcher">
@@ -25,6 +25,47 @@
         </select>
       </label>
 
+      <form id="project-context-form" class="project-switcher">
+        <label>Project for memory work
+          <select id="project-select" aria-label="Active project" disabled><option value="">All projects</option></select>
+        </label>
+        <details id="project-new">
+          <summary>Use a new project name</summary>
+          <label>Project name<input id="project-name" maxlength="200" autocomplete="off" placeholder="my-repository"></label>
+          <button id="project-apply" class="secondary-button" type="submit" disabled>Use project</button>
+        </details>
+        <p id="project-load-status" class="project-help" role="status"></p>
+      </form>
+
+      <nav class="primary-nav" aria-label="Primary">
+        <button class="nav-item active" type="button" data-view="today" aria-current="page">
+          <span>Home</span><small>setup, reviews and activity</small>
+        </button>
+        <button class="nav-item" type="button" data-view="ask">
+          <span>Ask</span><small>grounded answers</small>
+        </button>
+        <button class="nav-item" type="button" data-view="library">
+          <span>Library</span><small>memories and imports</small>
+        </button>
+        <button class="nav-item" type="button" data-view="connections">
+          <span>Connections</span><small>set up your coding agent</small>
+        </button>
+      </nav>
+
+      <nav class="manage-nav" aria-label="More tools">
+        <button class="nav-item" type="button" data-view="relations">
+          <span>Explore</span><small>connections and evidence</small>
+        </button>
+        <button class="nav-item" type="button" data-view="provenance">
+          <span>Activity</span><small>history, sources and receipts</small>
+        </button>
+        <button class="nav-item" type="button" data-view="manage">
+          <span>Settings</span><small>workspaces, services and preferences</small>
+        </button>
+      </nav>
+
+      <details id="sidebar-options" class="sidebar-options" open>
+        <summary>Display and account</summary>
       <nav class="dashboard-switcher" aria-label="Dashboard interface">
         <span>Dashboard</span>
         <a class="dashboard-link active" href="/" aria-current="page">Ledger</a>
@@ -41,40 +82,19 @@
         </select>
       </label>
 
-      <nav class="primary-nav" aria-label="Primary">
-        <button class="nav-item active" type="button" data-view="today" aria-current="page">
-          <span>Today</span><small>changes and decisions</small>
-        </button>
-        <button class="nav-item" type="button" data-view="ask">
-          <span>Ask</span><small>grounded answers</small>
-        </button>
-        <button class="nav-item" type="button" data-view="library">
-          <span>Library</span><small>memories and imports</small>
-        </button>
-        <button class="nav-item" type="button" data-view="relations">
-          <span>Graph &amp; Relationships</span><small>connections and evidence</small>
-        </button>
-        <button class="nav-item" type="button" data-view="provenance">
-          <span>Provenance</span><small>why, timeline, receipts</small>
-        </button>
-      </nav>
-
-      <nav class="manage-nav" aria-label="Management">
-        <button class="nav-item" type="button" data-view="manage">
-          <span>Manage</span><small>workspaces, consolidate, settings</small>
-        </button>
-      </nav>
-
       <div class="sidebar-promo">
+        <a id="plan-badge" class="plan-badge" href="#" aria-label="Subscribe to Pro in Plans and billing">GET PRO</a>
         <div class="pro-sidebar-copy" id="sidebar-pro-copy">Support continued Engraphis development with Pro.</div>
         <small class="pro-sidebar-detail" id="sidebar-pro-detail">Cloud Sync, Analytics, and managed memory maintenance.</small>
         <a id="sidebar-pro-cta" class="outline-button" data-pro-cta="sidebar" href="#" target="_blank" rel="noopener">Subscribe to Pro</a>
+
+      </div>
+      </details>
         <div class="engine-status">
           <span><i class="status-dot" aria-hidden="true"></i><span id="connection-status">Connecting…</span></span>
           <span id="deployment-mode-badge" class="mode-badge" hidden aria-label="Deployment mode">—</span>
           <span>Engine v2 · bi-temporal</span>
         </div>
-      </div>
     </aside>
 
     <main class="main" id="main-content" tabindex="-1">
@@ -86,8 +106,8 @@
         <div class="today-layout">
           <div class="view-column">
             <header class="view-header">
-              <p class="eyebrow">Today · <span id="today-date"></span></p>
-              <h1 id="today-title">What changed in <span data-workspace-name>this workspace</span></h1>
+              <p class="eyebrow">Home · <span id="today-date"></span></p>
+              <h1 id="today-title">Home for <span data-workspace-name>this workspace</span></h1>
               <p>Everything below comes from this workspace’s memory records and audit trail.</p>
             </header>
 
@@ -100,11 +120,12 @@
 
             <section class="content-section">
               <div class="section-heading">
-                <div><h2>Needs a decision</h2><p>High-signal records surfaced from local memory.</p></div>
-                <button class="text-button" type="button" data-go="ask">Ask about them</button>
+                <div><h2>Needs review</h2><p>Pending sources, quarantined records and conflicts reported by the engine.</p><p class="memory-context" data-memory-context>Choose a workspace</p></div>
+                <button id="review-refresh" class="text-button" type="button" disabled>Refresh reviews</button>
               </div>
+              <p id="review-status" class="project-help" role="status"></p>
               <div id="decision-list" class="decision-list">
-                <p class="empty-state">Reviewing active memory…</p>
+                <p class="empty-state">Loading review state…</p>
               </div>
             </section>
 
@@ -123,8 +144,17 @@
           </div>
 
           <aside class="today-rail" aria-label="Workspace summary">
+            <section class="rail-section" aria-labelledby="home-setup-title">
+              <p class="eyebrow">Your coding-agent setup</p>
+              <h2 id="home-setup-title">Continue your first useful recall</h2>
+              <p id="home-engine-status" class="project-help">Checking the dashboard connection…</p>
+              <p id="home-setup-context" class="memory-context" data-memory-context>Choose a workspace</p>
+              <p id="home-setup-progress" role="status">No setup progress recorded.</p>
+              <p id="home-setup-next" class="project-help">Your agent connection is separate from this dashboard.</p>
+              <button class="primary-button" type="button" data-go="connections">Continue setup</button>
+            </section>
             <section class="rail-section">
-              <p class="eyebrow">Live context</p>
+              <p class="eyebrow">Workspace context · all projects</p>
               <h2>Strongest memories</h2>
               <div id="proactive-list" class="compact-list"><p class="empty-state">Loading context…</p></div>
             </section>
@@ -138,7 +168,8 @@
               <p>Start with a project decision you want your agent to remember. Open the saved record, review its source and choose Approve for prompt. Then ask about it and edit the record when the decision changes.</p>
               <button id="first-memory-add" class="primary-button" type="button">Add your first memory</button>
               <button class="text-button" type="button" data-go="library">Or import local documents</button>
-              <p>To connect your coding agent, run <code>engraphis-init</code> for connection instructions. No account is needed for local memory.</p>
+              <p>No account is needed for local memory.</p>
+              <button class="text-button" type="button" data-go="connections">Connect your coding agent</button>
             </section>
             <section class="rail-section rail-action">
               <p class="eyebrow">Local-first</p>
@@ -150,12 +181,49 @@
         </div>
       </section>
 
+      <section class="view" data-view-panel="connections" aria-labelledby="connections-title">
+        <div class="page-wrap narrow-wrap">
+          <header class="view-header">
+            <p class="eyebrow">Connections · local coding agents</p>
+            <h1 id="connections-title">Carry a project fact into your next session</h1>
+            <p id="connection-scope" class="memory-context" data-memory-context>Choose a workspace to begin.</p>
+            <p>This checklist stays on this browser, separately for each workspace and project. Local memory needs no account.</p>
+          </header>
+          <p id="connection-progress" class="connection-progress" role="status"></p>
+          <ol class="connection-steps">
+            <li>
+              <h2>Connect your agent</h2>
+              <p>On the machine running your agent, run <code>engraphis-init</code>. Use its setup command for the same local database as this dashboard; it includes any configured database and encryption paths.</p>
+              <label>Agent<select id="connection-host"><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="generic">Other MCP client</option></select></label>
+              <p>For an installation already using the shared private configuration:</p>
+              <pre class="connection-command"><code id="connection-command"></code></pre>
+              <button id="connection-copy" class="secondary-button" type="button">Copy setup command</button>
+              <p id="connection-copy-status" role="status"></p>
+              <p>Other clients may use different configuration formats. For HTTP or hosted connections, follow the <a href="https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/AGENT_CONNECT.md" target="_blank" rel="noopener">connection guide</a>.</p>
+              <label class="connection-check"><input id="connection-configured" type="checkbox"> I added Engraphis to my agent's configuration.</label>
+            </li>
+            <li>
+              <h2>Save a fact and recall it after a restart</h2>
+              <p>Save one useful project decision. Review its source and approve it for prompt context. Restart your agent, then ask it about the decision in the workspace and project shown above.</p>
+              <div class="header-actions"><button id="connection-add-memory" class="primary-button" type="button">Save a project fact</button><button id="connection-ask" class="secondary-button" type="button">Try dashboard Ask</button></div>
+              <label class="connection-check"><input id="connection-recalled" type="checkbox"> I retrieved the fact with its source after restarting my agent.</label>
+            </li>
+            <li>
+              <h2>Correct the fact and inspect its history</h2>
+              <p>Open the cited record in Library, revise it, and inspect the supersession chain. Confirm that your agent recalls the current version.</p>
+              <label class="connection-check"><input id="connection-corrected" type="checkbox"> I checked the correction and its preserved history.</label>
+            </li>
+          </ol>
+        </div>
+      </section>
+
       <section class="view" data-view-panel="ask" aria-labelledby="ask-title">
         <div class="page-wrap narrow-wrap">
           <header class="view-header">
             <p class="eyebrow">Ask · grounded retrieval</p>
             <h1 id="ask-title">Answer from what the store can support</h1>
             <p>Every claim links to a memory. If the evidence is weak, Engraphis says so.</p>
+            <p class="memory-context" data-memory-context>Choose a workspace</p>
           </header>
 
           <form id="ask-form" class="question-card" novalidate>
@@ -166,8 +234,16 @@
                 <select id="ask-k"><option>3</option><option selected>5</option><option>8</option><option>12</option></select>
               </label>
               <button class="primary-button" type="submit">Grounded answer</button>
+              <button id="ask-cancel" class="secondary-button" type="button" hidden>Cancel pending requests</button>
             </div>
           </form>
+
+          <p id="ask-result-query" class="project-help ask-result-query"></p>
+          <p id="ask-status" class="project-help" role="status"></p>
+          <div class="form-actions ask-retry-actions">
+            <button id="ask-answer-retry" class="secondary-button" type="button" hidden>Retry answer</button>
+            <button id="ask-preview-retry" class="secondary-button" type="button" hidden>Retry preview</button>
+          </div>
 
           <section id="answer-panel" class="answer-panel" aria-live="polite">
             <p class="empty-state">Ask a question to begin.</p>
@@ -175,8 +251,9 @@
 
           <details class="retrieval-details">
             <summary>Inspect retrieval</summary>
+            <h2>Retrieved candidates</h2>
             <div id="retrieval-list" class="memory-list">
-              <p class="empty-state">Raw retrieval appears after an answer.</p>
+              <p class="empty-state">Candidate retrieval loads independently from the answer.</p>
             </div>
           </details>
         </div>
@@ -189,6 +266,7 @@
               <p class="eyebrow">Library · active memory</p>
               <h1 id="library-title">Browse, add and govern memories</h1>
               <p>Live records stay editable without erasing their temporal history.</p>
+              <p class="memory-context" data-memory-context>Choose a workspace</p>
             </div>
             <div class="header-actions">
               <button id="new-memory-button" class="primary-button" type="button">New memory</button>
@@ -228,10 +306,14 @@
                   <div><p class="eyebrow">Write</p><h2 id="editor-title">New memory</h2></div>
                   <button id="editor-close" class="text-button" type="button">Close</button>
                 </div>
-                <label>Title<input id="editor-memory-title" maxlength="500" placeholder="Concise title"></label>
+                <label id="editor-scope-control">Save to<select id="editor-memory-scope"><option value="workspace">Shared across this workspace</option><option value="repo">Selected project only</option></select></label>
+                <p id="editor-scope-note" class="project-help"></p>
+                <label>Title<input id="editor-memory-title" maxlength="500" placeholder="Concise title (optional)"></label>
                 <label>Type<select id="editor-memory-type"><option>working</option><option>episodic</option><option selected>semantic</option><option>procedural</option></select></label>
                 <label>Content<textarea id="editor-memory-content" rows="12" maxlength="10000" required placeholder="A discrete, durable fact or procedure…"></textarea></label>
                 <p id="editor-error" class="form-error" role="alert" hidden></p>
+                <button id="editor-refresh" class="secondary-button" type="button" hidden>Refresh saved versions</button>
+                <div id="editor-history" hidden></div>
                 <label for="editor-memory-importance">Importance<input id="editor-memory-importance" type="range" min="0" max="1" step="0.025" value="0.5" aria-label="Memory importance"></label>
                 <div class="form-actions">
                   <button id="editor-cancel" class="secondary-button" type="button">Cancel</button>
@@ -248,8 +330,8 @@
           <div class="graph-stage">
             <header class="graph-header">
               <div>
-                <p class="eyebrow">Graph &amp; Relationships · evidence graph</p>
-                <h1 id="relations-title">How this workspace connects</h1>
+                <p class="eyebrow">Explore · evidence graph</p>
+                <h1 id="relations-title">Explore project connections</h1>
               </div>
             </header>
             <div id="graph-canvas" class="graph-canvas" role="img" aria-label="Interactive knowledge graph" aria-describedby="graph-a11y-help graph-count graph-mode"></div>
@@ -296,6 +378,10 @@
               </div>
               <p id="graph-lod-note" class="graph-lod-note" role="status" aria-live="polite" hidden><strong>All nodes · live controls</strong><span>Layout, forces, scope, colour and relation flow update without reloading the complete graph.</span></p>
 
+              <p id="graph-lifecycle-status" class="graph-note" role="status">The graph loads when you open Explore.</p>
+              <p class="graph-note">Search by entity, then open its connected memories to inspect evidence.</p>
+              <details id="graph-advanced" class="graph-advanced graph-drawer-section">
+                <summary>Advanced appearance and physics</summary>
               <section class="graph-drawer-section" aria-labelledby="graph-rendering-title">
                 <h2 id="graph-rendering-title">Rendering</h2>
                 <div class="graph-choice-grid graph-rendering-grid" role="group" aria-label="Rendering style">
@@ -391,6 +477,7 @@
                 </details>
                 <button id="graph-reset-tuning" class="graph-action" type="button">Reset to preset defaults</button>
               </details>
+              </details>
             </section>
 
             <section class="graph-control-panel" id="graph-analyse" role="tabpanel" aria-labelledby="graph-analyse-tab" data-graph-tab-panel="analyse" hidden>
@@ -423,12 +510,12 @@
       <section class="view" data-view-panel="provenance" aria-labelledby="provenance-title">
         <div class="page-wrap">
           <header class="view-header">
-            <p class="eyebrow">Provenance · temporal truth</p>
-            <h1 id="provenance-title">Why the store believes what it believes</h1>
+            <p class="eyebrow">Activity · provenance and history</p>
+            <h1 id="provenance-title">Activity and memory history</h1>
             <p>Inspect support, supersessions and privacy-safe receipts without flattening history.</p>
           </header>
 
-          <div class="tab-list" role="tablist" aria-label="Provenance views">
+          <div class="tab-list" role="tablist" aria-label="Activity views">
             <button id="provenance-belief-tab" class="tab active" type="button" role="tab" data-provenance-tab="belief" aria-selected="true" aria-controls="provenance-belief-panel">What we believe</button>
             <button id="provenance-timeline-tab" class="tab" type="button" role="tab" data-provenance-tab="timeline" aria-selected="false" aria-controls="provenance-timeline-panel">Timeline</button>
             <button id="provenance-audit-tab" class="tab" type="button" role="tab" data-provenance-tab="audit" aria-selected="false" aria-controls="provenance-audit-panel">Audit &amp; receipts</button>
@@ -476,8 +563,8 @@
       <section class="view" data-view-panel="manage" aria-labelledby="manage-title">
         <div class="page-wrap">
           <header class="view-header">
-            <p class="eyebrow">Manage · local operations</p>
-            <h1 id="manage-title">Operate the engine deliberately</h1>
+            <p class="eyebrow">Settings · workspace and services</p>
+            <h1 id="manage-title">Settings and local operations</h1>
             <p>Workspace, consolidation, hosted services and interface preferences in one place.</p>
           </header>
 
@@ -497,7 +584,7 @@
             </div>
           </section>
 
-          <div class="tab-list manage-tabs" role="tablist" aria-label="Manage views">
+          <div class="tab-list manage-tabs" role="tablist" aria-label="Settings views">
             <button id="manage-workspaces-tab" class="tab active" type="button" role="tab" data-manage-tab="workspaces" aria-selected="true" aria-controls="manage-workspaces-panel">Workspaces</button>
             <button id="manage-sync-tab" class="tab" type="button" role="tab" data-manage-tab="sync" aria-selected="false" aria-controls="manage-sync-panel">Cloud Sync</button>
             <button id="manage-consolidate-tab" class="tab" type="button" role="tab" data-manage-tab="consolidate" aria-selected="false" aria-controls="manage-consolidate-panel">Consolidate</button>
@@ -731,6 +818,11 @@
   </dialog>
 
   <script src="/v2-assets/managed-processing.js?v=20260905-policy-1"></script>
-  <script src="/v2-assets/ledger.js?v=20260905-processing-review-1"></script>
+  <script src="/v2-assets/workflow-context.js?v=20260906-ask-home-1"></script>
+  <script src="/v2-assets/memory-revision.js?v=20260906-workflow-1"></script>
+  <script src="/v2-assets/memory-history.js?v=20260906-workflow-1"></script>
+  <script src="/v2-assets/ask-requests.js?v=20260906-ask-home-1"></script>
+  <script src="/v2-assets/graph-lifecycle.js?v=20260906-lifecycle-1"></script>
+  <script src="/v2-assets/ledger.js?v=20260906-lifecycle-1"></script>
 </body>
 </html>
