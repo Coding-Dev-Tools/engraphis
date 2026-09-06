@@ -560,6 +560,14 @@
     const rMod = Math.pow(fCentral, -0.65);
     return baseScale * rMod;
   }
+  /* Local stellar gravity follows the same inverse-radius law as the live solver. Keep its
+     zero endpoint finite so a 0 -> positive sweep remains reversible and path-independent. */
+  const GALAXY_LOCAL_GRAVITY_RADIUS_ENDPOINT = 0.25;
+  function galaxyImmediateLocalGravityRadiusScale(setting) {
+    const raw = Number(setting);
+    const value = Number.isFinite(raw) ? Math.max(0, Math.min(8, raw)) : 1;
+    return Math.pow(Math.max(GALAXY_LOCAL_GRAVITY_RADIUS_ENDPOINT, value), -0.35);
+  }
   /* The oversized-scene fallback has no live integrator, so its grid must map the complete
      slider range directly. Keeping the old `setting / 100` scale made compactness hit its
      minimum near 112 and left every higher gravity value visually identical. */
@@ -9377,6 +9385,8 @@
 
     function render(fit, reheat, dragging = false) {
       if (destroyed) return;
+      cachedPhysicsSnapshot = null;
+      cachedPhysicsSnapshotStep = -1;
       if (suspended) {
         pendingRender = pendingRender
           ? [pendingRender[0] || fit, pendingRender[1] || reheat, pendingRender[2] || dragging]
@@ -10338,7 +10348,7 @@
         : (state.settings.G_star !== undefined ? state.settings.G_star : 100));
       const localGChanged = (next.localGravitationalConstant !== undefined || next.G_star !== undefined)
         && Number.isFinite(previousLocalG) && Number.isFinite(nextLocalG)
-        && previousLocalG > 0 && nextLocalG > 0
+        && previousLocalG >= 0 && nextLocalG >= 0
         && Math.abs(nextLocalG - previousLocalG) > 1e-12
         && previousMode === 'galaxy' && state.settings.mode === 'galaxy';
       /* A galaxy slider burst (gravity / black-hole mass / damping / etc.) is a setting change,
@@ -10450,7 +10460,9 @@
         const nodes = graph && graph.nodes ? graph.nodes : null;
         if (nodes) {
           const anchor = galaxyGlobalAnchor(nodes);
-          const localRatio = Math.pow(previousLocalG / nextLocalG, 0.35);
+          const previousLocalScale = galaxyImmediateLocalGravityRadiusScale(previousLocalG);
+          const nextLocalScale = galaxyImmediateLocalGravityRadiusScale(nextLocalG);
+          const localRatio = nextLocalScale / previousLocalScale;
           if (Number.isFinite(localRatio) && localRatio > 0 && Math.abs(localRatio - 1.0) > 1e-9) {
             galaxyBlackHoleCarrierSystems(nodes, anchor).forEach(item => {
               if (!item.carrier) return;
@@ -10468,6 +10480,15 @@
                     node[key] = val * localRatio;
                   }
                 });
+                ['__galaxyKinematicLocalOrbit', '__galaxyKinematicCoreLocalOrbit']
+                  .forEach(cacheKey => {
+                    const orbit = node[cacheKey];
+                    if (!orbit || typeof orbit !== 'object') return;
+                    ['baseRadius', 'radius'].forEach(key => {
+                      const val = Number(orbit[key]);
+                      if (Number.isFinite(val) && val > 0) orbit[key] = val * localRatio;
+                    });
+                  });
               });
             });
             render(false, false);
@@ -10688,7 +10709,7 @@
         });
       });
       const systemAnchorIds = new Set(systemAnchors.map(star => String(star.id)));
-      return {
+      const snapshot = {
         center: center ? {
           id: center.id, x: center.x, y: center.y,
           label: nodeName(center),
@@ -11043,6 +11064,7 @@
       applyGalaxyInwardConvergence, enforceGalaxyOrbitalFloor,
       enforceGalaxyLocalOrbitBoundaries, supportGalaxyCarrierOrbits,
       galaxyImmediateGravityRadiusScale,
+      galaxyImmediateLocalGravityRadiusScale,
       galaxyLayoutCompactness,
       applyGalaxyGravitySettingResponse,
       galaxySpringStrength, galaxySpringDistance, galaxySafeSpringDistance,
