@@ -115,7 +115,12 @@ def _sanitized_http_exception(status_code: object) -> HTTPException:
 
 
 def service() -> MemoryService:
-    """Lazily bind a single MemoryService to the configured store (the live v2 DB)."""
+    """Resolve the request binding or lazily open the standalone local store."""
+    from engraphis.service_context import bound_service
+
+    bound = bound_service()
+    if bound is not None:
+        return bound
     global _service
     with _SERVICE_LOCK:
         if _service is None:

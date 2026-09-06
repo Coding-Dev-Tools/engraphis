@@ -111,6 +111,11 @@ _service_lock = threading.Lock()
 
 def service() -> MemoryService:
     """Lazily build the service so server startup is instant (model loads on first use)."""
+    from engraphis.service_context import bound_service
+
+    bound = bound_service()
+    if bound is not None:
+        return bound
     global _service
     if _service is None:
         with _service_lock:
