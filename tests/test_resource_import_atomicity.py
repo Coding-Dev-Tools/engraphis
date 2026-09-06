@@ -12,7 +12,9 @@ from engraphis.service import MemoryService
 
 
 @pytest.fixture(params=["files", "folder"])
-def import_resources(request, tmp_path):
+def import_resources(request, tmp_path, monkeypatch):
+    monkeypatch.setenv("ENGRAPHIS_IMPORT_ROOTS", str(tmp_path))
+
     def run(service, files, **kwargs):
         if request.param == "files":
             return service.import_files(workspace="atomic", files=files, **kwargs)
