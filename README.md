@@ -874,7 +874,7 @@ grant. See [`docs/LICENSING.md`](https://github.com/Coding-Dev-Tools/engraphis/b
 
 The current source uses schema 18 for durable, content-free vector-index repair and
 atomic memory-command receipts. Upgrades use the existing verified-backup migration path.
-The [rework execution register](docs/REWORK_EXECUTION.md) records the current findings,
+The [rework execution register](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/REWORK_EXECUTION.md) records the current findings,
 compatibility decisions, acceptance evidence, remaining work and recovery procedure.
 See [the reliability program](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/RELIABILITY_PROGRAM.md) for exact implementation,
 validation, migration and release boundaries. Managed processing now requires explicit
