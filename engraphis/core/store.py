@@ -65,7 +65,13 @@ from engraphis.core.retention_policy import (
     reinforced_stability,
 )
 from engraphis.core.savings import normalize_release_version
+from engraphis.core.read_snapshots import (
+    ReadSnapshotPool,
+    ReadSnapshotView,
+    validate_read_timeout,
+)
 from engraphis.core.schema import (
+    BROWSE_SCHEMA_SQL,
     FTS_SQL_FALLBACK,
     FTS_SQL_FTS5,
     SCHEMA_SQL,
@@ -75,6 +81,7 @@ from engraphis.core.schema import (
 
 # Rows materialized per locked batch when streaming the vector table (see iter_vectors).
 VECTOR_SCAN_BATCH = 2000
+_STARTUP_GRAPH_TRANSFORMS = {"edge_supports": 1, "live_edge_deduplication": 1}
 # Bound placeholders per ``IN (...)`` so a batched lookup stays under SQLite's
 # SQLITE_MAX_VARIABLE_NUMBER (999 before 3.32, 32766 after) on every build.
 IN_CLAUSE_CHUNK = 500
@@ -239,9 +246,11 @@ def _loads(raw: Any, default: Any) -> Any:
         return default
 
 
-def _close_connection_quietly(conn: Any) -> None:
+def _close_connection_quietly(conn: Any, readers: Any = None) -> None:
     """Best-effort cleanup for a Store abandoned without an explicit close."""
     try:
+        if readers is not None:
+            readers.close()
         conn.close()
     except Exception:
         pass
@@ -261,6 +270,17 @@ class ReadOnlyConnector(Protocol):
     def __call__(self, path: str) -> Any: ...
 
     def open_read_only(self, path: str) -> Any: ...
+
+
+class ReadSnapshotConnector(Protocol):
+    """An opt-in live reader: mode=ro, WAL-visible, query-only, no migrations.
+
+    The connector owns keying/exception translation and honors the opening timeout.
+    Its connection must support progress handlers, cross-thread interruption and
+    serialized cross-thread close. Immutable inspection is a separate contract.
+    """
+
+    def open_read_snapshot(self, path: str, *, timeout: float) -> Any: ...
 
 
 def _row_is_prompt_eligible(provenance: Any, metadata: Any) -> bool:
@@ -1159,7 +1179,7 @@ class Store:
     def __init__(self, path: str = ":memory:", *,
                  allowed_workspaces: Optional[set] = None,
                  connect: Optional[Callable[[str], Any]] = None,
-                 read_only: bool = False) -> None:
+                 read_only: bool = False, read_snapshot_limit: int = 4) -> None:
         """Open a store.
 
         ``read_only`` is deliberately stronger than merely promising not to call a
@@ -1182,6 +1202,11 @@ class Store:
             else path
         )
         self._connect = connect
+        self._read_snapshot_pool = ReadSnapshotPool(read_snapshot_limit)
+        self._read_snapshot_path = (
+            self.path if _is_memory_database_path(self.path)
+            else str(Path(self.path).resolve())
+        )
         self.read_only = bool(read_only)
         if self.read_only and _is_memory_database_path(path):
             raise ValueError("read-only Store requires an existing database file")
@@ -1204,7 +1229,7 @@ class Store:
         self.conn = _SerializedConnection(raw_conn)
         self._close_lock = threading.Lock()
         self._connection_finalizer = weakref.finalize(
-            self, _close_connection_quietly, self.conn
+            self, _close_connection_quietly, self.conn, self._read_snapshot_pool
         )
         self.has_fts5 = False
         self._fts_orphan_ids: Optional[set[str]] = None
@@ -1340,6 +1365,9 @@ class Store:
             "memory_sync_exports",
             "operation_receipts",
             "schema_migrations",
+            "migration_executions",
+            "browse_state",
+            "browse_scope_revisions",
             "source_vaults",
             "source_imports",
             "source_import_items",
@@ -1361,6 +1389,9 @@ class Store:
             ).fetchall()
         }
         required_source_security_objects = {
+            "trg_browse_memory_insert",
+            "trg_browse_memory_update",
+            "trg_browse_memory_delete",
             "trg_job_session_scope_insert",
             "trg_job_session_scope_update",
             "idx_source_vaults_identity",
@@ -2304,6 +2335,28 @@ class Store:
             bool(object_names) and "memory_sync_exports" not in object_names
         )
         self._sync_exports_need_table = sync_exports_need_table
+        applied_transforms = (
+            {(str(row[0]), int(row[1])) for row in self.conn.execute(
+                "SELECT name,version FROM migration_executions"
+            ).fetchall()}
+            if "migration_executions" in object_names else set()
+        )
+        pending_transforms = {
+            name for name, version in _STARTUP_GRAPH_TRANSFORMS.items()
+            if previous_version < 18 or (name, version) not in applied_transforms
+        }
+        # Missing normalized support storage or uniqueness constraints are shape
+        # repairs even if an earlier build recorded completion. Back them up too.
+        if "edge_supports" not in object_names:
+            pending_transforms.add("edge_supports")
+        if not {"idx_edge_workspace_live_unique", "idx_edge_repo_live_unique"} <= object_names:
+            pending_transforms.add("live_edge_deduplication")
+        self._startup_graph_transforms = pending_transforms
+        browse_schema_incomplete = not {
+            "browse_state", "browse_scope_revisions", "trg_browse_memory_insert",
+            "trg_browse_memory_update", "trg_browse_memory_delete",
+        } <= object_names
+        self._browse_schema_incomplete = browse_schema_incomplete
         if previous_version > SCHEMA_VERSION:
             raise RuntimeError(
                 f"database schema {previous_version} is newer than supported "
@@ -2316,6 +2369,8 @@ class Store:
             or sessions_need_handoff
             or tombstones_need_export_class
             or sync_exports_need_table
+            or bool(pending_transforms)
+            or browse_schema_incomplete
         )
         return previous_version, needs_backup
 
@@ -2690,8 +2745,21 @@ class Store:
             "CREATE INDEX IF NOT EXISTS idx_entity_normalized "
             "ON entities(workspace_id, normalized_name, etype);"
         )
-        self._backfill_edge_supports()
-        self._deduplicate_live_edges()
+        # Completion markers share the migration transaction. An interruption
+        # rolls back both the transform and its marker so a verified retry runs
+        # once; routine startup no longer scans every edge or support.
+        pending_transforms = getattr(self, "_startup_graph_transforms", _STARTUP_GRAPH_TRANSFORMS)
+        for name, transform in (
+            ("edge_supports", self._backfill_edge_supports),
+            ("live_edge_deduplication", self._deduplicate_live_edges),
+        ):
+            if name in pending_transforms:
+                transform()
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO migration_executions(name,version,applied_at) "
+                    "VALUES (?,?,?)",
+                    (name, _STARTUP_GRAPH_TRANSFORMS[name], migration_time),
+                )
         self._execute_script_transactional(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_edge_workspace_live_unique "
             "ON edges(workspace_id, src, dst, relation, layer) "
@@ -2756,6 +2824,12 @@ class Store:
                         receipt_scope["updated_at"],
                     ),
                 )
+
+        self._execute_script_transactional(BROWSE_SCHEMA_SQL)
+        if getattr(self, "_browse_schema_incomplete", False):
+            # A missing trigger could have allowed untracked changes. Repaired
+            # schemas start a new cursor epoch instead of trusting prior tokens.
+            self.conn.execute("UPDATE browse_state SET identity=lower(hex(randomblob(16)))")
 
         # One row per applied version: fresh installs record every version up to
         # current, upgrades record each crossed version. Reads stay on MAX(version).
@@ -3606,6 +3680,7 @@ class Store:
 
     def close(self) -> None:
         with self._close_lock:
+            self._read_snapshot_pool.close()
             finalizer = getattr(self, "_connection_finalizer", None)
             if finalizer is None:
                 self.conn.close()
@@ -3687,6 +3762,32 @@ class Store:
         finally:
             if owns_transaction and self.conn.transaction_owned_by_current_thread():
                 self.conn.rollback()
+
+    @contextmanager
+    def borrow_read_snapshot(self, *, timeout: float = 5.0):
+        """Borrow a live reader view without changing ``self.conn`` or its contract.
+
+        Caller transactions, memory databases, immutable inspectors, and connectors
+        without an explicit live-reader method retain the shared-connection path.
+        """
+        validate_read_timeout(timeout)
+        open_snapshot = getattr(self._connect, "open_read_snapshot", None)
+        if (self.read_only or _is_memory_database_path(self.path)
+                or self.conn.transaction_owned_by_current_thread()
+                or (self._connect is not None and not callable(open_snapshot))):
+            yield self
+            return
+
+        def opener(*, timeout):
+            if open_snapshot is not None:
+                return open_snapshot(self._read_snapshot_path, timeout=timeout)
+            uri = Path(self._read_snapshot_path).as_uri() + "?mode=ro"
+            connection = sqlite3.connect(uri, uri=True, timeout=timeout, check_same_thread=False)
+            connection.row_factory = sqlite3.Row
+            return connection
+
+        with self._read_snapshot_pool.borrow(opener, timeout=timeout) as connection:
+            yield ReadSnapshotView(connection, self._where)
 
     @contextmanager
     def write_savepoint(self):

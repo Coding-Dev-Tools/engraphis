@@ -69,8 +69,8 @@ class RegexTokenCounter:
 class DeterministicContextPacker:
     """Pack diverse, relevant evidence into a strict token budget.
 
-    Selection is stable for identical inputs.  A supersession/consolidation
-    family contributes at most one member, summaries are preferred when they
+    Selection is stable for identical inputs. Repeated memory IDs contribute
+    at most one candidate, summaries are preferred when they
     retain query evidence, and oversized sources are reduced at sentence
     boundaries. A complete evidence unit that cannot fit is omitted.
     """
@@ -97,7 +97,7 @@ class DeterministicContextPacker:
         # Keep legacy pruning options accepted for caller compatibility. Shared
         # text across distinct records does not establish equivalent evidence:
         # titles, scope, provenance and neighboring sentences bind its meaning.
-        # Only the established identity/family selection deduplicates sources.
+        # Only repeated canonical memory IDs deduplicate sources.
         self.redundancy_pruning = bool(redundancy_pruning)
         self.score_elbow_gating = bool(score_elbow_gating)
         self.elbow_ratio = float(elbow_ratio)
@@ -118,11 +118,19 @@ class DeterministicContextPacker:
                 context="",
                 chunks=[],
                 usage=self._usage(
-                    budget, 0, source_tokens, 0, len(candidates)
+                    budget, 0, source_tokens, 0, len(candidates),
+                    {"budget": len(candidates)} if candidates else {},
                 ),
             )
 
         representatives, duplicate_count = _family_representatives(candidates)
+        omissions = {"duplicate": duplicate_count, "budget": 0, "score_tail": 0,
+                     "missing_record": 0}
+        owners = {
+            _source_attribution(candidate) for candidate in representatives
+            if candidate.record is not None
+        }
+        include_attribution = len(owners) > 1
         query_terms = _terms(query)
         needs_bridge = bool(query_terms & _BRIDGE_TERMS) or bool(
             re.search(r"(?:\w+[./\\])+\w+|::|->|\b[A-Za-z_]\w*\(\)", query)
@@ -154,6 +162,7 @@ class DeterministicContextPacker:
             candidate = remaining.pop(0)
             record = candidate.record
             if record is None:
+                omissions["missing_record"] += 1
                 continue
 
             # Elastic score-elbow gating: gate candidate if scores drop steeply
@@ -166,11 +175,13 @@ class DeterministicContextPacker:
                     admitted_count=len(packed),
                     needs_bridge=needs_bridge,
                 ):
+                    omissions["score_tail"] += 1
                     continue
 
             prefix = "\n\n" if context else ""
             ordinal = len(packed) + 1
-            header = self._header(candidate, ordinal)
+            attribution = _source_attribution(candidate) if include_attribution else ""
+            header = self._header(candidate, ordinal, attribution=attribution)
             base = f"{context}{prefix}{header}\n"
             excerpt = ""
             truncated = False
@@ -189,7 +200,7 @@ class DeterministicContextPacker:
             if not excerpt or _starts_with_title(excerpt, record.title):
                 compact_base = (
                     f"{context}{prefix}"
-                    f"{self._header(candidate, ordinal, include_title=False)}\n"
+                    f"{self._header(candidate, ordinal, include_title=False, attribution=attribution)}\n"
                 )
                 if self._count(compact_base) < budget:
                     compact_available = budget - self._count(compact_base)
@@ -199,6 +210,7 @@ class DeterministicContextPacker:
                         available = compact_available
                         excerpt, truncated, reason = compact
             if not excerpt:
+                omissions["budget"] += 1
                 continue
 
             proposed = f"{base}{excerpt}"
@@ -215,6 +227,7 @@ class DeterministicContextPacker:
                 truncated = True
                 reason = "token_boundary_excerpt"
                 if not excerpt:
+                    omissions["budget"] += 1
                     continue
                 proposed = f"{base}{excerpt}"
 
@@ -225,6 +238,7 @@ class DeterministicContextPacker:
                 tokens=self._count(excerpt),
                 truncated=truncated,
                 reason=reason,
+                attribution=attribution,
             ))
             covered.update(_terms(excerpt) & query_terms)
 
@@ -234,13 +248,13 @@ class DeterministicContextPacker:
         context_tokens = self._count(context)
         omitted = len(candidates) - len(packed)
         # ``duplicate_count`` is intentionally folded into omitted_count; keep
-        # the local name to make the family-diversity policy explicit.
+        # the local name to distinguish repeated candidates from missing evidence.
         omitted = max(omitted, duplicate_count)
         return ContextPackResult(
             context=context,
             chunks=packed,
             usage=self._usage(
-                budget, context_tokens, source_tokens, len(packed), omitted
+                budget, context_tokens, source_tokens, len(packed), omitted, omissions
             ),
         )
 
@@ -469,16 +483,18 @@ class DeterministicContextPacker:
         ordinal: int,
         *,
         include_title: bool = True,
+        attribution: str = "",
     ) -> str:
         record = candidate.record
         if record is None:
             return f"[{ordinal}]"
-        # The compact source list carries identity/scope. Repeating ULIDs and
-        # scope labels inside the context spends reader tokens without adding
-        # evidence; the ordinal is the citation bridge.
+        # Ownership binds otherwise identical claims from different scopes. Include
+        # it when the context spans owners, and charge it to the same hard budget.
         header = f"[{ordinal}]"
+        if attribution:
+            header += f" {attribution}"
         if include_title and record.title:
-            title = " ".join(record.title.split())[:120]
+            title = " ".join(record.title.split())
             header += f" {title}"
         return header
 
@@ -495,6 +511,7 @@ class DeterministicContextPacker:
         source_tokens: int,
         packed_count: int,
         omitted_count: int,
+        omission_reasons: Optional[dict[str, int]] = None,
     ) -> ContextUsage:
         saved = max(0, source_tokens - context_tokens)
         ratio = (saved / source_tokens) if source_tokens else 0.0
@@ -507,6 +524,7 @@ class DeterministicContextPacker:
             packed_count=packed_count,
             omitted_count=max(0, omitted_count),
             token_counter=self.token_counter_identity,
+            omission_reasons=omission_reasons or {},
         )
 
 
@@ -516,8 +534,8 @@ def _terms(text: str) -> set[str]:
 
 def _starts_with_title(excerpt: str, title: str) -> bool:
     """Whether an excerpt already opens with the exact displayed title text."""
-    displayed_title = " ".join((title or "").split())[:120].casefold()
-    normalized_excerpt = " ".join((excerpt or "").split()).casefold()
+    displayed_title = " ".join((title or "").split())
+    normalized_excerpt = " ".join((excerpt or "").split())
     if not displayed_title or not normalized_excerpt.startswith(displayed_title):
         return False
     return (
@@ -529,65 +547,37 @@ def _starts_with_title(excerpt: str, title: str) -> bool:
 def _family_representatives(
     candidates: list[Candidate],
 ) -> tuple[list[Candidate], int]:
-    """Keep the highest-ranked member of each supersession/consolidation family."""
-    parents: dict[str, str] = {}
+    """Collapse repeated candidates, never distinct canonical records.
 
-    def find(value: str) -> str:
-        parents.setdefault(value, value)
-        while parents[value] != value:
-            parents[value] = parents[parents[value]]
-            value = parents[value]
-        return value
-
-    def union(left: str, right: str) -> None:
-        left_root, right_root = find(left), find(right)
-        if left_root != right_root:
-            parents[max(left_root, right_root)] = min(left_root, right_root)
-
-    by_claim: dict[str, str] = {}
-    for candidate in candidates:
-        find(candidate.id)
-        record = candidate.record
-        metadata = record.metadata if record and isinstance(record.metadata, dict) else {}
-        direct_subject = str(getattr(record, "subject_key", "") or "").strip()
-        direct_kind = str(getattr(record, "claim_kind", "") or "").strip()
-        if direct_subject:
-            claim_identity = f"{direct_subject}\0{direct_kind}"
-            prior = by_claim.setdefault(
-                f"subject_key:{claim_identity}", candidate.id
-            )
-            union(candidate.id, prior)
-        for field in ("subject_key", "claim_key", "consolidation_family"):
-            value = str(metadata.get(field) or "").strip()
-            if value:
-                if field == "subject_key":
-                    # Legacy rows may carry their claim identity solely in metadata.
-                    # Preserve independently relevant kinds for the same subject.
-                    claim_kind = str(metadata.get("claim_kind") or direct_kind).strip()
-                    value = f"{value}\0{claim_kind}"
-                prior = by_claim.setdefault(f"{field}:{value}", candidate.id)
-                union(candidate.id, prior)
-        related = metadata.get("supersedes") or metadata.get("source_ids") or []
-        if isinstance(related, str):
-            related = [related]
-        if isinstance(related, list):
-            for item in related:
-                if isinstance(item, str) and item:
-                    union(candidate.id, item)
-
+    Claim keys and consolidation lineage do not prove equal evidence or ownership.
+    Store visibility owns supersession: the packer cannot reinterpret historical
+    reads without their temporal filter, nor assume a digest covers its sources.
+    """
     selected: dict[str, Candidate] = {}
     for candidate in candidates:
-        root = find(candidate.id)
-        current = selected.get(root)
+        current = selected.get(candidate.id)
         if current is None or (candidate.score, candidate.id) > (
             current.score,
             current.id,
         ):
-            selected[root] = candidate
+            selected[candidate.id] = candidate
     representatives = sorted(
         selected.values(), key=lambda candidate: (-candidate.score, candidate.id)
     )
     return representatives, len(candidates) - len(representatives)
+
+
+def _source_attribution(candidate: Candidate) -> str:
+    record = candidate.record
+    if record is None:
+        return ""
+    scope = getattr(record.scope, "value", record.scope)
+    fields = [f"scope={scope}"]
+    for name in ("workspace_id", "repo_id", "session_id"):
+        value = getattr(record, name)
+        if value is not None:
+            fields.append(f"{name}={value}")
+    return "(" + "; ".join(fields) + ")"
 
 
 def _reverse_text(value: str) -> str:

@@ -344,7 +344,7 @@ def test_custom_counter_cannot_truncate_inside_one_evidence_unit() -> None:
     assert usage.budget_tokens == 24
 
 
-def test_supersession_and_claim_family_deduplication_keep_best_candidate() -> None:
+def test_supersession_metadata_cannot_collapse_distinct_visible_evidence() -> None:
     packer = DeterministicContextPacker()
     candidates = [
         _candidate(
@@ -369,9 +369,9 @@ def test_supersession_and_claim_family_deduplication_keep_best_candidate() -> No
 
     _, chunks, usage = packer.pack("current rollout policy", candidates, token_budget=80)
 
-    assert [chunk.id for chunk in chunks] == ["mem_latest"]
-    assert usage.packed_count == 1
-    assert usage.omitted_count == 2
+    assert {chunk.id for chunk in chunks} == {"mem_original", "mem_revision", "mem_latest"}
+    assert usage.packed_count == 3
+    assert usage.omitted_count == 0
 
 
 def test_legacy_subject_key_families_keep_distinct_claim_kinds() -> None:
