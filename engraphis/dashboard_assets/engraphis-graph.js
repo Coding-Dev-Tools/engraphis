@@ -6191,15 +6191,18 @@
         const requestedRelativeSpeed = baseSpeed * GALAXY_BASE_ORBITAL_SPEED_BOOST * orbitalSpeed;
         let phase = node.__galaxySpeedControlPhase;
         const previousPhaseMultiplier = phase && Number(phase.multiplier);
+        const previousPhaseLocalGravityMultiplier = phase && Number(phase.localGravityMultiplier);
         if (!phase || phase.anchorId !== parentId
           || !Number.isFinite(Number(phase.direction))) {
           phase = setGalaxyKinematicPhase(node, '__galaxySpeedControlPhase', {
             anchorId: parentId, angle: currentAngle, direction: sign,
-            multiplier: orbitalSpeed, radiusMultiplier: orbitalRadius, localSpeed: null,
+            multiplier: orbitalSpeed, radiusMultiplier: orbitalRadius,
+            localGravityMultiplier, localSpeed: null,
           });
         } else {
           phase.multiplier = orbitalSpeed;
           phase.radiusMultiplier = orbitalRadius;
+          phase.localGravityMultiplier = localGravityMultiplier;
         }
         /* Pointer ownership is the one temporary exception to exact lane projection. Let the
            existing bounded drag field pull followers instead of copying the star's pointer
@@ -6213,11 +6216,17 @@
            a planet backward or pull it onto a chord through the star. */
         const phaseMultiplierChanged = Number.isFinite(previousPhaseMultiplier)
           && Math.abs(previousPhaseMultiplier - orbitalSpeed) > 1e-9;
+        /* A local-gravity slider change changes the requested circular speed, but leaves the
+           orbital-speed multiplier untouched. Treat the effective field multiplier as part of
+           the phase cache key so the retained local speed cannot mask the new control value. */
+        const phaseLocalGravityChanged = Boolean(phase && (
+          !Number.isFinite(previousPhaseLocalGravityMultiplier)
+          || Math.abs(previousPhaseLocalGravityMultiplier - localGravityMultiplier) > 1e-9));
         /* Preserve the first healthy local energy budget. A fast outer carrier can temporarily
            leave only a small perpendicular world-speed budget; chasing the larger circular
            target every frame then reheats the planet as the carrier rotates into a new tangent. */
         if (!(Number.isFinite(Number(phase.localSpeed)) && Number(phase.localSpeed) > 1e-5)
-          || phaseMultiplierChanged) {
+          || phaseMultiplierChanged || phaseLocalGravityChanged) {
           const seededSpeed = Math.abs(currentTangent);
           phase.localSpeed = nestedCarrier ? requestedRelativeSpeed : seededSpeed > 1e-5
             ? Math.min(requestedRelativeSpeed, seededSpeed) : requestedRelativeSpeed;
@@ -10698,6 +10707,20 @@
                       if (Number.isFinite(target) && target > 0) {
                         node[key] = target * ratio;
                       }
+                    });
+                  /* The kinematic clock owns the next carrier position. Keep its cached radial
+                     state in the same field response as the painted lane; otherwise the next
+                     fixed slice replays the pre-slider radius and snaps the system back. */
+                  ['__galaxyKinematicGlobalOrbit', '__galaxyKinematicCoreOrbit']
+                    .forEach(cacheKey => {
+                      const orbit = node[cacheKey];
+                      if (!orbit || typeof orbit !== 'object') return;
+                      ['baseRadius', 'radius'].forEach(key => {
+                        const cachedRadius = Number(orbit[key]);
+                        if (Number.isFinite(cachedRadius) && cachedRadius > 0) {
+                          orbit[key] = cachedRadius * ratio;
+                        }
+                      });
                     });
                 });
                 moved++;
