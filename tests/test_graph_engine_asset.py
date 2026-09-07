@@ -12142,12 +12142,14 @@ def test_live_orbit_phase_refreshes_when_local_gravity_changes() -> None:
         });
         const second = nodes[2].__galaxySpeedControlPhase;
         emit({ firstSpeed, secondSpeed: second.localSpeed,
-          cachedGravityMultiplier: second.localGravityMultiplier,
-          changed: Math.abs(second.localSpeed - firstSpeed) > 1e-6 });
+           cachedGravityMultiplier: second.localGravityMultiplier,
+           changed: Math.abs(second.localSpeed - firstSpeed) > 1e-6,
+           increased: second.localSpeed > firstSpeed + 1e-6 });
         """
     )
     assert report["cachedGravityMultiplier"] == pytest.approx(4)
     assert report["changed"] is True, report
+    assert report["increased"] is True, report
 
 
 @requires_node
