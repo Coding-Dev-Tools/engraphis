@@ -12153,6 +12153,48 @@ def test_live_orbit_phase_refreshes_when_local_gravity_changes() -> None:
 
 
 @requires_node
+def test_live_nested_orbit_reserves_only_the_descendant_headroom() -> None:
+    """Adding a moon must not collapse its planet to the former fixed 5% speed cap."""
+    report = _run_node(
+        """
+        const trial = withMoon => {
+          const nodes = [
+            { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+              system_anchor_id: 'black-hole', gravity_mass: 16, radius: 8,
+              x: 0, y: 0, vx: 0, vy: 0 },
+            { id: 'star', anchor_role: 'community', community_id: 'solar',
+              system_anchor_id: 'star', gravity_mass: 6, radius: 5,
+              x: 120, y: 0, vx: 0, vy: 0 },
+            { id: 'planet', community_id: 'solar', system_anchor_id: 'star',
+              orbit_tier: 1, orbit_radius: 30, gravity_mass: 1, radius: 2,
+              x: 150, y: 0, vx: 0, vy: 0 },
+          ];
+          if (withMoon) nodes.push({ id: 'moon', community_id: 'solar',
+            system_anchor_id: 'planet', orbit_tier: 2, orbit_radius: 8,
+            gravity_mass: .5, radius: 1, x: 158, y: 0, vx: 0, vy: 0 });
+          I.applyGalaxyOrbitalSpeedControl(nodes, {
+            gravity: 48, softening: 32, centralSoftening: 40,
+            localGravitySetting: 48, orbitalSpeed: 100, layoutSeed: 19,
+            timestep: .032, speedLimit: 48,
+          });
+          const star = nodes[1], planet = nodes[2], moon = nodes[3];
+          return {
+            planetRelativeSpeed: Math.hypot(planet.vx - star.vx, planet.vy - star.vy),
+            moonRelativeSpeed: moon
+              ? Math.hypot(moon.vx - planet.vx, moon.vy - planet.vy) : null,
+            maximumSpeed: Math.max(...nodes.map(node => Math.hypot(node.vx, node.vy))),
+          };
+        };
+        emit({ without: trial(false), withMoon: trial(true) });
+        """
+    )
+    assert report["withMoon"]["planetRelativeSpeed"] \
+        > report["without"]["planetRelativeSpeed"] * 0.9, report
+    assert report["withMoon"]["moonRelativeSpeed"] > 0, report
+    assert report["withMoon"]["maximumSpeed"] <= 48 + 1e-9, report
+
+
+@requires_node
 def test_kinematic_carrier_is_capped_before_local_motion_budgeting() -> None:
     report = _run_node(
         """

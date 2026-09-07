@@ -715,6 +715,36 @@
     return Math.max(0, Math.min(requestedSpeed, maximum));
   }
 
+  /* Calculate the local circular-speed request once for both orbit controllers. The live path
+     caps the unclocked circular speed before applying its presentation multiplier; the
+     kinematic fallback applies the multiplier before its hard local ceiling. Keeping the two
+     formulas explicit preserves their calibrated contracts while letting nested-parent budget
+     planning use the same requested speed that the active controller will emit. */
+  function galaxyLocalOrbitRequestedSpeed(parent, node, radius, options, orbitalSpeed,
+    softening, kinematicCap) {
+    const opts = options || {};
+    const localRadius = Math.max(1e-9, Number(radius) || 0);
+    const authoredHierarchy = galaxyHasAuthoredParent(node, parent);
+    const localGravityMultiplier = galaxyLocalGravityMultiplier(parent, opts);
+    const localGravity = galaxySystemGravityConstant(parent, opts.gravity,
+      opts.localGravitySetting, authoredHierarchy) * localGravityMultiplier;
+    const localAccelerationCap = defaultGalaxySystemAccelerationCap(parent, opts.gravity,
+      opts.localGravitySetting, authoredHierarchy) * Math.max(0.25, localGravityMultiplier);
+    const anchorMass = finitePositive(parent && parent.gravity_mass, 1, 1000);
+    const softened = Math.max(0.1, Number(softening) || 8);
+    const denominator = Math.pow(localRadius * localRadius + softened * softened, 1.5);
+    const rawAcceleration = denominator > 0
+      ? localGravity * anchorMass * localRadius / denominator : 0;
+    const acceleration = Math.min(localAccelerationCap, rawAcceleration);
+    const circularSpeed = Math.sqrt(Math.max(0, acceleration * localRadius));
+    const multiplier = Math.max(0, Number(orbitalSpeed) || 0);
+    return kinematicCap
+      ? Math.min(circularSpeed * GALAXY_BASE_ORBITAL_SPEED_BOOST * multiplier,
+        GALAXY_LOCAL_RELATIVE_SPEED_LIMIT * multiplier)
+      : Math.min(GALAXY_LOCAL_RELATIVE_SPEED_LIMIT, circularSpeed)
+        * GALAXY_BASE_ORBITAL_SPEED_BOOST * multiplier;
+  }
+
   /* The classic renderer's *dense* signal (`GPERF.dense`, `links>1500` in dashboard.js). Past
      it the classic path turns off the two per-edge costs that scale with the link count and
      buy nothing at that density: link curvature (a quadratic bezier per relation instead of a
@@ -3098,6 +3128,79 @@
       if (!childrenByAnchor.has(parentId)) childrenByAnchor.set(parentId, []);
       childrenByAnchor.get(parentId).push(candidate);
     });
+    const requestedSpeedByNode = new Map();
+    (members || []).forEach(candidate => {
+      if (!candidate || candidate === carrier) return;
+      const parent = galaxyLocalOrbitParent(candidate, members, carrier, byId) || carrier;
+      const parentX = Number.isFinite(parent.x) ? parent.x : 0;
+      const parentY = Number.isFinite(parent.y) ? parent.y : 0;
+      const currentRadius = Math.hypot(candidate.x - parentX, candidate.y - parentY);
+      const minimumRadius = nodeRadius(parent) + nodeRadius(candidate)
+        + GALAXY_SYSTEM_ANCHOR_EXCLUSION_PADDING;
+      const local = candidate[localOrbitCache];
+      const cachedBaseRadius = local && local.anchorId === String(parent.id)
+        ? Number(local.baseRadius) : Number(candidate.__galaxyOrbitBaseRadius);
+      const baseRadius = Number.isFinite(cachedBaseRadius) && cachedBaseRadius > 0
+        ? cachedBaseRadius : currentRadius;
+      const localRadius = Math.max(minimumRadius, baseRadius * orbitalRadius);
+      requestedSpeedByNode.set(candidate, galaxyLocalOrbitRequestedSpeed(
+        parent, candidate, localRadius, opts, orbitalSpeed, localSoftening, true));
+    });
+    const requestedPathMemo = new Map();
+    const requestedPathVisiting = new Set();
+    const requestedPathSpeed = node => {
+      if (requestedPathMemo.has(node)) return requestedPathMemo.get(node);
+      if (requestedPathVisiting.has(node)) return 0;
+      requestedPathVisiting.add(node);
+      const ownSpeed = Math.max(0, Number(requestedSpeedByNode.get(node)) || 0);
+      let pathSpeed = ownSpeed;
+      (childrenByAnchor.get(String(node.id)) || []).forEach(child => {
+        pathSpeed = Math.max(pathSpeed, ownSpeed + requestedPathSpeed(child));
+      });
+      requestedPathVisiting.delete(node);
+      requestedPathMemo.set(node, pathSpeed);
+      return pathSpeed;
+    };
+    const allocatedSpeedByNode = new Map();
+    const allocatedVisiting = new Set();
+    const allocateSpeed = (node, inheritedScale) => {
+      if (!node || allocatedVisiting.has(node)) return;
+      allocatedVisiting.add(node);
+      const pathSpeed = requestedPathSpeed(node);
+      const pathScale = pathSpeed > strictSpeedLimit
+        ? strictSpeedLimit / Math.max(1e-9, pathSpeed) : 1;
+      const scale = Math.min(inheritedScale, pathScale);
+      allocatedSpeedByNode.set(node,
+        Math.max(0, Number(requestedSpeedByNode.get(node)) || 0) * scale);
+      (childrenByAnchor.get(String(node.id)) || []).forEach(child => {
+        allocateSpeed(child, scale);
+      });
+      allocatedVisiting.delete(node);
+    };
+    (members || []).forEach(node => {
+      if (node === carrier) return;
+      const parent = galaxyLocalOrbitParent(node, members, carrier, byId);
+      if (!parent || parent === carrier) allocateSpeed(node, 1);
+    });
+    (members || []).forEach(node => {
+      if (node !== carrier && !allocatedSpeedByNode.has(node)) allocateSpeed(node, 1);
+    });
+    const descendantSpeedMemo = new Map();
+    const descendantSpeedVisiting = new Set();
+    const descendantSpeedBudget = node => {
+      if (descendantSpeedMemo.has(node)) return descendantSpeedMemo.get(node);
+      if (descendantSpeedVisiting.has(node)) return 0;
+      descendantSpeedVisiting.add(node);
+      let budget = 0;
+      (childrenByAnchor.get(String(node.id)) || []).forEach(child => {
+        budget = Math.max(budget,
+          Math.max(0, Number(allocatedSpeedByNode.get(child)) || 0)
+            + descendantSpeedBudget(child));
+      });
+      descendantSpeedVisiting.delete(node);
+      descendantSpeedMemo.set(node, budget);
+      return budget;
+    };
     const targets = new Map([[carrier, carrierTarget]]);
     const visiting = new Set();
     let satellites = 0;
@@ -3136,32 +3239,19 @@
       }
       const localRadius = Math.max(minimumRadius, local.baseRadius * orbitalRadius);
       local.radius = localRadius;
-      const authoredHierarchy = galaxyHasAuthoredParent(node, parent);
-      const localGravityMultiplier = galaxyLocalGravityMultiplier(parent, opts);
-      const localGravity = galaxySystemGravityConstant(parent, opts.gravity,
-        opts.localGravitySetting, authoredHierarchy)
-        * localGravityMultiplier;
-      const denominator = Math.pow(localRadius * localRadius + localSoftening * localSoftening, 1.5);
-      const rawAcceleration = localGravity * finitePositive(parent.gravity_mass, 1, 1000)
-        * localRadius / Math.max(1e-9, denominator);
-      const acceleration = Math.min(
-        defaultGalaxySystemAccelerationCap(parent, opts.gravity, opts.localGravitySetting,
-          authoredHierarchy)
-          * Math.max(0.25, localGravityMultiplier), rawAcceleration);
-      const omega = Math.min(
-        Math.sqrt(Math.max(0, acceleration / localRadius)) * GALAXY_BASE_ORBITAL_SPEED_BOOST * orbitalSpeed,
-        GALAXY_LOCAL_RELATIVE_SPEED_LIMIT * orbitalSpeed / localRadius);
-      const requestedLocalSpeed = omega * localRadius;
+      const requestedLocalSpeed = Math.max(0,
+        Number(allocatedSpeedByNode.get(node)) || 0);
       const localTangentX = -Math.sin(local.angle) * local.direction;
       const localTangentY = Math.cos(local.angle) * local.direction;
-      /* Every nested target is a world-space sum of its parent frame and a local tangent. Keep
-         a small headroom for a node that owns descendants, then solve the same vector budget at
-         every hierarchy depth. The final kinematic cap below remains a defensive invariant for
-         floating-point closure and any future target source. */
-      const ownsNestedOrbit = (childrenByAnchor.get(String(node.id)) || []).length > 0;
-      const nestedParentSpeedLimit = Math.max(1, strictSpeedLimit * 0.05);
-      const requestedSpeed = ownsNestedOrbit
-        ? Math.min(requestedLocalSpeed, nestedParentSpeedLimit) : requestedLocalSpeed;
+      /* Every nested target is a world-space sum of its parent frame and a local tangent. Reserve
+         the allocated descendant path and solve the remaining directional budget at each depth.
+         The final kinematic cap below remains a defensive invariant for floating-point closure
+         and any future target source. */
+      const descendantSpeed = descendantSpeedBudget(node);
+      const parentSpeedBudget = galaxyRelativeSpeedBudget(parentTarget, strictSpeedLimit,
+        Number.POSITIVE_INFINITY, localTangentX, localTangentY);
+      const nestedParentSpeedLimit = Math.max(0, parentSpeedBudget - descendantSpeed);
+      const requestedSpeed = Math.min(requestedLocalSpeed, nestedParentSpeedLimit);
       const b1 = galaxyRelativeSpeedBudget(
         parentTarget, strictSpeedLimit, requestedSpeed, localTangentX, localTangentY);
       const nextAngle = local.angle + local.direction * (b1 / Math.max(1e-9, localRadius)) * timestep;
@@ -6054,6 +6144,7 @@
     const orbitalSpeed = galaxyOrbitalSpeedMultiplier(opts.orbitalSpeed);
     const absoluteSpeedLimit = Number.isFinite(Number(opts.speedLimit))
       ? Math.max(0.01, Number(opts.speedLimit)) : Number.POSITIVE_INFINITY;
+    const strictSpeedLimit = Math.max(0.01, absoluteSpeedLimit - 1e-6);
     const orbitalRadius = galaxyOrbitalRadiusMultiplier(opts.orbitalSpeed);
     const bodies = (nodes || []).filter(node => node && !node.ghost
       && Number.isFinite(node.x) && Number.isFinite(node.y));
@@ -6139,6 +6230,85 @@
         if (!childrenByAnchor.has(parentId)) childrenByAnchor.set(parentId, []);
         childrenByAnchor.get(parentId).push(candidate);
       });
+      const requestedSpeedByNode = new Map();
+      members.forEach(candidate => {
+        if (!candidate || candidate === localAnchor) return;
+        const parent = galaxyLocalOrbitParent(candidate, members, localAnchor, byId)
+          || localAnchor;
+        const dx = candidate.x - parent.x, dy = candidate.y - parent.y;
+        const radius = Math.hypot(dx, dy);
+        if (!(radius > 1e-9)) return;
+        const authoredRadius = Number(candidate.orbit_radius);
+        const cachedRadius = Number(candidate.__galaxyOrbitBaseRadius);
+        const baseRadius = Number.isFinite(authoredRadius) && authoredRadius > 0
+          ? authoredRadius : Number.isFinite(cachedRadius) && cachedRadius > 0
+            ? cachedRadius : radius;
+        const parentRadius = finitePositive(parent.radius,
+          finitePositive(parent.visual_radius, 3, 160), 160);
+        const candidateRadius = finitePositive(candidate.radius,
+          finitePositive(candidate.visual_radius, 3, 160), 160);
+        const minimumRadius = parentRadius + candidateRadius
+          + GALAXY_SYSTEM_ANCHOR_EXCLUSION_PADDING;
+        const targetRadius = Math.max(minimumRadius, baseRadius * orbitalRadius);
+        requestedSpeedByNode.set(candidate, galaxyLocalOrbitRequestedSpeed(
+          parent, candidate, targetRadius, opts, orbitalSpeed,
+          Math.max(0.1, Number(opts.softening) || 8), false));
+      });
+      const requestedPathMemo = new Map();
+      const requestedPathVisiting = new Set();
+      const requestedPathSpeed = node => {
+        if (requestedPathMemo.has(node)) return requestedPathMemo.get(node);
+        if (requestedPathVisiting.has(node)) return 0;
+        requestedPathVisiting.add(node);
+        const ownSpeed = Math.max(0, Number(requestedSpeedByNode.get(node)) || 0);
+        let pathSpeed = ownSpeed;
+        (childrenByAnchor.get(String(node.id)) || []).forEach(child => {
+          pathSpeed = Math.max(pathSpeed, ownSpeed + requestedPathSpeed(child));
+        });
+        requestedPathVisiting.delete(node);
+        requestedPathMemo.set(node, pathSpeed);
+        return pathSpeed;
+      };
+      const allocatedSpeedByNode = new Map();
+      const allocatedVisiting = new Set();
+      const allocateSpeed = (node, inheritedScale) => {
+        if (!node || allocatedVisiting.has(node)) return;
+        allocatedVisiting.add(node);
+        const pathSpeed = requestedPathSpeed(node);
+        const pathScale = pathSpeed > strictSpeedLimit
+          ? strictSpeedLimit / Math.max(1e-9, pathSpeed) : 1;
+        const scale = Math.min(inheritedScale, pathScale);
+        allocatedSpeedByNode.set(node,
+          Math.max(0, Number(requestedSpeedByNode.get(node)) || 0) * scale);
+        (childrenByAnchor.get(String(node.id)) || []).forEach(child => {
+          allocateSpeed(child, scale);
+        });
+        allocatedVisiting.delete(node);
+      };
+      members.forEach(node => {
+        if (node === localAnchor) return;
+        const parent = galaxyLocalOrbitParent(node, members, localAnchor, byId);
+        if (!parent || parent === localAnchor) allocateSpeed(node, 1);
+      });
+      members.forEach(node => {
+        if (node !== localAnchor && !allocatedSpeedByNode.has(node)) allocateSpeed(node, 1);
+      });
+      const descendantSpeedMemo = new Map();
+      const descendantSpeedVisiting = new Set();
+      const descendantSpeedBudget = node => {
+        if (descendantSpeedMemo.has(node)) return descendantSpeedMemo.get(node);
+        if (descendantSpeedVisiting.has(node)) return 0;
+        descendantSpeedVisiting.add(node);
+        let budget = 0;
+        (childrenByAnchor.get(String(node.id)) || []).forEach(child => {
+          budget = Math.max(budget,
+            Math.max(0, Number(allocatedSpeedByNode.get(child)) || 0)
+              + descendantSpeedBudget(child));
+        });
+        descendantSpeedVisiting.delete(node);
+        descendantSpeedMemo.set(node, budget);
+        return budget;
+      };
       const subtreeOf = root => {
         const subtree = [], seen = new Set(), pending = [root];
         while (pending.length) {
@@ -6177,22 +6347,10 @@
         const minimumRadius = parentRadius + nodeRadius
           + GALAXY_SYSTEM_ANCHOR_EXCLUSION_PADDING;
         const targetRadius = Math.max(minimumRadius, baseRadius * orbitalRadius);
-        const authoredHierarchy = galaxyHasAuthoredParent(node, parent);
         const localGravityMultiplier = galaxyLocalGravityMultiplier(parent, opts);
-        const localGravity = galaxySystemGravityConstant(parent, opts.gravity,
-          opts.localGravitySetting, authoredHierarchy)
-          * localGravityMultiplier;
-        const localAccelerationCap = defaultGalaxySystemAccelerationCap(parent, opts.gravity,
-          opts.localGravitySetting, authoredHierarchy)
-          * Math.max(0.25, localGravityMultiplier);
-        const anchorMass = finitePositive(parent.gravity_mass, 1, 1000);
-        const denominator = Math.pow(targetRadius * targetRadius
-          + Math.max(0.1, Number(opts.softening) || 8) ** 2, 1.5);
-        const rawAcceleration = denominator > 0
-          ? localGravity * anchorMass * targetRadius / denominator : 0;
-        const acceleration = Math.min(localAccelerationCap, rawAcceleration);
-        const baseSpeed = Math.min(GALAXY_LOCAL_RELATIVE_SPEED_LIMIT,
-          Math.sqrt(Math.max(0, acceleration * targetRadius)));
+        const requestedRelativeSpeed = requestedSpeedByNode.get(node)
+          ?? galaxyLocalOrbitRequestedSpeed(parent, node, targetRadius, opts, orbitalSpeed,
+            Math.max(0.1, Number(opts.softening) || 8), false);
         const currentAngle = Math.atan2(dy, dx);
         const relativeVx = (Number.isFinite(node.vx) ? node.vx : 0)
           - (Number.isFinite(parent.vx) ? parent.vx : 0);
@@ -6204,7 +6362,6 @@
         const parentId = String(parent.id);
         const nestedCarrier = parent !== localAnchor;
         const timestep = Math.max(0.001, Math.min(2, Number(opts.timestep) || 1));
-        const requestedRelativeSpeed = baseSpeed * GALAXY_BASE_ORBITAL_SPEED_BOOST * orbitalSpeed;
         let phase = node.__galaxySpeedControlPhase;
         const phaseExisted = Boolean(phase);
         const previousPhaseMultiplier = phase && Number(phase.multiplier);
@@ -6253,16 +6410,20 @@
               ? Math.min(requestedRelativeSpeed, seededSpeed) : requestedRelativeSpeed;
         }
         const localTargetSpeed = Math.max(0, Number(phase.localSpeed) || 0);
-        const ownsNestedOrbit = (childrenByAnchor.get(String(node.id)) || []).length > 0;
-        /* A parent that owns a moon leaves world-speed headroom for that moon. Keep the same
-           absolute budget for the child itself; reducing the parent lane is what prevents the
-           budget solver from collapsing the nested tangent to zero. */
-        const nestedParentSpeedLimit = Math.max(1, absoluteSpeedLimit * 0.05);
-        const requestedParentSpeed = ownsNestedOrbit
-          ? Math.min(localTargetSpeed, nestedParentSpeedLimit) : localTargetSpeed;
         const localAbsoluteSpeedLimit = absoluteSpeedLimit;
         const phaseTangentX = -Math.sin(phase.angle) * phase.direction;
         const phaseTangentY = Math.cos(phase.angle) * phase.direction;
+        /* Reserve only the speed actually requested by the deepest descendant path. This keeps
+           a parent near its natural orbit when its moon is slow, while still making room for a
+           fast nested chain before the directional world-speed budget is solved. */
+        const descendantSpeed = descendantSpeedBudget(node);
+        const parentSpeedBudget = galaxyRelativeSpeedBudget(parent, strictSpeedLimit,
+          Number.POSITIVE_INFINITY, phaseTangentX, phaseTangentY);
+        const nestedParentSpeedLimit = Math.max(0, parentSpeedBudget - descendantSpeed);
+        const allocatedSpeed = Math.max(0,
+          Number(allocatedSpeedByNode.get(node)) || 0);
+        const requestedParentSpeed = Math.min(localTargetSpeed, allocatedSpeed,
+          nestedParentSpeedLimit);
         /* Use one scalar for the phase clock and emitted velocity. The final tangent rotates
            during the step, so apply the directional budget across both start and end tangents;
            this preserves full perpendicular orbital velocity without exceeding the absolute cap. */
