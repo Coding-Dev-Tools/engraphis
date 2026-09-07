@@ -6244,8 +6244,12 @@
         if (!(Number.isFinite(Number(phase.localSpeed)) && Number(phase.localSpeed) > 1e-5)
           || phaseMultiplierChanged || phaseLocalGravityChanged) {
           const seededSpeed = Math.abs(currentTangent);
-          phase.localSpeed = nestedCarrier ? requestedRelativeSpeed : seededSpeed > 1e-5
-            ? Math.min(requestedRelativeSpeed, seededSpeed) : requestedRelativeSpeed;
+          /* An explicit local-gravity edit is a new field, not a transient reheat. Adopt its
+             requested circular speed first; the directional world-speed budget below performs
+             the only necessary cap against the moving carrier. */
+          phase.localSpeed = nestedCarrier || phaseLocalGravityChanged
+            ? requestedRelativeSpeed : seededSpeed > 1e-5
+              ? Math.min(requestedRelativeSpeed, seededSpeed) : requestedRelativeSpeed;
         }
         const localTargetSpeed = Math.max(0, Number(phase.localSpeed) || 0);
         const ownsNestedOrbit = (childrenByAnchor.get(String(node.id)) || []).length > 0;
