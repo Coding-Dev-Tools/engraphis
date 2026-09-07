@@ -12105,6 +12105,39 @@ def test_every_node_worker_consumes_all_full_mode_spacetime_controls() -> None:
 
 
 @requires_node
+def test_managed_live_carrier_uses_physical_velocity_target() -> None:
+    """Packed lanes may floor their painted phase, but live velocity stays physical."""
+    report = _run_node(
+        """
+        const nodes = [
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            system_anchor_id: 'black-hole', gravity_mass: 16, radius: 8,
+            x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'outer-star', anchor_role: 'community', community_id: 'outer',
+            system_anchor_id: 'outer-star', gravity_mass: 6, radius: 5,
+            x: 500, y: 0, vx: 0, vy: 0 },
+        ];
+        Object.defineProperty(nodes[1], '__galaxyCarrierLaneManaged', {
+          value: true, writable: true, configurable: true,
+        });
+        const options = {
+          gravity: 48, gravitationalConstant: 2, blackHoleMass: 1,
+          softening: 32, centralSoftening: 40, orbitalSpeed: 101,
+          layoutSeed: 19, timestep: 1, speedLimit: 48,
+        };
+        const radius = Math.hypot(nodes[1].x, nodes[1].y);
+        const field = I.galaxyBlackHoleField(nodes, options);
+        const physical = I.galaxyAuthoredCarrierTargetSpeed(field, radius, options.orbitalSpeed);
+        I.applyGalaxyOrbitalSpeedControl(nodes, options);
+        const actual = Math.hypot(nodes[1].vx, nodes[1].vy);
+        emit({ actual, physical, phaseFloor: radius * 0.039 });
+        """
+    )
+    assert report["physical"] < report["phaseFloor"], report
+    assert report["actual"] == pytest.approx(report["physical"], rel=1e-9), report
+
+
+@requires_node
 def test_live_orbit_phase_uses_the_budgeted_relative_speed() -> None:
     """Live phase advancement must agree with the capped velocity it emits."""
     report = _run_node(
