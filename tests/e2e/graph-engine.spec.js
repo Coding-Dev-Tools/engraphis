@@ -1861,7 +1861,7 @@ for (const reducedMotion of [false, true]) {
       expect(diagnostics.linkSetting).toBe(8);
       expect(diagnostics.relationOrbitScale).toBeCloseTo(0.25, 12);
       expect(diagnostics.gravitySetting).toBe(120);
-      expect(diagnostics.blackHoleGravity).toBeCloseTo(4624.615384615385, 12);
+      expect(diagnostics.blackHoleGravity).toBeCloseTo(4634.584615384615, 12);
       expect(diagnostics.localGravity).toBeCloseTo(240, 12);
       expect(diagnostics.systemOrbitSeedSpeedLimit).toBeCloseTo(23.4, 12);
 
