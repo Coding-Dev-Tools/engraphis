@@ -556,8 +556,15 @@
       ? Math.max(0, Number(extra.gravitationalConstant)) / 2.0 : 1.0;
     const mNorm = extra.blackHoleMass !== undefined && Number.isFinite(Number(extra.blackHoleMass))
       ? Math.max(0, Number(extra.blackHoleMass)) / 1.0 : 1.0;
-    const fCentral = Math.max(0.05, gNorm * Math.sqrt(Math.max(0, mNorm)));
-    const rMod = Math.pow(fCentral, -0.65);
+    const fCentral = Math.max(0, gNorm * Math.sqrt(Math.max(0, mNorm)));
+    /* The central controls are applied as an immediate radius ratio, so an inverse power
+       with a tiny zero floor can expand a cached lane far beyond the finite far-field
+       envelope. Keep the loose endpoint inside the same 1.25x allowance as the global
+       gravity response, while retaining the calibrated inverse-power contraction above the
+       neutral central field. The smooth lower branch has no dead zone at zero. */
+    const rMod = fCentral < 1
+      ? 1.25 - 0.25 * galaxySmoothstep(fCentral)
+      : Math.pow(fCentral, -0.65);
     return baseScale * rMod;
   }
   /* Local stellar gravity follows the same inverse-radius law as the live solver. Keep its
@@ -9628,6 +9635,7 @@
               || galaxyLastLocalOrbitBoundary;
             galaxyLastOrbitalCorrection = 0;
             galaxyLastLocalVelocityLimits = 0;
+            if (report.speedCapped) galaxySpeedCaps++;
           } else {
             galaxyLastKinetic = report.kinetic;
             galaxyLastCollisions = report.collisions;
@@ -9653,7 +9661,6 @@
             galaxyLastCarrierOrbitSupport = report.carrierOrbitSupport
               || galaxyLastCarrierOrbitSupport;
             dragFollowerGravityReport = report.dragGravity;
-            if (report.speedCapped) galaxySpeedCaps++;
           }
         }
         galaxyAccumulator = Math.max(0,

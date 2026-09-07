@@ -11046,6 +11046,30 @@ def test_central_slider_scales_the_cached_global_kinematic_radius() -> None:
     assert report["radiusRatio"] == pytest.approx(report["expectedRatio"], rel=1e-9), report
 
 
+@requires_node
+def test_zero_central_gravity_uses_a_bounded_cached_radius_response() -> None:
+    """The zero central-field endpoint must not expand kinematic lanes past the envelope."""
+    report = _run_node(
+        """
+        const neutral = I.galaxyImmediateGravityRadiusScale(48, {
+          gravitationalConstant: 2, blackHoleMass: 1,
+        });
+        const zero = I.galaxyImmediateGravityRadiusScale(48, {
+          gravitationalConstant: 0, blackHoleMass: 1,
+        });
+        const zeroMass = I.galaxyImmediateGravityRadiusScale(48, {
+          gravitationalConstant: 0, blackHoleMass: 0,
+        });
+        emit({ neutral, zero, zeroMass, ratio: zero / neutral,
+          finite: [neutral, zero, zeroMass].every(Number.isFinite) });
+        """
+    )
+    assert report["finite"] is True
+    assert report["ratio"] == pytest.approx(1.25, rel=1e-9)
+    assert report["zero"] == pytest.approx(report["zeroMass"], rel=1e-9)
+    assert report["ratio"] < 2.0
+
+
 
 @requires_node
 def test_full_graph_within_the_force_budget_keeps_centre_gravity_live() -> None:

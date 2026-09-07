@@ -16,7 +16,7 @@ from collections import Counter, defaultdict, deque
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
 
-ALGORITHM_VERSION = "galaxy-v12-responsive-compact-orbits"
+ALGORITHM_VERSION = "galaxy-v13-responsive-compact-orbits"
 PUBLIC_REFERENCE_ID_LIMIT = 200
 PUBLIC_FACET_LIMIT = 100
 PUBLIC_REPO_NAME_LIMIT = 100

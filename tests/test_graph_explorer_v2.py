@@ -1864,7 +1864,7 @@ def test_scene_hash_versions_physics_and_index_generation():
 
     assert baseline["meta"]["scene_hash"] != stronger["meta"]["scene_hash"]
     assert baseline["meta"]["scene_hash"] != next_generation["meta"]["scene_hash"]
-    assert baseline["meta"]["algorithm_version"] == "galaxy-v12-responsive-compact-orbits"
+    assert baseline["meta"]["algorithm_version"] == "galaxy-v13-responsive-compact-orbits"
 
 
 def test_graph_scene_v7_flags_projection_repo_names_and_cache_identity():
@@ -1887,7 +1887,7 @@ def test_graph_scene_v7_flags_projection_repo_names_and_cache_identity():
         workspace="acme", level="complete", include_memory_nodes=False,
     )
 
-    assert baseline["meta"]["algorithm_version"] == "galaxy-v12-responsive-compact-orbits"
+    assert baseline["meta"]["algorithm_version"] == "galaxy-v13-responsive-compact-orbits"
     assert baseline["meta"]["scene_hash"] != connected["meta"]["scene_hash"]
     assert baseline["meta"]["filters"]["connected_only"] is False
     assert connected["meta"]["filters"]["connected_only"] is True
