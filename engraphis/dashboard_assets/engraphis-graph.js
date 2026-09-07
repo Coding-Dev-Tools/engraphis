@@ -3089,6 +3089,15 @@
     const nodeRadius = node => finitePositive(node.radius,
       finitePositive(node.visual_radius, 3, 160), 160);
     const byId = new Map((members || []).map(node => [String(node.id), node]));
+    const childrenByAnchor = new Map();
+    (members || []).forEach(candidate => {
+      if (!candidate || candidate === carrier) return;
+      const parent = galaxyLocalOrbitParent(candidate, members, carrier, byId);
+      if (!parent || parent === candidate) return;
+      const parentId = String(parent.id);
+      if (!childrenByAnchor.has(parentId)) childrenByAnchor.set(parentId, []);
+      childrenByAnchor.get(parentId).push(candidate);
+    });
     const targets = new Map([[carrier, carrierTarget]]);
     const visiting = new Set();
     let satellites = 0;
@@ -3100,7 +3109,6 @@
       visiting.add(node);
       const parent = galaxyLocalOrbitParent(node, members, carrier, byId) || carrier;
       const parentTarget = visit(parent);
-      const nestedParent = parent !== carrier;
       const parentId = String(parent.id);
       const parentX = Number.isFinite(parent.x) ? parent.x : 0;
       const parentY = Number.isFinite(parent.y) ? parent.y : 0;
@@ -3146,18 +3154,21 @@
       const requestedLocalSpeed = omega * localRadius;
       const localTangentX = -Math.sin(local.angle) * local.direction;
       const localTangentY = Math.cos(local.angle) * local.direction;
-      /* A nested moon is already inside the carrier's local frame. Applying the world cap a
-         second time against its planet leaves no tangent whenever that planet is near the
-         emergency ceiling, which makes only the deepest authored orbit appear frozen. The
-         carrier frame is capped below; preserve the differential moon velocity here. */
-      const localSpeedLimit = nestedParent ? Number.POSITIVE_INFINITY : strictSpeedLimit;
-      const b1 = nestedParent ? requestedLocalSpeed : galaxyRelativeSpeedBudget(
-        parentTarget, localSpeedLimit, requestedLocalSpeed, localTangentX, localTangentY);
+      /* Every nested target is a world-space sum of its parent frame and a local tangent. Keep
+         a small headroom for a node that owns descendants, then solve the same vector budget at
+         every hierarchy depth. The final kinematic cap below remains a defensive invariant for
+         floating-point closure and any future target source. */
+      const ownsNestedOrbit = (childrenByAnchor.get(String(node.id)) || []).length > 0;
+      const nestedParentSpeedLimit = Math.max(1, strictSpeedLimit * 0.05);
+      const requestedSpeed = ownsNestedOrbit
+        ? Math.min(requestedLocalSpeed, nestedParentSpeedLimit) : requestedLocalSpeed;
+      const b1 = galaxyRelativeSpeedBudget(
+        parentTarget, strictSpeedLimit, requestedSpeed, localTangentX, localTangentY);
       const nextAngle = local.angle + local.direction * (b1 / Math.max(1e-9, localRadius)) * timestep;
       const nextTanX = -Math.sin(nextAngle) * local.direction;
       const nextTanY = Math.cos(nextAngle) * local.direction;
-      const phaseSpeed = nestedParent ? requestedLocalSpeed : Math.min(
-        b1, galaxyRelativeSpeedBudget(parentTarget, localSpeedLimit, b1, nextTanX, nextTanY));
+      const phaseSpeed = Math.min(b1, galaxyRelativeSpeedBudget(
+        parentTarget, strictSpeedLimit, b1, nextTanX, nextTanY));
       const cappedOmega = phaseSpeed / Math.max(1e-9, localRadius);
       local.angle += local.direction * cappedOmega * timestep;
       const offsetX = Math.cos(local.angle) * localRadius;
@@ -3331,8 +3342,13 @@
       : { systems: 0, overlaps: 0, adjustedSystems: 0, remainingOverlaps: 0,
         infeasiblePairs: 0, gap: 0 };
     const blackHoleSpinAngle = advanceGalaxyBlackHoleSpin(nodes, opts);
+    const finalSpeed = enforceGalaxyGlobalSpeedLimit(bodies, {
+      fixedNodeId: opts.fixedNodeId,
+      limit: absoluteSpeedLimit,
+    });
     return { bodies: bodies.length, systems, satellites, systemPacking,
-      blackHoleSpinAngle, ghostOrbit: integrateGalaxyGhostOrbits(nodes, opts) };
+      blackHoleSpinAngle, ghostOrbit: integrateGalaxyGhostOrbits(nodes, opts),
+      maximumSpeed: finalSpeed.maximumAfter, speedCapped: finalSpeed.applied };
   }
 
   function recenterGalaxyOnAnchor(nodes) {
