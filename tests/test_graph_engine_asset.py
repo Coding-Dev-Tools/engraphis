@@ -10998,6 +10998,54 @@ def test_slider_burst_reasserts_contact_invariant_when_galaxy_is_frozen() -> Non
     assert report["finite"] is True
 
 
+@requires_node
+def test_central_slider_scales_the_cached_global_kinematic_radius() -> None:
+    """A central-field slider move must update the carrier clock as well as painted lanes."""
+    report = _run_engine(
+        """
+        const api = G.create(el, { reducedMotion: () => false });
+        api.setPreset('galaxy');
+        api.setData({
+          nodes: [
+            { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+              system_anchor_id: 'black-hole', gravity_mass: 64, visual_radius: 8,
+              x: 0, y: 0, vx: 0, vy: 0 },
+            { id: 'star', anchor_role: 'community', community_id: 'outer',
+              system_anchor_id: 'star', gravity_mass: 8, visual_radius: 5,
+              x: 120, y: 0, vx: 0, vy: 0 },
+            { id: 'planet', community_id: 'outer', system_anchor_id: 'star',
+              orbit_tier: 1, gravity_mass: 1, visual_radius: 3,
+              x: 150, y: 0, vx: 0, vy: 0 },
+          ],
+          edges: [{ source: 'star', target: 'planet', layer: 'entity' }],
+        });
+        const nodes = store.graphData.nodes;
+        const star = nodes.find(node => node.id === 'star');
+        I.advanceGalaxyKinematicOrbits(nodes, {
+          gravity: 48, gravitationalConstant: 1, blackHoleMass: 1,
+          softening: 32, centralSoftening: 40, localSoftening: 12,
+          orbitalSpeed: 100, layoutSeed: 19, timestep: .032,
+        });
+        const before = star.__galaxyKinematicGlobalOrbit;
+        const beforeBaseRadius = before.baseRadius;
+        const beforeRadius = before.radius;
+        const expectedRatio = I.galaxyImmediateGravityRadiusScale(48, {
+          gravitationalConstant: 2, blackHoleMass: 1,
+        }) / I.galaxyImmediateGravityRadiusScale(48, {
+          gravitationalConstant: 1, blackHoleMass: 1,
+        });
+        api.setSettings({ gravitationalConstant: 2 });
+        const after = star.__galaxyKinematicGlobalOrbit;
+        emit({ expectedRatio, baseRatio: after.baseRadius / beforeBaseRadius,
+          radiusRatio: after.radius / beforeRadius,
+          finite: [after.baseRadius, after.radius].every(Number.isFinite) });
+        """
+    )
+    assert report["finite"] is True
+    assert report["baseRatio"] == pytest.approx(report["expectedRatio"], rel=1e-9), report
+    assert report["radiusRatio"] == pytest.approx(report["expectedRatio"], rel=1e-9), report
+
+
 
 @requires_node
 def test_full_graph_within_the_force_budget_keeps_centre_gravity_live() -> None:
@@ -12063,6 +12111,43 @@ def test_live_orbit_phase_uses_the_budgeted_relative_speed() -> None:
         """
     )
     assert report["phaseSpeed"] == pytest.approx(report["relativeSpeed"], rel=1e-9), report
+
+
+@requires_node
+def test_live_orbit_phase_refreshes_when_local_gravity_changes() -> None:
+    """A local-gravity slider move must invalidate the retained local speed budget."""
+    report = _run_node(
+        """
+        const nodes = [
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            system_anchor_id: 'black-hole', gravity_mass: 16, radius: 8,
+            x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'star', anchor_role: 'community', community_id: 'solar',
+            system_anchor_id: 'star', gravity_mass: 6, radius: 5,
+            x: 120, y: 0, vx: 0, vy: 0 },
+          { id: 'planet', community_id: 'solar', system_anchor_id: 'star',
+            orbit_tier: 1, gravity_mass: 1, radius: 2,
+            x: 150, y: 0, vx: 0, vy: 0 },
+        ];
+        const options = {
+          gravity: 48, softening: 32, centralSoftening: 40,
+          localGravitySetting: 48, localGravitationalConstant: 1,
+          orbitalSpeed: 400, layoutSeed: 19, timestep: 1, speedLimit: 48,
+        };
+        I.applyGalaxyOrbitalSpeedControl(nodes, options);
+        const first = nodes[2].__galaxySpeedControlPhase;
+        const firstSpeed = first.localSpeed;
+        I.applyGalaxyOrbitalSpeedControl(nodes, {
+          ...options, localGravitationalConstant: 4,
+        });
+        const second = nodes[2].__galaxySpeedControlPhase;
+        emit({ firstSpeed, secondSpeed: second.localSpeed,
+          cachedGravityMultiplier: second.localGravityMultiplier,
+          changed: Math.abs(second.localSpeed - firstSpeed) > 1e-6 });
+        """
+    )
+    assert report["cachedGravityMultiplier"] == pytest.approx(4)
+    assert report["changed"] is True, report
 
 
 @requires_node

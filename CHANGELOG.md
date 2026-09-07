@@ -3,6 +3,22 @@
 All notable changes to Engraphis are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions use SemVer.
 
+## [1.7.3] - 2026-09-07
+
+### Fixed
+
+- Preserved Galaxy carrier lane and kinematic orbit invariants through central-field slider
+  changes, including the global and core cached radii used by the next fixed slice.
+- Refreshed the retained local orbital speed budget when the effective local-gravity control
+  changes, preventing a stale phase cache from masking the slider.
+- Kept high-density Galaxy layouts inside the strict speed cap while maintaining authored
+  carrier and nested local orbit phase.
+
+### Tests
+
+- Added deterministic regressions for central-field cache scaling and local-gravity phase
+  invalidation, alongside the existing 500-body and browser accessibility coverage.
+
 ## [1.7.2] - 2026-09-05
 
 ### Added
