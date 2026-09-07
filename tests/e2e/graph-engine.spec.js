@@ -1743,6 +1743,7 @@ for (const reducedMotion of [false, true]) {
         localAngle: angleDelta(samples[index].local.angle, sample.local.angle),
         screenAngle: angleDelta(samples[index].screenLocal.angle, sample.screenLocal.angle),
         globalAngle: angleDelta(samples[index].globalAngle, sample.globalAngle),
+        stepDelta: Math.max(1, sample.diagnostics.steps - samples[index].diagnostics.steps),
         radiusChange: Math.abs(sample.local.radius - samples[index].local.radius)
           / Math.max(1e-9, samples[index].local.radius),
         systemCenterChord: Math.hypot(
@@ -1785,6 +1786,8 @@ for (const reducedMotion of [false, true]) {
         phaseReversals, localStepMagnitudes, localStepMean, relativeKinetics,
         maximumRadiusChange: Math.max(...segments.map(segment => segment.radiusChange)),
         maximumSystemCenterChord: Math.max(...segments.map(segment => segment.systemCenterChord)),
+        maximumSystemCenterStepDistance: Math.max(...segments.map(segment =>
+          segment.systemCenterChord / segment.stepDelta)),
       };
       await testInfo.attach(`visible-stellar-orbit-${reducedMotion ? 'reduced' : 'normal'}.json`, {
         body: Buffer.from(JSON.stringify(evidence, null, 2)),
@@ -1830,7 +1833,12 @@ for (const reducedMotion of [false, true]) {
       expect(evidence.maximumRadiusChange, JSON.stringify(evidence)).toBeLessThan(0.04);
       expect(Math.max(...relativeKinetics), JSON.stringify(evidence))
         .toBeLessThan(Math.min(...relativeKinetics) * 2);
-      expect(evidence.maximumSystemCenterChord, JSON.stringify(evidence)).toBeLessThan(20);
+      /* The fixed-step wait can observe several extra slices when Playwright polls a busy
+         runner. Normalize the aggregate center chord by the actual step delta so this remains a
+         world-space movement guard instead of a scheduler-timing guard. A 2-unit step bound is
+         still above the 48 * 0.032 emergency-speed displacement and rejects teleportation. */
+      expect(evidence.maximumSystemCenterStepDistance, JSON.stringify(evidence))
+        .toBeLessThan(2);
       expect(Math.max(...samples.map(sample => sample.star.warp)), JSON.stringify(evidence))
         .toBeLessThan(0.01);
       /* Six and a half seconds is sampled on a real wall-clock server, so OS scheduling changes
