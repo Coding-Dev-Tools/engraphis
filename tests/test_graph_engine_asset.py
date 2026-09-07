@@ -12181,6 +12181,43 @@ def test_kinematic_carrier_is_capped_before_local_motion_budgeting() -> None:
 
 
 @requires_node
+def test_kinematic_nested_orbits_respect_the_world_speed_limit() -> None:
+    report = _run_node(
+        """
+        const nodes = [
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            system_anchor_id: 'black-hole', gravity_mass: 8, radius: 8,
+            x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'star', anchor_role: 'community', community_id: 'solar',
+            system_anchor_id: 'star', gravity_mass: 4, radius: 5,
+            x: 120, y: 0, vx: 0, vy: 0 },
+          { id: 'planet', community_id: 'solar', system_anchor_id: 'star',
+            orbit_tier: 1, gravity_mass: 1, radius: 2,
+            x: 150, y: 0, vx: 0, vy: 0 },
+          { id: 'moon', community_id: 'solar', system_anchor_id: 'planet',
+            orbit_tier: 2, gravity_mass: .5, radius: 1,
+            x: 154, y: 0, vx: 0, vy: 0 },
+        ];
+        const options = {
+          gravity: 48, softening: 32, centralSoftening: 40, localSoftening: 12,
+          orbitalSpeed: 400, layoutSeed: 19, timestep: .032, speedLimit: 48,
+        };
+        I.advanceGalaxyKinematicOrbits(nodes, options);
+        emit({ maximumSpeed: Math.max(...nodes.map(node => Math.hypot(node.vx, node.vy))),
+          moonSpeed: Math.hypot(nodes[3].vx, nodes[3].vy),
+          moonRelativeSpeed: Math.hypot(nodes[3].vx - nodes[2].vx,
+            nodes[3].vy - nodes[2].vy),
+          finite: nodes.every(node =>
+            [node.x, node.y, node.vx, node.vy].every(Number.isFinite)) });
+        """
+    )
+    assert report["finite"] is True
+    assert report["maximumSpeed"] <= 48 + 1e-9, report
+    assert report["moonSpeed"] <= 48 + 1e-9, report
+    assert report["moonRelativeSpeed"] > 0, report
+
+
+@requires_node
 def test_kinematic_local_velocity_budget_uses_one_phase_speed() -> None:
     report = _run_node(
         """
