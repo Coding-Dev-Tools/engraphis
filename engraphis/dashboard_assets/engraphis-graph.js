@@ -6206,6 +6206,7 @@
         const timestep = Math.max(0.001, Math.min(2, Number(opts.timestep) || 1));
         const requestedRelativeSpeed = baseSpeed * GALAXY_BASE_ORBITAL_SPEED_BOOST * orbitalSpeed;
         let phase = node.__galaxySpeedControlPhase;
+        const phaseExisted = Boolean(phase);
         const previousPhaseMultiplier = phase && Number(phase.multiplier);
         const previousPhaseLocalGravityMultiplier = phase && Number(phase.localGravityMultiplier);
         if (!phase || phase.anchorId !== parentId
@@ -6235,7 +6236,7 @@
         /* A local-gravity slider change changes the requested circular speed, but leaves the
            orbital-speed multiplier untouched. Treat the effective field multiplier as part of
            the phase cache key so the retained local speed cannot mask the new control value. */
-        const phaseLocalGravityChanged = Boolean(phase && (
+        const phaseLocalGravityChanged = Boolean(phaseExisted && phase && (
           !Number.isFinite(previousPhaseLocalGravityMultiplier)
           || Math.abs(previousPhaseLocalGravityMultiplier - localGravityMultiplier) > 1e-9));
         /* Preserve the first healthy local energy budget. A fast outer carrier can temporarily
