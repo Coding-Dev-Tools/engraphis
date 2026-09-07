@@ -6192,8 +6192,12 @@
       const currentTangent = relativeVx * tangentX + relativeVy * tangentY;
       const sign = Math.sign(currentTangent) || direction;
       const managedCarrierLane = carrier.__galaxyCarrierLaneManaged === true;
+      /* A managed lane's cached painted phase may use the far-lane visibility floor, but the
+         live velocity must remain the calibrated physical target. Applying that floor here
+         injects radius-proportional speed into large lanes and can trigger the world cap for a
+         tiny orbital-speed change. The kinematic phase clock owns the presentation floor. */
       const desiredTangent = (managedCarrierLane
-        ? galaxyManagedCarrierTargetSpeed(field, radius, opts.orbitalSpeed, true)
+        ? galaxyManagedCarrierTargetSpeed(field, radius, opts.orbitalSpeed, false)
         : galaxyCarrierTargetSpeed(field, radius, opts.orbitalSpeed)) * sign;
       const delta = desiredTangent - currentTangent;
       members.forEach(node => {
@@ -9635,7 +9639,6 @@
               || galaxyLastLocalOrbitBoundary;
             galaxyLastOrbitalCorrection = 0;
             galaxyLastLocalVelocityLimits = 0;
-            if (report.speedCapped) galaxySpeedCaps++;
           } else {
             galaxyLastKinetic = report.kinetic;
             galaxyLastCollisions = report.collisions;
@@ -9662,6 +9665,10 @@
               || galaxyLastCarrierOrbitSupport;
             dragFollowerGravityReport = report.dragGravity;
           }
+          /* Both the live integrator and the kinematic fallback enforce the same world-speed
+             ceiling. Keep one counter at the shared boundary so diagnostics expose caps in
+             either path. */
+          if (report.speedCapped) galaxySpeedCaps++;
         }
         galaxyAccumulator = Math.max(0,
           galaxyAccumulator - ordinarySubsteps * GALAXY_FRAME_INTERVAL_MS);
