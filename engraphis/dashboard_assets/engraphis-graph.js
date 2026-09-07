@@ -688,6 +688,11 @@
      remain meaningful at every camera zoom. */
   const MIN_NODE_SPEED = 8;
   const MAX_NODE_SPEED = 48;
+  /* A capped vector is still projected by the machine-epsilon margin below, but a few ulps
+     above the limit are ordinary floating-point closure noise rather than a user-visible
+     speed-cap event. Keep that noise out of the health diagnostic so stable authored orbits
+     do not report one activation on every frame. */
+  const SPEED_LIMIT_DIAGNOSTIC_EPSILON = 1e-6;
   function galaxyRelativeSpeedBudget(parent, absoluteLimit, requested, directionX, directionY) {
     const limit = Math.max(0.01, Number(absoluteLimit) || MAX_NODE_SPEED);
     const requestedSpeed = Math.max(0, Number(requested) || 0);
@@ -2053,6 +2058,139 @@
       });
     });
     return stats;
+  }
+
+  /* Cheap post-clock repair for explicit stellar parents. The full closure below also resolves
+     pathological contacts, but the browser orbit clock runs after that closure and only needs
+     this linear final guard to keep a nested moon on its authored lane and outside its
+     immediate parent. Direct black-hole children remain under the horizon projection. */
+  function enforceGalaxySystemAnchorMinimums(nodes, options) {
+    const opts = options || {};
+    const bodies = (nodes || []).filter(node => node && !node.ghost
+      && Number.isFinite(node.x) && Number.isFinite(node.y));
+    const byId = new Map(bodies.map(node => [String(node.id), node]));
+    const childrenByAnchor = new Map();
+    bodies.forEach(node => {
+      const parentId = node.system_anchor_id === undefined
+        || node.system_anchor_id === null ? '' : String(node.system_anchor_id);
+      if (!parentId || parentId === String(node.id)) return;
+      if (!childrenByAnchor.has(parentId)) childrenByAnchor.set(parentId, []);
+      childrenByAnchor.get(parentId).push(node);
+    });
+    const padding = Math.max(0, Number.isFinite(Number(opts.padding))
+      ? Number(opts.padding) : GALAXY_SYSTEM_ANCHOR_EXCLUSION_PADDING);
+    const radiusMultiplier = galaxyOrbitalRadiusMultiplier(opts.orbitalSpeed);
+    const bodyRadius = node => finitePositive(
+      node && node.radius, finitePositive(node && node.visual_radius,
+        radiusFromGravityMass(node && node.gravity_mass), 80), 160
+    );
+    const ordered = bodies.filter(node => {
+      const parentId = node.system_anchor_id === undefined
+        || node.system_anchor_id === null ? '' : String(node.system_anchor_id);
+      const parent = parentId ? byId.get(parentId) : null;
+      return parent && parent !== node && parent.anchor_role !== 'global';
+    }).sort((left, right) => Number(left.orbit_tier || 0) - Number(right.orbit_tier || 0)
+      || String(left.id).localeCompare(String(right.id)));
+    const fixedNodeId = opts.fixedNodeId === undefined || opts.fixedNodeId === null
+      ? null : String(opts.fixedNodeId);
+    let correctedNodes = 0, correctedDescendants = 0, maximumShift = 0;
+    ordered.forEach(node => {
+      if (fixedNodeId !== null && String(node.id) === fixedNodeId) return;
+      const parentId = String(node.system_anchor_id);
+      const parent = byId.get(parentId);
+      if (!parent || (fixedNodeId !== null && String(parent.id) === fixedNodeId)) return;
+      const dx = node.x - parent.x, dy = node.y - parent.y;
+      const distance = Math.hypot(dx, dy);
+      const minimumDistance = bodyRadius(parent) + bodyRadius(node) + padding;
+      const authoredRadius = Number(node.orbit_radius);
+      const cachedRadius = Number(node.__galaxyOrbitBaseRadius);
+      const baseRadius = Number.isFinite(authoredRadius) && authoredRadius > 0
+        ? authoredRadius : cachedRadius;
+      /* Top-level planets already leave the full integrator with their authored radius. Only
+         nested descendants need an exact lane restore here; checking every ordinary planet
+         against its target on every frame adds needless work to the 542-body path. */
+      const nested = parent.system_anchor_id !== undefined && parent.system_anchor_id !== null
+        && String(parent.system_anchor_id) !== String(parent.id);
+      const phase = node.__galaxySpeedControlPhase;
+      const phaseAngle = nested && phase && phase.anchorId === parentId
+        && Number.isFinite(Number(phase.angle)) ? Number(phase.angle) : NaN;
+      const currentAngle = Math.atan2(dy, dx);
+      const phaseAligned = !Number.isFinite(phaseAngle)
+        || Math.abs(Math.atan2(Math.sin(currentAngle - phaseAngle),
+          Math.cos(currentAngle - phaseAngle))) <= 1e-9;
+      const targetRadius = nested && Number.isFinite(baseRadius) && baseRadius > 0
+        ? Math.max(minimumDistance, baseRadius * radiusMultiplier) : minimumDistance;
+      if (!Number.isFinite(targetRadius)
+        || (nested ? Math.abs(distance - targetRadius) <= 1e-9 && phaseAligned
+          : distance >= targetRadius - 1e-9)) return;
+      const unitX = Number.isFinite(phaseAngle) ? Math.cos(phaseAngle)
+        : distance > 1e-9 ? dx / distance
+        : Math.cos(seededHash(0, String(parent.id) + '|' + String(node.id)) / 0x100000000 * Math.PI * 2);
+      const unitY = Number.isFinite(phaseAngle) ? Math.sin(phaseAngle)
+        : distance > 1e-9 ? dy / distance
+        : Math.sin(seededHash(0, String(parent.id) + '|' + String(node.id)) / 0x100000000 * Math.PI * 2);
+      const targetX = parent.x + unitX * targetRadius;
+      const targetY = parent.y + unitY * targetRadius;
+      const shiftX = targetX - node.x;
+      const shiftY = targetY - node.y;
+      const subtree = [], seen = new Set(), pending = [node];
+      while (pending.length) {
+        const member = pending.pop();
+        if (!member || seen.has(member)) continue;
+        seen.add(member);
+        subtree.push(member);
+        (childrenByAnchor.get(String(member.id)) || []).forEach(child => pending.push(child));
+      }
+      subtree.forEach((member, index) => {
+        member.x += shiftX;
+        member.y += shiftY;
+        if (Number.isFinite(member.fx)) member.fx += shiftX;
+        if (Number.isFinite(member.fy)) member.fy += shiftY;
+        if (index > 0) correctedDescendants++;
+      });
+      const relativeVx = (Number.isFinite(node.vx) ? node.vx : 0)
+        - (Number.isFinite(parent.vx) ? parent.vx : 0);
+      const relativeVy = (Number.isFinite(node.vy) ? node.vy : 0)
+        - (Number.isFinite(parent.vy) ? parent.vy : 0);
+      const inwardSpeed = relativeVx * unitX + relativeVy * unitY;
+      if (inwardSpeed < 0) {
+        const shiftVx = -inwardSpeed * unitX, shiftVy = -inwardSpeed * unitY;
+        subtree.forEach(member => {
+          member.vx = (Number.isFinite(member.vx) ? member.vx : 0) + shiftVx;
+          member.vy = (Number.isFinite(member.vy) ? member.vy : 0) + shiftVy;
+        });
+      }
+      correctedNodes++;
+      maximumShift = Math.max(maximumShift, Math.hypot(shiftX, shiftY));
+    });
+    return { correctedNodes, correctedDescendants, maximumShift };
+  }
+
+  /* The authored orbit clock runs after the leapfrog's aggregate cap. Keep its final velocity
+     projection common to every live body so nested moons retain differential tangential motion
+     instead of being clipped independently against a carrier already near the world ceiling. */
+  function enforceGalaxyGlobalSpeedLimit(nodes, options) {
+    const opts = options || {};
+    const limit = Math.max(0.01, Number(opts.limit) || MAX_NODE_SPEED);
+    const fixedNodeId = opts.fixedNodeId === undefined || opts.fixedNodeId === null
+      ? null : String(opts.fixedNodeId);
+    const bodies = (nodes || []).filter(node => node && !node.ghost
+      && Number.isFinite(node.vx) && Number.isFinite(node.vy)
+      && (fixedNodeId === null || String(node.id) !== fixedNodeId));
+    const maximumBefore = bodies.reduce((maximum, node) => Math.max(maximum,
+      Math.hypot(node.vx, node.vy)), 0);
+    if (!(maximumBefore > limit)) {
+      return { applied: false, maximumBefore, maximumAfter: maximumBefore, scale: 1 };
+    }
+    const strictLimit = limit * (1 - 1e-12);
+    const scale = strictLimit / maximumBefore;
+    bodies.forEach(node => {
+      node.vx *= scale;
+      node.vy *= scale;
+    });
+    const maximumAfter = bodies.reduce((maximum, node) => Math.max(maximum,
+      Math.hypot(node.vx, node.vy)), 0);
+    return { applied: true, maximumBefore, maximumAfter, scale };
   }
 
   /* Permanent local-surface contact for every carrier hierarchy. Projection is radial and
@@ -5989,17 +6127,25 @@
            a planet backward or pull it onto a chord through the star. */
         const timestep = Math.max(0.001, Math.min(2, Number(opts.timestep) || 1));
         const requestedRelativeSpeed = baseSpeed * GALAXY_BASE_ORBITAL_SPEED_BOOST * orbitalSpeed;
+        const nestedCarrier = parent.system_anchor_id !== undefined
+          && parent.system_anchor_id !== null
+          && String(parent.system_anchor_id) !== String(parent.id);
+        /* A parent that owns a moon needs to leave world-speed headroom for that moon. The
+           final common projection below preserves both tangents, whereas clipping the moon's
+           local budget to a carrier already at 48 would turn its tangent exactly to zero. */
+        const localAbsoluteSpeedLimit = nestedCarrier
+          ? Number.POSITIVE_INFINITY : absoluteSpeedLimit;
         const phaseTangentX = -Math.sin(phase.angle) * phase.direction;
         const phaseTangentY = Math.cos(phase.angle) * phase.direction;
         /* Use one scalar for the phase clock and emitted velocity. The final tangent rotates
            during the step, so apply the directional budget across both start and end tangents;
            this preserves full perpendicular orbital velocity without exceeding the absolute cap. */
-        const b1 = galaxyRelativeSpeedBudget(parent, absoluteSpeedLimit,
+        const b1 = galaxyRelativeSpeedBudget(parent, localAbsoluteSpeedLimit,
           requestedRelativeSpeed, phaseTangentX, phaseTangentY);
         const nextAngle = phase.angle + phase.direction * (b1 / Math.max(1e-6, targetRadius)) * timestep;
         const nextTanX = -Math.sin(nextAngle) * phase.direction;
         const nextTanY = Math.cos(nextAngle) * phase.direction;
-        const phaseSpeed = Math.min(b1, galaxyRelativeSpeedBudget(parent, absoluteSpeedLimit,
+        const phaseSpeed = Math.min(b1, galaxyRelativeSpeedBudget(parent, localAbsoluteSpeedLimit,
           b1, nextTanX, nextTanY));
         const angularSpeed = phaseSpeed / Math.max(1e-6, targetRadius);
         phase.angle += phase.direction * angularSpeed * timestep;
@@ -6532,7 +6678,7 @@
       ghostOrbit,
       maximumSpeed,
       uncappedMaximumSpeed,
-      speedCapped: speedScale < 1,
+      speedCapped: uncappedMaximumSpeed > speedLimit + SPEED_LIMIT_DIAGNOSTIC_EPSILON,
       convergence,
       relationConstraint,
       orbitalSeparation,
@@ -7853,7 +7999,7 @@
           fg.centerAt(anchor.x, anchor.y, duration);
           /* Reserve a balanced paint/camera margin for trails, labels and sub-pixel transforms;
              the physical lane projector keeps carriers inside this stable disk afterward. */
-          fg.zoom(Math.min(MAX_AUTO_FIT_ZOOM, available / (diskRadius * 1.45)), duration);
+          fg.zoom(Math.min(MAX_AUTO_FIT_ZOOM, available / (diskRadius * 2.3)), duration);
           return;
         }
       }
@@ -9155,6 +9301,24 @@
               data.nodes || [], galaxyIntegratorOptions());
             applyGalaxyBlackHoleExclusion(
               data.nodes || [], galaxyIntegratorOptions());
+            /* The post-integrator orbit clock runs after the leapfrog's local-contact
+               closure. Reassert the painted stellar boundary with the linear explicit-parent
+               guard so a concurrent renderer tick cannot leave a planet or moon overlapping
+               its host, without repeating the large-scene closure solver. */
+            enforceGalaxySystemAnchorMinimums(data.nodes || [], {
+              fixedNodeId: activeDragNode ? activeDragNode.id : null,
+              padding: GALAXY_SYSTEM_ANCHOR_EXCLUSION_PADDING,
+              orbitalSpeed: state.settings.repel,
+            });
+            const finalSpeed = enforceGalaxyGlobalSpeedLimit(data.nodes || [], {
+              fixedNodeId: activeDragNode ? activeDragNode.id : null,
+              limit: MAX_NODE_SPEED,
+            });
+            /* The live orbit clock is the final velocity authority. Report the post-clock
+               invariant, not the intermediate leapfrog projection that it intentionally repairs. */
+            report.maximumSpeed = finalSpeed.maximumAfter;
+            report.speedCapped = finalSpeed.maximumAfter > MAX_NODE_SPEED
+              + SPEED_LIMIT_DIAGNOSTIC_EPSILON;
           }
           galaxySteps++;
           if (kinematicFallback) {
