@@ -13,6 +13,10 @@ All notable changes to Engraphis are documented here. Format loosely follows
   changes, preventing a stale phase cache from masking the slider.
 - Kept high-density Galaxy layouts inside the strict speed cap while maintaining authored
   carrier and nested local orbit phase.
+- Bounded the zero central-gravity radius response so finite far-field envelopes cannot leave
+  oversized kinematic carrier caches behind, and counted fallback speed-cap activations.
+- Bumped the deterministic Galaxy scene algorithm identity to `galaxy-v13-responsive-compact-orbits`
+  so cached layouts cannot be confused with the revised placement contract.
 
 ### Tests
 
