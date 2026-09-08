@@ -9856,8 +9856,7 @@
 
     function render(fit, reheat, dragging = false) {
       if (destroyed) return;
-      cachedPhysicsSnapshot = null;
-      cachedPhysicsSnapshotStep = -1;
+      invalidatePhysicsSnapshot();
       if (suspended) {
         pendingRender = pendingRender
           ? [pendingRender[0] || fit, pendingRender[1] || reheat, pendingRender[2] || dragging]
@@ -10296,6 +10295,7 @@
 
     function finishNodeDrag(node) {
       if (!node || !activeDragNode || activeDragNode.id !== node.id) return;
+      invalidatePhysicsSnapshot();
       const retainAnchor = state.settings.frozen || staticFullLayout;
       if (!retainAnchor) {
         node.fx = undefined;
@@ -11161,6 +11161,10 @@
     };
     let cachedPhysicsSnapshot = null;
     let cachedPhysicsSnapshotStep = -1;
+    function invalidatePhysicsSnapshot() {
+      cachedPhysicsSnapshot = null;
+      cachedPhysicsSnapshotStep = -1;
+    }
     api.getPhysicsSnapshot = () => {
       const data = fg.graphData() || {};
       const nodes = Array.isArray(data.nodes) ? data.nodes : [];

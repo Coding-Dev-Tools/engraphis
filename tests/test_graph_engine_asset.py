@@ -2466,7 +2466,12 @@ def test_advanced_spacetime_controls_pause_live_orbits_and_drag_release_is_bound
     report = _run_engine(
         """
         let released = null;
-        const api = G.create(el, { onSlingshotRelease: value => { released = value; } });
+        let callbackSnapshot = null;
+        let api;
+        api = G.create(el, { onSlingshotRelease: value => {
+          released = value;
+          callbackSnapshot = api.getPhysicsSnapshot();
+        } });
         api.setData({ nodes: [
           { id: 'custom-heavy-center-kappa', anchor_role: 'global', community_id: 'core', gravity_mass: 32,
             radius: 8, x: 0, y: 0, vx: 0, vy: 0 },
@@ -2493,7 +2498,7 @@ def test_advanced_spacetime_controls_pause_live_orbits_and_drag_release_is_bound
         engineWindowListeners.pointermove(event(node.x + 6, node.y, 10));
         engineWindowListeners.pointermove(event(node.x + 18, node.y, 34));
         engineWindowListeners.pointerup(event(node.x + 18, node.y, 35));
-        emit({ paused, live: api.physicsDiagnostics(), released,
+        emit({ paused, live: api.physicsDiagnostics(), released, callbackSnapshot,
           snapshot: api.getPhysicsSnapshot(), node: { vx: node.vx, vy: node.vy, fx: node.fx, fy: node.fy } });
         """
     )
@@ -2530,6 +2535,12 @@ def test_advanced_spacetime_controls_pause_live_orbits_and_drag_release_is_bound
     assert 0 < report["released"]["speed"] <= 24
     assert report["node"].get("fx") is report["node"].get("fy") is None
     assert [report["node"]["vx"], report["node"]["vy"]] == pytest.approx(
+        [report["released"]["vx"], report["released"]["vy"]]
+    )
+    assert report["callbackSnapshot"]["slingshot"] == report["released"]
+    callback_node = next(node for node in report["callbackSnapshot"]["nodes"]
+                         if node["id"] == "dragged")
+    assert [callback_node["vx"], callback_node["vy"]] == pytest.approx(
         [report["released"]["vx"], report["released"]["vy"]]
     )
     assert report["snapshot"]["slingshot"] == report["released"]
