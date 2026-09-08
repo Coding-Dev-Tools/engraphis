@@ -283,6 +283,7 @@ class PackedChunk:
     tokens: int
     truncated: bool = False
     reason: str = ""
+    attribution: str = ""            # complete ownership label when context spans scopes
 
 
 @dataclass
@@ -296,6 +297,7 @@ class ContextUsage:
     packed_count: int
     omitted_count: int
     token_counter: str = "estimate_tokens"
+    omission_reasons: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

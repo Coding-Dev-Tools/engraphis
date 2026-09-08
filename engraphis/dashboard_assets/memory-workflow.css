@@ -1,0 +1,61 @@
+/* Memory workflow additions use the existing theme tokens and renderer layout. */
+.project-switcher { display: grid; gap: 8px; margin: 0 0 14px; }
+.project-switcher label { display: grid; gap: 5px; color: var(--c-mid); font-size: 12px; }
+.project-switcher select, .project-switcher input { width: 100%; min-width: 0; }
+.project-switcher details { font-size: 12px; }
+.project-switcher details[open] { display: grid; gap: 8px; }
+.project-switcher summary { color: var(--c-mid); cursor: pointer; }
+.project-switcher details label { margin: 8px 0; }
+.project-help { margin: 0; color: var(--c-mid); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.project-help:empty { display: none; }
+.memory-context { color: var(--c-acc); font-size: 13px; overflow-wrap: anywhere; }
+.memory-ownership { overflow-wrap: anywhere; }
+.connection-progress { padding: 12px 14px; border: 1px solid var(--c-line); border-radius: 6px; color: var(--c-mid); }
+.connection-steps { display: grid; gap: 22px; margin: 24px 0; padding-left: 24px; }
+.connection-steps > li { padding: 0 0 20px 8px; border-bottom: 1px solid var(--c-line); }
+.connection-steps h2 { margin-top: 0; font-size: 19px; }
+.connection-steps p { line-height: 1.6; }
+.connection-steps label:not(.connection-check) { display: grid; gap: 6px; max-width: 320px; }
+.connection-command { padding: 14px; border-radius: 6px; border: 1px solid var(--c-line); background: var(--c-inset); white-space: pre-wrap; overflow-wrap: anywhere; }
+.connection-check { display: flex; align-items: start; gap: 8px; margin-top: 18px; line-height: 1.6; }
+.connection-check input { flex: 0 0 auto; width: 18px; height: 18px; margin-top: 3px; }
+.record-history { margin-top: 22px; padding-top: 16px; border-top: 1px solid var(--c-line); }
+.record-history h4 { margin: 0; font-size: 15px; overflow-wrap: anywhere; }
+.history-content { white-space: pre-wrap; overflow-wrap: anywhere; }
+.answer-coverage { padding: 12px 14px; margin: 12px 0; border: 1px solid var(--c-line); border-radius: 6px; color: var(--c-mid); }
+.answer-coverage strong { color: var(--c-fg); font-size: 14px; }
+.answer-coverage p { margin: 6px 0 0; font-size: 13px; line-height: 1.5; }
+.ask-result-query { margin-top: 16px; overflow-wrap: anywhere; }
+.ask-result-query:empty, .ask-retry-actions:has(> button[hidden]):not(:has(> button:not([hidden]))) { display: none; }
+.ask-retry-actions { margin: 8px 0; }
+
+@media (max-width: 860px) {
+  .project-switcher { grid-column: 1 / -1; grid-row: 2; margin-bottom: 0; }
+  .primary-nav { grid-row: 3; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .primary-nav .nav-item { min-width: 0; }
+  .manage-nav { grid-row: 4; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .sidebar-options { grid-column: 1 / -1; grid-row: 5; }
+  .sidebar > .engine-status { grid-column: 1 / -1; grid-row: 6; }
+}
+@media (max-width: 640px) {
+  .project-switcher { grid-row: 3; }
+  .primary-nav { grid-row: 4; }
+  .manage-nav { grid-row: 5; }
+  .sidebar-options { grid-row: 6; }
+  .sidebar > .engine-status { grid-row: 7; }
+  .connection-steps { padding-left: 18px; }
+}
+@media (max-width: 360px) {
+  .primary-nav { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+.graph-advanced > summary { cursor: pointer; color: var(--c-fg); font-size: 13px; line-height: 1.6; }
+.graph-advanced > summary:focus-visible { outline: 2px solid var(--c-acc); outline-offset: 4px; }
+.graph-advanced[open] > summary { margin-bottom: 16px; }
+.graph-advanced > .graph-drawer-section:last-child { margin-bottom: 0; }
+
+.sidebar-options { min-width: 0; }
+.sidebar-options > summary { cursor: pointer; color: var(--c-mid); font-size: 12px; line-height: 1.6; }
+.sidebar-options[open] > summary { margin-bottom: 10px; }
+.sidebar-options .theme-switcher { display: grid; margin: 10px 0; }
+.sidebar-options .sidebar-promo { margin-top: 10px; }
