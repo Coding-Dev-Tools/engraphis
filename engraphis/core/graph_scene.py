@@ -16,7 +16,7 @@ from collections import Counter, defaultdict, deque
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
 
-ALGORITHM_VERSION = "galaxy-v12-responsive-compact-orbits"
+ALGORITHM_VERSION = "galaxy-v13-responsive-compact-orbits"
 PUBLIC_REFERENCE_ID_LIMIT = 200
 PUBLIC_FACET_LIMIT = 100
 PUBLIC_REPO_NAME_LIMIT = 100
@@ -707,47 +707,155 @@ def _community_positions(
     # survive the overview cap. Rank-based assignment (rank/N) fails when only the top-K
     # by mass are shown — they occupy a tight arc instead of spreading evenly.
     GOLDEN_ANGLE_RAD = math.pi * (3.0 - math.sqrt(5.0))
-    orbital_rank = 0
-    for community in ordered:
-        community_id = str(community["id"])
-        system_radius = _clamp(
-            _finite_float(community.get("radius"), 36.0), 36.0, 10_000.0
-        )
-        if community_id == global_community_id:
+    non_global = [c for c in ordered if str(c["id"]) != global_community_id]
+    non_global_count = len(non_global)
+
+    if non_global_count <= 1:
+        orbital_rank = 0
+        for community in ordered:
+            community_id = str(community["id"])
+            system_radius = _clamp(
+                _finite_float(community.get("radius"), 36.0), 36.0, 10_000.0
+            )
+            if community_id == global_community_id:
+                specs.append({
+                    "id": community_id, "system_radius": system_radius,
+                    "arm": -1, "nominal_x": 0.0, "nominal_y": 0.0,
+                })
+                continue
+            arm = orbital_rank % arm_count if arm_count > 0 else 0
+            digest = hashlib.sha256(
+                f"{ALGORITHM_VERSION}:{layout_seed}:system:{community_id}".encode("utf-8")
+            ).digest()
+            # Small angular jitter for visual variety; kept tight so even spacing dominates.
+            angular_jitter = (
+                int.from_bytes(digest[:4], "big") / float(1 << 32) - 0.5
+            ) * 0.06
+            radial_jitter = 0.95 + (
+                int.from_bytes(digest[4:8], "big") / float(1 << 32)
+            ) * 0.10
+            # Golden-angle based placement: each successive system advances by ≈137.5°.
+            # This guarantees that any contiguous or sampled subset fills the circle evenly.
+            golden_angle = base_phase + orbital_rank * GOLDEN_ANGLE_RAD
+            angle = golden_angle + angular_jitter
+            # Ring radius clears the core envelope. Inter-system clearance is handled
+            # per-pair in the collision pass using actual radii, not a pessimistic global max.
+            baseline_radius = max(
+                core_clearance_radius,
+                spacing * 0.90 * radial_jitter,
+            )
             specs.append({
-                "id": community_id, "system_radius": system_radius,
-                "arm": -1, "nominal_x": 0.0, "nominal_y": 0.0,
+                "id": community_id,
+                "system_radius": system_radius,
+                "arm": arm,
+                "nominal_x": baseline_radius * math.cos(angle),
+                "nominal_y": baseline_radius * math.sin(angle),
             })
-            continue
-        arm = orbital_rank % arm_count if arm_count > 0 else 0
-        digest = hashlib.sha256(
-            f"{ALGORITHM_VERSION}:{layout_seed}:system:{community_id}".encode("utf-8")
-        ).digest()
-        # Small angular jitter for visual variety; kept tight so even spacing dominates.
-        angular_jitter = (
-            int.from_bytes(digest[:4], "big") / float(1 << 32) - 0.5
-        ) * 0.06
-        radial_jitter = 0.95 + (
-            int.from_bytes(digest[4:8], "big") / float(1 << 32)
-        ) * 0.10
-        # Golden-angle based placement: each successive system advances by ≈137.5°.
-        # This guarantees that any contiguous or sampled subset fills the circle evenly.
-        golden_angle = base_phase + orbital_rank * GOLDEN_ANGLE_RAD
-        angle = golden_angle + angular_jitter
-        # Ring radius clears the core envelope. Inter-system clearance is handled
-        # per-pair in the collision pass using actual radii, not a pessimistic global max.
-        baseline_radius = max(
-            core_clearance_radius,
-            spacing * 1.10 * radial_jitter,
+            orbital_rank += 1
+    else:
+        # Multi-tiered concentric orbital lanes: distribute communities across radial bands
+        # (inner, mid-inner, mid-outer, outer) filling the 2D disk from the core clearance radius
+        # outward. Each tier accommodates as many systems as geometrically fit without overlap
+        # before placing subsequent systems on the next radial tier, interleaved with golden-angle
+        # angular offsets. This prevents all star systems from colliding onto a single outer hoop.
+        for community in ordered:
+            if str(community["id"]) == global_community_id:
+                system_radius = _clamp(
+                    _finite_float(community.get("radius"), 36.0), 36.0, 10_000.0
+                )
+                specs.append({
+                    "id": str(community["id"]), "system_radius": system_radius,
+                    "arm": -1, "nominal_x": 0.0, "nominal_y": 0.0,
+                })
+                break
+
+        avg_sys_radius = sum(
+            _clamp(_finite_float(c.get("radius"), 36.0), 36.0, 10_000.0)
+            for c in non_global
+        ) / non_global_count
+        tier_step = max(spacing * 0.65, 2.0 * avg_sys_radius + GALAXY_SYSTEM_MIN_GAP * 0.35)
+
+        tiers: list[dict[str, float | int]] = []
+        curr_radius = core_clearance_radius + avg_sys_radius
+        remaining = non_global_count
+        while remaining > 0:
+            circ = 2.0 * math.pi * curr_radius
+            envelope_size = 2.0 * avg_sys_radius + GALAXY_SYSTEM_MIN_GAP * 0.35
+            capacity = max(2, int(circ / envelope_size))
+            take = min(capacity, remaining)
+            tiers.append({
+                "radius": curr_radius,
+                "count": take,
+            })
+            remaining -= take
+            curr_radius += tier_step
+
+        # Homogeneous systems can share a true tier-local lattice: using the actual slot
+        # count keeps every lane's angular gaps consistent and avoids radial fallback when
+        # several similarly sized systems sit close to the core.  Heterogeneous envelopes
+        # retain the scene-wide low-discrepancy carrier so a large system does not create a
+        # regular angular wall for the smaller systems.  A three-or-more-tier scene is also
+        # compact enough that local lane spacing is the safer choice even with modest size
+        # variation.
+        non_global_radii = [
+            _clamp(_finite_float(c.get("radius"), 36.0), 36.0, 10_000.0)
+            for c in non_global
+        ]
+        homogeneous_envelopes = (
+            max(non_global_radii, default=0.0) - min(non_global_radii, default=0.0)
+            <= max(2.0, avg_sys_radius * 0.08)
         )
-        specs.append({
-            "id": community_id,
-            "system_radius": system_radius,
-            "arm": arm,
-            "nominal_x": baseline_radius * math.cos(angle),
-            "nominal_y": baseline_radius * math.sin(angle),
-        })
-        orbital_rank += 1
+        use_tier_local_slots = len(tiers) >= 3 or homogeneous_envelopes
+
+        sys_idx = 0
+        for tier_index, tier_info in enumerate(tiers):
+            t_rad = float(tier_info["radius"])
+            t_count = int(tier_info["count"])
+            for tier_slot in range(t_count):
+                community = non_global[sys_idx]
+                community_id = str(community["id"])
+                system_radius = _clamp(
+                    _finite_float(community.get("radius"), 36.0), 36.0, 10_000.0
+                )
+                arm = sys_idx % arm_count if arm_count > 0 else 0
+                digest = hashlib.sha256(
+                    f"{ALGORITHM_VERSION}:{layout_seed}:system:{community_id}".encode("utf-8")
+                ).digest()
+                angular_jitter = (
+                    int.from_bytes(digest[:4], "big") / float(1 << 32) - 0.5
+                ) * 0.06
+                radial_jitter = 0.96 + (
+                    int.from_bytes(digest[4:8], "big") / float(1 << 32)
+                ) * 0.08
+                if use_tier_local_slots:
+                    tier_phase = base_phase + tier_index * math.tau / 12.0
+                    # Use the tier's actual slot count rather than continuing the previous
+                    # tier's golden-angle rank; the deterministic phase keeps the lanes
+                    # visually distinct while the exact local lattice prevents radial
+                    # fallback from an ID-dependent jitter collapse.
+                    angle = (
+                        tier_phase
+                        + tier_slot * math.tau / max(1, t_count)
+                    )
+                else:
+                    # Mixed-size two-tier scenes keep a scene-wide low-discrepancy carrier so
+                    # the angular distribution remains stable across unequal envelopes.
+                    angle = base_phase + sys_idx * GOLDEN_ANGLE_RAD + angular_jitter
+
+                # ``preferred_targets`` applies the user-facing compactness scale below.
+                # Tier radii are already physical lane coordinates, so compensate here or a
+                # compactness of 0.192 would shrink every tier back through the core floor and
+                # make the collision walk, rather than the tier plan, choose the lanes.
+                physical_tier_radius = max(core_clearance_radius, t_rad * radial_jitter)
+                nominal_r = physical_tier_radius / max(clean_radius_scale, 1e-9)
+                specs.append({
+                    "id": community_id,
+                    "system_radius": system_radius,
+                    "arm": arm,
+                    "nominal_x": nominal_r * math.cos(angle),
+                    "nominal_y": nominal_r * math.sin(angle),
+                })
+                sys_idx += 1
 
     def pack_with_radial_clearance(
         targets: Mapping[str, tuple[float, float]],
@@ -803,7 +911,7 @@ def _community_positions(
                 # The radius_scale compactness pass may shrink preferred targets inside
                 # the core; clamp the walk's starting radius to the clearance floor so
                 # the collision search never considers orbits inside the black hole.
-                minimum_orbital_radius = core_outer_extent + GALAXY_SYSTEM_MIN_GAP
+                minimum_orbital_radius = core_outer_extent + system_radius + GALAXY_SYSTEM_MIN_GAP
                 axis_radius = max(axis_radius, minimum_orbital_radius)
                 # Radial-only walk preserves the even angular distribution. Moving only
                 # the system centre outward (not angularly) keeps every local star/planet
@@ -2341,7 +2449,7 @@ def _build_complete_scene(
         str(all_nodes[global_anchor]["community_id"]) if global_anchor else ""
     )
     positions, community_hints = _community_positions(
-        communities, global_community_id, layout_seed, spacing=92.0
+        communities, global_community_id, layout_seed, spacing=74.0
     )
     for community in communities:
         community.update(community_hints[community["id"]])
@@ -2890,7 +2998,7 @@ def build_graph_scene(
         graph, set(graph["community_members"]), set(graph["nodes"]), _system_radii
     )
     layout_positions, layout_hints = _community_positions(
-        layout_communities, global_community_id, layout_seed, spacing=98.0
+        layout_communities, global_community_id, layout_seed, spacing=78.0
     )
     seeded_positions = _orbital_layout_positions(
         graph["nodes"], graph["community_members"], graph["community_anchors"],

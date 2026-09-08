@@ -55,7 +55,7 @@ def test_graph_scene_fixture_encodes_galaxy_invariants():
     scene = _scene()
     nodes = {node["id"]: node for node in scene["nodes"]}
     communities = {community["id"]: community for community in scene["communities"]}
-    assert scene["meta"]["algorithm_version"] == "galaxy-v12-responsive-compact-orbits"
+    assert scene["meta"]["algorithm_version"] == "galaxy-v13-responsive-compact-orbits"
     for node in scene["nodes"]:
         expected_mass = 1.0 + 15.0 * node["mass_score"] ** 2
         assert math.isclose(node["gravity_mass"], expected_mass, abs_tol=1e-6)
