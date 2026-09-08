@@ -97,7 +97,7 @@ ALL_17_SLIDERS = [
     {"id": "graph-flow-speed", "min": 0, "max": 100, "fallback": 45, "has_output": True},
     {"id": "graph-repel", "min": 0, "max": 400, "fallback": 100, "has_output": True},
     {"id": "graph-link", "min": 4, "max": 80, "fallback": 8, "has_output": True},
-    {"id": "graph-gravity", "min": 0, "max": 400, "fallback": 96, "has_output": True},
+    {"id": "graph-gravity", "min": 0, "max": 400, "fallback": 120, "has_output": True},
     {"id": "graph-node-size", "min": 1, "max": 12, "fallback": 3, "has_output": True},
     {"id": "graph-text-size", "min": 6, "max": 24, "fallback": 12, "has_output": True},
     {"id": "graph-line-width", "min": 0.1, "max": 2.0, "fallback": 0.72, "has_output": True},
@@ -501,9 +501,9 @@ def test_interactive_buttons_and_tuning_reset() -> None:
           link: api.state().settings.link,
         };
 
-        // Shipped Galaxy defaults: repel=100, link=8, gravity=96
+        // Shipped Galaxy defaults: repel=100, link=8, gravity=120
         api.setPreset('galaxy');
-        api.setSettings({ repel: 100, link: 8, gravity: 96 });
+        api.setSettings({ repel: 100, link: 8, gravity: 120 });
         const afterReset = {
           gravity: api.state().settings.gravity,
           repel: api.state().settings.repel,
@@ -517,4 +517,4 @@ def test_interactive_buttons_and_tuning_reset() -> None:
     assert all(report["paletteOk"].values()), f"Palette failed: {report['paletteOk']}"
     assert all(report["colorOk"].values()), f"ColorBy failed: {report['colorOk']}"
     assert report["beforeReset"] == {"gravity": 400, "repel": 350, "link": 50}
-    assert report["afterReset"] == {"gravity": 96, "repel": 100, "link": 8}
+    assert report["afterReset"] == {"gravity": 120, "repel": 100, "link": 8}

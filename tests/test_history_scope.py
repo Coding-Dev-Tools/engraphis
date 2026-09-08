@@ -1,4 +1,5 @@
 """Record history retains promoted ancestors without widening caller access."""
+import time
 
 import pytest
 
@@ -26,6 +27,7 @@ def promoted_lineage(svc):
     approved = svc.engine.approve_for_prompt(
         pending, reviewer="test-owner", reason="approved disposable fixture",
     )["id"]
+    time.sleep(0.002)
     promoted = svc.promote(
         approved, "workspace", workspace="w", repo="api", reason="shared convention",
     )["id"]

@@ -22,6 +22,26 @@ All notable changes to Engraphis are documented here. Format loosely follows
   acceptance validation and a file-backed independent-process capacity harness.
   These provide measurement infrastructure, not verified 100k capacity claims.
 
+## [1.7.3] - 2026-09-07
+
+### Fixed
+
+- Preserved Galaxy carrier lane and kinematic orbit invariants through central-field slider
+  changes, including the global and core cached radii used by the next fixed slice.
+- Refreshed the retained local orbital speed budget when the effective local-gravity control
+  changes, preventing a stale phase cache from masking the slider.
+- Kept high-density Galaxy layouts inside the strict speed cap while maintaining authored
+  carrier and nested local orbit phase.
+- Bounded the zero central-gravity radius response so finite far-field envelopes cannot leave
+  oversized kinematic carrier caches behind, and counted fallback speed-cap activations.
+- Bumped the deterministic Galaxy scene algorithm identity to `galaxy-v13-responsive-compact-orbits`
+  so cached layouts cannot be confused with the revised placement contract.
+
+### Tests
+
+- Added deterministic regressions for central-field cache scaling and local-gravity phase
+  invalidation, alongside the existing 500-body and browser accessibility coverage.
+
 ## [1.7.2] - 2026-09-05
 
 ### Added
