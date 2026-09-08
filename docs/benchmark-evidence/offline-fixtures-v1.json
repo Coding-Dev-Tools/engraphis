@@ -1,5 +1,5 @@
 {
-  "generated_on": "2026-09-03",
+  "generated_on": "2026-09-06",
   "privacy": {
     "contains_answers": false,
     "contains_customer_data": false,
@@ -44,7 +44,7 @@
       "id": "offline-performance",
       "result": {
         "answer_token_recall": 1.0,
-        "compact_serialized_payload_tokens": 10202,
+        "compact_serialized_payload_tokens": 10982,
         "dataset_cases": 14,
         "full_serialized_payload_tokens": 23810,
         "hit_at_k": 1.0,
@@ -54,8 +54,8 @@
         "memories": 44,
         "questions": 26,
         "recall_at_k": 1.0,
-        "saved_serialized_payload_tokens": 13608,
-        "serialized_payload_savings_ratio": 0.5715,
+        "saved_serialized_payload_tokens": 12828,
+        "serialized_payload_savings_ratio": 0.5388,
         "timed_recalls": 260,
         "token_budget": 1500,
         "token_counter": "engraphis.regex.v1"

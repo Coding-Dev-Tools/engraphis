@@ -3,6 +3,25 @@
 All notable changes to Engraphis are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions use SemVer.
 
+## [Unreleased]
+
+- Added schema 18 content-free command receipts and cross-process source revalidation for
+  corrections, approvals, promotions and merges. Combined memory revisions have expected
+  versions, operation IDs, atomic metadata/history, and typed conflicts.
+- Sync publication uses current canonical state and generation-aware repair; delayed work
+  cannot restore erased vectors. Native-index failures roll back canonical changes.
+- Context retains distinct scoped evidence; synthesis falls back when complete source
+  units, titles, values or conditions are lost. Answer coverage defaults to unknown.
+- Added project-aware memory workflows and paginated record history.
+- Library cursors survive unrelated activity and work across processes. File-backed
+  browsing uses bounded live read snapshots; completed graph migrations are not
+  repeated at ordinary startup.
+- Ask separates answer/preview retries, cancellation and answer coverage. Home uses
+  actionable review state; Explore pauses hidden views through existing renderers.
+- Added content-free diagnostics and build/capability information, strict coding
+  acceptance validation and a file-backed independent-process capacity harness.
+  These provide measurement infrastructure, not verified 100k capacity claims.
+
 ## [1.7.3] - 2026-09-07
 
 ### Fixed
