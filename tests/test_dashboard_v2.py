@@ -165,6 +165,57 @@ def test_dashboard_create_workspace_succeeds_when_unbound(monkeypatch, tmp_path)
     assert response.json()["created"] is True
 
 
+def test_dashboard_preserves_hosted_principal_for_personal_access(
+    monkeypatch, tmp_path,
+):
+    import anyio
+    import httpx
+
+    from engraphis.dashboard_app import create_app
+    from engraphis.service import current_user, set_current_user
+    from engraphis.service_context import bind_service
+
+    monkeypatch.setattr(settings, "db_path", str(tmp_path / "hosted-dashboard.db"))
+    monkeypatch.setattr(settings, "embed_model", "")
+    monkeypatch.setattr(settings, "embed_dim", 384)
+    monkeypatch.setattr(settings, "allowed_workspaces", [])
+    monkeypatch.setattr(settings, "api_token", "")
+    app = create_app()
+    hosted = MemoryService.create(":memory:", extractor="none")
+    owner = {"id": "member_bob", "email": "bob@example.test", "role": "member"}
+    principal = {"id": "member_alice", "email": "alice@example.test", "role": "member"}
+    set_current_user(owner)
+    hosted.create_workspace("bob-private", visibility="personal")
+    set_current_user(None)
+
+    @app.get("/api/test-hosted-personal", include_in_schema=False)
+    def hosted_personal_probe():
+        from engraphis.routes.v2_api import service
+        from engraphis.service import ValidationError
+
+        try:
+            service()._enforce_personal_access("bob-private")
+        except ValidationError:
+            allowed = False
+        else:
+            allowed = True
+        return {"allowed": allowed, "user": current_user()}
+
+    async def request_probe():
+        transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 50000))
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.get("/api/test-hosted-personal")
+
+    try:
+        with bind_service(hosted, principal=principal):
+            response = anyio.run(request_probe)
+        assert response.status_code == 200, response.text
+        assert response.json() == {"allowed": False, "user": principal}
+    finally:
+        hosted.close()
+        app.state.service.close()
+
+
 def test_dashboard_ignores_legacy_workspace_binding_setting(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "db_path", str(tmp_path / "legacy-binding.db"))
     monkeypatch.setattr(settings, "embed_model", "")

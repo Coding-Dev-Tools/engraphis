@@ -1292,10 +1292,15 @@ def create_app() -> FastAPI:
     @app.middleware("http")
     async def _auth_gate(request: Request, call_next):
         from engraphis.service import set_current_user
+        from engraphis.service_context import bound_service
 
         # The open runtime has no hosted identity model. Clear any context inherited from
         # embedding applications and authorize the whole local instance as one principal.
-        set_current_user(None)
+        # An embedding host may instead bind a tenant service and validated principal for
+        # this request; preserve that identity so personal-workspace enforcement remains
+        # active through dashboard and mounted MCP dispatch.
+        if bound_service() is None:
+            set_current_user(None)
         path = request.url.path
         if request.method == "OPTIONS":
             return await call_next(request)
