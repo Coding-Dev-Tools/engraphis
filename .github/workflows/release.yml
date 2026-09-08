@@ -589,6 +589,9 @@ jobs:
         uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
         with:
           image: engraphis:release
+          # Keep the scanner version aligned with the public evidence schema
+          # and its fail-closed validation in scripts/release_evidence.py.
+          grype-version: v0.110.0
           fail-build: false
           severity-cutoff: high
           only-fixed: true
