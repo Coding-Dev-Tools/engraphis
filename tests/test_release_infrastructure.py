@@ -226,6 +226,7 @@ def test_ci_and_release_audit_production_image_dependencies():
     assert "docker compose config --quiet" in release_docker
     assert "Audit production image dependencies" in release_docker
     assert "pip-audit==2.10.1" in release_docker
+    assert "grype-version: v0.110.0" in release_docker
     assert 'docker create --name "$container" engraphis:release' in release_docker
     assert 'docker cp "$container:$site_packages/."' in release_docker
     assert legacy_audit_path not in release_docker
