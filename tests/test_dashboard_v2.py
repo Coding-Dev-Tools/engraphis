@@ -876,6 +876,15 @@ def test_dashboard_and_mcp_recall_share_the_v2_service(monkeypatch, tmp_path):
         assert dashboard["score_semantics"] == mcp["score_semantics"]
 
 
+def test_dashboard_mcp_mount_is_stateless_for_request_scoped_contexts(monkeypatch, tmp_path):
+    pytest.importorskip("mcp", reason="MCP extra not installed")
+    from engraphis import mcp_server
+
+    with _client(monkeypatch, tmp_path) as client:
+        assert client.app.state.mcp_over_http is True
+        assert mcp_server.mcp.session_manager.stateless is True
+
+
 def test_dashboard_keyword_fallback_reports_truthful_lexical_scores(monkeypatch, tmp_path):
     with _client(monkeypatch, tmp_path) as client:
         def mismatched_embedder(*_args, **_kwargs):
