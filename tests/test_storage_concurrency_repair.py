@@ -11,6 +11,7 @@ import pytest
 
 from engraphis.core.interfaces import MemoryRecord, Scope, SearchFilter
 from engraphis.core.vector_repair import canonical_search_required, index_repair_identity
+from engraphis.core.schema import SCHEMA_VERSION
 from engraphis.factory import create_memory_engine
 from engraphis.service import MemoryService
 
@@ -363,9 +364,9 @@ def test_v16_upgrade_adds_durable_repair_without_changing_memories(tmp_path):
             previous.execute(f"DROP TRIGGER trg_vector_repair_{action}")
         for table in ("vector_index_repairs", "vector_index_targets", "vector_store_state"):
             previous.execute(f"DROP TABLE {table}")
-        previous.execute("DELETE FROM schema_migrations WHERE version=17")
+        previous.execute("DELETE FROM schema_migrations WHERE version>=17")
     with Store(path) as upgraded:
-        assert upgraded.schema_version == 17
+        assert upgraded.schema_version == SCHEMA_VERSION
         assert upgraded.get_memory(memory).content == "Atlas stores memory in SQLite."
         assert upgraded.vector_generation() == 0
         assert upgraded.conn.execute("PRAGMA foreign_key_check").fetchall() == []
@@ -677,7 +678,7 @@ def test_existing_v17_database_gains_repair_queue_index_without_losing_debt(tmp_
     with sqlite3.connect(str(path)) as previous:
         previous.execute("DROP INDEX idx_vector_index_repairs_queue")
     with Store(str(path)) as upgraded:
-        assert upgraded.schema_version == 17
+        assert upgraded.schema_version == SCHEMA_VERSION
         assert upgraded.vector_index_pending("upgrade-target") == 1
         plan = " ".join(str(row[3]) for row in upgraded.conn.execute(
             "EXPLAIN QUERY PLAN SELECT memory_id,generation FROM vector_index_repairs "

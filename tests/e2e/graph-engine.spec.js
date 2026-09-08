@@ -1,3 +1,10 @@
+async function revealAdvancedGraphControls(page) {
+  const advanced = page.locator('#graph-advanced');
+  if (!await advanced.evaluate(element => element.open)) {
+    await advanced.locator(':scope > summary').click();
+  }
+}
+
 const { test, expect } = require('@playwright/test');
 
 /*
@@ -1068,6 +1075,7 @@ test('Ledger releases a dragged node without reheating the graph', async ({ page
   await page.goto('/');
   await expect(page.locator('.nav-item[data-view="relations"]')).toBeVisible();
   await page.locator('.nav-item[data-view="relations"]').click();
+  await revealAdvancedGraphControls(page);
   await expect(page.locator('#graph-canvas canvas').first()).toBeAttached({ timeout: 20_000 });
   await page.waitForFunction(() => window.__engraphisGraph && window.__fg);
   // Use a small live scene so this regression exercises the normal D3 force path rather than
@@ -1718,6 +1726,7 @@ for (const reducedMotion of [false, true]) {
       // acceptance run.
       await page.goto('/');
       await page.locator('.nav-item[data-view="relations"]').click();
+      await revealAdvancedGraphControls(page);
       await expect(page.locator('#graph-canvas canvas').first()).toBeAttached({ timeout: 20_000 });
       await page.waitForFunction(() => window.__engraphisGraph && window.__fg
         && window.__fg.graphData().nodes.length === 542
@@ -1886,6 +1895,7 @@ test('served Ledger wires normalized spacetime controls, overlay, and orbit paus
     const session = await openDashboard(page, { graphScene: blackHoleGalaxyScene });
     await page.goto('/');
     await page.locator('.nav-item[data-view="relations"]').click();
+    await revealAdvancedGraphControls(page);
     await expect(page.locator('#graph-canvas canvas').first()).toBeAttached({ timeout: 20_000 });
     await expect(page.locator('#graph-canvas .graph-spacetime-overlay')).toHaveCount(1);
     await expect(page.locator('#graph-spacetime-tuning')).toBeVisible();
@@ -2011,6 +2021,7 @@ test('served Ledger wires normalized spacetime controls, overlay, and orbit paus
     });
     await page.reload();
     await page.locator('.nav-item[data-view="relations"]').click();
+    await revealAdvancedGraphControls(page);
     await page.waitForFunction(() => window.__engraphisGraph
       && window.__engraphisGraph.state().settings.orbitPaused === false
       && window.__engraphisGraph.physicsDiagnostics().active
@@ -2026,6 +2037,7 @@ test('served Galaxy paints complete independent solar envelopes with a visible c
     await openDashboard(page, { graphScene: servedLargeGalaxyScene });
     await page.goto('/');
     await page.locator('.nav-item[data-view="relations"]').click();
+    await revealAdvancedGraphControls(page);
     await expect(page.locator('#graph-canvas canvas').first()).toBeAttached({ timeout: 30_000 });
     await page.waitForFunction(() => window.__engraphisGraph && window.__fg
       && window.__fg.graphData().nodes.length === 542
@@ -2261,6 +2273,7 @@ test('served 500-body Galaxy sustains separated carrier orbits and the black-hol
     await openDashboard(page, { graphScene: servedLargeGalaxyWithCoreSatellites });
     await page.goto('/');
     await page.locator('.nav-item[data-view="relations"]').click();
+    await revealAdvancedGraphControls(page);
     await expect(page.locator('#graph-canvas canvas').first()).toBeAttached({ timeout: 20_000 });
     const normal = await run(false);
     const reduced = await run(true);
@@ -2280,6 +2293,7 @@ test('served Complete Galaxy uses the lightweight all-body orbit path instead of
     await openDashboard(page, { graphScene: servedCompleteGalaxyScene });
     await page.goto('/');
     await page.locator('.nav-item[data-view="relations"]').click();
+    await revealAdvancedGraphControls(page);
     await expect(page.locator('#graph-canvas canvas').first()).toBeAttached({ timeout: 30_000 });
     await page.waitForFunction(() => window.__engraphisGraph && window.__fg
       && window.__fg.graphData().nodes.length === 3336
@@ -2488,6 +2502,7 @@ for (const reducedMotion of [false, true]) {
       await openDashboard(page, { graphScene: servedLargeGalaxyScene });
       await page.goto('/');
       await page.locator('.nav-item[data-view="relations"]').click();
+      await revealAdvancedGraphControls(page);
       await expect(page.locator('#graph-canvas canvas').first()).toBeAttached({ timeout: 20_000 });
       await page.waitForFunction(() => window.__engraphisGraph && window.__fg
         && window.__fg.graphData().nodes.length === 542
@@ -2569,6 +2584,7 @@ for (const reducedMotion of [false, true]) {
       await openDashboard(page, { graphScene: blackHoleGalaxyScene });
       await page.goto('/');
       await page.locator('.nav-item[data-view="relations"]').click();
+      await revealAdvancedGraphControls(page);
       await expect(page.locator('#graph-canvas canvas').first()).toBeAttached({ timeout: 20_000 });
 
       /* One scene deliberately contains the awkward lifecycle cases that normally escape a
@@ -2750,6 +2766,7 @@ test('served primary dashboard keeps local stellar orbits independent at Galaxy-
     });
     await expect(page.locator('#graph-gravity-output')).toHaveText('0');
     await page.locator('.nav-item[data-view="relations"]').click();
+    await revealAdvancedGraphControls(page);
     await page.waitForFunction(() => window.__engraphisGraph && window.__fg
       && window.__fg.graphData().nodes.length === 3
       && window.__engraphisGraph.state().settings.gravity === 0
@@ -2833,6 +2850,7 @@ test('served non-Galaxy spacetime controls keep their full normalized range', as
   const session = await openDashboard(page);
   await page.goto('/');
   await page.locator('.nav-item[data-view="relations"]').click();
+  await revealAdvancedGraphControls(page);
   await expect(page.locator('#graph-canvas canvas').first()).toBeAttached({ timeout: 20_000 });
   await page.locator('[data-graph-preset-choice="compact"]').click();
   await page.waitForFunction(() => window.__engraphisGraph
@@ -3600,6 +3618,7 @@ test('Ledger Gravity slider changes Galaxy density immediately', async ({ page }
   const session = await openDashboard(page);
   await page.goto('/');
   await page.locator('.nav-item[data-view="relations"]').click();
+  await revealAdvancedGraphControls(page);
   await expect(page.locator('#graph-canvas canvas').first()).toBeAttached({ timeout: 20_000 });
   await page.waitForFunction(() => window.__engraphisGraph && window.__fg);
   const report = await page.evaluate(scene => {
@@ -3660,6 +3679,7 @@ test('Ledger Gravity slider is path-independent across burst sweeps', async ({ p
   const session = await openDashboard(page);
   await page.goto('/');
   await page.locator('.nav-item[data-view="relations"]').click();
+  await revealAdvancedGraphControls(page);
   await expect(page.locator('#graph-canvas canvas').first()).toBeAttached({ timeout: 20_000 });
   await page.waitForFunction(() => window.__engraphisGraph && window.__fg);
 
@@ -3719,6 +3739,7 @@ test('Ledger Gravity slider has no dead zone across 0..400', async ({ page }, te
   const session = await openDashboard(page);
   await page.goto('/');
   await page.locator('.nav-item[data-view="relations"]').click();
+  await revealAdvancedGraphControls(page);
   await expect(page.locator('#graph-canvas canvas').first()).toBeAttached({ timeout: 20_000 });
   await page.waitForFunction(() => window.__engraphisGraph && window.__fg);
 
@@ -4198,6 +4219,7 @@ test('served Ledger exposes spacetime controls for non-Galaxy presets', async ({
   const session = await openDashboard(page);
   await page.goto('/');
   await page.locator('.nav-item[data-view="relations"]').click();
+  await revealAdvancedGraphControls(page);
   await expect(page.locator('#graph-canvas canvas').first()).toBeAttached({ timeout: 20_000 });
   await page.locator('[data-graph-preset-choice="compact"]').click();
   await expect(page.locator('[data-graph-preset-choice="compact"]'))

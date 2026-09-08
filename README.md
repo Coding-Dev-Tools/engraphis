@@ -44,7 +44,7 @@ by default, or accept an explicit workspace plus optional `from_ts`, `to_ts`, an
 `release_version` filters.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Coding-Dev-Tools/engraphis/main/docs/images/context-efficiency.svg" alt="Dark chart of local measurements and deterministic fixtures, including a local LoCoMo diagnostic marked with an asterisk. Cross-session handoff satisfaction rises from 3 of 15 queries with the last memories to 15 of 15 with proactive ranking or a consolidated summary. Intent-layered graph routing rises from 0 of 3 to 3 of 3 correct top-1 targets, and two-hop graph recall rises from 0 of 3 with one-hop expansion to 3 of 3 with Personalized PageRank. Consolidation-aware ranking selects the expected digest in 2 of 2 summary cases instead of 0 of 2 for the baseline. Structure-aware chunks reduce context from 740.3 to 214.3 tokens and the smallest evidence-holding memory from 162.2 to 42.4 tokens. A compact JSON-shape proxy uses 10,202 rather than 23,810 tokens. Grounded recall makes 10 of 10 correct decisions and packed context averages 85.38 tokens under a 1,500-token cap." width="100%">
+  <img src="https://raw.githubusercontent.com/Coding-Dev-Tools/engraphis/main/docs/images/context-efficiency.svg" alt="Dark chart of local measurements and deterministic fixtures, including a local LoCoMo diagnostic marked with an asterisk. Cross-session handoff satisfaction rises from 3 of 15 queries with the last memories to 15 of 15 with proactive ranking or a consolidated summary. Intent-layered graph routing rises from 0 of 3 to 3 of 3 correct top-1 targets, and two-hop graph recall rises from 0 of 3 with one-hop expansion to 3 of 3 with Personalized PageRank. Consolidation-aware ranking selects the expected digest in 2 of 2 summary cases instead of 0 of 2 for the baseline. Structure-aware chunks reduce context from 740.3 to 214.3 tokens and the smallest evidence-holding memory from 162.2 to 42.4 tokens. A compact JSON-shape proxy uses 10,982 rather than 23,810 tokens. Grounded recall makes 11 of 11 correct decisions and packed context averages 85.38 tokens under a 1,500-token cap." width="100%">
   <br>
   <sup>Less repeated history means more room for the task, tools, and useful evidence.</sup>
 </p>
@@ -73,13 +73,13 @@ its counting boundary explicit.
 |---|---|---|---|
 | Retrieved top-5 memory content, averaged per question | Whole documents: **740.3** tokens → structure-aware chunks: **214.3** tokens | **526.0 fewer tokens per question** (**71.1% lower**, about **3.5× smaller**) | Recall@5 **1.000** in both modes across 6 documents and 18 questions |
 | Smallest returned memory that contains the reference evidence | Whole documents: **162.2** tokens → chunks: **42.4** tokens | **119.8 fewer tokens to evidence** (**73.9% lower**, about **3.8× smaller**) | The same 18 questions had a returned evidence-holding memory in both modes |
-| Full versus compact recall payload proxy across one 26-question pass within a 260-timed-recall CodeMem run | Full proxy: **23,810** `engraphis.regex.v1` tokens → compact proxy: **10,202** tokens | **13,608 proxy tokens avoided** (**57.15% lower**) | 26 payload samples; 260 timed recalls; Recall@5, hit@5, and answer-token recall all **1.000** |
+| Full versus compact recall payload proxy across one 26-question pass within a 260-timed-recall CodeMem run | Full proxy: **23,810** `engraphis.regex.v1` tokens → compact proxy: **10,982** tokens | **12,828 proxy tokens avoided** (**53.88% lower**) | 26 payload samples; 260 timed recalls; Recall@5, hit@5, and answer-token recall all **1.000** |
 | Packed prompt-context usage in the same 26-question CodeMem sample pass | Hard budget: **1,500** tokens; observed mean: **85.38**; observed maximum: **108** | A hard cap prevents a recall from exceeding its configured context budget | This is usage accounting, not a before/after savings comparison |
 
 These values are evidence IDs `offline-chunking` and `offline-performance` in
 [`offline-fixtures-v1.json`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/benchmark-evidence/offline-fixtures-v1.json),
 SHA-256
-`8a74e9f48e25f33d625d4cc5c1b14fec3055891944adccf615c440e84e4b0255`.
+`4d5056d137182ae5cf116c5d59af18b38a7a0ed7731885e9597f63e549cb46b7`.
 [`BENCHMARKS.md`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/BENCHMARKS.md#public-numeric-evidence-registry)
 records the matching suite digest, exact commands, and per-command config digests. External,
 model-dependent, consolidation, productivity, and latency results remain unpublished until the
@@ -872,10 +872,13 @@ grant. See [`docs/LICENSING.md`](https://github.com/Coding-Dev-Tools/engraphis/b
 
 ### Reliability implementation candidate
 
-The current source uses schema 17 for durable, content-free vector-index repair.
+The current source uses schema 18 for durable, content-free vector-index repair and
+atomic memory-command receipts. Upgrades use the existing verified-backup migration path.
+The [rework execution register](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/REWORK_EXECUTION.md) records the current findings,
+compatibility decisions, acceptance evidence, remaining work and recovery procedure.
 See [the reliability program](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/RELIABILITY_PROGRAM.md) for exact implementation,
 validation, migration and release boundaries. Managed processing now requires explicit
-workspace approval in Manage → Settings. Existing installations start with readable
+workspace approval in Settings. Existing installations start with readable
 uploads paused until confirmed; connecting an account does not grant approval.
 
 For setup diagnostics use `engraphis-init --check --json`. New configurations get an

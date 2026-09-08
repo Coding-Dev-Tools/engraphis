@@ -8,12 +8,19 @@ with a plain-table fallback so the schema initializes on any SQLite build).
 """
 from __future__ import annotations
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version    INTEGER PRIMARY KEY,
     applied_at REAL
+);
+
+CREATE TABLE IF NOT EXISTS migration_executions (
+    name       TEXT NOT NULL,
+    version    INTEGER NOT NULL,
+    applied_at REAL NOT NULL,
+    PRIMARY KEY (name, version)
 );
 
 -- ── Tenancy & structure ────────────────────────────────────────────────────
@@ -539,6 +546,27 @@ CREATE INDEX IF NOT EXISTS idx_audit_target ON audit(target, ts);
 -- Store.audit) needs the same treatment: without it every audit write scans.
 CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit(ts);
 
+-- Local authoritative commands; no content or provider payload is retained here.
+CREATE TABLE IF NOT EXISTS memory_commands (
+    sequence       INTEGER PRIMARY KEY AUTOINCREMENT,
+    workspace_id   TEXT NOT NULL,
+    operation_id   TEXT NOT NULL,
+    operation      TEXT NOT NULL,
+    request_hash   TEXT NOT NULL,
+    result_id      TEXT NOT NULL,
+    result_version TEXT NOT NULL,
+    created_at     REAL NOT NULL,
+    UNIQUE (workspace_id, operation_id)
+);
+CREATE INDEX IF NOT EXISTS idx_memory_commands_result ON memory_commands(result_id);
+CREATE TABLE IF NOT EXISTS memory_command_sources (
+    source_id    TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    operation_id TEXT NOT NULL,
+    FOREIGN KEY (workspace_id, operation_id)
+        REFERENCES memory_commands(workspace_id, operation_id)
+);
+
 CREATE TABLE IF NOT EXISTS operation_receipts (
     id             TEXT PRIMARY KEY,
     ts             REAL NOT NULL,
@@ -880,3 +908,67 @@ FTS_SQL_FALLBACK = (
     "CREATE TABLE IF NOT EXISTS mem_fts "
     "(id TEXT PRIMARY KEY, title TEXT, content TEXT, keywords TEXT);"
 )
+
+# Installed after additive memory-column migrations. These revisions are local,
+# content-free cursor state; they are never included in a sync bundle.
+BROWSE_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS browse_state (
+    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+    identity TEXT NOT NULL
+);
+INSERT OR IGNORE INTO browse_state(singleton,identity) VALUES (1,lower(hex(randomblob(16))));
+CREATE TABLE IF NOT EXISTS browse_scope_revisions (
+    workspace_id TEXT NOT NULL,
+    repo_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    mtype TEXT NOT NULL,
+    revision TEXT NOT NULL,
+    PRIMARY KEY (workspace_id,repo_id,session_id,scope,mtype)
+);
+
+CREATE TRIGGER IF NOT EXISTS trg_browse_memory_insert
+AFTER INSERT ON memories BEGIN
+    INSERT INTO browse_scope_revisions VALUES (
+        NEW.workspace_id,COALESCE(NEW.repo_id,''),COALESCE(NEW.session_id,''),
+        NEW.scope,NEW.mtype,lower(hex(randomblob(16)))
+    ) ON CONFLICT(workspace_id,repo_id,session_id,scope,mtype)
+      DO UPDATE SET revision=excluded.revision;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_browse_memory_delete
+AFTER DELETE ON memories BEGIN
+    INSERT INTO browse_scope_revisions VALUES (
+        OLD.workspace_id,COALESCE(OLD.repo_id,''),COALESCE(OLD.session_id,''),
+        OLD.scope,OLD.mtype,lower(hex(randomblob(16)))
+    ) ON CONFLICT(workspace_id,repo_id,session_id,scope,mtype)
+      DO UPDATE SET revision=excluded.revision;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_browse_memory_update
+AFTER UPDATE ON memories
+WHEN OLD.id IS NOT NEW.id OR OLD.workspace_id IS NOT NEW.workspace_id
+  OR OLD.repo_id IS NOT NEW.repo_id OR OLD.session_id IS NOT NEW.session_id
+  OR OLD.scope IS NOT NEW.scope OR OLD.mtype IS NOT NEW.mtype
+  OR OLD.title IS NOT NEW.title OR OLD.content IS NOT NEW.content
+  OR OLD.summary IS NOT NEW.summary OR OLD.keywords IS NOT NEW.keywords
+  OR OLD.metadata IS NOT NEW.metadata OR OLD.provenance IS NOT NEW.provenance
+  OR OLD.valid_from IS NOT NEW.valid_from OR OLD.valid_to IS NOT NEW.valid_to
+  OR OLD.valid_to_recorded_at IS NOT NEW.valid_to_recorded_at
+  OR OLD.ingested_at IS NOT NEW.ingested_at OR OLD.expired_at IS NOT NEW.expired_at
+  OR OLD.sort_order IS NOT NEW.sort_order OR OLD.pinned IS NOT NEW.pinned
+  OR OLD.pinned_at IS NOT NEW.pinned_at OR OLD.unpinned_at IS NOT NEW.unpinned_at
+  OR OLD.sensitivity IS NOT NEW.sensitivity OR OLD.importance IS NOT NEW.importance
+  OR OLD.surprise IS NOT NEW.surprise OR OLD.confidence IS NOT NEW.confidence
+  OR OLD.subject_key IS NOT NEW.subject_key OR OLD.claim_kind IS NOT NEW.claim_kind
+BEGIN
+    INSERT INTO browse_scope_revisions VALUES (
+        OLD.workspace_id,COALESCE(OLD.repo_id,''),COALESCE(OLD.session_id,''),
+        OLD.scope,OLD.mtype,lower(hex(randomblob(16)))
+    ) ON CONFLICT(workspace_id,repo_id,session_id,scope,mtype)
+      DO UPDATE SET revision=excluded.revision;
+    INSERT INTO browse_scope_revisions VALUES (
+        NEW.workspace_id,COALESCE(NEW.repo_id,''),COALESCE(NEW.session_id,''),
+        NEW.scope,NEW.mtype,lower(hex(randomblob(16)))
+    ) ON CONFLICT(workspace_id,repo_id,session_id,scope,mtype)
+      DO UPDATE SET revision=excluded.revision;
+END;
+"""

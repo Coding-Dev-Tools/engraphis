@@ -11,12 +11,12 @@ For the locked operator sequence for a public canonical run, see
 Every exact public aggregate retained below comes from the checked-in, public-safe
 [`offline-fixtures-v1.json`](docs/benchmark-evidence/offline-fixtures-v1.json) artifact. Its
 SHA-256 is
-`8a74e9f48e25f33d625d4cc5c1b14fec3055891944adccf615c440e84e4b0255`, also recorded in the
+`4d5056d137182ae5cf116c5d59af18b38a7a0ed7731885e9597f63e549cb46b7`, also recorded in the
 adjacent `.sha256` file. The artifact contains no raw questions, answers, prompts, customer data,
 or per-record content fingerprints.
 
 The fixture-suite digest is
-`4d7e40607319cd4bf8caee3897f1e416dbe5b81998b37a7e4839409ee2923537`. The artifact defines
+`f5544b56f009b2fc16dbae992039971899daf2b0095ee8d15bad5914c7f399a9`. The artifact defines
 the digest algorithm and records the SHA-256 of every suite and dataset file. Each evidence ID
 also binds its exact command through `sha256(UTF-8 exact command)`:
 
@@ -72,8 +72,8 @@ frontier-model QA score.
   JSON-safe schema. Payload proxies are sampled once per question, independently of the number
   of timed iterations; they are not serialized MCP envelopes or transport responses. In the
   registered CodeMem run, 26 payload samples total **23,810** full-proxy
-  `engraphis.regex.v1` tokens versus **10,202** compact-proxy tokens, avoiding **13,608** proxy
-  tokens (**57.15% lower**), while 260 recalls are timed. Packed context across the same 26
+  `engraphis.regex.v1` tokens versus **10,982** compact-proxy tokens, avoiding **12,828** proxy
+  tokens (**53.88% lower**), while 260 recalls are timed. Packed context across the same 26
   samples averages **85.38** tokens and reaches **108** under a 1,500-token cap; Recall@5,
   hit@5, and answer-token recall remain 1.000. These aggregates are evidence ID
   `offline-performance` in the registry above. `--filler-memories`, `--candidate-k`, and
