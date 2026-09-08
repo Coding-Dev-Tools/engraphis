@@ -18,6 +18,7 @@ The original checkout's active graph/layout changes remain separate.
 | --- | --- | --- | --- |
 | P1 reproduced defect | Delayed sync publication restored an erased or outdated external vector. | `core/vector_repair.py` publishes current canonical state under the writer reservation and acknowledges the applied generation. `tests/test_sync_index_repair.py` covers delayed publication, erasure, newer updates, provider failures and native rollback. | Arbitrary synchronous providers can still occupy the writer while publishing. |
 | P1 reproduced defect | A blocked vector update prevented later queued erasures from being repaired. | Repair traversal prioritizes canonical deletions and makes bounded progress past deferred updates. Focused regressions cover a one-operation budget, blocked embedding spaces, provider failures and later erasure. | A provider that cannot delete still leaves durable repair debt; deletion is not falsely acknowledged. |
+| P2 reproduced contention | Finding one erasure behind 1,000 updates acquired 1,002 writer reservations. | [Repair discovery](INDEX_REPAIR_MAINTENANCE.md) classifies paged canonical headers before reserving the writer, then revalidates inside it. Tests check independent writer progress, stale hints, and immediate stopping after the attempt budget. | Total discovery, repeated scans, failed-deletion fairness and provider latency remain separate scheduling work. |
 | P1 reproduced defect | Separate engines accepted multiple governed successors of one record. | `core/mutations.py` validates prepared versions and source claims inside the transaction; schema 18 retains content-free command receipts. `tests/test_governed_concurrency.py` exercises corrections, approvals, promotions and merges through independent engines and spawned processes. | Receipts coordinate processes sharing the canonical database; they are not a new distributed multi-database transaction protocol. |
 | P2 reproduced defect | A completed promotion or merge could not be retried after its session closed. | Existing receipts replay before transient active-session and embedding requirements. Tests reopen the engine, disable embedding, replay the result and reject removed successors; new writes still recheck session activity under the writer. | Changed requests are new operations and remain subject to current session and source guards. |
 | P1 reproduced defect | A shared claim key or consolidation lineage collapsed distinct repository facts. | Packing deduplicates repeated canonical IDs, preserves full ownership attribution and budgets it. `tests/test_context_scope_grounding.py` retains distinct repositories, values, conditions and title-bound subjects. | Stronger semantic compression remains an experiment; no ranking default changed. |
@@ -79,6 +80,37 @@ Paid calls, external participants, publication, deployment, merges and credentia
 changes have not been performed by these local changes. Ordinary local engineering
 and verification are already authorized; missing hardware and independent evidence
 are execution constraints, not reasons to claim completion or invent results.
+
+## Resource-import transaction follow-up
+
+Legacy folder/upload imports now isolate each file, including its chunks, FTS,
+canonical vectors, transactional index rows and receipts, before returning a
+recoverable per-file error. An optional fact-derivation failure rolls back its
+complete derived prefix while retaining the successful source import. Unexpected
+failures and final commit failures still abort the service-owned batch; a caller's
+preceding transaction remains caller-owned.
+
+The additional counterexamples at `dc4382d1` included an FTS failure leaving three
+canonical records despite a two-import/one-error report, and a second-chunk
+embedding failure leaving an unreported first chunk. Fourteen new regression
+cases reproduced these integrity failures against that unchanged dependency
+checkout. Review also reproduced failed savepoint rollback/release being treated
+as a recoverable file error. Savepoint settlement now raises `SavepointError` and
+aborts the enclosing operation, including optional conflict repair.
+
+This follow-up changes no schema, public signature, response field, ranking or
+approval rule. There is no data migration. Reverting the patch restores the prior
+partial-write risk; it does not reconcile fragments left by earlier imports.
+Do not delete suspected fragments automatically: retain provenance and inspect
+the applicable import report before governed correction or erasure.
+
+Preparation remains the next dependency. Folder enumeration, resource parsing,
+chunking, embedding and explicitly enabled derivation still occur inside the
+legacy batch writer. Move them through immutable prepared commands, with current
+workspace/embedding validation and explicit post-commit index publication, in a
+separate change. Preserve the existing caller-owned separate-index rejection until
+that publication contract exists. These integrity tests establish no throughput,
+100k capacity or production recovery claim.
 
 ## Schema 17 to 18 and recovery
 
