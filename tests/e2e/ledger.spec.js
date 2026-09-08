@@ -2305,7 +2305,7 @@ test('overview→Every-node readiness failure preserves the committed overview r
   await page.addInitScript(() => {
     const nativeSetTimeout = window.setTimeout.bind(window);
     window.setTimeout = (callback, delay, ...args) => {
-      if (delay === 30_000) return nativeSetTimeout(callback, 120, ...args);
+      if (delay === 90_000) return nativeSetTimeout(callback, 120, ...args);
       return nativeSetTimeout(callback, delay, ...args);
     };
   });
@@ -2386,7 +2386,7 @@ test('successful retry after readiness failure commits exactly one new renderer'
   await page.addInitScript(() => {
     const nativeSetTimeout = window.setTimeout.bind(window);
     window.setTimeout = (callback, delay, ...args) => {
-      if (delay === 30_000) return nativeSetTimeout(callback, 120, ...args);
+      if (delay === 90_000) return nativeSetTimeout(callback, 120, ...args);
       return nativeSetTimeout(callback, delay, ...args);
     };
   });

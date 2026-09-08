@@ -139,7 +139,11 @@
   const GRAPH_ALL_NODE_LIMIT = 20_000;
   const GRAPH_ALL_EDGE_LIMIT = 200_000;
   const GRAPH_LOAD_TIMEOUT_MS = 60_000;
-  const GRAPH_FULL_LOAD_TIMEOUT_MS = 30_000;
+  // Cold complete scenes can legitimately spend ~25s in the bounded server projection
+  // before the renderer receives its payload. Keep enough headroom for the response body,
+  // graph assets, and renderer readiness instead of turning a healthy cold request into a
+  // generic client timeout.
+  const GRAPH_FULL_LOAD_TIMEOUT_MS = 90_000;
   const GRAPH_CONNECTION_MEMORIES_TIMEOUT_MS = 8_000;
   const GRAPH_PREFERENCES_KEY = 'engraphis-ledger-graph-preferences-v1';
   const GRAPH_PHYSICS_VERSION = 5;
@@ -3719,7 +3723,10 @@
         const memoryProjection = fullGraph ? '&include_memory_nodes=false' : '';
         const [payload] = await Promise.race([
           Promise.all([
-            api(`/graph/scene?${query(targetWorkspace)}&level=${level}${presentation}${limits}${connectedOnly}${includeCode}${scopedRepo}${asOf}${history}${memoryProjection}`, { signal: controller.signal }),
+            api(`/graph/scene?${query(targetWorkspace)}&level=${level}${presentation}${limits}${connectedOnly}${includeCode}${scopedRepo}${asOf}${history}${memoryProjection}`, {
+              signal: controller.signal,
+              timeoutMs: deadline,
+            }),
             assets,
           ]),
           timeoutPromise,

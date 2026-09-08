@@ -1044,6 +1044,7 @@ def test_graph_load_is_bounded_single_flight_and_retryable(monkeypatch, tmp_path
         assert "const GRAPH_ALL_NODE_LIMIT = 20_000;" in script.text
         assert "const GRAPH_ALL_EDGE_LIMIT = 200_000;" in script.text
         assert "const GRAPH_LOAD_TIMEOUT_MS = 60_000;" in script.text
+        assert "const GRAPH_FULL_LOAD_TIMEOUT_MS = 90_000;" in script.text
         assert "AbortController" in script.text
         assert "state.graphLoadPromise" in script.text
         assert "graphLoadRepo: ''" in script.text
@@ -1061,6 +1062,7 @@ def test_graph_load_is_bounded_single_flight_and_retryable(monkeypatch, tmp_path
         assert "previousController.abort()" in script.text
         assert "Promise.race([" in script.text
         assert "timeoutPromise" in script.text
+        assert "timeoutMs: deadline" in script.text
         assert "/graph/scene?" in script.text
         assert "&level=${level}" in script.text
         assert "&include_memory_nodes=false" in script.text
