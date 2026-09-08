@@ -382,9 +382,16 @@ def create_app() -> FastAPI:
             pass
         _prev_path = _mcp_mod.mcp.settings.streamable_http_path
         _prev_security = _mcp_mod.mcp.settings.transport_security
+        _prev_stateless = getattr(_mcp_mod.mcp.settings, "stateless_http", False)
         try:
             _mcp_mod.mcp.settings.streamable_http_path = "/"
             _mcp_mod.mcp.settings.transport_security = _mcp_transport_security(_mcp_mod.mcp)
+            # Hosted callers can bind a tenant service and principal around each HTTP
+            # operation. Stateful Streamable HTTP runs tool callbacks in the persistent
+            # initialization task, which would retain the first request's ContextVars
+            # for later requests. Stateless mode keeps every callback in its request
+            # context and is therefore required for request-scoped service isolation.
+            _mcp_mod.mcp.settings.stateless_http = True
             _mcp_asgi = _mcp_mod.mcp.streamable_http_app()
         finally:
             # streamable_http_app() captures these settings in its session manager. Restore
@@ -392,6 +399,7 @@ def create_app() -> FastAPI:
             # standalone MCP server in the same process.
             _mcp_mod.mcp.settings.streamable_http_path = _prev_path
             _mcp_mod.mcp.settings.transport_security = _prev_security
+            _mcp_mod.mcp.settings.stateless_http = _prev_stateless
         _mcp_mgr = _mcp_mod.mcp.session_manager
     except (Exception, SystemExit) as _exc:  # noqa: BLE001 - MCP mount stays optional
         import logging as _logging
@@ -1284,10 +1292,15 @@ def create_app() -> FastAPI:
     @app.middleware("http")
     async def _auth_gate(request: Request, call_next):
         from engraphis.service import set_current_user
+        from engraphis.service_context import bound_service
 
         # The open runtime has no hosted identity model. Clear any context inherited from
         # embedding applications and authorize the whole local instance as one principal.
-        set_current_user(None)
+        # An embedding host may instead bind a tenant service and validated principal for
+        # this request; preserve that identity so personal-workspace enforcement remains
+        # active through dashboard and mounted MCP dispatch.
+        if bound_service() is None:
+            set_current_user(None)
         path = request.url.path
         if request.method == "OPTIONS":
             return await call_next(request)
