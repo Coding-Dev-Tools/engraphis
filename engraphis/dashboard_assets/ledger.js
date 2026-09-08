@@ -142,14 +142,14 @@
   const GRAPH_FULL_LOAD_TIMEOUT_MS = 30_000;
   const GRAPH_CONNECTION_MEMORIES_TIMEOUT_MS = 8_000;
   const GRAPH_PREFERENCES_KEY = 'engraphis-ledger-graph-preferences-v1';
-  const GRAPH_PHYSICS_VERSION = 4;
+  const GRAPH_PHYSICS_VERSION = 5;
   const GRAPH_CUSTOM_VIEW_KEY = 'engraphis-ledger-graph-custom-view-v1';
   const GRAPH_LAYERS = ['temporal', 'entity', 'causal', 'semantic', 'code'];
   const GRAPH_DEFAULT_LAYERS = { temporal: true, entity: true, causal: true, semantic: true, code: false };
   const GRAPH_TUNING = [
     { id: 'graph-repel', key: 'repel', fallback: 100 },
     { id: 'graph-link', key: 'link', fallback: 8 },
-    { id: 'graph-gravity', key: 'gravity', fallback: 96 },
+    { id: 'graph-gravity', key: 'gravity', fallback: 120 },
     { id: 'graph-node-size', key: 'size', fallback: 3 },
     { id: 'graph-text-size', key: 'font', fallback: 12 },
     { id: 'graph-line-width', key: 'linkw', fallback: 0.72, precision: 2 },
@@ -166,7 +166,7 @@
     original: { repel: 120, link: 30, gravity: 14, font: 13, size: 3, linkw: 1, labelDensity: 40 },
     compact: { repel: 42, link: 20, gravity: 26, font: 12, size: 3, linkw: 0.7, labelDensity: 30 },
     communities: { repel: 48, link: 16, gravity: 48, font: 12, size: 3, linkw: 0.72, labelDensity: 24 },
-    galaxy: { repel: 100, link: 8, gravity: 96, font: 12, size: 3, linkw: 0.72, labelDensity: 24 },
+    galaxy: { repel: 100, link: 8, gravity: 120, font: 12, size: 3, linkw: 0.72, labelDensity: 24 },
     radial: { repel: 68, link: 26, gravity: 12, font: 13, size: 3, linkw: 0.75, labelDensity: 55 },
     constellation: { repel: 34, link: 16, gravity: 38, font: 12, size: 3, linkw: 0.65, labelDensity: 35 },
   };
@@ -3128,8 +3128,10 @@
 
     const savedTuning = graphPreference('tuning', {});
     const savedPhysicsVersion = Number(graphPreference('physicsVersion', 0));
-    const legacyPhysics = hasSavedPreferences
-      && (!Number.isFinite(savedPhysicsVersion) || savedPhysicsVersion < GRAPH_PHYSICS_VERSION);
+    const sourcePhysicsVersion = Number.isFinite(savedPhysicsVersion) ? savedPhysicsVersion : 0;
+    const legacyPhysics = hasSavedPreferences && sourcePhysicsVersion < GRAPH_PHYSICS_VERSION;
+    const needsPhysicsV3Migration = hasSavedPreferences && sourcePhysicsVersion < 3;
+    const needsPhysicsV4Migration = hasSavedPreferences && sourcePhysicsVersion < 4;
     const effectiveTuning = savedTuning && typeof savedTuning === 'object'
       ? { ...savedTuning } : {};
     const savedSpacetimeTuning = graphPreference('spacetimeTuning', {});
@@ -3137,7 +3139,7 @@
        friction at zero, and the Galaxy spacing control at 400. That exact vector is not a
        useful custom preset: it collapses the visible graph and can reduce hundreds of loaded
        entities to a small central knot. Physics v3 resets only this known-bad snapshot. */
-    const staleMaxedPhysics = legacyPhysics && Number(effectiveTuning.gravity) === 400
+    const staleMaxedPhysics = needsPhysicsV3Migration && Number(effectiveTuning.gravity) === 400
       && Number(savedSpacetimeTuning && savedSpacetimeTuning.gravitationalConstant) === 200
       && Number(savedSpacetimeTuning && savedSpacetimeTuning.blackHoleMass) === 500
       && Number(savedSpacetimeTuning && savedSpacetimeTuning.localGravitationalConstant) === 200
@@ -3151,9 +3153,14 @@
     /* Older preferences persisted 48 and then 60 as Galaxy's default orbital speed. Physics v4
        defines the control as a percentage with 100 as neutral, so migrate only those exact
        retired defaults. Every other custom speed and every unrelated preference remains intact. */
-    if (legacyPhysics && preset === 'galaxy'
+    if (needsPhysicsV4Migration && preset === 'galaxy'
       && [48, 60].includes(Number(effectiveTuning.repel))) {
       effectiveTuning.repel = 100;
+    }
+    /* Physics v5 makes 120 the Galaxy gravity default. Migrate only the exact retired default;
+       a saved 96 in an already-versioned v5 snapshot remains an intentional user choice. */
+    if (legacyPhysics && preset === 'galaxy' && Number(effectiveTuning.gravity) === 96) {
+      effectiveTuning.gravity = 120;
     }
     syncGraphTuning({
       ...graphPresetTuning(preset),

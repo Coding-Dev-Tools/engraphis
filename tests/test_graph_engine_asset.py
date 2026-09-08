@@ -1090,12 +1090,12 @@ def test_orbital_speed_increases_use_a_bounded_response_with_less_expansion() ->
     assert report["radii"][0] == pytest.approx(report["radii"][1])
     assert report["radii"][1] < report["radii"][2] < report["radii"][3]
     assert report["radii"][1] == pytest.approx(30)
-    assert report["radii"][2] == pytest.approx(32.4)
-    assert report["radii"][3] == pytest.approx(37.2)
+    assert report["radii"][2] == pytest.approx(30.6)
+    assert report["radii"][3] == pytest.approx(31.8)
     assert report["multipliers"][2] - 1 == pytest.approx(0.5 * (2 - 1))
     assert report["multipliers"][3] - 1 == pytest.approx(0.5 * (4 - 1))
     assert report["radii"][3] - report["radii"][1] == pytest.approx(
-        0.8 * (39 - 30)
+        0.2 * (39 - 30)
     )
     assert report["localSpeeds"] == sorted(report["localSpeeds"])
     assert report["globalSpeeds"] == sorted(report["globalSpeeds"])
@@ -1448,7 +1448,7 @@ def test_orbital_speed_scales_live_carrier_and_kinematic_phase_rates() -> None:
     assert report["naturalKinematic"]["systemTravel"] > 0
     assert report["naturalKinematic"]["localTravel"] > 0
     assert report["kinematicSystemRatio"] > 1.8
-    assert report["kinematicLocalRatio"] > 2.5
+    assert report["kinematicLocalRatio"] > 1.25
     assert report["naturalCarrier"] > 0
     assert report["carrierRatio"] == pytest.approx(2.5, rel=0.02)
 
@@ -1568,7 +1568,7 @@ def test_four_hundred_percent_clock_keeps_release_sized_solar_systems_inside_res
     assert report["memberCount"] == 480
     assert report["finite"] is True
     assert report["multiplier"] == pytest.approx(2.5)
-    assert report["radiusMultiplier"] == pytest.approx(1.24)
+    assert report["radiusMultiplier"] == pytest.approx(1.06)
     assert report["maximumBoundaryRatio"] <= 1 + 1e-9
     assert report["minimumSystemClearance"] >= -1e-8
     assert report["minimumCarrierTravel"] > 0.1
@@ -1959,6 +1959,63 @@ def test_live_carrier_support_rotates_without_a_preseeded_lane_cache() -> None:
     assert report["second"]["radius"] == pytest.approx(report["cachedRadius"], abs=1e-9)
     assert report["second"]["radius"] == pytest.approx(120, abs=1e-9)
     assert report["second"]["localDistance"] == pytest.approx(report["first"]["localDistance"], abs=1e-9)
+
+
+@requires_node
+def test_central_slider_scales_each_carrier_lane_cache_once() -> None:
+    """Central-field feedback must not apply a carrier lane-cache ratio twice."""
+    source = ASSET.read_text(encoding="utf-8")
+    start = source.index("const targetCarrierX")
+    end = source.index("moved++;", start)
+    response = source[start:end]
+    assert "item.carrier[key]" not in response
+    assert response.count("__galaxyCarrierLaneRadius") == 1
+
+
+@requires_node
+def test_local_gravity_zero_endpoint_is_finite_and_scales_kinematic_cache() -> None:
+    """Local gravity's zero endpoint must remain reversible in both live and fallback paths."""
+    report = _run_node(
+        """
+        const scale = I.galaxyImmediateLocalGravityRadiusScale;
+        emit({ zero: scale(0), quarter: scale(.25), one: scale(1), two: scale(2),
+          zeroToOne: scale(1) / scale(0), oneToZero: scale(0) / scale(1) });
+        """
+    )
+    assert all(math.isfinite(report[key]) for key in ("zero", "quarter", "one", "two"))
+    assert report["zero"] == pytest.approx(report["quarter"])
+    assert report["zero"] > report["one"] > report["two"]
+    assert report["zeroToOne"] * report["oneToZero"] == pytest.approx(1)
+
+    source = ASSET.read_text(encoding="utf-8")
+    start = source.index("if (localGChanged")
+    end = source.index("if (state.settings.mode === 'galaxy')", start)
+    response = source[start:end]
+    assert "__galaxyKinematicLocalOrbit" in response
+    assert "__galaxyKinematicCoreLocalOrbit" in response
+    assert "baseRadius" in response and "radius" in response
+
+
+@requires_node
+def test_physics_snapshot_is_cached_after_build() -> None:
+    """The first built physics snapshot must populate the same-step cache."""
+    report = _run_engine(
+        """
+        const api = G.create(el, {});
+        api.setPreset('galaxy');
+        api.setData({ nodes: [
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            system_anchor_id: 'black-hole', gravity_mass: 8, radius: 8, x: 0, y: 0 },
+          { id: 'star', anchor_role: 'community', community_id: 'solar',
+            system_anchor_id: 'star', gravity_mass: 4, radius: 5, x: 120, y: 0 },
+        ], edges: [] });
+        const first = api.getPhysicsSnapshot();
+        const second = api.getPhysicsSnapshot();
+        emit({ same: first === second, center: second.center && second.center.id,
+          nodes: second.nodes.length });
+        """
+    )
+    assert report == {"same": True, "center": "black-hole", "nodes": 2}
 
 
 @requires_node
@@ -2409,7 +2466,12 @@ def test_advanced_spacetime_controls_pause_live_orbits_and_drag_release_is_bound
     report = _run_engine(
         """
         let released = null;
-        const api = G.create(el, { onSlingshotRelease: value => { released = value; } });
+        let callbackSnapshot = null;
+        let api;
+        api = G.create(el, { onSlingshotRelease: value => {
+          released = value;
+          callbackSnapshot = api.getPhysicsSnapshot();
+        } });
         api.setData({ nodes: [
           { id: 'custom-heavy-center-kappa', anchor_role: 'global', community_id: 'core', gravity_mass: 32,
             radius: 8, x: 0, y: 0, vx: 0, vy: 0 },
@@ -2436,7 +2498,7 @@ def test_advanced_spacetime_controls_pause_live_orbits_and_drag_release_is_bound
         engineWindowListeners.pointermove(event(node.x + 6, node.y, 10));
         engineWindowListeners.pointermove(event(node.x + 18, node.y, 34));
         engineWindowListeners.pointerup(event(node.x + 18, node.y, 35));
-        emit({ paused, live: api.physicsDiagnostics(), released,
+        emit({ paused, live: api.physicsDiagnostics(), released, callbackSnapshot,
           snapshot: api.getPhysicsSnapshot(), node: { vx: node.vx, vy: node.vy, fx: node.fx, fy: node.fy } });
         """
     )
@@ -2473,6 +2535,12 @@ def test_advanced_spacetime_controls_pause_live_orbits_and_drag_release_is_bound
     assert 0 < report["released"]["speed"] <= 24
     assert report["node"].get("fx") is report["node"].get("fy") is None
     assert [report["node"]["vx"], report["node"]["vy"]] == pytest.approx(
+        [report["released"]["vx"], report["released"]["vy"]]
+    )
+    assert report["callbackSnapshot"]["slingshot"] == report["released"]
+    callback_node = next(node for node in report["callbackSnapshot"]["nodes"]
+                         if node["id"] == "dragged")
+    assert [callback_node["vx"], callback_node["vy"]] == pytest.approx(
         [report["released"]["vx"], report["released"]["vy"]]
     )
     assert report["snapshot"]["slingshot"] == report["released"]
@@ -5582,9 +5650,10 @@ def test_dragging_connected_core_node_over_black_hole_keeps_the_annulus_stable(
           dragPull = Math.max(dragPull, tick.dragGravity.maximumPull);
           fixedSystemNodes += tick.blackHoleExclusion.fixedSystemNodes;
           skippedFixedEndpoint += tick.relationConstraint.skippedFixedEndpoint;
+          const anchorRadius = nodes[0].radius * (nodes[0].anchor_role === 'global' ? 2 : 1);
           nodes.slice(1).forEach(node => {
             minimumClearance = Math.min(minimumClearance,
-              Math.hypot(node.x, node.y) - nodes[0].radius - node.radius
+              Math.hypot(node.x, node.y) - anchorRadius - node.radius
                 - options.blackHoleExclusionPadding);
           });
           nodes.slice(2, 4).forEach((node, index) => {
@@ -5611,7 +5680,8 @@ def test_dragging_connected_core_node_over_black_hole_keeps_the_annulus_stable(
            drag. This is the former 400-slice runaway: a skipped fixed system let followers
            drift hundreds of units out, then snap back only after release. */
         if (externalSystem) {
-          const startRadius = nodes[0].radius + dragged.radius + options.blackHoleExclusionPadding;
+          const anchorRadius = nodes[0].radius * (nodes[0].anchor_role === 'global' ? 2 : 1);
+          const startRadius = anchorRadius + dragged.radius + options.blackHoleExclusionPadding;
           const endRadius = envelope + 320;
           for (let step = 0; step < 400; step++) {
             const before = nodes.slice(2, 4).map(node => [node.x, node.y]);
@@ -5629,7 +5699,7 @@ def test_dragging_connected_core_node_over_black_hole_keeps_the_annulus_stable(
             skippedFixedEndpoint += tick.relationConstraint.skippedFixedEndpoint;
             nodes.slice(1).forEach(node => {
               minimumClearance = Math.min(minimumClearance,
-                Math.hypot(node.x, node.y) - nodes[0].radius - node.radius
+                Math.hypot(node.x, node.y) - anchorRadius - node.radius
                   - options.blackHoleExclusionPadding);
             });
             nodes.slice(2, 4).forEach((node, index) => {
@@ -5666,7 +5736,8 @@ def test_dragging_connected_core_node_over_black_hole_keeps_the_annulus_stable(
           centreHeld, held, released: [dragged.x, dragged.y],
           anchor: [nodes[0].x, nodes[0].y, nodes[0].vx, nodes[0].vy],
           draggedRadius: Math.hypot(centreHeld[0], centreHeld[1]),
-          paintedHorizon: nodes[0].radius + dragged.radius + options.blackHoleExclusionPadding,
+          paintedHorizon: (nodes[0].radius * (nodes[0].anchor_role === 'global' ? 2 : 1))
+            + dragged.radius + options.blackHoleExclusionPadding,
         });
         """
     )
@@ -8482,7 +8553,7 @@ def test_galaxy_is_default_and_consumes_the_complete_scene_contract() -> None:
         """
     )
     assert report["mode"] == "galaxy"
-    assert report["settings"] == {"repel": 100, "link": 8, "gravity": 96}
+    assert report["settings"] == {"repel": 100, "link": 8, "gravity": 120}
     assert report["sizeBy"] == "mass"
     assert report["forces"] == {
         "charge": True,
@@ -8503,8 +8574,8 @@ def test_galaxy_is_default_and_consumes_the_complete_scene_contract() -> None:
     assert report["d3Budget"] == [0, 0, 0]
     assert report["diagnostics"]["timestep"] == pytest.approx(0.032)
     assert report["diagnostics"]["velocityDecay"] == pytest.approx(0.00005)
-    assert report["diagnostics"]["gravitySetting"] == 96
-    assert report["diagnostics"]["blackHoleGravity"] == pytest.approx(1615.3424319876754)
+    assert report["diagnostics"]["gravitySetting"] == 120
+    assert report["diagnostics"]["blackHoleGravity"] == pytest.approx(2317.2923076923075)
     assert report["diagnostics"]["localGravity"] == pytest.approx(240)
     assert report["diagnostics"]["linkSetting"] == 8
     assert report["diagnostics"]["relationOrbitScale"] == pytest.approx(0.25)
@@ -10379,10 +10450,10 @@ def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
         assert asset not in markup
     assert 'id="graph-repel" type="range" min="0" max="400" value="100"' in markup
     assert 'id="graph-link" type="range" min="4" max="80" value="8"' in markup
-    assert 'id="graph-gravity" type="range" min="0" max="400" value="96"' in markup
+    assert 'id="graph-gravity" type="range" min="0" max="400" value="120"' in markup
     assert "{ id: 'graph-repel', key: 'repel', fallback: 100 }" in source
     assert "{ id: 'graph-link', key: 'link', fallback: 8 }" in source
-    assert "{ id: 'graph-gravity', key: 'gravity', fallback: 96 }" in source
+    assert "{ id: 'graph-gravity', key: 'gravity', fallback: 120 }" in source
 
     loader_start = source.index("function ensureGraphAssets")
     loader = source[
@@ -10936,6 +11007,78 @@ def test_slider_burst_reasserts_contact_invariant_when_galaxy_is_frozen() -> Non
     assert report["starClearance"] >= -1e-9
     assert report["planetClearance"] >= -1e-9
     assert report["finite"] is True
+
+
+@requires_node
+def test_central_slider_scales_the_cached_global_kinematic_radius() -> None:
+    """A central-field slider move must update the carrier clock as well as painted lanes."""
+    report = _run_engine(
+        """
+        const api = G.create(el, { reducedMotion: () => false });
+        api.setPreset('galaxy');
+        api.setData({
+          nodes: [
+            { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+              system_anchor_id: 'black-hole', gravity_mass: 64, visual_radius: 8,
+              x: 0, y: 0, vx: 0, vy: 0 },
+            { id: 'star', anchor_role: 'community', community_id: 'outer',
+              system_anchor_id: 'star', gravity_mass: 8, visual_radius: 5,
+              x: 120, y: 0, vx: 0, vy: 0 },
+            { id: 'planet', community_id: 'outer', system_anchor_id: 'star',
+              orbit_tier: 1, gravity_mass: 1, visual_radius: 3,
+              x: 150, y: 0, vx: 0, vy: 0 },
+          ],
+          edges: [{ source: 'star', target: 'planet', layer: 'entity' }],
+        });
+        const nodes = store.graphData.nodes;
+        const star = nodes.find(node => node.id === 'star');
+        I.advanceGalaxyKinematicOrbits(nodes, {
+          gravity: 48, gravitationalConstant: 1, blackHoleMass: 1,
+          softening: 32, centralSoftening: 40, localSoftening: 12,
+          orbitalSpeed: 100, layoutSeed: 19, timestep: .032,
+        });
+        const before = star.__galaxyKinematicGlobalOrbit;
+        const beforeBaseRadius = before.baseRadius;
+        const beforeRadius = before.radius;
+        const expectedRatio = I.galaxyImmediateGravityRadiusScale(48, {
+          gravitationalConstant: 2, blackHoleMass: 1,
+        }) / I.galaxyImmediateGravityRadiusScale(48, {
+          gravitationalConstant: 1, blackHoleMass: 1,
+        });
+        api.setSettings({ gravitationalConstant: 2 });
+        const after = star.__galaxyKinematicGlobalOrbit;
+        emit({ expectedRatio, baseRatio: after.baseRadius / beforeBaseRadius,
+          radiusRatio: after.radius / beforeRadius,
+          finite: [after.baseRadius, after.radius].every(Number.isFinite) });
+        """
+    )
+    assert report["finite"] is True
+    assert report["baseRatio"] == pytest.approx(report["expectedRatio"], rel=1e-9), report
+    assert report["radiusRatio"] == pytest.approx(report["expectedRatio"], rel=1e-9), report
+
+
+@requires_node
+def test_zero_central_gravity_uses_a_bounded_cached_radius_response() -> None:
+    """The zero central-field endpoint must not expand kinematic lanes past the envelope."""
+    report = _run_node(
+        """
+        const neutral = I.galaxyImmediateGravityRadiusScale(48, {
+          gravitationalConstant: 2, blackHoleMass: 1,
+        });
+        const zero = I.galaxyImmediateGravityRadiusScale(48, {
+          gravitationalConstant: 0, blackHoleMass: 1,
+        });
+        const zeroMass = I.galaxyImmediateGravityRadiusScale(48, {
+          gravitationalConstant: 0, blackHoleMass: 0,
+        });
+        emit({ neutral, zero, zeroMass, ratio: zero / neutral,
+          finite: [neutral, zero, zeroMass].every(Number.isFinite) });
+        """
+    )
+    assert report["finite"] is True
+    assert report["ratio"] == pytest.approx(1.25, rel=1e-9)
+    assert report["zero"] == pytest.approx(report["zeroMass"], rel=1e-9)
+    assert report["ratio"] < 2.0
 
 
 
@@ -11973,6 +12116,39 @@ def test_every_node_worker_consumes_all_full_mode_spacetime_controls() -> None:
 
 
 @requires_node
+def test_managed_live_carrier_uses_physical_velocity_target() -> None:
+    """Packed lanes may floor their painted phase, but live velocity stays physical."""
+    report = _run_node(
+        """
+        const nodes = [
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            system_anchor_id: 'black-hole', gravity_mass: 16, radius: 8,
+            x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'outer-star', anchor_role: 'community', community_id: 'outer',
+            system_anchor_id: 'outer-star', gravity_mass: 6, radius: 5,
+            x: 500, y: 0, vx: 0, vy: 0 },
+        ];
+        Object.defineProperty(nodes[1], '__galaxyCarrierLaneManaged', {
+          value: true, writable: true, configurable: true,
+        });
+        const options = {
+          gravity: 48, gravitationalConstant: 2, blackHoleMass: 1,
+          softening: 32, centralSoftening: 40, orbitalSpeed: 101,
+          layoutSeed: 19, timestep: 1, speedLimit: 48,
+        };
+        const radius = Math.hypot(nodes[1].x, nodes[1].y);
+        const field = I.galaxyBlackHoleField(nodes, options);
+        const physical = I.galaxyAuthoredCarrierTargetSpeed(field, radius, options.orbitalSpeed);
+        I.applyGalaxyOrbitalSpeedControl(nodes, options);
+        const actual = Math.hypot(nodes[1].vx, nodes[1].vy);
+        emit({ actual, physical, phaseFloor: radius * 0.039 });
+        """
+    )
+    assert report["physical"] < report["phaseFloor"], report
+    assert report["actual"] == pytest.approx(report["physical"], rel=1e-9), report
+
+
+@requires_node
 def test_live_orbit_phase_uses_the_budgeted_relative_speed() -> None:
     """Live phase advancement must agree with the capped velocity it emits."""
     report = _run_node(
@@ -12006,6 +12182,87 @@ def test_live_orbit_phase_uses_the_budgeted_relative_speed() -> None:
 
 
 @requires_node
+def test_live_orbit_phase_refreshes_when_local_gravity_changes() -> None:
+    """A local-gravity slider move must invalidate the retained local speed budget."""
+    report = _run_node(
+        """
+        const nodes = [
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            system_anchor_id: 'black-hole', gravity_mass: 16, radius: 8,
+            x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'star', anchor_role: 'community', community_id: 'solar',
+            system_anchor_id: 'star', gravity_mass: 6, radius: 5,
+            x: 120, y: 0, vx: 0, vy: 0 },
+          { id: 'planet', community_id: 'solar', system_anchor_id: 'star',
+            orbit_tier: 1, gravity_mass: 1, radius: 2,
+            x: 150, y: 0, vx: 0, vy: 0 },
+        ];
+        const options = {
+          gravity: 48, softening: 32, centralSoftening: 40,
+          localGravitySetting: 48, localGravitationalConstant: 1,
+          orbitalSpeed: 400, layoutSeed: 19, timestep: 1, speedLimit: 48,
+        };
+        I.applyGalaxyOrbitalSpeedControl(nodes, options);
+        const first = nodes[2].__galaxySpeedControlPhase;
+        const firstSpeed = first.localSpeed;
+        I.applyGalaxyOrbitalSpeedControl(nodes, {
+          ...options, localGravitationalConstant: 4,
+        });
+        const second = nodes[2].__galaxySpeedControlPhase;
+        emit({ firstSpeed, secondSpeed: second.localSpeed,
+           cachedGravityMultiplier: second.localGravityMultiplier,
+           changed: Math.abs(second.localSpeed - firstSpeed) > 1e-6,
+           increased: second.localSpeed > firstSpeed + 1e-6 });
+        """
+    )
+    assert report["cachedGravityMultiplier"] == pytest.approx(4)
+    assert report["changed"] is True, report
+    assert report["increased"] is True, report
+
+
+@requires_node
+def test_live_nested_orbit_reserves_only_the_descendant_headroom() -> None:
+    """Adding a moon must not collapse its planet to the former fixed 5% speed cap."""
+    report = _run_node(
+        """
+        const trial = withMoon => {
+          const nodes = [
+            { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+              system_anchor_id: 'black-hole', gravity_mass: 16, radius: 8,
+              x: 0, y: 0, vx: 0, vy: 0 },
+            { id: 'star', anchor_role: 'community', community_id: 'solar',
+              system_anchor_id: 'star', gravity_mass: 6, radius: 5,
+              x: 120, y: 0, vx: 0, vy: 0 },
+            { id: 'planet', community_id: 'solar', system_anchor_id: 'star',
+              orbit_tier: 1, orbit_radius: 30, gravity_mass: 1, radius: 2,
+              x: 150, y: 0, vx: 0, vy: 0 },
+          ];
+          if (withMoon) nodes.push({ id: 'moon', community_id: 'solar',
+            system_anchor_id: 'planet', orbit_tier: 2, orbit_radius: 8,
+            gravity_mass: .5, radius: 1, x: 158, y: 0, vx: 0, vy: 0 });
+          I.applyGalaxyOrbitalSpeedControl(nodes, {
+            gravity: 48, softening: 32, centralSoftening: 40,
+            localGravitySetting: 48, orbitalSpeed: 100, layoutSeed: 19,
+            timestep: .032, speedLimit: 48,
+          });
+          const star = nodes[1], planet = nodes[2], moon = nodes[3];
+          return {
+            planetRelativeSpeed: Math.hypot(planet.vx - star.vx, planet.vy - star.vy),
+            moonRelativeSpeed: moon
+              ? Math.hypot(moon.vx - planet.vx, moon.vy - planet.vy) : null,
+            maximumSpeed: Math.max(...nodes.map(node => Math.hypot(node.vx, node.vy))),
+          };
+        };
+        emit({ without: trial(false), withMoon: trial(true) });
+        """
+    )
+    assert report["withMoon"]["planetRelativeSpeed"] \
+        > report["without"]["planetRelativeSpeed"] * 0.9, report
+    assert report["withMoon"]["moonRelativeSpeed"] > 0, report
+    assert report["withMoon"]["maximumSpeed"] <= 48 + 1e-9, report
+
+
+@requires_node
 def test_kinematic_carrier_is_capped_before_local_motion_budgeting() -> None:
     report = _run_node(
         """
@@ -12033,6 +12290,43 @@ def test_kinematic_carrier_is_capped_before_local_motion_budgeting() -> None:
     assert report["finite"] is True
     assert report["carrierSpeed"] <= 48 + 1e-9
     assert report["localSpeed"] <= 48 + 1e-9
+
+
+@requires_node
+def test_kinematic_nested_orbits_respect_the_world_speed_limit() -> None:
+    report = _run_node(
+        """
+        const nodes = [
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            system_anchor_id: 'black-hole', gravity_mass: 8, radius: 8,
+            x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'star', anchor_role: 'community', community_id: 'solar',
+            system_anchor_id: 'star', gravity_mass: 4, radius: 5,
+            x: 120, y: 0, vx: 0, vy: 0 },
+          { id: 'planet', community_id: 'solar', system_anchor_id: 'star',
+            orbit_tier: 1, gravity_mass: 1, radius: 2,
+            x: 150, y: 0, vx: 0, vy: 0 },
+          { id: 'moon', community_id: 'solar', system_anchor_id: 'planet',
+            orbit_tier: 2, gravity_mass: .5, radius: 1,
+            x: 154, y: 0, vx: 0, vy: 0 },
+        ];
+        const options = {
+          gravity: 48, softening: 32, centralSoftening: 40, localSoftening: 12,
+          orbitalSpeed: 400, layoutSeed: 19, timestep: .032, speedLimit: 48,
+        };
+        I.advanceGalaxyKinematicOrbits(nodes, options);
+        emit({ maximumSpeed: Math.max(...nodes.map(node => Math.hypot(node.vx, node.vy))),
+          moonSpeed: Math.hypot(nodes[3].vx, nodes[3].vy),
+          moonRelativeSpeed: Math.hypot(nodes[3].vx - nodes[2].vx,
+            nodes[3].vy - nodes[2].vy),
+          finite: nodes.every(node =>
+            [node.x, node.y, node.vx, node.vy].every(Number.isFinite)) });
+        """
+    )
+    assert report["finite"] is True
+    assert report["maximumSpeed"] <= 48 + 1e-9, report
+    assert report["moonSpeed"] <= 48 + 1e-9, report
+    assert report["moonRelativeSpeed"] > 0, report
 
 
 @requires_node
