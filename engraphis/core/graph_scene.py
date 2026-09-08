@@ -790,11 +790,28 @@ def _community_positions(
             remaining -= take
             curr_radius += tier_step
 
+        # Homogeneous systems can share a true tier-local lattice: using the actual slot
+        # count keeps every lane's angular gaps consistent and avoids radial fallback when
+        # several similarly sized systems sit close to the core.  Heterogeneous envelopes
+        # retain the scene-wide low-discrepancy carrier so a large system does not create a
+        # regular angular wall for the smaller systems.  A three-or-more-tier scene is also
+        # compact enough that local lane spacing is the safer choice even with modest size
+        # variation.
+        non_global_radii = [
+            _clamp(_finite_float(c.get("radius"), 36.0), 36.0, 10_000.0)
+            for c in non_global
+        ]
+        homogeneous_envelopes = (
+            max(non_global_radii, default=0.0) - min(non_global_radii, default=0.0)
+            <= max(2.0, avg_sys_radius * 0.08)
+        )
+        use_tier_local_slots = len(tiers) >= 3 or homogeneous_envelopes
+
         sys_idx = 0
-        for tier_info in tiers:
+        for tier_index, tier_info in enumerate(tiers):
             t_rad = float(tier_info["radius"])
             t_count = int(tier_info["count"])
-            for _ in range(t_count):
+            for tier_slot in range(t_count):
                 community = non_global[sys_idx]
                 community_id = str(community["id"])
                 system_radius = _clamp(
@@ -810,8 +827,20 @@ def _community_positions(
                 radial_jitter = 0.96 + (
                     int.from_bytes(digest[4:8], "big") / float(1 << 32)
                 ) * 0.08
-                golden_angle = base_phase + sys_idx * GOLDEN_ANGLE_RAD
-                angle = golden_angle + angular_jitter
+                if use_tier_local_slots:
+                    tier_phase = base_phase + tier_index * math.tau / 12.0
+                    # Use the tier's actual slot count rather than continuing the previous
+                    # tier's golden-angle rank; the deterministic phase keeps the lanes
+                    # visually distinct while the exact local lattice prevents radial
+                    # fallback from an ID-dependent jitter collapse.
+                    angle = (
+                        tier_phase
+                        + tier_slot * math.tau / max(1, t_count)
+                    )
+                else:
+                    # Mixed-size two-tier scenes keep a scene-wide low-discrepancy carrier so
+                    # the angular distribution remains stable across unequal envelopes.
+                    angle = base_phase + sys_idx * GOLDEN_ANGLE_RAD + angular_jitter
 
                 # ``preferred_targets`` applies the user-facing compactness scale below.
                 # Tier radii are already physical lane coordinates, so compensate here or a

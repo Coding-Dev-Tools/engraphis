@@ -1313,6 +1313,33 @@ def test_community_spiral_packs_compact_preferred_targets_without_envelope_overl
     assert max(x_span, y_span) < 4800.0
 
 
+def test_community_tiers_use_actual_slot_counts_for_homogeneous_lanes():
+    communities = [
+        {"id": "core", "mass": 100.0, "radius": 50.0},
+        *[
+            {"id": f"system-{index:02d}", "mass": 99.0 - index, "radius": 36.0}
+            for index in range(24)
+        ],
+    ]
+
+    positions, hints = graph_scene_module._community_positions(
+        communities, "core", 7, spacing=78.0
+    )
+    repeated = graph_scene_module._community_positions(
+        communities, "core", 7, spacing=78.0
+    )
+    assert (positions, hints) == repeated
+
+    radial_shifts = [
+        math.hypot(*positions[community["id"]])
+        - hints[community["id"]]["galactic_preferred_radius"]
+        for community in communities[1:]
+    ]
+    assert max(radial_shifts) < 5.0
+    assert max(math.hypot(*positions[community["id"]]) for community in communities[1:]) < 300.0
+    assert not any(hints[community["id"]]["galactic_overlap"] for community in communities)
+
+
 def test_community_spiral_spatial_traversal_is_subquadratic(monkeypatch):
     calls = 0
     original_hypot = math.hypot
