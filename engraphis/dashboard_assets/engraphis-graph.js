@@ -319,7 +319,6 @@
   const GALAXY_ORBITAL_SPEED_RESPONSE_GAIN = 0.5;
   const GALAXY_ORBITAL_SPEED_MAXIMUM = 4.6;
   const GALAXY_ORBITAL_RADIUS_MAXIMUM = 1.06;
-  const GALAXY_BASE_ORBITAL_SPEED_BOOST = 1.625;
   function galaxyOrbitalSpeedMultiplier(setting) {
     const raw = Number(setting);
     const value = Number.isFinite(raw)
@@ -746,10 +745,9 @@
     const circularSpeed = Math.sqrt(Math.max(0, acceleration * localRadius));
     const multiplier = Math.max(0, Number(orbitalSpeed) || 0);
     return kinematicCap
-      ? Math.min(circularSpeed * GALAXY_BASE_ORBITAL_SPEED_BOOST * multiplier,
+      ? Math.min(circularSpeed * multiplier,
         GALAXY_LOCAL_RELATIVE_SPEED_LIMIT * multiplier)
-      : Math.min(GALAXY_LOCAL_RELATIVE_SPEED_LIMIT, circularSpeed)
-        * GALAXY_BASE_ORBITAL_SPEED_BOOST * multiplier;
+      : Math.min(GALAXY_LOCAL_RELATIVE_SPEED_LIMIT, circularSpeed) * multiplier;
   }
 
   /* The classic renderer's *dense* signal (`GPERF.dense`, `links>1500` in dashboard.js). Past
@@ -1230,7 +1228,7 @@
           || ((seededHash(opts.layoutSeed, 'system:' + String(parent.id)) & 1) ? 1 : -1);
         const targetTangent = galaxyRelativeSpeedBudget(parent, absoluteSpeedLimit,
           Math.min(GALAXY_LOCAL_RELATIVE_SPEED_LIMIT,
-            Math.sqrt(Math.max(0, acceleration * radius)) * GALAXY_BASE_ORBITAL_SPEED_BOOST * orbitalSpeed),
+            Math.sqrt(Math.max(0, acceleration * radius)) * orbitalSpeed),
           tangentX * sign, tangentY * sign);
         const parentId = String(parent.id);
         const previousParent = typeof node.__galaxyOrbitAnchorId === 'string'
@@ -3428,12 +3426,13 @@
       const globalSpeed = omega * orbit.radius;
       const globalVx = -Math.sin(orbit.angle) * globalSpeed * direction;
       const globalVy = Math.cos(orbit.angle) * globalSpeed * direction;
-      moveNode(star, targetX, targetY, globalVx, globalVy);
+      // Initialize local phases against the old parent frame before moving the carrier.
       const localMotion = advanceGalaxyKinematicLocalMembers(members, star, {
         x: targetX, y: targetY, vx: globalVx, vy: globalVy,
       }, item.core ? Object.assign({}, opts, {
         localOrbitCache: '__galaxyKinematicCoreLocalOrbit',
       }) : opts);
+      moveNode(star, targetX, targetY, globalVx, globalVy);
       satellites += localMotion.satellites;
       speedCapped = speedCapped || localMotion.speedCapped;
       const carrierContact = nodeRadius(anchor) + nodeRadius(star)
@@ -4551,8 +4550,20 @@
     const maximumExtents = new Map(systems.map(system => [
       system, galaxySystemMaximumEnvelopeRadius(system, opts),
     ]));
-    systems.sort((left, right) => maximumExtents.get(right) - maximumExtents.get(left)
+    /* Rigid translations and rotations introduce a few ulps in otherwise equal envelopes.
+       Use stable precision only for ordering, so numerical noise cannot move a system to a
+       different ring. Keep exact extents for every safety reservation below. */
+    const extentOrder = new Map(systems.map(system => [
+      system, Number(maximumExtents.get(system).toPrecision(12)),
+    ]));
+    systems.sort((left, right) => extentOrder.get(right) - extentOrder.get(left)
       || String(left.id).localeCompare(String(right.id)));
+    const remainingExtents = new Array(systems.length);
+    let maximumRemainingExtent = 0;
+    for (let index = systems.length - 1; index >= 0; index--) {
+      maximumRemainingExtent = Math.max(maximumRemainingExtent, maximumExtents.get(systems[index]));
+      remainingExtents[index] = maximumRemainingExtent;
+    }
     const blackHoleBodyRadius = finitePositive(anchor.radius,
       evidenceNodeRadius(anchor, 3), 160);
     /* Runtime horizon projection paints the explicit global anchor at twice its body radius.
@@ -4567,7 +4578,7 @@
       /* Reserve the maximum nested local envelope, then keep a small independent lane margin.
          This remains collision-free when the orbital-speed control reaches its maximum. */
       const laneSlack = GALAXY_CARRIER_LANE_SLACK;
-      const laneExtent = maximumExtents.get(systems[cursor]) * laneSlack;
+      const laneExtent = remainingExtents[cursor] * laneSlack;
       let laneRadius = Math.max(coreRadius + laneExtent + gap
         + GALAXY_BLACK_HOLE_EXCLUSION_PADDING,
       previousLaneRadius + previousLaneExtent + laneExtent + gap);
@@ -4588,8 +4599,7 @@
         'carrier-ring:' + String(laneIndex)) / 0x100000000 * Math.PI * 2;
       for (let slot = 0; slot < count; slot++) {
         const system = systems[cursor + slot];
-        /* Re-evaluate with the largest member of the next lane only; sorting makes every
-           remaining extent no larger than this ring's conservative laneExtent. */
+        // The exact remaining maximum also covers larger members within an ordering tie.
         const angle = phaseOffset + slot * Math.PI * 2 / count;
         const unitX = Math.cos(angle), unitY = Math.sin(angle);
       const shiftX = anchor.x + unitX * laneRadius - system.x;
@@ -6475,19 +6485,9 @@
         phase.angle += phase.direction * angularSpeed * timestep;
         const unitX = Math.cos(phase.angle), unitY = Math.sin(phase.angle);
         const tangentX = -unitY * phase.direction, tangentY = unitX * phase.direction;
-        let targetX = parent.x + unitX * targetRadius;
-        let targetY = parent.y + unitY * targetRadius;
-        if (globalAnchor && parent !== globalAnchor) {
-          const minBhDist = (finitePositive(globalAnchor.radius, evidenceNodeRadius(globalAnchor, 3), 160) * GALAXY_BLACK_HOLE_PAINT_SCALE)
-            + nodeRadius + GALAXY_BLACK_HOLE_EXCLUSION_PADDING;
-          const bhDx = targetX - globalAnchor.x;
-          const bhDy = targetY - globalAnchor.y;
-          const bhDist = Math.hypot(bhDx, bhDy);
-          if (bhDist < minBhDist && bhDist > 1e-9) {
-            targetX = globalAnchor.x + (bhDx / bhDist) * minBhDist;
-            targetY = globalAnchor.y + (bhDy / bhDist) * minBhDist;
-          }
-        }
+        // The final black-hole exclusion pass translates the complete system together.
+        const targetX = parent.x + unitX * targetRadius;
+        const targetY = parent.y + unitY * targetRadius;
         const targetVx = (Number.isFinite(parent.vx) ? parent.vx : 0)
           + tangentX * phaseSpeed;
         const targetVy = (Number.isFinite(parent.vy) ? parent.vy : 0)
