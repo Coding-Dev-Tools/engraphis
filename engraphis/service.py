@@ -2485,7 +2485,7 @@ class MemoryService:
                     derived_facts += count
                     if note:
                         file_warnings.append(note)
-                except (OSError, ValueError) as exc:
+                except (OSError, ValueError, sqlite3.Error) as exc:
                     logger.warning("fact derivation failed for one file (%s)",
                                    type(exc).__name__)
                     file_warnings.append("fact derivation failed")
@@ -2624,7 +2624,7 @@ class MemoryService:
                     derived_facts += count
                     if note:
                         file_warnings.append(note)
-                except (OSError, ValueError) as exc:
+                except (OSError, ValueError, sqlite3.Error) as exc:
                     logger.info("uploaded resource fact derivation failed (%s)",
                                 type(exc).__name__)
                     file_warnings.append("fact derivation failed")
