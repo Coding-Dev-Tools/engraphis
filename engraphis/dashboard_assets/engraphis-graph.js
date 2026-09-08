@@ -3351,7 +3351,9 @@
       return speed / Math.max(1e-6, radius);
     };
     const boundedRadius = (radius, extent) => {
-      const inner = nodeRadius(anchor) + Math.max(0, extent)
+      const paintedAnchorRadius = nodeRadius(anchor)
+        * (anchor.anchor_role === 'global' ? GALAXY_BLACK_HOLE_PAINT_SCALE : 1);
+      const inner = paintedAnchorRadius + Math.max(0, extent)
         + GALAXY_BLACK_HOLE_EXCLUSION_PADDING;
       const outer = Math.max(inner, (Number(envelope.envelopeRadius) || inner) - Math.max(0, extent));
       return Math.max(inner, Math.min(outer, radius));
@@ -11501,6 +11503,7 @@
     }
     if (visibilityDocument && typeof visibilityDocument.addEventListener === 'function') {
       const handleVisibility = () => {
+        invalidatePhysicsSnapshot();
         if (pageHidden()) cancelGalaxyDynamics(true);
         else scheduleGalaxyDynamics(true);
       };
