@@ -813,7 +813,12 @@ def _community_positions(
                 golden_angle = base_phase + sys_idx * GOLDEN_ANGLE_RAD
                 angle = golden_angle + angular_jitter
 
-                nominal_r = max(core_clearance_radius, t_rad * radial_jitter)
+                # ``preferred_targets`` applies the user-facing compactness scale below.
+                # Tier radii are already physical lane coordinates, so compensate here or a
+                # compactness of 0.192 would shrink every tier back through the core floor and
+                # make the collision walk, rather than the tier plan, choose the lanes.
+                physical_tier_radius = max(core_clearance_radius, t_rad * radial_jitter)
+                nominal_r = physical_tier_radius / max(clean_radius_scale, 1e-9)
                 specs.append({
                     "id": community_id,
                     "system_radius": system_radius,
