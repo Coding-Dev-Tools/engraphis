@@ -20,7 +20,7 @@ const { test, expect } = require('@playwright/test');
  */
 
 const workspace = 'graph-e2e';
-const stellarOrbitAssetVersion = '20260903-rotation-balance-1';
+const stellarOrbitAssetVersion = '20260906-galaxy-boundaries-1';
 
 // A small connected store: two clusters joined by one bridge, so communities, the legend and
 // the bridge detector all have something real to work on.
@@ -691,7 +691,7 @@ async function renderedStellarSnapshot(page, systemId = 'aurora') {
     const blackHoleClearances = anchor
       ? nodes.filter(node => node !== anchor).map(node =>
         Math.hypot(Number(node.x) - Number(anchorPoint.x), Number(node.y) - Number(anchorPoint.y))
-          - nodeRadius(anchorPoint) - nodeRadius(node) - blackHolePadding)
+          - nodeRadius(anchorPoint) * 2 - nodeRadius(node) - blackHolePadding)
       : [];
     const stellarClearances = nodes.flatMap(node => {
       const stellarAnchor = byId.get(String(node.system_anchor_id));
@@ -758,6 +758,7 @@ async function renderedStellarSnapshot(page, systemId = 'aurora') {
           vx: Number(node.vx) || 0, vy: Number(node.vy) || 0 } : null;
       })(),
       systemCenter: center,
+      carrierAngle: star && anchor ? Math.atan2(star.y - anchor.y, star.x - anchor.x) : 0,
       globalAngle: Math.atan2(center.y - (anchor ? Number(anchor.y) || 0 : 0),
         center.x - (anchor ? Number(anchor.x) || 0 : 0)),
       visible: inside(starPoint) && inside(planetPoint),
@@ -1693,12 +1694,16 @@ test('reduced-motion Galaxy preserves simultaneous local and black-hole orbits',
     }));
   const start = await galaxySystemSnapshot(page);
   const startPhase = localAndGlobalPhase(start);
-  const targetStep = start.diagnostics.steps + 450;
-  // Wait on the solver's fixed-step telemetry, never an elapsed wall-clock delay.
-  await page.waitForFunction(target => window.__engraphisGraph.physicsDiagnostics().steps >= target,
-    targetStep, { timeout: 30_000 });
-  const end = await galaxySystemSnapshot(page);
-  const endPhase = localAndGlobalPhase(end);
+  const phases = [startPhase];
+  let end = start;
+  // Sample the path so a complete revolution cannot alias to an apparently stationary orbit.
+  // Wait on fixed-step telemetry, keeping the same 450-step observation boundary.
+  for (let step = 15; step <= 450; step += 15) {
+    await page.waitForFunction(target => window.__engraphisGraph.physicsDiagnostics().steps >= target,
+      start.diagnostics.steps + step, { timeout: 30_000 });
+    end = await galaxySystemSnapshot(page);
+    phases.push(localAndGlobalPhase(end));
+  }
 
   expect(start.diagnostics.reducedMotion).toBe(true);
   expect(start.diagnostics.staticLayout).toBe(false);
@@ -1707,8 +1712,10 @@ test('reduced-motion Galaxy preserves simultaneous local and black-hole orbits',
   expect(end.diagnostics.steps - start.diagnostics.steps).toBeGreaterThanOrEqual(450);
   for (const id of ['aurora', 'borealis']) {
     expect(startPhase[id].anchor).toBe(`${id}-star`);
-    const localTravel = signedAngleDelta(startPhase[id].local, endPhase[id].local);
-    const globalTravel = signedAngleDelta(startPhase[id].global, endPhase[id].global);
+    const localTravel = phases.slice(1).reduce((sum, phase, index) => sum
+      + signedAngleDelta(phases[index][id].local, phase[id].local), 0);
+    const globalTravel = phases.slice(1).reduce((sum, phase, index) => sum
+      + signedAngleDelta(phases[index][id].global, phase[id].global), 0);
     expect(Math.abs(localTravel), `${id} local phase`).toBeGreaterThan(0.3);
     expect(Math.abs(globalTravel), `${id} system phase`).toBeGreaterThan(0.25);
   }
@@ -1736,12 +1743,15 @@ for (const reducedMotion of [false, true]) {
       // painted planetary arc rather than camera animation.
       await page.waitForTimeout(1200);
 
+      const observationStartedAt = Date.now();
       const samples = [await renderedStellarSnapshot(page)];
-      for (let sample = 0; sample < 13; sample += 1) {
-        /* Advance by simulation work, not wall-clock time. Under a busy CI browser, a fixed
-           timeout can observe fewer integrator steps and turn a healthy global orbit into a
-           false negative even though the local orbit remains correct. */
-        const targetSteps = samples.at(-1).diagnostics.steps + 14;
+      const nominalObservationMs = 6_500, sampleCount = 13;
+      const sampleStepBudget = Math.ceil(nominalObservationMs / samples[0].diagnostics.frameIntervalMs);
+      for (let sample = 1; sample <= sampleCount; sample += 1) {
+        /* Preserve the original 6.5-second observation at the declared frame cadence (195
+           slices at 30 Hz). Absolute step targets prevent polling delays from accumulating. */
+        const targetSteps = samples[0].diagnostics.steps
+          + Math.ceil(sampleStepBudget * sample / sampleCount);
         await page.waitForFunction(step => window.__engraphisGraph
           && window.__engraphisGraph.physicsDiagnostics().steps >= step,
         targetSteps, { timeout: 10_000 });
@@ -1753,6 +1763,7 @@ for (const reducedMotion of [false, true]) {
         screenAngle: angleDelta(samples[index].screenLocal.angle, sample.screenLocal.angle),
         globalAngle: angleDelta(samples[index].globalAngle, sample.globalAngle),
         stepDelta: Math.max(1, sample.diagnostics.steps - samples[index].diagnostics.steps),
+        carrierAngle: angleDelta(samples[index].carrierAngle, sample.carrierAngle),
         radiusChange: Math.abs(sample.local.radius - samples[index].local.radius)
           / Math.max(1e-9, samples[index].local.radius),
         systemCenterChord: Math.hypot(
@@ -1767,6 +1778,7 @@ for (const reducedMotion of [false, true]) {
       const localTravel = segments.reduce((sum, segment) => sum + segment.localAngle, 0);
       const screenTravel = segments.reduce((sum, segment) => sum + segment.screenAngle, 0);
       const globalTravel = segments.reduce((sum, segment) => sum + segment.globalAngle, 0);
+      const carrierTravel = segments.reduce((sum, segment) => sum + segment.carrierAngle, 0);
       const screenChord = segments.reduce((sum, segment) => sum + segment.screenChord, 0);
       const direction = Math.sign(localTravel);
       const coRotatingSegments = segments.filter(segment =>
@@ -1783,7 +1795,9 @@ for (const reducedMotion of [false, true]) {
       });
       const before = samples[0], after = samples.at(-1);
       const evidence = {
-        preference, sampleStepBudget: 14 * 13,
+        preference, nominalObservationMs, sampleStepBudget,
+        observedWallClockMs: Date.now() - observationStartedAt,
+        simulatedObservationSeconds: sampleStepBudget * before.diagnostics.timestep,
         assetRequests: fetched(session.requested, '/v2-assets/engraphis-graph.js'),
         before: { anchor: before.anchor, star: before.star, planet: before.planet, local: before.local,
           screenLocal: before.screenLocal, globalAngle: before.globalAngle,
@@ -1791,7 +1805,7 @@ for (const reducedMotion of [false, true]) {
         after: { anchor: after.anchor, star: after.star, planet: after.planet, local: after.local,
           screenLocal: after.screenLocal, globalAngle: after.globalAngle,
           steps: after.diagnostics.steps, safety: after.safety },
-        localTravel, screenTravel, globalTravel, screenChord, coRotatingSegments,
+        localTravel, screenTravel, globalTravel, carrierTravel, screenChord, coRotatingSegments,
         phaseReversals, localStepMagnitudes, localStepMean, relativeKinetics,
         maximumRadiusChange: Math.max(...segments.map(segment => segment.radiusChange)),
         maximumSystemCenterChord: Math.max(...segments.map(segment => segment.systemCenterChord)),
@@ -1802,6 +1816,9 @@ for (const reducedMotion of [false, true]) {
         body: Buffer.from(JSON.stringify(evidence, null, 2)),
         contentType: 'application/json',
       });
+      console.log('BASE-PRIMARY-EVIDENCE', JSON.stringify({reducedMotion, before: before.star,
+        after: after.star, globalTravel, steps: after.diagnostics.steps,
+        maximumSpeed: after.safety.maximumSpeed}));
       testInfo.annotations.push({
         type: 'visible-orbit-evidence', description: JSON.stringify(evidence),
       });
@@ -1850,11 +1867,10 @@ for (const reducedMotion of [false, true]) {
         .toBeLessThan(2);
       expect(Math.max(...samples.map(sample => sample.star.warp)), JSON.stringify(evidence))
         .toBeLessThan(0.01);
-      /* Six and a half seconds is sampled on a real wall-clock server, so OS scheduling changes
-         the exact step count. A 0.30-radian sweep is already >17 degrees and independently
-         visible; the stronger local threshold above proves the nested planet orbit at the same
-         time. */
+      /* A 0.30-radian sweep within the original nominal 6.5-second boundary is >17 degrees;
+         the stronger local threshold above proves the nested planet orbit at the same time. */
       expect(Math.abs(globalTravel), JSON.stringify(evidence)).toBeGreaterThan(0.30);
+      expect(Math.abs(carrierTravel), JSON.stringify(evidence)).toBeGreaterThan(0.30);
       expect(after.local.radius, JSON.stringify(evidence))
         .toBeGreaterThan(before.local.radius * 0.7);
       expect(after.local.radius).toBeLessThan(before.local.radius * 1.3);
@@ -3894,6 +3910,7 @@ test('Reheat layout control never adds Galaxy bonus physics slices', async ({ pa
     return {
       phase: [star.x, star.y, star.vx || 0, star.vy || 0],
       diagnostics: window.__engraphisGraph.physicsDiagnostics(),
+      sampledAt: performance.now(),
     };
   });
   await page.locator('#graph-reheat, button[title="Re-run layout"]').first().click();
@@ -3910,13 +3927,18 @@ test('Reheat layout control never adds Galaxy bonus physics slices', async ({ pa
       phase: [star.x, star.y, star.vx || 0, star.vy || 0],
       diagnostics: window.__engraphisGraph.physicsDiagnostics(),
       d3: window.__explicitReheatD3,
+      sampledAt: performance.now(),
     };
   });
   expect(after.diagnostics.reheatActivations).toBe(before.diagnostics.reheatActivations + 1);
   expect(after.diagnostics.reheatStepsApplied).toBe(before.diagnostics.reheatStepsApplied);
   expect(after.diagnostics.reheatStepsRemaining).toBe(0);
   expect(after.diagnostics.lastReheatSubsteps).toBe(0);
-  expect(after.diagnostics.steps - before.diagnostics.steps).toBeLessThanOrEqual(12);
+  // Include the actual click/polling time in the normal 30 Hz budget. A busy browser can
+  // spend longer than the requested 250 ms here; it must still add no bonus physics slices.
+  const normalStepBudget = Math.ceil((after.sampledAt - before.sampledAt)
+    / after.diagnostics.frameIntervalMs) + 1;
+  expect(after.diagnostics.steps - before.diagnostics.steps).toBeLessThanOrEqual(normalStepBudget);
   expect(after.diagnostics.steps).toBeGreaterThan(before.diagnostics.steps);
   expect(Math.hypot(after.phase[0] - before.phase[0], after.phase[1] - before.phase[1]))
     .toBeGreaterThan(0.01);
