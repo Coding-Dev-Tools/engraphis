@@ -875,7 +875,7 @@ test('Ledger narrowly migrates only the legacy Galaxy spacing default', async ({
   await page.goto('/');
   await expect(page.locator('#graph-repel')).toHaveValue('100');
   await expect(page.locator('#graph-link')).toHaveValue('8');
-  await expect(page.locator('#graph-gravity')).toHaveValue('96');
+  await expect(page.locator('#graph-gravity')).toHaveValue('120');
   // A first-time dashboard may use the new HTML default without manufacturing preferences.
   expect(await readPreferences()).toBeNull();
 
@@ -890,7 +890,7 @@ test('Ledger narrowly migrates only the legacy Galaxy spacing default', async ({
   });
   await expect(page.locator('#graph-repel')).toHaveValue('100');
   await expect(page.locator('#graph-link')).toHaveValue('8');
-  await expect(page.locator('#graph-gravity')).toHaveValue('96');
+  await expect(page.locator('#graph-gravity')).toHaveValue('120');
 
   await writePreferences({
     preset: 'galaxy', style: 'solar', tuning: { repel: 48, link: 8, gravity: 0 },
@@ -900,7 +900,7 @@ test('Ledger narrowly migrates only the legacy Galaxy spacing default', async ({
   await expect(page.locator('#graph-repel')).toHaveValue('100');
   await expect(page.locator('#graph-gravity')).toHaveValue('0');
   const migrated = await readPreferences();
-  expect(migrated.physicsVersion).toBe(4);
+  expect(migrated.physicsVersion).toBe(5);
   expect(migrated.preset).toBe('galaxy');
   expect(migrated.style).toBe('solar');
   expect(migrated.tuning.repel).toBe(100);
@@ -911,6 +911,15 @@ test('Ledger narrowly migrates only the legacy Galaxy spacing default', async ({
   });
 
   await writePreferences({
+    preset: 'galaxy', style: 'solar', tuning: { repel: 100, link: 8, gravity: 96 },
+  });
+  await page.reload();
+  await expect(page.locator('#graph-gravity')).toHaveValue('120');
+  const migratedGravity = await readPreferences();
+  expect(migratedGravity.physicsVersion).toBe(5);
+  expect(migratedGravity.tuning.gravity).toBe(120);
+
+  await writePreferences({
     preset: 'galaxy', style: 'galaxy', tuning: { repel: 73, link: 21, gravity: 0 },
   });
   await page.reload();
@@ -918,14 +927,14 @@ test('Ledger narrowly migrates only the legacy Galaxy spacing default', async ({
   await expect(page.locator('#graph-link')).toHaveValue('21');
   await expect(page.locator('#graph-gravity')).toHaveValue('0');
   const custom = await readPreferences();
-  expect(custom.physicsVersion).toBe(4);
+  expect(custom.physicsVersion).toBe(5);
   expect(custom.tuning.repel).toBe(73);
   expect(custom.tuning.link).toBe(21);
   expect(custom.tuning.gravity).toBe(0);
 
   // Once versioned, 48 is a deliberate user selection rather than the retired default.
   await writePreferences({
-    physicsVersion: 4, preset: 'galaxy', tuning: { repel: 48, gravity: 0 },
+    physicsVersion: 5, preset: 'galaxy', tuning: { repel: 48, gravity: 0 },
   });
   await page.reload();
   await expect(page.locator('#graph-repel')).toHaveValue('48');
@@ -1569,7 +1578,7 @@ test('Explore uses the visual explorer controls and applies their state', async 
   await expect(page.locator('#graph-link-label')).toHaveText('Link distance · tight ↔ loose');
   await expect(page.locator('#graph-link')).toHaveValue('8');
   await expect(page.locator('#graph-gravity-label')).toHaveText('Galactic gravity · loose ↔ tight');
-  await expect(page.locator('#graph-gravity')).toHaveValue('96');
+  await expect(page.locator('#graph-gravity')).toHaveValue('120');
   await expect(page.getByRole('button', { name: 'Schema drift' })).toHaveAttribute('aria-pressed', 'true');
   await expect(page.getByRole('button', { name: 'Operations' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'People' })).toBeVisible();

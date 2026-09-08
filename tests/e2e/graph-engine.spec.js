@@ -1752,6 +1752,7 @@ for (const reducedMotion of [false, true]) {
         localAngle: angleDelta(samples[index].local.angle, sample.local.angle),
         screenAngle: angleDelta(samples[index].screenLocal.angle, sample.screenLocal.angle),
         globalAngle: angleDelta(samples[index].globalAngle, sample.globalAngle),
+        stepDelta: Math.max(1, sample.diagnostics.steps - samples[index].diagnostics.steps),
         radiusChange: Math.abs(sample.local.radius - samples[index].local.radius)
           / Math.max(1e-9, samples[index].local.radius),
         systemCenterChord: Math.hypot(
@@ -1794,6 +1795,8 @@ for (const reducedMotion of [false, true]) {
         phaseReversals, localStepMagnitudes, localStepMean, relativeKinetics,
         maximumRadiusChange: Math.max(...segments.map(segment => segment.radiusChange)),
         maximumSystemCenterChord: Math.max(...segments.map(segment => segment.systemCenterChord)),
+        maximumSystemCenterStepDistance: Math.max(...segments.map(segment =>
+          segment.systemCenterChord / segment.stepDelta)),
       };
       await testInfo.attach(`visible-stellar-orbit-${reducedMotion ? 'reduced' : 'normal'}.json`, {
         body: Buffer.from(JSON.stringify(evidence, null, 2)),
@@ -1839,7 +1842,12 @@ for (const reducedMotion of [false, true]) {
       expect(evidence.maximumRadiusChange, JSON.stringify(evidence)).toBeLessThan(0.04);
       expect(Math.max(...relativeKinetics), JSON.stringify(evidence))
         .toBeLessThan(Math.min(...relativeKinetics) * 2);
-      expect(evidence.maximumSystemCenterChord, JSON.stringify(evidence)).toBeLessThan(20);
+      /* The fixed-step wait can observe several extra slices when Playwright polls a busy
+         runner. Normalize the aggregate center chord by the actual step delta so this remains a
+         world-space movement guard instead of a scheduler-timing guard. A 2-unit step bound is
+         still above the 48 * 0.032 emergency-speed displacement and rejects teleportation. */
+      expect(evidence.maximumSystemCenterStepDistance, JSON.stringify(evidence))
+        .toBeLessThan(2);
       expect(Math.max(...samples.map(sample => sample.star.warp)), JSON.stringify(evidence))
         .toBeLessThan(0.01);
       /* Six and a half seconds is sampled on a real wall-clock server, so OS scheduling changes
@@ -1861,7 +1869,7 @@ for (const reducedMotion of [false, true]) {
       expect(diagnostics.renderedNodes).toBe(542);
       expect(before.collapsed).toBe(false);
       expect(before.settings).toMatchObject({
-        mode: 'galaxy', frozen: false, gravity: 96, repel: 100, link: 8,
+        mode: 'galaxy', frozen: false, gravity: 120, repel: 100, link: 8,
       });
       expect(diagnostics.orbitalSeparationSetting).toBe(100);
       expect(diagnostics.orbitalSeparationPadding).toBe(15);
@@ -1869,8 +1877,8 @@ for (const reducedMotion of [false, true]) {
       expect(diagnostics.crossSystemRepulsionStrength).toBe(0);
       expect(diagnostics.linkSetting).toBe(8);
       expect(diagnostics.relationOrbitScale).toBeCloseTo(0.25, 12);
-      expect(diagnostics.gravitySetting).toBe(96);
-      expect(diagnostics.blackHoleGravity).toBeCloseTo(3230.6848639753507, 12);
+      expect(diagnostics.gravitySetting).toBe(120);
+      expect(diagnostics.blackHoleGravity).toBeCloseTo(4634.584615384615, 12);
       expect(diagnostics.localGravity).toBeCloseTo(240, 12);
       expect(diagnostics.systemOrbitSeedSpeedLimit).toBeCloseTo(23.4, 12);
 
@@ -3475,14 +3483,14 @@ test('Galaxy sliders retain full ranges with orbital-speed and radius response',
   expect(naturalOrbits.before.diagnostics.orbitalSeparationStrength).toBe(1);
   expect(fastOrbits.before.diagnostics.orbitalSeparationSetting).toBe(400);
   expect(fastOrbits.before.diagnostics.orbitalSpeedMultiplier).toBeCloseTo(2.5, 12);
-  expect(fastOrbits.before.diagnostics.orbitalRadiusMultiplier).toBeCloseTo(1.24, 12);
+  expect(fastOrbits.before.diagnostics.orbitalRadiusMultiplier).toBeCloseTo(1.06, 12);
   expect(fastOrbits.before.diagnostics.orbitalSeparationPadding).toBe(15);
   expect(fastOrbits.before.diagnostics.orbitalSeparationStrength).toBe(1);
   expect(fastOrbits.before.diagnostics.crossSystemRepulsionStrength).toBe(0);
   expect(fastOrbits.maximumSeparations).toBeGreaterThan(0);
   expect(fastOrbits.starPlanetBefore).toBeGreaterThan(naturalOrbits.starPlanetBefore);
   expect(fastOrbits.starPlanetBefore).toBeCloseTo(
-    naturalOrbits.starPlanetBefore * 1.24, 6,
+    naturalOrbits.starPlanetBefore * 1.06, 6,
   );
   // The local orbit is allowed to settle at the modest radius selected by Orbital speed; the
   // fixed contact cushion remains diagnostics/compatibility telemetry, not the target radius.
@@ -3511,8 +3519,9 @@ test('Galaxy sliders retain full ranges with orbital-speed and radius response',
     expect(immediate.after.radii[id] / radius, id)
       .toBeCloseTo(immediateResponse.ratio, 2);
   }
-  expect(immediate.after.diameter / immediate.before.diameter)
-    .toBeCloseTo(immediateResponse.ratio, 2);
+  // The central response translates each solar system as a rigid carrier; its local orbit
+  // geometry remains unchanged while the system moves radially around the black hole.
+  expect(immediate.after.diameter / immediate.before.diameter).toBeCloseTo(1, 12);
   for (const [index, [id, vx, vy]] of immediate.before.velocities.entries()) {
     const [afterId, afterVx, afterVy] = immediate.after.velocities[index];
     expect(afterId).toBe(id);
