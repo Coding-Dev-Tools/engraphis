@@ -464,7 +464,11 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[test]" "uvicorn[standard]>=0.29"
           npm ci --ignore-scripts --omit=optional
-          npx playwright install --with-deps chromium
+          # The Playwright project runs dedicated Firefox and WebKit smoke
+          # projects as well as Chromium. Install every browser exercised by
+          # the release gate so a clean runner cannot fail for a missing
+          # executable after the Chromium-only install succeeds.
+          npx playwright install --with-deps chromium firefox webkit
       - name: Audit the root browser dependency lock
         run: npm audit --audit-level=high
       - name: Playwright desktop/mobile, keyboard, CSP, console, and axe checks
