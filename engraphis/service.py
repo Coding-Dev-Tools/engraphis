@@ -2300,42 +2300,52 @@ class MemoryService:
         )
         chunks = chunker.extract(content) if chunker is not None else None
         try:
-            if chunks:
-                total = len(chunks)
-                first: Optional[dict] = None
-                for i, fact in enumerate(chunks):
-                    title = (
-                        fact.title or resource_title
-                        or _title_from_content(fact.content, fallback)
-                    )
-                    r = self.remember(
-                        fact.content, workspace=ws,
-                        mtype=(fact.mtype.value if fact.mtype else mt.value),
-                        scope="workspace", title=title[:MAX_TITLE_CHARS],
-                        source="import", trusted=False, kind=kind,
-                        keywords=fact.keywords,
-                        metadata={**(extra_provenance or {}), "import_file": name,
-                                  "chunk": {"index": i, "of": total,
-                                            "heading": (fact.title or "")[:200]}},
-                        resolve_conflicts=False,
-                    )
-                    first = first or r
-                return {"file": name, "id": first["id"], "op": first["op"], "chunks": total}
-            title = resource_title or _title_from_content(content, fallback=fallback)
-            r = self.remember(
-                content, workspace=ws, mtype=mt.value, scope="workspace",
-                title=title[:MAX_TITLE_CHARS], source="import", trusted=False, kind=kind,
-                metadata={**(extra_provenance or {}), "import_file": name},
-            )
-            return {"file": name, "id": r["id"], "op": r["op"]}
+            # Expected per-file errors are caught below the batch boundary. Give the
+            # complete file (including all chunks and receipts) its own rollback scope
+            # before converting a write failure into a successful batch response.
+            with self.store.write_savepoint():
+                return self._store_import_chunks(
+                    name, content, ws=ws, mt=mt, kind=kind, chunks=chunks,
+                    fallback=fallback, extra_provenance=extra_provenance,
+                    resource_title=resource_title,
+                )
         except (ValidationError, ValueError, sqlite3.Error, RecursionError,
                 MemoryError) as exc:
-            # One bad file must degrade to a per-file error, not void the whole batch
-            # (e.g. sqlite3.OperationalError "database is locked" from a concurrent
-            # CLI/MCP writer, embedder ValueError, or a crafted deep-nested JSON upload
-            # blowing json.loads recursion).
             logger.info("uploaded resource import rejected (%s)", type(exc).__name__)
             return {"file": name, "error": "resource could not be imported"}
+
+    def _store_import_chunks(self, name: str, content: str, *, ws: str, mt: MemoryType,
+                             kind: str, chunks, fallback: str,
+                             extra_provenance: Optional[dict], resource_title: str) -> dict:
+        """Apply a resource inside its caller's per-file savepoint."""
+        if chunks:
+            total = len(chunks)
+            first: Optional[dict] = None
+            for i, fact in enumerate(chunks):
+                title = (
+                    fact.title or resource_title
+                    or _title_from_content(fact.content, fallback)
+                )
+                r = self.remember(
+                    fact.content, workspace=ws,
+                    mtype=(fact.mtype.value if fact.mtype else mt.value),
+                    scope="workspace", title=title[:MAX_TITLE_CHARS],
+                    source="import", trusted=False, kind=kind,
+                    keywords=fact.keywords,
+                    metadata={**(extra_provenance or {}), "import_file": name,
+                              "chunk": {"index": i, "of": total,
+                                        "heading": (fact.title or "")[:200]}},
+                    resolve_conflicts=False,
+                )
+                first = first or r
+            return {"file": name, "id": first["id"], "op": first["op"], "chunks": total}
+        title = resource_title or _title_from_content(content, fallback=fallback)
+        r = self.remember(
+            content, workspace=ws, mtype=mt.value, scope="workspace",
+            title=title[:MAX_TITLE_CHARS], source="import", trusted=False, kind=kind,
+            metadata={**(extra_provenance or {}), "import_file": name},
+        )
+        return {"file": name, "id": r["id"], "op": r["op"]}
 
     def _derive_import_facts(self, content: str, *, ws: str, mt: MemoryType,
                              resource_name: str, resource_kind: str,
@@ -2357,17 +2367,20 @@ class MemoryService:
 
         created = 0
         extracted = False
-        for chunk in inputs:
-            derived = self.ingest(
-                chunk, workspace=ws, mtype=mt.value, scope="workspace",
-                metadata={"derived_from_resource": resource_name, **resource_meta},
-                source="resource_extractor", trusted=False,
-                kind=f"{resource_kind}_facts",
-            )
-            extracted = extracted or bool(derived["extracted"])
-            created += sum(
-                1 for fact in derived["facts"] if fact.get("op") != "noop"
-            )
+        # This optional pass may fail without failing the imported source. Its count
+        # must describe committed facts, so discard the entire derived prefix first.
+        with self.store.write_savepoint():
+            for chunk in inputs:
+                derived = self.ingest(
+                    chunk, workspace=ws, mtype=mt.value, scope="workspace",
+                    metadata={"derived_from_resource": resource_name, **resource_meta},
+                    source="resource_extractor", trusted=False,
+                    kind=f"{resource_kind}_facts",
+                )
+                extracted = extracted or bool(derived["extracted"])
+                created += sum(
+                    1 for fact in derived["facts"] if fact.get("op") != "noop"
+                )
         if not extracted or created == 0:
             return created, "configured extractor produced no new discrete facts"
         return created, ""
@@ -2472,7 +2485,7 @@ class MemoryService:
                     derived_facts += count
                     if note:
                         file_warnings.append(note)
-                except (OSError, ValueError) as exc:
+                except (OSError, ValueError, sqlite3.Error) as exc:
                     logger.warning("fact derivation failed for one file (%s)",
                                    type(exc).__name__)
                     file_warnings.append("fact derivation failed")
@@ -2611,7 +2624,7 @@ class MemoryService:
                     derived_facts += count
                     if note:
                         file_warnings.append(note)
-                except (OSError, ValueError) as exc:
+                except (OSError, ValueError, sqlite3.Error) as exc:
                     logger.info("uploaded resource fact derivation failed (%s)",
                                 type(exc).__name__)
                     file_warnings.append("fact derivation failed")
