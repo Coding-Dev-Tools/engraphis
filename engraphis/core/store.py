@@ -79,6 +79,10 @@ from engraphis.core.schema import (
 )
 
 
+class SavepointError(RuntimeError):
+    """A sub-operation could not settle; its enclosing transaction must abort."""
+
+
 # Rows materialized per locked batch when streaming the vector table (see iter_vectors).
 VECTOR_SCAN_BATCH = 2000
 _STARTUP_GRAPH_TRANSFORMS = {"edge_supports": 1, "live_edge_deduplication": 1}
@@ -3791,17 +3795,23 @@ class Store:
 
     @contextmanager
     def write_savepoint(self):
-        """Isolate a best-effort sub-operation inside an authoritative transaction."""
+        """Isolate a sub-operation; settlement failures must abort its outer owner."""
         name = f"engraphis_optional_{threading.get_ident()}_{time.monotonic_ns()}"
         self.conn.execute(f"SAVEPOINT {name}")
         try:
             yield
         except BaseException:
-            self.conn.execute(f"ROLLBACK TO SAVEPOINT {name}")
-            self.conn.execute(f"RELEASE SAVEPOINT {name}")
+            try:
+                self.conn.execute(f"ROLLBACK TO SAVEPOINT {name}")
+                self.conn.execute(f"RELEASE SAVEPOINT {name}")
+            except Exception as exc:
+                raise SavepointError("could not roll back the write savepoint") from exc
             raise
         else:
-            self.conn.execute(f"RELEASE SAVEPOINT {name}")
+            try:
+                self.conn.execute(f"RELEASE SAVEPOINT {name}")
+            except Exception as exc:
+                raise SavepointError("could not release the write savepoint") from exc
 
     # ── local source-import manifest ─────────────────────────────────────────
     def _authorize_source_workspace_id(self, workspace_id: str) -> str:
