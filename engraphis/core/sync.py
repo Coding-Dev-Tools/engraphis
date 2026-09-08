@@ -85,6 +85,7 @@ from engraphis.core.store import (
     _is_memory_database_path,
     now_ts,
 )
+from engraphis.core.vector_repair import index_repair_identity, repair_vector_index
 
 
 logger = logging.getLogger("engraphis.sync")
@@ -1060,6 +1061,7 @@ class SyncEngine:
         )
         parsed_tombstones = self._parse_tombstones(tomb_dicts, src_device)
         accepted_tombstones: list[dict] = []
+        tombstone_index_actions: list[_VectorIndexAction] = []
         tombstone_state_changed = False
 
         # Tombstones are scoped before they are applied. A bundle authorized for one
@@ -1208,21 +1210,31 @@ class SyncEngine:
                 tombstone_state_changed = True
                 # A peer's secure erase must remove a row this device still holds
                 # immediately, not only block a future re-add.
-                if existing is not None:
-                    try:
+                try:
+                    repair_target = (
+                        index_repair_identity(self.index, self.store)
+                        if self.index is not None else None
+                    )
+                    if repair_target is not None:
+                        # Persist cleanup with the erasure, including orphaned
+                        # external rows and retries of unchanged terminal markers.
+                        self.store.queue_vector_index_repairs(repair_target, [tomb["id"]])
+                        tombstone_index_actions.append(("delete", tomb["id"], None, ""))
+                    if existing is not None:
                         self.store._erase_memory_rows(
                             self.store.conn, tomb["id"], actor="sync_tombstone"
                         )
-                    except Exception:  # noqa: BLE001 — never leave erased data resident
-                        # The tombstone must not be treated as successfully applied if
-                        # local derivative cleanup failed. Roll back this tombstone batch
-                        # so a retry can recover instead of leaving stale content behind.
-                        self.store.conn.rollback()
-                        raise
+                except Exception:  # noqa: BLE001 — never leave erased data resident
+                    # The tombstone must not be treated as successfully applied if
+                    # local derivative cleanup failed. Roll back this tombstone batch
+                    # so a retry can recover instead of leaving stale content behind.
+                    self.store.conn.rollback()
+                    raise
             if marker_changed or dry_run:
                 report["tombstones_applied"] += 1
         if not dry_run and (accepted_tombstones or tombstone_state_changed):
             self.store.conn.commit()
+            self._publish_index_actions(tombstone_index_actions)
 
         # Bulk apply. Previously this was N+1: a SELECT per id to test existence, then a
         # Store.add_memory that did its own dupe-check SELECT, INSERT, FTS delete+insert,
@@ -1994,59 +2006,45 @@ class SyncEngine:
                     type(exc).__name__,
                 )
                 raise RuntimeError("sync embedding unavailable") from exc
-        # sync logs its own semantic audit (sync_add/sync_overwrite), hence audit=False.
-        # Preserve an empty v1/v2 clock so later legacy versions still resolve by the
-        # deterministic legacy key; stamping the first arrival with a local v13 HLC
-        # would make it permanently beat every subsequent legacy update.
-        self.store.add_memory(
-            rec,
-            audit=False,
-            commit=False,
-            _preserve_legacy_modified_hlc=True,
-        )
-        if quarantined:
-            # ``add_memory(..., embedding=None)`` deliberately leaves an existing
-            # vector untouched for ordinary metadata updates. A sync overwrite that
-            # becomes quarantined is different: retaining the prior vector leaves
-            # stale derived state for a payload the policy has removed from retrieval.
-            self.store.conn.execute("DELETE FROM mem_vectors WHERE id=?", (rec.id,))
-            if (
-                self.index is not None
-                and vector_index_requires_sync(self.index, self.store)
-            ):
-                if vector_index_shares_store_transaction(self.index, self.store):
-                    try:
-                        self.index.delete([rec.id], commit=False)
-                    except Exception as exc:
-                        self._audit_index_failure("delete", rec.id, exc)
-                else:
-                    external_index_action = ("delete", rec.id, None, "")
-            if commit:
-                self.store.conn.commit()
-                self._publish_index_actions([external_index_action])
-                return None
-            return external_index_action
-        if (
-            rec.embedding is not None
-            and not quarantined
-            and self.index is not None
-            and vector_index_requires_sync(self.index, self.store)
-        ):
-            if vector_index_shares_store_transaction(self.index, self.store):
-                try:
-                    self.index.upsert(
-                        [rec.id], rec.embedding.reshape(1, -1),
-                        [{"model": self.embedding_space}],
-                        commit=False,
-                    )
-                except Exception as exc:
-                    self._audit_index_failure("upsert", rec.id, exc)
-            else:
-                external_index_action = (
-                    "upsert", rec.id, rec.embedding.copy(), self.embedding_space,
+        # Native rows and their canonical mirror share this operation's rollback.
+        # commit=False retains the existing partial-apply boundary: apply_bundle
+        # commits complete batches and rolls back the failing in-flight batch.
+        with self.store._write_operation("sync_memory", commit=commit):
+            with self.store.conn.defer_commits():
+                repair_target = (
+                    index_repair_identity(self.index, self.store)
+                    if self.index is not None else None
                 )
+                if repair_target is not None:
+                    # Register before mutation so vector triggers record this target;
+                    # explicit work also covers quarantine with no canonical vector.
+                    self.store.queue_vector_index_repairs(repair_target, [rec.id])
+                # Sync owns its semantic audit and must preserve legacy clocks.
+                self.store.add_memory(
+                    rec, audit=False, commit=False,
+                    _preserve_legacy_modified_hlc=True,
+                )
+                if quarantined:
+                    # Ordinary metadata updates retain vectors; quarantine must remove
+                    # old derivatives even when no replacement vector was computed.
+                    self.store.conn.execute("DELETE FROM mem_vectors WHERE id=?", (rec.id,))
+                    if self.index is not None and vector_index_requires_sync(self.index, self.store):
+                        if vector_index_shares_store_transaction(self.index, self.store):
+                            self.index.delete([rec.id], commit=False)
+                        else:
+                            external_index_action = ("delete", rec.id, None, "")
+                elif (rec.embedding is not None and self.index is not None
+                        and vector_index_requires_sync(self.index, self.store)):
+                    if vector_index_shares_store_transaction(self.index, self.store):
+                        self.index.upsert(
+                            [rec.id], rec.embedding.reshape(1, -1),
+                            [{"model": self.embedding_space}], commit=False,
+                        )
+                    else:
+                        external_index_action = (
+                            "upsert", rec.id, rec.embedding.copy(), self.embedding_space,
+                        )
         if commit:
-            self.store.conn.commit()
             self._publish_index_actions([external_index_action])
             return None
         return external_index_action
@@ -2056,9 +2054,8 @@ class SyncEngine:
     ) -> None:
         """Publish committed Store vectors to a separately-backed index.
 
-        Coalescing by id avoids exposing intermediate vectors when a bundle repeats one
-        memory inside a batch. Provider failures remain content-free repair debt while
-        the already-committed canonical memory stays available.
+        Actions retain their compatibility shape, but only their memory ids select
+        repair work. Captured payloads may predate another write or an erasure.
         """
         latest: dict[str, _VectorIndexAction] = {}
         for action in actions:
@@ -2067,16 +2064,15 @@ class SyncEngine:
         index = self.index
         if index is None:
             return
-        for operation, memory_id, vector, model in latest.values():
+        for operation, memory_id, _vector, _model in latest.values():
             try:
-                if operation == "delete":
-                    index.delete([memory_id])
-                elif operation == "upsert" and vector is not None:
-                    index.upsert(
-                        [memory_id], vector.reshape(1, -1), [{"model": model}],
-                    )
-                else:  # pragma: no cover - actions are constructed locally
+                if operation not in {"delete", "upsert"}:  # pragma: no cover - locally constructed
                     raise RuntimeError("invalid deferred vector-index action")
+                repair_vector_index(
+                    self.store, index, embedding_space=self.embedding_space,
+                    dim=int(getattr(self.embedder, "dim", 0) or 0),
+                    limit=1, memory_id=memory_id, actor="sync",
+                )
             except Exception as exc:  # noqa: BLE001 - canonical Store state is committed
                 self._audit_index_failure(operation, memory_id, exc)
 

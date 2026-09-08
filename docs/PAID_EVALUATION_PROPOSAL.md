@@ -76,3 +76,36 @@ violations fail acceptance. Report paired task-level differences and task-cluste
 95% intervals; missing/error outcomes remain in the report. Retain existing defaults when
 improvement or non-inferiority is not established. A 20-question pilot is not a reliable basis
 for a broad product claim.
+
+## Independent held-out study: separate proposal, not approved
+
+Pricing was re-opened and checked on 2026-09-05 against the same official model
+page linked above: `gpt-5.6-luna`, input $0.20/million, output $1.20/million.
+No substitute model, caching discount, batch discount or free retries are assumed.
+The official page does not provide a separately dated snapshot ID; freeze the exact
+returned model identity and system fingerprint when available and report that limit.
+The 720-call adapter pilot remains separately capped at $31 and is not independent evidence.
+
+The proposed independent held-out run is 240 tasks from 24 held-out repository families,
+five arms, budgets 512/1,500/4,096, and three independent repetitions: **10,800 calls**.
+No-memory and full-history arms are included in each budget stratum, with the same
+128,000-input and 8,192-output/reasoning ceiling as every arm. Over-limit tasks fail
+preflight in every matched arm. Exact maximum token charges:
+
+| Stage | Calls | Token-charge maximum | Proposed separate hard cap |
+| --- | ---: | ---: | ---: |
+| Validation (80 tasks x 5 arms x 3 budgets x 1 repetition) | 1,200 | $42.516480 | $52 |
+| Held-out (240 tasks x 5 arms x 3 budgets x 3 repetitions) | 10,800 | $382.648320 | $460 |
+
+The caps include approximately 20% headroom before tax. Human authorship/review,
+hardware and hosting are excluded and must be budgeted independently. Development
+iterations are not included. At most $512 is proposed for these two stages; this
+proposal authorizes no spending. Failed/reserved calls still consume their reserved
+ceiling; stop at the cap and report missing pairs rather than silently retrying.
+
+Before approval can bind execution, obtain the independently authored 400-task corpus,
+family split, license/consent and adjudicated labels; freeze corpus/prompt/task-test hashes,
+reader tokenizer and local semantic embedding revision, public source and runner hashes.
+Reject implementation-authored fixtures as held-out acceptance evidence. The protocol
+requires all category failures, task-cluster paired 95% intervals and the one-percentage-point
+non-inferiority gate; if uncertainty is too wide, retain current defaults.
