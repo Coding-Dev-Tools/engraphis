@@ -4997,7 +4997,17 @@
         setGalaxyKinematicPhase(system.carrier, '__galaxyCarrierLaneBaseRadius',
           radius / radiusMultiplier);
         setGalaxyKinematicPhase(system.carrier, '__galaxyCarrierLaneRadius', radius);
-        setGalaxyKinematicPhase(system.carrier, '__galaxyCarrierLaneAngle', Math.atan2(dy, dx));
+        const correctedAngle = Math.atan2(dy, dx);
+        setGalaxyKinematicPhase(system.carrier, '__galaxyCarrierLaneAngle', correctedAngle);
+        /* The fallback clock owns a second radial cache. Keep it in the same corrected
+           coordinate space as the managed lane or the next fixed slice will replay its stale
+           pre-horizon radius and snap the whole system back through the painted boundary. */
+        const kinematicOrbit = system.carrier.__galaxyKinematicGlobalOrbit;
+        if (kinematicOrbit && typeof kinematicOrbit === 'object') {
+          kinematicOrbit.baseRadius = radius / radiusMultiplier;
+          kinematicOrbit.radius = radius;
+          kinematicOrbit.angle = correctedAngle;
+        }
       });
     }
     return stats;
@@ -6416,7 +6426,7 @@
           /* An explicit local-gravity edit is a new field, not a transient reheat. Adopt its
              requested circular speed first; the directional world-speed budget below performs
              the only necessary cap against the moving carrier. */
-          phase.localSpeed = nestedCarrier || phaseLocalGravityChanged
+          phase.localSpeed = nestedCarrier || phaseMultiplierChanged || phaseLocalGravityChanged
             ? requestedRelativeSpeed : seededSpeed > 1e-5
               ? Math.min(requestedRelativeSpeed, seededSpeed) : requestedRelativeSpeed;
         }
@@ -11414,12 +11424,14 @@
     api.pause = () => {
       if (destroyed || !running) return;
       running = false;
+      invalidatePhysicsSnapshot();
       cancelGalaxyDynamics(true);
       if (fg.pauseAnimation) fg.pauseAnimation();
     };
     api.resume = () => {
       if (destroyed || running) return;
       running = true;
+      invalidatePhysicsSnapshot();
       if (fg.resumeAnimation) fg.resumeAnimation();
       measure();
       scheduleGalaxyDynamics(true);

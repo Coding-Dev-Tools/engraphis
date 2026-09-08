@@ -3128,8 +3128,10 @@
 
     const savedTuning = graphPreference('tuning', {});
     const savedPhysicsVersion = Number(graphPreference('physicsVersion', 0));
-    const legacyPhysics = hasSavedPreferences
-      && (!Number.isFinite(savedPhysicsVersion) || savedPhysicsVersion < GRAPH_PHYSICS_VERSION);
+    const sourcePhysicsVersion = Number.isFinite(savedPhysicsVersion) ? savedPhysicsVersion : 0;
+    const legacyPhysics = hasSavedPreferences && sourcePhysicsVersion < GRAPH_PHYSICS_VERSION;
+    const needsPhysicsV3Migration = hasSavedPreferences && sourcePhysicsVersion < 3;
+    const needsPhysicsV4Migration = hasSavedPreferences && sourcePhysicsVersion < 4;
     const effectiveTuning = savedTuning && typeof savedTuning === 'object'
       ? { ...savedTuning } : {};
     const savedSpacetimeTuning = graphPreference('spacetimeTuning', {});
@@ -3137,7 +3139,7 @@
        friction at zero, and the Galaxy spacing control at 400. That exact vector is not a
        useful custom preset: it collapses the visible graph and can reduce hundreds of loaded
        entities to a small central knot. Physics v3 resets only this known-bad snapshot. */
-    const staleMaxedPhysics = legacyPhysics && Number(effectiveTuning.gravity) === 400
+    const staleMaxedPhysics = needsPhysicsV3Migration && Number(effectiveTuning.gravity) === 400
       && Number(savedSpacetimeTuning && savedSpacetimeTuning.gravitationalConstant) === 200
       && Number(savedSpacetimeTuning && savedSpacetimeTuning.blackHoleMass) === 500
       && Number(savedSpacetimeTuning && savedSpacetimeTuning.localGravitationalConstant) === 200
@@ -3151,7 +3153,7 @@
     /* Older preferences persisted 48 and then 60 as Galaxy's default orbital speed. Physics v4
        defines the control as a percentage with 100 as neutral, so migrate only those exact
        retired defaults. Every other custom speed and every unrelated preference remains intact. */
-    if (legacyPhysics && preset === 'galaxy'
+    if (needsPhysicsV4Migration && preset === 'galaxy'
       && [48, 60].includes(Number(effectiveTuning.repel))) {
       effectiveTuning.repel = 100;
     }
