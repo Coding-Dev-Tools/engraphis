@@ -141,8 +141,9 @@ def test_fatal_batch_failure_preserves_transaction_owner(
         service.create_workspace("after-failure")
 
 
+@pytest.mark.parametrize("error_type", [ValueError, sqlite3.OperationalError])
 def test_optional_derivation_failure_keeps_base_without_partial_facts(
-    import_resources, tmp_path, monkeypatch,
+    import_resources, tmp_path, monkeypatch, error_type,
 ):
     with closing(MemoryService.create(str(tmp_path / "derive.db"), extractor="none")) as service:
         service.engine.extractor = SimpleNamespace(extract=lambda text: [
@@ -157,7 +158,7 @@ def test_optional_derivation_failure_keeps_base_without_partial_facts(
             calls += 1
             result = original(*args, **kwargs)
             if calls == 3:
-                raise ValueError("injected derived fact failure")
+                raise error_type("injected derived fact failure")
             return result
 
         monkeypatch.setattr(service.store, "_fts_upsert", fail_second_fact)
