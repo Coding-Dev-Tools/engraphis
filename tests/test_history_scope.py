@@ -1,3 +1,4 @@
+"""Record history retains promoted ancestors without widening caller access."""
 import time
 
 import pytest
