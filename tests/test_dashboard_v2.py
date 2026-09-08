@@ -60,7 +60,7 @@ def test_dashboard_serves_and_bootstraps_local_core(monkeypatch, tmp_path):
         assert "All versions, including history" in page.text
         assert "Live rows" not in page.text
         assert 'class="sidebar"' in page.text
-        for area in ("Today", "Ask", "Library", "Graph &amp; Relationships", "Provenance", "Manage"):
+        for area in ("Home", "Ask", "Library", "Connections", "Explore", "Activity", "Settings"):
             assert f">{area}<" in page.text
         assert 'value="matrix">Matrix' in page.text
         assert 'class="dashboard-switcher" aria-label="Dashboard interface"' in page.text
@@ -1042,7 +1042,8 @@ def test_graph_motion_saved_views_and_tuning_controls_are_wired(monkeypatch, tmp
         ):
             assert behavior in script.text
         assert "syncGraphSpacetimeTuning(" in script.text
-        assert "state.graphSpacetimeOverlay.setEnabled(graphIsGalaxy())" in script.text
+        assert "graphLifecycle.sync()" in script.text
+        assert "function graphOverlayEnabled(" in script.text
         assert 'id="editor-memory-importance" type="range" min="0" max="1" step="0.025"' in page.text
 
 

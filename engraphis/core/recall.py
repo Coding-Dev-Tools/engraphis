@@ -22,6 +22,7 @@ import os
 import queue
 import re
 import threading
+import time
 from dataclasses import dataclass, field, replace
 from itertools import islice
 from typing import Any, Callable, Optional, SupportsFloat, SupportsIndex
@@ -152,6 +153,7 @@ class RecallResult:
     vector_search_ready: bool = True
     vector_index_repairs_pending: Optional[int] = None
     vector_search_source: str = "configured"
+    diagnostics_v1: Optional[dict] = None
 
 
 class RecallEngine:
@@ -226,6 +228,14 @@ class RecallEngine:
                planning: str = "off",
                mtype_limits: Optional[dict] = None,
                arm_config: Optional[ProfileConfig] = None) -> RecallResult:
+        started = time.perf_counter()
+        def finish(result: RecallResult) -> RecallResult:
+            if diagnostics:
+                from engraphis.core.diagnostics import recall_diagnostics
+                result.diagnostics_v1 = recall_diagnostics(
+                    result, elapsed_ms=(time.perf_counter() - started) * 1000)
+            return result
+
         flt = flt or SearchFilter()
         requested_historical = flt.historical
         snapshot = now_ts()
@@ -559,7 +569,7 @@ class RecallEngine:
                 arm_candidate_k, False, 0,
             )
             context, packed, usage = self.context_packer.pack(query, [], budget)
-            return RecallResult(
+            return finish(RecallResult(
                 context=context,
                 packed_chunks=packed,
                 usage=usage,
@@ -598,7 +608,7 @@ class RecallEngine:
                 ),
                 token_counter=getattr(self.context_packer, "count_tokens", None),
                 **capabilities,
-            )
+            ))
 
         arm_state, rrf = _fuse_query_runs(query_runs, recs)
         primary_vec = query_runs[0]["vector"]
@@ -872,7 +882,7 @@ class RecallEngine:
                 {"id": candidate.id, **score_details[candidate.id]}
                 for candidate in final
             ]
-        return RecallResult(
+        return finish(RecallResult(
             chunks=chunks,
             context=context,
             count=len(final),
@@ -928,7 +938,7 @@ class RecallEngine:
                 for candidate, record in final_records
             },
             **capabilities,
-        )
+        ))
 
     def _plan_queries(
         self,
