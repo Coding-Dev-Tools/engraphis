@@ -320,6 +320,7 @@
   const GALAXY_ORBITAL_SPEED_MAXIMUM = 4.6;
   const GALAXY_ORBITAL_RADIUS_MAXIMUM = 1.06;
   const GALAXY_BASE_ORBITAL_SPEED_BOOST = 1.625;
+  const GALAXY_LIVE_ORBITAL_SPEED_BOOST = 2.6;
   function galaxyOrbitalSpeedMultiplier(setting) {
     const raw = Number(setting);
     const value = Number.isFinite(raw)
@@ -745,11 +746,12 @@
     const acceleration = Math.min(localAccelerationCap, rawAcceleration);
     const circularSpeed = Math.sqrt(Math.max(0, acceleration * localRadius));
     const multiplier = Math.max(0, Number(orbitalSpeed) || 0);
+    const boost = kinematicCap ? GALAXY_BASE_ORBITAL_SPEED_BOOST : GALAXY_LIVE_ORBITAL_SPEED_BOOST;
     return kinematicCap
-      ? Math.min(circularSpeed * GALAXY_BASE_ORBITAL_SPEED_BOOST * multiplier,
+      ? Math.min(circularSpeed * boost * multiplier,
         GALAXY_LOCAL_RELATIVE_SPEED_LIMIT * multiplier)
       : Math.min(GALAXY_LOCAL_RELATIVE_SPEED_LIMIT, circularSpeed)
-        * GALAXY_BASE_ORBITAL_SPEED_BOOST * multiplier;
+        * boost * multiplier;
   }
 
   /* The classic renderer's *dense* signal (`GPERF.dense`, `links>1500` in dashboard.js). Past
@@ -6428,9 +6430,7 @@
           /* An explicit local-gravity edit is a new field, not a transient reheat. Adopt its
              requested circular speed first; the directional world-speed budget below performs
              the only necessary cap against the moving carrier. */
-          phase.localSpeed = nestedCarrier || phaseMultiplierChanged || phaseLocalGravityChanged
-            ? requestedRelativeSpeed : seededSpeed > 1e-5
-              ? Math.min(requestedRelativeSpeed, seededSpeed) : requestedRelativeSpeed;
+          phase.localSpeed = requestedRelativeSpeed;
         }
         const localTargetSpeed = Math.max(0, Number(phase.localSpeed) || 0);
         const localAbsoluteSpeedLimit = absoluteSpeedLimit;
