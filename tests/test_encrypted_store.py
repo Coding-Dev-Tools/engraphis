@@ -31,6 +31,28 @@ from engraphis.service import MemoryService  # noqa: E402
 KEY = "b3" * 32  # 64 hex chars → raw-key form
 
 
+def test_encrypted_live_reader_observes_wal_without_blocking_writer(tmp_path):
+    from engraphis.core.interfaces import MemoryRecord, Scope
+
+    store = Store(str(tmp_path / "live-encrypted.db"), connect=encrypted_db.make_connector(KEY))
+    try:
+        workspace = store.get_or_create_workspace("readers")
+        store.add_memory(MemoryRecord(
+            id="mem_encrypted_reader", workspace_id=workspace,
+            scope=Scope.WORKSPACE, content="Encrypted WAL evidence.",
+        ))
+        with store.borrow_read_snapshot() as reader:
+            assert reader.conn is not store.conn
+            assert reader.conn.execute("SELECT content FROM memories").fetchone()[0] == "Encrypted WAL evidence."
+            store.conn.execute("UPDATE memories SET title='changed while reading'")
+            store.conn.commit()
+            assert reader.conn.execute("SELECT title FROM memories").fetchone()[0] == ""
+        with store.borrow_read_snapshot() as reader:
+            assert reader.conn.execute("SELECT title FROM memories").fetchone()[0] == "changed while reading"
+    finally:
+        store.close()
+
+
 def _hits(res):
     items = res.get("memories") or res.get("chunks") or res.get("results") or []
     return [i.get("content", "") for i in items]

@@ -31,6 +31,7 @@ from starlette.concurrency import run_in_threadpool
 from engraphis import licensing
 from engraphis.commercial import trial_days_by_plan
 from engraphis.config import DEFAULT_RELAY_URL, canonicalize_relay_url, settings
+from engraphis.core.mutations import MemoryConflict
 from engraphis.core.poisoning import prompt_eligible
 from engraphis.core.scoring import normalize
 from engraphis.service import (
@@ -165,6 +166,7 @@ def release_service(svc: MemoryService) -> None:
 def _run(fn, *a, **k):
     """Call a service method, mapping validation errors to 400 and the rest to 500."""
     from engraphis.core.browsing import BrowseCursorStale
+    from engraphis.core.read_snapshots import ReadSnapshotBusy, ReadSnapshotTimeout
     from engraphis.managed_processing import ProcessingPolicyChanged
     try:
         return fn(*a, **k)
@@ -195,6 +197,21 @@ def _run(fn, *a, **k):
         raise HTTPException(status_code=403, detail={
             "error": "workspace is not permitted by this instance's configuration",
             "code": "workspace_not_permitted",
+        }) from None
+    except (ReadSnapshotBusy, ReadSnapshotTimeout) as exc:
+        busy = isinstance(exc, ReadSnapshotBusy)
+        raise HTTPException(status_code=503 if busy else 504, detail={
+            "error": "Memory readers are busy. Retry shortly." if busy else
+                     "Memory read exceeded its deadline. Retry or narrow the search.",
+            "code": "read_busy" if busy else "read_timeout", "retryable": True,
+        }, headers={"Retry-After": "1"}) from None
+    except MemoryConflict as exc:
+        code = exc.code if exc.code in {
+            "memory_conflict", "version_conflict", "operation_conflict", "result_unavailable",
+        } else "memory_conflict"
+        raise HTTPException(status_code=409, detail={
+            "error": "Memory changed or this operation was already used. Refresh before editing.",
+            "code": code, "retryable": False,
         }) from None
     except ValidationError:
         logger.info("dashboard request rejected")
@@ -362,6 +379,9 @@ def _mem(m: dict) -> dict:
     return {
         "id": m.get("id") or m.get("memory_id") or "",
         "document_id": m.get("id") or m.get("memory_id") or "",
+        "version": m.get("version"), "can_revise": m.get("can_revise"),
+        "workspace_id": m.get("workspace_id"),
+        "repo_id": m.get("repo_id"), "session_id": m.get("session_id"),
         "title": m.get("title") or "",
         "content": m.get("content") or m.get("summary") or "",
         "memory_type": m.get("mtype") or "semantic",
@@ -539,6 +559,12 @@ def api_index():
 @router.get("/health")
 def health():
     return {"status": "ok", "engine": "v2"}
+
+
+@router.get("/build")
+def build():
+    from engraphis.build_info import build_info
+    return _run(build_info, service())
 
 
 @router.get("/bootstrap")
@@ -1506,10 +1532,48 @@ def managed_processing_set(req: _ManagedProcessingReq):
                 expected_revision=local["revision"])
 
 
+@router.get("/repos")
+def repos(workspace: Optional[str] = None):
+    return _run(service().list_repos, workspace=workspace or _default_ws())
+
+
+class _ReviseMemoryReq(BaseModel):
+    id: str = Field(min_length=1, max_length=200)
+    workspace: Optional[str] = None
+    repo: Optional[str] = None
+    expected_version: str = Field(min_length=1, max_length=100)
+    operation_id: str = Field(min_length=1, max_length=200)
+    content: Optional[str] = None
+    title: Optional[str] = None
+    mtype: Optional[str] = None
+    importance: Optional[float] = None
+    reason: str = ""
+
+
+@router.post("/memory/revise")
+def revise_memory(req: _ReviseMemoryReq):
+    return _run(
+        service().revise_memory, req.id, workspace=req.workspace or _default_ws(),
+        repo=req.repo, expected_version=req.expected_version, operation_id=req.operation_id,
+        content=req.content, title=req.title, mtype=req.mtype,
+        importance=req.importance, reason=req.reason,
+    )
+
+
+@router.get("/memory/{memory_id}/history")
+def memory_history(memory_id: str, workspace: Optional[str] = None,
+                   repo: Optional[str] = None, limit: int = Query(50, ge=1, le=200),
+                   cursor: str = "", valid_at: Optional[float] = None,
+                   known_at: Optional[float] = None):
+    out = _run(service().memory_history, memory_id, workspace=workspace or _default_ws(),
+               repo=repo, limit=limit, cursor=cursor, valid_at=valid_at, known_at=known_at)
+    return {**out, "versions": [_mem(record) for record in out["versions"]]}
+
+
 @router.get("/memory/{memory_id}")
-def memory_detail(memory_id: str, workspace: Optional[str] = None):
+def memory_detail(memory_id: str, workspace: Optional[str] = None, repo: Optional[str] = None):
     ws = workspace or _default_ws()
-    out = _run(service().inspect, memory_id, workspace=ws)
+    out = _run(service().inspect, memory_id, workspace=ws, repo=repo)
     mem = out.get("memory") or {}
     return {"memory": _mem(mem) if mem else None,
             "chain": [_mem(m) for m in (out.get("chain") or [])],
@@ -1575,6 +1639,13 @@ def timeline(q: str = Query(..., min_length=1, max_length=10_000),
                 "note": "Keyword match — install sentence-transformers for semantic search."}
     return {"query": q, "workspace": ws, "mode": "semantic",
             "history": [_mem(m) for m in out.get("history", [])]}
+
+
+@router.get("/review-inbox")
+def review_inbox(workspace: Optional[str] = None, repo: Optional[str] = None,
+                 limit: int = Query(default=6, ge=1, le=99)):
+    return _run(service().review_inbox, workspace=workspace or _default_ws(),
+                repo=repo, limit=limit)
 
 
 @router.get("/proactive")
@@ -1768,7 +1839,7 @@ def secure_erase(req: _IdReq):
 @router.post("/correct")
 def correct(req: _IdReq):
     ws = req.workspace or _default_ws()
-    return _run(service().correct, req.id, req.content, workspace=ws, reason=req.reason)
+    return _run(service().correct, req.id, req.content, workspace=ws, repo=req.repo, reason=req.reason)
 
 
 @router.post("/promote")

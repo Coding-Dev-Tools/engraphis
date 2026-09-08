@@ -59,6 +59,7 @@ except ImportError:  # pragma: no cover - exercised only without the optional de
 from engraphis.config import settings
 from engraphis.core.context import RegexTokenCounter
 from engraphis.core.poisoning import prompt_eligible
+from engraphis.core.mutations import MemoryConflict
 from engraphis.service import MemoryService, ValidationError, _authenticated_principal
 
 logger = logging.getLogger("engraphis.mcp")
@@ -144,6 +145,9 @@ def _ok(payload: dict) -> str:
 
 def _err(exc: Exception) -> str:
     """Actionable, safe error string (never leaks internals or credentials)."""
+    if isinstance(exc, MemoryConflict):
+        return _ok({"error": "Memory changed; refresh before editing.",
+                    "code": exc.code, "retryable": False})
     if isinstance(exc, ValidationError):
         return f"Error: {exc}"
     exc_type = type(exc).__name__

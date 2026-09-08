@@ -42,6 +42,10 @@ from engraphis.core.interfaces import (
     vector_index_requires_sync,
     vector_index_shares_store_transaction,
 )
+from engraphis.core.mutations import (
+    MemoryCommand, MemoryConflict, can_revise, memory_version,
+    governable_source as _governable_source,
+)
 from engraphis.core.poisoning import (
     REVIEW_APPROVED,
     REVIEW_PENDING,
@@ -303,20 +307,6 @@ def _required_memory_workspace_id(record: MemoryRecord) -> str:
         raise RuntimeError(f"memory {record.id!r} has no workspace id")
     return workspace_id
 
-
-def _governable_source(record: MemoryRecord, *, at: float) -> bool:
-    """Accept current truth and quarantined evidence for governed derivations."""
-    if record.expired_at is not None:
-        return False
-    if (
-        metadata_is_quarantined(record.metadata)
-        or bool((record.provenance or {}).get("quarantined"))
-    ):
-        return True
-    return (
-        (record.valid_from is None or record.valid_from <= at)
-        and (record.valid_to is None or record.valid_to > at)
-    )
 
 def _writable_scope(scope: Scope, repo_id: Optional[str]) -> Scope:
     """The nearest scope ``remember()`` will actually accept for ``repo_id``.
@@ -861,6 +851,7 @@ class MemoryEngine:
                  candidate_k: int = 5, subject_key: str = "", claim_kind: str = "",
                  _trusted_graph_keys: Optional[frozenset] = None,
                  _transactional_finalizer: Optional[Callable[[str], None]] = None,
+                 _transactional_validator: Optional[Callable[[], Optional[dict]]] = None,
                  redact_secrets: bool = False) -> str:
         """Store one memory. Returns the resulting record id: a new id for ADD/
         INVALIDATE/quarantine, or the existing memory's id if this was resolved as a
@@ -874,6 +865,7 @@ class MemoryEngine:
             candidate_k=candidate_k, subject_key=subject_key, claim_kind=claim_kind,
             _trusted_graph_keys=_trusted_graph_keys,
             _transactional_finalizer=_transactional_finalizer,
+            _transactional_validator=_transactional_validator,
             redact_secrets=redact_secrets,
         )["id"]
 
@@ -888,6 +880,7 @@ class MemoryEngine:
                  _trusted_graph_keys: Optional[frozenset] = None,
                  _approval_override: bool = False,
                  _transactional_finalizer: Optional[Callable[[str], None]] = None,
+                 _transactional_validator: Optional[Callable[[], Optional[dict]]] = None,
                  extra_neighbors: Optional[list] = None,
                  redact_secrets: bool = False) -> dict:
         """Store one memory with deterministic conflict resolution.
@@ -1014,6 +1007,10 @@ class MemoryEngine:
                     "index; commit or roll back before remembering"
                 )
             with self.store.write_transaction():
+                if _transactional_validator is not None:
+                    replay = _transactional_validator()
+                    if replay is not None:
+                        return replay
                 target = index_repair_identity(self.index, self.store)
                 if target is not None:
                     self.store.register_vector_index(target)
@@ -1388,72 +1385,12 @@ class MemoryEngine:
         Each publication holds a writer reservation through acknowledgement so an
         erasure cannot race the lookup and resurrect a deleted vector afterwards.
         """
-        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1 or limit > 1000:
-            raise ValueError("repair limit must be an integer between 1 and 1000")
-        target = index_repair_identity(self.index, self.store)
-        if target is None:
-            return {"attempted": 0, "repaired": 0, "pending": 0}
-        if self.store.read_only or self.store.conn.transaction_owned_by_current_thread():
-            raise RuntimeError("vector repair requires an independent writable transaction")
-        self.store.register_vector_index(target)
-        if ((not _is_memory_database_path(self.store.path)
-             or self.store.active_embedding_space() is not None)
-                and not self.store.embedding_space_ready(self.embedding_space)):
-            return {"attempted": 0, "repaired": 0,
-                    "pending": self.store.vector_index_pending(target) or 0}
-        attempted = repaired = 0
-        while attempted < limit:
-            selected_id = ""
-            try:
-                with self.store.write_transaction():
-                    sql = ("SELECT memory_id, generation FROM vector_index_repairs "
-                           "WHERE identity=?")
-                    params: list[Any] = [target]
-                    if memory_id is not None:
-                        sql += " AND memory_id=?"
-                        params.append(memory_id)
-                    row = self.store.conn.execute(
-                        sql + " ORDER BY generation, memory_id LIMIT 1", params,
-                    ).fetchone()
-                    if row is None:
-                        break
-                    selected_id = str(row["memory_id"])
-                    attempted += 1
-                    record = self.store.get_memory(selected_id)
-                    vector = self.store.conn.execute(
-                        "SELECT vector, dim, model FROM mem_vectors WHERE id=?", (selected_id,),
-                    ).fetchone()
-                    if (record is not None and vector is not None
-                            and inspection_eligible(record.provenance, record.metadata)):
-                        if (str(vector["model"] or "") != self.embedding_space
-                                or int(vector["dim"]) != int(self.embedder.dim)):
-                            raise RuntimeError("canonical vector space changed during repair")
-                        values = np.frombuffer(vector["vector"], dtype=np.float32)
-                        _safe_upsert(
-                            self.index, [selected_id], values.reshape(1, -1),
-                            [{"model": self.embedding_space}],
-                        )
-                    else:
-                        self.index.delete([selected_id])
-                    self.store.conn.execute(
-                        "DELETE FROM vector_index_repairs "
-                        "WHERE identity=? AND memory_id=? AND generation=?",
-                        (target, selected_id, row["generation"]),
-                    )
-                repaired += 1
-            except Exception as exc:  # noqa: BLE001 - retain durable work for the next retry
-                logger.warning("vector-index repair failed for %s (%s)",
-                               selected_id, type(exc).__name__)
-                try:
-                    self.store.audit(
-                        "engine", "index_upsert_failed", selected_id,
-                        "failure_type=%s" % type(exc).__name__,
-                    )
-                except Exception as audit_exc:  # noqa: BLE001 - durable queue remains authoritative
-                    self._warn_redacted_failure("vector-index failure audit", audit_exc)
-                break
-        return {"attempted": attempted, "repaired": repaired,
-                "pending": self.store.vector_index_pending(target) or 0}
+        from engraphis.core.vector_repair import repair_vector_index
+
+        return repair_vector_index(
+            self.store, self.index, embedding_space=self.embedding_space,
+            dim=self.embedder.dim, limit=limit, memory_id=memory_id, upsert=_safe_upsert,
+        )
 
     def _upsert_external_vector(self, memory_id: str, vec: np.ndarray) -> None:
         """Publish a canonical mutation, retaining failed external work durably."""
@@ -2480,7 +2417,7 @@ class MemoryEngine:
         # Recall is observational unless the caller has an explicit use signal.
         # Historical inspection is always observational: reinforcement would make a
         # past reconstruction alter future ranking.
-        return self.recall_engine.recall(
+        result = self.recall_engine.recall(
             query, flt, k=k, reinforce=bool(reinforce) and not flt.historical,
             token_budget=token_budget, retrieval_profile=retrieval_profile,
             candidate_depth=candidate_depth,
@@ -2490,6 +2427,8 @@ class MemoryEngine:
             planning=planning,
             mtype_limits=mtype_limits,
         )
+
+        return result
 
     def adaptive_context(
         self,
@@ -3059,15 +2998,84 @@ class MemoryEngine:
                 memory_id, new_content, reason=reason, actor=actor,
             )
 
+    def can_revise_memory(self, memory_id: str) -> bool:
+        """Current server-owned applicability hint; writes still revalidate atomically."""
+        return can_revise(self.store.get_memory(memory_id), self.store)
+
+    def revise_memory(self, memory_id: str, *, expected_version: str,
+                      operation_id: str, content: Optional[str] = None,
+                      title: Optional[str] = None, mtype: Optional[MemoryType] = None,
+                      importance: Optional[float] = None, reason: str = "",
+                      actor: str = "user") -> dict:
+        """Apply all descriptive changes as one versioned, idempotent revision."""
+        if not isinstance(operation_id, str) or not 1 <= len(operation_id) <= 200:
+            raise ValueError("operation_id must contain between 1 and 200 characters")
+        if not isinstance(expected_version, str) or not expected_version.startswith("mv1:"):
+            raise ValueError("expected_version is required")
+        if content is None and title is None and mtype is None and importance is None:
+            raise ValueError("nothing to revise")
+        if importance is not None and (
+            isinstance(importance, bool) or not isinstance(importance, (int, float))
+            or not math.isfinite(importance) or not 0 <= importance <= 1
+        ):
+            raise ValueError("importance must be between zero and one")
+        with self._write_lock:
+            old = self.store.get_memory(memory_id)
+            if old is None:
+                raise KeyError(f"no memory with id '{memory_id}'")
+            return self._correct_locked(
+                memory_id, old.content if content is None else content,
+                reason=reason, actor=actor, expected_version=expected_version,
+                operation_id=operation_id, title=title, mtype=mtype, importance=importance,
+            )
+
     def _correct_locked(self, memory_id: str, new_content: str, *, reason: str,
-                        actor: str) -> dict:
+                        actor: str, expected_version: Optional[str] = None,
+                        operation_id: Optional[str] = None, title: Optional[str] = None,
+                        mtype: Optional[MemoryType] = None,
+                        importance: Optional[float] = None) -> dict:
         """Insert a replacement and close its predecessor as one atomic transition."""
         old = self.store.get_memory(memory_id)
         if old is None:
             raise KeyError(f"no memory with id '{memory_id}'")
         effective_at = now_ts()
-        if not _governable_source(old, at=effective_at):
-            raise ValueError("only a current or quarantined memory can be corrected")
+        final_title = old.title if title is None else title
+        final_type = old.mtype if mtype is None else MemoryType(mtype)
+        final_importance = old.importance if importance is None else importance
+        command = MemoryCommand(self.store, "revise" if operation_id else "correct", [old], {
+            "content": new_content, "title": final_title, "mtype": final_type.value,
+            "importance": final_importance, "reason": reason, "actor": actor,
+            "expected_version": expected_version,
+        }, operation_id=operation_id)
+
+        def correction_result(new_id: str) -> dict:
+            result = {"id": new_id, "superseded": [memory_id], "reason": reason}
+            if operation_id is not None:
+                receipt = self.store.conn.execute(
+                    "SELECT result_version FROM memory_commands WHERE workspace_id=? AND operation_id=?",
+                    (old.workspace_id, operation_id),
+                ).fetchone()
+                if receipt is None:
+                    raise RuntimeError("committed revision receipt is missing")
+                result.update({"version": receipt["result_version"], "receipt": {
+                    "operation_id": operation_id, "operation": "revise", "status": "committed",
+                }})
+            return result
+
+        replay = command.replay()
+        if replay is not None:
+            return correction_result(replay["id"])
+
+        def validate_correction() -> Optional[dict]:
+            replay = command.validate()
+            if replay is not None:
+                return replay
+            if expected_version is not None and memory_version(old) != expected_version:
+                raise MemoryConflict("memory version is stale; refresh before editing",
+                                     code="version_conflict")
+            if not _governable_source(old, at=now_ts()):
+                raise MemoryConflict("only a current or quarantined memory can be corrected")
+            return None
         metadata = dict(old.metadata)
         metadata["corrects"] = memory_id
         metadata["supersedes"] = [memory_id]
@@ -3102,16 +3110,17 @@ class MemoryEngine:
                 memory_id, at=effective_at, actor=actor,
                 reason=reason or "corrected",
             )
+            command.complete(new_id)
 
         new_id = self.remember(
             new_content,
             workspace_id=_required_memory_workspace_id(old),
             repo_id=old.repo_id,
             session_id=old.session_id,
-            mtype=old.mtype,
+            mtype=final_type,
             scope=_writable_scope(old.scope, old.repo_id),
-            title=old.title,
-            importance=old.importance,
+            title=final_title,
+            importance=final_importance,
             confidence=old.confidence,
             keywords=old.keywords,
             metadata=metadata,
@@ -3120,10 +3129,11 @@ class MemoryEngine:
             subject_key=old.subject_key,
             claim_kind=old.claim_kind,
             _transactional_finalizer=finalize_correction,
+            _transactional_validator=validate_correction,
         )
         # The old vector is historical evidence; temporal filtering hides it from
         # current recall while keeping semantic time travel complete.
-        return {"id": new_id, "superseded": [memory_id], "reason": reason}
+        return correction_result(new_id)
 
     def approve_for_prompt(self, memory_id: str, *, reviewer: str,
                            reason: str = "", replacement_content: Optional[str] = None) -> dict:
@@ -3140,6 +3150,13 @@ class MemoryEngine:
         reason = str(reason or "").strip()
         if not reason:
             raise ValueError("approval reason is required")
+
+        def stored_reviewer(record: MemoryRecord) -> str:
+            approval = record.metadata.get("approval") if isinstance(record.metadata, dict) else None
+            value = approval.get("reviewer") if isinstance(approval, dict) else None
+            # A retry cannot supply the identity missing from a legacy record.
+            return value if isinstance(value, str) else ""
+
         # Keep lookup and insert in the engine's write critical section. Without it two
         # retries of the same pending source could each observe no successor and create
         # duplicate prompt-visible records. The normal remember path re-enters this RLock.
@@ -3155,54 +3172,80 @@ class MemoryEngine:
                 return {
                     "id": old.id,
                     "approved_from": old.provenance.get("approved_from"),
-                    "reviewer": str(
-                        old.metadata.get("approval", {}).get("reviewer", reviewer)
-                    ),
+                    "reviewer": stored_reviewer(old),
                 }
 
-            now = now_ts()
-            if (
-                old.expired_at is not None
-                or (old.valid_from is not None and old.valid_from > now)
-                or (old.valid_to is not None and old.valid_to <= now)
-            ):
-                raise ValueError("only a live pending memory can be approved")
-            if old.provenance.get("review_state") != REVIEW_PENDING:
-                raise ValueError("only a pending memory can be approved")
-
-            # ``approved_from`` lives in structured provenance and metadata rather than a
-            # mutable text field. Approval is an owner-driven, infrequent ceremony, so a
-            # bounded exact-scope scan is both portable to SQLite builds without JSON1 and
-            # avoids adding a denormalized trust index solely for retry idempotency.
-            source_scope = SearchFilter(
-                workspace_id=_required_memory_workspace_id(old),
-                repo_id=old.repo_id,
-                session_id=old.session_id if old.scope == Scope.SESSION else None,
-            )
-            # Include retired successors in this audit lookup. A retry may return a
-            # live successor, but it must never create a fresh one after the original
-            # approved record was deliberately retired: that would resurrect content
-            # without a new governed write.
-            for candidate in self.store.list_memories(source_scope, include_invalid=True):
-                approved_from = candidate.provenance.get("approved_from")
-                if approved_from is None:
-                    approved_from = candidate.metadata.get("approved_from")
-                if (approved_from == old.id and provenance_is_approved(candidate.provenance)):
-                    if (
-                        candidate.expired_at is not None
-                        or (candidate.valid_from is not None and candidate.valid_from > now)
-                        or (candidate.valid_to is not None and candidate.valid_to <= now)
-                    ):
-                        raise ValueError("memory has already been approved and retired")
-                    return {
-                        "id": candidate.id,
-                        "approved_from": old.id,
-                        "reviewer": str(candidate.metadata.get("approval", {}).get(
-                            "reviewer", reviewer
-                        )),
-                    }
-
             content = str(replacement_content if replacement_content is not None else old.content)
+            command = MemoryCommand(self.store, "approve", [old], {
+                "content": content, "reviewer": reviewer, "reason": reason,
+            })
+
+            def approval_replay() -> Optional[dict]:
+                current = self.store.get_memory(old.id)
+                if current is None or memory_version(current) != memory_version(old):
+                    raise MemoryConflict("pending memory changed during approval preparation")
+                now = now_ts()
+                if (
+                    old.expired_at is not None
+                    or (old.valid_from is not None and old.valid_from > now)
+                    or (old.valid_to is not None and old.valid_to <= now)
+                ):
+                    raise ValueError("only a live pending memory can be approved")
+                if old.provenance.get("review_state") != REVIEW_PENDING:
+                    raise ValueError("only a pending memory can be approved")
+
+                # ``approved_from`` lives in structured provenance and metadata rather than a
+                # mutable text field. Approval is an owner-driven, infrequent ceremony, so a
+                # bounded exact-scope scan is both portable to SQLite builds without JSON1 and
+                # avoids adding a denormalized trust index solely for retry idempotency.
+                source_scope = SearchFilter(
+                    workspace_id=_required_memory_workspace_id(old),
+                    repo_id=old.repo_id,
+                    session_id=old.session_id if old.scope == Scope.SESSION else None,
+                )
+                # Include retired successors in this audit lookup. A retry may return a
+                # live successor, but it must never create a fresh one after the original
+                # approved record was deliberately retired: that would resurrect content
+                # without a new governed write.
+                for candidate in self.store.list_memories(source_scope, include_invalid=True):
+                    approved_from = candidate.provenance.get("approved_from")
+                    if approved_from is None:
+                        approved_from = candidate.metadata.get("approved_from")
+                    if (approved_from == old.id and provenance_is_approved(candidate.provenance)):
+                        if (
+                            candidate.expired_at is not None
+                            or (candidate.valid_from is not None and candidate.valid_from > now)
+                            or (candidate.valid_to is not None and candidate.valid_to <= now)
+                        ):
+                            raise ValueError("memory has already been approved and retired")
+                        if candidate.content != content:
+                            raise MemoryConflict("memory was approved with different content")
+                        return {
+                            "id": candidate.id,
+                            "approved_from": old.id,
+                            "reviewer": stored_reviewer(candidate),
+                            "op": "noop",
+                        }
+
+                return command.replay()
+
+            def validate_approval() -> Optional[dict]:
+                replay = approval_replay()
+                return replay if replay is not None else command.validate()
+
+            def approval_result(result: dict) -> dict:
+                approved = self.store.get_memory(result["id"])
+                if approved is None:
+                    raise MemoryConflict("approved result was erased", code="result_unavailable")
+                return {"id": approved.id, "approved_from": old.id,
+                        "reviewer": stored_reviewer(approved)}
+
+            # Existing approval is a read: retain its recorded reviewer even when
+            # a later ceremony supplies another reason or embeddings are unavailable.
+            replay = approval_replay()
+            if replay is not None:
+                return approval_result(replay)
+
             metadata = {
                 "approved_from": old.id,
                 "approval": {
@@ -3238,6 +3281,7 @@ class MemoryEngine:
                     "human_review", "approve", new_id,
                     f"from={old.id}; reviewer={reviewer[:200]}; reason={reason[:500]}",
                 )
+                command.complete(new_id)
             result = self.remember_with_resolution(
                 content,
                 workspace_id=_required_memory_workspace_id(old),
@@ -3256,8 +3300,9 @@ class MemoryEngine:
                 claim_kind=old.claim_kind,
                 _approval_override=True,
                 _transactional_finalizer=finalize_approval,
+                _transactional_validator=validate_approval,
             )
-            return {"id": result["id"], "approved_from": old.id, "reviewer": reviewer}
+            return approval_result(result)
 
     def promote(self, memory_id: str, target_scope: Scope, *, reason: str = "",
                 actor: str = "user") -> dict:
@@ -3283,14 +3328,7 @@ class MemoryEngine:
         if not provenance_is_approved(old.provenance):
             raise ValueError("untrusted memory cannot be promoted; create a fresh approved local memory")
         now = now_ts()
-        if (old.expired_at is not None
-                or (old.valid_from is not None and old.valid_from > now)
-                or (old.valid_to is not None and old.valid_to <= now)):
-            raise ValueError("only a live memory can be promoted")
-        if old.scope == Scope.SESSION:
-            source_session = self.store.get_session(str(old.session_id or ""))
-            if source_session is None or source_session.get("status") != "active":
-                raise ValueError("cannot promote memory from a closed session")
+
         target_scope = Scope(target_scope)
         if target_scope == Scope.USER:
             raise ValueError(
@@ -3304,6 +3342,27 @@ class MemoryEngine:
         target_repo_id = old.repo_id if target_scope == Scope.REPO else None
         if target_scope == Scope.REPO and not target_repo_id:
             raise ValueError("cannot promote to repo scope: source has no repo")
+
+        command = MemoryCommand(self.store, "promote", [old], {
+            "target_scope": target_scope.value, "reason": reason, "actor": actor,
+        })
+
+        def promotion_result(result: dict) -> dict:
+            return {
+                "id": result["id"], "promoted_from": old.id,
+                "from_scope": old.scope.value, "scope": target_scope.value,
+                "op": result["op"], "reason": reason,
+            }
+
+        # A committed retry is a read, including after the source session closes.
+        # Recheck the receipt under the writer as well when preparation is needed.
+        replay = command.replay()
+        if replay is not None:
+            return promotion_result(replay)
+        if old.scope == Scope.SESSION:
+            source_session = self.store.get_session(str(old.session_id or ""))
+            if source_session is None or source_session.get("status") != "active":
+                raise ValueError("cannot promote memory from a closed session")
 
         metadata = dict(old.metadata)
         raw_promoted_from = metadata.get("promoted_from")
@@ -3326,6 +3385,18 @@ class MemoryEngine:
                 "trust_origin": "derived_unapproved",
             }
         )
+
+        def validate_promotion() -> Optional[dict]:
+            replay = command.validate()
+            if replay is not None:
+                return replay
+            if not _governable_source(old, at=now_ts()):
+                raise MemoryConflict("only a live memory can be promoted")
+            if old.scope == Scope.SESSION:
+                session = self.store.get_session(str(old.session_id or ""))
+                if session is None or session.get("status") != "active":
+                    raise MemoryConflict("cannot promote memory from a closed session")
+            return None
 
         def finalize_promotion(promoted_id: str) -> None:
             promoted = self.store.get_memory(promoted_id)
@@ -3406,6 +3477,8 @@ class MemoryEngine:
                 )[:1000],
             )
 
+            command.complete(promoted_id)
+
         result = self.remember_with_resolution(
             old.content,
             workspace_id=_required_memory_workspace_id(old),
@@ -3425,16 +3498,9 @@ class MemoryEngine:
             # This copies a record already approved by the owner; it is not ingress.
             _approval_override=True,
             _transactional_finalizer=finalize_promotion,
+            _transactional_validator=validate_promotion,
         )
-        promoted_id = result["id"]
-        return {
-            "id": promoted_id,
-            "promoted_from": old.id,
-            "from_scope": old.scope.value,
-            "scope": target_scope.value,
-            "op": result["op"],
-            "reason": reason,
-        }
+        return promotion_result(result)
 
     def merge(self, source_ids: list, merged_content: str, *,
               title: Optional[str] = None, mtype: Optional[MemoryType] = None,
@@ -3490,7 +3556,7 @@ class MemoryEngine:
                 )
             target_session_id = str(next(iter(session_ids)))
             session = self.store.get_session(target_session_id)
-            if session is None or session.get("status") != "active":
+            if session is None:
                 raise ValueError("session-scoped merge requires one active session")
             if (
                 session.get("workspace_id") != primary.workspace_id
@@ -3592,6 +3658,17 @@ class MemoryEngine:
                 },
             }
 
+        command = MemoryCommand(self.store, "merge", sources, {
+            "merge_key": merge_key, "reason": reason, "actor": actor,
+        })
+        replay = command.replay()
+        if replay is not None:
+            return merge_result(replay["id"])
+        if target_session_id:
+            session = self.store.get_session(target_session_id)
+            if session is None or session.get("status") != "active":
+                raise ValueError("session-scoped merge requires one active session")
+
         retry_links = self.store.conn.execute(
             "SELECT a, b FROM mem_links "
             "WHERE relation='merges' AND reason=? "
@@ -3627,11 +3704,14 @@ class MemoryEngine:
             ):
                 return merge_result(candidate.id)
 
-        for record in sources:
-            if not _governable_source(record, at=effective_at):
-                raise ValueError(
-                    "only current or quarantined source memories can be merged"
-                )
+        def validate_merge() -> Optional[dict]:
+            replay = command.validate()
+            if replay is not None:
+                return replay
+            for record in sources:
+                if not _governable_source(record, at=now_ts()):
+                    raise MemoryConflict("only current or quarantined source memories can be merged")
+            return None
 
         def finalize_merge(merged_id: str) -> None:
             self.store.advance_memory_modified_hlc(merged_id, commit=False)
@@ -3669,6 +3749,7 @@ class MemoryEngine:
                 actor, "merge", merged_id,
                 f"merged {len(ids)} memories: {', '.join(ids)}",
             )
+            command.complete(merged_id)
 
         merged_id = self.remember(
             merged_content,
@@ -3687,6 +3768,7 @@ class MemoryEngine:
             subject_key=subject_key,
             claim_kind=claim_kind,
             _transactional_finalizer=finalize_merge,
+            _transactional_validator=validate_merge,
         )
 
         return merge_result(merged_id)

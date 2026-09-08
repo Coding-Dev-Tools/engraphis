@@ -39,6 +39,7 @@ from urllib.request import url2pathname
 
 from engraphis import __version__
 from engraphis.backends.extractor import ChunkingExtractor
+from engraphis.core.mutations import MemoryConflict, can_revise, memory_version
 from engraphis.core.engine import MemoryEngine
 from engraphis.core.graph_scene import (
     ALGORITHM_VERSION as GRAPH_SCENE_ALGORITHM_VERSION,
@@ -3982,6 +3983,7 @@ class MemoryService:
             elif eligibility["total"] > 0 and not result.vector_search_ready:
                 out["note"] = result.degraded_reason
         if diagnostics:
+            out["diagnostics"] = result.diagnostics_v1 or {}
             out["retrieval_trace"] = result.retrieval_trace or []
             out["planning_details"] = result.planning_details or {}
             out["graph_traversal_details"] = result.graph_traversal_details or []
@@ -4494,6 +4496,44 @@ class MemoryService:
         except (KeyError, ValueError) as exc:
             raise ValidationError(str(exc))
 
+    def revise_memory(self, memory_id: str, *, workspace: str,
+                      expected_version: str, operation_id: str,
+                      repo: Optional[str] = None, content: Optional[str] = None,
+                      title: Optional[str] = None, mtype: Optional[str] = None,
+                      importance: Optional[float] = None, reason: str = "",
+                      actor: str = "user") -> dict:
+        """One recoverable revision: content, labels, provenance and history commit together."""
+        mid = _clean_text(memory_id, field="memory_id", max_chars=MAX_NAME_CHARS)
+        wid, rid = self._require_scope(workspace, repo)
+        self._check_owns(mid, wid, rid)
+        if content is not None:
+            content = _clean_text(content, field="content", max_chars=MAX_CONTENT_CHARS)
+        if title is not None:
+            title = _clean_text(title, field="title", max_chars=MAX_TITLE_CHARS, required=False)
+        reason = _clean_text(reason, field="reason", max_chars=MAX_TITLE_CHARS, required=False)
+        actor = _clean_text(actor, field="actor", max_chars=MAX_NAME_CHARS, required=False) or "user"
+        operation_id = _clean_text(operation_id, field="operation_id", max_chars=200)
+        expected_version = _clean_text(expected_version, field="expected_version", max_chars=100)
+        try:
+            return self.engine.revise_memory(
+                mid, expected_version=expected_version, operation_id=operation_id,
+                content=content, title=title,
+                mtype=_enum(mtype, MemoryType, "memory_type") if mtype is not None else None,
+                importance=importance, reason=reason, actor=actor,
+            )
+        except MemoryConflict:
+            raise
+        except (KeyError, ValueError) as exc:
+            raise ValidationError(str(exc)) from exc
+
+    def list_repos(self, *, workspace: str) -> dict:
+        ws = self._clean_ws(workspace)
+        wid = self._lookup_workspace(ws)
+        repos = [] if wid is None else [dict(row) for row in self.store.conn.execute(
+            "SELECT id, name FROM repos WHERE workspace_id=? ORDER BY name, id", (wid,),
+        ).fetchall()]
+        return {"workspace": ws, "repos": repos}
+
     def correct(self, memory_id: str, new_content: str, *, workspace: str,
                repo: Optional[str] = None, reason: str = "", actor: str = "user") -> dict:
         mid = _clean_text(memory_id, field="memory_id", max_chars=MAX_NAME_CHARS)
@@ -4505,6 +4545,8 @@ class MemoryService:
         self._check_owns(mid, wid, rid)
         try:
             return self.engine.correct(mid, new_content, reason=reason, actor=actor)
+        except MemoryConflict:
+            raise
         except (KeyError, ValueError) as exc:
             raise ValidationError(str(exc))
 
@@ -4524,6 +4566,8 @@ class MemoryService:
         self._check_owns(mid, wid, rid)
         try:
             out = self.engine.promote(mid, target, reason=reason, actor=actor)
+        except MemoryConflict:
+            raise
         except (KeyError, ValueError) as exc:
             raise ValidationError(str(exc))
         out["workspace"] = self._clean_ws(workspace)
@@ -4581,6 +4625,8 @@ class MemoryService:
                 uniq, merged_content, title=title_clean, mtype=mt, scope=target_scope,
                 reason=reason, actor=actor,
             )
+        except MemoryConflict:
+            raise
         except (KeyError, ValueError) as exc:
             raise ValidationError(str(exc))
         out["workspace"] = self._clean_ws(workspace)
@@ -5106,9 +5152,10 @@ class MemoryService:
         """Browse all matching non-session memories without embedding or reinforcement.
 
         Every transport shares the store's scope and bi-temporal predicates. Cursors
-        expire when the database changes; clients then restart with the same filters.
+        survive unrelated writes; relevant scope edits require refreshing the same filters.
         """
         from engraphis.core.browsing import browse_memories
+        from engraphis.core.store import _row_to_record
 
         ws = self._clean_ws(workspace)
         q = _clean_text(q, field="q", max_chars=10_000, required=False)
@@ -5132,6 +5179,10 @@ class MemoryService:
         ), q=q, limit=limit, cursor=cursor)
         records = [{
             "id": row["id"], "document_id": row["id"], "title": row["title"] or "",
+            "version": memory_version(_row_to_record(row)),
+            "can_revise": can_revise(_row_to_record(row), self.store),
+            "workspace_id": row["workspace_id"], "repo_id": row["repo_id"],
+            "session_id": row["session_id"],
             "content": row["content"] or row["summary"] or "",
             "memory_type": row["mtype"] or "semantic", "scope": row["scope"] or "",
             "pinned": bool(row["pinned"]), "importance": row["importance"],
@@ -6487,6 +6538,25 @@ class MemoryService:
             and (importance is None or importance == existing.importance)
         ):
             return {"id": mid, "updated": []}
+        prepared_vector = None
+        prepared_space = self.engine.embedding_space
+        if (title is not None and title != existing.title
+                and existing.sensitivity != "secret"
+                and inspection_eligible(existing.provenance, existing.metadata)):
+            _reject_secret_capture((("content", existing.content),))
+            if not _is_memory_database_path(self.store.path) and (
+                not prepared_space or not self.store.embedding_space_ready(prepared_space)
+            ):
+                raise ValidationError("the configured embedding space is not active")
+            text = f"{title}\n{existing.content}" if title else existing.content
+            try:
+                prepared_vector = np.asarray(self.engine.embedder.embed([text]), dtype=np.float32)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValidationError("embedder returned an invalid vector") from exc
+            expected_dim = int(getattr(self.engine.embedder, "dim", 0) or 0)
+            if (prepared_vector.shape != (1, expected_dim)
+                    or not np.isfinite(prepared_vector).all()):
+                raise ValidationError("embedder returned an invalid vector")
         result, external_index_action = self._update_memory_transactional(
             mid,
             workspace=workspace,
@@ -6494,7 +6564,8 @@ class MemoryService:
             title=title,
             mtype=mtype,
             importance=importance,
-            actor=actor,
+            actor=actor, expected_version=memory_version(existing),
+            prepared_vector=prepared_vector, prepared_space=prepared_space,
         )
         if external_index_action is not None:
             self._publish_memory_index_action(external_index_action)
@@ -6540,7 +6611,9 @@ class MemoryService:
             self, memory_id: str, *, workspace: str, repo: Optional[str] = None,
                       title: Optional[str] = None, mtype: Optional[str] = None,
                       importance: Optional[float] = None,
-                      actor: str = "user") -> tuple[
+                      actor: str = "user", expected_version: Optional[str] = None,
+                      prepared_vector: Optional[np.ndarray] = None,
+                      prepared_space: str = "") -> tuple[
                           dict, Optional[tuple[str, str, Optional[np.ndarray], str]]
                       ]:
         """In-place edit of a memory's metadata fields. Content edits go through
@@ -6550,7 +6623,10 @@ class MemoryService:
         wid, rid = self._require_scope(workspace, repo)
         self._check_owns(mid, wid, rid)
         existing = self.store.get_memory(mid)
-        old_title = existing.title if existing is not None else ""
+        if existing is None or (expected_version is not None
+                                and memory_version(existing) != expected_version):
+            raise MemoryConflict("memory changed during title preparation")
+        old_title = existing.title
         sets, params, changes = [], [], []
         title_changed = False
         external_index_action = None
@@ -6595,7 +6671,6 @@ class MemoryService:
             except Exception:
                 pass
             if title_changed:
-                text = f"{row['title']}\n{row['content']}" if row["title"] else row["content"]
                 repair_target = index_repair_identity(self.engine.index, self.store)
                 if repair_target is not None:
                     self.store.queue_vector_index_repairs(repair_target, [mid])
@@ -6627,22 +6702,9 @@ class MemoryService:
                             "the configured embedding space is not active; restart "
                             "Engraphis to complete the guarded rebuild"
                         )
-                    try:
-                        vectors = np.asarray(
-                            self.engine.embedder.embed([text]), dtype=np.float32,
-                        )
-                    except (TypeError, ValueError, OverflowError) as exc:
-                        raise ValidationError("embedder returned an invalid vector") from exc
-                    expected_dim = int(
-                        getattr(self.engine.embedder, "dim",
-                                getattr(self.engine.index, "dim", 0)) or 0
-                    )
-                    if (
-                        vectors.ndim != 2
-                        or vectors.shape != (1, expected_dim)
-                        or not np.isfinite(vectors).all()
-                    ):
-                        raise ValidationError("embedder returned an invalid vector")
+                    if prepared_vector is None or prepared_space != model:
+                        raise MemoryConflict("prepared title embedding is no longer current")
+                    vectors = prepared_vector
                     if vector_index_requires_sync(self.engine.index, self.store):
                         if vector_index_shares_store_transaction(
                             self.engine.index, self.store,
@@ -6692,6 +6754,99 @@ class MemoryService:
         c.commit()
         return {"workspace": workspace, "reordered": len(clean_ids)}
 
+    def memory_history(self, memory_id: str, *, workspace: str,
+                       repo: Optional[str] = None, limit: int = 50, cursor: str = "",
+                       valid_at: Optional[float] = None,
+                       known_at: Optional[float] = None) -> dict:
+        """Page record lineage using frozen temporal anchors, never title similarity."""
+        import base64
+        import hashlib
+        from engraphis.core.browsing import BrowseCursorStale
+
+        mid = _clean_text(memory_id, field="memory_id", max_chars=MAX_NAME_CHARS)
+        wid, rid = self._require_scope(workspace, repo)
+        self._check_owns(mid, wid, None)
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 200:
+            raise ValidationError("history limit must be between 1 and 200")
+        identity = hashlib.sha256(json.dumps([mid, wid, rid, valid_at, known_at]).encode()).hexdigest()
+        previous = None
+        if cursor:
+            try:
+                if not isinstance(cursor, str) or len(cursor) > 4096:
+                    raise ValueError
+                previous = json.loads(base64.b64decode(cursor.encode("ascii"), altchars=b"-_", validate=True))
+                if previous["v"] != "history/1" or previous["query"] != identity:
+                    raise ValueError
+                if (not isinstance(previous["position"], list) or len(previous["position"]) != 3
+                        or not isinstance(previous["position"][2], str)
+                        or not isinstance(previous["position"][1], int)
+                        or isinstance(previous["position"][1], bool)
+                        or not 0 <= previous["position"][1] <= 2**63 - 1
+                        or not isinstance(previous["position"][0], (int, float))
+                        or isinstance(previous["position"][0], bool)
+                        or not -1e16 <= previous["position"][0] <= 1e16):
+                    raise ValueError
+                anchors = previous["anchors"]
+            except (ValueError, TypeError, KeyError, UnicodeError, RecursionError) as exc:
+                raise ValidationError("invalid history cursor") from exc
+        else:
+            anchors = [time.time() if valid_at is None else valid_at,
+                       time.time() if known_at is None else known_at]
+        if (not isinstance(anchors, list) or len(anchors) != 2
+                or any(isinstance(value, bool) or not isinstance(value, (int, float))
+                       or not -1e16 <= value <= 1e16 for value in anchors)):
+            raise ValidationError("invalid history anchors")
+        with self.store.read_snapshot():
+            root = self.store.get_memory(mid)
+            if root is None:
+                raise MemoryConflict("memory was erased while opening history")
+            # History is a scoped read: project views include broader roots,
+            # while governance continues to require exact repository ownership.
+            if root.workspace_id != wid or (
+                rid is not None and root.repo_id != rid
+                and root.scope not in (Scope.WORKSPACE, Scope.USER)
+            ):
+                raise ValidationError(f"memory '{mid}' does not belong to that workspace/repo")
+            self._authorize_memory_session(root)
+            # Explicit promotion broadens lineage visibility. Preserve workspace/user
+            # ancestors, while narrow records still require the selected repository
+            # and the existing caller/session authorization below.
+            members = [record for record in self._chain_for(root, wid)
+                       if (rid is None or record.repo_id == rid
+                           or record.scope in (Scope.WORKSPACE, Scope.USER))
+                       and self._memory_visible_to_caller(record)
+                       and (record.ingested_at or 0) <= anchors[1]]
+            sequences = {}
+            for record in members:
+                command = self.store.conn.execute(
+                    "SELECT sequence FROM memory_commands WHERE result_id=? AND workspace_id=?",
+                    (record.id, wid),
+                ).fetchone()
+                sequences[record.id] = int(command["sequence"]) if command else 0
+            def position(record):
+                return [record.ingested_at or 0, sequences[record.id], record.id]
+            members.sort(key=position)
+            revision = hashlib.sha256(json.dumps([
+                [record.id, memory_version(record)] for record in members
+            ]).encode()).hexdigest()
+            if previous and previous.get("revision") != revision:
+                raise BrowseCursorStale("record history changed; refresh the inspector")
+            total = len(members)
+            remaining = [record for record in members if not previous or
+                         position(record) > previous["position"]]
+            page = remaining[:limit]
+            next_cursor = None
+            if len(remaining) > limit:
+                last = page[-1]
+                next_cursor = base64.urlsafe_b64encode(json.dumps({
+                    "v": "history/1", "query": identity, "revision": revision,
+                    "anchors": anchors, "position": position(last),
+                }).encode()).decode()
+            return {"id": mid, "versions": [{**self._chain_entry(record, wid),
+                        "can_revise": self.engine.can_revise_memory(record.id)} for record in page],
+                    "count": len(page), "total_count": total, "next_cursor": next_cursor,
+                    "valid_at": anchors[0], "known_at": anchors[1]}
+
     def inspect(self, memory_id: str, *, workspace: str, repo: Optional[str] = None) -> dict:
         """Everything the inspector shows for one memory: the record, its links, its
         audit trail, and the full supersession chain (oldest→newest) reconstructed from
@@ -6717,7 +6872,9 @@ class MemoryService:
         audit = [dict(r) for r in self.store.conn.execute(
             "SELECT ts, actor, action, detail FROM audit WHERE target=? ORDER BY ts", (mid,))]
         chain = [self._chain_entry(r, wid) for r in self._chain_for(rec, wid)]
-        return {"memory": _mem_to_dict(rec), "links": links, "audit": audit,
+        return {"memory": {**_mem_to_dict(rec),
+                           "can_revise": self.engine.can_revise_memory(mid)},
+                "links": links, "audit": audit,
                 "chain": chain}
 
     def conflict_review(self, *, workspace: str, repo: Optional[str] = None,
@@ -6811,6 +6968,8 @@ class MemoryService:
                 conflicted = bool(metadata.get("conflict_with"))
                 if not (quarantined or review_state == REVIEW_PENDING or conflicted):
                     continue
+                if not self.engine.can_revise_memory(row["id"]):
+                    continue
                 # Pending/quarantined content is evidence for a human reviewer, not model
                 # context. Return only an excerpt for already-approved conflict records.
                 excerpt = ""
@@ -6832,6 +6991,20 @@ class MemoryService:
         return {"workspace": workspace, "items": items, "count": len(items),
                 "truncated": truncated}
 
+    def review_inbox(self, *, workspace: str, repo: Optional[str] = None,
+                     limit: int = 6) -> dict:
+        """A bounded actionable sample; count is never advertised as a total."""
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 99:
+            raise ValidationError("review limit must be between 1 and 99")
+        with self.store.read_snapshot():
+            result = self.conflict_review(workspace=workspace, repo=repo, limit=limit + 1)
+        items = result["items"][:limit]
+        has_more = len(result["items"]) > limit
+        return {"workspace": workspace, "repo": repo, "items": items,
+                "count": len(items), "has_more": has_more,
+                "truncated": bool(result["truncated"] or has_more),
+                "count_semantics": "returned_sample"}
+
     def _chain_entry(self, rec, wid: str) -> dict:
         d = _mem_to_dict(rec)
         d["stability"] = rec.stability
@@ -6841,6 +7014,22 @@ class MemoryService:
             "AND action IN ('invalidate','noop','evolve') ORDER BY ts", (rec.id,)).fetchall()
         d["events"] = [dict(r) for r in rows]
         return d
+
+    @staticmethod
+    def _lineage_predecessors(metadata: Any) -> list[str]:
+        """Read exact lineage references; malformed caller metadata is not a link."""
+        if not isinstance(metadata, dict):
+            return []
+        ids = []
+        for key in ("supersedes", "promoted_from"):
+            values = metadata.get(key)
+            if isinstance(values, list):
+                ids.extend(value for value in values if isinstance(value, str))
+        for key in ("corrects", "approved_from"):
+            value = metadata.get(key)
+            if isinstance(value, str):
+                ids.append(value)
+        return ids
 
     def _chain_for(self, rec, wid: str) -> list:
         """Collect the full supersession component around ``rec`` and return its
@@ -6858,18 +7047,12 @@ class MemoryService:
         is dropped unless it is itself in ``wid``, so a foreign-workspace record can
         never ride a forged pointer into this response; the walk does not continue past
         a dropped candidate (its own predecessors/successors are never visited)."""
-        def predecessors(r):
-            ids = list(r.metadata.get("supersedes") or [])
-            if r.metadata.get("corrects"):
-                ids.append(r.metadata["corrects"])
-            return ids
-
         seen = {rec.id}
         members = {rec.id: rec}
         frontier = [rec]
         while frontier:
             cur = frontier.pop()
-            for pid in predecessors(cur):
+            for pid in self._lineage_predecessors(cur.metadata):
                 if pid in seen:
                     continue
                 seen.add(pid)
@@ -6908,7 +7091,7 @@ class MemoryService:
                 meta = _json.loads(r["metadata"] or "{}")
             except ValueError:
                 continue
-            if memory_id in (meta.get("supersedes") or []) or meta.get("corrects") == memory_id:
+            if memory_id in self._lineage_predecessors(meta):
                 candidate = self.store.get_memory(r["id"])
                 if candidate is not None and self._memory_visible_to_caller(candidate):
                     return candidate
@@ -12002,7 +12185,7 @@ def _empty_grounded(query: str, *, reason: str, token_budget: int,
     payload.pop("memories", None)
     payload.pop("note", None)
     payload.update({
-        "grounded": False,
+        "grounded": False, "answer_coverage": "unknown",
         "abstained": True,
         "answer": "",
         "support": 0.0,
@@ -12018,9 +12201,11 @@ def _mem_to_dict(rec: Any) -> dict:
     """Plain, JSON-able projection of a ``MemoryRecord`` for why/timeline/proactive
     responses — mirrors the fields ``RecallEngine`` already exposes in recall chunks."""
     return {
-        "id": rec.id, "title": rec.title, "content": rec.content, "summary": rec.summary,
+        "id": rec.id, "version": memory_version(rec),
+        "title": rec.title, "content": rec.content, "summary": rec.summary,
         "scope": rec.scope.value, "mtype": rec.mtype.value,
         "workspace_id": rec.workspace_id, "repo_id": rec.repo_id,
+        "session_id": rec.session_id,
         "importance": rec.importance, "pinned": rec.pinned,
         "confidence": rec.confidence,
         "subject_key": rec.subject_key, "claim_kind": rec.claim_kind,

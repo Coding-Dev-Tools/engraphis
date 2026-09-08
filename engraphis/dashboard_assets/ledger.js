@@ -4,6 +4,7 @@
   const apiRoot = `${location.origin}/api`;
   const state = {
     workspace: '',
+    project: '',
     workspaces: [],
     stats: {},
     memories: [],
@@ -14,6 +15,8 @@
     libraryLoading: false,
     selectedMemory: '',
     editorMemory: null,
+    editorSession: null,
+    memoryHistory: null,
     editorReturnFocus: null,
     view: 'today',
     provenanceTab: 'belief',
@@ -63,6 +66,7 @@
   };
 
   const byId = id => document.getElementById(id);
+  const memoryTitle = window.EngraphisWorkflow.title;
   const all = selector => [...document.querySelectorAll(selector)];
   const text = value => value == null ? '' : String(value);
   const number = value => Number.isFinite(Number(value)) ? Number(value) : 0;
@@ -101,6 +105,8 @@
     return item;
   };
   const query = (name = state.workspace) => `workspace=${encodeURIComponent(name || '')}`;
+  const memoryQuery = (workspace = state.workspace, project = state.project) => query(workspace)
+    + (project ? '&repo=' + encodeURIComponent(project) : '');
   const beginScopedRequest = kind => {
     if (state.scopedControllers[kind]) state.scopedControllers[kind].abort();
     const controller = new AbortController();
@@ -111,12 +117,14 @@
       kind,
       generation,
       workspace: state.workspace,
+      project: state.project,
       epoch: state.refreshEpoch,
       signal: controller.signal,
     };
   };
   const isCurrentScopedRequest = request => Boolean(request
     && request.workspace === state.workspace
+    && request.project === state.project
     && request.epoch === state.refreshEpoch
     && state.scopedRequests[request.kind] === request.generation);
   const invalidateScopedRequests = () => {
@@ -811,6 +819,7 @@
   function setConnection(message, healthy = true) {
     const status = byId('connection-status');
     if (status) status.textContent = message;
+    byId('home-engine-status').textContent = 'Dashboard: ' + message + '. Checked at ' + new Date().toLocaleTimeString() + '.';
     const dot = document.querySelector('.status-dot');
     if (dot) dot.classList.toggle('unhealthy', !healthy);
   }
@@ -836,11 +845,24 @@
     return memory.ingested_at || memory.valid_from || memory.last_access;
   }
 
+  const memoryOwnershipLabels = new WeakMap();
+
+  function refreshMemoryOwnershipLabels() {
+    all('[data-memory-ownership]').forEach(label => {
+      const owner = memoryOwnershipLabels.get(label);
+      if (owner) label.textContent = workflow.ownership(owner.memory, owner.workspace);
+    });
+  }
+
   function memoryMeta(memory) {
     const meta = node('div', 'memory-meta');
+    const ownership = node('span', 'memory-ownership', workflow.ownership(memory, state.workspace));
+    ownership.dataset.memoryOwnership = '';
+    // Bind the authorized read context, never the selected project preference.
+    memoryOwnershipLabels.set(ownership, { memory, workspace: state.workspace });
     meta.append(
       node('span', 'type-chip', memoryType(memory)),
-      node('span', '', memory.scope || 'workspace'),
+      ownership,
       node('span', '', relative(memoryTime(memory))),
     );
     if (memory.pinned) meta.append(node('span', '', 'pinned'));
@@ -999,29 +1021,62 @@
     target.append(node('p', 'savings-note', `${excluded} excluded or unclassified deliver${excluded === 1 ? 'y' : 'ies'}. Measures estimated prompt-context reduction; it does not measure provider billing.`));
   }
 
-  function renderDecisions(memories) {
+  function renderReviewInbox(result) {
     const target = byId('decision-list');
     target.replaceChildren();
-    const candidates = memories.slice(0, 3);
-    if (!candidates.length) {
-      target.append(empty('No high-signal memories need review.'));
+    const items = result.items;
+    const partial = result.has_more || result.truncated;
+    byId('review-status').textContent = `${items.length} review ${items.length === 1 ? 'item' : 'items'} shown.`
+      + (partial ? ' This is a partial list; more records may need review.' : '');
+    if (!items.length) {
+      target.append(empty(partial ? 'No review items in this sample. More records may remain.'
+        : 'No records currently need review in this context.'));
       return;
     }
-    candidates.forEach(memory => {
-      const card = node(memory.id ? 'button' : 'article', 'decision-card memory-link-card');
-      if (memory.id) {
+    items.forEach((item, index) => {
+      const card = node(item.id ? 'button' : 'article', 'decision-card memory-link-card');
+      if (item.id) {
         card.type = 'button';
-        card.dataset.memoryId = memory.id;
-        card.addEventListener('click', () => openMemory(memory));
+        card.dataset.memoryId = item.id;
+        card.addEventListener('click', () => openMemory(item));
       }
+      const states = [];
+      if (item.quarantined) states.push('Quarantined');
+      if (item.conflict_with) states.push('Conflicting evidence');
+      if (item.review_state === 'pending') states.push('Source review pending');
       const header = node('div', 'decision-card-header');
       header.append(
-        node('span', 'tag', memory.pinned ? 'Pinned' : memoryType(memory)),
-        node('h3', '', memory.title || memory.id || 'Untitled memory'),
+        node('span', 'tag', states.join(' · ') || 'Review required'),
+        node('h3', '', 'Inspect review item ' + (index + 1)),
       );
-      card.append(header, node('p', '', truncate(memory.content || memory.summary, 360)));
+      card.append(header, node('p', '', item.excerpt || 'Open the record to review its source and history.'));
       target.append(card);
     });
+  }
+
+  async function loadReviewInbox() {
+    if (!state.workspace) return;
+    const request = beginScopedRequest('reviews');
+    const target = byId('decision-list');
+    target.replaceChildren(empty('Loading review state…'));
+    target.setAttribute('aria-busy', 'true');
+    byId('review-status').textContent = '';
+    byId('review-refresh').disabled = true;
+    try {
+      const result = await api('/review-inbox?' + memoryQuery(request.workspace, request.project) + '&limit=6', { signal: request.signal });
+      if (!isCurrentScopedRequest(request)) return;
+      if (!result || !Array.isArray(result.items)) throw new Error('No review state was returned.');
+      renderReviewInbox(result);
+    } catch (error) {
+      if (!isCurrentScopedRequest(request)) return;
+      target.replaceChildren(empty('Review state is unavailable: ' + error.message));
+      byId('review-status').textContent = 'Review status is unknown. Refresh reviews to try again.';
+    } finally {
+      if (isCurrentScopedRequest(request)) {
+        target.setAttribute('aria-busy', 'false');
+        byId('review-refresh').disabled = false;
+      }
+    }
   }
 
   function auditItems(payload) {
@@ -1090,7 +1145,7 @@
       row.type = 'button';
       if (memory.id) row.dataset.memoryId = memory.id;
       row.append(
-        node('strong', '', memory.title || memory.id || 'Memory'),
+        node('strong', '', memoryTitle(memory)),
         node('span', '', truncate(memory.summary || memory.content, 140)),
       );
       row.addEventListener('click', () => openMemory(memory));
@@ -1099,12 +1154,17 @@
   }
 
   async function loadStats(workspace, epoch) {
-    const stats = await api(`/stats?${query(workspace)}`);
-    if (epoch !== state.refreshEpoch) return;
-    state.stats = stats;
-    renderMetricValues(stats);
-    renderTypeBars(stats);
-    renderFirstMemoryJourney();
+    try {
+      const stats = await api(`/stats?${query(workspace)}`);
+      if (epoch !== state.refreshEpoch) return;
+      state.stats = stats;
+      renderMetricValues(stats);
+      renderTypeBars(stats);
+      renderFirstMemoryJourney();
+    } catch (error) {
+      if (epoch === state.refreshEpoch) byId('type-bars').replaceChildren(empty('Workspace composition is unavailable.'));
+      throw error;
+    }
   }
 
   async function loadSavings(epoch) {
@@ -1126,6 +1186,7 @@
   async function loadMemories(workspace, epoch, page = 0) {
     const request = beginScopedRequest('library');
     const params = new URLSearchParams({ workspace, limit: '100' });
+    if (request.project) params.set('repo', request.project);
     const search = byId('library-filter').value.trim();
     const type = byId('library-type').value;
     if (search) params.set('q', search);
@@ -1178,7 +1239,8 @@
   function renderFirstMemoryJourney() {
     const journey = byId('first-memory-journey');
     if (!journey) return;
-    journey.hidden = number(state.stats.memories) > 0 || state.libraryTotal > 0;
+    journey.hidden = Boolean(state.workspace) && (state.stats.memories == null
+      || number(state.stats.memories) > 0 || state.libraryTotal > 0);
     byId('first-memory-add').textContent = state.workspace ? 'Add your first memory' : 'Create your first workspace';
   }
 
@@ -1193,7 +1255,6 @@
       : [];
     renderProactive(proactive, proactiveResult.status === 'rejected'
       ? 'Strongest memories are unavailable. Try refreshing this workspace.' : '');
-    renderDecisions(proactive);
     renderActivity(auditResult.status === 'fulfilled' ? auditItems(auditResult.value) : []);
     if (auditResult.status === 'rejected') {
       const cell = byId('activity-body').querySelector('td');
@@ -1229,13 +1290,55 @@
     });
   }
 
+  const graphLifecycle = window.EngraphisGraphLifecycle.create({
+    isVisible: () => state.view === 'relations',
+    onStatus: ({ visible, capability }) => {
+      const status = byId('graph-lifecycle-status');
+      status.dataset.lifecycle = capability === 'drawing' ? (visible ? 'active' : 'paused') : capability;
+      status.textContent = capability === 'unloaded' ? 'The graph loads when you open Explore.'
+        : capability === 'physics' ? 'This renderer can pause physics only when you leave.'
+        : capability === 'unsupported' ? 'Automatic pause is unavailable for this renderer.'
+        : visible ? 'Select a node to inspect its evidence. Drawing pauses when you leave.'
+        : 'Graph drawing paused. Camera and selection are kept.';
+    },
+    onError: () => showNotice('A graph resource could not be paused or released. Reload this page if it stays active.'),
+  });
+  const narrowSidebar = window.matchMedia('(max-width: 860px)');
+  const syncSidebarOptions = () => { byId('sidebar-options').open = !narrowSidebar.matches; };
+  if (narrowSidebar.addEventListener) narrowSidebar.addEventListener('change', syncSidebarOptions);
+  else narrowSidebar.addListener(syncSidebarOptions);
+  syncSidebarOptions();
+
   const processingControls = window.EngraphisProcessingControls.create(api);
+  const askRequests = window.EngraphisAskRequests.create({ renderAnswer, renderPreview });
+  const workflow = window.EngraphisWorkflow.create({
+    onProjectChange: () => { void selectWorkspace(state.workspace); },
+    onNavigate: view => switchView(view),
+    onNewMemory: () => { switchView('library'); openEditor(); },
+  });
+
+  async function loadProjects(workspace, epoch) {
+    const request = beginScopedRequest('projects');
+    try {
+      const result = await api('/repos?' + query(workspace), { signal: request.signal });
+      if (epoch === state.refreshEpoch && isCurrentScopedRequest(request)) {
+        workflow.setProjects(result && result.repos);
+        refreshMemoryOwnershipLabels();
+      }
+    } catch (_) {
+      if (isCurrentScopedRequest(request)) {
+        workflow.projectsUnavailable();
+        refreshMemoryOwnershipLabels();
+      }
+    }
+  }
 
   async function selectWorkspace(name) {
     if (!name) return;
     invalidateConsolidationReview();
     const epoch = ++state.refreshEpoch;
     invalidateScopedRequests();
+    askRequests.reset();
     window.clearTimeout(librarySearchTimer);
     state.libraryCursors = [null];
     state.libraryPage = 0;
@@ -1246,6 +1349,12 @@
     renderLibraryPaging();
     closeGraphConnections();
     state.workspace = name;
+    state.stats = {};
+    renderMetricValues({});
+    byId('type-bars').replaceChildren(empty('Loading workspace composition…'));
+    renderFirstMemoryJourney();
+    workflow.selectWorkspace(name);
+    state.project = workflow.project();
     void processingControls.selectWorkspace(name);
     state.graphWorkspace = '';
     state.graphData = null;
@@ -1258,20 +1367,17 @@
     // workspace fetches begin so a stale form cannot write that record into the
     // newly selected workspace.
     state.editorMemory = null;
+    resetEditorSession();
+    destroyMemoryHistory();
     byId('memory-editor').hidden = true;
     const memoryDetail = byId('memory-detail');
     memoryDetail.replaceChildren();
     memoryDetail.hidden = true;
     resetScopedPanels();
     state.syncStatus = null;
-    if (state.graphEngine) {
-      if (state.graphSpacetimeOverlay) {
-        state.graphSpacetimeOverlay.destroy();
-        state.graphSpacetimeOverlay = null;
-      }
-      state.graphEngine.destroy();
-      state.graphEngine = null;
-    }
+    graphLifecycle.clear();
+    state.graphSpacetimeOverlay = null;
+    state.graphEngine = null;
     byId('workspace-select').value = name;
     renderWorkspaceNames();
     try {
@@ -1281,7 +1387,9 @@
     try {
       const results = await Promise.allSettled([
         loadStats(name, epoch),
+        loadProjects(name, epoch),
         loadMemories(name, epoch),
+        loadReviewInbox(),
         loadToday(name, epoch),
       ]);
       if (epoch !== state.refreshEpoch) return;
@@ -1307,7 +1415,7 @@
     card.setAttribute('aria-selected', String(state.selectedMemory === memory.id));
     if (state.selectedMemory === memory.id) card.classList.add('selected');
     card.append(
-      node('h2', '', memory.title || memory.id || 'Untitled memory'),
+      node('h2', '', memoryTitle(memory)),
       node('p', '', truncate(memory.content || memory.summary, 240)),
       memoryMeta(memory),
     );
@@ -1367,19 +1475,24 @@
   }
 
   async function selectMemory(id) {
+    const workspace = state.workspace;
+    const project = state.project;
+    const request = beginScopedRequest('memory-detail');
     state.selectedMemory = id;
+    resetEditorSession();
+    destroyMemoryHistory();
     renderLibrary();
     const target = byId('memory-detail');
     target.hidden = false;
     byId('memory-editor').hidden = true;
     target.replaceChildren(empty('Loading memory…'));
     try {
-      const payload = await api(`/memory/${encodeURIComponent(id)}?${query()}`);
+      const payload = await api(`/memory/${encodeURIComponent(id)}?${query(workspace)}`, { signal: request.signal });
       const memory = payload.memory || state.memories.find(item => item.id === id);
-      if (!memory || state.selectedMemory !== id) return;
+      if (!memory || state.selectedMemory !== id || !isCurrentScopedRequest(request)) return;
       state.editorMemory = memory;
       target.replaceChildren();
-      const title = node('h2', '', memory.title || memory.id || 'Untitled memory');
+      const title = node('h2', '', memoryTitle(memory));
       title.id = 'memory-detail-title';
       target.append(
         node('p', 'eyebrow', `${memoryType(memory)} · ${memory.scope || 'workspace'}`),
@@ -1388,6 +1501,9 @@
         memoryMeta(memory),
         definitionList([
           ['Memory id', memory.id],
+          ['Workspace id', memory.workspace_id],
+          ['Project id', memory.repo_id],
+          ['Session id', memory.session_id],
           ['Importance', memory.importance == null ? '—' : number(memory.importance).toFixed(2)],
           ['Valid from', relative(memory.valid_from)],
           ['Valid to', memory.valid_to ? relative(memory.valid_to) : 'current'],
@@ -1401,22 +1517,24 @@
         actions.append(button('Approve for prompt…', 'primary-button', () => approveForPrompt(memory)));
       }
       actions.append(
-        button('Edit', 'secondary-button', () => openEditor(memory)),
+        button(memory.can_revise === false ? 'Review saved versions' : 'Edit', 'secondary-button', () => openEditor(memory)),
         button(memory.pinned ? 'Unpin' : 'Pin', 'secondary-button', () => togglePin(memory)),
-        button('View timeline', 'secondary-button', () => openMemoryTimeline(memory)),
+        button('Search topic timeline', 'secondary-button', () => openMemoryTimeline(memory)),
         button('Retire', 'danger-button', () => retireMemory(memory)),
         button('Secure erase leak', 'danger-button', () => secureEraseMemory(memory)),
       );
       target.append(actions);
-      const chain = payload.chain || [];
-      if (chain.length) {
-        target.append(node('h3', '', 'Supersession chain'));
-        const list = node('div', 'timeline-list');
-        chain.forEach(item => list.append(simpleMemoryCard(item, 'timeline-card')));
-        target.append(list);
-      }
+      state.memoryHistory = window.EngraphisMemoryHistory.create({
+        api, id, workspace, repo: project,
+        isCurrent: () => isCurrentScopedRequest(request) && state.selectedMemory === id,
+        onOpen: openMemory,
+      });
+      target.append(state.memoryHistory.element);
+      void state.memoryHistory.load();
     } catch (error) {
-      if (state.selectedMemory === id) target.replaceChildren(empty(`Could not inspect memory: ${error.message}`));
+      if (state.selectedMemory === id && isCurrentScopedRequest(request)) {
+        target.replaceChildren(empty(`Could not inspect memory: ${error.message}`));
+      }
     }
   }
 
@@ -1438,7 +1556,7 @@
       card.addEventListener('click', () => openMemory(memory));
     }
     card.append(
-      node('h3', '', memory.title || memory.id || 'Memory'),
+      node('h3', '', memoryTitle(memory)),
       node('p', '', truncate(memory.content || memory.summary, 500)),
       memoryMeta(memory),
     );
@@ -1446,6 +1564,11 @@
   }
 
   function openEditor(memory = null) {
+    resetEditorSession();
+    state.editorSession = {
+      revision: window.EngraphisMemoryRevision.create(memory), busy: false,
+      conflicted: Boolean(memory && memory.can_revise === false),
+    };
     state.editorMemory = memory;
     state.editorReturnFocus = document.activeElement instanceof HTMLElement
       ? document.activeElement : byId('new-memory-button');
@@ -1455,6 +1578,16 @@
     byId('editor-title').textContent = memory ? 'Revise memory' : 'New memory';
     byId('editor-memory-title').value = memory ? (memory.title || '') : '';
     byId('editor-memory-type').value = memory ? memoryType(memory) : 'semantic';
+    const scope = byId('editor-memory-scope');
+    scope.querySelector('[value="repo"]').disabled = !state.project;
+    scope.querySelector('[value="repo"]').textContent = state.project
+      ? 'Project: ' + state.project : 'Select a project first';
+    scope.value = state.project ? 'repo' : 'workspace';
+    scope.disabled = Boolean(memory);
+    byId('editor-scope-control').hidden = Boolean(memory);
+    byId('editor-scope-note').textContent = memory
+      ? 'This revision preserves the existing ' + (memory.scope || 'workspace') + ' scope.'
+      : 'Workspace: ' + state.workspace + '. Choose where this new memory belongs.';
     byId('editor-memory-content').value = memory ? (memory.content || memory.summary || '') : '';
     byId('editor-memory-content').removeAttribute('aria-invalid');
     byId('editor-error').hidden = true;
@@ -1467,11 +1600,71 @@
     importanceControl.setAttribute('aria-valuetext', `${graphSliderResponseValue(
       'editor-memory-importance', importanceControl.value, 0.5,
     ).toFixed(2)} importance`);
+    if (state.editorSession.conflicted) {
+      byId('editor-error').textContent = 'This version cannot be revised. Refresh saved versions and choose an editing base; your draft will be retained.';
+      byId('editor-error').hidden = false;
+      byId('editor-refresh').hidden = false;
+      setEditorBusy(false);
+    }
     byId('editor-memory-title').focus();
+  }
+
+  function destroyMemoryHistory() {
+    if (state.memoryHistory) state.memoryHistory.destroy();
+    state.memoryHistory = null;
+  }
+
+  function resetEditorSession() {
+    const session = state.editorSession;
+    if (session && session.history) session.history.destroy();
+    state.editorSession = null;
+    byId('editor-refresh').hidden = true;
+    byId('editor-history').replaceChildren();
+    byId('editor-history').hidden = true;
+    setEditorBusy(false);
+  }
+
+  function setEditorBusy(busy) {
+    const editor = byId('memory-editor');
+    editor.setAttribute('aria-busy', String(busy));
+    editor.querySelectorAll('input, select, textarea, button').forEach(control => { control.disabled = busy; });
+    byId('editor-memory-scope').disabled = busy || Boolean(state.editorMemory);
+    editor.querySelector('button[type="submit"]').disabled = busy || Boolean(state.editorSession && state.editorSession.conflicted);
+  }
+
+  function refreshEditorVersions() {
+    const session = state.editorSession;
+    const original = state.editorMemory;
+    const workspace = state.workspace;
+    const project = state.project;
+    if (!session || !original || session.busy) return;
+    if (session.history) session.history.destroy();
+    const target = byId('editor-history');
+    target.hidden = false;
+    session.history = window.EngraphisMemoryHistory.create({
+      api, id: original.id, workspace, repo: project, original,
+      isCurrent: () => state.editorSession === session && state.workspace === workspace && state.project === project,
+      onUseBase: record => {
+        state.editorMemory = record;
+        session.revision = window.EngraphisMemoryRevision.create(record);
+        session.conflicted = false;
+        session.history.destroy();
+        target.replaceChildren();
+        target.hidden = true;
+        byId('editor-refresh').hidden = true;
+        byId('editor-error').textContent = 'Editing base refreshed. Your draft is unchanged; review it before saving.';
+        byId('editor-error').hidden = false;
+        setEditorBusy(false);
+        byId('editor-memory-content').focus();
+      },
+    });
+    target.replaceChildren(session.history.element);
+    void session.history.load();
   }
 
   function closeEditor() {
     const returnFocus = state.editorReturnFocus;
+    resetEditorSession();
     byId('memory-editor').hidden = true;
     byId('memory-detail').hidden = false;
     state.editorMemory = null;
@@ -1483,6 +1676,8 @@
 
   async function saveMemory(event) {
     event.preventDefault();
+    const session = state.editorSession;
+    if (!session || session.busy || session.conflicted) return;
     const current = state.editorMemory;
     let savedId = current && current.id;
     const workspace = state.workspace;
@@ -1493,6 +1688,8 @@
     const importance = graphSliderResponseValue(
       'editor-memory-importance', number(byId('editor-memory-importance').value), 0.5,
     );
+    const creationScope = byId('editor-memory-scope').value;
+    const creationProject = creationScope === 'repo' ? state.project : '';
     const currentImportance = current && current.importance != null
       ? number(current.importance) : 0.5;
     const contentField = byId('editor-memory-content');
@@ -1500,6 +1697,11 @@
     contentField.removeAttribute('aria-invalid');
     editorError.hidden = true;
     editorError.textContent = '';
+    if (!current && creationScope === 'repo' && !creationProject) {
+      editorError.textContent = 'Select a project before saving a project memory.';
+      editorError.hidden = false;
+      return;
+    }
     if (!content) {
       contentField.setAttribute('aria-invalid', 'true');
       editorError.textContent = 'Enter memory content before saving.';
@@ -1509,41 +1711,23 @@
       return;
     }
     try {
+      session.busy = true;
+      setEditorBusy(true);
       if (current) {
-        if (content !== (current.content || current.summary || '')) {
-          const corrected = await api('/correct', {
-            method: 'POST',
-            body: { id: current.id, workspace, content, reason: 'revised in Ledger' },
-          });
-          savedId = corrected.id;
-          // A correction intentionally creates a replacement.  The core inherits the
-          // source importance; carry any label edits to that replacement rather than
-          // accidentally applying them to the historical source record.
-          if (title !== (current.title || '') || memoryTypeValue !== memoryType(current)
-            || importance !== currentImportance) {
-            await api('/memory/update', {
-              method: 'POST',
-              body: {
-                id: corrected.id,
-                workspace,
-                title,
-                memory_type: memoryTypeValue,
-                importance,
-              },
-            });
-          }
-        } else if (title !== (current.title || '') || memoryTypeValue !== memoryType(current)
+        if (content !== (current.content || current.summary || '')
+          || title !== (current.title || '') || memoryTypeValue !== memoryType(current)
           || importance !== currentImportance) {
-          await api('/memory/update', {
-            method: 'POST',
-            body: {
-              id: current.id,
-              workspace,
-              title,
-              memory_type: memoryTypeValue,
-              importance,
-            },
-          });
+          const body = session.revision.body({ workspace, content, title, mtype: memoryTypeValue, importance, reason: 'revised in Ledger' });
+          const revised = await api('/memory/revise', { method: 'POST', body });
+          if (!revised || !revised.id || !revised.version || !revised.receipt
+            || revised.receipt.status !== 'committed' || revised.receipt.operation !== 'revise'
+            || revised.receipt.operation_id !== body.operation_id) {
+            throw new Error('The save could not be confirmed. Retry the unchanged draft to check this operation.');
+          }
+          savedId = revised.id;
+          if (state.editorSession === session) {
+            state.editorMemory = { ...current, id: revised.id, version: revised.version, content, title, memory_type: memoryTypeValue, importance };
+          }
         }
         if (workspace === state.workspace && epoch === state.refreshEpoch) {
           showNotice('Memory revision recorded with temporal history preserved.');
@@ -1556,7 +1740,8 @@
             content,
             title,
             mtype: memoryTypeValue,
-            scope: 'workspace',
+            scope: creationScope,
+            ...(creationProject ? { repo: creationProject } : {}),
             importance,
             source: 'human:ledger',
             trusted: true,
@@ -1567,12 +1752,23 @@
           showNotice('Memory saved locally. Review its source before approving it for model context.');
         }
       }
-      if (workspace !== state.workspace || epoch !== state.refreshEpoch) return;
+      if (workspace !== state.workspace || epoch !== state.refreshEpoch || state.editorSession !== session) return;
       closeEditor();
       await selectWorkspace(workspace);
       if (savedId && workspace === state.workspace && state.refreshEpoch === epoch + 1) await selectMemory(savedId);
     } catch (error) {
-      if (workspace === state.workspace && epoch === state.refreshEpoch) showNotice(`Could not save memory: ${error.message}`);
+      if (workspace === state.workspace && epoch === state.refreshEpoch && state.editorSession === session) {
+        session.conflicted = Boolean(current && (error.status === 409 || !current.version));
+        editorError.textContent = session.conflicted
+          ? 'This saved record changed. Your draft is retained. Refresh saved versions and choose an editing base before saving.'
+          : `Could not save memory: ${error.message} Your draft is retained.`;
+        editorError.hidden = false;
+        byId('editor-refresh').hidden = !session.conflicted;
+        showNotice(editorError.textContent);
+      }
+    } finally {
+      session.busy = false;
+      if (state.editorSession === session) setEditorBusy(false);
     }
   }
 
@@ -2051,10 +2247,21 @@
     const grounded = Boolean(result.grounded);
     meta.append(
       node('span', `support-pill ${grounded ? 'grounded' : 'abstained'}`, grounded ? 'Grounded' : 'Abstained'),
-      node('span', 'support-pill', `Support ${number(result.support).toFixed(2)}`),
-      node('span', 'support-pill', `${(result.citations || []).length} citations`),
+      node('span', 'support-pill', Number.isFinite(result.support) ? `Support ${result.support.toFixed(2)}` : 'Support unavailable'),
+      node('span', 'support-pill', `${(result.citations || []).length} ${(result.citations || []).length === 1 ? 'citation' : 'citations'}`),
     );
     target.append(meta);
+    const coverage = ['unknown', 'partial', 'complete'].includes(result.answer_coverage) ? result.answer_coverage : 'unknown';
+    const coverageNote = {
+      unknown: 'This answer has not been checked against every part of your question.',
+      partial: 'The answering service reports that some requested information is missing.',
+      complete: 'The answering service reports that every part of the question is covered.',
+    };
+    const coveragePanel = node('div', 'answer-coverage');
+    coveragePanel.dataset.coverage = coverage;
+    coveragePanel.append(node('strong', '', 'Question coverage: ' + coverage),
+      node('p', '', coverageNote[coverage] + ' Support and citations describe the returned evidence.'));
+    target.append(coveragePanel);
     if (!grounded) {
       target.append(
         node('h2', '', 'Insufficient evidence'),
@@ -2062,7 +2269,7 @@
       );
       return;
     }
-    target.append(node('p', 'answer-copy', result.answer || 'The cited memories support this answer.'));
+    target.append(node('h2', '', 'Answer'), node('p', 'answer-copy', result.answer || 'The cited memories support this answer.'));
     const citations = node('div', 'citation-list');
     (result.citations || []).forEach(citation => {
       const card = node(citation.id ? 'button' : 'article', 'citation-card memory-link-card');
@@ -2072,7 +2279,7 @@
         card.addEventListener('click', () => openMemory(citation));
       }
       card.append(
-        node('h3', '', `[${citation.n || citation.number || '•'}] ${citation.title || citation.id || 'Memory'}`),
+        node('h3', '', `[${citation.n || citation.number || '•'}] ${memoryTitle(citation)}`),
         node('p', '', citation.content || citation.summary || ''),
         node('div', 'memory-meta', `support ${number(citation.support || citation.score).toFixed(2)} · ${citation.id || ''}`),
       );
@@ -2098,33 +2305,26 @@
     const workspace = request.workspace;
     showNotice('');
     const k = number(byId('ask-k').value) || 5;
-    byId('answer-panel').replaceChildren(empty('Searching, checking support and building citations…'));
-    byId('retrieval-list').replaceChildren(empty('Retrieving candidate memories…'));
-    const showFailure = (id, label, error) => {
-      if (!isCurrentScopedRequest(request)) return;
-      byId(id).replaceChildren(empty(`${label} is unavailable: ${error.message}`));
-    };
-    // Render each result as soon as it arrives. The optional raw preview must never
-    // hide a grounded answer, including when one response stalls until its deadline.
-    await Promise.allSettled([
-      api('/answer', {
-        method: 'POST', signal: request.signal,
-        body: { query: question, workspace, k: Math.max(8, k), max_citations: k },
-      }).then(answer => {
-        if (isCurrentScopedRequest(request)) renderAnswer(answer);
-      }).catch(error => showFailure('answer-panel', 'Grounded Ask', error)),
+    await askRequests.start({
+      question,
+      scopeLabel: workspace + (request.project ? ' / ' + request.project : ' / all projects'),
+      isCurrent: () => isCurrentScopedRequest(request),
+      answer: signal => api('/answer', {
+        method: 'POST', signal,
+        body: { query: question, workspace, ...(request.project ? { repo: request.project } : {}), k: Math.max(8, k), max_citations: k },
+      }),
       // /recall is read-only (reinforce=False): uncited candidates add no second
       // reinforcement of memories cited by the grounded answer.
-      api(`/recall?q=${encodeURIComponent(question)}&${query(workspace)}&k=${Math.max(8, k)}`,
-        { signal: request.signal }).then(retrieval => {
-        if (!isCurrentScopedRequest(request)) return;
-        const target = byId('retrieval-list');
-        target.replaceChildren();
-        const memories = retrieval.memories || [];
-        if (!memories.length) target.append(empty('No raw candidates were returned.'));
-        else memories.forEach(memory => target.append(simpleMemoryCard(memory)));
-      }).catch(error => showFailure('retrieval-list', 'Raw retrieval', error)),
-    ]);
+      preview: signal => api(`/recall?q=${encodeURIComponent(question)}&${memoryQuery(workspace, request.project)}&k=${Math.max(8, k)}`, { signal }),
+    });
+  }
+
+  function renderPreview(retrieval) {
+    const target = byId('retrieval-list');
+    target.replaceChildren();
+    const memories = retrieval.memories || [];
+    if (!memories.length) target.append(empty('No raw candidates were returned.'));
+    else memories.forEach(memory => target.append(simpleMemoryCard(memory)));
   }
 
   function graphCommunityIndex(value) {
@@ -2243,7 +2443,7 @@
   function graphMemoryEvidenceCard(memory) {
     const card = node('article', 'graph-memory-evidence');
     card.append(
-      node('h4', '', memory.title || memory.id || 'Memory'),
+      node('h4', '', memoryTitle(memory)),
       node('p', '', truncate(memory.content || memory.summary, 500)),
       memoryMeta(memory),
     );
@@ -2482,6 +2682,11 @@
 
   function graphIsGalaxy() {
     return byId('graph-preset').value === 'galaxy';
+  }
+
+  function graphOverlayEnabled(galaxyQuality = state.graphGalaxyQuality) {
+    // Every can use the authored Galaxy renderer even though its toolbar preset is 'every'.
+    return graphIsGalaxy() || (galaxyQuality && byId('graph-preset').value === 'every');
   }
 
   function graphSizeBy() {
@@ -3087,9 +3292,7 @@
       }, false, !state.graphFrozen);
       state.graphEngine.freeze(state.graphFrozen);
     }
-    if (state.graphSpacetimeOverlay) {
-      state.graphSpacetimeOverlay.setEnabled(graphIsGalaxy());
-    }
+    graphLifecycle.sync();
     saveGraphPreferences();
     if (previousIncludeCode !== state.graphIncludeCode
       || previousShowUnlinked !== state.graphShowUnlinked || previousAsOf !== asOf
@@ -3383,6 +3586,7 @@
       && state.graphDataAsOf === graphAsOfTimestamp()
       && state.graphDataRepo === currentRepo && state.graphData) {
       if (state.graphEngine) state.graphEngine.resize();
+      graphLifecycle.sync();
       return;
     }
     const targetWorkspace = state.workspace;
@@ -3426,7 +3630,6 @@
     // the retry control until that transaction settles so repeated clicks cannot churn it.
     setGraphLoadControlsBusy(true, force);
     const oldEngine = state.graphEngine;
-    const oldOverlay = state.graphSpacetimeOverlay;
     /* Loading is a transaction: freeze the committed renderer before fetching its replacement.
        A failed request restores it; a successful request destroys it immediately before commit. */
     if (state.graphEngine && typeof state.graphEngine.freeze === 'function') {
@@ -3455,7 +3658,7 @@
         if (oldEngine && typeof oldEngine.freeze === 'function') {
           oldEngine.freeze(state.graphFrozen);
         }
-        if (oldOverlay) oldOverlay.setEnabled(graphIsGalaxy());
+        graphLifecycle.sync();
       };
       let candidateHost = null;
       let candidateEngine = null;
@@ -3474,13 +3677,8 @@
         // Keep committed references live: renderer callbacks close over candidateEngine.
         // Nulling it here would make every post-readiness stats/metrics callback look stale.
         if (state.graphEngine === candidateEngine) return;
-        if (candidateOverlay && typeof candidateOverlay.destroy === 'function') {
-          try { candidateOverlay.destroy(); } catch (_) { /* best-effort */ }
-        }
+        graphLifecycle.release(candidateEngine, candidateOverlay);
         candidateOverlay = null;
-        if (typeof candidateEngine.destroy === 'function') {
-          try { candidateEngine.destroy(); } catch (_) { /* best-effort */ }
-        }
         candidateEngine = null;
         if (candidateHost && candidateHost.parentNode) {
           candidateHost.remove();
@@ -3552,7 +3750,7 @@
         const responseIncludeCode = sceneMeta.include_code === false ? false : targetIncludeCode;
         const codeOverlayDegraded = targetIncludeCode && !responseIncludeCode;
         const oldHost = byId('graph-canvas');
-        // oldEngine/oldOverlay were captured before the first await so the failure path
+        // oldEngine was captured before the first await so the failure path
         // can restore the exact committed renderer even when candidate setup never begins.
         candidateHost = oldHost.cloneNode(false);
         candidateHost.id = `graph-canvas-candidate-${request.id}`;
@@ -3650,6 +3848,8 @@
           );
           candidateOverlay.setEnabled(galaxyQuality || graphIsGalaxy());
         }
+        // Pending renderers also follow visibility while finite worker preparation finishes.
+        graphLifecycle.track(candidateEngine, candidateOverlay, () => graphOverlayEnabled(galaxyQuality));
         if (typeof candidateEngine.whenReady === 'function') {
           await Promise.race([candidateEngine.whenReady(), timeoutPromise]);
           if (!isCurrentGraphLoad(request)) {
@@ -3687,8 +3887,8 @@
             ? 'Code overlay needs a repository filter; showing entity relationships only.'
             : 'Code overlay is unavailable; showing entity relationships only.');
         }
-        if (oldOverlay) oldOverlay.destroy();
-        if (oldEngine) oldEngine.destroy();
+        graphLifecycle.replace(candidateEngine, candidateOverlay,
+          () => graphOverlayEnabled());
         byId('graph-empty').hidden = Boolean(data.nodes.length);
         if (!data.nodes.length) byId('graph-empty').textContent = 'No entities exist in this workspace yet.';
         updateGraphModeControls();
@@ -3726,9 +3926,7 @@
         if (oldEngine && typeof oldEngine.freeze === 'function') {
           oldEngine.freeze(state.graphFrozen);
         }
-        if (oldOverlay) {
-          oldOverlay.setEnabled(graphIsGalaxy());
-        }
+        graphLifecycle.sync();
       } finally {
         // Safety net: if control left the try/catch without committing or cleaning up
         // (e.g. an unexpected throw in finally itself), ensure no candidate leaks.
@@ -4612,7 +4810,7 @@
   }
 
   function switchView(view, { pushHistory = true } = {}) {
-    const validViews = ['today', 'ask', 'library', 'relations', 'provenance', 'manage'];
+    const validViews = ['today', 'ask', 'library', 'connections', 'relations', 'provenance', 'manage'];
     if (!validViews.includes(view)) view = 'today';
     if (pushHistory && state.view !== view) {
       const url = new URL(location.href);
@@ -4630,9 +4828,7 @@
     try {
       localStorage.setItem('engraphis-ledger-view', view);
     } catch (_) {}
-    if (state.graphSpacetimeOverlay) {
-      state.graphSpacetimeOverlay.setEnabled(view === 'relations' && graphIsGalaxy());
-    }
+    graphLifecycle.sync();
     if (view === 'relations') loadGraph();
     if (view === 'provenance' && state.provenanceTab === 'audit') loadAudit();
     if (view === 'manage') {
@@ -4681,6 +4877,8 @@
       select.disabled = true;
       setConnection('Local engine connected · no workspace');
       state.workspace = '';
+      state.project = '';
+      workflow.selectWorkspace('');
       state.stats = {};
       state.libraryTotal = 0;
       renderFirstMemoryJourney();
@@ -4688,6 +4886,8 @@
       renderWorkspaceList();
       renderMetricValues({ memories: 0, total_rows: 0, workspaces: 0, sessions: 0 });
       byId('decision-list').replaceChildren(empty('Create a workspace in Manage to start reviewing memory.'));
+      byId('review-status').textContent = 'Create a workspace to load its review state.';
+      byId('review-refresh').disabled = true;
       const emptyActivity = node('tr');
       const emptyActivityCell = node('td', '', 'No workspace selected yet.');
       emptyActivityCell.colSpan = 5;
@@ -4727,10 +4927,10 @@
       let view = 'today';
       try {
         const saved = localStorage.getItem('engraphis-ledger-view');
-        if (['today', 'ask', 'library', 'relations', 'provenance', 'manage'].includes(saved)) view = saved;
+        if (['today', 'ask', 'library', 'connections', 'relations', 'provenance', 'manage'].includes(saved)) view = saved;
       } catch (_) {}
       const urlView = new URL(location.href).searchParams.get('view');
-      switchView(['today', 'ask', 'library', 'relations', 'provenance', 'manage'].includes(urlView) ? urlView : view, { pushHistory: false });
+      switchView(['today', 'ask', 'library', 'connections', 'relations', 'provenance', 'manage'].includes(urlView) ? urlView : view, { pushHistory: false });
       if (urlView === 'manage' && entry.searchParams.get('tab') === 'settings') {
         switchManageTab('settings');
       }
@@ -4796,6 +4996,7 @@
 
   byId('workspace-select').addEventListener('change', event => selectWorkspace(event.target.value));
   byId('ask-form').addEventListener('submit', askMemory);
+  byId('review-refresh').addEventListener('click', () => { void loadReviewInbox(); });
   byId('library-filter').addEventListener('input', () => {
     window.clearTimeout(librarySearchTimer);
     // Invalidate immediately: an earlier query must not paint while the new one debounces.
@@ -4820,6 +5021,7 @@
   byId('new-memory-button').addEventListener('click', () => openEditor());
   byId('editor-close').addEventListener('click', closeEditor);
   byId('editor-cancel').addEventListener('click', closeEditor);
+  byId('editor-refresh').addEventListener('click', refreshEditorVersions);
   byId('memory-editor').addEventListener('submit', saveMemory);
   byId('editor-memory-importance').addEventListener('input', event => {
     const effective = graphSliderResponseValue(
@@ -4966,7 +5168,7 @@
       }
       updateGraphModeControls();
       if (state.graphEngine) state.graphEngine.setSizeBy(graphSizeBy());
-      if (state.graphSpacetimeOverlay) state.graphSpacetimeOverlay.setEnabled(graphIsGalaxy());
+      graphLifecycle.sync();
       return;
     }
     const resumeLayout = state.graphFrozen;
@@ -4984,7 +5186,7 @@
     syncGraphTuning(settings);
     updateGraphModeControls();
     if (state.graphEngine) state.graphEngine.setSizeBy(graphSizeBy());
-    if (state.graphSpacetimeOverlay) state.graphSpacetimeOverlay.setEnabled(graphIsGalaxy());
+    graphLifecycle.sync();
     clearGraphSavedView();
     syncGraphChoices();
     saveGraphPreferences();
