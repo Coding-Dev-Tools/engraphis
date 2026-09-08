@@ -850,18 +850,18 @@ test('Ledger cache-busts a graph renderer that fetched but did not register', as
   await expect(page.locator('#graph-empty')).toContainText('Graph unavailable');
   expect(rendererRequests).toHaveLength(1);
   const first = new URL(rendererRequests[0]);
-  expect(first.searchParams.get('v')).toBe('20260903-rotation-balance-1');
+  expect(first.searchParams.get('v')).toBe('20260906-galaxy-boundaries-1');
   expect(first.searchParams.has('retry')).toBe(false);
 
   await page.getByRole('button', { name: 'Reload data' }).click();
   await expect(page.locator('#graph-count')).toContainText('3 entities · 1 relations');
   expect(rendererRequests).toHaveLength(2);
   const second = new URL(rendererRequests[1]);
-  expect(second.searchParams.get('v')).toBe('20260903-rotation-balance-1');
+  expect(second.searchParams.get('v')).toBe('20260906-galaxy-boundaries-1');
   expect(second.searchParams.get('retry')).toBe('1');
 });
 
-test('Ledger narrowly migrates only the legacy Galaxy spacing default', async ({ page }) => {
+test('Ledger applies each Galaxy preference migration once', async ({ page }) => {
   const key = 'engraphis-ledger-graph-preferences-v1';
   const writePreferences = preferences => page.evaluate(({ storageKey, value }) => {
     localStorage.setItem(storageKey, JSON.stringify(value));
@@ -932,13 +932,36 @@ test('Ledger narrowly migrates only the legacy Galaxy spacing default', async ({
   expect(custom.tuning.link).toBe(21);
   expect(custom.tuning.gravity).toBe(0);
 
-  // Once versioned, 48 is a deliberate user selection rather than the retired default.
-  await writePreferences({
-    physicsVersion: 5, preset: 'galaxy', tuning: { repel: 48, gravity: 0 },
-  });
-  await page.reload();
-  await expect(page.locator('#graph-repel')).toHaveValue('48');
-  expect((await readPreferences()).tuning.repel).toBe(48);
+  // A later migration must not reinterpret a previously versioned user choice.
+  for (const physicsVersion of [4, 5]) {
+    for (const repel of [48, 60]) {
+      await writePreferences({
+        physicsVersion, preset: 'galaxy', tuning: { repel, gravity: 96 },
+      });
+      await page.reload();
+      await expect(page.locator('#graph-repel')).toHaveValue(String(repel));
+      const expectedGravity = physicsVersion < 5 ? 120 : 96;
+      await expect(page.locator('#graph-gravity')).toHaveValue(String(expectedGravity));
+      const saved = await readPreferences();
+      expect(saved.physicsVersion).toBe(5);
+      expect(saved.tuning.repel).toBe(repel);
+      expect(saved.tuning.gravity).toBe(expectedGravity);
+    }
+  }
+
+  // The v3 reset applies only to snapshots older than v3, even after a v5 upgrade.
+  for (const physicsVersion of [3, 4]) {
+    const spacetimeTuning = { gravitationalConstant: 200, blackHoleMass: 500,
+      localGravitationalConstant: 200, damping: 0, springStiffness: 100 };
+    await writePreferences({ physicsVersion, preset: 'galaxy',
+      tuning: { repel: 400, link: 80, gravity: 400 }, spacetimeTuning });
+    await page.reload();
+    await expect(page.locator('#graph-repel')).toHaveValue('400');
+    await expect(page.locator('#graph-gravity')).toHaveValue('400');
+    const saved = await readPreferences();
+    expect(saved.tuning).toMatchObject({ repel: 400, link: 80, gravity: 400 });
+    expect(saved.spacetimeTuning).toMatchObject(spacetimeTuning);
+  }
 });
 
 test('Ledger deadline includes stalled graph assets and Reload data starts a fresh attempt', async ({ page }) => {

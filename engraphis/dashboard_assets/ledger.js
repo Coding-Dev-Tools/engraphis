@@ -500,7 +500,7 @@
         graphAssetSource('/v2-assets/vendor/force-graph.min.js?v=20260727-final'),
         'ForceGraph', controller.signal,
       )).then(() => loadScript(
-        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260903-rotation-balance-1'),
+        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260906-galaxy-boundaries-1'),
         'EngraphisGraph', controller.signal,
       )).then(() => loadScript(
         graphAssetSource('/v2-assets/engraphis-spacetime.js?v=20260812-stable-orbit-lanes-7'),
@@ -3129,9 +3129,11 @@
     const savedTuning = graphPreference('tuning', {});
     const savedPhysicsVersion = Number(graphPreference('physicsVersion', 0));
     const sourcePhysicsVersion = Number.isFinite(savedPhysicsVersion) ? savedPhysicsVersion : 0;
-    const legacyPhysics = hasSavedPreferences && sourcePhysicsVersion < GRAPH_PHYSICS_VERSION;
-    const needsPhysicsV3Migration = hasSavedPreferences && sourcePhysicsVersion < 3;
-    const needsPhysicsV4Migration = hasSavedPreferences && sourcePhysicsVersion < 4;
+    const needsPhysicsMigration = version => hasSavedPreferences
+      && sourcePhysicsVersion < version;
+    const legacyPhysics = needsPhysicsMigration(GRAPH_PHYSICS_VERSION);
+    const needsPhysicsV3Migration = needsPhysicsMigration(3);
+    const needsPhysicsV4Migration = needsPhysicsMigration(4);
     const effectiveTuning = savedTuning && typeof savedTuning === 'object'
       ? { ...savedTuning } : {};
     const savedSpacetimeTuning = graphPreference('spacetimeTuning', {});
@@ -3159,7 +3161,7 @@
     }
     /* Physics v5 makes 120 the Galaxy gravity default. Migrate only the exact retired default;
        a saved 96 in an already-versioned v5 snapshot remains an intentional user choice. */
-    if (legacyPhysics && preset === 'galaxy' && Number(effectiveTuning.gravity) === 96) {
+    if (needsPhysicsMigration(5) && preset === 'galaxy' && Number(effectiveTuning.gravity) === 96) {
       effectiveTuning.gravity = 120;
     }
     syncGraphTuning({
