@@ -188,10 +188,11 @@ class _FakeLLM:
 
 def test_llm_synthesis_used_when_provided():
     eng, wid, rid = _engine_with_facts()
+    complete = "auth\nWe standardised on PASETO tokens for auth, replacing JWT [1]."
     ans = eng.grounded_recall("which auth scheme did we standardise on?", workspace_id=wid, repo_id=rid,
-                              llm=_FakeLLM("PASETO, per source [1]."))
+                              llm=_FakeLLM(complete))
     assert ans.grounded and ans.synthesized is True
-    assert ans.answer == "PASETO, per source [1]."
+    assert ans.answer == complete
 
 
 def test_llm_abstain_sentinel_respected():

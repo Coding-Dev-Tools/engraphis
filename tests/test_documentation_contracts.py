@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import json
 import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -104,6 +105,12 @@ def test_core_backend_imports_stay_behind_outer_composition_root() -> None:
 
 
 def test_benchmark_text_alternatives_match_registered_fixture_boundary() -> None:
+    registry = json.loads(_read("docs/benchmark-evidence/offline-fixtures-v1.json"))
+    measurements = {run["id"]: run["result"] for run in registry["runs"]}
+    payload = measurements["offline-performance"]
+    grounding = measurements["offline-grounded"]
+    decisions = grounding["answerable"] + grounding["off_topic"]
+    correct = round(decisions * grounding["decision_accuracy"])
     readme = _read("README.md")
     svg_text = _read("docs/images/context-efficiency.svg")
     svg_root = ET.fromstring(svg_text)
@@ -128,8 +135,9 @@ def test_benchmark_text_alternatives_match_registered_fixture_boundary() -> None
         "15 of 15",
         "0 of 3 to 3 of 3",
         "2 of 2 summary cases",
-        "10,202 rather than 23,810 tokens",
-        "10 of 10 correct decisions",
+        f"{payload['compact_serialized_payload_tokens']:,} rather than "
+        f"{payload['full_serialized_payload_tokens']:,} tokens",
+        f"{correct} of {decisions} correct decisions",
         "85.38 tokens under a 1,500-token cap",
     ):
         assert evidence in alternative

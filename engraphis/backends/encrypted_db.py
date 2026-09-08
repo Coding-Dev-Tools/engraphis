@@ -186,7 +186,7 @@ class _TranslatingConnection:
 
 
 class _EncryptedConnector:
-    """SQLCipher connector with distinct writable and immutable-open entry points.
+    """SQLCipher connector with separate writable, live-reader and immutable opens.
 
     ``__call__`` preserves the historical writable connector behavior.  Store's
     explicit read-only connector contract uses ``open_read_only``; that path never
@@ -223,8 +223,18 @@ class _EncryptedConnector:
             ) from None
         return self._open(target, uri=True, read_only=True)
 
-    def _open(self, target: str, *, uri: bool, read_only: bool):
-        options = {"timeout": 30, "check_same_thread": False}
+    def open_read_snapshot(self, path: str, *, timeout: float):
+        """Open a WAL-visible reader, distinct from immutable file inspection."""
+        try:
+            target = Path(path).resolve(strict=True).as_uri() + "?mode=ro"
+        except OSError:
+            raise EncryptionError(
+                "could not initialize the encrypted database connection"
+            ) from None
+        return self._open(target, uri=True, read_only=True, timeout=timeout)
+
+    def _open(self, target: str, *, uri: bool, read_only: bool, timeout: float = 30):
+        options = {"timeout": timeout, "check_same_thread": False}
         if uri:
             options["uri"] = True
         try:
@@ -247,7 +257,7 @@ class _EncryptedConnector:
             ) from None
         try:
             if read_only:
-                # Defense in depth after the immutable URI has already constrained
+                # Defense in depth after the read-only URI has already constrained
                 # the open itself. This PRAGMA is connection-local and non-persistent.
                 raw.execute("PRAGMA query_only=ON")
             # Touch the header so a wrong key / plaintext-vs-encrypted mismatch fails now,

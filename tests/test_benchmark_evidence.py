@@ -154,7 +154,7 @@ def test_readme_distinguishes_every_registered_token_context_measurement():
         "offline-fixtures-v1.json",
         "offline-chunking",
         "offline-performance",
-        "8a74e9f48e25f33d625d4cc5c1b14fec3055891944adccf615c440e84e4b0255",
+        "4d5056d137182ae5cf116c5d59af18b38a7a0ed7731885e9597f63e549cb46b7",
         "There is no universal memory-count",
         "python -m eval.vector_scale",
         'vector_backend="sqlite-vec"',
@@ -288,7 +288,7 @@ def test_example_visual_uses_the_checked_in_offline_fixture_results(
     }
     assert "5/5 answerable questions" in visual
     assert "6/6 off-topic questions" in visual
-    assert "8a74e9f48e25f33d625d4cc5c1b14fec3055891944adccf615c440e84e4b0255" in visual
+    assert "4d5056d137182ae5cf116c5d59af18b38a7a0ed7731885e9597f63e549cb46b7" in visual
 
 
 def test_context_savings_visual_uses_only_registered_measurements():
@@ -307,6 +307,7 @@ def test_context_savings_visual_uses_only_registered_measurements():
     performance = committed["performance"]
     context_full = performance["full_serialized_payload_tokens"]
     context_compact = performance["compact_serialized_payload_tokens"]
+    grounded_total = committed["grounded"]["answerable"] + committed["grounded"]["off_topic"]
     payload_samples = performance["questions"]
     timed_recalls = performance["timed_recalls"]
 
@@ -341,11 +342,19 @@ def test_context_savings_visual_uses_only_registered_measurements():
         f"{100 * performance['serialized_payload_savings_ratio']:.2f}% lower",
         f"{performance['mean_context_tokens']:.2f} avg · {performance['max_context_tokens']} max",
         "35 / 35",
-        "10 / 10 · 8 / 8",
+        f"{grounded_total} / {grounded_total} · 8 / 8",
         "9.66% lower",
         "Local deterministic fixtures",
     ):
         assert evidence in visual
+
+    svg = ElementTree.fromstring(visual)
+    namespace = "{http://www.w3.org/2000/svg}"
+    # Numeric source text must be rendered by SVG, not hidden beside a stale bitmap.
+    assert not svg.findall(f".//{namespace}image")
+    visible_text = {node.text for node in svg.iter(f"{namespace}text")}
+    assert f"{context_compact:,} tokens" in visible_text
+    assert f"{100 * performance['serialized_payload_savings_ratio']:.2f}% lower" in visible_text
 
     for unsupported in (
         "Public evidence is checksum-bound",
@@ -382,7 +391,7 @@ def test_public_numeric_evidence_registry_is_complete_and_live(
     sidecar_path = artifact_path.with_suffix(".json.sha256")
     artifact_bytes = artifact_path.read_bytes()
     artifact_sha = hashlib.sha256(artifact_bytes).hexdigest()
-    expected_sha = "8a74e9f48e25f33d625d4cc5c1b14fec3055891944adccf615c440e84e4b0255"
+    expected_sha = "4d5056d137182ae5cf116c5d59af18b38a7a0ed7731885e9597f63e549cb46b7"
 
     assert artifact_sha == expected_sha
     assert sidecar_path.read_text(encoding="ascii") == (
