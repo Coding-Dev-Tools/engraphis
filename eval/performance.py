@@ -21,12 +21,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+import os
 import platform
 import statistics
 import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
-from dataclasses import dataclass
+from contextlib import ExitStack
+from dataclasses import dataclass, field
+from multiprocessing import get_context
 from pathlib import Path
 from typing import Optional
 
@@ -39,9 +43,20 @@ from engraphis.core.retrieval_policy import CANDIDATE_DEPTH_MODES, RETRIEVAL_PRO
 from engraphis.core.store import Store
 from eval import metrics
 from eval.harness import load_dataset
+from eval.performance_engine import (
+    FactoryBenchmarkSession,
+    PerformanceEngineConfig,
+    factory_benchmark_session,
+)
 
 
 SUPPORTED_CONCURRENCY = (1, 4, 16)
+_WORKER_BARRIER = None
+
+
+def _initialize_worker(barrier) -> None:
+    global _WORKER_BARRIER
+    _WORKER_BARRIER = barrier
 
 
 @dataclass(frozen=True)
@@ -82,6 +97,47 @@ class _Measurements:
     compact_payload_tokens: list[int]
     candidate_depths: list[int]
     quality: list[dict]
+    cold_queue_ms: list[float] = field(default_factory=list)
+    warm_queue_ms: list[float] = field(default_factory=list)
+    cold_stage_ms: list[dict[str, float]] = field(default_factory=list)
+    warm_stage_ms: list[dict[str, float]] = field(default_factory=list)
+
+
+_RECALL_TIMING_FIELDS = (
+    "engine_recall", "preparation", "planning", "embedding", "candidate_filtering",
+    "vector_search", "lexical_search", "graph_search", "code_search", "fusion_scoring",
+    "reranking", "selection", "reinforcement", "support_and_provenance", "packing", "response_metadata",
+)
+
+
+def _observed_recall_stages(result) -> dict[str, float]:
+    """Copy only recognized finite observations, never diagnostic traces or text."""
+    diagnostics = getattr(result, "diagnostics_v1", None)
+    raw = diagnostics.get("phase_ms") if isinstance(diagnostics, dict) else None
+    if not isinstance(raw, dict):
+        return {}
+    return {name: raw[name] for name in _RECALL_TIMING_FIELDS
+            if type(raw.get(name)) in {int, float} and math.isfinite(raw[name]) and raw[name] >= 0}
+
+
+def _recall_stage_report(measurements: list[_Measurements]) -> dict:
+    report = {
+        "diagnostics_enabled": True,
+        "boundary": "observed engine wall time with diagnostics enabled; disjoint stages accumulate repeated arms; engine_recall encloses those stages and must not be added to them",
+        "missing_observations": "unexecuted or unavailable stages are omitted, never imputed as zero; timings exclude warmup passes",
+    }
+    for temperature in ("cold", "warm"):
+        rows = [row for item in measurements for row in getattr(item, f"{temperature}_stage_ms")]
+        phases = {}
+        for name in _RECALL_TIMING_FIELDS:
+            values = [row[name] for row in rows if name in row]
+            if values:
+                phases[name] = {"sample_count": len(values), **_latency_summary(values)}
+        report[temperature] = {
+            "timed_recalls": len(rows), "recalls_with_observed_timings": sum(bool(row) for row in rows),
+            "phase_ms": phases,
+        }
+    return report
 
 
 def _percentile(values: list[float], percentile: float) -> float:
@@ -184,8 +240,11 @@ def _measure_recall(
     candidate_depth: str,
     token_budget: int,
     retrieval_profile: str,
-) -> tuple[dict, float]:
+    diagnostics: bool = False,
+    submitted_ns: Optional[int] = None,
+) -> tuple[dict, float, float]:
     started = time.perf_counter_ns()
+    queue_ms = max(0, started - submitted_ns) / 1_000_000 if submitted_ns is not None else 0.0
     result = engine.recall_engine.recall(
         question["q"],
         search_filter,
@@ -195,8 +254,9 @@ def _measure_recall(
         reinforce=False,
         token_budget=token_budget,
         retrieval_profile=retrieval_profile,
+        **({"diagnostics": True} if diagnostics else {}),
     )
-    return result, (time.perf_counter_ns() - started) / 1_000_000
+    return result, (time.perf_counter_ns() - started) / 1_000_000, queue_ms
 
 
 def _measure_batch(
@@ -210,7 +270,8 @@ def _measure_batch(
     token_budget: int,
     retrieval_profile: str,
     concurrency: int,
-) -> list[tuple[dict, float]]:
+    diagnostics: bool = False,
+) -> list[tuple[dict, float, float]]:
     if concurrency == 1:
         return [
             _measure_recall(
@@ -222,6 +283,8 @@ def _measure_batch(
                 candidate_depth=candidate_depth,
                 token_budget=token_budget,
                 retrieval_profile=retrieval_profile,
+                diagnostics=diagnostics,
+                submitted_ns=time.perf_counter_ns(),
             )
             for question in questions
         ]
@@ -237,6 +300,8 @@ def _measure_batch(
                 candidate_depth=candidate_depth,
                 token_budget=token_budget,
                 retrieval_profile=retrieval_profile,
+                diagnostics=diagnostics,
+                submitted_ns=time.perf_counter_ns(),
             )
             for question in questions
         ]
@@ -246,10 +311,43 @@ def _measure_batch(
 def _run_single(
     dataset: list[dict],
     *,
+    dim: int,
+    embedder: Optional[DeterministicEmbedder] = None,
+    engine_config: Optional[PerformanceEngineConfig] = None,
+    **kwargs,
+) -> tuple[dict, _Measurements]:
+    # One blocked task per child guarantees the requested workers are distinct;
+    # a fast tiny workload cannot silently run several process samples in one PID.
+    if _WORKER_BARRIER is not None:
+        _WORKER_BARRIER.wait(timeout=60)
+    with ExitStack() as owned:
+        started = time.perf_counter_ns()
+        session = None
+        if engine_config is not None:
+            session = owned.enter_context(factory_benchmark_session(engine_config, dim=dim))
+            engine = session.engine
+        else:
+            embedder = embedder or DeterministicEmbedder(dim=dim)
+            store = Store(":memory:")
+            owned.callback(store.close)
+            engine = MemoryEngine(store, embedder, NumpyVectorIndex(store), IdentityReranker())
+        startup_ms = (time.perf_counter_ns() - started) / 1_000_000
+        return _run_engine(
+            dataset, engine=engine, factory_session=session,
+            startup_ms=startup_ms, startup_peak_rss_bytes=_process_rss_bytes(), **kwargs,
+        )
+
+
+def _run_engine(
+    dataset: list[dict],
+    *,
+    engine: MemoryEngine,
+    factory_session: Optional[FactoryBenchmarkSession],
+    startup_ms: float,
+    startup_peak_rss_bytes: Optional[int],
     k: int,
     candidate_k: int,
     candidate_depth: str,
-    dim: int,
     warmups: int,
     iterations: int,
     filler_memories: int,
@@ -257,14 +355,11 @@ def _run_single(
     retrieval_profile: str,
     config: AcceptanceConfig,
     process_number: int,
-    embedder: Optional[DeterministicEmbedder] = None,
 ) -> tuple[dict, _Measurements]:
-    embedder = embedder or DeterministicEmbedder(dim=dim)
-    store = Store(":memory:")
+    ingest_started = time.perf_counter_ns()
+    store = engine.store
     workspace_id = store.get_or_create_workspace("performance")
     repo_id = store.get_or_create_repo(workspace_id, "corpus")
-    index = NumpyVectorIndex(store)
-    engine = MemoryEngine(store, embedder, index, IdentityReranker())
     search_filter = SearchFilter(
         workspace_id=workspace_id,
         repo_id=repo_id,
@@ -308,6 +403,15 @@ def _run_single(
             resolve_conflicts=False,
         )
 
+    ingestion_ms = (time.perf_counter_ns() - ingest_started) / 1_000_000
+    if factory_session is not None:
+        factory_session.reopen()
+        engine = factory_session.engine
+        store = engine.store
+    reopen_peak_rss_bytes = (
+        _process_rss_bytes() if factory_session and factory_session.reopen_ms is not None else None
+    )
+
     cold = _measure_batch(
         engine,
         questions,
@@ -318,6 +422,7 @@ def _run_single(
         token_budget=token_budget,
         retrieval_profile=retrieval_profile,
         concurrency=config.concurrency,
+        diagnostics=factory_session is not None,
     )
     for _ in range(warmups):
         _measure_batch(
@@ -330,12 +435,13 @@ def _run_single(
             token_budget=token_budget,
             retrieval_profile=retrieval_profile,
             concurrency=config.concurrency,
+            diagnostics=factory_session is not None,
         )
 
     measurements = _Measurements([], [], [], [], [], [], [], [])
     counter = RegexTokenCounter()
     for iteration in range(iterations):
-        for question_number, (result, latency_ms) in enumerate(_measure_batch(
+        for question_number, (result, latency_ms, queue_ms) in enumerate(_measure_batch(
             engine,
             questions,
             search_filter,
@@ -345,8 +451,12 @@ def _run_single(
             token_budget=token_budget,
             retrieval_profile=retrieval_profile,
             concurrency=config.concurrency,
+            diagnostics=factory_session is not None,
         )):
             measurements.warm_latencies_ms.append(latency_ms)
+            measurements.warm_queue_ms.append(queue_ms)
+            if factory_session is not None:
+                measurements.warm_stage_ms.append(_observed_recall_stages(result))
             if iteration != 0:
                 continue
             retrieved_ids = [chunk["id"] for chunk in result.chunks]
@@ -374,11 +484,20 @@ def _run_single(
                 ),
             })
 
-    measurements.cold_latencies_ms = [latency_ms for _, latency_ms in cold]
+    measurements.cold_latencies_ms = [latency_ms for _, latency_ms, _ in cold]
+    measurements.cold_queue_ms = [queue_ms for _, _, queue_ms in cold]
+    if factory_session is not None:
+        measurements.cold_stage_ms = [_observed_recall_stages(result) for result, _, _ in cold]
     process_resources = {
         "process": process_number,
+        "pid": os.getpid(),
         "rss_bytes": _process_rss_bytes(),
         "storage_bytes": _storage_bytes(store),
+        "startup_ms": startup_ms,
+        "ingestion_ms": ingestion_ms,
+        "populated_reopen_ms": factory_session.reopen_ms if factory_session else None,
+        "process_peak_rss_after_startup_bytes": startup_peak_rss_bytes,
+        "process_peak_rss_after_reopen_bytes": reopen_peak_rss_bytes,
     }
     corpus = {
         "dataset_cases": len(dataset),
@@ -390,10 +509,17 @@ def _run_single(
         "python": platform.python_version(),
         "platform": platform.system().lower(),
         "architecture": platform.machine().lower(),
-        "embedder": type(embedder).__name__,
-        "vector_backend": type(index).__name__,
+        "embedder": type(engine.embedder).__name__,
+        "vector_backend": type(engine.index).__name__,
+        "reranker": type(engine.reranker).__name__,
+        "sqlite": {
+            "journal_mode": store.conn.execute("PRAGMA journal_mode").fetchone()[0],
+            "synchronous": store.conn.execute("PRAGMA synchronous").fetchone()[0],
+        },
+        "backend_configuration": (
+            factory_session.provenance if factory_session else {"mode": "fixture", "storage": "memory"}
+        ),
     }
-    store.close()
     return {"corpus": corpus, "environment": environment, "resources": process_resources}, measurements
 
 
@@ -433,6 +559,12 @@ def _build_report(
         item["storage_bytes"] for item in resources if item["storage_bytes"] is not None
     ]
     warm_summary = _latency_summary(warm_latencies)
+    observed_processes = len({item["pid"] for item in resources})
+    if observed_processes != config.processes:
+        raise RuntimeError("performance samples did not execute in distinct worker processes")
+    reopen_values = [
+        item["populated_reopen_ms"] for item in resources if item["populated_reopen_ms"] is not None
+    ]
 
     return {
         "schema": "engraphis-performance/v1",
@@ -459,6 +591,7 @@ def _build_report(
         "acceptance": {
             "concurrency": config.concurrency,
             "independent_processes": config.processes,
+            "observed_processes": observed_processes,
             "minimum_queries": config.minimum_queries,
             "canonical": config.canonical,
             "query_count": question_count,
@@ -499,6 +632,27 @@ def _build_report(
             "max_process_rss_bytes": max(rss_values, default=None),
             "max_storage_bytes": max(storage_values, default=None),
         },
+        "phases": {
+            **({"recall_stages": _recall_stage_report(measurements)}
+               if base["environment"]["backend_configuration"]["mode"] == "factory" else {}),
+            "startup_ms": _latency_summary([item["startup_ms"] for item in resources]),
+            "startup_samples": len(resources),
+            "ingestion_ms": _latency_summary([item["ingestion_ms"] for item in resources]),
+            "populated_reopen_ms": _latency_summary(reopen_values) if reopen_values else None,
+            "populated_reopen_samples": len(reopen_values),
+            "queue_wait_ms": {
+                "cold": _latency_summary([value for item in measurements for value in item.cold_queue_ms]),
+                "warm": _latency_summary([value for item in measurements for value in item.warm_queue_ms]),
+            },
+            "scope": {
+                "startup": "empty database and engine construction; excludes Python/MCP process startup",
+                "populated_reopen": "disk database and engine reconstruction after ingestion; excludes close",
+                "cold": "first workload pass after construction/reopen; not process startup or uncached IO",
+                "recall": "engine call execution, excluding executor queue wait and transport",
+                "queue": "in-process executor submission to call start; excludes transport queues",
+                "rss": "process lifetime peak sampled at named boundaries, not an isolated phase peak",
+            },
+        },
         "detail": quality,
     }
 
@@ -520,12 +674,14 @@ def run(
     processes: int = 1,
     minimum_queries: int = 0,
     canonical: bool = False,
+    engine_config: Optional[PerformanceEngineConfig] = None,
 ) -> dict:
     """Benchmark recall and return a JSON-safe report.
 
     Existing callers keep the single-process deterministic path.  ``processes`` creates
-    isolated in-memory corpora in child processes; a caller-provided embedder is therefore
-    intentionally limited to the established single-process API.
+    isolated corpora in child processes. ``engine_config`` enables the serializable,
+    exact production factory path, with local-only models and fresh disk databases.
+    A caller-provided embedder remains limited to the established single-process fixture API.
     """
     k = max(1, int(k))
     candidate_k = max(1, int(candidate_k))
@@ -553,6 +709,12 @@ def run(
     config.validate(question_count)
     if embedder is not None and config.processes != 1:
         raise ValueError("a custom embedder is only supported with processes=1")
+    if engine_config is not None:
+        if not isinstance(engine_config, PerformanceEngineConfig):
+            raise ValueError("engine_config must be a PerformanceEngineConfig")
+        engine_config.validate()
+        if embedder is not None:
+            raise ValueError("engine_config and a custom embedder cannot be combined")
 
     if config.processes == 1:
         base, measurement = _run_single(
@@ -569,6 +731,7 @@ def run(
             config=config,
             process_number=0,
             embedder=embedder,
+            engine_config=engine_config,
         )
         return _build_report(
             base,
@@ -596,8 +759,14 @@ def run(
         "token_budget": token_budget,
         "retrieval_profile": retrieval_profile,
         "config": config,
+        "engine_config": engine_config,
     }
-    with ProcessPoolExecutor(max_workers=config.processes) as executor:
+    # Spawn also on Unix: native model/SQLite state must never leak through fork.
+    context = get_context("spawn")
+    with ProcessPoolExecutor(
+        max_workers=config.processes, mp_context=context,
+        initializer=_initialize_worker, initargs=(context.Barrier(config.processes),),
+    ) as executor:
         futures = [
             executor.submit(_run_single, dataset, process_number=number, **worker_args)
             for number in range(config.processes)
@@ -645,6 +814,7 @@ def run_acceptance_matrix(
     processes: int = 5,
     minimum_queries: int = 1000,
     concurrencies: Optional[list[int]] = None,
+    engine_config: Optional[PerformanceEngineConfig] = None,
 ) -> dict:
     """Run the complete canonical 1/4/16-concurrency acceptance protocol.
 
@@ -679,6 +849,7 @@ def run_acceptance_matrix(
             processes=processes,
             minimum_queries=effective_minimum,
             canonical=False,
+            engine_config=engine_config,
         )
     return {
         "schema": "engraphis-performance-matrix/v1",
@@ -832,7 +1003,19 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="run the canonical 1/4/16-concurrency, >=5-process acceptance matrix",
     )
     parser.add_argument("--json", action="store_true", help="print the full JSON report")
+    parser.add_argument(
+        "--engine-config",
+        help="JSON factory configuration: fresh disk/memory DB, exact backends, pinned local-only models",
+    )
     args = parser.parse_args(argv)
+    engine_options = {}
+    if args.engine_config:
+        try:
+            engine_options["engine_config"] = PerformanceEngineConfig.from_dict(
+                json.loads(Path(args.engine_config).read_text(encoding="utf-8"))
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            parser.error(str(exc))
     processes = args.processes if args.processes is not None else (
         5 if args.acceptance_matrix else 1
     )
@@ -851,6 +1034,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             retrieval_profile=args.retrieval_profile,
             processes=processes,
             minimum_queries=args.minimum_queries,
+            **engine_options,
         )
     else:
         report = run(
@@ -868,6 +1052,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             processes=processes,
             minimum_queries=args.minimum_queries,
             canonical=args.canonical,
+            **engine_options,
         )
     if args.json:
         print(json.dumps(report, indent=2))

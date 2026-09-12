@@ -112,6 +112,7 @@ def test_performance_report_separates_cold_warm_and_acceptance_shape():
     assert report["acceptance"] == {
         "concurrency": 4,
         "independent_processes": 1,
+        "observed_processes": 1,
         "minimum_queries": 0,
         "canonical": False,
         "query_count": 1,

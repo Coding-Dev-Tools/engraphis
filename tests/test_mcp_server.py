@@ -2,6 +2,7 @@
 is not installed, so the offline CI gate is unaffected."""
 import logging
 import json
+import os
 import re
 import subprocess
 import sys
@@ -542,7 +543,7 @@ def test_server_identity_and_tools_registered():
     ].inputSchema.get("properties", {})
 
 
-def test_mcp_server_module_entrypoint_runs_stdio_handshake():
+def test_mcp_server_module_entrypoint_runs_stdio_handshake(tmp_path):
     payload = json.dumps({
         "jsonrpc": "2.0",
         "id": 1,
@@ -554,9 +555,19 @@ def test_mcp_server_module_entrypoint_runs_stdio_handshake():
         },
     }) + "\n"
 
+    env = os.environ.copy()
+    env.update({
+        "ENGRAPHIS_DB_PATH": str(tmp_path / "stdio-handshake.db"),
+        "ENGRAPHIS_EMBED_MODEL": "",
+        "ENGRAPHIS_EXTRACTOR": "none",
+        "ENGRAPHIS_GRAPH_EXTRACTOR": "none",
+        "ENGRAPHIS_VECTOR_BACKEND": "numpy",
+        "ENGRAPHIS_MCP_PRELOAD_EMBEDDER": "auto",
+    })
     result = subprocess.run(
         [sys.executable, "-m", "engraphis.mcp_server"],
         cwd=ROOT,
+        env=env,
         input=payload,
         text=True,
         capture_output=True,
@@ -570,7 +581,60 @@ def test_mcp_server_module_entrypoint_runs_stdio_handshake():
     assert response["result"]["serverInfo"]["name"] == "engraphis_mcp"
 
 
-def test_classic_mcp_entrypoint_preserves_historical_server_identity():
+def test_mcp_server_module_entrypoint_serves_first_tool_call(tmp_path):
+    payload = "\n".join([
+        json.dumps({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "first-tool-test", "version": "1"},
+            },
+        }),
+        json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}),
+        json.dumps({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "engraphis_recall_context",
+                "arguments": {"query": "startup", "workspace": "default", "token_budget": 64},
+            },
+        }),
+        "",
+    ])
+    env = os.environ.copy()
+    env.update({
+        "ENGRAPHIS_DB_PATH": str(tmp_path / "stdio-first-tool.db"),
+        "ENGRAPHIS_EMBED_MODEL": "",
+        "ENGRAPHIS_EXTRACTOR": "none",
+        "ENGRAPHIS_GRAPH_EXTRACTOR": "none",
+        "ENGRAPHIS_VECTOR_BACKEND": "numpy",
+        "ENGRAPHIS_MCP_WARMUP": "1",
+        "ENGRAPHIS_MCP_PRELOAD_EMBEDDER": "auto",
+    })
+
+    result = subprocess.run(
+        [sys.executable, "-m", "engraphis.mcp_server"],
+        cwd=ROOT,
+        env=env,
+        input=payload,
+        text=True,
+        capture_output=True,
+        timeout=15,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    responses = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+    by_id = {response["id"]: response for response in responses if "id" in response}
+    assert by_id[1]["result"]["serverInfo"]["name"] == "engraphis_mcp"
+    assert by_id[2]["result"]["content"]
+
+
+def test_classic_mcp_entrypoint_preserves_historical_server_identity(tmp_path):
     payload = json.dumps({
         "jsonrpc": "2.0",
         "id": 1,
@@ -582,9 +646,19 @@ def test_classic_mcp_entrypoint_preserves_historical_server_identity():
         },
     }) + "\n"
 
+    env = os.environ.copy()
+    env.update({
+        "ENGRAPHIS_DB_PATH": str(tmp_path / "classic-handshake.db"),
+        "ENGRAPHIS_EMBED_MODEL": "",
+        "ENGRAPHIS_EXTRACTOR": "none",
+        "ENGRAPHIS_GRAPH_EXTRACTOR": "none",
+        "ENGRAPHIS_VECTOR_BACKEND": "numpy",
+        "ENGRAPHIS_MCP_PRELOAD_EMBEDDER": "auto",
+    })
     result = subprocess.run(
         [sys.executable, "-m", "engraphis.mcp_classic_cli"],
         cwd=ROOT,
+        env=env,
         input=payload,
         text=True,
         capture_output=True,
@@ -1307,6 +1381,54 @@ def test_background_warmup_honors_env(monkeypatch):
     assert started_threads[0].name == "engraphis-warmup"
 
 
+def test_stdio_startup_preloads_semantic_dependency_before_background_warmup(monkeypatch, capsys):
+    import engraphis.mcp_server as server
+
+    calls = []
+
+    def fake_import(name):
+        print("dependency import noise")
+        calls.append(name)
+        return object()
+
+    monkeypatch.setattr(server.sys, "platform", "win32")
+    monkeypatch.setattr(server.settings, "embed_model", "sentence-transformers/model")
+    monkeypatch.setenv("ENGRAPHIS_MCP_PRELOAD_EMBEDDER", "auto")
+    monkeypatch.setattr(server.importlib, "import_module", fake_import)
+
+    server._preload_sentence_transformers()
+
+    captured = capsys.readouterr()
+    assert calls == ["sentence_transformers"]
+    assert captured.out == ""
+    assert "dependency import noise" in captured.err
+
+
+@pytest.mark.parametrize(
+    ("platform", "embed_model", "policy", "should_import"),
+    [
+        ("linux", "sentence-transformers/model", "auto", False),
+        ("win32", "", "auto", False),
+        ("win32", "sentence-transformers/model", "0", False),
+        ("linux", "sentence-transformers/model", "1", True),
+    ],
+)
+def test_stdio_startup_preload_respects_backend_and_policy(monkeypatch, platform,
+                                                            embed_model, policy,
+                                                            should_import):
+    import engraphis.mcp_server as server
+
+    calls = []
+    monkeypatch.setattr(server.sys, "platform", platform)
+    monkeypatch.setattr(server.settings, "embed_model", embed_model)
+    monkeypatch.setenv("ENGRAPHIS_MCP_PRELOAD_EMBEDDER", policy)
+    monkeypatch.setattr(server.importlib, "import_module", lambda name: calls.append(name))
+
+    server._preload_sentence_transformers()
+
+    assert bool(calls) is should_import
+
+
 def test_recall_context_prunes_default_diagnostics_when_disabled(monkeypatch):
     import engraphis.mcp_server as srv
     from engraphis.service import MemoryService
@@ -1421,4 +1543,3 @@ def test_context_response_cap_omits_whole_evidence_and_updates_usage(monkeypatch
     assert usage["omitted_count"] == full["usage"]["packed_count"] + full["usage"]["omitted_count"]
     assert usage["saved_tokens"] == usage["estimated_saved_tokens"] == usage["source_tokens"]
     assert RegexTokenCounter()(json.dumps(bounded, ensure_ascii=False)) == usage["actual_response_tokens"] <= cap
-

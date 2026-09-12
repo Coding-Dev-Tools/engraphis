@@ -26,13 +26,14 @@ def main(argv=None) -> None:
 
     # Import after argparse so --help works without the optional MCP dependency.
     # See mcp_http_cli.py for the try/except ImportError rationale.
-    from engraphis.mcp_server import classic_mcp
+    from engraphis.mcp_server import classic_mcp, _preload_sentence_transformers
 
     try:
         from engraphis.mcp_server import _eager_exact_backend_check
     except ImportError:
         _eager_exact_backend_check = lambda: None  # noqa: E731
 
+    _preload_sentence_transformers()
     _eager_exact_backend_check()
     classic_mcp.run()
 

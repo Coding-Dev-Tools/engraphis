@@ -1421,7 +1421,8 @@ class MemoryService:
                retention_supervisor: Optional[str] = None,
                allow_automatic_critical_retention: Optional[bool] = None,
                query_planner=None, read_only: bool = False,
-               require_exact_backends: bool = False) -> "MemoryService":
+               require_exact_backends: bool = False,
+               sqlite_durability: Optional[str] = None) -> "MemoryService":
         database_path = str(db_path)
         physical_db_path = _physical_database_path(database_path)
         migration_allowed = (
@@ -1435,7 +1436,7 @@ class MemoryService:
         # auto-maintenance, MCP server, and CLI all honor the same config knob. An
         # explicit value (e.g. extractor="none") still overrides the environment.
         if (extractor is None or graph_extractor is None or retention_supervisor is None
-                or allow_automatic_critical_retention is None):
+                or allow_automatic_critical_retention is None or sqlite_durability is None):
             from engraphis.config import settings
             if extractor is None:
                 extractor = settings.extractor
@@ -1445,6 +1446,11 @@ class MemoryService:
                 retention_supervisor = settings.retention_supervisor
             if allow_automatic_critical_retention is None:
                 allow_automatic_critical_retention = settings.allow_automatic_critical_retention
+            if sqlite_durability is None:
+                sqlite_durability = settings.sqlite_durability
+        if (not isinstance(sqlite_durability, str)
+                or sqlite_durability.strip().lower() not in {"durable", "balanced"}):
+            raise ValueError("sqlite_durability must be 'durable' or 'balanced'")
         # One-time, safe upgrade path for a self-host whose ENGRAPHIS_DB_PATH already
         # holds a v1-shaped database (see docstring) — must run before Store() ever
         # touches the file. No-ops instantly for a fresh install or an already-v2 db.
@@ -1465,6 +1471,7 @@ class MemoryService:
             allow_automatic_critical_retention=bool(allow_automatic_critical_retention),
             query_planner=query_planner, read_only=read_only,
             require_exact_backends=require_exact_backends,
+            sqlite_durability=sqlite_durability,
         )
         if migration_allowed:
             try:
@@ -1878,7 +1885,8 @@ class MemoryService:
         )
 
     @_rollback_service_transaction
-    def remember_batch(self, memories: list[dict], *, workspace: str) -> dict:
+    def remember_batch(self, memories: list[dict], *, workspace: str,
+                        redact_secrets: bool = False) -> dict:
         """Store multiple memories in a single atomic transaction.
 
         Each item in *memories* accepts the same keyword arguments as
@@ -1891,6 +1899,7 @@ class MemoryService:
         Returns a dict with ``total``, ``succeeded``, ``failed``, and a
         ``results`` list carrying per-item resolution (``op``: add / noop /
         invalidate / relate / quarantined) or an ``error`` string.
+        When ``redact_secrets`` is True, embedded secrets are redacted before storage.
         """
         if not isinstance(memories, list):
             raise ValidationError("memories must be a list")
@@ -1936,6 +1945,7 @@ class MemoryService:
                     valid_from=mem.get("valid_from"),
                     subject_key=mem.get("subject_key", ""),
                     claim_kind=mem.get("claim_kind", ""),
+                    redact_secrets=redact_secrets,
                 )
                 results.append({"index": idx, "status": "ok", **result})
             except (ValidationError, ValueError) as exc:
@@ -1956,7 +1966,8 @@ class MemoryService:
                       mtype: str = "semantic", scope: Optional[str] = None,
                       source: str = "agent", trusted: bool = False,
                       _local_agent_operator: bool = False,
-                      _ingress: str = "service") -> dict:
+                      _ingress: str = "service",
+                      redact_secrets: bool = False) -> dict:
         """Store a fan-out batch with within-batch resolution and evidence edges.
 
         Unlike :meth:`remember_batch` (which loops ordinary single writes and can
@@ -1969,7 +1980,8 @@ class MemoryService:
         Each item accepts ``content`` (required) plus optional ``title``, ``mtype``,
         ``importance``, ``keywords``, ``metadata``, ``subject_key``, ``claim_kind``,
         and ``valid_from``. Provenance/trust is decided once for the whole batch —
-        a sub-agent fleet shares one origin.
+        a sub-agent fleet shares one origin. When ``redact_secrets`` is True,
+        embedded secrets in content/title are redacted before storage.
         """
         if not isinstance(facts, list):
             raise ValidationError("facts must be a list")
@@ -2023,6 +2035,10 @@ class MemoryService:
                 fact.get("title", ""), field="title", max_chars=MAX_TITLE_CHARS,
                 required=False,
             )
+            if redact_secrets:
+                content = _redact_secrets(content)
+                if title:
+                    title = _redact_secrets(title)
             _reject_secret_capture((
                 ("content", content), ("title", title),
                 ("keywords", fact.get("keywords")),
@@ -2110,13 +2126,17 @@ class MemoryService:
                source: str = "agent", trusted: bool = False,
                kind: Optional[str] = None, resolve_conflicts: bool = True,
                _local_agent_operator: bool = False,
-               _ingress: str = "service") -> dict:
+               _ingress: str = "service",
+               redact_secrets: bool = False) -> dict:
         """Store raw, undistilled text. With an extractor configured (ENGRAPHIS_EXTRACTOR)
         the text is first distilled into discrete typed facts; without one this behaves
         exactly like ``remember``. Normal local-agent ingest is prompt-visible after
         validation; explicitly external sources remain pending, and detector matches
-        are quarantined before they can surface."""
+        are quarantined before they can surface. When ``redact_secrets`` is True,
+        embedded secrets are redacted before storage."""
         content = _clean_text(content, field="content", max_chars=MAX_CONTENT_CHARS)
+        if redact_secrets:
+            content = _redact_secrets(content)
         _reject_secret_capture((("content", content), ("metadata", metadata)))
         local_agent_provenance = (
             _local_agent_provenance(source, ingress=_ingress)
@@ -2275,7 +2295,8 @@ class MemoryService:
     # ── folder / file import (dashboard "Import" section) ────────────────────────
     def _import_one(self, name: str, content: str, *, ws: str, mt: MemoryType,
                     kind: str, extra_provenance: Optional[dict] = None,
-                    resource_title: str = "") -> dict:
+                    resource_title: str = "",
+                    redact_secrets: bool = False) -> dict:
         """Shared per-file ingest for ``import_folder``/``import_files``: one memory per
         file, workspace-scoped, always marked untrusted (SECURITY.md §5/§1 — imported
         content did not originate from an already-trusted agent write, so it must not be
@@ -2288,7 +2309,8 @@ class MemoryService:
         position. An LLM/custom extractor is never applied by this base import pass.
         Callers must explicitly opt into the separate ``derive_facts`` pass, which may
         send content to the configured provider (SECURITY.md §6). With no extractor
-        (the default) behaviour is byte-for-byte unchanged."""
+        (the default) behaviour is byte-for-byte unchanged. When ``redact_secrets`` is
+        True, embedded secrets are redacted before storage."""
         if not content.strip():
             return {"file": name, "skipped": True}
         fallback = Path(name).stem or name
@@ -2307,7 +2329,7 @@ class MemoryService:
                 return self._store_import_chunks(
                     name, content, ws=ws, mt=mt, kind=kind, chunks=chunks,
                     fallback=fallback, extra_provenance=extra_provenance,
-                    resource_title=resource_title,
+                    resource_title=resource_title, redact_secrets=redact_secrets,
                 )
         except (ValidationError, ValueError, sqlite3.Error, RecursionError,
                 MemoryError) as exc:
@@ -2316,7 +2338,8 @@ class MemoryService:
 
     def _store_import_chunks(self, name: str, content: str, *, ws: str, mt: MemoryType,
                              kind: str, chunks, fallback: str,
-                             extra_provenance: Optional[dict], resource_title: str) -> dict:
+                             extra_provenance: Optional[dict], resource_title: str,
+                             redact_secrets: bool = False) -> dict:
         """Apply a resource inside its caller's per-file savepoint."""
         if chunks:
             total = len(chunks)
@@ -2336,6 +2359,7 @@ class MemoryService:
                               "chunk": {"index": i, "of": total,
                                         "heading": (fact.title or "")[:200]}},
                     resolve_conflicts=False,
+                    redact_secrets=redact_secrets,
                 )
                 first = first or r
             return {"file": name, "id": first["id"], "op": first["op"], "chunks": total}
@@ -2344,6 +2368,7 @@ class MemoryService:
             content, workspace=ws, mtype=mt.value, scope="workspace",
             title=title[:MAX_TITLE_CHARS], source="import", trusted=False, kind=kind,
             metadata={**(extra_provenance or {}), "import_file": name},
+            redact_secrets=redact_secrets,
         )
         return {"file": name, "id": r["id"], "op": r["op"]}
 
@@ -4523,6 +4548,9 @@ class MemoryService:
             content = _clean_text(content, field="content", max_chars=MAX_CONTENT_CHARS)
         if title is not None:
             title = _clean_text(title, field="title", max_chars=MAX_TITLE_CHARS, required=False)
+        _reject_secret_capture((
+            ("content", content or ""), ("title", title or ""),
+        ))
         reason = _clean_text(reason, field="reason", max_chars=MAX_TITLE_CHARS, required=False)
         actor = _clean_text(actor, field="actor", max_chars=MAX_NAME_CHARS, required=False) or "user"
         operation_id = _clean_text(operation_id, field="operation_id", max_chars=200)
@@ -4551,6 +4579,7 @@ class MemoryService:
                repo: Optional[str] = None, reason: str = "", actor: str = "user") -> dict:
         mid = _clean_text(memory_id, field="memory_id", max_chars=MAX_NAME_CHARS)
         new_content = _clean_text(new_content, field="new_content", max_chars=MAX_CONTENT_CHARS)
+        _reject_secret_capture((("new_content", new_content),))
         reason = _clean_text(reason, field="reason", max_chars=MAX_TITLE_CHARS, required=False)
         actor = _clean_text(actor, field="actor", max_chars=MAX_NAME_CHARS,
                             required=False) or "user"
@@ -4621,13 +4650,16 @@ class MemoryService:
             raise ValidationError("merge needs at least two distinct source memories")
         merged_content = _clean_text(merged_content, field="content",
                                      max_chars=MAX_CONTENT_CHARS)
+        title_clean = (None if title is None
+                       else _clean_text(title, field="title", max_chars=MAX_TITLE_CHARS,
+                                        required=False))
+        _reject_secret_capture((
+            ("merged_content", merged_content), ("title", title_clean or ""),
+        ))
         reason = _clean_text(reason, field="reason", max_chars=MAX_TITLE_CHARS,
                              required=False)
         actor = _clean_text(actor, field="actor", max_chars=MAX_NAME_CHARS,
                             required=False) or "user"
-        title_clean = (None if title is None
-                       else _clean_text(title, field="title", max_chars=MAX_TITLE_CHARS,
-                                        required=False))
         mt = _enum(mtype, MemoryType, "memory_type") if mtype else None
         target_scope = _enum(scope, Scope, "scope") if scope else None
         wid, _ = self._require_scope(workspace, repo)
@@ -11938,6 +11970,7 @@ class MemoryService:
             "schema_version": self.store.schema_version,
             "prompt_eligibility": eligibility,
             "embedding": embedding,
+            "sqlite_durability": self.store.durability_health(),
             **ledger_counts,
         }
 

@@ -66,6 +66,7 @@ def backend_health(engine: Any = None, *, vector_backend: str = "numpy") -> dict
         "embedder": _backend_identity(getattr(engine, "embedder", None)),
         "reranker": _backend_identity(getattr(engine, "reranker", None)),
         "extractor": _backend_identity(getattr(engine, "extractor", None)),
+        "sqlite_durability": engine.store.durability_health(),
     }
 
 
@@ -130,6 +131,7 @@ def create_memory_engine(
     query_planner: Optional[QueryPlanner] = None,
     read_only: bool = False,
     require_exact_backends: bool = False,
+    sqlite_durability: str = "durable",
 ):
     """Construct a ``MemoryEngine`` and transfer ownership of all resources to it.
 
@@ -138,6 +140,9 @@ def create_memory_engine(
             is unavailable instead of falling back to degraded alternatives. Use this
             for production deployments where silent degradation is unacceptable.
             ``ENGRAPHIS_ENV=prod`` forces this on regardless of the argument.
+        sqlite_durability: ``durable`` (default) uses WAL + FULL synchronization
+            for writable files; ``balanced`` explicitly requests WAL + NORMAL.
+            In-memory databases are not persistent and read-only opens are unchanged.
     """
     if _is_prod_env():
         require_exact_backends = True
@@ -153,7 +158,8 @@ def create_memory_engine(
 
         engine_cls = MemoryEngine
 
-    store = Store(db_path, connect=connect, read_only=read_only)
+    store = Store(db_path, connect=connect, read_only=read_only,
+                  sqlite_durability=sqlite_durability)
     owned = []
     try:
         embedder = get_embedder(

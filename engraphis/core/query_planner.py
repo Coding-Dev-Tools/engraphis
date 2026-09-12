@@ -76,14 +76,21 @@ class DeterministicQueryPlanner:
         reasons = [type_reason] if type_reason else []
 
         exact_terms = []
+        seen_terms: set[str] = set()
         for match in _QUOTED_RE.finditer(text):
             value = next((group for group in match.groups() if group), "").strip()
-            if value and value.casefold() not in {term.casefold() for term in exact_terms}:
-                exact_terms.append(value)
+            if value:
+                folded = value.casefold()
+                if folded not in seen_terms:
+                    seen_terms.add(folded)
+                    exact_terms.append(value)
         for value in _IDENTIFIER_RE.findall(text):
             value = value.strip()
-            if value and value.casefold() not in {term.casefold() for term in exact_terms}:
-                exact_terms.append(value)
+            if value:
+                folded = value.casefold()
+                if folded not in seen_terms:
+                    seen_terms.add(folded)
+                    exact_terms.append(value)
         if exact_terms:
             planned.append(PlannedQuery(
                 text=" ".join(exact_terms[:6]),

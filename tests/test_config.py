@@ -295,10 +295,10 @@ def test_invalid_cors_origin_diagnostic_does_not_echo_credentials(monkeypatch, c
 
     assert "cors-token" not in capsys.readouterr().err
 
-def test_invalid_service_mode_exits_process(monkeypatch):
-    """Invalid ENGRAPHIS_SERVICE_MODE must fail-closed (sys.exit), not silently fall back."""
+def test_invalid_service_mode_raises_value_error(monkeypatch):
+    """Invalid ENGRAPHIS_SERVICE_MODE must fail-closed (ValueError), not silently fall back."""
     monkeypatch.setenv("ENGRAPHIS_SERVICE_MODE", "bogus")
-    with pytest.raises(SystemExit):
+    with pytest.raises(ValueError, match="invalid ENGRAPHIS_SERVICE_MODE"):
         Settings()
 
 
@@ -313,7 +313,7 @@ def test_service_mode_defaults_to_customer_trust_domain(monkeypatch):
 def test_private_service_modes_are_not_available_in_the_public_package(monkeypatch):
     for mode in ("relay", "vendor", "combined"):
         monkeypatch.setenv("ENGRAPHIS_SERVICE_MODE", mode)
-        with pytest.raises(SystemExit):
+        with pytest.raises(ValueError, match="invalid ENGRAPHIS_SERVICE_MODE"):
             Settings()
 
 

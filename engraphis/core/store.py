@@ -5,7 +5,8 @@ does *not* own retrieval scoring (that is the recall engine, Phase 1) — it own
 durable state and the primitives the engines need: scoped + bi-temporal reads,
 vector storage, full-text, the knowledge graph, sessions, and an audit trail.
 
-Connections use WAL + foreign keys. Vectors are stored L2-normalized so the
+Writable file-backed connections use WAL + FULL synchronization by default.
+Vectors are stored L2-normalized so the
 NumPy reference index can use a dot product as cosine similarity.
 """
 from __future__ import annotations
@@ -1183,7 +1184,8 @@ class Store:
     def __init__(self, path: str = ":memory:", *,
                  allowed_workspaces: Optional[set] = None,
                  connect: Optional[Callable[[str], Any]] = None,
-                 read_only: bool = False, read_snapshot_limit: int = 4) -> None:
+                 read_only: bool = False, read_snapshot_limit: int = 4,
+                 sqlite_durability: str = "durable") -> None:
         """Open a store.
 
         ``read_only`` is deliberately stronger than merely promising not to call a
@@ -1195,7 +1197,17 @@ class Store:
         incomplete immutable snapshot. An injected connector must implement the
         :class:`ReadOnlyConnector` ``open_read_only(path)`` contract; a bare writable
         callable is rejected before it can be invoked.
+
+        ``sqlite_durability="durable"`` requests FULL commit synchronization;
+        ``"balanced"`` explicitly selects NORMAL. File-backed writable stores
+        verify the requested WAL/synchronization settings before returning.
+        Read-only inspection never changes either setting, and memory databases
+        do not provide persistent durability under either selector.
         """
+        if (not isinstance(sqlite_durability, str)
+                or sqlite_durability.strip().lower() not in {"durable", "balanced"}):
+            raise ValueError("sqlite_durability must be 'durable' or 'balanced'")
+        self.sqlite_durability = sqlite_durability.strip().lower()
         # Keep named shared-memory URIs intact for lifecycle bookkeeping.  A URI such
         # as ``file:shared?mode=memory&cache=shared`` is a logical SQLite database,
         # not a filesystem path named ``shared``; reducing it here would let migration
@@ -1263,11 +1275,17 @@ class Store:
                 # setting it at writable-store startup makes the protection durable for
                 # every normal v2 connection without changing the schema or data model.
                 self.conn.execute("PRAGMA secure_delete=ON")
-                self.conn.execute("PRAGMA synchronous=NORMAL")
+                synchronization = "FULL" if self.sqlite_durability == "durable" else "NORMAL"
+                self.conn.execute(f"PRAGMA synchronous={synchronization}")
                 self.init_schema()
                 # journal_mode is persistent state, so set it only after a required backup
                 # and the transactional migration have completed successfully.
                 self.conn.execute("PRAGMA journal_mode=WAL")
+                if (not _is_memory_database_path(self.path)
+                        and not self.durability_health()["matches_requested"]):
+                    raise RuntimeError(
+                        "SQLite did not apply the requested WAL durability settings"
+                    )
         except BaseException:
             try:
                 if self.conn.transaction_owned_by_current_thread():
@@ -1275,6 +1293,52 @@ class Store:
             finally:
                 self.close()
             raise
+
+    def durability_health(self) -> dict:
+        """Read effective connection settings without paths, content or writes.
+
+        These are SQLite configuration observations, not a power-failure test.
+        No commit, checkpoint or pragma assignment is performed, including when
+        the caller owns a transaction or the database is immutable/read-only.
+        """
+        journal_mode = None
+        synchronous = None
+        try:
+            journal = self.conn.execute("PRAGMA journal_mode").fetchone()
+            sync = self.conn.execute("PRAGMA synchronous").fetchone()
+            if journal is not None:
+                observed = str(journal[0]).lower()
+                if observed in {"delete", "truncate", "persist", "memory", "wal", "off"}:
+                    journal_mode = observed
+            if sync is not None:
+                synchronous = {0: "OFF", 1: "NORMAL", 2: "FULL", 3: "EXTRA"}.get(int(sync[0]))
+        except Exception:
+            # Diagnostics must remain useful if a connector cannot answer a pragma.
+            # Do not include exception messages: injected connectors may expose secrets.
+            pass
+        file_backed = not _is_memory_database_path(self.path)
+        matches_requested = None
+        if self.read_only:
+            effective = "read_only"
+        elif not file_backed:
+            effective = "memory"
+        else:
+            effective = (
+                "durable" if journal_mode == "wal" and synchronous in {"FULL", "EXTRA"}
+                else "balanced" if journal_mode == "wal" and synchronous == "NORMAL"
+                else "unverified"
+            )
+            expected = "FULL" if self.sqlite_durability == "durable" else "NORMAL"
+            matches_requested = journal_mode == "wal" and synchronous == expected
+        return {
+            "configured": self.sqlite_durability,
+            "effective": effective,
+            "file_backed": file_backed,
+            "read_only": self.read_only,
+            "journal_mode": journal_mode,
+            "synchronous": synchronous,
+            "matches_requested": matches_requested,
+        }
 
     def _open_connection(self, path: str):
         """Open *path* with the primary database's connection semantics."""

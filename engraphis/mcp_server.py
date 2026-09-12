@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import importlib
 import json
 import logging
 import math
@@ -3148,6 +3149,41 @@ def _start_background_warmup() -> None:
     thread.start()
 
 
+def _preload_sentence_transformers() -> None:
+    """Import the optional embedding dependency before opening stdio on Windows.
+
+    On Windows, the first SciPy/sklearn native-module import can stall when it is
+    initiated by the background warmup thread while a first MCP tool call waits on
+    ``_service_lock``. Importing the package in the launcher thread preserves the
+    existing lazy model construction and lets the background warmup retain its
+    non-blocking behavior. The preload is enabled automatically on Windows and can
+    be explicitly enabled or disabled with ``ENGRAPHIS_MCP_PRELOAD_EMBEDDER``.
+
+    A blank embed-model setting selects the dependency-free deterministic embedder,
+    so it deliberately skips the optional import. Import failures are also allowed
+    to continue: the normal factory still owns fallback versus
+    ``require_exact_backends`` policy and will report the authoritative result.
+    """
+    policy = os.environ.get("ENGRAPHIS_MCP_PRELOAD_EMBEDDER", "auto").strip().lower()
+    if policy in {"0", "false", "no", "off"}:
+        return
+    if policy not in {"1", "true", "yes", "on"} and sys.platform != "win32":
+        return
+    if not str(getattr(settings, "embed_model", "") or "").strip():
+        return
+
+    try:
+        # Some native/model dependencies print while importing. Stdio stdout is
+        # reserved for JSON-RPC, so keep that output on stderr even before the
+        # transport's broader stdout isolation is installed.
+        from contextlib import redirect_stdout
+
+        with redirect_stdout(sys.stderr):
+            importlib.import_module("sentence_transformers")
+    except Exception as exc:  # noqa: BLE001 - optional dependency; factory owns policy
+        logger.debug("MCP embedding dependency preload skipped (%s)", type(exc).__name__)
+
+
 async def _safe_run_stdio_async(server: FastMCP) -> None:
     """Run stdio transport with pure wire protocol isolation.
 
@@ -3183,6 +3219,7 @@ async def _safe_run_stdio_async(server: FastMCP) -> None:
 
 def main() -> None:
     """Console entry point (``engraphis-mcp``). Runs Smart MCP over stdio."""
+    _preload_sentence_transformers()
     _eager_exact_backend_check()
     _start_background_warmup()
     import anyio

@@ -389,3 +389,68 @@ jobs:
           AUDIT_SITE=$(.audit-venv/bin/python -c "import site; print(site.getsitepackages()[0])")
           python -m pip_audit --path "$AUDIT_SITE"
           .audit-venv/bin/python -c "import engraphis, eval.harness; print('wheel imports OK')"
+
+  installed-journeys:
+    name: Installed journey (${{ matrix.os }}, ${{ matrix.profile }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        profile: [mcp, server]
+    env:
+      PIP_CONSTRAINT: ${{ github.workspace }}/.github/release-constraints.txt
+      PIP_BUILD_CONSTRAINT: ${{ github.workspace }}/.github/release-constraints.txt
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - name: Build the candidate wheel
+        run: |
+          python -m pip install build==1.5.0
+          python -m build --wheel --outdir dist
+      - name: Exercise a clean installed product outside the checkout
+        env:
+          ENGRAPHIS_SMOKE_PROFILE: ${{ matrix.profile }}
+        shell: python
+        run: |
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import sys
+
+          root = Path(os.environ["RUNNER_TEMP"]) / "installed-candidate"
+          root.mkdir()
+          environment = root / "venv"
+          subprocess.run([sys.executable, "-m", "venv", str(environment)], check=True)
+          executable = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+          wheels = list(Path("dist").glob("*.whl"))
+          assert len(wheels) == 1
+          profile = os.environ["ENGRAPHIS_SMOKE_PROFILE"]
+          subprocess.run([str(executable), "-m", "pip", "install",
+                          str(wheels[0].resolve()) + f"[{profile}]"], check=True)
+          subprocess.run([str(executable), "-m", "pip", "check"], check=True)
+          (root / "environment.lock").write_text(subprocess.check_output(
+              [str(executable), "-m", "pip", "freeze", "--all"], text=True), encoding="utf-8")
+          (root / "artifact.json").write_text(json.dumps({
+              "commit": os.environ["GITHUB_SHA"], "profile": profile,
+              "wheel": wheels[0].name,
+              "sha256": hashlib.sha256(wheels[0].read_bytes()).hexdigest(),
+          }), encoding="utf-8")
+          subprocess.run([str(executable), "-m", "scripts.smoke_installed_product",
+                          "--surface", profile, "--output", str(root / "journey.json")],
+                         cwd=root, check=True)
+      - name: Preserve installed journey evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: candidate-journey-${{ matrix.os }}-${{ matrix.profile }}
+          path: |
+            ${{ runner.temp }}/installed-candidate/journey.json
+            ${{ runner.temp }}/installed-candidate/environment.lock
+            ${{ runner.temp }}/installed-candidate/artifact.json
+          if-no-files-found: warn

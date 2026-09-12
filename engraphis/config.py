@@ -745,10 +745,11 @@ def _validate_service_mode(value: str) -> str:
     live in a private service repository and cannot be enabled through configuration."""
     normalized = (value or "").strip().lower()
     if normalized not in SERVICE_MODES:
-        print(f"[engraphis] invalid ENGRAPHIS_SERVICE_MODE '{value}' "
-              f"(expected one of {', '.join(SERVICE_MODES)}); refusing to start with an "
-              f"ambiguous trust boundary.", file=sys.stderr)
-        sys.exit(1)
+        raise ValueError(
+            f"invalid ENGRAPHIS_SERVICE_MODE '{value}' "
+            f"(expected one of {', '.join(SERVICE_MODES)}); refusing to start with an "
+            f"ambiguous trust boundary."
+        )
     return normalized
 
 
@@ -911,6 +912,11 @@ class Settings:
     db_path: str = field(
         default_factory=_configured_db_path
     )
+    # SQLite commit synchronization: durable uses FULL; balanced explicitly uses
+    # NORMAL and can lose recent acknowledged transactions after OS/power failure.
+    sqlite_durability: str = field(
+        default_factory=lambda: _env("ENGRAPHIS_SQLITE_DURABILITY", "durable").lower()
+    )
 
     embed_model: str = field(
         default_factory=lambda: _env(
@@ -1050,6 +1056,10 @@ class Settings:
 
     def __post_init__(self) -> None:
         """Validate critical settings and fail fast on configuration errors."""
+        if (not isinstance(self.sqlite_durability, str)
+                or self.sqlite_durability.strip().lower() not in {"durable", "balanced"}):
+            raise ValueError("ENGRAPHIS_SQLITE_DURABILITY must be 'durable' or 'balanced'")
+        self.sqlite_durability = self.sqlite_durability.strip().lower()
         if not self.host or not self.host.strip():
             raise ValueError("ENGRAPHIS_HOST must be a non-empty hostname or IP address")
         if not (1 <= self.port <= 65535):
