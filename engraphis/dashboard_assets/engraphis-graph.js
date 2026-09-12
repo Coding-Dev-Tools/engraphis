@@ -9543,10 +9543,12 @@
          a constant gravity amount. */
       const diagnosticMass = galaxyPhysicsMultiplier(state.settings.blackHoleMass,
         GALAXY_BLACK_HOLE_MASS_MULTIPLIER, 16);
+      const blackHoleOrbitClock = GALAXY_BLACK_HOLE_ORBIT_CLOCK;
       const effectiveGravity = galaxyBlackHoleGravityConstant(state.settings.gravity, true)
         * galaxyPhysicsMultiplier(state.settings.gravitationalConstant,
           GALAXY_GRAVITATIONAL_CONSTANT_MULTIPLIER, 8)
-        * Math.sqrt(Math.max(0.25, diagnosticMass));
+        * Math.sqrt(Math.max(0.25, diagnosticMass))
+        * blackHoleOrbitClock * blackHoleOrbitClock;
       return Object.assign(galaxyMotionDiagnostics(data.nodes || []), {
         mode: state.settings.mode,
         running,
@@ -9589,6 +9591,7 @@
         globalAnchorLabel: diagnosticAnchor ? nodeName(diagnosticAnchor) : null,
         blackHoleSpinAngle: diagnosticAnchor ? galaxyBlackHoleSpinAngle(diagnosticAnchor) : 0,
         blackHoleMass: diagnosticMass,
+        blackHoleOrbitClock,
         damping: galaxyPhysicsMultiplier(state.settings.damping, 1, 100),
         springStiffness: galaxyPhysicsMultiplier(state.settings.springStiffness,
           GALAXY_SPRING_STIFFNESS_MULTIPLIER, 8),

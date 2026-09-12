@@ -8575,7 +8575,7 @@ def test_galaxy_is_default_and_consumes_the_complete_scene_contract() -> None:
     assert report["diagnostics"]["timestep"] == pytest.approx(0.032)
     assert report["diagnostics"]["velocityDecay"] == pytest.approx(0.0004)
     assert report["diagnostics"]["gravitySetting"] == 120
-    assert report["diagnostics"]["blackHoleGravity"] == pytest.approx(1412.1)
+    assert report["diagnostics"]["blackHoleGravity"] == pytest.approx(14.121)
     assert report["diagnostics"]["localGravity"] == pytest.approx(146.25)
     assert report["diagnostics"]["linkSetting"] == 8
     assert report["diagnostics"]["relationOrbitScale"] == pytest.approx(0.25)

@@ -4911,11 +4911,15 @@ class Store:
         if not unique:
             return set()
         marks = ",".join("?" for _ in unique)
+        # Preserve the instance authority even when the caller has no workspace
+        # filter. Apply it in the same bounded query, without per-ID lookups.
+        where, params = self._where(None, include_invalid=True)
+        where.insert(0, f"id IN ({marks})")
         rows = self.conn.execute(
             "SELECT id, workspace_id, repo_id, session_id, scope, mtype, "
             "valid_from, valid_to, valid_to_recorded_at, ingested_at, expired_at "
-            f"FROM memories WHERE id IN ({marks})",
-            unique,
+            "FROM memories WHERE " + " AND ".join(where),
+            [*unique, *params],
         ).fetchall()
         visible: set[str] = set()
         for row in rows:
