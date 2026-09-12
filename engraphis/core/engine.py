@@ -581,6 +581,7 @@ class MemoryEngine:
         query_planner: Optional[QueryPlanner] = None,
         read_only: bool = False,
         require_exact_backends: bool = False,
+        sqlite_durability: str = "durable",
     ) -> "MemoryEngine":
         """Compose the default engine through the package-level backend provider."""
         if _ENGINE_FACTORY is None:
@@ -608,6 +609,7 @@ class MemoryEngine:
             query_planner=query_planner,
             read_only=read_only,
             require_exact_backends=require_exact_backends,
+            sqlite_durability=sqlite_durability,
         )
 
     def _rebuild_versioned_embeddings(self) -> None:
@@ -2070,13 +2072,15 @@ class MemoryEngine:
             current_fallback = True
         neighbors = []
 
-        def append_visible_neighbors(
+        def filter_visible_neighbors(
             candidates: list[tuple[str, float]],
             *,
             fallback: bool,
+            memories: dict,
         ) -> None:
+            """Filter pre-fetched memories for visibility."""
             for nid, sim in candidates:
-                nrec = self.store.get_memory(nid)
+                nrec = memories.get(nid)
                 if (nrec and nrec.workspace_id == workspace_id
                         and nrec.repo_id == repo_id and nrec.scope == scope
                         and nrec.mtype == mtype
@@ -2087,7 +2091,11 @@ class MemoryEngine:
                                  and nrec.valid_to is None))):
                     neighbors.append((sim, nrec))
 
-        append_visible_neighbors(hits, fallback=current_fallback)
+        # Batch fetch all candidate memories at once for efficiency
+        all_candidate_ids = [nid for nid, _ in hits if nid]
+        fetched_memories = self.store.get_memories(all_candidate_ids) if all_candidate_ids else {}
+
+        filter_visible_neighbors(hits, fallback=current_fallback, memories=fetched_memories)
         if not neighbors and valid_at is not None and not current_fallback:
             # A stale or overly broad injected index can return candidates that are
             # all outside the requested historical view. Retry against the current
@@ -2105,7 +2113,11 @@ class MemoryEngine:
                 canonical_only=canonical_fallback,
             )
             current_fallback = True
-            append_visible_neighbors(hits, fallback=current_fallback)
+            # Batch fetch new candidates
+            new_ids = [nid for nid, _ in hits if nid and nid not in fetched_memories]
+            if new_ids:
+                fetched_memories.update(self.store.get_memories(new_ids))
+            filter_visible_neighbors(hits, fallback=current_fallback, memories=fetched_memories)
         if subject_key:
             # A claim identity is authoritative, while vector retrieval is only a
             # bounded candidate-discovery aid.  Always add its visible predecessor(s): a

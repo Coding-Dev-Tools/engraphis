@@ -13,6 +13,7 @@ The arms are pluggable:
 """
 from __future__ import annotations
 
+import functools
 import hashlib
 import inspect
 import json
@@ -72,6 +73,7 @@ from engraphis.core.poisoning import (
     prompt_eligible,
 )
 from engraphis.core.store import (
+    IN_CLAUSE_CHUNK,
     Store,
     _is_memory_database_path,
     memory_matches_filter,
@@ -229,11 +231,25 @@ class RecallEngine:
                mtype_limits: Optional[dict] = None,
                arm_config: Optional[ProfileConfig] = None) -> RecallResult:
         started = time.perf_counter()
+        phase_started = started
+        phase_ms: dict[str, float] = {}
+
+        def mark_phase(name: str) -> None:
+            # Opt-in observations use disjoint wall-clock intervals. Repeated
+            # query arms/pages accumulate; no query or memory content is retained.
+            nonlocal phase_started
+            if diagnostics:
+                ended = time.perf_counter()
+                phase_ms[name] = phase_ms.get(name, 0.0) + (ended - phase_started) * 1000
+                phase_started = ended
+
         def finish(result: RecallResult) -> RecallResult:
             if diagnostics:
                 from engraphis.core.diagnostics import recall_diagnostics
+                mark_phase("response_metadata")
                 result.diagnostics_v1 = recall_diagnostics(
-                    result, elapsed_ms=(time.perf_counter() - started) * 1000)
+                    result, elapsed_ms=(time.perf_counter() - started) * 1000,
+                    phase_ms=phase_ms)
             return result
 
         flt = flt or SearchFilter()
@@ -309,12 +325,14 @@ class RecallEngine:
             choices = ", ".join(sorted(PLANNING_MODES))
             raise ValueError(f"planning must be one of: {choices}")
         caller_limits = _normalize_mtype_limits(mtype_limits)
+        mark_phase("preparation")
         plan, planner_fallback = self._plan_queries(
             query,
             flt,
             selected_profile=selected_profile,
             planning_mode=planning_mode,
         )
+        mark_phase("planning")
         effective_limits = dict(plan.mtype_limits)
         effective_limits.update(caller_limits)
         planned_queries = list(plan.queries)
@@ -378,6 +396,7 @@ class RecallEngine:
             if run_config.vector
         ]
         query_vectors: list[Optional[np.ndarray]]
+        mark_phase("preparation")
         if embedded_texts:
             try:
                 embedded = self.embedder.embed(embedded_texts)
@@ -410,6 +429,7 @@ class RecallEngine:
                 )
         else:
             query_vectors = [None for _ in run_configs]
+        mark_phase("embedding")
 
         vector_runtime_failed = False
         while True:
@@ -429,6 +449,7 @@ class RecallEngine:
                     })
                     continue
                 vec = {}
+                mark_phase("candidate_filtering")
                 if qvec is not None and not vector_runtime_failed:
                     try:
                         if canonical_search_required(
@@ -467,12 +488,14 @@ class RecallEngine:
                             "semantic vector retrieval failed (%s); using non-vector arms",
                             type(exc).__name__,
                         )
+                mark_phase("vector_search")
                 lex = (
                     dict(self.store.fts_search(
                         item.text, arm_candidate_k, filter=query_filter
                     ))
                     if run_config.lexical else {}
                 )
+                mark_phase("lexical_search")
                 graph_plan, graph_policy_fallback = (
                     self._plan_graph_traversal(item.text, query_filter)
                     if run_config.graph else (None, "")
@@ -489,6 +512,7 @@ class RecallEngine:
                     )
                     if run_config.graph else {}
                 )
+                mark_phase("graph_search")
                 code = (
                     self._code_arm(
                         item.text,
@@ -498,6 +522,7 @@ class RecallEngine:
                     )
                     if run_config.code else {}
                 )
+                mark_phase("code_search")
                 query_runs.append({
                     "query": item,
                     "config": run_config,
@@ -561,6 +586,7 @@ class RecallEngine:
             ):
                 break
             arm_candidate_k = candidate_ceiling
+        mark_phase("candidate_filtering")
         if not recs:
             # Telemetry is logged regardless of ``diagnostics`` so operators can
             # see page depth and drop counts without paying for full traces.
@@ -568,7 +594,9 @@ class RecallEngine:
                 "recall candidate_k_used=%d rerank_changed=%s type_limit_drops=%d",
                 arm_candidate_k, False, 0,
             )
+            mark_phase("response_metadata")
             context, packed, usage = self.context_packer.pack(query, [], budget)
+            mark_phase("packing")
             return finish(RecallResult(
                 context=context,
                 packed_chunks=packed,
@@ -727,6 +755,7 @@ class RecallEngine:
         # from every eligible memory type; with four types this remains <= 8k.
         pool = _type_aware_rerank_pool(scored, effective_limits, k=max(0, int(k)))
         rerank_k = len(pool) if effective_limits else k
+        mark_phase("fusion_scoring")
         rerank_changed = False
         if self.reranker:
             fused_before = {candidate.id: candidate.score for candidate in pool}
@@ -800,6 +829,7 @@ class RecallEngine:
                 detail["calibrated_score"] = candidate.score
         else:
             ranked_final = pool
+        mark_phase("reranking")
 
         final, type_limit_drops = _apply_mtype_limits(
             ranked_final, effective_limits, k=max(0, int(k))
@@ -826,10 +856,12 @@ class RecallEngine:
             )
             for candidate, record in final_records
         }
+        mark_phase("selection")
 
         if reinforce and not requested_historical:
             for c in final:
                 self.store.reinforce(c.id, boost=scoring.INTERACTION_BOOST["recall"])
+        mark_phase("reinforcement")
 
         # ``Candidate.score`` is deliberately query-relative: its retrieval arms are
         # min-max normalised before fusion. Publish a separate absolute signal from the
@@ -875,7 +907,9 @@ class RecallEngine:
             # ``_consolidation_evidence``).  Ordinary memories carry no such field.
             "consolidation_source_ids": list(final_consolidation_evidence[c.id]),
         } for c, record in final_records]
+        mark_phase("support_and_provenance")
         context, packed_chunks, usage = self.context_packer.pack(query, final, budget)
+        mark_phase("packing")
         trace = None
         if diagnostics:
             trace = [
@@ -2287,26 +2321,15 @@ def _consolidation_evidence(
     sources as evidence ids for citation without duplicating their bodies; ordinary
     memories have no such links and yield ``[]``.
     """
-    evidence: list[str] = []
-    seen: set[str] = set()
+    # Collect all candidate IDs first, then batch-check visibility for efficiency.
+    candidates: list[str] = []
+    seen_candidates: set[str] = set()
 
-    def append_visible(value: object) -> None:
+    def collect_candidate(value: object) -> None:
         memory_id = str(value or "").strip()
-        if not memory_id or memory_id in seen:
-            return
-        if store is not None and flt is not None:
-            try:
-                source = store.get_memory(memory_id)
-            except Exception as exc:
-                logger.debug(
-                    "consolidation evidence source lookup failed (%s)",
-                    type(exc).__name__,
-                )
-                return
-            if source is None or not memory_matches_filter(source, flt):
-                return
-        seen.add(memory_id)
-        evidence.append(memory_id)
+        if memory_id and memory_id not in seen_candidates:
+            seen_candidates.add(memory_id)
+            candidates.append(memory_id)
 
     metadata = record.metadata if isinstance(record.metadata, dict) else {}
     provenance = record.provenance if isinstance(record.provenance, dict) else {}
@@ -2319,7 +2342,7 @@ def _consolidation_evidence(
                 values = [values]
             if isinstance(values, (list, tuple, set)):
                 for value in values:
-                    append_visible(value)
+                    collect_candidate(value)
     if record.id and store is not None and hasattr(store, "get_links"):
         try:
             try:
@@ -2340,13 +2363,36 @@ def _consolidation_evidence(
                 other = endpoint_b if endpoint_a == record.id else endpoint_a
                 if not other or other == record.id:
                     continue
-                append_visible(other)
+                collect_candidate(other)
         except Exception as exc:
             # Link lookup is best-effort evidence enrichment, never a recall failure.
             logger.warning(
                 "consolidation evidence link lookup failed (%s)",
                 type(exc).__name__,
             )
+
+    # Respect the store's bounded visibility query. A digest can accumulate more
+    # sources than one SQL IN clause permits across repeated consolidations.
+    evidence: list[str] = []
+    if store is not None and flt is not None and candidates:
+        try:
+            visible_ids: set[str] = set()
+            for start in range(0, len(candidates), IN_CLAUSE_CHUNK):
+                visible_ids.update(store.visible_memory_ids(
+                    candidates[start:start + IN_CLAUSE_CHUNK], flt=flt,
+                ))
+            for memory_id in candidates:
+                if memory_id in visible_ids:
+                    evidence.append(memory_id)
+        except Exception as exc:
+            logger.debug(
+                "consolidation evidence batch visibility check failed (%s)",
+                type(exc).__name__,
+            )
+    else:
+        # No filter or no store - return all candidates
+        evidence = candidates
+
     return evidence
 
 
@@ -2379,6 +2425,7 @@ def _absolute_retrieval_support(
     return max(semantic, lexical)
 
 
+@functools.lru_cache(maxsize=4096)
 def _entity_pattern(name: str) -> re.Pattern[str]:
     """Match an entity as a complete token/phrase, not inside unrelated words."""
     return re.compile(r"(?<!\w)" + re.escape(name) + r"(?!\w)", re.IGNORECASE)

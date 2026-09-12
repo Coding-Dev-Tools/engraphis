@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import sys
 import time
 from pathlib import Path
 from typing import Optional
@@ -270,7 +271,7 @@ def _release_gates(
             # LongMemEval matrix and the independent safety suites are separate artifacts.
             "opt_in_eligible": False,
             "opt_in_blockers": [
-                "requires a complete pinned 20-cell LongMemEval-V2 matrix",
+                "requires a complete pinned 30-cell LongMemEval-V2 matrix",
                 "requires verified grounded, temporal, and poisoning safety artifacts",
             ],
             "default_eligible": False,
@@ -395,6 +396,36 @@ def run(
     }
 
 
+def require_gate(report: dict, candidate: str, *, level: str = "default") -> None:
+    """Fail closed for an explicitly requested experiment/promotion gate.
+
+    Reporting the matrix never selects a default. Promotion callers must request
+    a specific candidate and satisfy the evidence booleans, including the separate
+    safety and official-run gates; a successful CLI report is not approval.
+    """
+    levels = {
+        "repository-local": "repository_local_gate_pass",
+        "opt-in": "opt_in_eligible",
+        "default": "default_eligible",
+    }
+    if level not in levels:
+        raise ValueError("gate level must be repository-local, opt-in, or default")
+    if candidate not in {"planner", "planner_type_limits"}:
+        raise ValueError("gate candidate must be planner or planner_type_limits")
+    gates = report.get("release_gates")
+    gate = gates.get(candidate) if isinstance(gates, dict) else None
+    if not isinstance(gate, dict):
+        raise ValueError(f"required {level} gate for {candidate} is missing")
+    required = {"repository_local_gate_pass", levels[level]}
+    if level != "repository-local":
+        required.update({"safety_regressions_ok", "opt_in_eligible"})
+    failed = [name for name in sorted(required) if gate.get(name) is not True]
+    if failed:
+        raise ValueError(
+            f"required {level} gate for {candidate} failed: " + ", ".join(failed)
+        )
+
+
 def main(argv: Optional[list[str]] = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -404,7 +435,17 @@ def main(argv: Optional[list[str]] = None) -> None:
         ),
     )
     parser.add_argument("--details", action="store_true")
+    parser.add_argument(
+        "--require-gate", choices=("planner", "planner_type_limits"),
+        help="exit nonzero unless this explicitly selected candidate passes the requested gate",
+    )
+    parser.add_argument(
+        "--gate-level", choices=("repository-local", "opt-in", "default"),
+        default="default", help="required evidence level (default: default promotion)",
+    )
     args = parser.parse_args(argv)
+    if args.gate_level != "default" and args.require_gate is None:
+        parser.error("--gate-level requires --require-gate")
     try:
         report = run(load_dataset(args.dataset))
     except (OSError, ValueError, json.JSONDecodeError) as exc:
@@ -413,6 +454,12 @@ def main(argv: Optional[list[str]] = None) -> None:
     if not args.details:
         report.pop("detail", None)
     print(json.dumps(report, indent=2, sort_keys=True))
+    if args.require_gate:
+        try:
+            require_gate(report, args.require_gate, level=args.gate_level)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            raise SystemExit(1) from exc
 
 
 if __name__ == "__main__":
