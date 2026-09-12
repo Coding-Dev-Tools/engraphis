@@ -582,29 +582,8 @@ def test_mcp_server_module_entrypoint_runs_stdio_handshake(tmp_path):
 
 
 def test_mcp_server_module_entrypoint_serves_first_tool_call(tmp_path):
-    payload = "\n".join([
-        json.dumps({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {"name": "first-tool-test", "version": "1"},
-            },
-        }),
-        json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}),
-        json.dumps({
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "tools/call",
-            "params": {
-                "name": "engraphis_recall_context",
-                "arguments": {"query": "startup", "workspace": "default", "token_budget": 64},
-            },
-        }),
-        "",
-    ])
+    from scripts.smoke_installed_product import _Mcp
+
     env = os.environ.copy()
     env.update({
         "ENGRAPHIS_DB_PATH": str(tmp_path / "stdio-first-tool.db"),
@@ -616,22 +595,15 @@ def test_mcp_server_module_entrypoint_serves_first_tool_call(tmp_path):
         "ENGRAPHIS_MCP_PRELOAD_EMBEDDER": "auto",
     })
 
-    result = subprocess.run(
-        [sys.executable, "-m", "engraphis.mcp_server"],
-        cwd=ROOT,
-        env=env,
-        input=payload,
-        text=True,
-        capture_output=True,
-        timeout=15,
-        check=False,
-    )
-
-    assert result.returncode == 0, result.stderr
-    responses = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
-    by_id = {response["id"]: response for response in responses if "id" in response}
-    assert by_id[1]["result"]["serverInfo"]["name"] == "engraphis_mcp"
-    assert by_id[2]["result"]["content"]
+    # EOF cancels in-flight requests in the MCP SDK. Keep stdin open until the
+    # response arrives, as a real client does, and retain bounded shutdown.
+    with _Mcp([sys.executable, "-m", "engraphis.mcp_server"], env, ROOT, 15) as client:
+        result = client.request("tools/call", {
+            "name": "engraphis_recall_context",
+            "arguments": {"query": "startup", "workspace": "default", "token_budget": 64},
+        })
+        assert not result.get("isError")
+        assert result["content"]
 
 
 def test_classic_mcp_entrypoint_preserves_historical_server_identity(tmp_path):
