@@ -77,9 +77,9 @@ its counting boundary explicit.
 | Packed prompt-context usage in the same 26-question CodeMem sample pass | Hard budget: **1,500** tokens; observed mean: **85.38**; observed maximum: **108** | A hard cap prevents a recall from exceeding its configured context budget | This is usage accounting, not a before/after savings comparison |
 
 These values are evidence IDs `offline-chunking` and `offline-performance` in
-[`offline-fixtures-v2.json`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/benchmark-evidence/offline-fixtures-v2.json),
+[`offline-fixtures-v3.json`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/benchmark-evidence/offline-fixtures-v3.json),
 SHA-256
-`a9ed2bd793483145d9f3c57efac55d73a2c4669b45ef2d673fdae7b8110baea6`.
+`2d6b4fab9e75edc91d105d49877f9225f28ffe4d366e40a44e931f19cb13f498`.
 [`BENCHMARKS.md`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/BENCHMARKS.md#public-numeric-evidence-registry)
 records the matching suite digest, exact commands, and per-command config digests. External,
 model-dependent, consolidation, productivity, and latency results remain unpublished until the
@@ -393,13 +393,6 @@ codex mcp add engraphis -- engraphis-mcp  # Codex subscription
 > falls back to NumPy without the `vector` extra, and recall without a usable semantic space
 > reports `degraded_mode=true` with lexical/graph recall. Run `engraphis-init --check` to
 > verify the install and database path before registering the server.
-
-On Windows, the stdio launchers preload the optional `sentence-transformers` dependency in
-the launcher thread before accepting JSON-RPC. This addresses the observed first-call
-import stall; the underlying native-lock cause has not been established. The preload is
-skipped when `ENGRAPHIS_EMBED_MODEL` is blank; set `ENGRAPHIS_MCP_PRELOAD_EMBEDDER=0` to
-opt out, or `=1` to use the ordering on another platform. This changes import ordering only;
-model fallback and `ENGRAPHIS_REQUIRE_EXACT_BACKENDS` policy remain owned by the normal factory.
 
 For Codex subscription setup and verification, see the [agent connection guide](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/AGENT_CONNECT.md)
 and the [LLM provider guide](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/LLM_PROVIDERS.md).

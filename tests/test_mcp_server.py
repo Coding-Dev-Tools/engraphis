@@ -558,11 +558,11 @@ def test_mcp_server_module_entrypoint_runs_stdio_handshake(tmp_path):
     env = os.environ.copy()
     env.update({
         "ENGRAPHIS_DB_PATH": str(tmp_path / "stdio-handshake.db"),
-        "ENGRAPHIS_EMBED_MODEL": "",
+        "ENGRAPHIS_EMBED_MODEL": "sentence-transformers/all-MiniLM-L6-v2",
         "ENGRAPHIS_EXTRACTOR": "none",
         "ENGRAPHIS_GRAPH_EXTRACTOR": "none",
         "ENGRAPHIS_VECTOR_BACKEND": "numpy",
-        "ENGRAPHIS_MCP_PRELOAD_EMBEDDER": "auto",
+        "ENGRAPHIS_MCP_WARMUP": "0",
     })
     result = subprocess.run(
         [sys.executable, "-m", "engraphis.mcp_server"],
@@ -592,7 +592,6 @@ def test_mcp_server_module_entrypoint_serves_first_tool_call(tmp_path):
         "ENGRAPHIS_GRAPH_EXTRACTOR": "none",
         "ENGRAPHIS_VECTOR_BACKEND": "numpy",
         "ENGRAPHIS_MCP_WARMUP": "1",
-        "ENGRAPHIS_MCP_PRELOAD_EMBEDDER": "auto",
     })
 
     # EOF cancels in-flight requests in the MCP SDK. Keep stdin open until the
@@ -621,11 +620,11 @@ def test_classic_mcp_entrypoint_preserves_historical_server_identity(tmp_path):
     env = os.environ.copy()
     env.update({
         "ENGRAPHIS_DB_PATH": str(tmp_path / "classic-handshake.db"),
-        "ENGRAPHIS_EMBED_MODEL": "",
+        "ENGRAPHIS_EMBED_MODEL": "sentence-transformers/all-MiniLM-L6-v2",
         "ENGRAPHIS_EXTRACTOR": "none",
         "ENGRAPHIS_GRAPH_EXTRACTOR": "none",
         "ENGRAPHIS_VECTOR_BACKEND": "numpy",
-        "ENGRAPHIS_MCP_PRELOAD_EMBEDDER": "auto",
+        "ENGRAPHIS_MCP_WARMUP": "0",
     })
     result = subprocess.run(
         [sys.executable, "-m", "engraphis.mcp_classic_cli"],
@@ -1351,54 +1350,6 @@ def test_background_warmup_honors_env(monkeypatch):
     assert len(started_threads) == 1
     assert started_threads[0].daemon is True
     assert started_threads[0].name == "engraphis-warmup"
-
-
-def test_stdio_startup_preloads_semantic_dependency_before_background_warmup(monkeypatch, capsys):
-    import engraphis.mcp_server as server
-
-    calls = []
-
-    def fake_import(name):
-        print("dependency import noise")
-        calls.append(name)
-        return object()
-
-    monkeypatch.setattr(server.sys, "platform", "win32")
-    monkeypatch.setattr(server.settings, "embed_model", "sentence-transformers/model")
-    monkeypatch.setenv("ENGRAPHIS_MCP_PRELOAD_EMBEDDER", "auto")
-    monkeypatch.setattr(server.importlib, "import_module", fake_import)
-
-    server._preload_sentence_transformers()
-
-    captured = capsys.readouterr()
-    assert calls == ["sentence_transformers"]
-    assert captured.out == ""
-    assert "dependency import noise" in captured.err
-
-
-@pytest.mark.parametrize(
-    ("platform", "embed_model", "policy", "should_import"),
-    [
-        ("linux", "sentence-transformers/model", "auto", False),
-        ("win32", "", "auto", False),
-        ("win32", "sentence-transformers/model", "0", False),
-        ("linux", "sentence-transformers/model", "1", True),
-    ],
-)
-def test_stdio_startup_preload_respects_backend_and_policy(monkeypatch, platform,
-                                                            embed_model, policy,
-                                                            should_import):
-    import engraphis.mcp_server as server
-
-    calls = []
-    monkeypatch.setattr(server.sys, "platform", platform)
-    monkeypatch.setattr(server.settings, "embed_model", embed_model)
-    monkeypatch.setenv("ENGRAPHIS_MCP_PRELOAD_EMBEDDER", policy)
-    monkeypatch.setattr(server.importlib, "import_module", lambda name: calls.append(name))
-
-    server._preload_sentence_transformers()
-
-    assert bool(calls) is should_import
 
 
 def test_recall_context_prunes_default_diagnostics_when_disabled(monkeypatch):

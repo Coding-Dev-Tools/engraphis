@@ -1894,7 +1894,7 @@ for (const reducedMotion of [false, true]) {
       expect(diagnostics.linkSetting).toBe(8);
       expect(diagnostics.relationOrbitScale).toBeCloseTo(0.25, 12);
       expect(diagnostics.gravitySetting).toBe(120);
-      expect(diagnostics.blackHoleGravity).toBeCloseTo(2824.2, 12);
+      expect(diagnostics.blackHoleGravity).toBeCloseTo(28.242, 12);
       expect(diagnostics.localGravity).toBeCloseTo(146.25, 12);
       expect(diagnostics.systemOrbitSeedSpeedLimit).toBeCloseTo(23.4, 12);
 
@@ -3593,12 +3593,16 @@ test('Galaxy sliders retain full ranges with orbital-speed and radius response',
     11.430769230769231, 12,
   );
   expect(baseline.before.diagnostics.gravitySetting).toBe(48);
-  expect(baseline.before.diagnostics.effectiveGravity).toBe(292.5);
-  expect(baseline.before.diagnostics.blackHoleGravity).toBe(292.5);
+  expect(baseline.before.diagnostics.effectiveGravity).toBeCloseTo(2.925, 12);
+  expect(baseline.before.diagnostics.blackHoleGravity).toBeCloseTo(
+    baseline.curve.baseline * 0.1 ** 2, 12,
+  );
   expect(baseline.before.diagnostics.localGravity).toBe(146.25);
   expect(strong.before.diagnostics.gravitySetting).toBe(200);
-  expect(strong.before.diagnostics.effectiveGravity).toBeCloseTo(3343.5, 12);
-  expect(strong.before.diagnostics.blackHoleGravity).toBeCloseTo(3343.5, 12);
+  expect(strong.before.diagnostics.effectiveGravity).toBeCloseTo(33.435, 12);
+  expect(strong.before.diagnostics.blackHoleGravity).toBeCloseTo(
+    baseline.curve.maximum * 0.1 ** 2, 12,
+  );
   // The visible Galaxy gravity slider owns the central field; local stellar gravity stays on
   // the calibrated baseline and only the dedicated local control can change it.
   expect(strong.before.diagnostics.localGravity).toBe(146.25);
