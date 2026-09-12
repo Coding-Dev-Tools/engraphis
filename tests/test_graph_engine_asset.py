@@ -851,7 +851,7 @@ def test_gravity_slider_response_has_exact_endpoints_and_scales_every_physics_la
         const settings = [0, 1, 12, 24, 48, 72, 100, 200, 400];
         const response = settings.map(I.galaxyGravityConstant);
         const legacy = setting => setting * (772 + 11 * setting) / 2600;
-            // This is the release-stable calibration restored after the unsafe speed-up.
+            // Independent endpoint oracle for the calmer calibrated central field.
         const priorCalibration = setting => {
           const value = Math.max(0, Math.min(400, Number(setting) || 0));
           const base = value * (772 + 11 * value) / 2600;
@@ -862,7 +862,7 @@ def test_gravity_slider_response_has_exact_endpoints_and_scales_every_physics_la
           const boost = 1 + 0.25 * smoothstep(value / 48)
             + 0.25 * smoothstep((value - 48) / 52);
           const highEndGain = 1 + 0.5 * smoothstep((value - 200) / 200 * 1.5);
-          return base * boost * 4 * highEndGain * 2.0;
+          return base * boost * 4 * highEndGain * 1.875;
         };
         const fullRange = Array.from({ length: 401 }, (_, setting) => setting);
         const centralCap = (gravity, explicit) => {
@@ -937,27 +937,27 @@ def test_gravity_slider_response_has_exact_endpoints_and_scales_every_physics_la
         });
         """
     )
-    assert report["endpoints"][:2] == [240, 864]
-    assert report["endpoints"][2] == pytest.approx(2743.3846153846152)
-    assert report["endpoints"][3] == pytest.approx(14322.461538461538)
+    assert report["endpoints"][:2] == [225, 810]
+    assert report["endpoints"][2] == pytest.approx(2571.9230769230767)
+    assert report["endpoints"][3] == pytest.approx(13427.307692307693)
     assert report["split"]["blackHole"] == pytest.approx(
-        [480, 1728, 5486.7692307692305, 28644.923076923076]
+        [292.5, 1053, 3343.5, 17455.5]
     )
     assert report["split"]["local"] == pytest.approx(
-        [240, 864, 2743.3846153846152, 14322.461538461538]
+        [146.25, 526.5, 1671.75, 8727.75]
     )
     assert report["split"]["local"] == [
         value * 0.5 for value in report["split"]["blackHole"]
     ]
-    assert report["clamps"] == pytest.approx([0, 14322.461538461538, 0, 0])
+    assert report["clamps"] == pytest.approx([0, 13427.307692307693, 0, 0])
     assert report["layoutCompactness"] == pytest.approx([1.75, 1.5616, 0.965, 0.18])
     assert all(
         right < left
         for left, right in zip(report["layoutCompactness"], report["layoutCompactness"][1:])
     )
-    assert report["caps"] == pytest.approx([50, 180, 1])
-    assert report["compatibilityCaps"] == pytest.approx([50, 180])
-    assert report["localCaps"] == pytest.approx([25, 90])
+    assert report["caps"] == pytest.approx([12.1875, 43.875, 1])
+    assert report["compatibilityCaps"] == pytest.approx([12.1875, 43.875])
+    assert report["localCaps"] == pytest.approx([6.09375, 21.9375])
     assert report["response"][0] == 0
     assert all(
         right > left
@@ -1171,7 +1171,7 @@ def test_default_orbital_speed_preserves_cached_star_relative_direction() -> Non
     assert math.copysign(1, report["repairedTangent"]) == report["cachedDirection"]
     assert abs(report["repairedTangent"]) > 1e-5
     assert report["repairedRadius"] == pytest.approx(report["initialRadius"])
-    assert report["stellarSpeedGain"] == pytest.approx(1.8384776310850235)
+    assert report["stellarSpeedGain"] == pytest.approx(math.sqrt(5265 / 750))
     assert report["starAfter"] == pytest.approx(report["starBefore"])
 
 
@@ -1266,7 +1266,7 @@ def test_default_clock_keeps_planets_and_moons_orbiting_their_immediate_parent()
     assert report["maximumRadiusError"] < 1e-8
     assert report["laneAnchors"] == ["planet", "planet", "star", "star"]
     assert report["laneRadii"] == pytest.approx([16, 25, 42, 70])
-    assert report["moonSpeedGain"] == pytest.approx(1.3)
+    assert report["moonSpeedGain"] == pytest.approx(6 / 4.5)
     assert report["moonRole"] == "radial"
 
 
@@ -2077,7 +2077,7 @@ def test_black_hole_field_is_twice_local_gravity_and_uses_only_anchor_mass() -> 
         });
         """
     )
-    assert report["constants"] == [480, 240]
+    assert report["constants"] == [292.5, 146.25]
     assert report["accelerationRatio"] == pytest.approx(2, rel=1e-12)
     assert report["masses"] == [8, 101, 109]
 
@@ -2643,7 +2643,7 @@ def test_gravity_zero_leaves_the_galactic_field_weak_and_stellar_floor_intact() 
         "blackHole": 0,
         "compatibilityLocal": 0,
         "stellar": 0,
-        "defaultStellar": pytest.approx(2535.0),
+        "defaultStellar": pytest.approx(5265.0),
     }
     before, after = report["before"], report["after"]
     assert math.hypot(before["relative"]["vx"], before["relative"]["vy"]) > 1
@@ -2760,7 +2760,7 @@ def test_core_pair_reduction_is_complementary_momentum_safe_and_seed_exact() -> 
         const corePair = system('core-pair', 'core');
         const pairs = [...regularPair, ...corePair];
         I.applyGalaxyGravity(pairs, {
-          effectiveGravity: I.galaxyGravityConstant(48),
+          effectiveGravity: I.galaxyLocalGravityConstant(48),
           pairFraction: 0.15,
           corePairFraction: 0.1125,
           coreCommunity: 'core',
@@ -2792,7 +2792,7 @@ def test_core_pair_reduction_is_complementary_momentum_safe_and_seed_exact() -> 
         const coreCombined = system('core-combined', 'core');
         const combined = [...regularCombined, ...coreCombined];
         I.applyGalaxyGravity(combined, {
-          effectiveGravity: I.galaxyGravityConstant(48), pairFraction: 0.15, corePairFraction: 0.1125,
+          effectiveGravity: I.galaxyLocalGravityConstant(48), pairFraction: 0.15, corePairFraction: 0.1125,
           coreCommunity: 'core', softening: 12,
         });
         I.applyGalaxySystemHaloGravity(combined, {
@@ -2934,9 +2934,10 @@ def test_legacy_system_halo_and_anchor_integrator_preserve_free_system_com() -> 
         const expectedPinned = -I.galaxyBlackHoleGravityConstant(100, true) * 8 * 24
           / Math.pow(24 * 24 + 12 * 12, 1.5);
         const seededPair = freePair.map(node => ({ ...node, vx: 0, vy: 0 }));
-        I.seedGalaxyOrbits(seededPair, 72, 100, 12, false, 0.15);
+        // Keep this exact circular-law fixture below the 48-unit seed safety ceiling.
+        I.seedGalaxyOrbits(seededPair, 72, 48, 12, false, 0.15);
         const seededAcceleration = I.galaxyAccelerations(seededPair, [], [], {
-          gravity: 100, softening: 12, central: false, localPairFraction: 0.15,
+          gravity: 48, softening: 12, central: false, localPairFraction: 0.15,
           // This legacy two-body law intentionally excludes the new near-surface pressure;
           // the seed uses the pure dominant-star circular field, as covered separately.
           systemAnchorRepulsionAcceleration: 0,
@@ -2992,7 +2993,7 @@ def test_legacy_system_halo_and_anchor_integrator_preserve_free_system_com() -> 
     assert report["pinned"][1]["ax"] == pytest.approx(report["expectedPinned"], rel=1e-12)
     assert report["pinned"][1]["ay"] == pytest.approx(0, abs=1e-12)
     assert report["seedLaw"][0] == pytest.approx(report["seedLaw"][1], rel=1e-12)
-    assert max(report["capped"]) == pytest.approx(1491.9230769230769)
+    assert max(report["capped"]) == pytest.approx(363.65625)
     assert report["cappedMomentum"] == pytest.approx(0, abs=1e-9)
     assert report["finite"] is True
 
@@ -7064,9 +7065,8 @@ def test_unequal_mass_local_seed_remains_a_bound_two_body_orbit() -> None:
     assert report["centered"] is True
     assert report["finite"] is True
     assert report["minimum"] >= 23.9
-    # Exact-2x gravity raises the integrator's dimensionless step at this deliberately coarse
-    # 0.525 fixture timestep; the orbit remains within roughly 8% of its seeded radius with the
-    # compact kinematic carrier and translate-system-descendants admission.
+    # Coarse caller steps are subdivided before contact projection so the stronger stellar
+    # clock preserves the original orbital bounds without changing the browser timestep.
     assert report["maximum"] <= 26.0
 
 
@@ -8573,10 +8573,10 @@ def test_galaxy_is_default_and_consumes_the_complete_scene_contract() -> None:
     assert report["radii"]["c"] == pytest.approx(radius(2))
     assert report["d3Budget"] == [0, 0, 0]
     assert report["diagnostics"]["timestep"] == pytest.approx(0.032)
-    assert report["diagnostics"]["velocityDecay"] == pytest.approx(0.00005)
+    assert report["diagnostics"]["velocityDecay"] == pytest.approx(0.0004)
     assert report["diagnostics"]["gravitySetting"] == 120
-    assert report["diagnostics"]["blackHoleGravity"] == pytest.approx(2317.2923076923075)
-    assert report["diagnostics"]["localGravity"] == pytest.approx(240)
+    assert report["diagnostics"]["blackHoleGravity"] == pytest.approx(1412.1)
+    assert report["diagnostics"]["localGravity"] == pytest.approx(146.25)
     assert report["diagnostics"]["linkSetting"] == 8
     assert report["diagnostics"]["relationOrbitScale"] == pytest.approx(0.25)
     assert report["diagnostics"]["orbitalSeparationSetting"] == 100
@@ -10188,7 +10188,7 @@ def test_persistent_galaxy_clock_is_fixed_bounded_and_lifecycle_safe() -> None:
     assert report["first"]["d3ForcesOff"] is True
     assert first["frames"] == first["steps"] == first["lastSubsteps"] == 1
     assert first["timestep"] == pytest.approx(0.032)
-    assert first["velocityDecay"] == pytest.approx(0.00005)
+    assert first["velocityDecay"] == pytest.approx(0.0004)
     assert first["reducedMotion"] is False
     assert first["kineticEnergy"] > 0
     assert first["speedCapActivations"] == 0
@@ -12149,8 +12149,8 @@ def test_managed_live_carrier_uses_physical_velocity_target() -> None:
 
 
 @requires_node
-def test_live_orbit_phase_uses_the_budgeted_relative_speed() -> None:
-    """Live phase advancement must agree with the capped velocity it emits."""
+def test_live_orbit_phase_uses_the_presentation_clock_over_emitted_velocity() -> None:
+    """Live phase advances at the requested presentation rate over capped velocity."""
     report = _run_node(
         """
         const nodes = [
@@ -12178,7 +12178,56 @@ def test_live_orbit_phase_uses_the_budgeted_relative_speed() -> None:
         emit({ phaseDelta, radius, phaseSpeed: phaseDelta * radius, relativeSpeed });
         """
     )
-    assert report["phaseSpeed"] == pytest.approx(report["relativeSpeed"], rel=1e-9), report
+    assert report["phaseSpeed"] == pytest.approx(
+        report["relativeSpeed"] * 1.5, rel=1e-9
+    ), report
+
+
+@requires_node
+def test_live_orbit_phase_continues_when_parent_velocity_uses_the_world_cap() -> None:
+    """A capped carrier must not freeze a local orbit at a blocked tangent."""
+    report = _run_node(
+        """
+        const nodes = [
+          { id: 'black-hole', anchor_role: 'global', community_id: 'core',
+            system_anchor_id: 'black-hole', gravity_mass: 16, radius: 8,
+            x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'star', anchor_role: 'community', community_id: 'solar',
+            system_anchor_id: 'star', gravity_mass: 6, radius: 5,
+            x: 120, y: 0, vx: 0, vy: 48 },
+          { id: 'planet', community_id: 'solar', system_anchor_id: 'star',
+            orbit_tier: 1, orbit_radius: 30, gravity_mass: 1, radius: 2,
+            x: 120, y: 30, vx: 0, vy: 48 },
+        ];
+        const options = {
+          gravity: 48, softening: 32, centralSoftening: 40,
+          localGravitySetting: 48, orbitalSpeed: 400,
+          layoutSeed: 19, timestep: 1, speedLimit: 48,
+        };
+        const angle = () => Math.atan2(nodes[2].y - nodes[1].y,
+          nodes[2].x - nodes[1].x);
+        const before = angle();
+        I.applyGalaxyOrbitalSpeedControl(nodes, options);
+        const afterFirst = angle();
+        I.applyGalaxyOrbitalSpeedControl(nodes, options);
+        const afterSecond = angle();
+        const phase = nodes[2].__galaxySpeedControlPhase;
+        emit({ firstTravel: Math.abs(Math.atan2(Math.sin(afterFirst - before),
+            Math.cos(afterFirst - before))),
+          secondTravel: Math.abs(Math.atan2(Math.sin(afterSecond - afterFirst),
+            Math.cos(afterSecond - afterFirst))),
+          emittedRelativeSpeed: Math.hypot(nodes[2].vx - nodes[1].vx,
+            nodes[2].vy - nodes[1].vy),
+          localSpeed: phase.localSpeed,
+          finite: nodes.every(node =>
+            [node.x, node.y, node.vx, node.vy].every(Number.isFinite)) });
+        """
+    )
+    assert report["finite"] is True
+    assert report["firstTravel"] > 1e-5, report
+    assert report["secondTravel"] > 1e-5, report
+    assert report["emittedRelativeSpeed"] <= 48 + 1e-9, report
+    assert report["localSpeed"] > 0, report
 
 
 @requires_node
@@ -12330,7 +12379,7 @@ def test_kinematic_nested_orbits_respect_the_world_speed_limit() -> None:
 
 
 @requires_node
-def test_kinematic_local_velocity_budget_uses_one_phase_speed() -> None:
+def test_kinematic_local_velocity_budget_uses_presentation_phase_clock() -> None:
     report = _run_node(
         """
         const nodes = [
@@ -12364,7 +12413,9 @@ def test_kinematic_local_velocity_budget_uses_one_phase_speed() -> None:
     )
     assert report["finite"] is True
     assert report["maximumSpeed"] <= 48 + 1e-9
-    assert report["phaseSpeed"] == pytest.approx(report["relativeSpeed"], rel=1e-9), report
+    assert report["phaseSpeed"] == pytest.approx(
+        report["relativeSpeed"] * 1.5, rel=1e-9
+    ), report
 
 
 @requires_node
