@@ -5,6 +5,10 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
+    # MCP 2 changes the server API; migrate and qualify it separately.
+    ignore:
+      - dependency-name: "mcp"
+        update-types: ["version-update:semver-major"]
     labels:
       - "dependencies"
   - package-ecosystem: "npm"

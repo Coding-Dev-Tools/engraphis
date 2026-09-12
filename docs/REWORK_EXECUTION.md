@@ -177,3 +177,33 @@ mailboxes/provider journeys, a reconciled restore drill, first-time developer
 acceptance and the three-week bounded pilot. Existing private Cloud checks and
 local website checks are not substituted for those observations. Paid evaluation
 still requires a fresh approved budget before any call.
+
+## September 12 source consolidation
+
+The follow-up inventory covers 58 registered worktrees across seven Git repositories,
+including three Cloud stashes and eight older Cloud directories with broken Git
+metadata. Original source, index states and stashes are preserved. Complete-tree,
+ancestry, changed-file and behavioral comparisons distinguish submitted work from
+superseded drafts; generated databases, credentials, dependencies and raw private
+evidence do not belong in a source PR.
+
+The engine candidate now includes the three previously separate graph files and
+their required regression repairs. Carrier and stellar clocks share their force
+and seed settings, large helper timesteps use bounded integration subdivisions,
+and correction budgets preserve the world-speed boundary. Local presentation
+phase remains independent from capped emitted velocity. Graph and browser gates
+must qualify these changes together; the September 11 artifact results describe
+the earlier candidate only.
+
+Compatible dependency work from PRs #213, #214 and #215 is consolidated here:
+Playwright 1.63.0, the Python 3.10+ language pack 1.16.2, and Impeccable 4.0.4.
+Python 3.9 retains its compatible language pack. PR #216's proposed MCP major
+upgrade is replaced by the existing MCP <2 contract and an explicit major-upgrade
+ignore until compatibility is demonstrated. Patched Pi Hono remains in place.
+
+Private Cloud/Team PR #74 is the integrated application delivery; the independent
+R2 backup addition remains PR #72. Website PR #15 incorporates the useful older
+measurement, offer and artifact checks while retaining the shipped v1.7.3 contract.
+Final source identities and new CI results must be recorded separately from the
+earlier release package. Consolidation and passing source checks do not complete
+the outstanding capacity, recovery, hosted, human-acceptance or pilot gates.
