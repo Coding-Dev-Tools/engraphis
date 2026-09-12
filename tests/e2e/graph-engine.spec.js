@@ -1894,8 +1894,8 @@ for (const reducedMotion of [false, true]) {
       expect(diagnostics.linkSetting).toBe(8);
       expect(diagnostics.relationOrbitScale).toBeCloseTo(0.25, 12);
       expect(diagnostics.gravitySetting).toBe(120);
-      expect(diagnostics.blackHoleGravity).toBeCloseTo(4634.584615384615, 12);
-      expect(diagnostics.localGravity).toBeCloseTo(240, 12);
+      expect(diagnostics.blackHoleGravity).toBeCloseTo(2824.2, 12);
+      expect(diagnostics.localGravity).toBeCloseTo(146.25, 12);
       expect(diagnostics.systemOrbitSeedSpeedLimit).toBeCloseTo(23.4, 12);
 
       const assetRequests = fetched(session.requested, '/v2-assets/engraphis-graph.js');
@@ -1905,7 +1905,7 @@ for (const reducedMotion of [false, true]) {
       const servedAsset = await page.request.get(assetUrl.href);
       expect(servedAsset.ok()).toBe(true);
       const servedSource = await servedAsset.text();
-      expect(servedSource).toContain('const GALAXY_STELLAR_ORBIT_CLOCK = 3.25;');
+      expect(servedSource).toContain('const GALAXY_STELLAR_ORBIT_CLOCK = 6.0;');
       expect(servedSource).toContain('const GALAXY_AUTHORED_CARRIER_ORBIT_CLOCK = 1.3;');
       expect(servedSource).toContain('const BASE_NODE_RADIUS_SCALE = 1.2;');
       expect(servedSource).toContain('preserveSystemRadii: true,');
@@ -2355,10 +2355,10 @@ test('served Complete Galaxy uses the lightweight all-body orbit path instead of
     }
 
     const orbitEvidence = async label => {
-      /* Keep the 3,335 global and 2,960 local bodies in the page. Serializing six full object
-         arrays dominated this test, but reducing the sample would make a frozen member invisible.
-         The observer scans every body on every phase and returns only counts, extrema, and first
-         failures to Playwright. */
+      /* Audit all 3,335 moving bodies in their actual parent frames: 375 global carriers and
+         2,960 local children. A child's local rotation can cancel the black-hole polar angle
+         without stopping its orbit, so global polar angle is only an oracle for carriers.
+         Disjoint exhaustive coverage below still makes any frozen authored member visible. */
       const boot = await page.evaluate(() => {
         const graph = window.__fg, engine = window.__engraphisGraph;
         const delta = (from, to) => Math.atan2(Math.sin(to - from), Math.cos(to - from));
@@ -2369,7 +2369,7 @@ test('served Complete Galaxy uses the lightweight all-body orbit path instead of
           const anchor = nodes.find(node => node.anchor_role === 'global');
           const global = new Map(), local = new Map();
           const finite = node => [node.x, node.y, node.vx, node.vy].every(Number.isFinite);
-          if (anchor) for (const node of nodes) if (node !== anchor) {
+          if (anchor) for (const node of nodes) if (node.anchor_role === 'community') {
             global.set(String(node.id), { angle: Math.atan2(node.y - anchor.y, node.x - anchor.x),
               finite: finite(node) });
           }
@@ -2387,8 +2387,13 @@ test('served Complete Galaxy uses the lightweight all-body orbit path instead of
             const expectedY = valid ? anchor.y + Math.sin(orbit.angle) * orbit.radius : NaN;
             return { id: String(node.id), valid, error: valid ? Math.hypot(node.x - expectedX, node.y - expectedY) : Infinity };
           }) : [];
+          const trackedIds = new Set([...global.keys(), ...local.keys()]);
+          const untracked = nodes.filter(node => node !== anchor && !trackedIds.has(String(node.id)));
+          const duplicated = [...global.keys()].filter(id => local.has(id));
           return { global, local, carriers, systems: new Set(nodes.filter(node => node.anchor_role === 'community').map(node => String(node.id))),
-            finite: nodes.every(finite), diagnostics: engine.physicsDiagnostics() };
+            trackedCount: trackedIds.size, untrackedCount: untracked.length,
+            duplicateCount: duplicated.length, finite: nodes.every(finite),
+            diagnostics: engine.physicsDiagnostics() };
         };
         const initial = snapshot();
         window.__completeOrbitObserver = { delta, snapshot, initial,
@@ -2397,6 +2402,8 @@ test('served Complete Galaxy uses the lightweight all-body orbit path instead of
           samples: [] };
         return { globalCount: initial.global.size, localCount: initial.local.size,
           anchorCount: initial.carriers.length, systemCount: initial.systems.size,
+          trackedCount: initial.trackedCount, untrackedCount: initial.untrackedCount,
+          duplicateCount: initial.duplicateCount,
           finite: initial.finite, diagnostics: initial.diagnostics };
       });
       // This deliberately samples short fixed intervals. A production-sized canvas can paint
@@ -2432,6 +2439,8 @@ test('served Complete Galaxy uses the lightweight all-body orbit path instead of
           const summary = { global, local, carrierCount: current.carriers.length,
             carrierMaxError: current.carriers.reduce((max, carrier) => Math.max(max, carrier.error), 0),
             carrierFailures: carrierFailures.slice(0, 3), systemCount: current.systems.size,
+            trackedCount: current.trackedCount, untrackedCount: current.untrackedCount,
+            duplicateCount: current.duplicateCount,
             finite: current.finite, diagnostics: current.diagnostics };
           observer.samples.push(current);
           return summary;
@@ -2442,7 +2451,12 @@ test('served Complete Galaxy uses the lightweight all-body orbit path instead of
         body: Buffer.from(JSON.stringify({ boot, phases }, null, 2)),
         contentType: 'application/json',
       });
-      expect(boot.globalCount).toBe(3335);
+      expect(boot.globalCount).toBe(375);
+      for (const observation of [boot, ...phases]) {
+        expect(observation.trackedCount).toBe(3335);
+        expect(observation.untrackedCount).toBe(0);
+        expect(observation.duplicateCount).toBe(0);
+      }
       expect(boot.localCount).toBe(2960);
       expect(boot.anchorCount).toBe(375);
       expect(boot.systemCount).toBe(375);
@@ -2455,7 +2469,7 @@ test('served Complete Galaxy uses the lightweight all-body orbit path instead of
       expect(after.diagnostics.speedCapActivations).toBe(0);
       expect(after.diagnostics.lastCollisions).toBe(0);
       expect(after.diagnostics.lastRelationCorrections).toBe(0);
-      expect(phases.every(phase => phase.global.count === 3335 && phase.global.missing === 0
+      expect(phases.every(phase => phase.global.count === 375 && phase.global.missing === 0
         && phase.global.nonFinite === 0 && phase.global.frozen === 0 && phase.global.totalFrozen === 0
         && phase.global.minTravel > .001), JSON.stringify(phases.map(phase => phase.global))).toBe(true);
       expect(phases.every(phase => phase.local.count === 2960 && phase.local.missing === 0
@@ -2598,6 +2612,102 @@ for (const reducedMotion of [false, true]) {
       }
     });
 }
+
+test('Galaxy slider changes keep every authored local orbit advancing', async ({ page }) => {
+  test.setTimeout(60_000);
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  await openDashboard(page, { graphScene: servedCompleteGalaxyScene });
+  await page.goto('/');
+  await page.locator('.nav-item[data-view="relations"]').click();
+  await revealAdvancedGraphControls(page);
+  await expect(page.locator('#graph-canvas canvas').first()).toBeAttached({ timeout: 20_000 });
+  await page.waitForFunction(() => window.__engraphisGraph && window.__fg
+    && window.__fg.graphData().nodes.length === 3336
+    && window.__engraphisGraph.physicsDiagnostics().steps >= 30
+    && window.__engraphisGraph.physicsDiagnostics().active);
+
+  const snapshot = () => page.evaluate(() => {
+    const nodes = window.__fg.graphData().nodes.filter(node => !node.ghost);
+    const byId = new Map(nodes.map(node => [String(node.id), node]));
+    return {
+      diagnostics: window.__engraphisGraph.physicsDiagnostics(),
+      members: nodes.flatMap(node => {
+        const anchorId = node.system_anchor_id == null ? null : String(node.system_anchor_id);
+        const parent = anchorId && byId.get(anchorId);
+        if (!parent || parent === node) return [];
+        return [{ id: String(node.id), anchorId,
+          angle: Math.atan2(node.y - parent.y, node.x - parent.x),
+          parentSpeed: Math.hypot(parent.vx, parent.vy),
+          relativeSpeed: Math.hypot(node.vx - parent.vx, node.vy - parent.vy),
+          localAngle: node.__galaxyKinematicLocalOrbit
+            ? node.__galaxyKinematicLocalOrbit.angle : null,
+          finite: [node.x, node.y, node.vx, node.vy, parent.x, parent.y,
+            parent.vx, parent.vy].every(Number.isFinite) }];
+      }),
+    };
+  });
+  const delta = (from, to) => Math.atan2(Math.sin(to - from), Math.cos(to - from));
+  const moveAfter = async (selector, value) => {
+    const before = await snapshot();
+    const target = before.diagnostics.steps + 90;
+    await page.locator(selector).fill(String(value));
+    await page.dispatchEvent(selector, 'input');
+    await page.waitForFunction(step => window.__engraphisGraph.physicsDiagnostics().steps >= step,
+      target, { timeout: 25_000 });
+    const after = await snapshot();
+    const beforeById = new Map(before.members.map(member => [member.id, member]));
+    const moved = after.members.map(member => ({ ...member,
+      travel: Math.abs(delta(beforeById.get(member.id).angle, member.angle)),
+    }));
+    return { before, after, moved };
+  };
+
+  for (const [selector, value] of [['#graph-repel', 400], ['#graph-gravity', 400]]) {
+    const report = await moveAfter(selector, value);
+    expect(report.moved).toHaveLength(2960);
+    const frozen = report.moved.filter(member => !member.finite || member.travel <= 1e-4);
+    expect(frozen.length, `${selector} left authored local nodes frozen: ${JSON.stringify(
+      frozen.slice(0, 12))}`).toBe(0);
+  }
+});
+
+test('served Galaxy keeps local members moving after live slider changes', async ({ page }) => {
+  test.setTimeout(75_000);
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  await openDashboard(page, { graphScene: servedLargeGalaxyScene });
+  await page.goto('/');
+  await page.locator('.nav-item[data-view="relations"]').click();
+  await revealAdvancedGraphControls(page);
+  await expect(page.locator('#graph-canvas canvas').first()).toBeAttached({ timeout: 20_000 });
+  await page.waitForFunction(() => window.__engraphisGraph && window.__fg
+    && window.__fg.graphData().nodes.length === 542
+    && window.__engraphisGraph.physicsDiagnostics().steps >= 30
+    && window.__engraphisGraph.physicsDiagnostics().active);
+
+  const angleDelta = (from, to) => Math.atan2(Math.sin(to - from), Math.cos(to - from));
+  const moveAfter = async selector => {
+    const before = await renderedAllLocalOrbitSnapshot(page);
+    const target = before.diagnostics.steps + 90;
+    await page.locator(selector).fill('400');
+    await page.locator(selector).press('Tab');
+    await page.waitForFunction(step => window.__engraphisGraph.physicsDiagnostics().steps >= step,
+      target, { timeout: 25_000 });
+    const after = await renderedAllLocalOrbitSnapshot(page);
+    const beforeById = new Map(before.members.map(member => [member.id, member]));
+    const moved = after.members.map(member => ({ ...member,
+      travel: Math.abs(angleDelta(beforeById.get(member.id).angle, member.angle)),
+    }));
+    return { before, after, moved };
+  };
+
+  for (const selector of ['#graph-repel', '#graph-gravity']) {
+    const report = await moveAfter(selector);
+    expect(report.moved).toHaveLength(481);
+    const frozen = report.moved.filter(member => !member.finite || member.travel <= 1e-5);
+    expect(frozen, `${selector} froze authored local members: ${JSON.stringify(
+      frozen.slice(0, 12))}`).toHaveLength(0);
+  }
+});
 
 for (const reducedMotion of [false, true]) {
   const preference = reducedMotion ? 'reduced motion' : 'normal motion';
@@ -3473,25 +3583,25 @@ test('Galaxy sliders retain full ranges with orbital-speed and radius response',
 
   expect(baseline.curve.setting).toBe(48);
   expect(strong.curve.setting).toBe(200);
-  expect(baseline.curve.baseline).toBe(480);
-  expect(baseline.curve.maximum).toBeCloseTo(5486.7692307692305, 12);
-  expect(baseline.curve.localBaseline).toBe(240);
-  expect(baseline.curve.localMaximum).toBeCloseTo(2743.3846153846152, 12);
+  expect(baseline.curve.baseline).toBe(292.5);
+  expect(baseline.curve.maximum).toBeCloseTo(3343.5, 12);
+  expect(baseline.curve.localBaseline).toBe(146.25);
+  expect(baseline.curve.localMaximum).toBeCloseTo(1671.75, 12);
   expect(baseline.curve.localBaseline).toBe(baseline.curve.baseline * 0.5);
   expect(baseline.curve.localMaximum).toBe(baseline.curve.maximum * 0.5);
   expect(baseline.curve.maximum / baseline.curve.baseline).toBeCloseTo(
     11.430769230769231, 12,
   );
   expect(baseline.before.diagnostics.gravitySetting).toBe(48);
-  expect(baseline.before.diagnostics.effectiveGravity).toBe(480);
-  expect(baseline.before.diagnostics.blackHoleGravity).toBe(480);
-  expect(baseline.before.diagnostics.localGravity).toBe(240);
+  expect(baseline.before.diagnostics.effectiveGravity).toBe(292.5);
+  expect(baseline.before.diagnostics.blackHoleGravity).toBe(292.5);
+  expect(baseline.before.diagnostics.localGravity).toBe(146.25);
   expect(strong.before.diagnostics.gravitySetting).toBe(200);
-  expect(strong.before.diagnostics.effectiveGravity).toBeCloseTo(5486.7692307692305, 12);
-  expect(strong.before.diagnostics.blackHoleGravity).toBeCloseTo(5486.7692307692305, 12);
+  expect(strong.before.diagnostics.effectiveGravity).toBeCloseTo(3343.5, 12);
+  expect(strong.before.diagnostics.blackHoleGravity).toBeCloseTo(3343.5, 12);
   // The visible Galaxy gravity slider owns the central field; local stellar gravity stays on
   // the calibrated baseline and only the dedicated local control can change it.
-  expect(strong.before.diagnostics.localGravity).toBe(240);
+  expect(strong.before.diagnostics.localGravity).toBe(146.25);
   expect(naturalOrbits.before.diagnostics.orbitalSeparationSetting).toBe(100);
   expect(naturalOrbits.before.diagnostics.orbitalSpeedMultiplier).toBe(1);
   expect(naturalOrbits.before.diagnostics.orbitalRadiusMultiplier).toBe(1);

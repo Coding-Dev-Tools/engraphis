@@ -4,6 +4,12 @@ This is the execution register for the approved memory-first reliability program
 It records engineering work and remaining gates separately. It is not a release,
 capacity, independent-quality, or production-restoration claim.
 
+The September 11 release-readiness implementation continues this register from public
+`cd71929344c0c63070954e9963b7bc5c45ebfa30`. The full-product gate inventory, evidence
+schema, ownership and publication/rollback procedure are in
+[RELEASE_READINESS.md](RELEASE_READINESS.md). The earlier identities below are historical
+baselines. Current results belong to the candidate ledger, not to those older revisions.
+
 The implementation starts from public source
 `8d9770d6676c7c19aabe21c4d0e6bcebff9a4d59` (source version 1.7.2).
 The separately verified published release was 1.7.1 on September 6, 2026.
@@ -72,7 +78,7 @@ The original checkout's active graph/layout changes remain separate.
 | 3 | Add optional coordinated repair scheduling with deadlines, backoff and backlog age. | Idempotent generations; no resurrection after erasure; bounded provider calls and interruption recovery. Offline library requires no background service. | Disable scheduling on missed deadlines or growing backlog; retain canonical fallback and durable queue. |
 | 4 | Complete independent quality and capacity evidence before optimization. | [Corpus protocol](CODING_ACCEPTANCE_CORPUS.md), [capacity protocol](ENGINE_CAPACITY_PROTOCOL.md), exact approved [paid matrix](PAID_EVALUATION_PROPOSAL.md). Family-separated 400 tasks, both machines, all 48 cells and paired uncertainty are required. | Incomplete evidence or failure of the one-percentage-point non-inferiority gate retains defaults. |
 | 5 | Optimize measured contention/startup/vector/embedding/graph bottlenecks, one at a time. | Compare matched complete-engine workloads, including queueing, actual semantic embeddings and real backends; account for failures and resource usage. | Revert an algorithm/default change that violates correctness or declared quality limits. |
-| 6 | Finish installed-product and human UI acceptance. | Windows/macOS/Linux; Chromium plus Firefox/WebKit correction/history; screen-reader, keyboard, reduced motion and reflow checks. Twelve target developers, at least ten unassisted journeys, and investigation of every scope error. | Preserve drafts and existing paths until replacement parity; ambiguous saves block progression. |
+| 6 | Finish installed-product and human UI acceptance. | Windows/macOS/Linux; Chromium plus Firefox/WebKit correction/history; screen-reader, keyboard, reduced motion and reflow checks. At least 11 of 12 first-time developers complete install to useful cross-session recall unaided within ten minutes; investigate every scope error. | Preserve drafts and existing paths until replacement parity; ambiguous saves block progression. |
 | 7 | Complete backend-first hosted cutover and recovery proof. | Exact client/control/compute/worker/edge/schema/grants; old/new policy combinations; revocation persistence; erasure/member/token/opt-out/entitlement reconciliation while fenced; verified alerts and ownership. | Keep submissions and restored services fenced on missing policy, reconciliation or operational evidence. |
 | 8 | Run the consented bounded pilot, then simplify duplicate surfaces. | Five developers, one clean week before twenty repositories, then two weeks observation. Metrics local by default; external collection requires opt-in. | Stop for lost evidence, leakage, resurrection, unexpected processing, revoked access or migration-integrity failure. |
 
@@ -137,3 +143,67 @@ This candidate does not claim a successful production restoration. The private
 restore-release checker validates a supplied, hash-bound evidence package and
 retains the release fence until the required categories are represented; it does
 not execute those operational reconciliations on production data.
+
+## September 11 release candidate work
+
+The original 16-file working tree was inventoried before selecting release work.
+Thirteen nongraph changes were copied into an isolated candidate; the three active
+graph files remain in their original checkout. The candidate removes an ineffective
+per-write regex-list preparation change and retains bounded lookup batching with
+scope/time regression coverage. Original user edits were not rewritten.
+
+| Work | Implemented evidence | Remaining acceptance |
+| --- | --- | --- |
+| Durable SQLite writers | WAL/FULL is the default, with an explicit balanced policy and effective diagnostics. `tests/test_sqlite_durability.py` covers startup enforcement, injected/read-only connectors, interrupted writes and `SQLITE_FULL` rollback/retry. | Physical power failure and the complete operational restore contract remain unverified. |
+| Consolidation evidence | Visibility lookups are chunked at the Store's 500-ID bound. Scope, historical visibility, missing evidence and failed batches are covered by `tests/test_consolidate_recall.py`. | A best-effort lookup failure hides citations; it does not erase canonical source records. |
+| Pi dependency repair | Hono resolves to patched 4.13.7. Pi verification, type checking, packaging and genuine MCP integration passed locally; MCP remains below major version 2. | Final candidate CI and release artifact checks are indexed separately. |
+| Complete-engine measurement | Serializable factory configuration supports real files, pinned local semantic models, exact NumPy/sqlite-vec backends and rerankers. Opt-in recall phases separate embedding, retrieval, ranking and packing. | Full writer occupancy, production-load calibration and measured optimization remain open. |
+| Capacity acceptance | Lifecycle RSS includes startup, backlog is sampled and recomputed, and the complete matrix validator enforces prebound hosts, WAL/FULL, all scheduled outcomes, RAM and the required 100k latency limits. | No primary 48-cell matrix was executed. The separate 16 GiB reference host remains necessary. |
+| Installed journeys | A packaged stdlib runner performs actual MCP/HTTP writes, restart recall, correction and historical reads. PR CI and release jobs cover Windows, macOS and Linux, with artifact/dependency identities retained. | Cached Windows source semantic startup passed in four fresh processes, taking 20-23 seconds. This is not semantic qualification of all installed platforms. |
+| Evidence and publication | Candidate ledger validation checks identities, hashes, dependencies, outcomes and selected evaluation booleans. All four publication/repair writes require [owner qualification](RELEASE_QUALIFICATION.md). | Owner-protected environment/authority setup, final approval and all missing mandatory evidence remain open. |
+| Public claims | Fresh [offline fixture evidence](benchmark-evidence/offline-fixtures-v2.json) reproduces retained public aggregates and binds the current engine/eval source. Historical v1 evidence is preserved. | Planner variants still require successful promotion gates; no retrieval default or leadership claim is promoted. |
+| Website contract | Active commercial/MCP/install guidance is generated and checked against a selected shipped public contract in the website candidate. | The live portal, authenticated provider journeys and combined deployed identities require attended acceptance. |
+
+Final commits, distributions, dependency inventories, raw execution results and gate
+owners belong to the private `candidate-ledger.json` package described in
+[RELEASE_READINESS.md](RELEASE_READINESS.md). A passing subset is retained without
+turning an incomplete mandatory gate into PASS. The first integrated local run was
+interrupted by host disk exhaustion; its failure log is retained separately from
+subsequent executions. Disposable tests do not certify recovery of customer data.
+
+The next release-critical dependencies are sufficient reference-host storage, both
+capacity hosts, the independently authored executable corpus, controlled staging
+mailboxes/provider journeys, a reconciled restore drill, first-time developer
+acceptance and the three-week bounded pilot. Existing private Cloud checks and
+local website checks are not substituted for those observations. Paid evaluation
+still requires a fresh approved budget before any call.
+
+## September 12 source consolidation
+
+The follow-up inventory covers 58 registered worktrees across seven Git repositories,
+including three Cloud stashes and eight older Cloud directories with broken Git
+metadata. Original source, index states and stashes are preserved. Complete-tree,
+ancestry, changed-file and behavioral comparisons distinguish submitted work from
+superseded drafts; generated databases, credentials, dependencies and raw private
+evidence do not belong in a source PR.
+
+The engine candidate now includes the three previously separate graph files and
+their required regression repairs. Carrier and stellar clocks share their force
+and seed settings, large helper timesteps use bounded integration subdivisions,
+and correction budgets preserve the world-speed boundary. Local presentation
+phase remains independent from capped emitted velocity. Graph and browser gates
+must qualify these changes together; the September 11 artifact results describe
+the earlier candidate only.
+
+Compatible dependency work from PRs #213, #214 and #215 is consolidated here:
+Playwright 1.63.0, the Python 3.10+ language pack 1.16.2, and Impeccable 4.0.4.
+Python 3.9 retains its compatible language pack. PR #216's proposed MCP major
+upgrade is replaced by the existing MCP <2 contract and an explicit major-upgrade
+ignore until compatibility is demonstrated. Patched Pi Hono remains in place.
+
+Private Cloud/Team PR #74 is the integrated application delivery; the independent
+R2 backup addition remains PR #72. Website PR #15 incorporates the useful older
+measurement, offer and artifact checks while retaining the shipped v1.7.3 contract.
+Final source identities and new CI results must be recorded separately from the
+earlier release package. Consolidation and passing source checks do not complete
+the outstanding capacity, recovery, hosted, human-acceptance or pilot gates.

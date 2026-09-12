@@ -5,6 +5,21 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+- Writable SQLite files now default to WAL plus FULL synchronization, with an explicit
+  balanced option and effective-policy diagnostics. Disposable fault tests cover abrupt
+  process exit and database-full rollback; hardware power loss remains unverified.
+- Consolidation recall batches evidence-visibility checks within the Store's 500-ID bound,
+  preserving citations for larger digests under scope and temporal filters.
+- Pi resolves patched Hono while retaining MCP SDK compatibility below version 2.
+- Release verification exercises installed MCP and dashboard writes, restarts, corrections
+  and history on Windows, macOS and Linux. Product-readiness receipts bind exact components,
+  underlying evidence and independent release/leadership decisions.
+- Normal and repair publication require owner-signed qualification of the exact source,
+  distributions and private ledger. Protected authority configuration is a release prerequisite;
+  no signing authority or approval is created by installing this package.
+- Performance diagnostics accept pinned local models, real files and exact vector backends,
+  and expose opt-in recall phase timings. Planner promotion now has an explicit failing CLI
+  gate when its evaluation booleans are unmet; ranking defaults are unchanged.
 - Added schema 18 content-free command receipts and cross-process source revalidation for
   corrections, approvals, promotions and merges. Combined memory revisions have expected
   versions, operation IDs, atomic metadata/history, and typed conflicts.
@@ -21,6 +36,9 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - Added content-free diagnostics and build/capability information, strict coding
   acceptance validation and a file-backed independent-process capacity harness.
   These provide measurement infrastructure, not verified 100k capacity claims.
+- Preload the optional `sentence-transformers` dependency before Windows stdio MCP
+  accepts JSON-RPC, avoiding the observed native import/thread startup stall while
+  preserving deterministic fallback and exact-backend policy.
 
 ## [1.7.3] - 2026-09-07
 

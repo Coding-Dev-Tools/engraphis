@@ -6,6 +6,8 @@ source memories should be citable evidence (ids, never duplicated bodies).
 """
 from __future__ import annotations
 
+import pytest
+
 from engraphis.backends import DeterministicEmbedder
 from engraphis.backends.reranker import IdentityReranker
 from engraphis.backends.vector_sqlitevec import get_vector_index
@@ -19,7 +21,7 @@ from engraphis.core.recall import (
     _consolidation_evidence,
     _consolidated_source,
 )
-from engraphis.core.store import Store
+from engraphis.core.store import IN_CLAUSE_CHUNK, Store
 
 
 class _SemanticTestEmbedder(DeterministicEmbedder):
@@ -178,20 +180,20 @@ def test_recall_resolves_consolidation_evidence_once(monkeypatch):
         store.add_link(digest_id, source_id, "consolidates")
     expected_sources = set(source_ids)
     link_calls = []
-    memory_calls = []
+    visibility_calls = []
     real_get_links = store.get_links
-    real_get_memory = store.get_memory
+    real_visible_memory_ids = store.visible_memory_ids
 
     def recording_get_links(memory_id, *, flt=None):
         link_calls.append(memory_id)
         return real_get_links(memory_id, flt=flt)
 
-    def recording_get_memory(memory_id):
-        memory_calls.append(memory_id)
-        return real_get_memory(memory_id)
+    def recording_visible_memory_ids(memory_ids, flt, **kwargs):
+        visibility_calls.append(tuple(memory_ids))
+        return real_visible_memory_ids(memory_ids, flt, **kwargs)
 
     monkeypatch.setattr(store, "get_links", recording_get_links)
-    monkeypatch.setattr(store, "get_memory", recording_get_memory)
+    monkeypatch.setattr(store, "visible_memory_ids", recording_visible_memory_ids)
     result = eng.recall(
         "flaky network integration test",
         SearchFilter(workspace_id=wid, repo_id=rid),
@@ -205,9 +207,104 @@ def test_recall_resolves_consolidation_evidence_once(monkeypatch):
         expected_sources
     )
     assert link_calls == [digest_id]
-    assert set(memory_calls) == expected_sources
-    assert len(memory_calls) == len(expected_sources)
+    assert visibility_calls.count(tuple(source_ids)) == 1
     store.close()
+
+
+def test_large_consolidation_retains_every_visible_source_without_duplicate_bodies():
+    """A digest larger than one visibility query must retain all citable evidence."""
+    from engraphis.core.interfaces import MemoryRecord, Scope
+
+    store = Store(":memory:")
+    try:
+        wid = store.get_or_create_workspace("w")
+        rid = store.get_or_create_repo(wid, "r")
+        sources = [store.add_memory(MemoryRecord(
+            id="", content=f"Source evidence {index}", workspace_id=wid,
+            repo_id=rid, scope=Scope.REPO,
+        )) for index in range(IN_CLAUSE_CHUNK + 3)]
+        digest = MemoryRecord(
+            id="digest", content="Summary", workspace_id=wid, repo_id=rid,
+            scope=Scope.REPO,
+            provenance={"source": "consolidation", "consolidates": sources + sources[:2]},
+        )
+
+        evidence = _consolidation_evidence(
+            digest, store=store, flt=SearchFilter(workspace_id=wid, repo_id=rid),
+        )
+
+        assert evidence == sources
+    finally:
+        store.close()
+
+
+def test_consolidation_batch_preserves_scope_and_bitemporal_visibility():
+    from engraphis.core.interfaces import MemoryRecord, Scope
+
+    store = Store(":memory:")
+    try:
+        wid = store.get_or_create_workspace("w")
+        other_wid = store.get_or_create_workspace("other")
+        rid = store.get_or_create_repo(wid, "r")
+        other_rid = store.get_or_create_repo(wid, "other")
+
+        def add(**overrides):
+            fields = dict(id="", content="Source evidence", workspace_id=wid,
+                          repo_id=rid, scope=Scope.REPO, valid_from=10, ingested_at=10)
+            fields.update(overrides)
+            return store.add_memory(MemoryRecord(**fields))
+
+        live = add()
+        closed = add(valid_to=30, valid_to_recorded_at=30)
+        later_known = add(ingested_at=50)
+        later_valid = add(valid_from=50)
+        backdated = add(valid_to=30, valid_to_recorded_at=50)
+        foreign_repo = add(repo_id=other_rid)
+        foreign_workspace = add(workspace_id=other_wid, repo_id=None, scope=Scope.WORKSPACE)
+        sources = [live, closed, later_known, later_valid, backdated,
+                   foreign_repo, foreign_workspace, "mem_missing"]
+        digest = MemoryRecord(
+            id="digest", content="Summary", workspace_id=wid, repo_id=rid,
+            scope=Scope.REPO, provenance={"source": "consolidation", "consolidates": sources},
+        )
+
+        def evidence(valid_at, known_at):
+            return _consolidation_evidence(
+                digest, store=store, flt=SearchFilter(
+                    workspace_id=wid, repo_id=rid, valid_at=valid_at, known_at=known_at,
+                ),
+            )
+
+        assert evidence(20, 20) == [live, closed, backdated]
+        assert evidence(40, 40) == [live, backdated]
+        assert evidence(40, 60) == [live, later_known]
+        assert evidence(60, 60) == [live, later_known, later_valid]
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("failed_batch", [1, 2])
+def test_consolidation_visibility_failure_never_exposes_unverified_sources(failed_batch):
+    from engraphis.core.interfaces import MemoryRecord
+
+    source_ids = [f"mem_{index}" for index in range(IN_CLAUSE_CHUNK + 1)]
+
+    class UnavailableStore:
+        calls = 0
+
+        def visible_memory_ids(self, memory_ids, *, flt):
+            self.calls += 1
+            if self.calls == failed_batch:
+                raise RuntimeError("visibility unavailable")
+            return set(memory_ids)
+
+    digest = MemoryRecord(
+        id="digest", content="Summary",
+        provenance={"source": "consolidation", "consolidates": source_ids},
+    )
+    assert _consolidation_evidence(
+        digest, store=UnavailableStore(), flt=SearchFilter(workspace_id="w"),
+    ) == []
 
 
 def test_legacy_digest_with_only_link_table_sources_yields_evidence():
