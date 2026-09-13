@@ -21,6 +21,11 @@ def test_ulid_is_time_sortable():
     assert early < late
 
 
+def test_ulids_are_monotonic_within_one_timestamp():
+    values = [ids.ulid(timestamp_ms=42_000) for _ in range(4)]
+    assert values == sorted(values)
+
+
 _CROCKFORD = {
     char: index for index, char in enumerate("0123456789ABCDEFGHJKMNPQRSTVWXYZ")
 }
