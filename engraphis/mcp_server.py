@@ -3162,8 +3162,13 @@ async def _safe_run_stdio_async(server: FastMCP) -> None:
 
     real_stdout_buffer = getattr(sys.stdout, "buffer", None)
     real_stdin_buffer = getattr(sys.stdin, "buffer", None)
+    # Redirect before any eager backend construction or background warmup.  A
+    # dependency may write diagnostics to stdout while it imports; stdio MCP
+    # reserves that stream exclusively for JSON-RPC frames.
+    sys.stdout = sys.stderr
+    _eager_exact_backend_check()
+    _start_background_warmup()
     if real_stdout_buffer is not None and real_stdin_buffer is not None:
-        sys.stdout = sys.stderr
         wrapped_stdout = anyio.wrap_file(TextIOWrapper(real_stdout_buffer, encoding="utf-8"))
         wrapped_stdin = anyio.wrap_file(TextIOWrapper(real_stdin_buffer, encoding="utf-8", errors="replace"))
         async with stdio_server(stdin=wrapped_stdin, stdout=wrapped_stdout) as (read_stream, write_stream):
@@ -3183,8 +3188,6 @@ async def _safe_run_stdio_async(server: FastMCP) -> None:
 
 def main() -> None:
     """Console entry point (``engraphis-mcp``). Runs Smart MCP over stdio."""
-    _eager_exact_backend_check()
-    _start_background_warmup()
     import anyio
     anyio.run(lambda: _safe_run_stdio_async(mcp))
 
