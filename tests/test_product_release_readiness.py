@@ -342,6 +342,29 @@ def test_extensionless_ignored_script_cannot_qualify_candidate(ledger, tmp_path)
     assert not result["valid"]
 
 
+def test_ignored_build_entrypoint_cannot_qualify_candidate(ledger, tmp_path):
+    repository = tmp_path / "ignored-build-repo"
+    repository.mkdir()
+    (repository / ".gitignore").write_text("build/\n", encoding="utf-8")
+    (repository / "engine.py").write_text("original", encoding="utf-8")
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+    subprocess.run(["git", "add", ".gitignore", "engine.py"], cwd=repository, check=True)
+    subprocess.run(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                    "commit", "--quiet", "-m", "fixture"], cwd=repository, check=True)
+    ledger["components"]["engine"]["commit"] = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=repository, text=True).strip()
+    ledger["candidate_id"] = candidate_id(ledger["components"])
+    for name in RELEASE_GATES:
+        pass_gate(ledger, tmp_path, name)
+    build = repository / "build"
+    build.mkdir()
+    (build / "__main__.py").write_text("raise RuntimeError('ignored build')\n", encoding="utf-8")
+    result = validate(ledger, tmp_path, engine_root=repository)
+    assert not result["engine_checkout_verified"]
+    assert any("build/__main__.py" in error for error in result["errors"])
+    assert not result["valid"]
+
+
 @pytest.mark.parametrize("flag", ["--assume-unchanged", "--skip-worktree"])
 def test_hidden_git_changes_cannot_qualify_candidate(ledger, tmp_path, flag):
     repository = tmp_path / "hidden-repo"

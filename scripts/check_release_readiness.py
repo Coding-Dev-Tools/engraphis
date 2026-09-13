@@ -46,6 +46,9 @@ _IGNORED_RUNTIME_DIRS = frozenset({
     "build", "dist", "models_cache", "node_modules", "playwright-report",
     "test-results", "venv",
 })
+_IGNORED_RUNTIME_ENTRYPOINTS = frozenset({
+    "__init__.py", "__main__.py", "sitecustomize.py", "usercustomize.py",
+})
 
 
 def _is_ignored_runtime_artifact(root: Path, relative: Path) -> bool:
@@ -64,6 +67,16 @@ def _is_ignored_runtime_artifact(root: Path, relative: Path) -> bool:
     except OSError:
         # An unreadable ignored artifact cannot be proven harmless.
         return True
+
+
+def _is_ignored_runtime_entrypoint(relative: Path) -> bool:
+    """Return whether an excluded directory contains a top-level import hook."""
+    parts = relative.parts
+    return (
+        len(parts) == 2
+        and parts[0].lower() in _IGNORED_RUNTIME_DIRS
+        and parts[1].lower() in _IGNORED_RUNTIME_ENTRYPOINTS
+    )
 
 
 def canonical_bytes(value: Any) -> bytes:
@@ -126,6 +139,9 @@ def _ignored_executable_paths(root: Path) -> list[str]:
         if not entry:
             continue
         relative = Path(os.fsdecode(entry))
+        if _is_ignored_runtime_entrypoint(relative):
+            suspicious.append(relative.as_posix())
+            continue
         parts = {part.lower() for part in relative.parts}
         if parts & _IGNORED_RUNTIME_DIRS:
             continue
