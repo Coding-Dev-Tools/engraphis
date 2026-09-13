@@ -21,6 +21,7 @@ Pure ``numpy``-only core; runs fully offline.
 """
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import logging
@@ -1829,6 +1830,7 @@ def _write_structured_digests(engine, cluster: list[MemoryRecord], facts: list[d
 
 # ── pass 3: entity profiles (a "profile that grows with you") ────────
 
+@functools.lru_cache(maxsize=4096)
 def _entity_pattern(name: str) -> re.Pattern[str]:
     return re.compile(r"(?<!\w)" + re.escape(name) + r"(?!\w)", re.IGNORECASE)
 

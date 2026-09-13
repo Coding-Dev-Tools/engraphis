@@ -2,6 +2,7 @@
 is not installed, so the offline CI gate is unaffected."""
 import logging
 import json
+import os
 import re
 import subprocess
 import sys
@@ -542,7 +543,7 @@ def test_server_identity_and_tools_registered():
     ].inputSchema.get("properties", {})
 
 
-def test_mcp_server_module_entrypoint_runs_stdio_handshake():
+def test_mcp_server_module_entrypoint_runs_stdio_handshake(tmp_path):
     payload = json.dumps({
         "jsonrpc": "2.0",
         "id": 1,
@@ -554,9 +555,19 @@ def test_mcp_server_module_entrypoint_runs_stdio_handshake():
         },
     }) + "\n"
 
+    env = os.environ.copy()
+    env.update({
+        "ENGRAPHIS_DB_PATH": str(tmp_path / "stdio-handshake.db"),
+        "ENGRAPHIS_EMBED_MODEL": "sentence-transformers/all-MiniLM-L6-v2",
+        "ENGRAPHIS_EXTRACTOR": "none",
+        "ENGRAPHIS_GRAPH_EXTRACTOR": "none",
+        "ENGRAPHIS_VECTOR_BACKEND": "numpy",
+        "ENGRAPHIS_MCP_WARMUP": "0",
+    })
     result = subprocess.run(
         [sys.executable, "-m", "engraphis.mcp_server"],
         cwd=ROOT,
+        env=env,
         input=payload,
         text=True,
         capture_output=True,
@@ -570,7 +581,31 @@ def test_mcp_server_module_entrypoint_runs_stdio_handshake():
     assert response["result"]["serverInfo"]["name"] == "engraphis_mcp"
 
 
-def test_classic_mcp_entrypoint_preserves_historical_server_identity():
+def test_mcp_server_module_entrypoint_serves_first_tool_call(tmp_path):
+    from scripts.smoke_installed_product import _Mcp
+
+    env = os.environ.copy()
+    env.update({
+        "ENGRAPHIS_DB_PATH": str(tmp_path / "stdio-first-tool.db"),
+        "ENGRAPHIS_EMBED_MODEL": "",
+        "ENGRAPHIS_EXTRACTOR": "none",
+        "ENGRAPHIS_GRAPH_EXTRACTOR": "none",
+        "ENGRAPHIS_VECTOR_BACKEND": "numpy",
+        "ENGRAPHIS_MCP_WARMUP": "1",
+    })
+
+    # EOF cancels in-flight requests in the MCP SDK. Keep stdin open until the
+    # response arrives, as a real client does, and retain bounded shutdown.
+    with _Mcp([sys.executable, "-m", "engraphis.mcp_server"], env, ROOT, 15) as client:
+        result = client.request("tools/call", {
+            "name": "engraphis_recall_context",
+            "arguments": {"query": "startup", "workspace": "default", "token_budget": 64},
+        })
+        assert not result.get("isError")
+        assert result["content"]
+
+
+def test_classic_mcp_entrypoint_preserves_historical_server_identity(tmp_path):
     payload = json.dumps({
         "jsonrpc": "2.0",
         "id": 1,
@@ -582,9 +617,19 @@ def test_classic_mcp_entrypoint_preserves_historical_server_identity():
         },
     }) + "\n"
 
+    env = os.environ.copy()
+    env.update({
+        "ENGRAPHIS_DB_PATH": str(tmp_path / "classic-handshake.db"),
+        "ENGRAPHIS_EMBED_MODEL": "sentence-transformers/all-MiniLM-L6-v2",
+        "ENGRAPHIS_EXTRACTOR": "none",
+        "ENGRAPHIS_GRAPH_EXTRACTOR": "none",
+        "ENGRAPHIS_VECTOR_BACKEND": "numpy",
+        "ENGRAPHIS_MCP_WARMUP": "0",
+    })
     result = subprocess.run(
         [sys.executable, "-m", "engraphis.mcp_classic_cli"],
         cwd=ROOT,
+        env=env,
         input=payload,
         text=True,
         capture_output=True,
@@ -1421,4 +1466,3 @@ def test_context_response_cap_omits_whole_evidence_and_updates_usage(monkeypatch
     assert usage["omitted_count"] == full["usage"]["packed_count"] + full["usage"]["omitted_count"]
     assert usage["saved_tokens"] == usage["estimated_saved_tokens"] == usage["source_tokens"]
     assert RegexTokenCounter()(json.dumps(bounded, ensure_ascii=False)) == usage["actual_response_tokens"] <= cap
-

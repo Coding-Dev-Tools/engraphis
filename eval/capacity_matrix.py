@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from bisect import bisect_right
 from collections import Counter
 from dataclasses import asdict
 import hashlib
@@ -9,9 +10,13 @@ import json
 import math
 from pathlib import Path
 import re
+from typing import Optional
 
 from eval.benchmark import canonical_json, report_envelope, sha256_file, validate_report, write_canonical_artifact
-from eval.engine_capacity import Cell, HARDWARE, SCHEMA as CELL_SCHEMA, operation_plan, protocol
+from eval.engine_capacity import (
+    BACKLOG_INTERVAL_S, RSS_INTERVAL_S, RESOURCE_PHASES, Cell, HARDWARE, SCHEMA as CELL_SCHEMA,
+    _backlog_assessment, acceptance_policy, operation_plan, protocol, validate_reference_hosts,
+)
 from eval.rework_statistics import blocked_mean_interval
 from eval.vector_scale import _latency_ms
 
@@ -42,6 +47,123 @@ def _fingerprint(value) -> str:
 
 def _key(config: dict) -> tuple:
     return tuple(config.get(axis) for axis in _AXES)
+
+
+def _resource_summary(repeat: dict) -> dict:
+    unknown = {"all_lifecycle_phases_observed": False, "phase_peaks": {},
+               "startup_rss_observed": False, "sampler_complete": False}
+    observations = repeat.get("resource_observations")
+    if not isinstance(observations, dict) or observations.get("version") != 2:
+        return unknown
+    phases = observations.get("phases")
+    if not isinstance(phases, dict) or set(phases) != set(RESOURCE_PHASES):
+        return unknown
+    peaks, total_samples, observed = {}, 0, []
+    fields = {"sampling_attempts", "sample_count", "unavailable_samples", "observed_peak_rss_bytes",
+              "first_sample_elapsed_s", "last_sample_elapsed_s", "max_sample_gap_s"}
+    for phase in RESOURCE_PHASES:
+        row = phases[phase]
+        if not isinstance(row, dict) or not fields <= set(row):
+            return unknown
+        for name in ("sampling_attempts", "sample_count", "unavailable_samples"):
+            if type(row[name]) is not int or row[name] < 0:
+                raise ValueError("lifecycle sampling counts must be nonnegative integers")
+        if row["sampling_attempts"] != row["sample_count"] + row["unavailable_samples"]:
+            raise ValueError("lifecycle sample counts disagree")
+        peak = row["observed_peak_rss_bytes"]
+        if (row["sample_count"] == 0) != (peak is None):
+            raise ValueError("lifecycle memory peak has no matching samples")
+        if peak is not None:
+            _number(peak, "lifecycle RSS peak", positive=True)
+        if row["sampling_attempts"]:
+            first = _number(row["first_sample_elapsed_s"], "first resource observation")
+            last = _number(row["last_sample_elapsed_s"], "last resource observation")
+            if first > last:
+                raise ValueError("lifecycle observation timestamps are reversed")
+            gap = row["max_sample_gap_s"]
+            if row["sampling_attempts"] > 1:
+                _number(gap, "maximum resource sampling gap")
+                if gap > last - first + 1e-6:
+                    raise ValueError("resource gap exceeds its observation interval")
+        elif any(row[name] is not None for name in (
+            "first_sample_elapsed_s", "last_sample_elapsed_s", "max_sample_gap_s"
+        )):
+            raise ValueError("unsampled lifecycle phase contains timestamps")
+        total_samples += row["sample_count"]
+        peaks[phase] = peak
+        observed.append(row["sample_count"] > 0)
+    if (total_samples != repeat["memory_samples"] or max(
+            (peak for peak in peaks.values() if peak is not None), default=None
+    ) != repeat["observed_process_tree_peak_rss_bytes"]):
+        raise ValueError("lifecycle RSS summary disagrees with phase observations")
+    complete = (observations.get("started_before_seeding") is True
+                and observations.get("sampler_thread_stopped") is True
+                and observations.get("requested_sample_interval_s") == RSS_INTERVAL_S)
+    return {"all_lifecycle_phases_observed": all(observed) and complete, "phase_peaks": peaks,
+            "startup_rss_observed": peaks["startup"] is not None, "sampler_complete": complete}
+
+
+def _backlog_summary(repeat: dict, cell: Cell, measured: int) -> dict:
+    unknown = {"backlog_assessment_available": False, "no_sustained_backlog_growth_observed": False}
+    if cell.arrival_rate <= 0:
+        return unknown
+    observations, declared = repeat.get("backlog_observations"), repeat.get("backlog_assessment")
+    if not isinstance(observations, dict) or not isinstance(declared, dict):
+        return unknown
+    if (observations.get("version") != 1 or observations.get("requested_sample_interval_s") != BACKLOG_INTERVAL_S
+            or observations.get("offered_operations_per_second") != cell.arrival_rate):
+        return unknown
+    series, until = observations.get("series"), observations.get("offering_observed_until_s")
+    if not isinstance(series, list) or until is None:
+        return unknown
+    _number(until, "observed arrival interval")
+    if until > repeat["elapsed_s"] + 0.05:
+        raise ValueError("offered-load observation exceeds workload boundary")
+    last_time, previous = -1, {"scheduled_due": 0, "submitted": 0, "received": 0}
+    receipt_times = sorted(row["number"] / cell.arrival_rate + row["wall_ms"] / 1000
+                           for row in repeat["operations"] if "wall_ms" in row)
+    count_fields = {"scheduled_due", "submitted", "received", "scheduled_outstanding",
+                    "dispatch_pending", "submitted_unreceived"}
+    for row in series:
+        if not isinstance(row, dict) or not (count_fields | {"elapsed_s", "phase"}) <= set(row):
+            return unknown
+        elapsed = _number(row["elapsed_s"], "backlog timestamp")
+        if elapsed < last_time or row["phase"] not in {"workload", "teardown"}:
+            raise ValueError("backlog observation order/phase is invalid")
+        last_time = elapsed
+        if any(type(row[name]) is not int or not 0 <= row[name] <= cell.operations for name in count_fields):
+            raise ValueError("backlog counts must be bounded integers")
+        due, submitted, received = (row[name] for name in ("scheduled_due", "submitted", "received"))
+        if not received <= submitted <= due or any(row[name] < previous[name] for name in previous):
+            raise ValueError("backlog counters are inconsistent or reversed")
+        # Persisted timestamps have six decimal places; tolerate only that rounding.
+        earliest, latest = (min(until, max(0, elapsed + offset)) for offset in (-1e-6, 1e-6))
+        lower, upper = (min(cell.operations, math.floor(value * cell.arrival_rate) + 1)
+                        for value in (earliest, latest))
+        if not lower <= due <= upper:
+            raise ValueError("backlog scheduled arrivals differ from the declared offered load")
+        # One parent consumer can have timestamped a receipt while waiting to
+        # update the observer counter. No larger mismatch is consistent with it.
+        receipt_lower = max(0, bisect_right(receipt_times, elapsed - 1e-6) - 1)
+        receipt_upper = bisect_right(receipt_times, elapsed + 1e-6)
+        if not receipt_lower <= received <= receipt_upper:
+            raise ValueError("backlog receipt timeline disagrees with operation wall times")
+        if (row["scheduled_outstanding"] != due - received or row["dispatch_pending"] != due - submitted
+                or row["submitted_unreceived"] != submitted - received):
+            raise ValueError("outstanding-work summary disagrees with counters")
+        previous = {name: row[name] for name in previous}
+    if series and previous["received"] != measured:
+        raise ValueError("backlog receipts disagree with measured operation outcomes")
+    complete = repeat["status"] == "complete"
+    if complete and (not series or previous["scheduled_due"] != cell.operations):
+        return unknown
+    expected = _backlog_assessment(cell, observations, execution_complete=complete)
+    if canonical_json(declared) != canonical_json(expected):
+        raise ValueError("backlog assessment differs from the preregistered rule")
+    return {"backlog_assessment_available": expected["available"] is True,
+            "no_sustained_backlog_growth_observed": expected["available"] is True
+                and expected["sustained_growth_observed"] is False and complete,
+            "backlog_assessment": expected}
 
 
 def _cell_identity(report: dict, cell: Cell, *, fixture: bool) -> tuple[dict, dict]:
@@ -107,6 +229,15 @@ def _cell_identity(report: dict, cell: Cell, *, fixture: bool) -> tuple[dict, di
               "git_commit": report["system"]["git_commit"],
               "packages": report["environment"].get("packages"), "dependencies": dependencies,
               "python": report["environment"].get("python"),
+              "acceptance_policy": metrics.get("acceptance_policy"),
+              "acceptance_policy_sha256": metrics.get("acceptance_policy_sha256"),
+              "reference_hosts_sha256": metrics.get("reference_hosts_sha256"),
+              "observation_contract": metrics.get("resource_observation_version") == 2
+                  and metrics.get("acceptance_policy") == acceptance_policy()
+                  and metrics.get("acceptance_policy_sha256") == _fingerprint(acceptance_policy())
+                  and metrics.get("sqlite_durability") == acceptance_policy()["sqlite_durability"]
+                  and before.get("eval/engine_capacity.py") == sha256_file(Path(__file__).with_name("engine_capacity.py"))
+                  and before.get("eval/capacity_matrix.py") == sha256_file(Path(__file__)),
               "boundaries": {name: metrics.get(name) for name in
                              ("measurement_boundary", "memory_boundary", "startup_boundary")}}
     if not isinstance(common["git_commit"], str) or not re.fullmatch(r"[0-9a-f]{40}", common["git_commit"]):
@@ -114,11 +245,13 @@ def _cell_identity(report: dict, cell: Cell, *, fixture: bool) -> tuple[dict, di
     if any(not isinstance(value, str) or not value for value in common["boundaries"].values()):
         raise ValueError("measurement boundaries are required")
     return common, {"hardware": hardware, "environment": report["environment"],
-                    "dependencies": dependencies, "ram_matches": matches}
+                    "dependencies": dependencies, "ram_matches": matches,
+                    "host_identity_sha256": metrics.get("host_identity_sha256"),
+                    "host_identity_stable": metrics.get("host_identity_stable") is True}
 
 
 def _validate_repeat(repeat: dict, cell: Cell, expected: list[dict],
-                     executions: set[str]) -> dict:
+                     executions: set[str], *, observation_contract: bool = False) -> dict:
     execution = repeat.get("execution_id")
     if not isinstance(execution, str) or not _RUN.fullmatch(execution) or execution in executions:
         raise ValueError("repetitions require distinct execution IDs across the whole matrix")
@@ -196,6 +329,29 @@ def _validate_repeat(repeat: dict, cell: Cell, expected: list[dict],
                "measured": sum("wall_ms" in row for row in rows),
                "memory_peak": peak, "memory_samples": samples,
                "startup_ms": [item["startup_ms"] for item in startup], "operations": {}}
+    summary.update({"all_lifecycle_phases_observed": False, "startup_rss_observed": False,
+                    "no_sustained_backlog_growth_observed": False, "backlog_assessment_available": False,
+                    "durable_workers_observed": False, "clean_worker_teardown": False})
+    if observation_contract:
+        summary.update(_resource_summary(repeat))
+        summary.update(_backlog_summary(repeat, cell, summary["measured"]))
+        summary["durable_workers_observed"] = len(startup) == cell.concurrency and all(
+            isinstance(item.get("sqlite_durability"), dict)
+            and item["sqlite_durability"].get("configured") == "durable"
+            and item["sqlite_durability"].get("effective") == "durable"
+            and item["sqlite_durability"].get("journal_mode") == "wal"
+            and item["sqlite_durability"].get("synchronous") == "FULL"
+            and item["sqlite_durability"].get("matches_requested") is True
+            and item["sqlite_durability"].get("file_backed") is True
+            and item["sqlite_durability"].get("read_only") is False
+            for item in startup
+        )
+        summary["clean_worker_teardown"] = (
+            repeat.get("lifecycle_errors") == [] and type(repeat.get("late_result_count")) is int
+            and repeat["late_result_count"] == 0 and isinstance(repeat.get("worker_exitcodes"), list)
+            and len(repeat["worker_exitcodes"]) == cell.concurrency
+            and all(type(code) is int and code == 0 for code in repeat["worker_exitcodes"])
+        )
     for kind in expected_counts:
         selected = [row for row in rows if row["operation"] == kind]
         measured = [row["wall_ms"] for row in selected if "wall_ms" in row]
@@ -210,10 +366,13 @@ def _validate_repeat(repeat: dict, cell: Cell, expected: list[dict],
 
 
 def aggregate_capacity(reports: list[dict], *, fixture: bool = False,
-                       iterations: int = 2000, seed: int = 20260905) -> dict:
+                       iterations: int = 2000, seed: int = 20260905,
+                       reference_hosts: Optional[dict] = None) -> dict:
     """Require 48 complete cell manifests; failed scheduled operations remain visible."""
     if not isinstance(reports, list) or len(reports) != 48:
         raise ValueError("the primary matrix requires exactly 48 cell artifacts")
+    if reference_hosts is not None:
+        validate_reference_hosts(reference_hosts)
     expected_cells = {_key(config) for config in protocol()["primary_cells"]}
     found, executions, hardware_identities, cells, common = set(), set(), {}, [], None
     for report in reports:
@@ -247,7 +406,7 @@ def aggregate_capacity(reports: list[dict], *, fixture: bool = False,
                 or {row.get("repeat_number") for row in repeats} != set(range(5))):
             raise ValueError("each cell requires five distinct numbered repetitions")
         jobs = operation_plan(cell, [{"index": i} for i in range(cell.size)])
-        summaries = [_validate_repeat(row, cell, jobs, executions)
+        summaries = [_validate_repeat(row, cell, jobs, executions, observation_contract=identity["observation_contract"])
                      for row in sorted(repeats, key=lambda row: row["repeat_number"])]
         expected_records = {}
         for repeat in repeats:
@@ -279,14 +438,47 @@ def aggregate_capacity(reports: list[dict], *, fixture: bool = False,
                 operations[kind]["mean_wall_ms_interval"]["inferentially_usable"] = False
         ram = hardware["hardware"]["physical_ram_bytes"]
         peaks = [summary["memory_peak"] for summary in summaries]
+        references_match = (
+            reference_hosts is not None and identity["reference_hosts_sha256"] == _fingerprint(reference_hosts)
+            and hardware["host_identity_stable"] and reference_hosts["hosts"][cell.hardware] == {
+                "host_identity_sha256": hardware["host_identity_sha256"],
+                "hardware_sha256": _fingerprint(hardware["hardware"]),
+            }
+        )
+        complete = all(summary["status"] == "complete" and summary["measured"] == 2000
+                       and summary["clean_worker_teardown"] for summary in summaries) and failure_count == 0
+        resource_pass = all(summary["all_lifecycle_phases_observed"] for summary in summaries)
+        resource_pass = resource_pass and all(peak is not None and peak < ram * 0.75 for peak in peaks)
+        backlog_pass = all(summary["no_sustained_backlog_growth_observed"] for summary in summaries)
+        limits = [limit for limit in acceptance_policy()["recall_p95_ms"]
+                  if all(config[axis] == limit[axis] for axis in ("hardware", "size", "concurrency"))]
+        latency_limit = limits[0]["maximum"] if limits else None
+        latency_pass = (all(summary["operations"]["recall"]["wall_latency_ms"] is not None
+                            and summary["operations"]["recall"]["wall_latency_ms"]["p95"] <= latency_limit
+                            for summary in summaries) if latency_limit is not None else None)
         cells.append({"cell": {axis: config[axis] for axis in _AXES}, "repeats": summaries,
                       "operations": operations, "failures": failure_count,
                       "hardware_ram_matches": hardware["ram_matches"],
                       "observed_rss_within_physical_ram": all(peak is not None and peak <= ram for peak in peaks),
-                      "startup_peak_memory_known": False, "cold_cache_verified": False})
+                      "reference_host_matches": references_match,
+                      "startup_rss_observed": all(summary["startup_rss_observed"] for summary in summaries),
+                      "lifecycle_rss_below_75_percent_ram": resource_pass,
+                      "no_sustained_backlog_growth_observed": backlog_pass,
+                      "recall_p95_limit_ms": latency_limit, "recall_p95_observation_pass": latency_pass,
+                      "execution_integrity_pass": complete,
+                      "durable_workers_observed": all(summary["durable_workers_observed"] for summary in summaries),
+                      "cold_cache_verified": False})
     if found != expected_cells or len(executions) != 240:
         raise ValueError("missing primary cells or independent repetition identities")
     cells.sort(key=lambda value: _key(value["cell"]))
+    reference_pass = all(cell["reference_host_matches"] and cell["hardware_ram_matches"] for cell in cells)
+    integrity_pass = all(cell["execution_integrity_pass"] and cell["durable_workers_observed"] for cell in cells)
+    resource_pass = all(cell["lifecycle_rss_below_75_percent_ram"] for cell in cells)
+    backlog_pass = all(cell["no_sustained_backlog_growth_observed"] for cell in cells)
+    targeted = [cell for cell in cells if cell["recall_p95_limit_ms"] is not None]
+    latency_pass = len(targeted) == 8 and all(cell["recall_p95_observation_pass"] for cell in targeted)
+    observations_pass = (reference_pass and integrity_pass and resource_pass and backlog_pass
+                         and latency_pass and common["observation_contract"])
     return report_envelope(
         suite=SCHEMA, dataset_path=Path(__file__),
         config={"iterations": iterations, "seed": seed, "fixture": fixture,
@@ -300,16 +492,26 @@ def aggregate_capacity(reports: list[dict], *, fixture: bool = False,
                      summary["measured"] == 2000 for cell in cells for summary in cell["repeats"]),
                  "target_capacity_verified": False, "publication_ready": False,
                  "measurement_authenticity_verified": False, "fixture": fixture,
+                 "acceptance_policy": acceptance_policy(), "acceptance_policy_sha256": _fingerprint(acceptance_policy()),
+                 "reference_hosts_sha256": _fingerprint(reference_hosts) if reference_hosts is not None else None,
+                 "protocol_observations_pass": observations_pass,
+                 "capacity_acceptance_pass": observations_pass and not fixture,
+                 "reference_host_gate_pass": reference_pass and integrity_pass and not fixture,
+                 "responsiveness_gate_pass": observations_pass and not fixture,
+                 "resource_stability_gate_pass": observations_pass and not fixture,
                  "correctness_failures": sum(cell["failures"] for cell in cells),
-                 "hardware_gates_pass": all(cell["hardware_ram_matches"] and
+                 "hardware_gates_pass": observations_pass and not fixture,
+                 "physical_ram_observations_pass": all(cell["hardware_ram_matches"] and
                      cell["observed_rss_within_physical_ram"] for cell in cells),
                  "input_identity": common, "hardware_identities": hardware_identities,
-                 "limitations": ["RSS is sampled during operations, not a startup/allocation peak",
+                 "limitations": ["lifecycle RSS includes startup when versioned observations are complete; unsampled transient/GPU peaks remain unknown",
                     "startup uses warm OS cache; no cold-disk certification",
                     "five-repeat intervals are exploratory, not operation-level independent trials",
-                    "no predeclared latency/resource SLO or independent task acceptance is evaluated",
+                    "backlog acceptance is a finite observation at the declared load, not a general stability proof",
+                    "independent task acceptance and hardware power-failure durability are not evaluated",
                     "consistent artifacts and execution IDs do not prove measurement authenticity"]},
-        source_paths=[Path(__file__), Path(__file__).with_name("rework_statistics.py")],
+        source_paths=[Path(__file__), Path(__file__).with_name("rework_statistics.py"),
+                      Path(__file__).with_name("engine_capacity.py")],
         models={"embedding": common["model"]}, token_accounting=common["token_counter"],
         command=["python", "-m", "eval.capacity_matrix", "--inputs", "<48-cell-artifacts>"])
 
@@ -319,6 +521,8 @@ def main(argv=None) -> int:
     parser.add_argument("--inputs", nargs="+", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--fixture", action="store_true")
+    parser.add_argument("--reference-hosts", type=Path)
+    parser.add_argument("--require-acceptance", action="store_true")
     args = parser.parse_args(argv)
     reports = []
     for path in args.inputs:
@@ -327,9 +531,12 @@ def main(argv=None) -> int:
         if digest != checksum:
             raise ValueError("input artifact checksum does not match")
         reports.append(json.loads(path.read_text(encoding="utf-8")))
-    report = aggregate_capacity(reports, fixture=args.fixture)
+    references = json.loads(args.reference_hosts.read_text(encoding="utf-8")) if args.reference_hosts else None
+    report = aggregate_capacity(reports, fixture=args.fixture, reference_hosts=references)
     print(json.dumps(write_canonical_artifact(report, args.output)))
-    return int(report["metrics"]["correctness_failures"] > 0 or not report["metrics"]["hardware_gates_pass"])
+    return int(report["metrics"]["correctness_failures"] > 0
+               or (not args.fixture and not report["metrics"]["hardware_gates_pass"])
+               or (args.require_acceptance and not report["metrics"]["capacity_acceptance_pass"]))
 
 
 if __name__ == "__main__":

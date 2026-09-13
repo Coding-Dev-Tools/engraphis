@@ -9,8 +9,11 @@ from eval.planned_recall import (
     TOKEN_BUDGETS,
     _evidence_retention_quality,
     _validate_dataset,
+    main,
+    require_gate,
     run,
 )
+from eval import planned_recall
 from engraphis.core.schema import SCHEMA_VERSION
 
 
@@ -74,3 +77,65 @@ def test_dataset_validation_rejects_unknown_support_instead_of_awarding_perfect_
 
     with pytest.raises(ValueError, match="unknown supporting memory tags"):
         _validate_dataset(cases)
+
+
+@pytest.mark.parametrize("value", [False, None, "true", 1])
+def test_requested_gate_rejects_false_missing_and_non_boolean_results(value):
+    report = {"release_gates": {"planner": {"repository_local_gate_pass": value}}}
+    with pytest.raises(ValueError, match="failed"):
+        require_gate(report, "planner", level="repository-local")
+
+
+def test_local_gate_does_not_authorize_default_promotion():
+    report = {"release_gates": {"planner": {
+        "repository_local_gate_pass": True,
+        "safety_regressions_ok": True,
+        "opt_in_eligible": False,
+        "default_eligible": False,
+    }}}
+    require_gate(report, "planner", level="repository-local")
+    with pytest.raises(ValueError, match="default_eligible"):
+        require_gate(report, "planner")
+
+
+def test_promotion_requires_all_prerequisite_booleans():
+    gate = {
+        "repository_local_gate_pass": True,
+        "safety_regressions_ok": True,
+        "opt_in_eligible": True,
+        "default_eligible": True,
+    }
+    report = {"release_gates": {"planner": gate}}
+    require_gate(report, "planner")
+    for prerequisite in gate:
+        incomplete = {**gate, prerequisite: False}
+        with pytest.raises(ValueError, match=prerequisite):
+            require_gate({"release_gates": {"planner": incomplete}}, "planner")
+
+
+def test_default_report_does_not_fail_for_unpromoted_experiments(monkeypatch, capsys):
+    monkeypatch.setattr(planned_recall, "load_dataset", lambda path: [])
+    monkeypatch.setattr(planned_recall, "run", lambda dataset: {
+        "release_gates": {"planner": {"repository_local_gate_pass": False, "default_eligible": False}},
+    })
+    assert main([]) is None
+    assert "false" in capsys.readouterr().out
+
+
+def test_cli_explicit_promotion_request_fails_but_keeps_report(monkeypatch, capsys):
+    monkeypatch.setattr(planned_recall, "load_dataset", lambda path: [])
+    monkeypatch.setattr(planned_recall, "run", lambda dataset: {
+        "release_gates": {"planner": {"repository_local_gate_pass": True, "default_eligible": False}},
+    })
+    with pytest.raises(SystemExit) as failure:
+        main(["--require-gate", "planner"])
+    assert failure.value.code == 1
+    captured = capsys.readouterr()
+    assert '"default_eligible": false' in captured.out
+    assert "required default gate for planner failed" in captured.err
+
+
+def test_cli_gate_level_requires_an_explicit_candidate():
+    with pytest.raises(SystemExit) as failure:
+        main(["--gate-level", "repository-local"])
+    assert failure.value.code == 2

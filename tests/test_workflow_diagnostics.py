@@ -1,5 +1,6 @@
 """User-facing status reports observed state without inventing completeness."""
 import json
+import time
 
 import pytest
 
@@ -59,6 +60,36 @@ def test_content_free_diagnostics_keep_unobserved_counts_unknown(svc):
     answer = svc.grounded_recall("cache expires", workspace="w", repo="api", diagnostics=True)
     assert answer["answer_coverage"] == "unknown"
     assert answer["diagnostics"]["schema"] == "diagnostics/1"
+
+
+def test_recall_phases_attribute_slow_backend_without_changing_results(svc, monkeypatch):
+    svc.remember("Atlas uses SQLite for durable local memory.", workspace="w")
+    baseline = svc.recall("Atlas SQLite", workspace="w", reinforce=False)
+    search = svc.store.fts_search
+
+    def delayed(*args, **kwargs):
+        time.sleep(0.02)
+        return search(*args, **kwargs)
+
+    monkeypatch.setattr(svc.store, "fts_search", delayed)
+    measured = svc.recall("Atlas SQLite", workspace="w", reinforce=False, diagnostics=True)
+    assert measured["context"] == baseline["context"]
+    phases = measured["diagnostics"]["phase_ms"]
+    assert phases["lexical_search"] >= 15
+    assert phases["packing"] >= 0
+    assert abs(sum(value for key, value in phases.items() if key != "engine_recall")
+               - phases["engine_recall"]) < 1
+    assert "diagnostics" not in baseline
+    assert "Atlas" not in json.dumps(measured["diagnostics"])
+
+
+def test_empty_recall_reports_only_executed_phases(svc):
+    svc.remember("Atlas durable memory.", workspace="w")
+    measured = svc.recall("unknown", workspace="w", mtypes=["working"], diagnostics=True)
+    phases = measured["diagnostics"]["phase_ms"]
+    assert phases["packing"] >= 0
+    assert "fusion_scoring" not in phases
+    assert measured["count"] == 0
 
 
 def test_build_and_review_routes_do_not_expose_secrets(svc, monkeypatch):
