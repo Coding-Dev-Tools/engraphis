@@ -9,12 +9,32 @@ Prefixed ids (``mem_...``, ``repo_...``) make logs and traces self-describing.
 """
 from __future__ import annotations
 
+import os
 import secrets
+import threading
 import time
 from typing import Optional
 
 _CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"  # excludes I, L, O, U
 _MAX_TIMESTAMP_MS = 1 << 48
+_MAX_RANDOM = (1 << 80) - 1
+_ULID_LOCK = threading.Lock()
+_LAST_TIMESTAMP_MS = -1
+_LAST_RANDOM = -1
+_LAST_PID = os.getpid()
+
+
+def _reset_ulid_state_after_fork() -> None:
+    """Drop inherited sequence state and locks in a forked child."""
+    global _LAST_PID, _LAST_RANDOM, _LAST_TIMESTAMP_MS, _ULID_LOCK
+    _ULID_LOCK = threading.Lock()
+    _LAST_PID = os.getpid()
+    _LAST_TIMESTAMP_MS = -1
+    _LAST_RANDOM = -1
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_ulid_state_after_fork)
 
 
 # Canonical prefixes for each entity kind.
@@ -45,7 +65,7 @@ def _encode(value: int, length: int) -> str:
 
 
 def ulid(timestamp_ms: Optional[int] = None) -> str:
-    """Return a 26-char, lexicographically sortable ULID."""
+    """Return a 26-char ULID that is monotonic within one process and timestamp."""
     if timestamp_ms is None:
         ts = int(time.time() * 1000)
     elif isinstance(timestamp_ms, bool) or not isinstance(timestamp_ms, int):
@@ -54,7 +74,21 @@ def ulid(timestamp_ms: Optional[int] = None) -> str:
         ts = timestamp_ms
     if not 0 <= ts < _MAX_TIMESTAMP_MS:
         raise ValueError("timestamp_ms must be an integer in range [0, 2**48)")
-    rand = secrets.randbits(80)
+    global _LAST_PID, _LAST_RANDOM, _LAST_TIMESTAMP_MS
+    with _ULID_LOCK:
+        pid = os.getpid()
+        if pid != _LAST_PID:
+            _LAST_PID = pid
+            _LAST_TIMESTAMP_MS = -1
+            _LAST_RANDOM = -1
+        if ts == _LAST_TIMESTAMP_MS:
+            if _LAST_RANDOM >= _MAX_RANDOM:
+                raise RuntimeError("ULID entropy exhausted within one millisecond")
+            rand = _LAST_RANDOM + 1
+        else:
+            rand = secrets.randbits(80)
+        _LAST_TIMESTAMP_MS = ts
+        _LAST_RANDOM = rand
     return _encode(ts, 10) + _encode(rand, 16)
 
 

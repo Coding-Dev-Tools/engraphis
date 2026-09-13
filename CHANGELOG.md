@@ -5,6 +5,8 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [1.7.4] - 2026-09-13
+
 - Writable SQLite files now default to WAL plus FULL synchronization, with an explicit
   balanced option and effective-policy diagnostics. Disposable fault tests cover abrupt
   process exit and database-full rollback; hardware power loss remains unverified.
@@ -36,9 +38,8 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - Added content-free diagnostics and build/capability information, strict coding
   acceptance validation and a file-backed independent-process capacity harness.
   These provide measurement infrastructure, not verified 100k capacity claims.
-- Preload the optional `sentence-transformers` dependency before Windows stdio MCP
-  accepts JSON-RPC, avoiding the observed native import/thread startup stall while
-  preserving deterministic fallback and exact-backend policy.
+- MCP stdio startup accepts the JSON-RPC handshake before optional semantic-model
+  warmup, while retaining deterministic fallback and exact-backend policy.
 
 ## [1.7.3] - 2026-09-07
 
