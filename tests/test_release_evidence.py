@@ -258,7 +258,7 @@ def test_release_evidence_is_canonical_and_contains_only_public_release_inputs(t
         "installed-artifact-platform-smoke"
     )
     assert checks["installed-artifact-platform-smoke"]["workflow_steps"] == [
-        "Install and smoke the downloaded wheel on Windows and macOS",
+        "Install and exercise the downloaded wheel on supported platforms",
     ]
     assert any(check["id"] == "encryption-at-rest" for check in evidence["checks"]["tests"])
     assert any(check["id"] == "pi-extension" for check in evidence["checks"]["tests"])
@@ -1258,7 +1258,10 @@ def test_release_workflow_publishes_complete_captured_evidence():
     assert 'builder: ["a", "b"]' in reproducibility
     assert "Compare independent distribution builders" in reproducibility
     assert "name: independent-reproducibility" in reproducibility
-    assert "os: [windows-latest, macos-latest]" in platform_smoke
+    assert "os: [ubuntu-latest, windows-latest, macos-latest]" in platform_smoke
+    assert "profile: [base, mcp, server]" in platform_smoke
+    assert "scripts.smoke_installed_product" in platform_smoke
+    assert "installed-journey.json" in platform_smoke
     assert '"pip", "check"' in platform_smoke
     assert "scripts.smoke_entry_points" in platform_smoke
     assert "anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26" in docker_job

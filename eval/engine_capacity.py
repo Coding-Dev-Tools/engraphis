@@ -12,7 +12,9 @@ import math
 import multiprocessing
 import os
 from pathlib import Path
+import platform
 import queue
+import re
 import tempfile
 import threading
 import time
@@ -29,6 +31,62 @@ from eval.vector_scale_storage import _disk, _hardware
 ROOT = Path(__file__).resolve().parents[1]
 HARDWARE = {"laptop16": 16, "shared32": 32}
 SCHEMA = "engraphis-engine-capacity/v1"
+SQLITE_DURABILITY = "durable"
+RESOURCE_PHASES = ("seeding", "startup", "workload", "teardown")
+RSS_INTERVAL_S = 0.05
+BACKLOG_INTERVAL_S = 1.0
+
+
+def acceptance_policy() -> dict:
+    """Existing release criteria, bound before execution rather than chosen from results."""
+    return {
+        "schema": "engraphis-capacity-acceptance/v1", "resource_observation_version": 2,
+        "resource_phases": list(RESOURCE_PHASES), "rss_fraction_of_physical_ram_exclusive": 0.75,
+        "sqlite_durability": {"policy": SQLITE_DURABILITY, "journal_mode": "wal", "synchronous": "FULL"},
+        "recall_p95_ms": [
+            {"hardware": "laptop16", "size": 100_000, "concurrency": 4, "maximum": 1000},
+            {"hardware": "shared32", "size": 100_000, "concurrency": 16, "maximum": 2000},
+        ],
+        "latency_boundary": "queue-inclusive recall p95 in every repeat, both backends and workloads",
+        "backlog": {"version": 1, "active_windows": 5, "minimum_active_seconds": 10,
+                    "minimum_distinct_samples_per_window": 2,
+                    "growth_rule": "every successive mean grows; net growth exceeds max(1, offered operations per second)"},
+    }
+
+
+def _identity_digest(value) -> str:
+    return hashlib.sha256(canonical_json(value).encode()).hexdigest()
+
+
+def validate_reference_hosts(value: dict) -> None:
+    if (not isinstance(value, dict) or value.get("schema") != "engraphis-capacity-reference-hosts/v1"
+            or value.get("policy_sha256") != _identity_digest(acceptance_policy())
+            or not isinstance(value.get("hosts"), dict) or set(value["hosts"]) != set(HARDWARE)):
+        raise ValueError("reference hosts must bind both declared profiles and the current acceptance policy")
+    identities = []
+    for host in value["hosts"].values():
+        if (not isinstance(host, dict) or set(host) != {"host_identity_sha256", "hardware_sha256"}
+                or any(not isinstance(item, str) or not re.fullmatch(r"[0-9a-f]{64}", item)
+                       for item in host.values())):
+            raise ValueError("reference host requires observed host and hardware SHA-256 identities")
+        identities.append(host["host_identity_sha256"])
+    if len(set(identities)) != len(HARDWARE):
+        raise ValueError("reference profiles require distinct hosts")
+
+
+def host_observation() -> dict:
+    """Read-only host inventory; hashes keep the machine name out of public artifacts."""
+    hardware = _hardware()
+    if hardware.get("physical_ram_bytes") is None and importlib.util.find_spec("psutil"):
+        import psutil
+
+        hardware["physical_ram_bytes"] = psutil.virtual_memory().total
+    node = platform.node().strip()
+    return {"hardware": hardware, "hardware_sha256": _identity_digest(hardware),
+            "host_identity_sha256": _identity_digest({"node": node,
+                "system": platform.system(), "architecture": platform.machine()}) if node else None,
+            "host_identity_boundary": "hash of locally observed hostname, OS and architecture; not attestation",
+            "policy_sha256": _identity_digest(acceptance_policy())}
 
 
 def protocol() -> dict:
@@ -43,6 +101,8 @@ def protocol() -> dict:
             "repeats": 5, "operations_per_repeat": 2000,
             "mixed_percent": {"recall": 80, "remember": 15, "correct": 4, "erase": 1},
             "arrival_rate": "one operation per agent per second; recorded in every cell",
+            "sqlite_durability": {"policy": SQLITE_DURABILITY, "journal_mode": "wal", "synchronous": "FULL"},
+            "acceptance_policy": acceptance_policy(),
             "stress_sizes": [1_000_000], "target_capacity_verified": False}
 
 
@@ -99,6 +159,7 @@ def _snapshot() -> dict:
              ROOT / "engraphis/factory.py", ROOT / "engraphis/__init__.py",
              Path(__file__), ROOT / "eval/benchmark.py", ROOT / "eval/vector_scale.py",
              ROOT / "eval/vector_scale_storage.py"]
+    paths.append(ROOT / "eval/capacity_matrix.py")
     return {path.relative_to(ROOT).as_posix(): sha256_file(path) for path in sorted(paths)}
 
 
@@ -129,11 +190,16 @@ def _engine(path: str, cell: Cell, model: Optional[str]) -> MemoryEngine:
     os.environ["ENGRAPHIS_EXTRACTOR"] = "none"
     engine = MemoryEngine.create(path, embed_model="local:" + model if model else None,
                                  embed_dim=cell.dimension, vector_backend=cell.backend,
+                                 sqlite_durability=SQLITE_DURABILITY,
                                  require_exact_backends=True, extractor="none", graph_extractor="none")
     if (engine.embedder.dim != cell.dimension
             or (model is not None and not engine.embedder.supports_semantic_search)):
-        engine.store.close()
+        engine.close()
         raise ValueError("observed embedding dimension/capability differs from the declared cell")
+    durability = engine.store.durability_health()
+    if durability["synchronous"] != "FULL" or durability["journal_mode"] != "wal":
+        engine.close()
+        raise RuntimeError("capacity engine did not establish the declared WAL/FULL policy")
     return engine
 
 
@@ -160,11 +226,11 @@ def _seed(path: str, cell: Cell, model: Optional[str]) -> tuple[list[dict], floa
             targets.append({"id": result["id"], "workspace": workspace, "repo": repo,
                             "index": index})
     finally:
-        engine.store.close()
+        engine.close()
     return targets, (time.perf_counter() - started) * 1000
 
 
-def operation_plan(cell: Cell, targets: list[dict]) -> list[dict]:
+def operation_plan(cell: Cell, targets: Optional[list[dict]] = None) -> list[dict]:
     """Stable schedules have exact ratios and never race erasure against a gold read."""
     import random
 
@@ -173,15 +239,16 @@ def operation_plan(cell: Cell, targets: list[dict]) -> list[dict]:
     kinds *= cell.operations // 100
     random.Random(cell.seed).shuffle(kinds)
     mutable_count = sum(kind in {"correct", "erase"} for kind in kinds)
-    immutable_count = len(targets) - mutable_count
+    immutable_count = (len(targets) if targets is not None else cell.size) - mutable_count
     mutation = immutable_count
     operations = []
     for index, kind in enumerate(kinds):
         if kind in {"correct", "erase"}:
-            target = targets[mutation]
+            target_index = mutation
             mutation += 1
         else:
-            target = targets[(index * 17 + cell.seed) % immutable_count]
+            target_index = (index * 17 + cell.seed) % immutable_count
+        target = targets[target_index] if targets is not None else {"index": target_index}
         operations.append({"number": index, "kind": kind, "target": target})
     return operations
 
@@ -242,6 +309,7 @@ def _worker(database: str, cell: Cell, model: Optional[str], incoming, outgoing)
         outgoing.put({"kind": "ready", "pid": os.getpid(),
                       "startup_ms": (time.perf_counter() - start) * 1000,
                       "backend": type(engine.index).__name__, "embedding_dimension": engine.embedder.dim,
+                      "sqlite_durability": engine.store.durability_health(),
                       "embedding_semantic": engine.embedder.supports_semantic_search})
         while True:
             job = incoming.get()
@@ -258,7 +326,11 @@ def _worker(database: str, cell: Cell, model: Optional[str], incoming, outgoing)
                       "error_type": type(exc).__name__})
     finally:
         if engine is not None:
-            engine.store.close()
+            try:
+                engine.close()
+            except Exception as exc:
+                outgoing.put({"kind": "teardown_error", "pid": os.getpid(),
+                              "error_type": type(exc).__name__})
 
 
 def _tree_rss(pids: list[int]) -> Optional[int]:
@@ -275,133 +347,418 @@ def _tree_rss(pids: list[int]) -> Optional[int]:
                 processes[child.pid] = child
         except psutil.Error:
             continue
-    total = 0
+    total, observed = 0, 0
     for process in processes.values():
         try:
             total += process.memory_info().rss
+            observed += 1
         except psutil.Error:
             continue
-    return total
+    return total if observed else None
+
+
+class _LifecycleObserver:
+    """Sample RSS independently of blocked seeding/startup/operation calls."""
+
+    def __init__(self, cell: Cell, *, clock=None, rss_reader=None):
+        self.cell = cell
+        self.clock = clock or time.perf_counter
+        self.rss_reader = rss_reader or _tree_rss
+        self.origin = self.clock()
+        self.lock = threading.Lock()
+        self.sample_lock = threading.Lock()
+        self.stop = threading.Event()
+        self.thread = None
+        self.phase = "seeding"
+        self.pids = []
+        self.phases = {phase: {
+            "sampling_attempts": 0, "sample_count": 0, "unavailable_samples": 0,
+            "observed_peak_rss_bytes": None, "first_sample_elapsed_s": None,
+            "last_sample_elapsed_s": None, "max_sample_gap_s": None,
+        } for phase in RESOURCE_PHASES}
+        self.epoch = None
+        self.load_end = None
+        self.submitted = 0
+        self.received = 0
+        self.backlog = []
+        self.sampling_started = False
+
+    def start(self):
+        self.sampling_started = True
+        self.sample(force_backlog=True)
+        self.thread = threading.Thread(target=self._loop, daemon=True)
+        self.thread.start()
+
+    def _loop(self):
+        while not self.stop.wait(RSS_INTERVAL_S):
+            self.sample()
+
+    def add_pid(self, pid):
+        if pid is not None:
+            with self.lock:
+                self.pids.append(pid)
+
+    def set_phase(self, phase):
+        if phase not in RESOURCE_PHASES:
+            raise ValueError("unknown resource observation phase")
+        self.sample(force_backlog=True)
+        with self.lock:
+            self.phase = phase
+        self.sample(force_backlog=True)
+
+    def begin_load(self, epoch):
+        with self.lock:
+            self.epoch = epoch
+        self.sample(force_backlog=True)
+
+    def end_load(self):
+        with self.lock:
+            if self.epoch is not None and self.load_end is None:
+                self.load_end = self.clock()
+        self.sample(force_backlog=True)
+
+    def record_submission(self):
+        with self.lock:
+            self.submitted += 1
+
+    def record_receipt(self):
+        with self.lock:
+            self.received += 1
+
+    def sample(self, *, force_backlog=False):
+        # Serialize boundary/background collection so time-series order is stable.
+        with self.sample_lock:
+            now = self.clock()
+            with self.lock:
+                phase, pids = self.phase, list(self.pids)
+            try:
+                rss = self.rss_reader(pids)
+            except Exception:
+                rss = None
+            with self.lock:
+                row = self.phases[phase]
+                row["sampling_attempts"] += 1
+                elapsed = now - self.origin
+                if row["last_sample_elapsed_s"] is not None:
+                    gap = elapsed - row["last_sample_elapsed_s"]
+                    row["max_sample_gap_s"] = max(row["max_sample_gap_s"] or 0, gap)
+                if row["first_sample_elapsed_s"] is None:
+                    row["first_sample_elapsed_s"] = elapsed
+                row["last_sample_elapsed_s"] = elapsed
+                if type(rss) is int and rss > 0:
+                    row["sample_count"] += 1
+                    row["observed_peak_rss_bytes"] = max(row["observed_peak_rss_bytes"] or 0, rss)
+                else:
+                    row["unavailable_samples"] += 1
+                if self.epoch is None:
+                    return
+                # Queue counters and their timestamp are captured together, after
+                # RSS collection, which may itself take appreciable time.
+                queue_now = self.clock()
+                load_elapsed = max(0, queue_now - self.epoch)
+                if (not force_backlog and self.backlog
+                        and load_elapsed - self.backlog[-1]["elapsed_s"] < BACKLOG_INTERVAL_S):
+                    return
+                offered_until = min(queue_now, self.load_end) if self.load_end is not None else queue_now
+                due = (min(self.cell.operations, math.floor(
+                    max(0, offered_until - self.epoch) * self.cell.arrival_rate) + 1)
+                       if self.cell.arrival_rate else self.cell.operations)
+                self.backlog.append({
+                    "elapsed_s": round(load_elapsed, 6), "phase": self.phase,
+                    "scheduled_due": due, "submitted": self.submitted, "received": self.received,
+                    "scheduled_outstanding": max(0, due - self.received),
+                    "dispatch_pending": max(0, due - self.submitted),
+                    "submitted_unreceived": max(0, self.submitted - self.received),
+                })
+
+    def close(self):
+        self.stop.set()
+        if self.thread is not None:
+            self.thread.join(timeout=2)
+        self.sample(force_backlog=True)
+
+    def report(self):
+        with self.lock:
+            phases = {key: dict(value) for key, value in self.phases.items()}
+            peaks = [row["observed_peak_rss_bytes"] for row in phases.values()
+                     if row["observed_peak_rss_bytes"] is not None]
+            observed_until = (max(0, (self.load_end if self.load_end is not None else self.clock()) - self.epoch)
+                              if self.epoch is not None else None)
+            return {
+                "observed_process_tree_peak_rss_bytes": max(peaks, default=None),
+                "memory_samples": sum(row["sample_count"] for row in phases.values()),
+                "resource_observations": {
+                    "version": 2, "requested_sample_interval_s": RSS_INTERVAL_S,
+                    "started_before_seeding": self.sampling_started,
+                    "sampler_thread_stopped": self.thread is None or not self.thread.is_alive(),
+                    "phases": phases,
+                    "observation_limits": [
+                        "sampled RSS peaks can miss transients between observations",
+                        "shared resident pages may be counted in more than one process",
+                        "exited or inaccessible descendants can be omitted from a sample",
+                        "phase is captured at sample start; collection can cross a phase boundary",
+                        "runner Python/model allocator retention contributes to later phase RSS",
+                        "GPU memory and cold OS cache are not measured",
+                    ],
+                },
+                "backlog_observations": {
+                    "version": 1, "requested_sample_interval_s": BACKLOG_INTERVAL_S,
+                    "offered_operations_per_second": self.cell.arrival_rate,
+                    "offering_observed_until_s": observed_until,
+                    "series": [dict(row) for row in self.backlog],
+                    "boundary": "scheduled-due minus parent-received operations; includes dispatch, IPC, running work and verification",
+                },
+            }
+
+
+def _backlog_assessment(cell: Cell, observations: dict, *, execution_complete: bool) -> dict:
+    """A predeclared finite-window observation, never a capacity/stability proof."""
+    result = {
+        "available": False, "sustained_growth_observed": None,
+        "offered_operations_per_second": cell.arrival_rate,
+        "execution_complete": execution_complete, "general_capacity_proof": False,
+        "rule": "five active-arrival windows with at least two samples each; every successive mean grows and net growth exceeds one second of offered arrivals",
+    }
+    if cell.arrival_rate <= 0:
+        return {**result, "reason": "burst workload has no sustained offered rate"}
+    until = observations.get("offering_observed_until_s")
+    if until is None:
+        return {**result, "reason": "offered-load execution never started"}
+    duration = min(float(until), (cell.operations - 1) / cell.arrival_rate)
+    # Forced boundary observations at the same timestamp add no independent
+    # sampling coverage; use their last recorded counter snapshot.
+    active = list({row["elapsed_s"]: row for row in observations["series"]
+                   if 0 <= row["elapsed_s"] <= duration}.values())
+    bins = [[] for _ in range(5)]
+    if duration < 10:
+        return {**result, "reason": "fewer than ten seconds of active offered-load observations"}
+    for row in active:
+        bins[min(4, int(row["elapsed_s"] / duration * 5))].append(row["scheduled_outstanding"])
+    if any(len(window) < 2 for window in bins):
+        return {**result, "reason": "insufficient sampling across the five arrival windows"}
+    means = [sum(window) / len(window) for window in bins]
+    mean_time = sum(row["elapsed_s"] for row in active) / len(active)
+    mean_backlog = sum(row["scheduled_outstanding"] for row in active) / len(active)
+    time_variance = sum((row["elapsed_s"] - mean_time) ** 2 for row in active)
+    slope = (sum((row["elapsed_s"] - mean_time) * (row["scheduled_outstanding"] - mean_backlog)
+                 for row in active) / time_variance if time_variance else None)
+    growth = all(right > left for left, right in zip(means, means[1:]))
+    growth = growth and means[-1] - means[0] > max(1.0, cell.arrival_rate)
+    return {
+        **result, "available": True, "sustained_growth_observed": growth,
+        "assessment_duration_s": duration, "active_samples": len(active),
+        "window_sample_counts": [len(window) for window in bins],
+        "window_mean_outstanding": means, "observed_slope_operations_per_second": slope,
+        "peak_scheduled_outstanding": max(row["scheduled_outstanding"] for row in active),
+        "interpretation": "growth observed under this finite load" if growth else "no sustained growth observed in this finite load; stability is unproven",
+    }
 
 
 def _repeat(cell: Cell, model: Optional[str]) -> dict:
-    with tempfile.TemporaryDirectory(prefix="engraphis-capacity-") as scratch:
-        database = str(Path(scratch) / "capacity.db")
+    observer = _LifecycleObserver(cell)
+    observer.start()
+    result = None
+    try:
+        with tempfile.TemporaryDirectory(prefix="engraphis-capacity-") as scratch:
+            result = _repeat_database(str(Path(scratch) / "capacity.db"), cell, model, observer)
+    except Exception as exc:
+        if result is None:
+            raise
+        if result["status"] == "complete":
+            result["status"] = "worker_error"
+        result["lifecycle_errors"].append({"phase": "teardown", "error_type": type(exc).__name__})
+    finally:
+        # Keep observing worker/queue shutdown and temporary database cleanup.
+        observer.close()
+    observations = observer.report()
+    result.update(observations)
+    result["backlog_assessment"] = _backlog_assessment(
+        cell, observations["backlog_observations"], execution_complete=result["status"] == "complete",
+    )
+    return result
+
+
+def _repeat_database(database: str, cell: Cell, model: Optional[str], observer) -> dict:
+    # An unseeded schedule still preserves the complete denominator on seed failure.
+    jobs = operation_plan(cell)
+    ready, rows, submitted, errors = [], [], {}, []
+    workers, incoming, outgoing = [], None, None
+    stop = threading.Event()
+    dispatcher = None
+    dispatch_errors = []
+    started = time.perf_counter()
+    seed_ms, epoch, status, phase = 0.0, None, "complete", "seeding"
+    late_results = 0
+    try:
         targets, seed_ms = _seed(database, cell, model)
         jobs = operation_plan(cell, targets)
+        phase = "startup"
+        observer.set_phase(phase)
         ctx = multiprocessing.get_context("spawn")
         incoming, outgoing = ctx.Queue(), ctx.Queue()
         workers = [ctx.Process(target=_worker, args=(database, cell, model, incoming, outgoing))
                    for _ in range(cell.concurrency)]
-        ready, rows, submitted = [], [], {}
-        peak, samples = None, 0
-        stop = threading.Event()
-        dispatcher = None
-        started = time.perf_counter()
-        status = "complete"
-        try:
-            for worker in workers:
-                worker.start()
-            while len(ready) < cell.concurrency:
-                remaining = cell.timeout_s - (time.perf_counter() - started)
-                if remaining <= 0:
-                    raise TimeoutError("worker startup deadline")
-                try:
-                    item = outgoing.get(timeout=min(remaining, 1.0))
-                except queue.Empty:
-                    if any(worker.is_alive() for worker in workers):
-                        continue
-                    raise RuntimeError("workers exited before readiness")
-                if item["kind"] != "ready":
-                    raise RuntimeError("worker startup failed: " + item.get("error_type", "unknown"))
-                ready.append(item)
-            epoch = time.perf_counter()
+        startup_started = time.perf_counter()
+        for worker in workers:
+            worker.start()
+            observer.add_pid(worker.pid)
+        while len(ready) < cell.concurrency:
+            remaining = cell.timeout_s - (time.perf_counter() - startup_started)
+            if remaining <= 0:
+                raise TimeoutError("worker startup deadline")
+            try:
+                item = outgoing.get(timeout=min(remaining, 1.0))
+            except queue.Empty:
+                if any(worker.is_alive() for worker in workers):
+                    continue
+                raise RuntimeError("workers exited before readiness")
+            if item["kind"] != "ready":
+                errors.append({"phase": "startup", "error_type": item.get("error_type", "unknown")})
+                raise RuntimeError("worker startup failed")
+            ready.append(item)
+        phase = "workload"
+        observer.set_phase(phase)
+        epoch = time.perf_counter()
+        observer.begin_load(epoch)
 
-            def dispatch():
+        def dispatch():
+            try:
                 for job in jobs:
                     scheduled = epoch + (job["number"] / cell.arrival_rate if cell.arrival_rate else 0)
                     if stop.wait(max(0, scheduled - time.perf_counter())):
                         return
                     submitted[job["number"]] = (scheduled, time.perf_counter())
+                    observer.record_submission()
                     incoming.put(job)
                 for _ in workers:
                     incoming.put(None)
+            except Exception as exc:
+                dispatch_errors.append(type(exc).__name__)
+                stop.set()
 
-            dispatcher = threading.Thread(target=dispatch, daemon=True)
-            dispatcher.start()
-            while len(rows) < len(jobs):
-                if time.perf_counter() - epoch > cell.timeout_s:
-                    status = "timeout"
+        dispatcher = threading.Thread(target=dispatch, daemon=True)
+        dispatcher.start()
+        seen = set()
+        while len(rows) < len(jobs):
+            if time.perf_counter() - epoch > cell.timeout_s:
+                status = "timeout"
+                break
+            if dispatch_errors:
+                status = "worker_error"
+                break
+            try:
+                item = outgoing.get(timeout=0.05)
+            except queue.Empty:
+                if not any(worker.is_alive() for worker in workers):
+                    status = "worker_exit"
                     break
-                rss = _tree_rss([item["pid"] for item in ready])
-                if rss is not None:
-                    peak = max(peak or 0, rss)
-                    samples += 1
-                try:
-                    item = outgoing.get(timeout=0.05)
-                except queue.Empty:
-                    if not any(worker.is_alive() for worker in workers):
-                        status = "worker_exit"
-                        break
-                    continue
-                if item["kind"] != "result":
+                continue
+            received = time.perf_counter()
+            if received - epoch > cell.timeout_s:
+                status = "timeout"
+                late_results += int(item.get("kind") == "result")
+                break
+            if item["kind"] != "result" or item.get("number") not in submitted or item["number"] in seen:
+                status = "worker_error"
+                errors.append({"phase": "workload", "error_type": item.get("error_type", "UnexpectedResult")})
+                break
+            seen.add(item["number"])
+            observer.record_receipt()
+            scheduled, enqueued = submitted[item["number"]]
+            wall = (received - scheduled) * 1000
+            item.update({"wall_ms": wall, "dispatch_lag_ms": (enqueued - scheduled) * 1000,
+                         "queue_ipc_ms": max(0, wall - item.get("operation_ms", 0)
+                                             - item.get("verification_ms", 0))})
+            rows.append(item)
+        elapsed = time.perf_counter() - epoch
+    except Exception as exc:
+        status = "startup_failed" if phase in {"seeding", "startup"} else "worker_error"
+        errors.append({"phase": phase, "error_type": type(exc).__name__})
+        elapsed = time.perf_counter() - (epoch if epoch is not None else started)
+        if phase == "seeding":
+            seed_ms = (time.perf_counter() - started) * 1000
+    finally:
+        stop.set()
+        observer.end_load()
+        observer.set_phase("teardown")
+        if dispatcher is not None:
+            dispatcher.join(timeout=1)
+            if dispatcher.is_alive():
+                errors.append({"phase": "dispatch", "error_type": "DispatcherStillRunning"})
+                if status == "complete":
                     status = "worker_error"
-                    break
-                received = time.perf_counter()
-                scheduled, enqueued = submitted[item["number"]]
-                wall = (received - scheduled) * 1000
-                item.update({"wall_ms": wall, "dispatch_lag_ms": (enqueued - scheduled) * 1000,
-                             "queue_ipc_ms": max(0, wall - item.get("operation_ms", 0)
-                                                 - item.get("verification_ms", 0))})
-                rows.append(item)
-            elapsed = time.perf_counter() - epoch
-        except (TimeoutError, queue.Empty, RuntimeError):
-            status, elapsed = "startup_failed", time.perf_counter() - started
-        finally:
-            stop.set()
-            if dispatcher is not None:
-                dispatcher.join(timeout=1)
-            for worker in workers:
-                if worker.pid is not None:
+        for worker in workers:
+            if worker.pid is not None:
+                worker.join(timeout=2)
+                if worker.is_alive():
+                    worker.terminate()  # only this runner's disposable worker processes
                     worker.join(timeout=2)
-                    if worker.is_alive():
-                        worker.terminate()  # only this runner's disposable worker processes
-                        worker.join(timeout=2)
+                    errors.append({"phase": "teardown", "error_type": "WorkerTerminated"})
+                    if status == "complete":
+                        status = "worker_error"
+                if worker.exitcode not in {0, None} and status == "complete":
+                    status = "worker_error"
+        if outgoing is not None:
+            while True:
+                try:
+                    item = outgoing.get_nowait()
+                except queue.Empty:
+                    break
+                except (OSError, ValueError) as exc:
+                    errors.append({"phase": "teardown", "error_type": type(exc).__name__})
+                    if status == "complete":
+                        status = "worker_error"
+                    break
+                if item.get("kind") == "result":
+                    late_results += 1
+                elif item.get("kind") in {"teardown_error", "startup_error"}:
+                    errors.append({"phase": "teardown", "error_type": item.get("error_type", "unknown")})
+                    if status == "complete":
+                        status = "worker_error"
+        errors.extend({"phase": "dispatch", "error_type": error} for error in dispatch_errors)
+        if incoming is not None:
             incoming.cancel_join_thread()
             incoming.close()
+        if outgoing is not None:
             outgoing.close()
-        completed = {row["number"] for row in rows}
-        for job in jobs:
-            if job["number"] not in completed:
-                rows.append({"number": job["number"], "operation": job["kind"],
-                             "correct": False, "error_type": status})
-        by_operation = {}
-        for kind in sorted({job["kind"] for job in jobs}):
-            selected = [row for row in rows if row["operation"] == kind]
-            measured = [row["wall_ms"] for row in selected if "wall_ms" in row]
-            by_operation[kind] = {"scheduled": len(selected), "measured": len(measured),
-                                  "failures": sum(not row["correct"] for row in selected),
-                                  "wall_latency_ms": _latency_ms(measured) if measured else None}
-        return {"execution_id": uuid.uuid4().hex, "status": status, "seed_ms": seed_ms, "startup": ready,
-                "elapsed_s": elapsed, "operations": sorted(rows, key=lambda row: row["number"]),
-                "by_operation": by_operation,
-                "received_operations_per_second": len(completed) / elapsed if elapsed else None,
-                "operation_counts": dict(Counter(job["kind"] for job in jobs)),
-                "observed_process_tree_peak_rss_bytes": peak, "memory_samples": samples,
-                "disk": _disk(Path(database)), "input_sha256": hashlib.sha256(
-                    canonical_json([{"number": j["number"], "kind": j["kind"],
-                                     "target_index": j["target"]["index"]} for j in jobs]).encode()
-                ).hexdigest()}
+    completed = {row["number"] for row in rows}
+    for job in jobs:
+        if job["number"] not in completed:
+            rows.append({"number": job["number"], "operation": job["kind"],
+                         "correct": False, "error_type": status})
+    by_operation = {}
+    for kind in sorted({job["kind"] for job in jobs}):
+        selected = [row for row in rows if row["operation"] == kind]
+        measured = [row["wall_ms"] for row in selected if "wall_ms" in row]
+        by_operation[kind] = {"scheduled": len(selected), "measured": len(measured),
+                              "failures": sum(not row["correct"] for row in selected),
+                              "wall_latency_ms": _latency_ms(measured) if measured else None}
+    return {"execution_id": uuid.uuid4().hex, "status": status, "seed_ms": seed_ms, "startup": ready,
+            "elapsed_s": elapsed, "operations": sorted(rows, key=lambda row: row["number"]),
+            "by_operation": by_operation, "lifecycle_errors": errors,
+            "late_result_count": late_results,
+            "worker_exitcodes": [worker.exitcode for worker in workers if worker.pid is not None],
+            "received_operations_per_second": len(completed) / elapsed if elapsed else None,
+            "operation_counts": dict(Counter(job["kind"] for job in jobs)),
+            "disk": _disk(Path(database)), "input_sha256": hashlib.sha256(
+                canonical_json([{"number": job["number"], "kind": job["kind"],
+                                 "target_index": job["target"]["index"]} for job in jobs]).encode()
+            ).hexdigest()}
 
 
 def run_cell(cell: Cell, *, model_dir: Optional[str] = None,
-             model_sha256: Optional[str] = None) -> dict:
+             model_sha256: Optional[str] = None, reference_hosts: Optional[dict] = None) -> dict:
     cell.validate()
+    if reference_hosts is not None:
+        validate_reference_hosts(reference_hosts)
+    host_before = host_observation()
     identity = _local_model(model_dir, model_sha256)
     if not cell.smoke and not identity["semantic"]:
         raise ValueError("protocol cells require a pinned existing local semantic model")
     if not cell.smoke and importlib.util.find_spec("psutil") is None:
         raise ValueError("protocol cells require psutil process-tree memory sampling")
+    if cell.backend == "sqlite-vec" and importlib.util.find_spec("sqlite_vec") is None:
+        raise ModuleNotFoundError("explicit sqlite-vec backend requires installed sqlite_vec")
     before = _snapshot()
     repeats = [{**_repeat(cell, model_dir), "repeat_number": number}
                for number in range(cell.repeats)]
@@ -410,11 +767,7 @@ def run_cell(cell: Cell, *, model_dir: Optional[str] = None,
         model_stable = identity == _local_model(model_dir, model_sha256)
     except (OSError, ValueError):
         model_stable = False
-    hardware = _hardware()
-    if hardware.get("physical_ram_bytes") is None and importlib.util.find_spec("psutil"):
-        import psutil
-
-        hardware["physical_ram_bytes"] = psutil.virtual_memory().total
+    hardware = host_before["hardware"]
     dependencies = {}
     for distribution in ("sqlite-vec", "psutil"):
         try:
@@ -434,6 +787,14 @@ def run_cell(cell: Cell, *, model_dir: Optional[str] = None,
                  for r, repeat in enumerate(repeats) for row in repeat["operations"]],
         metrics={"repeats": repeats, "hardware": hardware, "runner_dependencies": dependencies,
                  "measurement_origin": "observed_local_engine", "measurement_version": 1,
+                 "resource_observation_version": 2,
+                 "acceptance_policy": acceptance_policy(),
+                 "acceptance_policy_sha256": _identity_digest(acceptance_policy()),
+                 "reference_hosts_sha256": _identity_digest(reference_hosts) if reference_hosts is not None else None,
+                 "host_identity_sha256": host_before["host_identity_sha256"],
+                 "host_identity_boundary": host_before["host_identity_boundary"],
+                 "host_identity_stable": host_before == host_observation(),
+                 "sqlite_durability": {"policy": SQLITE_DURABILITY, "journal_mode": "wal", "synchronous": "FULL"},
                  "recall_diagnostics_enabled": True, "source_before": before,
                  "source_after": after, "source_stable": before == after, "model_stable": model_stable,
                  "wall_latency_ms": _latency_ms(wall) if wall else None,
@@ -443,12 +804,13 @@ def run_cell(cell: Cell, *, model_dir: Optional[str] = None,
                  "dataset_origin": "synthetic_generator", "independent_task_quality": False,
                  "measurement_boundary": "scheduled arrival to parent receipt; includes dispatch, "
                      "IPC, queue, engine call and canonical verification; excludes startup/seeding",
-                 "memory_boundary": "sampled simultaneous RSS sum of runner and descendants during "
-                     "operations; excludes seeding/startup; shared pages may be counted more than "
-                     "once; not an allocation high-water mark",
+                 "memory_boundary": "sampled simultaneous RSS sum of runner and descendants from "
+                     "before seeding through engine startup, workload and teardown; shared pages "
+                     "may be counted more than once; not an allocation high-water mark",
                  "startup_boundary": "fresh process and connection with warm OS page cache",
                  "unmeasured": ["phase-level embedding/ranking/packing timings", "agent task success",
                                 "production workload representativeness", "cold OS cache", "restore drills",
+                                "unsampled transient allocation peaks", "seeding hard deadline",
                                 "full 48-cell paired matrix and confidence intervals"]},
         source_paths=[ROOT / name for name in before], models={"embedding": identity,
                     "vector_backend": {"identity": cell.backend}},
@@ -467,12 +829,17 @@ def main(argv=None) -> int:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--smoke", action="store_true")
     mode.add_argument("--run-cell", type=Path, help="JSON Cell configuration; smoke must be false")
+    mode.add_argument("--host-identity", action="store_true", help="read-only reference host inventory")
     parser.add_argument("--backend", choices=("numpy", "sqlite-vec"), default="numpy")
     parser.add_argument("--concurrency", type=int, default=1)
     parser.add_argument("--model-dir")
     parser.add_argument("--model-sha256")
+    parser.add_argument("--reference-hosts", type=Path, help="manifest frozen before the primary matrix")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
+    if args.host_identity:
+        print(json.dumps(host_observation(), indent=2))
+        return 0
     if not args.smoke and args.run_cell is None:
         print(json.dumps(protocol(), indent=2))
         return 0
@@ -480,13 +847,15 @@ def main(argv=None) -> int:
             Cell(backend=args.backend, concurrency=args.concurrency))
     if args.run_cell is not None and cell.smoke:
         raise ValueError("--run-cell requires smoke=false")
-    report = run_cell(cell, model_dir=args.model_dir, model_sha256=args.model_sha256)
+    references = json.loads(args.reference_hosts.read_text(encoding="utf-8")) if args.reference_hosts else None
+    report = run_cell(cell, model_dir=args.model_dir, model_sha256=args.model_sha256, reference_hosts=references)
     if args.output:
         print(json.dumps(write_canonical_artifact(report, args.output)))
     else:
         print(json.dumps(report, indent=2))
     return int(bool(report["metrics"]["correctness_failures"])
-               or not report["metrics"]["source_stable"] or not report["metrics"]["model_stable"])
+               or not report["metrics"]["source_stable"] or not report["metrics"]["model_stable"]
+               or any(repeat["status"] != "complete" for repeat in report["metrics"]["repeats"]))
 
 
 if __name__ == "__main__":
