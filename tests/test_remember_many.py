@@ -372,3 +372,71 @@ def test_session_ended_between_validation_and_transaction_rejects_batch():
         "SELECT COUNT(*) AS n FROM memories WHERE session_id=?", (sid,)
     ).fetchone()
     assert rows["n"] == 0
+
+
+def test_service_remember_many_redacts_secrets_when_opted_in():
+    """With redact_secrets=True, embedded secrets are masked before storage."""
+    from engraphis.service import MemoryService
+
+    eng = MemoryEngine.create(":memory:", auto_evolve=False)
+    svc = MemoryService(eng)
+    leak = "sk-proj-abcdef1234567890abcdef1234567890abcdef12"
+    out = svc.remember_many(
+        [{"content": f"Log shows key {leak} in output"}],
+        workspace="w", redact_secrets=True,
+    )
+    assert out["stored"] is True
+    mem = eng.store.get_memory(out["results"][0]["id"])
+    assert leak not in mem.content
+    assert "<redacted>" in mem.content
+
+
+def test_service_remember_many_redacts_title_when_opted_in():
+    """redact_secrets must also mask secrets in per-fact titles."""
+    from engraphis.service import MemoryService
+
+    eng = MemoryEngine.create(":memory:", auto_evolve=False)
+    svc = MemoryService(eng)
+    leak = "sk-proj-abcdef1234567890abcdef1234567890abcdef12"
+    out = svc.remember_many(
+        [{"content": "ok", "title": f"Secret: {leak}"}],
+        workspace="w", redact_secrets=True,
+    )
+    mem = eng.store.get_memory(out["results"][0]["id"])
+    assert leak not in mem.title
+    assert "<redacted>" in mem.title
+
+
+def test_service_remember_many_without_redact_rejects_secret():
+    """Without redact_secrets, a secret in the batch must raise ValidationError."""
+    from engraphis.service import MemoryService, ValidationError
+
+    eng = MemoryEngine.create(":memory:", auto_evolve=False)
+    svc = MemoryService(eng)
+    leak = "sk-proj-abcdef1234567890abcdef1234567890abcdef12"
+    with pytest.raises(ValidationError):
+        svc.remember_many(
+            [{"content": f"Log shows key {leak}"}],
+            workspace="w", redact_secrets=False,
+        )
+
+
+def test_service_remember_batch_redacts_secrets_when_opted_in():
+    """remember_batch should also support redact_secrets parameter."""
+    from engraphis.service import MemoryService
+
+    eng = MemoryEngine.create(":memory:", auto_evolve=False)
+    svc = MemoryService(eng)
+    leak = "sk-proj-abcdef1234567890abcdef1234567890abcdef12"
+    out = svc.remember_batch(
+        [{"content": f"Log shows key {leak} in output"}],
+        workspace="w", redact_secrets=True,
+    )
+    assert out["succeeded"] == 1
+    # Get the memory ID from the engine's store
+    rows = eng.store.conn.execute(
+        "SELECT id FROM memories LIMIT 1"
+    ).fetchone()
+    mem = eng.store.get_memory(rows["id"])
+    assert leak not in mem.content
+    assert "<redacted>" in mem.content

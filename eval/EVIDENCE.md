@@ -52,8 +52,8 @@ planner failures, context revisions, provider cached-input tokens when supplied,
 paired-bootstrap deltas. This is fixture-scoped regression evidence, not a third-party benchmark.
 
 The official LongMemEval-V2 adapter accepts the same `planning` and `mtype_limits` controls. Use the
-four pinned configs in `eval/configs/longmemeval_v2_engraphis*.json`. Materialize the exact 20-run
-matrix in that restricted run directory with:
+four pinned configs in `eval/configs/longmemeval_v2_engraphis*.json`. Materialize the exact 30-run
+matrix, including the two matched `context_k=2` variants at every budget, in that restricted run directory with:
 
 ```bash
 python -m eval.longmemeval_v2_matrix --output "$ENGRAPHIS_EVIDENCE_RUN_DIR/configs"
@@ -63,10 +63,82 @@ Run the pinned official harness once per manifest entry. Keep upstream per-quest
 private comparison data outside the repository; export only redacted evidence with pinned dataset,
 reader, embedder, configuration, and seed metadata.
 
+`python -m eval.planned_recall` is a report-only command. Its successful exit does not mean that
+an experimental candidate passed. To require a particular gate, run:
+
+```bash
+python -m eval.planned_recall --require-gate planner --gate-level repository-local
+python -m eval.planned_recall --require-gate planner --gate-level default
+```
+
+`--require-gate` accepts `planner` or `planner_type_limits`; its default level is `default`,
+which also requires the local, safety, and opt-in eligibility booleans. Missing, false, or
+non-boolean evidence fails closed with exit code 1 after the report is printed. Python promotion
+callers use `require_gate(report, candidate, level="default")`. Synthetic results alone never
+set official-run or default eligibility to true. Keeping the existing balanced default does not
+require promoting either experiment.
+
 `eval.resource_hierarchy` is evaluation-only. It derives file/section overviews from path, heading,
 and chunk-order metadata. If its held-out gate does not improve quality by at least three percentage
-points at three budgets without more context and within the latency bound, schema 7 is retained and
-no resource hierarchy is built.
+points at three budgets without more context and within the latency bound, no resource hierarchy
+is built. The shipped memory schema remains version 18; legacy `retain_7`/`bump_to_8` labels in the
+isolated prototype are not instructions to migrate the product database.
+
+## Production factory performance diagnostics
+
+The default `eval.performance` fixture mode retains its deterministic, in-memory constructor and
+`engraphis-performance/v1` result contract. For disk/backend diagnostics, provide `--engine-config`
+with an explicit JSON configuration. A fully offline example is:
+
+```json
+{
+  "storage": "disk",
+  "vector_backend": "numpy",
+  "sqlite_durability": "durable"
+}
+```
+
+```bash
+python -m eval.performance --dataset eval/datasets/codemem.jsonl --engine-config engine.json --json
+python -m eval.performance --dataset fixed-1000-plus.jsonl --engine-config engine.json --acceptance-matrix --processes 5 --json
+```
+
+Set `storage_root` to an existing absolute directory on the disk to measure. Each spawned worker
+gets a fresh temporary database there, reopens its populated database before recall, and closes
+and removes only that temporary database afterward. `storage="memory"` measures the same factory
+without a disk reopen. The factory uses exact `numpy` or `sqlite-vec` selection; `auto` and backend
+fallbacks are rejected. `sqlite_durability="balanced"` is an explicit alternative to `durable`;
+the report records the observed SQLite journal mode and synchronous setting.
+
+To select already-cached semantic models, add `embed_model="local:org/model"` and an exact
+lowercase 40-character `embed_revision`. Optional reranking uses `rerank_model` and
+`rerank_revision` under the same policy. Absolute local model directories instead require
+`embed_artifact_sha256` or `rerank_artifact_sha256`, using the existing
+`engraphis-local-artifact-v1` directory-content digest. Directory bytes are verified before and
+after loading. No implicit downloads or fallback models are permitted. Missing local assets or
+dependencies fail the run, and tests exercise this path with model doubles rather than downloads.
+
+Additive `phases` and per-process resource fields distinguish empty-engine construction, ingestion,
+populated disk reopen, first-pass recall, steady-state recall and executor queue wait. Construction
+includes configured local-model verification/loading. Recall latency excludes executor queue wait
+and MCP/HTTP transport. First-pass recall is not uncached disk IO. RSS values are optional process
+lifetime peak watermarks sampled at named boundaries, not isolated phase peaks. Python/MCP process
+startup, provider queues and hardware power-loss durability are unmeasured by this diagnostic.
+An acceptance matrix's `valid` value establishes protocol coverage, not an SLA or quality win.
+Factory runs are separate local diagnostics and do not inherit the historical fixture evidence ID.
+
+Factory mode enables recall diagnostics and records recognized, content-free stage timings under
+`phases.recall_stages`, separately for cold and warm calls. Reports include sample counts and
+p50/p95/p99 for the observed preparation, planning, embedding, candidate filtering, vector/lexical/
+graph/code search, fusion/scoring, reranking, selection, reinforcement, support/provenance, packing
+and response metadata stages. Unexecuted or unavailable stages are omitted; observed rounded zero
+durations are retained. Warmup calls are excluded from these summaries. `engine_recall` is the
+enclosing total and must not be added to the disjoint stages. Repeated arm/page work accumulates
+within each stage. These measurements include diagnostics overhead and exclude transport,
+database-lock attribution and answer generation. Fixture mode keeps diagnostics disabled and
+does not emit these stage summaries. Full retrieval traces and memory content are never copied
+into the stage timing fields.
+
 ## Consolidation ranking preference
 
 The post-normalization consolidation bonus is measured by a deterministic paired

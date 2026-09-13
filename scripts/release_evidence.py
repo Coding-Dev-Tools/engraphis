@@ -11,9 +11,10 @@ import hashlib
 import json
 import re
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Iterable, Optional
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
+import zipfile
 
 try:  # Python 3.11+
     import tomllib
@@ -875,11 +876,11 @@ def check_manifest(root: Path) -> dict[str, list[dict[str, Any]]]:
             {
                 "id": "installed-artifact-platform-smoke",
                 "command": [
-                    "python", "-m", "scripts.smoke_entry_points", "--timeout", "20",
+                    "python", "-m", "scripts.smoke_installed_product", "--surface", "<mcp-or-server>",
                 ],
                 "workflow_job": "installed-artifact-platform-smoke",
                 "workflow_steps": [
-                    "Install and smoke the downloaded wheel on Windows and macOS",
+                    "Install and exercise the downloaded wheel on supported platforms",
                 ],
                 "inputs": [],
             },
@@ -1002,6 +1003,236 @@ def _verified_check_ids(manifest: dict[str, list[dict[str, Any]]]) -> set[str]:
     return {check["id"] for group in manifest.values() for check in group}
 
 
+_INSTALLED_PLATFORMS = {"ubuntu-latest": "linux", "windows-latest": "win32", "macos-latest": "darwin"}
+_INSTALLED_CHECKS = {
+    "mcp": ["initialize", "tools/list", "remember", "restart recall", "correction",
+            "restart current and historical recall", "governed history and provenance"],
+    "server": ["dashboard HTML", "health/readiness/build identity", "HTTP remember",
+               "restart recall", "correction", "restart current and historical recall", "history"],
+}
+_INSTALLED_ENVIRONMENT_NOTE = "Pinned package versions; local wheel URI replaced by engraphis==version."
+
+
+def _installed_bytes(root: Path, path: Path) -> bytes:
+    _relative_path(root, path)
+    for ancestor in (path, *path.parents):
+        if ancestor == root:
+            break
+        if ancestor.is_symlink() or getattr(ancestor, "is_junction", lambda: False)():
+            raise EvidenceError("installed evidence must not use linked paths")
+    with path.open("rb") as handle:
+        raw = handle.read(8 * 1024 * 1024 + 1)
+    if len(raw) > 8 * 1024 * 1024:
+        raise EvidenceError("installed evidence exceeds its size limit")
+    return raw
+
+
+def _installed_json(raw: bytes) -> dict:
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            if key in result:
+                raise EvidenceError("installed evidence contains duplicate JSON keys")
+            result[key] = value
+        return result
+
+    def number(_):
+        raise EvidenceError("installed evidence must not contain numeric JSON fields")
+
+    try:
+        value = json.loads(raw.decode("utf-8"), object_pairs_hook=pairs,
+                           parse_int=number, parse_float=number, parse_constant=number)
+    except (ValueError, UnicodeError, RecursionError) as exc:
+        raise EvidenceError("installed evidence must be unambiguous UTF-8 JSON") from exc
+    if not isinstance(value, dict):
+        raise EvidenceError("installed evidence must be a JSON object")
+    _reject_secret_like(value)
+    return value
+
+
+def _wheel_source_digest(wheel: Path, platform: str) -> str:
+    """Match package_build_info against archive bytes, including platform path ordering."""
+    try:
+        with zipfile.ZipFile(wheel) as archive:
+            names = archive.namelist()
+            if len(names) != len(set(names)):
+                raise EvidenceError("wheel contains duplicate archive entries")
+            sources = [name for name in names if name.startswith("engraphis/")
+                       and PurePosixPath(name).suffix in {".py", ".js", ".css", ".html", ".json"}]
+            if not sources:
+                raise EvidenceError("wheel is missing package source identity")
+            digest = hashlib.sha256()
+            order = PureWindowsPath if platform == "win32" else PurePosixPath
+            for name in sorted(sources, key=order):
+                if ".." in PurePosixPath(name).parts or "\\" in name:
+                    raise EvidenceError("wheel source path is unsafe")
+                digest.update(name[len("engraphis/"):].encode("utf-8"))
+                digest.update(b"\0")
+                with archive.open(name) as handle:
+                    for block in iter(lambda: handle.read(1024 * 1024), b""):
+                        digest.update(block)
+            return digest.hexdigest()
+    except (OSError, zipfile.BadZipFile, KeyError) as exc:
+        raise EvidenceError("installed evidence requires a readable release wheel") from exc
+
+
+def _public_installed_environment(raw: bytes, version: str, wheel: str, profile: str) -> bytes:
+    """Publish full pinned versions while removing the runner's local wheel URI."""
+    try:
+        lines = raw.decode("utf-8-sig").splitlines()
+    except UnicodeError as exc:
+        raise EvidenceError("installed environment must be UTF-8") from exc
+    packages = {}
+    for line in lines:
+        if not line.strip():
+            continue
+        if line.startswith("engraphis @ "):
+            reference = urlsplit(line[len("engraphis @ "):])
+            if (reference.scheme != "file" or reference.netloc not in ("", "localhost")
+                    or PurePosixPath(unquote(reference.path)).name != wheel):
+                raise EvidenceError("installed environment references a different wheel")
+            line = "engraphis==" + version
+        match = _PACKAGE_LOCK_LINE.fullmatch(line)
+        if match is None:
+            raise EvidenceError("installed environment must contain pinned public package versions")
+        name, package_version = match.groups()
+        name = _canonical_package_name(name)
+        try:
+            Version(package_version)
+        except InvalidVersion as exc:
+            raise EvidenceError("installed environment contains an invalid package version") from exc
+        if name in packages:
+            raise EvidenceError("installed environment contains duplicate packages")
+        packages[name] = package_version
+    required = {"engraphis", "numpy", "pip"} | ({"mcp"} if profile == "mcp" else {"fastapi", "uvicorn"})
+    if not required <= packages.keys() or packages.get("engraphis") != version:
+        raise EvidenceError("installed environment is incomplete for its selected profile")
+    if "mcp" in packages and Version(packages["mcp"]) >= Version("2"):
+        raise EvidenceError("installed environment widened the supported MCP major version")
+    result = "".join(name + "==" + value + "\n" for name, value in sorted(packages.items()))
+    _reject_secret_like(result)
+    return result.encode("utf-8")
+
+
+def installed_journey_artifacts(
+    root: Path, directory: Path, output: Path, wheel: Path, version: str,
+) -> dict:
+    """Validate all six real surface cells and publish only their allowlisted reports."""
+    root, directory, output = root.resolve(), directory.absolute(), output.absolute()
+    expected = {"installed-journey-" + os_name + "-" + profile
+                for os_name in _INSTALLED_PLATFORMS for profile in _INSTALLED_CHECKS}
+    if not directory.is_dir() or {path.name for path in directory.iterdir()} != expected:
+        raise EvidenceError("installed journey evidence requires the complete six-cell surface matrix")
+    wheel_digest = _sha256(wheel)
+    files = {"journey": "installed-journey.json", "environment": "installed-environment.lock",
+             "artifact": "installed-artifact.json"}
+    cells, staged = [], {}
+    for os_name, platform in sorted(_INSTALLED_PLATFORMS.items()):
+        source_digest = _wheel_source_digest(wheel, platform)
+        for profile, checks in _INSTALLED_CHECKS.items():
+            cell_root = directory / ("installed-journey-" + os_name + "-" + profile)
+            if not cell_root.is_dir() or {path.name for path in cell_root.iterdir()} != set(files.values()):
+                raise EvidenceError("installed journey cell must contain exactly its three public inputs")
+            raw = {kind: _installed_bytes(root, cell_root / name) for kind, name in files.items()}
+            journey, artifact = _installed_json(raw["journey"]), _installed_json(raw["artifact"])
+            if (set(journey) != {"format", "version", "package_source_sha256", "platform", "python",
+                                 "installed_artifact", "embedding", "checks"}
+                    or journey["format"] != "engraphis-installed-journey/v1"
+                    or journey["version"] != version or journey["platform"] != platform
+                    or not isinstance(journey["python"], str)
+                    or not re.fullmatch(r"3\.11\.\d+", journey["python"])
+                    or journey["installed_artifact"] is not True
+                    or journey["embedding"] != "deterministic/offline"
+                    or journey["package_source_sha256"] != source_digest
+                    or journey["checks"] != {profile: checks}):
+                raise EvidenceError("installed journey identity or completed milestones do not match")
+            if artifact != {"profile": profile, "wheel": wheel.name, "wheel_sha256": wheel_digest}:
+                raise EvidenceError("installed journey used different distribution bytes")
+            public = {
+                "journey": canonical_json_bytes(journey), "artifact": canonical_json_bytes(artifact),
+                "environment": _public_installed_environment(raw["environment"], version, wheel.name, profile),
+            }
+            records = []
+            for kind, data in public.items():
+                filename = "installed-" + os_name + "-" + profile + "-" + files[kind].removeprefix("installed-")
+                destination = output / filename
+                relative = _relative_path(root, destination)
+                for ancestor in (destination, *destination.parents):
+                    if ancestor == root:
+                        break
+                    if ancestor.is_symlink() or getattr(ancestor, "is_junction", lambda: False)():
+                        raise EvidenceError("installed evidence output must not be linked")
+                staged[destination] = data
+                records.append({"kind": kind, "filename": filename, "path": relative,
+                                "sha256": hashlib.sha256(data).hexdigest(),
+                                "captured_sha256": hashlib.sha256(raw[kind]).hexdigest()})
+            cells.append({"os": os_name, "profile": profile, "platform": platform,
+                          "python": journey["python"], "package_source_sha256": source_digest,
+                          "files": records})
+    for destination, data in staged.items():
+        if destination.exists() and destination.read_bytes() != data:
+            raise EvidenceError("installed evidence output already contains different candidate bytes")
+    for destination, data in staged.items():
+        destination.write_bytes(data)
+    return {"format": "engraphis-installed-matrix/v1", "wheel": wheel.name,
+            "wheel_sha256": wheel_digest, "cells": cells,
+            "environment_normalization": _INSTALLED_ENVIRONMENT_NOTE}
+
+
+def installed_bundle_records(document: Any, distributions: dict[str, str]) -> list[dict]:
+    """Validate the public matrix index before a repair reuses its hashed files."""
+    if (not isinstance(document, dict)
+            or set(document) != {"format", "wheel", "wheel_sha256", "cells", "environment_normalization"}
+            or document.get("format") != "engraphis-installed-matrix/v1"
+            or document.get("environment_normalization") != _INSTALLED_ENVIRONMENT_NOTE
+            or not isinstance(document.get("wheel"), str)
+            or not document["wheel"].endswith(".whl")
+            or document.get("wheel_sha256") != distributions.get(document["wheel"])):
+        raise EvidenceError("installed bundle does not match the release distributions")
+    cells = document["cells"]
+    expected = {(os_name, profile) for os_name in _INSTALLED_PLATFORMS for profile in _INSTALLED_CHECKS}
+    if not isinstance(cells, list) or len(cells) != len(expected):
+        raise EvidenceError("installed bundle has an incomplete surface matrix")
+    seen, records = set(), []
+    for cell in cells:
+        if not isinstance(cell, dict) or set(cell) != {
+            "os", "profile", "platform", "python", "package_source_sha256", "files",
+        }:
+            raise EvidenceError("installed bundle cell is malformed")
+        key = (cell["os"], cell["profile"])
+        if (any(not isinstance(value, str) for value in key) or key not in expected or key in seen
+                or cell["platform"] != _INSTALLED_PLATFORMS[cell["os"]]
+                or not isinstance(cell["package_source_sha256"], str)
+                or not _SHA256.fullmatch(cell["package_source_sha256"])
+                or not isinstance(cell["python"], str) or not re.fullmatch(r"3\.11\.\d+", cell["python"])):
+            raise EvidenceError("installed bundle contains a duplicate or invalid cell")
+        seen.add(key)
+        files = cell["files"]
+        if not isinstance(files, list) or len(files) != 3:
+            raise EvidenceError("installed bundle cell requires all three captured inputs")
+        kinds = set()
+        for record in files:
+            if not isinstance(record, dict) or set(record) != {
+                "kind", "filename", "path", "sha256", "captured_sha256",
+            }:
+                raise EvidenceError("installed bundle file record is malformed")
+            suffixes = {"journey": "journey.json", "artifact": "artifact.json", "environment": "environment.lock"}
+            kind = record["kind"]
+            if not isinstance(kind, str) or kind not in suffixes or kind in kinds:
+                raise EvidenceError("installed bundle file kinds must be complete and distinct")
+            kinds.add(kind)
+            filename = "installed-" + cell["os"] + "-" + cell["profile"] + "-" + suffixes[kind]
+            if (record["filename"] != filename or not isinstance(record["path"], str)
+                    or not _SAFE_PATH.fullmatch(record["path"])
+                    or ".." in PurePosixPath(record["path"]).parts
+                    or PurePosixPath(record["path"]).name != filename
+                    or any(not isinstance(record[field], str) or not _SHA256.fullmatch(record[field])
+                           for field in ("sha256", "captured_sha256"))):
+                raise EvidenceError("installed bundle file identity is invalid")
+            records.append(record)
+    return records
+
+
 def build_evidence(
     root: Path,
     distribution_directory: Path,
@@ -1014,6 +1245,7 @@ def build_evidence(
     image_digest: str,
     image_scan: Path,
     reproducibility: Path,
+    installed_journeys: Optional[Path] = None,
     verified_checks: Iterable[str] = (),
 ) -> dict[str, Any]:
     """Build deterministic evidence; callers state which fixed checks they ran."""
@@ -1045,6 +1277,10 @@ def build_evidence(
     reproducibility_record = reproducibility_artifact(
         root, reproducibility, artifact_digests,
     )
+    installed = None
+    if installed_journeys is not None:
+        wheel = next(distribution_directory.glob("*.whl"))
+        installed = installed_journey_artifacts(root, installed_journeys, sbom.parent, wheel, version)
     evidence = {
         "format": FORMAT,
         "package": {"name": PACKAGE, "version": version},
@@ -1099,6 +1335,9 @@ def build_evidence(
             "Grype version and database identity; later disclosures require rescanning.",
         ],
     }
+    if installed is not None:
+        installed_bundle_records(installed, artifact_digests)
+        evidence["installed_journeys"] = installed
     _reject_secret_like(evidence)
     return evidence
 
@@ -1131,6 +1370,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="two-builder reproducibility evidence",
     )
     parser.add_argument("--verified-check", action="append", default=[], help="one completed public check id")
+    parser.add_argument("--installed-journeys", type=Path,
+                        help="complete six-cell installed surface evidence; required by new release workflows")
     parser.add_argument("--output", type=Path, help="write canonical JSON instead of stdout")
     args = parser.parse_args(argv)
     try:
@@ -1143,6 +1384,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             image_digest=args.image_digest,
             image_scan=args.image_scan.resolve(),
             reproducibility=args.reproducibility.resolve(),
+            installed_journeys=args.installed_journeys,
             verified_checks=args.verified_check,
         )
         encoded = canonical_json_bytes(evidence)

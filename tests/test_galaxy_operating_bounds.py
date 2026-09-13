@@ -94,7 +94,7 @@ def test_auto_fit_contains_complete_orbital_envelopes(width, height):
     (47.999, 0.7037167544041136, 2),
     (0, 0.4, 2),
 ])
-def test_live_phase_and_emitted_velocity_share_a_safe_endpoint(parent_speed, angle, timestep):
+def test_live_presentation_phase_preserves_its_clock_and_safe_emitted_endpoint(parent_speed, angle, timestep):
     result = _run_node(
         "const probe = " + json.dumps({"speed": parent_speed, "angle": angle, "dt": timestep}) + ";\n" + """
         const a = probe.angle, r = 5;
@@ -127,7 +127,65 @@ def test_live_phase_and_emitted_velocity_share_a_safe_endpoint(parent_speed, ang
     )
     assert result["speed"] <= 48, result
     assert result["radius"] == pytest.approx(5), result
-    assert result["phaseSpeed"] == pytest.approx(result["relativeSpeed"], rel=1e-9, abs=1e-10), result
+    # The rendered local clock deliberately runs 1.5x the bounded velocity clock.
+    assert result["phaseSpeed"] == pytest.approx(
+        result["relativeSpeed"] * 1.5, rel=1e-9, abs=1e-10,
+    ), result
+
+
+@requires_node
+def test_black_hole_clock_matches_carrier_seed_and_integrator_force_samples():
+    report = _run_node("""
+        const run = clock => {
+          const nodes = [
+            { id: 'bh', anchor_role: 'global', community_id: 'core', system_anchor_id: 'bh',
+              gravity_mass: 16, radius: 8, x: 0, y: 0, vx: 0, vy: 0 },
+            { id: 'star', anchor_role: 'community', community_id: 'solar', system_anchor_id: 'star',
+              gravity_mass: 4, radius: 3, x: 200, y: 0, vx: 0, vy: 0 },
+            { id: 'planet', community_id: 'solar', system_anchor_id: 'star',
+              gravity_mass: 1, radius: 1, x: 225, y: 0, vx: 0, vy: 0 },
+          ];
+          const options = { gravity: 48, softening: 40, centralSoftening: 40,
+            blackHoleOrbitClock: clock, localGravitySetting: 0,
+            systemAnchorRepulsionAcceleration: 0, includeFarFieldConfinement: false };
+          const field = I.galaxyBlackHoleField(nodes, options);
+          const sample = I.galaxyAccelerations(nodes, [], [], options);
+          I.seedGalaxySystemOrbits(nodes, 19, 48, 40, false, options);
+          return { expected: [field.systems[0].ax, field.systems[0].ay],
+            actual: [sample.get(nodes[1]).ax, sample.get(nodes[1]).ay],
+            planet: [sample.get(nodes[2]).ax, sample.get(nodes[2]).ay],
+            circularSpeed: field.systems[0].circularSpeed,
+            seededSpeed: Math.hypot(nodes[1].vx, nodes[1].vy) };
+        };
+        emit([run(1), run(.1)]);
+    """)
+    for result in report:
+        assert result["actual"] == pytest.approx(result["expected"], rel=1e-12)
+        assert result["planet"] == pytest.approx(result["actual"], rel=1e-12)
+        # The established seed includes a bounded authored carrier rate and eccentric offset.
+        assert 1.3 * .92 <= result["seededSpeed"] / result["circularSpeed"] <= 1.3 * 1.04
+    assert report[1]["actual"][0] == pytest.approx(report[0]["actual"][0] * .01)
+    assert report[1]["seededSpeed"] == pytest.approx(report[0]["seededSpeed"] * .1)
+
+
+@requires_node
+@pytest.mark.parametrize("timestep,substeps", [(.032, 1), (.525, 5), (2, 16)])
+def test_coarse_force_substeps_preserve_elapsed_time_and_count_every_sample(timestep, substeps):
+    result = _run_node(f"const timestep = {timestep};\n" + """
+        const node = { id: 'free', community_id: 'one', gravity_mass: 1,
+          x: 3, y: -2, vx: 2, vy: -4 };
+        const step = I.integrateGalaxyLeapfrog([node], [], [], {
+          gravity: 0, central: false, timestep, velocityDecay: 0, speedLimit: 100,
+          includeCollisions: false, includeFarFieldConfinement: false,
+        });
+        emit({ x: node.x, y: node.y, vx: node.vx, vy: node.vy,
+          substeps: step.integrationSubsteps, samples: step.farFieldGravity.samples });
+    """)
+    assert result["x"] == pytest.approx(3 + 2 * timestep)
+    assert result["y"] == pytest.approx(-2 - 4 * timestep)
+    assert (result["vx"], result["vy"]) == (2, -4)
+    assert result["substeps"] == substeps
+    assert result["samples"] == substeps + 1
 
 
 @requires_node

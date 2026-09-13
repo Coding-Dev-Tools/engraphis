@@ -77,9 +77,9 @@ its counting boundary explicit.
 | Packed prompt-context usage in the same 26-question CodeMem sample pass | Hard budget: **1,500** tokens; observed mean: **85.38**; observed maximum: **108** | A hard cap prevents a recall from exceeding its configured context budget | This is usage accounting, not a before/after savings comparison |
 
 These values are evidence IDs `offline-chunking` and `offline-performance` in
-[`offline-fixtures-v1.json`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/benchmark-evidence/offline-fixtures-v1.json),
+[`offline-fixtures-v3.json`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/benchmark-evidence/offline-fixtures-v3.json),
 SHA-256
-`4d5056d137182ae5cf116c5d59af18b38a7a0ed7731885e9597f63e549cb46b7`.
+`2d6b4fab9e75edc91d105d49877f9225f28ffe4d366e40a44e931f19cb13f498`.
 [`BENCHMARKS.md`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/BENCHMARKS.md#public-numeric-evidence-registry)
 records the matching suite digest, exact commands, and per-command config digests. External,
 model-dependent, consolidation, productivity, and latency results remain unpublished until the
@@ -762,6 +762,7 @@ file. It never searches the working directory for `.env`, and explicit process v
 |---------|---------|-------------|
 | `ENGRAPHIS_ENV_FILE` | `~/.engraphis/config.env` | Optional trusted config leaf selected before trusted values load. Its bounded dependency-free parser performs no interpolation. An explicit value must be an absolute path to an owner-private regular file; arbitrary working-directory `.env` files are ignored. |
 | `ENGRAPHIS_DB_PATH` | Source: `<repo>/engraphis.db`; installed: platform user-data directory | SQLite database file. Installed defaults are `%LOCALAPPDATA%\engraphis\engraphis.db` (Windows), `~/Library/Application Support/engraphis/engraphis.db` (macOS), and `$XDG_DATA_HOME/engraphis/engraphis.db` or `~/.local/share/engraphis/engraphis.db` (Linux). The environment variable overrides every default; a relative value is resolved from the trusted `~/.engraphis/config.env` directory so launch CWD cannot select a different workspace database. |
+| `ENGRAPHIS_SQLITE_DURABILITY` | `durable` | Writable file databases use WAL and FULL commit synchronization. Explicit `balanced` selects NORMAL, which can lose recent acknowledged writes after OS/power failure. Effective settings appear in diagnostics; see [SQLite durability](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/SQLITE_DURABILITY.md). |
 | `ENGRAPHIS_HOST` | `127.0.0.1` | Server bind address |
 | `ENGRAPHIS_PORT` | `8700` | Dashboard port. A platform-injected `$PORT` (Railway/Fly/Heroku) takes precedence over this value for the dashboard bind; Compose pins both to `ENGRAPHIS_COMPOSE_PORT` so the mapping stays in sync |
 | `ENGRAPHIS_SERVICE_MODE` | `customer` | The public package supports only `customer`; hosted vendor, relay, compute, and worker roles are not distributed here |

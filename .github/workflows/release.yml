@@ -83,9 +83,10 @@ jobs:
           mkdir build-environment-evidence
           python -m pip list --format=freeze \
             | LC_ALL=C sort -f > build-environment-evidence/environment.lock
+          package_version="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
           cyclonedx-py environment --output-reproducible --of JSON \
             --pyproject pyproject.toml \
-            -o build-environment-evidence/engraphis-${GITHUB_REF_NAME#v}.cdx.json
+            -o "build-environment-evidence/engraphis-${package_version}.cdx.json"
 
       - name: Build source and universal wheel distributions
         shell: bash
@@ -370,16 +371,18 @@ jobs:
 
 
   installed-artifact-platform-smoke:
-    name: Installed wheel smoke (${{ matrix.os }})
+    name: Installed wheel journey (${{ matrix.os }}, ${{ matrix.profile }})
     needs: build
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
     if: >-
       github.event_name == 'push' ||
       inputs.release_tag == ''
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        profile: [base, mcp, server]
     env:
       PIP_CONSTRAINT: ${{ github.workspace }}/.github/release-constraints.txt
       PIP_BUILD_CONSTRAINT: ${{ github.workspace }}/.github/release-constraints.txt
@@ -393,11 +396,15 @@ jobs:
         with:
           name: python-package-distributions
           path: dist/
-      - name: Install and smoke the downloaded wheel on Windows and macOS
+      - name: Install and exercise the downloaded wheel on supported platforms
+        env:
+          ENGRAPHIS_SMOKE_PROFILE: ${{ matrix.profile }}
         shell: bash
         run: |
           set -euo pipefail
           python - <<'PY'
+          import hashlib
+          import json
           import os
           from pathlib import Path
           import subprocess
@@ -408,9 +415,11 @@ jobs:
           executable = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
           wheels = list(Path("dist").glob("*.whl"))
           assert len(wheels) == 1
+          profile = os.environ["ENGRAPHIS_SMOKE_PROFILE"]
+          requirement = str(wheels[0].resolve()) + ("" if profile == "base" else f"[{profile}]")
           subprocess.run(
               [str(executable), "-m", "pip", "install", "--disable-pip-version-check",
-               str(wheels[0].resolve())],
+               requirement],
               check=True,
           )
           subprocess.run([str(executable), "-m", "pip", "check"], check=True)
@@ -419,7 +428,32 @@ jobs:
               cwd=os.environ["RUNNER_TEMP"],
               check=True,
           )
+          if profile != "base":
+              evidence = Path(os.environ["RUNNER_TEMP"])
+              (evidence / "installed-environment.lock").write_text(subprocess.check_output(
+                  [str(executable), "-m", "pip", "freeze", "--all"], text=True,
+              ), encoding="utf-8")
+              (evidence / "installed-artifact.json").write_text(json.dumps({
+                  "profile": profile, "wheel": wheels[0].name,
+                  "wheel_sha256": hashlib.sha256(wheels[0].read_bytes()).hexdigest(),
+              }), encoding="utf-8")
+              subprocess.run(
+                  [str(executable), "-m", "scripts.smoke_installed_product", "--surface", profile,
+                   "--output", str(Path(os.environ["RUNNER_TEMP"]) / "installed-journey.json")],
+                  cwd=os.environ["RUNNER_TEMP"],
+                  check=True,
+              )
           PY
+      - name: Retain installed journey evidence
+        if: matrix.profile != 'base'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: installed-journey-${{ matrix.os }}-${{ matrix.profile }}
+          path: |
+            ${{ runner.temp }}/installed-journey.json
+            ${{ runner.temp }}/installed-environment.lock
+            ${{ runner.temp }}/installed-artifact.json
+          if-no-files-found: error
 
   encryption:
     name: Encryption driver release gate (Python ${{ matrix.python-version }})
@@ -732,6 +766,11 @@ jobs:
         with:
           name: independent-reproducibility
           path: release-evidence/
+      - name: Download complete installed journey evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: installed-journey-*
+          path: installed-journey-inputs/
       - name: Generate evidence from captured release artifacts
         shell: bash
         run: |
@@ -745,6 +784,7 @@ jobs:
             --image-digest "$(tr -d '\r\n' < release-evidence/image.digest)" \
             --image-scan release-evidence/grype.json \
             --reproducibility release-evidence/reproducibility.json \
+            --installed-journeys installed-journey-inputs \
             --verified-check ruff \
             --verified-check pyright-core-backends \
             --verified-check codeql \
@@ -777,6 +817,7 @@ jobs:
   publish:
     name: Publish to PyPI
     needs: release-evidence
+    environment: release-qualification
     # Manual dispatch is intentionally build/check-only. Publication requires a pushed
     # semver tag, whose value was matched to pyproject.toml in the build job above.
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
@@ -811,6 +852,19 @@ jobs:
           mkdir verified-dist
           cp dist/*.whl dist/*.tar.gz verified-dist/
 
+      - name: Require signed full-product qualification before PyPI publication
+        env:
+          ENGRAPHIS_RELEASE_QUALIFICATION: ${{ vars.ENGRAPHIS_RELEASE_QUALIFICATION }}
+          ENGRAPHIS_RELEASE_VERIFY_KEY: ${{ vars.ENGRAPHIS_RELEASE_VERIFY_KEY }}
+          ENGRAPHIS_RELEASE_CANDIDATE_ID: ${{ vars.ENGRAPHIS_RELEASE_CANDIDATE_ID }}
+          ENGRAPHIS_RELEASE_LEDGER_SHA256: ${{ vars.ENGRAPHIS_RELEASE_LEDGER_SHA256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check "cryptography==50.0.0"
+          python -m scripts.verify_release_qualification --dist dist \
+            --commit "$GITHUB_SHA" --tag "$GITHUB_REF_NAME"
+
       - name: Publish distributions to PyPI
         uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # v1.14.1
         with:
@@ -825,12 +879,17 @@ jobs:
   github-release:
     name: Publish GitHub Release
     needs: publish
+    environment: release-qualification
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
 
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
       - name: Download distributions
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
@@ -842,6 +901,19 @@ jobs:
         with:
           name: public-release-evidence
           path: release-evidence/
+
+      - name: Require signed full-product qualification before GitHub publication
+        env:
+          ENGRAPHIS_RELEASE_QUALIFICATION: ${{ vars.ENGRAPHIS_RELEASE_QUALIFICATION }}
+          ENGRAPHIS_RELEASE_VERIFY_KEY: ${{ vars.ENGRAPHIS_RELEASE_VERIFY_KEY }}
+          ENGRAPHIS_RELEASE_CANDIDATE_ID: ${{ vars.ENGRAPHIS_RELEASE_CANDIDATE_ID }}
+          ENGRAPHIS_RELEASE_LEDGER_SHA256: ${{ vars.ENGRAPHIS_RELEASE_LEDGER_SHA256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check "cryptography==50.0.0"
+          python -m scripts.verify_release_qualification --dist dist \
+            --commit "$GITHUB_SHA" --tag "$GITHUB_REF_NAME"
 
       - name: Create GitHub Release
         env:
@@ -867,6 +939,7 @@ jobs:
 
   github-release-repair:
     name: Repair GitHub Release
+    environment: release-qualification
     if: >-
       github.event_name == 'workflow_dispatch' &&
       github.ref == 'refs/heads/main' &&
@@ -962,6 +1035,7 @@ jobs:
           import json
           import sys
           from pathlib import Path
+          from scripts.release_evidence import installed_bundle_records
 
           tag, commit = sys.argv[1:]
           evidence_root = Path("candidate-evidence")
@@ -991,6 +1065,8 @@ jobs:
               evidence["container"]["sbom"],
               evidence["container"]["vulnerability_scan"],
           ]
+          if "installed_journeys" in evidence:
+              records.extend(installed_bundle_records(evidence["installed_journeys"], actual))
           for record in records:
               path = evidence_root / Path(record["path"]).name
               assert path.is_file()
@@ -1004,6 +1080,7 @@ jobs:
             fi
           done < "$RUNNER_TEMP/release-run-candidates"
           test -n "$selected_run"
+          printf 'ENGRAPHIS_REPAIR_COMMIT=%s\n' "$tag_sha" >> "$GITHUB_ENV"
 
       - name: Verify any previously published subset
         env:
@@ -1021,6 +1098,20 @@ jobs:
           mkdir verified-dist
           cp dist/*.whl dist/*.tar.gz verified-dist/
 
+      - name: Require signed full-product qualification before PyPI repair
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          ENGRAPHIS_RELEASE_QUALIFICATION: ${{ vars.ENGRAPHIS_RELEASE_QUALIFICATION }}
+          ENGRAPHIS_RELEASE_VERIFY_KEY: ${{ vars.ENGRAPHIS_RELEASE_VERIFY_KEY }}
+          ENGRAPHIS_RELEASE_CANDIDATE_ID: ${{ vars.ENGRAPHIS_RELEASE_CANDIDATE_ID }}
+          ENGRAPHIS_RELEASE_LEDGER_SHA256: ${{ vars.ENGRAPHIS_RELEASE_LEDGER_SHA256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check "cryptography==50.0.0"
+          python -m scripts.verify_release_qualification --dist dist \
+            --commit "$ENGRAPHIS_REPAIR_COMMIT" --tag "$RELEASE_TAG"
+
       - name: Publish only missing verified distributions
         uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # v1.14.1
         with:
@@ -1033,6 +1124,19 @@ jobs:
         run: >-
           python scripts/verify_release_artifacts.py --dist verified-dist
           --version "${RELEASE_TAG#v}" --retries 18 --delay 10
+
+      - name: Require signed full-product qualification before GitHub repair
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          ENGRAPHIS_RELEASE_QUALIFICATION: ${{ vars.ENGRAPHIS_RELEASE_QUALIFICATION }}
+          ENGRAPHIS_RELEASE_VERIFY_KEY: ${{ vars.ENGRAPHIS_RELEASE_VERIFY_KEY }}
+          ENGRAPHIS_RELEASE_CANDIDATE_ID: ${{ vars.ENGRAPHIS_RELEASE_CANDIDATE_ID }}
+          ENGRAPHIS_RELEASE_LEDGER_SHA256: ${{ vars.ENGRAPHIS_RELEASE_LEDGER_SHA256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m scripts.verify_release_qualification --dist verified-dist \
+            --commit "$ENGRAPHIS_REPAIR_COMMIT" --tag "$RELEASE_TAG"
 
       - name: Repair GitHub Release
         env:

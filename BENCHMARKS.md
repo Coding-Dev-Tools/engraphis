@@ -9,14 +9,14 @@ For the locked operator sequence for a public canonical run, see
 ### Public numeric evidence registry
 
 Every exact public aggregate retained below comes from the checked-in, public-safe
-[`offline-fixtures-v1.json`](docs/benchmark-evidence/offline-fixtures-v1.json) artifact. Its
+[`offline-fixtures-v3.json`](docs/benchmark-evidence/offline-fixtures-v3.json) artifact. Its
 SHA-256 is
-`4d5056d137182ae5cf116c5d59af18b38a7a0ed7731885e9597f63e549cb46b7`, also recorded in the
+`2d6b4fab9e75edc91d105d49877f9225f28ffe4d366e40a44e931f19cb13f498`, also recorded in the
 adjacent `.sha256` file. The artifact contains no raw questions, answers, prompts, customer data,
 or per-record content fingerprints.
 
 The fixture-suite digest is
-`f5544b56f009b2fc16dbae992039971899daf2b0095ee8d15bad5914c7f399a9`. The artifact defines
+`95c233e3fb79a1618bf40f0daefb36d3d1772b1f332d281d6f4c5d6cc902455b`. The artifact defines
 the digest algorithm and records the SHA-256 of every suite and dataset file. Each evidence ID
 also binds its exact command through `sha256(UTF-8 exact command)`:
 
