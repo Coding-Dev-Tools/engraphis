@@ -9,6 +9,7 @@ Prefixed ids (``mem_...``, ``repo_...``) make logs and traces self-describing.
 """
 from __future__ import annotations
 
+import os
 import secrets
 import threading
 import time
@@ -20,6 +21,20 @@ _MAX_RANDOM = (1 << 80) - 1
 _ULID_LOCK = threading.Lock()
 _LAST_TIMESTAMP_MS = -1
 _LAST_RANDOM = -1
+_LAST_PID = os.getpid()
+
+
+def _reset_ulid_state_after_fork() -> None:
+    """Drop inherited sequence state and locks in a forked child."""
+    global _LAST_PID, _LAST_RANDOM, _LAST_TIMESTAMP_MS, _ULID_LOCK
+    _ULID_LOCK = threading.Lock()
+    _LAST_PID = os.getpid()
+    _LAST_TIMESTAMP_MS = -1
+    _LAST_RANDOM = -1
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_ulid_state_after_fork)
 
 
 # Canonical prefixes for each entity kind.
@@ -59,8 +74,13 @@ def ulid(timestamp_ms: Optional[int] = None) -> str:
         ts = timestamp_ms
     if not 0 <= ts < _MAX_TIMESTAMP_MS:
         raise ValueError("timestamp_ms must be an integer in range [0, 2**48)")
-    global _LAST_RANDOM, _LAST_TIMESTAMP_MS
+    global _LAST_PID, _LAST_RANDOM, _LAST_TIMESTAMP_MS
     with _ULID_LOCK:
+        pid = os.getpid()
+        if pid != _LAST_PID:
+            _LAST_PID = pid
+            _LAST_TIMESTAMP_MS = -1
+            _LAST_RANDOM = -1
         if ts == _LAST_TIMESTAMP_MS:
             if _LAST_RANDOM >= _MAX_RANDOM:
                 raise RuntimeError("ULID entropy exhausted within one millisecond")
