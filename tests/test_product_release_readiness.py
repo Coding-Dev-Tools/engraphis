@@ -1,6 +1,8 @@
 """A checklist label cannot bypass missing, stale or contradictory evidence."""
 import hashlib
+import importlib.util
 import json
+import py_compile
 import subprocess
 
 import pytest
@@ -248,6 +250,119 @@ def test_strict_cli_requires_clean_matching_engine(ledger, tmp_path):
     assert main(args) == 0
     (repository / "drift.txt").write_text("changed", encoding="utf-8")
     assert main(args) == 1
+
+
+def test_ignored_executable_artifact_cannot_qualify_candidate(ledger, tmp_path):
+    repository = tmp_path / "ignored-repo"
+    repository.mkdir()
+    (repository / ".gitignore").write_text("*.pyc\n", encoding="utf-8")
+    (repository / "engine.py").write_text("original", encoding="utf-8")
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+    subprocess.run(["git", "add", ".gitignore", "engine.py"], cwd=repository, check=True)
+    subprocess.run(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                    "commit", "--quiet", "-m", "fixture"], cwd=repository, check=True)
+    ledger["components"]["engine"]["commit"] = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=repository, text=True).strip()
+    ledger["candidate_id"] = candidate_id(ledger["components"])
+    for name in RELEASE_GATES:
+        pass_gate(ledger, tmp_path, name)
+    (repository / "ignored.pyc").write_bytes(b"not executable Python bytecode")
+    result = validate(ledger, tmp_path, engine_root=repository)
+    assert not result["engine_checkout_verified"]
+    assert any("ignored executable artifacts" in error for error in result["errors"])
+    assert not result["valid"]
+
+
+def test_ignored_importable_source_cannot_qualify_candidate(ledger, tmp_path):
+    repository = tmp_path / "ignored-source-repo"
+    repository.mkdir()
+    (repository / ".gitignore").write_text("sitecustomize.py\n", encoding="utf-8")
+    (repository / "engine.py").write_text("original", encoding="utf-8")
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+    subprocess.run(["git", "add", ".gitignore", "engine.py"], cwd=repository, check=True)
+    subprocess.run(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                    "commit", "--quiet", "-m", "fixture"], cwd=repository, check=True)
+    ledger["components"]["engine"]["commit"] = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=repository, text=True).strip()
+    ledger["candidate_id"] = candidate_id(ledger["components"])
+    for name in RELEASE_GATES:
+        pass_gate(ledger, tmp_path, name)
+    (repository / "sitecustomize.py").write_text("raise RuntimeError('ignored')\n", encoding="utf-8")
+    result = validate(ledger, tmp_path, engine_root=repository)
+    assert not result["engine_checkout_verified"]
+    assert any("sitecustomize.py" in error for error in result["errors"])
+    assert not result["valid"]
+
+
+def test_unchecked_hash_bytecode_cannot_qualify_candidate(ledger, tmp_path):
+    repository = tmp_path / "unchecked-bytecode-repo"
+    repository.mkdir()
+    (repository / ".gitignore").write_text("__pycache__/\n", encoding="utf-8")
+    source = repository / "engine.py"
+    source.write_text("value = 'tracked'\n", encoding="utf-8")
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+    subprocess.run(["git", "add", ".gitignore", "engine.py"], cwd=repository, check=True)
+    subprocess.run(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                    "commit", "--quiet", "-m", "fixture"], cwd=repository, check=True)
+    ledger["components"]["engine"]["commit"] = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=repository, text=True).strip()
+    ledger["candidate_id"] = candidate_id(ledger["components"])
+    for name in RELEASE_GATES:
+        pass_gate(ledger, tmp_path, name)
+    py_compile.compile(
+        str(source),
+        cfile=importlib.util.cache_from_source(str(source)),
+        doraise=True,
+        invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH,
+    )
+    result = validate(ledger, tmp_path, engine_root=repository)
+    assert not result["engine_checkout_verified"]
+    assert any("__pycache__" in error for error in result["errors"])
+    assert not result["valid"]
+
+
+def test_extensionless_ignored_script_cannot_qualify_candidate(ledger, tmp_path):
+    repository = tmp_path / "extensionless-script-repo"
+    repository.mkdir()
+    (repository / ".gitignore").write_text("release-helper\n", encoding="utf-8")
+    (repository / "engine.py").write_text("original", encoding="utf-8")
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+    subprocess.run(["git", "add", ".gitignore", "engine.py"], cwd=repository, check=True)
+    subprocess.run(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                    "commit", "--quiet", "-m", "fixture"], cwd=repository, check=True)
+    ledger["components"]["engine"]["commit"] = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=repository, text=True).strip()
+    ledger["candidate_id"] = candidate_id(ledger["components"])
+    for name in RELEASE_GATES:
+        pass_gate(ledger, tmp_path, name)
+    (repository / "release-helper").write_text("#!/bin/sh\necho ignored\n", encoding="utf-8")
+    result = validate(ledger, tmp_path, engine_root=repository)
+    assert not result["engine_checkout_verified"]
+    assert any("release-helper" in error for error in result["errors"])
+    assert not result["valid"]
+
+
+def test_ignored_build_entrypoint_cannot_qualify_candidate(ledger, tmp_path):
+    repository = tmp_path / "ignored-build-repo"
+    repository.mkdir()
+    (repository / ".gitignore").write_text("build/\n", encoding="utf-8")
+    (repository / "engine.py").write_text("original", encoding="utf-8")
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+    subprocess.run(["git", "add", ".gitignore", "engine.py"], cwd=repository, check=True)
+    subprocess.run(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                    "commit", "--quiet", "-m", "fixture"], cwd=repository, check=True)
+    ledger["components"]["engine"]["commit"] = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=repository, text=True).strip()
+    ledger["candidate_id"] = candidate_id(ledger["components"])
+    for name in RELEASE_GATES:
+        pass_gate(ledger, tmp_path, name)
+    build = repository / "build"
+    build.mkdir()
+    (build / "__main__.py").write_text("raise RuntimeError('ignored build')\n", encoding="utf-8")
+    result = validate(ledger, tmp_path, engine_root=repository)
+    assert not result["engine_checkout_verified"]
+    assert any("build/__main__.py" in error for error in result["errors"])
+    assert not result["valid"]
 
 
 @pytest.mark.parametrize("flag", ["--assume-unchanged", "--skip-worktree"])
