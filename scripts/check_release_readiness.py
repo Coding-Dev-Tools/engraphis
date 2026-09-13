@@ -12,6 +12,7 @@ import json
 import math
 import os
 import re
+import stat
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -36,8 +37,8 @@ _EXECUTABLE_SUFFIXES = frozenset({
     # ``sitecustomize.py`` executes before the candidate package and can alter
     # imports even when the tracked tree is clean.
     ".bat", ".cjs", ".cmd", ".css", ".dll", ".dylib", ".exe", ".html",
-    ".js", ".jsx", ".mjs", ".node", ".ps1", ".pyd", ".py", ".pyc", ".pyo",
-    ".pyw", ".sh", ".so", ".ts", ".tsx",
+    ".egg", ".js", ".jsx", ".mjs", ".node", ".pth", ".ps1", ".pyd", ".py",
+    ".pyc", ".pyo", ".pyw", ".sh", ".so", ".ts", ".tsx", ".whl", ".zip",
 })
 _IGNORED_RUNTIME_DIRS = frozenset({
     ".codex-pytest-tmp", ".hosted-eval-results", ".playwright", ".private-eval",
@@ -45,6 +46,24 @@ _IGNORED_RUNTIME_DIRS = frozenset({
     "build", "dist", "models_cache", "node_modules", "playwright-report",
     "test-results", "venv",
 })
+
+
+def _is_ignored_runtime_artifact(root: Path, relative: Path) -> bool:
+    """Return whether an ignored path can execute or affect imports."""
+    if relative.suffix.lower() in _EXECUTABLE_SUFFIXES:
+        return True
+    path = root / relative
+    try:
+        if path.is_symlink():
+            return True
+        mode = path.stat().st_mode
+        if mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
+            return True
+        with path.open("rb") as source:
+            return source.read(2) == b"#!"
+    except OSError:
+        # An unreadable ignored artifact cannot be proven harmless.
+        return True
 
 
 def canonical_bytes(value: Any) -> bytes:
@@ -107,12 +126,11 @@ def _ignored_executable_paths(root: Path) -> list[str]:
         if not entry:
             continue
         relative = Path(os.fsdecode(entry))
-        if relative.suffix.lower() not in _EXECUTABLE_SUFFIXES:
-            continue
         parts = {part.lower() for part in relative.parts}
         if parts & _IGNORED_RUNTIME_DIRS:
             continue
-        suspicious.append(relative.as_posix())
+        if _is_ignored_runtime_artifact(root, relative):
+            suspicious.append(relative.as_posix())
     return suspicious
 
 
