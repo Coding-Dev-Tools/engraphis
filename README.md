@@ -77,9 +77,9 @@ its counting boundary explicit.
 | Packed prompt-context usage in the same 26-question CodeMem sample pass | Hard budget: **1,500** tokens; observed mean: **85.38**; observed maximum: **108** | A hard cap prevents a recall from exceeding its configured context budget | This is usage accounting, not a before/after savings comparison |
 
 These values are evidence IDs `offline-chunking` and `offline-performance` in
-[`offline-fixtures-v8.json`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/benchmark-evidence/offline-fixtures-v8.json),
+[`offline-fixtures-v9.json`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/benchmark-evidence/offline-fixtures-v9.json),
 SHA-256
-`f48f4aa3b4bde802c1b2f008820ee1fc45faee1901e876e0725a4b77964e44c2`.
+`455fc9d32a236e582a49aaaf9b84f30cae2573dc6ed982f4dd7dd845afcaf24c`.
 [`BENCHMARKS.md`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/BENCHMARKS.md#public-numeric-evidence-registry)
 records the matching suite digest, exact commands, and per-command config digests. External,
 model-dependent, consolidation, productivity, and latency results remain unpublished until the
