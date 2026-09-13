@@ -32,7 +32,12 @@ _HASH = re.compile(r"[a-f0-9]{64}\Z")
 _COMMIT = re.compile(r"[a-f0-9]{40}\Z")
 _MAX_BYTES = 8 * 1024 * 1024
 _EXECUTABLE_SUFFIXES = frozenset({
-    ".dll", ".dylib", ".exe", ".node", ".pyd", ".pyc", ".pyo", ".so",
+    # Source files are included because an ignored module such as
+    # ``sitecustomize.py`` executes before the candidate package and can alter
+    # imports even when the tracked tree is clean.
+    ".bat", ".cjs", ".cmd", ".css", ".dll", ".dylib", ".exe", ".html",
+    ".js", ".jsx", ".mjs", ".node", ".ps1", ".pyd", ".py", ".pyc", ".pyo",
+    ".pyw", ".sh", ".so", ".ts", ".tsx",
 })
 _IGNORED_RUNTIME_DIRS = frozenset({
     ".codex-pytest-tmp", ".hosted-eval-results", ".playwright", ".private-eval",
@@ -87,18 +92,12 @@ def _ignored_executable_paths(root: Path) -> list[str]:
     """Return ignored executable artifacts that can affect a source checkout.
 
     ``git status`` deliberately hides ignored files. Release qualification may
-    import source from the checkout, so an ignored bytecode/native artifact can
-    change behavior even when the tracked tree is clean. Standard tool caches
-    are excluded; bytecode under ``__pycache__`` is allowed only when it maps to
-    a tracked Python source file.
+    import source from the checkout, so an ignored source, bytecode, native
+    artifact or runtime script can change behavior even when the tracked tree
+    is clean. Standard tool/runtime directories are excluded because they are
+    not candidate source paths; all matching artifacts elsewhere fail closed,
+    including bytecode under ``__pycache__``.
     """
-    tracked = {
-        Path(os.fsdecode(entry)).as_posix()
-        for entry in subprocess.check_output(
-            ["git", "ls-files", "-z"], cwd=root, stderr=subprocess.DEVNULL
-        ).split(b"\0")
-        if entry
-    }
     ignored = subprocess.check_output(
         ["git", "ls-files", "--others", "--ignored", "--exclude-standard", "-z"],
         cwd=root, stderr=subprocess.DEVNULL,
@@ -113,13 +112,6 @@ def _ignored_executable_paths(root: Path) -> list[str]:
         parts = {part.lower() for part in relative.parts}
         if parts & _IGNORED_RUNTIME_DIRS:
             continue
-        if "__pycache__" in parts:
-            cache_index = next(index for index, part in enumerate(relative.parts)
-                               if part.lower() == "__pycache__")
-            stem = relative.name.split(".", 1)[0]
-            source = Path(*relative.parts[:cache_index]) / (stem + ".py")
-            if source.as_posix() in tracked:
-                continue
         suspicious.append(relative.as_posix())
     return suspicious
 
