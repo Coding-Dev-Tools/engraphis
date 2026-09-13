@@ -10,6 +10,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import re
 import subprocess
 from datetime import datetime, timedelta, timezone
@@ -30,6 +31,15 @@ STATES = {"PASS", "FAIL", "UNVERIFIED"}
 _HASH = re.compile(r"[a-f0-9]{64}\Z")
 _COMMIT = re.compile(r"[a-f0-9]{40}\Z")
 _MAX_BYTES = 8 * 1024 * 1024
+_EXECUTABLE_SUFFIXES = frozenset({
+    ".dll", ".dylib", ".exe", ".node", ".pyd", ".pyc", ".pyo", ".so",
+})
+_IGNORED_RUNTIME_DIRS = frozenset({
+    ".codex-pytest-tmp", ".hosted-eval-results", ".playwright", ".private-eval",
+    ".pytest_cache", ".release-full-tmp", ".ruff_cache", ".secrets", ".venv",
+    "build", "dist", "models_cache", "node_modules", "playwright-report",
+    "test-results", "venv",
+})
 
 
 def canonical_bytes(value: Any) -> bytes:
@@ -71,6 +81,47 @@ def _decode_json(payload: bytes) -> Any:
                       parse_float=_finite_float,
                       parse_constant=lambda _: (_ for _ in ()).throw(
                           ValueError("non-finite JSON number")))
+
+
+def _ignored_executable_paths(root: Path) -> list[str]:
+    """Return ignored executable artifacts that can affect a source checkout.
+
+    ``git status`` deliberately hides ignored files. Release qualification may
+    import source from the checkout, so an ignored bytecode/native artifact can
+    change behavior even when the tracked tree is clean. Standard tool caches
+    are excluded; bytecode under ``__pycache__`` is allowed only when it maps to
+    a tracked Python source file.
+    """
+    tracked = {
+        Path(os.fsdecode(entry)).as_posix()
+        for entry in subprocess.check_output(
+            ["git", "ls-files", "-z"], cwd=root, stderr=subprocess.DEVNULL
+        ).split(b"\0")
+        if entry
+    }
+    ignored = subprocess.check_output(
+        ["git", "ls-files", "--others", "--ignored", "--exclude-standard", "-z"],
+        cwd=root, stderr=subprocess.DEVNULL,
+    )
+    suspicious: list[str] = []
+    for entry in ignored.split(b"\0"):
+        if not entry:
+            continue
+        relative = Path(os.fsdecode(entry))
+        if relative.suffix.lower() not in _EXECUTABLE_SUFFIXES:
+            continue
+        parts = {part.lower() for part in relative.parts}
+        if parts & _IGNORED_RUNTIME_DIRS:
+            continue
+        if "__pycache__" in parts:
+            cache_index = next(index for index, part in enumerate(relative.parts)
+                               if part.lower() == "__pycache__")
+            stem = relative.name.split(".", 1)[0]
+            source = Path(*relative.parts[:cache_index]) / (stem + ".py")
+            if source.as_posix() in tracked:
+                continue
+        suspicious.append(relative.as_posix())
+    return suspicious
 
 
 def new_ledger(components: dict) -> dict:
@@ -359,10 +410,16 @@ def validate(ledger: Any, evidence_root: Path, *, engine_root: Optional[Path] = 
                                               cwd=engine_root, stderr=subprocess.DEVNULL)
             hidden = any(entry[:1].islower() or entry[:1] == b"S"
                          for entry in indexed.split(b"\0") if entry)
+            ignored_executables = _ignored_executable_paths(engine_root)
             engine_identity = components.get("engine")
             if (not isinstance(engine_identity, dict)
-                    or actual != engine_identity.get("commit") or dirty or hidden):
-                errors.append("engine checkout must be clean and match the candidate commit")
+                    or actual != engine_identity.get("commit") or dirty or hidden
+                    or ignored_executables):
+                if ignored_executables:
+                    errors.append("engine checkout contains ignored executable artifacts: "
+                                  + ", ".join(ignored_executables[:8]))
+                else:
+                    errors.append("engine checkout must be clean and match the candidate commit")
             else:
                 engine_verified = True
         except (OSError, subprocess.CalledProcessError):

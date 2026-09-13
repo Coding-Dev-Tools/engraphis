@@ -10,11 +10,16 @@ Prefixed ids (``mem_...``, ``repo_...``) make logs and traces self-describing.
 from __future__ import annotations
 
 import secrets
+import threading
 import time
 from typing import Optional
 
 _CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"  # excludes I, L, O, U
 _MAX_TIMESTAMP_MS = 1 << 48
+_MAX_RANDOM = (1 << 80) - 1
+_ULID_LOCK = threading.Lock()
+_LAST_TIMESTAMP_MS = -1
+_LAST_RANDOM = -1
 
 
 # Canonical prefixes for each entity kind.
@@ -45,7 +50,7 @@ def _encode(value: int, length: int) -> str:
 
 
 def ulid(timestamp_ms: Optional[int] = None) -> str:
-    """Return a 26-char, lexicographically sortable ULID."""
+    """Return a 26-char ULID that is monotonic within one process and timestamp."""
     if timestamp_ms is None:
         ts = int(time.time() * 1000)
     elif isinstance(timestamp_ms, bool) or not isinstance(timestamp_ms, int):
@@ -54,7 +59,16 @@ def ulid(timestamp_ms: Optional[int] = None) -> str:
         ts = timestamp_ms
     if not 0 <= ts < _MAX_TIMESTAMP_MS:
         raise ValueError("timestamp_ms must be an integer in range [0, 2**48)")
-    rand = secrets.randbits(80)
+    global _LAST_RANDOM, _LAST_TIMESTAMP_MS
+    with _ULID_LOCK:
+        if ts == _LAST_TIMESTAMP_MS:
+            if _LAST_RANDOM >= _MAX_RANDOM:
+                raise RuntimeError("ULID entropy exhausted within one millisecond")
+            rand = _LAST_RANDOM + 1
+        else:
+            rand = secrets.randbits(80)
+        _LAST_TIMESTAMP_MS = ts
+        _LAST_RANDOM = rand
     return _encode(ts, 10) + _encode(rand, 16)
 
 

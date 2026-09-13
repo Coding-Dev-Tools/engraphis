@@ -250,6 +250,27 @@ def test_strict_cli_requires_clean_matching_engine(ledger, tmp_path):
     assert main(args) == 1
 
 
+def test_ignored_executable_artifact_cannot_qualify_candidate(ledger, tmp_path):
+    repository = tmp_path / "ignored-repo"
+    repository.mkdir()
+    (repository / ".gitignore").write_text("*.pyc\n", encoding="utf-8")
+    (repository / "engine.py").write_text("original", encoding="utf-8")
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+    subprocess.run(["git", "add", ".gitignore", "engine.py"], cwd=repository, check=True)
+    subprocess.run(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                    "commit", "--quiet", "-m", "fixture"], cwd=repository, check=True)
+    ledger["components"]["engine"]["commit"] = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=repository, text=True).strip()
+    ledger["candidate_id"] = candidate_id(ledger["components"])
+    for name in RELEASE_GATES:
+        pass_gate(ledger, tmp_path, name)
+    (repository / "ignored.pyc").write_bytes(b"not executable Python bytecode")
+    result = validate(ledger, tmp_path, engine_root=repository)
+    assert not result["engine_checkout_verified"]
+    assert any("ignored executable artifacts" in error for error in result["errors"])
+    assert not result["valid"]
+
+
 @pytest.mark.parametrize("flag", ["--assume-unchanged", "--skip-worktree"])
 def test_hidden_git_changes_cannot_qualify_candidate(ledger, tmp_path, flag):
     repository = tmp_path / "hidden-repo"
