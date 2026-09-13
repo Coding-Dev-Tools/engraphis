@@ -1697,9 +1697,22 @@ def _build_digest_content(
 ) -> tuple[str, str, bool, dict[str, Any]]:
     """Build deterministic content and an optional bounded provider summary."""
     subject = ", ".join(_common_tokens(cluster)) or "recurring episode"
+    # Memory ids are time-sortable only to the millisecond and intentionally carry
+    # random suffixes. A cluster built from records written at different clock
+    # resolutions must therefore not use timestamp or id order to choose its bounded
+    # quote set: that would make compaction accounting and the digest body vary across
+    # otherwise identical runs.
+    quote_cluster = sorted(
+        cluster,
+        key=lambda memory: (
+            memory.content,
+            memory.title,
+            memory.id,
+        ),
+    )
     quotes = [
         memory.content.strip().replace("\n", " ")[:300]
-        for memory in cluster[:DIGEST_QUOTES]
+        for memory in quote_cluster[:DIGEST_QUOTES]
     ]
     content = (
         f"Recurring pattern ({len(cluster)} occurrences): {subject}.\n"

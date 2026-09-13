@@ -10,7 +10,9 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import re
+import stat
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -30,6 +32,51 @@ STATES = {"PASS", "FAIL", "UNVERIFIED"}
 _HASH = re.compile(r"[a-f0-9]{64}\Z")
 _COMMIT = re.compile(r"[a-f0-9]{40}\Z")
 _MAX_BYTES = 8 * 1024 * 1024
+_EXECUTABLE_SUFFIXES = frozenset({
+    # Source files are included because an ignored module such as
+    # ``sitecustomize.py`` executes before the candidate package and can alter
+    # imports even when the tracked tree is clean.
+    ".bat", ".cjs", ".cmd", ".css", ".dll", ".dylib", ".exe", ".html",
+    ".egg", ".js", ".jsx", ".mjs", ".node", ".pth", ".ps1", ".pyd", ".py",
+    ".pyc", ".pyo", ".pyw", ".sh", ".so", ".ts", ".tsx", ".whl", ".zip",
+})
+_IGNORED_RUNTIME_DIRS = frozenset({
+    ".codex-pytest-tmp", ".hosted-eval-results", ".playwright", ".private-eval",
+    ".pytest_cache", ".release-full-tmp", ".ruff_cache", ".secrets", ".venv",
+    "build", "dist", "models_cache", "node_modules", "playwright-report",
+    "test-results", "venv",
+})
+_IGNORED_RUNTIME_ENTRYPOINTS = frozenset({
+    "__init__.py", "__main__.py", "sitecustomize.py", "usercustomize.py",
+})
+
+
+def _is_ignored_runtime_artifact(root: Path, relative: Path) -> bool:
+    """Return whether an ignored path can execute or affect imports."""
+    if relative.suffix.lower() in _EXECUTABLE_SUFFIXES:
+        return True
+    path = root / relative
+    try:
+        if path.is_symlink():
+            return True
+        mode = path.stat().st_mode
+        if mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
+            return True
+        with path.open("rb") as source:
+            return source.read(2) == b"#!"
+    except OSError:
+        # An unreadable ignored artifact cannot be proven harmless.
+        return True
+
+
+def _is_ignored_runtime_entrypoint(relative: Path) -> bool:
+    """Return whether an excluded directory contains a top-level import hook."""
+    parts = relative.parts
+    return (
+        len(parts) == 2
+        and parts[0].lower() in _IGNORED_RUNTIME_DIRS
+        and parts[1].lower() in _IGNORED_RUNTIME_ENTRYPOINTS
+    )
 
 
 def canonical_bytes(value: Any) -> bytes:
@@ -71,6 +118,36 @@ def _decode_json(payload: bytes) -> Any:
                       parse_float=_finite_float,
                       parse_constant=lambda _: (_ for _ in ()).throw(
                           ValueError("non-finite JSON number")))
+
+
+def _ignored_executable_paths(root: Path) -> list[str]:
+    """Return ignored executable artifacts that can affect a source checkout.
+
+    ``git status`` deliberately hides ignored files. Release qualification may
+    import source from the checkout, so an ignored source, bytecode, native
+    artifact or runtime script can change behavior even when the tracked tree
+    is clean. Standard tool/runtime directories are excluded because they are
+    not candidate source paths; all matching artifacts elsewhere fail closed,
+    including bytecode under ``__pycache__``.
+    """
+    ignored = subprocess.check_output(
+        ["git", "ls-files", "--others", "--ignored", "--exclude-standard", "-z"],
+        cwd=root, stderr=subprocess.DEVNULL,
+    )
+    suspicious: list[str] = []
+    for entry in ignored.split(b"\0"):
+        if not entry:
+            continue
+        relative = Path(os.fsdecode(entry))
+        if _is_ignored_runtime_entrypoint(relative):
+            suspicious.append(relative.as_posix())
+            continue
+        parts = {part.lower() for part in relative.parts}
+        if parts & _IGNORED_RUNTIME_DIRS:
+            continue
+        if _is_ignored_runtime_artifact(root, relative):
+            suspicious.append(relative.as_posix())
+    return suspicious
 
 
 def new_ledger(components: dict) -> dict:
@@ -359,10 +436,16 @@ def validate(ledger: Any, evidence_root: Path, *, engine_root: Optional[Path] = 
                                               cwd=engine_root, stderr=subprocess.DEVNULL)
             hidden = any(entry[:1].islower() or entry[:1] == b"S"
                          for entry in indexed.split(b"\0") if entry)
+            ignored_executables = _ignored_executable_paths(engine_root)
             engine_identity = components.get("engine")
             if (not isinstance(engine_identity, dict)
-                    or actual != engine_identity.get("commit") or dirty or hidden):
-                errors.append("engine checkout must be clean and match the candidate commit")
+                    or actual != engine_identity.get("commit") or dirty or hidden
+                    or ignored_executables):
+                if ignored_executables:
+                    errors.append("engine checkout contains ignored executable artifacts: "
+                                  + ", ".join(ignored_executables[:8]))
+                else:
+                    errors.append("engine checkout must be clean and match the candidate commit")
             else:
                 engine_verified = True
         except (OSError, subprocess.CalledProcessError):

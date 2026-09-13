@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from engraphis.core.consolidate import _cluster_by_subject, consolidate
+from engraphis.core.consolidate import _build_digest_content, _cluster_by_subject, consolidate
 from engraphis.core.engine import MemoryEngine
 from engraphis.core.interfaces import MemoryRecord, MemoryType, Scope, SearchFilter
 from engraphis.service import MemoryService, ValidationError
@@ -714,6 +714,16 @@ def test_consolidate_reports_compaction_savings_on_a_real_cluster():
     for key in ("tokens_before", "tokens_after", "tokens_saved", "reduction_pct"):
         assert key in entry
     assert report["compaction"]["total_tokens_saved"] >= comp["tokens_saved"]
+
+
+def test_digest_compaction_is_stable_for_equivalent_cluster_order():
+    eng, wid, rid = _engine_with_large_cluster()
+    flt = SearchFilter(workspace_id=wid, repo_id=rid, mtypes=[MemoryType.EPISODIC])
+    cluster = eng.store.list_memories_page(flt)
+    forward, *_ = _build_digest_content(cluster, llm=None)
+    reverse, *_ = _build_digest_content(list(reversed(cluster)), llm=None)
+
+    assert forward == reverse
 
 
 def test_consolidate_archive_reports_freed_tokens():
