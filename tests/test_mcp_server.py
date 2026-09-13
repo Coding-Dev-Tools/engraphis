@@ -562,7 +562,7 @@ def test_mcp_server_module_entrypoint_runs_stdio_handshake(tmp_path):
         "ENGRAPHIS_EXTRACTOR": "none",
         "ENGRAPHIS_GRAPH_EXTRACTOR": "none",
         "ENGRAPHIS_VECTOR_BACKEND": "numpy",
-        "ENGRAPHIS_MCP_WARMUP": "0",
+        "ENGRAPHIS_MCP_WARMUP": "1",
     })
     result = subprocess.run(
         [sys.executable, "-m", "engraphis.mcp_server"],
@@ -624,7 +624,7 @@ def test_classic_mcp_entrypoint_preserves_historical_server_identity(tmp_path):
         "ENGRAPHIS_EXTRACTOR": "none",
         "ENGRAPHIS_GRAPH_EXTRACTOR": "none",
         "ENGRAPHIS_VECTOR_BACKEND": "numpy",
-        "ENGRAPHIS_MCP_WARMUP": "0",
+        "ENGRAPHIS_MCP_WARMUP": "1",
     })
     result = subprocess.run(
         [sys.executable, "-m", "engraphis.mcp_classic_cli"],

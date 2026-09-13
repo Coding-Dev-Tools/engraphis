@@ -21,6 +21,27 @@ def test_ulid_is_time_sortable():
     assert early < late
 
 
+def test_ulids_are_monotonic_within_one_timestamp():
+    values = [ids.ulid(timestamp_ms=42_000) for _ in range(4)]
+    assert values == sorted(values)
+
+
+def test_ulid_sequence_resets_when_process_id_changes(monkeypatch):
+    random_values = iter((100, 200))
+    process_id = 1000
+    monkeypatch.setattr(ids.os, "getpid", lambda: process_id)
+    monkeypatch.setattr(ids.secrets, "randbits", lambda _: next(random_values))
+
+    first = ids.ulid(timestamp_ms=42_000)
+    second = ids.ulid(timestamp_ms=42_000)
+    process_id = 1001
+    third = ids.ulid(timestamp_ms=42_000)
+
+    assert first.endswith(ids._encode(100, 16))
+    assert second.endswith(ids._encode(101, 16))
+    assert third.endswith(ids._encode(200, 16))
+
+
 _CROCKFORD = {
     char: index for index, char in enumerate("0123456789ABCDEFGHJKMNPQRSTVWXYZ")
 }
