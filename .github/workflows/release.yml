@@ -707,6 +707,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      security-events: write
     env:
       CODEQL_ACTION_DIFF_INFORMED_QUERIES: "false"
     strategy:
