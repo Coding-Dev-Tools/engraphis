@@ -394,6 +394,7 @@ def test_tag_release_binds_codeql_reproducibility_and_installed_artifact_smokes(
         assert pin in constraints
     assert 'language: ["python", "javascript-typescript"]' in codeql
     assert 'CODEQL_ACTION_DIFF_INFORMED_QUERIES: "false"' in codeql
+    assert "contents: read\n      security-events: write" in codeql
     assert "github/codeql-action/init@" in codeql
     assert "github/codeql-action/analyze@" in codeql
     assert "upload: never" in codeql
