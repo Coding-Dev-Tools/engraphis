@@ -446,7 +446,10 @@ def test_pyright_core_backend_ratchet_is_pinned_and_runs_in_ci_and_release():
     ci = _text(".github/workflows/ci.yml")
     release = _text(".github/workflows/release.yml")
 
-    assert pyproject.count('"pyright==1.1.411"') == 2
+    # Keep the dev and test extras on one exact, Dependabot-updatable Pyright pin.
+    pyright_pins = re.findall(r'"(pyright==[^"\n]+)"', pyproject)
+    assert len(pyright_pins) == 2
+    assert pyright_pins[0] == pyright_pins[1]
     assert '"engraphis/core",\n    "engraphis/backends",' in pyproject
     assert '"eval/harness.py",\n    "eval/external.py",' in pyproject
     assert 'pythonVersion = "3.9"' in pyproject
