@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from eval import benchmark_campaign as campaign
-from eval.benchmark import canonical_json, sha256_file
+from eval.benchmark import canonical_json, sha256_file, validate_report
 
 
 def small_manifest():
@@ -49,6 +49,36 @@ def test_completed_attempt_resumes_without_duplicate(tmp_path):
     assert complete["noninferiority"] == "indeterminate"
 
 
+def test_campaign_attempt_reaches_real_ledger_when_digest_starts_with_digit(tmp_path, monkeypatch):
+    from eval.campaign_api import LunaResponsesClient, MODEL
+    from eval.campaign_ledger import BudgetApproval, CampaignBinding, CampaignLedger
+    from eval.coding_corpus import load_corpus
+
+    corpus = load_corpus()
+    scenario = corpus.scenarios("development")[0]
+    manifest = small_manifest()
+    manifest.update(source={}, docker_image="unused-isolated-oracle")
+    cell = {"scenario_id": scenario.id, "arm": "no_memory", "token_budget": 512, "repetition": 0}
+    monkeypatch.setattr(campaign, "digest", lambda value: "0" * 64)
+    binding = CampaignBinding(campaign_id="attempt-label-regression", model=MODEL,
+        reasoning_effort="medium", dataset_sha256="a" * 64, config_sha256="b" * 64,
+        repo_revision="fixture", pins_sha256="c" * 64)
+    ledger = CampaignLedger(tmp_path / "ledger.jsonl", binding,
+        BudgetApproval.create(max_calls=1, max_cost_micros=20000))
+    class Transport:
+        def create(self, **kwargs):
+            return {"model": MODEL, "output_text": json.dumps({"answer": "done", "citations": [], "files": {}}),
+                    "usage": {"input_tokens": 100, "output_tokens": 10, "total_tokens": 110,
+                              "input_tokens_details": {"cached_tokens": 0},
+                              "output_tokens_details": {"reasoning_tokens": 0}}}
+    result = campaign.run_attempt(manifest, "development_pilot", cell, corpus,
+        LunaResponsesClient(ledger, transport=Transport()),
+        oracle=lambda *args: {"passed": True, "timed_out": False})
+    assert result["status"] == "complete"
+    assert result["reader_calls"] == 1
+    assert ledger.lookup("attempt-" + "0" * 32 + "-reader-0").status == "completed"
+
+
 def test_failed_call_remains_visible_and_stops_resume(tmp_path):
     def runner(*args):
         raise RuntimeError("raw provider SECRET must not be published")
@@ -86,6 +116,7 @@ def test_public_boundary_omits_private_outputs(tmp_path):
     assert public["records"][0]["arm"] == "no_memory"
     assert public["metrics"]["expected_attempts"] == 2
     assert public["metrics"]["leadership_eligible"] is False
+    assert not validate_report(public)
 
 
 def test_summary_and_public_report_preserve_safe_oauth_usage_totals(tmp_path):

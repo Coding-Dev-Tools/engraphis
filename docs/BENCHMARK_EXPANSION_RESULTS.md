@@ -125,7 +125,7 @@ schema and checksum validation. The LongMemEval 4,096-token comparison also comp
 [comparison artifact](benchmark-evidence/longmemeval-budget-comparison-20260916.json) passed
 schema and checksum validation. MAB conflict-resolution and test-time-learning also completed.
 The queue then stopped between jobs because the OAuth implementation changed its source binding.
-The [successor manifest](../eval/configs/benchmark-local-queue-final-20260916.json) preserves those
+The [successor manifest](../eval/configs/benchmark-local-queue-final-v2-20260916.json) preserves those
 five completions and contains only the four unfinished jobs. Its private execution status is
 `.private-eval/benchmark-20260915/local-queue-final/status.json`; a prepared manifest is not a
 completion claim. No hosted calls are included in either local queue.
@@ -145,8 +145,13 @@ were a dependency deprecation and an intentional malformed-ZIP fixture. Native W
 has the pre-existing `os.register_at_fork` platform-stub limitation; the CI target reported zero
 errors. Tests cover budget exhaustion, crash reservations, source drift, duplicate prevention,
 model mismatch, OAuth-only routing, context overflow, redaction, adapters, isolated oracles,
-queue heartbeats, watchdogs and capacity-summary validation. Earlier test snapshots remain
-historical; the selected current deterministic fixture is v14.
+queue heartbeats, watchdogs and capacity-summary validation. The first live pilot then exposed
+a call-label integration defect before any reservation or provider dispatch. The fix prefixes
+digest-based call IDs and also corrects public record identifiers; **63 focused tests** passed
+after these two harness fixes, including real-ledger and artifact-envelope regressions. The
+[failed attempt](benchmark-evidence/core-pilot-oauth-predispatch-failure-20260916.json) is retained
+with zero provider dispatches. The full-suite count above precedes these small harness fixes.
+Earlier snapshots remain historical; the selected current deterministic fixture is v16.
 
 These changes are on `codex/benchmark-expansion-20260915`, based on `ca790261`, with exact source
 bytes retained in the manifests. They remain local for review. No production
