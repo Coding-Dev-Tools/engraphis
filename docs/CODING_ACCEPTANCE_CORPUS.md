@@ -195,10 +195,12 @@ intervals, with category-level failures reported. If uncertainty cannot exclude
 the declared degradation, retain the current default. Missing/error outcomes
 stay in the denominator; do not silently retry or exclude difficult tasks.
 
-The remaining work is actual independent authorship and adjudication, frozen
-artifact/license verification, the executable five-arm adapter, task-oracle and
-budget-interruption tests, and approved paired validation/held-out runs. Passing
-this validator establishes none of those operational results.
+The implementation-authored campaign now provides executable five-arm adapters,
+task oracles and budget-interruption tests; see the
+[expansion results](BENCHMARK_EXPANSION_RESULTS.md). Remaining independent acceptance
+work includes actual independent authorship and adjudication, frozen artifact/license
+verification, and approved paired validation/held-out runs. Passing this validator
+establishes none of those operational results.
 
 ## Matched outcome aggregation
 
@@ -240,3 +242,28 @@ Even statistical support retains `default_action=keep_current_defaults` and
 cannot prove real execution or independent authorship. Completing one pair is
 also not execution of the full five-arm corpus. Local tests and benchmarking are
 already authorized; paid calls remain governed by their separate proposal.
+
+## Versioned implementation corpus repair
+
+The frozen `eval/datasets/coding_memory_v1` remains the historical pilot input. Its
+long-document task demanded exact prose not supplied to the reader. The pilot excludes
+that entire scenario across arms/budgets with a retrospective, checksummed validity mask;
+it does not rewrite or regrade the original outcomes.
+
+The generator has an explicit `coding-memory-v2` option. Its long-document task specifies
+an object with `store`, `retention_days` and `timezone`; session evidence supplies the
+values and the oracle compares that object. Temporary development-fixture tests verify
+that stale code fails and a contract-preserving repair passes. This fixes the measurement
+contract and makes no claim about model or memory quality.
+
+Load/verify defaults still select v1. Generation refuses any nonempty output directory.
+Prepare v2 only at a fresh path, then review and freeze a new campaign before execution:
+
+```powershell
+python -m eval.coding_corpus --materialize --version coding-memory-v2 --root <new-empty-corpus-directory>
+python -m eval.coding_corpus --verify --root <new-empty-corpus-directory>
+```
+
+No v2 model outcome, independent authorship or held-out acceptance is established by
+the generator repair. The 90-cell continuation retains v1 and excludes its invalid
+category; substituting v2 into that continuation would violate its frozen binding.

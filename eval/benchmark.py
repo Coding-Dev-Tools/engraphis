@@ -159,7 +159,9 @@ _PUBLIC_RECORD_FIELDS = frozenset({
     "scenario_id", "family_id", "arm", "token_budget", "repetition", "status",
     "task_success", "citation_validity", "citation_support", "evidence_retention",
     "abstention_correct", "reader_calls", "correction_calls", "oracle_calls",
-    "critical_violation_count",
+    "oracle_outcome", "unscored_reason", "critical_violation_count",
+    "cohort", "campaign_sha256", "source_manifest_sha256", "deadline_seconds",
+    "validity", "eligible_for_quality",
 })
 _PUBLIC_METRIC_PREFIXES = ("recall_at_", "hit_at_", "mrr_at_", "ndcg_at_")
 _PUBLIC_USAGE_FIELDS = frozenset({

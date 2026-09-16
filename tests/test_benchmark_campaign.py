@@ -119,6 +119,75 @@ def test_public_boundary_omits_private_outputs(tmp_path):
     assert not validate_report(public)
 
 
+def test_oracle_timeout_is_unscored_and_not_replayed(tmp_path):
+    manifest = small_manifest()
+    calls = []
+
+    def runner(_manifest, _stage, cell, _corpus, _client):
+        calls.append(cell)
+        return row(
+            cell,
+            status="error",
+            task_success=None,
+            oracle_outcome="timeout_unknown",
+            unscored_reason="oracle_timeout_unknown",
+            oracle_calls=1,
+            private_oracles=[{
+                "passed": False,
+                "returncode": None,
+                "timed_out": True,
+                "oracle_outcome": "timeout_unknown",
+                "stdout": "",
+                "stderr": "oracle timeout",
+            }],
+        )
+
+    summary = campaign.execute(manifest, "development_pilot", tmp_path, None, None,
+                               attempt_runner=runner)
+    assert summary["status"] == "BLOCKED"
+    assert summary["statuses"] == {"error": 1}
+    assert summary["oracle_summary"]["timeouts"] == 1
+    campaign.execute(manifest, "development_pilot", tmp_path, None, None,
+                     attempt_runner=lambda *args: pytest.fail("unscored attempt replayed"))
+    assert len(calls) == 1
+
+    path = tmp_path / "manifest.json"
+    path.write_text(canonical_json(manifest))
+    public = campaign.public_report(path, summary)
+    assert public["metrics"]["oracle_summary"]["unscored"] == 1
+    assert all(record["status"] == "error" for record in public["records"])
+    assert all(record["oracle_outcome"] == "timeout_unknown" for record in public["records"])
+    assert "oracle timeout" not in json.dumps(public)
+    assert not validate_report(public)
+
+
+def test_zero_exit_value_mismatch_remains_a_scored_failure(tmp_path):
+    manifest = small_manifest()
+
+    def runner(_manifest, _stage, cell, _corpus, _client):
+        return row(
+            cell,
+            task_success=False,
+            oracle_outcome="value_mismatch",
+            oracle_calls=1,
+            private_oracles=[{
+                "passed": False,
+                "returncode": 0,
+                "timed_out": False,
+                "oracle_outcome": "value_mismatch",
+                "stdout": "",
+                "stderr": "",
+            }],
+        )
+
+    summary = campaign.execute(manifest, "development_pilot", tmp_path, None, None,
+                               attempt_runner=runner)
+    assert summary["status"] == "COMPLETE"
+    assert summary["arms"]["no_memory"]["successes"] == 0
+    assert summary["oracle_summary"]["value_mismatches"] == 2
+    assert summary["oracle_summary"]["unscored"] == 0
+
+
 def test_summary_and_public_report_preserve_safe_oauth_usage_totals(tmp_path):
     manifest = small_manifest()
     usage = [{

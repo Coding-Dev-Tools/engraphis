@@ -51,7 +51,22 @@ The original, retired API-route inputs are preserved at
 [`benchmark-comparisons-20260916.json`](../eval/configs/benchmark-comparisons-20260916.json).
 Their source-byte bindings cover the earlier implementation on base `ca790261`; the base
 commit alone does not reproduce those changes. The OAuth-only runner rejects this transport.
-Prepare a new successor after freezing the OAuth implementation. Preparation creates no approval.
+The original [OAuth scored run](../eval/configs/benchmark-campaign-oauth-v2-20260916.json)
+binds source commit `7370e148d7793aeb632bc92494528376ec35267e` and campaign
+`59560230f21a371a03de13aab2c055ab49d56ac47c5fbcd0a05835220c93b7d4`.
+The preceding OAuth manifest is retained with a pre-dispatch failure: its call identifier was
+rejected before any reservation or generation. The successor includes the corrected identifier
+and public record envelope. Preparation itself creates no approval.
+
+To reproduce that pilot, use an isolated checkout at that exact source commit and copy
+the frozen OAuth successor manifest and checksum into it from this review package. Later result
+and documentation commits are deliberately separate from the measured source revision. Restore
+the declared dependency and model bytes, verify the existing native ChatGPT OAuth sign-in, and
+prepare a new private approval/results location for a separately authorized replication. To
+inspect the existing run, retain its exact original approval, results directory and source checkout.
+It is stopped at an uncertain call, so ordinary resume deliberately stops there. Do not replay
+its completed or uncertain calls. The explicitly bound continuation below handles only eligible
+cells that were never attempted.
 
 The manifest binds reader instructions, corpus bytes, model revisions, dependency versions,
 source bytes, repository revision, stage membership, context budgets and repetitions. A source
@@ -61,7 +76,7 @@ selection boundary, not a secret or independent evaluation service.
 
 ## Spending and recovery
 
-Every paid stage needs separate owner authorization of its generated proposal. See
+Every model-using stage needs separate owner authorization of its generated proposal. See
 [BENCHMARK_STAGE_BUDGETS.md](BENCHMARK_STAGE_BUDGETS.md). No authorization receipt is created by
 preparation. The `--approval` file must bind the campaign, stage, durable journal location,
 approved prices and limits, an authorization reference, and a bounded UTC validity window.
@@ -78,6 +93,15 @@ the campaign reservation record; they do not implement an additional shared cash
 stages. Input, extraction, correction and reader calls all consume that stage's reservation.
 The journal stores exact completed response text privately for byte-identical recovery.
 
+The core pilot's retrospective eligibility mask excludes all arms/budgets of its invalid
+long-document fixture. A continuation binds that mask, the original ledger, checkpoint set,
+approval and public result before dispatching only previously unattempted eligible cells.
+Original terminal errors are preserved. The continuation's lower remaining allowance counts
+every original reservation, including unknown usage, and cannot expand the approved stage.
+Both parent and child directories are locked against concurrent campaign dispatch. The
+600-second continuation deadline is a separate transport cohort from the original 180 seconds;
+it cannot be hidden inside an equivalent-latency claim.
+
 Each reader gets an ephemeral native thread with environment access, MCP servers, plugins,
 agent delegation and tools disabled. Inherited global Codex instructions remain present;
 their bytes are frozen and common across arms. They are included in reported model usage.
@@ -89,7 +113,15 @@ A completed attempt is never dispatched again. An interrupted reservation is unc
 requires reconciliation with provider usage; the runner does not automatically retry it.
 Errors and missing attempts remain visible. Do not delete journals, move an approved run to a
 new location, or silently replace an error with a successful retry. Archive a rejected attempt
-and approve a separately identified recovery stage if another paid call is necessary.
+and obtain approval for any replay or additional stage. Continuing never-attempted cells within
+the already approved pilot requires a bound recovery receipt, not a second authorization.
+
+After execution, `python -m scripts.audit_coding_oauth_run --manifest <manifest.json>
+--report <public-report.json> --results <private-results> --private-inventory <new-private.json>
+--output <new-public-audit.json>` joins checkpoint, ledger and native journal evidence without
+calling a model. The inventory hashes are taken after execution; they do not prove dispatch-time
+sealing. Native thread-start model identity and absence of rerouting are checked, but final-turn
+model metadata was not captured. An incomplete audit remains `BLOCKED` and preserves its causes.
 
 Validation selection is derived from actual checksummed validation outcomes, with no missing
 attempts, errors, or critical violations and fully scored candidate outcomes. Unsupported
@@ -116,7 +148,7 @@ by campaign preparation, project-authored intervals, or a green offline suite.
   citation support remain ungraded until a separately validated grader is executed; the runner
   leaves them absent rather than promoting lexical overlap to answer quality.
 - Evidence tokens use the common RegexTokenCounter. Serialized JSON proxy measurements, actual
-  Smart/Classic wrapper responses, complete API inputs and provider-reported usage have separate
+  Smart/Classic wrapper responses, complete model inputs and provider-reported usage have separate
   fields and boundaries. Wrapper journeys do not claim network/stdio transport capture.
 - Paired descriptive 95% intervals resample repository-family means. Shared templates limit their
   independence; missing/unscored pairs are reported. Non-inferiority remains `indeterminate` when
@@ -213,9 +245,11 @@ LoCoMo/LongMemEval baselines and LoCoMo k=20 comparison completed before this qu
 frozen prerequisites and are not dispatched again. Five jobs completed before the queue stopped
 at a job boundary on source drift at 04:06:59 UTC: Mem2ActBench, LongMemEval's larger-budget run
 and comparison, and MAB conflict-resolution and test-time-learning. No workload was interrupted.
-The [successor queue](../eval/configs/benchmark-local-queue-final-v2-20260916.json) contains only
+The [successor queue](../eval/configs/benchmark-local-queue-final-v3-20260916.json) contains only
 MAB accurate retrieval, MAB long-range understanding, the LoCoMo-Plus Cognitive slice, and the
-24 capacity cells. It retains the prior manifest hash and completed-job inventory.
+24 capacity cells. It retains the prior manifest hash and completed-job inventory. Two unexecuted
+successor manifests remain as provenance for the final ledger and process-tree timeout fixes.
+The queue starts after the coding pilot so measured workloads do not compete.
 
 Inspect the live state without starting a duplicate:
 
@@ -235,7 +269,9 @@ shown above must remain `1` when validating or executing that plan.
 The successor runner emits periodic heartbeats with the child PID, elapsed time, deadline and
 runtime identity. Diagnostic jobs have six-hour timeouts; the capacity job has a 72-hour timeout,
 with a separate whole-cell watchdog covering seeding and worker shutdown. Timeouts preserve
-uncertain reservations for investigation. `--stop-after-job <id>` pauses only after the named
+uncertain reservations for investigation. On Windows, the watchdog terminates the launcher and
+its descendants, including virtual-environment child Python processes, and records teardown
+counts. `--stop-after-job <id>` pauses only after the named
 job is validated. The canonical capacity `summary.json` binds all cell hashes and reports
 integrity, resource, latency and backlog gates separately; a zero process exit alone is insufficient.
 

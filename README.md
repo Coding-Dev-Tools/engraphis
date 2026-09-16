@@ -78,15 +78,15 @@ its counting boundary explicit.
 
 The performance report keeps its legacy `quality` fields for all candidate chunks returned before
 context packing and adds `packed_quality` for evidence admitted to the reader context. The checked-in
-v16 artifact includes both quality views, with Recall@5, hit@5 and answer-token evidence coverage
+v18 artifact includes both quality views, with Recall@5, hit@5 and answer-token evidence coverage
 of 1.000 for the 26-question fixture in each view. Both views measure retrieved evidence;
 neither is an end-to-end question-answer score. Coding outcomes, external datasets, and staged
 operational capacity remain separate pending evaluation tracks until their artifacts are selected.
 
 These values are evidence IDs `offline-chunking` and `offline-performance` in
-[`offline-fixtures-v16.json`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/benchmark-evidence/offline-fixtures-v16.json),
+[`offline-fixtures-v18.json`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/benchmark-evidence/offline-fixtures-v18.json),
 SHA-256
-`83be915795c2eede0ddb1bd00cccf61ac74b8d1ae8177d4a2f09a1523c839046`.
+`afe7e1be24f18701d4eec8f2e989abed9d9b8e2796660b7eb6bb7da5d4f3ebcc`.
 [`BENCHMARKS.md`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/BENCHMARKS.md#public-numeric-evidence-registry)
 records the matching suite digest, exact commands, and per-command config digests. The offline
 fixture registry intentionally excludes external, model-dependent, consolidation, productivity,

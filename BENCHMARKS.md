@@ -6,8 +6,9 @@ those results. When this document and the code disagree, the code is the source 
 The current expansion has a separate [results and workload report](docs/BENCHMARK_EXPANSION_RESULTS.md),
 [execution runbook](docs/BENCHMARK_EXPANSION_RUNBOOK.md), and
 [proposed stage budgets](docs/BENCHMARK_STAGE_BUDGETS.md). Completed external retrieval diagnostics
-are review artifacts with explicit denominators and uncertainty; paid coding, official QA,
-competitor scores and capacity qualification remain separate experiments.
+are review artifacts with explicit denominators and uncertainty. The coding pilot uses Codex
+OAuth only and retains fixture exclusions and interrupted calls. Official QA, competitor
+scores and capacity qualification remain separate experiments.
 
 For the locked operator sequence for a public canonical run, see
 [`docs/PUBLIC_BENCHMARK_RUNBOOK.md`](docs/PUBLIC_BENCHMARK_RUNBOOK.md).
@@ -15,14 +16,14 @@ For the locked operator sequence for a public canonical run, see
 ### Public numeric evidence registry
 
 Every exact public aggregate retained below comes from the checked-in, public-safe
-[`offline-fixtures-v16.json`](docs/benchmark-evidence/offline-fixtures-v16.json) artifact. Its
+[`offline-fixtures-v18.json`](docs/benchmark-evidence/offline-fixtures-v18.json) artifact. Its
 SHA-256 is
-`83be915795c2eede0ddb1bd00cccf61ac74b8d1ae8177d4a2f09a1523c839046`, also recorded in the
+`afe7e1be24f18701d4eec8f2e989abed9d9b8e2796660b7eb6bb7da5d4f3ebcc`, also recorded in the
 adjacent `.sha256` file. The artifact contains no raw questions, answers, prompts, customer data,
 or per-record content fingerprints.
 
 The fixture-suite digest is
-`df0032d5fa0d5f0f9044560bd0323222e820e6e8c6d7a90d7a3b1867acf02ded`. The artifact defines
+`8410166610522059c47ae1bfac6f0e73d7b9c1512f6e835354e446ce27ea2ae3`. The artifact defines
 the digest algorithm and records the SHA-256 of every suite and dataset file. Each evidence ID
 also binds its exact command through `sha256(UTF-8 exact command)`:
 
@@ -44,10 +45,10 @@ Historical LoCoMo, graph, handoff, consolidation, and security figures remain pr
 source artifacts but are omitted from the current chart until each has a matching immutable,
 public-safe artifact. The chart labels coding outcomes, external datasets, and operational
 capacity as pending evaluation tracks rather than implying scores. Regenerate it with
-`python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-v16.json --output docs/images/context-efficiency.svg` after selecting the report to publish.
+`python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-v18.json --output docs/images/context-efficiency.svg` after selecting the report to publish.
 
 The companion examples are also generated from that artifact with
-`python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-v16.json --output docs/images/evidence-backed-agent-examples.svg`.
+`python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-v18.json --output docs/images/evidence-backed-agent-examples.svg`.
 The historical-to-executable mapping is in
 [`docs/BENCHMARK_CHANGE_COVERAGE.md`](docs/BENCHMARK_CHANGE_COVERAGE.md).
 

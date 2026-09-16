@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -118,16 +119,37 @@ def test_queue_watchdog_keeps_started_attempt_on_timeout(monkeypatch, tmp_path):
         def wait(self, **_kwargs):
             return -9
 
+    class Child:
+        def __init__(self):
+            self.killed = False
+
+        def kill(self):
+            self.killed = True
+
+        def wait(self, **_kwargs):
+            return None
+
+    child = Child()
+
+    class Root:
+        def children(self, *, recursive):
+            assert recursive is True
+            return [child]
+
     process = Process()
     monkeypatch.setattr(queue.subprocess, "Popen", lambda *_a, **_k: process)
-    ticks = iter((0.0, 0.0, 2.0))
+    monkeypatch.setitem(sys.modules, "psutil", SimpleNamespace(Process=lambda _pid: Root()))
+    ticks = iter((0.0, 0.0, 2.0, 2.0, 2.0, 2.0, 2.0))
     monkeypatch.setattr(queue.time, "monotonic", lambda: next(ticks))
     monkeypatch.setattr(queue.time, "sleep", lambda _seconds: None)
     with pytest.raises(queue.JobTimeoutError, match="timeout"):
         queue.execute(value, tmp_path, poll_seconds=0.01, default_timeout_seconds=1)
     assert process.killed
+    assert child.killed
     assert (tmp_path / "smoke.started").is_file()
-    assert json.loads((tmp_path / "status.json").read_text())["status"] == "BLOCKED"
+    status = json.loads((tmp_path / "status.json").read_text())
+    assert status["status"] == "BLOCKED"
+    assert status["process_tree_teardown"]["descendants_killed"] == 1
 
 
 def test_queue_requires_complete_external_analysis_artifact(tmp_path):

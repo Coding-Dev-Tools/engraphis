@@ -353,6 +353,16 @@ def _values_equal(actual: Any, expected: Any) -> bool:
     return actual == expected
 
 
+def _payload_matches(payload: Optional[dict[str, Any]], spec: OracleSpec) -> bool:
+    if not isinstance(payload, dict) or payload.get("ok") is not True or "value" not in payload:
+        return False
+    return (
+        payload["value"] is None
+        if spec.operator == "is_none"
+        else _values_equal(payload["value"], spec.expected)
+    )
+
+
 def docker_oracle(scenario: Any, workspace: Path, image: str) -> dict[str, Any]:
     """Evaluate a candidate operation without mounting or executing the oracle.
 
@@ -379,26 +389,36 @@ def docker_oracle(scenario: Any, workspace: Path, image: str) -> dict[str, Any]:
             check=False,
         )
         payload = _runner_payload(result.stdout)
-        passed = (
-            result.returncode == 0
-            and isinstance(payload, dict)
-            and payload.get("ok") is True
-            and "value" in payload
-            and (
-                payload["value"] is None
-                if spec.operator == "is_none"
-                else _values_equal(payload["value"], spec.expected)
-            )
-        )
+        if result.returncode != 0:
+            # A non-zero container status does not distinguish candidate
+            # failure from Docker/runtime failure. Keep it unscored so a
+            # correction cannot be driven by infrastructure diagnostics.
+            oracle_outcome = "ambiguous_nonzero"
+        elif (
+            isinstance(payload, dict)
+            and payload.get("ok") is False
+            and isinstance(payload.get("error_type"), str)
+            and payload["error_type"].strip()
+        ):
+            oracle_outcome = "candidate_exception"
+        elif not isinstance(payload, dict) or payload.get("ok") is not True or "value" not in payload:
+            oracle_outcome = "ambiguous_zero_exit"
+        else:
+            # A valid zero-exit payload with the wrong value is a real task
+            # failure and remains eligible for the bounded correction loop.
+            oracle_outcome = "passed" if _payload_matches(payload, spec) else "value_mismatch"
+        passed = oracle_outcome == "passed"
         return {
             "passed": passed,
             "returncode": result.returncode,
             "timed_out": False,
+            "oracle_outcome": oracle_outcome,
             "stdout": result.stdout[-OUTPUT_LIMIT:],
             "stderr": result.stderr[-OUTPUT_LIMIT:],
         }
     except subprocess.TimeoutExpired:
-        return {"passed": False, "returncode": None, "timed_out": True, "stdout": "", "stderr": "oracle timeout"}
+        return {"passed": False, "returncode": None, "timed_out": True,
+                "oracle_outcome": "timeout_unknown", "stdout": "", "stderr": "oracle timeout"}
     finally:
         # Only the container name created by this invocation is addressed.
         try:
