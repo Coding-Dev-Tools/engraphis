@@ -63,6 +63,11 @@ def test_container_runtime_matches_the_railway_persistence_and_port_contract():
     assert "refusing symlinked state directory" in entrypoint
     assert 'elif [ -e "$state_dir" ] && [ ! -d "$state_dir" ]; then' in entrypoint
     assert "refusing non-directory state path" in entrypoint
+    assert 'if [ -L "$config_parent" ]; then' in entrypoint
+    assert 'config_parent_created=0' in entrypoint
+    assert "refusing non-directory trusted config parent" in entrypoint
+    assert 'if [ "$config_parent_created" = "1" ]; then' in entrypoint
+    assert 'chown engraphis:engraphis "$config_parent"' in entrypoint
     assert 'if [ -L "$ownership_marker" ]; then' in entrypoint
     assert "refusing symlinked volume ownership marker" in entrypoint
     assert 'if [ ! -e "$ownership_marker" ]; then' in entrypoint

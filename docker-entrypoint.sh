@@ -48,9 +48,30 @@ if [ "$(id -u)" = "0" ]; then
     fi
     if [ -n "$config_file" ]; then
         config_parent=$(dirname "$config_file")
+        if [ -L "$config_parent" ]; then
+            printf '%s\n' "[engraphis] refusing symlinked trusted config directory: $config_parent" >&2
+            exit 1
+        fi
+        config_parent_created=0
+        if [ ! -e "$config_parent" ]; then
+            config_parent_created=1
+        elif [ ! -d "$config_parent" ]; then
+            printf '%s\n' "[engraphis] refusing non-directory trusted config parent: $config_parent" >&2
+            exit 1
+        fi
         if ! mkdir -p "$config_parent"; then
             printf '%s\n' "[engraphis] unable to create config directory: $config_parent" >&2
             exit 1
+        fi
+        if [ "$config_parent_created" = "1" ]; then
+            if [ -L "$config_parent" ] || [ ! -d "$config_parent" ]; then
+                printf '%s\n' "[engraphis] refusing changed trusted config directory: $config_parent" >&2
+                exit 1
+            fi
+            if ! chown engraphis:engraphis "$config_parent"; then
+                printf '%s\n' "[engraphis] unable to own trusted config directory" >&2
+                exit 1
+            fi
         fi
         if [ -L "$config_file" ]; then
             printf '%s\n' "[engraphis] refusing symlinked trusted config file: $config_file" >&2
