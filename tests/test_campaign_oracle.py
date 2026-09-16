@@ -173,6 +173,134 @@ if __name__ == "__main__":
     assert calls[1][:4] == ["docker", "rm", "--force", calls[0][3]]
 
 
+def test_zero_exit_value_mismatch_is_a_scored_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _oracle, scenario = _write_oracle(
+        tmp_path,
+        '''import service
+
+
+def main():
+    assert service.current_timeout() == 41
+
+
+if __name__ == "__main__":
+    main()
+''',
+    )
+    workspace = tmp_path / "candidate"
+    workspace.mkdir()
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if command[1] == "run":
+            return subprocess.CompletedProcess(
+                command, 0, stdout=_RESULT_MARKER + '{"ok":true,"value":40}\n', stderr=""
+            )
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("eval.campaign_oracle.subprocess.run", fake_run)
+    result = docker_oracle(scenario, workspace, "image@sha256:abc")
+
+    assert result["passed"] is False
+    assert result["timed_out"] is False
+    assert result["returncode"] == 0
+    assert result["oracle_outcome"] == "value_mismatch"
+
+
+def test_zero_exit_candidate_exception_is_a_scored_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _oracle, scenario = _write_oracle(
+        tmp_path,
+        '''import service
+
+
+def main():
+    assert service.current_timeout() == 41
+
+
+if __name__ == "__main__":
+    main()
+''',
+    )
+    workspace = tmp_path / "candidate"
+    workspace.mkdir()
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if command[1] == "run":
+            return subprocess.CompletedProcess(
+                command, 0, stdout=_RESULT_MARKER + '{"ok":false,"error_type":"ValueError"}\n', stderr=""
+            )
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("eval.campaign_oracle.subprocess.run", fake_run)
+    result = docker_oracle(scenario, workspace, "image@sha256:abc")
+
+    assert result["passed"] is False
+    assert result["timed_out"] is False
+    assert result["returncode"] == 0
+    assert result["oracle_outcome"] == "candidate_exception"
+
+
+def test_nonzero_container_exit_is_ambiguous_and_unscored(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _oracle, scenario = _write_oracle(
+        tmp_path,
+        '''import service
+
+
+def main():
+    assert service.current_timeout() == 41
+
+
+if __name__ == "__main__":
+    main()
+''',
+    )
+    workspace = tmp_path / "candidate"
+    workspace.mkdir()
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if command[1] == "run":
+            return subprocess.CompletedProcess(command, 17, stdout="", stderr="container exit")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("eval.campaign_oracle.subprocess.run", fake_run)
+    result = docker_oracle(scenario, workspace, "image@sha256:abc")
+
+    assert result["passed"] is False
+    assert result["timed_out"] is False
+    assert result["returncode"] == 17
+    assert result["oracle_outcome"] == "ambiguous_nonzero"
+
+
+def test_outer_oracle_timeout_is_explicitly_unscored(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _oracle, scenario = _write_oracle(
+        tmp_path,
+        '''import service
+
+
+def main():
+    assert service.current_timeout() == 41
+
+
+if __name__ == "__main__":
+    main()
+''',
+    )
+    workspace = tmp_path / "candidate"
+    workspace.mkdir()
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if command[1] == "run":
+            raise subprocess.TimeoutExpired(command, 45)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("eval.campaign_oracle.subprocess.run", fake_run)
+    result = docker_oracle(scenario, workspace, "image@sha256:abc")
+
+    assert result["passed"] is False
+    assert result["timed_out"] is True
+    assert result["returncode"] is None
+    assert result["oracle_outcome"] == "timeout_unknown"
+
+
 @pytest.mark.skipif(shutil.which("docker") is None, reason="Docker is not installed")
 def test_docker_smoke_does_not_expose_oracle_source(tmp_path: Path) -> None:
     image = "python@sha256:fd95fa221297a88e1cf49c55ec1828edd7c5a428187e67b5d1805692d11588db"

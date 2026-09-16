@@ -25,6 +25,9 @@ the failed setup check's $0.008346 proxy reservation and $0.000546 for the earli
 leaving **298 calls and a $3.923508 proxy allowance** for the 150 scored attempts. The combined
 allowance remains $3.932400 and never becomes an API-key spending authorization.
 All peer, larger coding, official benchmark and rented-compute stages remain unapproved.
+The larger coding proposals also require a new corpus freeze after the long-document contract
+repair. Their attempt/call counts remain planning ceilings, not permission to run the invalid
+v1 category or silently substitute a repaired corpus into an existing campaign.
 The earlier inherited API gateway returned HTTP 402 and is retired from this campaign. No
 scored API-key call was dispatched. Native Codex OAuth authentication, Luna availability,
 medium effort and response usage have now been verified. No account top-up is required by
@@ -51,11 +54,31 @@ frozen campaign manifest. The generated
 [historical API stage proposals](../eval/configs/benchmark-stage-proposals-20260916.json) bind campaign
 `fa7995b8ce8cc27a7aa57dc14cfe1361a542d716e66b85f7eb53f55e3ac0716d`. They retain their original
 proposal status and are retained unchanged. They cannot be executed by the OAuth-only runner.
-The subsequent core-only authorization is a separate private receipt.
+The [OAuth successor proposals](../eval/configs/benchmark-stage-proposals-oauth-v2-20260916.json)
+bind campaign `59560230f21a371a03de13aab2c055ab49d56ac47c5fbcd0a05835220c93b7d4`.
+The subsequent core-only authorization is a separate private receipt. The first OAuth pilot
+attempt failed before any reservation or provider dispatch; its retained error does not consume
+a generation. The successor is the same authorized 150-attempt pilot, with that harness defect
+corrected and the two setup generations still deducted.
 Inspect a stage without executing it by passing `--stage <stage>` and
 omitting `--execute`. The durable ledger path is fixed by the approval. Pending reservations
 survive crashes and continue consuming the ceiling until reconciled; uncertain calls are not
 silently reissued. The runner stops on budget exhaustion or a reported model mismatch.
+
+The stopped OAuth v2 pilot reserved **82 calls / $1.074856 proxy**, including one call with
+unknown usage after a transport timeout. That entire reservation remains consumed; known usage
+does not release it. The validity review excludes the long-document scenario across all arms
+and budgets. Recovery is limited to the **90 unattempted eligible cells**, with at most
+**180 calls / $2.359440 proxy**. Parent plus continuation reservations can therefore total at
+most **262 calls / $3.434296 proxy**, or **264 calls / $3.443188** including the two setup
+generations. These totals fit the existing authorization and authorize no additional scenario,
+stage or replay of a completed, failed or uncertain attempt. Private recovery receipts bind
+the original approval, ledger and checkpoint-set hashes; changed parent bytes stop execution.
+
+The continuation records a 600-second native transport deadline, compared with the original
+180 seconds. This change is explicit in provenance and does not change the reader model,
+reasoning, source access, retrieval budgets or correction allowance. The unresolved original
+call remains in the raw experiment and prevents an unqualified completion claim.
 
 The official LongMemEval-V2 feasibility proposal is separate and retains its prescribed models;
 see [LONGMEMEVAL_V2_FEASIBILITY.md](LONGMEMEVAL_V2_FEASIBILITY.md). No rented compute is approved.

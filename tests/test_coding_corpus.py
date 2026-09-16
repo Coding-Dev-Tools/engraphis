@@ -6,8 +6,14 @@ import pytest
 
 from eval.coding_acceptance import validate_corpus
 from eval.coding_corpus import (
+    CORPUS_VERSION_V1,
+    CORPUS_VERSION_V2,
+    Corpus,
     DATASET_ROOT,
+    RUNTIME_SCHEMA_V1,
+    RUNTIME_SCHEMA_V2,
     ReaderResponse,
+    build_artifacts,
     load_corpus,
     run_oracle,
     run_reader,
@@ -32,6 +38,71 @@ def test_checked_in_corpus_has_frozen_family_split_and_categories():
     assert len(corpus.runtime["template_groups"]) == 10
     assert {group: sum(row["template_group"] == group for row in families)
             for group in corpus.runtime["template_groups"]} == {group: 4 for group in corpus.runtime["template_groups"]}
+
+
+
+def test_v1_loader_contract_remains_available_for_historical_pilot():
+    corpus = load_corpus()
+    assert corpus.runtime["schema"] == RUNTIME_SCHEMA_V1
+    assert corpus.runtime["version"] == CORPUS_VERSION_V1
+
+
+def test_v2_development_fixture_uses_structural_long_document_contract(tmp_path):
+    root = tmp_path / "coding_memory_v2"
+    generated = build_artifacts(
+        root,
+        version=CORPUS_VERSION_V2,
+        family_ids=("atlas-north",),
+    )
+    assert generated["runtime"]["schema"] == RUNTIME_SCHEMA_V2
+    assert generated["runtime"]["version"] == CORPUS_VERSION_V2
+    assert len(generated["runtime"]["scenarios"]) == 10
+    assert {row["split"] for row in generated["manifest"]["scenarios"]} == {"development"}
+
+    corpus = Corpus(root, generated["manifest"], generated["runtime"])
+    scenario = corpus.get("atlas-north:long_documents")
+    context_text = "\n".join(item.content for item in corpus.context(scenario))
+    for value in ("vault", "14", "UTC"):
+        assert value in context_text
+    for key in ("store", "retention_days", "timezone"):
+        assert key in scenario.task.prompt
+        assert key in scenario.task.expected_change
+
+    workspace = tmp_path / "repository"
+    with scenario_workspace(scenario, workspace) as prepared:
+        initial = run_oracle(scenario, workspace=prepared)
+        source = json.loads(scenario.source_path.read_text(encoding="utf-8"))
+        signature = source["family_signature"]
+        contract = repr({
+            "store": signature["store"],
+            "retention_days": signature["retention_days"],
+            "timezone": signature["timezone"],
+        })
+        service = prepared / "service.py"
+        text = service.read_text(encoding="utf-8")
+        changed_text = text.replace(
+            'return sections.get("overview") if name == "late-constraint" else sections.get(name)',
+            f'return {contract} if name == "late-constraint" else sections.get(name)',
+            1,
+        )
+        assert changed_text != text
+        service.write_text(changed_text, encoding="utf-8", newline="\n")
+        repaired = run_oracle(scenario, workspace=prepared)
+    assert initial.passed is False
+    assert repaired.passed is True
+    oracle_text = scenario.oracle_path.read_text(encoding="utf-8")
+    assert "find_section('late-constraint') == {'store':" in oracle_text
+    assert "retains" not in oracle_text
+
+
+def test_v2_build_refuses_to_overwrite_existing_output(tmp_path):
+    root = tmp_path / "existing"
+    root.mkdir()
+    marker = root / "marker.txt"
+    marker.write_text("preserve", encoding="utf-8")
+    with pytest.raises(ValueError, match="refusing to regenerate"):
+        build_artifacts(root, version=CORPUS_VERSION_V2, family_ids=("atlas-north",))
+    assert marker.read_text(encoding="utf-8") == "preserve"
 
 
 def test_loader_fails_closed_without_explicit_build(tmp_path):

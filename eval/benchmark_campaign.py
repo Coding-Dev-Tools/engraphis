@@ -10,6 +10,7 @@ import argparse
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 import hashlib
+import math
 import importlib.metadata
 import json
 import os
@@ -58,10 +59,18 @@ READER_INSTRUCTIONS = (
     "replacement file text). Only edit allowed files. For an unsupported question, leave answer "
     "empty and citations empty. Never invent a source. Do not include Markdown fences."
 )
+ORACLE_UNSCORED_OUTCOMES = frozenset({"timeout_unknown", "ambiguous_nonzero", "ambiguous_zero_exit"})
 
 
 def digest(value: Any) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def _oauth_attempt_timeout(value: Any) -> float:
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(float(value)) or not 30 <= float(value) <= 600):
+        raise ValueError("OAuth attempt timeout must be finite and bounded to 30..600 seconds")
+    return float(value)
 
 
 def _read(path: Path) -> dict:
@@ -142,9 +151,10 @@ def source_snapshot(root: Path = ROOT) -> dict:
         "eval/harness.py", "eval/task_pairs.py", "eval/rework_statistics.py", "eval/metrics.py",
         "eval/campaign_oracle.py", "eval/campaign_storage.py",
     )]
-    oauth_path = root / "eval/codex_oauth.py"
-    if oauth_path.is_file():
-        paths.append(oauth_path)
+    for optional in ("eval/codex_oauth.py", "eval/campaign_continuation.py"):
+        optional_path = root / optional
+        if optional_path.is_file():
+            paths.append(optional_path)
     return {path.relative_to(root).as_posix(): sha256_file(path) for path in sorted(paths)}
 
 
@@ -211,6 +221,8 @@ def validate_manifest(manifest: dict, companion: dict, *, corpus_root: Path = DA
             or manifest.get("automatic_retries") != 0):
         raise ValueError("campaign model, controls or retry contract changed")
     oauth = manifest.get("oauth")
+    if isinstance(oauth, dict):
+        _oauth_attempt_timeout(oauth.get("attempt_timeout_seconds", 180))
     if (not isinstance(oauth, dict)
             or oauth.get("transport") != "codex_oauth"
             or oauth.get("provider") != "engraphis_benchmark_oauth"
@@ -360,6 +372,7 @@ def approved_client(manifest: dict, stage_name: str, approval_path: Path, result
         config_sha256=manifest["binding_sha256"], repo_revision=manifest["repository_revision"],
         pins_sha256=manifest["pins_sha256"],
     )
+    timeout_seconds = _oauth_attempt_timeout(oauth.get("attempt_timeout_seconds", 180))
     try:
         from eval.codex_oauth import CodexOAuthTransport
         executable = Path(str(oauth["resolved_executable"]))
@@ -373,6 +386,7 @@ def approved_client(manifest: dict, stage_name: str, approval_path: Path, result
             expected_instruction_sha256=oauth["instruction_sha256"],
             expected_executable_sha256=oauth["executable_sha256"],
             work_root=(results / "oauth-transport").resolve(),
+            timeout_seconds=timeout_seconds,
         )
         readiness = transport.inspect()
         expected_readiness = {
@@ -502,6 +516,7 @@ def run_attempt(manifest: dict, stage_name: str, cell: dict, corpus: Any, client
     started = time.perf_counter()
     adapter = None
     usage_rows, responses, oracle_rows = [], [], []
+    oracle_unscored: Optional[str] = None
     context, ids = "", []
     adapter_metrics = {}
     with tempfile.TemporaryDirectory(prefix="engraphis-campaign-") as temporary:
@@ -581,7 +596,12 @@ def run_attempt(manifest: dict, stage_name: str, cell: dict, corpus: Any, client
                     responses.append(parsed)
                     observed = oracle(scenario, workspace, manifest["docker_image"])
                     oracle_rows.append(observed)
-                    if observed["passed"] or observed["timed_out"]:
+                    outcome = observed.get("oracle_outcome")
+                    if observed.get("timed_out") is True:
+                        oracle_unscored = "timeout_unknown"
+                    elif isinstance(outcome, str) and outcome in ORACLE_UNSCORED_OUTCOMES:
+                        oracle_unscored = outcome
+                    if observed["passed"] or oracle_unscored is not None:
                         break
                     # The immutable oracle source/expected values are never sent to the reader.
                     request["previous_attempt"] = parsed
@@ -593,15 +613,23 @@ def run_attempt(manifest: dict, stage_name: str, cell: dict, corpus: Any, client
                 evidence = [Evidence(op.evidence_id, op.content, op.scope, op.workspace, op.repo,
                                      op.session, op.trusted, op.valid_from, op.valid_to, op.known_at)
                             for op in getattr(scenario, "operations", ()) if op.evidence_id in ids]
-                scored = score_response(scenario, final, evidence, oracle_passed=bool(oracle_rows[-1]["passed"]))
+                oracle_passed = None if oracle_unscored is not None else bool(oracle_rows[-1]["passed"])
+                scored = score_response(scenario, final, evidence, oracle_passed=oracle_passed)
                 critical = list(scored.critical_violations)
                 if forbidden & set(ids) and "forbidden_evidence_exposed" not in critical:
                     critical.append("forbidden_evidence_exposed")
                 from eval.metrics import answer_token_recall
+                raw_oracle_outcome = oracle_rows[-1].get("oracle_outcome")
+                final_oracle_outcome = (
+                    oracle_unscored
+                    if oracle_unscored is not None
+                    else raw_oracle_outcome if isinstance(raw_oracle_outcome, str) else None
+                )
                 result_row = {
                     **cell, "attempt_id": attempt_id, "family_id": scenario.family_id,
-                    "category": scenario.category, "status": "complete",
-                    "task_success": bool(oracle_rows[-1]["passed"]),
+                    "category": scenario.category,
+                    "status": "error" if oracle_unscored is not None else "complete",
+                    "task_success": None if oracle_unscored is not None else bool(oracle_rows[-1]["passed"]),
                     "evidence_retention": len(required & set(ids)) / len(required) if required else None,
                     # Preserve the scorer's required-evidence contract.  A
                     # bare subset check would mark an empty citation list as
@@ -610,7 +638,9 @@ def run_attempt(manifest: dict, stage_name: str, cell: dict, corpus: Any, client
                     "citation_support": len(required & cited) / len(required) if required else None,
                     "citation_support_status": "required source ID agreement; entailment not independently graded",
                     "answer_completeness": None,
-                    "answer_completeness_status": "not independently graded; oracle measures repository behavior",
+                    "answer_completeness_status": ("not independently graded; oracle outcome is unscored"
+                                                  if oracle_unscored is not None else
+                                                  "not independently graded; oracle measures repository behavior"),
                     "answer_token_coverage": answer_token_recall([final["answer"]], list(scenario.task.answer_tokens)),
                     "abstention_correct": (bool(final["answer"].strip()) == scenario.task.answerable),
                     "critical_violations": critical, "evidence_retained_ids": sorted(required & set(ids)),
@@ -620,6 +650,8 @@ def run_attempt(manifest: dict, stage_name: str, cell: dict, corpus: Any, client
                     "source_sha256": scenario.source_sha256, "oracle_sha256": scenario.oracle_sha256,
                     "implementation_sha256": digest(manifest["source"]),
                     "provider_usage": usage_rows, "adapter_metrics": adapter_metrics,
+                    "oracle_outcome": final_oracle_outcome,
+                    "unscored_reason": f"oracle_{oracle_unscored}" if oracle_unscored is not None else None,
                     "private_responses": responses, "private_oracles": oracle_rows,
                 }
                 return result_row
@@ -698,6 +730,25 @@ def validate_row(row: dict, cell: dict) -> None:
         raise ValueError("completed attempt requires observed boolean task success")
     if row["status"] != "complete" and row.get("task_success") is not None:
         raise ValueError("unscored attempt cannot claim task success")
+    allowed_oracle_outcomes = {"passed", "value_mismatch", "candidate_exception"} | ORACLE_UNSCORED_OUTCOMES
+    oracle_outcome = row.get("oracle_outcome")
+    if oracle_outcome is not None and oracle_outcome not in allowed_oracle_outcomes:
+        raise ValueError("oracle outcome must be an explicit stable label")
+    unscored_reason = row.get("unscored_reason")
+    if unscored_reason is not None and (
+        not isinstance(unscored_reason, str)
+        or oracle_outcome not in ORACLE_UNSCORED_OUTCOMES
+        or unscored_reason != f"oracle_{oracle_outcome}"
+    ):
+        raise ValueError("unscored reason must bind to an unscored oracle outcome")
+    if oracle_outcome in ORACLE_UNSCORED_OUTCOMES and row["status"] != "error":
+        raise ValueError("an unscored oracle outcome requires an error attempt")
+    if oracle_outcome in {"passed", "value_mismatch", "candidate_exception"} and row["status"] != "complete":
+        raise ValueError("a scored oracle outcome requires a complete attempt")
+    if oracle_outcome == "passed" and row.get("task_success") is not True:
+        raise ValueError("a passed oracle outcome requires task success")
+    if oracle_outcome in {"value_mismatch", "candidate_exception"} and row.get("task_success") is not False:
+        raise ValueError("a proven candidate failure must remain a scored task failure")
     violations = row.get("critical_violations")
     if (not isinstance(violations, list) or len(violations) != len(set(violations))
             or any(item not in {"forbidden_evidence_exposed", "forbidden_evidence_cited",
@@ -768,6 +819,55 @@ def _provider_usage_summary(rows: list[dict]) -> dict:
         "billing_bases": billing,
         "billing_basis": billing[0] if len(billing) == 1 else None,
         "unmetered_peer_internal_calls": "not surfaced by the row contract",
+    }
+
+
+def _oracle_summary(rows: list[dict]) -> dict:
+    """Expose only stable oracle outcome counters; never export oracle text."""
+    counts: Counter[str] = Counter()
+    legacy_observations = 0
+    for row in rows:
+        observations = row.get("private_oracles")
+        if not isinstance(observations, list):
+            continue
+        for observation in observations:
+            if not isinstance(observation, dict):
+                continue
+            outcome = observation.get("oracle_outcome")
+            if not isinstance(outcome, str):
+                legacy_observations += 1
+                if observation.get("timed_out") is True:
+                    outcome = "timeout_unknown"
+                elif observation.get("returncode") is not None and observation.get("returncode") != 0:
+                    outcome = "ambiguous_nonzero"
+                elif observation.get("returncode") == 0 and observation.get("passed") is True:
+                    outcome = "legacy_passed"
+                elif observation.get("returncode") == 0 and observation.get("passed") is False:
+                    outcome = "legacy_zero_exit_false"
+                else:
+                    outcome = "legacy_unclassified"
+            counts[outcome] += 1
+    unscored = sum(counts[label] for label in ORACLE_UNSCORED_OUTCOMES)
+    if not counts:
+        status = "missing"
+    elif legacy_observations:
+        status = "legacy_compatibility"
+    else:
+        status = "complete"
+    return {
+        "status": status,
+        "observations": sum(counts.values()),
+        "passed": counts["passed"] + counts["legacy_passed"],
+        "value_mismatches": counts["value_mismatch"],
+        "candidate_exceptions": counts["candidate_exception"],
+        "timeouts": counts["timeout_unknown"],
+        "ambiguous_nonzero": counts["ambiguous_nonzero"],
+        "ambiguous_zero_exit": counts["ambiguous_zero_exit"],
+        "unscored": unscored,
+        "legacy_observations": legacy_observations,
+        "legacy_zero_exit_false": counts["legacy_zero_exit_false"],
+        "legacy_unclassified": counts["legacy_unclassified"],
+        "outcomes": dict(sorted(counts.items())),
     }
 
 
@@ -850,6 +950,7 @@ def summarize(manifest: dict, stage_name: str, results: Path) -> dict:
             "expected_attempts": len(expected), "missing_attempts": missing, "statuses": dict(statuses),
             "critical_violations": critical_count,
             "arms": aggregates, "rows": rows, "noninferiority": "indeterminate",
+            "oracle_summary": _oracle_summary(rows),
             "provider_usage": _provider_usage_summary(rows),
             "paired_by_budget": _paired_summaries(manifest, stage_name, rows),
             "independent_acceptance_eligible": False, "leadership_eligible": False}
@@ -888,6 +989,7 @@ def public_report(manifest_path: Path, summary: dict) -> dict:
         "scenario_id", "family_id", "category", "arm", "token_budget", "repetition", "status",
         "task_success", "context_tokens", "latency_ms", "citation_validity", "citation_support",
         "evidence_retention", "abstention_correct", "reader_calls", "correction_calls", "oracle_calls",
+        "oracle_outcome", "unscored_reason",
     )} | {"critical_violation_count": len(row.get("critical_violations", [])),
           "question_id": f"{row['scenario_id']}:{row['arm']}:{row['token_budget']}:{row['repetition']}"}
                  for row in summary["rows"]]

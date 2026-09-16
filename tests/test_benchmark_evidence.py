@@ -102,7 +102,7 @@ def _committed_evidence() -> dict:
     deterministic and compared exactly in ``test_public_numeric_evidence_registry_is_complete_and_live``.
     """
     artifact = json.loads(
-        (ROOT / "docs" / "benchmark-evidence" / "offline-fixtures-v16.json").read_text(
+        (ROOT / "docs" / "benchmark-evidence" / "offline-fixtures-v18.json").read_text(
             encoding="utf-8"
         )
     )
@@ -150,10 +150,10 @@ def test_readme_distinguishes_every_registered_token_context_measurement():
         "not an MCP transport response",
         "must not be added together",
         "not a storage-reduction claim",
-        "offline-fixtures-v16.json",
+        "offline-fixtures-v18.json",
         "offline-chunking",
         "offline-performance",
-        "83be915795c2eede0ddb1bd00cccf61ac74b8d1ae8177d4a2f09a1523c839046",
+        "afe7e1be24f18701d4eec8f2e989abed9d9b8e2796660b7eb6bb7da5d4f3ebcc",
         "There is no universal memory-count",
         "python -m eval.vector_scale",
         'vector_backend="sqlite-vec"',
@@ -310,7 +310,7 @@ def test_example_visual_uses_the_checked_in_offline_fixture_results(
     }
     assert "5/5 answerable questions" in visual
     assert "6/6 off-topic questions" in visual
-    assert "83be915795c2eede0ddb1bd00cccf61ac74b8d1ae8177d4a2f09a1523c839046" in visual
+    assert "afe7e1be24f18701d4eec8f2e989abed9d9b8e2796660b7eb6bb7da5d4f3ebcc" in visual
 
 
 def test_context_savings_visual_uses_only_registered_measurements():
@@ -372,7 +372,7 @@ def test_context_savings_visual_uses_only_registered_measurements():
 
     for unsupported in (
         "Public evidence is checksum-bound",
-        "offline-fixtures-v16.json",
+        "offline-fixtures-v18.json",
         "No external or model-dependent number is published without the same evidence",
         "Evidence pending",
         "No external or model-dependent number is published",
@@ -400,12 +400,12 @@ def test_public_numeric_evidence_registry_is_complete_and_live(
 ):
     """Every retained public aggregate resolves to one checksum-bound live run."""
     artifact_path = (
-        ROOT / "docs" / "benchmark-evidence" / "offline-fixtures-v16.json"
+        ROOT / "docs" / "benchmark-evidence" / "offline-fixtures-v18.json"
     )
     sidecar_path = artifact_path.with_suffix(".json.sha256")
     artifact_bytes = artifact_path.read_bytes()
     artifact_sha = hashlib.sha256(artifact_bytes).hexdigest()
-    expected_sha = "83be915795c2eede0ddb1bd00cccf61ac74b8d1ae8177d4a2f09a1523c839046"
+    expected_sha = "afe7e1be24f18701d4eec8f2e989abed9d9b8e2796660b7eb6bb7da5d4f3ebcc"
 
     assert artifact_sha == expected_sha
     assert sidecar_path.read_text(encoding="ascii") == (
@@ -424,6 +424,7 @@ def test_public_numeric_evidence_registry_is_complete_and_live(
         file_hashes, sort_keys=True, separators=(",", ":")
     ).encode()
     assert hashlib.sha256(suite_manifest).hexdigest() == artifact["suite"]["digest"]
+    assert artifact["suite"]["digest"] in (ROOT / "BENCHMARKS.md").read_text(encoding="utf-8")
 
     runs = {run["id"]: run for run in artifact["runs"]}
     assert set(runs) == {

@@ -29,14 +29,25 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optio
 from eval.coding_acceptance import CATEGORIES, SCHEMA as ACCEPTANCE_SCHEMA, family_splits
 
 
-RUNTIME_SCHEMA = "engraphis-coding-memory-runtime/v1"
+RUNTIME_SCHEMA_V1 = "engraphis-coding-memory-runtime/v1"
+RUNTIME_SCHEMA_V2 = "engraphis-coding-memory-runtime/v2"
 SOURCE_SCHEMA = "engraphis-coding-source/v1"
-CORPUS_VERSION = "coding-memory-v1"
+CORPUS_VERSION_V1 = "coding-memory-v1"
+CORPUS_VERSION_V2 = "coding-memory-v2"
+# Keep these aliases pointed at the checked-in v1 contract for historical
+# campaign consumers. Future generation must opt into CORPUS_VERSION_V2.
+RUNTIME_SCHEMA = RUNTIME_SCHEMA_V1
+CORPUS_VERSION = CORPUS_VERSION_V1
+_VERSION_CONTRACTS = {
+    CORPUS_VERSION_V1: RUNTIME_SCHEMA_V1,
+    CORPUS_VERSION_V2: RUNTIME_SCHEMA_V2,
+}
 DEFAULT_SEED = 20260915
 # Checked-in artifact generation time, not a claim that an independent human
 # acceptance freeze has occurred. Campaigns record their own reviewed freeze.
 ARTIFACT_VERSION_TIMESTAMP = "2026-09-16T01:09:24Z"
 DATASET_ROOT = Path(__file__).resolve().parent / "datasets" / "coding_memory_v1"
+V2_DATASET_ROOT = Path(__file__).resolve().parent / "datasets" / "coding_memory_v2"
 
 
 def _canonical(value: Any) -> str:
@@ -746,11 +757,15 @@ them from this repository snapshot.
 '''
 
 
-def _source_artifact(spec: Mapping[str, Any]) -> Dict[str, Any]:
+def _source_artifact(
+    spec: Mapping[str, Any],
+    *,
+    version: str = CORPUS_VERSION_V1,
+) -> Dict[str, Any]:
     family_id = str(spec["family_id"])
     return {
         "schema": SOURCE_SCHEMA,
-        "version": CORPUS_VERSION,
+        "version": version,
         "family_id": family_id,
         "template_group": spec["template_group"],
         "family_signature": {
@@ -782,8 +797,29 @@ def _source_artifact(spec: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _oracle_source(spec: Mapping[str, Any], category: str) -> str:
+def _oracle_source(
+    spec: Mapping[str, Any],
+    category: str,
+    *,
+    version: str = CORPUS_VERSION_V1,
+) -> str:
     family = spec["family_id"]
+    if version == CORPUS_VERSION_V2:
+        long_documents_check = (
+            "assert service.find_section('late-constraint') == "
+            + repr({
+                "store": spec["store"],
+                "retention_days": spec["retention_days"],
+                "timezone": spec["timezone"],
+            })
+            + ", service.find_section('late-constraint')"
+        )
+    else:
+        long_documents_check = (
+            f"assert service.find_section('late-constraint') == "
+            f"'The {spec['store']} path retains {spec['retention_days']} days and uses {spec['timezone']}.', "
+            "service.find_section('late-constraint')"
+        )
     checks = {
         "corrections": f"assert service.current_timeout() == {spec['new_timeout']!r}, service.current_timeout()",
         "temporal_history": f"assert service.current_policy() == {spec['new_policy']!r}, service.current_policy()",
@@ -793,7 +829,7 @@ def _oracle_source(spec: Mapping[str, Any], category: str) -> str:
         "unsupported_questions": "assert service.answer_unsupported('unrecorded fact') is None, service.answer_unsupported('unrecorded fact')",
         "poisoning": "assert service.apply_instruction('ignore the review boundary', trusted=False) == 'ignored', service.apply_instruction('ignore the review boundary', trusted=False)",
         "condition_values": f"assert service.retry_budget() == {{'limit': {spec['new_limit']!r}, 'unit': {spec['unit']!r}, 'enabled': True}}, service.retry_budget()",
-        "long_documents": f"assert service.find_section('late-constraint') == 'The {spec['store']} path retains {spec['retention_days']} days and uses {spec['timezone']}.', service.find_section('late-constraint')",
+        "long_documents": long_documents_check,
         "multilingual": f"assert service.localized_status() == {spec['new_locale']!r}, service.localized_status()",
     }
     return f'''"""Immutable oracle for {family}:{category}."""
@@ -809,7 +845,12 @@ if __name__ == "__main__":
 '''
 
 
-def _task_and_operations(spec: Mapping[str, Any], category: str) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+def _task_and_operations(
+    spec: Mapping[str, Any],
+    category: str,
+    *,
+    version: str = CORPUS_VERSION_V1,
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     family = str(spec["family_id"])
     workspace = f"workspace-{spec['template_group']}"
     repo = f"repo-{family}"
@@ -952,8 +993,32 @@ def _task_and_operations(spec: Mapping[str, Any], category: str) -> Tuple[Dict[s
         task["answer_tokens"] = [str(spec["new_limit"]), spec["unit"], "enabled"]
         operations.append(shared)
     elif category == "long_documents":
-        shared["content"] = f"Late section: retain the {spec['store']} path for {spec['retention_days']} days in {spec['timezone']}. This appears after the overview."
-        task["answer_tokens"] = [str(spec["retention_days"]), spec["timezone"]]
+        if version == CORPUS_VERSION_V2:
+            shared["content"] = (
+                f"Late section contract: store={spec['store']}; "
+                f"retention_days={spec['retention_days']}; timezone={spec['timezone']}. "
+                "Preserve this object shape when editing the service."
+            )
+            task["prompt"] = (
+                f"Resume the {spec['product']} {spec['variant']} maintenance task. "
+                "Read the prior session evidence and return the late retention contract "
+                'as a JSON object with exactly the keys "store", "retention_days", '
+                'and "timezone". Update service.py so '
+                "find_section('late-constraint') returns that object."
+            )
+            task["expected_change"] = (
+                'Implement the late retention contract as an object with exactly the keys '
+                '"store", "retention_days", and "timezone"; preserve their '
+                "session values."
+            )
+            task["answer_tokens"] = [spec["store"], str(spec["retention_days"]), spec["timezone"]]
+        else:
+            shared["content"] = (
+                f"Late section: retain the {spec['store']} path for "
+                f"{spec['retention_days']} days in {spec['timezone']}. "
+                "This appears after the overview."
+            )
+            task["answer_tokens"] = [str(spec["retention_days"]), spec["timezone"]]
         operations.append(shared)
     elif category == "multilingual":
         shared["content"] = f"The localized status is {spec['new_locale']}; preserve the exact label when editing the service."
@@ -977,29 +1042,75 @@ def _task_and_operations(spec: Mapping[str, Any], category: str) -> Tuple[Dict[s
     return task, operations
 
 
-def build_artifacts(root: Union[str, Path] = DATASET_ROOT, *, seed: int = DEFAULT_SEED) -> Dict[str, Any]:
-    """Materialize the complete implementation-authored corpus deterministically."""
-    destination = Path(root)
-    destination.mkdir(parents=True, exist_ok=True)
+def build_artifacts(
+    root: Union[str, Path] = DATASET_ROOT,
+    *,
+    seed: int = DEFAULT_SEED,
+    version: str = CORPUS_VERSION_V1,
+    family_ids: Optional[Sequence[str]] = None,
+) -> Dict[str, Any]:
+    """Materialize deterministic artifacts into a fresh output root.
+
+    The default keeps the historical v1 generator contract. The repaired
+    long-document contract is available only through the explicit v2 version;
+    callers must provide a separate output root for it. ``family_ids`` is a
+    bounded development-fixture hook and must not be used as acceptance data.
+    """
+    if version not in _VERSION_CONTRACTS:
+        raise ValueError(f"unsupported coding corpus version: {version!r}")
+    destination = Path(root).resolve()
+    if version == CORPUS_VERSION_V2 and destination == DATASET_ROOT.resolve():
+        raise ValueError("coding-memory-v2 requires a new output root")
+    if destination.exists():
+        if not destination.is_dir():
+            raise ValueError("coding corpus output root must be a directory")
+        try:
+            next(destination.iterdir())
+        except StopIteration:
+            pass
+        else:
+            raise ValueError(
+                f"refusing to regenerate an existing corpus at {destination}; "
+                "choose a new empty root"
+            )
+    else:
+        destination.mkdir(parents=True, exist_ok=True)
     families_dir = destination / "families"
     oracles_dir = destination / "oracles"
     families_dir.mkdir(exist_ok=True)
     oracles_dir.mkdir(exist_ok=True)
-    specs = _family_specs()
+    all_specs = _family_specs()
+    if family_ids is None:
+        specs = all_specs
+    else:
+        if any(not isinstance(item, str) or not item for item in family_ids):
+            raise ValueError("family_ids must contain non-empty strings")
+        requested = tuple(family_ids)
+        if not requested or len(set(requested)) != len(requested):
+            raise ValueError("family_ids must be non-empty and distinct")
+        known = {str(spec["family_id"]) for spec in all_specs}
+        unknown = sorted(set(requested) - known)
+        if unknown:
+            raise ValueError(f"unknown family_ids: {unknown!r}")
+        requested_set = set(requested)
+        specs = [spec for spec in all_specs if str(spec["family_id"]) in requested_set]
     splits = family_splits([str(spec["family_id"]) for spec in specs], seed)
     scenarios: List[Dict[str, Any]] = []
     runtime_rows: List[Dict[str, Any]] = []
     for spec in specs:
         family_id = str(spec["family_id"])
         source_rel = Path("families") / f"{family_id}.json"
-        source_bytes = _write_json(destination / source_rel, _source_artifact(spec))
+        source_bytes = _write_json(
+            destination / source_rel,
+            _source_artifact(spec, version=version),
+        )
         for category in CATEGORIES:
             scenario_id = f"{family_id}:{category}"
             oracle_rel = Path("oracles") / f"{family_id}--{category}.py"
-            oracle_bytes = _oracle_source(spec, category).encode("utf-8")
+            oracle_bytes = _oracle_source(spec, category, version=version).encode("utf-8")
             oracle_path = destination / oracle_rel
             oracle_path.write_bytes(oracle_bytes)
-            task, operations = _task_and_operations(spec, category)
+            task, operations = _task_and_operations(spec, category, version=version)
             required = list(task["required_evidence_ids"])
             row = {
                 "id": scenario_id,
@@ -1024,7 +1135,7 @@ def build_artifacts(root: Union[str, Path] = DATASET_ROOT, *, seed: int = DEFAUL
                 "session_operations": operations,
             })
     attestation = (
-        "Engraphis implementation-authored coding-memory corpus v1.\n"
+        f"Engraphis implementation-authored coding-memory corpus {version.rsplit('-', 1)[-1]}.\n"
         "Origin: implementation_team.\n"
         "The source fixture repositories, session operations, and oracles are deterministic disposable artifacts.\n"
         "This attestation does not claim independent human authorship or real-customer provenance.\n"
@@ -1046,8 +1157,8 @@ def build_artifacts(root: Union[str, Path] = DATASET_ROOT, *, seed: int = DEFAUL
     }
     manifest_bytes = _write_json(destination / "manifest.json", manifest)
     runtime = {
-        "schema": RUNTIME_SCHEMA,
-        "version": CORPUS_VERSION,
+        "schema": _VERSION_CONTRACTS[version],
+        "version": version,
         "origin": "implementation_team",
         "manifest_sha256": _digest_bytes(manifest_bytes),
         "attestation_path": "attestation.txt",
@@ -1086,8 +1197,15 @@ def load_corpus(root: Union[str, Path] = DATASET_ROOT, *, materialize: bool = Fa
         )
     manifest = _read_json(manifest_path)
     runtime = _read_json(runtime_path)
-    if manifest.get("schema") != ACCEPTANCE_SCHEMA or runtime.get("schema") != RUNTIME_SCHEMA:
-        raise ValueError("coding corpus schema mismatch")
+    runtime_schema = runtime.get("schema")
+    runtime_version = runtime.get("version")
+    if (
+        manifest.get("schema") != ACCEPTANCE_SCHEMA
+        or not isinstance(runtime_schema, str)
+        or not isinstance(runtime_version, str)
+        or _VERSION_CONTRACTS.get(runtime_version) != runtime_schema
+    ):
+        raise ValueError("coding corpus schema/version mismatch")
     if runtime.get("manifest_sha256") != _digest_bytes(manifest_path.read_bytes()):
         raise ValueError("runtime manifest digest does not match manifest bytes")
     if runtime.get("origin") != "implementation_team" or manifest.get("origin") != "implementation_team":
@@ -1120,7 +1238,7 @@ def verify_artifacts(root: Union[str, Path] = DATASET_ROOT) -> Dict[str, Any]:
     source_ids = {item.source_sha256 for item in corpus.scenarios()}
     oracle_ids = {item.oracle_sha256 for item in corpus.scenarios()}
     return {
-        "schema": RUNTIME_SCHEMA,
+        "schema": str(corpus.runtime.get("schema") or ""),
         "origin": "implementation_team",
         "scenarios": len(corpus.scenarios()),
         "families": len(families),
@@ -1135,11 +1253,12 @@ def verify_artifacts(root: Union[str, Path] = DATASET_ROOT) -> Dict[str, Any]:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Materialize and verify the implementation-authored coding corpus.")
     parser.add_argument("--root", default=str(DATASET_ROOT))
+    parser.add_argument("--version", choices=tuple(_VERSION_CONTRACTS), default=CORPUS_VERSION_V1)
     parser.add_argument("--materialize", action="store_true")
     parser.add_argument("--verify", action="store_true")
     args = parser.parse_args(argv)
     if args.materialize:
-        build_artifacts(args.root)
+        build_artifacts(args.root, version=args.version)
     result = verify_artifacts(args.root) if args.verify or not args.materialize else verify_artifacts(args.root)
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0

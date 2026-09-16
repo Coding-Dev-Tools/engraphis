@@ -241,6 +241,55 @@ def _verified_artifact(path: Path) -> dict:
 class JobTimeoutError(TimeoutError):
     """The child was stopped at a known deadline; its started marker is retained."""
 
+    def __init__(self, message: str, *, teardown: Optional[dict] = None):
+        super().__init__(message)
+        self.teardown = teardown
+
+
+def _terminate_process_tree(process: subprocess.Popen, *, wait_seconds: float = 30.0) -> dict:
+    """Kill a timed-out launcher and descendants, including Windows venv wrappers."""
+    descendants = []
+    psutil_available = False
+    try:
+        import psutil
+
+        psutil_available = True
+        descendants = psutil.Process(process.pid).children(recursive=True)
+    except Exception:
+        # The queue still kills the direct child when psutil is unavailable or
+        # the launcher has already exited; the started marker remains durable.
+        descendants = []
+    killed = 0
+    for child in reversed(descendants):
+        try:
+            child.kill()
+            killed += 1
+        except Exception:
+            pass
+    try:
+        process.kill()
+    except Exception:
+        pass
+    deadline = time.monotonic() + wait_seconds
+    try:
+        process.wait(timeout=max(0.1, deadline - time.monotonic()))
+    except Exception:
+        try:
+            process.kill()
+        except Exception:
+            pass
+    for child in descendants:
+        try:
+            child.wait(timeout=max(0.1, deadline - time.monotonic()))
+        except Exception:
+            # A second kill handles descendants that ignored the first signal.
+            try:
+                child.kill()
+            except Exception:
+                pass
+    return {"psutil_available": psutil_available, "descendant_count": len(descendants),
+            "descendants_killed": killed}
+
 
 def _run_subprocess(command: list[str], *, cwd: Path, env: dict, log, timeout_seconds: float,
                     poll_seconds: float, heartbeat: Callable[[dict], None]) -> tuple[int, Optional[int], float]:
@@ -256,15 +305,14 @@ def _run_subprocess(command: list[str], *, cwd: Path, env: dict, log, timeout_se
                        "returncode": returncode, "timeout_seconds": timeout_seconds})
             return returncode, process.pid, elapsed
         if elapsed >= timeout_seconds:
-            process.kill()
-            try:
-                process.wait(timeout=min(30.0, max(1.0, poll_seconds)))
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
+            teardown = _terminate_process_tree(
+                process, wait_seconds=min(30.0, max(1.0, poll_seconds)),
+            )
             heartbeat({"job_pid": process.pid, "elapsed_seconds": elapsed,
-                       "timeout_seconds": timeout_seconds, "timed_out": True})
-            raise JobTimeoutError(f"local benchmark job exceeded {timeout_seconds:g}s timeout")
+                       "timeout_seconds": timeout_seconds, "timed_out": True,
+                       "process_tree_teardown": teardown})
+            raise JobTimeoutError(f"local benchmark job exceeded {timeout_seconds:g}s timeout",
+                                  teardown=teardown)
         heartbeat({"job_pid": process.pid, "elapsed_seconds": elapsed,
                    "timeout_seconds": timeout_seconds})
         time.sleep(min(poll_seconds, max(0.001, timeout_seconds - elapsed)))
@@ -389,9 +437,10 @@ def execute(plan: dict, directory: Path, *, runner: Callable = subprocess.run,
         _status(directory, **result)
         return result
     except BaseException as exc:
+        details = {"process_tree_teardown": exc.teardown} if isinstance(exc, JobTimeoutError) else {}
         _status(directory, status="BLOCKED", phase="stopped", completed_jobs=completed,
                 error_class=type(exc).__name__, reason=str(exc), runtime=runtime,
-                heartbeat_unix=time.time())
+                heartbeat_unix=time.time(), **details)
         raise
     finally:
         lock.unlink(missing_ok=True)
