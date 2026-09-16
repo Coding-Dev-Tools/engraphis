@@ -80,5 +80,13 @@ The continuation records a 600-second native transport deadline, compared with t
 reasoning, source access, retrieval budgets or correction allowance. The unresolved original
 call remains in the raw experiment and prevents an unqualified completion claim.
 
+The executed continuation stopped after 75 completed cells and one native failed-turn cell;
+14 eligible cells remain unattempted. Its ledger reserves **132 calls / $1.730256 proxy**:
+131 completed calls and one terminally failed correction without usage. Combined with the
+parent, the run retains **214 calls / $2.805112 proxy**, or **216 calls / $2.814004** including
+setup. Neither the original unknown reservation nor the failed correction is released.
+The execution block is not budget exhaustion or evidence of an account-payment problem.
+These amounts are reservation accounting, not an invoice or measured cost for missing usage.
+
 The official LongMemEval-V2 feasibility proposal is separate and retains its prescribed models;
 see [LONGMEMEVAL_V2_FEASIBILITY.md](LONGMEMEVAL_V2_FEASIBILITY.md). No rented compute is approved.

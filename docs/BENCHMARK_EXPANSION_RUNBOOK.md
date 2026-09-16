@@ -102,6 +102,43 @@ Both parent and child directories are locked against concurrent campaign dispatc
 600-second continuation deadline is a separate transport cohort from the original 180 seconds;
 it cannot be hidden inside an equivalent-latency claim.
 
+The [frozen continuation manifest](../eval/configs/benchmark-campaign-continuation-20260916.json)
+binds source revision `cc25ac5b59e3b5e04a79ee09b8d7454d01cb31c1` and campaign
+`79996b53272a76b2836d4835dada4be321dd26d1820ee2d260f4eadc92b14cad`.
+The parent directory's durable `continuation-allocation.json` binds this exact child ledger,
+eligible cell set and allowance. Moving execution to a second results directory cannot obtain
+a fresh allowance. Parent evidence, approval validity and source bytes are checked before
+every initial or corrective generation. An interrupted child marker also prevents replay.
+
+Run the authorized continuation from its frozen source checkout, preserving the original
+private approval, ledger and checkpoints at their bound locations:
+
+```powershell
+& $py -m eval.campaign_continuation `
+  --parent-manifest eval/configs/benchmark-campaign-oauth-v2-20260916.json `
+  --companion eval/configs/benchmark-comparisons-20260916.json `
+  --eligibility eval/configs/benchmark-core-pilot-eligibility-20260916.json `
+  --audit-artifact docs/benchmark-evidence/core-pilot-corpus-validity-20260916.json `
+  --public-artifact docs/benchmark-evidence/core-pilot-oauth-v2-20260916.json `
+  --parent-approval .private-eval/benchmark-20260915/core-pilot-oauth-v2-approval.json `
+  --parent-results .private-eval/benchmark-20260915/core-pilot-oauth-v2 `
+  --child-results .private-eval/benchmark-20260915/core-pilot-oauth-continuation `
+  --dependency-lock eval/configs/benchmark-environment-windows-py312.json `
+  --execute --public-output docs/benchmark-evidence/core-pilot-combined-20260916.json
+```
+
+Omit `--execute` and `--public-output` for the read-only eligibility and allowance preview.
+This command is recovery of the existing run, not authorization for a replication. A completed
+eligible subset still returns exit code 2 when the original raw experiment retains an error.
+Read `valid_missing_attempts`, raw statuses and exclusions separately before interpreting it.
+
+The retained continuation itself is now stopped at a terminal native failed turn: 75 cells
+completed, one errored, and 14 were never attempted. Re-running the command preserves that stop;
+it does not skip the error or retry the failed call. A different child directory is rejected by
+the allocation receipt. Further execution needs a new reviewed recovery artifact that preserves
+both cohorts, charges every reservation and selects only genuinely unattempted cells. The
+existing core allowance is not exhausted; no additional account funding is implied.
+
 Each reader gets an ephemeral native thread with environment access, MCP servers, plugins,
 agent delegation and tools disabled. Inherited global Codex instructions remain present;
 their bytes are frozen and common across arms. They are included in reported model usage.
@@ -122,6 +159,11 @@ After execution, `python -m scripts.audit_coding_oauth_run --manifest <manifest.
 calling a model. The inventory hashes are taken after execution; they do not prove dispatch-time
 sealing. Native thread-start model identity and absence of rerouting are checked, but final-turn
 model metadata was not captured. An incomplete audit remains `BLOCKED` and preserves its causes.
+The continuation cohort report retains the full 150-cell stage contract, so its audit also
+reports cells intentionally covered by the parent or excluded by the eligibility mask. Use
+the combined report for total coverage. The stopped correction additionally exposed a partial
+checkpoint gap: native ledgers retain 212 completed calls across both cohorts, while row-level
+usage contains 211. The audit records the difference without rewriting the failed checkpoint.
 
 Validation selection is derived from actual checksummed validation outcomes, with no missing
 attempts, errors, or critical violations and fully scored candidate outcomes. Unsupported
@@ -245,11 +287,14 @@ LoCoMo/LongMemEval baselines and LoCoMo k=20 comparison completed before this qu
 frozen prerequisites and are not dispatched again. Five jobs completed before the queue stopped
 at a job boundary on source drift at 04:06:59 UTC: Mem2ActBench, LongMemEval's larger-budget run
 and comparison, and MAB conflict-resolution and test-time-learning. No workload was interrupted.
-The [successor queue](../eval/configs/benchmark-local-queue-final-v3-20260916.json) contains only
+The [successor queue](../eval/configs/benchmark-local-queue-final-v4-20260916.json) contains only
 MAB accurate retrieval, MAB long-range understanding, the LoCoMo-Plus Cognitive slice, and the
-24 capacity cells. It retains the prior manifest hash and completed-job inventory. Two unexecuted
-successor manifests remain as provenance for the final ledger and process-tree timeout fixes.
+24 capacity cells. It retains the prior manifest hash and completed-job inventory. Three unexecuted
+successor manifests remain as provenance for the final ledger, process-tree timeout and
+continuation fixes. The fresh capacity plan binds source `cc25ac5b` before any full cell starts.
 The queue starts after the coding pilot so measured workloads do not compete.
+This successor launched at 2026-09-16 07:00:19 UTC; the launch receipt and live status below
+identify the active process and current job.
 
 Inspect the live state without starting a duplicate:
 
