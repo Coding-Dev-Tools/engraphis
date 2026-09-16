@@ -1,6 +1,6 @@
 # Benchmark change coverage
 
-This is the change-to-evidence map for the screenshot reference at `a4c19eee76163bd4e4435ae5724472f51a1ed5f3`, the `v1.7.4` release at `ea6ed79c6d86e69f98b075614e64e50d9fd24d11`, and the campaign's frozen pre-expansion main endpoint at `ca790261f499e0d124cdc7131235ffff89637248`. The subsequent benchmark implementation is recorded in local commits `11abc345` and `7370e148`; the active OAuth pilot binds the latter. This is a historical capability inventory, not a claim that remote main still has the same head.
+This is the change-to-evidence map for the screenshot reference at `a4c19eee76163bd4e4435ae5724472f51a1ed5f3`, the `v1.7.4` release at `ea6ed79c6d86e69f98b075614e64e50d9fd24d11`, and the campaign's frozen pre-expansion main endpoint at `ca790261f499e0d124cdc7131235ffff89637248`. The subsequent benchmark implementation is recorded in local commits `11abc345`, `7370e148` and `cc25ac5b`; the original OAuth pilot binds `7370e148` and its eligible continuation binds `cc25ac5b`. This is a historical capability inventory, not a claim that remote main still has the same head.
 
 The screenshot commit is not an ancestor of current `main`. The two histories meet at
 `54c9985aa41304d8420437d388b7ee8ac1be56dd`, so a direct two-dot diff would mix branch-only
@@ -104,8 +104,11 @@ metric and its boundary.
 The local implementation commits add separate retrieved/packed evidence metrics, executable
 corpus/oracles, isolated adapters, conservative reservations, resumable checkpoints, native
 Codex OAuth-only readers, and source-bound serial local queues. They preserve production engine
-defaults. The current pilot source is `7370e148d7793aeb632bc92494528376ec35267e`; a later queue
-watchdog fix additionally terminates Windows launcher descendants. These benchmark controls
+defaults. The original pilot source is `7370e148d7793aeb632bc92494528376ec35267e`.
+The continuation source `cc25ac5b59e3b5e04a79ee09b8d7454d01cb31c1` adds durable allocation
+protection, preserves unknown calls and fixture exclusions, distinguishes ambiguous oracle
+execution from task failure, and repairs the future v2 long-document contract. Its queue
+watchdog also terminates Windows launcher descendants. These benchmark controls
 are validated by the offline suite and focused regressions described in
 [BENCHMARK_EXPANSION_RESULTS.md](BENCHMARK_EXPANSION_RESULTS.md). Experimental execution status
 is maintained there; infrastructure completion does not imply completion of all experiment stages.

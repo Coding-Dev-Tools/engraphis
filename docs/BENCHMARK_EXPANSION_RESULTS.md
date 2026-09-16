@@ -54,7 +54,8 @@ is retained for evidence diagnostics and excluded from answer-token scoring as a
 | Recall from long conversation history | Increasing k from 10 to 20 raised packed recall from 65.51% to 72.79% at the same 1,500-token cap | Mean context roughly doubled; 27.21% of supporting evidence is still missing on average. Good compression does not prove correct answers | Try the measured opt-in configuration on similar workloads and validate task correctness before adopting it |
 | Long sessions with temporal questions | LongMemEval retrieved evidence recall reached 97.53%; a 4,096-token budget retained 81.09% | At 1,500 tokens, packed recall was 57.07%; temporal-category recall fell from 96.06% retrieved to 45.12% packed | The measured larger budget improves evidence retention at roughly 2.73 times the context; validate reader correctness before adopting it |
 | Short coding memories and context economy | Existing registered deterministic fixtures demonstrate smaller serialized payload and structure-aware document context | Historical 57.15% payload saving and current 53.88% use different payload measurements; neither is provider billing or task quality | Use compact responses for context economy when the required evidence is retained; test actual Smart/Classic wrapper results separately |
-| Corrections, history and cross-session coding work | The executable corpus, real-engine journeys and native OAuth pilot exercise correction lineage, scope, handoff and abstention | The pilot uses one synthetic repository family. Its long-document oracle demanded hidden wording and is excluded across every arm; an interrupted call remains unscored | Complete eligible unattempted pilot cells within the existing allowance; repair the future corpus contract and validate across families before selecting a product change |
+| Corrections, history and cross-session coding work | The executable corpus, real-engine journeys and native OAuth pilot exercise correction lineage, scope and handoff | The pilot uses one synthetic repository family. Its long-document oracle demanded hidden wording and is excluded across every arm; two infrastructure errors remain visible and the unsupported-question category is incomplete | Reconcile the native failed-turn boundary before further execution; validate the repaired corpus across families before selecting a product change |
+| Exact configuration and localized labels | The pilot's 12 multilingual cells with memory retained the required evidence | All 12 still failed exact-value execution; source-ID agreement was 11/12. The reader retained only parts of the composite label | Evaluate explicit whole-value copying and structured value fields in a separately frozen experiment; retrieving the source alone does not guarantee a correct edit |
 | Mixed documents, reimports, code-memory links | Seven executable journeys cover real v2 functional paths and preserve explicit measurement boundaries | Small fixtures do not establish throughput, multilingual quality, large-import reliability, or public leadership | Retain journey regressions; add observed customer-shaped failure cases to development data with provenance |
 | Many memories and multiple agents | Both exact backend paths and the one-host capacity protocol are executable | Until the 24 cells finish, no 100k/16-process latency or throughput conclusion is supported. A second host is still required | Run fresh-process/database repetitions serially, inspect queue-inclusive tails, acknowledgement and erasure integrity before recommending a backend |
 | Comparing memory products | Mem0 OSS and Graphiti have pinned local-store adapters and shared budgeted extraction routes | Adapter temporal/history/session limitations remain explicit; unsupported cells cannot establish product inferiority | Complete matched peer pilots and report preprocessing usage, supported subsets and missing attempts together |
@@ -109,12 +110,32 @@ raw results and the interrupted call remain unchanged and visible. This is a fix
 so these failures cannot establish a weakness in any memory product. The other nine pilot
 contracts expose their required values or return conventions.
 
-There are 135 eligible cells: 45 completed in the original run and 90 unattempted. A continuation
-may run only those unattempted eligible cells under the existing core-only allowance, with a
-separately recorded 600-second transport deadline. It must retain the original error and bind
-the parent checkpoints, ledger, eligibility audit and source revisions. Different transport
-deadline cohorts cannot support an equivalent-latency comparison. The full raw experiment stays
-`BLOCKED` while the original call's outcome is unknown, even if eligible execution completes.
+There are 135 eligible cells. The bound continuation completed 75 of its 90 assigned cells,
+then stopped on a native Codex failed turn during a correction. Its first reader call completed,
+but the correction has no completed output or usage record; its reservation remains consumed.
+No failure was retried. The retained native journal omits the provider error payload, so the
+cause cannot be identified as billing, quota, network or model failure from this evidence.
+
+The [combined artifact](benchmark-evidence/core-pilot-combined-20260916.json) retains **133 complete,
+2 error and 15 missing raw cells**. After the whole-scenario exclusion, there are **120 complete,
+1 error and 14 unattempted eligible cells**. Both raw and eligible execution remain `BLOCKED`.
+The original 180-second and continuation 600-second deadlines are separate transport cohorts;
+they cannot support an equivalent-latency comparison. The continuation is bound to the original
+approval, parent checkpoints, ledger, eligibility audit and source revisions.
+
+Across the eight eligible categories with complete coverage, observed task successes are
+1/24 for no memory, 17/24 for full history, and 14/24 each for lexical, dense and hybrid recall.
+These descriptive counts share one synthetic family; they do not establish superiority or
+non-inferiority. The uncompleted unsupported-question category is not counted as success or
+failure in those ratios.
+
+The [continuation audit](benchmark-evidence/core-pilot-continuation-integrity-20260916.json)
+joins 131 completed native calls and one failed call. Together with the parent audit, **212
+completed calls** have known usage. The generic error checkpoint omitted the already completed
+initial call's response/usage and oracle observation, so row-based usage covers only 211 calls;
+the durable ledger and native audit retain the additional completed call. Both calls without
+usage remain explicit. The audit stays `BLOCKED` on these checkpoint gaps and incomplete
+coverage; it does not turn recovered usage into a scored task outcome.
 
 The pilot's ten scenarios all belong to **one repository family**. Repeated arms and budgets
 do not create independent repository samples; a clustered 95% quality interval is not estimable
@@ -123,8 +144,21 @@ and the one-percentage-point non-inferiority result is **indeterminate**. These 
 required-source-ID agreement, not independently judged entailment. The abstention field records
 answer-presence agreement; it does not independently judge semantic refusal quality. Answer
 completeness remains ungraded and answer-token overlap is a separate lexical diagnostic.
+The zero critical-violation counter covers the declared evidence and citation checks; it does
+not mean every scope-owner or poisoning repository task passed. Those oracle failures remain
+task failures in the per-category records and cannot support a security qualification claim.
 
-![Coding pilot outcomes with fixture exclusions and missing attempts](images/core-pilot-oauth-v2-20260916.svg)
+The multilingual fixture illustrates this distinction. Across the four memory arms and three
+budgets, all 12 cells retained the required source, but none preserved the complete target label
+in the edited function; 11/12 supplied its required source ID. All three no-memory cells also
+failed. A separate read-only review verified the original source/oracle hashes and confirmed
+that the full label and exact-copy requirement were supplied in the session evidence. This is
+an observed literal-value preservation failure after retrieval, shared across arms, rather than
+another hidden-oracle defect. It remains one synthetic fixture, not a general multilingual
+quality score. Explicit whole-value copying and structured value fields are future hypotheses;
+no measured prompt gain or engine default change is claimed.
+
+![Coding pilot outcomes with fixture exclusions and missing attempts](images/core-pilot-combined-20260916.svg)
 
 ## Experiment status
 
@@ -137,7 +171,7 @@ completeness remains ungraded and answer-token overlap is a separate lexical dia
 | k=20 LoCoMo configuration experiment | COMPLETE | Same source, model and budget; +7.28 points packed recall with roughly doubled mean evidence context |
 | LongMemEval 4,096-token context experiment | COMPLETE | Same-source 500-question comparison; packed recall 57.07% → 81.09% (+24.03 points), answer-token coverage 52.62% → 65.12%; retrieval-only and exploratory |
 | NumPy / sqlite-vec capacity smokes | COMPLETE | Two serial four-process smoke cells, 100 scheduled operations each, zero observed correctness failures; hashing fixtures only |
-| Coding core development pilot | BLOCKED | Original 58 complete / 1 error / 91 missing cells retained; 15 whole-scenario exclusions leave 135 eligible cells. Only the 90 unattempted eligible cells may continue; the original unknown call prevents a full completion claim |
+| Coding core development pilot | BLOCKED | Combined raw: 133 complete / 2 errors / 15 missing. Eligible subset: 120 complete / 1 error / 14 unattempted. Native failed-turn cause is unavailable; original timeout and all reservations are retained; no replay |
 | Mem0 OSS / Graphiti matched peer pilot | BLOCKED | Separate peer ingestion/reader budget required; local constructors/storage preflight only |
 | Full coding development, validation and three-repeat holdout | BLOCKED | Corrected corpus validity, pilot, measured candidate selection and separate stage approvals must precede execution |
 | Official LongMemEval-V2 pilot / 30-cell matrix | BLOCKED | Pinned harness CLI works; local GPU does not fit either prescribed model. [Compute proposal](LONGMEMEVAL_V2_FEASIBILITY.md) awaits approval; an OAuth judge path preserving GPT-5.2 is unqualified |
@@ -161,10 +195,14 @@ schema and checksum validation. The LongMemEval 4,096-token comparison also comp
 [comparison artifact](benchmark-evidence/longmemeval-budget-comparison-20260916.json) passed
 schema and checksum validation. MAB conflict-resolution and test-time-learning also completed.
 The queue then stopped between jobs because the OAuth implementation changed its source binding.
-The [successor manifest](../eval/configs/benchmark-local-queue-final-v3-20260916.json) preserves those
+The [successor manifest](../eval/configs/benchmark-local-queue-final-v4-20260916.json) preserves those
 five completions and contains only the four unfinished jobs. Its private execution status is
 `.private-eval/benchmark-20260915/local-queue-final/status.json`; a prepared manifest is not a
-completion claim. No hosted calls are included in either local queue.
+completion claim. The successor launched at **2026-09-16 07:00:19 UTC** after the model pilot
+stopped and the final report checks passed. Its first active job is MAB accurate retrieval;
+MAB long-range understanding, the Cognitive slice and the 24-cell capacity matrix follow
+serially. Live status and completed artifacts supersede this launch snapshot. No hosted calls
+are included in either local queue.
 
 The owner changed model authentication to **Codex OAuth only**. The inherited API gateway is
 retired and no top-up of that gateway is needed for this runner. The
@@ -174,21 +212,21 @@ Luna medium and usage; its first client check exposed a provenance-field mismatc
 fixed and covered by an offline integration regression. That failed check remains recorded and
 was not retried. Subscription usage is explicitly distinct from the API-price proxy.
 
-Full offline validation completed with **5,522 tests passed, 39 skipped, zero failures
-and errors** in 635.6 seconds. Ruff, Pyright for the CI Linux target, commercial-boundary checks,
+Final offline validation at source `cc25ac5b` completed in an isolated checkout with
+**5,554 tests passed, 39 skipped, zero failures and errors** in 521.1 seconds.
+Unrelated Railway work was excluded from that checkout. Ruff, Pyright for the CI Linux target, commercial-boundary checks,
 dashboard asset checks and all seven required offline evaluations also passed. Two suite warnings
 were a dependency deprecation and an intentional malformed-ZIP fixture. Native Windows Pyright
 has the pre-existing `os.register_at_fork` platform-stub limitation; the CI target reported zero
 errors. Tests cover budget exhaustion, crash reservations, source drift, duplicate prevention,
 model mismatch, OAuth-only routing, context overflow, redaction, adapters, isolated oracles,
-queue heartbeats, watchdogs and capacity-summary validation. The first live pilot then exposed
-a call-label integration defect before any reservation or provider dispatch. The fix prefixes
-digest-based call IDs and also corrects public record identifiers; **63 focused tests** passed
-after these two harness fixes, including real-ledger and artifact-envelope regressions. The
-[failed attempt](benchmark-evidence/core-pilot-oauth-predispatch-failure-20260916.json) is retained
-with zero provider dispatches. A subsequent process-tree timeout fix passed **23 focused queue
-and capacity tests**, including a Windows launcher/child teardown regression. The full-suite
-count above precedes these small harness fixes.
+queue heartbeats, Windows process-tree teardown and capacity-summary validation. The final
+suite also includes call-ID and public-record integration fixes, continuation allocation/replay
+protection, explicit ambiguous-oracle outcomes, post-run native evidence audits and the future
+v2 corpus contract repair. The original
+[pre-dispatch failure](benchmark-evidence/core-pilot-oauth-predispatch-failure-20260916.json)
+is retained with zero provider dispatches. A final **58 report, chart, documentation and public
+boundary tests** also passed after the stopped-run artifacts and findings were assembled.
 Earlier snapshots remain historical; the selected current deterministic fixture is v18.
 
 These changes are on `codex/benchmark-expansion-20260915`, based on `ca790261`, with exact source
@@ -196,6 +234,6 @@ bytes retained in the manifests. They remain local for review. No production
 ranking default, independent acceptance decision, merge, publication or product leadership
 claim has been promoted.
 
-The [validation snapshot](benchmark-evidence/campaign-validation-20260916.json) binds retained
+The [final OAuth validation snapshot](benchmark-evidence/campaign-validation-oauth-20260916.json) binds retained
 test-log digests, the selected fixture, unchanged historical artifacts, completed evidence
 artifacts and the active queue manifest. It contains no raw dataset text or provider output.

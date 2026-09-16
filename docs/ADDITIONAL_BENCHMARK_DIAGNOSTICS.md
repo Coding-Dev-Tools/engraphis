@@ -194,7 +194,7 @@ units are labeled relevant; neither number is an upstream learning, conflict-res
 generated-answer score. The declared `--no-resolve` ingestion also means this conflict split
 does not exercise Engraphis's automatic correction resolution.
 
-The [successor queue manifest](../eval/configs/benchmark-local-queue-final-v3-20260916.json) binds
+The [successor queue manifest](../eval/configs/benchmark-local-queue-final-v4-20260916.json) binds
 the prepared input bytes and producer source. It preserves the original queue's five completed
 jobs and dispatches only the remaining diagnostics and capacity campaign. Live progress is in
 `.private-eval/benchmark-20260915/local-queue-final/status.json`. The statuses above describe

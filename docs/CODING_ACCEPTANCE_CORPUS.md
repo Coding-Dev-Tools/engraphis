@@ -264,6 +264,10 @@ python -m eval.coding_corpus --materialize --version coding-memory-v2 --root <ne
 python -m eval.coding_corpus --verify --root <new-empty-corpus-directory>
 ```
 
+The repaired generator was materialized into a separate private directory and its source/oracle
+byte verification passed for all 400 scenarios and 40 families. The historical v1 directory
+remains unchanged. This checks executable corpus integrity; it is not model execution.
+
 No v2 model outcome, independent authorship or held-out acceptance is established by
 the generator repair. The 90-cell continuation retains v1 and excludes its invalid
 category; substituting v2 into that continuation would violate its frozen binding.
