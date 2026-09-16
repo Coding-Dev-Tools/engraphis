@@ -73,6 +73,8 @@ def test_container_runtime_matches_the_railway_persistence_and_port_contract():
     assert "refusing non-directory trusted config parent" in entrypoint
     assert 'if [ "$config_parent_created" = "1" ]; then' in entrypoint
     assert 'chown engraphis:engraphis "$config_parent"' in entrypoint
+    assert "config_owner=$(stat -c '%u' \"$config_parent\"" in entrypoint
+    assert "trusted config directory must be owned by engraphis" in entrypoint
     assert 'if [ -L "$ownership_marker" ]; then' in entrypoint
     assert "refusing symlinked volume ownership marker" in entrypoint
     assert 'if [ ! -e "$ownership_marker" ]; then' in entrypoint

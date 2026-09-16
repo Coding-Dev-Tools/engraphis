@@ -161,6 +161,17 @@ if [ "$(id -u)" = "0" ]; then
         printf '%s\n' "[engraphis] unable to verify /data ownership" >&2
         exit 1
     fi
+    if [ -n "$config_file" ]; then
+        # A pre-existing config directory may be a separate root-owned mount. Do not
+        # chown an arbitrary existing host path; fail closed if it is unusable instead
+        # of starting a dashboard whose settings silently cannot persist.
+        config_owner=$(stat -c '%u' "$config_parent" 2>/dev/null || true)
+        app_owner=$(id -u engraphis)
+        if [ -z "$config_owner" ] || [ "$config_owner" != "$app_owner" ]; then
+            printf '%s\n' "[engraphis] trusted config directory must be owned by engraphis: $config_parent" >&2
+            exit 1
+        fi
+    fi
     if [ -n "$config_file" ] && ! chown engraphis:engraphis "$config_file"; then
         printf '%s\n' "[engraphis] unable to own trusted config file" >&2
         exit 1
