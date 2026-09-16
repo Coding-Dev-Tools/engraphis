@@ -33,6 +33,15 @@ if [ "$(id -u)" = "0" ]; then
     state_dir="${ENGRAPHIS_STATE_DIR:-/data/.engraphis}"
     ownership_marker="${state_dir}/.volume-ownership"
     config_file="${ENGRAPHIS_ENV_FILE:-}"
+    # The state directory is app-writable after first boot. Reject a planted link or
+    # non-directory before mkdir/chown can follow it into a root-owned image path.
+    if [ -L "$state_dir" ]; then
+        printf '%s\n' "[engraphis] refusing symlinked state directory: $state_dir" >&2
+        exit 1
+    elif [ -e "$state_dir" ] && [ ! -d "$state_dir" ]; then
+        printf '%s\n' "[engraphis] refusing non-directory state path: $state_dir" >&2
+        exit 1
+    fi
     if ! mkdir -p "$state_dir"; then
         printf '%s\n' "[engraphis] unable to create state directory: $state_dir" >&2
         exit 1
