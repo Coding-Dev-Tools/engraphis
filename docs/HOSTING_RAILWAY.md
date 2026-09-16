@@ -13,12 +13,19 @@ Use the `Dockerfile`, mount a private persistent volume at `/data`, and configur
 
 ```dotenv
 ENGRAPHIS_SERVICE_MODE=customer
+ENGRAPHIS_HOST=0.0.0.0
 ENGRAPHIS_DB_PATH=/data/engraphis.db
 ENGRAPHIS_STATE_DIR=/data/.engraphis
+ENGRAPHIS_ENV_FILE=/data/.engraphis/config.env
 ENGRAPHIS_API_TOKEN=<strong-random-secret>
 ENGRAPHIS_JSON_LOGS=1
 ENGRAPHIS_FORWARDED_ALLOW_IPS=*
 ```
+
+Keep the image entrypoint and default command (`engraphis-dashboard --no-open`) in place. A
+Railway service-level Start Command override can bypass `docker-entrypoint.sh`, which is
+responsible for volume ownership repair, and can leave the app bound only to loopback. Clear
+old Start Command overrides before deploying this image.
 
 Set `ENGRAPHIS_FORWARDED_ALLOW_IPS=*` only when the container is reachable exclusively through
 Railway's trusted proxy. Set the dashboard's public URL where the runtime supports it, terminate
