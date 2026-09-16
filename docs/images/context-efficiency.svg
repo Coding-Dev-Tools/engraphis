@@ -1,161 +1,111 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1103" height="956" viewBox="0 0 1103 956" role="img" aria-labelledby="title desc">
-<title id="title">What the memory system changes</title>
-<desc id="desc">A compact dark telemetry chart of local measurements and deterministic fixtures across continuity, graph reasoning, retrieval quality, and context economy. A local LoCoMo diagnostic reduces replayed context from 49,915,394 to 891,857 tokens, 98.21% lower, while preserving the measured retrieval result for that diagnostic. Cross-session handoff satisfaction rises from 3 of 15 queries with the last memories to 15 of 15 with proactive ranking or a consolidated summary. Intent-layered graph routing rises from 0 of 3 to 3 of 3 correct top-1 targets. Two-hop graph recall rises from 0 of 3 with one-hop expansion to 3 of 3 with Personalized PageRank. Consolidation-aware ranking selects the expected digest in 2 of 2 summary cases instead of 0 of 2 for the baseline while preserving raw and source evidence. Structure-aware chunks reduce retrieved context from 740.3 to 214.3 tokens and the smallest evidence-holding memory from 162.2 to 42.4 tokens, both with Recall at 5 of 1.000. A compact JSON-shape proxy, not an MCP transport response, uses 10,982 rather than 23,810 tokens, with Recall at 5, hit at 5, and answer-token recall all 1.000. Grounded recall makes 11 of 11 correct decisions, 8 of 8 memory-security checks pass, and packed context averages 85.38 tokens under a 1,500-token cap. This measures estimated prompt-context reduction, does not measure provider billing, with current chunking, payload and grounding aggregates bound to public fixture SHA-256 455fc9d32a236e582a49aaaf9b84f30cae2573dc6ed982f4dd7dd845afcaf24c.</desc>
-<style>text{font-family:Consolas,monospace;fill:#b9c8dc} .heading{font-family:Segoe UI,sans-serif;font-weight:700;fill:#f2f5f9}.green{fill:#00c896}.muted{fill:#7589a7}</style>
+<title id="title">Measured context and retrieval boundaries</title>
+<desc id="desc">Artifact-driven local deterministic benchmark report. Structure-aware chunks report 740.3 to 214.3 retrieved tokens per question. The performance run reports 23,810 full-proxy versus 10,982 compact-proxy tokens. Retrieved-candidate quality and packed-context quality are separate views; packed quality is shown only when the selected report includes it. Payload counts are a serialized JSON-shape proxy; the payload is not an MCP transport measurement. The report does not measure provider billing. Packed context reports 85.38 mean and 108 max under a 1,500-token cap. Source artifact SHA-256 5de646349e6d7f5e7c9bcf782f592b6e133bf90457e6a126ef372c04069a2415.</desc>
+<style>text{font-family:Consolas,monospace;fill:#b9c8dc} .heading{font-family:Segoe UI,sans-serif;font-weight:700;fill:#f2f5f9} .green{fill:#00c896}.muted{fill:#7589a7}</style>
 <rect x="3" y="2" width="1094" height="949" fill="#0e1114" stroke="#252c36"/>
 <rect x="23" y="27" width="176" height="20" fill="#1c222b" stroke="#303a47"/>
-<text x="32" y="41" font-size="12.5" class="" text-anchor="start">BENCHMARK FIXTURE REPORT</text>
-<text x="225" y="48" font-size="33" class="heading" text-anchor="start">What the memory system changes</text>
-<text x="23" y="75" font-size="13.2" class="muted" text-anchor="start">Local deterministic fixtures: continuity, graph reasoning, retrieval quality and context economy.</text>
+<text x="32" y="41" font-size="12.5" text-anchor="start">BENCHMARK FIXTURE REPORT</text>
+<text x="225" y="48" font-size="33" class="heading" text-anchor="start">Measured context and retrieval boundaries</text>
+<text x="23" y="75" font-size="13.2" class="muted" text-anchor="start">Registered local fixtures with explicit candidate, packed, and payload scopes.</text>
 <rect x="4" y="90" width="1092" height="28" fill="#141920" stroke="#252c36"/>
-<text x="19" y="109" font-size="12.5" class="green" text-anchor="start">01 CONTINUITY</text>
-<text x="1080" y="109" font-size="12.5" class="muted" text-anchor="end">2 FIXTURES</text>
+<text x="19" y="109" font-size="12.5" class="green" text-anchor="start">01 CONTEXT BOUNDARIES</text>
+<text x="1080" y="109" font-size="12.5" class="muted" text-anchor="end">2 REGISTERED FIXTURES</text>
 <rect x="4" y="118" width="1092" height="108" fill="#0e1114" stroke="#252c36"/>
 <rect x="368" y="118" width="1" height="108" fill="#252c36"/>
 <rect x="823" y="118" width="1" height="108" fill="#252c36"/>
-<g aria-label="Local LoCoMo diagnostic · 10 conversations · 1,986 questions; Replay everything · 49,915,394 tokens; Engraphis · 891,857 tokens">
-<text x="19" y="149" font-size="17.4" class="heading" text-anchor="start">Long project history sent to the model*</text>
-<text x="19" y="170" font-size="12.5" class="muted" text-anchor="start">Local LoCoMo diagnostic</text>
-<text x="19" y="187" font-size="12.5" class="muted" text-anchor="start">10 conversations / 1,986 questions</text>
-<text x="19" y="204" font-size="12.5" class="muted" text-anchor="start">Measured retrieval result preserved</text>
-<text x="384" y="146" font-size="14.3" class="" text-anchor="start">Replay everything</text>
-<text x="808" y="146" font-size="14.3" class="" text-anchor="end">49,915,394 tokens</text>
-<rect x="384" y="154" width="424" height="8" fill="#1d2530"/>
-<rect x="384" y="154" width="424.0" height="8" fill="#445367"/>
-<text x="384" y="182" font-size="14.3" class="green" text-anchor="start">Engraphis</text>
-<text x="808" y="182" font-size="14.3" class="green" text-anchor="end">891,857 tokens</text>
-<rect x="384" y="190" width="424" height="8" fill="#1d2530"/>
-<rect x="384" y="190" width="7.58" height="8" fill="#00b889"/>
+<g aria-label="Structure-aware chunking; 740.3 to 214.3 tokens">
+<text x="19" y="149" font-size="17.4" class="heading" text-anchor="start">Retrieved context per question</text>
+<text x="19" y="170" font-size="12.5" class="muted" text-anchor="start">18 questions / Recall@5 is fixture-bound</text>
+<text x="19" y="187" font-size="12.5" class="muted" text-anchor="start">Smallest evidence: 162.2 to 42.4 tokens</text>
+<text x="19" y="204" font-size="12.5" class="muted" text-anchor="start">Stored-memory content before context packing</text>
+<text x="384" y="146" font-size="14.3" text-anchor="start">Whole documents</text>
+<text x="808" y="146" font-size="14.3" text-anchor="end">740.3 tokens</text>
+<rect x="384" y="154" width="424" height="8" fill="#1d2530"/><rect x="384" y="154" width="424.00" height="8" fill="#00b889"/>
+<text x="384" y="182" font-size="14.3" class="green" text-anchor="start">Structure-aware chunks</text>
+<text x="808" y="182" font-size="14.3" class="green" text-anchor="end">214.3 tokens</text>
+<rect x="384" y="190" width="424" height="8" fill="#1d2530"/><rect x="384" y="190" width="122.74" height="8" fill="#00b889"/>
 <text x="1080" y="161" font-size="12.5" class="muted" text-anchor="end">OUTCOME DIFFERENTIAL</text>
-<text x="1080" y="189" font-size="24" class="green" text-anchor="end">98.21% lower*</text>
+<text x="1080" y="189" font-size="24" class="green" text-anchor="end">71.1% lower</text>
 </g>
 <rect x="4" y="226" width="1092" height="93" fill="#0e1114" stroke="#252c36"/>
 <rect x="368" y="226" width="1" height="93" fill="#252c36"/>
 <rect x="823" y="226" width="1" height="93" fill="#252c36"/>
-<g aria-label="Cross-session handoff; 3 / 15 satisfied; 15 / 15 satisfied">
-<text x="19" y="257" font-size="17.4" class="heading" text-anchor="start">Cross-session handoff</text>
-<text x="19" y="278" font-size="12.5" class="muted" text-anchor="start">3 session transitions / 15 follow-up queries</text>
-<text x="384" y="254" font-size="14.3" class="" text-anchor="start">Last N memories</text>
-<text x="808" y="254" font-size="14.3" class="" text-anchor="end">3 / 15 satisfied</text>
-<rect x="384" y="262" width="424" height="8" fill="#1d2530"/>
-<rect x="384" y="262" width="84.8" height="8" fill="#445367"/>
-<text x="384" y="290" font-size="14.3" class="green" text-anchor="start">Proactive or consolidated</text>
-<text x="808" y="290" font-size="14.3" class="green" text-anchor="end">15 / 15 satisfied</text>
-<rect x="384" y="298" width="424" height="8" fill="#1d2530"/>
-<rect x="384" y="298" width="424" height="8" fill="#00b889"/>
-<text x="1080" y="269" font-size="12.5" class="muted" text-anchor="end">OUTCOME DIFFERENTIAL</text>
-<text x="1080" y="297" font-size="24" class="green" text-anchor="end">5× satisfied</text>
+<g aria-label="Serialized JSON-shape payload proxy; 23,810 full; 10,982 compact">
+<text x="19" y="257" font-size="17.4" class="heading" text-anchor="start">Serialized recall payload proxy</text>
+<text x="19" y="278" font-size="12.5" class="muted" text-anchor="start">26 payload samples / 260 timed recalls</text>
+<text x="384" y="254" font-size="14.3" text-anchor="start">Full JSON-shape proxy</text>
+<text x="808" y="254" font-size="14.3" text-anchor="end">23,810 tokens</text>
+<rect x="384" y="262" width="424" height="8" fill="#1d2530"/><rect x="384" y="262" width="424.00" height="8" fill="#00b889"/>
+<text x="384" y="290" font-size="14.3" class="green" text-anchor="start">Compact JSON-shape proxy</text>
+<text x="808" y="290" font-size="14.3" class="green" text-anchor="end">10,982 tokens</text>
+<rect x="384" y="298" width="424" height="8" fill="#1d2530"/><rect x="384" y="298" width="195.56" height="8" fill="#00b889"/>
+<text x="1080" y="269" font-size="12.5" class="muted" text-anchor="end">PROXY DIFFERENTIAL</text>
+<text x="1080" y="297" font-size="24" class="green" text-anchor="end">53.88% lower</text>
 </g>
 <rect x="4" y="319" width="1092" height="28" fill="#141920" stroke="#252c36"/>
-<text x="19" y="338" font-size="12.5" class="green" text-anchor="start">02 GRAPH REASONING</text>
-<text x="1080" y="338" font-size="12.5" class="muted" text-anchor="end">3 FIXTURES</text>
+<text x="19" y="338" font-size="12.5" class="green" text-anchor="start">02 QUALITY SCOPES</text>
+<text x="1080" y="338" font-size="12.5" class="muted" text-anchor="end">CANDIDATE VS PACKED</text>
 <rect x="4" y="347" width="1092" height="94" fill="#0e1114" stroke="#252c36"/>
 <rect x="368" y="347" width="1" height="94" fill="#252c36"/>
 <rect x="823" y="347" width="1" height="94" fill="#252c36"/>
-<g aria-label="Intent-layered graph routing; 0 / 3 top-1; 3 / 3 top-1">
-<text x="19" y="378" font-size="17.4" class="heading" text-anchor="start">Intent-layered graph routing</text>
-<text x="19" y="399" font-size="12.5" class="muted" text-anchor="start">3 relation types: causal / temporal / entity</text>
-<text x="384" y="375" font-size="14.3" class="" text-anchor="start">Uniform graph</text>
-<text x="808" y="375" font-size="14.3" class="" text-anchor="end">0 / 3 top-1</text>
-<rect x="384" y="383" width="424" height="8" fill="#1d2530"/>
-<rect x="384" y="383" width="0" height="8" fill="#445367"/>
-<text x="384" y="411" font-size="14.3" class="green" text-anchor="start">Layer-aware graph</text>
-<text x="808" y="411" font-size="14.3" class="green" text-anchor="end">3 / 3 top-1</text>
-<rect x="384" y="419" width="424" height="8" fill="#1d2530"/>
-<rect x="384" y="419" width="424" height="8" fill="#00b889"/>
-<text x="1080" y="390" font-size="12.5" class="muted" text-anchor="end">OUTCOME DIFFERENTIAL</text>
-<text x="1080" y="418" font-size="24" class="green" text-anchor="end">3 / 3 correct</text>
+<g aria-label="Retrieved candidate quality and packed context quality">
+<text x="19" y="378" font-size="17.4" class="heading" text-anchor="start">Retrieved candidate quality</text>
+<text x="19" y="399" font-size="12.5" class="muted" text-anchor="start">Legacy fields score all candidate chunks before packing</text>
+<text x="384" y="375" font-size="14.3" text-anchor="start">Retrieved candidates</text>
+<text x="808" y="375" font-size="14.3" text-anchor="end">Recall@5 1.000</text>
+<text x="384" y="403" font-size="14.3" text-anchor="start">hit@5 1.000 / answer tokens 1.000</text>
+<text x="384" y="431" font-size="14.3" class="green" text-anchor="start">Packed context</text>
+<text x="808" y="431" font-size="12.5" class="green" text-anchor="end">Recall@5 1.000 / hit@5 1.000 / answer tokens 1.000</text>
 </g>
 <rect x="4" y="441" width="1092" height="94" fill="#0e1114" stroke="#252c36"/>
 <rect x="368" y="441" width="1" height="94" fill="#252c36"/>
 <rect x="823" y="441" width="1" height="94" fill="#252c36"/>
-<g aria-label="One-hop graph · 0 / 3 found; Personalized PageRank · 3 / 3 found">
-<text x="19" y="472" font-size="17.4" class="heading" text-anchor="start">Two-hop graph recall</text>
-<text x="19" y="493" font-size="12.5" class="muted" text-anchor="start">3 synthetic multi-hop questions</text>
-<text x="384" y="469" font-size="14.3" class="" text-anchor="start">One-hop graph</text>
-<text x="808" y="469" font-size="14.3" class="" text-anchor="end">0 / 3 found</text>
-<rect x="384" y="477" width="424" height="8" fill="#1d2530"/>
-<rect x="384" y="477" width="0" height="8" fill="#445367"/>
-<text x="384" y="505" font-size="14.3" class="green" text-anchor="start">Personalized PageRank</text>
-<text x="808" y="505" font-size="14.3" class="green" text-anchor="end">3 / 3 found</text>
-<rect x="384" y="513" width="424" height="8" fill="#1d2530"/>
-<rect x="384" y="513" width="424" height="8" fill="#00b889"/>
-<text x="1080" y="484" font-size="12.5" class="muted" text-anchor="end">OUTCOME DIFFERENTIAL</text>
-<text x="1080" y="512" font-size="24" class="green" text-anchor="end">3 / 3 found</text>
-</g>
-<rect x="4" y="535" width="1092" height="94" fill="#0e1114" stroke="#252c36"/>
-<rect x="368" y="535" width="1" height="94" fill="#252c36"/>
-<rect x="823" y="535" width="1" height="94" fill="#252c36"/>
-<g aria-label="Baseline digest top-1 · 0 / 2; With consolidation bonus · 2 / 2">
-<text x="19" y="566" font-size="17.4" class="heading" text-anchor="start">Consolidation-aware ranking</text>
-<text x="19" y="587" font-size="12.5" class="muted" text-anchor="start">2 summary cases</text>
-<text x="19" y="604" font-size="12.5" class="muted" text-anchor="start">Raw and source evidence stays retrievable</text>
-<text x="384" y="563" font-size="14.3" class="" text-anchor="start">Baseline digest top-1</text>
-<text x="808" y="563" font-size="14.3" class="" text-anchor="end">0 / 2</text>
-<rect x="384" y="571" width="424" height="8" fill="#1d2530"/>
-<rect x="384" y="571" width="0" height="8" fill="#445367"/>
-<text x="384" y="599" font-size="14.3" class="green" text-anchor="start">With consolidation bonus</text>
-<text x="808" y="599" font-size="14.3" class="green" text-anchor="end">2 / 2</text>
-<rect x="384" y="607" width="424" height="8" fill="#1d2530"/>
-<rect x="384" y="607" width="424" height="8" fill="#00b889"/>
-<text x="1080" y="578" font-size="12.5" class="muted" text-anchor="end">OUTCOME DIFFERENTIAL</text>
-<text x="1080" y="606" font-size="24" class="green" text-anchor="end">2 / 2 top-1</text>
-</g>
-<rect x="4" y="629" width="1092" height="28" fill="#141920" stroke="#252c36"/>
-<text x="19" y="648" font-size="12.5" class="green" text-anchor="start">03 CONTEXT ECONOMY</text>
-<text x="1080" y="648" font-size="12.5" class="muted" text-anchor="end">2 FIXTURES</text>
-<rect x="4" y="657" width="1092" height="93" fill="#0e1114" stroke="#252c36"/>
-<rect x="368" y="657" width="1" height="93" fill="#252c36"/>
-<rect x="823" y="657" width="1" height="93" fill="#252c36"/>
-<g aria-label="Whole documents · 740.3 tokens; Structure-aware chunks · 214.3 tokens; Smallest evidence: 162.2 → 42.4 tokens · 73.9% lower">
-<text x="19" y="688" font-size="17.4" class="heading" text-anchor="start">Retrieved context per question</text>
-<text x="19" y="709" font-size="12.5" class="muted" text-anchor="start">6 documents / 18 questions / Recall@5 1.000</text>
-<text x="19" y="726" font-size="12.5" class="muted" text-anchor="start">Smallest evidence: 162.2 → 42.4 tokens</text>
-<text x="19" y="743" font-size="12.5" class="muted" text-anchor="start">73.9% lower</text>
-<text x="384" y="685" font-size="14.3" class="" text-anchor="start">Whole documents</text>
-<text x="808" y="685" font-size="14.3" class="" text-anchor="end">740.3 tokens</text>
-<rect x="384" y="693" width="424" height="8" fill="#1d2530"/>
-<rect x="384" y="693" width="424.0" height="8" fill="#445367"/>
-<text x="384" y="721" font-size="14.3" class="green" text-anchor="start">Structure-aware chunks</text>
-<text x="808" y="721" font-size="14.3" class="green" text-anchor="end">214.3 tokens</text>
-<rect x="384" y="729" width="424" height="8" fill="#1d2530"/>
-<rect x="384" y="729" width="122.74" height="8" fill="#00b889"/>
-<text x="1080" y="700" font-size="12.5" class="muted" text-anchor="end">OUTCOME DIFFERENTIAL</text>
-<text x="1080" y="728" font-size="24" class="green" text-anchor="end">71.1% lower</text>
-</g>
-<rect x="4" y="750" width="1092" height="94" fill="#0e1114" stroke="#252c36"/>
-<rect x="368" y="750" width="1" height="94" fill="#252c36"/>
-<rect x="823" y="750" width="1" height="94" fill="#252c36"/>
-<g aria-label="Full proxy · 23,810 tokens; Compact proxy · 10,982 tokens">
-<text x="19" y="781" font-size="17.4" class="heading" text-anchor="start">Serialized recall payload proxy</text>
-<text x="19" y="802" font-size="12.5" class="muted" text-anchor="start">CodeMem / 26 samples · 260 timed recalls</text>
-<text x="19" y="819" font-size="12.5" class="muted" text-anchor="start">Recall@5 · hit@5 · answer-token recall: 1.000</text>
-<text x="384" y="778" font-size="14.3" class="" text-anchor="start">Full proxy</text>
-<text x="808" y="778" font-size="14.3" class="" text-anchor="end">23,810 tokens</text>
-<rect x="384" y="786" width="424" height="8" fill="#1d2530"/>
-<rect x="384" y="786" width="424.0" height="8" fill="#445367"/>
-<text x="384" y="814" font-size="14.3" class="green" text-anchor="start">Compact proxy</text>
-<text x="808" y="814" font-size="14.3" class="green" text-anchor="end">10,982 tokens</text>
-<rect x="384" y="822" width="424" height="8" fill="#1d2530"/>
-<rect x="384" y="822" width="195.56" height="8" fill="#00b889"/>
-<text x="1080" y="793" font-size="12.5" class="muted" text-anchor="end">OUTCOME DIFFERENTIAL</text>
-<text x="1080" y="821" font-size="24" class="green" text-anchor="end">53.88% lower</text>
-</g>
+<text x="19" y="472" font-size="17.4" class="heading" text-anchor="start">Packed prompt-context usage</text>
+<text x="19" y="493" font-size="12.5" class="muted" text-anchor="start">Context usage is separate from payload serialization</text>
+<text x="19" y="510" font-size="12.5" class="muted" text-anchor="start">Mean 85.38 / max 108 tokens</text>
+<text x="384" y="469" font-size="14.3" text-anchor="start">Configured hard budget</text>
+<text x="808" y="469" font-size="14.3" text-anchor="end">1,500 tokens</text>
+<rect x="384" y="477" width="424" height="8" fill="#1d2530"/><rect x="384" y="477" width="30.53" height="8" fill="#00b889"/>
+<text x="384" y="505" font-size="14.3" class="green" text-anchor="start">Transport boundary</text>
+<text x="808" y="505" font-size="14.3" class="green" text-anchor="end">MCP transport not measured</text>
+<text x="1080" y="484" font-size="12.5" class="muted" text-anchor="end">SCOPE</text>
+<text x="1080" y="512" font-size="24" class="green" text-anchor="end">JSON proxy only</text>
+<rect x="4" y="535" width="1092" height="28" fill="#141920" stroke="#252c36"/>
+<text x="19" y="554" font-size="12.5" class="green" text-anchor="start">03 PENDING EVALUATION TRACKS</text>
+<text x="1080" y="554" font-size="12.5" class="muted" text-anchor="end">NO UNREGISTERED SCORES</text>
+<rect x="4" y="566" width="1092" height="50" fill="#0e1114" stroke="#252c36"/>
+<rect x="368" y="566" width="1" height="50" fill="#252c36"/>
+<rect x="823" y="566" width="1" height="50" fill="#252c36"/>
+<text x="19" y="588" font-size="14.3" class="heading" text-anchor="start">Coding outcomes</text>
+<text x="384" y="588" font-size="13.2" text-anchor="start">Project-authored tasks, paired graders, and held-out corrections</text>
+<text x="1080" y="588" font-size="13.2" class="muted" text-anchor="end">PENDING</text>
+<rect x="4" y="616" width="1092" height="50" fill="#0e1114" stroke="#252c36"/>
+<rect x="368" y="616" width="1" height="50" fill="#252c36"/>
+<rect x="823" y="616" width="1" height="50" fill="#252c36"/>
+<text x="19" y="638" font-size="14.3" class="heading" text-anchor="start">External datasets</text>
+<text x="384" y="638" font-size="13.2" text-anchor="start">Pinned LoCoMo and LongMemEval artifacts with answer evaluators</text>
+<text x="1080" y="638" font-size="13.2" class="muted" text-anchor="end">PENDING</text>
+<rect x="4" y="666" width="1092" height="50" fill="#0e1114" stroke="#252c36"/>
+<rect x="368" y="666" width="1" height="50" fill="#252c36"/>
+<rect x="823" y="666" width="1" height="50" fill="#252c36"/>
+<text x="19" y="688" font-size="14.3" class="heading" text-anchor="start">Operational capacity</text>
+<text x="384" y="688" font-size="13.2" text-anchor="start">Frozen 1/4/16 process matrix at staged memory counts</text>
+<text x="1080" y="688" font-size="13.2" class="muted" text-anchor="end">PENDING</text>
 <rect x="23" y="864" width="263" height="82" fill="#0e1114" stroke="#252c36"/>
-<text x="35" y="885" font-size="12.5" class="muted" text-anchor="start">RETRIEVAL QUALITY</text>
-<text x="35" y="913" font-size="20" class="heading" text-anchor="start">35 / 35</text>
-<text x="35" y="935" font-size="12.5" class="muted" text-anchor="start">sample + CodeMem queries</text>
+<text x="35" y="885" font-size="12.5" class="muted" text-anchor="start">RETRIEVED QUALITY</text>
+<text x="35" y="913" font-size="20" class="heading" text-anchor="start">1.000 Recall@5</text>
+<text x="35" y="935" font-size="12.5" class="muted" text-anchor="start">candidate page metric</text>
 <rect x="287" y="864" width="263" height="82" fill="#0e1114" stroke="#252c36"/>
-<text x="299" y="885" font-size="12.5" class="muted" text-anchor="start">GROUNDING / SAFETY</text>
-<text x="299" y="913" font-size="20" class="heading" text-anchor="start">11 / 11 · 8 / 8</text>
-<text x="299" y="935" font-size="12.5" class="muted" text-anchor="start">decisions / security checks</text>
+<text x="299" y="885" font-size="12.5" class="muted" text-anchor="start">PACKED QUALITY</text>
+<text x="299" y="913" font-size="20" class="heading" text-anchor="start">1.000 Recall@5</text>
+<text x="299" y="935" font-size="12.5" class="muted" text-anchor="start">reader-admitted context</text>
 <rect x="550" y="864" width="263" height="82" fill="#0e1114" stroke="#252c36"/>
-<text x="562" y="885" font-size="12.5" class="muted" text-anchor="start">CONTEXT ECONOMY</text>
-<text x="562" y="913" font-size="22" class="green" text-anchor="start">9.66% lower</text>
-<text x="562" y="935" font-size="12.5" class="muted" text-anchor="start">41.00 vs 45.38 avg</text>
+<text x="562" y="885" font-size="12.5" class="muted" text-anchor="start">PAYLOAD BOUNDARY</text>
+<text x="562" y="913" font-size="20" class="green" text-anchor="start">JSON proxy only</text>
+<text x="562" y="935" font-size="12.5" class="muted" text-anchor="start">mcp transport not measured</text>
 <rect x="814" y="864" width="263" height="82" fill="#0e1114" stroke="#252c36"/>
-<text x="826" y="885" font-size="12.5" class="muted" text-anchor="start">CONTEXT CAP</text>
-<text x="826" y="913" font-size="20" class="heading" text-anchor="start">85.38 avg · 108 max</text>
-<text x="826" y="935" font-size="12.5" class="muted" text-anchor="start">1,500-token limit</text>
-<text x="1080" y="70" font-size="18.7" class="muted" text-anchor="end">Local measurements</text>
+<text x="826" y="885" font-size="12.5" class="muted" text-anchor="start">SOURCE ARTIFACT</text>
+<text x="826" y="913" font-size="20" class="heading" text-anchor="start">5de646349e6d</text>
+<text x="826" y="935" font-size="12.5" class="muted" text-anchor="start">SHA-256 prefix</text>
+<text x="1080" y="70" font-size="18.7" class="muted" text-anchor="end">Artifact-driven local measurements</text>
 </svg>

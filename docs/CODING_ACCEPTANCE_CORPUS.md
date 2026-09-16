@@ -1,10 +1,89 @@
-# Independent coding-memory acceptance corpus
+# Coding-memory acceptance corpus
 
-`eval.coding_acceptance` defines a versioned manifest and validates structural
-and provenance declarations. It does not contain an independently authored corpus,
-execute model calls, prove authorship, or authorize evaluation spending.
-Existing deterministic fixtures remain useful regression tests and keep their
-implementation-authored or synthetic labels.
+`eval.coding_acceptance` defines the versioned acceptance manifest and validates
+structural and provenance declarations. It does not execute model calls, prove
+authorship, or authorize evaluation spending. The checked-in executable corpus in
+`eval/datasets/coding_memory_v1/` is implementation-authored and synthetic; it is
+an offline plumbing and regression lane, not independent human evidence or
+real-customer data. Existing deterministic fixtures retain their implementation-
+authored or synthetic labels.
+
+## Checked-in implementation corpus
+
+`eval.coding_corpus` loads and verifies the implementation-authored v1 corpus. It
+contains exactly 40 compact, family-specific disposable repository fixtures and
+400 scenarios: one scenario for each of the ten categories below in each family.
+The 40 families are arranged as ten template groups with four distinct variants
+per group. Each variant has its own product context, region, transport, values,
+helper relationship, document constraints and scope identifiers. This provides
+curated family variation while making the shared template lineage explicit for
+leakage review; it must not be described as 40 independently authored repositories.
+
+Each family source artifact contains a runnable `service.py`, operating contract,
+configuration and README. Every scenario has a separately hashed Python oracle.
+The source and oracle hashes are checked against the bytes on disk before a
+scenario is returned. The attestation is also bound and explicitly states
+`origin=implementation_team`, synthetic disposable fixtures, no independent
+human authorship and no real-customer provenance. Oracles run in a disposable
+directory with the fixture on `PYTHONPATH`; the generated implementation is
+deliberately initially incorrect, so an oracle only passes after the target
+repository is actually changed. There are no unconditional pass stubs.
+
+Materialize or verify the artifacts with:
+
+```console
+python -m eval.coding_corpus --materialize --verify
+python -m pytest tests/test_coding_corpus.py -q
+```
+
+The loader keeps the acceptance manifest's exact fields and leaves the existing
+five-arm binding validator separate. Runtime-only fields live in `runtime.json`,
+so executable source paths, task contracts and session operations cannot silently
+change the acceptance schema. The stable Python API is:
+
+```python
+from eval.coding_corpus import load_corpus, run_oracle, run_reader
+
+corpus = load_corpus()
+scenario = corpus.get("atlas-green:corrections")
+context = corpus.context(scenario)       # replayed, scoped and time-filtered
+oracle = run_oracle(scenario)            # disposable repository execution
+
+def reader(request):
+    # request.scenario, request.prompt and request.context are immutable inputs.
+    return {"answer": "...", "citations": [request.context[0].id]}
+
+score = run_reader(scenario, reader, oracle_passed=oracle.passed)
+```
+
+`Scenario.task` provides the prompt, target files, expected change, answerable
+flag, answer tokens, required/forbidden/untrusted evidence IDs, scope and
+`valid_at`/`known_at` anchors. `SessionOperation` supports `remember`, `event`,
+`correct` and `invalidate`; `replay_session` and `Corpus.replay` expose the
+deterministic ledger for offline readers. `Reader` is an injectable callback
+returning a string, `ReaderResponse(answer, citations)`, or an equivalent mapping.
+`ScenarioScore` reports `task_success`, `evidence_retained`, `citation_validity`,
+`answer_token_coverage`, `answer_completeness`, `abstention_correct`, and a
+separate tuple of `critical_violations`. `task_success`,
+`structural_correctness` and `structural_completeness` are the supplied
+deterministic oracle result; they are `None` when no oracle result is supplied.
+Token coverage is only a diagnostic and never claims semantic completeness.
+`answer_completeness` is `None` until a real structural/semantic grader supplies
+it. `evidence_retained` is also `None` for unsupported tasks with no required
+evidence, rather than a free perfect score. `Corpus.read(..., oracle_passed=...)`
+combines context, callback and typed scoring when the caller already ran the
+repository oracle.
+
+The frozen split is by family: eight development families, eight validation
+families and 24 held-out families, with the SHA-256 seed protocol below. The
+loader never evaluates held-out answers itself; a campaign must reserve those
+families until its predeclared final comparison. This lane is suitable for local
+oracle/replay/adapter checks and deterministic reader plumbing. It does not
+establish independent authorship, external validity, model quality, production
+capacity or a paid-evaluation result. Because four families share each of ten
+template groups, family-clustered intervals must either cluster at the template
+group level or be labeled descriptive; the 40 family IDs cannot support a claim
+of 40 independent repository draws.
 
 ## Frozen task structure
 
@@ -42,9 +121,11 @@ Source and oracle hashes reference separately frozen task artifacts. Those
 artifacts must contain the initial history/repository, ordered operations, query,
 scope/time anchors, expected memory transitions, evidence units, unsupported
 claims, deterministic task oracle and safe disposable setup/cleanup instructions.
-This manifest validator checks the hash format, not the referenced bytes or the
-behavior of those tasks. A future corpus loader must verify the bytes and execute
-the sequence before a report can claim coverage.
+The existing manifest validator checks the hash format, not referenced bytes or
+task behavior. `eval.coding_corpus` supplies that implementation-authored loader
+boundary for the checked-in lane; independent-corpus submissions still require
+their own artifact loader and adjudication evidence before claiming acceptance
+coverage.
 
 ## Validator use and evidence boundaries
 
@@ -65,8 +146,10 @@ candidate mode. Changing only a manifest's origin cannot relabel its scenarios.
 No automated metadata check can prove that every declaration is truthful: even a
 matching attestation returns `independently_authored_verified=false`,
 `publication_ready=false` and at most `authorship_status=attested_unverified`.
-The generated 400-row test data is explicitly a test of this validator, never
-400 completed acceptance tasks or independent evidence.
+The generated structural fixture in `tests/test_coding_acceptance.py` is a test
+of this validator, never independent evidence. The checked-in 400-row executable
+corpus is a separate implementation-authored regression lane and carries the
+same limitation.
 
 ## Matched comparison bindings
 

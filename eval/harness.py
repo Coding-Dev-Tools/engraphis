@@ -802,6 +802,10 @@ def run(dataset: list[dict], *, k: int = 5, dim: int = 256,
             retrieved_ids = [c["id"] for c in res.chunks]
             retrieved_tags = [t for i in retrieved_ids for t in id_to_tags.get(i, [])]
             retrieved_texts = [id_to_text.get(i, "") for i in retrieved_ids]
+            packed_tags = [
+                tag for chunk in res.packed_chunks for tag in id_to_tags.get(chunk.id, [])
+            ]
+            packed_texts = [chunk.excerpt for chunk in res.packed_chunks]
             retrieval_scored = bool(supporting)
             accepted_answer = (
                 q.get("answer_variants")
@@ -850,6 +854,14 @@ def run(dataset: list[dict], *, k: int = 5, dim: int = 256,
                 ndcg_at_k=metrics.ndcg_at_k(retrieved_tags, supporting, k),
                 answer_token_recall=metrics.answer_token_recall(
                     retrieved_texts, accepted_answer,
+                ),
+                packed_ids=[tag for tag in packed_tags if tag],
+                packed_recall_at_k=metrics.recall_at_k(packed_tags, supporting),
+                packed_hit_at_k=metrics.hit_at_k(packed_tags, supporting),
+                packed_mrr_at_k=metrics.mrr_at_k(packed_tags, supporting, k),
+                packed_ndcg_at_k=metrics.ndcg_at_k(packed_tags, supporting, k),
+                packed_answer_token_recall=metrics.answer_token_recall(
+                    packed_texts, accepted_answer,
                 ),
                 usage=usage,
                 **depth_metrics,
@@ -918,6 +930,11 @@ def run(dataset: list[dict], *, k: int = 5, dim: int = 256,
         "grounded_recall": bool(grounded),
         "detail": per_q,
     }
+    for metric in ("recall_at_k", "hit_at_k", "mrr_at_k", "ndcg_at_k"):
+        report[f"packed_{metric}"] = round(_mean(retrieval_rows, f"packed_{metric}"), 4)
+    report["packed_answer_token_recall"] = round(
+        _mean(answer_rows, "packed_answer_token_recall"), 4
+    )
     if not v2:
         return report
 
@@ -948,6 +965,12 @@ def run(dataset: list[dict], *, k: int = 5, dim: int = 256,
         public_record.pop("q", None)
         public_records.append(public_record)
     v2_metrics = _v2_metrics(per_q, bootstrap_iterations=max(0, int(bootstrap_iterations)))
+    v2_metrics["packed_evidence"] = {
+        key: report[key] for key in (
+            "packed_recall_at_k", "packed_hit_at_k", "packed_mrr_at_k", "packed_ndcg_at_k",
+            "packed_answer_token_recall",
+        )
+    }
     if canonical:
         v2_metrics["fixed_budget_curve"] = _measured_fixed_budget_curve(curve_measurements)
     envelope = report_envelope(
