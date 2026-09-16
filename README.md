@@ -44,7 +44,7 @@ by default, or accept an explicit workspace plus optional `from_ts`, `to_ts`, an
 `release_version` filters.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Coding-Dev-Tools/engraphis/main/docs/images/context-efficiency.svg" alt="Dark chart of local measurements and deterministic fixtures, including a local LoCoMo diagnostic marked with an asterisk. Cross-session handoff satisfaction rises from 3 of 15 queries with the last memories to 15 of 15 with proactive ranking or a consolidated summary. Intent-layered graph routing rises from 0 of 3 to 3 of 3 correct top-1 targets, and two-hop graph recall rises from 0 of 3 with one-hop expansion to 3 of 3 with Personalized PageRank. Consolidation-aware ranking selects the expected digest in 2 of 2 summary cases instead of 0 of 2 for the baseline. Structure-aware chunks reduce context from 740.3 to 214.3 tokens and the smallest evidence-holding memory from 162.2 to 42.4 tokens. A compact JSON-shape proxy uses 10,982 rather than 23,810 tokens. Grounded recall makes 11 of 11 correct decisions and packed context averages 85.38 tokens under a 1,500-token cap." width="100%">
+  <img src="https://raw.githubusercontent.com/Coding-Dev-Tools/engraphis/main/docs/images/context-efficiency.svg" alt="Dark chart of registered deterministic fixtures. Structure-aware chunks reduce retrieved context from 740.3 to 214.3 tokens and the smallest evidence-holding memory from 162.2 to 42.4 tokens. A compact JSON-shape proxy uses 10,982 rather than 23,810 tokens. Retrieved-candidate quality is labeled separately from packed-context quality, both measured in the selected report with packed-quality fields. Actual MCP transport and provider billing are not measured." width="100%">
   <br>
   <sup>Less repeated history means more room for the task, tools, and useful evidence.</sup>
 </p>
@@ -76,14 +76,24 @@ its counting boundary explicit.
 | Full versus compact recall payload proxy across one 26-question pass within a 260-timed-recall CodeMem run | Full proxy: **23,810** `engraphis.regex.v1` tokens → compact proxy: **10,982** tokens | **12,828 proxy tokens avoided** (**53.88% lower**) | 26 payload samples; 260 timed recalls; Recall@5, hit@5, and answer-token recall all **1.000** |
 | Packed prompt-context usage in the same 26-question CodeMem sample pass | Hard budget: **1,500** tokens; observed mean: **85.38**; observed maximum: **108** | A hard cap prevents a recall from exceeding its configured context budget | This is usage accounting, not a before/after savings comparison |
 
+The performance report keeps its legacy `quality` fields for all candidate chunks returned before
+context packing and adds `packed_quality` for evidence admitted to the reader context. The checked-in
+v14 artifact includes both quality views, with Recall@5, hit@5 and answer-token evidence coverage
+of 1.000 for the 26-question fixture in each view. Both views measure retrieved evidence;
+neither is an end-to-end question-answer score. Coding outcomes, external datasets, and staged
+operational capacity remain separate pending evaluation tracks until their artifacts are selected.
+
 These values are evidence IDs `offline-chunking` and `offline-performance` in
-[`offline-fixtures-v9.json`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/benchmark-evidence/offline-fixtures-v9.json),
+[`offline-fixtures-v14.json`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/benchmark-evidence/offline-fixtures-v14.json),
 SHA-256
-`455fc9d32a236e582a49aaaf9b84f30cae2573dc6ed982f4dd7dd845afcaf24c`.
+`5de646349e6d7f5e7c9bcf782f592b6e133bf90457e6a126ef372c04069a2415`.
 [`BENCHMARKS.md`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/BENCHMARKS.md#public-numeric-evidence-registry)
-records the matching suite digest, exact commands, and per-command config digests. External,
-model-dependent, consolidation, productivity, and latency results remain unpublished until the
-same evidence exists for them.
+records the matching suite digest, exact commands, and per-command config digests. The offline
+fixture registry intentionally excludes external, model-dependent, consolidation, productivity,
+and latency results. Completed retrieval-only diagnostics are published separately in the
+[benchmark expansion results](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/BENCHMARK_EXPANSION_RESULTS.md) with redacted immutable
+artifacts; no generated-answer, official leaderboard, hosted-latency, or paid result is claimed
+here.
 
 The compact payload shape avoids duplicating full memory bodies when the packed context and source
 list are enough. The evaluator tokenizes JSON-shaped full and compact payload proxies built from

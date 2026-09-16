@@ -230,6 +230,28 @@ def _compact_payload(result) -> dict:
     return {"context": result.context, "sources": sources, "usage": usage}
 
 
+def _quality_metrics(
+    retrieved_tags: list[str],
+    retrieved_texts: list[str],
+    question: dict,
+) -> dict[str, float]:
+    """Score one evidence view without changing the legacy metric meanings.
+
+    ``retrieved_tags`` and ``retrieved_texts`` are deliberately supplied by the
+    caller.  The performance report uses the complete candidate page for the
+    legacy ``quality`` fields and the packed chunks for the additive
+    ``packed_quality`` fields.  Keeping the scorer shared prevents the two
+    views from quietly acquiring different token or gold-answer semantics.
+    """
+    return {
+        "recall_at_k": metrics.recall_at_k(retrieved_tags, question["supporting"]),
+        "hit_at_k": metrics.hit_at_k(retrieved_tags, question["supporting"]),
+        "answer_token_recall": metrics.answer_token_recall(
+            retrieved_texts, question["answer"]
+        ),
+    }
+
+
 def _measure_recall(
     engine: MemoryEngine,
     question: dict,
@@ -464,6 +486,11 @@ def _run_engine(
                 tag for memory_id in retrieved_ids for tag in id_to_tags.get(memory_id, [])
             ]
             retrieved_texts = [id_to_text.get(memory_id, "") for memory_id in retrieved_ids]
+            packed_ids = [str(chunk.id or "") for chunk in result.packed_chunks]
+            packed_tags = [
+                tag for memory_id in packed_ids for tag in id_to_tags.get(memory_id, [])
+            ]
+            packed_texts = [str(chunk.excerpt or "") for chunk in result.packed_chunks]
             usage = result.usage
             measurements.context_tokens.append(usage.context_tokens if usage else 0)
             measurements.source_tokens.append(usage.source_tokens if usage else 0)
@@ -475,13 +502,18 @@ def _run_engine(
             )
             measurements.candidate_depths.append(result.candidate_k_used)
             question = questions[question_number]
+            retrieved_quality = _quality_metrics(retrieved_tags, retrieved_texts, question)
+            packed_quality = _quality_metrics(packed_tags, packed_texts, question)
             measurements.quality.append({
                 "question": question_number,
-                "recall_at_k": metrics.recall_at_k(retrieved_tags, question["supporting"]),
-                "hit_at_k": metrics.hit_at_k(retrieved_tags, question["supporting"]),
-                "answer_token_recall": metrics.answer_token_recall(
-                    retrieved_texts, question["answer"]
-                ),
+                # These three fields retain their established meaning: the
+                # complete candidate page before context packing.
+                **retrieved_quality,
+                # Additive fields score only evidence admitted to the reader
+                # context.  They must not replace the legacy fields above.
+                "packed_recall_at_k": packed_quality["recall_at_k"],
+                "packed_hit_at_k": packed_quality["hit_at_k"],
+                "packed_answer_token_recall": packed_quality["answer_token_recall"],
             })
 
     measurements.cold_latencies_ms = [latency_ms for _, latency_ms, _ in cold]
@@ -546,6 +578,12 @@ def _build_report(
     compact_payload_tokens = [value for item in measurements for value in item.compact_payload_tokens]
     candidate_depths = [value for item in measurements for value in item.candidate_depths]
     quality = [value for item in measurements for value in item.quality]
+    packed_quality = [
+        item for item in quality
+        if all(key in item for key in (
+            "packed_recall_at_k", "packed_hit_at_k", "packed_answer_token_recall",
+        ))
+    ]
     full_total = sum(full_payload_tokens)
     compact_total = sum(compact_payload_tokens)
     saved_total = full_total - compact_total
@@ -554,6 +592,7 @@ def _build_report(
         for full, compact in zip(full_payload_tokens, compact_payload_tokens)
     ]
     count = max(len(quality), 1)
+    packed_count = max(len(packed_quality), 1)
     rss_values = [item["rss_bytes"] for item in resources if item["rss_bytes"] is not None]
     storage_values = [
         item["storage_bytes"] for item in resources if item["storage_bytes"] is not None
@@ -603,6 +642,34 @@ def _build_report(
             "answer_token_recall": round(
                 sum(item["answer_token_recall"] for item in quality) / count, 4
             ),
+        },
+        "packed_quality": {
+            "recall_at_k": round(
+                sum(item["packed_recall_at_k"] for item in packed_quality) / packed_count,
+                4,
+            ),
+            "hit_at_k": round(
+                sum(item["packed_hit_at_k"] for item in packed_quality) / packed_count,
+                4,
+            ),
+            "answer_token_recall": round(
+                sum(item["packed_answer_token_recall"] for item in packed_quality)
+                / packed_count,
+                4,
+            ),
+            "sample_count": len(packed_quality),
+        },
+        "quality_scope": {
+            "retrieved": (
+                "legacy quality fields score all candidate chunks returned before context packing"
+            ),
+            "packed": "packed_quality fields score only chunks admitted to reader context",
+        },
+        "payload_boundary": {
+            "kind": "serialized_json_shape_proxy",
+            "transport_measured": False,
+            "mcp_envelope_serialized": False,
+            "token_counter": "engraphis.regex.v1",
         },
         "context": {
             "mean_tokens": round(sum(context_tokens) / max(len(context_tokens), 1), 2),
@@ -869,6 +936,7 @@ def _print(report: dict) -> None:
     corpus = report["corpus"]
     run_info = report["run"]
     quality = report["quality"]
+    packed_quality = report["packed_quality"]
     latency = report["latency_ms"]
     context = report["context"]
     environment = report["environment"]
@@ -901,9 +969,15 @@ def _print(report: dict) -> None:
         f"answer-token={quality['answer_token_recall']:.3f}"
     )
     print(
+        "  packed quality       : "
+        f"recall@k={packed_quality['recall_at_k']:.3f} · "
+        f"hit@k={packed_quality['hit_at_k']:.3f} · "
+        f"answer-token={packed_quality['answer_token_recall']:.3f}"
+    )
+    print(
         "  context tokens       : "
         f"mean={context['mean_tokens']:.2f} · max={context['max_tokens']} · "
-        "compact payload saved="
+        "compact JSON-shape proxy saved="
         f"{context['serialized_payload_savings_ratio']:.1%}"
     )
     print(

@@ -1,0 +1,275 @@
+import json
+from types import SimpleNamespace
+
+import pytest
+
+from eval import benchmark_campaign as campaign
+from eval.benchmark import canonical_json, sha256_file
+
+
+def small_manifest():
+    return {"binding_sha256": "a" * 64, "stages": {"development_pilot": {
+        "split": "development", "scenario_ids": ["fixture-a"], "arms": ["no_memory", "hybrid"],
+        "repetitions": 1, "token_budgets": [512], "max_reader_turns": 2,
+        "max_peer_internal_calls_per_attempt": 32, "max_input_tokens": 32768, "max_output_tokens": 4096,
+    }}}
+
+
+def row(cell, **extra):
+    return {**cell, "family_id": "family-a", "category": "corrections", "status": "complete",
+            "task_success": True, "critical_violations": [], "private_responses": ["SECRET ANSWER"], **extra}
+
+
+def test_interrupted_reservation_is_not_replayed(tmp_path):
+    manifest = small_manifest()
+    cell = campaign.cells(manifest, "development_pilot")[0]
+    path = tmp_path / "development_pilot" / (campaign.digest(cell) + ".started")
+    path.parent.mkdir()
+    path.write_text("{}")
+    with pytest.raises(ValueError, match="unfinished attempt"):
+        campaign.execute(manifest, "development_pilot", tmp_path, None, None,
+                         attempt_runner=lambda *args: pytest.fail("duplicate dispatch"))
+
+
+def test_completed_attempt_resumes_without_duplicate(tmp_path):
+    manifest = small_manifest()
+    calls = []
+
+    def runner(_manifest, _stage, cell, _corpus, _client):
+        calls.append(cell)
+        return row(cell)
+
+    partial = campaign.execute(manifest, "development_pilot", tmp_path, None, None,
+                               maximum_attempts=1, attempt_runner=runner)
+    assert partial["status"] == "PARTIAL"
+    assert partial["missing_attempts"] == 1
+    complete = campaign.execute(manifest, "development_pilot", tmp_path, None, None, attempt_runner=runner)
+    assert complete["status"] == "COMPLETE"
+    assert len(calls) == 2
+    assert complete["noninferiority"] == "indeterminate"
+
+
+def test_failed_call_remains_visible_and_stops_resume(tmp_path):
+    def runner(*args):
+        raise RuntimeError("raw provider SECRET must not be published")
+
+    manifest = small_manifest()
+    summary = campaign.execute(manifest, "development_pilot", tmp_path, None, None, attempt_runner=runner)
+    assert summary["statuses"] == {"error": 1}
+    assert summary["missing_attempts"] == 1
+    resumed = campaign.execute(manifest, "development_pilot", tmp_path, None, None,
+                                attempt_runner=lambda *args: pytest.fail("terminal error replay"))
+    assert resumed["statuses"] == {"error": 1}
+    assert "SECRET" not in json.dumps(resumed)
+
+
+def test_checkpoint_content_tampering_fails(tmp_path):
+    manifest = small_manifest()
+    campaign.execute(manifest, "development_pilot", tmp_path, None, None,
+                     maximum_attempts=1, attempt_runner=lambda m, s, c, *args: row(c))
+    path = next((tmp_path / "development_pilot").glob("*.json"))
+    content = json.loads(path.read_text())
+    content["row"]["task_success"] = False
+    path.write_text(json.dumps(content))
+    with pytest.raises(ValueError, match="checksum"):
+        campaign.summarize(manifest, "development_pilot", tmp_path)
+
+
+def test_public_boundary_omits_private_outputs(tmp_path):
+    manifest = small_manifest()
+    summary = campaign.execute(manifest, "development_pilot", tmp_path, None, None,
+                               attempt_runner=lambda m, s, c, *args: row(c))
+    path = tmp_path / "manifest.json"
+    path.write_text(canonical_json(manifest))
+    public = campaign.public_report(path, summary)
+    assert "SECRET ANSWER" not in json.dumps(public)
+    assert public["records"][0]["arm"] == "no_memory"
+    assert public["metrics"]["expected_attempts"] == 2
+    assert public["metrics"]["leadership_eligible"] is False
+
+
+def test_summary_and_public_report_preserve_safe_oauth_usage_totals(tmp_path):
+    manifest = small_manifest()
+    usage = [{
+        "input_tokens": 11, "cached_input_tokens": 3, "output_tokens": 5,
+        "reasoning_output_tokens": 2, "total_tokens": 16, "latency_ms": 7.5,
+        "cost_micros": 123, "transport_identity": "codex_oauth",
+        "billing_basis": campaign.OAUTH_BILLING_BASIS,
+    }]
+    summary = campaign.execute(
+        manifest, "development_pilot", tmp_path, None, None,
+        attempt_runner=lambda m, s, c, *args: row(c, provider_usage=usage),
+    )
+    aggregate = summary["provider_usage"]
+    assert aggregate["status"] == "complete"
+    assert aggregate["input_tokens"] == 22
+    assert aggregate["cached_input_tokens"] == 6
+    assert aggregate["output_tokens"] == 10
+    assert aggregate["reasoning_output_tokens"] == 4
+    assert aggregate["latency_ms"] == 15.0
+    assert aggregate["api_price_proxy_micros"] == 246
+    assert aggregate["billing_bases"] == [campaign.OAUTH_BILLING_BASIS]
+    assert summary["arms"]["hybrid"]["provider_usage"]["calls_observed"] == 1
+
+    path = tmp_path / "manifest.json"
+    path.write_text(canonical_json(manifest))
+    public = campaign.public_report(path, summary)
+    assert public["metrics"]["provider_usage"] == aggregate
+    accounting = public["protocol"]["token_accounting"]
+    assert accounting["transport"] == "codex_oauth"
+    assert accounting["billing_basis"] == campaign.OAUTH_BILLING_BASIS
+
+
+def test_usage_summary_marks_missing_failed_call_counters_explicitly():
+    summary = campaign._provider_usage_summary([
+        {"status": "complete", "provider_usage": [{
+            "input_tokens": 1, "output_tokens": 1, "total_tokens": 2,
+            "transport_identity": "codex_oauth",
+            "billing_basis": campaign.OAUTH_BILLING_BASIS,
+        }]},
+        {"status": "error", "provider_usage": []},
+    ])
+    assert summary["status"] == "partial"
+    assert summary["rows_without_usage"] == 1
+    assert summary["failed_rows_without_usage"] == 1
+    assert summary["unmetered_peer_internal_calls"] == "not surfaced by the row contract"
+
+
+def test_reader_cannot_escape_declared_task_files(tmp_path):
+    scenario = SimpleNamespace(task=SimpleNamespace(target_files=("service.py",)))
+    response = {"answer": "", "citations": [], "files": {"../oracle.py": "pass"}}
+    with pytest.raises(ValueError, match="undeclared"):
+        campaign.apply_reader_files(response, scenario, tmp_path)
+    assert not (tmp_path.parent / "oracle.py").exists()
+
+
+def test_approval_is_bound_to_stage_and_location_before_sdk_init(tmp_path):
+    path = tmp_path / "approval.json"
+    path.write_text(json.dumps({"schema": "engraphis-campaign-stage-approval/v1",
+                               "campaign_sha256": "b" * 64, "stage": "development_pilot"}))
+    with pytest.raises(ValueError, match="exact campaign"):
+        campaign.approved_client(small_manifest(), "development_pilot", path, tmp_path)
+
+
+def test_peer_internal_calls_have_one_durable_namespace_and_bounded_inputs():
+    manifest = small_manifest()
+    stage = {**manifest["stages"]["development_pilot"], "max_peer_internal_calls_per_attempt": 1}
+    calls = []
+    client = SimpleNamespace(complete=lambda **kwargs: calls.append(kwargs))
+    proxy = campaign.AttemptBudgetClient(client, "test-attempt", stage)
+    proxy.complete(call_id="untrusted-collision", kind="evaluator", input="short", max_output_tokens=50000)
+    assert calls[0]["call_id"] == "test-attempt-internal-0"
+    assert calls[0]["kind"] == "ingest"
+    assert calls[0]["max_output_tokens"] == 4096
+    with pytest.raises(ValueError, match="call ceiling"):
+        proxy.complete(input="repeat", max_output_tokens=1)
+
+
+def test_proposal_includes_ingestion_corrections_and_cache_write_ceiling():
+    manifest = small_manifest()
+    manifest["stages"]["development_pilot"]["arms"] = ["mem0", "graphiti"]
+    proposal = campaign.budget_proposal(manifest, "development_pilot")
+    assert proposal["approved"] is False
+    assert proposal["reader_calls_max"] == 2
+    assert proposal["correction_calls_max"] == 2
+    assert proposal["ingestion_extraction_calls_max"] == 64
+    assert proposal["max_calls"] == 68
+    assert proposal["max_cost_micros"] == 68 * 13108
+
+
+def test_run_attempt_does_not_send_oracle_or_answers_to_reader(tmp_path, monkeypatch):
+    source = tmp_path / "source.json"
+    source.write_text("{}")
+    oracle_path = tmp_path / "oracle.py"
+    oracle_path.write_text("# SECRET_ORACLE")
+    task = SimpleNamespace(prompt="Fix the public function.", target_files=("service.py",),
+                           required_evidence_ids=("gold-secret",), forbidden_evidence_ids=(),
+                           untrusted_evidence_ids=(), answer_tokens=("ANSWER_KEY",), answerable=True)
+    scenario = SimpleNamespace(id="fixture-a", source_path=source, source_sha256=sha256_file(source),
+                               oracle_path=oracle_path, oracle_sha256=sha256_file(oracle_path), task=task,
+                               family_id="family-a", category="corrections")
+    from contextlib import contextmanager
+
+    @contextmanager
+    def workspace(_scenario, target):
+        target.mkdir()
+        (target / "service.py").write_text("def result(): return 0")
+        yield target
+
+    monkeypatch.setattr(campaign, "scenario_workspace", workspace)
+    calls = []
+
+    def complete(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(text=json.dumps({"answer": "Done", "citations": [], "files": {}}),
+                               usage=SimpleNamespace(as_dict=lambda: {"input_tokens": 10, "output_tokens": 5}))
+
+    manifest = {**small_manifest(), "source": {}, "docker_image": "unused"}
+    observed = campaign.run_attempt(manifest, "development_pilot", campaign.cells(manifest, "development_pilot")[0],
+                                    SimpleNamespace(get=lambda _: scenario), SimpleNamespace(complete=complete),
+                                    oracle=lambda *args: {"passed": True, "timed_out": False})
+    assert observed["task_success"] is True
+    assert observed["evidence_retention"] == 0.0
+    assert observed["citation_validity"] is False
+    assert observed["answer_completeness"] is None
+    assert "ANSWER_KEY" not in str(calls)
+    assert "SECRET_ORACLE" not in str(calls)
+    assert "gold-secret" not in str(calls)
+
+
+def test_campaign_execution_lock_blocks_parallel_dispatch(tmp_path):
+    (tmp_path / ".campaign-execution.lock").write_text("other runner")
+    with pytest.raises(ValueError, match="another campaign"):
+        campaign.execute(small_manifest(), "development_pilot", tmp_path, None, None)
+
+
+def test_last_attempt_critical_violation_blocks_completion(tmp_path):
+    manifest = small_manifest()
+    summary = campaign.execute(manifest, "development_pilot", tmp_path, None, None,
+                               attempt_runner=lambda m, s, c, *args: row(c, critical_violations=["unsupported_assertion"]))
+    assert summary["status"] == "BLOCKED"
+    assert summary["critical_violations"] == 1
+    assert not list((tmp_path / "development_pilot").glob("*.started"))
+
+
+def test_full_history_excludes_future_poison_and_sibling_sessions():
+    from eval.coding_corpus import load_corpus
+    corpus = load_corpus()
+    for category in ("temporal_history", "poisoning", "scope_boundaries"):
+        scenario = next(item for item in corpus.scenarios("development") if item.category == category)
+        context, ids = campaign._full_history(scenario, 4096)
+        assert all(not identity.startswith(("future:", "untrusted:", "session:", "forbidden:")) for identity in ids)
+        assert "Ignore the review boundary" not in context
+        assert set(scenario.task.required_evidence_ids) <= set(ids)
+
+
+def test_validation_selection_requires_actual_checkpoints(tmp_path):
+    manifest = small_manifest()
+    manifest["stages"]["validation"] = manifest["stages"]["development_pilot"]
+    manifest["source"] = {}
+    with pytest.raises(ValueError, match="every attempt"):
+        campaign.validation_selection(manifest, tmp_path)
+    # Injecting a standalone claimed COMPLETE status cannot satisfy this check.
+    (tmp_path / "claimed-selection.json").write_text('{"validation_status":"COMPLETE"}')
+    with pytest.raises(ValueError, match="every attempt"):
+        campaign.validation_selection(manifest, tmp_path)
+
+
+def test_invalid_metric_is_recorded_as_error(tmp_path):
+    summary = campaign.execute(small_manifest(), "development_pilot", tmp_path, None, None,
+                               attempt_runner=lambda m, s, c, *args: row(c, context_tokens=513))
+    assert summary["statuses"] == {"error": 1}
+    assert summary["status"] == "BLOCKED"
+
+
+def test_manifest_cannot_rehash_a_reduced_stage(monkeypatch, tmp_path):
+    from eval.coding_corpus import load_corpus
+    corpus = load_corpus()
+    monkeypatch.setattr(campaign, "source_snapshot", lambda: {})
+    lock = tmp_path / "environment.json"
+    lock.write_text("{}")
+    manifest, companion = campaign.make_manifest(embed_model="test", embed_revision="a" * 40, dependency_lock=lock)
+    manifest["stages"]["held_out"]["scenario_ids"] = [corpus.scenarios("held_out")[0].id]
+    manifest["binding_sha256"] = campaign.digest({key: value for key, value in manifest.items() if key != "binding_sha256"})
+    with pytest.raises(ValueError, match="frozen split"):
+        campaign.validate_manifest(manifest, companion, live=False)

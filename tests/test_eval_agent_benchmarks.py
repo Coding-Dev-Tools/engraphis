@@ -399,3 +399,79 @@ def test_cli_requires_a_pinned_embedder_revision(tmp_path):
         main(["--dataset", path, "--format", "locomo_plus", "--embed-model", "test/model"])
 
     assert error.value.code == 2
+
+
+def test_unlabeled_sources_do_not_get_packed_retrieval_credit(tmp_path, capsys):
+    source = _write_json(tmp_path / "missing.json", [{
+        "context": "A blue bicycle is stored here.",
+        "questions": ["Which city is mentioned?"], "answers": ["Stockholm"],
+    }])
+    artifact = tmp_path / "artifact.json"
+    assert main(["--dataset", source, "--format", "memoryagentbench", "--artifact", str(artifact)]) == 0
+    capsys.readouterr()
+    report = json.loads(artifact.read_text())
+    assert report["metrics"]["retrieval_scored_questions"] == 0
+    assert report["metrics"]["packed_recall_at_k"] is None
+    assert report["records"][0]["retrieval_scored"] is False
+    assert "packed_recall_at_k" not in report["records"][0]
+    assert report["records"][0]["answer_scored"] is True
+
+
+def test_repeated_accepted_answers_preserve_meaning_and_validate(tmp_path):
+    from eval.harness import _validate_dataset
+
+    source = _write_json(tmp_path / "variants.json", [{
+        "context": "The setting is 42.", "questions": ["What is the setting?"],
+        "answers": [["42", "42", "forty two", "42"]],
+    }])
+    cases = load_memoryagentbench(source)
+    _validate_dataset(cases)
+    assert cases[0]["questions"][0]["answer_variants"] == ["42", "forty two"]
+
+
+def test_reused_upstream_question_ids_keep_all_context_variants(tmp_path):
+    from eval.harness import _validate_dataset
+
+    source = _write_json(tmp_path / "contexts.json", [{
+        "id": f"context-{i}", "context": f"The setting is {i}.",
+        "questions": ["What is the setting?"], "answers": [str(i)],
+        "qa_pair_ids": ["shared-upstream-question"],
+    } for i in range(2)])
+    cases = load_memoryagentbench(source)
+    _validate_dataset(cases)
+    questions = [case["questions"][0] for case in cases]
+    assert len({q["id"] for q in questions}) == 2
+    assert {q["source_question_id"] for q in questions} == {"shared-upstream-question"}
+    assert [q["answer"] for q in questions] == ["0", "1"]
+
+
+def test_checkpoint_reuses_cases_and_rejects_source_drift(tmp_path, capsys, monkeypatch):
+    from eval import agent_benchmarks as module
+    from eval.external_checkpoints import run_resumable
+
+    source = _write_json(tmp_path / "plus.json", [{
+        "id": "cognitive-1", "input_prompt": "Morgan needs oat milk.",
+        "trigger": "What milk does Morgan need?", "evidence": "Morgan needs oat milk.",
+        "category": "Cognitive",
+    }])
+    executions = []
+
+    def measured_runner(cases, **kwargs):
+        executions.append(len(cases))
+        return run(cases, **kwargs)
+
+    def checkpointed(cases, **kwargs):
+        return run_resumable(cases, runner=measured_runner, **kwargs)
+
+    monkeypatch.setattr(module, "run_resumable", checkpointed)
+    arguments = ["--dataset", source, "--format", "locomo_plus", "--token-budget", "64",
+                 "--checkpoint-dir", str(tmp_path / "private")]
+    assert main(arguments) == 0
+    assert main(arguments) == 0
+    capsys.readouterr()
+    assert executions == [1]
+    with open(source, "a", encoding="utf-8") as handle:
+        handle.write("\n")
+    with pytest.raises(SystemExit) as error:
+        main(arguments)
+    assert error.value.code == 2

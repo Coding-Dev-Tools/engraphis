@@ -244,4 +244,5 @@ def test_external_offline_report_records_dataset_and_embedding_provenance(tmp_pa
     assert report['dataset_sha256'] == external.dataset_sha256(path)
     assert report['source_cases'] == report['normalized_cases'] == 1
     assert report['embedding']['revision'] is None
-    assert report['configuration'] == {'k': 10, 'limit': None, 'resolve_conflicts': True}
+    assert report['configuration'] == {'k': 10, 'limit': None, 'resolve_conflicts': True,
+                                       'token_budget': 1500}

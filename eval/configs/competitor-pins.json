@@ -1,0 +1,61 @@
+{
+  "schema": "engraphis-competitor-pins/v1",
+  "source_policy": "immutable upstream release tag and commit; no mutable latest aliases",
+  "competitors": {
+    "mem0": {
+      "display_name": "Mem0 OSS",
+      "package": "mem0ai",
+      "package_version": "2.0.20",
+      "release_tag": "v2.0.20",
+      "source": "https://github.com/mem0ai/mem0",
+      "source_revision": "9a7924befd7026e41e445ba809370009e5e985a6",
+      "python_requires": ">=3.10",
+      "capabilities": {
+        "scopes": ["workspace"],
+        "adapter_modes": ["workspace_partition", "isolated_repo_partition_without_session_history"],
+        "valid_at": false,
+        "known_at": false,
+        "history": false,
+        "graph": false,
+        "llm_route": "campaign_budget_client_required"
+      },
+      "adapter_limitations": {
+        "scope_note": "Mem0 OSS is natively workspace-oriented; this campaign adapter projects repo rows into isolated user partitions.",
+        "valid_at": "unsupported by this adapter",
+        "known_at": "unsupported by this adapter",
+        "history": "unsupported by this adapter",
+        "session": "unsupported by this adapter"
+      }
+    },
+    "graphiti": {
+      "display_name": "Graphiti",
+      "package": "graphiti-core",
+      "package_version": "0.29.3",
+      "release_tag": "v0.29.3",
+      "source": "https://github.com/getzep/graphiti",
+      "source_revision": "021d3a57d511f21b10adaf7fa923bd5c1fce5e9d",
+      "python_requires": ">=3.10",
+      "capabilities": {
+        "scopes": ["workspace"],
+        "adapter_modes": ["workspace_partition", "isolated_repo_partition_without_session_history"],
+        "valid_at": false,
+        "known_at": false,
+        "history": false,
+        "graph": true,
+        "llm_route": "campaign_budget_client_required"
+      },
+      "adapter_limitations": {
+        "scope_note": "Graphiti exposes group IDs; this campaign adapter projects workspace and repo rows into isolated groups and includes the selected workspace ancestor.",
+        "valid_at": "unsupported by this adapter",
+        "known_at": "unsupported by this adapter",
+        "history": "unsupported by this adapter",
+        "session": "unsupported by this adapter"
+      },
+      "neo4j_image": "neo4j@sha256:5a015e53de1895e7eee1574ae0325cf8c4b89587222778108c594bdd45a474b5",
+      "notes": [
+        "The repository release tag is v0.29.3; verify the resolved graphiti-core wheel metadata before execution.",
+        "Group IDs are the only common isolation key exposed by this adapter."
+      ]
+    }
+  }
+}

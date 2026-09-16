@@ -154,7 +154,12 @@ _PUBLIC_RECORD_FIELDS = frozenset({
     "grounded_support", "answer_token_recall", "context_token_method",
     "context_tokenizer_identity", "qa_score", "qa_correct", "retrieval_excluded",
     "retrieval_scored", "inserted_memory_type_counts", "retrieved_memory_type_counts",
-    "usage",
+    "usage", "packed_ids", "packed_recall_at_k", "packed_hit_at_k",
+    "packed_mrr_at_k", "packed_ndcg_at_k", "packed_answer_token_recall",
+    "scenario_id", "family_id", "arm", "token_budget", "repetition", "status",
+    "task_success", "citation_validity", "citation_support", "evidence_retention",
+    "abstention_correct", "reader_calls", "correction_calls", "oracle_calls",
+    "critical_violation_count",
 })
 _PUBLIC_METRIC_PREFIXES = ("recall_at_", "hit_at_", "mrr_at_", "ndcg_at_")
 _PUBLIC_USAGE_FIELDS = frozenset({

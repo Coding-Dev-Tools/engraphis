@@ -1,0 +1,10 @@
+"""Immutable oracle for juniper-violet:corrections."""
+import service
+
+
+def main():
+    assert service.current_timeout() == 178, service.current_timeout()
+
+
+if __name__ == "__main__":
+    main()

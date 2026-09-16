@@ -1,0 +1,148 @@
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from eval import local_benchmark_queue as queue
+
+
+def plan(monkeypatch):
+    monkeypatch.setattr(queue, "snapshot", lambda: {"producer": "frozen"})
+    value = {"schema": queue.SCHEMA, "source": queue.snapshot(), "wait_for": None, "inputs": {},
+             "jobs": [{"id": "smoke", "module": "eval.engine_capacity", "args": ["--smoke"]}]}
+    value["binding_sha256"] = queue.digest(value)
+    return value
+
+
+def test_queue_refuses_hosted_modules_even_after_rehash(monkeypatch):
+    value = plan(monkeypatch)
+    value["jobs"][0]["module"] = "eval.benchmark_campaign"
+    value["binding_sha256"] = queue.digest({key: v for key, v in value.items() if key != "binding_sha256"})
+    with pytest.raises(ValueError, match="allowed"):
+        queue.validate(value)
+
+
+def test_queue_resumes_completed_jobs_without_dispatch(monkeypatch, tmp_path):
+    value = plan(monkeypatch)
+    calls = []
+    def runner(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=0)
+    assert queue.execute(value, tmp_path, runner=runner)["status"] == "COMPLETE"
+    assert queue.execute(value, tmp_path, runner=runner)["status"] == "COMPLETE"
+    assert len(calls) == 1
+
+
+def test_queue_preserves_failure_and_stops_resuming(monkeypatch, tmp_path):
+    value = plan(monkeypatch)
+    with pytest.raises(ValueError, match="failure"):
+        queue.execute(value, tmp_path, runner=lambda *a, **k: SimpleNamespace(returncode=2))
+    assert json.loads((tmp_path / "status.json").read_text())["status"] == "BLOCKED"
+    with pytest.raises(ValueError, match="previous job failed"):
+        queue.execute(value, tmp_path, runner=lambda *a, **k: pytest.fail("replayed"))
+
+
+def test_queue_source_drift_prevents_dispatch(monkeypatch, tmp_path):
+    value = plan(monkeypatch)
+    monkeypatch.setattr(queue, "snapshot", lambda: {"producer": "changed"})
+    with pytest.raises(ValueError, match="source changed"):
+        queue.execute(value, tmp_path, runner=lambda *a, **k: pytest.fail("dispatched"))
+
+
+def test_queue_interrupted_job_is_not_automatically_retried(monkeypatch, tmp_path):
+    value = plan(monkeypatch)
+    (tmp_path / "smoke.started").write_text("{}")
+    with pytest.raises(ValueError, match="interrupted"):
+        queue.execute(value, tmp_path, runner=lambda *a, **k: pytest.fail("replayed"))
+
+
+def test_queue_input_drift_prevents_dispatch(monkeypatch, tmp_path):
+    value = plan(monkeypatch)
+    monkeypatch.setattr(queue, "ROOT", tmp_path)
+    source = tmp_path / "data.json"
+    source.write_text('{"source": 1}')
+    value["inputs"] = {"data.json": queue.sha256_file(source)}
+    value["binding_sha256"] = queue.digest({key: v for key, v in value.items() if key != "binding_sha256"})
+    source.write_text('{"source": 2}')
+    with pytest.raises(ValueError, match="input changed"):
+        queue.execute(value, tmp_path / "results", runner=lambda *a, **k: pytest.fail("dispatched"))
+
+
+def test_queue_records_runtime_and_can_stop_after_a_completed_job(monkeypatch, tmp_path):
+    value = plan(monkeypatch)
+    second = {"id": "second", "module": "eval.engine_capacity", "args": ["--smoke"]}
+    value["jobs"].append(second)
+    value["binding_sha256"] = queue.digest({key: v for key, v in value.items()
+                                             if key != "binding_sha256"})
+    calls = []
+
+    def runner(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=0)
+
+    result = queue.execute(value, tmp_path, runner=runner, stop_after_job="smoke")
+    assert result == {"status": "PAUSED", "completed_jobs": ["smoke"],
+                      "stopped_after_job": "smoke"}
+    assert len(calls) == 1
+    status = json.loads((tmp_path / "status.json").read_text())
+    assert status["status"] == "PAUSED" and status["runtime"]["python_executable"]
+    checkpoint = json.loads((tmp_path / "smoke.json").read_text())
+    assert checkpoint["runtime"]["packages"]
+
+    assert queue.execute(value, tmp_path, runner=runner)["status"] == "COMPLETE"
+    assert len(calls) == 2
+
+
+def test_queue_rejects_nonpositive_job_timeout(monkeypatch):
+    value = plan(monkeypatch)
+    value["jobs"][0]["timeout_seconds"] = 0
+    value["binding_sha256"] = queue.digest({key: v for key, v in value.items()
+                                             if key != "binding_sha256"})
+    with pytest.raises(ValueError, match="timeout_seconds"):
+        queue.validate(value)
+
+
+def test_queue_watchdog_keeps_started_attempt_on_timeout(monkeypatch, tmp_path):
+    value = plan(monkeypatch)
+
+    class Process:
+        pid = 4242
+
+        def poll(self):
+            return None
+
+        def kill(self):
+            self.killed = True
+
+        def wait(self, **_kwargs):
+            return -9
+
+    process = Process()
+    monkeypatch.setattr(queue.subprocess, "Popen", lambda *_a, **_k: process)
+    ticks = iter((0.0, 0.0, 2.0))
+    monkeypatch.setattr(queue.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(queue.time, "sleep", lambda _seconds: None)
+    with pytest.raises(queue.JobTimeoutError, match="timeout"):
+        queue.execute(value, tmp_path, poll_seconds=0.01, default_timeout_seconds=1)
+    assert process.killed
+    assert (tmp_path / "smoke.started").is_file()
+    assert json.loads((tmp_path / "status.json").read_text())["status"] == "BLOCKED"
+
+
+def test_queue_requires_complete_external_analysis_artifact(tmp_path):
+    source = Path("docs/benchmark-evidence/longmemeval-budget-comparison-20260916.json")
+    report = json.loads(source.read_text(encoding="utf-8"))
+    valid = tmp_path / "valid.json"
+    valid.write_text(json.dumps(report), encoding="utf-8")
+    valid.with_suffix(".json.sha256").write_text(
+        f"{queue.sha256_file(valid)}  valid.json\n", encoding="utf-8")
+    assert queue._verified_artifact(valid)["schema"] == "engraphis-external-analysis/v1"
+
+    report["reports"][0]["status"] = "PARTIAL"
+    invalid = tmp_path / "invalid.json"
+    invalid.write_text(json.dumps(report), encoding="utf-8")
+    invalid.with_suffix(".json.sha256").write_text(
+        f"{queue.sha256_file(invalid)}  invalid.json\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="incomplete"):
+        queue._verified_artifact(invalid)
