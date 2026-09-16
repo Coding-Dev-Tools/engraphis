@@ -213,7 +213,7 @@ LoCoMo/LongMemEval baselines and LoCoMo k=20 comparison completed before this qu
 frozen prerequisites and are not dispatched again. Five jobs completed before the queue stopped
 at a job boundary on source drift at 04:06:59 UTC: Mem2ActBench, LongMemEval's larger-budget run
 and comparison, and MAB conflict-resolution and test-time-learning. No workload was interrupted.
-The [successor queue](../eval/configs/benchmark-local-queue-final-20260916.json) contains only
+The [successor queue](../eval/configs/benchmark-local-queue-final-v2-20260916.json) contains only
 MAB accurate retrieval, MAB long-range understanding, the LoCoMo-Plus Cognitive slice, and the
 24 capacity cells. It retains the prior manifest hash and completed-job inventory.
 

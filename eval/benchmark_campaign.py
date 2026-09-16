@@ -497,7 +497,8 @@ def run_attempt(manifest: dict, stage_name: str, cell: dict, corpus: Any, client
             or sha256_file(scenario.oracle_path) != scenario.oracle_sha256):
         raise ValueError("selected source/oracle changed after corpus load")
     stage = manifest["stages"][stage_name]
-    attempt_id = digest({"campaign": manifest["binding_sha256"], "stage": stage_name, **cell})[:32]
+    # Ledger labels must start with a letter; a bare hex digest may start with a digit.
+    attempt_id = "attempt-" + digest({"campaign": manifest["binding_sha256"], "stage": stage_name, **cell})[:32]
     started = time.perf_counter()
     adapter = None
     usage_rows, responses, oracle_rows = [], [], []
@@ -887,7 +888,9 @@ def public_report(manifest_path: Path, summary: dict) -> dict:
         "scenario_id", "family_id", "category", "arm", "token_budget", "repetition", "status",
         "task_success", "context_tokens", "latency_ms", "citation_validity", "citation_support",
         "evidence_retention", "abstention_correct", "reader_calls", "correction_calls", "oracle_calls",
-    )} | {"critical_violation_count": len(row.get("critical_violations", []))} for row in summary["rows"]]
+    )} | {"critical_violation_count": len(row.get("critical_violations", [])),
+          "question_id": f"{row['scenario_id']}:{row['arm']}:{row['token_budget']}:{row['repetition']}"}
+                 for row in summary["rows"]]
     metrics = {key: value for key, value in summary.items() if key != "rows"}
     return report_envelope(suite="implementation-team coding campaign", dataset_path=manifest_path,
                            config={"campaign_sha256": summary["campaign_sha256"], "stage": summary["stage"],
