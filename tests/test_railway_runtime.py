@@ -59,6 +59,11 @@ def test_container_runtime_matches_the_railway_persistence_and_port_contract():
     assert "ENGRAPHIS_HOST=\"0.0.0.0\"" in entrypoint
     assert "chown -R engraphis:engraphis /data" in entrypoint
     assert ".volume-ownership" in entrypoint
+    assert "reject_linked_path()" in entrypoint
+    assert 'if ! reject_linked_path "$state_dir"; then' in entrypoint
+    assert "refusing linked or unnormalized state path" in entrypoint
+    assert 'if ! reject_linked_path "$config_file"; then' in entrypoint
+    assert "refusing linked or unnormalized trusted config path" in entrypoint
     assert 'if [ -L "$state_dir" ]; then' in entrypoint
     assert "refusing symlinked state directory" in entrypoint
     assert 'elif [ -e "$state_dir" ] && [ ! -d "$state_dir" ]; then' in entrypoint
