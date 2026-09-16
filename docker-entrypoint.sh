@@ -56,6 +56,14 @@ if [ "$(id -u)" = "0" ]; then
             exit 1
         fi
     fi
+    # The app user owns the persistent marker after first boot. Fail closed if it has
+    # replaced that trusted root-startup input with a symlink or a non-regular path:
+    # chown follows symlinks by default and would otherwise let the marker redirect
+    # root's ownership change to an arbitrary target on the mounted volume.
+    if [ -L "$ownership_marker" ]; then
+        printf '%s\n' "[engraphis] refusing symlinked volume ownership marker: $ownership_marker" >&2
+        exit 1
+    fi
     if [ ! -e "$ownership_marker" ]; then
         if ! chown -R engraphis:engraphis /data; then
             printf '%s\n' "[engraphis] unable to repair /data ownership" >&2
@@ -69,6 +77,9 @@ if [ "$(id -u)" = "0" ]; then
             printf '%s\n' "[engraphis] unable to own volume ownership marker" >&2
             exit 1
         fi
+    elif [ ! -f "$ownership_marker" ]; then
+        printf '%s\n' "[engraphis] refusing non-regular volume ownership marker: $ownership_marker" >&2
+        exit 1
     elif ! chown engraphis:engraphis /data "$state_dir" "$ownership_marker"; then
         printf '%s\n' "[engraphis] unable to verify /data ownership" >&2
         exit 1
