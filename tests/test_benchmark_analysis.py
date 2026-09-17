@@ -16,6 +16,22 @@ def test_case_bootstrap_keeps_question_weights_and_matches_mean():
     assert result["low"] == 0 and result["high"] == 1
 
 
+def test_case_bootstrap_prefers_explicit_case_identity_over_question_id_shape():
+    rows = [
+        {"question_id": "upstream:shared:q:0", "case": "conversation-a",
+         "retrieval_scored": True, "value": 1.0},
+        {"question_id": "upstream:shared:q:1", "case": "conversation-a",
+         "retrieval_scored": True, "value": 0.0},
+        {"question_id": "upstream:shared:q:0", "case": "conversation-b",
+         "retrieval_scored": True, "value": 1.0},
+    ]
+
+    result = analysis.clustered_interval(rows, "value")
+
+    assert result["source_cases"] == 2
+    assert result["scored_questions"] == 3
+
+
 def test_one_source_case_has_no_manufactured_interval():
     result = analysis.clustered_interval([{"question_id": "a:0", "retrieval_scored": True, "value": .5}], "value")
     assert result["point"] == .5

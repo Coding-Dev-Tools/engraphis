@@ -878,7 +878,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         if args.public_output:
             write_canonical_artifact(report, args.public_output)
         print(json.dumps(_public_cli_metrics(report["metrics"]), sort_keys=True))
-        return 0 if report["metrics"]["valid_missing_attempts"] == 0 and not report["metrics"]["statuses"].get("error") else 2
+        metrics = report["metrics"]
+        return 0 if (
+            metrics["valid_missing_attempts"] == 0
+            and not metrics["statuses"].get("error")
+            and not metrics.get("critical_violations")
+        ) else 2
     except (ContinuationError, OSError, ValueError) as exc:
         print(f"continuation stopped: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
