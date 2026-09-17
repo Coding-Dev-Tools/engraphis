@@ -515,7 +515,8 @@ def _materialize_source(source_path: Path, destination: Path) -> None:
         if not isinstance(content, str):
             raise ValueError(f"source file content must be text: {path}")
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8", newline="\n")
+        with path.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(content)
 
 
 @contextmanager
@@ -1142,7 +1143,8 @@ def build_artifacts(
         "The manifest timestamp is an artifact-version timestamp; a campaign must record its own reviewed freeze.\n"
     )
     attestation_path = destination / "attestation.txt"
-    attestation_path.write_text(attestation, encoding="utf-8", newline="\n")
+    with attestation_path.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(attestation)
     manifest = {
         "schema": ACCEPTANCE_SCHEMA,
         "origin": "implementation_team",
