@@ -104,7 +104,7 @@ def test_codeql_gate_waives_only_the_three_exact_nonsecurity_hash_calls(tmp_path
             ),
             _weak_hash_result(
                 "eval/benchmark_campaign.py",
-                80,
+                78,
                 "approved public integrity digest",
             ),
             _weak_hash_result(
@@ -148,6 +148,18 @@ def test_codeql_query_remains_enabled_globally() -> None:
 
     assert "query-filters:" not in config
     assert "py/weak-sensitive-data-hashing" not in config
+
+
+def test_codeql_workflow_loads_alert_suppression_packs() -> None:
+    workflow = (
+        Path(__file__).resolve().parents[1]
+        / ".github"
+        / "workflows"
+        / "codeql.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "codeql/python-queries:AlertSuppression.ql" in workflow
+    assert "codeql/javascript-queries:AlertSuppression.ql" in workflow
 
 
 def test_codeql_gate_rejects_baselined_and_source_suppressed_findings(tmp_path, capsys) -> None:
