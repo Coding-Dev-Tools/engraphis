@@ -25,11 +25,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - language: "python"
-            alert_suppression_pack: "codeql/python-queries:AlertSuppression.ql"
-          - language: "javascript-typescript"
-            alert_suppression_pack: "codeql/javascript-queries:AlertSuppression.ql"
+        language: ["python", "javascript-typescript"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Initialize CodeQL
@@ -38,7 +34,7 @@ jobs:
           languages: ${{ matrix.language }}
           build-mode: none
           config-file: ./.github/codeql/codeql-config.yml
-          packs: ${{ matrix.alert_suppression_pack }}
+          packs: ${{ matrix.language == 'python' && 'codeql/python-queries:AlertSuppression.ql' || 'codeql/javascript-queries:AlertSuppression.ql' }}
       - name: Analyze
         id: analyze
         uses: github/codeql-action/analyze@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4
