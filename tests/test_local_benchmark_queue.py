@@ -51,6 +51,18 @@ def test_queue_source_drift_prevents_dispatch(monkeypatch, tmp_path):
         queue.execute(value, tmp_path, runner=lambda *a, **k: pytest.fail("dispatched"))
 
 
+def test_queue_revalidates_source_after_job_before_checkpoint(monkeypatch, tmp_path):
+    value = plan(monkeypatch)
+    snapshots = iter(({"producer": "frozen"}, {"producer": "frozen"}, {"producer": "changed"}))
+    monkeypatch.setattr(queue, "snapshot", lambda: next(snapshots))
+
+    with pytest.raises(ValueError, match="source changed"):
+        queue.execute(value, tmp_path, runner=lambda *a, **k: SimpleNamespace(returncode=0))
+
+    assert not (tmp_path / "smoke.json").exists()
+    assert (tmp_path / "smoke.started").is_file()
+
+
 def test_queue_interrupted_job_is_not_automatically_retried(monkeypatch, tmp_path):
     value = plan(monkeypatch)
     (tmp_path / "smoke.started").write_text("{}")

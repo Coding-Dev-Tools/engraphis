@@ -62,6 +62,8 @@ def test_container_runtime_matches_the_railway_persistence_and_port_contract():
     assert 'if [ ! -e "$ownership_marker" ]; then' in entrypoint
     assert '[ -L "$state_dir" ]' in entrypoint
     assert '[ -L "$ownership_marker" ]' in entrypoint
+    assert "reject_symlink_components" in entrypoint
+    assert 'reject_symlink_components "$config_parent"' in entrypoint
     assert "refusing symlinked state path" in entrypoint
     assert 'config_file="${ENGRAPHIS_ENV_FILE:-}"' in entrypoint
     assert "refusing symlinked trusted config file" in entrypoint

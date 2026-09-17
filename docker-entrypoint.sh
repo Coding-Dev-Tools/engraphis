@@ -13,6 +13,25 @@
 # a no-op passthrough.
 set -e
 
+# Refuse any symlink in a path before a root-owned mkdir/chmod/chown can follow
+# it. Checking only the leaf is insufficient when an app-writable parent can
+# be swapped for a link between container restarts.
+reject_symlink_components() {
+    candidate=$1
+    while [ -n "$candidate" ] && [ "$candidate" != "/" ] && [ "$candidate" != "." ]; do
+        if [ -L "$candidate" ]; then
+            printf '%s\n' "[engraphis] refusing symlinked path component: $candidate" >&2
+            return 1
+        fi
+        parent=$(dirname "$candidate")
+        if [ "$parent" = "$candidate" ]; then
+            break
+        fi
+        candidate=$parent
+    done
+    return 0
+}
+
 # Default bind host, decided at runtime (not baked into the image). Uvicorn's `::`
 # listener is IPv6-only on some container kernels, so plain Docker port forwarding cannot
 # reach it over IPv4. Railway injects RAILWAY_SERVICE_NAME into every deployment and needs
@@ -36,7 +55,9 @@ if [ "$(id -u)" = "0" ]; then
     # These paths are trusted root-owned state locations.  Check them before
     # mkdir/chown so an app-controlled symlink cannot redirect root ownership
     # repair to an unrelated file or directory.
-    if [ -L "$state_dir" ] || [ -L "$ownership_marker" ]; then
+    if [ -L "$state_dir" ] || [ -L "$ownership_marker" ] \
+        || ! reject_symlink_components "$state_dir" \
+        || ! reject_symlink_components "$ownership_marker"; then
         printf '%s\n' "[engraphis] refusing symlinked state path: $state_dir" >&2
         exit 1
     fi
@@ -46,11 +67,15 @@ if [ "$(id -u)" = "0" ]; then
     fi
     if [ -n "$config_file" ]; then
         config_parent=$(dirname "$config_file")
+        if ! reject_symlink_components "$config_parent"; then
+            printf '%s\n' "[engraphis] refusing symlinked trusted config parent: $config_parent" >&2
+            exit 1
+        fi
         if ! mkdir -p "$config_parent"; then
             printf '%s\n' "[engraphis] unable to create config directory: $config_parent" >&2
             exit 1
         fi
-        if [ -L "$config_file" ]; then
+        if ! reject_symlink_components "$config_parent" || [ -L "$config_file" ]; then
             printf '%s\n' "[engraphis] refusing symlinked trusted config file: $config_file" >&2
             exit 1
         fi
@@ -62,8 +87,14 @@ if [ "$(id -u)" = "0" ]; then
             printf '%s\n' "[engraphis] unable to restrict trusted config file: $config_file" >&2
             exit 1
         fi
+        if ! reject_symlink_components "$config_parent" || [ -L "$config_file" ]; then
+            printf '%s\n' "[engraphis] refusing symlinked trusted config file: $config_file" >&2
+            exit 1
+        fi
     fi
-    if [ -L "$state_dir" ] || [ -L "$ownership_marker" ]; then
+    if [ -L "$state_dir" ] || [ -L "$ownership_marker" ] \
+        || ! reject_symlink_components "$state_dir" \
+        || ! reject_symlink_components "$ownership_marker"; then
         printf '%s\n' "[engraphis] refusing symlinked state path: $state_dir" >&2
         exit 1
     fi

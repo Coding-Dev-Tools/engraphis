@@ -421,6 +421,11 @@ def execute(plan: dict, directory: Path, *, runner: Callable = subprocess.run,
                                   "elapsed_seconds": elapsed, "timeout_seconds": timeout_seconds})
                 started.unlink()
                 raise ValueError("local benchmark job returned a failure or incomplete result")
+            # Revalidate the frozen source and inputs after the child exits and
+            # before accepting its artifacts. A concurrent edit can otherwise
+            # leave a successful checkpoint bound to different bytes than the
+            # plan that was scored.
+            validate(plan)
             for artifact in _job_artifacts(job):
                 _verified_artifact(_artifact_path(artifact))
             _new(checkpoint, {"binding_sha256": plan["binding_sha256"], "job": job,
