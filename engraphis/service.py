@@ -1894,6 +1894,8 @@ class MemoryService:
         }
         if result["op"] in ("noop", "invalidate", "relate"):
             out["resolution"] = result.get("reason", "")
+        if result.get("exact_value_bound"):
+            out["exact_value_bound"] = True
         if result["op"] == "invalidate":
             out["superseded"] = result["superseded"]
             if "superseded_detail" in result:
@@ -3889,7 +3891,7 @@ class MemoryService:
     def recall(self, query: str, *, workspace: Optional[str] = None,
                repo: Optional[str] = None, session_id: Optional[str] = None,
                mtypes: Optional[list] = None,
-               k: int = 8, as_of: Optional[float] = None,
+               k: Optional[int] = None, as_of: Optional[float] = None,
                valid_at: Optional[float] = None,
                known_at: Optional[float] = None,
                reinforce: bool = False, intent: str = "recall",
@@ -3904,11 +3906,14 @@ class MemoryService:
                include_untrusted: bool = False,
                planning: str = "off",
                mtype_limits: Optional[dict] = None,
-               record_receipt: bool = True) -> dict:
+               record_receipt: bool = True,
+               _default_k: int = 8,
+               _default_token_budget: Optional[int] = None) -> dict:
         """Retrieve the most relevant memories for ``query`` within scope."""
         query = _clean_text(query, field="query", max_chars=MAX_CONTENT_CHARS)
+        k_supplied = k is not None
         try:
-            k = int(k)
+            k = int(_default_k if k is None else k)
         except (TypeError, ValueError, OverflowError):
             raise ValidationError("k must be an integer")
         k = max(1, min(MAX_K, k))
@@ -3927,7 +3932,10 @@ class MemoryService:
         try:
             token_budget = (
                 self.engine.recall_engine.token_budget
-                if token_budget is None else int(token_budget)
+                if token_budget is None and _default_token_budget is None
+                else _default_token_budget
+                if token_budget is None
+                else int(token_budget)
             )
         except (TypeError, ValueError, OverflowError):
             raise ValidationError("token_budget must be an integer")
@@ -3953,6 +3961,7 @@ class MemoryService:
                 retrieval_recipe,
                 k=k,
                 token_budget=token_budget,
+                k_supplied=k_supplied,
                 token_budget_supplied=False,
             )
         response_mode = str(response_mode or "full").strip().casefold()
@@ -4026,6 +4035,9 @@ class MemoryService:
             recall_filter,
             k=k, reinforce=reinforce,
             token_budget=engine_token_budget,
+            k_supplied=k_supplied,
+            token_budget_supplied=token_budget_supplied,
+            default_token_budget=_default_token_budget,
             retrieval_profile=retrieval_profile,
             candidate_depth=candidate_depth,
             packing_mode=packing_mode,

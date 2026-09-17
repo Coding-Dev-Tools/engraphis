@@ -63,6 +63,10 @@ ORACLE_UNSCORED_OUTCOMES = frozenset({"timeout_unknown", "ambiguous_nonzero", "a
 
 
 def digest(value: Any) -> str:
+    # This is a content-addressing/integrity digest for frozen campaign bindings,
+    # never a password hash or an authentication verifier. Keep the field name
+    # ``*_sha256`` stable because it is part of the retained artifact contract.
+    # lgtm[py/weak-sensitive-data-hashing]
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
 
 
@@ -1051,7 +1055,18 @@ def main(argv: Optional[list[str]] = None) -> int:
         validate_manifest(manifest, companion, corpus_root=args.corpus, dependency_lock=args.dependency_lock)
         if args.stage not in manifest["stages"]:
             raise ValueError("unknown stage")
-        print(json.dumps(budget_proposal(manifest, args.stage), indent=2))
+        proposal = budget_proposal(manifest, args.stage)
+        public_proposal = {
+            key: proposal[key]
+            for key in (
+                "stage", "approved", "attempts", "reader_calls_max", "correction_calls_max",
+                "ingestion_extraction_calls_max", "evaluator_calls_max", "evaluator",
+                "rented_compute_usd", "embedding", "max_calls", "max_cost_micros",
+                "max_cost_usd", "per_call_ceiling_micros", "pricing_source", "pricing_is",
+                "billing_basis",
+            )
+        }
+        print(json.dumps(public_proposal, indent=2))
         if args.freeze_selection:
             if args.selection_receipt is None:
                 raise ValueError("freeze-selection requires a new selection receipt path")

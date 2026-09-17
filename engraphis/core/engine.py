@@ -1500,11 +1500,25 @@ class MemoryEngine:
 
         if decision is not None and decision.op == ResolutionOp.NOOP:
             target_id = _required_resolution_target(decision)
+            exact_value_bound = False
+            incoming_exact = (metadata or {}).get("exact_value")
+            if isinstance(incoming_exact, dict):
+                target = self.store.get_memory(target_id)
+                current_metadata = dict(target.metadata or {}) if target is not None else {}
+                if target is not None and "exact_value" not in current_metadata:
+                    target.metadata = {**current_metadata, "exact_value": incoming_exact}
+                    # Keep the annotation in the same transaction as the NOOP
+                    # reinforcement. ``add_memory`` updates the descriptive HLC and
+                    # mirrors without replacing the existing vector when it is absent
+                    # from the row snapshot.
+                    self.store.add_memory(target, audit=False, commit=False)
+                    exact_value_bound = True
             self.store.reinforce(target_id, boost=scoring.INTERACTION_BOOST["create"])
             self.store.audit("resolver", "noop", target_id, decision.reason)
             if transactional_finalizer is not None:
                 transactional_finalizer(target_id)
-            return {"id": target_id, "op": "noop", "reason": decision.reason}
+            return {"id": target_id, "op": "noop", "reason": decision.reason,
+                    "exact_value_bound": exact_value_bound}
 
         # Before anything reads it: demote graph hints this write cannot prove came from
         # an Extractor, so the "structured_extractor" feed below can only ever see

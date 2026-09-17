@@ -223,7 +223,7 @@ class RecallEngine:
         # "1hop" = the Phase-1 entity expansion, kept for fallback and ablation.
         self.graph_mode = graph_mode
 
-    def recall(self, query: str, flt: Optional[SearchFilter] = None, *, k: int = 8,
+    def recall(self, query: str, flt: Optional[SearchFilter] = None, *, k: Optional[int] = None,
                candidate_k: int = 50, reinforce: bool = False,
                token_budget: Optional[int] = None,
                retrieval_profile: str = "balanced",
@@ -235,7 +235,10 @@ class RecallEngine:
                prompt_only: bool = False,
                planning: str = "off",
                mtype_limits: Optional[dict] = None,
-               arm_config: Optional[ProfileConfig] = None) -> RecallResult:
+               arm_config: Optional[ProfileConfig] = None,
+               k_supplied: Optional[bool] = None,
+               token_budget_supplied: Optional[bool] = None,
+               default_token_budget: Optional[int] = None) -> RecallResult:
         started = time.perf_counter()
         phase_started = started
         phase_ms: dict[str, float] = {}
@@ -274,12 +277,22 @@ class RecallEngine:
             known_at=effective_known_at,
         )
         now = effective_valid_at
-        supplied_token_budget = token_budget is not None
-        budget = self.token_budget if token_budget is None else max(0, int(token_budget))
+        supplied_token_budget = (
+            token_budget is not None
+            if token_budget_supplied is None
+            else bool(token_budget_supplied)
+        )
+        if token_budget is None:
+            base_budget = self.token_budget if default_token_budget is None else default_token_budget
+        else:
+            base_budget = token_budget
+        budget = max(0, int(base_budget))
+        supplied_k = k is not None if k_supplied is None else bool(k_supplied)
         requested_k, budget, selected_recipe = apply_retrieval_recipe(
             retrieval_recipe,
-            k=max(1, int(k)),
+            k=max(1, int(8 if k is None else k)),
             token_budget=budget,
+            k_supplied=supplied_k,
             token_budget_supplied=supplied_token_budget,
         )
         k = requested_k
@@ -2195,8 +2208,11 @@ def _pack_context(
             ]]],
             getattr(packer, "pack_coverage", None),
         )
-        if coverage is not None:
-            return coverage(query, candidates, budget)
+        if coverage is None:
+            raise ValueError(
+                "packing_mode=coverage requires a ContextPacker with pack_coverage"
+            )
+        return coverage(query, candidates, budget)
     return packer.pack(query, candidates, budget)
 
 

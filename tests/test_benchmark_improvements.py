@@ -11,6 +11,7 @@ from engraphis.core.evidence import (
     validate_exact_copy,
 )
 from engraphis.core.interfaces import Candidate, MemoryRecord
+from engraphis.core.recall import _pack_context
 from engraphis.core.retrieval_policy import apply_retrieval_recipe
 from engraphis.service import MemoryService
 
@@ -73,6 +74,15 @@ def test_coverage_packing_skips_an_oversized_top_source_when_a_later_unit_fits()
     assert packed.usage.omission_reasons["unit_too_large"] == 1
 
 
+def test_coverage_mode_rejects_a_packer_without_the_coverage_extension() -> None:
+    class LegacyOnlyPacker:
+        def pack(self, _query, _candidates, _budget):
+            raise AssertionError("legacy packer must not be used for coverage mode")
+
+    with pytest.raises(ValueError, match="requires a ContextPacker with pack_coverage"):
+        _pack_context(LegacyOnlyPacker(), "query", [], 32, "coverage")
+
+
 def test_exact_value_binding_requires_a_unique_verbatim_source_span() -> None:
     content = "The deployment label is Δ-42 in production."
     binding = make_exact_value_binding(content, "Δ-42", "identifier")
@@ -124,13 +134,15 @@ def test_measured_retrieval_recipes_are_opt_in_and_bounded(
     recipe: str, expected_k: int, expected_budget: int,
 ) -> None:
     assert apply_retrieval_recipe(
-        recipe, k=8, token_budget=1500, token_budget_supplied=False,
+        recipe, k=8, token_budget=1500, k_supplied=False,
+        token_budget_supplied=False,
     ) == (expected_k, expected_budget, recipe)
 
 
 def test_explicit_depth_and_budget_win_over_recipe() -> None:
     assert apply_retrieval_recipe(
-        "conversation", k=12, token_budget=700, token_budget_supplied=True,
+        "conversation", k=12, token_budget=700, k_supplied=True,
+        token_budget_supplied=True,
     ) == (12, 700, "conversation")
 
 
@@ -177,6 +189,25 @@ def test_service_batch_accepts_source_bound_exact_value() -> None:
     record = service.store.get_memory(result["results"][0]["id"])
     assert record is not None
     assert record.metadata["exact_value"]["type"] == "enum"
+
+
+def test_service_binds_exact_value_on_a_deduplicated_write() -> None:
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    first = service.remember("release channel is canary-7", workspace="acme")
+    second = service.remember(
+        "release channel is canary-7",
+        workspace="acme",
+        exact_value="canary-7",
+        exact_value_type="enum",
+    )
+
+    assert first["op"] == "add"
+    assert second["op"] == "noop"
+    assert second["id"] == first["id"]
+    assert second["exact_value_bound"] is True
+    stored = service.store.get_memory(first["id"])
+    assert stored is not None
+    assert stored.metadata["exact_value"]["value"] == "canary-7"
 
 
 def test_unknown_scope_recall_reports_opt_in_controls_and_effective_budget() -> None:

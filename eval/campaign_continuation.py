@@ -840,6 +840,18 @@ def write_combined_artifact(plan: ContinuationPlan, output: Path) -> dict[str, A
     return write_canonical_artifact(combined_report(plan), output)
 
 
+def _public_cli_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
+    """Expose aggregate continuation status without exporting private row fields."""
+    keys = (
+        "status", "stage", "expected_attempts", "missing_attempts", "raw_terminal_attempts",
+        "eligible_expected_attempts", "eligible_attempts", "valid_missing_attempts",
+        "excluded_fixture_cells", "excluded_observed_attempts", "uncertain_calls",
+        "critical_violations", "eligible_execution_status", "independent_acceptance_eligible",
+        "leadership_eligible",
+    )
+    return {key: metrics.get(key) for key in keys}
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("parent-manifest", "companion", "eligibility", "audit-artifact", "public-artifact", "parent-approval", "parent-results", "child-results"):
@@ -865,7 +877,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         report = run_continuation(plan, corpus=load_corpus(args.corpus), client=client, maximum_attempts=args.max_attempts)
         if args.public_output:
             write_canonical_artifact(report, args.public_output)
-        print(json.dumps(report["metrics"], sort_keys=True))
+        print(json.dumps(_public_cli_metrics(report["metrics"]), sort_keys=True))
         return 0 if report["metrics"]["valid_missing_attempts"] == 0 and not report["metrics"]["statuses"].get("error") else 2
     except (ContinuationError, OSError, ValueError) as exc:
         print(f"continuation stopped: {type(exc).__name__}: {exc}", file=sys.stderr)
