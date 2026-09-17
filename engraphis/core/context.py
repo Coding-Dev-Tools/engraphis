@@ -58,6 +58,12 @@ def _protected_sentence(text: str) -> bool:
     return bool(_terms(text) & _QUALIFIER_TERMS) or bool(re.search(r"\d", text))
 
 
+def _normalize_title(title: Optional[str]) -> str:
+    """Keep source titles single-line across chunk storage and final rendering."""
+
+    return " ".join(str(title or "").split())
+
+
 class RegexTokenCounter:
     """Exact counter for Engraphis' dependency-free tokenization contract."""
 
@@ -384,7 +390,7 @@ class DeterministicContextPacker:
                 reason=chosen_reason,
                 attribution=attribution,
                 exact_value=chosen_exact,
-                title=(candidate.record.title or "").strip(),
+                title=_normalize_title(candidate.record.title),
             ))
 
         # Second pass: expand each admitted unit in score order using the space
@@ -412,7 +418,7 @@ class DeterministicContextPacker:
                         (record.content or record.summary or "").strip()
                     ), reason=reason or current_reason,
                     attribution=chunk.attribution, exact_value=exact or current_exact,
-                    title=chunk.title or (record.title or "").strip(),
+                    title=_normalize_title(chunk.title or record.title),
                 )
                 rendered = self._render_packed(trial)
                 if self._count(rendered) <= budget:
@@ -512,7 +518,8 @@ class DeterministicContextPacker:
         parts = []
         for ordinal, chunk in enumerate(chunks, start=1):
             attribution = f" {chunk.attribution}" if chunk.attribution else ""
-            title = f" {chunk.title}" if chunk.title else ""
+            displayed_title = _normalize_title(chunk.title)
+            title = f" {displayed_title}" if displayed_title else ""
             parts.append(f"[{ordinal}]{attribution}{title}\n{chunk.excerpt}")
         return "\n\n".join(parts)
 

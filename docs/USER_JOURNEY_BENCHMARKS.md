@@ -31,7 +31,7 @@ source paths, and exception messages.
 | ID | Runtime path | Evidence recorded |
 | --- | --- | --- |
 | `mixed_document_import` | `DocumentImporter.preview()` and `import_scan()` with Markdown, text, and JSON records, a repeat import, and one revised document | Format dispatch, completed import, repeat skips, temporal revision, source-neutral receipts, and live-document count |
-| `mcp_context_budget` | Direct calls to the Classic and Smart MCP wrappers bound to one disposable `MemoryService` | JSON serialization, context-budget accounting, contract parity, source counts, and dynamically discovered tool counts |
+| `mcp_context_budget` | Direct calls to the Classic and Smart MCP wrappers bound to one disposable `MemoryService`; the NumPy-only Python 3.9 core job uses an explicit service-level fallback because MCP is an optional Python 3.10+ extra | JSON serialization, context-budget accounting, contract parity, source counts, and dynamically discovered tool counts when MCP is installed; the fallback records the dependency gate and verifies the same core budget contract |
 | `session_handoff` | `MemoryService.start_session()`, `end_session()`, `remember()`, and `recall()` | Exact active-session reuse, new session after end, bootstrap handoff, and next-session workspace context |
 | `code_memory_bridge` | `index_repo()` and `search_code()` over a temporary Python repository, followed by code-profile recall | Indexed symbols/edges, symbol-to-memory linkage, recalled memory bridge, and observed code retrieval arm |
 | `concurrent_corrections` | Two independent `MemoryEngine` connections with synchronized embedding and the same `subject_key`/`claim_kind` | Two committed corrections, one live claim, and preserved temporal history |
@@ -64,6 +64,11 @@ and any production-like embedding or capacity campaign require their own
 frozen protocol and reporting boundary.
 
 The retained current invocation passed all seven journeys:
-[public artifact](benchmark-evidence/user-journeys-20260916.json), with its adjacent checksum.
+[public artifact](benchmark-evidence/user-journeys-20260917.json), with its adjacent checksum.
 Reproduce the export with
 `python -m scripts.export_user_journey_evidence --output <new-artifact.json>`.
+
+The retained artifact is the full MCP-enabled path.  In the Python 3.9 core-floor
+environment, `mcp_context_budget` cannot load the optional MCP package; the runner
+does not silently claim transport or tool-discovery coverage there.  It records the
+gate and verifies the dependency-light service recall budget instead.

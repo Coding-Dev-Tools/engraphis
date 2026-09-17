@@ -38,6 +38,61 @@ def test_one_source_case_has_no_manufactured_interval():
     assert result["low"] is result["high"] is None
 
 
+def test_paired_difference_carries_source_case_into_bootstrap_rows(tmp_path, monkeypatch):
+    baseline = tmp_path / "baseline.json"
+    candidate = tmp_path / "candidate.json"
+    records = [
+        {
+            "question_id": "upstream:shared:q:0",
+            "case": "conversation-a",
+            "retrieval_scored": True,
+            "supporting_ids": ["mem-a"],
+            "packed_recall_at_k": 0.5,
+        },
+        {
+            "question_id": "upstream:shared:q:1",
+            "case": "conversation-a",
+            "retrieval_scored": True,
+            "supporting_ids": ["mem-b"],
+            "packed_recall_at_k": 0.0,
+        },
+    ]
+    before = {
+        "suite": {"sha256": "dataset"},
+        "models": {"model": "deterministic"},
+        "protocol": {"config": {"token_budget": 12}},
+        "records": records,
+    }
+    after = {
+        **before,
+        "records": [
+            {**records[0], "packed_recall_at_k": 1.0},
+            {**records[1], "packed_recall_at_k": 0.5},
+        ],
+    }
+    monkeypatch.setattr(
+        analysis,
+        "read_verified",
+        lambda path: before if path == baseline else after,
+    )
+    monkeypatch.setattr(analysis, "sha256_file", lambda path: path.name)
+    captured = {}
+    original = analysis.clustered_interval
+
+    def spy(rows, field, **kwargs):
+        captured["rows"] = rows
+        return original(rows, field, **kwargs)
+
+    monkeypatch.setattr(analysis, "clustered_interval", spy)
+
+    result = analysis.paired_difference(baseline, candidate)
+
+    assert result["packed_recall_delta"]["source_cases"] == 1
+    assert [row["case"] for row in captured["rows"]] == [
+        "conversation-a", "conversation-a",
+    ]
+
+
 def test_analysis_requires_artifact_sidecar(tmp_path):
     path = tmp_path / "report.json"
     path.write_text("{}")

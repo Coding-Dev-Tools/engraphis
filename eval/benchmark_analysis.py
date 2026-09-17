@@ -67,12 +67,7 @@ def clustered_interval(rows: list[dict], field: str, *, eligible: str = "retriev
             # it instead of parsing question IDs: MemoryAgentBench upstream QA
             # IDs may contain colons, and collision-qualified IDs add another
             # colon-delimited suffix that is not a source-case boundary.
-            source_case = row.get("case") or row.get("source_case_id")
-            if not isinstance(source_case, str) or not source_case.strip():
-                # Keep older retained artifacts readable; these predate the
-                # explicit case field and use the historical ID convention.
-                source_case = str(row["question_id"]).rsplit(":", 1)[0]
-            groups[source_case.strip()].append(float(row[field]))
+            groups[_source_case(row)].append(float(row[field]))
     blocks = list(groups.values())
     observed = [value for values in blocks for value in values]
     result = {"point": sum(observed) / len(observed) if observed else None,
@@ -90,6 +85,17 @@ def clustered_interval(rows: list[dict], field: str, *, eligible: str = "retriev
     estimates.sort()
     result.update(low=estimates[int(.025 * (iterations - 1))], high=estimates[int(.975 * (iterations - 1))])
     return result
+
+
+def _source_case(row: dict, identity: Optional[str] = None) -> str:
+    """Return the retained source-case identity, with a legacy fallback."""
+
+    source_case = row.get("case") or row.get("source_case_id")
+    if not isinstance(source_case, str) or not source_case.strip():
+        # Keep older retained artifacts readable; these predate the explicit case
+        # field and use the historical ID convention.
+        source_case = str(identity if identity is not None else row["question_id"]).rsplit(":", 1)[0]
+    return source_case.strip()
 
 
 def summarize(path: Path) -> dict:
@@ -132,7 +138,11 @@ def paired_difference(baseline: Path, candidate: Path) -> dict:
         old, new = left[identity], right[identity]
         if (old["retrieval_scored"] != new["retrieval_scored"] or old["supporting_ids"] != new["supporting_ids"]):
             raise ValueError("paired diagnostic scoring or oracle differs")
+        source_case = _source_case(old, identity)
+        if _source_case(new, identity) != source_case:
+            raise ValueError("paired diagnostic source-case identity differs")
         deltas.append({"question_id": identity, "retrieval_scored": old["retrieval_scored"],
+                       "case": source_case,
                        "delta": new["packed_recall_at_k"] - old["packed_recall_at_k"]})
     return {"baseline_sha256": sha256_file(baseline), "candidate_sha256": sha256_file(candidate),
             "baseline_config": before["protocol"]["config"], "candidate_config": after["protocol"]["config"],

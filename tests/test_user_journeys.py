@@ -8,10 +8,12 @@ from eval.user_journeys import (
     AVAILABLE_JOURNEYS,
     EVIDENCE_KIND,
     SCHEMA,
+    _core_context_budget_fallback,
     run_journey,
     run_journeys,
     verify_envelope,
 )
+from engraphis.service import MemoryService
 
 
 def test_all_user_journeys_execute_as_runtime_evidence():
@@ -64,3 +66,15 @@ def test_single_outcome_is_safe_and_does_not_require_campaign_state():
     assert outcome["status"] == "passed"
     assert outcome["counts"]["repaired"] == 1
     assert "error_message" not in outcome
+
+
+def test_mcp_core_floor_fallback_records_the_optional_dependency_boundary():
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    try:
+        observation = _core_context_budget_fallback(service)
+    finally:
+        service.close()
+
+    assert all(observation.checks.values())
+    assert observation.counts["mcp_tools"] == 0
+    assert observation.counts["core_context_tokens"] <= 12

@@ -130,7 +130,7 @@ def test_coverage_packing_preserves_titles_and_multiline_exact_values() -> None:
     content = 'JSON payload:\n{\n  "mode": "canary"\n}'
     record = MemoryRecord(
         id="multiline",
-        title="Deployment payload",
+        title="Deployment\n  payload",
         content=content,
         metadata={
             "exact_value": make_exact_value_binding(
