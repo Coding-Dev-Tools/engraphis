@@ -60,6 +60,12 @@ READER_INSTRUCTIONS = (
     "empty and citations empty. Never invent a source. Do not include Markdown fences."
 )
 ORACLE_UNSCORED_OUTCOMES = frozenset({"timeout_unknown", "ambiguous_nonzero", "ambiguous_zero_exit"})
+_OAUTH_PUBLIC_FIELDS = frozenset({
+    "transport", "provider", "executable", "resolved_executable", "executable_sha256",
+    "version", "instruction_sha256", "global_instruction_sha256", "forced_login_method",
+    "requested_model", "effective_model", "reasoning_effort", "allow_provider_model_fallback",
+    "request_max_retries", "stream_max_retries", "supports_websockets", "attempt_timeout_seconds",
+})
 
 
 def digest(value: Any) -> str:
@@ -147,6 +153,37 @@ def _codex_oauth_configuration(*, executable: Optional[str] = None) -> dict:
     }
 
 
+def _public_oauth_configuration(value: Optional[dict]) -> dict:
+    """Keep arbitrary caller dictionaries out of the public campaign binding."""
+    if value is None:
+        return _codex_oauth_configuration()
+    if not isinstance(value, dict):
+        raise ValueError("OAuth configuration must be an object")
+    if any(key not in _OAUTH_PUBLIC_FIELDS for key in value):
+        raise ValueError("OAuth configuration contains unsupported fields")
+    public = {
+        "transport": value.get("transport"),
+        "provider": value.get("provider"),
+        "executable": value.get("executable"),
+        "resolved_executable": value.get("resolved_executable"),
+        "executable_sha256": value.get("executable_sha256"),
+        "version": value.get("version"),
+        "instruction_sha256": value.get("instruction_sha256"),
+        "global_instruction_sha256": value.get("global_instruction_sha256"),
+        "forced_login_method": value.get("forced_login_method"),
+        "requested_model": value.get("requested_model"),
+        "effective_model": value.get("effective_model"),
+        "reasoning_effort": value.get("reasoning_effort"),
+        "allow_provider_model_fallback": value.get("allow_provider_model_fallback"),
+        "request_max_retries": value.get("request_max_retries"),
+        "stream_max_retries": value.get("stream_max_retries"),
+        "supports_websockets": value.get("supports_websockets"),
+    }
+    if "attempt_timeout_seconds" in value:
+        public["attempt_timeout_seconds"] = value.get("attempt_timeout_seconds")
+    return public
+
+
 def source_snapshot(root: Path = ROOT) -> dict:
     paths = [path for folder in ("engraphis/core", "engraphis/backends")
              for path in (root / folder).rglob("*.py")]
@@ -182,7 +219,7 @@ def make_manifest(*, corpus_root: Path = DATASET_ROOT, embed_model: str,
                          "max_reader_turns": 2, "max_peer_internal_calls_per_attempt": 32,
                          "max_input_tokens": 32768, "max_output_tokens": 4096,
                          "approved": False}
-    oauth = dict(oauth_configuration or _codex_oauth_configuration())
+    oauth = _public_oauth_configuration(oauth_configuration)
     manifest = {
         "schema": SCHEMA, "campaign_id": "engraphis-expansion-20260915",
         "created_at": datetime.now(timezone.utc).isoformat(),

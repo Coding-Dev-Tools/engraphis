@@ -373,3 +373,17 @@ def test_manifest_cannot_rehash_a_reduced_stage(monkeypatch, tmp_path):
     manifest["binding_sha256"] = campaign.digest({key: value for key, value in manifest.items() if key != "binding_sha256"})
     with pytest.raises(ValueError, match="frozen split"):
         campaign.validate_manifest(manifest, companion, live=False)
+
+
+def test_manifest_rejects_secret_oauth_fields_before_binding(tmp_path, monkeypatch):
+    monkeypatch.setattr(campaign, "source_snapshot", lambda: {})
+    lock = tmp_path / "environment.json"
+    lock.write_text("{}")
+    oauth = campaign._codex_oauth_configuration()
+    oauth["password"] = "must-not-enter-the-binding"
+
+    with pytest.raises(ValueError, match="unsupported fields"):
+        campaign.make_manifest(
+            embed_model="test", embed_revision="a" * 40, dependency_lock=lock,
+            oauth_configuration=oauth,
+        )
