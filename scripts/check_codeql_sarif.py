@@ -12,8 +12,21 @@ from urllib.parse import unquote, urlsplit
 
 MAX_REPORTED_FINDINGS = 50
 _APPROVED_WEAK_HASH_SITES = {
-    "engraphis/backends/embedder_deterministic.py": ("_feature_hash", frozenset({36})),
-    "engraphis/backends/codegraph.py": ("_content_hash", frozenset({182, 183})),
+    "engraphis/backends/embedder_deterministic.py": (
+        "_feature_hash",
+        frozenset({36}),
+        "sha1",
+    ),
+    "engraphis/backends/codegraph.py": (
+        "_content_hash",
+        frozenset({182, 183}),
+        "sha1",
+    ),
+    "eval/benchmark_campaign.py": (
+        "digest",
+        frozenset({78}),
+        "sha256",
+    ),
 }
 
 
@@ -58,9 +71,9 @@ def _code_flows(result: dict[str, Any]) -> list[str]:
     return flows
 
 
-# CodeQL flags these two intentional SHA-1 feature hashes on some analyzer
-# releases. The release gate waives only the exact source call expressions;
-# every other result for the same rule remains release-blocking.
+# CodeQL flags these intentional non-security hashes on some analyzer releases.
+# The release gate waives only the exact source call expressions; every other
+# result for the same rule remains release-blocking.
 
 
 def _normalized_repository_path(value: Any) -> str | None:
@@ -77,8 +90,10 @@ def _normalized_repository_path(value: Any) -> str | None:
             return approved
     return None
 
-def _approved_source_identity(path: str, line: int, function_name: str) -> bool:
-    """Confirm the waived result still names the intended non-security SHA-1 call."""
+def _approved_source_identity(
+    path: str, line: int, function_name: str, algorithm_name: str
+) -> bool:
+    """Confirm the waived result still names the intended non-security hash call."""
     try:
         tree = ast.parse(Path(path).read_text(encoding="utf-8"))
     except (OSError, SyntaxError, UnicodeDecodeError):
@@ -97,7 +112,7 @@ def _approved_source_identity(path: str, line: int, function_name: str) -> bool:
             target = candidate.func
             if not (
                     isinstance(target, ast.Attribute)
-                    and target.attr == "sha1"
+                    and target.attr == algorithm_name
                     and isinstance(target.value, ast.Name)
                     and target.value.id == "hashlib"):
                 continue
@@ -131,7 +146,7 @@ def _is_approved_weak_hash(result: dict[str, Any]) -> bool:
         and path is not None
         and isinstance(line, int)
         and line in approved[1]
-        and _approved_source_identity(path, line, approved[0])
+        and _approved_source_identity(path, line, approved[0], approved[2])
     )
 
 
