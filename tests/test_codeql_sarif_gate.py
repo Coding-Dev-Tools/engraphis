@@ -160,6 +160,8 @@ def test_codeql_workflow_loads_alert_suppression_packs() -> None:
 
     assert "codeql/python-queries:AlertSuppression.ql" in workflow
     assert "codeql/javascript-queries:AlertSuppression.ql" in workflow
+    assert "language: [\"python\", \"javascript-typescript\"]" in workflow
+    assert "matrix.alert_suppression_pack" not in workflow
 
 
 def test_codeql_gate_rejects_baselined_and_source_suppressed_findings(tmp_path, capsys) -> None:
