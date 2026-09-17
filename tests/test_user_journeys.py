@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import json
 
+import eval.user_journeys as user_journeys
 from eval.user_journeys import (
     AVAILABLE_JOURNEYS,
     EVIDENCE_KIND,
@@ -78,3 +79,32 @@ def test_mcp_core_floor_fallback_records_the_optional_dependency_boundary():
     assert all(observation.checks.values())
     assert observation.counts["mcp_tools"] == 0
     assert observation.counts["core_context_tokens"] <= 12
+
+
+def test_mcp_fallback_only_applies_when_optional_server_is_absent(monkeypatch):
+    monkeypatch.setattr(user_journeys, "_load_mcp_server", lambda: None)
+
+    outcome = user_journeys.run_journey("mcp_context_budget")
+
+    assert outcome["status"] == "passed"
+    assert outcome["counts"]["mcp_tools"] == 0
+
+
+def test_mcp_runtime_system_exit_is_reported_instead_of_falling_back(monkeypatch):
+    class BrokenMcp:
+        _service = None
+
+        @staticmethod
+        def set_service(service):
+            BrokenMcp._service = service
+
+        @staticmethod
+        def engraphis_remember(*args, **kwargs):
+            raise SystemExit("wrapper failure")
+
+    monkeypatch.setattr(user_journeys, "_load_mcp_server", lambda: BrokenMcp)
+
+    outcome = user_journeys.run_journey("mcp_context_budget")
+
+    assert outcome["status"] == "failed"
+    assert outcome["error_type"] == "SystemExit"

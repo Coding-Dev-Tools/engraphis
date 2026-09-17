@@ -64,7 +64,7 @@ and any production-like embedding or capacity campaign require their own
 frozen protocol and reporting boundary.
 
 The retained current invocation passed all seven journeys:
-[public artifact](benchmark-evidence/user-journeys-20260917.json), with its adjacent checksum.
+[public artifact](benchmark-evidence/user-journeys-20260917-review-fix.json), with its adjacent checksum.
 Reproduce the export with
 `python -m scripts.export_user_journey_evidence --output <new-artifact.json>`.
 
