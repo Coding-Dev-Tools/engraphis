@@ -167,13 +167,72 @@ def findings_in(path: Path) -> list[str]:
     return findings
 
 
+def _sarif_files(directory: Path) -> list[Path]:
+    return sorted({
+        *directory.rglob("*.sarif"),
+        *directory.rglob("*.sarif.json"),
+    })
+
+
+def filter_approved_results(input_directory: Path, output_directory: Path) -> int:
+    """Copy SARIF while removing only the exact approved non-security hashes.
+
+    The CodeQL alert-suppression query records an in-source suppression in SARIF,
+    but GitHub's code-scanning check still treats that raw result as a high alert.
+    Keep the raw SARIF gate above this step release-blocking, then upload a copy
+    with only the source-identity-verified non-security digest results removed.
+    """
+    sarif_files = _sarif_files(input_directory)
+    if not sarif_files:
+        print(
+            f"CodeQL filter: no SARIF files found under {input_directory}",
+            file=sys.stderr,
+        )
+        return 2
+    output_directory.mkdir(parents=True, exist_ok=True)
+    removed = 0
+    for source in sarif_files:
+        document = json.loads(source.read_text(encoding="utf-8"))
+        for run in document.get("runs", []):
+            if not isinstance(run, dict) or not isinstance(run.get("results"), list):
+                continue
+            kept = []
+            for result in run["results"]:
+                if isinstance(result, dict) and _is_approved_weak_hash(result):
+                    removed += 1
+                else:
+                    kept.append(result)
+            run["results"] = kept
+        destination = output_directory / source.relative_to(input_directory)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(
+            json.dumps(document, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    print(f"CodeQL filter: removed {removed} approved non-security result(s)")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
+    if args[:1] == ["--filter-approved"]:
+        if len(args) != 3:
+            print(
+                "usage: check_codeql_sarif.py --filter-approved "
+                "<input-directory> <output-directory>",
+                file=sys.stderr,
+            )
+            return 2
+        return filter_approved_results(Path(args[1]), Path(args[2]))
     if len(args) != 1:
-        print("usage: check_codeql_sarif.py <SARIF directory>", file=sys.stderr)
+        print(
+            "usage: check_codeql_sarif.py <SARIF directory> | "
+            "--filter-approved <input-directory> <output-directory>",
+            file=sys.stderr,
+        )
         return 2
     directory = Path(args[0])
-    sarif_files = sorted(directory.rglob("*.sarif"))
+    sarif_files = _sarif_files(directory)
     if not sarif_files:
         print(f"CodeQL gate: no SARIF files found under {directory}", file=sys.stderr)
         return 2
