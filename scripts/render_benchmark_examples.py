@@ -28,7 +28,8 @@ def render(source: Path, output: Path) -> None:
     })
     template = Template(Path(__file__).with_name("templates").joinpath("benchmark_examples.svg").read_text(encoding="utf-8"))
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(template.substitute(values), encoding="utf-8", newline="\n")
+    with output.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(template.substitute(values))
 
 
 def main(argv=None) -> int:

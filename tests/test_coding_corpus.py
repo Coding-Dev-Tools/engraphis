@@ -86,7 +86,8 @@ def test_v2_development_fixture_uses_structural_long_document_contract(tmp_path)
             1,
         )
         assert changed_text != text
-        service.write_text(changed_text, encoding="utf-8", newline="\n")
+        with service.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(changed_text)
         repaired = run_oracle(scenario, workspace=prepared)
     assert initial.passed is False
     assert repaired.passed is True
@@ -194,7 +195,8 @@ def test_oracle_fails_on_fixture_and_passes_after_real_source_change(tmp_path):
             f"return {signature['new_timeout']!r}",
             1,
         )
-        service.write_text(text, encoding="utf-8", newline="\n")
+        with service.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
         changed = run_oracle(scenario, workspace=prepared)
     assert changed.passed is True
 

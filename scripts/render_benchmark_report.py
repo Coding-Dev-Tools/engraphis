@@ -699,7 +699,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     report = load_report(args.report)
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(render_report(report), encoding="utf-8", newline="\n")
+    with output.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(render_report(report))
     return 0
 
 
