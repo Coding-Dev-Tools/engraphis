@@ -805,7 +805,10 @@ def run(dataset: list[dict], *, k: int = 5, dim: int = 256,
             packed_tags = [
                 tag for chunk in res.packed_chunks for tag in id_to_tags.get(chunk.id, [])
             ]
-            packed_texts = [chunk.excerpt for chunk in res.packed_chunks]
+            # Score the context actually emitted to the reader.  Titles and
+            # ownership headers can carry required answer tokens even when the
+            # chunk excerpt is only a value or procedure body.
+            packed_texts = [res.context] if res.context else []
             retrieval_scored = bool(supporting)
             accepted_answer = (
                 q.get("answer_variants")

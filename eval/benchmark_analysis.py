@@ -63,9 +63,16 @@ def clustered_interval(rows: list[dict], field: str, *, eligible: str = "retriev
     groups: dict[str, list[float]] = defaultdict(list)
     for row in rows:
         if row.get(eligible):
-            # Both loaders emit <case ID>:<question ordinal>; the final colon
-            # separates the ordinal even when a source case ID contains colons.
-            groups[row["question_id"].rsplit(":", 1)[0]].append(float(row[field]))
+            # Current harness artifacts retain a public-safe case identity.  Use
+            # it instead of parsing question IDs: MemoryAgentBench upstream QA
+            # IDs may contain colons, and collision-qualified IDs add another
+            # colon-delimited suffix that is not a source-case boundary.
+            source_case = row.get("case") or row.get("source_case_id")
+            if not isinstance(source_case, str) or not source_case.strip():
+                # Keep older retained artifacts readable; these predate the
+                # explicit case field and use the historical ID convention.
+                source_case = str(row["question_id"]).rsplit(":", 1)[0]
+            groups[source_case.strip()].append(float(row[field]))
     blocks = list(groups.values())
     observed = [value for values in blocks for value in values]
     result = {"point": sum(observed) / len(observed) if observed else None,

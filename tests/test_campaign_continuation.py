@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -138,6 +139,37 @@ def test_duplicate_checkpoint_is_skipped(tmp_path):
     )
     assert seen == [cell2]
     assert report["metrics"]["valid_missing_attempts"] == 0
+
+
+def test_continuation_cli_fails_on_critical_violations(monkeypatch, tmp_path, capsys):
+    plan = object()
+    monkeypatch.setattr(cc, "prepare_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(cc, "build_continuation_client", lambda value: object())
+    monkeypatch.setattr(cc, "load_corpus", lambda path: [])
+    monkeypatch.setattr(
+        cc,
+        "run_continuation",
+        lambda *args, **kwargs: {"metrics": {
+            "valid_missing_attempts": 0,
+            "statuses": {},
+            "critical_violations": 1,
+        }},
+    )
+    paths = [str(tmp_path / name) for name in (
+        "parent.json", "companion.json", "eligibility.json", "audit.json",
+        "public.json", "approval.json", "parent-results", "child-results",
+    )]
+
+    result = cc.main([
+        "--parent-manifest", paths[0], "--companion", paths[1],
+        "--eligibility", paths[2], "--audit-artifact", paths[3],
+        "--public-artifact", paths[4], "--parent-approval", paths[5],
+        "--parent-results", paths[6], "--child-results", paths[7],
+        "--execute",
+    ])
+
+    assert result == 2
+    assert json.loads(capsys.readouterr().out)["critical_violations"] == 1
 
 
 def test_started_marker_fails_closed_without_runner(tmp_path):

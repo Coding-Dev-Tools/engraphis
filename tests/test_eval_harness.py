@@ -40,6 +40,25 @@ def test_harness_runs_and_scores():
     assert report["recall_at_k"] > 0.5
 
 
+def test_packed_answer_tokens_score_the_rendered_context_title():
+    report = run([{
+        "id": "title-evidence",
+        "memories": [{
+            "tag": "deployment",
+            "title": "Release target",
+            "text": "The value is canary-7.",
+        }],
+        "questions": [{
+            "id": "q-title",
+            "q": "What is the deployment value?",
+            "answer": "Release target",
+            "supporting": ["deployment"],
+        }],
+    }], k=1, token_budget=64)
+
+    assert report["detail"][0]["packed_answer_token_recall"] == 1.0
+
+
 def test_harness_seeds_declared_fixture_graph_before_memory_ingestion():
     case = load_dataset(str(GRAPH_DATASET))[0]
     store = Store(":memory:")
