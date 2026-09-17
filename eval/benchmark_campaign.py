@@ -73,6 +73,7 @@ def digest(value: Any) -> str:
     # never a password hash or an authentication verifier. Keep the field name
     # ``*_sha256`` stable because it is part of the retained artifact contract.
     # The explicit flag also documents the non-security use for FIPS-aware tooling.
+    # codeql[py/weak-sensitive-data-hashing]: non-secret public integrity binding, not password storage
     return hashlib.sha256(
         canonical_json(value).encode("utf-8"), usedforsecurity=False
     ).hexdigest()
