@@ -311,10 +311,8 @@ def _journey_mixed_document_import() -> _Observation:
 
 
 @contextmanager
-def _bound_mcp_service(service: MemoryService) -> Iterator[Any]:
+def _bound_mcp_service(service: MemoryService, mcp_server: Any) -> Iterator[Any]:
     """Bind both MCP wrappers to one disposable service for a direct call."""
-
-    import engraphis.mcp_server as mcp_server
 
     previous = mcp_server._service
     mcp_server.set_service(service)
@@ -325,6 +323,16 @@ def _bound_mcp_service(service: MemoryService) -> Iterator[Any]:
             mcp_server._service = None
         else:
             mcp_server.set_service(previous)
+
+
+def _load_mcp_server() -> Optional[Any]:
+    """Probe the optional MCP dependency without masking runtime failures."""
+
+    try:
+        import engraphis.mcp_server as mcp_server
+    except (ImportError, SystemExit):
+        return None
+    return mcp_server
 
 
 def _tool_count(server: Any) -> int:
@@ -385,7 +393,13 @@ def _core_context_budget_fallback(service: MemoryService) -> _Observation:
 def _journey_mcp_context_budget() -> _Observation:
     service = _local_service()
     try:
-        with _bound_mcp_service(service) as mcp_server:
+        mcp_server = _load_mcp_server()
+        if mcp_server is None:
+            # The MCP extra is an optional Python 3.10+ dependency.  Its absence
+            # in the NumPy-only Python 3.9 core job is explicit; once imported,
+            # wrapper and registry failures must remain visible to the journey.
+            return _core_context_budget_fallback(service)
+        with _bound_mcp_service(service, mcp_server):
             classic_remember = mcp_server.engraphis_remember(
                 "Release deployment requires a signed tag.",
                 workspace="journey-mcp",
@@ -445,11 +459,6 @@ def _journey_mcp_context_budget() -> _Observation:
                 "smart_context_tokens": smart_usage.get("context_tokens", 0),
             }
             return _Observation(checks=checks, counts=counts)
-    except (ImportError, SystemExit):
-        # The MCP package is an optional Python 3.10+ extra.  Its absence in the
-        # NumPy-only Python 3.9 core job is an explicit dependency boundary, not a
-        # failure of the service's context-budget contract.
-        return _core_context_budget_fallback(service)
     finally:
         service.close()
 

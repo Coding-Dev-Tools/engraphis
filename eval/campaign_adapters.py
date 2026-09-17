@@ -398,6 +398,81 @@ def _campaign_source_id(
     return None
 
 
+def _campaign_trust(
+    item: Any,
+    source_id: str,
+    trust_by_id: Optional[Mapping[str, bool]],
+) -> Optional[bool]:
+    """Resolve the campaign trust label without trusting backend display text."""
+
+    metadata = _value(item, "metadata", default={})
+    raw: Any = None
+    if isinstance(metadata, Mapping):
+        raw = metadata.get("campaign_trusted", metadata.get("trusted"))
+        provenance = metadata.get("provenance")
+        if raw is None and isinstance(provenance, Mapping):
+            raw = provenance.get("trusted")
+    if raw is None and trust_by_id is not None:
+        raw = trust_by_id.get(source_id)
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        normalized = raw.strip().casefold()
+        if normalized in {"true", "1", "yes", "trusted"}:
+            return True
+        if normalized in {"false", "0", "no", "untrusted"}:
+            return False
+        return None
+    if raw is None:
+        return None
+    return bool(raw)
+
+
+def _merge_peer_result_pages(pages: Sequence[Sequence[Any]]) -> list[Any]:
+    """Merge partition pages before the common evidence ``k`` limit.
+
+    Mem0 returns an independently ranked page for each physical partition.  A
+    flat append makes the first partition consume the entire common limit.  Use
+    comparable backend scores when present; otherwise interleave pages so no
+    selected partition is silently starved by page order.
+    """
+
+    normalized_pages = [list(page) for page in pages if page]
+    rows = [
+        (
+            item,
+            _value(item, "score", "similarity", "relevance", default=None),
+            page_index,
+            rank,
+        )
+        for page_index, page in enumerate(normalized_pages)
+        for rank, item in enumerate(page)
+    ]
+    if not rows:
+        return []
+    scored: list[tuple[Any, float, int, int]] = []
+    for item, raw_score, page_index, rank in rows:
+        try:
+            score = float(raw_score)
+        except (TypeError, ValueError, OverflowError):
+            scored = []
+            break
+        if not math.isfinite(score):
+            scored = []
+            break
+        scored.append((item, score, page_index, rank))
+    if scored and len(scored) == len(rows):
+        scored.sort(key=lambda row: (-row[1], row[2], row[3]))
+        return [row[0] for row in scored]
+
+    merged: list[Any] = []
+    for rank in range(max(len(page) for page in normalized_pages)):
+        for page in normalized_pages:
+            if rank < len(page):
+                merged.append(page[rank])
+    return merged
+
+
 def _pack_peer_items(
     items: Sequence[Any],
     *,
@@ -405,6 +480,7 @@ def _pack_peer_items(
     k: int,
     token_budget: int,
     memory_ids: Mapping[str, str],
+    trust_by_id: Optional[Mapping[str, bool]] = None,
 ) -> tuple[str, tuple[str, ...], AdapterUsage, int]:
     """Pack complete peer facts under the same deterministic counter as Engraphis."""
     del query  # Peer APIs already rank; packing must not re-rank their evidence.
@@ -419,11 +495,7 @@ def _pack_peer_items(
         if not text:
             omitted += 1
             continue
-        tokens = _token_estimate(text)
-        source_tokens += tokens
-        if tokens > limit:
-            omitted += 1
-            continue
+        source_tokens += _token_estimate(text)
         source_id = _campaign_source_id(item, index, memory_ids)
         if source_id is None:
             # Keep each admitted context unit positionally attributable to one
@@ -432,7 +504,14 @@ def _pack_peer_items(
             unmapped += 1
             omitted += 1
             continue
-        selected_text.append(text)
+        trusted = _campaign_trust(item, source_id, trust_by_id)
+        trust_label = "unknown" if trusted is None else str(trusted).lower()
+        rendered = f"[{source_id}] trusted={trust_label}\n{text}"
+        tokens = _token_estimate(rendered)
+        if tokens > limit:
+            omitted += 1
+            continue
+        selected_text.append(rendered)
         limit -= tokens
         selected_ids.append(source_id)
     context = "\n\n".join(selected_text)
@@ -968,6 +1047,7 @@ class _PeerAdapter(_BaseAdapter):
         self._selected_partitions: tuple[str, ...] = ()
         self._record_partitions: dict[str, str] = {}
         self._backend_partitions: dict[str, str] = {}
+        self._record_trust: dict[str, bool] = {}
 
     @staticmethod
     def _partition_id(namespace: str, workspace: str) -> str:
@@ -1122,6 +1202,7 @@ class _PeerAdapter(_BaseAdapter):
     def reset(self) -> None:
         self._record_partitions.clear()
         self._backend_partitions.clear()
+        self._record_trust.clear()
         super().reset()
 
     def metrics(self) -> dict[str, Any]:
@@ -1809,6 +1890,7 @@ class Mem0Adapter(_PeerAdapter):
             self._memory_ids[record.record_id] = result_ids[-1]
             self._record_partitions[record.record_id] = self._record_partition(record)
             self._backend_partitions[result_ids[-1]] = self._record_partition(record)
+            self._record_trust[record.record_id] = record.trusted
             self._counters["ingest"] += 1
         return result_ids
 
@@ -1823,20 +1905,22 @@ class Mem0Adapter(_PeerAdapter):
         search = getattr(self.client, "search", None)
         if not callable(search):
             raise AdapterError("Mem0 client has no search method")
-        items: list[Any] = []
+        pages: list[list[Any]] = []
         for partition in self._selected_partitions:
             raw = _call_with_fallbacks(search, (
                 ((query,), {"filters": {"user_id": partition}, "top_k": max(1, k), "threshold": 0.0, "rerank": False}),
                 ((query,), {"user_id": partition, "top_k": max(1, k)}),
                 ((query,), {"user_id": partition, "limit": max(1, k)}),
             ))
-            items.extend(self._filter_partition_items(_result_items(raw)))
+            pages.append(self._filter_partition_items(_result_items(raw)))
+        items = _merge_peer_result_pages(pages)
         context, source_ids, usage, unmapped = _pack_peer_items(
             items,
             query=query,
             k=k,
             token_budget=token_budget,
             memory_ids=self._memory_ids,
+            trust_by_id=self._record_trust,
         )
         self._counters["recall"] += 1
         usage = AdapterUsage(
@@ -2058,6 +2142,7 @@ class GraphitiAdapter(_PeerAdapter):
             self._memory_ids[record.record_id] = result_ids[-1]
             self._record_partitions[record.record_id] = partition
             self._backend_partitions[result_ids[-1]] = partition
+            self._record_trust[record.record_id] = record.trusted
             self._counters["ingest"] += 1
         return result_ids
 
@@ -2087,6 +2172,7 @@ class GraphitiAdapter(_PeerAdapter):
             k=k,
             token_budget=token_budget,
             memory_ids=self._memory_ids,
+            trust_by_id=self._record_trust,
         )
         self._counters["recall"] += 1
         usage = AdapterUsage(

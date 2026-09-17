@@ -10,6 +10,7 @@ from eval.campaign_adapters import (
     GraphitiAdapter,
     Mem0Adapter,
     _call_with_fallbacks,
+    _merge_peer_result_pages,
     _pack_peer_items,
 )
 
@@ -90,9 +91,11 @@ def test_mem0_namespace_and_common_packing_contract():
     assert [call[0][0]["content"] for call in client.add_calls] == [
         "first complete fact", "second complete fact",
     ]
-    result = adapter.recall("fact", k=2, token_budget=6)
+    result = adapter.recall("fact", k=2, token_budget=30)
     assert result.source_ids == ("a", "b")
-    assert result.usage.context_tokens <= 6
+    assert result.usage.context_tokens <= 30
+    assert "[a] trusted=true" in result.context
+    assert "[b] trusted=false" in result.context
     assert result.provenance["source_ids_are_packed_only"] is True
     assert client.search_calls[0][1]["filters"]["user_id"] == prepared["workspace_id"]
 
@@ -142,9 +145,10 @@ def test_peer_packing_omits_unmapped_text_instead_of_shifting_citations():
         k=2,
         token_budget=50,
         memory_ids={"record-1": "backend-1"},
+        trust_by_id={"record-1": True},
     )
 
-    assert context == "mapped public fact"
+    assert context == "[record-1] trusted=true\nmapped public fact"
     assert source_ids == ("record-1",)
     assert usage.packed_count == 1
     assert usage.omitted_count == 1
@@ -163,6 +167,60 @@ def test_mem0_preflights_unsupported_scope_before_any_add():
     with pytest.raises(AdapterCapabilityError, match="repo"):
         adapter.ingest(records)
     assert client.add_calls == []
+
+
+def test_mem0_repo_partition_results_are_merged_by_score_before_k_limit():
+    class PartitionedMem0(FakeMem0):
+        def search(self, query, **kwargs):
+            result = super().search(query, **kwargs)
+            partition = (kwargs.get("filters") or {}).get("user_id")
+            if partition == adapter._workspace_partition:
+                result["results"] = [{
+                    "id": "workspace-backend",
+                    "memory": "workspace distractor",
+                    "score": 0.1,
+                    "metadata": {"campaign_record_id": "workspace-fact",
+                                  "campaign_partition": partition,
+                                  "campaign_trusted": True},
+                }]
+            else:
+                result["results"] = [{
+                    "id": "repo-backend",
+                    "memory": "repo-specific evidence",
+                    "score": 0.9,
+                    "metadata": {"campaign_record_id": "repo-fact",
+                                  "campaign_partition": partition,
+                                  "campaign_trusted": True},
+                }]
+            return result
+
+    client = PartitionedMem0()
+    adapter = Mem0Adapter(
+        client=client,
+        config={"namespace": "attempt-merge", "scope_partition": "repo"},
+    )
+    adapter.prepare(workspace_id="workspace-a", repo_id="repo-a")
+    adapter.ingest([{
+        "record_id": "workspace-fact", "content": "workspace distractor",
+        "scope": "workspace", "workspace": "workspace-a", "trusted": True,
+    }, {
+        "record_id": "repo-fact", "content": "repo-specific evidence",
+        "scope": "repo", "workspace": "workspace-a", "repo": "repo-a",
+        "trusted": True,
+    }])
+
+    result = adapter.recall("evidence", k=1, token_budget=20)
+
+    assert result.source_ids == ("repo-fact",)
+    assert "repo-specific evidence" in result.context
+
+
+def test_peer_page_merge_interleaves_when_backend_scores_are_unavailable():
+    merged = _merge_peer_result_pages(
+        [[{"id": "workspace"}], [{"id": "repo"}]],
+    )
+
+    assert [item["id"] for item in merged] == ["workspace", "repo"]
 
 
 def test_peer_repo_partition_is_explicit_and_keeps_sibling_facts_out():
@@ -210,7 +268,7 @@ def test_graphiti_maps_episode_evidence_and_preflights_scope():
     result = adapter.recall("fact", k=1, token_budget=10)
     assert client.index_calls == 1
     assert result.source_ids == ("a",)
-    assert result.context == "graph fact"
+    assert result.context == "[a] trusted=true\ngraph fact"
     assert client.search_calls[0][1]["group_ids"] == [prepared["workspace_id"]]
     assert [item["group_id"] for item in client.add_calls] == [prepared["workspace_id"]] * 2
 
