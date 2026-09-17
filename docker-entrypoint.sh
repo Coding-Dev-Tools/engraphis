@@ -6,10 +6,11 @@
 # create /data/engraphis.db or customer state under /data/.engraphis and crashes at
 # startup with `sqlite3.OperationalError: unable to open database file`.
 #
-# We therefore start the container as root, chown the mounted volume to `engraphis`, and
-# exec the real command as `engraphis` via gosu — keeping the deliberate non-root runtime
-# while making the volume writable. When not running as root (e.g. a local `docker run`
-# that already dropped privileges) this is a no-op passthrough.
+# We therefore start the container as root, repair ownership once, and exec the real command
+# as `engraphis` via gosu — keeping the deliberate non-root runtime while making the volume
+# writable. A marker avoids recursively walking a large Hugging Face cache on every restart.
+# When not running as root (e.g. a local `docker run` that already dropped privileges) this is
+# a no-op passthrough.
 set -e
 
 # Default bind host, decided at runtime (not baked into the image). Uvicorn's `::`
@@ -27,11 +28,55 @@ if [ -z "${ENGRAPHIS_HOST:-}" ]; then
 fi
 
 if [ "$(id -u)" = "0" ]; then
-    # ENGRAPHIS_STATE_DIR defaults to /data/.engraphis; ensure both it and the volume root
-    # exist and are owned by the app user. `|| true` so a transient FS hiccup never blocks
-    # startup — the app surfaces any real write failure itself.
-    mkdir -p "${ENGRAPHIS_STATE_DIR:-/data/.engraphis}" 2>/dev/null || true
-    chown -R engraphis:engraphis /data 2>/dev/null || true
+    # ENGRAPHIS_STATE_DIR defaults to /data/.engraphis. Repair the complete volume only on
+    # first boot; later restarts verify the mount and state roots without walking the cache.
+    state_dir="${ENGRAPHIS_STATE_DIR:-/data/.engraphis}"
+    ownership_marker="${state_dir}/.volume-ownership"
+    config_file="${ENGRAPHIS_ENV_FILE:-}"
+    if ! mkdir -p "$state_dir"; then
+        printf '%s\n' "[engraphis] unable to create state directory: $state_dir" >&2
+        exit 1
+    fi
+    if [ -n "$config_file" ]; then
+        config_parent=$(dirname "$config_file")
+        if ! mkdir -p "$config_parent"; then
+            printf '%s\n' "[engraphis] unable to create config directory: $config_parent" >&2
+            exit 1
+        fi
+        if [ -L "$config_file" ]; then
+            printf '%s\n' "[engraphis] refusing symlinked trusted config file: $config_file" >&2
+            exit 1
+        fi
+        if [ ! -e "$config_file" ] && ! : > "$config_file"; then
+            printf '%s\n' "[engraphis] unable to create trusted config file: $config_file" >&2
+            exit 1
+        fi
+        if ! chmod 600 "$config_file"; then
+            printf '%s\n' "[engraphis] unable to restrict trusted config file: $config_file" >&2
+            exit 1
+        fi
+    fi
+    if [ ! -e "$ownership_marker" ]; then
+        if ! chown -R engraphis:engraphis /data; then
+            printf '%s\n' "[engraphis] unable to repair /data ownership" >&2
+            exit 1
+        fi
+        if ! : > "$ownership_marker"; then
+            printf '%s\n' "[engraphis] unable to create volume ownership marker" >&2
+            exit 1
+        fi
+        if ! chown engraphis:engraphis "$ownership_marker"; then
+            printf '%s\n' "[engraphis] unable to own volume ownership marker" >&2
+            exit 1
+        fi
+    elif ! chown engraphis:engraphis /data "$state_dir" "$ownership_marker"; then
+        printf '%s\n' "[engraphis] unable to verify /data ownership" >&2
+        exit 1
+    fi
+    if [ -n "$config_file" ] && ! chown engraphis:engraphis "$config_file"; then
+        printf '%s\n' "[engraphis] unable to own trusted config file" >&2
+        exit 1
+    fi
     exec gosu engraphis "$@"
 fi
 

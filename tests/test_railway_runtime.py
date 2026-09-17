@@ -50,12 +50,20 @@ def test_container_runtime_matches_the_railway_persistence_and_port_contract():
     assert "useradd --create-home --uid 10001 engraphis" in dockerfile
     assert "HF_HOME=/data/.cache/huggingface" in dockerfile
     assert "ENGRAPHIS_STATE_DIR=/data/.engraphis" in dockerfile
+    assert "ENGRAPHIS_ENV_FILE=/data/.engraphis/config.env" in dockerfile
+    assert "COPY deploy ./deploy" in dockerfile
 
     assert 'if [ -z "${ENGRAPHIS_HOST:-}" ]; then' in entrypoint
     assert '[ -n "${RAILWAY_SERVICE_NAME:-}" ]' in entrypoint
     assert "ENGRAPHIS_HOST=\"::\"" in entrypoint
     assert "ENGRAPHIS_HOST=\"0.0.0.0\"" in entrypoint
     assert "chown -R engraphis:engraphis /data" in entrypoint
+    assert ".volume-ownership" in entrypoint
+    assert 'if [ ! -e "$ownership_marker" ]; then' in entrypoint
+    assert 'config_file="${ENGRAPHIS_ENV_FILE:-}"' in entrypoint
+    assert "refusing symlinked trusted config file" in entrypoint
+    assert 'chmod 600 "$config_file"' in entrypoint
+    assert "chown -R engraphis:engraphis /data 2>/dev/null || true" not in entrypoint
     assert 'exec gosu engraphis "$@"' in entrypoint
 
 

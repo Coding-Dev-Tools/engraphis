@@ -26,12 +26,13 @@ import threading
 import time
 from dataclasses import dataclass, field, replace
 from itertools import islice
-from typing import Any, Callable, Optional, SupportsFloat, SupportsIndex
+from typing import Any, Callable, Optional, SupportsFloat, SupportsIndex, cast
 
 import numpy as np
 
 from engraphis.core import scoring
 from engraphis.core.context import DeterministicContextPacker
+from engraphis.core.evidence import exact_value_binding
 from engraphis.core.graph_policy import UniformGraphTraversalPolicy
 from engraphis.core.graphrank import personalized_pagerank
 from engraphis.core.interfaces import (
@@ -59,6 +60,7 @@ from engraphis.core.retrieval_policy import (
     DeterministicRetrievalPolicy,
     ProfileConfig,
     RETRIEVAL_PROFILES,
+    apply_retrieval_recipe,
     profile_config,
 )
 from engraphis.core.query_planner import (
@@ -136,6 +138,8 @@ class RecallResult:
     candidate_k_requested: int = 50
     candidate_k_used: int = 50
     candidate_depth_reason: str = "fixed requested depth"
+    packing_mode: str = "legacy"
+    retrieval_recipe: str = "default"
     retrieval_trace: Optional[list[dict[str, Any]]] = None
     context_revision: str = ""
     planning_mode: str = "off"
@@ -224,6 +228,8 @@ class RecallEngine:
                token_budget: Optional[int] = None,
                retrieval_profile: str = "balanced",
                candidate_depth: str = "fixed",
+               packing_mode: str = "legacy",
+               retrieval_recipe: str = "default",
                diagnostics: bool = False,
                include_untrusted: bool = False,
                prompt_only: bool = False,
@@ -268,7 +274,18 @@ class RecallEngine:
             known_at=effective_known_at,
         )
         now = effective_valid_at
+        supplied_token_budget = token_budget is not None
         budget = self.token_budget if token_budget is None else max(0, int(token_budget))
+        requested_k, budget, selected_recipe = apply_retrieval_recipe(
+            retrieval_recipe,
+            k=max(1, int(k)),
+            token_budget=budget,
+            token_budget_supplied=supplied_token_budget,
+        )
+        k = requested_k
+        requested_packing_mode = str(packing_mode or "legacy").strip().casefold()
+        if requested_packing_mode not in {"legacy", "coverage"}:
+            raise ValueError("packing_mode must be one of: legacy, coverage")
         requested_profile = str(retrieval_profile or "balanced").strip().casefold()
         if requested_profile not in RETRIEVAL_PROFILES:
             choices = ", ".join(sorted(RETRIEVAL_PROFILES))
@@ -595,7 +612,9 @@ class RecallEngine:
                 arm_candidate_k, False, 0,
             )
             mark_phase("response_metadata")
-            context, packed, usage = self.context_packer.pack(query, [], budget)
+            context, packed, usage = _pack_context(
+                self.context_packer, query, [], budget, requested_packing_mode,
+            )
             mark_phase("packing")
             return finish(RecallResult(
                 context=context,
@@ -611,6 +630,8 @@ class RecallEngine:
                 # prompt-only recall may have widened it to find approved evidence.
                 candidate_k_used=arm_candidate_k,
                 candidate_depth_reason=candidate_depth_reason,
+                packing_mode=requested_packing_mode,
+                retrieval_recipe=selected_recipe,
                 retrieval_trace=[] if diagnostics else None,
                 context_revision=_context_revision(usage, packed, context),
                 planning_mode=planning_mode,
@@ -900,6 +921,7 @@ class RecallEngine:
             "absolute_support": round(support[c.id], 4),
             "subject_key": record.subject_key,
             "claim_kind": record.claim_kind,
+            "exact_value": exact_value_binding(record.metadata, content=record.content),
             "retention": round(scoring.retention(record.stability, record.last_access, now), 4),
             "provenance": record.provenance,
             # Consolidated digests/profiles expose the ids of the source memories
@@ -908,7 +930,9 @@ class RecallEngine:
             "consolidation_source_ids": list(final_consolidation_evidence[c.id]),
         } for c, record in final_records]
         mark_phase("support_and_provenance")
-        context, packed_chunks, usage = self.context_packer.pack(query, final, budget)
+        context, packed_chunks, usage = _pack_context(
+            self.context_packer, query, final, budget, requested_packing_mode,
+        )
         mark_phase("packing")
         trace = None
         if diagnostics:
@@ -932,6 +956,8 @@ class RecallEngine:
             # initial candidate depth.  This is diagnostic telemetry, not a limit.
             candidate_k_used=arm_candidate_k,
             candidate_depth_reason=candidate_depth_reason,
+            packing_mode=requested_packing_mode,
+            retrieval_recipe=selected_recipe,
             retrieval_trace=trace,
             context_revision=_context_revision(usage, packed_chunks, context),
             planning_mode=planning_mode,
@@ -2152,6 +2178,26 @@ def _context_revision(
     }
     canonical = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _pack_context(
+    packer: ContextPacker,
+    query: str,
+    candidates: list[Candidate],
+    budget: int,
+    packing_mode: str,
+) -> tuple[str, list[PackedChunk], ContextUsage]:
+    """Dispatch the opt-in packer without changing the ContextPacker protocol."""
+    if packing_mode == "coverage":
+        coverage = cast(
+            Optional[Callable[[str, list[Candidate], int], tuple[
+                str, list[PackedChunk], ContextUsage,
+            ]]],
+            getattr(packer, "pack_coverage", None),
+        )
+        if coverage is not None:
+            return coverage(query, candidates, budget)
+    return packer.pack(query, candidates, budget)
 
 
 def _arm_counts(query_runs: list[dict[str, Any]]) -> dict[str, int]:

@@ -11,7 +11,7 @@ def recall_diagnostics(result, *, elapsed_ms: float,
     raw = getattr(usage, "omission_reasons", {}) or {}
     counts: dict[str, Optional[int]] = {
         name: min(1_000_000_000, max(0, int(raw.get(name, 0))))
-        for name in ("duplicate", "budget", "score_tail", "missing_record")
+        for name in ("duplicate", "budget", "score_tail", "missing_record", "unit_too_large")
     }
     counts["truncated"] = sum(bool(chunk.truncated) for chunk in result.packed_chunks)
     # Candidate discovery is bounded. Counting all invisible records would both

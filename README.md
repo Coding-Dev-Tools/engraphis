@@ -44,7 +44,7 @@ by default, or accept an explicit workspace plus optional `from_ts`, `to_ts`, an
 `release_version` filters.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Coding-Dev-Tools/engraphis/main/docs/images/context-efficiency.svg" alt="Dark chart of registered deterministic fixtures. Structure-aware chunks reduce retrieved context from 740.3 to 214.3 tokens and the smallest evidence-holding memory from 162.2 to 42.4 tokens. A compact JSON-shape proxy uses 10,982 rather than 23,810 tokens. Retrieved-candidate quality is labeled separately from packed-context quality, both measured in the selected report with packed-quality fields. Actual MCP transport and provider billing are not measured." width="100%">
+  <img src="https://raw.githubusercontent.com/Coding-Dev-Tools/engraphis/main/docs/images/context-efficiency.svg" alt="Dark chart of registered deterministic fixtures. Structure-aware chunks reduce retrieved context from 740.3 to 214.3 tokens and the smallest evidence-holding memory from 162.2 to 42.4 tokens. A compact JSON-shape proxy uses 11,138 rather than 24,590 tokens. Retrieved-candidate quality is labeled separately from packed-context quality, both measured in the selected report with packed-quality fields. Actual MCP transport and provider billing are not measured." width="100%">
   <br>
   <sup>Less repeated history means more room for the task, tools, and useful evidence.</sup>
 </p>
@@ -73,20 +73,20 @@ its counting boundary explicit.
 |---|---|---|---|
 | Retrieved top-5 memory content, averaged per question | Whole documents: **740.3** tokens → structure-aware chunks: **214.3** tokens | **526.0 fewer tokens per question** (**71.1% lower**, about **3.5× smaller**) | Recall@5 **1.000** in both modes across 6 documents and 18 questions |
 | Smallest returned memory that contains the reference evidence | Whole documents: **162.2** tokens → chunks: **42.4** tokens | **119.8 fewer tokens to evidence** (**73.9% lower**, about **3.8× smaller**) | The same 18 questions had a returned evidence-holding memory in both modes |
-| Full versus compact recall payload proxy across one 26-question pass within a 260-timed-recall CodeMem run | Full proxy: **23,810** `engraphis.regex.v1` tokens → compact proxy: **10,982** tokens | **12,828 proxy tokens avoided** (**53.88% lower**) | 26 payload samples; 260 timed recalls; Recall@5, hit@5, and answer-token recall all **1.000** |
+| Full versus compact recall payload proxy across one 26-question pass within a 260-timed-recall CodeMem run | Full proxy: **24,590** `engraphis.regex.v1` tokens → compact proxy: **11,138** tokens | **13,452 proxy tokens avoided** (**54.71% lower**) | 26 payload samples; 260 timed recalls; Recall@5, hit@5, and answer-token recall all **1.000** |
 | Packed prompt-context usage in the same 26-question CodeMem sample pass | Hard budget: **1,500** tokens; observed mean: **85.38**; observed maximum: **108** | A hard cap prevents a recall from exceeding its configured context budget | This is usage accounting, not a before/after savings comparison |
 
 The performance report keeps its legacy `quality` fields for all candidate chunks returned before
 context packing and adds `packed_quality` for evidence admitted to the reader context. The checked-in
-v18 artifact includes both quality views, with Recall@5, hit@5 and answer-token evidence coverage
+v19 artifact includes both quality views, with Recall@5, hit@5 and answer-token evidence coverage
 of 1.000 for the 26-question fixture in each view. Both views measure retrieved evidence;
 neither is an end-to-end question-answer score. Coding outcomes, external datasets, and staged
 operational capacity remain separate pending evaluation tracks until their artifacts are selected.
 
 These values are evidence IDs `offline-chunking` and `offline-performance` in
-[`offline-fixtures-v18.json`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/benchmark-evidence/offline-fixtures-v18.json),
+[`offline-fixtures-v19.json`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/benchmark-evidence/offline-fixtures-v19.json),
 SHA-256
-`afe7e1be24f18701d4eec8f2e989abed9d9b8e2796660b7eb6bb7da5d4f3ebcc`.
+`704de1e307fab08404c71af7226f9318855ee63dd954f3fd173d40f8ae2e7fe8`.
 [`BENCHMARKS.md`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/BENCHMARKS.md#public-numeric-evidence-registry)
 records the matching suite digest, exact commands, and per-command config digests. The offline
 fixture registry intentionally excludes external, model-dependent, consolidation, productivity,
@@ -559,6 +559,13 @@ reader's tokenizer when reader-model token parity is required. `engraphis_recall
 surface; use `response_mode="compact"` when the packed context is enough and full memory bodies
 would duplicate it. For advanced query-planning configuration, see the
 [architecture guide](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/ARCHITECTURE_V3.md#query-planning).
+
+Benchmark-driven alternatives are opt-in: `packing_mode="coverage"` keeps complete evidence
+units from more source memories, while `retrieval_recipe="conversation"` and
+`retrieval_recipe="long_session"` select the measured depth/budget starting points. The
+historical `legacy`/`default` settings remain unchanged. For a value that must survive a file
+edit or tool call exactly, Classic `engraphis_remember` and the Python/service write APIs accept
+source-bound `exact_value` plus its `exact_value_type`; ambiguous repeated literals are rejected.
 
 For bi-temporal reads, `valid_at` selects what was true at a Unix timestamp and `known_at` selects
 what Engraphis had learned then. `as_of` remains a compatibility alias for `valid_at`; supplying

@@ -47,6 +47,11 @@ Store a memory so it can be recalled later, across turns, sessions, and repos.
 - `subject_key (str, "")`: optional stable claim subject, such as `api.rate_limit`.
 - `claim_kind (str, "")`: optional predicate/category, such as `configured_value`. A matching
   subject and compatible kind make supersession deterministic; uncertain neighbors remain live.
+- `exact_value (str, None)`: optional literal that must occur verbatim in the source content;
+  use this when a downstream edit or tool argument must preserve an exact value.
+- `exact_value_type (str, "literal")`: `literal` | `string` | `identifier` | `path` | `number` |
+  `date` | `enum` | `json`. Ambiguous repeated values require a source span through the
+  Python/service API.
 
 Returns `{id, workspace, repo, scope, mtype, stored:true, op}` where `op` is `add` | `noop` |
 `invalidate` (with `superseded:[old_id,…]`) | `relate` (with `related_to`; both claims remain) |
@@ -61,8 +66,8 @@ council) in one atomic, deduplicated write, instead of many separate `remember` 
 
 - `facts (list[dict])`: each item needs `content` and optionally `title`, `mtype`,
   `importance` (0..1), `keywords`, `metadata`, `subject_key`, `claim_kind`,
-  `valid_from` (Unix timestamp), and `evidence_source` (a declared citeable origin for the
-  fact, e.g. `"subagent-7"`; defaults to none).
+  `valid_from` (Unix timestamp), `exact_value`, `exact_value_type`, and `evidence_source`
+  (a declared citeable origin for the fact, e.g. `"subagent-7"`; defaults to none).
 - `workspace (str, "default")`, `repo (str, None)`, `session_id (str, None)`.
 - `mtype (str, "semantic")`: default type for items without their own.
 - `scope (str, None)`: same visibility rules as `engraphis_remember`.
@@ -109,6 +114,11 @@ bodies already represented in `context`.
 - `candidate_depth (str, "fixed")`: `fixed` preserves the historical 50-candidate pool;
   opt-in `adaptive` uses a deterministic profile-aware smaller pool for routine lexical/balanced
   queries while retaining wider graph/code pools. Responses report the requested and used depth.
+- `packing_mode (str, "legacy")`: `legacy` preserves the established one-candidate-at-a-time
+  packer; opt-in `coverage` reserves complete evidence units across sources before expanding them.
+- `retrieval_recipe (str, "default")`: `default` preserves historical settings; opt-in
+  `conversation` starts at `k=20` / 1,500 tokens and `long_session` at `k=10` / 4,096 tokens
+  when the caller leaves depth and budget at their defaults. Explicit caller values win.
 - `valid_at (float, None)`: what was true in world time; `known_at (float, None)`: what
   Engraphis had learned in system time; `as_of (float, None)` is the `valid_at` compatibility
   alias and must match when both are supplied.
@@ -143,6 +153,11 @@ It is the full-response compatibility surface; prefer `engraphis_recall_context`
 - `candidate_depth (str, "fixed")`: `fixed` preserves the historical candidate pool; opt-in
   `adaptive` is a deterministic profile-aware depth experiment. The response records the
   requested mode, actual depth, and reason.
+- `packing_mode (str, "legacy")`: `legacy` preserves the established packer; opt-in `coverage`
+  spreads complete evidence units across sources.
+- `retrieval_recipe (str, "default")`: `default` preserves historical settings; opt-in
+  `conversation` starts at `k=20` / 1,500 tokens and `long_session` at `k=10` / 4,096 tokens
+  when depth and budget are left at their historical defaults.
 - `response_mode (str, "full")`: `full` preserves legacy memory bodies; `compact` omits bodies
   already represented in `context`.
 - `valid_at (float, None)`, `known_at (float, None)`; `as_of (float, None)` is the compatible
@@ -483,7 +498,8 @@ The two overlapping names deliberately have smaller Smart schemas than their Cla
 above. Smart `engraphis_remember` accepts only `content`, `workspace`, `repo`, `session_id`,
 `mtype`, `importance`, `subject_key`, and `claim_kind`; safe provenance is fixed internally.
 Smart `engraphis_recall_context` accepts only `query`, `workspace`, `repo`, `session_id`, `k`,
-`token_budget`, and `format`; advanced planning/profile controls are discoverable rather than routine.
+`token_budget`, `packing_mode`, `retrieval_recipe`, and `format`; advanced planning/profile
+controls are discoverable rather than routine.
 
 ### `engraphis_session`
 Start or resume a session, or end it with a next-session handoff.

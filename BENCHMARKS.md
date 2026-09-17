@@ -13,17 +13,26 @@ scores and capacity qualification remain separate experiments.
 For the locked operator sequence for a public canonical run, see
 [`docs/PUBLIC_BENCHMARK_RUNBOOK.md`](docs/PUBLIC_BENCHMARK_RUNBOOK.md).
 
+The current measured improvement priorities and their evidence boundaries are in
+[`docs/BENCHMARK_IMPROVEMENT_PRIORITIES.md`](docs/BENCHMARK_IMPROVEMENT_PRIORITIES.md).
+The implementation exposes three opt-in comparison controls: `packing_mode="coverage"`
+for complete evidence units across sources, source-bound `exact_value` fields on the
+Classic/service write path, and `retrieval_recipe="conversation"` or `"long_session"`
+for the measured depth/budget starting points. `"legacy"` packing and `"default"`
+retrieval remain the defaults until development, validation and untouched-holdout gates
+show a workload-specific benefit.
+
 ### Public numeric evidence registry
 
 Every exact public aggregate retained below comes from the checked-in, public-safe
-[`offline-fixtures-v18.json`](docs/benchmark-evidence/offline-fixtures-v18.json) artifact. Its
+[`offline-fixtures-v19.json`](docs/benchmark-evidence/offline-fixtures-v19.json) artifact. Its
 SHA-256 is
-`afe7e1be24f18701d4eec8f2e989abed9d9b8e2796660b7eb6bb7da5d4f3ebcc`, also recorded in the
+`704de1e307fab08404c71af7226f9318855ee63dd954f3fd173d40f8ae2e7fe8`, also recorded in the
 adjacent `.sha256` file. The artifact contains no raw questions, answers, prompts, customer data,
 or per-record content fingerprints.
 
 The fixture-suite digest is
-`8410166610522059c47ae1bfac6f0e73d7b9c1512f6e835354e446ce27ea2ae3`. The artifact defines
+`09a899b73076f1feca19e157f8627204f9f98ffcb248fcc92b190064de595977`. The artifact defines
 the digest algorithm and records the SHA-256 of every suite and dataset file. Each evidence ID
 also binds its exact command through `sha256(UTF-8 exact command)`:
 
@@ -45,10 +54,10 @@ Historical LoCoMo, graph, handoff, consolidation, and security figures remain pr
 source artifacts but are omitted from the current chart until each has a matching immutable,
 public-safe artifact. The chart labels coding outcomes, external datasets, and operational
 capacity as pending evaluation tracks rather than implying scores. Regenerate it with
-`python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-v18.json --output docs/images/context-efficiency.svg` after selecting the report to publish.
+`python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-v19.json --output docs/images/context-efficiency.svg` after selecting the report to publish.
 
 The companion examples are also generated from that artifact with
-`python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-v18.json --output docs/images/evidence-backed-agent-examples.svg`.
+`python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-v19.json --output docs/images/evidence-backed-agent-examples.svg`.
 The historical-to-executable mapping is in
 [`docs/BENCHMARK_CHANGE_COVERAGE.md`](docs/BENCHMARK_CHANGE_COVERAGE.md).
 
@@ -94,9 +103,9 @@ frontier-model QA score.
   context packing; additive `packed_quality` fields score only chunks admitted to reader context.
   Payload proxies are sampled once per question, independently of the number of timed iterations;
   they are not serialized MCP envelopes or transport responses. In the
-  registered CodeMem run, 26 payload samples total **23,810** full-proxy
-  `engraphis.regex.v1` tokens versus **10,982** compact-proxy tokens, avoiding **12,828** proxy
-  tokens (**53.88% lower**), while 260 recalls are timed. Packed context across the same 26
+  registered CodeMem run, 26 payload samples total **24,590** full-proxy
+  `engraphis.regex.v1` tokens versus **11,138** compact-proxy tokens, avoiding **13,452** proxy
+  tokens (**54.71% lower**), while 260 recalls are timed. Packed context across the same 26
   samples averages **85.38** tokens and reaches **108** under a 1,500-token cap; Recall@5,
   hit@5, and answer-token recall remain 1.000 for the legacy candidate-page view. The registered
   v9 artifact predates `packed_quality`, so no packed-quality aggregate is published from it.
