@@ -88,7 +88,7 @@ def test_codeql_gate_reports_path_problem_endpoints(tmp_path) -> None:
     ]
 
 
-def test_codeql_gate_waives_only_the_two_exact_nonsecurity_hash_calls(tmp_path) -> None:
+def test_codeql_gate_waives_only_the_three_exact_nonsecurity_hash_calls(tmp_path) -> None:
     path = _write_sarif(
         tmp_path,
         [
@@ -101,6 +101,11 @@ def test_codeql_gate_waives_only_the_two_exact_nonsecurity_hash_calls(tmp_path) 
                 r".\engraphis\backends\codegraph.py",
                 182,
                 "approved code hash",
+            ),
+            _weak_hash_result(
+                "eval/benchmark_campaign.py",
+                78,
+                "approved public integrity digest",
             ),
             _weak_hash_result(
                 "engraphis/backends/embedder_deterministic.py",
