@@ -239,9 +239,9 @@ def _quality_metrics(
 
     ``retrieved_tags`` and ``retrieved_texts`` are deliberately supplied by the
     caller.  The performance report uses the complete candidate page for the
-    legacy ``quality`` fields and the packed chunks for the additive
-    ``packed_quality`` fields.  Keeping the scorer shared prevents the two
-    views from quietly acquiring different token or gold-answer semantics.
+    legacy ``quality`` fields and the final rendered context for the additive
+    ``packed_quality`` fields.  Keeping the scorer shared prevents the two views
+    from quietly acquiring different token or gold-answer semantics.
     """
     return {
         "recall_at_k": metrics.recall_at_k(retrieved_tags, question["supporting"]),
@@ -250,6 +250,13 @@ def _quality_metrics(
             retrieved_texts, question["answer"]
         ),
     }
+
+
+def _packed_context_text(result) -> list[str]:
+    """Score the exact rendered context admitted to the reader prompt."""
+
+    context = str(getattr(result, "context", "") or "")
+    return [context] if context else []
 
 
 def _measure_recall(
@@ -490,7 +497,7 @@ def _run_engine(
             packed_tags = [
                 tag for memory_id in packed_ids for tag in id_to_tags.get(memory_id, [])
             ]
-            packed_texts = [str(chunk.excerpt or "") for chunk in result.packed_chunks]
+            packed_texts = _packed_context_text(result)
             usage = result.usage
             measurements.context_tokens.append(usage.context_tokens if usage else 0)
             measurements.source_tokens.append(usage.source_tokens if usage else 0)

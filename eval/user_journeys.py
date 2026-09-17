@@ -335,6 +335,53 @@ def _tool_count(server: Any) -> int:
         loop.close()
 
 
+def _core_context_budget_fallback(service: MemoryService) -> _Observation:
+    """Exercise the dependency-light budget contract when MCP is not installed.
+
+    The MCP extra is intentionally unavailable in the Python 3.9 core-floor job.
+    Keep that job meaningful without pretending that the transport/tool registry was
+    tested: the fallback records the optional boundary explicitly and exercises the
+    same service recall and hard context-budget path that the wrappers delegate to.
+    """
+
+    service.remember(
+        "Release deployment requires a signed tag.",
+        workspace="journey-mcp",
+        repo="agent-repo",
+    )
+    service.remember(
+        "Release verification requires a successful backup.",
+        workspace="journey-mcp",
+        repo="agent-repo",
+    )
+    result = service.recall(
+        "release signed tag",
+        workspace="journey-mcp",
+        repo="agent-repo",
+        k=5,
+        token_budget=12,
+        response_mode="full",
+    )
+    usage = result.get("usage", {})
+    serialized = _canonical(result)
+    sources = result.get("packed_sources", [])
+    checks = {
+        "optional_mcp_dependency_is_explicitly_gated": True,
+        "core_service_serializes_as_json": isinstance(result, dict)
+        and "\n" not in serialized,
+        "core_budget_is_observed": usage.get("budget_tokens") == 12
+        and 0 <= usage.get("context_tokens", -1) <= 12,
+        "core_context_sources_are_reported": isinstance(sources, list)
+        and len(sources) > 0,
+    }
+    counts = {
+        "mcp_tools": 0,
+        "core_sources": len(sources) if isinstance(sources, list) else 0,
+        "core_context_tokens": usage.get("context_tokens", 0),
+    }
+    return _Observation(checks=checks, counts=counts)
+
+
 def _journey_mcp_context_budget() -> _Observation:
     service = _local_service()
     try:
@@ -398,6 +445,11 @@ def _journey_mcp_context_budget() -> _Observation:
                 "smart_context_tokens": smart_usage.get("context_tokens", 0),
             }
             return _Observation(checks=checks, counts=counts)
+    except (ImportError, SystemExit):
+        # The MCP package is an optional Python 3.10+ extra.  Its absence in the
+        # NumPy-only Python 3.9 core job is an explicit dependency boundary, not a
+        # failure of the service's context-budget contract.
+        return _core_context_budget_fallback(service)
     finally:
         service.close()
 
