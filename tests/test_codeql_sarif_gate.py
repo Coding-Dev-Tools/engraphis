@@ -104,7 +104,7 @@ def test_codeql_gate_waives_only_the_three_exact_nonsecurity_hash_calls(tmp_path
             ),
             _weak_hash_result(
                 "eval/benchmark_campaign.py",
-                78,
+                80,
                 "approved public integrity digest",
             ),
             _weak_hash_result(

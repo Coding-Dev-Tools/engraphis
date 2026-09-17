@@ -24,7 +24,7 @@ _APPROVED_WEAK_HASH_SITES = {
     ),
     "eval/benchmark_campaign.py": (
         "digest",
-        frozenset({78}),
+        frozenset({79, 80}),
         "sha256",
     ),
 }
@@ -111,10 +111,20 @@ def _approved_source_identity(
                 continue
             target = candidate.func
             if not (
-                    isinstance(target, ast.Attribute)
-                    and target.attr == algorithm_name
-                    and isinstance(target.value, ast.Name)
-                    and target.value.id == "hashlib"):
+                    (isinstance(target, ast.Attribute)
+                     and target.attr == algorithm_name
+                     and isinstance(target.value, ast.Name)
+                     and target.value.id == "hashlib")
+                    or
+                    (isinstance(target, ast.Call)
+                     and isinstance(target.func, ast.Name)
+                     and target.func.id == "getattr"
+                     and len(target.args) == 2
+                     and isinstance(target.args[0], ast.Name)
+                     and target.args[0].id == "hashlib"
+                     and isinstance(target.args[1], ast.Constant)
+                     and target.args[1].value == algorithm_name)
+            ):
                 continue
             return any(
                 keyword.arg == "usedforsecurity"
