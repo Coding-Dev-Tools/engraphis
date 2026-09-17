@@ -64,7 +64,7 @@ try:
     value = getattr(module, function_name)(*args, **kwargs)
     payload = {"ok": True, "value": value}
 except BaseException as exc:
-    payload = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    payload = {"ok": False, "error_type": type(exc).__name__}
     print("__ENGRAPHIS_ORACLE_RESULT__" + json.dumps(payload, sort_keys=True), flush=True)
     raise
 else:

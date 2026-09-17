@@ -17,6 +17,7 @@ from eval.campaign_oracle import (
     OracleOperation,
     OUTPUT_LIMIT,
     _RESULT_MARKER,
+    _RUNNER_SOURCE,
     _capture_bounded,
     _candidate_command,
     _values_equal,
@@ -156,6 +157,10 @@ def test_candidate_operation_has_no_expected_field() -> None:
     assert "image@sha256:abc" in joined
     assert "current_timeout" in joined
     assert "expected" not in joined
+
+
+def test_candidate_runner_emits_a_stable_exception_type() -> None:
+    assert '"error_type": type(exc).__name__' in _RUNNER_SOURCE
 
 
 def test_fake_transport_compares_result_on_trusted_host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
