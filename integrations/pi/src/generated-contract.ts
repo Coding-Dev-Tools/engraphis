@@ -188,6 +188,11 @@ export const SMART_SCHEMAS = {
         "title": "K",
         "type": "integer"
       },
+      "packing_mode": {
+        "default": "legacy",
+        "title": "Packing Mode",
+        "type": "string"
+      },
       "query": {
         "description": "Question or task needing prior context.",
         "maxLength": 100000,
@@ -208,6 +213,11 @@ export const SMART_SCHEMAS = {
         "default": null,
         "description": "Optional repository.",
         "title": "Repo"
+      },
+      "retrieval_recipe": {
+        "default": "default",
+        "title": "Retrieval Recipe",
+        "type": "string"
       },
       "session_id": {
         "anyOf": [

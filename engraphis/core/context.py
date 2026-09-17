@@ -17,6 +17,7 @@ from engraphis.core.interfaces import (
     ContextUsage,
     PackedChunk,
 )
+from engraphis.core.evidence import exact_value_binding
 
 
 _TOKEN_RE = re.compile(r"\w+|[^\w\s]", re.UNICODE)
@@ -125,7 +126,7 @@ class DeterministicContextPacker:
 
         representatives, duplicate_count = _family_representatives(candidates)
         omissions = {"duplicate": duplicate_count, "budget": 0, "score_tail": 0,
-                     "missing_record": 0}
+                     "missing_record": 0, "unit_too_large": 0}
         owners = {
             _source_attribution(candidate) for candidate in representatives
             if candidate.record is not None
@@ -259,6 +260,245 @@ class DeterministicContextPacker:
         )
 
     pack_context = pack
+
+    def pack_coverage(
+        self,
+        query: str,
+        candidates: list[Candidate],
+        token_budget: int,
+    ) -> ContextPackResult:
+        """Pack compact complete evidence units across more source records.
+
+        The legacy path admits a candidate in score order and may spend most of
+        the budget on the first long source.  Coverage mode reserves a bounded
+        slice for each still-eligible source, admits one contiguous sentence
+        window first, and only then spends remaining space expanding the windows.
+        It is opt-in because changing source granularity changes benchmark
+        measurements and must be compared with the legacy packer explicitly.
+        """
+        budget = max(0, int(token_budget))
+        source_tokens = sum(self._source_tokens(candidate) for candidate in candidates)
+        if budget == 0 or not candidates:
+            return ContextPackResult(
+                context="", chunks=[],
+                usage=self._usage(
+                    budget, 0, source_tokens, 0, len(candidates),
+                    {"budget": len(candidates)} if candidates else {},
+                ),
+            )
+
+        representatives, duplicate_count = _family_representatives(candidates)
+        omissions = {"duplicate": duplicate_count, "budget": 0, "score_tail": 0,
+                     "missing_record": 0, "unit_too_large": 0}
+        owners = {
+            _source_attribution(candidate) for candidate in representatives
+            if candidate.record is not None
+        }
+        include_attribution = len(owners) > 1
+        query_terms = _terms(query)
+        needs_bridge = bool(query_terms & _BRIDGE_TERMS) or bool(
+            re.search(r"(?:\w+[./\\])+\w+|::|->|\b[A-Za-z_]\w*\(\)", query)
+        )
+        ordered = self._selection_order(
+            representatives, query_terms=query_terms, needs_bridge=needs_bridge,
+        )
+        remaining = []
+        for candidate in ordered:
+            if candidate.record is None:
+                omissions["missing_record"] += 1
+            else:
+                remaining.append(candidate)
+        context = ""
+        packed: list[PackedChunk] = []
+
+        # First pass: reserve a small complete unit for as many distinct sources
+        # as can fit.  A source with a long body cannot consume the whole budget.
+        while remaining and self._count(context) < budget:
+            available_total = budget - self._count(context)
+            source_slots = max(1, len(remaining))
+            target = max(8, available_total // source_slots)
+            separator = "\n\n" if context else ""
+            chosen_index: Optional[int] = None
+            chosen_excerpt = ""
+            chosen_reason = ""
+            chosen_exact: Optional[dict[str, object]] = None
+            for index, candidate in enumerate(remaining):
+                record = candidate.record
+                if record is None:
+                    continue
+                ordinal = len(packed) + 1
+                attribution = _source_attribution(candidate) if include_attribution else ""
+                header = self._header(candidate, ordinal, attribution=attribution)
+                excerpt, reason, exact = self._coverage_excerpt(
+                    query, candidate, max_tokens=target,
+                )
+                if not excerpt:
+                    continue
+                proposed = f"{context}{separator}{header}\n{excerpt}"
+                if self._count(proposed) <= budget:
+                    chosen_index = index
+                    chosen_excerpt = excerpt
+                    chosen_reason = reason
+                    chosen_exact = exact
+                    break
+            if chosen_index is None:
+                # If the fair first-pass slice is too small, try every remaining
+                # source against the actual space. A long top-ranked source must
+                # not prevent a later source with a complete unit from fitting.
+                for index, candidate in enumerate(remaining):
+                    attribution = _source_attribution(candidate) if include_attribution else ""
+                    header = self._header(candidate, len(packed) + 1, attribution=attribution)
+                    chosen_excerpt, chosen_reason, chosen_exact = self._coverage_excerpt(
+                        query, candidate, max_tokens=available_total,
+                    )
+                    proposed = f"{context}{separator}{header}\n{chosen_excerpt}"
+                    if chosen_excerpt and self._count(proposed) <= budget:
+                        chosen_index = index
+                        break
+                if chosen_index is None:
+                    for candidate in remaining:
+                        attribution = _source_attribution(candidate) if include_attribution else ""
+                        header = self._header(candidate, len(packed) + 1, attribution=attribution)
+                        excerpt, _, _ = self._coverage_excerpt(
+                            query, candidate, max_tokens=available_total,
+                        )
+                        proposed = f"{context}{separator}{header}\n{excerpt}"
+                        if not excerpt:
+                            omissions["unit_too_large"] += 1
+                        elif self._count(proposed) > budget:
+                            omissions["budget"] += 1
+                    break
+
+            candidate = remaining.pop(chosen_index)
+            attribution = _source_attribution(candidate) if include_attribution else ""
+            header = self._header(candidate, len(packed) + 1, attribution=attribution)
+            prefix = f"{context}{separator}{header}\n"
+            context = f"{prefix}{chosen_excerpt}"
+            packed.append(PackedChunk(
+                id=candidate.id,
+                excerpt=chosen_excerpt,
+                tokens=self._count(chosen_excerpt),
+                truncated=chosen_excerpt.strip() != (
+                    (candidate.record.content or candidate.record.summary or "").strip()
+                ),
+                reason=chosen_reason,
+                attribution=attribution,
+                exact_value=chosen_exact,
+            ))
+
+        # Second pass: expand each admitted unit in score order using the space
+        # left after coverage. Rebuilding the context keeps ordinal/header costs
+        # exact for custom provider token counters.
+        if packed:
+            for index, chunk in enumerate(list(packed)):
+                candidate = next((item for item in representatives if item.id == chunk.id), None)
+                if candidate is None or candidate.record is None:
+                    continue
+                record = candidate.record
+                current_excerpt = chunk.excerpt
+                current_exact = chunk.exact_value
+                current_reason = chunk.reason
+                expanded, reason, exact = self._coverage_excerpt(
+                    query, candidate, max_tokens=budget,
+                    minimum_tokens=self._count(current_excerpt),
+                )
+                if not expanded or self._count(expanded) <= self._count(current_excerpt):
+                    continue
+                trial = list(packed)
+                trial[index] = PackedChunk(
+                    id=chunk.id, excerpt=expanded, tokens=self._count(expanded),
+                    truncated=expanded.strip() != (
+                        (record.content or record.summary or "").strip()
+                    ), reason=reason or current_reason,
+                    attribution=chunk.attribution, exact_value=exact or current_exact,
+                )
+                rendered = self._render_packed(trial)
+                if self._count(rendered) <= budget:
+                    packed = trial
+                    context = rendered
+
+        context = self._render_packed(packed)
+        context_tokens = self._count(context)
+        if remaining and context_tokens >= budget:
+            omissions["budget"] += len(remaining)
+        omitted = max(len(candidates) - len(packed), duplicate_count)
+        return ContextPackResult(
+            context=context,
+            chunks=packed,
+            usage=self._usage(
+                budget, context_tokens, source_tokens, len(packed), omitted, omissions,
+            ),
+        )
+
+    def _coverage_excerpt(
+        self,
+        query: str,
+        candidate: Candidate,
+        *,
+        max_tokens: int,
+        minimum_tokens: int = 0,
+    ) -> tuple[str, str, Optional[dict[str, object]]]:
+        """Choose a contiguous evidence window, retaining exact-value bindings."""
+        record = candidate.record
+        if record is None or max_tokens <= 0:
+            return "", "", None
+        source = (record.content or record.summary or "").strip()
+        sentences = [part.strip() for part in _SENTENCE_RE.split(source) if part.strip()]
+        if not sentences:
+            return "", "", None
+        query_terms = _terms(query)
+        binding = exact_value_binding(record.metadata, content=record.content)
+        exact_value = binding.get("value") if binding else ""
+        ranked = sorted(
+            range(len(sentences)),
+            key=lambda index: (
+                -(len(_terms(sentences[index]) & query_terms)
+                  + (4 if exact_value and exact_value in sentences[index] else 0)
+                  + (2 if _terms(sentences[index]) & _QUALIFIER_TERMS else 0)),
+                index,
+            ),
+        )
+        best = ""
+        best_score = -1
+        best_reason = "coverage_unit"
+        # A short adjacent window keeps subject, value, condition and date in
+        # the same evidence unit without falling back to arbitrary token prefixes.
+        for seed in ranked:
+            for width in (3, 2, 1):
+                start = max(0, min(seed, len(sentences) - width))
+                end = start + width
+                excerpt = " ".join(sentences[start:end])
+                if exact_value and exact_value in source and exact_value not in excerpt:
+                    continue
+                if self._count(excerpt) > max_tokens or self._count(excerpt) < minimum_tokens:
+                    continue
+                score = sum(len(_terms(part) & query_terms) for part in sentences[start:end])
+                score += sum(2 for part in sentences[start:end] if _terms(part) & _QUALIFIER_TERMS)
+                if exact_value and exact_value in excerpt:
+                    score += 8
+                if score > best_score:
+                    best, best_score = excerpt, score
+                    best_reason = "coverage_exact" if exact_value and exact_value in excerpt else "coverage_unit"
+        if not best:
+            return "", "", None
+        # Make the literal independently visible to the reader. This is only in
+        # the opt-in coverage path and is charged to the same hard token budget.
+        if binding and exact_value and exact_value not in best:
+            line = f"Exact value (copy exactly): {exact_value}"
+            proposed = f"{line}\n{best}"
+            if self._count(proposed) <= max_tokens:
+                best = proposed
+                best_reason = "coverage_exact"
+            else:
+                return "", "", None
+        return best, best_reason, binding
+
+    def _render_packed(self, chunks: list[PackedChunk]) -> str:
+        parts = []
+        for ordinal, chunk in enumerate(chunks, start=1):
+            attribution = f" {chunk.attribution}" if chunk.attribution else ""
+            parts.append(f"[{ordinal}]{attribution}\n{chunk.excerpt}")
+        return "\n\n".join(parts)
 
     def _is_score_elbow(
         self,

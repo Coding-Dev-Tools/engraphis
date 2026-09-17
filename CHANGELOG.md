@@ -5,6 +5,10 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+- Receipt-chain structural corruption remains fail-closed at the Store boundary without
+  bricking a completed service operation: affected responses now carry a content-free
+  `receipt_warning`, and graph/import workers preserve their completed state.
+
 ## [1.7.4] - 2026-09-13
 
 - Writable SQLite files now default to WAL plus FULL synchronization, with an explicit

@@ -106,7 +106,7 @@ def test_core_backend_imports_stay_behind_outer_composition_root() -> None:
 
 def test_benchmark_text_alternatives_match_registered_fixture_boundary() -> None:
     """The current image and its alt text expose only current registered boundaries."""
-    registry = json.loads(_read("docs/benchmark-evidence/offline-fixtures-v18.json"))
+    registry = json.loads(_read("docs/benchmark-evidence/offline-fixtures-v19.json"))
     measurements = {run["id"]: run["result"] for run in registry["runs"]}
     payload = measurements["offline-performance"]
     readme = _read("README.md")
@@ -141,7 +141,8 @@ def test_benchmark_text_alternatives_match_registered_fixture_boundary() -> None
         "artifact-driven local deterministic benchmark report",
         "structure-aware chunks report 740.3 to 214.3 retrieved tokens per question",
         "retrieved-candidate quality and packed-context quality are separate views",
-        "23,810 full-proxy versus 10,982 compact-proxy tokens",
+        f"{payload['full_serialized_payload_tokens']:,} full-proxy versus "
+        f"{payload['compact_serialized_payload_tokens']:,} compact-proxy tokens",
         "not an mcp transport measurement",
         "does not measure provider billing",
         "1,500-token cap",

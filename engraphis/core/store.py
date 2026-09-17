@@ -84,6 +84,16 @@ class SavepointError(RuntimeError):
     """A sub-operation could not settle; its enclosing transaction must abort."""
 
 
+class ReceiptChainIntegrityError(sqlite3.IntegrityError):
+    """The receipt chain has no safe predecessor for a new append.
+
+    The Store deliberately refuses to guess which branch is authoritative when a
+    chain is forked, cyclic, or disconnected.  High-level service operations may
+    catch this specific error after their primary work has completed and report the
+    missing audit receipt without hiding the underlying verification failure.
+    """
+
+
 # Rows materialized per locked batch when streaming the vector table (see iter_vectors).
 VECTOR_SCAN_BATCH = 2000
 _STARTUP_GRAPH_TRANSFORMS = {"edge_supports": 1, "live_edge_deduplication": 1}
@@ -8643,7 +8653,9 @@ class Store:
         workspace/repo names, raw ids, and actor identity. Scope and actor are represented
         by one-way digests. Receipts are chained per workspace and the current count/head
         is anchored independently, so modification, reordering, interior deletion, and
-        tail truncation are detectable during verification.
+        tail truncation are detectable during verification. If a fork, cycle, or disconnected
+        chain leaves no unique structural head, this method raises ``ReceiptChainIntegrityError``
+        instead of guessing which branch to extend.
         """
         operation = str(operation or "unknown")
         operation_normalized = operation.strip().casefold()
@@ -8733,7 +8745,7 @@ class Store:
                     # predecessor can still be extended without retrying the memory action.
                     chain = self._receipt_chain_state(workspace_id)
                     if chain["structure_errors"]:
-                        raise sqlite3.IntegrityError(
+                        raise ReceiptChainIntegrityError(
                             "receipt chain has no unique structural head; append refused"
                         )
                     current_count = len(chain["rows"])

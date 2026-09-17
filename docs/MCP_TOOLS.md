@@ -32,8 +32,8 @@ namesakes; advanced controls are discoverable rather than routine:
 
 | Smart tool | Accepted parameters |
 |---|---|
-| `engraphis_remember` | `content`, `workspace`, `repo`, `session_id`, `mtype`, `importance`, `subject_key`, `claim_kind`; safe provenance is fixed internally |
-| `engraphis_recall_context` | `query`, `workspace`, `repo`, `session_id`, `k`, `token_budget`, `format`; always compact, no `response_mode` |
+| `engraphis_remember` | `content`, `workspace`, `repo`, `session_id`, `mtype`, `importance`, `subject_key`, `claim_kind`, optional source-bound `exact_value`/`exact_value_type`; safe provenance is fixed internally |
+| `engraphis_recall_context` | `query`, `workspace`, `repo`, `session_id`, `k`, `token_budget`, `packing_mode`, `retrieval_recipe`, `format`; always compact, no `response_mode` |
 
 `format="gist"` is a compatibility option for the same budgeted, cited evidence as
 `full`. It preserves complete conditions and code whitespace; it does not apply an
@@ -90,6 +90,16 @@ not a transport permission.
 For the full memory trust model, automatic schema-11 classification, and operator recovery, see
 the [memory write trust model](WRITE_REVIEW.md) and [recall recovery guide](RECALL_RECOVERY.md).
 
+### Receipt-chain failure behavior
+
+Receipt recording is deliberately fail-closed: if verification finds a fork, cycle, or
+disconnected chain with no safe predecessor, the Store refuses to append and
+`engraphis_verify_receipts` continues to report the invalid chain. The completed service
+operation is not rolled back or reported as failed solely because its follow-up receipt could
+not be recorded. Its JSON result contains `"receipt": null` and a content-free
+`"receipt_warning":{"code":"receipt_chain_integrity_failure",...}` marker. Repair or restore
+the receipt chain before treating subsequent receipt continuity as audit evidence.
+
 | Category | Tool | What it does |
 |---|---|---|
 | Write | `engraphis_remember` | Stores a fact and resolves it as a new memory, reinforcement, safe supersession, or related memory. |
@@ -100,14 +110,14 @@ the [memory write trust model](WRITE_REVIEW.md) and [recall recovery guide](RECA
 | Write | `engraphis_ingest_postgres_schema` | Stores a PostgreSQL schema snapshot and typed graph. The DSN is never stored. |
 | Write | `engraphis_consolidate` | Runs a dry-run or live consolidation sweep. A live call can write resolved facts and receipts. |
 | Stateful read | `engraphis_recall_context` | Returns hard-budget context, compact sources, token usage, and optional diagnostics. Recommended for agent prompts. Compact-only: it never accepts `response_mode` and never returns full memory bodies. |
-| Stateful read | `engraphis_recall` | Runs hybrid vector, lexical, and graph recall. It records a receipt without strengthening weak matches. |
-| Stateful read | `engraphis_recall_grounded` | Returns a cited answer or abstains when the evidence is too weak. It records a receipt and reinforces cited memories. |
+| Stateful read | `engraphis_recall` | Runs hybrid vector, lexical, and graph recall. It attempts a receipt without strengthening weak matches. |
+| Stateful read | `engraphis_recall_grounded` | Returns a cited answer or abstains when the evidence is too weak. It attempts a receipt and reinforces cited memories. |
 | Stateful read | `engraphis_answer` | Backward-compatible alias for `engraphis_recall_grounded`. |
 | Pure read | `engraphis_recall_proactive` | Returns high-signal, queryless context and a last-session handoff. It does not reinforce or record a receipt. |
-| Stateful read | `engraphis_proactive_context` | Builds task-aware cited context and records a receipt without reinforcement. |
+| Stateful read | `engraphis_proactive_context` | Builds task-aware cited context and attempts a receipt without reinforcement. |
 | Read | `engraphis_why` | Returns the current answer and the memories it superseded. |
 | Read | `engraphis_timeline` | Returns complete bi-temporal history, oldest first. |
-| Code | `engraphis_index_repo` | Incrementally parses a repository into the code and memory graph. Each run records a receipt. |
+| Code | `engraphis_index_repo` | Incrementally parses a repository into the code and memory graph. Each run attempts a receipt. |
 | Code | `engraphis_search_code` | Finds symbols, callers, and linked memories. |
 | Code | `engraphis_code_path` | Finds a path across definitions, calls, imports, and memories. |
 | Code | `engraphis_code_impact` | Ranks changed-file impact using dependents, communities, memories, and hotspots. |

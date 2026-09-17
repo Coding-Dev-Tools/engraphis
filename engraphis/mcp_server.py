@@ -498,6 +498,12 @@ def engraphis_remember(
     claim_kind: Annotated[str, Field(
         description="Optional claim predicate/category (for example 'configured_value').",
         max_length=200)] = "",
+    exact_value: Annotated[Optional[str], Field(
+        description="Optional verbatim source value to copy exactly.",
+        max_length=4_096)] = None,
+    exact_value_type: Annotated[str, Field(
+        description="Literal type: literal, string, identifier, path, number, date, enum, or json.",
+        max_length=32)] = "literal",
 ) -> str:
     """Store a memory so it can be recalled in later turns, sessions, or repos.
 
@@ -526,6 +532,7 @@ def engraphis_remember(
             retention_class=retention_class, retention_reason=retention_reason,
             valid_from=valid_from,
             subject_key=subject_key, claim_kind=claim_kind,
+            exact_value=exact_value, exact_value_type=exact_value_type,
             resolve_conflicts=dedupe,
             # Stdio is an operator-launched local capability. The dashboard's
             # MCP-over-HTTP mount is protected by its loopback/token/role gate before
@@ -552,7 +559,9 @@ def engraphis_remember_many(
                                      "like 'api.rate_limit'), 'claim_kind', "
                                      "'evidence_source' (per-fact origin label; facts "
                                      "sharing one get evidence-labeled links), and "
-                                     "'valid_from' (Unix timestamp). All facts are "
+                                     "'valid_from' (Unix timestamp), plus optional "
+                                     "'exact_value' and 'exact_value_type' for a unique "
+                                     "verbatim source literal. All facts are "
                                      "stored in one transaction; each is deduplicated "
                                      "against the others, and facts that share a "
                                      "subject_key or evidence_source are linked with "
@@ -646,6 +655,11 @@ def engraphis_recall(
     candidate_depth: Annotated[str, Field(
         description="Candidate depth: fixed preserves the legacy pool; adaptive is an opt-in "
                     "profile-aware performance experiment.")] = "fixed",
+    packing_mode: Annotated[str, Field(
+        description="Context packing: legacy preserves the established packer; coverage "
+                    "spreads complete evidence units across sources.")] = "legacy",
+    retrieval_recipe: Annotated[str, Field(
+        description="Measured opt-in workload recipe: default, conversation, or long_session.")] = "default",
     response_mode: Annotated[str, Field(
         description="full preserves legacy memory bodies; compact omits bodies already "
                     "represented in the packed context.")] = "full",
@@ -668,9 +682,12 @@ def engraphis_recall(
 
     Call this before answering or acting when prior context would help — to avoid re-asking
     the user, to recover decisions/conventions, or to resume earlier work.
-    Successful calls append a privacy-safe recall receipt but do not strengthen weak
-    neighbors merely because they were returned. Grounded recall reinforces cited
-    evidence; an explicit-use caller can opt into reinforcement through the Python API.
+    Successful calls attempt to append a privacy-safe recall receipt but do not strengthen weak
+    neighbors merely because they were returned. If the existing receipt chain is structurally
+    invalid, the recall result still completes with ``receipt: null`` and a ``receipt_warning``;
+    the Store remains fail-closed rather than guessing a chain predecessor. Grounded recall
+    reinforces cited evidence; an explicit-use caller can opt into reinforcement through the
+    Python API.
     Because the receipt is stateful, this surface is neither read-only nor idempotent.
 
     Returns:
@@ -689,6 +706,7 @@ def engraphis_recall(
             mtypes=mtypes, k=k, as_of=as_of, valid_at=valid_at,
             known_at=known_at, token_budget=token_budget,
             retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
+            packing_mode=packing_mode, retrieval_recipe=retrieval_recipe,
             response_mode=response_mode,
             diagnostics=diagnostics,
             planning=planning,
@@ -725,6 +743,8 @@ def engraphis_recall_context(
         description="balanced, fast, auto, lexical, graph, or code.")] = "balanced",
     candidate_depth: Annotated[str, Field(
         description="fixed preserves the legacy pool; adaptive is profile-aware and opt-in.")] = "fixed",
+    packing_mode: Annotated[str, Field()] = "legacy",
+    retrieval_recipe: Annotated[str, Field()] = "default",
     as_of: Annotated[Optional[float], Field(
         description="Compatibility alias for valid_at.")] = None,
     valid_at: Annotated[Optional[float], Field(
@@ -764,6 +784,10 @@ def engraphis_recall_context(
         if format not in {"full", "gist"}:
             raise ValidationError("format must be one of: full, gist")
         _recall_started = time.monotonic()
+        effective_token_budget = (
+            None if retrieval_recipe != "default" and token_budget == 1024
+            else token_budget
+        )
         payload = service().recall(
             query,
             workspace=workspace,
@@ -774,9 +798,11 @@ def engraphis_recall_context(
             as_of=as_of,
             valid_at=valid_at,
             known_at=known_at,
-            token_budget=token_budget,
+            token_budget=effective_token_budget,
             retrieval_profile=retrieval_profile,
             candidate_depth=candidate_depth,
+            packing_mode=packing_mode,
+            retrieval_recipe=retrieval_recipe,
             response_mode="compact",
             diagnostics=diagnostics,
             planning=planning,
@@ -795,6 +821,8 @@ def engraphis_recall_context(
                 "id": packed.get("id"),
                 "tokens": packed.get("tokens"),
             }
+            if packed.get("exact_value"):
+                source["exact_value"] = packed["exact_value"]
             if detail.get("title"):
                 source["title"] = detail["title"]
             # Compact recall omits source bodies, but keeps both scoring contracts so
@@ -846,6 +874,8 @@ def engraphis_recall_context(
             default_settings = {
                 "retrieval_profile": "balanced",
                 "candidate_depth": "fixed",
+                "packing_mode": "legacy",
+                "retrieval_recipe": "default",
                 "planning": "off",
                 "response_mode": "compact",
                 "historical": False,
@@ -946,8 +976,9 @@ def engraphis_recall_grounded(
     When ``degraded_mode`` is true, its feature-hashing fallback is treated as lexical-only:
     semantic vector retrieval and semantic cosine support are disabled.
     With ``synthesize=True``, configured LLM prose is accepted only when citations hold.
-    Every resolved call appends a privacy-safe receipt (including abstentions), and a
-    grounded answer reinforces cited memories.
+    Every resolved call attempts to append a privacy-safe receipt (including abstentions), and a
+    grounded answer reinforces cited memories. A structurally invalid receipt chain is reported
+    in ``receipt_warning`` without turning the completed answer into an API failure.
 
     Returns:
         str: JSON ``{"query","grounded","abstained","answer","support","reason",
@@ -1167,9 +1198,10 @@ def engraphis_proactive_context(
     Combines proactive recall, optional task-specific recall, and last-session handoff
     into a cited ``context_summary`` plus ``suggested_queries``. Deterministic by
     default; LLM synthesis is opt-in and accepted only when it cites source memories.
-    When ``task`` or ``agent_state`` is supplied, the task-specific recall appends a
+    When ``task`` or ``agent_state`` is supplied, the task-specific recall attempts a
     privacy-safe receipt (without reinforcing memories), so the tool is conservatively
-    annotated as mutating and non-idempotent.
+    annotated as mutating and non-idempotent. If receipt continuity is already invalid, the
+    context result still completes with a content-free ``receipt_warning``.
     """
     try:
         return _ok(service().proactive_context(
@@ -1415,7 +1447,8 @@ def engraphis_promote(
 
     Returns:
         str: JSON ``{"id","promoted_from","from_scope","scope","op","reason"}``
-        plus a privacy receipt, or an actionable validation error.
+        plus a privacy receipt (or a content-free ``receipt_warning`` when the existing
+        receipt chain cannot safely be extended), or an actionable validation error.
     """
     try:
         return _ok(service().promote(
@@ -1454,6 +1487,7 @@ def engraphis_link(
 
     Returns:
         str: JSON ``{"a","b","relation","layer","reason","linked":true,"receipt":...}``
+        (with ``receipt_warning`` if receipt continuity is unavailable)
         or an actionable error if either id is unknown or doesn't belong to
         ``workspace``/``repo``.
     """
@@ -1536,8 +1570,9 @@ def engraphis_index_repo(
     the same trust boundary as any other local tool you have, nothing is sent anywhere.
     Set ``ENGRAPHIS_INDEX_ROOTS`` to a path-separator-delimited absolute-path allow-list when
     repositories live outside the working, home, or temporary directories, or to narrow the
-    defaults. Each completed scan appends a fresh operation receipt, so the MCP call is
-    non-idempotent even when the code graph itself is unchanged.
+    defaults. Each completed scan attempts a fresh operation receipt, so the MCP call is
+    non-idempotent even when the code graph itself is unchanged; a pre-existing receipt-chain
+    integrity failure is returned as a content-free warning instead of failing the scan.
 
     Returns:
         str: JSON ``{"files_indexed","symbols","edges","backend"}``.
@@ -2029,8 +2064,9 @@ def engraphis_ingest_postgres_schema(
 ) -> str:
     """Convert tables, columns, constraints, and foreign keys into a schema memory and
     entity graph. Requires the optional psycopg backend. An exact retry reuses its live
-    point-in-time schema snapshot, but every invocation appends audit/receipt records,
-    so the tool as a whole is not idempotent."""
+    point-in-time schema snapshot, but every invocation attempts audit/receipt records,
+    so the tool as a whole is not idempotent. A structurally invalid receipt chain is surfaced
+    as a content-free warning after the completed import."""
     try:
         return _ok(service().import_postgres_schema(
             dsn, workspace=workspace, repo=repo, schemas=schemas, actor="agent",
@@ -2832,12 +2868,15 @@ def smart_recall_context(
     k: Annotated[int, Field(description="Maximum source memories.", ge=1, le=50)] = 50,
     token_budget: Annotated[int, Field(description="Hard returned-context token budget.", ge=0,
                                       le=32_768)] = 1024,
+    packing_mode: Annotated[str, Field()] = "legacy",
+    retrieval_recipe: Annotated[str, Field()] = "default",
     format: Annotated[str, Field(description="Context format: 'full' or 'gist'.")] = "full",
 ) -> str:
     """Return one compact, bounded context packet for routine agent work."""
     result = engraphis_recall_context(
         query=query, workspace=workspace, repo=repo, session_id=session_id, k=k,
-        token_budget=token_budget, format=format,
+        token_budget=token_budget, packing_mode=packing_mode,
+        retrieval_recipe=retrieval_recipe, format=format,
     )
     if isinstance(result, str) and result.startswith("Error:"):
         return _smart_error_from_string(result)

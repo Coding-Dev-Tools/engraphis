@@ -284,6 +284,9 @@ class PackedChunk:
     truncated: bool = False
     reason: str = ""
     attribution: str = ""            # complete ownership label when context spans scopes
+    # Source-bound literal that an action/edit contract must copy exactly.
+    # Kept optional so legacy callers and positional construction remain compatible.
+    exact_value: Optional[dict[str, Any]] = None
 
 
 @dataclass
