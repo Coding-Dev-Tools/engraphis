@@ -66,8 +66,10 @@ def digest(value: Any) -> str:
     # This is a content-addressing/integrity digest for frozen campaign bindings,
     # never a password hash or an authentication verifier. Keep the field name
     # ``*_sha256`` stable because it is part of the retained artifact contract.
-    # lgtm[py/weak-sensitive-data-hashing]
-    return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+    # The explicit flag also documents the non-security use for FIPS-aware tooling.
+    return hashlib.sha256(
+        canonical_json(value).encode("utf-8"), usedforsecurity=False
+    ).hexdigest()
 
 
 def _oauth_attempt_timeout(value: Any) -> float:
