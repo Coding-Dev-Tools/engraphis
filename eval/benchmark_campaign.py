@@ -74,7 +74,7 @@ def digest(value: Any) -> str:
     # ``*_sha256`` stable because it is part of the retained artifact contract.
     # The explicit flag also documents the non-security use for FIPS-aware tooling.
     payload = canonical_json(value).encode("utf-8")
-    # codeql[py/weak-sensitive-data-hashing]: public integrity binding, not password storage
+    # codeql[py/weak-sensitive-data-hashing]
     return hashlib.sha256(payload, usedforsecurity=False).hexdigest()
 
 
