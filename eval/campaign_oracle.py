@@ -18,6 +18,7 @@ import hashlib
 import json
 import re
 import subprocess
+import threading
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -336,6 +337,60 @@ def _runner_payload(stdout: str) -> Optional[dict[str, Any]]:
     return payload if isinstance(payload, dict) else None
 
 
+def _capture_bounded(pipe: Any, target: list[bytes]) -> None:
+    """Drain one child pipe while retaining only its bounded tail."""
+    tail = bytearray()
+    try:
+        while True:
+            chunk = pipe.read(8192)
+            if not chunk:
+                break
+            tail.extend(chunk)
+            if len(tail) > OUTPUT_LIMIT:
+                del tail[:-OUTPUT_LIMIT]
+    finally:
+        try:
+            pipe.close()
+        except OSError:
+            pass
+        target.append(bytes(tail))
+
+
+def _run_bounded(command: list[str]) -> tuple[Optional[int], bool, str, str]:
+    """Run the candidate with continuously drained, bounded stdout/stderr."""
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    stdout_tail: list[bytes] = []
+    stderr_tail: list[bytes] = []
+    readers = [
+        threading.Thread(
+            target=_capture_bounded, args=(process.stdout, stdout_tail), daemon=True,
+        ),
+        threading.Thread(
+            target=_capture_bounded, args=(process.stderr, stderr_tail), daemon=True,
+        ),
+    ]
+    for reader in readers:
+        reader.start()
+    timed_out = False
+    try:
+        returncode = process.wait(timeout=ORACLE_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        process.kill()
+        returncode = process.wait()
+    finally:
+        for reader in readers:
+            reader.join(timeout=5)
+
+    stdout = (stdout_tail[0] if stdout_tail else b"").decode("utf-8", "replace")
+    stderr = (stderr_tail[0] if stderr_tail else b"").decode("utf-8", "replace")
+    return returncode, timed_out, stdout, stderr
+
+
 def _values_equal(actual: Any, expected: Any) -> bool:
     """Compare JSON values without Python's bool-is-int equality surprise."""
 
@@ -381,26 +436,25 @@ def docker_oracle(scenario: Any, workspace: Path, image: str) -> dict[str, Any]:
     container_name = f"engraphis-benchmark-{uuid.uuid4().hex}"
     command = _candidate_command(spec.operation, Path(workspace), image, container_name)
     try:
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=ORACLE_TIMEOUT_SECONDS,
-            check=False,
-        )
-        payload = _runner_payload(result.stdout)
-        if result.returncode != 0:
-            # A non-zero container status does not distinguish candidate
-            # failure from Docker/runtime failure. Keep it unscored so a
-            # correction cannot be driven by infrastructure diagnostics.
-            oracle_outcome = "ambiguous_nonzero"
-        elif (
+        returncode, timed_out, stdout, stderr = _run_bounded(command)
+        if timed_out:
+            return {"passed": False, "returncode": None, "timed_out": True,
+                    "oracle_outcome": "timeout_unknown", "stdout": "", "stderr": "oracle timeout"}
+        payload = _runner_payload(stdout)
+        if (
             isinstance(payload, dict)
             and payload.get("ok") is False
             and isinstance(payload.get("error_type"), str)
             and payload["error_type"].strip()
         ):
+            # The runner emits this stable marker before re-raising, so a
+            # candidate exception is scoreable even though Python exits nonzero.
             oracle_outcome = "candidate_exception"
+        elif returncode != 0:
+            # A non-zero container status does not distinguish candidate
+            # failure from Docker/runtime failure. Keep it unscored so a
+            # correction cannot be driven by infrastructure diagnostics.
+            oracle_outcome = "ambiguous_nonzero"
         elif not isinstance(payload, dict) or payload.get("ok") is not True or "value" not in payload:
             oracle_outcome = "ambiguous_zero_exit"
         else:
@@ -410,15 +464,12 @@ def docker_oracle(scenario: Any, workspace: Path, image: str) -> dict[str, Any]:
         passed = oracle_outcome == "passed"
         return {
             "passed": passed,
-            "returncode": result.returncode,
+            "returncode": returncode,
             "timed_out": False,
             "oracle_outcome": oracle_outcome,
-            "stdout": result.stdout[-OUTPUT_LIMIT:],
-            "stderr": result.stderr[-OUTPUT_LIMIT:],
+            "stdout": stdout,
+            "stderr": stderr,
         }
-    except subprocess.TimeoutExpired:
-        return {"passed": False, "returncode": None, "timed_out": True,
-                "oracle_outcome": "timeout_unknown", "stdout": "", "stderr": "oracle timeout"}
     finally:
         # Only the container name created by this invocation is addressed.
         try:

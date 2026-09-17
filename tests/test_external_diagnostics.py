@@ -60,6 +60,31 @@ def test_dataset_drift_after_loading_prevents_export(tmp_path, monkeypatch):
     assert not artifact.exists()
 
 
+def test_repair_manifest_drift_after_normalization_prevents_export(tmp_path, monkeypatch):
+    dataset = dataset_file(tmp_path)
+    manifest = tmp_path / "repair.json"
+    manifest.write_text(json.dumps({
+        "schema": "engraphis-locomo-repair/v2",
+        "dataset_sha256": sha256_file(dataset),
+        "repairs": [],
+        "deduplications": [],
+    }), encoding="utf-8")
+    artifact = tmp_path / "public.json"
+    original = external._load_locomo_with_integrity
+
+    def drifting_load(*args, **kwargs):
+        result = original(*args, **kwargs)
+        manifest.write_text(manifest.read_text() + "\n", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(external, "_load_locomo_with_integrity", drifting_load)
+    assert external.main([
+        "--dataset", str(dataset), "--format", "locomo", "--offline",
+        "--locomo-repair-manifest", str(manifest), "--artifact", str(artifact),
+    ]) == 2
+    assert not artifact.exists()
+
+
 def test_export_rejects_changed_dataset_bytes(tmp_path):
     dataset = dataset_file(tmp_path)
     with pytest.raises(ValueError, match="dataset changed"):

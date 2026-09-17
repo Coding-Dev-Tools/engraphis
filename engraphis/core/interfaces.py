@@ -287,6 +287,9 @@ class PackedChunk:
     # Source-bound literal that an action/edit contract must copy exactly.
     # Kept optional so legacy callers and positional construction remain compatible.
     exact_value: Optional[dict[str, Any]] = None
+    # Coverage packing preserves the source title through its final render pass.
+    # Appended after the established fields so legacy positional construction stays valid.
+    title: str = ""
 
 
 @dataclass

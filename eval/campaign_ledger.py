@@ -26,7 +26,10 @@ except ImportError:  # pragma: no cover
 
 SCHEMA_VERSION = "engraphis-campaign-ledger/1"
 CALL_KINDS = frozenset({"ingest", "reader", "evaluator", "correction"})
-MAX_RESPONSE_CHARS = 16_384
+# The frozen campaign contract permits 4,096 output tokens.  A 4 MiB UTF-8
+# journal bound leaves 1 KiB per output token, covering code-heavy and
+# non-ASCII responses while retaining a bounded append-only record.
+MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _LABEL = re.compile(r"[a-z][a-z0-9_.:-]{0,127}\Z")
 
@@ -89,7 +92,7 @@ def _normalized_response(value: Any) -> str:
     # newlines) remains intact.
     if "\x00" in value:
         raise CampaignLedgerError("response contains an unsafe NUL byte")
-    if len(value.encode("utf-8", "surrogatepass")) > MAX_RESPONSE_CHARS:
+    if len(value.encode("utf-8", "surrogatepass")) > MAX_RESPONSE_BYTES:
         raise CampaignLedgerError("response exceeds the campaign ledger size cap")
     return value
 

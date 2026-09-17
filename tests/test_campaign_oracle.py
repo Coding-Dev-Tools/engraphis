@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import shutil
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Optional
 
 import pytest
 
 from eval.campaign_oracle import (
     OracleError,
     OracleOperation,
+    OUTPUT_LIMIT,
     _RESULT_MARKER,
+    _capture_bounded,
     _candidate_command,
     _values_equal,
     docker_oracle,
@@ -28,6 +32,27 @@ def _write_oracle(tmp_path: Path, body: str) -> tuple[Path, SimpleNamespace]:
         oracle_path=oracle,
         oracle_sha256=hashlib.sha256(oracle.read_bytes()).hexdigest(),
     )
+
+
+def _patch_bounded_runner(
+    monkeypatch: pytest.MonkeyPatch,
+    calls: list[list[str]],
+    *,
+    returncode: Optional[int],
+    timed_out: bool = False,
+    stdout: str = "",
+    stderr: str = "",
+) -> None:
+    def fake_bounded(command: list[str]) -> tuple[Optional[int], bool, str, str]:
+        calls.append(command)
+        return returncode, timed_out, stdout, stderr
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("eval.campaign_oracle._run_bounded", fake_bounded)
+    monkeypatch.setattr("eval.campaign_oracle.subprocess.run", fake_run)
 
 
 def test_parse_generated_oracle_keeps_expected_value_host_side(tmp_path: Path) -> None:
@@ -150,19 +175,10 @@ if __name__ == "__main__":
     workspace = tmp_path / "candidate"
     workspace.mkdir()
     calls: list[list[str]] = []
-
-    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        calls.append(command)
-        if command[1] == "run":
-            return subprocess.CompletedProcess(
-                command,
-                0,
-                stdout=_RESULT_MARKER + '{"ok":true,"value":41}\n',
-                stderr="",
-            )
-        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-
-    monkeypatch.setattr("eval.campaign_oracle.subprocess.run", fake_run)
+    _patch_bounded_runner(
+        monkeypatch, calls, returncode=0,
+        stdout=_RESULT_MARKER + '{"ok":true,"value":41}\n',
+    )
     result = docker_oracle(scenario, workspace, "image@sha256:abc")
 
     assert result["passed"] is True
@@ -189,15 +205,10 @@ if __name__ == "__main__":
     )
     workspace = tmp_path / "candidate"
     workspace.mkdir()
-
-    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        if command[1] == "run":
-            return subprocess.CompletedProcess(
-                command, 0, stdout=_RESULT_MARKER + '{"ok":true,"value":40}\n', stderr=""
-            )
-        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-
-    monkeypatch.setattr("eval.campaign_oracle.subprocess.run", fake_run)
+    _patch_bounded_runner(
+        monkeypatch, [], returncode=0,
+        stdout=_RESULT_MARKER + '{"ok":true,"value":40}\n',
+    )
     result = docker_oracle(scenario, workspace, "image@sha256:abc")
 
     assert result["passed"] is False
@@ -206,7 +217,10 @@ if __name__ == "__main__":
     assert result["oracle_outcome"] == "value_mismatch"
 
 
-def test_zero_exit_candidate_exception_is_a_scored_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("returncode", [0, 17])
+def test_candidate_exception_is_scored_even_when_runner_exits_nonzero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, returncode: int,
+) -> None:
     _oracle, scenario = _write_oracle(
         tmp_path,
         '''import service
@@ -222,21 +236,24 @@ if __name__ == "__main__":
     )
     workspace = tmp_path / "candidate"
     workspace.mkdir()
-
-    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        if command[1] == "run":
-            return subprocess.CompletedProcess(
-                command, 0, stdout=_RESULT_MARKER + '{"ok":false,"error_type":"ValueError"}\n', stderr=""
-            )
-        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-
-    monkeypatch.setattr("eval.campaign_oracle.subprocess.run", fake_run)
+    _patch_bounded_runner(
+        monkeypatch, [], returncode=returncode,
+        stdout=_RESULT_MARKER + '{"ok":false,"error_type":"ValueError"}\n',
+    )
     result = docker_oracle(scenario, workspace, "image@sha256:abc")
 
     assert result["passed"] is False
     assert result["timed_out"] is False
-    assert result["returncode"] == 0
+    assert result["returncode"] == returncode
     assert result["oracle_outcome"] == "candidate_exception"
+
+
+def test_oracle_output_capture_is_bounded_to_the_tail():
+    target: list[bytes] = []
+    _capture_bounded(io.BytesIO(b"prefix" + b"x" * OUTPUT_LIMIT + b"tail"), target)
+    assert len(target) == 1
+    assert len(target[0]) == OUTPUT_LIMIT
+    assert target[0].endswith(b"tail")
 
 
 def test_nonzero_container_exit_is_ambiguous_and_unscored(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -255,13 +272,9 @@ if __name__ == "__main__":
     )
     workspace = tmp_path / "candidate"
     workspace.mkdir()
-
-    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        if command[1] == "run":
-            return subprocess.CompletedProcess(command, 17, stdout="", stderr="container exit")
-        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-
-    monkeypatch.setattr("eval.campaign_oracle.subprocess.run", fake_run)
+    _patch_bounded_runner(
+        monkeypatch, [], returncode=17, stderr="container exit",
+    )
     result = docker_oracle(scenario, workspace, "image@sha256:abc")
 
     assert result["passed"] is False
@@ -286,13 +299,7 @@ if __name__ == "__main__":
     )
     workspace = tmp_path / "candidate"
     workspace.mkdir()
-
-    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        if command[1] == "run":
-            raise subprocess.TimeoutExpired(command, 45)
-        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-
-    monkeypatch.setattr("eval.campaign_oracle.subprocess.run", fake_run)
+    _patch_bounded_runner(monkeypatch, [], returncode=None, timed_out=True)
     result = docker_oracle(scenario, workspace, "image@sha256:abc")
 
     assert result["passed"] is False

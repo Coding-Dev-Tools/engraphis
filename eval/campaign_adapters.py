@@ -284,14 +284,46 @@ def _await(value: Any) -> Any:
     raise AdapterError("async competitor operation cannot run inside an active event loop")
 
 
-def _call_with_fallbacks(method: Callable[..., Any], calls: Sequence[tuple[tuple[Any, ...], dict[str, Any]]]) -> Any:
+def _call_with_fallbacks(
+    method: Callable[..., Any],
+    calls: Sequence[tuple[tuple[Any, ...], dict[str, Any]]],
+    *,
+    await_result: Callable[[Any], Any] = _await,
+) -> Any:
+    """Try only call shapes rejected by Python's signature binder.
+
+    A ``TypeError`` raised after a method starts executing can represent a real
+    provider/backend failure.  Retrying that exception would issue another paid
+    write or duplicate a partially-applied write.  Signature inspection lets us
+    skip incompatible shapes before execution and makes an in-body ``TypeError``
+    terminal for that operation.
+    """
+    try:
+        signature = inspect.signature(method)
+    except (TypeError, ValueError):
+        signature = None
+
     last_error: Optional[Exception] = None
+    attempted = False
     for args, kwargs in calls:
+        if signature is not None:
+            try:
+                signature.bind(*args, **kwargs)
+            except TypeError as exc:
+                last_error = exc
+                continue
+        attempted = True
         try:
-            return _await(method(*args, **kwargs))
+            return await_result(method(*args, **kwargs))
         except TypeError as exc:
-            last_error = exc
-    if last_error is not None:
+            if signature is None:
+                raise AdapterError(
+                    "competitor SDK method raised TypeError after execution"
+                ) from exc
+            raise AdapterError(
+                "competitor SDK method raised TypeError after execution"
+            ) from exc
+    if last_error is not None and not attempted:
         raise AdapterError("competitor SDK method signature is unsupported") from last_error
     raise AdapterError("competitor SDK method is unavailable")
 
@@ -392,13 +424,17 @@ def _pack_peer_items(
         if tokens > limit:
             omitted += 1
             continue
+        source_id = _campaign_source_id(item, index, memory_ids)
+        if source_id is None:
+            # Keep each admitted context unit positionally attributable to one
+            # fixture record.  An unmapped backend projection is qualitative
+            # evidence only and must not shift the IDs used for citation scoring.
+            unmapped += 1
+            omitted += 1
+            continue
         selected_text.append(text)
         limit -= tokens
-        source_id = _campaign_source_id(item, index, memory_ids)
-        if source_id is not None:
-            selected_ids.append(source_id)
-        else:
-            unmapped += 1
+        selected_ids.append(source_id)
     context = "\n\n".join(selected_text)
     usage = AdapterUsage(
         token_budget=token_budget,
@@ -2036,19 +2072,14 @@ class GraphitiAdapter(_PeerAdapter):
         search = getattr(self.client, "search", None)
         if not callable(search):
             raise AdapterError("Graphiti client has no search method")
-        raw: Any = None
-        last_error: Optional[Exception] = None
-        for args, kwargs in (
-            ((query,), {"group_ids": list(self._selected_partitions), "num_results": max(1, k)}),
-            ((query,), {"group_ids": list(self._selected_partitions), "limit": max(1, k)}),
-        ):
-            try:
-                raw = self._run_async(search(*args, **kwargs))
-                break
-            except TypeError as exc:
-                last_error = exc
-        else:
-            raise AdapterError("competitor SDK method signature is unsupported") from last_error
+        raw: Any = _call_with_fallbacks(
+            search,
+            (
+                ((query,), {"group_ids": list(self._selected_partitions), "num_results": max(1, k)}),
+                ((query,), {"group_ids": list(self._selected_partitions), "limit": max(1, k)}),
+            ),
+            await_result=self._run_async,
+        )
         items = self._filter_partition_items(_result_items(raw))
         context, source_ids, usage, unmapped = _pack_peer_items(
             items,
