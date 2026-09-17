@@ -168,3 +168,39 @@ def test_queue_requires_complete_external_analysis_artifact(tmp_path):
         f"{queue.sha256_file(invalid)}  invalid.json\n", encoding="utf-8")
     with pytest.raises(ValueError, match="incomplete"):
         queue._verified_artifact(invalid)
+
+
+def test_queue_waits_for_producer_lock_release_before_verifying_artifact(monkeypatch, tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    monkeypatch.setattr(queue, "ROOT", root)
+    value = plan(monkeypatch)
+    artifact = root / "diagnostic.json"
+    artifact.write_text("{}", encoding="utf-8")
+    producer_lock = root / "producer.lock"
+    producer_lock.write_text("running", encoding="utf-8")
+    value["wait_for"] = {"artifact": "diagnostic.json", "producer_lock": "producer.lock"}
+    value["binding_sha256"] = queue.digest({key: v for key, v in value.items()
+                                             if key != "binding_sha256"})
+    verified_while_locked = []
+
+    def verify(path):
+        verified_while_locked.append(producer_lock.exists())
+        return {"schema": "test"}
+
+    monkeypatch.setattr(queue, "_verified_artifact", verify)
+    original_sleep = queue.time.sleep
+
+    def release_lock(seconds):
+        if producer_lock.exists():
+            producer_lock.unlink()
+        original_sleep(0)
+
+    monkeypatch.setattr(queue.time, "sleep", release_lock)
+    result = queue.execute(
+        value, tmp_path / "results", runner=lambda *a, **k: SimpleNamespace(returncode=0),
+        poll_seconds=0.01,
+    )
+
+    assert result["status"] == "COMPLETE"
+    assert verified_while_locked == [False]

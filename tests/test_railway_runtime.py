@@ -60,6 +60,9 @@ def test_container_runtime_matches_the_railway_persistence_and_port_contract():
     assert "chown -R engraphis:engraphis /data" in entrypoint
     assert ".volume-ownership" in entrypoint
     assert 'if [ ! -e "$ownership_marker" ]; then' in entrypoint
+    assert '[ -L "$state_dir" ]' in entrypoint
+    assert '[ -L "$ownership_marker" ]' in entrypoint
+    assert "refusing symlinked state path" in entrypoint
     assert 'config_file="${ENGRAPHIS_ENV_FILE:-}"' in entrypoint
     assert "refusing symlinked trusted config file" in entrypoint
     assert 'chmod 600 "$config_file"' in entrypoint

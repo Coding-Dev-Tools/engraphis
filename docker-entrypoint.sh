@@ -33,6 +33,13 @@ if [ "$(id -u)" = "0" ]; then
     state_dir="${ENGRAPHIS_STATE_DIR:-/data/.engraphis}"
     ownership_marker="${state_dir}/.volume-ownership"
     config_file="${ENGRAPHIS_ENV_FILE:-}"
+    # These paths are trusted root-owned state locations.  Check them before
+    # mkdir/chown so an app-controlled symlink cannot redirect root ownership
+    # repair to an unrelated file or directory.
+    if [ -L "$state_dir" ] || [ -L "$ownership_marker" ]; then
+        printf '%s\n' "[engraphis] refusing symlinked state path: $state_dir" >&2
+        exit 1
+    fi
     if ! mkdir -p "$state_dir"; then
         printf '%s\n' "[engraphis] unable to create state directory: $state_dir" >&2
         exit 1
@@ -55,6 +62,10 @@ if [ "$(id -u)" = "0" ]; then
             printf '%s\n' "[engraphis] unable to restrict trusted config file: $config_file" >&2
             exit 1
         fi
+    fi
+    if [ -L "$state_dir" ] || [ -L "$ownership_marker" ]; then
+        printf '%s\n' "[engraphis] refusing symlinked state path: $state_dir" >&2
+        exit 1
     fi
     if [ ! -e "$ownership_marker" ]; then
         if ! chown -R engraphis:engraphis /data; then

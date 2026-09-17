@@ -126,6 +126,64 @@ def test_coverage_packing_retains_source_bound_exact_value_metadata() -> None:
     assert tampered_pack.chunks[0].exact_value is None
 
 
+def test_coverage_packing_preserves_titles_and_multiline_exact_values() -> None:
+    content = 'JSON payload:\n{\n  "mode": "canary"\n}'
+    record = MemoryRecord(
+        id="multiline",
+        title="Deployment payload",
+        content=content,
+        metadata={
+            "exact_value": make_exact_value_binding(
+                content, '{\n  "mode": "canary"\n}', "json",
+            ),
+        },
+    )
+    packed = DeterministicContextPacker().pack_coverage(
+        "deployment payload", [Candidate("multiline", 1.0, "lexical", record)], 24,
+    )
+
+    assert packed.chunks[0].title == "Deployment payload"
+    assert "[1] Deployment payload" in packed.context
+    assert '{\n  "mode": "canary"\n}' in packed.context
+    assert packed.chunks[0].exact_value is not None
+
+
+def test_engine_recipe_distinguishes_omitted_k_from_explicit_k(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    captured: dict[str, object] = {}
+    original = service.engine.recall_engine.recall
+
+    def spy(query, flt, **kwargs):
+        captured.update(kwargs)
+        return original(query, flt, **kwargs)
+
+    monkeypatch.setattr(service.engine.recall_engine, "recall", spy)
+    service.engine.recall("deployment", retrieval_recipe="conversation")
+
+    assert captured["k"] is None
+    assert captured["k_supplied"] is False
+
+
+def test_service_rebinds_exact_value_on_a_reworded_deduplicated_write() -> None:
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    first = service.remember("Deploy to canary-7 today", workspace="acme")
+    second = service.remember(
+        "Today deploy to canary-7",
+        workspace="acme",
+        exact_value="canary-7",
+        exact_value_type="enum",
+    )
+
+    assert second["op"] == "noop"
+    assert second["id"] == first["id"]
+    assert second["exact_value_bound"] is True
+    stored = service.store.get_memory(first["id"])
+    assert stored is not None
+    binding = exact_value_binding(stored.metadata, content=stored.content)
+    assert binding is not None
+    assert stored.content[binding["start"]:binding["end"]] == "canary-7"
+
+
 @pytest.mark.parametrize(
     ("recipe", "expected_k", "expected_budget"),
     [("default", 8, 1500), ("conversation", 20, 1500), ("long_session", 10, 4096)],

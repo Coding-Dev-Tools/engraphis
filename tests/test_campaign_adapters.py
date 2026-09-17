@@ -5,9 +5,12 @@ import pytest
 from eval.campaign_adapters import (
     AdapterCapabilityError,
     AdapterConfigurationError,
+    AdapterError,
     EngraphisAdapter,
     GraphitiAdapter,
     Mem0Adapter,
+    _call_with_fallbacks,
+    _pack_peer_items,
 )
 
 
@@ -92,6 +95,60 @@ def test_mem0_namespace_and_common_packing_contract():
     assert result.usage.context_tokens <= 6
     assert result.provenance["source_ids_are_packed_only"] is True
     assert client.search_calls[0][1]["filters"]["user_id"] == prepared["workspace_id"]
+
+
+def test_adapter_signature_fallback_does_not_retry_an_in_body_type_error():
+    class FailingMem0:
+        def __init__(self):
+            self.calls = 0
+
+        def add(self, messages, **kwargs):
+            self.calls += 1
+            raise TypeError("backend write failed after mutation")
+
+    client = FailingMem0()
+    adapter = Mem0Adapter(client=client)
+    adapter.prepare(workspace_id="workspace-a")
+    with pytest.raises(AdapterError, match="after execution"):
+        adapter.ingest([{"record_id": "one", "content": "one", "workspace": "workspace-a"}])
+    assert client.calls == 1
+
+
+def test_signature_fallback_skips_incompatible_shapes_before_execution():
+    calls = []
+
+    def narrow(value, *, user_id):
+        calls.append((value, user_id))
+        return "ok"
+
+    result = _call_with_fallbacks(
+        narrow,
+        (
+            (("payload",), {"user_id": "w", "metadata": {"x": 1}}),
+            (("payload",), {"user_id": "w"}),
+        ),
+    )
+    assert result == "ok"
+    assert calls == [("payload", "w")]
+
+
+def test_peer_packing_omits_unmapped_text_instead_of_shifting_citations():
+    context, source_ids, usage, unmapped = _pack_peer_items(
+        [
+            {"id": "unknown", "memory": "unmapped private fact"},
+            {"id": "backend-1", "memory": "mapped public fact"},
+        ],
+        query="fact",
+        k=2,
+        token_budget=50,
+        memory_ids={"record-1": "backend-1"},
+    )
+
+    assert context == "mapped public fact"
+    assert source_ids == ("record-1",)
+    assert usage.packed_count == 1
+    assert usage.omitted_count == 1
+    assert unmapped == 1
 
 
 def test_mem0_preflights_unsupported_scope_before_any_add():

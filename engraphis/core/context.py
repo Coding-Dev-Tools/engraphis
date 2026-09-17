@@ -384,6 +384,7 @@ class DeterministicContextPacker:
                 reason=chosen_reason,
                 attribution=attribution,
                 exact_value=chosen_exact,
+                title=(candidate.record.title or "").strip(),
             ))
 
         # Second pass: expand each admitted unit in score order using the space
@@ -411,6 +412,7 @@ class DeterministicContextPacker:
                         (record.content or record.summary or "").strip()
                     ), reason=reason or current_reason,
                     attribution=chunk.attribution, exact_value=exact or current_exact,
+                    title=chunk.title or (record.title or "").strip(),
                 )
                 rendered = self._render_packed(trial)
                 if self._count(rendered) <= budget:
@@ -443,12 +445,25 @@ class DeterministicContextPacker:
         if record is None or max_tokens <= 0:
             return "", "", None
         source = (record.content or record.summary or "").strip()
+        query_terms = _terms(query)
+        binding = exact_value_binding(record.metadata, content=record.content)
+        exact_value = ""
+        if binding and isinstance(binding.get("value"), str):
+            exact_value = binding["value"]
+        # A JSON/string exact value may itself contain line breaks.  Sentence
+        # splitting normalizes those separators, so handle the bound source span
+        # directly before selecting sentence windows.  The literal remains
+        # byte-for-byte copyable and is omitted if it cannot fit in the budget.
+        if binding and any(separator in exact_value for separator in ("\n", "\r")):
+            if (
+                self._count(exact_value) <= max_tokens
+                and self._count(exact_value) >= minimum_tokens
+            ):
+                return exact_value, "coverage_exact", binding
+            return "", "", None
         sentences = [part.strip() for part in _SENTENCE_RE.split(source) if part.strip()]
         if not sentences:
             return "", "", None
-        query_terms = _terms(query)
-        binding = exact_value_binding(record.metadata, content=record.content)
-        exact_value = binding.get("value") if binding else ""
         ranked = sorted(
             range(len(sentences)),
             key=lambda index: (
@@ -497,7 +512,8 @@ class DeterministicContextPacker:
         parts = []
         for ordinal, chunk in enumerate(chunks, start=1):
             attribution = f" {chunk.attribution}" if chunk.attribution else ""
-            parts.append(f"[{ordinal}]{attribution}\n{chunk.excerpt}")
+            title = f" {chunk.title}" if chunk.title else ""
+            parts.append(f"[{ordinal}]{attribution}{title}\n{chunk.excerpt}")
         return "\n\n".join(parts)
 
     def _is_score_elbow(

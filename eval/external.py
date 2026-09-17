@@ -660,8 +660,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         ap.error('--longmemeval-repair-manifest is valid only with --format longmemeval')
 
     dataset_integrity: Optional[dict[str, Any]] = None
+    repair_manifest = args.locomo_repair_manifest or args.longmemeval_repair_manifest
+    repair_manifest_before: Optional[str] = None
     try:
         dataset_before = dataset_sha256(args.dataset)
+        if repair_manifest:
+            repair_manifest_before = sha256_file(repair_manifest)
         if args.format == 'locomo':
             cases, dataset_integrity = _load_locomo_with_integrity(
                 args.dataset,
@@ -672,11 +676,15 @@ def main(argv: Optional[list[str]] = None) -> int:
             cases = load_longmemeval(args.dataset, limit=args.limit,
                                     repair_manifest=args.longmemeval_repair_manifest)
             if args.longmemeval_repair_manifest:
+                if sha256_file(args.longmemeval_repair_manifest) != repair_manifest_before:
+                    raise ValueError("repair manifest changed during normalization")
                 declaration = json.loads(Path(args.longmemeval_repair_manifest).read_text(encoding='utf-8'))
                 dataset_integrity = {"repair_manifest": {
                     **declaration, "sha256": sha256_file(args.longmemeval_repair_manifest),
                     "applied_empty_turn_omissions": len(declaration['empty_turn_omissions']),
                 }}
+        if repair_manifest and sha256_file(repair_manifest) != repair_manifest_before:
+            raise ValueError("repair manifest changed during normalization")
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         print(f'external dataset rejected: {redact_secrets(str(exc))}', file=sys.stderr)
         return 2
@@ -732,7 +740,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                                    binding={"dataset_sha256": dataset_before, "format": args.format,
                                             "model": args.embed_model if not args.offline else "hashing",
                                             "revision": args.embed_revision,
-                                            "repair_sha256": sha256_file(repair) if repair else None})
+                                            "repair_sha256": repair_manifest_before if repair else None})
         else:
             report = run(cases, k=args.k, embedder=embedder, token_budget=args.token_budget,
                          resolve_conflicts=not args.no_resolve)
@@ -745,6 +753,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         report['dataset_sha256'] = dataset_sha256(args.dataset)
         if report['dataset_sha256'] != dataset_before:
             raise ValueError("dataset changed during evaluation")
+        if repair_manifest and sha256_file(repair_manifest) != repair_manifest_before:
+            raise ValueError("repair manifest changed during evaluation")
     except Exception as exc:
         print(f'external evaluation failed ({type(exc).__name__})', file=sys.stderr)
         return 2

@@ -6,6 +6,8 @@ from eval.campaign_ledger import (
     CampaignBinding,
     CampaignLedger,
     CampaignLedgerError,
+    MAX_RESPONSE_BYTES,
+    _normalized_response,
     sha256_json,
 )
 
@@ -93,3 +95,10 @@ def test_completion_cannot_exceed_its_reservation(tmp_path):
     ledger.reserve("call-a", "evaluator", 2, request_sha256="e" * 64)
     with pytest.raises(CampaignLedgerError, match="exceeds"):
         ledger.complete("call-a", "answer", usage={}, actual_cost_micros=3)
+
+
+def test_response_cap_covers_the_frozen_4096_token_output_contract():
+    accepted = "x" * 16_385
+    assert _normalized_response(accepted) == accepted
+    with pytest.raises(CampaignLedgerError, match="size cap"):
+        _normalized_response("x" * (MAX_RESPONSE_BYTES + 1))

@@ -345,19 +345,22 @@ def execute(plan: dict, directory: Path, *, runner: Callable = subprocess.run,
         wait = plan.get("wait_for")
         if wait:
             deadline = time.monotonic() + wait_timeout
-            while not (ROOT / wait["artifact"]).exists():
-                if not (ROOT / wait["producer_lock"]).exists() or time.monotonic() >= deadline:
+            artifact = ROOT / wait["artifact"]
+            producer_lock = ROOT / wait["producer_lock"]
+            while not artifact.exists() or producer_lock.exists():
+                if time.monotonic() >= deadline:
+                    if artifact.exists():
+                        raise ValueError("prerequisite producer has not released its timing lock")
+                    raise ValueError("prerequisite producer stopped or exceeded its wait window")
+                if not artifact.exists() and not producer_lock.exists():
                     raise ValueError("prerequisite producer stopped or exceeded its wait window")
                 _status(directory, status="PARTIAL", phase="waiting_for_existing_diagnostic",
                         completed_jobs=completed, current_artifact=wait["artifact"], runtime=runtime,
                         heartbeat_unix=time.time())
                 time.sleep(poll_seconds)
-            _verified_artifact(ROOT / wait["artifact"])
-            # The artifact can precede release of the upstream runner lock.
-            while (ROOT / wait["producer_lock"]).exists():
-                if time.monotonic() >= deadline:
-                    raise ValueError("prerequisite producer has not released its timing lock")
-                time.sleep(poll_seconds)
+            # Verify only after the producer has released its lock and completed
+            # the JSON plus checksum sidecar write.
+            _verified_artifact(artifact)
         for job in plan["jobs"]:
             validate(plan)
             checkpoint = directory / f"{job['id']}.json"
