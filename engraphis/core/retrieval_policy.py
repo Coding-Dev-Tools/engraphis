@@ -25,16 +25,17 @@ def apply_retrieval_recipe(
     *,
     k: int,
     token_budget: int,
+    k_supplied: bool,
     token_budget_supplied: bool,
 ) -> tuple[int, int, str]:
-    """Apply a measured workload recipe without changing legacy defaults."""
+    """Apply a measured workload recipe without changing explicit caller values."""
     selected = str(recipe or "default").strip().casefold()
     if selected not in RETRIEVAL_RECIPES:
         choices = ", ".join(sorted(RETRIEVAL_RECIPES))
         raise ValueError(f"retrieval_recipe must be one of: {choices}")
     output_k = max(1, int(k))
     budget = max(0, int(token_budget))
-    if output_k == 8:
+    if not k_supplied:
         if selected == "conversation":
             output_k = 20
         elif selected == "long_session":

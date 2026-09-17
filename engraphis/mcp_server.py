@@ -636,7 +636,9 @@ def engraphis_recall(
                     "its repo/workspace ancestors; requires workspace.")] = None,
     mtypes: Annotated[Optional[List[str]], Field(description="Restrict to these memory types "
                       "(semantic/episodic/procedural/working).")] = None,
-    k: Annotated[int, Field(description="Max memories to return (1-50).", ge=1, le=50)] = 8,
+    k: Annotated[Optional[int], Field(
+        description="Max memories to return (1-50).",
+        ge=1, le=50, json_schema_extra={"default": 8})] = None,
     as_of: Annotated[Optional[float], Field(
         description="Compatibility alias for valid_at. If both are supplied they must "
                     "match.")] = None,
@@ -735,10 +737,12 @@ def engraphis_recall_context(
         description="Optional active session; includes its repo/workspace ancestors.")] = None,
     mtypes: Annotated[Optional[List[str]], Field(
         description="Optional memory types: semantic/episodic/procedural/working.")] = None,
-    k: Annotated[int, Field(description="Max candidate memories (1-50).", ge=1, le=50)] = 50,
-    token_budget: Annotated[int, Field(
+    k: Annotated[Optional[int], Field(
+        description="Max candidate memories (1-50).",
+        ge=1, le=50, json_schema_extra={"default": 50})] = None,
+    token_budget: Annotated[Optional[int], Field(
         description="Hard packed-context budget under the reported token counter.",
-        ge=0, le=32_768)] = 1024,
+        ge=0, le=32_768, json_schema_extra={"default": 1024})] = None,
     retrieval_profile: Annotated[str, Field(
         description="balanced, fast, auto, lexical, graph, or code.")] = "balanced",
     candidate_depth: Annotated[str, Field(
@@ -784,10 +788,6 @@ def engraphis_recall_context(
         if format not in {"full", "gist"}:
             raise ValidationError("format must be one of: full, gist")
         _recall_started = time.monotonic()
-        effective_token_budget = (
-            None if retrieval_recipe != "default" and token_budget == 1024
-            else token_budget
-        )
         payload = service().recall(
             query,
             workspace=workspace,
@@ -795,10 +795,12 @@ def engraphis_recall_context(
             session_id=session_id,
             mtypes=mtypes,
             k=k,
+            _default_k=50,
             as_of=as_of,
             valid_at=valid_at,
             known_at=known_at,
-            token_budget=effective_token_budget,
+            token_budget=token_budget,
+            _default_token_budget=1024,
             retrieval_profile=retrieval_profile,
             candidate_depth=candidate_depth,
             packing_mode=packing_mode,
@@ -2865,9 +2867,12 @@ def smart_recall_context(
     workspace: Annotated[Optional[str], Field(description="Optional workspace.", max_length=200)] = None,
     repo: Annotated[Optional[str], Field(description="Optional repository.", max_length=200)] = None,
     session_id: Annotated[Optional[str], Field(description="Optional active session.")] = None,
-    k: Annotated[int, Field(description="Maximum source memories.", ge=1, le=50)] = 50,
-    token_budget: Annotated[int, Field(description="Hard returned-context token budget.", ge=0,
-                                      le=32_768)] = 1024,
+    k: Annotated[Optional[int], Field(
+        description="Maximum source memories.",
+        ge=1, le=50, json_schema_extra={"default": 50})] = None,
+    token_budget: Annotated[Optional[int], Field(
+        description="Hard returned-context token budget.",
+        ge=0, le=32_768, json_schema_extra={"default": 1024})] = None,
     packing_mode: Annotated[str, Field()] = "legacy",
     retrieval_recipe: Annotated[str, Field()] = "default",
     format: Annotated[str, Field(description="Context format: 'full' or 'gist'.")] = "full",

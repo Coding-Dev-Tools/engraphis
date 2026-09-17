@@ -1,6 +1,6 @@
 {
   "schema": "engraphis-mcp-contract/v1",
-  "sha256": "2667b8488dca6b2029a784bc163a686e7f35b4433ce8476beeafdedcb9e8b4c7",
+  "sha256": "00313f5cf8110bd18def46a6128ac52c360ccf4a21fd613a44b1511f55f31e69",
   "surfaces": {
     "classic": [
       {
@@ -1464,12 +1464,19 @@
               "type": "boolean"
             },
             "k": {
+              "anyOf": [
+                {
+                  "maximum": 50,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
               "default": 8,
               "description": "Max memories to return (1-50).",
-              "maximum": 50,
-              "minimum": 1,
-              "title": "K",
-              "type": "integer"
+              "title": "K"
             },
             "known_at": {
               "anyOf": [
@@ -1689,12 +1696,19 @@
               "type": "string"
             },
             "k": {
+              "anyOf": [
+                {
+                  "maximum": 50,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
               "default": 50,
               "description": "Max candidate memories (1-50).",
-              "maximum": 50,
-              "minimum": 1,
-              "title": "K",
-              "type": "integer"
+              "title": "K"
             },
             "known_at": {
               "anyOf": [
@@ -1813,12 +1827,19 @@
               "title": "Session Id"
             },
             "token_budget": {
+              "anyOf": [
+                {
+                  "maximum": 32768,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
               "default": 1024,
               "description": "Hard packed-context budget under the reported token counter.",
-              "maximum": 32768,
-              "minimum": 0,
-              "title": "Token Budget",
-              "type": "integer"
+              "title": "Token Budget"
             },
             "valid_at": {
               "anyOf": [
@@ -3262,12 +3283,19 @@
               "type": "string"
             },
             "k": {
+              "anyOf": [
+                {
+                  "maximum": 50,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
               "default": 50,
               "description": "Maximum source memories.",
-              "maximum": 50,
-              "minimum": 1,
-              "title": "K",
-              "type": "integer"
+              "title": "K"
             },
             "packing_mode": {
               "default": "legacy",
@@ -3314,12 +3342,19 @@
               "title": "Session Id"
             },
             "token_budget": {
+              "anyOf": [
+                {
+                  "maximum": 32768,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
               "default": 1024,
               "description": "Hard returned-context token budget.",
-              "maximum": 32768,
-              "minimum": 0,
-              "title": "Token Budget",
-              "type": "integer"
+              "title": "Token Budget"
             },
             "workspace": {
               "anyOf": [

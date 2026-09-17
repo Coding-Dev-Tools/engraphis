@@ -996,7 +996,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     except (AuditError, OSError, ValueError) as exc:
         print(f"OAuth audit failed: {type(exc).__name__}", file=sys.stderr)
         return 2
-    print(json.dumps(result, sort_keys=True, indent=2))
+    print(json.dumps({
+        "status": result.get("status"),
+        "stage": result.get("stage"),
+        "issue_count": len(result.get("issues", [])),
+    }, sort_keys=True, indent=2))
     return 0 if result["status"] == "COMPLETE" else 2
 
 
