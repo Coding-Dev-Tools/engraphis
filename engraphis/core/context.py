@@ -238,6 +238,10 @@ class DeterministicContextPacker:
                     continue
                 proposed = f"{base}{excerpt}"
 
+            exact, source_span, evidence_unit_id, evidence_unit = self._evidence_details(
+                candidate, excerpt, attribution=attribution,
+            )
+
             context = proposed
             packed.append(PackedChunk(
                 id=candidate.id,
@@ -246,6 +250,10 @@ class DeterministicContextPacker:
                 truncated=truncated,
                 reason=reason,
                 attribution=attribution,
+                exact_value=exact,
+                source_span=source_span,
+                evidence_unit_id=evidence_unit_id,
+                evidence_unit=evidence_unit,
             ))
             covered.update(_terms(excerpt) & query_terms)
 
@@ -380,6 +388,9 @@ class DeterministicContextPacker:
             header = self._header(candidate, len(packed) + 1, attribution=attribution)
             prefix = f"{context}{separator}{header}\n"
             context = f"{prefix}{chosen_excerpt}"
+            exact, source_span, evidence_unit_id, evidence_unit = self._evidence_details(
+                candidate, chosen_excerpt, attribution=attribution, binding=chosen_exact,
+            )
             packed.append(PackedChunk(
                 id=candidate.id,
                 excerpt=chosen_excerpt,
@@ -389,8 +400,11 @@ class DeterministicContextPacker:
                 ),
                 reason=chosen_reason,
                 attribution=attribution,
-                exact_value=chosen_exact,
+                exact_value=exact,
                 title=_normalize_title(candidate.record.title),
+                source_span=source_span,
+                evidence_unit_id=evidence_unit_id,
+                evidence_unit=evidence_unit,
             ))
 
         # Second pass: expand each admitted unit in score order using the space
@@ -411,14 +425,20 @@ class DeterministicContextPacker:
                 )
                 if not expanded or self._count(expanded) <= self._count(current_excerpt):
                     continue
+                exact, source_span, evidence_unit_id, evidence_unit = self._evidence_details(
+                    candidate, expanded, attribution=chunk.attribution, binding=exact or current_exact,
+                )
                 trial = list(packed)
                 trial[index] = PackedChunk(
                     id=chunk.id, excerpt=expanded, tokens=self._count(expanded),
                     truncated=expanded.strip() != (
                         (record.content or record.summary or "").strip()
                     ), reason=reason or current_reason,
-                    attribution=chunk.attribution, exact_value=exact or current_exact,
+                    attribution=chunk.attribution, exact_value=exact,
                     title=_normalize_title(chunk.title or record.title),
+                    source_span=source_span or chunk.source_span,
+                    evidence_unit_id=evidence_unit_id or chunk.evidence_unit_id,
+                    evidence_unit=evidence_unit or chunk.evidence_unit,
                 )
                 rendered = self._render_packed(trial)
                 if self._count(rendered) <= budget:
@@ -437,6 +457,67 @@ class DeterministicContextPacker:
                 budget, context_tokens, source_tokens, len(packed), omitted, omissions,
             ),
         )
+
+    def _evidence_details(
+        self,
+        candidate: Candidate,
+        excerpt: str,
+        *,
+        attribution: str = "",
+        binding: Optional[dict[str, object]] = None,
+    ) -> tuple[
+        Optional[dict[str, object]],
+        Optional[tuple[int, int]],
+        str,
+        dict[str, object],
+    ]:
+        """Return bounded provenance for one packed evidence unit.
+
+        The unit is intentionally derived only from the retrieved record and the
+        rendered excerpt.  Gold labels and arbitrary metadata never cross this
+        packing boundary.  A literal is advertised as packed only when its exact
+        Unicode text is present in the emitted excerpt.
+        """
+        record = candidate.record
+        if record is None:
+            return None, None, str(candidate.id), {"id": str(candidate.id), "source_id": str(candidate.id)}
+        checked = binding or exact_value_binding(record.metadata, content=record.content)
+        exact: Optional[dict[str, object]] = None
+        span = None
+        value: Optional[str] = None
+        if checked is not None:
+            raw_value = checked.get("value")
+            raw_start = checked.get("start")
+            raw_end = checked.get("end")
+            if (
+                isinstance(raw_value, str)
+                and raw_value in excerpt
+                and isinstance(raw_start, int)
+                and not isinstance(raw_start, bool)
+                and isinstance(raw_end, int)
+                and not isinstance(raw_end, bool)
+            ):
+                exact = checked
+                span = (raw_start, raw_end)
+                value = raw_value
+        metadata = record.metadata if isinstance(record.metadata, dict) else {}
+        raw_unit_id = metadata.get("evidence_unit_id")
+        unit_id = str(raw_unit_id).strip() if isinstance(raw_unit_id, str) else ""
+        unit_id = unit_id[:512] or str(candidate.id)
+        qualifier_terms = sorted(_terms(excerpt) & _QUALIFIER_TERMS)
+        evidence_unit = {
+            "id": unit_id,
+            "source_id": str(candidate.id),
+            "subject_key": str(record.subject_key or ""),
+            "claim_kind": str(record.claim_kind or ""),
+            "value": value,
+            "qualifiers": qualifier_terms,
+            "valid_from": record.valid_from,
+            "valid_to": record.valid_to,
+            "attribution": attribution,
+            "source_span": list(span) if span is not None else None,
+        }
+        return exact, span, unit_id, evidence_unit
 
     def _coverage_excerpt(
         self,

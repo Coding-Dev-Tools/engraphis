@@ -4083,13 +4083,27 @@ class MemoryService:
             operation="recall",
             intent=str(intent or "recall"),
         )
-        packed_sources = [{
-            "id": packed.id,
-            "tokens": packed.tokens,
-            "truncated": packed.truncated,
-            "reason": packed.reason,
-            "exact_value": packed.exact_value,
-        } for packed in result.packed_chunks]
+        packed_sources = []
+        for packed in result.packed_chunks:
+            source = {
+                "id": packed.id,
+                "tokens": packed.tokens,
+                "truncated": packed.truncated,
+                "reason": packed.reason,
+            }
+            if packed.exact_value is not None:
+                source["exact_value"] = packed.exact_value
+            if packed.source_span is not None:
+                source["source_span"] = list(packed.source_span)
+            if packed.evidence_unit_id:
+                source["evidence_unit_id"] = packed.evidence_unit_id
+            if packed.evidence_unit is not None:
+                source["evidence_unit"] = packed.evidence_unit
+            if packed.attribution:
+                source["attribution"] = packed.attribution
+            if packed.title:
+                source["title"] = packed.title
+            packed_sources.append(source)
         capabilities = {
             "degraded_mode": result.degraded_mode,
             "semantic_support": result.semantic_support,
@@ -4114,6 +4128,8 @@ class MemoryService:
             "candidate_k_requested": result.candidate_k_requested,
             "candidate_k_used": result.candidate_k_used,
             "candidate_depth_reason": result.candidate_depth_reason,
+            "adaptive_stop_reason": result.adaptive_stop_reason,
+            "packed_candidate_coverage": result.packed_candidate_coverage,
             "packing_mode": result.packing_mode,
             "retrieval_recipe": result.retrieval_recipe,
             "context_revision": result.context_revision,

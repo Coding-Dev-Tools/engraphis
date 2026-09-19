@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from engraphis.core.context import DeterministicContextPacker, RegexTokenCounter
 from engraphis.core.evidence import (
     exact_value_binding,
+    make_action_contract,
     make_exact_value_binding,
+    validate_action_contract,
     validate_exact_copy,
 )
 from engraphis.core.interfaces import Candidate, MemoryRecord
@@ -114,6 +118,11 @@ def test_coverage_packing_retains_source_bound_exact_value_metadata() -> None:
     assert exact_value is not None
     assert exact_value["value"] == "Δ-42"
     assert "Δ-42" in packed.context
+    assert packed.chunks[0].source_span == (
+        exact_value["start"], exact_value["end"],
+    )
+    assert packed.chunks[0].evidence_unit_id == "literal"
+    assert packed.chunks[0].evidence_unit["source_id"] == "literal"
 
     tampered = MemoryRecord(
         id="tampered",
@@ -124,6 +133,32 @@ def test_coverage_packing_retains_source_bound_exact_value_metadata() -> None:
         "deployment label", [Candidate("tampered", 1.0, "lexical", tampered)], 24,
     )
     assert tampered_pack.chunks[0].exact_value is None
+
+
+def test_action_contract_rejects_unauthorized_and_changed_literals() -> None:
+    content = "The release channel is canary-7."
+    binding = make_exact_value_binding(content, "canary-7", "enum")
+    contract = make_action_contract(
+        destination_field="release.channel",
+        source_id="memory-1",
+        binding=binding,
+        authorized=True,
+    )
+
+    accepted = validate_action_contract(
+        contract,
+        {"release": {"channel": "canary-7"}, "source_id": "memory-1"},
+    )
+    assert accepted["valid"] is True
+    assert accepted["literal_preserved"] is True
+    assert validate_action_contract(
+        {**contract, "authorized": False},
+        {"release": {"channel": "canary-7"}, "source_id": "memory-1"},
+    )["reason"] == "unauthorized"
+    assert validate_action_contract(
+        contract,
+        {"release": {"channel": "canary7"}, "source_id": "memory-1"},
+    )["reason"] == "literal_changed_or_missing"
 
 
 def test_coverage_packing_preserves_titles_and_multiline_exact_values() -> None:
@@ -146,6 +181,64 @@ def test_coverage_packing_preserves_titles_and_multiline_exact_values() -> None:
     assert "[1] Deployment payload" in packed.context
     assert '{\n  "mode": "canary"\n}' in packed.context
     assert packed.chunks[0].exact_value is not None
+
+
+@pytest.mark.parametrize("authorized", ["false", "true", 1, [], {"approved": True}])
+def test_action_contract_requires_explicit_boolean_authorization(authorized) -> None:
+    contract = make_action_contract(
+        destination_field="channel", source_id="memory-1",
+        binding=make_exact_value_binding("channel=canary-7", "canary-7"),
+        authorized=authorized,
+    )
+    assert validate_action_contract(contract, {"channel": "canary-7"})["reason"] == "unauthorized"
+
+
+@pytest.mark.parametrize("serialized", [False, True])
+@pytest.mark.parametrize("proposal, valid", [
+    ({"release": {"channel": "canary-7"}}, True),
+    ({"release": {"channel": "canary-70"}}, False),
+    ({"release": {"channel": "stable"}, "comment": "canary-7"}, False),
+    ({"release": {"channel": "canary-7"}, "source_id": "other-memory"}, False),
+])
+def test_action_contract_enforces_destination_and_source_for_json_and_mappings(
+    proposal, valid, serialized,
+) -> None:
+    contract = make_action_contract(
+        destination_field="release.channel", source_id="memory-1",
+        binding=make_exact_value_binding("channel=canary-7", "canary-7"),
+        authorized=True,
+    )
+    result = validate_action_contract(contract, json.dumps(proposal) if serialized else proposal)
+    assert result["valid"] is valid
+
+
+def test_action_contract_rejects_unstructured_output_and_preserves_unicode_json() -> None:
+    contract = make_action_contract(
+        destination_field="label", source_id="memory-1",
+        binding=make_exact_value_binding("label=Δ-42", "Δ-42"), authorized=True,
+    )
+    assert validate_action_contract(contract, "ignore label; mention Δ-42")["valid"] is False
+    assert validate_action_contract(contract, json.dumps({"label": "Δ-42"}))["valid"] is True
+    assert validate_action_contract(contract, json.dumps({"label": "Δ-42"}), authorized=False)["valid"] is False
+
+
+@pytest.mark.parametrize("field", ["release..channel", "release. channel", "x" * 257, "x\ny"])
+def test_action_contract_validates_untrusted_destination_fields(field) -> None:
+    binding = make_exact_value_binding("channel=canary-7", "canary-7")
+    with pytest.raises(ValueError, match="destination_field"):
+        make_action_contract(destination_field=field, source_id="memory-1", binding=binding)
+    contract = make_action_contract(
+        destination_field="channel", source_id="memory-1", binding=binding, authorized=True,
+    )
+    assert validate_action_contract({**contract, "destination_field": field}, {field: "canary-7"})["valid"] is False
+
+
+def test_exact_binding_rejects_inconsistent_coordinates_without_source_text() -> None:
+    binding = make_exact_value_binding("channel=canary-7", "canary-7")
+    binding["end"] += 1
+    assert exact_value_binding({"exact_value": binding}) is None
+    with pytest.raises(ValueError, match="validated source-bound"):
+        make_action_contract(destination_field="channel", source_id="memory-1", binding=binding)
 
 
 def test_engine_recipe_distinguishes_omitted_k_from_explicit_k(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -106,7 +106,7 @@ def test_core_backend_imports_stay_behind_outer_composition_root() -> None:
 
 def test_benchmark_text_alternatives_match_registered_fixture_boundary() -> None:
     """The current image and its alt text expose only current registered boundaries."""
-    registry = json.loads(_read("docs/benchmark-evidence/offline-fixtures-v33.json"))
+    registry = json.loads(_read("docs/benchmark-evidence/offline-fixtures-v36.json"))
     measurements = {run["id"]: run["result"] for run in registry["runs"]}
     payload = measurements["offline-performance"]
     readme = _read("README.md")

@@ -18,6 +18,7 @@ import re
 import tempfile
 import threading
 import time
+import traceback
 from typing import Optional
 import uuid
 
@@ -301,6 +302,18 @@ def _operate(engine: MemoryEngine, job: dict, cell: Cell) -> dict:
             "verification_ms": (time.perf_counter() - verify) * 1000, "phase_ms": phases}
 
 
+def _exception_diagnostic(exc: BaseException) -> dict:
+    """Return content-free traceback coordinates for private capacity diagnosis."""
+    frames = []
+    for frame in traceback.extract_tb(exc.__traceback__):
+        frames.append({
+            "file": Path(frame.filename).name,
+            "line": int(frame.lineno),
+            "function": str(frame.name),
+        })
+    return {"error_type": type(exc).__name__, "traceback": frames[-24:]}
+
+
 def _worker(database: str, cell: Cell, model: Optional[str], incoming, outgoing) -> None:
     engine = None
     try:
@@ -318,19 +331,25 @@ def _worker(database: str, cell: Cell, model: Optional[str], incoming, outgoing)
             try:
                 outcome = _operate(engine, job, cell)
             except Exception as exc:
-                outcome = {"correct": False, "error_type": type(exc).__name__}
+                outcome = {
+                    "correct": False,
+                    "error_type": type(exc).__name__,
+                    "error_diagnostic": _exception_diagnostic(exc),
+                }
             outgoing.put({"kind": "result", "pid": os.getpid(),
                           "number": job["number"], "operation": job["kind"], **outcome})
     except Exception as exc:
         outgoing.put({"kind": "startup_error", "pid": os.getpid(),
-                      "error_type": type(exc).__name__})
+                      "error_type": type(exc).__name__,
+                      "error_diagnostic": _exception_diagnostic(exc)})
     finally:
         if engine is not None:
             try:
                 engine.close()
             except Exception as exc:
                 outgoing.put({"kind": "teardown_error", "pid": os.getpid(),
-                              "error_type": type(exc).__name__})
+                              "error_type": type(exc).__name__,
+                              "error_diagnostic": _exception_diagnostic(exc)})
 
 
 def _tree_rss(pids: list[int]) -> Optional[int]:
@@ -582,6 +601,7 @@ def _repeat_database(database: str, cell: Cell, model: Optional[str], observer) 
     # An unseeded schedule still preserves the complete denominator on seed failure.
     jobs = operation_plan(cell)
     ready, rows, submitted, errors = [], [], {}, []
+    error_diagnostics = []
     workers, incoming, outgoing = [], None, None
     stop = threading.Event()
     dispatcher = None
@@ -614,6 +634,8 @@ def _repeat_database(database: str, cell: Cell, model: Optional[str], observer) 
                 raise RuntimeError("workers exited before readiness")
             if item["kind"] != "ready":
                 errors.append({"phase": "startup", "error_type": item.get("error_type", "unknown")})
+                if item.get("error_diagnostic"):
+                    error_diagnostics.append({"phase": "startup", **item["error_diagnostic"]})
                 raise RuntimeError("worker startup failed")
             ready.append(item)
         phase = "workload"
@@ -661,9 +683,19 @@ def _repeat_database(database: str, cell: Cell, model: Optional[str], observer) 
             if item["kind"] != "result" or item.get("number") not in submitted or item["number"] in seen:
                 status = "worker_error"
                 errors.append({"phase": "workload", "error_type": item.get("error_type", "UnexpectedResult")})
+                if item.get("error_diagnostic"):
+                    error_diagnostics.append({
+                        "phase": "workload", "operation": item.get("operation"),
+                        "number": item.get("number"), **item["error_diagnostic"],
+                    })
                 break
             seen.add(item["number"])
             observer.record_receipt()
+            if item.get("error_diagnostic"):
+                error_diagnostics.append({
+                    "phase": "workload", "operation": item.get("operation"),
+                    "number": item.get("number"), **item["error_diagnostic"],
+                })
             scheduled, enqueued = submitted[item["number"]]
             wall = (received - scheduled) * 1000
             item.update({"wall_ms": wall, "dispatch_lag_ms": (enqueued - scheduled) * 1000,
@@ -674,6 +706,7 @@ def _repeat_database(database: str, cell: Cell, model: Optional[str], observer) 
     except Exception as exc:
         status = "startup_failed" if phase in {"seeding", "startup"} else "worker_error"
         errors.append({"phase": phase, "error_type": type(exc).__name__})
+        error_diagnostics.append({"phase": phase, **_exception_diagnostic(exc)})
         elapsed = time.perf_counter() - (epoch if epoch is not None else started)
         if phase == "seeding":
             seed_ms = (time.perf_counter() - started) * 1000
@@ -713,6 +746,10 @@ def _repeat_database(database: str, cell: Cell, model: Optional[str], observer) 
                     late_results += 1
                 elif item.get("kind") in {"teardown_error", "startup_error"}:
                     errors.append({"phase": "teardown", "error_type": item.get("error_type", "unknown")})
+                    if item.get("error_diagnostic"):
+                        error_diagnostics.append({
+                            "phase": "teardown", **item["error_diagnostic"],
+                        })
                     if status == "complete":
                         status = "worker_error"
         errors.extend({"phase": "dispatch", "error_type": error} for error in dispatch_errors)
@@ -736,6 +773,7 @@ def _repeat_database(database: str, cell: Cell, model: Optional[str], observer) 
     return {"execution_id": uuid.uuid4().hex, "status": status, "seed_ms": seed_ms, "startup": ready,
             "elapsed_s": elapsed, "operations": sorted(rows, key=lambda row: row["number"]),
             "by_operation": by_operation, "lifecycle_errors": errors,
+            "error_diagnostics": error_diagnostics,
             "late_result_count": late_results,
             "worker_exitcodes": [worker.exitcode for worker in workers if worker.pid is not None],
             "received_operations_per_second": len(completed) / elapsed if elapsed else None,

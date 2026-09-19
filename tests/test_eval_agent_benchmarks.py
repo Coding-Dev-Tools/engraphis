@@ -50,6 +50,8 @@ def test_memoryagentbench_context_export_and_structured_conflict_events(tmp_path
     assert len(cases) == 2
     assert cases[0]["memories"][1]["subject_key"] == "ada.home_city"
     assert cases[0]["questions"][0]["supporting"] == ["city-new"]
+    assert cases[0]["questions"][0]["evidence_label_provenance"] == "explicit_ids"
+    assert cases[0]["questions"][0]["evidence_label_method"] == "provided_source_ids"
     assert len(cases[1]["memories"]) == 2
     report = run(cases[:1], k=3)
     assert report["questions"] == 1
@@ -82,6 +84,8 @@ def test_memoryagentbench_accepts_official_nested_answers_and_metadata(tmp_path)
     assert question["answer"] == "us-east-1"
     assert question["answer_variants"] == ["us-east-1", "US East"]
     assert question["supporting"]
+    assert question["evidence_label_provenance"] == "derived_answer_substring"
+    assert question["evidence_label_method"] == "answer_variant_substring"
     assert question["category"] == "factconsolidation_sh_32k"
 
 
@@ -96,6 +100,8 @@ def test_memoryagentbench_scores_any_accepted_answer_variant(tmp_path):
     report = run(load_memoryagentbench(path), k=1)
 
     assert report["answer_token_recall"] == 1.0
+    assert report["evidence_label_cardinality"]["max"] >= 1
+    assert "sufficient_evidence_proxy_rate" in report
 
 
 def test_memoryagentbench_no_gold_is_answer_scored_but_retrieval_excluded(
@@ -301,6 +307,7 @@ def test_cli_writes_redacted_immutable_artifact(tmp_path, capsys):
     assert "query_sha256" not in artifact["records"][0]
     assert artifact["suite"]["sources"][0]["name"] == "plus.json"
     assert artifact["metrics"]["claim_boundary"].startswith("Cue-evidence retrieval")
+    assert "not generated-answer correctness" in artifact["metrics"]["sufficient_evidence_proxy_boundary"]
     assert artifact["protocol"]["config"]["limit"] is None
     assert "--limit" not in artifact["protocol"]["command"]
     assert artifact_path.with_name("artifact.json.sha256").is_file()

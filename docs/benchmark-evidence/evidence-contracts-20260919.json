@@ -1,0 +1,105 @@
+{
+  "command": "python -m eval.evidence_contracts",
+  "result": {
+    "action_validation": {
+      "cases": 14,
+      "correct": 14,
+      "false_acceptances": 0,
+      "false_rejections": 0,
+      "outcomes": [
+        {
+          "actual": true,
+          "case": "mapping_accept",
+          "expected": true
+        },
+        {
+          "actual": true,
+          "case": "json_accept",
+          "expected": true
+        },
+        {
+          "actual": true,
+          "case": "escaped_unicode_accept",
+          "expected": true
+        },
+        {
+          "actual": false,
+          "case": "mapping_wrong_field",
+          "expected": false
+        },
+        {
+          "actual": false,
+          "case": "json_wrong_field",
+          "expected": false
+        },
+        {
+          "actual": false,
+          "case": "mapping_wrong_source",
+          "expected": false
+        },
+        {
+          "actual": false,
+          "case": "json_wrong_source",
+          "expected": false
+        },
+        {
+          "actual": false,
+          "case": "mapping_changed_literal",
+          "expected": false
+        },
+        {
+          "actual": false,
+          "case": "json_changed_literal",
+          "expected": false
+        },
+        {
+          "actual": false,
+          "case": "unstructured_output",
+          "expected": false
+        },
+        {
+          "actual": false,
+          "case": "string_false",
+          "expected": false
+        },
+        {
+          "actual": false,
+          "case": "integer_one",
+          "expected": false
+        },
+        {
+          "actual": false,
+          "case": "boolean_false",
+          "expected": false
+        },
+        {
+          "actual": false,
+          "case": "inconsistent_source_span",
+          "expected": false
+        }
+      ]
+    },
+    "boundary": "Development fixtures; not external QA, generated-answer quality, or provider savings.",
+    "packing": {
+      "coverage": {
+        "budget": 35,
+        "budget_honored": true,
+        "sources": 3,
+        "tokens": 33
+      },
+      "legacy": {
+        "budget": 35,
+        "budget_honored": true,
+        "sources": 1,
+        "tokens": 35
+      }
+    },
+    "schema": "engraphis-evidence-contract-diagnostic/v1"
+  },
+  "schema": "engraphis-evidence-contract-report/v1",
+  "source_sha256": {
+    "engraphis/core/context.py": "cd1444ace9202673fb442373b34eb840c79518acdc6d58c49783a6f3ab0c7d15",
+    "engraphis/core/evidence.py": "d9aece1bdcbc9fc0996a455d43c1c2b6e134a046f3417b7a229edae9c87678ab",
+    "eval/evidence_contracts.py": "e74e3e987de87d519fe63e5115e0d611a54a6fae973d5f5c7af7cc20f6370e82"
+  }
+}
