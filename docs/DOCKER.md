@@ -27,13 +27,15 @@ Then open `http://127.0.0.1:8787`. License issuance, trials, leases, and revocat
 
 The root entrypoint repairs ownership only for the managed `/data` volume. When a custom
 container configuration places `ENGRAPHIS_STATE_DIR` outside `/data`, create that directory
-with the container's `engraphis` UID as owner before startup. Existing external config parent
+with the container's `engraphis` UID as owner and provision its contents for that UID before
+startup; external descendants are never recursively repaired. Existing external config parent
 directories must also belong to that UID; startup rejects other owners before changing files.
 The repair marker lives at `/data/.volume-ownership`, so reusing external state cannot skip
 the repair of a replaced data volume. Restarts scan for ownership drift before trusting an
 existing marker, repairing restored files when needed without following external symlinks.
 Correctly owned volumes avoid recursive ownership writes, but still require a metadata scan.
-State directories use mode `0700` and trusted settings use `0600`. A container started with
+State directories use mode `0700`; trusted settings must have a single hard link and use
+mode `0600`. A container started with
 `--user` or `runAsUser` initializes a missing settings file when its state volume is writable
 by that runtime UID; it preserves the file on restart.
 
