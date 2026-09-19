@@ -3,7 +3,7 @@ import json
 import pytest
 
 from eval import benchmark_analysis as analysis
-from eval.benchmark import sha256_file
+from eval.benchmark import canonical_json, sha256_file, sha256_text
 
 
 def test_case_bootstrap_keeps_question_weights_and_matches_mean():
@@ -60,7 +60,7 @@ def test_paired_difference_carries_source_case_into_bootstrap_rows(tmp_path, mon
     before = {
         "suite": {"sha256": "dataset"},
         "models": {"model": "deterministic"},
-        "protocol": {"config": {"token_budget": 12}},
+        "protocol": {"config": {"token_budget": 12, "format": "locomo"}},
         "records": records,
     }
     after = {
@@ -98,6 +98,41 @@ def test_analysis_requires_artifact_sidecar(tmp_path):
     path.write_text("{}")
     with pytest.raises(ValueError, match="checksum"):
         analysis.read_verified(path)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("repair_manifest_sha256", "b" * 64),
+    ("repair_manifest_sha256", None),
+    ("format", "longmemeval"),
+    ("format", None),
+])
+def test_paired_difference_rejects_changed_normalization_bindings(tmp_path, field, value):
+    source = analysis.Path(__file__).parents[1] / "docs/benchmark-evidence/locomo-full-20260916.json"
+    before = json.loads(source.read_text(encoding="utf-8"))
+    after = json.loads(json.dumps(before))
+    after["protocol"]["config"][field] = value
+    after["system"]["config_sha256"] = sha256_text(canonical_json(after["protocol"]["config"]))
+    paths = [tmp_path / name for name in ("baseline.json", "candidate.json")]
+    for path, report in zip(paths, (before, after)):
+        path.write_text(json.dumps(report), encoding="utf-8")
+        path.with_suffix(".json.sha256").write_text(sha256_file(path), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="normalized-corpus bindings"):
+        analysis.paired_difference(*paths)
+
+
+def test_paired_difference_accepts_same_normalized_corpus_with_different_k(tmp_path):
+    source = analysis.Path(__file__).parents[1] / "docs/benchmark-evidence/locomo-full-20260916.json"
+    before = json.loads(source.read_text(encoding="utf-8"))
+    after = json.loads(json.dumps(before))
+    after["protocol"]["config"]["k"] += 1
+    after["system"]["config_sha256"] = sha256_text(canonical_json(after["protocol"]["config"]))
+    paths = [tmp_path / name for name in ("baseline.json", "candidate.json")]
+    for path, report in zip(paths, (before, after)):
+        path.write_text(json.dumps(report), encoding="utf-8")
+        path.with_suffix(".json.sha256").write_text(sha256_file(path), encoding="utf-8")
+
+    assert analysis.paired_difference(*paths)["packed_recall_delta"]["point"] == 0
 
 
 def test_analysis_rechecks_counts_even_with_recomputed_checksum(tmp_path):

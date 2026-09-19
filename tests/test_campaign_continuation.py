@@ -150,6 +150,8 @@ def test_continuation_cli_fails_on_critical_violations(monkeypatch, tmp_path, ca
         cc,
         "run_continuation",
         lambda *args, **kwargs: {"metrics": {
+            "status": "BLOCKED",
+            "eligible_execution_status": "BLOCKED",
             "valid_missing_attempts": 0,
             "statuses": {},
             "critical_violations": 1,
@@ -170,6 +172,44 @@ def test_continuation_cli_fails_on_critical_violations(monkeypatch, tmp_path, ca
 
     assert result == 2
     assert json.loads(capsys.readouterr().out)["critical_violations"] == 1
+
+
+@pytest.mark.parametrize("unsupported", ["eligible", "excluded", "none"])
+def test_terminal_unsupported_attempts_cannot_complete_eligible_execution(
+    monkeypatch, tmp_path, capsys, unsupported,
+):
+    manifest = _manifest()
+    cells = tuple(cc._cells(manifest, "development_pilot"))
+    excluded = _excluded(manifest)
+    excluded_keys = {cc._cell_key(cell) for cell in excluded}
+    rows = {}
+    for cell in cells:
+        is_excluded = cc._cell_key(cell) in excluded_keys
+        status = "unsupported" if (
+            unsupported == "eligible" and not is_excluded
+            or unsupported == "excluded" and is_excluded
+        ) else "complete"
+        rows[cc._cell_key(cell)] = _row(cell, status)
+    plan = replace(_plan(tmp_path, cells), parent_rows=rows,
+                   excluded_cells=excluded, eligible_missing=())
+    report = cc.combined_report(plan)
+    metrics = report["metrics"]
+    assert metrics["missing_attempts"] == metrics["valid_missing_attempts"] == 0
+    assert metrics["status"] == ("BLOCKED" if unsupported == "eligible" else "COMPLETE")
+    assert metrics["eligible_execution_status"] == (
+        "PARTIAL" if unsupported == "eligible" else "COMPLETE"
+    )
+    monkeypatch.setattr(cc, "prepare_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(cc, "build_continuation_client", lambda value: object())
+    monkeypatch.setattr(cc, "load_corpus", lambda path: [])
+    monkeypatch.setattr(cc, "run_continuation", lambda *args, **kwargs: report)
+    args = ["--execute"]
+    for name in ("parent-manifest", "companion", "eligibility", "audit-artifact",
+                 "public-artifact", "parent-approval", "parent-results", "child-results"):
+        args.extend(["--" + name, str(tmp_path / name)])
+
+    assert cc.main(args) == (2 if unsupported == "eligible" else 0)
+    assert json.loads(capsys.readouterr().out)["status"] == metrics["status"]
 
 
 def test_started_marker_fails_closed_without_runner(tmp_path):

@@ -786,7 +786,9 @@ def combined_report(plan: ContinuationPlan) -> dict[str, Any]:
         "schema": campaign.SCHEMA, "campaign_sha256": plan.parent_manifest["binding_sha256"],
         "parent_campaign_sha256": plan.parent_manifest["binding_sha256"],
         "continuation_campaign_sha256": plan.child_manifest["binding_sha256"], "stage": plan.stage_name,
-        "status": "BLOCKED" if (raw_missing or valid_missing or statuses.get("error", 0) or critical or uncertain or len(excluded) != 15) else "COMPLETE",
+        "status": "BLOCKED" if (raw_missing or valid_missing or statuses.get("error", 0)
+                                or eligible_statuses.get("unsupported", 0) or critical
+                                or uncertain or len(excluded) != 15) else "COMPLETE",
         "expected_attempts": len(plan.all_cells), "missing_attempts": raw_missing,
         "statuses": dict(sorted(statuses.items())), "raw_terminal_attempts": len(terminal),
         "eligible_expected_attempts": len(valid_expected), "eligible_attempts": valid_observed,
@@ -879,11 +881,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             write_canonical_artifact(report, args.public_output)
         print(json.dumps(_public_cli_metrics(report["metrics"]), sort_keys=True))
         metrics = report["metrics"]
-        return 0 if (
-            metrics["valid_missing_attempts"] == 0
-            and not metrics["statuses"].get("error")
-            and not metrics.get("critical_violations")
-        ) else 2
+        return 0 if (metrics.get("status") == "COMPLETE"
+                     and metrics.get("eligible_execution_status") == "COMPLETE") else 2
     except (ContinuationError, OSError, ValueError) as exc:
         print(f"continuation stopped: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
