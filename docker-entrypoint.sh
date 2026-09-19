@@ -189,8 +189,9 @@ if [ "$(id -u)" = "0" ]; then
             printf '%s\n' "[engraphis] unable to create trusted config file: $config_file" >&2
             exit 1
         fi
-        if ! reject_linked_path "$config_file" || [ ! -f "$config_file" ]; then
-            printf '%s\n' "[engraphis] refusing changed or non-regular trusted config file: $config_file" >&2
+        if ! reject_linked_path "$config_file" || [ ! -f "$config_file" ] \
+                || [ "$(stat -c '%h' "$config_file" 2>/dev/null)" != "1" ]; then
+            printf '%s\n' "[engraphis] refusing changed, hard-linked, or non-regular trusted config file: $config_file" >&2
             exit 1
         fi
         if ! chmod 600 "$config_file"; then
@@ -222,6 +223,9 @@ if [ "$(id -u)" = "0" ]; then
     elif [ ! -f "$ownership_marker" ]; then
         printf '%s\n' "[engraphis] refusing non-regular volume ownership marker: $ownership_marker" >&2
         exit 1
+    elif [ "$(stat -c '%h' "$ownership_marker" 2>/dev/null)" != "1" ]; then
+        printf '%s\n' "[engraphis] refusing hard-linked volume ownership marker: $ownership_marker" >&2
+        exit 1
     elif ! repair_volume_descendants /data "$app_owner" \
             || ! chown engraphis:engraphis /data "$state_dir" "$ownership_marker"; then
         printf '%s\n' "[engraphis] unable to verify /data ownership" >&2
@@ -238,7 +242,8 @@ if [ "$(id -u)" = "0" ]; then
         fi
     fi
     if [ -n "$config_file" ]; then
-        if ! reject_linked_path "$config_file" || [ ! -f "$config_file" ]; then
+        if ! reject_linked_path "$config_file" || [ ! -f "$config_file" ] \
+                || [ "$(stat -c '%h' "$config_file" 2>/dev/null)" != "1" ]; then
             printf '%s\n' "[engraphis] refusing changed trusted config file: $config_file" >&2
             exit 1
         fi
@@ -281,7 +286,8 @@ if [ -n "$config_file" ]; then
         printf '%s\n' "[engraphis] unable to create trusted config file: $config_file" >&2
         exit 1
     fi
-    if ! reject_linked_path "$config_file" || [ ! -f "$config_file" ] || ! chmod 600 "$config_file"; then
+    if ! reject_linked_path "$config_file" || [ ! -f "$config_file" ] \
+            || [ "$(stat -c '%h' "$config_file" 2>/dev/null)" != "1" ] || ! chmod 600 "$config_file"; then
         printf '%s\n' "[engraphis] unable to restrict trusted config file: $config_file" >&2
         exit 1
     fi
