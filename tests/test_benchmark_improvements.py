@@ -135,6 +135,53 @@ def test_coverage_packing_retains_source_bound_exact_value_metadata() -> None:
     assert tampered_pack.chunks[0].exact_value is None
 
 
+@pytest.mark.parametrize("counter,budget", [(RegexTokenCounter(), 24), (len, 100)])
+def test_coverage_preserves_a_bound_literal_inside_an_oversized_sentence(counter, budget) -> None:
+    content = "padding " * 80 + "must use Δ-42 only if approved " + "trailing " * 80
+    binding = make_exact_value_binding(content, "Δ-42", "identifier")
+    record = MemoryRecord(id="long-literal", title="Deployment", content=content,
+                          metadata={"exact_value": binding})
+    packer = DeterministicContextPacker(token_counter=counter)
+    packed = packer.pack_coverage("deployment approved", [Candidate(record.id, 1, "lexical", record)], budget)
+
+    assert len(packed.chunks) == 1
+    chunk = packed.chunks[0]
+    assert "must use Δ-42 only if approved" in chunk.excerpt
+    assert chunk.excerpt in content
+    assert chunk.exact_value == binding
+    assert chunk.source_span == (binding["start"], binding["end"])
+    assert packed.usage.context_tokens == counter(packed.context) <= budget
+
+
+def test_coverage_exact_literal_accounts_for_header_at_a_tight_budget() -> None:
+    content = "noise " * 60 + "Δ-42 " + "suffix " * 60
+    binding = make_exact_value_binding(content, "Δ-42", "identifier")
+    record = MemoryRecord(id="tight", title="Deployment", content=content,
+                          metadata={"exact_value": binding})
+    candidate = Candidate(record.id, 1, "lexical", record)
+    packer = DeterministicContextPacker()
+    minimum = packer.count_tokens("[1] Deployment\nΔ-42")
+
+    packed = packer.pack_coverage("deployment", [candidate], minimum)
+    assert packed.chunks[0].excerpt == "Δ-42"
+    assert packed.usage.context_tokens == minimum
+    assert not packer.pack_coverage("deployment", [candidate], minimum - 1).chunks
+
+
+@pytest.mark.parametrize("bound_label,query", [("First", "second"), ("Second", "first")])
+def test_coverage_uses_the_bound_occurrence_when_literals_repeat(bound_label, query) -> None:
+    content = "  First Δ-42. Second Δ-42.  "
+    start = content.index("Δ-42", content.index(bound_label))
+    binding = make_exact_value_binding(content, "Δ-42", "identifier", source_span=(start, start + 4))
+    record = MemoryRecord(id="duplicate", title="Deployment", content=content,
+                          metadata={"exact_value": binding})
+    packed = DeterministicContextPacker().pack_coverage(
+        query, [Candidate(record.id, 1, "lexical", record)], 9,
+    )
+    assert packed.chunks[0].excerpt == f"{bound_label} Δ-42."
+    assert packed.chunks[0].source_span == (start, start + 4)
+
+
 def test_action_contract_rejects_unauthorized_and_changed_literals() -> None:
     content = "The release channel is canary-7."
     binding = make_exact_value_binding(content, "canary-7", "enum")
