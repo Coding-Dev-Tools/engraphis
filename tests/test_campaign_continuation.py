@@ -174,7 +174,7 @@ def test_continuation_cli_fails_on_critical_violations(monkeypatch, tmp_path, ca
     assert json.loads(capsys.readouterr().out)["critical_violations"] == 1
 
 
-@pytest.mark.parametrize("unsupported", ["eligible", "excluded", "none"])
+@pytest.mark.parametrize("unsupported", ["eligible", "excluded", "none", "unattempted_excluded"])
 def test_terminal_unsupported_attempts_cannot_complete_eligible_execution(
     monkeypatch, tmp_path, capsys, unsupported,
 ):
@@ -185,6 +185,8 @@ def test_terminal_unsupported_attempts_cannot_complete_eligible_execution(
     rows = {}
     for cell in cells:
         is_excluded = cc._cell_key(cell) in excluded_keys
+        if unsupported == "unattempted_excluded" and is_excluded:
+            continue
         status = "unsupported" if (
             unsupported == "eligible" and not is_excluded
             or unsupported == "excluded" and is_excluded
@@ -194,8 +196,11 @@ def test_terminal_unsupported_attempts_cannot_complete_eligible_execution(
                    excluded_cells=excluded, eligible_missing=())
     report = cc.combined_report(plan)
     metrics = report["metrics"]
-    assert metrics["missing_attempts"] == metrics["valid_missing_attempts"] == 0
-    assert metrics["status"] == ("BLOCKED" if unsupported == "eligible" else "COMPLETE")
+    assert metrics["valid_missing_attempts"] == 0
+    assert metrics["missing_attempts"] == (15 if unsupported == "unattempted_excluded" else 0)
+    assert metrics["status"] == (
+        "BLOCKED" if unsupported in {"eligible", "unattempted_excluded"} else "COMPLETE"
+    )
     assert metrics["eligible_execution_status"] == (
         "PARTIAL" if unsupported == "eligible" else "COMPLETE"
     )

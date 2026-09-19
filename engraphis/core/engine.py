@@ -1506,7 +1506,8 @@ class MemoryEngine:
             if isinstance(incoming_exact, dict):
                 target = self.store.get_memory(target_id)
                 current_metadata = dict(target.metadata or {}) if target is not None else {}
-                if target is not None and "exact_value" not in current_metadata:
+                if (target is not None
+                        and exact_value_binding(current_metadata, content=target.content) is None):
                     # The incoming offsets are relative to the duplicate's source
                     # content, not necessarily to the retained record.  Rebind the
                     # literal against the record that will actually be recalled;
