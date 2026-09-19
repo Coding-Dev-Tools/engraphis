@@ -75,6 +75,39 @@ state_directory_is_owned() {
     [ -d "$1" ] && [ "$(stat -c '%u' "$1" 2>/dev/null)" = "$2" ]
 }
 
+create_private_runtime_directory() {
+    if ! reject_linked_path "$1"; then
+        return 1
+    fi
+    create_remaining=${1#/}
+    create_current=
+    while [ -n "$create_remaining" ]; do
+        case "$create_remaining" in
+            */*)
+                create_component=${create_remaining%%/*}
+                create_remaining=${create_remaining#*/}
+                ;;
+            *)
+                create_component=$create_remaining
+                create_remaining=
+                ;;
+        esac
+        case "$create_component" in ""|.) continue ;; esac
+        create_current="$create_current/$create_component"
+        if [ ! -e "$create_current" ]; then
+            # Never chown an existing ancestor. Each new directory must become
+            # traversable by the app before another private child is created.
+            if ! mkdir "$create_current" || ! reject_linked_path "$create_current" \
+                    || [ ! -d "$create_current" ] \
+                    || ! chown engraphis:engraphis "$create_current"; then
+                return 1
+            fi
+        elif [ ! -d "$create_current" ] || [ -L "$create_current" ]; then
+            return 1
+        fi
+    done
+}
+
 if [ "$(id -u)" = "0" ]; then
     # ENGRAPHIS_STATE_DIR defaults to /data/.engraphis. Repair the complete volume only on
     # first boot; later restarts verify the mount and state roots without walking the cache.
@@ -101,7 +134,7 @@ if [ "$(id -u)" = "0" ]; then
         printf '%s\n' "[engraphis] external state directory must already be owned by engraphis: $state_dir" >&2
         exit 1
     fi
-    if ! mkdir -p "$state_dir"; then
+    if ! create_private_runtime_directory "$state_dir"; then
         printf '%s\n' "[engraphis] unable to create state directory: $state_dir" >&2
         exit 1
     fi
@@ -119,26 +152,13 @@ if [ "$(id -u)" = "0" ]; then
             printf '%s\n' "[engraphis] refusing symlinked trusted config directory: $config_parent" >&2
             exit 1
         fi
-        config_parent_created=0
-        if [ ! -e "$config_parent" ]; then
-            config_parent_created=1
-        elif [ ! -d "$config_parent" ]; then
+        if [ -e "$config_parent" ] && [ ! -d "$config_parent" ]; then
             printf '%s\n' "[engraphis] refusing non-directory trusted config parent: $config_parent" >&2
             exit 1
         fi
-        if ! mkdir -p "$config_parent"; then
+        if ! create_private_runtime_directory "$config_parent"; then
             printf '%s\n' "[engraphis] unable to create config directory: $config_parent" >&2
             exit 1
-        fi
-        if [ "$config_parent_created" = "1" ]; then
-            if ! reject_linked_path "$config_parent" || [ ! -d "$config_parent" ]; then
-                printf '%s\n' "[engraphis] refusing changed trusted config directory: $config_parent" >&2
-                exit 1
-            fi
-            if ! chown engraphis:engraphis "$config_parent"; then
-                printf '%s\n' "[engraphis] unable to own trusted config directory" >&2
-                exit 1
-            fi
         fi
         # Check external existing parents before creating or changing any file.
         # Parents under /data receive the volume's first-boot ownership repair.

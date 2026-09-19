@@ -69,10 +69,7 @@ def test_container_runtime_matches_the_railway_persistence_and_port_contract():
     assert 'elif [ -e "$state_dir" ] && [ ! -d "$state_dir" ]; then' in entrypoint
     assert "refusing non-directory state path" in entrypoint
     assert 'if [ -L "$config_parent" ]; then' in entrypoint
-    assert 'config_parent_created=0' in entrypoint
     assert "refusing non-directory trusted config parent" in entrypoint
-    assert 'if [ "$config_parent_created" = "1" ]; then' in entrypoint
-    assert 'chown engraphis:engraphis "$config_parent"' in entrypoint
     assert "config_owner=$(stat -c '%u' \"$config_parent\"" in entrypoint
     assert "trusted config directory must be owned by engraphis" in entrypoint
     assert '[ -L "$ownership_marker" ]' in entrypoint
