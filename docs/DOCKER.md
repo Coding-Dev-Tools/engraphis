@@ -25,6 +25,11 @@ ENGRAPHIS_COMPOSE_PORT=8787
 
 Then open `http://127.0.0.1:8787`. License issuance, trials, leases, and revocations remain on the private control plane.
 
+The root entrypoint repairs ownership only for the managed `/data` volume. When a custom
+container configuration places `ENGRAPHIS_STATE_DIR` outside `/data`, create that directory
+with the container's `engraphis` UID as owner before startup. Existing external config parent
+directories must also belong to that UID; startup rejects other owners before changing files.
+
 > Port precedence: the dashboard binds `$PORT` when the platform injects one, falling back
 > to `ENGRAPHIS_PORT` (then `8700`). Compose sets both from `ENGRAPHIS_COMPOSE_PORT` so the
 > published host port and the in-container bind stay in sync; a stray desktop `ENGRAPHIS_PORT`
