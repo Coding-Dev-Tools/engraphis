@@ -486,8 +486,9 @@ class DeterministicContextPacker:
 
         The unit is intentionally derived only from the retrieved record and the
         rendered excerpt.  Gold labels and arbitrary metadata never cross this
-        packing boundary.  A literal is advertised as packed only when its exact
-        Unicode text is present in the emitted excerpt.
+        packing boundary. A literal is advertised only when its bound occurrence
+        is present. Coverage supplies a coordinate-validated binding; legacy
+        excerpts must map unambiguously to a contiguous source span.
         """
         record = candidate.record
         if record is None:
@@ -500,9 +501,20 @@ class DeterministicContextPacker:
             raw_value = checked.get("value")
             raw_start = checked.get("start")
             raw_end = checked.get("end")
+            occurrence_proven = binding is not None
+            if not occurrence_proven:
+                source_excerpt = excerpt.removesuffix(" […]")
+                excerpt_start = record.content.find(source_excerpt) if source_excerpt else -1
+                occurrence_proven = (
+                    excerpt_start >= 0
+                    and record.content.find(source_excerpt, excerpt_start + 1) < 0
+                    and isinstance(raw_start, int) and isinstance(raw_end, int)
+                    and excerpt_start <= raw_start <= raw_end <= excerpt_start + len(source_excerpt)
+                )
             if (
                 isinstance(raw_value, str)
                 and raw_value in excerpt
+                and occurrence_proven
                 and isinstance(raw_start, int)
                 and not isinstance(raw_start, bool)
                 and isinstance(raw_end, int)

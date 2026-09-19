@@ -8,11 +8,13 @@ from eval.benchmark import canonical_json, sha256_file, validate_report
 
 
 def small_manifest():
-    return {"binding_sha256": "a" * 64, "stages": {"development_pilot": {
+    manifest = {"stages": {"development_pilot": {
         "split": "development", "scenario_ids": ["fixture-a"], "arms": ["no_memory", "hybrid"],
         "repetitions": 1, "token_budgets": [512], "max_reader_turns": 2,
         "max_peer_internal_calls_per_attempt": 32, "max_input_tokens": 32768, "max_output_tokens": 4096,
     }}}
+    manifest["binding_sha256"] = campaign.digest(manifest)
+    return manifest
 
 
 def row(cell, **extra):
@@ -117,6 +119,139 @@ def test_public_boundary_omits_private_outputs(tmp_path):
     assert public["metrics"]["expected_attempts"] == 2
     assert public["metrics"]["leadership_eligible"] is False
     assert not validate_report(public)
+
+
+@pytest.mark.parametrize("rehash", [False, True])
+def test_public_report_rejects_manifest_changes_after_execution(tmp_path, rehash):
+    manifest = small_manifest()
+    summary = campaign.execute(manifest, "development_pilot", tmp_path, None, None,
+                               attempt_runner=lambda m, s, c, *args: row(c))
+    manifest["docker_image"] = "changed-after-execution"
+    if rehash:
+        manifest["binding_sha256"] = campaign.digest(
+            {key: value for key, value in manifest.items() if key != "binding_sha256"})
+    path = tmp_path / "manifest.json"
+    path.write_text(canonical_json(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="evaluated snapshot"):
+        campaign.public_report(path, summary)
+
+
+def test_public_report_rejects_changed_raw_manifest_bytes(tmp_path):
+    manifest = small_manifest()
+    summary = campaign.execute(manifest, "development_pilot", tmp_path, None, None,
+                               attempt_runner=lambda m, s, c, *args: row(c))
+    path = tmp_path / "manifest.json"
+    path.write_text(canonical_json(manifest), encoding="utf-8")
+    original_sha256 = sha256_file(path)
+    path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    with pytest.raises(ValueError, match="evaluated snapshot"):
+        campaign.public_report(path, summary, expected_manifest_sha256=original_sha256)
+
+
+@pytest.mark.parametrize("changed", ["manifest", "producer"])
+def test_public_report_rechecks_completed_envelope(tmp_path, monkeypatch, changed):
+    manifest = small_manifest()
+    summary = campaign.execute(manifest, "development_pilot", tmp_path, None, None,
+                               attempt_runner=lambda m, s, c, *args: row(c))
+    path = tmp_path / "manifest.json"
+    path.write_text(canonical_json(manifest), encoding="utf-8")
+    producer = tmp_path / "producer.py"
+    producer.write_text("# original producer\n", encoding="utf-8")
+    monkeypatch.setattr(campaign, "__file__", str(producer))
+    original = campaign.report_envelope
+
+    def mutate(**kwargs):
+        target = path if changed == "manifest" else producer
+        target.write_text(target.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+        return original(**kwargs)
+
+    monkeypatch.setattr(campaign, "report_envelope", mutate)
+    with pytest.raises(ValueError, match="artifact construction"):
+        campaign.public_report(path, summary)
+
+
+@pytest.mark.parametrize("phase", ["before_report", "during_envelope"])
+def test_public_report_revalidates_all_frozen_producers(tmp_path, monkeypatch, phase):
+    manifest = small_manifest()
+    manifest["source"] = {"engraphis/core/context.py": "a" * 64}
+    manifest["binding_sha256"] = campaign.digest(
+        {key: value for key, value in manifest.items() if key != "binding_sha256"})
+    observed = dict(manifest["source"])
+    monkeypatch.setattr(campaign, "source_snapshot", lambda: dict(observed))
+    summary = campaign.execute(manifest, "development_pilot", tmp_path, None, None,
+                               attempt_runner=lambda m, s, c, *args: row(c))
+    path = tmp_path / "manifest.json"
+    path.write_text(canonical_json(manifest), encoding="utf-8")
+    if phase == "before_report":
+        observed["engraphis/core/context.py"] = "b" * 64
+    else:
+        original = campaign.report_envelope
+
+        def change_core(**kwargs):
+            observed["engraphis/core/context.py"] = "b" * 64
+            return original(**kwargs)
+
+        monkeypatch.setattr(campaign, "report_envelope", change_core)
+    with pytest.raises(ValueError, match="producer differs"):
+        campaign.public_report(path, summary)
+
+
+def test_campaign_rechecks_producers_after_final_summary(tmp_path, monkeypatch):
+    manifest = small_manifest()
+    manifest["source"] = {}
+    observed = {}
+    monkeypatch.setattr(campaign, "source_snapshot", lambda: dict(observed))
+    original = campaign.summarize
+
+    def mutate_after_attempts(*args, **kwargs):
+        summary = original(*args, **kwargs)
+        observed["changed.py"] = "b" * 64
+        return summary
+
+    monkeypatch.setattr(campaign, "summarize", mutate_after_attempts)
+    with pytest.raises(ValueError, match="source changed"):
+        campaign.execute(manifest, "development_pilot", tmp_path, None, None,
+                         attempt_runner=lambda m, s, c, *args: row(c))
+
+
+@pytest.mark.parametrize("change", ["file", "loaded"])
+def test_campaign_rejects_corpus_metadata_drift_before_dispatch(tmp_path, change):
+    manifest = small_manifest()
+    corpus = SimpleNamespace(root=tmp_path, manifest={"version": 1}, runtime={"operations": []})
+    manifest["corpus"] = {}
+    for name in ("manifest", "runtime"):
+        path = tmp_path / f"{name}.json"
+        path.write_text(json.dumps(getattr(corpus, name)), encoding="utf-8")
+        manifest["corpus"][f"{name}_sha256"] = sha256_file(path)
+    if change == "file":
+        (tmp_path / "runtime.json").write_text("{}", encoding="utf-8")
+    else:
+        corpus.runtime = {"operations": ["different"]}
+    with pytest.raises(ValueError, match="corpus bytes differ"):
+        campaign.execute(manifest, "development_pilot", tmp_path, corpus, None,
+                         attempt_runner=lambda *args: pytest.fail("dispatched changed corpus"))
+
+
+def test_validation_receipt_hashes_the_checkpoint_bytes_actually_summarized(tmp_path, monkeypatch):
+    manifest = small_manifest()
+    manifest["stages"]["validation"] = manifest["stages"].pop("development_pilot")
+    manifest.update(source={}, core_arms=["no_memory", "hybrid"])
+    monkeypatch.setattr(campaign, "source_snapshot", lambda: {})
+    campaign.execute(manifest, "validation", tmp_path, None, None,
+                     attempt_runner=lambda m, s, c, *args: row(c))
+    paths = list((tmp_path / "validation").glob("*.json"))
+    expected = {path.name: sha256_file(path) for path in paths}
+    original = campaign.summarize
+
+    def mutate_after_parsing(*args, **kwargs):
+        result = original(*args, **kwargs)
+        paths[0].write_text("{}", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(campaign, "summarize", mutate_after_parsing)
+    receipt = campaign.validation_selection(manifest, tmp_path)
+    assert receipt["validation_checkpoints"] == expected
+    assert sha256_file(paths[0]) != expected[paths[0].name]
 
 
 def test_oracle_timeout_is_unscored_and_not_replayed(tmp_path):

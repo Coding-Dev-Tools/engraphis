@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 from collections import defaultdict
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -20,10 +21,18 @@ SCHEMA = "engraphis-external-analysis/v1"
 
 
 def read_verified(path: Path) -> dict:
+    return _read_verified_snapshot(path)[0]
+
+
+def _read_verified_snapshot(path: Path) -> tuple[dict, str]:
+    """Validate and identify the same bytes that are parsed for analysis."""
+    payload = path.read_bytes()
+    input_digest = hashlib.sha256(payload).hexdigest()
     sidecar = path.with_suffix(path.suffix + ".sha256")
-    if not sidecar.is_file() or sidecar.read_text(encoding="utf-8").split()[0] != sha256_file(path):
+    recorded = sidecar.read_text(encoding="utf-8").split() if sidecar.is_file() else []
+    if not recorded or recorded[0] != input_digest:
         raise ValueError("diagnostic artifact checksum missing or mismatched")
-    report = json.loads(path.read_text(encoding="utf-8"))
+    report = json.loads(payload)
     errors = validate_report(report)
     if errors:
         raise ValueError("invalid diagnostic envelope: " + errors[0])
@@ -54,7 +63,7 @@ def read_verified(path: Path) -> dict:
         values = [row[field] for row in rows if row[eligible]]
         if values and not math.isclose(report["metrics"][field], sum(values) / len(values), abs_tol=5e-6):
             raise ValueError("aggregate does not match its scored records")
-    return report
+    return report, input_digest
 
 
 def clustered_interval(rows: list[dict], field: str, *, eligible: str = "retrieval_scored",
@@ -99,7 +108,10 @@ def _source_case(row: dict, identity: Optional[str] = None) -> str:
 
 
 def summarize(path: Path) -> dict:
-    report = read_verified(path)
+    return _summarize_snapshot(path, *_read_verified_snapshot(path))
+
+
+def _summarize_snapshot(path: Path, report: dict, input_digest: str) -> dict:
     rows, metrics = report["records"], report["metrics"]
     categories = {}
     for category in sorted({str(row["category"]) for row in rows}):
@@ -108,7 +120,7 @@ def summarize(path: Path) -> dict:
         categories[category] = {"questions": len(selected), "scored": len(scored),
                                 "recall_at_k": sum(row["recall_at_k"] for row in scored) / len(scored) if scored else None,
                                 "packed_recall_at_k": sum(row["packed_recall_at_k"] for row in scored) / len(scored) if scored else None}
-    return {"schema": SCHEMA, "input_artifact": path.name, "input_sha256": sha256_file(path),
+    return {"schema": SCHEMA, "input_artifact": path.name, "input_sha256": input_digest,
             "dataset": report["suite"]["dataset"], "dataset_sha256": report["suite"]["sha256"],
             "configuration": report["protocol"]["config"], "models": report["models"],
             "status": metrics["checkpoint_status"], "questions": len(rows),
@@ -126,7 +138,11 @@ def summarize(path: Path) -> dict:
 
 
 def paired_difference(baseline: Path, candidate: Path) -> dict:
-    before, after = read_verified(baseline), read_verified(candidate)
+    return _paired_snapshots(_read_verified_snapshot(baseline), _read_verified_snapshot(candidate))
+
+
+def _paired_snapshots(baseline: tuple[dict, str], candidate: tuple[dict, str]) -> dict:
+    (before, baseline_digest), (after, candidate_digest) = baseline, candidate
     if before["suite"]["sha256"] != after["suite"]["sha256"] or before["models"] != after["models"]:
         raise ValueError("paired diagnostics require identical data bytes and models")
     before_config, after_config = before["protocol"]["config"], after["protocol"]["config"]
@@ -151,7 +167,7 @@ def paired_difference(baseline: Path, candidate: Path) -> dict:
         deltas.append({"question_id": identity, "retrieval_scored": old["retrieval_scored"],
                        "case": source_case,
                        "delta": new["packed_recall_at_k"] - old["packed_recall_at_k"]})
-    return {"baseline_sha256": sha256_file(baseline), "candidate_sha256": sha256_file(candidate),
+    return {"baseline_sha256": baseline_digest, "candidate_sha256": candidate_digest,
             "baseline_config": before["protocol"]["config"], "candidate_config": after["protocol"]["config"],
             "packed_recall_delta": clustered_interval(deltas, "delta"),
             "selection_boundary": "exploratory external configuration comparison; not a coding holdout gate"}
@@ -163,12 +179,18 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--compare", action="store_true")
     args = parser.parse_args(argv)
-    value = {"schema": SCHEMA, "reports": [summarize(path) for path in args.reports],
-             "source_sha256": sha256_file(Path(__file__))}
+    source_before = sha256_file(Path(__file__))
+    snapshots = [_read_verified_snapshot(path) for path in args.reports]
+    value = {"schema": SCHEMA,
+             "reports": [_summarize_snapshot(path, *snapshot)
+                         for path, snapshot in zip(args.reports, snapshots)],
+             "source_sha256": source_before}
     if args.compare:
         if len(args.reports) != 2:
             raise ValueError("comparison requires exactly two reports")
-        value["comparison"] = paired_difference(*args.reports)
+        value["comparison"] = _paired_snapshots(*snapshots)
+    if source_before != sha256_file(Path(__file__)):
+        raise ValueError("analysis producer changed during execution")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("x", encoding="utf-8", newline="\n") as handle:
         handle.write(canonical_json(value) + "\n")

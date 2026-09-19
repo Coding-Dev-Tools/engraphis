@@ -29,6 +29,48 @@ def _candidate(memory_id: str, content: str, score: float) -> Candidate:
     )
 
 
+@pytest.mark.parametrize("bound,query,selected", [
+    ("First", "second", "Second"), ("Second", "first", "First"),
+])
+def test_legacy_packing_does_not_advertise_a_different_literal_occurrence(bound, query, selected):
+    content = "  First Δ-42. Second Δ-42.  "
+    start = content.index("Δ-42", content.index(bound))
+    binding = make_exact_value_binding(content, "Δ-42", source_span=(start, start + 4))
+    candidate = _candidate("duplicate", content, 1.0)
+    candidate.record.metadata = {"exact_value": binding}
+    result = DeterministicContextPacker().pack(query, [candidate], 9)
+    chunk = result.chunks[0]
+    assert chunk.excerpt == f"{selected} Δ-42."
+    assert chunk.exact_value is None
+    assert chunk.source_span is None
+    assert chunk.evidence_unit["value"] is None
+
+
+@pytest.mark.parametrize("budget", [16, 100])
+def test_legacy_packing_retains_a_proven_bound_occurrence_and_qualifiers(budget):
+    content = "  First Δ-42 only if approved. Second Δ-42.  "
+    start = content.index("Δ-42")
+    binding = make_exact_value_binding(content, "Δ-42", source_span=(start, start + 4))
+    candidate = _candidate("duplicate", content, 1.0)
+    candidate.record.metadata = {"exact_value": binding}
+    result = DeterministicContextPacker().pack("approved", [candidate], budget)
+    chunk = result.chunks[0]
+    assert chunk.exact_value == binding
+    assert chunk.source_span == (start, start + 4)
+    assert chunk.evidence_unit["qualifiers"] == ["if", "only"]
+
+
+def test_legacy_packing_omits_ambiguous_duplicate_sentence_metadata():
+    content = "Label Δ-42. Label Δ-42."
+    start = content.rindex("Δ-42")
+    candidate = _candidate("duplicate", content, 1.0)
+    candidate.record.metadata = {"exact_value": make_exact_value_binding(
+        content, "Δ-42", source_span=(start, start + 4))}
+    chunk = DeterministicContextPacker().pack("label", [candidate], 12).chunks[0]
+    assert chunk.exact_value is None
+    assert chunk.source_span is None
+
+
 def test_coverage_packing_spreads_complete_units_across_long_sources() -> None:
     packer = DeterministicContextPacker()
     candidates = [

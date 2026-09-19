@@ -72,8 +72,8 @@ def test_paired_difference_carries_source_case_into_bootstrap_rows(tmp_path, mon
     }
     monkeypatch.setattr(
         analysis,
-        "read_verified",
-        lambda path: before if path == baseline else after,
+        "_read_verified_snapshot",
+        lambda path: (before if path == baseline else after, path.name),
     )
     monkeypatch.setattr(analysis, "sha256_file", lambda path: path.name)
     captured = {}
@@ -96,6 +96,72 @@ def test_paired_difference_carries_source_case_into_bootstrap_rows(tmp_path, mon
 def test_analysis_requires_artifact_sidecar(tmp_path):
     path = tmp_path / "report.json"
     path.write_text("{}")
+    with pytest.raises(ValueError, match="checksum"):
+        analysis.read_verified(path)
+
+
+def _copy_diagnostic(path):
+    source = analysis.Path(__file__).parents[1] / "docs/benchmark-evidence/locomo-full-20260916.json"
+    path.write_bytes(source.read_bytes())
+    checksum = sha256_file(path)
+    path.with_suffix(".json.sha256").write_text(checksum, encoding="utf-8")
+    return checksum
+
+
+def test_analysis_digest_identifies_the_verified_bytes_even_if_input_changes(tmp_path, monkeypatch):
+    path = tmp_path / "report.json"
+    original_digest = _copy_diagnostic(path)
+    original = analysis.validate_report
+
+    def mutate_after_read(report):
+        path.write_text("{}", encoding="utf-8")
+        return original(report)
+
+    monkeypatch.setattr(analysis, "validate_report", mutate_after_read)
+    result = analysis.summarize(path)
+    assert result["input_sha256"] == original_digest
+    assert result["input_sha256"] != sha256_file(path)
+    assert result["questions"] > 0
+
+
+def test_analysis_parses_the_same_bytes_it_checksums(tmp_path, monkeypatch):
+    path = tmp_path / "report.json"
+    _copy_diagnostic(path)
+    original = analysis.Path.read_text
+
+    def mutate_after_checksum_read(target, *args, **kwargs):
+        value = original(target, *args, **kwargs)
+        if target == path.with_suffix(".json.sha256"):
+            path.write_text("{}", encoding="utf-8")
+        return value
+
+    monkeypatch.setattr(analysis.Path, "read_text", mutate_after_checksum_read)
+    assert analysis.read_verified(path)["records"]
+
+
+def test_analysis_cli_reuses_input_snapshots_for_summary_and_pairing(tmp_path, monkeypatch):
+    paths = [tmp_path / name for name in ("baseline.json", "candidate.json")]
+    digests = [_copy_diagnostic(path) for path in paths]
+    original = analysis._summarize_snapshot
+
+    def mutate_after_read(*args):
+        for path in paths:
+            path.write_text("{}", encoding="utf-8")
+        return original(*args)
+
+    monkeypatch.setattr(analysis, "_summarize_snapshot", mutate_after_read)
+    output = tmp_path / "analysis.json"
+    assert analysis.main(["--reports", *map(str, paths), "--compare", "--output", str(output)]) == 0
+    result = json.loads(output.read_text(encoding="utf-8"))
+    assert [report["input_sha256"] for report in result["reports"]] == digests
+    assert result["comparison"]["baseline_sha256"] == digests[0]
+    assert result["comparison"]["candidate_sha256"] == digests[1]
+
+
+def test_analysis_rejects_empty_checksum_file(tmp_path):
+    path = tmp_path / "report.json"
+    _copy_diagnostic(path)
+    path.with_suffix(".json.sha256").write_text("", encoding="utf-8")
     with pytest.raises(ValueError, match="checksum"):
         analysis.read_verified(path)
 
