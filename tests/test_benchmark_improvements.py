@@ -257,6 +257,28 @@ def test_engine_recipe_distinguishes_omitted_k_from_explicit_k(monkeypatch: pyte
     assert captured["k_supplied"] is False
 
 
+@pytest.mark.parametrize("invalid", [None, "untrusted", {}, {"value": "canary-7", "start": 999, "end": 1007}])
+def test_validated_noop_repairs_invalid_retained_exact_value_metadata(invalid) -> None:
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    workspace_id = service.store.get_or_create_workspace("exact-repair")
+    first = service.engine.remember_with_resolution(
+        "Deploy to canary-7 today", workspace_id=workspace_id, metadata={"exact_value": invalid},
+    )
+    second = service.remember(
+        "Deploy to canary-7 today", workspace="exact-repair",
+        exact_value="canary-7", exact_value_type="enum",
+    )
+
+    assert second["op"] == "noop"
+    assert second["id"] == first["id"]
+    assert second["exact_value_bound"] is True
+    stored = service.store.get_memory(first["id"])
+    assert stored is not None
+    binding = exact_value_binding(stored.metadata, content=stored.content)
+    assert binding is not None
+    assert binding["value"] == "canary-7"
+
+
 def test_service_rebinds_exact_value_on_a_reworded_deduplicated_write() -> None:
     service = MemoryService.create(":memory:", graph_extractor="none")
     first = service.remember("Deploy to canary-7 today", workspace="acme")

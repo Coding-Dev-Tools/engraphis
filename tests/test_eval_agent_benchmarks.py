@@ -5,6 +5,7 @@ import json
 
 import pytest
 
+from eval import agent_benchmarks
 from eval.agent_benchmarks import (
     load_locomo_plus,
     load_mem2actbench,
@@ -311,6 +312,39 @@ def test_cli_writes_redacted_immutable_artifact(tmp_path, capsys):
     assert artifact["protocol"]["config"]["limit"] is None
     assert "--limit" not in artifact["protocol"]["command"]
     assert artifact_path.with_name("artifact.json.sha256").is_file()
+
+
+@pytest.mark.parametrize("changed", ["dataset", "conversations", "producer"])
+def test_cli_rejects_artifact_drift_after_evaluation(tmp_path, monkeypatch, capsys, changed):
+    conversations = _write_jsonl(tmp_path / "sessions.jsonl", [{
+        "session_id": "s-1", "original_conversation_ids": ["source-1"],
+        "turns": [{"role": "user", "source_id": "source-1", "content": "My city is Boston."}],
+    }])
+    dataset = _write_jsonl(tmp_path / "qa.jsonl", [{
+        "qa_id": "tool-q", "source_conversation_ids": ["source-1"],
+        "query": "Book a trip to my city.",
+        "tool_call": {"name": "book_trip", "arguments": {"city": "Boston"}},
+    }])
+    producer = tmp_path / "producer.py"
+    producer.write_text("# evaluated producer\n")
+    monkeypatch.setattr(agent_benchmarks, "_producer_snapshot",
+                        lambda: {str(producer): agent_benchmarks.sha256_file(producer)})
+    changed_path = {"dataset": agent_benchmarks.Path(dataset),
+                    "conversations": agent_benchmarks.Path(conversations), "producer": producer}[changed]
+
+    def late_print(*args, **kwargs):
+        changed_path.write_bytes(changed_path.read_bytes() + b"\n")
+
+    monkeypatch.setattr(agent_benchmarks, "print", late_print, raising=False)
+    artifact = tmp_path / "artifact.json"
+    with pytest.raises(SystemExit) as error:
+        main(["--dataset", dataset, "--conversations", conversations,
+              "--format", "mem2actbench", "--artifact", str(artifact)])
+
+    assert error.value.code == 2
+    assert "evaluated producer or data snapshots" in capsys.readouterr().err
+    assert not artifact.exists()
+    assert not artifact.with_suffix(".json.sha256").exists()
 
 
 def test_cli_records_a_selected_limit_in_its_public_artifact(tmp_path, capsys):

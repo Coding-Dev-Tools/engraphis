@@ -693,6 +693,18 @@ def main(argv: Optional[list[str]] = None) -> int:
             resolve_conflicts=not args.no_resolve,
             token_budget=args.token_budget,
         )
+        # Envelope construction reads files again. Verify the completed envelope
+        # against the snapshots that actually bounded this evaluation, including
+        # changes made while the private report was serialized or printed.
+        expected_sources = [
+            (Path(name).name, data_before[name])
+            for name in (args.dataset, args.conversations) if name
+        ] + [(Path(name).name, digest) for name, digest in source_before.items()]
+        observed_sources = [(item["name"], item["sha256"])
+                            for item in artifact["suite"]["sources"]]
+        if (artifact["suite"]["sha256"] != data_before[args.dataset]
+                or observed_sources != expected_sources):
+            parser.error("diagnostic artifact does not match the evaluated producer or data snapshots")
         write_canonical_artifact(artifact, args.artifact)
     return 0
 
