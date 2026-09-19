@@ -57,7 +57,7 @@ def test_container_runtime_matches_the_railway_persistence_and_port_contract():
     assert '[ -n "${RAILWAY_SERVICE_NAME:-}" ]' in entrypoint
     assert "ENGRAPHIS_HOST=\"::\"" in entrypoint
     assert "ENGRAPHIS_HOST=\"0.0.0.0\"" in entrypoint
-    assert "chown -R engraphis:engraphis /data" in entrypoint
+    assert "chown -R -h engraphis:engraphis /data" in entrypoint
     assert ".volume-ownership" in entrypoint
     assert "reject_linked_path()" in entrypoint
     assert 'if ! reject_linked_path "$state_dir"; then' in entrypoint
