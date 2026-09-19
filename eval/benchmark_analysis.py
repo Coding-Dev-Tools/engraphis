@@ -129,6 +129,13 @@ def paired_difference(baseline: Path, candidate: Path) -> dict:
     before, after = read_verified(baseline), read_verified(candidate)
     if before["suite"]["sha256"] != after["suite"]["sha256"] or before["models"] != after["models"]:
         raise ValueError("paired diagnostics require identical data bytes and models")
+    before_config, after_config = before["protocol"]["config"], after["protocol"]["config"]
+    # A repair can change memory text while preserving raw dataset bytes and
+    # question/evidence IDs. Bind the normalization inputs before pairing rows.
+    if (not before_config.get("format") or not after_config.get("format")
+            or any(before_config.get(field) != after_config.get(field)
+                   for field in ("format", "repair_manifest_sha256"))):
+        raise ValueError("paired diagnostics require identical normalized-corpus bindings")
     left = {row["question_id"]: row for row in before["records"]}
     right = {row["question_id"]: row for row in after["records"]}
     if left.keys() != right.keys():
