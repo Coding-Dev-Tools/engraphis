@@ -71,6 +71,30 @@ def test_legacy_packing_omits_ambiguous_duplicate_sentence_metadata():
     assert chunk.source_span is None
 
 
+@pytest.mark.parametrize("separator", ["\n", "\r\n"])
+def test_multiline_exact_value_retains_surrounding_restrictions_when_they_fit(separator):
+    value = '{' + separator + '  "label": "Δ-42"' + separator + '}'
+    content = "Only use in production after approval.\n" + value + "\nNever use in staging."
+    candidate = _candidate("multiline", content, 1.0)
+    candidate.record.metadata = {"exact_value": make_exact_value_binding(content, value, "json")}
+    packer = DeterministicContextPacker()
+    minimum_budget = packer.count_tokens("[1]\n" + value)
+    for budget in (minimum_budget, minimum_budget + 4, 100):
+        result = packer.pack_coverage("production approval staging", [candidate], budget)
+        chunk = result.chunks[0]
+        assert value in chunk.excerpt
+        assert chunk.exact_value["value"] == value
+        assert result.usage.context_tokens <= budget
+        if budget == 100:
+            assert chunk.excerpt == content
+            assert "only" in chunk.evidence_unit["qualifiers"]
+            assert "never" in chunk.evidence_unit["qualifiers"]
+        elif budget == minimum_budget:
+            assert chunk.excerpt == value
+        else:
+            assert chunk.excerpt in content and len(chunk.excerpt) > len(value)
+
+
 def test_coverage_packing_spreads_complete_units_across_long_sources() -> None:
     packer = DeterministicContextPacker()
     candidates = [

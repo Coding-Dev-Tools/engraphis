@@ -568,15 +568,14 @@ class DeterministicContextPacker:
             )
 
         # A JSON/string exact value may itself contain line breaks.  Sentence
-        # splitting normalizes those separators, so handle the bound source span
-        # directly before selecting sentence windows.  The literal remains
-        # byte-for-byte copyable and is omitted if it cannot fit in the budget.
+        # splitting normalizes those separators, so grow a verbatim window around
+        # the bound span. Keep surrounding restrictions whenever space permits;
+        # a bare value is reserved for budgets that cannot fit nearby context.
         if binding and any(separator in exact_value for separator in ("\n", "\r")):
-            if (
-                fits(exact_value)
-                and self._count(exact_value) >= minimum_tokens
-            ):
-                return exact_value, "coverage_exact", binding
+            if fits(exact_value):
+                excerpt = self._exact_window(record.content, binding, query_terms, fits)
+                if self._count(excerpt) >= minimum_tokens:
+                    return excerpt, "coverage_exact", binding
             return "", "", None
         sentences = [part.strip() for part in _SENTENCE_RE.split(source) if part.strip()]
         if not sentences:
@@ -627,29 +626,7 @@ class DeterministicContextPacker:
             # An oversized sentence must not hide a small verified literal.
             # Grow a verbatim source window from its bound coordinates, choosing
             # nearby qualifier/query tokens first and balancing both sides.
-            raw_source = record.content
-            left, right = cast(int, binding["start"]), cast(int, binding["end"])
-            before = list(_TOKEN_RE.finditer(raw_source, 0, left))
-            after = list(_TOKEN_RE.finditer(raw_source, right))
-            taken = [0, 0]
-            best = raw_source[left:right]
-            while True:
-                options = []
-                for side, matches in enumerate((before, after)):
-                    if taken[side] >= len(matches):
-                        continue
-                    token = matches[-taken[side] - 1] if side == 0 else matches[taken[side]]
-                    start, end = (token.start(), right) if side == 0 else (left, token.end())
-                    excerpt = raw_source[start:end]
-                    if fits(excerpt):
-                        terms = _terms(token.group())
-                        rank = (2 * len(terms & _QUALIFIER_TERMS) + len(terms & query_terms),
-                                -taken[side], -side)
-                        options.append((rank, side, start, end, excerpt))
-                if not options:
-                    break
-                _, side, left, right, best = max(options)
-                taken[side] += 1
+            best = self._exact_window(record.content, binding, query_terms, fits)
             best_reason = "coverage_exact"
         if not best or self._count(best) < minimum_tokens:
             return "", "", None
@@ -664,6 +641,37 @@ class DeterministicContextPacker:
             else:
                 return "", "", None
         return best, best_reason, binding
+
+    def _exact_window(
+        self, source: str, binding: dict[str, object], query_terms: set[str],
+        fits: Callable[[str], bool],
+    ) -> str:
+        """Expand a verified literal without normalizing its surrounding text."""
+        if fits(source):
+            return source
+        left, right = cast(int, binding["start"]), cast(int, binding["end"])
+        before = list(_TOKEN_RE.finditer(source, 0, left))
+        after = list(_TOKEN_RE.finditer(source, right))
+        taken = [0, 0]
+        best = source[left:right]
+        while True:
+            options = []
+            for side, matches in enumerate((before, after)):
+                if taken[side] >= len(matches):
+                    continue
+                token = matches[-taken[side] - 1] if side == 0 else matches[taken[side]]
+                start, end = (token.start(), right) if side == 0 else (left, token.end())
+                excerpt = source[start:end]
+                if fits(excerpt):
+                    terms = _terms(token.group())
+                    rank = (2 * len(terms & _QUALIFIER_TERMS) + len(terms & query_terms),
+                            -taken[side], -side)
+                    options.append((rank, side, start, end, excerpt))
+            if not options:
+                break
+            _, side, left, right, best = max(options)
+            taken[side] += 1
+        return best
 
     def _render_packed(self, chunks: list[PackedChunk]) -> str:
         parts = []
