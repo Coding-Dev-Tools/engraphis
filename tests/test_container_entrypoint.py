@@ -73,8 +73,10 @@ def test_external_state_marker_cannot_skip_repair_of_a_replaced_volume(tmp_path)
     # Remap only the managed volume in this unprivileged startup exercise.
     entrypoint = entrypoint.replace('ownership_marker="/data/.volume-ownership"',
                                     'ownership_marker="$MANAGED_VOLUME/.volume-ownership"')
-    entrypoint = entrypoint.replace('chown -R engraphis:engraphis /data',
-                                    'chown -R engraphis:engraphis "$MANAGED_VOLUME"')
+    entrypoint = entrypoint.replace('chown -R -h engraphis:engraphis /data',
+                                    'chown -R -h engraphis:engraphis "$MANAGED_VOLUME"')
+    entrypoint = entrypoint.replace('repair_volume_descendants /data',
+                                    'repair_volume_descendants "$MANAGED_VOLUME"')
     entrypoint = entrypoint.replace('chown engraphis:engraphis /data',
                                     'chown engraphis:engraphis "$MANAGED_VOLUME"')
     script = tmp_path / "entrypoint.sh"
@@ -84,7 +86,7 @@ def test_external_state_marker_cannot_skip_repair_of_a_replaced_volume(tmp_path)
            "MANAGED_VOLUME": str(managed), "ENGRAPHIS_STATE_DIR": str(external),
            "ENGRAPHIS_ENV_FILE": str(external / "new" / "deep" / "config.env")}
     subprocess.run(["sh", str(script), "true"], env=env, check=True)
-    assert f"-R engraphis:engraphis {managed}" in log.read_text().splitlines()
+    assert f"-R -h engraphis:engraphis {managed}" in log.read_text().splitlines()
     for directory in (external / "new", external / "new" / "deep"):
         assert f"engraphis:engraphis {directory}" in log.read_text().splitlines()
     assert (managed / ".volume-ownership").is_file()
@@ -94,6 +96,28 @@ def test_external_state_marker_cannot_skip_repair_of_a_replaced_volume(tmp_path)
     log.write_text("")
     subprocess.run(["sh", str(script), "true"], env=env, check=True)
     assert not any(line.startswith("-R ") for line in log.read_text().splitlines())
+
+
+def test_volume_scan_repairs_mismatched_ownership_without_rewriting_owned_files(tmp_path):
+    volume = tmp_path / "data"
+    volume.mkdir()
+    database = volume / "engraphis.db"
+    database.write_text("retained database")
+    binaries = tmp_path / "bin"
+    binaries.mkdir()
+    chown = binaries / "chown"
+    chown.write_text('#!/bin/sh\nprintf "%s\\n" "$*"\n')
+    chown.chmod(0o755)
+    entrypoint = (Path(__file__).resolve().parents[1] / "docker-entrypoint.sh").read_text()
+    body = entrypoint.split("repair_volume_descendants() {", 1)[1].split("\n}", 1)[0]
+    script = 'repair_volume_descendants() {' + body + '\n}\nrepair_volume_descendants "$1" "$2"\n'
+    env = {**os.environ, "PATH": str(binaries) + os.pathsep + os.environ["PATH"]}
+    owner = volume.stat().st_uid
+    for uid, expected in ((owner, ""), (owner + 1, f"-R -h engraphis:engraphis {volume}\n")):
+        result = subprocess.run(["sh", "-c", script, "validator", str(volume), str(uid)],
+                                env=env, text=True, capture_output=True, check=True)
+        assert result.stdout == expected
+    assert database.read_text() == "retained database"
 
 
 def test_non_root_first_boot_initializes_private_state_and_config(tmp_path):
