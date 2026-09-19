@@ -29,6 +29,8 @@ The root entrypoint repairs ownership only for the managed `/data` volume. When 
 container configuration places `ENGRAPHIS_STATE_DIR` outside `/data`, create that directory
 with the container's `engraphis` UID as owner before startup. Existing external config parent
 directories must also belong to that UID; startup rejects other owners before changing files.
+The repair marker lives at `/data/.volume-ownership`, so reusing external state cannot skip
+the repair of a replaced or restored data volume.
 
 > Port precedence: the dashboard binds `$PORT` when the platform injects one, falling back
 > to `ENGRAPHIS_PORT` (then `8700`). Compose sets both from `ENGRAPHIS_COMPOSE_PORT` so the
