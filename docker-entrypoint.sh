@@ -9,9 +9,9 @@
 # We therefore start the container as root, repair ownership once, and exec the real command
 # as `engraphis` via gosu — keeping the deliberate non-root runtime while making the volume
 # writable. A marker avoids recursively walking a large Hugging Face cache on every restart.
-# When not running as root (e.g. a local `docker run` that already dropped privileges) this is
-# a no-op passthrough.
+# A non-root launch initializes private settings in its already-writable state volume.
 set -e
+umask 077
 
 # Default bind host, decided at runtime (not baked into the image). Uvicorn's `::`
 # listener is IPv6-only on some container kernels, so plain Docker port forwarding cannot
@@ -27,55 +27,55 @@ if [ -z "${ENGRAPHIS_HOST:-}" ]; then
     export ENGRAPHIS_HOST
 fi
 
+# Validate every existing component without resolving through a symlink. The trusted
+# config path is operator-configured and may be outside /data, so checking only its
+# leaf or final parent would let an app-writable intermediate directory redirect root's
+# chmod/chown into the image. Reject dot-dot paths rather than guessing their target.
+reject_linked_path() {
+    path=$1
+    case "$path" in
+        /*) ;;
+        *) return 1 ;;
+    esac
+    remainder=${path#/}
+    current=
+    while [ -n "$remainder" ]; do
+        case "$remainder" in
+            */*)
+                component=${remainder%%/*}
+                remainder=${remainder#*/}
+                ;;
+            *)
+                component=$remainder
+                remainder=
+                ;;
+        esac
+        case "$component" in
+            ""|.) continue ;;
+            ..) return 1 ;;
+        esac
+        if [ -n "$current" ]; then
+            current="$current/$component"
+        else
+            current="/$component"
+        fi
+        if [ -L "$current" ]; then
+            return 1
+        fi
+    done
+    return 0
+}
+
+state_directory_is_owned() {
+    # Only /data is an ownership-repair target. External state paths must be
+    # provisioned for the app beforehand, including on the first boot.
+    case "$1" in
+        /data|/data/*) return 0 ;;
+    esac
+    [ -d "$1" ] && [ "$(stat -c '%u' "$1" 2>/dev/null)" = "$2" ]
+}
+
 if [ "$(id -u)" = "0" ]; then
-    # Validate every existing component without resolving through a symlink. The trusted
-    # config path is operator-configured and may be outside /data, so checking only its
-    # leaf or final parent would let an app-writable intermediate directory redirect root's
-    # chmod/chown into the image. Reject dot-dot paths rather than guessing their target.
-    reject_linked_path() {
-        path=$1
-        case "$path" in
-            /*) ;;
-            *) return 1 ;;
-        esac
-        remainder=${path#/}
-        current=
-        while [ -n "$remainder" ]; do
-            case "$remainder" in
-                */*)
-                    component=${remainder%%/*}
-                    remainder=${remainder#*/}
-                    ;;
-                *)
-                    component=$remainder
-                    remainder=
-                    ;;
-            esac
-            case "$component" in
-                ""|.) continue ;;
-                ..) return 1 ;;
-            esac
-            if [ -n "$current" ]; then
-                current="$current/$component"
-            else
-                current="/$component"
-            fi
-            if [ -L "$current" ]; then
-                return 1
-            fi
-        done
-        return 0
-    }
-
-    state_directory_is_owned() {
-        # Only /data is an ownership-repair target. External state paths must be
-        # provisioned for the app beforehand, including on the first boot.
-        case "$1" in
-            /data|/data/*) return 0 ;;
-        esac
-        [ -d "$1" ] && [ "$(stat -c '%u' "$1" 2>/dev/null)" = "$2" ]
-    }
-
     # ENGRAPHIS_STATE_DIR defaults to /data/.engraphis. Repair the complete volume only on
     # first boot; later restarts verify the mount and state roots without walking the cache.
     state_dir="${ENGRAPHIS_STATE_DIR:-/data/.engraphis}"
@@ -103,6 +103,10 @@ if [ "$(id -u)" = "0" ]; then
     fi
     if ! mkdir -p "$state_dir"; then
         printf '%s\n' "[engraphis] unable to create state directory: $state_dir" >&2
+        exit 1
+    fi
+    if ! reject_linked_path "$state_dir" || [ ! -d "$state_dir" ] || ! chmod 700 "$state_dir"; then
+        printf '%s\n' "[engraphis] unable to restrict state directory: $state_dir" >&2
         exit 1
     fi
     if [ -n "$config_file" ]; then
@@ -214,6 +218,43 @@ if [ "$(id -u)" = "0" ]; then
         fi
     fi
     exec gosu engraphis "$@"
+fi
+
+# Explicit trusted settings are required by the configuration loader. A rootless
+# container with a writable volume must provision them before the app imports it.
+state_dir="${ENGRAPHIS_STATE_DIR:-/data/.engraphis}"
+config_file="${ENGRAPHIS_ENV_FILE:-}"
+if ! reject_linked_path "$state_dir"; then
+    printf '%s\n' "[engraphis] refusing linked or unnormalized state path: $state_dir" >&2
+    exit 1
+fi
+if ! mkdir -p "$state_dir" || ! reject_linked_path "$state_dir" || [ ! -d "$state_dir" ] || ! chmod 700 "$state_dir"; then
+    printf '%s\n' "[engraphis] unable to initialize private state directory: $state_dir" >&2
+    exit 1
+fi
+if [ -n "$config_file" ]; then
+    if ! reject_linked_path "$config_file"; then
+        printf '%s\n' "[engraphis] refusing linked or unnormalized trusted config path: $config_file" >&2
+        exit 1
+    fi
+    config_parent=$(dirname "$config_file")
+    if ! mkdir -p "$config_parent" || ! reject_linked_path "$config_parent" || [ ! -d "$config_parent" ]; then
+        printf '%s\n' "[engraphis] unable to initialize trusted config directory: $config_parent" >&2
+        exit 1
+    fi
+    config_owner=$(stat -c '%u' "$config_parent" 2>/dev/null || true)
+    if [ "$config_owner" != "$(id -u)" ]; then
+        printf '%s\n' "[engraphis] trusted config directory must belong to the runtime user: $config_parent" >&2
+        exit 1
+    fi
+    if [ ! -e "$config_file" ] && ! : > "$config_file"; then
+        printf '%s\n' "[engraphis] unable to create trusted config file: $config_file" >&2
+        exit 1
+    fi
+    if ! reject_linked_path "$config_file" || [ ! -f "$config_file" ] || ! chmod 600 "$config_file"; then
+        printf '%s\n' "[engraphis] unable to restrict trusted config file: $config_file" >&2
+        exit 1
+    fi
 fi
 
 exec "$@"
