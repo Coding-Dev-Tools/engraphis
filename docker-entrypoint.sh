@@ -79,7 +79,9 @@ if [ "$(id -u)" = "0" ]; then
     # ENGRAPHIS_STATE_DIR defaults to /data/.engraphis. Repair the complete volume only on
     # first boot; later restarts verify the mount and state roots without walking the cache.
     state_dir="${ENGRAPHIS_STATE_DIR:-/data/.engraphis}"
-    ownership_marker="${state_dir}/.volume-ownership"
+    # Keep the marker on the volume it describes; external state may outlive a
+    # replaced /data volume that still needs its first ownership repair.
+    ownership_marker="/data/.volume-ownership"
     config_file="${ENGRAPHIS_ENV_FILE:-}"
     app_owner=$(id -u engraphis)
     if ! reject_linked_path "$state_dir"; then
