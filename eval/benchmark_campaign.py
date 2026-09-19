@@ -703,6 +703,18 @@ def run_attempt(manifest: dict, stage_name: str, cell: dict, corpus: Any, client
                 adapter.close()
 
 
+def _verify_frozen_corpus(manifest: dict, corpus: Any) -> None:
+    if "corpus" not in manifest:
+        return
+    if corpus is None:
+        raise ValueError("campaign requires its frozen loaded corpus")
+    for name in ("manifest", "runtime"):
+        payload = (corpus.root / f"{name}.json").read_bytes()
+        if (hashlib.sha256(payload).hexdigest() != manifest["corpus"][f"{name}_sha256"]
+                or json.loads(payload) != getattr(corpus, name)):
+            raise ValueError("corpus bytes differ from the evaluated campaign snapshot")
+
+
 def execute(manifest: dict, stage_name: str, results: Path, corpus: Any, client: Any,
             *, maximum_attempts: Optional[int] = None,
             attempt_runner: Callable[..., dict] = run_attempt) -> dict:
@@ -721,6 +733,7 @@ def execute(manifest: dict, stage_name: str, results: Path, corpus: Any, client:
         directory.mkdir(exist_ok=True)
         executed = 0
         for cell in cells(manifest, stage_name):
+            _verify_frozen_corpus(manifest, corpus)
             if "source" in manifest and manifest["source"] != source_snapshot():
                 raise ValueError("implementation source changed during campaign execution")
             identity = digest(cell)
@@ -759,7 +772,11 @@ def execute(manifest: dict, stage_name: str, results: Path, corpus: Any, client:
                 break
             if maximum_attempts is not None and executed >= maximum_attempts:
                 break
-        return summarize(manifest, stage_name, results)
+        summary = summarize(manifest, stage_name, results)
+        if "source" in manifest and manifest["source"] != source_snapshot():
+            raise ValueError("implementation source changed during campaign execution")
+        _verify_frozen_corpus(manifest, corpus)
+        return summary
     finally:
         lock.unlink(missing_ok=True)
 
@@ -954,7 +971,8 @@ def _paired_summaries(manifest: dict, stage_name: str, rows: list[dict]) -> dict
     return output
 
 
-def summarize(manifest: dict, stage_name: str, results: Path) -> dict:
+def summarize(manifest: dict, stage_name: str, results: Path, *,
+              checkpoint_digests: Optional[dict[str, str]] = None) -> dict:
     expected = cells(manifest, stage_name)
     rows, missing = [], 0
     for cell in expected:
@@ -962,12 +980,15 @@ def summarize(manifest: dict, stage_name: str, results: Path) -> dict:
         if not path.exists():
             missing += 1
             continue
-        checkpoint = _read(path)
+        checkpoint_bytes = path.read_bytes()
+        checkpoint = json.loads(checkpoint_bytes)
         if checkpoint.get("binding_sha256") != manifest["binding_sha256"] or checkpoint.get("cell") != cell:
             raise ValueError("checkpoint provenance mismatch")
         if checkpoint.get("row_sha256") != digest(checkpoint["row"]):
             raise ValueError("checkpoint content checksum mismatch")
         validate_row(checkpoint["row"], cell)
+        if checkpoint_digests is not None:
+            checkpoint_digests[path.name] = hashlib.sha256(checkpoint_bytes).hexdigest()
         rows.append(checkpoint["row"])
     statuses = Counter(row["status"] for row in rows)
     aggregates = {}
@@ -1000,7 +1021,8 @@ def summarize(manifest: dict, stage_name: str, results: Path) -> dict:
 
 
 def validation_selection(manifest: dict, results: Path) -> dict:
-    summary = summarize(manifest, "validation", results)
+    checkpoints: dict[str, str] = {}
+    summary = summarize(manifest, "validation", results, checkpoint_digests=checkpoints)
     if (summary["missing_attempts"] or summary["statuses"].get("error", 0)
             or summary["critical_violations"]):
         raise ValueError("validation must account for every attempt with no errors or critical violations")
@@ -1015,7 +1037,6 @@ def validation_selection(manifest: dict, results: Path) -> dict:
         observed = summary["arms"].get(arm, {}).get("complete")
         if observed != expected:
             raise ValueError("candidate requires fully scored validation outcomes for every core arm")
-    checkpoints = {path.name: sha256_file(path) for path in sorted((results / "validation").glob("*.json"))}
     receipt = {"schema": "engraphis-validation-selection/v1", "campaign_sha256": manifest["binding_sha256"],
                "candidate_source_sha256": digest(manifest["source"]),
                "validation_checkpoints": checkpoints,
@@ -1026,8 +1047,20 @@ def validation_selection(manifest: dict, results: Path) -> dict:
     return receipt
 
 
-def public_report(manifest_path: Path, summary: dict) -> dict:
-    manifest = _read(manifest_path)
+def public_report(manifest_path: Path, summary: dict, *,
+                  expected_manifest_sha256: Optional[str] = None, corpus: Any = None) -> dict:
+    manifest_bytes = manifest_path.read_bytes()
+    manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+    manifest = json.loads(manifest_bytes)
+    unsigned = {key: value for key, value in manifest.items() if key != "binding_sha256"}
+    if (manifest.get("binding_sha256") != digest(unsigned)
+            or manifest.get("binding_sha256") != summary.get("campaign_sha256")
+            or (expected_manifest_sha256 is not None and manifest_sha256 != expected_manifest_sha256)):
+        raise ValueError("campaign report manifest differs from the evaluated snapshot")
+    if "source" in manifest and manifest["source"] != source_snapshot():
+        raise ValueError("campaign report producer differs from the evaluated snapshot")
+    _verify_frozen_corpus(manifest, corpus)
+    producer_sha256 = sha256_file(Path(__file__))
     safe_rows = [{key: row.get(key) for key in (
         "scenario_id", "family_id", "category", "arm", "token_budget", "repetition", "status",
         "task_success", "context_tokens", "latency_ms", "citation_validity", "citation_support",
@@ -1037,7 +1070,7 @@ def public_report(manifest_path: Path, summary: dict) -> dict:
           "question_id": f"{row['scenario_id']}:{row['arm']}:{row['token_budget']}:{row['repetition']}"}
                  for row in summary["rows"]]
     metrics = {key: value for key, value in summary.items() if key != "rows"}
-    return report_envelope(suite="implementation-team coding campaign", dataset_path=manifest_path,
+    report = report_envelope(suite="implementation-team coding campaign", dataset_path=manifest_path,
                            config={"campaign_sha256": summary["campaign_sha256"], "stage": summary["stage"],
                                    "dependency_lock_sha256": manifest.get("dependency_lock_sha256"),
                                    "competitor_pins_sha256": manifest.get("pins_sha256"),
@@ -1061,6 +1094,14 @@ def public_report(manifest_path: Path, summary: dict) -> dict:
                                              "method": "native app-server usage counters; failed calls without counters remain explicit",
                                              "transport": "codex_oauth",
                                              "billing_basis": OAUTH_BILLING_BASIS})
+    if (report["suite"]["sha256"] != manifest_sha256
+            or [(item["name"], item["sha256"]) for item in report["suite"]["sources"]]
+            != [(Path(__file__).name, producer_sha256)]):
+        raise ValueError("campaign report changed during artifact construction")
+    if "source" in manifest and manifest["source"] != source_snapshot():
+        raise ValueError("campaign report producer differs from the evaluated snapshot")
+    _verify_frozen_corpus(manifest, corpus)
+    return report
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -1090,7 +1131,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                                                 embed_revision=args.embed_revision, dependency_lock=args.dependency_lock)
             _save_new(args.manifest, manifest)
             _save_new(args.companion, companion)
-        manifest, companion = _read(args.manifest), _read(args.companion)
+        manifest_bytes = args.manifest.read_bytes()
+        manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+        manifest, companion = json.loads(manifest_bytes), _read(args.companion)
         validate_manifest(manifest, companion, corpus_root=args.corpus, dependency_lock=args.dependency_lock)
         if args.stage not in manifest["stages"]:
             raise ValueError("unknown stage")
@@ -1124,13 +1167,16 @@ def main(argv: Optional[list[str]] = None) -> int:
             receipt = _read(args.selection_receipt)
             if receipt != validation_selection(manifest, args.results):
                 raise ValueError("validation selection does not bind the actual frozen candidate outcomes")
+        corpus = load_corpus(args.corpus)
+        _verify_frozen_corpus(manifest, corpus)
         _docker_ready(manifest["docker_image"])
         client = approved_client(manifest, args.stage, args.approval, args.results)
         with graph_store("graphiti" in manifest["stages"][args.stage]["arms"]):
-            summary = execute(manifest, args.stage, args.results, load_corpus(args.corpus), client,
+            summary = execute(manifest, args.stage, args.results, corpus, client,
                               maximum_attempts=args.max_attempts)
         if args.public_artifact:
-            write_canonical_artifact(public_report(args.manifest, summary), args.public_artifact)
+            write_canonical_artifact(public_report(args.manifest, summary,
+                expected_manifest_sha256=manifest_sha256, corpus=corpus), args.public_artifact)
         print(json.dumps({key: value for key, value in summary.items() if key != "rows"}, indent=2))
         return 0 if summary["status"] == "COMPLETE" else 2
     except (ValueError, OSError, subprocess.SubprocessError) as exc:

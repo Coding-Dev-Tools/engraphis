@@ -104,11 +104,26 @@ def source_digest(path: Union[str, Path]) -> dict[str, Union[str, int]]:
     the bytes used, not disclose an operator's directory layout.
     """
     resolved = Path(path)
+    digest = hashlib.sha256()
+    byte_count = 0
+    with resolved.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+            byte_count += len(block)
     return {
         "name": resolved.name,
-        "sha256": sha256_file(resolved),
-        "bytes": resolved.stat().st_size,
+        "sha256": digest.hexdigest(),
+        "bytes": byte_count,
     }
+
+
+def verify_report_snapshot(report: dict, *, dataset_sha256: str,
+                           sources: Sequence[tuple[str, str]]) -> dict:
+    """Reject envelopes that identify bytes other than the evaluated snapshot."""
+    if (report["suite"]["sha256"] != dataset_sha256
+            or [(item["name"], item["sha256"]) for item in report["suite"]["sources"]] != list(sources)):
+        raise ValueError("report artifact does not match the evaluated source snapshot")
+    return report
 
 
 def git_provenance(cwd: Optional[Union[str, Path]] = None) -> dict[str, Union[str, bool]]:

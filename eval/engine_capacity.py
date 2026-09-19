@@ -24,7 +24,9 @@ import uuid
 
 from engraphis.core.engine import MemoryEngine
 from engraphis.core.interfaces import Scope
-from eval.benchmark import canonical_json, report_envelope, sha256_file, write_canonical_artifact
+from eval.benchmark import (
+    canonical_json, report_envelope, sha256_file, verify_report_snapshot, write_canonical_artifact,
+)
 from eval.vector_scale import _latency_ms
 from eval.vector_scale_storage import _disk, _hardware
 
@@ -817,7 +819,7 @@ def run_cell(cell: Cell, *, model_dir: Optional[str] = None,
                         abs(ram / (HARDWARE[cell.hardware] * 1024 ** 3) - 1) <= 0.125)
     rows = [row for repeat in repeats for row in repeat["operations"]]
     wall = [row["wall_ms"] for row in rows if "wall_ms" in row]
-    return report_envelope(
+    report = report_envelope(
         suite=SCHEMA, dataset_path=Path(__file__), config=asdict(cell),
         records=[{"question_id": f"r{r}-op{row['number']}", "category": row["operation"],
                   "qa_correct": row["correct"],
@@ -860,6 +862,8 @@ def run_cell(cell: Cell, *, model_dir: Optional[str] = None,
                  ["python", "-m", "eval.engine_capacity", "--run-cell", "<saved-cell-config.json>",
                   "--model-dir", "<existing-local-model>", "--model-sha256", str(model_sha256)]),
     )
+    return verify_report_snapshot(report, dataset_sha256=before["eval/engine_capacity.py"],
+        sources=[(Path(name).name, value) for name, value in before.items()])
 
 
 def main(argv=None) -> int:
