@@ -30,7 +30,9 @@ container configuration places `ENGRAPHIS_STATE_DIR` outside `/data`, create tha
 with the container's `engraphis` UID as owner before startup. Existing external config parent
 directories must also belong to that UID; startup rejects other owners before changing files.
 The repair marker lives at `/data/.volume-ownership`, so reusing external state cannot skip
-the repair of a replaced or restored data volume.
+the repair of a replaced data volume. Restarts scan for ownership drift before trusting an
+existing marker, repairing restored files when needed without following external symlinks.
+Correctly owned volumes avoid recursive ownership writes, but still require a metadata scan.
 State directories use mode `0700` and trusted settings use `0600`. A container started with
 `--user` or `runAsUser` initializes a missing settings file when its state volume is writable
 by that runtime UID; it preserves the file on restart.
