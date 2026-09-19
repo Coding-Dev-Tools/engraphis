@@ -10,7 +10,8 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Callable
-from typing import NamedTuple, Optional
+from dataclasses import replace
+from typing import NamedTuple, Optional, cast
 
 from engraphis.core.interfaces import (
     Candidate,
@@ -345,6 +346,9 @@ class DeterministicContextPacker:
                 header = self._header(candidate, ordinal, attribution=attribution)
                 excerpt, reason, exact = self._coverage_excerpt(
                     query, candidate, max_tokens=target,
+                    rendered_fits=lambda text: self._count(
+                        f"{context}{separator}{header}\n{text}"
+                    ) <= budget,
                 )
                 if not excerpt:
                     continue
@@ -364,6 +368,9 @@ class DeterministicContextPacker:
                     header = self._header(candidate, len(packed) + 1, attribution=attribution)
                     chosen_excerpt, chosen_reason, chosen_exact = self._coverage_excerpt(
                         query, candidate, max_tokens=available_total,
+                        rendered_fits=lambda text: self._count(
+                            f"{context}{separator}{header}\n{text}"
+                        ) <= budget,
                     )
                     proposed = f"{context}{separator}{header}\n{chosen_excerpt}"
                     if chosen_excerpt and self._count(proposed) <= budget:
@@ -422,6 +429,10 @@ class DeterministicContextPacker:
                 expanded, reason, exact = self._coverage_excerpt(
                     query, candidate, max_tokens=budget,
                     minimum_tokens=self._count(current_excerpt),
+                    rendered_fits=lambda text: self._count(self._render_packed([
+                        replace(item, excerpt=text) if offset == index else item
+                        for offset, item in enumerate(packed)
+                    ])) <= budget,
                 )
                 if not expanded or self._count(expanded) <= self._count(current_excerpt):
                     continue
@@ -526,24 +537,31 @@ class DeterministicContextPacker:
         *,
         max_tokens: int,
         minimum_tokens: int = 0,
+        rendered_fits: Optional[Callable[[str], bool]] = None,
     ) -> tuple[str, str, Optional[dict[str, object]]]:
         """Choose a contiguous evidence window, retaining exact-value bindings."""
         record = candidate.record
         if record is None or max_tokens <= 0:
             return "", "", None
-        source = (record.content or record.summary or "").strip()
+        source = record.content or record.summary or ""
         query_terms = _terms(query)
         binding = exact_value_binding(record.metadata, content=record.content)
         exact_value = ""
         if binding and isinstance(binding.get("value"), str):
             exact_value = binding["value"]
+
+        def fits(text: str) -> bool:
+            return self._count(text) <= max_tokens and (
+                rendered_fits is None or rendered_fits(text)
+            )
+
         # A JSON/string exact value may itself contain line breaks.  Sentence
         # splitting normalizes those separators, so handle the bound source span
         # directly before selecting sentence windows.  The literal remains
         # byte-for-byte copyable and is omitted if it cannot fit in the budget.
         if binding and any(separator in exact_value for separator in ("\n", "\r")):
             if (
-                self._count(exact_value) <= max_tokens
+                fits(exact_value)
                 and self._count(exact_value) >= minimum_tokens
             ):
                 return exact_value, "coverage_exact", binding
@@ -551,6 +569,12 @@ class DeterministicContextPacker:
         sentences = [part.strip() for part in _SENTENCE_RE.split(source) if part.strip()]
         if not sentences:
             return "", "", None
+        sentence_spans = []
+        offset = 0
+        for sentence in sentences:
+            start = source.index(sentence, offset)
+            offset = start + len(sentence)
+            sentence_spans.append((start, offset))
         ranked = sorted(
             range(len(sentences)),
             key=lambda index: (
@@ -569,10 +593,16 @@ class DeterministicContextPacker:
             for width in (3, 2, 1):
                 start = max(0, min(seed, len(sentences) - width))
                 end = start + width
+                window_spans = sentence_spans[start:end]
+                if binding and not (
+                    window_spans[0][0] <= cast(int, binding["start"])
+                    and cast(int, binding["end"]) <= window_spans[-1][1]
+                ):
+                    continue
                 excerpt = " ".join(sentences[start:end])
                 if exact_value and exact_value in source and exact_value not in excerpt:
                     continue
-                if self._count(excerpt) > max_tokens or self._count(excerpt) < minimum_tokens:
+                if not fits(excerpt) or self._count(excerpt) < minimum_tokens:
                     continue
                 score = sum(len(_terms(part) & query_terms) for part in sentences[start:end])
                 score += sum(2 for part in sentences[start:end] if _terms(part) & _QUALIFIER_TERMS)
@@ -581,14 +611,42 @@ class DeterministicContextPacker:
                 if score > best_score:
                     best, best_score = excerpt, score
                     best_reason = "coverage_exact" if exact_value and exact_value in excerpt else "coverage_unit"
-        if not best:
+        if not best and binding and exact_value and fits(exact_value):
+            # An oversized sentence must not hide a small verified literal.
+            # Grow a verbatim source window from its bound coordinates, choosing
+            # nearby qualifier/query tokens first and balancing both sides.
+            raw_source = record.content
+            left, right = cast(int, binding["start"]), cast(int, binding["end"])
+            before = list(_TOKEN_RE.finditer(raw_source, 0, left))
+            after = list(_TOKEN_RE.finditer(raw_source, right))
+            taken = [0, 0]
+            best = raw_source[left:right]
+            while True:
+                options = []
+                for side, matches in enumerate((before, after)):
+                    if taken[side] >= len(matches):
+                        continue
+                    token = matches[-taken[side] - 1] if side == 0 else matches[taken[side]]
+                    start, end = (token.start(), right) if side == 0 else (left, token.end())
+                    excerpt = raw_source[start:end]
+                    if fits(excerpt):
+                        terms = _terms(token.group())
+                        rank = (2 * len(terms & _QUALIFIER_TERMS) + len(terms & query_terms),
+                                -taken[side], -side)
+                        options.append((rank, side, start, end, excerpt))
+                if not options:
+                    break
+                _, side, left, right, best = max(options)
+                taken[side] += 1
+            best_reason = "coverage_exact"
+        if not best or self._count(best) < minimum_tokens:
             return "", "", None
         # Make the literal independently visible to the reader. This is only in
         # the opt-in coverage path and is charged to the same hard token budget.
         if binding and exact_value and exact_value not in best:
             line = f"Exact value (copy exactly): {exact_value}"
             proposed = f"{line}\n{best}"
-            if self._count(proposed) <= max_tokens:
+            if fits(proposed):
                 best = proposed
                 best_reason = "coverage_exact"
             else:

@@ -232,6 +232,11 @@ product write behavior. No QA reader or evaluator is called. A completed case re
 work; interrupted local-only cases require explicit `--restart-interrupted`, with the earlier
 attempt retained. Do not run these alongside capacity or other performance measurements.
 
+Checkpoint v2 also binds the actual embedder fingerprint and runtime package versions, and
+revalidates question coverage for cached cases. A changed source, model, or environment requires
+a new checkpoint directory; preserve earlier directories as historical evidence. Unscored
+retrieval categories remain `null` in the diagnostic rather than becoming zero-score results.
+
 Official LongMemEval-V2 has its own pinned Python 3.11 checkout/environment, prescribed Qwen
 reader/embedding, default GPT-5.2 judge and 30 generated configurations. Its resource feasibility
 and compute proposal are in [LONGMEMEVAL_V2_FEASIBILITY.md](LONGMEMEVAL_V2_FEASIBILITY.md).

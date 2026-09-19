@@ -13,7 +13,7 @@ from engraphis.core.context import DeterministicContextPacker
 from engraphis.core.interfaces import Candidate, MemoryRecord
 
 
-def run(*, evidence_module=evidence) -> dict:
+def run(*, evidence_module=evidence, packer_type=DeterministicContextPacker) -> dict:
     binding = evidence_module.make_exact_value_binding("label=Δ-42", "Δ-42", "identifier")
     contract = evidence_module.make_action_contract(
         destination_field="release.label", source_id="fixture-source",
@@ -60,9 +60,17 @@ def run(*, evidence_module=evidence) -> dict:
     ]
     candidates = [Candidate(name, 1.0 - index / 10, "semantic", MemoryRecord(id=name, content=text))
                   for index, (name, text) in enumerate(sources)]
-    packer = DeterministicContextPacker()
+    packer = packer_type()
     packed = {name: method("rollout owner", candidates, 35)
               for name, method in (("legacy", packer.pack), ("coverage", packer.pack_coverage))}
+    oversized_source = "padding " * 80 + "must use Δ-42 only if approved " + "trailing " * 80
+    oversized_record = MemoryRecord(
+        id="oversized-literal", content=oversized_source,
+        metadata={"exact_value": evidence_module.make_exact_value_binding(oversized_source, "Δ-42")},
+    )
+    oversized = packer.pack_coverage(
+        "deployment approved", [Candidate(oversized_record.id, 1.0, "lexical", oversized_record)], 24,
+    )
     return {
         "schema": "engraphis-evidence-contract-diagnostic/v1",
         "boundary": "Development fixtures; not external QA, generated-answer quality, or provider savings.",
@@ -78,6 +86,14 @@ def run(*, evidence_module=evidence) -> dict:
                    "budget": 35, "budget_honored": result.usage.context_tokens <= 35}
             for name, result in packed.items()
         },
+        "oversized_exact": {
+            "sources": len(oversized.chunks),
+            "literal_preserved": "Δ-42" in oversized.context,
+            "nearby_qualifiers_preserved": "must use Δ-42 only if approved" in oversized.context,
+            "tokens": oversized.usage.context_tokens,
+            "budget": 24,
+            "budget_honored": oversized.usage.context_tokens <= 24,
+        },
     }
 
 
@@ -86,7 +102,10 @@ def main() -> int:
     print(json.dumps(report, sort_keys=True))
     validation = report["action_validation"]
     return 0 if (validation["correct"] == validation["cases"]
-                 and all(row["budget_honored"] for row in report["packing"].values())) else 1
+                 and all(row["budget_honored"] for row in report["packing"].values())
+                 and all(report["oversized_exact"][key] for key in (
+                     "literal_preserved", "nearby_qualifiers_preserved", "budget_honored",
+                 ))) else 1
 
 
 if __name__ == "__main__":

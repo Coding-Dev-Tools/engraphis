@@ -49,10 +49,12 @@ from engraphis.backends.embedder_st import get_embedder
 from engraphis.core.secrets import redact_secrets
 from eval.harness import run
 from eval.benchmark import report_envelope, sha256_file, write_canonical_artifact
+from eval.external_checkpoints import producer_snapshot
 
 
 def diagnostic_artifact(report: dict, *, dataset: str,
-                        repair_manifest: Optional[str] = None) -> dict:
+                        repair_manifest: Optional[str] = None,
+                        source_snapshot: Optional[dict[str, str]] = None) -> dict:
     """Export retrieval observations without turning them into official QA evidence."""
     if report.get("dataset_sha256") != sha256_file(dataset):
         raise ValueError("dataset changed during evaluation")
@@ -77,8 +79,8 @@ def diagnostic_artifact(report: dict, *, dataset: str,
         if isinstance(integrity.get("repair_manifest"), dict):
             integrity["repair_manifest"].pop("path", None)
         metrics["dataset_integrity"] = integrity
-    paths = [Path(__file__), Path(__file__).with_name("harness.py"),
-             Path(__file__).with_name("metrics.py")]
+    root = Path(__file__).resolve().parents[1]
+    paths = [root / name for name in (source_snapshot if source_snapshot is not None else producer_snapshot())]
     if repair_manifest:
         paths.append(Path(repair_manifest))
     return report_envelope(
@@ -663,6 +665,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     repair_manifest = args.locomo_repair_manifest or args.longmemeval_repair_manifest
     repair_manifest_before: Optional[str] = None
     try:
+        source_before = producer_snapshot()
         dataset_before = dataset_sha256(args.dataset)
         if repair_manifest:
             repair_manifest_before = sha256_file(repair_manifest)
@@ -755,6 +758,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             raise ValueError("dataset changed during evaluation")
         if repair_manifest and sha256_file(repair_manifest) != repair_manifest_before:
             raise ValueError("repair manifest changed during evaluation")
+        if producer_snapshot() != source_before:
+            raise ValueError("producer changed during evaluation")
     except Exception as exc:
         print(f'external evaluation failed ({type(exc).__name__})', file=sys.stderr)
         return 2
@@ -799,7 +804,18 @@ def main(argv: Optional[list[str]] = None) -> int:
             artifact = diagnostic_artifact(
                 report, dataset=args.dataset,
                 repair_manifest=args.locomo_repair_manifest or args.longmemeval_repair_manifest,
+                source_snapshot=source_before,
             )
+            expected_sources = [
+                (Path(name).name, digest) for name, digest in source_before.items()
+            ]
+            if repair_manifest:
+                expected_sources.append((Path(repair_manifest).name, repair_manifest_before))
+            observed_sources = [(item["name"], item["sha256"]) for item in artifact["suite"]["sources"]]
+            if (artifact["suite"]["sha256"] != dataset_before
+                    or observed_sources != expected_sources
+                    or artifact["protocol"]["config"]["repair_manifest_sha256"] != repair_manifest_before):
+                raise ValueError("diagnostic artifact does not match the evaluated producer or data snapshots")
             write_canonical_artifact(artifact, args.artifact)
         except (OSError, TypeError, ValueError) as exc:
             print(

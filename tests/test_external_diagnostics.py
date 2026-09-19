@@ -91,6 +91,44 @@ def test_export_rejects_changed_dataset_bytes(tmp_path):
         external.diagnostic_artifact({"dataset_sha256": "0" * 64}, dataset=str(dataset))
 
 
+@pytest.mark.parametrize("changed", ["dataset", "manifest", "producer"])
+@pytest.mark.parametrize("stage", ["printing", "envelope"])
+def test_completed_artifact_matches_frozen_evaluation_snapshots(tmp_path, monkeypatch, changed, stage):
+    dataset = dataset_file(tmp_path)
+    manifest = tmp_path / "repair.json"
+    manifest.write_text(json.dumps({
+        "schema": "engraphis-locomo-repair/v2", "dataset_sha256": sha256_file(dataset),
+        "repairs": [], "deduplications": [],
+    }))
+    producer = tmp_path / "producer.py"
+    producer.write_text("# frozen producer\n")
+    monkeypatch.setattr(external, "producer_snapshot", lambda: {str(producer): sha256_file(producer)})
+    target = {"dataset": dataset, "manifest": manifest, "producer": producer}[changed]
+
+    def mutate():
+        target.write_bytes(target.read_bytes() + b"\n")
+
+    if stage == "printing":
+        def late_print(*args, **kwargs):
+            if args and str(args[0]).startswith("\nEngraphis"):
+                mutate()
+        monkeypatch.setattr(external, "print", late_print, raising=False)
+    else:
+        original = external.report_envelope
+
+        def late_envelope(*args, **kwargs):
+            mutate()
+            return original(*args, **kwargs)
+        monkeypatch.setattr(external, "report_envelope", late_envelope)
+    artifact = tmp_path / "artifact.json"
+    assert external.main([
+        "--dataset", str(dataset), "--format", "locomo", "--offline",
+        "--locomo-repair-manifest", str(manifest), "--artifact", str(artifact),
+    ]) == 2
+    assert not artifact.exists()
+    assert not artifact.with_suffix(".json.sha256").exists()
+
+
 def test_packed_metrics_do_not_credit_unadmitted_candidate_text(tmp_path):
     dataset = dataset_file(tmp_path)
     report = harness.run(external.load_locomo(str(dataset)), token_budget=0)

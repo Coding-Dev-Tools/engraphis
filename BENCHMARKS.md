@@ -25,19 +25,22 @@ show a workload-specific benefit.
 `python -m eval.evidence_contracts` checks exact-action validation and compares
 legacy and coverage packing on small deterministic development fixtures. It runs
 in the full offline CI matrix and the NumPy-only Python 3.9 job. These fixtures
-test boundary correctness; they do not estimate external QA or model task success.
+test boundary correctness; they do not estimate external QA or model task success. The
+[current diagnostic](docs/benchmark-evidence/evidence-contracts-20260919-v3.json)
+also preserves a verified literal and nearby conditions from an oversized sentence
+inside a 24-token context. This is one development case, not a general quality estimate.
 
 ### Public numeric evidence registry
 
 Every exact public aggregate retained below comes from the checked-in, public-safe
-[`offline-fixtures-v40.json`](docs/benchmark-evidence/offline-fixtures-v40.json) artifact. Its
+[`offline-fixtures-v43.json`](docs/benchmark-evidence/offline-fixtures-v43.json) artifact. Its
 SHA-256 is
-`0cad1f99354853bb592b46791378b7a634b9d784bd2a7263455647ed69413629`, also recorded in the
+`0395c0bd28e62bfda8f1234ae2311fef045de5c51c9a23dd23645474dedd8cd5`, also recorded in the
 adjacent `.sha256` file. The artifact contains no raw questions, answers, prompts, customer data,
 or per-record content fingerprints.
 
 The fixture-suite digest is
-`ee26a13d9c82ea984c06022476cfbb4012a780865bb920a1b1da650cb986f3cc`. The artifact defines
+`593cf75057018828631bb5f1836df947ce660503f728225cbe314c6d818ec577`. The artifact defines
 the digest algorithm and records the SHA-256 of every suite and dataset file. Each evidence ID
 also binds its exact command through `sha256(UTF-8 exact command)`:
 
@@ -59,10 +62,10 @@ Historical LoCoMo, graph, handoff, consolidation, and security figures remain pr
 source artifacts but are omitted from the current chart until each has a matching immutable,
 public-safe artifact. The chart labels coding outcomes, external datasets, and operational
 capacity as pending evaluation tracks rather than implying scores. Regenerate it with
-`python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-v40.json --output docs/images/context-efficiency.svg` after selecting the report to publish.
+`python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-v43.json --output docs/images/context-efficiency.svg` after selecting the report to publish.
 
 The companion examples are also generated from that artifact with
-`python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-v40.json --output docs/images/evidence-backed-agent-examples.svg`.
+`python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-v43.json --output docs/images/evidence-backed-agent-examples.svg`.
 The historical-to-executable mapping is in
 [`docs/BENCHMARK_CHANGE_COVERAGE.md`](docs/BENCHMARK_CHANGE_COVERAGE.md).
 

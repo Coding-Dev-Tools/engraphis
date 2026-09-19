@@ -7,16 +7,18 @@ from __future__ import annotations
 
 from collections import defaultdict
 import json
+import math
 import os
 from pathlib import Path
 import time
 from typing import Callable, Optional
 
-from eval.benchmark import canonical_json, sha256_file, sha256_text
+from engraphis.core.interfaces import embedding_space_fingerprint
+from eval.benchmark import canonical_json, environment_provenance, sha256_file, sha256_text
 from eval.harness import run
 
 
-SCHEMA = "engraphis-external-checkpoints/v1"
+SCHEMA = "engraphis-external-checkpoints/v2"
 
 
 def _write(path: Path, payload: dict) -> None:
@@ -43,6 +45,37 @@ def producer_snapshot() -> dict:
     return {path.relative_to(root).as_posix(): sha256_file(path) for path in sorted(paths)}
 
 
+def _runtime_identity(embedder: object) -> dict:
+    fingerprint = embedding_space_fingerprint(embedder)
+    if not fingerprint:
+        raise ValueError("external checkpoints require a durable embedder fingerprint")
+    return {"embedder": fingerprint, "environment": environment_provenance()}
+
+
+def _validate_case_report(report: object, case: dict) -> None:
+    rows = report.get("detail") if isinstance(report, dict) else None
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        raise ValueError("external case did not retain exact question coverage")
+    expected = [str(question.get("id") or f"{case['id']}:{i}")
+                for i, question in enumerate(case["questions"])]
+    if [row.get("question_id") for row in rows] != expected:
+        raise ValueError("external case did not retain exact question coverage")
+    for row, question in zip(rows, case["questions"]):
+        answer = question.get("answer_variants") or question.get("answer") or question.get("evidence") or ""
+        supporting = question.get("supporting", [])
+        if (row.get("retrieval_scored") is not bool(supporting)
+                or row.get("answer_scored") is not (question.get("answerable") is not False and bool(answer))
+                or row.get("category") != str(question.get("category") or "unknown")):
+            raise ValueError("external case has invalid scored detail")
+        for name in ("recall_at_k", "hit_at_k", "mrr_at_k", "ndcg_at_k", "packed_recall_at_k",
+                     "packed_hit_at_k", "packed_mrr_at_k", "packed_ndcg_at_k",
+                     "answer_token_recall", "packed_answer_token_recall"):
+            value = row.get(name)
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(value) or not 0 <= value <= 1):
+                raise ValueError("external case has invalid scored detail")
+
+
 def aggregate(reports: list[dict]) -> dict:
     rows = [row for report in reports for row in report["detail"]]
     retrieval = [row for row in rows if row.get("retrieval_scored")]
@@ -58,13 +91,14 @@ def aggregate(reports: list[dict]) -> dict:
     categories: dict[str, list] = defaultdict(list)
     for row in rows:
         categories[str(row.get("category", "unknown"))].append(row)
-    result["category_metrics"] = {
-        category: {"questions": len(items), "retrieval_scored_questions": sum(bool(row.get("retrieval_scored")) for row in items),
-                   **{name: (sum(row[name] for row in items if row.get("retrieval_scored")) /
-                              max(sum(bool(row.get("retrieval_scored")) for row in items), 1))
-                      for name in ("recall_at_k", "packed_recall_at_k")}}
-        for category, items in categories.items()
-    }
+    result["category_metrics"] = {}
+    for category, items in categories.items():
+        scored = [row for row in items if row.get("retrieval_scored")]
+        result["category_metrics"][category] = {
+            "questions": len(items), "retrieval_scored_questions": len(scored),
+            **{name: sum(row[name] for row in scored) / len(scored) if scored else None
+               for name in ("recall_at_k", "packed_recall_at_k")},
+        }
     result["case_wall_seconds"] = sum(report.get("case_wall_seconds", 0) for report in reports)
     result["query_latency_ms_sum"] = sum(row.get("latency_ms", 0) for row in rows)
     result["latency_boundary"] = "query latency excludes ingestion; case wall time includes ingestion and cleanup"
@@ -78,6 +112,7 @@ def run_resumable(cases: list[dict], *, directory: Path, binding: dict, embedder
                   maximum_cases: Optional[int] = None) -> dict:
     directory.mkdir(parents=True, exist_ok=True)
     identity = {"schema": SCHEMA, **binding, "producer": snapshot(), "k": k,
+                "runtime": _runtime_identity(embedder),
                 "token_budget": token_budget, "resolve_conflicts": resolve_conflicts,
                 "normalized_cases_sha256": sha256_text(canonical_json(cases))}
     header = directory / "manifest.json"
@@ -102,10 +137,12 @@ def run_resumable(cases: list[dict], *, directory: Path, binding: dict, embedder
             case_hash = sha256_text(canonical_json(case))
             if case_path.exists():
                 checkpoint = _read(case_path)
+                cached_report = checkpoint.get("report")
+                _validate_case_report(cached_report, case)
                 if (checkpoint.get("case_sha256") != case_hash
-                        or checkpoint.get("report_sha256") != sha256_text(canonical_json(checkpoint["report"]))):
+                        or checkpoint.get("report_sha256") != sha256_text(canonical_json(cached_report))):
                     raise ValueError("external case checkpoint content changed")
-                reports.append(checkpoint["report"])
+                reports.append(cached_report)
                 continue
             start_path = directory / f"case-{ordinal:05d}.started"
             if start_path.exists():
@@ -119,14 +156,10 @@ def run_resumable(cases: list[dict], *, directory: Path, binding: dict, embedder
             started = time.perf_counter()
             report = runner([case], k=k, token_budget=token_budget, embedder=embedder,
                             resolve_conflicts=resolve_conflicts)
+            _validate_case_report(report, case)
             report["case_wall_seconds"] = time.perf_counter() - started
-            if snapshot() != identity["producer"]:
-                raise ValueError("external producer changed during a case")
-            expected_ids = [str(question.get("id") or f"{case['id']}:{i}")
-                            for i, question in enumerate(case["questions"])]
-            observed_ids = [row["question_id"] for row in report["detail"]]
-            if observed_ids != expected_ids:
-                raise ValueError("external case did not retain exact question coverage")
+            if snapshot() != identity["producer"] or _runtime_identity(embedder) != identity["runtime"]:
+                raise ValueError("external producer or runtime changed during a case")
             _write(case_path, {"case_sha256": case_hash, "report": report,
                                "report_sha256": sha256_text(canonical_json(report))})
             reports.append(report)
@@ -139,6 +172,8 @@ def run_resumable(cases: list[dict], *, directory: Path, binding: dict, embedder
         result["completed_cases"] = len(reports)
         result["expected_cases"] = len(cases)
         result["explicit_local_restarts"] = retries
+        if snapshot() != identity["producer"] or _runtime_identity(embedder) != identity["runtime"]:
+            raise ValueError("external producer or runtime changed during checkpoint aggregation")
         return result
     finally:
         lock.unlink(missing_ok=True)

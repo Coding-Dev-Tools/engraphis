@@ -647,7 +647,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                          "limit": args.limit, "include_original_locomo": args.include_original_locomo,
                          "embed_model": getattr(embedder, "model_name", "DeterministicEmbedder"),
                          "embed_revision": getattr(embedder, "revision", None)},
-                embedder=embedder, k=args.k, token_budget=args.token_budget,
+                embedder=embedder if embedder is not None else DeterministicEmbedder(),
+                k=args.k, token_budget=args.token_budget,
                 resolve_conflicts=not args.no_resolve, snapshot=_producer_snapshot,
                 restart_interrupted=args.restart_interrupted,
             )

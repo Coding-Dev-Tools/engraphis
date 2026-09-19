@@ -204,5 +204,7 @@ Local retrieval-only execution is within the authorized campaign. The durable se
 the pinned MiniLM model, k=10, a 1,500-token context budget, distinct case checkpoints and explicit
 `--no-resolve`; completed artifacts must still be inspected before making a quality claim.
 Use `--checkpoint-dir <private-directory>` to retain work and `--token-budget 1500` to state the
-context ceiling. Source/model/configuration drift stops recovery. Upstream model, judge or tool
+context ceiling. Source/model/configuration drift stops recovery; checkpoint v2 additionally
+binds the actual embedder fingerprint and runtime versions and validates cached question IDs.
+Use a new checkpoint directory after such a change, retaining the old evidence. Upstream model, judge or tool
 evaluations remain separate work requiring their own compatible harness and spending approval.
