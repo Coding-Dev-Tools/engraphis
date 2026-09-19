@@ -82,9 +82,11 @@ def test_external_state_marker_cannot_skip_repair_of_a_replaced_volume(tmp_path)
     env = {**os.environ, "PATH": str(binaries) + os.pathsep + os.environ["PATH"],
            "APP_UID": str(external.stat().st_uid), "CHOWN_LOG": str(log),
            "MANAGED_VOLUME": str(managed), "ENGRAPHIS_STATE_DIR": str(external),
-           "ENGRAPHIS_ENV_FILE": ""}
+           "ENGRAPHIS_ENV_FILE": str(external / "new" / "deep" / "config.env")}
     subprocess.run(["sh", str(script), "true"], env=env, check=True)
     assert f"-R engraphis:engraphis {managed}" in log.read_text().splitlines()
+    for directory in (external / "new", external / "new" / "deep"):
+        assert f"engraphis:engraphis {directory}" in log.read_text().splitlines()
     assert (managed / ".volume-ownership").is_file()
     assert legacy_marker.read_text() == "older external volume"
     assert external.stat().st_mode & 0o777 == 0o700
