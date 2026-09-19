@@ -17,6 +17,7 @@ from pathlib import Path
 import re
 import sys
 import time
+import traceback
 from typing import Callable, Optional
 
 from eval.benchmark import canonical_json, sha256_file, validate_report, write_canonical_artifact
@@ -106,6 +107,11 @@ def _cell_worker(output: str, error: str, config: dict, model_dir: str, model_sh
     except BaseException as exc:
         Path(error).write_text(canonical_json({
             "error_class": type(exc).__name__, "reason": str(exc),
+            "traceback": [
+                {"file": Path(frame.filename).name, "line": int(frame.lineno),
+                 "function": str(frame.name)}
+                for frame in traceback.extract_tb(exc.__traceback__)[-24:]
+            ],
         }) + "\n", encoding="utf-8")
         raise
 
@@ -162,7 +168,9 @@ def _run_cell_with_watchdog(cell: Cell, *, model_dir: str, model_sha256: str, ou
             except (OSError, ValueError):
                 details = {}
         reason = details.get("reason") or "worker exited before producing a complete artifact"
-        raise ValueError(f"capacity cell worker failed: {reason}")
+        trace = details.get("traceback")
+        suffix = f"; traceback={trace}" if isinstance(trace, list) and trace else ""
+        raise ValueError(f"capacity cell worker failed: {reason}{suffix}")
     report = _read_verified(output)
     error.unlink(missing_ok=True)
     return report

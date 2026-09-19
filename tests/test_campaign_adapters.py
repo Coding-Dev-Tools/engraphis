@@ -169,6 +169,38 @@ def test_mem0_preflights_unsupported_scope_before_any_add():
     assert client.add_calls == []
 
 
+def test_peer_packing_backfills_after_unmapped_and_empty_rows():
+    context, source_ids, usage, unmapped = _pack_peer_items(
+        [{"id": "unknown-1", "memory": "first derived fact"},
+         {"id": "unknown-2", "memory": "second derived fact"},
+         {"id": "empty", "memory": " "},
+         {"id": "backend-1", "memory": "first mapped fact"},
+         {"id": "backend-2", "memory": "second mapped fact"},
+         {"id": "backend-3", "memory": "beyond the candidate limit"}],
+        query="fact", k=2, token_budget=100,
+        memory_ids={"record-1": "backend-1", "record-2": "backend-2", "record-3": "backend-3"},
+    )
+    assert source_ids == ("record-1", "record-2")
+    assert usage.packed_count == 2
+    assert usage.omitted_count == 3
+    assert unmapped == 2
+    assert "derived" not in context
+    assert "beyond" not in context
+
+
+def test_peer_packing_applies_k_to_mapped_candidates_before_budget_filtering():
+    context, source_ids, usage, unmapped = _pack_peer_items(
+        [{"id": "backend-1", "memory": "oversized " * 100},
+         {"id": "backend-2", "memory": "short fact"}],
+        query="fact", k=1, token_budget=20,
+        memory_ids={"record-1": "backend-1", "record-2": "backend-2"},
+    )
+    assert context == ""
+    assert source_ids == ()
+    assert usage.omitted_count == 1
+    assert unmapped == 0
+
+
 def test_mem0_repo_partition_results_are_merged_by_score_before_k_limit():
     class PartitionedMem0(FakeMem0):
         def search(self, query, **kwargs):

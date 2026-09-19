@@ -208,6 +208,7 @@ def load_memoryagentbench(path: str, *, limit: Optional[int] = None) -> list[dic
         if ids and (not isinstance(ids, list) or len(ids) != len(questions)):
             raise ValueError(f"MemoryAgentBench {case_id}: qa_pair_ids must align with questions")
         supporting_rows = row.get("supporting_ids") or row.get("evidence_ids") or []
+        label_source = "explicit_ids" if supporting_rows else "derived_answer_substring"
         if supporting_rows and (not isinstance(supporting_rows, list) or len(supporting_rows) != len(questions)):
             raise ValueError(f"MemoryAgentBench {case_id}: supporting_ids must align with questions")
         normalized_questions = []
@@ -229,12 +230,23 @@ def load_memoryagentbench(path: str, *, limit: Optional[int] = None) -> list[dic
                         for variant in answer_variants
                     )
                 ]
+            label_provenance = label_source if supporting else "unlabeled"
             normalized_questions.append({
                 "id": str(ids[q_number]) if ids else f"{case_id}:q:{q_number}",
                 "q": question,
                 "answer": answer,
                 "answer_variants": answer_variants,
                 "supporting": supporting,
+                # MAB exports frequently lack adjudicated source IDs.  Preserve
+                # the derivation method so a high-cardinality substring label is
+                # never mistaken for an authoritative sufficient-evidence set.
+                "evidence_label_provenance": label_provenance,
+                "evidence_label_count": len(set(supporting)),
+                "evidence_label_method": (
+                    "provided_source_ids" if label_provenance == "explicit_ids"
+                    else "answer_variant_substring" if label_provenance == "derived_answer_substring"
+                    else "none"
+                ),
                 "category": str(
                     row.get("sub_dataset")
                     or row.get("dataset")
@@ -500,6 +512,9 @@ def public_artifact(
         "answer_token_recall",
         "answer_scored_questions", "packed_recall_at_k", "packed_hit_at_k",
         "packed_mrr_at_k", "packed_ndcg_at_k", "packed_answer_token_recall",
+        "sufficient_evidence_proxy_rate", "sufficient_evidence_proxy_questions",
+        "sufficient_evidence_proxy_boundary",
+        "evidence_label_provenance", "evidence_label_cardinality",
         "checkpoint_status", "completed_cases", "expected_cases", "explicit_local_restarts",
         "case_wall_seconds", "query_latency_ms_sum", "latency_boundary",
     )

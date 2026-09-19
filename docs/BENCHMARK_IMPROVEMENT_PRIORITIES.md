@@ -5,9 +5,8 @@ The campaign remains PARTIAL and the coding pilot remains BLOCKED. This review u
 [the expansion results](BENCHMARK_EXPANSION_RESULTS.md), their checksummed artifacts,
 and the v2 implementation reviewed at `cc25ac5b` / `fefee937`, followed by the
 opt-in changes in this working tree.
-The implementation adds only the opt-in controls described below; it changes no frozen
-result, benchmark producer, or production default, and it does not alter a running
-workload.
+The implementation adds the opt-in controls and diagnostic fields described below.
+Historical result artifacts remain immutable, and production defaults remain unchanged.
 
 The external numbers retain their original provenance: the four LoCoMo/LongMemEval
 run artifacts record `ca790261` with distinct dirty-state hashes. They are not fresh
@@ -52,16 +51,45 @@ The first implementation pass keeps the production and benchmark defaults unchan
   `k` and the token budget at their defaults. An explicit caller value always wins, and
   `"default"` preserves historical behavior. The selected recipe is returned in traces
   for paired analysis.
+- Packed chunks now expose a stable `evidence_unit_id`, source span, subject/claim
+  identity, qualifiers, validity times, and source attribution. These fields are
+  content-bounded provenance for the selected excerpt; they do not expose evaluator
+  labels or turn source presence into a citation-entailment score.
+- `make_action_contract` / `validate_action_contract` provide an opt-in file/tool
+  boundary for typed literals. The validator reports authorization, source identity,
+  schema/destination presence, and exact literal preservation independently. It rejects
+  unbound, changed, ambiguous, or unauthorized values without changing the production
+  write or recall defaults.
+  Serialized proposals must be JSON objects and satisfy the same destination and
+  source checks as mappings. Only explicit boolean authorization is accepted.
+- MemoryAgentBench rows retain `evidence_label_provenance`, label cardinality and the
+  perfect-top-k cardinality ceiling. The adapter also emits a clearly named packed
+  answer-token sufficient-evidence proxy; this is a diagnostic for label quality and
+  context selection, not generated-answer correctness or citation entailment.
+- Adaptive candidate-depth recalls report `adaptive_stop_reason` and a bounded
+  packed-candidate coverage ratio over the selected packing input. This ratio does
+  not measure the complete retrieval pool or gold evidence coverage. Capacity worker failures retain content-free
+  traceback coordinates in private artifacts, while public operation rows keep the
+  existing redaction boundary.
 
-The Smart and Classic `recall_context` schemas retain their historical `token_budget=1024`
-default for compatibility. When a non-default recipe is selected, that sentinel means the
-budget was omitted so the recipe can choose its measured budget; a caller that must force an
-explicit 1,024-token budget should use the Python/service API or pass a different explicit
-budget and record the choice in the experiment manifest.
+The Smart and Classic `recall_context` schemas retain their historical advertised
+`token_budget=1024` default. Internally, omitted values remain distinct from explicitly
+supplied values. A non-default recipe may choose its measured budget only when the caller
+omits the budget; an explicit 1,024-token budget is honored on both MCP surfaces.
 
 These controls are experiment surfaces, not quality promotions. Run development and
 validation measurements first, freeze the candidate, and use the untouched holdout plus
 the existing non-inferiority and critical-integrity gates before changing a default.
+
+### Follow-up development diagnostic, 2026-09-19
+
+The [source-bound action and packing fixture](benchmark-evidence/evidence-contracts-20260919.json)
+checks 14 action-boundary cases, all passing, including exact destination matching,
+source identity, escaped Unicode, explicit authorization and source-span consistency.
+Its fixed 35-token packing example retains one source in 35 tokens with legacy packing
+and three sources in 33 tokens with coverage packing. Reproduce the current results
+with `python -m eval.evidence_contracts`. This small development diagnostic does not
+measure external benchmark scores, generated answers, or a held-out quality gain.
 
 ## 1. Packing is the clearest engine opportunity
 

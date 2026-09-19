@@ -138,6 +138,11 @@ class RecallResult:
     candidate_k_requested: int = 50
     candidate_k_used: int = 50
     candidate_depth_reason: str = "fixed requested depth"
+    adaptive_stop_reason: str = ""
+    # This is a diagnostic ratio over the selected packing input, not a gold-evidence
+    # score.  It makes the budget/depth tradeoff visible without claiming answer
+    # correctness from a reader-independent recall call.
+    packed_candidate_coverage: Optional[float] = None
     packing_mode: str = "legacy"
     retrieval_recipe: str = "default"
     retrieval_trace: Optional[list[dict[str, Any]]] = None
@@ -409,6 +414,7 @@ class RecallEngine:
             if self._arm_candidate_k_cap is not None:
                 ceiling_bound = min(ceiling_bound, self._arm_candidate_k_cap)
             candidate_ceiling = max(arm_candidate_k, ceiling_bound)
+        adaptive_stop_reason = ""
         run_configs = [
             config if index == 0 and arm_config is not None else profile_config(item.profile)
             for index, item in enumerate(planned_queries)
@@ -605,15 +611,23 @@ class RecallEngine:
                 )
                 if enabled
             )
-            if (
-                not prompt_only
-                or (
-                    len(recs) >= prompt_target
-                    and _mtype_limits_can_fill(recs, effective_limits, prompt_target)
-                )
-                or arm_candidate_k >= candidate_ceiling
-                or not can_expand
-            ):
+            enough_records = (
+                len(recs) >= prompt_target
+                and _mtype_limits_can_fill(recs, effective_limits, prompt_target)
+            )
+            budget_exhausted = requested_depth_mode == "adaptive" and budget <= 0
+            if not prompt_only or enough_records or budget_exhausted or arm_candidate_k >= candidate_ceiling or not can_expand:
+                if requested_depth_mode == "adaptive":
+                    if budget_exhausted:
+                        adaptive_stop_reason = "context_budget_exhausted"
+                    elif enough_records:
+                        adaptive_stop_reason = "sufficient_records_and_type_limits"
+                    elif arm_candidate_k >= candidate_ceiling:
+                        adaptive_stop_reason = "candidate_ceiling"
+                    elif not can_expand:
+                        adaptive_stop_reason = "retrieval_exhausted"
+                    else:
+                        adaptive_stop_reason = "fixed_scope"
                 break
             arm_candidate_k = candidate_ceiling
         mark_phase("candidate_filtering")
@@ -643,6 +657,10 @@ class RecallEngine:
                 # prompt-only recall may have widened it to find approved evidence.
                 candidate_k_used=arm_candidate_k,
                 candidate_depth_reason=candidate_depth_reason,
+                adaptive_stop_reason=adaptive_stop_reason,
+                packed_candidate_coverage=(
+                    len(packed) / max(len(recs), 1) if requested_depth_mode == "adaptive" else None
+                ),
                 packing_mode=requested_packing_mode,
                 retrieval_recipe=selected_recipe,
                 retrieval_trace=[] if diagnostics else None,
@@ -969,6 +987,10 @@ class RecallEngine:
             # initial candidate depth.  This is diagnostic telemetry, not a limit.
             candidate_k_used=arm_candidate_k,
             candidate_depth_reason=candidate_depth_reason,
+            adaptive_stop_reason=adaptive_stop_reason,
+            packed_candidate_coverage=(
+                len(packed_chunks) / max(len(final), 1) if requested_depth_mode == "adaptive" else None
+            ),
             packing_mode=requested_packing_mode,
             retrieval_recipe=selected_recipe,
             retrieval_trace=trace,

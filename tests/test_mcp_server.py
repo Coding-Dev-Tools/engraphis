@@ -806,6 +806,24 @@ def test_recall_context_returns_compact_sources_and_strict_usage(monkeypatch):
     assert "memories" not in recalled
 
 
+@pytest.mark.parametrize("surface", ["classic_mcp", "smart_mcp"])
+def test_mcp_recipe_preserves_explicit_1024_budget_through_tool_validation(monkeypatch, surface):
+    import asyncio
+
+    srv = _module_with_memory_db(monkeypatch)
+    _approved_successor(srv, srv.engraphis_remember(
+        content="Deploy after release approval.", workspace="acme", repo="infra",
+    ))
+    tool = getattr(srv, surface)._tool_manager._tools["engraphis_recall_context"]
+    arguments = {"query": "deploy", "workspace": "acme", "repo": "infra",
+                 "retrieval_recipe": "long_session"}
+    explicit = json.loads(asyncio.run(tool.run({**arguments, "token_budget": 1024})))
+    omitted = json.loads(asyncio.run(tool.run(arguments)))
+    assert explicit["usage"]["budget_tokens"] == 1024
+    assert omitted["usage"]["budget_tokens"] == 4096
+    assert explicit["usage"]["context_tokens"] <= 1024
+
+
 def test_recall_context_payload_saves_at_least_half_vs_full_recall(monkeypatch):
     from engraphis.core.context import RegexTokenCounter
 

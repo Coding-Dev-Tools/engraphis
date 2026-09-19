@@ -1,5 +1,6 @@
 import copy
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -121,6 +122,27 @@ def test_plan_mode_does_not_dispatch(monkeypatch, plan, tmp_path, capsys):
     assert campaign.main(["--manifest", str(manifest)]) == 0
     assert '"dry_run": true' in capsys.readouterr().out
     assert list(tmp_path.iterdir()) == [Path(manifest)]
+
+
+def test_cell_worker_persists_traceback_coordinates_for_reproducible_failures(
+    monkeypatch, tmp_path,
+):
+    error = tmp_path / "cell.error.json"
+    output = tmp_path / "cell.json"
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("diagnostic-only failure")
+
+    monkeypatch.setattr(campaign, "run_cell", fail)
+    with pytest.raises(RuntimeError, match="diagnostic-only"):
+        campaign._cell_worker(
+            str(output), str(error), campaign.asdict(campaign.Cell()), "model", "sha",
+        )
+    details = json.loads(error.read_text(encoding="utf-8"))
+    assert details["error_class"] == "RuntimeError"
+    assert details["reason"] == "diagnostic-only failure"
+    assert details["traceback"]
+    assert {"file", "line", "function"} <= set(details["traceback"][-1])
 
 
 def test_local_intervals_use_five_repetitions_and_check_public_rows(monkeypatch):

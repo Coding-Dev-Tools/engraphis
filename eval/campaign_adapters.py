@@ -490,7 +490,10 @@ def _pack_peer_items(
     source_tokens = 0
     omitted = 0
     unmapped = 0
-    for index, item in enumerate(list(items)[:max(1, k)]):
+    mapped_candidates = 0
+    for index, item in enumerate(items):
+        if mapped_candidates >= max(0, k):
+            break
         text = _result_text(item).strip()
         if not text:
             omitted += 1
@@ -504,6 +507,7 @@ def _pack_peer_items(
             unmapped += 1
             omitted += 1
             continue
+        mapped_candidates += 1
         trusted = _campaign_trust(item, source_id, trust_by_id)
         trust_label = "unknown" if trusted is None else str(trusted).lower()
         rendered = f"[{source_id}] trusted={trust_label}\n{text}"

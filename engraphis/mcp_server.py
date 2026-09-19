@@ -825,6 +825,14 @@ def engraphis_recall_context(
             }
             if packed.get("exact_value"):
                 source["exact_value"] = packed["exact_value"]
+            if packed.get("source_span") is not None:
+                source["source_span"] = packed["source_span"]
+            if packed.get("evidence_unit_id"):
+                source["evidence_unit_id"] = packed["evidence_unit_id"]
+            if packed.get("evidence_unit"):
+                source["evidence_unit"] = packed["evidence_unit"]
+            if packed.get("attribution"):
+                source["attribution"] = packed["attribution"]
             if detail.get("title"):
                 source["title"] = detail["title"]
             # Compact recall omits source bodies, but keeps both scoring contracts so
