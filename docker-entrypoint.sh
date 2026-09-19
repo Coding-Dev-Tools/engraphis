@@ -8,7 +8,7 @@
 #
 # We therefore start the container as root, repair ownership once, and exec the real command
 # as `engraphis` via gosu — keeping the deliberate non-root runtime while making the volume
-# writable. A marker avoids recursively walking a large Hugging Face cache on every restart.
+# writable. A marker avoids repeating ownership writes on a correctly owned volume.
 # A non-root launch initializes private settings in its already-writable state volume.
 set -e
 umask 077
@@ -108,9 +108,18 @@ create_private_runtime_directory() {
     done
 }
 
+repair_volume_descendants() {
+    # Restores can preserve the marker while resetting file ownership. Scan for
+    # a mismatch before trusting it; do not follow links outside the volume.
+    unowned_entry=$(find "$1" ! -uid "$2" -print -quit) || return 1
+    if [ -n "$unowned_entry" ]; then
+        chown -R -h engraphis:engraphis "$1" || return 1
+    fi
+}
+
 if [ "$(id -u)" = "0" ]; then
     # ENGRAPHIS_STATE_DIR defaults to /data/.engraphis. Repair the complete volume only on
-    # first boot; later restarts verify the mount and state roots without walking the cache.
+    # first boot or ownership drift; restarts scan without rewriting correct ownership.
     state_dir="${ENGRAPHIS_STATE_DIR:-/data/.engraphis}"
     # Keep the marker on the volume it describes; external state may outlive a
     # replaced /data volume that still needs its first ownership repair.
@@ -198,7 +207,7 @@ if [ "$(id -u)" = "0" ]; then
         exit 1
     fi
     if [ ! -e "$ownership_marker" ]; then
-        if ! chown -R engraphis:engraphis /data; then
+        if ! chown -R -h engraphis:engraphis /data; then
             printf '%s\n' "[engraphis] unable to repair /data ownership" >&2
             exit 1
         fi
@@ -213,7 +222,8 @@ if [ "$(id -u)" = "0" ]; then
     elif [ ! -f "$ownership_marker" ]; then
         printf '%s\n' "[engraphis] refusing non-regular volume ownership marker: $ownership_marker" >&2
         exit 1
-    elif ! chown engraphis:engraphis /data "$state_dir" "$ownership_marker"; then
+    elif ! repair_volume_descendants /data "$app_owner" \
+            || ! chown engraphis:engraphis /data "$state_dir" "$ownership_marker"; then
         printf '%s\n' "[engraphis] unable to verify /data ownership" >&2
         exit 1
     fi
