@@ -1,11 +1,11 @@
 import json
-from pathlib import Path
 import sys
 from types import SimpleNamespace
 
 import pytest
 
 from eval import local_benchmark_queue as queue
+from eval import benchmark_analysis
 
 
 def plan(monkeypatch):
@@ -165,12 +165,15 @@ def test_queue_watchdog_keeps_started_attempt_on_timeout(monkeypatch, tmp_path):
 
 
 def test_queue_requires_complete_external_analysis_artifact(tmp_path):
-    source = Path("docs/benchmark-evidence/longmemeval-budget-comparison-20260916.json")
-    report = json.loads(source.read_text(encoding="utf-8"))
     valid = tmp_path / "valid.json"
-    valid.write_text(json.dumps(report), encoding="utf-8")
-    valid.with_suffix(".json.sha256").write_text(
-        f"{queue.sha256_file(valid)}  valid.json\n", encoding="utf-8")
+    # Retained analyses bind their historical producer. Exercise a fresh output
+    # instead of treating an old producer checksum as current implementation.
+    assert benchmark_analysis.main([
+        "--reports", "docs/benchmark-evidence/longmemeval-full-20260916.json",
+        "docs/benchmark-evidence/longmemeval-budget4096-20260916.json",
+        "--compare", "--output", str(valid),
+    ]) == 0
+    report = json.loads(valid.read_text(encoding="utf-8"))
     assert queue._verified_artifact(valid)["schema"] == "engraphis-external-analysis/v1"
 
     report["reports"][0]["status"] = "PARTIAL"
