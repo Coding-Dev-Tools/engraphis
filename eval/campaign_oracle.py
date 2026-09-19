@@ -59,16 +59,30 @@ args = json.loads(sys.argv[2])
 kwargs = json.loads(sys.argv[3])
 sys.path.insert(0, "/work")
 
+def json_value(value):
+    if value is None or isinstance(value, (str, int, bool)):
+        return True
+    if isinstance(value, float):
+        return value == value and value not in (float("inf"), float("-inf"))
+    if isinstance(value, list):
+        return all(json_value(item) for item in value)
+    if isinstance(value, dict):
+        return all(isinstance(key, str) and json_value(item) for key, item in value.items())
+    return False
+
 try:
     module = importlib.import_module("service")
     value = getattr(module, function_name)(*args, **kwargs)
+    if not json_value(value):
+        raise TypeError("candidate result must be JSON-compatible")
     payload = {"ok": True, "value": value}
+    serialized = json.dumps(payload, sort_keys=True, allow_nan=False)
 except BaseException as exc:
     payload = {"ok": False, "error_type": type(exc).__name__}
     print("__ENGRAPHIS_ORACLE_RESULT__" + json.dumps(payload, sort_keys=True), flush=True)
     raise
 else:
-    print("__ENGRAPHIS_ORACLE_RESULT__" + json.dumps(payload, sort_keys=True), flush=True)
+    print("__ENGRAPHIS_ORACLE_RESULT__" + serialized, flush=True)
 '''.strip()
 
 
