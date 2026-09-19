@@ -31,6 +31,7 @@ facts stop being treated as current.
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
@@ -802,6 +803,13 @@ def run(dataset: list[dict], *, k: int = 5, dim: int = 256,
             retrieved_ids = [c["id"] for c in res.chunks]
             retrieved_tags = [t for i in retrieved_ids for t in id_to_tags.get(i, [])]
             retrieved_texts = [id_to_text.get(i, "") for i in retrieved_ids]
+            packed_tags = [
+                tag for chunk in res.packed_chunks for tag in id_to_tags.get(chunk.id, [])
+            ]
+            # Score the context actually emitted to the reader.  Titles and
+            # ownership headers can carry required answer tokens even when the
+            # chunk excerpt is only a value or procedure body.
+            packed_texts = [res.context] if res.context else []
             retrieval_scored = bool(supporting)
             accepted_answer = (
                 q.get("answer_variants")
@@ -825,6 +833,19 @@ def run(dataset: list[dict], *, k: int = 5, dim: int = 256,
             usage = _usage_dict(
                 res.usage,
                 budget=(token_budget if token_budget is not None else 1500),
+            )
+            label_provenance = str(q.get("evidence_label_provenance") or (
+                "explicit_ids" if supporting else "unlabeled"
+            ))
+            label_count = int(q.get("evidence_label_count") or len(set(supporting)))
+            label_ceiling = (
+                min(1.0, float(k) / label_count) if label_count > 0 else None
+            )
+            packed_answer_recall = metrics.answer_token_recall(
+                packed_texts, accepted_answer,
+            )
+            sufficient_evidence_proxy = bool(
+                answer_scored and packed_answer_recall >= 1.0
             )
             record = question_record(
                 question_id,
@@ -851,6 +872,20 @@ def run(dataset: list[dict], *, k: int = 5, dim: int = 256,
                 answer_token_recall=metrics.answer_token_recall(
                     retrieved_texts, accepted_answer,
                 ),
+                packed_ids=[tag for tag in packed_tags if tag],
+                packed_recall_at_k=metrics.recall_at_k(packed_tags, supporting),
+                packed_hit_at_k=metrics.hit_at_k(packed_tags, supporting),
+                packed_mrr_at_k=metrics.mrr_at_k(packed_tags, supporting, k),
+                packed_ndcg_at_k=metrics.ndcg_at_k(packed_tags, supporting, k),
+                packed_answer_token_recall=packed_answer_recall,
+                evidence_label_provenance=label_provenance,
+                evidence_label_count=label_count,
+                evidence_label_ceiling_at_k=label_ceiling,
+                evidence_label_method=str(q.get("evidence_label_method") or (
+                    "provided_source_ids" if supporting else "none"
+                )),
+                sufficient_evidence_proxy=sufficient_evidence_proxy,
+                sufficient_evidence_proxy_method="all_answer_tokens_in_packed_context",
                 usage=usage,
                 **depth_metrics,
             )
@@ -918,6 +953,34 @@ def run(dataset: list[dict], *, k: int = 5, dim: int = 256,
         "grounded_recall": bool(grounded),
         "detail": per_q,
     }
+    for metric in ("recall_at_k", "hit_at_k", "mrr_at_k", "ndcg_at_k"):
+        report[f"packed_{metric}"] = round(_mean(retrieval_rows, f"packed_{metric}"), 4)
+    report["packed_answer_token_recall"] = round(
+        _mean(answer_rows, "packed_answer_token_recall"), 4
+    )
+    labeled = [item for item in per_q if item.get("evidence_label_count", 0) > 0]
+    label_counts = [int(item["evidence_label_count"]) for item in labeled]
+    report["evidence_label_provenance"] = dict(Counter(
+        str(item.get("evidence_label_provenance") or "unknown") for item in per_q
+    ))
+    report["evidence_label_cardinality"] = {
+        "questions": len(labeled),
+        "mean": round(sum(label_counts) / len(label_counts), 4) if label_counts else None,
+        "max": max(label_counts, default=0),
+        "ceiling_at_k_mean": round(
+            sum(float(item["evidence_label_ceiling_at_k"]) for item in labeled) / len(labeled), 4
+        ) if labeled else None,
+        "boundary": "label-cardinality ceiling assumes perfect top-k selection; it is not a quality score",
+    }
+    sufficient_rows = [item for item in per_q if item.get("answer_scored") is True]
+    report["sufficient_evidence_proxy_rate"] = round(
+        sum(bool(item.get("sufficient_evidence_proxy")) for item in sufficient_rows)
+        / max(len(sufficient_rows), 1), 4,
+    )
+    report["sufficient_evidence_proxy_questions"] = len(sufficient_rows)
+    report["sufficient_evidence_proxy_boundary"] = (
+        "packed answer-token coverage diagnostic; not generated-answer correctness or citation entailment"
+    )
     if not v2:
         return report
 
@@ -948,6 +1011,12 @@ def run(dataset: list[dict], *, k: int = 5, dim: int = 256,
         public_record.pop("q", None)
         public_records.append(public_record)
     v2_metrics = _v2_metrics(per_q, bootstrap_iterations=max(0, int(bootstrap_iterations)))
+    v2_metrics["packed_evidence"] = {
+        key: report[key] for key in (
+            "packed_recall_at_k", "packed_hit_at_k", "packed_mrr_at_k", "packed_ndcg_at_k",
+            "packed_answer_token_recall",
+        )
+    }
     if canonical:
         v2_metrics["fixed_budget_curve"] = _measured_fixed_budget_curve(curve_measurements)
     envelope = report_envelope(

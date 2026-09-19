@@ -105,12 +105,10 @@ def test_core_backend_imports_stay_behind_outer_composition_root() -> None:
 
 
 def test_benchmark_text_alternatives_match_registered_fixture_boundary() -> None:
-    registry = json.loads(_read("docs/benchmark-evidence/offline-fixtures-v1.json"))
+    """The current image and its alt text expose only current registered boundaries."""
+    registry = json.loads(_read("docs/benchmark-evidence/offline-fixtures-v45.json"))
     measurements = {run["id"]: run["result"] for run in registry["runs"]}
     payload = measurements["offline-performance"]
-    grounding = measurements["offline-grounded"]
-    decisions = grounding["answerable"] + grounding["off_topic"]
-    correct = round(decisions * grounding["decision_accuracy"])
     readme = _read("README.md")
     svg_text = _read("docs/images/context-efficiency.svg")
     svg_root = ET.fromstring(svg_text)
@@ -126,29 +124,38 @@ def test_benchmark_text_alternatives_match_registered_fixture_boundary() -> None
     assert image is not None
     alternative = " ".join(image.group(1).lower().split())
 
-    for evidence in (
-        "local measurements and deterministic fixtures",
-        "local locomo diagnostic",
-        "740.3 to 214.3 tokens",
-        "162.2 to 42.4 tokens",
-        "3 of 15 queries",
-        "15 of 15",
-        "0 of 3 to 3 of 3",
-        "2 of 2 summary cases",
+    assert "registered deterministic fixtures" in alternative
+    assert "structure-aware chunks reduce retrieved context" in alternative
+    assert "retrieved-candidate quality is labeled separately" in alternative
+    assert "packed-context quality" in alternative
+    assert "both measured in the selected report" in alternative
+    assert "actual mcp transport and provider billing are not measured" in alternative
+    assert "740.3 to 214.3 tokens" in alternative
+    assert "162.2 to 42.4 tokens" in alternative
+    assert (
         f"{payload['compact_serialized_payload_tokens']:,} rather than "
-        f"{payload['full_serialized_payload_tokens']:,} tokens",
-        f"{correct} of {decisions} correct decisions",
-        "85.38 tokens under a 1,500-token cap",
+        f"{payload['full_serialized_payload_tokens']:,} tokens"
+    ) in alternative
+
+    for evidence in (
+        "artifact-driven local deterministic benchmark report",
+        "structure-aware chunks report 740.3 to 214.3 retrieved tokens per question",
+        "retrieved-candidate quality and packed-context quality are separate views",
+        f"{payload['full_serialized_payload_tokens']:,} full-proxy versus "
+        f"{payload['compact_serialized_payload_tokens']:,} compact-proxy tokens",
+        "not an mcp transport measurement",
+        "does not measure provider billing",
+        "1,500-token cap",
     ):
-        assert evidence in alternative
         assert evidence in description
 
-    assert "not an mcp transport" in description
-    assert "does not measure provider billing" in description
-    assert "1,500-token cap" in description
     for unsupported in ("unpinned", "noncanonical", "leaderboard"):
         assert unsupported not in alternative
         assert unsupported not in description
+
+    for retired in ("local locomo diagnostic", "3 of 15 queries", "0 of 3 to 3 of 3"):
+        assert retired not in alternative
+        assert retired not in description
 
 
 def test_official_longmemeval_runbook_tracks_attested_evidence_contract() -> None:

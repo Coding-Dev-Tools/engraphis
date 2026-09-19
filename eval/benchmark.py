@@ -104,11 +104,26 @@ def source_digest(path: Union[str, Path]) -> dict[str, Union[str, int]]:
     the bytes used, not disclose an operator's directory layout.
     """
     resolved = Path(path)
+    digest = hashlib.sha256()
+    byte_count = 0
+    with resolved.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+            byte_count += len(block)
     return {
         "name": resolved.name,
-        "sha256": sha256_file(resolved),
-        "bytes": resolved.stat().st_size,
+        "sha256": digest.hexdigest(),
+        "bytes": byte_count,
     }
+
+
+def verify_report_snapshot(report: dict, *, dataset_sha256: str,
+                           sources: Sequence[tuple[str, str]]) -> dict:
+    """Reject envelopes that identify bytes other than the evaluated snapshot."""
+    if (report["suite"]["sha256"] != dataset_sha256
+            or [(item["name"], item["sha256"]) for item in report["suite"]["sources"]] != list(sources)):
+        raise ValueError("report artifact does not match the evaluated source snapshot")
+    return report
 
 
 def git_provenance(cwd: Optional[Union[str, Path]] = None) -> dict[str, Union[str, bool]]:
@@ -154,7 +169,17 @@ _PUBLIC_RECORD_FIELDS = frozenset({
     "grounded_support", "answer_token_recall", "context_token_method",
     "context_tokenizer_identity", "qa_score", "qa_correct", "retrieval_excluded",
     "retrieval_scored", "inserted_memory_type_counts", "retrieved_memory_type_counts",
-    "usage",
+    "usage", "packed_ids", "packed_recall_at_k", "packed_hit_at_k",
+    "packed_mrr_at_k", "packed_ndcg_at_k", "packed_answer_token_recall",
+    "evidence_label_provenance", "evidence_label_count", "evidence_label_ceiling_at_k",
+    "evidence_label_method", "sufficient_evidence_proxy",
+    "sufficient_evidence_proxy_method",
+    "scenario_id", "family_id", "arm", "token_budget", "repetition", "status",
+    "task_success", "citation_validity", "citation_support", "evidence_retention",
+    "abstention_correct", "reader_calls", "correction_calls", "oracle_calls",
+    "oracle_outcome", "unscored_reason", "critical_violation_count",
+    "cohort", "campaign_sha256", "source_manifest_sha256", "deadline_seconds",
+    "validity", "eligible_for_quality",
 })
 _PUBLIC_METRIC_PREFIXES = ("recall_at_", "hit_at_", "mrr_at_", "ndcg_at_")
 _PUBLIC_USAGE_FIELDS = frozenset({

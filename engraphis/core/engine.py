@@ -28,6 +28,7 @@ import numpy as np
 from engraphis.core import scoring
 from engraphis.core.adaptive_context import AdaptiveContextResult, fit_recent_history
 from engraphis.core.conflicts import detect_conflicts
+from engraphis.core.evidence import exact_value_binding, make_exact_value_binding
 from engraphis.core.interfaces import (
     MemoryRecord,
     MemoryType,
@@ -1500,11 +1501,45 @@ class MemoryEngine:
 
         if decision is not None and decision.op == ResolutionOp.NOOP:
             target_id = _required_resolution_target(decision)
+            exact_value_bound = False
+            incoming_exact = (metadata or {}).get("exact_value")
+            if isinstance(incoming_exact, dict):
+                target = self.store.get_memory(target_id)
+                current_metadata = dict(target.metadata or {}) if target is not None else {}
+                if (target is not None
+                        and exact_value_binding(current_metadata, content=target.content) is None):
+                    # The incoming offsets are relative to the duplicate's source
+                    # content, not necessarily to the retained record.  Rebind the
+                    # literal against the record that will actually be recalled;
+                    # otherwise a harmlessly reworded duplicate can advertise a
+                    # binding that later fails validation and silently disappears.
+                    rebound = exact_value_binding(
+                        {"exact_value": incoming_exact}, content=target.content,
+                    )
+                    if rebound is None:
+                        try:
+                            exact_value = incoming_exact.get("value")
+                            exact_type = incoming_exact.get("type", "literal")
+                            if isinstance(exact_value, str):
+                                rebound = make_exact_value_binding(
+                                    target.content, exact_value, exact_type,
+                                )
+                        except (TypeError, ValueError):
+                            rebound = None
+                    if rebound is not None:
+                        target.metadata = {**current_metadata, "exact_value": rebound}
+                        # Keep the annotation in the same transaction as the NOOP
+                        # reinforcement. ``add_memory`` updates the descriptive HLC and
+                        # mirrors without replacing the existing vector when it is absent
+                        # from the row snapshot.
+                        self.store.add_memory(target, audit=False, commit=False)
+                        exact_value_bound = True
             self.store.reinforce(target_id, boost=scoring.INTERACTION_BOOST["create"])
             self.store.audit("resolver", "noop", target_id, decision.reason)
             if transactional_finalizer is not None:
                 transactional_finalizer(target_id)
-            return {"id": target_id, "op": "noop", "reason": decision.reason}
+            return {"id": target_id, "op": "noop", "reason": decision.reason,
+                    "exact_value_bound": exact_value_bound}
 
         # Before anything reads it: demote graph hints this write cannot prove came from
         # an Extractor, so the "structured_extractor" feed below can only ever see
@@ -2418,8 +2453,10 @@ class MemoryEngine:
                scopes: Optional[list] = None,
                mtypes: Optional[list] = None, as_of: Optional[float] = None,
                valid_at: Optional[float] = None, known_at: Optional[float] = None,
-               k: int = 8, token_budget: Optional[int] = None,
+               k: Optional[int] = None, token_budget: Optional[int] = None,
                retrieval_profile: str = "balanced", candidate_depth: str = "fixed",
+               packing_mode: str = "legacy",
+               retrieval_recipe: str = "default",
                diagnostics: bool = False,
                include_untrusted: bool = False,
                prompt_only: bool = False,
@@ -2437,7 +2474,11 @@ class MemoryEngine:
         result = self.recall_engine.recall(
             query, flt, k=k, reinforce=bool(reinforce) and not flt.historical,
             token_budget=token_budget, retrieval_profile=retrieval_profile,
+            k_supplied=k is not None,
+            token_budget_supplied=token_budget is not None,
             candidate_depth=candidate_depth,
+            packing_mode=packing_mode,
+            retrieval_recipe=retrieval_recipe,
             diagnostics=diagnostics,
             include_untrusted=bool(include_untrusted),
             prompt_only=bool(prompt_only),

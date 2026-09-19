@@ -27,7 +27,7 @@ import numpy as np
 from engraphis.backends.vector_numpy import NumpyVectorIndex
 from engraphis.core.interfaces import MemoryRecord, MemoryType, Scope, SearchFilter
 from engraphis.core.store import Store
-from eval.benchmark import report_envelope, sha256_file
+from eval.benchmark import report_envelope, sha256_file, verify_report_snapshot
 from eval.vector_scale import (
     BACKENDS, _latency_ms, _normalized_random, _result_hash, get_vector_index, parse_sizes,
 )
@@ -398,7 +398,7 @@ def run_file_backed(sizes: list[int], *, dim: int = 256, queries: int = 20,
         native_version = importlib.metadata.version("sqlite-vec") if backend == "sqlite-vec" else None
     except importlib.metadata.PackageNotFoundError:
         native_version = "unavailable"
-    return report_envelope(
+    report = report_envelope(
         suite="file-backed-exact-index-scale/v1", dataset_path=Path(__file__), config=config,
         records=[{"question_id": f"n{cell['corpus_size']}-c{cell['concurrency']}",
                   "category": "exact_index_throughput", "latency_ms": cell["latency_ms"]["p50"]}
@@ -427,3 +427,6 @@ def run_file_backed(sizes: list[int], *, dim: int = 256, queries: int = 20,
                  "--mixed-writes", str(mixed_writes), "--batch-size", str(batch_size),
                  "--tenants", str(tenants), *(["--progress"] if progress else [])],
     )
+    return verify_report_snapshot(report,
+        dataset_sha256=source_before["files"]["eval/vector_scale_storage.py"],
+        sources=[(Path(name).name, value) for name, value in source_before["files"].items()])

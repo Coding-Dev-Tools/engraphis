@@ -10,6 +10,32 @@ from engraphis.core.store import Store
 from engraphis.service import MemoryService
 
 
+def _insert_receipt_fork(store: Store, workspace_id: str) -> None:
+    """Create a valid-looking second branch for corruption regression tests."""
+    first = store.record_receipt("remember", workspace_id=workspace_id)
+    second = store.record_receipt("recall", workspace_id=workspace_id)
+    fork = dict(second)
+    fork.pop("hash")
+    fork["id"] = new_id("receipt")
+    fork["prev_hash"] = first["hash"]
+    fork["ts_ms"] += 1
+    payload = json.dumps(
+        fork, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    receipt_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    store.conn.execute(
+        "INSERT INTO operation_receipts(id, ts, operation, workspace_id, repo_id, "
+        "sequence, scope_digest, actor, target_count, status, payload, prev_hash, "
+        "receipt_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            fork["id"], fork["ts_ms"] / 1000.0, fork["operation"], workspace_id, "", 999,
+            fork["scope_digest"], fork["actor_digest"], fork["target_count"],
+            fork["status"], payload, fork["prev_hash"], receipt_hash,
+        ),
+    )
+    store.conn.commit()
+
+
 def test_empty_context_savings_scope_has_valid_receipt_chain():
     summary = Store(":memory:").context_savings()
 
@@ -317,28 +343,7 @@ def test_receipt_append_after_payload_corruption_is_non_bricking_and_stays_inval
 def test_receipt_fork_has_no_safe_append_head():
     store = Store(":memory:")
     wid = store.get_or_create_workspace("team")
-    first = store.record_receipt("remember", workspace_id=wid)
-    second = store.record_receipt("recall", workspace_id=wid)
-    fork = dict(second)
-    fork.pop("hash")
-    fork["id"] = new_id("receipt")
-    fork["prev_hash"] = first["hash"]
-    fork["ts_ms"] += 1
-    payload = json.dumps(
-        fork, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-    )
-    receipt_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
-    store.conn.execute(
-        "INSERT INTO operation_receipts(id, ts, operation, workspace_id, repo_id, "
-        "sequence, scope_digest, actor, target_count, status, payload, prev_hash, "
-        "receipt_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (
-            fork["id"], fork["ts_ms"] / 1000.0, fork["operation"], wid, "", 999,
-            fork["scope_digest"], fork["actor_digest"], fork["target_count"],
-            fork["status"], payload, fork["prev_hash"], receipt_hash,
-        ),
-    )
-    store.conn.commit()
+    _insert_receipt_fork(store, wid)
 
     with pytest.raises(sqlite3.IntegrityError, match="no unique structural head"):
         store.record_receipt("link", workspace_id=wid)
@@ -346,6 +351,42 @@ def test_receipt_fork_has_no_safe_append_head():
     verification = store.verify_receipts(workspace_id=wid)
     assert verification["valid"] is False
     assert "chain_fork" in {error["error"] for error in verification["errors"]}
+
+
+def test_service_receipt_corruption_does_not_brick_completed_operations():
+    service = MemoryService.create(":memory:")
+    workspace_id = service.store.get_or_create_workspace("team")
+    _insert_receipt_fork(service.store, workspace_id)
+
+    stored = service.remember(
+        "The completed memory operation remains available.",
+        workspace="team",
+        scope="workspace",
+    )
+    assert stored["stored"] is True
+    assert stored["receipt"] is None
+    assert stored["receipt_warning"]["code"] == "receipt_chain_integrity_failure"
+    assert service.store.get_memory(stored["id"]) is not None
+
+    recalled = service.recall("completed memory operation", workspace="team")
+    assert recalled["count"] >= 1
+    assert recalled["receipt"] is None
+    assert recalled["receipt_warning"]["code"] == "receipt_chain_integrity_failure"
+
+    verification = service.store.verify_receipts(workspace_id=workspace_id)
+    assert verification["valid"] is False
+    assert "chain_fork" in {error["error"] for error in verification["errors"]}
+
+
+def test_service_does_not_mask_unrelated_receipt_database_errors(monkeypatch):
+    service = MemoryService.create(":memory:")
+
+    def fail_with_unrelated_error(*_args, **_kwargs):
+        raise sqlite3.IntegrityError("database is locked")
+
+    monkeypatch.setattr(service.store, "record_receipt", fail_with_unrelated_error)
+    with pytest.raises(sqlite3.IntegrityError, match="database is locked"):
+        service.remember("An unrelated receipt error must remain visible.", workspace="team")
 
 
 def test_healthy_receipt_append_does_not_reconstruct_chain(monkeypatch):

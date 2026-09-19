@@ -1,6 +1,6 @@
 {
   "schema": "engraphis-mcp-contract/v1",
-  "sha256": "1f0b4351e3a3d10b4404a86f47e30dfa85922f3aa08a86ce723e64aba6c793a3",
+  "sha256": "00313f5cf8110bd18def46a6128ac52c360ccf4a21fd613a44b1511f55f31e69",
   "surfaces": {
     "classic": [
       {
@@ -865,7 +865,7 @@
           "readOnlyHint": false,
           "title": "Index a repository's code graph"
         },
-        "description": "Parse a repository into the code symbol graph: function/class/method definitions\nplus best-effort calls/imports edges. Run this once when you start working in a repo\n(or after large changes) so ``engraphis_search_code`` has something to search \u2014 uses\nAST parsing (tree-sitter) when available, a dependency-free regex fallback otherwise.\nSupported languages: Python, JavaScript, TypeScript, C#, C, and C++.\n\nBuild/dependency directories (node_modules, bin, obj, target, .venv, \u2026) are skipped\nwhile walking, so a large non-Python repo indexes quickly instead of appearing to\nhang; add a ``.engraphisignore`` file (gitignore-style) at the repo root to skip\nproject-specific generated files.\n\nCreates the workspace/repo if you haven't named them before (like\nengraphis_remember). Re-indexing is safe to call again; each file's symbols are\nreplaced, not duplicated. Reads files from ``root_path`` on the local filesystem \u2014\nthe same trust boundary as any other local tool you have, nothing is sent anywhere.\nSet ``ENGRAPHIS_INDEX_ROOTS`` to a path-separator-delimited absolute-path allow-list when\nrepositories live outside the working, home, or temporary directories, or to narrow the\ndefaults. Each completed scan appends a fresh operation receipt, so the MCP call is\nnon-idempotent even when the code graph itself is unchanged.\n\nReturns:\n    str: JSON ``{\"files_indexed\",\"symbols\",\"edges\",\"backend\"}``.",
+        "description": "Parse a repository into the code symbol graph: function/class/method definitions\nplus best-effort calls/imports edges. Run this once when you start working in a repo\n(or after large changes) so ``engraphis_search_code`` has something to search \u2014 uses\nAST parsing (tree-sitter) when available, a dependency-free regex fallback otherwise.\nSupported languages: Python, JavaScript, TypeScript, C#, C, and C++.\n\nBuild/dependency directories (node_modules, bin, obj, target, .venv, \u2026) are skipped\nwhile walking, so a large non-Python repo indexes quickly instead of appearing to\nhang; add a ``.engraphisignore`` file (gitignore-style) at the repo root to skip\nproject-specific generated files.\n\nCreates the workspace/repo if you haven't named them before (like\nengraphis_remember). Re-indexing is safe to call again; each file's symbols are\nreplaced, not duplicated. Reads files from ``root_path`` on the local filesystem \u2014\nthe same trust boundary as any other local tool you have, nothing is sent anywhere.\nSet ``ENGRAPHIS_INDEX_ROOTS`` to a path-separator-delimited absolute-path allow-list when\nrepositories live outside the working, home, or temporary directories, or to narrow the\ndefaults. Each completed scan attempts a fresh operation receipt, so the MCP call is\nnon-idempotent even when the code graph itself is unchanged; a pre-existing receipt-chain\nintegrity failure is returned as a content-free warning instead of failing the scan.\n\nReturns:\n    str: JSON ``{\"files_indexed\",\"symbols\",\"edges\",\"backend\"}``.",
         "inputSchema": {
           "properties": {
             "languages": {
@@ -1005,7 +1005,7 @@
           "readOnlyHint": false,
           "title": "Ingest a live PostgreSQL schema"
         },
-        "description": "Convert tables, columns, constraints, and foreign keys into a schema memory and\nentity graph. Requires the optional psycopg backend. An exact retry reuses its live\npoint-in-time schema snapshot, but every invocation appends audit/receipt records,\nso the tool as a whole is not idempotent.",
+        "description": "Convert tables, columns, constraints, and foreign keys into a schema memory and\nentity graph. Requires the optional psycopg backend. An exact retry reuses its live\npoint-in-time schema snapshot, but every invocation attempts audit/receipt records,\nso the tool as a whole is not idempotent. A structurally invalid receipt chain is surfaced\nas a content-free warning after the completed import.",
         "inputSchema": {
           "properties": {
             "dsn": {
@@ -1070,7 +1070,7 @@
           "readOnlyHint": false,
           "title": "Link two memories"
         },
-        "description": "Explicitly connect two memories (A-MEM-style linking) \u2014 use when you notice two\nstored facts are related but a plain recall wouldn't surface that connection, e.g. a\nbug report and the memory describing its fix.\n\nReturns:\n    str: JSON ``{\"a\",\"b\",\"relation\",\"layer\",\"reason\",\"linked\":true,\"receipt\":...}``\n    or an actionable error if either id is unknown or doesn't belong to\n    ``workspace``/``repo``.",
+        "description": "Explicitly connect two memories (A-MEM-style linking) \u2014 use when you notice two\nstored facts are related but a plain recall wouldn't surface that connection, e.g. a\nbug report and the memory describing its fix.\n\nReturns:\n    str: JSON ``{\"a\",\"b\",\"relation\",\"layer\",\"reason\",\"linked\":true,\"receipt\":...}``\n    (with ``receipt_warning`` if receipt continuity is unavailable)\n    or an actionable error if either id is unknown or doesn't belong to\n    ``workspace``/``repo``.",
         "inputSchema": {
           "properties": {
             "a": {
@@ -1282,7 +1282,7 @@
           "readOnlyHint": false,
           "title": "Agent-ready proactive context"
         },
-        "description": "Return an agent-ready context packet before the agent knows what to ask.\n\nCombines proactive recall, optional task-specific recall, and last-session handoff\ninto a cited ``context_summary`` plus ``suggested_queries``. Deterministic by\ndefault; LLM synthesis is opt-in and accepted only when it cites source memories.\nWhen ``task`` or ``agent_state`` is supplied, the task-specific recall appends a\nprivacy-safe receipt (without reinforcing memories), so the tool is conservatively\nannotated as mutating and non-idempotent.",
+        "description": "Return an agent-ready context packet before the agent knows what to ask.\n\nCombines proactive recall, optional task-specific recall, and last-session handoff\ninto a cited ``context_summary`` plus ``suggested_queries``. Deterministic by\ndefault; LLM synthesis is opt-in and accepted only when it cites source memories.\nWhen ``task`` or ``agent_state`` is supplied, the task-specific recall attempts a\nprivacy-safe receipt (without reinforcing memories), so the tool is conservatively\nannotated as mutating and non-idempotent. If receipt continuity is already invalid, the\ncontext result still completes with a content-free ``receipt_warning``.",
         "inputSchema": {
           "properties": {
             "agent_state": {
@@ -1373,7 +1373,7 @@
           "readOnlyHint": false,
           "title": "Promote a memory to a wider scope"
         },
-        "description": "Widen a memory's visibility without losing its narrow-scope history.\n\nThe wider record is stored first, inherits the source's protection,\nconfidentiality, provenance, and learned stability, and is linked back to the\nbi-temporally closed source. Promotion must be strictly wider (session\u2192repo/workspace\nor repo\u2192workspace); it never edits scope in place. User-scope promotion is not yet\nsupported because records remain workspace-bound.\n\nReturns:\n    str: JSON ``{\"id\",\"promoted_from\",\"from_scope\",\"scope\",\"op\",\"reason\"}``\n    plus a privacy receipt, or an actionable validation error.",
+        "description": "Widen a memory's visibility without losing its narrow-scope history.\n\nThe wider record is stored first, inherits the source's protection,\nconfidentiality, provenance, and learned stability, and is linked back to the\nbi-temporally closed source. Promotion must be strictly wider (session\u2192repo/workspace\nor repo\u2192workspace); it never edits scope in place. User-scope promotion is not yet\nsupported because records remain workspace-bound.\n\nReturns:\n    str: JSON ``{\"id\",\"promoted_from\",\"from_scope\",\"scope\",\"op\",\"reason\"}``\n    plus a privacy receipt (or a content-free ``receipt_warning`` when the existing\n    receipt chain cannot safely be extended), or an actionable validation error.",
         "inputSchema": {
           "properties": {
             "memory_id": {
@@ -1435,7 +1435,7 @@
           "readOnlyHint": false,
           "title": "Recall relevant memories"
         },
-        "description": "Retrieve the memories most relevant to a query (semantic vector + lexical + graph).\n\nCall this before answering or acting when prior context would help \u2014 to avoid re-asking\nthe user, to recover decisions/conventions, or to resume earlier work.\nSuccessful calls append a privacy-safe recall receipt but do not strengthen weak\nneighbors merely because they were returned. Grounded recall reinforces cited\nevidence; an explicit-use caller can opt into reinforcement through the Python API.\nBecause the receipt is stateful, this surface is neither read-only nor idempotent.\n\nReturns:\n    str: JSON with ``{\"query\",\"count\",\"context\",\"degraded_mode\",\"semantic_support\",\n    \"embedding_mode\",\"score_semantics\",\"memories\":[{\"id\",\n    \"title\",\"content\",\"scope\",\"mtype\",\"repo_id\",\"score\",\"relative_score\",\n    \"absolute_support\",\"arm\",\"retention\",\"provenance\"}]}``. ``score`` is a compatibility\n    alias for the query-relative rank; use ``absolute_support`` (0..1) for an evidence floor.\n    ``degraded_mode=true`` and ``semantic_support=false`` mean semantic vector retrieval\n    was disabled because the active embedder is not declared semantic.\n    Returns count 0 with a \"note\" if the workspace/repo isn't known yet.",
+        "description": "Retrieve the memories most relevant to a query (semantic vector + lexical + graph).\n\nCall this before answering or acting when prior context would help \u2014 to avoid re-asking\nthe user, to recover decisions/conventions, or to resume earlier work.\nSuccessful calls attempt to append a privacy-safe recall receipt but do not strengthen weak\nneighbors merely because they were returned. If the existing receipt chain is structurally\ninvalid, the recall result still completes with ``receipt: null`` and a ``receipt_warning``;\nthe Store remains fail-closed rather than guessing a chain predecessor. Grounded recall\nreinforces cited evidence; an explicit-use caller can opt into reinforcement through the\nPython API.\nBecause the receipt is stateful, this surface is neither read-only nor idempotent.\n\nReturns:\n    str: JSON with ``{\"query\",\"count\",\"context\",\"degraded_mode\",\"semantic_support\",\n    \"embedding_mode\",\"score_semantics\",\"memories\":[{\"id\",\n    \"title\",\"content\",\"scope\",\"mtype\",\"repo_id\",\"score\",\"relative_score\",\n    \"absolute_support\",\"arm\",\"retention\",\"provenance\"}]}``. ``score`` is a compatibility\n    alias for the query-relative rank; use ``absolute_support`` (0..1) for an evidence floor.\n    ``degraded_mode=true`` and ``semantic_support=false`` mean semantic vector retrieval\n    was disabled because the active embedder is not declared semantic.\n    Returns count 0 with a \"note\" if the workspace/repo isn't known yet.",
         "inputSchema": {
           "properties": {
             "as_of": {
@@ -1464,12 +1464,19 @@
               "type": "boolean"
             },
             "k": {
+              "anyOf": [
+                {
+                  "maximum": 50,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
               "default": 8,
               "description": "Max memories to return (1-50).",
-              "maximum": 50,
-              "minimum": 1,
-              "title": "K",
-              "type": "integer"
+              "title": "K"
             },
             "known_at": {
               "anyOf": [
@@ -1531,6 +1538,12 @@
               "description": "Restrict to these memory types (semantic/episodic/procedural/working).",
               "title": "Mtypes"
             },
+            "packing_mode": {
+              "default": "legacy",
+              "description": "Context packing: legacy preserves the established packer; coverage spreads complete evidence units across sources.",
+              "title": "Packing Mode",
+              "type": "string"
+            },
             "planning": {
               "default": "off",
               "description": "Query planning: off preserves the single-query path; auto enables bounded offline or injected planning.",
@@ -1568,6 +1581,12 @@
               "default": "balanced",
               "description": "Retrieval profile: balanced (hybrid), fast (vector + lexical, no graph), auto, lexical, graph, or code. Auto is opt-in until benchmarks demonstrate a win.",
               "title": "Retrieval Profile",
+              "type": "string"
+            },
+            "retrieval_recipe": {
+              "default": "default",
+              "description": "Measured opt-in workload recipe: default, conversation, or long_session.",
+              "title": "Retrieval Recipe",
               "type": "string"
             },
             "session_id": {
@@ -1677,12 +1696,19 @@
               "type": "string"
             },
             "k": {
+              "anyOf": [
+                {
+                  "maximum": 50,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
               "default": 50,
               "description": "Max candidate memories (1-50).",
-              "maximum": 50,
-              "minimum": 1,
-              "title": "K",
-              "type": "integer"
+              "title": "K"
             },
             "known_at": {
               "anyOf": [
@@ -1744,6 +1770,11 @@
               "description": "Optional memory types: semantic/episodic/procedural/working.",
               "title": "Mtypes"
             },
+            "packing_mode": {
+              "default": "legacy",
+              "title": "Packing Mode",
+              "type": "string"
+            },
             "planning": {
               "default": "off",
               "description": "off preserves single-query recall; auto enables bounded planning.",
@@ -1777,6 +1808,11 @@
               "title": "Retrieval Profile",
               "type": "string"
             },
+            "retrieval_recipe": {
+              "default": "default",
+              "title": "Retrieval Recipe",
+              "type": "string"
+            },
             "session_id": {
               "anyOf": [
                 {
@@ -1791,12 +1827,19 @@
               "title": "Session Id"
             },
             "token_budget": {
+              "anyOf": [
+                {
+                  "maximum": 32768,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
               "default": 1024,
               "description": "Hard packed-context budget under the reported token counter.",
-              "maximum": 32768,
-              "minimum": 0,
-              "title": "Token Budget",
-              "type": "integer"
+              "title": "Token Budget"
             },
             "valid_at": {
               "anyOf": [
@@ -1842,7 +1885,7 @@
           "readOnlyHint": false,
           "title": "Grounded recall (cited answer, or abstain)"
         },
-        "description": "Answer a question *strictly from* stored memories, with citations \u2014 or abstain.\n\nUnlike ``engraphis_recall`` (which returns memories and leaves synthesis to you),\nthis returns an answer assembled only from the retrieved memories, each claim tied\nto a ``[n]`` citation, and \u2014 crucially \u2014 refuses to answer when nothing in scope\nactually supports the query (``grounded: false``). Use it when you want a grounded,\nnon-hallucinated answer and would rather get \"insufficient evidence\" than a guess.\nThe deterministic default never introduces a claim that is not in a cited memory.\nWhen ``degraded_mode`` is true, its feature-hashing fallback is treated as lexical-only:\nsemantic vector retrieval and semantic cosine support are disabled.\nWith ``synthesize=True``, configured LLM prose is accepted only when citations hold.\nEvery resolved call appends a privacy-safe receipt (including abstentions), and a\ngrounded answer reinforces cited memories.\n\nReturns:\n    str: JSON ``{\"query\",\"grounded\",\"abstained\",\"answer\",\"support\",\"reason\",\n    \"degraded_mode\",\"semantic_support\",\"embedding_mode\",\n    \"synthesized\":false,\"citations\":[{\"n\",\"id\",\"title\",\"content\",\"score\",\"support\",\n    \"provenance\"}]}``. When ``grounded`` is false, ``answer`` is empty and ``reason``\n    explains why (insufficient evidence, or unknown workspace/repo).",
+        "description": "Answer a question *strictly from* stored memories, with citations \u2014 or abstain.\n\nUnlike ``engraphis_recall`` (which returns memories and leaves synthesis to you),\nthis returns an answer assembled only from the retrieved memories, each claim tied\nto a ``[n]`` citation, and \u2014 crucially \u2014 refuses to answer when nothing in scope\nactually supports the query (``grounded: false``). Use it when you want a grounded,\nnon-hallucinated answer and would rather get \"insufficient evidence\" than a guess.\nThe deterministic default never introduces a claim that is not in a cited memory.\nWhen ``degraded_mode`` is true, its feature-hashing fallback is treated as lexical-only:\nsemantic vector retrieval and semantic cosine support are disabled.\nWith ``synthesize=True``, configured LLM prose is accepted only when citations hold.\nEvery resolved call attempts to append a privacy-safe receipt (including abstentions), and a\ngrounded answer reinforces cited memories. A structurally invalid receipt chain is reported\nin ``receipt_warning`` without turning the completed answer into an API failure.\n\nReturns:\n    str: JSON ``{\"query\",\"grounded\",\"abstained\",\"answer\",\"support\",\"reason\",\n    \"degraded_mode\",\"semantic_support\",\"embedding_mode\",\n    \"synthesized\":false,\"citations\":[{\"n\",\"id\",\"title\",\"content\",\"score\",\"support\",\n    \"provenance\"}]}``. When ``grounded`` is false, ``answer`` is empty and ``reason``\n    explains why (insufficient evidence, or unknown workspace/repo).",
         "inputSchema": {
           "properties": {
             "as_of": {
@@ -2247,6 +2290,27 @@
               "title": "Dedupe",
               "type": "boolean"
             },
+            "exact_value": {
+              "anyOf": [
+                {
+                  "maxLength": 4096,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional verbatim source value to copy exactly.",
+              "title": "Exact Value"
+            },
+            "exact_value_type": {
+              "default": "literal",
+              "description": "Literal type: literal, string, identifier, path, number, date, enum, or json.",
+              "maxLength": 32,
+              "title": "Exact Value Type",
+              "type": "string"
+            },
             "importance": {
               "default": 0.0,
               "description": "Salience 0..1; higher resists decay.",
@@ -2420,7 +2484,7 @@
         "inputSchema": {
           "properties": {
             "facts": {
-              "description": "The facts collected from a fan-out (parallel sub-agents, research, a review council), as a list of objects: each needs 'content' and optionally 'title', 'importance' (0..1), 'keywords', 'subject_key' (stable claim subject like 'api.rate_limit'), 'claim_kind', 'evidence_source' (per-fact origin label; facts sharing one get evidence-labeled links), and 'valid_from' (Unix timestamp). All facts are stored in one transaction; each is deduplicated against the others, and facts that share a subject_key or evidence_source are linked with evidence-labeled edges.",
+              "description": "The facts collected from a fan-out (parallel sub-agents, research, a review council), as a list of objects: each needs 'content' and optionally 'title', 'importance' (0..1), 'keywords', 'subject_key' (stable claim subject like 'api.rate_limit'), 'claim_kind', 'evidence_source' (per-fact origin label; facts sharing one get evidence-labeled links), and 'valid_from' (Unix timestamp), plus optional 'exact_value' and 'exact_value_type' for a unique verbatim source literal. All facts are stored in one transaction; each is deduplicated against the others, and facts that share a subject_key or evidence_source are linked with evidence-labeled edges.",
               "items": {
                 "additionalProperties": true,
                 "type": "object"
@@ -3219,12 +3283,24 @@
               "type": "string"
             },
             "k": {
+              "anyOf": [
+                {
+                  "maximum": 50,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
               "default": 50,
               "description": "Maximum source memories.",
-              "maximum": 50,
-              "minimum": 1,
-              "title": "K",
-              "type": "integer"
+              "title": "K"
+            },
+            "packing_mode": {
+              "default": "legacy",
+              "title": "Packing Mode",
+              "type": "string"
             },
             "query": {
               "description": "Question or task needing prior context.",
@@ -3247,6 +3323,11 @@
               "description": "Optional repository.",
               "title": "Repo"
             },
+            "retrieval_recipe": {
+              "default": "default",
+              "title": "Retrieval Recipe",
+              "type": "string"
+            },
             "session_id": {
               "anyOf": [
                 {
@@ -3261,12 +3342,19 @@
               "title": "Session Id"
             },
             "token_budget": {
+              "anyOf": [
+                {
+                  "maximum": 32768,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
               "default": 1024,
               "description": "Hard returned-context token budget.",
-              "maximum": 32768,
-              "minimum": 0,
-              "title": "Token Budget",
-              "type": "integer"
+              "title": "Token Budget"
             },
             "workspace": {
               "anyOf": [

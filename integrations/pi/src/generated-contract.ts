@@ -181,12 +181,24 @@ export const SMART_SCHEMAS = {
         "type": "string"
       },
       "k": {
+        "anyOf": [
+          {
+            "maximum": 50,
+            "minimum": 1,
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
         "default": 50,
         "description": "Maximum source memories.",
-        "maximum": 50,
-        "minimum": 1,
-        "title": "K",
-        "type": "integer"
+        "title": "K"
+      },
+      "packing_mode": {
+        "default": "legacy",
+        "title": "Packing Mode",
+        "type": "string"
       },
       "query": {
         "description": "Question or task needing prior context.",
@@ -209,6 +221,11 @@ export const SMART_SCHEMAS = {
         "description": "Optional repository.",
         "title": "Repo"
       },
+      "retrieval_recipe": {
+        "default": "default",
+        "title": "Retrieval Recipe",
+        "type": "string"
+      },
       "session_id": {
         "anyOf": [
           {
@@ -223,12 +240,19 @@ export const SMART_SCHEMAS = {
         "title": "Session Id"
       },
       "token_budget": {
+        "anyOf": [
+          {
+            "maximum": 32768,
+            "minimum": 0,
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
         "default": 1024,
         "description": "Hard returned-context token budget.",
-        "maximum": 32768,
-        "minimum": 0,
-        "title": "Token Budget",
-        "type": "integer"
+        "title": "Token Budget"
       },
       "workspace": {
         "anyOf": [
