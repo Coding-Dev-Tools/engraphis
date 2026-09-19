@@ -111,7 +111,7 @@ if [ "$(id -u)" = "0" ]; then
             exit 1
         fi
         if [ "$config_parent_created" = "1" ]; then
-            if [ -L "$config_parent" ] || [ ! -d "$config_parent" ]; then
+            if ! reject_linked_path "$config_parent" || [ ! -d "$config_parent" ]; then
                 printf '%s\n' "[engraphis] refusing changed trusted config directory: $config_parent" >&2
                 exit 1
             fi
@@ -120,12 +120,16 @@ if [ "$(id -u)" = "0" ]; then
                 exit 1
             fi
         fi
-        if [ -L "$config_file" ]; then
+        if ! reject_linked_path "$config_file"; then
             printf '%s\n' "[engraphis] refusing symlinked trusted config file: $config_file" >&2
             exit 1
         fi
         if [ ! -e "$config_file" ] && ! : > "$config_file"; then
             printf '%s\n' "[engraphis] unable to create trusted config file: $config_file" >&2
+            exit 1
+        fi
+        if ! reject_linked_path "$config_file" || [ ! -f "$config_file" ]; then
+            printf '%s\n' "[engraphis] refusing changed or non-regular trusted config file: $config_file" >&2
             exit 1
         fi
         if ! chmod 600 "$config_file"; then
@@ -137,7 +141,7 @@ if [ "$(id -u)" = "0" ]; then
     # replaced that trusted root-startup input with a symlink or a non-regular path:
     # chown follows symlinks by default and would otherwise let the marker redirect
     # root's ownership change to an arbitrary target on the mounted volume.
-    if [ -L "$ownership_marker" ]; then
+    if [ -L "$ownership_marker" ] || ! reject_linked_path "$ownership_marker"; then
         printf '%s\n' "[engraphis] refusing symlinked volume ownership marker: $ownership_marker" >&2
         exit 1
     fi
@@ -172,9 +176,15 @@ if [ "$(id -u)" = "0" ]; then
             exit 1
         fi
     fi
-    if [ -n "$config_file" ] && ! chown engraphis:engraphis "$config_file"; then
-        printf '%s\n' "[engraphis] unable to own trusted config file" >&2
-        exit 1
+    if [ -n "$config_file" ]; then
+        if ! reject_linked_path "$config_file" || [ ! -f "$config_file" ]; then
+            printf '%s\n' "[engraphis] refusing changed trusted config file: $config_file" >&2
+            exit 1
+        fi
+        if ! chown engraphis:engraphis "$config_file"; then
+            printf '%s\n' "[engraphis] unable to own trusted config file" >&2
+            exit 1
+        fi
     fi
     exec gosu engraphis "$@"
 fi
