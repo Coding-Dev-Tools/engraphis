@@ -33,3 +33,19 @@ def test_root_path_validation_checks_intermediate_symlinks_before_dot_segments(t
     assert _validate(str(link) + "/../config.env") != 0
     assert _validate(str(target / "nested" / "config.env")) == 0
     assert _validate(str(tmp_path / "new" / "config.env")) == 0
+
+
+def test_external_state_requires_an_existing_app_owned_directory(tmp_path):
+    entrypoint = (Path(__file__).resolve().parents[1] / "docker-entrypoint.sh").read_text()
+    body = entrypoint.split("    state_directory_is_owned() {", 1)[1].split("\n    }", 1)[0]
+    script = 'state_directory_is_owned() {' + body + '\n}\nstate_directory_is_owned "$1" "$2"\n'
+    owner = tmp_path.stat().st_uid
+
+    def check(path, uid):
+        return subprocess.run(["sh", "-c", script, "validator", str(path), str(uid)],
+                              check=False).returncode
+
+    assert check(tmp_path, owner) == 0
+    assert check(tmp_path, owner + 1) != 0
+    assert check(tmp_path / "missing", owner) != 0
+    assert check("/data/new-state", owner) == 0
