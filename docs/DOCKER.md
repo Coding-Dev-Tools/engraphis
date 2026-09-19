@@ -31,6 +31,9 @@ with the container's `engraphis` UID as owner before startup. Existing external 
 directories must also belong to that UID; startup rejects other owners before changing files.
 The repair marker lives at `/data/.volume-ownership`, so reusing external state cannot skip
 the repair of a replaced or restored data volume.
+State directories use mode `0700` and trusted settings use `0600`. A container started with
+`--user` or `runAsUser` initializes a missing settings file when its state volume is writable
+by that runtime UID; it preserves the file on restart.
 
 > Port precedence: the dashboard binds `$PORT` when the platform injects one, falling back
 > to `ENGRAPHIS_PORT` (then `8700`). Compose sets both from `ENGRAPHIS_COMPOSE_PORT` so the

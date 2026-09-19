@@ -13,7 +13,7 @@ pytestmark = pytest.mark.skipif(os.name == "nt" or not shutil.which("sh"),
 
 def _validate(path: str) -> int:
     entrypoint = (Path(__file__).resolve().parents[1] / "docker-entrypoint.sh").read_text()
-    body = entrypoint.split("    reject_linked_path() {", 1)[1].split("\n    }", 1)[0]
+    body = entrypoint.split("reject_linked_path() {", 1)[1].split("\n}", 1)[0]
     script = 'reject_linked_path() {' + body + '\n}\nreject_linked_path "$1"\n'
     return subprocess.run(["sh", "-c", script, "validator", path], check=False).returncode
 
@@ -37,7 +37,7 @@ def test_root_path_validation_checks_intermediate_symlinks_before_dot_segments(t
 
 def test_external_state_requires_an_existing_app_owned_directory(tmp_path):
     entrypoint = (Path(__file__).resolve().parents[1] / "docker-entrypoint.sh").read_text()
-    body = entrypoint.split("    state_directory_is_owned() {", 1)[1].split("\n    }", 1)[0]
+    body = entrypoint.split("state_directory_is_owned() {", 1)[1].split("\n}", 1)[0]
     script = 'state_directory_is_owned() {' + body + '\n}\nstate_directory_is_owned "$1" "$2"\n'
     owner = tmp_path.stat().st_uid
 
@@ -87,7 +87,35 @@ def test_external_state_marker_cannot_skip_repair_of_a_replaced_volume(tmp_path)
     assert f"-R engraphis:engraphis {managed}" in log.read_text().splitlines()
     assert (managed / ".volume-ownership").is_file()
     assert legacy_marker.read_text() == "older external volume"
+    assert external.stat().st_mode & 0o777 == 0o700
 
     log.write_text("")
     subprocess.run(["sh", str(script), "true"], env=env, check=True)
     assert not any(line.startswith("-R ") for line in log.read_text().splitlines())
+
+
+def test_non_root_first_boot_initializes_private_state_and_config(tmp_path):
+    binaries = tmp_path / "bin"
+    binaries.mkdir()
+    identity = binaries / "id"
+    # Use the actual fixture owner, while selecting the rootless startup branch
+    # even when this regression runs under a privileged container test runner.
+    identity.write_text('#!/bin/sh\nprintf "%s\\n" "$APP_UID"\n')
+    identity.chmod(0o755)
+    entrypoint = (Path(__file__).resolve().parents[1] / "docker-entrypoint.sh").read_text()
+    entrypoint = entrypoint.replace('if [ "$(id -u)" = "0" ]; then', 'if false; then', 1)
+    script = tmp_path / "entrypoint.sh"
+    script.write_text(entrypoint)
+    state = tmp_path / "fresh-state"
+    config = state / "config.env"
+    env = {**os.environ, "PATH": str(binaries) + os.pathsep + os.environ["PATH"],
+           "APP_UID": str(tmp_path.stat().st_uid), "ENGRAPHIS_STATE_DIR": str(state),
+           "ENGRAPHIS_ENV_FILE": str(config)}
+
+    subprocess.run(["sh", str(script), "true"], env=env, check=True)
+
+    assert state.stat().st_mode & 0o777 == 0o700
+    assert config.stat().st_mode & 0o777 == 0o600
+    config.write_text("preserved=true\n")
+    subprocess.run(["sh", str(script), "true"], env=env, check=True)
+    assert config.read_text() == "preserved=true\n"
