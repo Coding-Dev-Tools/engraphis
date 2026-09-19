@@ -67,11 +67,21 @@ if [ "$(id -u)" = "0" ]; then
         return 0
     }
 
+    state_directory_is_owned() {
+        # Only /data is an ownership-repair target. External state paths must be
+        # provisioned for the app beforehand, including on the first boot.
+        case "$1" in
+            /data|/data/*) return 0 ;;
+        esac
+        [ -d "$1" ] && [ "$(stat -c '%u' "$1" 2>/dev/null)" = "$2" ]
+    }
+
     # ENGRAPHIS_STATE_DIR defaults to /data/.engraphis. Repair the complete volume only on
     # first boot; later restarts verify the mount and state roots without walking the cache.
     state_dir="${ENGRAPHIS_STATE_DIR:-/data/.engraphis}"
     ownership_marker="${state_dir}/.volume-ownership"
     config_file="${ENGRAPHIS_ENV_FILE:-}"
+    app_owner=$(id -u engraphis)
     if ! reject_linked_path "$state_dir"; then
         printf '%s\n' "[engraphis] refusing linked or unnormalized state path: $state_dir" >&2
         exit 1
@@ -83,6 +93,10 @@ if [ "$(id -u)" = "0" ]; then
         exit 1
     elif [ -e "$state_dir" ] && [ ! -d "$state_dir" ]; then
         printf '%s\n' "[engraphis] refusing non-directory state path: $state_dir" >&2
+        exit 1
+    fi
+    if ! state_directory_is_owned "$state_dir" "$app_owner"; then
+        printf '%s\n' "[engraphis] external state directory must already be owned by engraphis: $state_dir" >&2
         exit 1
     fi
     if ! mkdir -p "$state_dir"; then
@@ -120,6 +134,18 @@ if [ "$(id -u)" = "0" ]; then
                 exit 1
             fi
         fi
+        # Check external existing parents before creating or changing any file.
+        # Parents under /data receive the volume's first-boot ownership repair.
+        case "$config_parent" in
+            /data|/data/*) ;;
+            *)
+                config_owner=$(stat -c '%u' "$config_parent" 2>/dev/null || true)
+                if [ "$config_owner" != "$app_owner" ]; then
+                    printf '%s\n' "[engraphis] trusted config directory must be owned by engraphis: $config_parent" >&2
+                    exit 1
+                fi
+                ;;
+        esac
         if ! reject_linked_path "$config_file"; then
             printf '%s\n' "[engraphis] refusing symlinked trusted config file: $config_file" >&2
             exit 1
@@ -170,7 +196,6 @@ if [ "$(id -u)" = "0" ]; then
         # chown an arbitrary existing host path; fail closed if it is unusable instead
         # of starting a dashboard whose settings silently cannot persist.
         config_owner=$(stat -c '%u' "$config_parent" 2>/dev/null || true)
-        app_owner=$(id -u engraphis)
         if [ -z "$config_owner" ] || [ "$config_owner" != "$app_owner" ]; then
             printf '%s\n' "[engraphis] trusted config directory must be owned by engraphis: $config_parent" >&2
             exit 1
