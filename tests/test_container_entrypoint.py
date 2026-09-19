@@ -97,6 +97,21 @@ def test_external_state_marker_cannot_skip_repair_of_a_replaced_volume(tmp_path)
     subprocess.run(["sh", str(script), "true"], env=env, check=True)
     assert not any(line.startswith("-R ") for line in log.read_text().splitlines())
 
+    marker_alias = managed / "marker-alias"
+    os.link(managed / ".volume-ownership", marker_alias)
+    log.write_text("")
+    rejected = subprocess.run(["sh", str(script), "true"], env=env, check=False)
+    assert rejected.returncode != 0
+    assert not log.read_text()
+
+    config = Path(env["ENGRAPHIS_ENV_FILE"])
+    alias = external / "config-alias.env"
+    os.link(config, alias)
+    config.chmod(0o640)
+    rejected = subprocess.run(["sh", str(script), "true"], env=env, check=False)
+    assert rejected.returncode != 0
+    assert alias.stat().st_mode & 0o777 == 0o640
+
 
 def test_volume_scan_repairs_mismatched_ownership_without_rewriting_owned_files(tmp_path):
     volume = tmp_path / "data"
@@ -145,3 +160,11 @@ def test_non_root_first_boot_initializes_private_state_and_config(tmp_path):
     config.write_text("preserved=true\n")
     subprocess.run(["sh", str(script), "true"], env=env, check=True)
     assert config.read_text() == "preserved=true\n"
+
+    alias = state / "config-alias.env"
+    os.link(config, alias)
+    config.chmod(0o640)
+    rejected = subprocess.run(["sh", str(script), "true"], env=env, check=False)
+    assert rejected.returncode != 0
+    assert alias.stat().st_mode & 0o777 == 0o640
+    assert alias.read_text() == "preserved=true\n"
