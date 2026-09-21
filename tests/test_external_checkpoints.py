@@ -203,3 +203,12 @@ def test_retained_restart_receipts_are_validated_on_cached_resume(tmp_path, corr
         (tmp_path / "case-00000.started").write_text(json.dumps({"case_sha256": "0" * 64, "ordinal": 0}))
     with pytest.raises(ValueError, match="restart receipt|start receipt"):
         execute(tmp_path)
+
+
+def test_cached_case_without_retries_validates_retained_start_receipt(tmp_path):
+    execute(tmp_path)
+    assert not list(tmp_path.glob("*.retry-*"))
+    start = tmp_path / "case-00000.started"
+    start.write_text(json.dumps({"ordinal": 1, "case_sha256": "0" * 64}))
+    with pytest.raises(ValueError, match="start receipt"):
+        execute(tmp_path)

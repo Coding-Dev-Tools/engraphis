@@ -8,6 +8,7 @@ rejects ambiguous or mismatched bindings.
 from __future__ import annotations
 
 from collections.abc import Mapping
+import hashlib
 import json
 from typing import Any, Optional
 
@@ -149,18 +150,29 @@ def _valid_source_id(source_id: object) -> bool:
     )
 
 
+def _source_digest(content: object) -> Optional[str]:
+    if not isinstance(content, str) or not content:
+        return None
+    try:
+        return hashlib.sha256(content.encode("utf-8")).hexdigest()
+    except UnicodeEncodeError:
+        return None
+
+
 def make_action_contract(
     *,
     destination_field: str,
     source_id: str,
+    source_content: str,
     binding: object,
     authorized: bool = False,
 ) -> dict[str, Any]:
     """Build an opt-in, source-bound contract for a file or tool action.
 
-    The contract carries only the literal and its provenance.  It does not execute
-    an action or grant authorization; callers must explicitly set ``authorized``
-    after applying their host's authorization decision.
+    The host must load ``source_content`` from the trusted record identified by
+    ``source_id``. The contract retains a digest of that exact source revision,
+    not its full text. It does not execute an action or grant authorization;
+    callers must set ``authorized`` after applying their host's decision.
     """
     field = destination_field.strip() if isinstance(destination_field, str) else ""
     if not _valid_action_field(field):
@@ -168,13 +180,15 @@ def make_action_contract(
     owner = source_id.strip() if isinstance(source_id, str) else ""
     if not _valid_source_id(owner):
         raise ValueError("source_id must be a bounded non-empty identifier")
-    checked = exact_value_binding({"exact_value": binding})
+    digest = _source_digest(source_content)
+    checked = exact_value_binding({"exact_value": binding}, content=source_content) if digest else None
     if checked is None:
         raise ValueError("action contract requires a validated source-bound exact value")
     return {
         "schema": "engraphis-action-contract/v1",
         "destination_field": field,
         "source_id": owner,
+        "source_sha256": digest,
         "source_span": [checked["start"], checked["end"]],
         "value": checked["value"],
         "value_type": checked["type"],
@@ -199,6 +213,7 @@ def validate_action_contract(
     contract: object,
     proposed: object,
     *,
+    source_content: str,
     authorized: Optional[bool] = None,
 ) -> dict[str, Any]:
     """Validate a proposed file/tool result against an action contract.
@@ -206,7 +221,10 @@ def validate_action_contract(
     This returns structured diagnostics rather than raising so a benchmark can score
     authorization, schema validity and literal preservation independently. A string
     proposal must be a JSON object with the same destination-field contract as a
-    mapping. No normalization or case folding is performed on literals.
+    mapping. The host must independently load ``source_content`` for the contract's
+    source ID and apply its authorization policy; neither comes from the proposed
+    output. A changed source revision invalidates the contract. No normalization
+    or case folding is performed on literals.
     """
     result = {
         "valid": False,
@@ -230,12 +248,16 @@ def validate_action_contract(
         or any(isinstance(item, bool) or not isinstance(item, int) for item in span)
     ):
         return result
+    digest = _source_digest(source_content)
+    if digest is None or contract.get("source_sha256") != digest:
+        result["reason"] = "source_revision_mismatch"
+        return result
     checked = exact_value_binding({
         "exact_value": {
             "value": value, "type": value_type, "source": "content",
             "start": span[0], "end": span[1], "copy_exactly": True,
         }
-    })
+    }, content=source_content)
     if checked is None or contract.get("copy_exactly") is not True:
         result["reason"] = "unbound_literal"
         return result

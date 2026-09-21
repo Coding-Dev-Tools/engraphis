@@ -564,8 +564,8 @@ def test_empty_dataset_is_a_valid_zero_sized_evaluation():
     report = run([], k=1)
     assert report["questions"] == 0
     assert report["scored_questions"] == 0
-    assert report["recall_at_k"] == 0.0
-    assert report["hit_at_k"] == 0.0
+    assert report["recall_at_k"] is None
+    assert report["hit_at_k"] is None
     assert report["detail"] == []
 
 CODEMEM_DATASET = Path(__file__).resolve().parent.parent / "eval" / "datasets" / "codemem.jsonl"

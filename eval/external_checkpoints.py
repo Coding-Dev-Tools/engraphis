@@ -88,7 +88,7 @@ def aggregate(reports: list[dict]) -> dict:
                   "packed_hit_at_k", "packed_mrr_at_k", "packed_ndcg_at_k")
     for name in rank_names + ("answer_token_recall", "packed_answer_token_recall"):
         eligible = answers if "answer_token" in name else retrieval
-        result[name] = round(sum(row[name] for row in eligible) / max(len(eligible), 1), 6)
+        result[name] = round(sum(row[name] for row in eligible) / len(eligible), 6) if eligible else None
     categories: dict[str, list] = defaultdict(list)
     for row in rows:
         categories[str(row.get("category", "unknown"))].append(row)
@@ -172,6 +172,9 @@ def run_resumable(cases: list[dict], *, directory: Path, binding: dict, embedder
         for ordinal, case in enumerate(cases):
             case_path = directory / f"case-{ordinal:05d}.json"
             case_hash = case_hashes[ordinal]
+            start_path = directory / f"case-{ordinal:05d}.started"
+            if start_path.exists():
+                _validate_start_receipt(start_path, ordinal, case_hash)
             if case_path.exists():
                 checkpoint = _read(case_path)
                 cached_report = checkpoint.get("report")
@@ -181,9 +184,7 @@ def run_resumable(cases: list[dict], *, directory: Path, binding: dict, embedder
                     raise ValueError("external case checkpoint content changed")
                 reports.append(cached_report)
                 continue
-            start_path = directory / f"case-{ordinal:05d}.started"
             if start_path.exists():
-                _validate_start_receipt(start_path, ordinal, case_hash)
                 if not restart_interrupted:
                     raise ValueError("interrupted local case; use explicit restart flag after inspecting retained attempt")
                 retry_path = directory / f"case-{ordinal:05d}.retry-{retries[ordinal]:03d}"

@@ -36,6 +36,8 @@ def test_external_export_is_checksummed_redacted_and_not_qa(tmp_path):
     assert report["metrics"]["semantic_embedding"] is False
     assert report["metrics"]["questions"] == 1
     assert report["metrics"]["source_case_coverage_complete"] is True
+    assert report["protocol"]["config"]["source_case_identity"] == "explicit"
+    assert report["records"][0]["case"] == "conversation-1"
     assert "packed_recall_at_k" in report["records"][0]
     assert "Private project Mercury" not in raw
     assert str(tmp_path) not in raw

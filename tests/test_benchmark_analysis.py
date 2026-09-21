@@ -183,7 +183,7 @@ def test_paired_difference_rejects_changed_normalization_bindings(tmp_path, fiel
         path.write_text(json.dumps(report), encoding="utf-8")
         path.with_suffix(".json.sha256").write_text(sha256_file(path), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="normalized-corpus bindings"):
+    with pytest.raises(ValueError, match="normalized-corpus bindings|repair manifest source binding"):
         analysis.paired_difference(*paths)
 
 
@@ -212,3 +212,27 @@ def test_analysis_rechecks_counts_even_with_recomputed_checksum(tmp_path):
     path.with_suffix(".json.sha256").write_text(sha256_file(path), encoding="utf-8")
     with pytest.raises(ValueError, match="metric"):
         analysis.read_verified(path)
+
+
+@pytest.mark.parametrize("mutation", ["changed_repair", "missing_repair", "changed_producer"])
+def test_analysis_binds_repair_sources_without_blocking_producer_changes(tmp_path, mutation):
+    baseline = tmp_path / "baseline.json"
+    candidate = tmp_path / "candidate.json"
+    _copy_diagnostic(baseline)
+    report = json.loads(baseline.read_text(encoding="utf-8"))
+    repair = report["protocol"]["config"]["repair_manifest_sha256"]
+    sources = report["suite"]["sources"]
+    repair_source = next(source for source in sources if source["sha256"] == repair)
+    if mutation == "missing_repair":
+        sources.remove(repair_source)
+    elif mutation == "changed_repair":
+        repair_source["sha256"] = "0" * 64
+    else:
+        next(source for source in sources if source["sha256"] != repair)["sha256"] = "0" * 64
+    candidate.write_text(json.dumps(report), encoding="utf-8")
+    candidate.with_suffix(".json.sha256").write_text(sha256_file(candidate))
+    if mutation == "changed_producer":
+        assert analysis.paired_difference(baseline, candidate)["packed_recall_delta"]["point"] == 0.0
+    else:
+        with pytest.raises(ValueError, match="repair manifest source binding"):
+            analysis.paired_difference(baseline, candidate)

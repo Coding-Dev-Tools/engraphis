@@ -49,7 +49,7 @@ from engraphis.backends.embedder_st import get_embedder
 from engraphis.core.secrets import redact_secrets
 from eval.harness import run
 from eval.benchmark import report_envelope, sha256_file, write_canonical_artifact
-from eval.external_checkpoints import producer_snapshot
+from eval.external_checkpoints import aggregate, producer_snapshot
 
 
 def diagnostic_artifact(report: dict, *, dataset: str,
@@ -68,6 +68,13 @@ def diagnostic_artifact(report: dict, *, dataset: str,
              "query_latency_ms_sum", "latency_boundary", "checkpoint_status", "completed_cases",
              "expected_cases", "explicit_local_restarts")
     metrics = {name: report[name] for name in names if name in report}
+    # Public aggregates retain enough precision for independent record checks,
+    # even when the compact console report rounds a mean to four places.
+    aggregated = aggregate([report])
+    for name in ("recall_at_k", "hit_at_k", "mrr_at_k", "ndcg_at_k", "packed_recall_at_k",
+                 "packed_hit_at_k", "packed_mrr_at_k", "packed_ndcg_at_k",
+                 "answer_token_recall", "packed_answer_token_recall"):
+        metrics[name] = aggregated[name]
     metrics.update({"claim_boundary": "evidence retrieval diagnostic; not generated-answer accuracy",
                     "official_qa_complete": False,
                     "source_case_coverage_complete": report.get("source_cases") == report.get("normalized_cases"),
@@ -87,6 +94,7 @@ def diagnostic_artifact(report: dict, *, dataset: str,
         suite=f"Engraphis {report['format']} retrieval diagnostic", dataset_path=dataset,
         source_paths=paths, records=detail, metrics=metrics,
         config={**report["configuration"], "measurement_scope": "retrieval_only",
+                "source_case_identity": "explicit",
                 "format": report["format"], "embedding": report["embedding"],
                 "complete_source_required": bool(report.get("canonical")),
                 "repair_manifest_sha256": sha256_file(repair_manifest) if repair_manifest else None},
@@ -747,6 +755,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         else:
             report = run(cases, k=args.k, embedder=embedder, token_budget=args.token_budget,
                          resolve_conflicts=not args.no_resolve)
+            report.update(checkpoint_status="COMPLETE", completed_cases=len(cases), expected_cases=len(cases),
+                          explicit_local_restarts=0)
         dt = time.time() - t0
         report['embedding'] = {
             'model_id': getattr(embedder, 'model_name', None),
@@ -784,9 +794,11 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     print(f"\nEngraphis × {args.format} — {report['questions']} questions @ k={args.k} "
           f"({dt:.1f}s)")
-    print(f"  evidence recall@k   : {report['recall_at_k']:.3f}")
-    print(f"  evidence hit@k      : {report['hit_at_k']:.3f}")
-    print(f"  answer_token_recall : {report['answer_token_recall']:.3f}")
+    for label, key in (("evidence recall@k", "recall_at_k"), ("evidence hit@k", "hit_at_k"),
+                       ("answer_token_recall", "answer_token_recall")):
+        value = report[key]
+        display = "unscored" if value is None else f"{value:.3f}"
+        print(f"  {label:<19} : {display}")
     print(f"  retrieval scored    : {report['scored_questions']}/{report['questions']} "
           f"(exclusions={len(report['exclusions'])})")
     if source_secret_redactions:

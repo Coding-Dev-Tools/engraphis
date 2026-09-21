@@ -26,21 +26,25 @@ show a workload-specific benefit.
 legacy and coverage packing on small deterministic development fixtures. It runs
 in the full offline CI matrix and the NumPy-only Python 3.9 job. These fixtures
 test boundary correctness; they do not estimate external QA or model task success. The
-[current diagnostic](docs/benchmark-evidence/evidence-contracts-20260919-v5.json)
+[current diagnostic](docs/benchmark-evidence/evidence-contracts-20260920-v6.json)
 also preserves a verified literal and nearby conditions from an oversized sentence
 inside a 24-token context. This is one development case, not a general quality estimate.
+Action contracts also require the host to supply the actual source text when creating
+and validating a contract. The source revision digest and literal offsets must match;
+four additional diagnostic cases reject forged or stale bindings. Authorization
+remains the responsibility of the trusted host.
 
 ### Public numeric evidence registry
 
 Every exact public aggregate retained below comes from the checked-in, public-safe
-[`offline-fixtures-v46.json`](docs/benchmark-evidence/offline-fixtures-v46.json) artifact. Its
+[`offline-fixtures-v47.json`](docs/benchmark-evidence/offline-fixtures-v47.json) artifact. Its
 SHA-256 is
-`0be02da1bd4a8f86721b76695c0a5ebc16cacd5ac0ce8325cb6b29d3208df95d`, also recorded in the
+`b4a4726bca323b1bc897c310a062b606c1b1e0acc2ed83b4a5eab2ea8858a417`, also recorded in the
 adjacent `.sha256` file. The artifact contains no raw questions, answers, prompts, customer data,
 or per-record content fingerprints.
 
 The fixture-suite digest is
-`be112cecc006a357f7618324fa59232af797455b02578b906deaafede7699f4e`. The artifact defines
+`e75d301a6605d7b79593120b962f0c10c1135e8fc4799a83b46851029e2ae555`. The artifact defines
 the digest algorithm and records the SHA-256 of every suite and dataset file. Each evidence ID
 also binds its exact command through `sha256(UTF-8 exact command)`:
 
@@ -62,12 +66,19 @@ Historical LoCoMo, graph, handoff, consolidation, and security figures remain pr
 source artifacts but are omitted from the current chart until each has a matching immutable,
 public-safe artifact. The chart labels coding outcomes, external datasets, and operational
 capacity as pending evaluation tracks rather than implying scores. Regenerate it with
-`python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-v46.json --output docs/images/context-efficiency.svg` after selecting the report to publish.
+`python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-v47.json --output docs/images/context-efficiency.svg` after selecting the report to publish.
 
 The companion examples are also generated from that artifact with
-`python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-v46.json --output docs/images/evidence-backed-agent-examples.svg`.
+`python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-v47.json --output docs/images/evidence-backed-agent-examples.svg`.
 The historical-to-executable mapping is in
 [`docs/BENCHMARK_CHANGE_COVERAGE.md`](docs/BENCHMARK_CHANGE_COVERAGE.md).
+
+Fresh diagnostics retain explicit source-case identities so confidence intervals
+cluster whole conversations even when question IDs do not encode their case.
+Metrics with no eligible questions remain `null` (unscored), including fresh and
+resumed runs. Artifact parsing, checksum validation, and queue receipts bind the
+same byte snapshot. Comparisons require consistent dataset and repair bindings
+while allowing the producer implementation to change between versions.
 
 ## What we measure today (all offline, no API key)
 

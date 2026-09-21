@@ -18,6 +18,7 @@ def run(*, evidence_module=evidence, packer_type=DeterministicContextPacker) -> 
     contract = evidence_module.make_action_contract(
         destination_field="release.label", source_id="fixture-source",
         binding=binding, authorized=True,
+        source_content="label=Δ-42",
     )
     good = {"release": {"label": "Δ-42"}, "source_id": "fixture-source"}
     wrong_field = {"release": {"label": "stable"}, "comment": "Δ-42"}
@@ -37,21 +38,39 @@ def run(*, evidence_module=evidence, packer_type=DeterministicContextPacker) -> 
     ]
     outcomes = []
     for name, proposal, expected in cases:
-        actual = evidence_module.validate_action_contract(contract, proposal)["valid"]
+        actual = evidence_module.validate_action_contract(contract, proposal, source_content="label=Δ-42")["valid"]
         outcomes.append({"case": name, "expected": expected, "actual": actual})
     for name, authorization in (("string_false", "false"), ("integer_one", 1),
                                 ("boolean_false", False)):
         unapproved = evidence_module.make_action_contract(
             destination_field="release.label", source_id="fixture-source",
             binding=binding, authorized=authorization,
+            source_content="label=Δ-42",
         )
-        actual = evidence_module.validate_action_contract(unapproved, good)["valid"]
+        actual = evidence_module.validate_action_contract(unapproved, good, source_content="label=Δ-42")["valid"]
         outcomes.append({"case": name, "expected": False, "actual": actual})
     malformed = {**binding, "end": binding["end"] + 1}
     outcomes.append({
         "case": "inconsistent_source_span", "expected": False,
         "actual": evidence_module.exact_value_binding({"exact_value": malformed}) is not None,
     })
+    forged_binding = {**binding, "start": 900, "end": 904}
+    try:
+        evidence_module.make_action_contract(
+            destination_field="release.label", source_id="fixture-source",
+            source_content="label=Δ-42", binding=forged_binding, authorized=True,
+        )
+        forged_accepted = True
+    except ValueError:
+        forged_accepted = False
+    source_outcomes = [{"case": "forged_source_span", "expected": False, "actual": forged_accepted}]
+    for name, candidate, source in (
+        ("changed_source_revision", contract, "label=Δ-42; authorization revoked"),
+        ("missing_source_digest", {key: value for key, value in contract.items() if key != "source_sha256"}, "label=Δ-42"),
+        ("tampered_contract_span", {**contract, "source_span": [900, 904]}, "label=Δ-42"),
+    ):
+        actual = evidence_module.validate_action_contract(candidate, good, source_content=source)["valid"]
+        source_outcomes.append({"case": name, "expected": False, "actual": actual})
 
     sources = [
         ("long", "The rollout is blue. " + "This unrelated historical explanation continues. " * 12),
@@ -81,6 +100,11 @@ def run(*, evidence_module=evidence, packer_type=DeterministicContextPacker) -> 
             "false_rejections": sum(not row["actual"] and row["expected"] for row in outcomes),
             "outcomes": outcomes,
         },
+        "source_validation": {
+            "cases": len(source_outcomes),
+            "correct": sum(row["actual"] == row["expected"] for row in source_outcomes),
+            "outcomes": source_outcomes,
+        },
         "packing": {
             name: {"sources": len(result.chunks), "tokens": result.usage.context_tokens,
                    "budget": 35, "budget_honored": result.usage.context_tokens <= 35}
@@ -102,6 +126,7 @@ def main() -> int:
     print(json.dumps(report, sort_keys=True))
     validation = report["action_validation"]
     return 0 if (validation["correct"] == validation["cases"]
+                 and report["source_validation"]["correct"] == report["source_validation"]["cases"]
                  and all(row["budget_honored"] for row in report["packing"].values())
                  and all(report["oversized_exact"][key] for key in (
                      "literal_preserved", "nearby_qualifiers_preserved", "budget_honored",
