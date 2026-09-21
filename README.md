@@ -84,9 +84,9 @@ neither is an end-to-end question-answer score. Coding outcomes, external datase
 operational capacity remain separate pending evaluation tracks until their artifacts are selected.
 
 These values are evidence IDs `offline-chunking` and `offline-performance` in
-[`offline-fixtures-v55.json`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/benchmark-evidence/offline-fixtures-v55.json),
+[`offline-fixtures-v56.json`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/benchmark-evidence/offline-fixtures-v56.json),
 SHA-256
-`349dc6ffab9e24cc49599ce9808b243db0bfa75bb25827db96a20504a2ecb532`.
+`d3fedb76e7b2a57f56533faeaeee89752911134639faffb3e2c11548d56ce8f5`.
 [`BENCHMARKS.md`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/BENCHMARKS.md#public-numeric-evidence-registry)
 records the matching suite digest, exact commands, and per-command config digests. The offline
 fixture registry intentionally excludes external, model-dependent, consolidation, productivity,
