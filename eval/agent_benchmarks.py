@@ -550,6 +550,7 @@ def public_artifact(
         source_paths=source_paths,
         config={
             "measurement_scope": "retrieval_only",
+            "source_case_identity": "explicit",
             "format": fmt,
             "k": k,
             "token_budget": token_budget,

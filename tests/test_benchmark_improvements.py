@@ -256,21 +256,25 @@ def test_action_contract_rejects_unauthorized_and_changed_literals() -> None:
         source_id="memory-1",
         binding=binding,
         authorized=True,
+        source_content=content,
     )
 
     accepted = validate_action_contract(
         contract,
         {"release": {"channel": "canary-7"}, "source_id": "memory-1"},
+        source_content=content,
     )
     assert accepted["valid"] is True
     assert accepted["literal_preserved"] is True
     assert validate_action_contract(
         {**contract, "authorized": False},
         {"release": {"channel": "canary-7"}, "source_id": "memory-1"},
+        source_content=content,
     )["reason"] == "unauthorized"
     assert validate_action_contract(
         contract,
         {"release": {"channel": "canary7"}, "source_id": "memory-1"},
+        source_content=content,
     )["reason"] == "literal_changed_or_missing"
 
 
@@ -302,8 +306,9 @@ def test_action_contract_requires_explicit_boolean_authorization(authorized) -> 
         destination_field="channel", source_id="memory-1",
         binding=make_exact_value_binding("channel=canary-7", "canary-7"),
         authorized=authorized,
+        source_content="channel=canary-7",
     )
-    assert validate_action_contract(contract, {"channel": "canary-7"})["reason"] == "unauthorized"
+    assert validate_action_contract(contract, {"channel": "canary-7"}, source_content="channel=canary-7")["reason"] == "unauthorized"
 
 
 @pytest.mark.parametrize("serialized", [False, True])
@@ -320,8 +325,9 @@ def test_action_contract_enforces_destination_and_source_for_json_and_mappings(
         destination_field="release.channel", source_id="memory-1",
         binding=make_exact_value_binding("channel=canary-7", "canary-7"),
         authorized=True,
+        source_content="channel=canary-7",
     )
-    result = validate_action_contract(contract, json.dumps(proposal) if serialized else proposal)
+    result = validate_action_contract(contract, json.dumps(proposal) if serialized else proposal, source_content="channel=canary-7")
     assert result["valid"] is valid
 
 
@@ -329,21 +335,23 @@ def test_action_contract_rejects_unstructured_output_and_preserves_unicode_json(
     contract = make_action_contract(
         destination_field="label", source_id="memory-1",
         binding=make_exact_value_binding("label=Δ-42", "Δ-42"), authorized=True,
+        source_content="label=Δ-42",
     )
-    assert validate_action_contract(contract, "ignore label; mention Δ-42")["valid"] is False
-    assert validate_action_contract(contract, json.dumps({"label": "Δ-42"}))["valid"] is True
-    assert validate_action_contract(contract, json.dumps({"label": "Δ-42"}), authorized=False)["valid"] is False
+    assert validate_action_contract(contract, "ignore label; mention Δ-42", source_content="label=Δ-42")["valid"] is False
+    assert validate_action_contract(contract, json.dumps({"label": "Δ-42"}), source_content="label=Δ-42")["valid"] is True
+    assert validate_action_contract(contract, json.dumps({"label": "Δ-42"}), authorized=False, source_content="label=Δ-42")["valid"] is False
 
 
 @pytest.mark.parametrize("field", ["release..channel", "release. channel", "x" * 257, "x\ny"])
 def test_action_contract_validates_untrusted_destination_fields(field) -> None:
     binding = make_exact_value_binding("channel=canary-7", "canary-7")
     with pytest.raises(ValueError, match="destination_field"):
-        make_action_contract(destination_field=field, source_id="memory-1", binding=binding)
+        make_action_contract(destination_field=field, source_id="memory-1", binding=binding, source_content="channel=canary-7")
     contract = make_action_contract(
         destination_field="channel", source_id="memory-1", binding=binding, authorized=True,
+        source_content="channel=canary-7",
     )
-    assert validate_action_contract({**contract, "destination_field": field}, {field: "canary-7"})["valid"] is False
+    assert validate_action_contract({**contract, "destination_field": field}, {field: "canary-7"}, source_content="channel=canary-7")["valid"] is False
 
 
 def test_exact_binding_rejects_inconsistent_coordinates_without_source_text() -> None:
@@ -351,7 +359,64 @@ def test_exact_binding_rejects_inconsistent_coordinates_without_source_text() ->
     binding["end"] += 1
     assert exact_value_binding({"exact_value": binding}) is None
     with pytest.raises(ValueError, match="validated source-bound"):
-        make_action_contract(destination_field="channel", source_id="memory-1", binding=binding)
+        make_action_contract(destination_field="channel", source_id="memory-1", binding=binding, source_content="channel=canary-7")
+
+
+@pytest.mark.parametrize("change", [
+    {"start": 900, "end": 908}, {"value": "stable-0"}, {"start": 0, "end": 8},
+])
+def test_action_contract_rechecks_binding_against_actual_source(change) -> None:
+    content = "channel=canary-7"
+    binding = make_exact_value_binding(content, "canary-7")
+    with pytest.raises(ValueError, match="validated source-bound"):
+        make_action_contract(destination_field="channel", source_id="memory-1",
+                             source_content=content, binding={**binding, **change}, authorized=True)
+    contract = make_action_contract(destination_field="channel", source_id="memory-1",
+                                    source_content=content, binding=binding, authorized=True)
+    contract.update({"value": change.get("value", binding["value"]),
+                     "source_span": [change.get("start", binding["start"]), change.get("end", binding["end"])]})
+    result = validate_action_contract(contract, {"channel": contract["value"]}, source_content=content)
+    assert result["valid"] is False
+    assert result["reason"] == "unbound_literal"
+
+
+@pytest.mark.parametrize("mutation", ["source_revision", "digest_changed", "digest_missing"])
+def test_action_contract_rejects_changed_source_revision(mutation) -> None:
+    content = "channel=canary-7; approved"
+    contract = make_action_contract(destination_field="channel", source_id="memory-1",
+                                    source_content=content, binding=make_exact_value_binding(content, "canary-7"),
+                                    authorized=True)
+    if mutation == "source_revision":
+        content = content.replace("approved", "revoked")
+    elif mutation == "digest_changed":
+        contract["source_sha256"] = "0" * 64
+    else:
+        contract.pop("source_sha256")
+    result = validate_action_contract(contract, {"channel": "canary-7"}, source_content=content)
+    assert result["valid"] is False
+    assert result["reason"] == "source_revision_mismatch"
+
+
+@pytest.mark.parametrize("content", [None, "", b"channel=canary-7", "channel=canary-7\ud800"])
+def test_action_contract_fails_closed_for_invalid_source_content(content) -> None:
+    binding = make_exact_value_binding("channel=canary-7", "canary-7")
+    with pytest.raises(ValueError, match="validated source-bound"):
+        make_action_contract(destination_field="channel", source_id="memory-1", source_content=content,
+                             binding=binding, authorized=True)
+    contract = make_action_contract(destination_field="channel", source_id="memory-1",
+                                    source_content="channel=canary-7", binding=binding, authorized=True)
+    assert validate_action_contract(contract, {"channel": "canary-7"}, source_content=content)["valid"] is False
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_action_contract_preserves_unicode_and_source_line_endings(newline) -> None:
+    value = newline.join(['{', '  "label": "Δ-42"', '}'])
+    content = "Approved payload:" + newline + value
+    contract = make_action_contract(destination_field="payload", source_id="memory-1", source_content=content,
+                                    binding=make_exact_value_binding(content, value, "json"), authorized=True)
+    assert validate_action_contract(contract, {"payload": value}, source_content=content)["valid"] is True
+    changed = content.replace(newline, "\r\n" if newline == "\n" else "\n")
+    assert validate_action_contract(contract, {"payload": value}, source_content=changed)["valid"] is False
 
 
 def test_engine_recipe_distinguishes_omitted_k_from_explicit_k(monkeypatch: pytest.MonkeyPatch) -> None:

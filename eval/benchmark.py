@@ -164,7 +164,7 @@ def environment_provenance() -> dict[str, Any]:
 
 
 _PUBLIC_RECORD_FIELDS = frozenset({
-    "question_id", "category", "retrieved_ids", "supporting_ids", "context_tokens",
+    "question_id", "case", "category", "retrieved_ids", "supporting_ids", "context_tokens",
     "latency_ms", "abstained", "excluded", "answerable", "answer_scored", "grounded",
     "grounded_support", "answer_token_recall", "context_token_method",
     "context_tokenizer_identity", "qa_score", "qa_correct", "retrieval_excluded",
@@ -536,6 +536,10 @@ def validate_report(report: Any, *, canonical: bool = False) -> list[str]:
             errors.append("protocol.token_accounting fields have invalid types")
     record_ids: list[str] = []
     embedded_exclusions: dict[str, dict] = {}
+    config = protocol.get("config") if isinstance(protocol.get("config"), dict) else {}
+    explicit_cases = config.get("source_case_identity") == "explicit"
+    if "source_case_identity" in config and not explicit_cases:
+        errors.append("protocol.config.source_case_identity must be explicit when supplied")
     for record in records:
         if not isinstance(record, dict) or not isinstance(record.get("question_id"), str):
             errors.append("each record requires a string question_id")
@@ -545,6 +549,10 @@ def validate_report(report: Any, *, canonical: bool = False) -> list[str]:
             errors.append("each record question_id must be non-empty")
             continue
         record_ids.append(question_id)
+        if explicit_cases or "case" in record:
+            case = record.get("case")
+            if not isinstance(case, str) or not case.strip() or case != case.strip():
+                errors.append("each source-case record requires a non-empty case identity")
         fingerprints = sorted(set(record) & _CONTENT_FINGERPRINT_FIELDS)
         if fingerprints:
             errors.append(

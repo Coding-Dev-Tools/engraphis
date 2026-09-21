@@ -218,24 +218,34 @@ def _validate_capacity_summary(report: dict) -> None:
             raise ValueError(f"capacity {name} status is missing")
 
 
-def _verified_artifact(path: Path) -> dict:
+def _verified_artifact_snapshot(path: Path) -> tuple[dict, str]:
+    """Validate, parse, and identify one immutable read of an artifact."""
+    payload = path.read_bytes()
+    artifact_digest = hashlib.sha256(payload).hexdigest()
     sidecar = path.with_suffix(path.suffix + ".sha256")
-    if not sidecar.is_file() or sidecar.read_text(encoding="utf-8").split()[0] != sha256_file(path):
+    recorded = sidecar.read_text(encoding="utf-8").split() if sidecar.is_file() else []
+    if not recorded or recorded[0] != artifact_digest:
         raise ValueError("queued artifact checksum missing or mismatched")
-    report = json.loads(path.read_text(encoding="utf-8"))
+    report = json.loads(payload)
+    if not isinstance(report, dict):
+        raise ValueError("queued artifact must contain a report object")
     if report.get("schema") == "engraphis-external-analysis/v1":
         _validate_external_analysis(report)
-        return report
+        return report, artifact_digest
     if (report.get("schema") == CAPACITY_SUMMARY_SCHEMA
             or report.get("summary_schema") == CAPACITY_SUMMARY_SCHEMA):
         _validate_capacity_summary(report)
-        return report
+        return report, artifact_digest
     errors = validate_report(report)
     if errors:
         raise ValueError("queued artifact failed validation")
     if report.get("metrics", {}).get("checkpoint_status") not in (None, "COMPLETE"):
         raise ValueError("prerequisite diagnostic is incomplete")
-    return report
+    return report, artifact_digest
+
+
+def _verified_artifact(path: Path) -> dict:
+    return _verified_artifact_snapshot(path)[0]
 
 
 class JobTimeoutError(TimeoutError):
@@ -374,8 +384,8 @@ def execute(plan: dict, directory: Path, *, runner: Callable = subprocess.run,
                 if saved.get("returncode") != 0:
                     raise ValueError("previous job failed; preserve its attempt instead of automatic replay")
                 for artifact in _job_artifacts(job):
-                    _verified_artifact(_artifact_path(artifact))
-                    if saved.get("artifact_sha256", {}).get(artifact) != sha256_file(_artifact_path(artifact)):
+                    _, artifact_digest = _verified_artifact_snapshot(_artifact_path(artifact))
+                    if saved.get("artifact_sha256", {}).get(artifact) != artifact_digest:
                         raise ValueError("queued result changed after completion")
                 completed.append(job["id"])
                 if stop_after_job == job["id"]:
@@ -426,14 +436,13 @@ def execute(plan: dict, directory: Path, *, runner: Callable = subprocess.run,
             # leave a successful checkpoint bound to different bytes than the
             # plan that was scored.
             validate(plan)
-            for artifact in _job_artifacts(job):
-                _verified_artifact(_artifact_path(artifact))
+            artifacts = {artifact: _verified_artifact_snapshot(_artifact_path(artifact))[1]
+                         for artifact in _job_artifacts(job)}
             _new(checkpoint, {"binding_sha256": plan["binding_sha256"], "job": job,
                               "returncode": 0, "finished_unix": time.time(), "runtime": runtime,
                               "job_pid": job_pid, "elapsed_seconds": elapsed,
                               "timeout_seconds": timeout_seconds,
-                              "artifact_sha256": {p: sha256_file(_artifact_path(p))
-                                                   for p in _job_artifacts(job)}})
+                              "artifact_sha256": artifacts})
             started.unlink()
             completed.append(job["id"])
             if stop_after_job == job["id"]:

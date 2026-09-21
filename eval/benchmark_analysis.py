@@ -38,6 +38,11 @@ def _read_verified_snapshot(path: Path) -> tuple[dict, str]:
         raise ValueError("invalid diagnostic envelope: " + errors[0])
     if report["metrics"].get("claim_boundary") != "evidence retrieval diagnostic; not generated-answer accuracy":
         raise ValueError("only external retrieval diagnostics are accepted")
+    repair_digest = report["protocol"]["config"].get("repair_manifest_sha256")
+    if repair_digest is not None and not any(
+        source["sha256"] == repair_digest for source in report["suite"]["sources"]
+    ):
+        raise ValueError("repair manifest source binding differs from configured digest")
     rows = report["records"]
     if report["metrics"]["questions"] != len(rows):
         raise ValueError("question count differs from records")
@@ -61,7 +66,12 @@ def _read_verified_snapshot(path: Path) -> tuple[dict, str]:
     for field, eligible in (("recall_at_k", "retrieval_scored"), ("packed_recall_at_k", "retrieval_scored"),
                             ("answer_token_recall", "answer_scored"), ("packed_answer_token_recall", "answer_scored")):
         values = [row[field] for row in rows if row[eligible]]
-        if values and not math.isclose(report["metrics"][field], sum(values) / len(values), abs_tol=5e-6):
+        aggregate = report["metrics"][field]
+        if not values:
+            if aggregate is not None:
+                raise ValueError("unscored aggregate must be undefined")
+        elif (type(aggregate) not in {int, float}
+              or not math.isclose(aggregate, sum(values) / len(values), abs_tol=5e-6)):
             raise ValueError("aggregate does not match its scored records")
     return report, input_digest
 

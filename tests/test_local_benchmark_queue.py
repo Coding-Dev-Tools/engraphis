@@ -219,3 +219,55 @@ def test_queue_waits_for_producer_lock_release_before_verifying_artifact(monkeyp
 
     assert result["status"] == "COMPLETE"
     assert verified_while_locked == [False]
+
+
+def _analysis_artifact(path):
+    report = {"schema": "engraphis-external-analysis/v1", "source_sha256": "a" * 64,
+              "reports": [{"schema": "engraphis-external-analysis/v1", "status": "COMPLETE",
+                           "input_sha256": "b" * 64, "dataset_sha256": "c" * 64,
+                           "input_artifact": "input.json", "dataset": "fixture",
+                           "configuration": {}, "models": {}, "questions": 0,
+                           "retrieval_scored_questions": 0}]}
+    path.write_text(json.dumps(report), encoding="utf-8")
+    digest = queue.sha256_file(path)
+    path.with_suffix(".json.sha256").write_text(digest, encoding="utf-8")
+    return report, digest
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_queue_checkpoint_binds_the_snapshot_it_validated(tmp_path, monkeypatch, resume):
+    monkeypatch.setattr(queue, "ROOT", tmp_path)
+    value = plan(monkeypatch)
+    value["jobs"][0]["artifacts"] = ["analysis.json"]
+    value["binding_sha256"] = queue.digest({key: item for key, item in value.items() if key != "binding_sha256"})
+    artifact = tmp_path / "analysis.json"
+    _, expected = _analysis_artifact(artifact)
+    def runner(*args, **kwargs):
+        return SimpleNamespace(returncode=0)
+    directory = tmp_path / "results"
+    if resume:
+        queue.execute(value, directory, runner=runner)
+
+    original = type(artifact).read_bytes
+    def replace_after_read(path):
+        payload = original(path)
+        if path == artifact:
+            path.write_text('{"replacement": true}', encoding="utf-8")
+        return payload
+    monkeypatch.setattr(type(artifact), "read_bytes", replace_after_read)
+
+    assert queue.execute(value, directory, runner=runner)["status"] == "COMPLETE"
+    checkpoint = json.loads((directory / "smoke.json").read_text(encoding="utf-8"))
+    assert checkpoint["artifact_sha256"]["analysis.json"] == expected
+    with pytest.raises(ValueError, match="checksum"):
+        queue.execute(value, directory, runner=runner)
+
+
+@pytest.mark.parametrize("sidecar", ["", "0" * 64])
+def test_queue_rejects_empty_or_changed_checksum(tmp_path, monkeypatch, sidecar):
+    monkeypatch.setattr(queue, "ROOT", tmp_path)
+    path = tmp_path / "analysis.json"
+    _analysis_artifact(path)
+    path.with_suffix(".json.sha256").write_text(sidecar)
+    with pytest.raises(ValueError, match="checksum"):
+        queue._verified_artifact(path)
