@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1693" height="929" viewBox="0 0 1693 929" role="img" aria-labelledby="title desc">
   <title id="title">Three evidence-backed Engraphis agent behaviors</title>
-  <desc id="desc">A three-card summary of deterministic offline fixtures. Focused context returns 740.3 to 214.3 tokens while retaining Recall at 5 of 1.000. A grounded answer returns support for 5/5 answerable questions. An unsupported question safely abstains for 6/6 off-topic questions. Reproduce with eval.chunking_eval and eval.grounded. Exact commands and config digests are registered in BENCHMARKS.md. Public-safe artifact SHA-256: f09b4f9eb253582263ab425fd1d80bbea6d8cc8df47ad7f3415573a8da69c8fe.</desc>
+  <desc id="desc">A three-card summary of deterministic offline fixtures. Focused context returns 740.3 to 214.3 tokens while retaining Recall at 5 of 1.000. A grounded answer returns support for 5/5 answerable questions. An unsupported question safely abstains for 6/6 off-topic questions. Reproduce with eval.chunking_eval and eval.grounded. Exact commands and config digests are registered in BENCHMARKS.md. Public-safe artifact SHA-256: d0da947955bf587a3e1da852caa0fad84cd0c49b963806b52a0b43c90358730d.</desc>
   <defs>
     <linearGradient id="page" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#f8fbff"/><stop offset="1" stop-color="#eef4fb"/></linearGradient>
     <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%"><feDropShadow dx="0" dy="5" stdDeviation="8" flood-opacity=".12"/></filter>
@@ -47,5 +47,5 @@
   </g>
   <line x1="70" y1="832" x2="1623" y2="832" stroke="#ced8e7" stroke-width="2"/>
   <text x="846" y="875" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="24" font-weight="600" fill="#53627b">Reproduce: eval.chunking_eval + eval.grounded</text>
-  <text x="846" y="910" text-anchor="middle" font-family="ui-monospace, monospace" font-size="15" font-weight="600" fill="#53627b">SHA256 f09b4f9eb253582263ab425fd1d80bbea6d8cc8df47ad7f3415573a8da69c8fe</text>
+  <text x="846" y="910" text-anchor="middle" font-family="ui-monospace, monospace" font-size="15" font-weight="600" fill="#53627b">SHA256 d0da947955bf587a3e1da852caa0fad84cd0c49b963806b52a0b43c90358730d</text>
 </svg>

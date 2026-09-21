@@ -783,6 +783,15 @@ def _public_receipt_row(row: dict) -> dict:
                     or not math.isfinite(float(usage_value))
                 ):
                     return invalid
+        elif key == "packing_mode":
+            if not (
+                isinstance(value, str)
+                and (
+                    value in _PUBLIC_RECEIPT_LABELS_BY_KEY["packing_mode"]
+                    or _PUBLIC_RECEIPT_HASHED_LABEL.fullmatch(value)
+                )
+            ):
+                return invalid
         elif isinstance(value, str):
             public_labels = _PUBLIC_RECEIPT_LABELS_BY_KEY.get(key, set())
             if not (

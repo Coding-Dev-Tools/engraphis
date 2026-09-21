@@ -118,22 +118,29 @@ def test_legacy_packing_withholds_binding_when_a_later_restriction_is_omitted():
     assert roomy.chunks[0].source_span == (binding["start"], binding["end"])
 
 
-def test_qualifier_words_inside_a_literal_are_not_surrounding_conditions():
-    candidate, binding = _bound("deployment " * 8 + "ONLY plain suffix", value="ONLY")
-    result = DeterministicContextPacker().pack_coverage("deployment", [candidate], 4)
-    assert result.chunks[0].excerpt == "ONLY"
+def test_literal_qualifier_words_do_not_exempt_complete_source_requirement():
+    content = "deployment " * 8 + "ONLY plain suffix"
+    candidate, binding = _bound(content, value="ONLY")
+    packer = DeterministicContextPacker()
+    tight = packer.pack_coverage("deployment", [candidate], 4)
+    assert not tight.chunks
+    result = packer.pack_coverage("deployment", [candidate], packer.count_tokens("[1]\n" + content))
+    assert result.chunks[0].excerpt == content
     assert result.chunks[0].exact_value == binding
 
 
-def test_a_bounded_condition_fits_inside_an_oversized_record():
+def test_a_bounded_english_condition_does_not_exempt_complete_source_requirement():
     content = "padding " * 80 + ". must use Δ-42 only if approved. " + "trailing " * 80
     candidate, binding = _bound(content, value="Δ-42", title="Deployment")
-    result = DeterministicContextPacker().pack_coverage("deployment approved", [candidate], 24)
-    assert "must use Δ-42 only if approved." in result.chunks[0].excerpt
-    assert result.chunks[0].excerpt in content
+    packer = DeterministicContextPacker()
+    tight = packer.pack_coverage("deployment approved", [candidate], 24)
+    assert not tight.chunks
+    budget = packer.count_tokens("[1] Deployment\n" + content.strip())
+    result = packer.pack_coverage("deployment approved", [candidate], budget)
+    assert result.chunks[0].excerpt == content.strip()
     assert result.chunks[0].exact_value == binding
     assert result.chunks[0].source_span == (binding["start"], binding["end"])
-    assert result.usage.context_tokens <= 24
+    assert result.usage.context_tokens == budget
 
 
 def test_complete_group_charges_title_and_custom_counter_without_outer_whitespace():
