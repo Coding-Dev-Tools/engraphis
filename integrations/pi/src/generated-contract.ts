@@ -21,7 +21,7 @@ export const SMART_SCHEMAS = {
           }
         ],
         "default": null,
-        "description": "Optional repository scope.",
+        "description": "Optional repo scope.",
         "title": "Repo"
       },
       "workspace": {
@@ -46,7 +46,7 @@ export const SMART_SCHEMAS = {
       },
       "intent": {
         "default": "any",
-        "description": "Optional side effect: any, read, write, admin, or destructive.",
+        "description": "Side effect: any, read, write, admin, or destructive.",
         "pattern": "^(any|read|write|admin|destructive)$",
         "title": "Intent",
         "type": "string"
@@ -60,7 +60,7 @@ export const SMART_SCHEMAS = {
         "type": "integer"
       },
       "task": {
-        "description": "Describe the capability needed, without pasting memory content.",
+        "description": "Describe the capability; do not paste memory content.",
         "maxLength": 2000,
         "minLength": 1,
         "title": "Task",
@@ -77,19 +77,19 @@ export const SMART_SCHEMAS = {
     "properties": {
       "arguments": {
         "additionalProperties": true,
-        "description": "Arguments matching the discovered schema.",
+        "description": "Arguments matching its schema.",
         "title": "Arguments",
         "type": "object"
       },
       "capability_id": {
-        "description": "Capability id returned by discover_actions.",
+        "description": "Capability id from discover_actions.",
         "maxLength": 128,
         "minLength": 8,
         "title": "Capability Id",
         "type": "string"
       },
       "schema_digest": {
-        "description": "Schema digest returned by discovery.",
+        "description": "Schema digest from discovery.",
         "maxLength": 128,
         "minLength": 8,
         "title": "Schema Digest",
@@ -108,19 +108,19 @@ export const SMART_SCHEMAS = {
     "properties": {
       "arguments": {
         "additionalProperties": true,
-        "description": "Arguments matching the discovered schema.",
+        "description": "Arguments matching its schema.",
         "title": "Arguments",
         "type": "object"
       },
       "capability_id": {
-        "description": "Capability id returned by discover_actions.",
+        "description": "Capability id from discover_actions.",
         "maxLength": 128,
         "minLength": 8,
         "title": "Capability Id",
         "type": "string"
       },
       "schema_digest": {
-        "description": "Schema digest returned by discovery.",
+        "description": "Schema digest from discovery.",
         "maxLength": 128,
         "minLength": 8,
         "title": "Schema Digest",
@@ -138,7 +138,7 @@ export const SMART_SCHEMAS = {
   "engraphis_get_memory": {
     "properties": {
       "memory_id": {
-        "description": "Memory id to read.",
+        "description": "Memory id.",
         "maxLength": 200,
         "minLength": 1,
         "title": "Memory Id",
@@ -155,12 +155,12 @@ export const SMART_SCHEMAS = {
           }
         ],
         "default": null,
-        "description": "Optional repository scope.",
+        "description": "Optional repo scope.",
         "title": "Repo"
       },
       "workspace": {
         "default": "default",
-        "description": "Workspace containing the memory.",
+        "description": "Memory workspace.",
         "maxLength": 200,
         "title": "Workspace",
         "type": "string"
@@ -176,7 +176,7 @@ export const SMART_SCHEMAS = {
     "properties": {
       "format": {
         "default": "full",
-        "description": "Context format: 'full' or 'gist'.",
+        "description": "Context format: full or gist.",
         "title": "Format",
         "type": "string"
       },
@@ -192,7 +192,7 @@ export const SMART_SCHEMAS = {
           }
         ],
         "default": 50,
-        "description": "Maximum source memories.",
+        "description": "Max source memories.",
         "title": "K"
       },
       "packing_mode": {
@@ -201,7 +201,7 @@ export const SMART_SCHEMAS = {
         "type": "string"
       },
       "query": {
-        "description": "Question or task needing prior context.",
+        "description": "Question/task needing context.",
         "maxLength": 100000,
         "minLength": 1,
         "title": "Query",
@@ -218,7 +218,7 @@ export const SMART_SCHEMAS = {
           }
         ],
         "default": null,
-        "description": "Optional repository.",
+        "description": "Optional repo.",
         "title": "Repo"
       },
       "retrieval_recipe": {
@@ -279,7 +279,7 @@ export const SMART_SCHEMAS = {
     "properties": {
       "claim_kind": {
         "default": "",
-        "description": "Optional claim predicate/category (for example 'configured_value').",
+        "description": "Optional claim predicate/category (e.g. 'configured_value').",
         "maxLength": 200,
         "title": "Claim Kind",
         "type": "string"
@@ -291,9 +291,30 @@ export const SMART_SCHEMAS = {
         "title": "Content",
         "type": "string"
       },
+      "exact_value": {
+        "anyOf": [
+          {
+            "maxLength": 4096,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "description": "Optional verbatim source value to copy exactly.",
+        "title": "Exact Value"
+      },
+      "exact_value_type": {
+        "default": "literal",
+        "description": "Literal type: literal, string, identifier, path, number, date, enum, or json.",
+        "maxLength": 32,
+        "title": "Exact Value Type",
+        "type": "string"
+      },
       "importance": {
         "default": 0.0,
-        "description": "Salience from 0 to 1.",
+        "description": "Salience 0 to 1.",
         "maximum": 1.0,
         "minimum": 0.0,
         "title": "Importance",
@@ -301,7 +322,7 @@ export const SMART_SCHEMAS = {
       },
       "mtype": {
         "default": "semantic",
-        "description": "semantic, episodic, procedural, or working.",
+        "description": "Type: semantic, episodic, procedural, or working.",
         "title": "Mtype",
         "type": "string"
       },
@@ -316,7 +337,7 @@ export const SMART_SCHEMAS = {
           }
         ],
         "default": null,
-        "description": "Optional repository.",
+        "description": "Optional repo.",
         "title": "Repo"
       },
       "session_id": {
@@ -334,14 +355,14 @@ export const SMART_SCHEMAS = {
       },
       "subject_key": {
         "default": "",
-        "description": "Optional stable claim subject (for example 'api.rate_limit'). Matching keys make supersession safer and deterministic.",
+        "description": "Optional stable claim subject (e.g. 'api.rate_limit'); keyed supersession is deterministic.",
         "maxLength": 1000,
         "title": "Subject Key",
         "type": "string"
       },
       "workspace": {
         "default": "default",
-        "description": "Workspace for the memory.",
+        "description": "Memory workspace.",
         "maxLength": 200,
         "title": "Workspace",
         "type": "string"
@@ -357,26 +378,26 @@ export const SMART_SCHEMAS = {
     "properties": {
       "action": {
         "default": "start",
-        "description": "start to resume work, or end to save its handoff.",
+        "description": "Start/resume, or end with handoff.",
         "title": "Action",
         "type": "string"
       },
       "agent": {
         "default": "",
-        "description": "Optional agent name.",
+        "description": "Optional agent.",
         "maxLength": 200,
         "title": "Agent",
         "type": "string"
       },
       "force_new": {
         "default": false,
-        "description": "Start only: branch a new session instead of reusing an exact active task.",
+        "description": "Start only: create a session even if this task is already active.",
         "title": "Force New",
         "type": "boolean"
       },
       "goal": {
         "default": "",
-        "description": "Task goal; start returns bounded relevant context.",
+        "description": "Goal; start returns bounded context.",
         "maxLength": 1000,
         "title": "Goal",
         "type": "string"
@@ -399,7 +420,7 @@ export const SMART_SCHEMAS = {
       },
       "outcome": {
         "default": "",
-        "description": "Optional outcome label.",
+        "description": "Outcome label.",
         "maxLength": 1000,
         "title": "Outcome",
         "type": "string"
@@ -415,26 +436,26 @@ export const SMART_SCHEMAS = {
           }
         ],
         "default": null,
-        "description": "Optional repository scope.",
+        "description": "Optional repo.",
         "title": "Repo"
       },
       "session_id": {
         "default": "",
-        "description": "Session id required to end a session.",
+        "description": "Session id for end.",
         "maxLength": 200,
         "title": "Session Id",
         "type": "string"
       },
       "summary": {
         "default": "",
-        "description": "Short final handoff.",
+        "description": "Final handoff.",
         "maxLength": 100000,
         "title": "Summary",
         "type": "string"
       },
       "token_budget": {
         "default": 512,
-        "description": "Goal-context budget when starting.",
+        "description": "Start context token budget.",
         "maximum": 32768,
         "minimum": 0,
         "title": "Token Budget",
@@ -442,7 +463,7 @@ export const SMART_SCHEMAS = {
       },
       "workspace": {
         "default": "default",
-        "description": "Workspace for a started session.",
+        "description": "Workspace.",
         "maxLength": 200,
         "title": "Workspace",
         "type": "string"
@@ -455,7 +476,7 @@ export const SMART_SCHEMAS = {
     "properties": {
       "actor": {
         "default": "user",
-        "description": "Optional local-mode actor label; authenticated team mode uses the caller identity.",
+        "description": "Local actor label; team mode uses caller identity.",
         "maxLength": 200,
         "title": "Actor",
         "type": "string"
@@ -472,11 +493,11 @@ export const SMART_SCHEMAS = {
           }
         ],
         "default": null,
-        "description": "Optional importance 0..1.",
+        "description": "Optional importance 0 to 1.",
         "title": "Importance"
       },
       "memory_id": {
-        "description": "Memory id to update.",
+        "description": "Memory id.",
         "maxLength": 200,
         "minLength": 1,
         "title": "Memory Id",
@@ -493,7 +514,7 @@ export const SMART_SCHEMAS = {
           }
         ],
         "default": null,
-        "description": "Optional memory type (working|episodic|semantic|procedural).",
+        "description": "Optional type: working|episodic|semantic|procedural.",
         "title": "Mtype"
       },
       "repo": {
@@ -507,7 +528,7 @@ export const SMART_SCHEMAS = {
           }
         ],
         "default": null,
-        "description": "Optional repository scope.",
+        "description": "Optional repo scope.",
         "title": "Repo"
       },
       "title": {
@@ -521,12 +542,12 @@ export const SMART_SCHEMAS = {
           }
         ],
         "default": null,
-        "description": "Optional new title.",
+        "description": "Optional title.",
         "title": "Title"
       },
       "workspace": {
         "default": "default",
-        "description": "Workspace containing the memory.",
+        "description": "Memory workspace.",
         "maxLength": 200,
         "title": "Workspace",
         "type": "string"

@@ -2802,23 +2802,23 @@ def engraphis_session(
     action: Annotated[
         str,
         BeforeValidator(_normalize_session_action),
-        Field(description="start to resume work, or end to save its handoff.",
+        Field(description="Start/resume, or end with handoff.",
               pattern="^(start|end)$"),
     ] = "start",
-    workspace: Annotated[str, Field(description="Workspace for a started session.", max_length=200)] = "default",
-    repo: Annotated[Optional[str], Field(description="Optional repository scope.", max_length=200)] = None,
-    agent: Annotated[str, Field(description="Optional agent name.", max_length=200)] = "",
-    goal: Annotated[str, Field(description="Task goal; start returns bounded relevant context.",
+    workspace: Annotated[str, Field(description="Workspace.", max_length=200)] = "default",
+    repo: Annotated[Optional[str], Field(description="Optional repo.", max_length=200)] = None,
+    agent: Annotated[str, Field(description="Optional agent.", max_length=200)] = "",
+    goal: Annotated[str, Field(description="Goal; start returns bounded context.",
                                max_length=1_000)] = "",
-    session_id: Annotated[str, Field(description="Session id required to end a session.",
+    session_id: Annotated[str, Field(description="Session id for end.",
                                     max_length=200)] = "",
-    summary: Annotated[str, Field(description="Short final handoff.", max_length=100_000)] = "",
-    outcome: Annotated[str, Field(description="Optional outcome label.", max_length=1_000)] = "",
+    summary: Annotated[str, Field(description="Final handoff.", max_length=100_000)] = "",
+    outcome: Annotated[str, Field(description="Outcome label.", max_length=1_000)] = "",
     open_threads: Annotated[Optional[List[str]], Field(description="Unresolved follow-ups.")] = None,
     force_new: Annotated[StrictBool, Field(
-        description="Start only: branch a new session instead of reusing an exact active task."
+        description="Start only: create a session even if this task is already active."
     )] = False,
-    token_budget: Annotated[int, Field(description="Goal-context budget when starting.", ge=0,
+    token_budget: Annotated[int, Field(description="Start context token budget.", ge=0,
                                       le=32_768)] = 512,
 ) -> str:
     """Start/resume a session or end it with its next-session handoff."""
@@ -2870,20 +2870,20 @@ def engraphis_session(
     structured_output=False,
 )
 def smart_recall_context(
-    query: Annotated[str, Field(description="Question or task needing prior context.", min_length=1,
+    query: Annotated[str, Field(description="Question/task needing context.", min_length=1,
                                 max_length=100_000)],
     workspace: Annotated[Optional[str], Field(description="Optional workspace.", max_length=200)] = None,
-    repo: Annotated[Optional[str], Field(description="Optional repository.", max_length=200)] = None,
+    repo: Annotated[Optional[str], Field(description="Optional repo.", max_length=200)] = None,
     session_id: Annotated[Optional[str], Field(description="Optional active session.")] = None,
     k: Annotated[Optional[int], Field(
-        description="Maximum source memories.",
+        description="Max source memories.",
         ge=1, le=50, json_schema_extra={"default": 50})] = None,
     token_budget: Annotated[Optional[int], Field(
         description="Hard returned-context token budget.",
         ge=0, le=32_768, json_schema_extra={"default": 1024})] = None,
     packing_mode: Annotated[str, Field()] = "legacy",
     retrieval_recipe: Annotated[str, Field()] = "default",
-    format: Annotated[str, Field(description="Context format: 'full' or 'gist'.")] = "full",
+    format: Annotated[str, Field(description="Context format: full or gist.")] = "full",
 ) -> str:
     """Return one compact, bounded context packet for routine agent work."""
     result = engraphis_recall_context(
@@ -2905,25 +2905,32 @@ def smart_recall_context(
 def smart_remember(
     content: Annotated[str, Field(description="Durable fact, decision, preference, or procedure.",
                                   min_length=1, max_length=100_000)],
-    workspace: Annotated[str, Field(description="Workspace for the memory.", max_length=200)] = "default",
-    repo: Annotated[Optional[str], Field(description="Optional repository.", max_length=200)] = None,
+    workspace: Annotated[str, Field(description="Memory workspace.", max_length=200)] = "default",
+    repo: Annotated[Optional[str], Field(description="Optional repo.", max_length=200)] = None,
     session_id: Annotated[Optional[str], Field(description="Optional active session.")] = None,
-    mtype: Annotated[str, Field(description="semantic, episodic, procedural, or working.")] = "semantic",
-    importance: Annotated[float, Field(description="Salience from 0 to 1.", ge=0.0,
+    mtype: Annotated[str, Field(description="Type: semantic, episodic, procedural, or working.")] = "semantic",
+    importance: Annotated[float, Field(description="Salience 0 to 1.", ge=0.0,
                                        le=1.0)] = 0.0,
     subject_key: Annotated[str, Field(
-        description="Optional stable claim subject (for example 'api.rate_limit'). "
-                    "Matching keys make supersession safer and deterministic.",
+        description="Optional stable claim subject (e.g. 'api.rate_limit'); keyed supersession "
+                    "is deterministic.",
         max_length=1_000)] = "",
     claim_kind: Annotated[str, Field(
-        description="Optional claim predicate/category (for example 'configured_value').",
+        description="Optional claim predicate/category (e.g. 'configured_value').",
         max_length=200)] = "",
+    exact_value: Annotated[Optional[str], Field(
+        description="Optional verbatim source value to copy exactly.",
+        max_length=4_096)] = None,
+    exact_value_type: Annotated[str, Field(
+        description="Literal type: literal, string, identifier, path, number, date, enum, or json.",
+        max_length=32)] = "literal",
 ) -> str:
-    """Store a routine durable memory with safe default provenance and deduplication."""
+    """Store a durable fact with safe default provenance and deduplication."""
     result = engraphis_remember(
         content=content, workspace=workspace, repo=repo, session_id=session_id,
         mtype=mtype, importance=importance,
         subject_key=subject_key, claim_kind=claim_kind,
+        exact_value=exact_value, exact_value_type=exact_value_type,
     )
     if isinstance(result, str) and result.startswith("Error:"):
         return _smart_error_from_string(result)
@@ -2937,15 +2944,15 @@ def smart_remember(
     structured_output=False,
 )
 def engraphis_discover_actions(
-    task: Annotated[str, Field(description="Describe the capability needed, without pasting memory content.",
+    task: Annotated[str, Field(description="Describe the capability; do not paste memory content.",
                                min_length=1, max_length=2_000)],
     category: Annotated[str, Field(description="Optional area: memory, governance, code, audit, or ops.",
                                   max_length=100)] = "",
-    intent: Annotated[str, Field(description="Optional side effect: any, read, write, admin, or destructive.",
+    intent: Annotated[str, Field(description="Side effect: any, read, write, admin, or destructive.",
                                 pattern="^(any|read|write|admin|destructive)$")] = "any",
     limit: Annotated[int, Field(description="Number of ranked actions to return.", ge=1, le=3)] = 1,
 ) -> str:
-    """Return only the exact schemas needed for a small set of matching advanced actions."""
+    """Return exact schemas for matching advanced actions."""
     actions = _rank_actions(task, category=category, intent=intent)[:limit]
     if not actions:
         return _ok({"actions": [], "note": "No matching action is available."})
@@ -2982,13 +2989,13 @@ def _execute_gateway(capability_id: str, schema_digest: str, arguments: dict[str
     structured_output=False,
 )
 def engraphis_execute_read(
-    capability_id: Annotated[str, Field(description="Capability id returned by discover_actions.",
+    capability_id: Annotated[str, Field(description="Capability id from discover_actions.",
                                         min_length=8, max_length=128)],
-    schema_digest: Annotated[str, Field(description="Schema digest returned by discovery.",
+    schema_digest: Annotated[str, Field(description="Schema digest from discovery.",
                                         min_length=8, max_length=128)],
-    arguments: Annotated[dict[str, Any], Field(description="Arguments matching the discovered schema.")],
+    arguments: Annotated[dict[str, Any], Field(description="Arguments matching its schema.")],
 ) -> str:
-    """Execute only a discovered action that is truthfully read-only and idempotent."""
+    """Run a discovered read-only, idempotent action."""
     return _execute_gateway(capability_id, schema_digest, arguments, expected="read")
 
 
@@ -2999,13 +3006,13 @@ def engraphis_execute_read(
     structured_output=False,
 )
 def engraphis_execute_action(
-    capability_id: Annotated[str, Field(description="Capability id returned by discover_actions.",
+    capability_id: Annotated[str, Field(description="Capability id from discover_actions.",
                                         min_length=8, max_length=128)],
-    schema_digest: Annotated[str, Field(description="Schema digest returned by discovery.",
+    schema_digest: Annotated[str, Field(description="Schema digest from discovery.",
                                         min_length=8, max_length=128)],
-    arguments: Annotated[dict[str, Any], Field(description="Arguments matching the discovered schema.")],
+    arguments: Annotated[dict[str, Any], Field(description="Arguments matching its schema.")],
 ) -> str:
-    """Execute a discovered write, admin, or destructive-capable action safely."""
+    """Run a discovered write/admin/destructive action under its authorization rules."""
     return _execute_gateway(capability_id, schema_digest, arguments, expected="action")
 
 
@@ -3016,18 +3023,17 @@ def engraphis_execute_action(
     structured_output=False,
 )
 def engraphis_get_memory(
-    memory_id: Annotated[str, Field(description="Memory id to read.", min_length=1,
+    memory_id: Annotated[str, Field(description="Memory id.", min_length=1,
                                     max_length=200)],
-    workspace: Annotated[str, Field(description="Workspace containing the memory.",
+    workspace: Annotated[str, Field(description="Memory workspace.",
                                     max_length=200)] = "default",
-    repo: Annotated[Optional[str], Field(description="Optional repository scope.",
+    repo: Annotated[Optional[str], Field(description="Optional repo scope.",
                                          max_length=200)] = None,
 ) -> str:
-    """Return one memory's governed record (content, provenance, scope, temporal fields).
+    """Return one governed memory record (content, provenance, scope, and time).
 
-    Read-only and never reinforces. Pending/quarantined content is NOT returned to an
-    agent — the tool answers ``not_prompt_eligible`` instead, so untrusted content never
-    reaches model context through this surface.
+    Read-only; never reinforces. Pending/quarantined bodies stay hidden; only
+    prompt-eligible content reaches the agent.
     """
     try:
         record = service().inspect(memory_id=memory_id, workspace=workspace, repo=repo)
@@ -3110,27 +3116,26 @@ def engraphis_get_memory(
     structured_output=False,
 )
 def engraphis_update_memory(
-    memory_id: Annotated[str, Field(description="Memory id to update.", min_length=1,
-                                    max_length=200)],
-    workspace: Annotated[str, Field(description="Workspace containing the memory.",
+    memory_id: Annotated[str, Field(description="Memory id.", min_length=1,
+                                   max_length=200)],
+    workspace: Annotated[str, Field(description="Memory workspace.",
                                     max_length=200)] = "default",
-    repo: Annotated[Optional[str], Field(description="Optional repository scope.",
+    repo: Annotated[Optional[str], Field(description="Optional repo scope.",
                                          max_length=200)] = None,
-    title: Annotated[Optional[str], Field(description="Optional new title.",
+    title: Annotated[Optional[str], Field(description="Optional title.",
                                           max_length=500)] = None,
-    mtype: Annotated[Optional[str], Field(description="Optional memory type (working|episodic|semantic|procedural).",
+    mtype: Annotated[Optional[str], Field(description="Optional type: working|episodic|semantic|procedural.",
                                           max_length=50)] = None,
-    importance: Annotated[Optional[float], Field(description="Optional importance 0..1.", ge=0.0,
+    importance: Annotated[Optional[float], Field(description="Optional importance 0 to 1.", ge=0.0,
                                                  le=1.0)] = None,
     actor: Annotated[str, Field(
-        description="Optional local-mode actor label; authenticated team mode uses the caller identity.",
+        description="Local actor label; team mode uses caller identity.",
         max_length=200,
     )] = "user",
 ) -> str:
-    """Edit a memory's metadata fields (title/type/importance). An identical retry is an
-    atomic no-op. Content edits must go through the governed correction path so bi-temporal
-    history is preserved. Secret capture is rejected; provenance/trust/sensitivity are never
-    editable here."""
+    """Edit metadata only (title/type/importance). Identical retries are atomic no-ops. Content uses
+    governed correction to preserve history; secrets are rejected and provenance/trust/
+    sensitivity cannot be edited."""
     if title is None and mtype is None and importance is None:
         return _gateway_error("nothing_to_update")
     try:
@@ -3152,15 +3157,14 @@ def engraphis_update_memory(
 )
 def engraphis_conflict_review(
     workspace: Annotated[str, Field(description="Workspace to review.", max_length=200)] = "default",
-    repo: Annotated[Optional[str], Field(description="Optional repository scope.",
+    repo: Annotated[Optional[str], Field(description="Optional repo scope.",
                                          max_length=200)] = None,
     limit: Annotated[int, Field(description="Max items to return.", ge=1, le=100)] = 50,
 ) -> str:
-    """Read-only inbox of pending/quarantined/conflicting memories for a reviewer.
+    """Read-only review of pending/quarantined/conflicting memories.
 
-    Scope and personal-folder authorization are enforced by ``MemoryService``. Pending
-    and quarantined bodies are never returned to an agent; only approved conflict
-    records may include a short excerpt.
+    Scope and personal-folder authorization apply. Bodies stay hidden; only approved
+    conflicts may expose a short excerpt.
     """
     try:
         return _ok(service().conflict_review(

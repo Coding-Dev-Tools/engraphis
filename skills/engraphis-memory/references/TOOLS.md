@@ -496,7 +496,9 @@ or mismatched schemas and enforce the declared side-effect boundary.
 
 The two overlapping names deliberately have smaller Smart schemas than their Classic sections
 above. Smart `engraphis_remember` accepts only `content`, `workspace`, `repo`, `session_id`,
-`mtype`, `importance`, `subject_key`, and `claim_kind`; safe provenance is fixed internally.
+`mtype`, `importance`, `subject_key`, `claim_kind`, `exact_value`, and `exact_value_type`;
+safe provenance is fixed internally. Exact values must occur uniquely and verbatim in
+the supplied content; the service validates their type and preserves source offsets.
 Smart `engraphis_recall_context` accepts only `query`, `workspace`, `repo`, `session_id`, `k`,
 `token_budget`, `packing_mode`, `retrieval_recipe`, and `format`; advanced planning/profile
 controls are discoverable rather than routine.

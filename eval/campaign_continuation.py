@@ -970,11 +970,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         metrics = report["metrics"]
         # Intentionally excluded fixtures need not be executed to finish the
         # eligible cohort; raw protocol completeness remains a separate metric.
+        eligible_statuses = metrics.get("eligible_statuses")
         return 0 if (
             metrics["valid_missing_attempts"] == 0
-            and not metrics["statuses"].get("error")
+            and metrics.get("eligible_execution_status") == "COMPLETE"
+            and isinstance(eligible_statuses, Mapping)
+            and not eligible_statuses.get("error")
+            and not eligible_statuses.get("unsupported")
             and not metrics.get("critical_violations")
-            and not metrics.get("eligible_statuses", {}).get("unsupported")
         ) else 2
     except (ContinuationError, OSError, ValueError) as exc:
         print(f"continuation stopped: {type(exc).__name__}: {exc}", file=sys.stderr)

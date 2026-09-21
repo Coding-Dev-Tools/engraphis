@@ -230,6 +230,47 @@ def test_continuation_cli_fails_on_critical_violations(monkeypatch, tmp_path, ca
     assert json.loads(capsys.readouterr().out)["critical_violations"] == 1
 
 
+@pytest.mark.parametrize(
+    ("eligible_execution_status", "valid_missing_attempts", "eligible_statuses", "expected"),
+    [
+        ("COMPLETE", 0, {"complete": 89}, 0),
+        ("BLOCKED", 0, {"complete": 88, "error": 1}, 2),
+        ("PARTIAL", 1, {"complete": 88}, 2),
+    ],
+)
+def test_continuation_cli_exit_gate_uses_eligible_cohort(
+    monkeypatch, tmp_path, capsys, eligible_execution_status,
+    valid_missing_attempts, eligible_statuses, expected,
+):
+    # The raw protocol retains an excluded fixture error.  It must not block a
+    # complete eligible cohort, while eligible errors and missing cells fail closed.
+    report = {"metrics": {
+        "status": "BLOCKED" if expected else "COMPLETE",
+        "eligible_execution_status": eligible_execution_status,
+        "valid_missing_attempts": valid_missing_attempts,
+        "statuses": {**eligible_statuses, "error": eligible_statuses.get("error", 0) + 1},
+        "eligible_statuses": eligible_statuses,
+        "critical_violations": 0,
+    }}
+    monkeypatch.setattr(cc, "prepare_plan", lambda **kwargs: object())
+    monkeypatch.setattr(cc, "build_continuation_client", lambda value: object())
+    monkeypatch.setattr(cc, "load_corpus", lambda path: [])
+    monkeypatch.setattr(cc, "run_continuation", lambda *args, **kwargs: report)
+    paths = [str(tmp_path / name) for name in (
+        "parent.json", "companion.json", "eligibility.json", "audit.json",
+        "public.json", "approval.json", "parent-results", "child-results",
+    )]
+    args = ["--execute"]
+    for name, path in zip((
+        "parent-manifest", "companion", "eligibility", "audit-artifact",
+        "public-artifact", "parent-approval", "parent-results", "child-results",
+    ), paths):
+        args.extend(["--" + name, path])
+
+    assert cc.main(args) == expected
+    assert json.loads(capsys.readouterr().out)["eligible_execution_status"] == eligible_execution_status
+
+
 @pytest.mark.parametrize("unsupported", ["eligible", "excluded", "none", "unattempted_excluded"])
 def test_terminal_unsupported_attempts_cannot_complete_eligible_execution(
     monkeypatch, tmp_path, capsys, unsupported,

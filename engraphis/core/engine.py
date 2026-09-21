@@ -1509,23 +1509,28 @@ class MemoryEngine:
                 if (target is not None
                         and exact_value_binding(current_metadata, content=target.content) is None):
                     # The incoming offsets are relative to the duplicate's source
-                    # content, not necessarily to the retained record.  Rebind the
-                    # literal against the record that will actually be recalled;
-                    # otherwise a harmlessly reworded duplicate can advertise a
-                    # binding that later fails validation and silently disappears.
-                    rebound = exact_value_binding(
-                        {"exact_value": incoming_exact}, content=target.content,
+                    # content, not necessarily to the retained record.  Validate the
+                    # caller's binding against that source before rebinding it against
+                    # the record that will actually be recalled; otherwise a forged
+                    # value absent from the duplicate can be legitimized merely because
+                    # it happens to occur uniquely in the retained content.
+                    incoming_binding = exact_value_binding(
+                        {"exact_value": incoming_exact}, content=content,
                     )
-                    if rebound is None:
-                        try:
-                            exact_value = incoming_exact.get("value")
-                            exact_type = incoming_exact.get("type", "literal")
-                            if isinstance(exact_value, str):
+                    rebound = None
+                    if incoming_binding is not None:
+                        rebound = exact_value_binding(
+                            {"exact_value": incoming_binding}, content=target.content,
+                        )
+                        if rebound is None:
+                            try:
                                 rebound = make_exact_value_binding(
-                                    target.content, exact_value, exact_type,
+                                    target.content,
+                                    incoming_binding["value"],
+                                    incoming_binding["type"],
                                 )
-                        except (TypeError, ValueError):
-                            rebound = None
+                            except (TypeError, ValueError):
+                                rebound = None
                     if rebound is not None:
                         target.metadata = {**current_metadata, "exact_value": rebound}
                         # Keep the annotation in the same transaction as the NOOP
