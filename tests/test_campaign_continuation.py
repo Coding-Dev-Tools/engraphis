@@ -11,6 +11,21 @@ from eval.campaign_ledger import BudgetApproval
 from eval import campaign_continuation as cc
 
 
+def _complete_usage(counters):
+    """Full synthetic provider measurements for post-response failure fixtures."""
+    from eval.campaign_api import TokenUsage
+
+    fields = {
+        "input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0,
+        "reasoning_output_tokens": 0, "latency_ms": 0.0, "cost_micros": 0,
+        "worst_case_cost_micros": 0, "cache_write_tokens_assumed": 0,
+        "transport_identity": "codex_oauth", "billing_basis": cc.campaign.OAUTH_BILLING_BASIS,
+    }
+    fields.update(counters)
+    fields.setdefault("total_tokens", fields["input_tokens"] + fields["output_tokens"])
+    return TokenUsage(**fields).as_dict()
+
+
 def _manifest() -> dict:
     ids = ["atlas-north:long_documents"] + [
         f"atlas-north:category_{index}" for index in range(1, 10)
@@ -412,12 +427,12 @@ def test_failed_real_attempt_usage_survives_continuation_and_resume(tmp_path, fa
     from types import SimpleNamespace
 
     plan, corpus = _real_attempt_plan(tmp_path)
-    usage = {
+    usage = _complete_usage({
         "input_tokens": 11, "cached_input_tokens": 3, "output_tokens": 5,
         "reasoning_output_tokens": 2, "total_tokens": 16, "latency_ms": 7.5,
         "cost_micros": 123, "transport_identity": "codex_oauth",
         "billing_basis": cc.campaign.OAUTH_BILLING_BASIS,
-    }
+    })
     calls = []
 
     def complete(**kwargs):
@@ -497,7 +512,7 @@ def test_real_attempt_preserves_continuation_guard_stop_after_metered_response(t
         plan.parent_ledger_path.write_text("changed after first call", encoding="utf-8")
         return SimpleNamespace(
             text=json.dumps({"answer": "done", "citations": [], "files": {}}),
-            usage=SimpleNamespace(as_dict=lambda: {"input_tokens": 11, "output_tokens": 5}),
+            usage=SimpleNamespace(as_dict=lambda: _complete_usage({"input_tokens": 11, "output_tokens": 5})),
         )
 
     def runner(manifest, stage, cell, corpus, guarded):

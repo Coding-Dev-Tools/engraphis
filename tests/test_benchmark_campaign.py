@@ -9,6 +9,21 @@ from eval import benchmark_campaign as campaign
 from eval.benchmark import canonical_json, sha256_file, validate_report
 
 
+def _complete_usage(counters):
+    """Full synthetic provider measurements for post-response failure fixtures."""
+    from eval.campaign_api import TokenUsage
+
+    fields = {
+        "input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0,
+        "reasoning_output_tokens": 0, "latency_ms": 0.0, "cost_micros": 0,
+        "worst_case_cost_micros": 0, "cache_write_tokens_assumed": 0,
+        "transport_identity": "codex_oauth", "billing_basis": campaign.OAUTH_BILLING_BASIS,
+    }
+    fields.update(counters)
+    fields.setdefault("total_tokens", fields["input_tokens"] + fields["output_tokens"])
+    return TokenUsage(**fields).as_dict()
+
+
 def small_manifest():
     manifest = {"stages": {"development_pilot": {
         "split": "development", "scenario_ids": ["fixture-a"], "arms": ["no_memory", "hybrid"],
@@ -327,12 +342,12 @@ def test_zero_exit_value_mismatch_remains_a_scored_failure(tmp_path):
 
 def test_summary_and_public_report_preserve_safe_oauth_usage_totals(tmp_path):
     manifest = small_manifest()
-    usage = [{
+    usage = [_complete_usage({
         "input_tokens": 11, "cached_input_tokens": 3, "output_tokens": 5,
         "reasoning_output_tokens": 2, "total_tokens": 16, "latency_ms": 7.5,
         "cost_micros": 123, "transport_identity": "codex_oauth",
         "billing_basis": campaign.OAUTH_BILLING_BASIS,
-    }]
+    })]
     summary = campaign.execute(
         manifest, "development_pilot", tmp_path, None, None,
         attempt_runner=lambda m, s, c, *args: row(c, provider_usage=usage),
@@ -359,11 +374,11 @@ def test_summary_and_public_report_preserve_safe_oauth_usage_totals(tmp_path):
 
 def test_usage_summary_marks_missing_failed_call_counters_explicitly():
     summary = campaign._provider_usage_summary([
-        {"status": "complete", "provider_usage": [{
+        {"status": "complete", "provider_usage": [_complete_usage({
             "input_tokens": 1, "output_tokens": 1, "total_tokens": 2,
             "transport_identity": "codex_oauth",
             "billing_basis": campaign.OAUTH_BILLING_BASIS,
-        }]},
+        })]},
         {"status": "error", "provider_usage": []},
     ])
     assert summary["status"] == "partial"
@@ -406,7 +421,7 @@ def test_usage_summary_distinguishes_no_invocation_from_missing_counters():
         "provider_usage_status": "not_attempted",
     }
     observed = {
-        "status": "error", "provider_usage": [{"input_tokens": 10}],
+        "status": "error", "provider_usage": [_complete_usage({"input_tokens": 10})],
         "provider_usage_attempted": 1,
     }
     legacy_unknown = {"status": "error", "provider_usage": []}
@@ -423,8 +438,8 @@ def test_usage_summary_distinguishes_no_invocation_from_missing_counters():
 
 def test_failed_post_response_attempt_retains_observed_usage(tmp_path, monkeypatch):
     scenario = _attempt_fixture(tmp_path, monkeypatch)
-    usage = {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15,
-             "transport_identity": "codex_oauth", "billing_basis": campaign.OAUTH_BILLING_BASIS}
+    usage = _complete_usage({"input_tokens": 10, "output_tokens": 5, "total_tokens": 15,
+             "transport_identity": "codex_oauth", "billing_basis": campaign.OAUTH_BILLING_BASIS})
 
     class Client:
         def complete(self, **_kwargs):
@@ -457,8 +472,8 @@ def test_failed_post_response_attempt_retains_observed_usage(tmp_path, monkeypat
 
 def test_failed_correction_call_marks_retained_usage_incomplete(tmp_path, monkeypatch):
     scenario = _attempt_fixture(tmp_path, monkeypatch)
-    usage = {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15,
-             "transport_identity": "codex_oauth", "billing_basis": campaign.OAUTH_BILLING_BASIS}
+    usage = _complete_usage({"input_tokens": 10, "output_tokens": 5, "total_tokens": 15,
+             "transport_identity": "codex_oauth", "billing_basis": campaign.OAUTH_BILLING_BASIS})
     calls = 0
 
     class Client:
@@ -502,7 +517,7 @@ def test_source_validation_failure_preserves_returned_usage(tmp_path, monkeypatc
     manifest = small_manifest()
     manifest["source"] = {}
     observed = 0
-    usage = [{"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}]
+    usage = [_complete_usage({"input_tokens": 1, "output_tokens": 1, "total_tokens": 2})]
 
     def source_snapshot():
         nonlocal observed
@@ -546,7 +561,7 @@ def test_adapter_close_failure_retains_observed_usage(tmp_path, monkeypatch, fai
         "embedding": {"model": "test", "revision": "a" * 40},
     }
     manifest["stages"]["development_pilot"]["arms"] = ["hybrid"]
-    usage = {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
+    usage = _complete_usage({"input_tokens": 10, "output_tokens": 5, "total_tokens": 15})
 
     class Adapter:
         capabilities = SimpleNamespace(supports_valid_at=True, supports_known_at=True)
@@ -636,7 +651,7 @@ def test_workspace_cleanup_preserves_usage_and_primary_failure(tmp_path, monkeyp
         critical_violations=["forbidden_evidence_exposed"], citation_validity=False,
         abstention_correct=None,
     ))
-    usage = {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
+    usage = _complete_usage({"input_tokens": 10, "output_tokens": 5, "total_tokens": 15})
     calls = []
 
     def complete(**kwargs):
@@ -792,7 +807,7 @@ def test_run_attempt_binds_manifest_revision_to_engraphis_adapter():
         def complete(self, **_kwargs):
             return SimpleNamespace(
                 text=json.dumps({"answer": "done", "citations": [], "files": {}}),
-                usage=SimpleNamespace(as_dict=lambda: {"input_tokens": 1, "output_tokens": 1}),
+                usage=SimpleNamespace(as_dict=lambda: _complete_usage({"input_tokens": 1, "output_tokens": 1})),
             )
 
     result = campaign.run_attempt(
@@ -830,7 +845,7 @@ def test_run_attempt_does_not_send_oracle_or_answers_to_reader(tmp_path, monkeyp
     def complete(**kwargs):
         calls.append(kwargs)
         return SimpleNamespace(text=json.dumps({"answer": "Done", "citations": [], "files": {}}),
-                               usage=SimpleNamespace(as_dict=lambda: {"input_tokens": 10, "output_tokens": 5}))
+                               usage=SimpleNamespace(as_dict=lambda: _complete_usage({"input_tokens": 10, "output_tokens": 5})))
 
     manifest = {**small_manifest(), "source": {}, "docker_image": "unused"}
     observed = campaign.run_attempt(manifest, "development_pilot", campaign.cells(manifest, "development_pilot")[0],
@@ -905,12 +920,13 @@ def test_manifest_cannot_rehash_a_reduced_stage(monkeypatch, tmp_path):
 
 def test_manifest_rejects_secret_oauth_fields_before_binding(tmp_path, monkeypatch):
     monkeypatch.setattr(campaign, "source_snapshot", lambda: {})
+    monkeypatch.setattr(campaign.shutil, "which", lambda _: None)
     lock = tmp_path / "environment.json"
     lock.write_text("{}")
-    oauth = campaign._codex_oauth_configuration()
+    oauth = campaign._codex_execution_metadata()
     oauth["password"] = "must-not-enter-the-binding"
 
-    with pytest.raises(ValueError, match="unsupported fields"):
+    with pytest.raises(ValueError, match="caller-supplied OAuth configuration is unsupported"):
         campaign.make_manifest(
             embed_model="test", embed_revision="a" * 40, dependency_lock=lock,
             oauth_configuration=oauth,
@@ -956,7 +972,7 @@ def test_run_attempt_materializes_the_verified_source_snapshot(tmp_path, monkeyp
             observed_inputs.append(json.loads(kwargs["input"]))
             return SimpleNamespace(
                 text=json.dumps({"answer": "done", "citations": [], "files": {}}),
-                usage=SimpleNamespace(as_dict=lambda: {"input_tokens": 1, "output_tokens": 1}),
+                usage=SimpleNamespace(as_dict=lambda: _complete_usage({"input_tokens": 1, "output_tokens": 1})),
             )
 
     manifest = {**small_manifest(), "source": {}, "docker_image": "unused"}

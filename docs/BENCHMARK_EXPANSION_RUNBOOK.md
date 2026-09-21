@@ -74,6 +74,19 @@ edit invalidates execution; create a new campaign rather than modifying a frozen
 The public corpus deliberately remains accessible to inspection, so its holdout is a procedural
 selection boundary, not a secret or independent evaluation service.
 
+Preparation derives public execution metadata from the local Codex executable and
+instruction fingerprints. Caller-supplied OAuth configuration is rejected. Only a
+bounded `codex-cli <version>` identifier is retained from the version probe; banners
+or malformed output become `unconfigured`, which cannot pass live validation. The
+public metadata contains portable executable basenames, hashes and fixed reader
+controls; it never contains account configuration or credentials.
+
+Checkpoint and summary readers count a provider measurement only when every
+`TokenUsage` field is present and valid. Malformed or contradictory retained
+accounting blocks publication. Failed attempts keep valid observations and mark
+missing measurements explicitly; an explicit zero-invocation result cannot be
+scored as complete. Reservation estimates remain distinct from observed usage.
+
 ## Spending and recovery
 
 Every model-using stage needs separate owner authorization of its generated proposal. See
