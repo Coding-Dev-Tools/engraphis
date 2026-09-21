@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1103" height="956" viewBox="0 0 1103 956" role="img" aria-labelledby="title desc">
 <title id="title">Measured context and retrieval boundaries</title>
-<desc id="desc">Artifact-driven local deterministic benchmark report. Structure-aware chunks report 740.3 to 214.3 retrieved tokens per question. The performance run reports 24,590 full-proxy versus 11,138 compact-proxy tokens. Retrieved-candidate quality and packed-context quality are separate views; packed quality is shown only when the selected report includes it. Payload counts are a serialized JSON-shape proxy; the payload is not an MCP transport measurement. The report does not measure provider billing. Packed context reports 85.38 mean and 108 max under a 1,500-token cap. Source artifact SHA-256 9047f330eb70da7d7e20df260e989449d1d0fe56b6197ba0a0fe087d57cd34be.</desc>
+<desc id="desc">Artifact-driven local deterministic benchmark report. Structure-aware chunks report 740.3 to 214.3 retrieved tokens per question. The performance run reports 24,590 full-proxy versus 11,138 compact-proxy tokens. Retrieved-candidate quality and packed-context quality are separate views; packed quality is shown only when the selected report includes it. Payload counts are a serialized JSON-shape proxy; the payload is not an MCP transport measurement. The report does not measure provider billing. Packed context reports 85.38 mean and 108 max under a 1,500-token cap. Source artifact SHA-256 b3934a77fe38e6356ff892940c93366304eb8e853337b87e2791c9b95791473a.</desc>
 <style>text{font-family:Consolas,monospace;fill:#b9c8dc} .heading{font-family:Segoe UI,sans-serif;font-weight:700;fill:#f2f5f9} .green{fill:#00c896}.muted{fill:#7589a7}</style>
 <rect x="3" y="2" width="1094" height="949" fill="#0e1114" stroke="#252c36"/>
 <rect x="23" y="27" width="176" height="20" fill="#1c222b" stroke="#303a47"/>
@@ -105,7 +105,7 @@
 <text x="562" y="935" font-size="12.5" class="muted" text-anchor="start">mcp transport not measured</text>
 <rect x="814" y="864" width="263" height="82" fill="#0e1114" stroke="#252c36"/>
 <text x="826" y="885" font-size="12.5" class="muted" text-anchor="start">SOURCE ARTIFACT</text>
-<text x="826" y="913" font-size="20" class="heading" text-anchor="start">9047f330eb70</text>
+<text x="826" y="913" font-size="20" class="heading" text-anchor="start">b3934a77fe38</text>
 <text x="826" y="935" font-size="12.5" class="muted" text-anchor="start">SHA-256 prefix</text>
 <text x="1080" y="70" font-size="18.7" class="muted" text-anchor="end">Artifact-driven local measurements</text>
 </svg>
