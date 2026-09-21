@@ -26,9 +26,11 @@ show a workload-specific benefit.
 legacy and coverage packing on small deterministic development fixtures. It runs
 in the full offline CI matrix and the NumPy-only Python 3.9 job. These fixtures
 test boundary correctness; they do not estimate external QA or model task success. The
-[current diagnostic](docs/benchmark-evidence/evidence-contracts-20260920-v7.json)
-also preserves a verified literal and nearby conditions from an oversized sentence
-inside a 24-token context. This is one development case, not a general quality estimate.
+[current diagnostic](docs/benchmark-evidence/evidence-contracts-20260921-v8.json)
+withholds the unchanged oversized, unpunctuated fixture at its 24-token budget:
+no fitting sentence boundary proves that the remaining condition text can be dropped.
+The prior literal-preservation result remains in the historical artifact. Tight budgets
+can therefore return fewer exact values under the complete-group contract.
 Action contracts also require the host to supply the actual source text when creating
 and validating a contract. The source revision digest and literal offsets must match;
 four additional diagnostic cases reject forged or stale bindings. Authorization
@@ -38,17 +40,24 @@ requested evidence. At the same token budgets, correctness improves from 4/8 on 
 `0244c45f` to 8/8 with query-first coverage selection. The diagnostic retains both outcomes
 and source hashes. This is a regression comparison on development fixtures.
 
+Two separate five-case comparisons against `65f4becd` improve from 0/5 to 5/5:
+complete restriction retention under competing query terms, and safe withholding when
+the complete group cannot fit. Coverage uses nearby punctuation-delimited units and
+recognized qualifier terms, treating line breaks as wrapping. It is not a general
+semantic parser. Headers, titles, and source attribution remain inside the budget;
+incomplete bound groups cannot regain exact-value metadata during expansion.
+
 ### Public numeric evidence registry
 
 Every exact public aggregate retained below comes from the checked-in, public-safe
-[`offline-fixtures-v49.json`](docs/benchmark-evidence/offline-fixtures-v49.json) artifact. Its
+[`offline-fixtures-v50.json`](docs/benchmark-evidence/offline-fixtures-v50.json) artifact. Its
 SHA-256 is
-`f7450524d9fea117d64abecbe8136ff95e1443189336b37b6612f67e7cfc85fe`, also recorded in the
+`729b74ba02cac3048c032c684d305c351d7800debdffc53aea2200dfafaa4120`, also recorded in the
 adjacent `.sha256` file. The artifact contains no raw questions, answers, prompts, customer data,
 or per-record content fingerprints.
 
 The fixture-suite digest is
-`1ff490643a23c1faf9c934e3b5f756d915513d4351a27978ba3e999b66440d1c`. The artifact defines
+`71715cf33e47e03f630b59f2151d0f28d41b5738bbff5bce272d5e95bec1baf4`. The artifact defines
 the digest algorithm and records the SHA-256 of every suite and dataset file. Each evidence ID
 also binds its exact command through `sha256(UTF-8 exact command)`:
 
@@ -70,10 +79,10 @@ Historical LoCoMo, graph, handoff, consolidation, and security figures remain pr
 source artifacts but are omitted from the current chart until each has a matching immutable,
 public-safe artifact. The chart labels coding outcomes, external datasets, and operational
 capacity as pending evaluation tracks rather than implying scores. Regenerate it with
-`python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-v49.json --output docs/images/context-efficiency.svg` after selecting the report to publish.
+`python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-v50.json --output docs/images/context-efficiency.svg` after selecting the report to publish.
 
 The companion examples are also generated from that artifact with
-`python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-v49.json --output docs/images/evidence-backed-agent-examples.svg`.
+`python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-v50.json --output docs/images/evidence-backed-agent-examples.svg`.
 The historical-to-executable mapping is in
 [`docs/BENCHMARK_CHANGE_COVERAGE.md`](docs/BENCHMARK_CHANGE_COVERAGE.md).
 

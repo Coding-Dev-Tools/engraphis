@@ -58,6 +58,105 @@ def coverage_query_diagnostic(*, packer_type=DeterministicContextPacker) -> dict
             "outcomes": outcomes}
 
 
+def coverage_restriction_diagnostic(*, packer_type=DeterministicContextPacker) -> dict:
+    """Keep repeated query terms from displacing a bound restriction phrase.
+
+    This is a separate development denominator from ``coverage_query_diagnostic``:
+    the fixtures exercise the bounded expansion fallback for an oversized source,
+    while the older eight cases cover query selection, occurrence identity, and
+    multiline values.
+    """
+    cases = [
+        ("suffix_repeated_query", "deployment " * 8 + "VALUE filler only if approved",
+         "VALUE", "deployment", 14, "VALUE filler only if approved"),
+        ("prefix_repeated_query", "only if approved VALUE " + "deployment " * 8,
+         "VALUE", "deployment", 14, "only if approved VALUE"),
+        ("suffix_competing_queries",
+         "deployment " * 5 + "VALUE neutral gap only if approved and never share",
+         "VALUE", "deployment", 16,
+         "VALUE neutral gap only if approved and never share"),
+        ("prefix_long_condition", "must use only if approved VALUE " + "deployment " * 8,
+         "VALUE", "deployment", 14, "must use only if approved VALUE"),
+        ("tight_suffix", "deployment " * 6 + "VALUE only if approved",
+         "VALUE", "deployment", 12, "VALUE only if approved"),
+    ]
+    outcomes = []
+    for name, content, value, query, budget, expected in cases:
+        binding = evidence.make_exact_value_binding(content, value, "identifier")
+        record = MemoryRecord(id=name, content=content, metadata={"exact_value": binding})
+        packed = packer_type().pack_coverage(
+            query, [Candidate(name, 1.0, "lexical", record)], budget,
+        )
+        selected = next((chunk for chunk in packed.chunks if chunk.id == name), None)
+        excerpt = selected.excerpt if selected else ""
+        actual_binding = selected.exact_value if selected else None
+        correct = (expected in excerpt and actual_binding == binding
+                   and packed.usage.context_tokens <= budget)
+        outcomes.append({
+            "case": name,
+            "query": query,
+            "budget": budget,
+            "tokens": packed.usage.context_tokens,
+            "excerpt": excerpt,
+            "expected_excerpt": expected,
+            "expected_bound": True,
+            "actual_bound": actual_binding is not None,
+            "correct": correct,
+        })
+    return {"cases": len(outcomes), "correct": sum(row["correct"] for row in outcomes),
+            "outcomes": outcomes}
+
+
+def coverage_binding_safety_diagnostic(*, packer_type=DeterministicContextPacker) -> dict:
+    """Require omission when a bound group's complete restrictions do not fit."""
+    outcomes = []
+
+    def check(name, query, budget, candidates):
+        packed = packer_type().pack_coverage(query, candidates, budget)
+        selected = next((chunk for chunk in packed.chunks if chunk.id == name), None)
+        omitted = selected is None or (
+            selected.exact_value is None
+            and selected.source_span is None
+            and selected.evidence_unit.get("value") is None
+            and "VALUE" not in selected.excerpt
+        )
+        outcomes.append({
+            "case": name,
+            "query": query,
+            "budget": budget,
+            "tokens": packed.usage.context_tokens,
+            "excerpt": selected.excerpt if selected else "",
+            "actual_bound": selected.exact_value is not None if selected else False,
+            "omitted_bound_group": omitted,
+            "correct": omitted and packed.usage.context_tokens <= budget,
+        })
+
+    for name, content, budget in (
+        ("tight_suffix", "VALUE only if approved", 6),
+        ("tight_prefix", "only if approved VALUE", 6),
+        ("tight_both_sides", "only if approved VALUE only if approved", 9),
+        ("tight_multiline", "VALUE only if\napproved", 6),
+    ):
+        binding = evidence.make_exact_value_binding(content, "VALUE", "identifier")
+        record = MemoryRecord(id=name, content=content, metadata={"exact_value": binding})
+        check(name, "deployment", budget, [Candidate(name, 1.0, "lexical", record)])
+
+    status = MemoryRecord(id="status", title="Status", content="Deployment status is green.")
+    content = "VALUE only if approved"
+    binding = evidence.make_exact_value_binding(content, "VALUE", "identifier")
+    bound = MemoryRecord(
+        id="second_pass_bound", title="Rule", content=content,
+        metadata={"exact_value": binding},
+    )
+    check(
+        "second_pass_bound", "deployment", 14,
+        [Candidate("status", 1.0, "lexical", status),
+         Candidate("second_pass_bound", 0.9, "lexical", bound)],
+    )
+    return {"cases": len(outcomes), "correct": sum(row["correct"] for row in outcomes),
+            "outcomes": outcomes}
+
+
 def run(*, evidence_module=evidence, packer_type=DeterministicContextPacker) -> dict:
     binding = evidence_module.make_exact_value_binding("label=Δ-42", "Δ-42", "identifier")
     contract = evidence_module.make_action_contract(
@@ -151,6 +250,8 @@ def run(*, evidence_module=evidence, packer_type=DeterministicContextPacker) -> 
             "outcomes": source_outcomes,
         },
         "coverage_queries": coverage_query_diagnostic(packer_type=packer_type),
+        "coverage_restrictions": coverage_restriction_diagnostic(packer_type=packer_type),
+        "coverage_binding_safety": coverage_binding_safety_diagnostic(packer_type=packer_type),
         "packing": {
             name: {"sources": len(result.chunks), "tokens": result.usage.context_tokens,
                    "budget": 35, "budget_honored": result.usage.context_tokens <= 35}
@@ -160,6 +261,8 @@ def run(*, evidence_module=evidence, packer_type=DeterministicContextPacker) -> 
             "sources": len(oversized.chunks),
             "literal_preserved": "Δ-42" in oversized.context,
             "nearby_qualifiers_preserved": "must use Δ-42 only if approved" in oversized.context,
+            "withheld_boundary": not oversized.chunks,
+            "omission_reasons": oversized.usage.omission_reasons,
             "tokens": oversized.usage.context_tokens,
             "budget": 24,
             "budget_honored": oversized.usage.context_tokens <= 24,
@@ -174,10 +277,13 @@ def main() -> int:
     return 0 if (validation["correct"] == validation["cases"]
                  and report["source_validation"]["correct"] == report["source_validation"]["cases"]
                  and report["coverage_queries"]["correct"] == report["coverage_queries"]["cases"]
+                 and report["coverage_restrictions"]["correct"] == report["coverage_restrictions"]["cases"]
+                 and report["coverage_binding_safety"]["correct"] == report["coverage_binding_safety"]["cases"]
                  and all(row["budget_honored"] for row in report["packing"].values())
-                 and all(report["oversized_exact"][key] for key in (
-                     "literal_preserved", "nearby_qualifiers_preserved", "budget_honored",
-                 ))) else 1
+                 and report["oversized_exact"]["withheld_boundary"]
+                 and not report["oversized_exact"]["literal_preserved"]
+                 and not report["oversized_exact"]["nearby_qualifiers_preserved"]
+                 and report["oversized_exact"]["budget_honored"]) else 1
 
 
 if __name__ == "__main__":
