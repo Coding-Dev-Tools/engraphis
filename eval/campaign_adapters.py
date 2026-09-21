@@ -1294,6 +1294,7 @@ class EngraphisAdapter(_BaseAdapter):
         self._workspace_label = ""
         self._repo_label = ""
         self._session_label = ""
+        self._session_ids: dict[tuple[str, Optional[str], str], str] = {}
         self.baseline_label = str(baseline_label or "").strip().casefold() or None
         self._baseline_spec: Any = None
         self._arm_config: Any = None
@@ -1410,7 +1411,7 @@ class EngraphisAdapter(_BaseAdapter):
         return record.repo
 
     def _record_session(self, record: CampaignRecord) -> Optional[str]:
-        if not record.session or record.session in {self._session_label, self.session_id}:
+        if not record.session:
             return self.session_id
         store = getattr(self.engine, "store", None)
         if store is not None:
@@ -1444,18 +1445,22 @@ class EngraphisAdapter(_BaseAdapter):
                 return candidate
         return str(store.get_or_create_repo(workspace_id, candidate))
 
-    @staticmethod
     def _resolve_session(
-        store: Any, workspace_id: str, repo_id: Optional[str], value: Optional[str],
+        self, store: Any, workspace_id: str, repo_id: Optional[str], value: Optional[str],
     ) -> Optional[str]:
         if value is None or not str(value).strip():
             return None
         candidate = str(value).strip()
         if candidate.startswith("ses_"):
             row = store.get_session(candidate)
-            if row is not None and row.get("workspace_id") == workspace_id:
+            if row is not None:
+                if row.get("workspace_id") != workspace_id or row.get("repo_id") != repo_id:
+                    raise AdapterConfigurationError("Engraphis session belongs to a different scope")
                 return candidate
-        return str(store.start_session(workspace_id, repo_id, agent="campaign"))
+        key = (workspace_id, repo_id, candidate)
+        if key not in self._session_ids:
+            self._session_ids[key] = str(store.start_session(workspace_id, repo_id, agent="campaign"))
+        return self._session_ids[key]
 
     def ingest(self, records: Iterable[Mapping[str, Any]]) -> list[str]:
         self._ensure_prepared()
@@ -1731,6 +1736,7 @@ class EngraphisAdapter(_BaseAdapter):
         self._engine = None if self._owned_engine else self._engine
         self._fixture_clock_current = None
         self._fixture_clock_max = None
+        self._session_ids.clear()
         super().reset()
 
     def close(self) -> None:

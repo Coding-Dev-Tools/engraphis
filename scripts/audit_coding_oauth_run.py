@@ -775,7 +775,7 @@ def _report_bindings(
     manifest: dict,
     stage_name: Optional[str],
     issues: list[str],
-) -> None:
+) -> Optional[int]:
     records = report.get("records") if isinstance(report.get("records"), list) else []
     public_by_id: dict[str, dict] = {}
     for record in records:
@@ -790,11 +790,26 @@ def _report_bindings(
         _add_issue(issues, "checkpoint_denominator")
     if set(public_by_id) != set(private_by_id):
         _add_issue(issues, "report_checkpoint_binding")
+    critical_count: Optional[int] = 0
     for question_id, item in private_by_id.items():
+        row = item["row"]
+        violations = row.get("critical_violations")
+        if not isinstance(violations, list) or any(not isinstance(value, str) or not value.strip() for value in violations):
+            _add_issue(issues, "checkpoint_critical_violations")
+            row_count = None
+            critical_count = None
+        else:
+            row_count = len(violations)
+            if critical_count is not None:
+                critical_count += row_count
+            if row_count:
+                _add_issue(issues, "checkpoint_critical_violations")
         public = public_by_id.get(question_id)
         if public is None:
             continue
-        row = item["row"]
+        public_count = public.get("critical_violation_count")
+        if not _is_nonnegative_int(public_count) or public_count != row_count:
+            _add_issue(issues, "report_critical_violation_binding")
         for field in ("status", "task_success", "reader_calls", "context_tokens", "token_budget"):
             if field in public and public.get(field) != row.get(field):
                 _add_issue(issues, "report_checkpoint_binding")
@@ -803,10 +818,14 @@ def _report_bindings(
         _add_issue(issues, "report_not_complete")
     if metrics.get("missing_attempts") not in (None, 0):
         _add_issue(issues, "report_missing_attempts")
-    if metrics.get("critical_violations") not in (None, 0):
+    reported_critical = metrics.get("critical_violations")
+    if not _is_nonnegative_int(reported_critical) or reported_critical != critical_count:
+        _add_issue(issues, "report_critical_violation_binding")
+    if critical_count:
         _add_issue(issues, "report_critical_violations")
     if stage_name and metrics.get("stage") not in (None, stage_name):
         _add_issue(issues, "report_stage")
+    return critical_count
 
 
 def _usage_totals(ledger: dict[str, dict]) -> dict:
@@ -849,7 +868,7 @@ def audit_run(
     stage_name = stage_names[0] if len(stage_names) == 1 else None
     if len(stage_names) != 1:
         _add_issue(issues, "stage_ambiguous")
-    _report_bindings(report, checkpoint_inventory, manifest, stage_name, issues)
+    critical_count = _report_bindings(report, checkpoint_inventory, manifest, stage_name, issues)
     joins = _join_evidence(rows_by_attempt, ledger_states, journal_states, issues)
     oracle_counts = _parse_oracles(checkpoint_rows, issues)
     pending_inventory = [
@@ -899,6 +918,7 @@ def audit_run(
             "completed_calls_without_output": joins["completed_calls_without_output"],
             "native_turns_complete": joins["native_turns_complete"],
             "native_turns_incomplete": joins["native_turns_incomplete"],
+            "critical_violations": critical_count,
             "oracle_calls": oracle_counts["calls"],
             "oracle_timeouts": oracle_counts["timed_out"],
             "oracle_nonzero": oracle_counts["nonzero_exit"],
@@ -934,6 +954,7 @@ def audit_run(
                 state.get("status") in {"reserved", "dispatched"}
                 for state in ledger_states.values()
             ),
+            "critical_violations": critical_count,
             "oracle_calls": oracle_counts["calls"],
             "oracle_timeouts": oracle_counts["timed_out"],
             "oracle_nonzero": oracle_counts["nonzero_exit"],

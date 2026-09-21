@@ -8,13 +8,20 @@ import math
 from pathlib import Path
 
 
-def render(analysis: Path, output: Path) -> None:
+def _read_analysis(analysis: Path) -> tuple[dict, str]:
     expected = analysis.with_suffix(analysis.suffix + ".sha256").read_text(encoding="utf-8").split()[0]
-    if hashlib.sha256(analysis.read_bytes()).hexdigest() != expected:
+    payload = analysis.read_bytes()
+    digest = hashlib.sha256(payload).hexdigest()
+    if digest != expected:
         raise ValueError("analysis checksum mismatch")
-    data = json.loads(analysis.read_text(encoding="utf-8"))
-    if data.get("schema") != "engraphis-external-analysis/v1" or not data.get("reports"):
+    data = json.loads(payload)
+    if not isinstance(data, dict) or data.get("schema") != "engraphis-external-analysis/v1" or not data.get("reports"):
         raise ValueError("expected an external diagnostic analysis")
+    return data, digest
+
+
+def render(analysis: Path, output: Path) -> None:
+    data, expected = _read_analysis(analysis)
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
