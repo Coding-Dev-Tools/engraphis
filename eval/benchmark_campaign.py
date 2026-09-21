@@ -63,7 +63,7 @@ READER_INSTRUCTIONS = (
     "empty and citations empty. Never invent a source. Do not include Markdown fences."
 )
 ORACLE_UNSCORED_OUTCOMES = frozenset({"timeout_unknown", "ambiguous_nonzero", "ambiguous_zero_exit"})
-_OAUTH_PUBLIC_FIELDS = frozenset({
+_TRANSPORT_METADATA_FIELDS = frozenset({
     "transport", "provider", "executable", "resolved_executable", "executable_sha256",
     "version", "instruction_sha256", "global_instruction_sha256", "forced_login_method",
     "requested_model", "effective_model", "reasoning_effort", "allow_provider_model_fallback",
@@ -81,9 +81,9 @@ def digest(value: Any) -> str:
     return hashlib.sha256(payload, usedforsecurity=False).hexdigest()
 
 
-def _oauth_attempt_timeout(value: Any) -> float:
-    if (isinstance(value, bool) or not isinstance(value, (int, float))
-            or not math.isfinite(float(value)) or not 30 <= float(value) <= 600):
+def _attempt_timeout(value: Any) -> float:
+    if (type(value) not in (int, float) or not 30 <= value <= 600
+            or not math.isfinite(value)):
         raise ValueError("OAuth attempt timeout must be finite and bounded to 30..600 seconds")
     return float(value)
 
@@ -114,7 +114,114 @@ def _save_new(path: Path, value: dict) -> None:
         os.fsync(handle.fileno())
 
 
-def _codex_oauth_configuration(*, executable: Optional[str] = None) -> dict:
+# Keep this schema aligned with ``TokenUsage.as_dict()`` in campaign_api.  A
+# provider usage entry is counted only after every field has been validated.
+_PROVIDER_USAGE_FIELDS = (
+    "input_tokens", "cached_input_tokens", "output_tokens",
+    "reasoning_output_tokens", "total_tokens", "latency_ms", "cost_micros",
+    "worst_case_cost_micros", "cache_write_tokens_assumed", "token_counter",
+    "transport_identity", "billing_basis",
+)
+_PROVIDER_USAGE_INTEGER_FIELDS = (
+    "input_tokens", "cached_input_tokens", "output_tokens",
+    "reasoning_output_tokens", "total_tokens", "cost_micros",
+    "worst_case_cost_micros", "cache_write_tokens_assumed",
+)
+_PROVIDER_USAGE_TEXT_FIELDS = ("token_counter", "transport_identity", "billing_basis")
+_PROVIDER_USAGE_SUM_FIELDS = (
+    "input_tokens", "cached_input_tokens", "output_tokens",
+    "reasoning_output_tokens", "total_tokens", "latency_ms", "cost_micros",
+)
+
+
+def _validate_provider_usage_entry(item: Any) -> dict:
+    if not isinstance(item, dict):
+        raise ValueError("provider usage entries must be objects")
+    missing = [key for key in _PROVIDER_USAGE_FIELDS if key not in item]
+    if missing:
+        raise ValueError("provider usage entry is missing: " + ", ".join(missing))
+    for key in _PROVIDER_USAGE_INTEGER_FIELDS:
+        value = item[key]
+        if type(value) is not int or value < 0:
+            raise ValueError(f"provider usage {key} must be a non-negative integer")
+    latency = item["latency_ms"]
+    if isinstance(latency, bool) or not isinstance(latency, (int, float)):
+        raise ValueError("provider usage latency_ms must be numeric")
+    if latency < 0:
+        raise ValueError("provider usage latency_ms must be finite and non-negative")
+    try:
+        finite_latency = math.isfinite(latency)
+    except (OverflowError, ValueError):
+        finite_latency = False
+    if not finite_latency:
+        raise ValueError("provider usage latency_ms must be finite and non-negative")
+    for key in _PROVIDER_USAGE_TEXT_FIELDS:
+        value = item[key]
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"provider usage {key} must be a non-empty string")
+    if item["cached_input_tokens"] > item["input_tokens"]:
+        raise ValueError("provider usage cached_input_tokens exceeds input_tokens")
+    if item["reasoning_output_tokens"] > item["output_tokens"]:
+        raise ValueError("provider usage reasoning_output_tokens exceeds output_tokens")
+    if item["total_tokens"] < item["input_tokens"] + item["output_tokens"]:
+        raise ValueError("provider usage total_tokens is below input plus output")
+    return item
+
+
+def _validated_provider_usage(value: Any, *, strict: bool) -> list[dict]:
+    """Return only complete usage entries; strict mode rejects malformed rows."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        if strict:
+            raise ValueError("provider_usage must be a list or null")
+        return []
+    entries: list[dict] = []
+    for item in value:
+        try:
+            entries.append(_validate_provider_usage_entry(item))
+        except ValueError:
+            if strict:
+                raise
+    return entries
+
+
+def _provider_usage_row_state(row: dict) -> tuple[list[dict], int, int, int, bool]:
+    entries = _validated_provider_usage(row.get("provider_usage"), strict=True)
+    explicit_attempted = "provider_usage_attempted" in row
+    raw_attempted = row.get("provider_usage_attempted")
+    if not explicit_attempted:
+        attempted = len(entries)
+    elif type(raw_attempted) is not int or raw_attempted < 0:
+        raise ValueError("provider_usage_attempted must be a non-negative integer")
+    else:
+        attempted = raw_attempted
+    observed = len(entries)
+    if attempted < observed:
+        raise ValueError("provider_usage_attempted cannot be below observed usage")
+    if explicit_attempted and attempted == 0 and row.get("status") == "complete":
+        raise ValueError("completed attempt cannot report zero provider invocations")
+    missing = attempted - observed
+    status = ("not_attempted" if explicit_attempted and attempted == 0 else
+              "missing" if observed == 0 else "partial" if missing else "complete")
+    expected = {
+        "provider_usage_observed": observed,
+        "provider_usage_missing": missing,
+        "provider_usage_status": status,
+    }
+    for key, value in expected.items():
+        if key in row:
+            actual = row[key]
+            if key in {"provider_usage_observed", "provider_usage_missing"}:
+                valid = type(actual) is int and actual == value
+            else:
+                valid = actual == value
+            if not valid:
+                raise ValueError(f"{key} does not match provider usage entries")
+    return entries, attempted, observed, missing, explicit_attempted
+
+
+def _codex_execution_metadata(*, executable: Optional[str] = None) -> dict:
     """Read the non-secret native Codex contract for a successor manifest.
 
     This only checks the local executable and instruction-source bytes.  It
@@ -136,10 +243,13 @@ def _codex_oauth_configuration(*, executable: Optional[str] = None) -> dict:
         }
     resolved_path = Path(resolved).expanduser().resolve()
     try:
-        version = subprocess.check_output(
+        output = subprocess.check_output(
             [str(resolved_path), "--version"], text=True, stderr=subprocess.STDOUT,
             timeout=10,
         ).strip()
+        # A launcher may print warnings or other arbitrary text. Only a complete,
+        # bounded CLI version identifier belongs in a public campaign artifact.
+        version = output if _is_codex_version(output) else "unconfigured"
     except (OSError, subprocess.SubprocessError):
         version = "unconfigured"
     instruction = Path.home() / ".codex" / "AGENTS.md"
@@ -166,35 +276,44 @@ def _codex_oauth_configuration(*, executable: Optional[str] = None) -> dict:
     }
 
 
-def _public_oauth_configuration(value: Optional[dict]) -> dict:
-    """Keep arbitrary caller dictionaries out of the public campaign binding."""
-    if value is None:
-        return _codex_oauth_configuration()
-    if not isinstance(value, dict):
-        raise ValueError("OAuth configuration must be an object")
-    if any(key not in _OAUTH_PUBLIC_FIELDS for key in value):
-        raise ValueError("OAuth configuration contains unsupported fields")
-    public = {
-        "transport": value.get("transport"),
-        "provider": value.get("provider"),
-        "executable": value.get("executable"),
-        "resolved_executable": value.get("resolved_executable"),
-        "executable_sha256": value.get("executable_sha256"),
-        "version": value.get("version"),
-        "instruction_sha256": value.get("instruction_sha256"),
-        "global_instruction_sha256": value.get("global_instruction_sha256"),
-        "forced_login_method": value.get("forced_login_method"),
-        "requested_model": value.get("requested_model"),
-        "effective_model": value.get("effective_model"),
-        "reasoning_effort": value.get("reasoning_effort"),
-        "allow_provider_model_fallback": value.get("allow_provider_model_fallback"),
-        "request_max_retries": value.get("request_max_retries"),
-        "stream_max_retries": value.get("stream_max_retries"),
-        "supports_websockets": value.get("supports_websockets"),
+def _is_codex_version(value: Any) -> bool:
+    return (isinstance(value, str) and len(value) <= 128
+            and re.fullmatch(
+                r"codex-cli [0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?(?:\+[A-Za-z0-9.-]+)?",
+                value,
+            ) is not None)
+
+
+def _validate_execution_metadata(value: Any) -> None:
+    """Check the public executable fingerprint, never an account configuration."""
+    required = _TRANSPORT_METADATA_FIELDS - {"attempt_timeout_seconds"}
+    if (not isinstance(value, dict) or not required <= value.keys()
+            or not value.keys() <= _TRANSPORT_METADATA_FIELDS):
+        raise ValueError("campaign OAuth transport metadata fields are incomplete or unsupported")
+    fixed = {
+        "transport": "codex_oauth", "provider": OAUTH_PROVIDER,
+        "forced_login_method": "chatgpt", "requested_model": MODEL,
+        "effective_model": MODEL, "reasoning_effort": "medium",
+        "allow_provider_model_fallback": False, "request_max_retries": 0,
+        "stream_max_retries": 0, "supports_websockets": False,
     }
-    if "attempt_timeout_seconds" in value:
-        public["attempt_timeout_seconds"] = value.get("attempt_timeout_seconds")
-    return public
+    if any(type(value[key]) is not type(expected) or value[key] != expected
+           for key, expected in fixed.items()):
+        raise ValueError("campaign OAuth transport controls changed")
+    executable = value["executable"]
+    if (not isinstance(executable, str)
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", executable) is None
+            or value["resolved_executable"] != executable):
+        raise ValueError("campaign executable metadata must contain matching portable basenames")
+    if value["version"] != "unconfigured" and not _is_codex_version(value["version"]):
+        raise ValueError("campaign executable version is not a public CLI version identifier")
+    for key in ("executable_sha256", "instruction_sha256", "global_instruction_sha256"):
+        if (not isinstance(value[key], str)
+                or re.fullmatch(r"[a-f0-9]{64}", value[key]) is None):
+            raise ValueError("campaign executable metadata digest is invalid")
+    if value["instruction_sha256"] != value["global_instruction_sha256"]:
+        raise ValueError("campaign instruction fingerprints disagree")
+    _attempt_timeout(value.get("attempt_timeout_seconds", 180))
 
 
 def source_snapshot(root: Path = ROOT) -> dict:
@@ -219,6 +338,8 @@ def make_manifest(*, corpus_root: Path = DATASET_ROOT, embed_model: str,
                   embed_revision: str, dependency_lock: Path,
                   pins: Path = ROOT / "eval/configs/competitor-pins.json",
                   oauth_configuration: Optional[dict] = None) -> tuple[dict, dict]:
+    if oauth_configuration is not None:
+        raise ValueError("caller-supplied OAuth configuration is unsupported; metadata is derived locally")
     corpus = load_corpus(corpus_root)
     if not re.fullmatch(r"[a-f0-9]{40}", embed_revision):
         raise ValueError("embedding revision must be an immutable 40-character commit")
@@ -233,14 +354,15 @@ def make_manifest(*, corpus_root: Path = DATASET_ROOT, embed_model: str,
                          "max_reader_turns": 2, "max_peer_internal_calls_per_attempt": 32,
                          "max_input_tokens": 32768, "max_output_tokens": 4096,
                          "approved": False}
-    oauth = _public_oauth_configuration(oauth_configuration)
+    metadata = _codex_execution_metadata()
+    _validate_execution_metadata(metadata)
     manifest = {
         "schema": SCHEMA, "campaign_id": "engraphis-expansion-20260915",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "origin": "implementation_team", "independent_acceptance_eligible": False,
         "leadership_eligible": False,
         "model": MODEL, "reasoning_effort": "medium", "transport": "codex_oauth",
-        "oauth": oauth,
+        "oauth": metadata,
         "automatic_retries": 0, "docker_image": DOCKER_IMAGE,
         "graph_store_image": NEO4J_IMAGE,
         "reader_instructions_sha256": digest(READER_INSTRUCTIONS),
@@ -278,26 +400,7 @@ def validate_manifest(manifest: dict, companion: dict, *, corpus_root: Path = DA
             or manifest.get("automatic_retries") != 0):
         raise ValueError("campaign model, controls or retry contract changed")
     oauth = manifest.get("oauth")
-    if isinstance(oauth, dict):
-        _oauth_attempt_timeout(oauth.get("attempt_timeout_seconds", 180))
-    if (not isinstance(oauth, dict)
-            or oauth.get("transport") != "codex_oauth"
-            or oauth.get("provider") != "engraphis_benchmark_oauth"
-            or oauth.get("forced_login_method") != "chatgpt"
-            or oauth.get("requested_model") != MODEL
-            or oauth.get("effective_model") != MODEL
-            or oauth.get("reasoning_effort") != "medium"
-            or oauth.get("allow_provider_model_fallback") is not False
-            or oauth.get("request_max_retries") != 0
-            or oauth.get("stream_max_retries") != 0
-            or oauth.get("supports_websockets") is not False
-            or not isinstance(oauth.get("executable"), str)
-            or oauth.get("executable") != oauth.get("resolved_executable")
-            or not re.fullmatch(r"[a-f0-9]{64}", str(oauth.get("executable_sha256")))
-            or not isinstance(oauth.get("version"), str)
-            or not re.fullmatch(r"[a-f0-9]{64}", str(oauth.get("instruction_sha256")))
-            or oauth.get("instruction_sha256") != oauth.get("global_instruction_sha256")):
-        raise ValueError("campaign OAuth transport contract is incomplete")
+    _validate_execution_metadata(oauth)
     if manifest.get("reader_instructions_sha256") != digest(READER_INSTRUCTIONS):
         raise ValueError("reader prompt drift")
     if manifest.get("origin") != "implementation_team" or manifest.get("independent_acceptance_eligible") is not False:
@@ -328,7 +431,7 @@ def validate_manifest(manifest: dict, companion: dict, *, corpus_root: Path = DA
         observed_executable = str(oauth["executable"])
         if not Path(observed_executable).is_absolute():
             observed_executable = shutil.which(observed_executable) or ""
-        observed_oauth = _codex_oauth_configuration(
+        observed_oauth = _codex_execution_metadata(
             executable=observed_executable if observed_executable else None
         )
         if observed_oauth.get("version") == "unconfigured":
@@ -432,7 +535,7 @@ def approved_client(manifest: dict, stage_name: str, approval_path: Path, result
         config_sha256=manifest["binding_sha256"], repo_revision=manifest["repository_revision"],
         pins_sha256=manifest["pins_sha256"],
     )
-    timeout_seconds = _oauth_attempt_timeout(oauth.get("attempt_timeout_seconds", 180))
+    timeout_seconds = _attempt_timeout(oauth.get("attempt_timeout_seconds", 180))
     try:
         from eval.codex_oauth import CodexOAuthTransport
         executable = Path(str(oauth["resolved_executable"]))
@@ -553,9 +656,11 @@ class _AttemptExecutionError(RuntimeError):
         self.cause = cause
         self.error_class = type(cause).__name__
         self.status = "unsupported" if isinstance(cause, AdapterCapabilityError) else "error"
-        self.provider_usage = list(usage_rows)
-        self.provider_usage_attempted = provider_usage_attempted
+        self.provider_usage = _validated_provider_usage(usage_rows, strict=False)
         observed, missing, usage_status = _usage_state(usage_rows, provider_usage_attempted)
+        # Retain the normalized lower-bound attempt count after malformed
+        # entries are filtered, so the typed error cannot lose missingness.
+        self.provider_usage_attempted = observed + missing
         self.provider_usage_observed = observed
         self.provider_usage_missing = missing
         self.provider_usage_status = usage_status
@@ -565,10 +670,17 @@ class _AttemptExecutionError(RuntimeError):
 
 
 def _usage_state(usage_rows: list[Any], attempted: int) -> tuple[int, int, str]:
-    """Return observed/missing reader-counter state without inventing values."""
+    """Return observed/missing state using only complete usage entries."""
 
-    observed = sum(isinstance(item, dict) for item in usage_rows)
-    missing = max(attempted - observed, 0)
+    raw_count = len(usage_rows)
+    observed = len(_validated_provider_usage(usage_rows, strict=False))
+    if type(attempted) is not int or attempted < 0:
+        attempted = raw_count
+    # This is the internal failure path.  A malformed test/provider row must
+    # never make the observed count exceed the invocation count or disappear
+    # as a false not_attempted result.
+    attempted = max(attempted, raw_count, observed)
+    missing = attempted - observed
     status = ("not_attempted" if attempted == 0 else
               "missing" if observed == 0 else "partial" if missing else "complete")
     return observed, missing, status
@@ -874,13 +986,23 @@ def _attempt_error_row(cell: dict, exc: Exception, attempt_row: Optional[dict] =
     }
     violations = preserved.get("critical_violations", source_fields.get("critical_violations", []))
     row["critical_violations"] = list(violations) if isinstance(violations, list) else []
-    usage = typed.provider_usage if typed is not None else preserved.get("provider_usage", [])
-    row["provider_usage"] = list(usage) if isinstance(usage, list) else []
+    raw_usage = typed.provider_usage if typed is not None else preserved.get("provider_usage", [])
+    row["provider_usage"] = _validated_provider_usage(raw_usage, strict=False)
     attempted = typed.provider_usage_attempted if typed is not None else preserved.get("provider_usage_attempted")
-    if isinstance(attempted, bool) or not isinstance(attempted, int) or attempted < 0:
-        attempted = len(row["provider_usage"]) if attempt_row is not None else 0
+    raw_count = len(raw_usage) if isinstance(raw_usage, list) else 0
+    known_attempted = type(attempted) is int and attempted >= 0
+    if not known_attempted:
+        # A malformed counter is not evidence of zero calls.  The retained
+        # list length is the only safe lower bound; malformed entries remain
+        # missing rather than becoming observed usage.
+        attempted = raw_count
+    else:
+        attempted = max(attempted, raw_count, len(row["provider_usage"]))
     observed, missing, usage_status = _usage_state(row["provider_usage"], attempted)
-    if typed is not None or attempt_row is not None:
+    # Without a valid count or a retained entry there is no evidence of zero
+    # calls. Leave the legacy unknown representation instead of inventing it.
+    known_zero = known_attempted and (raw_usage is None or isinstance(raw_usage, list))
+    if typed is not None or raw_count or (known_attempted and attempted > 0) or known_zero:
         row.update({
             "provider_usage_attempted": attempted,
             "provider_usage_observed": observed,
@@ -1006,51 +1128,49 @@ def validate_row(row: dict, cell: dict) -> None:
     tokens = row.get("context_tokens")
     if tokens is not None and (type(tokens) is not int or not 0 <= tokens <= cell["token_budget"]):
         raise ValueError("reported context exceeds its budget")
+    # Missing/None usage remains a legacy unknown.  Once a row supplies an
+    # entry, however, every TokenUsage.as_dict field and redundant counter must
+    # agree before the row can reach a checkpoint or aggregate.
+    _provider_usage_row_state(row)
 
 
 def _provider_usage_summary(rows: list[dict]) -> dict:
-    """Aggregate safe OAuth token counters without exporting provider text."""
-    fields = ("input_tokens", "cached_input_tokens", "output_tokens",
-              "reasoning_output_tokens", "total_tokens", "latency_ms",
-              "cost_micros")
-    totals = {field: 0 for field in fields}
-    entries = []
+    """Aggregate only complete, finite OAuth token counters."""
+    totals = {field: 0 for field in _PROVIDER_USAGE_SUM_FIELDS}
+    entries: list[dict] = []
     rows_without_usage = 0
     rows_with_incomplete_usage = 0
     rows_not_attempted = 0
     legacy_rows_without_usage = 0
     usage_attempted = usage_observed = usage_missing = 0
     for row in rows:
-        usage = row.get("provider_usage")
-        fallback_observed = sum(isinstance(item, dict) for item in usage) if isinstance(usage, list) else 0
-        attempted = row.get("provider_usage_attempted")
-        known_not_attempted = type(attempted) is int and attempted == 0 and fallback_observed == 0
-        if isinstance(attempted, bool) or not isinstance(attempted, int) or attempted < 0:
-            attempted = fallback_observed
-        # Derive both values from the retained list.  Redundant row counters
-        # are descriptive output and cannot manufacture observed usage.
-        observed = fallback_observed
-        missing = max(attempted - observed, 0)
-        usage_attempted += attempted
-        usage_observed += observed
-        usage_missing += missing
-        if known_not_attempted:
+        if not isinstance(row, dict):
+            raise ValueError("campaign rows must be objects")
+        entries_for_row, attempted, observed, missing, explicit_attempted = (
+            _provider_usage_row_state(row)
+        )
+        if not entries_for_row:
+            rows_without_usage += 1
+            if "provider_usage_status" not in row and not explicit_attempted:
+                legacy_rows_without_usage += 1
+        if explicit_attempted and attempted == 0 and observed == 0:
             rows_not_attempted += 1
         if missing:
             rows_with_incomplete_usage += 1
-        if not isinstance(usage, list) or not usage:
-            rows_without_usage += 1
-            if "provider_usage_status" not in row and "provider_usage_attempted" not in row:
-                legacy_rows_without_usage += 1
-            continue
-        for item in usage:
-            if not isinstance(item, dict):
-                continue
-            entries.append(item)
-            for field in fields:
-                value = item.get(field, 0)
-                if isinstance(value, (int, float)) and not isinstance(value, bool):
-                    totals[field] += value
+        usage_attempted += attempted
+        usage_observed += observed
+        usage_missing += missing
+        entries.extend(entries_for_row)
+        for item in entries_for_row:
+            for field in _PROVIDER_USAGE_SUM_FIELDS:
+                totals[field] += item[field]
+                if field == "latency_ms":
+                    try:
+                        finite_latency = math.isfinite(totals[field])
+                    except (OverflowError, ValueError):
+                        finite_latency = False
+                    if not finite_latency:
+                        raise ValueError("aggregate provider usage latency_ms must be finite")
     complete_rows = sum(row.get("status") == "complete" for row in rows)
     if not entries:
         status = "not_attempted" if rows and rows_not_attempted == len(rows) else "missing"
@@ -1058,15 +1178,11 @@ def _provider_usage_summary(rows: list[dict]) -> dict:
         status = "partial"
     else:
         status = "complete"
-    transports = sorted({str(item["transport_identity"]) for item in entries
-                         if item.get("transport_identity") is not None})
-    billing = sorted({str(item["billing_basis"]) for item in entries
-                      if item.get("billing_basis") is not None})
+    transports = sorted({item["transport_identity"] for item in entries})
+    billing = sorted({item["billing_basis"] for item in entries})
     return {
         **totals,
-        # ``cost_micros`` is retained as the known usage estimate for
-        # compatibility with private ledgers; the explicit alias prevents a
-        # reader from mistaking it for a subscription invoice.
+        # ``cost_micros`` is the known usage estimate; it is not an invoice.
         "api_price_proxy_micros": totals["cost_micros"],
         "status": status,
         "scope": "reader_and_correction_calls_only",
