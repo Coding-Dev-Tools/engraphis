@@ -1,6 +1,8 @@
 import hashlib
 import json
 
+import pytest
+
 from scripts.audit_coding_oauth_run import (
     MODEL,
     REASONING_EFFORT,
@@ -201,6 +203,7 @@ def make_fixture(tmp_path, *, oracle_timeout=False, request_mismatch=False):
             "reader_calls": 1,
             "context_tokens": 4,
             "token_budget": 512,
+            "critical_violation_count": 0,
         }],
     }
     report_path = tmp_path / "report.json"
@@ -340,3 +343,51 @@ def test_duplicate_native_usage_blocks(tmp_path):
     )
     assert result["status"] == "BLOCKED"
     assert "journal_usage_duplicate" in result["issues"]
+
+
+@pytest.mark.parametrize("violations,public_count,aggregate", [
+    (["forbidden_evidence"], 0, 0),
+    (["forbidden_evidence"], 1, 0),
+    (["forbidden_evidence"], 1, None),
+    (["forbidden_evidence"], 1, "missing"),
+    (["forbidden_evidence"], 1, 1),
+    ([], 1, 0),
+    ([], None, 0),
+    ([], "missing", 0),
+    ([], False, 0),
+    ([], 0, None),
+    ([], 0, False),
+    (None, 0, 0),
+    ("missing", 0, 0),
+    ({"forbidden_evidence": True}, 0, 0),
+])
+def test_private_critical_violations_must_match_every_public_count(
+    tmp_path, violations, public_count, aggregate,
+):
+    manifest, report_path, results = make_fixture(tmp_path)
+    checkpoint_path = results / "development_pilot" / "checkpoint.json"
+    checkpoint = json.loads(checkpoint_path.read_text())
+    if violations == "missing":
+        checkpoint["row"].pop("critical_violations")
+    else:
+        checkpoint["row"]["critical_violations"] = violations
+    checkpoint["row_sha256"] = digest(checkpoint["row"])
+    checkpoint_path.write_text(canonical_json(checkpoint) + "\n")
+    report = json.loads(report_path.read_text())
+    if public_count == "missing":
+        report["records"][0].pop("critical_violation_count")
+    else:
+        report["records"][0]["critical_violation_count"] = public_count
+    if aggregate == "missing":
+        report["metrics"].pop("critical_violations")
+    else:
+        report["metrics"]["critical_violations"] = aggregate
+    report_path.write_text(canonical_json(report) + "\n")
+    result = audit_run(
+        manifest_path=manifest, report_path=report_path, results=results,
+        private_inventory=tmp_path / "private-inventory.json", output=tmp_path / "public-audit.json",
+    )
+    assert result["status"] == "BLOCKED"
+    assert any("critical" in issue for issue in result["issues"])
+    expected_count = len(violations) if isinstance(violations, list) else None
+    assert result["counts"]["critical_violations"] == expected_count

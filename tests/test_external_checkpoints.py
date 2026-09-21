@@ -159,3 +159,47 @@ def test_checkpoint_does_not_invent_labels_for_an_unlabeled_document(tmp_path):
     assert fresh["scored_questions"] == cached["scored_questions"] == 0
     assert fresh["category_metrics"]["unknown"]["recall_at_k"] is None
     assert cached["category_metrics"]["unknown"]["recall_at_k"] is None
+
+
+def test_restart_history_survives_cached_only_aggregation(tmp_path):
+    def interrupted(*args, **kwargs):
+        raise RuntimeError("simulated interruption")
+
+    with pytest.raises(RuntimeError):
+        execute(tmp_path, runner=interrupted)
+    with pytest.raises(RuntimeError):
+        execute(tmp_path, runner=interrupted, restart_interrupted=True)
+    fresh = execute(tmp_path, restart_interrupted=True)
+    assert fresh["explicit_local_restarts"] == 2
+    receipts = {path.name: path.read_bytes() for path in tmp_path.glob("*.retry-*")}
+    cached = execute(tmp_path, runner=lambda *args, **kwargs: pytest.fail("completed case replayed"))
+    assert cached["explicit_local_restarts"] == fresh["explicit_local_restarts"]
+    assert receipts == {path.name: path.read_bytes() for path in tmp_path.glob("*.retry-*")}
+
+
+@pytest.mark.parametrize("corruption", ["wrong_case", "wrong_reason", "malformed", "gap", "unknown_case", "started"])
+def test_retained_restart_receipts_are_validated_on_cached_resume(tmp_path, corruption):
+    def interrupted(*args, **kwargs):
+        raise RuntimeError("simulated interruption")
+
+    with pytest.raises(RuntimeError):
+        execute(tmp_path, runner=interrupted)
+    execute(tmp_path, restart_interrupted=True)
+    path = tmp_path / "case-00000.retry-000"
+    value = json.loads(path.read_text())
+    if corruption == "wrong_case":
+        value["case_sha256"] = "0" * 64
+        path.write_text(json.dumps(value))
+    elif corruption == "wrong_reason":
+        value["reason"] = "automatic retry"
+        path.write_text(json.dumps(value))
+    elif corruption == "malformed":
+        path.write_text("[]")
+    elif corruption == "gap":
+        path.rename(path.with_name("case-00000.retry-001"))
+    elif corruption == "unknown_case":
+        path.rename(path.with_name("case-99999.retry-000"))
+    else:
+        (tmp_path / "case-00000.started").write_text(json.dumps({"case_sha256": "0" * 64, "ordinal": 0}))
+    with pytest.raises(ValueError, match="restart receipt|start receipt"):
+        execute(tmp_path)

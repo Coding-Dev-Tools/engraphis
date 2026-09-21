@@ -9,6 +9,7 @@ from collections import defaultdict
 import json
 import math
 import os
+import re
 from pathlib import Path
 import time
 from typing import Callable, Optional
@@ -105,6 +106,40 @@ def aggregate(reports: list[dict]) -> dict:
     return result
 
 
+def _validate_start_receipt(path: Path, ordinal: int, case_hash: str) -> None:
+    try:
+        receipt = _read(path)
+    except (OSError, ValueError) as exc:
+        raise ValueError("invalid external case start receipt") from exc
+    if receipt != {"case_sha256": case_hash, "ordinal": ordinal} or type(receipt.get("ordinal")) is not int:
+        raise ValueError("external case start receipt binding changed")
+
+
+def _retained_restart_counts(directory: Path, case_hashes: list[str]) -> list[int]:
+    attempts: dict[int, list[int]] = defaultdict(list)
+    for path in directory.glob("*.retry-*"):
+        match = re.fullmatch(r"case-(\d+)[.]retry-(\d+)", path.name)
+        if match is None:
+            raise ValueError("invalid external restart receipt name")
+        ordinal, attempt = map(int, match.groups())
+        if ordinal >= len(case_hashes) or path.name != f"case-{ordinal:05d}.retry-{attempt:03d}":
+            raise ValueError("external restart receipt case binding changed")
+        try:
+            receipt = _read(path)
+        except (OSError, ValueError) as exc:
+            raise ValueError("invalid external restart receipt") from exc
+        if receipt != {"reason": "explicit local-only interrupted-case restart", "case_sha256": case_hashes[ordinal]}:
+            raise ValueError("external restart receipt content changed")
+        attempts[ordinal].append(attempt)
+    counts = [0] * len(case_hashes)
+    for ordinal, indices in attempts.items():
+        if sorted(indices) != list(range(len(indices))):
+            raise ValueError("external restart receipt sequence changed")
+        _validate_start_receipt(directory / f"case-{ordinal:05d}.started", ordinal, case_hashes[ordinal])
+        counts[ordinal] = len(indices)
+    return counts
+
+
 def run_resumable(cases: list[dict], *, directory: Path, binding: dict, embedder: object,
                   k: int = 10, token_budget: int = 1500, resolve_conflicts: bool = False,
                   restart_interrupted: bool = False, runner: Callable = run,
@@ -126,15 +161,17 @@ def run_resumable(cases: list[dict], *, directory: Path, binding: dict, embedder
         handle = lock.open("x", encoding="utf-8")
     except FileExistsError as exc:
         raise ValueError("external diagnostic runner already owns this directory") from exc
-    reports, retries, executed = [], 0, 0
+    reports, executed = [], 0
     try:
         with handle:
             handle.write(str(os.getpid()))
             handle.flush()
             os.fsync(handle.fileno())
+        case_hashes = [sha256_text(canonical_json(case)) for case in cases]
+        retries = _retained_restart_counts(directory, case_hashes)
         for ordinal, case in enumerate(cases):
             case_path = directory / f"case-{ordinal:05d}.json"
-            case_hash = sha256_text(canonical_json(case))
+            case_hash = case_hashes[ordinal]
             if case_path.exists():
                 checkpoint = _read(case_path)
                 cached_report = checkpoint.get("report")
@@ -146,11 +183,12 @@ def run_resumable(cases: list[dict], *, directory: Path, binding: dict, embedder
                 continue
             start_path = directory / f"case-{ordinal:05d}.started"
             if start_path.exists():
+                _validate_start_receipt(start_path, ordinal, case_hash)
                 if not restart_interrupted:
                     raise ValueError("interrupted local case; use explicit restart flag after inspecting retained attempt")
-                retries += 1
-                retry_path = directory / f"case-{ordinal:05d}.retry-{len(list(directory.glob(f'case-{ordinal:05d}.retry-*'))):03d}"
+                retry_path = directory / f"case-{ordinal:05d}.retry-{retries[ordinal]:03d}"
                 _write(retry_path, {"reason": "explicit local-only interrupted-case restart", "case_sha256": case_hash})
+                retries[ordinal] += 1
             else:
                 _write(start_path, {"case_sha256": case_hash, "ordinal": ordinal})
             started = time.perf_counter()
@@ -171,7 +209,9 @@ def run_resumable(cases: list[dict], *, directory: Path, binding: dict, embedder
         result["checkpoint_status"] = "COMPLETE" if len(reports) == len(cases) else "PARTIAL"
         result["completed_cases"] = len(reports)
         result["expected_cases"] = len(cases)
-        result["explicit_local_restarts"] = retries
+        if _retained_restart_counts(directory, case_hashes) != retries:
+            raise ValueError("external restart receipts changed during aggregation")
+        result["explicit_local_restarts"] = sum(retries)
         if snapshot() != identity["producer"] or _runtime_identity(embedder) != identity["runtime"]:
             raise ValueError("external producer or runtime changed during checkpoint aggregation")
         return result

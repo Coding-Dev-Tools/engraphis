@@ -373,3 +373,68 @@ def test_engraphis_fixture_clock_seeds_known_at_and_retention_age(tmp_path):
     assert result.provenance["fixture_clock"]["mapped_known_at"] == anchor + 25
     assert adapter.metrics()["fixture_clock"]["mode"] == "fixture_anchor"
     adapter.close()
+
+
+def test_engraphis_logical_session_labels_reuse_one_scope(tmp_path):
+    adapter = EngraphisAdapter(db_path=str(tmp_path / "sessions.db"))
+    try:
+        adapter.prepare(workspace_id="workspace-a", repo_id="repo-a")
+        ids = adapter.ingest([
+            {"record_id": "owner", "content": "Repository owner is Delta.",
+             "scope": "session", "session": "shared-label", "trusted": True},
+            {"record_id": "release", "content": "Release day is Tuesday.",
+             "scope": "session", "session": "shared-label", "trusted": True},
+            {"record_id": "secret", "content": "Restricted project is Juniper.",
+             "scope": "session", "session": "other-label", "trusted": True},
+        ])
+        sessions = [adapter.engine.store.get_memory(mid).session_id for mid in ids]
+        assert sessions[0] == sessions[1]
+        assert sessions[2] != sessions[0]
+        assert adapter.session_id is None
+        assert adapter.recall("owner release", k=10, token_budget=512).source_ids == ()
+        prepared = adapter.prepare(workspace_id="workspace-a", repo_id="repo-a",
+                                   session_id="shared-label")
+        assert prepared["session_id"] == sessions[0]
+        result = adapter.recall("repository owner release Tuesday", k=10, token_budget=512)
+        assert set(result.source_ids) == {"owner", "release"}
+    finally:
+        adapter.close()
+
+
+def test_engraphis_session_label_cache_is_bound_to_workspace_and_repo(tmp_path):
+    adapter = EngraphisAdapter(db_path=str(tmp_path / "session-scopes.db"))
+    try:
+        first = adapter.prepare(workspace_id="workspace-a", repo_id="repo-a", session_id="same-label")
+        other_repo = adapter.prepare(workspace_id="workspace-a", repo_id="repo-b", session_id="same-label")
+        other_workspace = adapter.prepare(workspace_id="workspace-b", repo_id="repo-a", session_id="same-label")
+        repeated = adapter.prepare(workspace_id="workspace-a", repo_id="repo-a", session_id="same-label")
+        assert len({first["session_id"], other_repo["session_id"], other_workspace["session_id"]}) == 3
+        assert repeated["session_id"] == first["session_id"]
+        physical = adapter.prepare(workspace_id="workspace-a", repo_id="repo-a",
+                                   session_id=first["session_id"])
+        assert physical["session_id"] == first["session_id"]
+    finally:
+        adapter.close()
+
+
+@pytest.mark.parametrize("workspace,repo", [("workspace-b", "repo-a"), ("workspace-a", "repo-b")])
+def test_engraphis_rejects_foreign_physical_session(tmp_path, workspace, repo):
+    adapter = EngraphisAdapter(db_path=str(tmp_path / "physical-session.db"))
+    try:
+        prepared = adapter.prepare(workspace_id="workspace-a", repo_id="repo-a", session_id="same-label")
+        with pytest.raises(AdapterConfigurationError, match="scope initialization failed"):
+            adapter.prepare(workspace_id=workspace, repo_id=repo, session_id=prepared["session_id"])
+    finally:
+        adapter.close()
+
+
+def test_engraphis_reset_discards_session_aliases():
+    adapter = EngraphisAdapter()
+    try:
+        before = adapter.prepare(workspace_id="workspace-a", repo_id="repo-a", session_id="session-a")
+        adapter.reset()
+        after = adapter.prepare(workspace_id="workspace-a", repo_id="repo-a", session_id="session-a")
+        assert after["session_id"] != before["session_id"]
+        assert adapter.engine.store.get_session(after["session_id"]) is not None
+    finally:
+        adapter.close()
