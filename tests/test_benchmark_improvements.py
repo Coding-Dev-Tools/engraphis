@@ -81,18 +81,17 @@ def test_multiline_exact_value_retains_surrounding_restrictions_when_they_fit(se
     minimum_budget = packer.count_tokens("[1]\n" + value)
     for budget in (minimum_budget, minimum_budget + 4, 100):
         result = packer.pack_coverage("label Δ-42", [candidate], budget)
-        chunk = result.chunks[0]
-        assert value in chunk.excerpt
-        assert chunk.exact_value["value"] == value
         assert result.usage.context_tokens <= budget
         if budget == 100:
+            chunk = result.chunks[0]
             assert chunk.excerpt == content
+            assert chunk.exact_value["value"] == value
             assert "only" in chunk.evidence_unit["qualifiers"]
             assert "never" in chunk.evidence_unit["qualifiers"]
-        elif budget == minimum_budget:
-            assert chunk.excerpt == value
         else:
-            assert chunk.excerpt in content and len(chunk.excerpt) > len(value)
+            assert value not in result.context
+            assert all(chunk.exact_value is None and chunk.source_span is None
+                       and chunk.evidence_unit["value"] is None for chunk in result.chunks)
 
 
 def test_coverage_packing_spreads_complete_units_across_long_sources() -> None:
@@ -202,7 +201,7 @@ def test_coverage_packing_retains_source_bound_exact_value_metadata() -> None:
 
 
 @pytest.mark.parametrize("counter,budget", [(RegexTokenCounter(), 24), (len, 100)])
-def test_coverage_preserves_a_bound_literal_inside_an_oversized_sentence(counter, budget) -> None:
+def test_coverage_withholds_an_unpunctuated_oversized_restriction_group(counter, budget) -> None:
     content = "padding " * 80 + "must use Δ-42 only if approved " + "trailing " * 80
     binding = make_exact_value_binding(content, "Δ-42", "identifier")
     record = MemoryRecord(id="long-literal", title="Deployment", content=content,
@@ -210,12 +209,11 @@ def test_coverage_preserves_a_bound_literal_inside_an_oversized_sentence(counter
     packer = DeterministicContextPacker(token_counter=counter)
     packed = packer.pack_coverage("deployment approved", [Candidate(record.id, 1, "lexical", record)], budget)
 
-    assert len(packed.chunks) == 1
-    chunk = packed.chunks[0]
-    assert "must use Δ-42 only if approved" in chunk.excerpt
-    assert chunk.excerpt in content
-    assert chunk.exact_value == binding
-    assert chunk.source_span == (binding["start"], binding["end"])
+    # Preserve this historical fixture's input. Without a sentence boundary,
+    # the runner cannot prove that the unbounded trailing text is dispensable.
+    assert packed.chunks == []
+    assert packed.context == ""
+    assert packed.usage.omission_reasons["unit_too_large"] == 1
     assert packed.usage.context_tokens == counter(packed.context) <= budget
 
 

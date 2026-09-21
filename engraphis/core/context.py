@@ -23,6 +23,7 @@ from engraphis.core.evidence import exact_value_binding
 
 _TOKEN_RE = re.compile(r"\w+|[^\w\s]", re.UNICODE)
 _SENTENCE_RE = re.compile(r"(?<=[.!?])(?:[\"')\]]*)\s+|\n+")
+_RESTRICTION_SENTENCE_RE = re.compile(r"(?<=[.!?])(?:[\"')\]]*)\s+")
 _WORD_RE = re.compile(r"\w+", re.UNICODE)
 _BRIDGE_TERMS = frozenset({
     "call", "calls", "called", "caller", "dependency", "depends", "flow",
@@ -57,6 +58,35 @@ class ContextPackResult(NamedTuple):
 def _protected_sentence(text: str) -> bool:
     """Conditions and numerical claims must retain their complete bindings."""
     return bool(_terms(text) & _QUALIFIER_TERMS) or bool(re.search(r"\d", text))
+
+
+def _exact_group_span(source: str, binding: dict[str, object]) -> tuple[int, int]:
+    """Bind nearby restriction sentences without treating line wraps as endings."""
+    left, right = cast(int, binding["start"]), cast(int, binding["end"])
+    units = []
+    start = 0
+    for separator in _RESTRICTION_SENTENCE_RE.finditer(source):
+        # Preserve closing quotes/brackets before the separating whitespace.
+        end = separator.start() + len(separator.group().rstrip())
+        units.append((start, end))
+        start = separator.end()
+    units.append((start, len(source)))
+    units = [(start + len(source[start:end]) - len(source[start:end].lstrip()),
+              start + len(source[start:end].rstrip())) for start, end in units]
+    units = [(start, end) for start, end in units if start < end]
+    overlaps = [index for index, (start, end) in enumerate(units)
+                if start < right and left < end]
+    if not overlaps:
+        return left, right
+    required_left, required_right = left, right
+    # Match the three-unit neighborhood on either side of the bound literal.
+    # Qualifiers inside a literal are data, not surrounding restrictions.
+    for start, end in units[max(0, overlaps[0] - 2):overlaps[-1] + 3]:
+        if start < left and _terms(source[start:min(end, left)]) & _QUALIFIER_TERMS:
+            required_left = min(required_left, start)
+        if right < end and _terms(source[max(start, right):end]) & _QUALIFIER_TERMS:
+            required_right = max(required_right, end)
+    return required_left, required_right
 
 
 def _normalize_title(title: Optional[str]) -> str:
@@ -560,6 +590,7 @@ class DeterministicContextPacker:
         exact_value = ""
         if binding and isinstance(binding.get("value"), str):
             exact_value = binding["value"]
+        required_span = _exact_group_span(record.content, binding) if binding else None
 
         def fits(text: str) -> bool:
             return self._count(text) <= max_tokens and (
@@ -610,6 +641,9 @@ class DeterministicContextPacker:
                     continue
                 covers_binding = bool(binding and left <= cast(int, binding["start"])
                                       and cast(int, binding["end"]) <= right)
+                if (covers_binding and required_span is not None
+                        and not (left <= required_span[0] and required_span[1] <= right)):
+                    continue
                 terms = _terms(excerpt)
                 score = (len(terms & query_terms), len(terms & _QUALIFIER_TERMS),
                          int(covers_binding))
@@ -620,11 +654,13 @@ class DeterministicContextPacker:
             # Grow a verified literal when nearby complete units cannot fit. Score its
             # own unit's query terms, so growth into an adjacent sentence cannot
             # displace that sentence's complete, more relevant evidence.
-            excerpt = self._exact_window(record.content, binding, query_terms, fits)
+            excerpt = self._exact_window(
+                record.content, binding, query_terms, fits, required_span=required_span,
+            )
             terms = _terms(excerpt)
             score = (len(terms & query_terms & _terms(bound_unit)),
                      len(terms & _QUALIFIER_TERMS), 1)
-            if self._count(excerpt) >= minimum_tokens and score > best_score:
+            if excerpt and self._count(excerpt) >= minimum_tokens and score > best_score:
                 best, best_score, best_binding = excerpt, score, binding
         if not best:
             return "", "", None
@@ -634,17 +670,22 @@ class DeterministicContextPacker:
     def _exact_window(
         self, source: str, binding: dict[str, object], query_terms: set[str],
         fits: Callable[[str], bool],
+        *, required_span: Optional[tuple[int, int]] = None,
     ) -> str:
-        """Expand a verified literal without normalizing its surrounding text."""
+        """Reserve complete nearby restrictions, then expand the bound literal."""
         if fits(source):
             return source
-        left, right = cast(int, binding["start"]), cast(int, binding["end"])
+        left, right = required_span or _exact_group_span(source, binding)
+        if not fits(source[left:right]):
+            return ""
         before = list(_TOKEN_RE.finditer(source, 0, left))
         after = list(_TOKEN_RE.finditer(source, right))
         taken = [0, 0]
         best = source[left:right]
         while True:
             options = []
+            # Repeated query terms add no coverage after their first occurrence.
+            covered = _terms(best)
             for side, matches in enumerate((before, after)):
                 if taken[side] >= len(matches):
                     continue
@@ -653,7 +694,7 @@ class DeterministicContextPacker:
                 excerpt = source[start:end]
                 if fits(excerpt):
                     terms = _terms(token.group())
-                    rank = (2 * len(terms & _QUALIFIER_TERMS) + len(terms & query_terms),
+                    rank = (2 * len(terms & _QUALIFIER_TERMS) + len((terms - covered) & query_terms),
                             -taken[side], -side)
                     options.append((rank, side, start, end, excerpt))
             if not options:
