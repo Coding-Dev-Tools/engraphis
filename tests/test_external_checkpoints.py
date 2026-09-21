@@ -1,4 +1,9 @@
 import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
 
 import pytest
 
@@ -212,3 +217,129 @@ def test_cached_case_without_retries_validates_retained_start_receipt(tmp_path):
     start.write_text(json.dumps({"ordinal": 1, "case_sha256": "0" * 64}))
     with pytest.raises(ValueError, match="start receipt"):
         execute(tmp_path)
+
+
+@pytest.mark.parametrize("payload", [b"", str(os.getpid()).encode("ascii"), b"{", b"unknown",
+                                    b"\0", external_checkpoints.RUNNER_LOCK_MARKER + b"extra"])
+def test_unrecognized_marker_fails_closed_without_changing_checkpoint_files(tmp_path, payload):
+    marker = tmp_path / ".runner.lock"
+    marker.write_bytes(payload)
+    with pytest.raises(ValueError, match="manual inspection"):
+        execute(tmp_path)
+    assert marker.read_bytes() == payload
+    assert sorted(path.name for path in tmp_path.iterdir()) == [".runner.lock"]
+
+
+@pytest.mark.parametrize("prefix_length", [1, len(external_checkpoints.RUNNER_LOCK_MARKER) - 1])
+def test_interrupted_marker_initialization_can_complete_under_lock(tmp_path, prefix_length):
+    marker = tmp_path / ".runner.lock"
+    marker.write_bytes(external_checkpoints.RUNNER_LOCK_MARKER[:prefix_length])
+    execute(tmp_path)
+    assert marker.read_bytes() == external_checkpoints.RUNNER_LOCK_MARKER
+    previous = marker.stat()
+    execute(tmp_path, runner=lambda *args, **kwargs: pytest.fail("completed case replayed"))
+    assert marker.stat().st_mtime_ns == previous.st_mtime_ns
+    assert marker.stat().st_ino == previous.st_ino
+
+
+def test_hardlinked_marker_is_rejected_without_writing_target(tmp_path):
+    target = tmp_path / "target"
+    target.write_bytes(external_checkpoints.RUNNER_LOCK_MARKER[:1])
+    os.link(target, tmp_path / ".runner.lock")
+    with pytest.raises(ValueError, match="unsafe"):
+        execute(tmp_path)
+    assert target.read_bytes() == external_checkpoints.RUNNER_LOCK_MARKER[:1]
+    assert not (tmp_path / "manifest.json").exists()
+
+
+@pytest.mark.parametrize("body_error", [False, True])
+def test_lock_release_failure_preserves_an_active_runner_error(tmp_path, monkeypatch, body_error):
+    if sys.platform == "win32":
+        import msvcrt
+        module, operation, unlock = msvcrt, "locking", msvcrt.LK_UNLCK
+    else:
+        module, operation, unlock = external_checkpoints.fcntl, "flock", external_checkpoints.fcntl.LOCK_UN
+    original = getattr(module, operation)
+
+    def fail_after_unlock(fd, mode, *args):
+        result = original(fd, mode, *args)
+        if mode == unlock:
+            raise OSError("unlock failed")
+        return result
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(module, operation, fail_after_unlock)
+        expected = RuntimeError if body_error else OSError
+        with pytest.raises(expected, match="runner failed" if body_error else "unlock failed"):
+            with external_checkpoints._runner_lock(tmp_path / ".runner.lock"):
+                if body_error:
+                    raise RuntimeError("runner failed")
+    assert execute(tmp_path)["checkpoint_status"] == "COMPLETE"
+
+
+def test_abrupt_runner_death_releases_os_lock_for_explicit_resume(tmp_path):
+    ready = tmp_path / "runner-ready"
+    script = r'''
+import sys
+import time
+from pathlib import Path
+from engraphis.backends import DeterministicEmbedder
+from eval.external_checkpoints import run_resumable
+
+cases = [{"id": f"case-{i}", "memories": [{"tag": "fact", "text": "Release is Tuesday."}],
+          "questions": [{"id": f"q-{i}", "q": "When is release?", "answer": "Tuesday",
+                          "supporting": ["fact"]}]} for i in range(2)]
+
+def interrupted(*args, **kwargs):
+    Path(sys.argv[2]).write_text("ready", encoding="utf-8")
+    while True:
+        time.sleep(1)
+
+run_resumable(cases, directory=Path(sys.argv[1]), binding={"dataset_sha256": "a" * 64},
+              embedder=DeterministicEmbedder(), snapshot=lambda: {"code": "frozen"},
+              runner=interrupted)
+'''
+    process = subprocess.Popen(
+        [sys.executable, "-c", script, str(tmp_path), str(ready)],
+        cwd=Path.cwd(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+    )
+    try:
+        deadline = time.monotonic() + 15
+        while not ready.exists() and process.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if not ready.exists():
+            if process.poll() is None:
+                process.kill()
+            pytest.fail(process.communicate(timeout=10)[1] or "child runner did not become ready")
+        retained = {path.name: path.read_bytes() for path in tmp_path.iterdir()
+                    if path.name != ".runner.lock"}
+        with pytest.raises(ValueError, match="already owns"):
+            run_resumable(cases(), directory=tmp_path, binding={},
+                          embedder=DeterministicEmbedder(), restart_interrupted=True,
+                          snapshot=lambda: pytest.fail("manifest accessed before exclusive ownership"))
+        assert retained == {path.name: path.read_bytes() for path in tmp_path.iterdir()
+                            if path.name != ".runner.lock"}
+        process.kill()
+        process.wait(timeout=10)
+        marker = tmp_path / ".runner.lock"
+        assert marker.read_bytes() == external_checkpoints.RUNNER_LOCK_MARKER
+        assert "case-00000.started" in retained
+        with pytest.raises(ValueError, match="explicit restart"):
+            execute(tmp_path)
+        assert retained == {path.name: path.read_bytes() for path in tmp_path.iterdir()
+                            if path.name != ".runner.lock"}
+        report = execute(tmp_path, restart_interrupted=True)
+        assert report["checkpoint_status"] == "COMPLETE"
+        assert report["explicit_local_restarts"] == 1
+        assert [path.name for path in tmp_path.glob("*.retry-*")] == ["case-00000.retry-000"]
+        assert all((tmp_path / name).read_bytes() == payload for name, payload in retained.items())
+        completed = {path.name: path.read_bytes() for path in tmp_path.iterdir()}
+        cached = execute(tmp_path, runner=lambda *args, **kwargs: pytest.fail("completed case replayed"))
+        assert cached["questions"] == report["questions"] == 2
+        assert cached["explicit_local_restarts"] == 1
+        assert completed == {path.name: path.read_bytes() for path in tmp_path.iterdir()}
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.communicate(timeout=10)

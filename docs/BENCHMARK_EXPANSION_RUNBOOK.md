@@ -232,6 +232,16 @@ product write behavior. No QA reader or evaluator is called. A completed case re
 work; interrupted local-only cases require explicit `--restart-interrupted`, with the earlier
 attempt retained. Do not run these alongside capacity or other performance measurements.
 
+The per-directory runner lock is held by the operating system before the checkpoint manifest
+is read or created. Its protocol marker file remains in the directory after the process exits;
+the operating system releases ownership even after an abrupt exit. A second live runner is
+rejected. Keep the lock file in place, and use `--restart-interrupted --checkpoint-dir <directory>`
+to explicitly rerun an incomplete local case while retaining its earlier start and retry receipts.
+Legacy PID-only, existing empty, or unrecognized lock files remain blocked for inspection; they
+are not treated as evidence that a previous owner is dead. An exit before the first marker byte
+is written can leave an empty file; use a new directory in that case. A recognized nonempty
+marker prefix can be completed under the OS lock. The source-binding rule below applies to upgrades.
+
 Checkpoint v2 also binds the actual embedder fingerprint and runtime package versions, and
 revalidates question coverage for cached cases. A changed source, model, or environment requires
 a new checkpoint directory; preserve earlier directories as historical evidence. Unscored

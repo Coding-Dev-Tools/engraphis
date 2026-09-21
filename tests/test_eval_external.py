@@ -301,6 +301,16 @@ def test_canonical_external_mode_requires_a_pinned_semantic_revision_before_load
     assert error.value.code == 2
 
 
+def test_external_restart_requires_checkpoint_directory_before_loading(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(external, '_read_json_snapshot',
+                        lambda *_args: pytest.fail('dataset loaded for invalid restart options'))
+    with pytest.raises(SystemExit) as error:
+        main(['--dataset', str(tmp_path / 'unused.json'), '--format', 'locomo',
+              '--offline', '--restart-interrupted'])
+    assert error.value.code == 2
+    assert '--restart-interrupted requires --checkpoint-dir' in capsys.readouterr().err
+
+
 def test_canonical_external_mode_forwards_the_pinned_revision(tmp_path, monkeypatch):
     path = _locomo_fixture(tmp_path)
     captured = {}
