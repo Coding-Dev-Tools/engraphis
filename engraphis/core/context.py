@@ -546,9 +546,21 @@ class DeterministicContextPacker:
             raw_start = checked.get("start")
             raw_end = checked.get("end")
             occurrence_proven = binding is not None
+            group_complete = True
             if not occurrence_proven:
+                # A legacy excerpt can be a complete sentence containing the
+                # bound literal while still dropping a later qualifier-bearing
+                # sentence. The source-wide group is the safety boundary for
+                # exact metadata; keep the established excerpt selection, but
+                # withhold the binding until that whole group is rendered.
                 source_excerpt = excerpt.removesuffix(" […]")
                 excerpt_start = record.content.find(source_excerpt) if source_excerpt else -1
+                required_span = _exact_group_span(record.content, checked)
+                group_complete = (
+                    excerpt_start >= 0
+                    and excerpt_start <= required_span[0]
+                    and required_span[1] <= excerpt_start + len(source_excerpt)
+                )
                 occurrence_proven = (
                     excerpt_start >= 0
                     and record.content.find(source_excerpt, excerpt_start + 1) < 0
@@ -563,6 +575,7 @@ class DeterministicContextPacker:
                 and not isinstance(raw_start, bool)
                 and isinstance(raw_end, int)
                 and not isinstance(raw_end, bool)
+                and group_complete
             ):
                 exact = checked
                 span = (raw_start, raw_end)

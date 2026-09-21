@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 
 from engraphis.core import evidence
-from engraphis.core.context import DeterministicContextPacker
+from engraphis.core.context import DeterministicContextPacker, RegexTokenCounter
 from engraphis.core.interfaces import Candidate, MemoryRecord
 
 
@@ -328,6 +328,218 @@ def coverage_complete_unit_diagnostic(*, packer_type=DeterministicContextPacker)
     }
 
 
+
+def legacy_binding_safety_diagnostic(*, packer_type=DeterministicContextPacker) -> dict:
+    """Pair legacy context output with source-bound binding safety.
+
+    The legacy default remains a context-and-token baseline: a fix for a partial
+    qualifier group must suppress the exact binding while preserving the exact
+    selected context and accounting.  Tight cases deliberately retain the literal
+    as visible text, but do not publish a binding; roomy cases retain the complete
+    source and binding.  This is a deterministic development diagnostic, not a
+    semantic condition classifier or external benchmark quality measure.
+    """
+    cases = [
+        {
+            "case": "suffix_tight",
+            "content": (
+                "Credential is ALPHA only in production. Never use this credential "
+                "in staging environments under any circumstances whatsoever."
+            ),
+            "query": "credential",
+            "budget": 10,
+            "expected_context": "[1]\nCredential is ALPHA only in production.",
+            "expected_bound": False,
+        },
+        {
+            "case": "prefix_tight",
+            "content": (
+                "Only use this credential in production. Credential is ALPHA only "
+                "in production."
+            ),
+            "query": "ALPHA",
+            "budget": 10,
+            "expected_context": "[1]\nCredential is ALPHA only in production.",
+            "expected_bound": False,
+        },
+        {
+            "case": "both_tight",
+            "content": (
+                "Only use this credential in production. Credential is ALPHA only "
+                "in production. Never use this credential in staging."
+            ),
+            "query": "ALPHA",
+            "budget": 10,
+            "expected_context": "[1]\nCredential is ALPHA only in production.",
+            "expected_bound": False,
+        },
+        {
+            "case": "distant_tight",
+            "content": (
+                "Credential is ALPHA only in production. Neutral note. Never use "
+                "this credential in staging."
+            ),
+            "query": "ALPHA",
+            "budget": 10,
+            "expected_context": "[1]\nCredential is ALPHA only in production.",
+            "expected_bound": False,
+        },
+        {
+            "case": "suffix_roomy",
+            "content": (
+                "Credential is ALPHA only in production. Never use this credential "
+                "in staging environments under any circumstances whatsoever."
+            ),
+            "query": "credential",
+            "budget": 22,
+            "expected_context": (
+                "[1]\nCredential is ALPHA only in production. Never use this credential "
+                "in staging environments under any circumstances whatsoever."
+            ),
+            "expected_bound": True,
+        },
+        {
+            "case": "prefix_roomy",
+            "content": (
+                "Only use this credential in production. Credential is ALPHA only "
+                "in production."
+            ),
+            "query": "ALPHA",
+            "budget": 17,
+            "expected_context": (
+                "[1]\nOnly use this credential in production. Credential is ALPHA only "
+                "in production."
+            ),
+            "expected_bound": True,
+        },
+        {
+            "case": "both_roomy",
+            "content": (
+                "Only use this credential in production. Credential is ALPHA only "
+                "in production. Never use this credential in staging."
+            ),
+            "query": "ALPHA",
+            "budget": 24,
+            "expected_context": (
+                "[1]\nOnly use this credential in production. Credential is ALPHA only "
+                "in production. Never use this credential in staging."
+            ),
+            "expected_bound": True,
+        },
+        {
+            "case": "distant_roomy",
+            "content": (
+                "Credential is ALPHA only in production. Neutral note. Never use "
+                "this credential in staging."
+            ),
+            "query": "ALPHA",
+            "budget": 20,
+            "expected_context": (
+                "[1]\nCredential is ALPHA only in production. Neutral note. Never use "
+                "this credential in staging."
+            ),
+            "expected_bound": True,
+        },
+    ]
+    baseline_counter = RegexTokenCounter()
+    outcomes = []
+    for case in cases:
+        name = case["case"]
+        content = case["content"]
+        value = "ALPHA"
+        binding = evidence.make_exact_value_binding(content, value, "identifier")
+        record = MemoryRecord(
+            id=name, content=content, metadata={"exact_value": binding},
+        )
+        candidate = Candidate(name, 1.0, "lexical", record)
+        packed = packer_type().pack(case["query"], [candidate], case["budget"])
+        selected = next((chunk for chunk in packed.chunks if chunk.id == name), None)
+        actual_binding = selected.exact_value if selected else None
+        actual_bound = actual_binding is not None
+        evidence_unit = (
+            selected.evidence_unit
+            if selected is not None and isinstance(selected.evidence_unit, dict)
+            else {}
+        )
+        literal_present = value in packed.context
+        expected_context = case["expected_context"]
+        expected_context_tokens = baseline_counter(expected_context)
+        expected_source_tokens = baseline_counter(f"\n{content}")
+        expected_saved_tokens = max(0, expected_source_tokens - expected_context_tokens)
+        usage = packed.usage
+        context_unchanged = packed.context == expected_context
+        accounting_unchanged = (
+            usage.budget_tokens == case["budget"]
+            and usage.context_tokens == expected_context_tokens
+            and usage.source_tokens == expected_source_tokens
+            and usage.saved_tokens == expected_saved_tokens
+            and usage.packed_count == 1
+            and usage.omitted_count == 0
+        )
+        if case["expected_bound"]:
+            binding_preserved = (
+                actual_binding == binding
+                and selected is not None
+                and selected.source_span == (binding["start"], binding["end"])
+                and evidence_unit.get("value") == value
+                and evidence_unit.get("source_span") == [binding["start"], binding["end"]]
+            )
+        else:
+            binding_preserved = (
+                actual_binding is None
+                and selected is not None
+                and selected.source_span is None
+                and evidence_unit.get("value") is None
+                and evidence_unit.get("source_span") is None
+            )
+        correct = (
+            context_unchanged
+            and accounting_unchanged
+            and literal_present
+            and actual_bound is case["expected_bound"]
+            and binding_preserved
+        )
+        outcomes.append({
+            "case": name,
+            "query": case["query"],
+            "budget": case["budget"],
+            "tokens": usage.context_tokens,
+            "expected_tokens": expected_context_tokens,
+            "context": packed.context,
+            "expected_context": expected_context,
+            "context_unchanged": context_unchanged,
+            "accounting_unchanged": accounting_unchanged,
+            "expected_bound": case["expected_bound"],
+            "actual_bound": actual_bound,
+            "literal_present": literal_present,
+            "binding_preserved": binding_preserved,
+            "correct": correct,
+        })
+    suppressed = sum(
+        row["expected_bound"] is False and row["actual_bound"] is False
+        for row in outcomes
+    )
+    retained = sum(
+        row["expected_bound"] is True and row["actual_bound"] is True
+        for row in outcomes
+    )
+    return {
+        "boundary": (
+            "Fixed synthetic legacy-packing fixtures; paired commits must preserve "
+            "context and token accounting while suppressing incomplete exact bindings. "
+            "Not semantic condition inference or external benchmark quality."
+        ),
+        "cases": len(outcomes),
+        "unsafe_cases": sum(not row["expected_bound"] for row in outcomes),
+        "roomy_cases": sum(row["expected_bound"] for row in outcomes),
+        "binding_suppressed": suppressed,
+        "roomy_retained": retained,
+        "contexts_unchanged": sum(row["context_unchanged"] for row in outcomes),
+        "token_accounting_unchanged": sum(row["accounting_unchanged"] for row in outcomes),
+        "correct": sum(row["correct"] for row in outcomes),
+        "outcomes": outcomes,
+    }
+
 def run(*, evidence_module=evidence, packer_type=DeterministicContextPacker) -> dict:
     binding = evidence_module.make_exact_value_binding("label=Δ-42", "Δ-42", "identifier")
     contract = evidence_module.make_action_contract(
@@ -425,6 +637,7 @@ def run(*, evidence_module=evidence, packer_type=DeterministicContextPacker) -> 
         "coverage_binding_safety": coverage_binding_safety_diagnostic(packer_type=packer_type),
         "coverage_distant_restrictions": coverage_distant_restriction_diagnostic(packer_type=packer_type),
         "coverage_complete_units": coverage_complete_unit_diagnostic(packer_type=packer_type),
+        "legacy_binding_safety": legacy_binding_safety_diagnostic(packer_type=packer_type),
         "packing": {
             name: {"sources": len(result.chunks), "tokens": result.usage.context_tokens,
                    "budget": 35, "budget_honored": result.usage.context_tokens <= 35}
@@ -456,6 +669,7 @@ def main() -> int:
                  and report["coverage_binding_safety"]["correct"] == report["coverage_binding_safety"]["cases"]
                  and report["coverage_distant_restrictions"]["correct"] == report["coverage_distant_restrictions"]["cases"]
                  and report["coverage_complete_units"]["correct"] == report["coverage_complete_units"]["cases"]
+                 and report["legacy_binding_safety"]["correct"] == report["legacy_binding_safety"]["cases"]
                  and all(row["budget_honored"] for row in report["packing"].values())
                  and report["oversized_exact"]["withheld_boundary"]
                  and not report["oversized_exact"]["literal_preserved"]

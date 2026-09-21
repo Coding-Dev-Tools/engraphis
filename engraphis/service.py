@@ -4205,6 +4205,7 @@ class MemoryService:
                 metadata={"intent": str(intent or "recall")[:80],
                           "k": result.effective_k,
                           "retrieval_recipe": result.retrieval_recipe,
+                          "packing_mode": result.packing_mode,
                           "result_count": result.count,
                           "graph_layers": [layer.value for layer in layers] if layers else [],
                           "retrieval_profile": result.retrieval_profile,

@@ -37,7 +37,8 @@ The first implementation pass keeps the production and benchmark defaults unchan
 
 - `packing_mode="coverage"` uses a two-pass packer that admits complete, query-relevant
   evidence units across distinct sources before expanding them. It reports the selected
-  mode, packed IDs, exact token usage and source-bound exact-value metadata. The existing
+  mode, packed IDs, exact token usage and source-bound exact-value metadata. Emitted recall
+  receipts also retain the normalized mode. The existing
   `"legacy"` mode remains the default and is still used by existing callers.
 - Smart/Classic `engraphis_remember` and the Python/service APIs accept `exact_value` plus an
   `exact_value_type`. The value must be copied verbatim from the authorized source (or be
@@ -47,6 +48,9 @@ The first implementation pass keeps the production and benchmark defaults unchan
   within its existing payload budget. Compact recall candidate rows omit exact bindings;
   admitted bindings remain in `packed_sources` (or MCP `recall_context`'s `sources`) alongside
   the returned context.
+  Legacy packing also withholds exact binding metadata when its excerpt omits part of
+  the detected restriction group. Its selected text and token accounting are unchanged;
+  visible literal text alone does not establish a safe exact-copy binding.
 - `retrieval_recipe="conversation"` selects the measured `k=20` / 1,500-token starting
   point, while `"long_session"` selects `k=10` / 4,096 tokens when the caller leaves
   `k` and the token budget at their defaults. An explicit caller value always wins, and

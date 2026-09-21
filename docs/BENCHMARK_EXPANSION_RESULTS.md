@@ -167,7 +167,7 @@ no measured prompt gain or engine default change is claimed.
 | Historical screenshot/release/current source mapping | COMPLETE | [Change coverage](BENCHMARK_CHANGE_COVERAGE.md); original artifacts unchanged |
 | Full LoCoMo retrieval diagnostic | COMPLETE | 1,986 questions; 4 explicit retrieval exclusions; retained artifact and confidence analysis |
 | Full LongMemEval retrieval diagnostic | COMPLETE | 500 questions; retained private checkpoints, public artifact and source-case intervals |
-| Seven local user journeys | COMPLETE | [Checksummed journey artifact](benchmark-evidence/user-journeys-20260921.json); unique repository-relative producer names; functional fixtures, not coding or capacity qualification |
+| Seven local user journeys | COMPLETE | [Checksummed journey artifact](benchmark-evidence/user-journeys-20260921-v2.json); unique repository-relative producer names; functional fixtures, not coding or capacity qualification |
 | k=20 LoCoMo configuration experiment | COMPLETE | Same source, model and budget; +7.28 points packed recall with roughly doubled mean evidence context |
 | LongMemEval 4,096-token context experiment | COMPLETE | Same-source 500-question comparison; packed recall 57.07% → 81.09% (+24.03 points), answer-token coverage 52.62% → 65.12%; retrieval-only and exploratory |
 | NumPy / sqlite-vec capacity smokes | COMPLETE | Two serial four-process smoke cells, 100 scheduled operations each, zero observed correctness failures; hashing fixtures only |
