@@ -24,10 +24,15 @@ configuration and README. Every scenario has a separately hashed Python oracle.
 The source and oracle hashes are checked against the bytes on disk before a
 scenario is returned. The attestation is also bound and explicitly states
 `origin=implementation_team`, synthetic disposable fixtures, no independent
-human authorship and no real-customer provenance. Oracles run in a disposable
-directory with the fixture on `PYTHONPATH`; the generated implementation is
-deliberately initially incorrect, so an oracle only passes after the target
-repository is actually changed. There are no unconditional pass stubs.
+human authorship and no real-customer provenance. The oracle is parsed as a
+bounded declarative assertion; its comparison stays in the parent process.
+The local `run_oracle` helper starts a separate isolated Python interpreter that
+interprets fixture expressions without importing candidate code. Campaigns run
+that same trusted interpreter inside Docker. Both use the versioned
+[`engraphis-candidate-expressions/v1` contract](BENCHMARK_EXPANSION_RUNBOOK.md#environment-and-freeze).
+The generated implementation is deliberately initially incorrect, so an oracle
+only passes after the target repository is actually changed. There are no
+unconditional pass stubs.
 
 Materialize or verify the artifacts with:
 
@@ -35,6 +40,10 @@ Materialize or verify the artifacts with:
 python -m eval.coding_corpus --materialize --verify
 python -m pytest tests/test_coding_corpus.py -q
 ```
+
+Verification reports `oracle_execution_contract` explicitly. The retained
+`executable_oracles=True` compatibility field means the checks can be evaluated;
+it does not mean candidate or oracle Python is imported or executed.
 
 The loader keeps the acceptance manifest's exact fields and leaves the existing
 five-arm binding validator separate. Runtime-only fields live in `runtime.json`,
@@ -47,7 +56,7 @@ from eval.coding_corpus import load_corpus, run_oracle, run_reader
 corpus = load_corpus()
 scenario = corpus.get("atlas-green:corrections")
 context = corpus.context(scenario)       # replayed, scoped and time-filtered
-oracle = run_oracle(scenario)            # disposable repository execution
+oracle = run_oracle(scenario)            # bounded fixture interpretation
 
 def reader(request):
     # request.scenario, request.prompt and request.context are immutable inputs.
@@ -55,6 +64,12 @@ def reader(request):
 
 score = run_reader(scenario, reader, oracle_passed=oracle.passed)
 ```
+
+`OracleResult.passed` is `True`/`False` for a scored value or supported-operation
+exception, and `None` for unsupported candidate syntax, resource limits or an
+ambiguous/timeout result. `oracle_outcome` identifies that distinction. `returncode`
+is the actual interpreter process status; a zero exit does not imply a passing
+host comparison. Candidate prints are stderr diagnostics and never oracle results.
 
 `Scenario.task` provides the prompt, target files, expected change, answerable
 flag, answer tokens, required/forbidden/untrusted evidence IDs, scope and

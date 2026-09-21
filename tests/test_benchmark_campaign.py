@@ -271,7 +271,9 @@ def test_validation_receipt_hashes_the_checkpoint_bytes_actually_summarized(tmp_
     assert sha256_file(paths[0]) != expected[paths[0].name]
 
 
-def test_oracle_timeout_is_unscored_and_not_replayed(tmp_path):
+@pytest.mark.parametrize(("outcome", "counter"), [("timeout_unknown", "timeouts"),
+                                                ("candidate_contract_unknown", "candidate_contract_unknown")])
+def test_oracle_unknown_is_unscored_and_not_replayed(tmp_path, outcome, counter):
     manifest = small_manifest()
     calls = []
 
@@ -281,14 +283,14 @@ def test_oracle_timeout_is_unscored_and_not_replayed(tmp_path):
             cell,
             status="error",
             task_success=None,
-            oracle_outcome="timeout_unknown",
-            unscored_reason="oracle_timeout_unknown",
+            oracle_outcome=outcome,
+            unscored_reason="oracle_" + outcome,
             oracle_calls=1,
             private_oracles=[{
                 "passed": False,
                 "returncode": None,
-                "timed_out": True,
-                "oracle_outcome": "timeout_unknown",
+                "timed_out": outcome == "timeout_unknown",
+                "oracle_outcome": outcome,
                 "stdout": "",
                 "stderr": "oracle timeout",
             }],
@@ -298,7 +300,7 @@ def test_oracle_timeout_is_unscored_and_not_replayed(tmp_path):
                                attempt_runner=runner)
     assert summary["status"] == "BLOCKED"
     assert summary["statuses"] == {"error": 1}
-    assert summary["oracle_summary"]["timeouts"] == 1
+    assert summary["oracle_summary"][counter] == 1
     campaign.execute(manifest, "development_pilot", tmp_path, None, None,
                      attempt_runner=lambda *args: pytest.fail("unscored attempt replayed"))
     assert len(calls) == 1
@@ -308,7 +310,7 @@ def test_oracle_timeout_is_unscored_and_not_replayed(tmp_path):
     public = campaign.public_report(path, summary)
     assert public["metrics"]["oracle_summary"]["unscored"] == 1
     assert all(record["status"] == "error" for record in public["records"])
-    assert all(record["oracle_outcome"] == "timeout_unknown" for record in public["records"])
+    assert all(record["oracle_outcome"] == outcome for record in public["records"])
     assert "oracle timeout" not in json.dumps(public)
     assert not validate_report(public)
 
@@ -338,6 +340,35 @@ def test_zero_exit_value_mismatch_remains_a_scored_failure(tmp_path):
     assert summary["arms"]["no_memory"]["successes"] == 0
     assert summary["oracle_summary"]["value_mismatches"] == 2
     assert summary["oracle_summary"]["unscored"] == 0
+
+
+def test_unsupported_candidate_never_triggers_a_reader_correction():
+    from eval.campaign_oracle import local_oracle, parse_oracle
+    from eval.coding_corpus import load_corpus
+
+    corpus = load_corpus()
+    scenario = corpus.scenarios("development")[0]
+    manifest = {**small_manifest(), "source": {}, "docker_image": "unused"}
+    cell = {"scenario_id": scenario.id, "arm": "no_memory", "token_budget": 512, "repetition": 0}
+    calls = []
+
+    def complete(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(
+            text=json.dumps({"answer": "", "citations": [], "files": {"service.py": "import os\n"}}),
+            usage=SimpleNamespace(as_dict=lambda: _complete_usage({"input_tokens": 1, "output_tokens": 1})),
+        )
+
+    def oracle(scenario, workspace, _image):
+        return local_oracle(parse_oracle(scenario.oracle_path, scenario.oracle_sha256), workspace, 5)
+
+    result = campaign.run_attempt(manifest, "development_pilot", cell, corpus,
+                                  SimpleNamespace(complete=complete), oracle=oracle)
+    assert len(calls) == 1
+    assert result["reader_calls"] == 1
+    assert result["status"] == "error"
+    assert result["task_success"] is None
+    assert result["oracle_outcome"] == "candidate_contract_unknown"
 
 
 def test_summary_and_public_report_preserve_safe_oauth_usage_totals(tmp_path):

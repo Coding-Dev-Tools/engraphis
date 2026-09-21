@@ -164,22 +164,24 @@ def test_candidate_runner_emits_a_stable_exception_type() -> None:
     assert '"error_type": type(exc).__name__' in _RUNNER_SOURCE
 
 
-@pytest.mark.parametrize("value", [{"set-value"}, b"bytes", object(), float("nan"), (1, 2), {1: "value"}])
-def test_non_json_candidate_result_is_emitted_and_scored(tmp_path, monkeypatch, capsys, value):
-    monkeypatch.setitem(sys.modules, "service", SimpleNamespace(current_timeout=lambda: value))
-    monkeypatch.setattr(sys, "argv", ["runner", "current_timeout", "[]", "{}"])
-    monkeypatch.setattr(sys, "path", list(sys.path))
-    with pytest.raises(TypeError, match="JSON-compatible"):
-        exec(compile(_RUNNER_SOURCE, "candidate-runner", "exec"), {})
-    output = capsys.readouterr().out
-    assert _RESULT_MARKER in output
+@pytest.mark.parametrize("expression", ["b'bytes'", "float('nan')", "(1, 2)", "{1: 'value'}"])
+def test_non_json_candidate_result_is_emitted_and_scored(tmp_path, monkeypatch, expression):
+    (tmp_path / "service.py").write_text(
+        "def current_timeout():\n    return " + expression + "\n", encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [sys.executable, "-I", "-B", "-c", _RUNNER_SOURCE, "current_timeout", "[]", "{}"],
+        cwd=tmp_path, capture_output=True, text=True, check=True, timeout=10,
+    )
+    output = completed.stdout
+    assert '"error_type": "TypeError"' in output
     _oracle, scenario = _write_oracle(tmp_path, (
         "import service\n\ndef main():\n    assert service.current_timeout() == 41\n\n"
         "if __name__ == '__main__':\n    main()\n"
     ))
     workspace = tmp_path / "candidate"
     workspace.mkdir()
-    _patch_bounded_runner(monkeypatch, [], returncode=1, stdout=output)
+    _patch_bounded_runner(monkeypatch, [], returncode=completed.returncode, stdout=output)
 
     result = docker_oracle(scenario, workspace, "image@sha256:abc")
 

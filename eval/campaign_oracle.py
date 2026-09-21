@@ -18,6 +18,7 @@ import hashlib
 import json
 import re
 import subprocess
+import sys
 import threading
 import uuid
 from dataclasses import dataclass
@@ -49,41 +50,9 @@ ALLOWED_FUNCTIONS = frozenset(
 )
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _RESULT_MARKER = "__ENGRAPHIS_ORACLE_RESULT__"
-_RUNNER_SOURCE = r'''
-import importlib
-import json
-import sys
-
-function_name = sys.argv[1]
-args = json.loads(sys.argv[2])
-kwargs = json.loads(sys.argv[3])
-sys.path.insert(0, "/work")
-
-def json_value(value):
-    if value is None or isinstance(value, (str, int, bool)):
-        return True
-    if isinstance(value, float):
-        return value == value and value not in (float("inf"), float("-inf"))
-    if isinstance(value, list):
-        return all(json_value(item) for item in value)
-    if isinstance(value, dict):
-        return all(isinstance(key, str) and json_value(item) for key, item in value.items())
-    return False
-
-try:
-    module = importlib.import_module("service")
-    value = getattr(module, function_name)(*args, **kwargs)
-    if not json_value(value):
-        raise TypeError("candidate result must be JSON-compatible")
-    payload = {"ok": True, "value": value}
-    serialized = json.dumps(payload, sort_keys=True, allow_nan=False)
-except BaseException as exc:
-    payload = {"ok": False, "error_type": type(exc).__name__}
-    print("__ENGRAPHIS_ORACLE_RESULT__" + json.dumps(payload, sort_keys=True), flush=True)
-    raise
-else:
-    print("__ENGRAPHIS_ORACLE_RESULT__" + serialized, flush=True)
-'''.strip()
+# Only this trusted interpreter is executable. Candidate source is parsed as
+# data under its versioned expression contract, never imported into this process.
+_RUNNER_SOURCE = Path(__file__).with_name("campaign_candidate.py").read_text(encoding="utf-8")
 
 
 class OracleError(ValueError):
@@ -340,10 +309,11 @@ def _candidate_command(operation: OracleOperation, workspace: Path, image: str, 
 
 
 def _runner_payload(stdout: str) -> Optional[dict[str, Any]]:
-    marker_at = stdout.rfind(_RESULT_MARKER)
-    if marker_at < 0:
+    # The trusted runner owns stdout; candidate print is diagnostic stderr.
+    # Reject extra frames/text instead of choosing a candidate-controlled marker.
+    if not stdout.startswith(_RESULT_MARKER):
         return None
-    line = stdout[marker_at + len(_RESULT_MARKER):].splitlines()[0]
+    line = stdout[len(_RESULT_MARKER):]
     try:
         payload = json.loads(line)
     except (TypeError, ValueError, json.JSONDecodeError):
@@ -370,12 +340,14 @@ def _capture_bounded(pipe: Any, target: list[bytes]) -> None:
         target.append(bytes(tail))
 
 
-def _run_bounded(command: list[str]) -> tuple[Optional[int], bool, str, str]:
+def _run_bounded(command: list[str], *, cwd: Optional[Path] = None,
+                 timeout_seconds: float = ORACLE_TIMEOUT_SECONDS) -> tuple[Optional[int], bool, str, str]:
     """Run the candidate with continuously drained, bounded stdout/stderr."""
     process = subprocess.Popen(
         command,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        cwd=cwd,
     )
     stdout_tail: list[bytes] = []
     stderr_tail: list[bytes] = []
@@ -391,7 +363,7 @@ def _run_bounded(command: list[str]) -> tuple[Optional[int], bool, str, str]:
         reader.start()
     timed_out = False
     try:
-        returncode = process.wait(timeout=ORACLE_TIMEOUT_SECONDS)
+        returncode = process.wait(timeout=timeout_seconds)
     except subprocess.TimeoutExpired:
         timed_out = True
         process.kill()
@@ -432,6 +404,45 @@ def _payload_matches(payload: Optional[dict[str, Any]], spec: OracleSpec) -> boo
     )
 
 
+def _operation_result(spec: OracleSpec, returncode: Optional[int], timed_out: bool,
+                      stdout: str, stderr: str) -> dict[str, Any]:
+    if timed_out:
+        return {"passed": False, "returncode": None, "timed_out": True,
+                "oracle_outcome": "timeout_unknown", "stdout": "", "stderr": "oracle timeout"}
+    payload = _runner_payload(stdout)
+    if isinstance(payload, dict) and payload.get("contract_error") is True:
+        oracle_outcome = "candidate_contract_unknown"
+    elif (
+        isinstance(payload, dict)
+        and payload.get("ok") is False
+        and isinstance(payload.get("error_type"), str)
+        and payload["error_type"].strip()
+    ):
+        # A typed interpreter exception is a scored failure, including
+        # retained runner transports that exit nonzero after the error frame.
+        oracle_outcome = "candidate_exception"
+    elif returncode != 0:
+        # A non-zero container status does not distinguish candidate
+        # failure from Docker/runtime failure. Keep it unscored so a
+        # correction cannot be driven by infrastructure diagnostics.
+        oracle_outcome = "ambiguous_nonzero"
+    elif not isinstance(payload, dict) or payload.get("ok") is not True or "value" not in payload:
+        oracle_outcome = "ambiguous_zero_exit"
+    else:
+        # A valid zero-exit payload with the wrong value is a real task
+        # failure and remains eligible for the bounded correction loop.
+        oracle_outcome = "passed" if _payload_matches(payload, spec) else "value_mismatch"
+    passed = oracle_outcome == "passed"
+    return {
+        "passed": passed,
+        "returncode": returncode,
+        "timed_out": False,
+        "oracle_outcome": oracle_outcome,
+        "stdout": stdout,
+        "stderr": stderr,
+    }
+
+
 def docker_oracle(scenario: Any, workspace: Path, image: str) -> dict[str, Any]:
     """Evaluate a candidate operation without mounting or executing the oracle.
 
@@ -451,39 +462,7 @@ def docker_oracle(scenario: Any, workspace: Path, image: str) -> dict[str, Any]:
     command = _candidate_command(spec.operation, Path(workspace), image, container_name)
     try:
         returncode, timed_out, stdout, stderr = _run_bounded(command)
-        if timed_out:
-            return {"passed": False, "returncode": None, "timed_out": True,
-                    "oracle_outcome": "timeout_unknown", "stdout": "", "stderr": "oracle timeout"}
-        payload = _runner_payload(stdout)
-        if (
-            isinstance(payload, dict)
-            and payload.get("ok") is False
-            and isinstance(payload.get("error_type"), str)
-            and payload["error_type"].strip()
-        ):
-            # The runner emits this stable marker before re-raising, so a
-            # candidate exception is scoreable even though Python exits nonzero.
-            oracle_outcome = "candidate_exception"
-        elif returncode != 0:
-            # A non-zero container status does not distinguish candidate
-            # failure from Docker/runtime failure. Keep it unscored so a
-            # correction cannot be driven by infrastructure diagnostics.
-            oracle_outcome = "ambiguous_nonzero"
-        elif not isinstance(payload, dict) or payload.get("ok") is not True or "value" not in payload:
-            oracle_outcome = "ambiguous_zero_exit"
-        else:
-            # A valid zero-exit payload with the wrong value is a real task
-            # failure and remains eligible for the bounded correction loop.
-            oracle_outcome = "passed" if _payload_matches(payload, spec) else "value_mismatch"
-        passed = oracle_outcome == "passed"
-        return {
-            "passed": passed,
-            "returncode": returncode,
-            "timed_out": False,
-            "oracle_outcome": oracle_outcome,
-            "stdout": stdout,
-            "stderr": stderr,
-        }
+        return _operation_result(spec, returncode, timed_out, stdout, stderr)
     finally:
         # Only the container name created by this invocation is addressed.
         try:
@@ -495,6 +474,15 @@ def docker_oracle(scenario: Any, workspace: Path, image: str) -> dict[str, Any]:
             )
         except (OSError, subprocess.TimeoutExpired):
             pass
+
+
+def local_oracle(spec: OracleSpec, workspace: Path, timeout_seconds: float) -> dict[str, Any]:
+    """Run the same bounded interpreter locally; no arbitrary candidate Python."""
+    command = [sys.executable, "-I", "-B", "-c", _RUNNER_SOURCE, spec.function,
+               _json(list(spec.args), "operation arguments"),
+               _json(dict(spec.kwargs), "operation keywords")]
+    return _operation_result(spec, *_run_bounded(command, cwd=workspace,
+                                                 timeout_seconds=timeout_seconds))
 
 
 __all__ = [
