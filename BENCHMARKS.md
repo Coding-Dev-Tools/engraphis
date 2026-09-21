@@ -26,7 +26,7 @@ show a workload-specific benefit.
 legacy and coverage packing on small deterministic development fixtures. It runs
 in the full offline CI matrix and the NumPy-only Python 3.9 job. These fixtures
 test boundary correctness; they do not estimate external QA or model task success. The
-[current diagnostic](docs/benchmark-evidence/evidence-contracts-20260921-v8.json)
+[current diagnostic](docs/benchmark-evidence/evidence-contracts-20260921-v9.json)
 withholds the unchanged oversized, unpunctuated fixture at its 24-token budget:
 no fitting sentence boundary proves that the remaining condition text can be dropped.
 The prior literal-preservation result remains in the historical artifact. Tight budgets
@@ -40,14 +40,24 @@ requested evidence. At the same token budgets, correctness improves from 4/8 on 
 `0244c45f` to 8/8 with query-first coverage selection. The diagnostic retains both outcomes
 and source hashes. This is a regression comparison on development fixtures.
 
-Two separate five-case comparisons against `65f4becd` improve from 0/5 to 5/5:
-complete restriction retention under competing query terms, and safe withholding when
-the complete detected group cannot fit. Coverage recognizes qualifier terms in the
-literal's punctuation-delimited units and up to two neighboring units on each side,
-treating line breaks as wrapping. It does not establish conditions outside that
-neighborhood or infer their semantic relationship to the literal. Headers, titles,
-and source attribution remain inside the budget; incomplete detected groups cannot
-regain exact-value metadata during expansion.
+Five safe-withholding cases improve from 0/5 against `65f4becd` to 5/5. A separate
+five-case retention population exposes a tradeoff: the earlier v8 implementation
+retained the expected literals in 5/5 cases, while the complete-unit rule retains
+0/5 at those unchanged tight budgets. These unpunctuated records do not fit as
+complete units. Their original inputs, expected literals and outcomes remain in
+the diagnostic; safe omission is not counted as successful literal retention.
+
+Eight distant-restriction cases improve from 5/8 on `98e8f5c2` to 8/8, including
+roomy retention controls. Coverage scans recognized qualifier terms throughout the
+source, excluding terms inside the bound literal. It reserves complete
+punctuation-delimited units and their intervening text, treating line breaks as
+wrapping. This also prevents `Only use ALPHA in production` from becoming
+`Only use ALPHA`. Complete-unit safety improves from 8/16 on `98e8f5c2` to 16/16
+in its separate diagnostic and CI gate.
+Unrelated qualifiers can cause conservative withholding; this heuristic does not
+infer semantic relationships or recognize every possible condition. Headers,
+titles and source attribution remain inside the budget; incomplete detected groups
+cannot regain exact-value metadata during expansion.
 
 Corpus replay rejects non-boolean trust and answerability labels before execution.
 Direct campaign records also require boolean trust labels and reject contradictory
@@ -64,14 +74,14 @@ interpretation and do not count as additional benchmark-quality gains.
 ### Public numeric evidence registry
 
 Every exact public aggregate retained below comes from the checked-in, public-safe
-[`offline-fixtures-v58.json`](docs/benchmark-evidence/offline-fixtures-v58.json) artifact. Its
+[`offline-fixtures-v59.json`](docs/benchmark-evidence/offline-fixtures-v59.json) artifact. Its
 SHA-256 is
-`0916dea7babce98a22eee4b346921d50df4dc616a0c557ea5782bc1d102e73ea`, also recorded in the
+`a566e26b38cff5aca4edd986fb46ee755241588d9d82bb336855b24ca95f7401`, also recorded in the
 adjacent `.sha256` file. The artifact contains no raw questions, answers, prompts, customer data,
 or per-record content fingerprints.
 
 The fixture-suite digest is
-`d4264dbd946090959ea1802228efac295cba34cb29a7c39db1bea45040b4e809`. The artifact defines
+`7d1f895964dec9a8554224f2ff13695fa7875ece44eb4e2ef99b517d28c44bc7`. The artifact defines
 the digest algorithm and records the SHA-256 of every suite and dataset file. Each evidence ID
 also binds its exact command through `sha256(UTF-8 exact command)`:
 
@@ -93,10 +103,10 @@ Historical LoCoMo, graph, handoff, consolidation, and security figures remain pr
 source artifacts but are omitted from the current chart until each has a matching immutable,
 public-safe artifact. The chart labels coding outcomes, external datasets, and operational
 capacity as pending evaluation tracks rather than implying scores. Regenerate it with
-`python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-v58.json --output docs/images/context-efficiency.svg` after selecting the report to publish.
+`python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-v59.json --output docs/images/context-efficiency.svg` after selecting the report to publish.
 
 The companion examples are also generated from that artifact with
-`python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-v58.json --output docs/images/evidence-backed-agent-examples.svg`.
+`python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-v59.json --output docs/images/evidence-backed-agent-examples.svg`.
 The historical-to-executable mapping is in
 [`docs/BENCHMARK_CHANGE_COVERAGE.md`](docs/BENCHMARK_CHANGE_COVERAGE.md).
 

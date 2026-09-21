@@ -61,7 +61,17 @@ def _protected_sentence(text: str) -> bool:
 
 
 def _exact_group_span(source: str, binding: dict[str, object]) -> tuple[int, int]:
-    """Bind nearby restriction sentences without treating line wraps as endings."""
+    """Bind complete qualifier units around a bound literal.
+
+    The source is the only authority available at packing time. A fixed-distance
+    neighborhood can miss a qualifier separated from a bound literal by neutral
+    sentences, then expose the literal without its condition. Treat every
+    punctuation-delimited qualifier-bearing unit outside the literal as potentially
+    governing and include complete units from the outermost qualifier through the
+    complete bound unit. Line breaks remain soft wrapping; an ambiguous
+    unpunctuated record therefore falls back to its whole record, preserving the
+    fail-closed rule.
+    """
     left, right = cast(int, binding["start"]), cast(int, binding["end"])
     units = []
     start = 0
@@ -76,17 +86,22 @@ def _exact_group_span(source: str, binding: dict[str, object]) -> tuple[int, int
     units = [(start, end) for start, end in units if start < end]
     overlaps = [index for index, (start, end) in enumerate(units)
                 if start < right and left < end]
-    if not overlaps:
+    qualifier_units = []
+    # Scan the bounded source once. Qualifiers inside the literal are data, so
+    # inspect only the portions of a unit outside [left, right).
+    for index, (start, end) in enumerate(units):
+        before = source[start:min(end, left)] if start < left else ""
+        after = source[max(start, right):end] if right < end else ""
+        if _terms(before) & _QUALIFIER_TERMS or _terms(after) & _QUALIFIER_TERMS:
+            qualifier_units.append(index)
+    if not qualifier_units:
         return left, right
-    required_left, required_right = left, right
-    # Match the three-unit neighborhood on either side of the bound literal.
-    # Qualifiers inside a literal are data, not surrounding restrictions.
-    for start, end in units[max(0, overlaps[0] - 2):overlaps[-1] + 3]:
-        if start < left and _terms(source[start:min(end, left)]) & _QUALIFIER_TERMS:
-            required_left = min(required_left, start)
-        if right < end and _terms(source[max(start, right):end]) & _QUALIFIER_TERMS:
-            required_right = max(required_right, end)
-    return required_left, required_right
+    if not overlaps:
+        # A whitespace literal between units has no proven sentence boundary.
+        return 0, len(source)
+    first = min(qualifier_units[0], overlaps[0])
+    last = max(qualifier_units[-1], overlaps[-1])
+    return min(left, units[first][0]), max(right, units[last][1])
 
 
 def _normalize_title(title: Optional[str]) -> str:
@@ -672,7 +687,7 @@ class DeterministicContextPacker:
         fits: Callable[[str], bool],
         *, required_span: Optional[tuple[int, int]] = None,
     ) -> str:
-        """Reserve complete nearby restrictions, then expand the bound literal."""
+        """Reserve complete detected restriction units, then expand the literal."""
         if fits(source):
             return source
         left, right = required_span or _exact_group_span(source, binding)

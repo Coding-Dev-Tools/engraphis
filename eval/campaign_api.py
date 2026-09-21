@@ -121,10 +121,11 @@ def estimate_input_tokens(value: Any) -> int:
     return max(1, len(encoded.encode("utf-8", "surrogatepass")))
 
 
-def _ceil_micros(tokens: int, micros_per_million: int) -> int:
-    if tokens <= 0 or micros_per_million <= 0:
+def _ceil_total_micros(raw_micros: int) -> int:
+    """Round a sum of category prices up once to integer microdollars."""
+    if raw_micros <= 0:
         return 0
-    return (tokens * micros_per_million + 999_999) // 1_000_000
+    return (raw_micros + 999_999) // 1_000_000
 
 
 def estimate_cost_micros(
@@ -137,13 +138,13 @@ def estimate_cost_micros(
 ) -> int:
     """Estimate integer-microdollar cost without double-counting input tokens.
 
-    ``cache_write_tokens`` is a billing-category estimate for the same input
-    tokens, rather than an additional token stream.  A reservation therefore
-    uses the cache-write price for the covered tokens (1.25x the ordinary input
-    price), which is the ceiling used by the campaign proposal.  When no cache
-    write estimate is supplied, known usage is priced as ordinary plus cached
-    input tokens.  This keeps reservation ceilings conservative while keeping
-    completed-call accounting separate from unverified cache-write billing.
+    ``cache_write_tokens`` is a billing-category estimate for a covered subset
+    of the input, rather than an additional token stream.  The remaining input
+    is priced as ordinary or cached input, so a partial write estimate cannot
+    hide the uncovered ordinary tokens.  All category prices are summed before
+    one upward integer-microdollar rounding, matching the campaign proposal.
+    Completed-call accounting remains separate from unverified cache-write
+    billing.
     """
     approval = approval or BudgetApproval.create(max_calls=1, max_cost_micros=10**18)
     for name, value in (
@@ -154,19 +155,18 @@ def estimate_cost_micros(
             raise CampaignAPIError(f"{name} must be a non-negative integer")
     if cached_input_tokens > input_tokens:
         raise CampaignAPIError("cached_input_tokens cannot exceed input_tokens")
-    ordinary_input_tokens = input_tokens - cached_input_tokens
-    ordinary_input_cost = (
-        _ceil_micros(ordinary_input_tokens, approval.input_micros_per_million)
-        + _ceil_micros(cached_input_tokens, approval.cached_input_micros_per_million)
+    if cached_input_tokens + cache_write_tokens > input_tokens:
+        raise CampaignAPIError(
+            "cached_input_tokens plus cache_write_tokens cannot exceed input_tokens"
+        )
+    ordinary_input_tokens = input_tokens - cached_input_tokens - cache_write_tokens
+    raw_micros = (
+        ordinary_input_tokens * approval.input_micros_per_million
+        + cached_input_tokens * approval.cached_input_micros_per_million
+        + cache_write_tokens * approval.cache_write_micros_per_million
+        + output_tokens * approval.output_micros_per_million
     )
-    # Cache-write tokens are normally the full input envelope for a reservation.
-    # They replace ordinary input billing for those tokens; ``max`` also keeps a
-    # partially specified write estimate from lowering a known-input ceiling.
-    input_cost = max(
-        ordinary_input_cost,
-        _ceil_micros(cache_write_tokens, approval.cache_write_micros_per_million),
-    )
-    return input_cost + _ceil_micros(output_tokens, approval.output_micros_per_million)
+    return _ceil_total_micros(raw_micros)
 
 
 @dataclass(frozen=True)
@@ -334,6 +334,7 @@ class LunaResponsesClient:
         estimated_request_tokens = estimate_input_tokens(reservation_input)
         if input_tokens is not None and (
             isinstance(input_tokens, bool) or not isinstance(input_tokens, int)
+            or input_tokens < 0
         ):
             raise CampaignAPIError("input_tokens must be a non-negative integer")
         # An explicit tokenizer count may cover only ``input``.  The envelope
@@ -355,6 +356,10 @@ class LunaResponsesClient:
             raise CampaignAPIError("cached_input_tokens must be a non-negative integer")
         if cached_input_tokens < 0:
             raise CampaignAPIError("cached_input_tokens must be a non-negative integer")
+        # Cache hints are unverified before dispatch. The default reservation
+        # therefore retains full-input write coverage even when a hint is given.
+        # An explicit partial count bounds the assumed write coverage only; it
+        # does not establish actual provider cache-write billing.
         resolved_cache_write = (
             resolved_input_tokens if cache_write_tokens is None else cache_write_tokens
         )
@@ -365,10 +370,36 @@ class LunaResponsesClient:
         estimated_cost = estimate_cost_micros(
             input_tokens=resolved_input_tokens,
             cached_input_tokens=cached_input_tokens,
-            cache_write_tokens=resolved_cache_write,
+            cache_write_tokens=(
+                max(0, resolved_input_tokens - cached_input_tokens)
+                if cache_write_tokens is None else resolved_cache_write
+            ),
             output_tokens=max_output_tokens,
             approval=self.ledger.approval,
         )
+        # Price the uncovered input at both cache-hit extremes. Configurable
+        # rates may also price ordinary or cached input above a write, so cover
+        # both possible known-usage extremes before any transport call.
+        unverified_cache_ceiling = max(
+            estimate_cost_micros(
+                input_tokens=resolved_input_tokens,
+                cached_input_tokens=cached,
+                cache_write_tokens=resolved_cache_write,
+                output_tokens=max_output_tokens,
+                approval=self.ledger.approval,
+            )
+            for cached in (0, resolved_input_tokens - resolved_cache_write)
+        )
+        known_usage_ceiling = max(
+            estimate_cost_micros(
+                input_tokens=resolved_input_tokens,
+                cached_input_tokens=cached,
+                output_tokens=max_output_tokens,
+                approval=self.ledger.approval,
+            )
+            for cached in (0, resolved_input_tokens)
+        )
+        estimated_cost = max(estimated_cost, unverified_cache_ceiling, known_usage_ceiling)
         request_hash = input_digest({
             "model": MODEL,
             "reasoning_effort": REASONING_EFFORT,

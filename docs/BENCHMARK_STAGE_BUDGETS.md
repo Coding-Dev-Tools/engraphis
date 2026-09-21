@@ -8,6 +8,17 @@ subscription charges or invoices. The [official model page](https://developers.o
 lists $0.20/M input and $1.20/M output tokens. Reservations use $0.25/M input to cover the
 1.25× cache-write category. Provider-reported usage and the price proxy are stored separately.
 
+The estimator prices ordinary, cached and cache-write input as disjoint categories,
+then rounds the total input/output price upward once to integer microdollars. A partial
+write estimate also charges the uncovered ordinary input: at the configured rates,
+100 input tokens with 50 written tokens and no output cost 23 microdollars. Counts that
+overlap or exceed total input are rejected. An explicit partial write count bounds
+the assumed write coverage; actual cache-write billing remains unverified.
+Cache hints cannot reduce the default full-input write reservation;
+reservations also cover ordinary/cached usage at the
+configured rates before dispatch. Completed calls retain their observed usage and
+historical ledger prices without repricing or repeating the call.
+
 Every call reserves the proxy for 32,768 input and 4,096 output tokens: **$0.013108**, rounded
 up to integer microdollars. Codex's native interface does not expose a provider hard output cap;
 the output allowance is checked against reported usage after completion. An overage invalidates
