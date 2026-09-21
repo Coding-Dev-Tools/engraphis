@@ -624,6 +624,52 @@ def test_explicit_depth_and_budget_win_over_recipe() -> None:
     ) == (12, 700, "conversation")
 
 
+@pytest.mark.parametrize(
+    ("recipe", "kwargs", "expected_k"),
+    [
+        ("default", {}, 8),
+        ("conversation", {}, 20),
+        ("long_session", {}, 10),
+        ("conversation", {"k": 12}, 12),
+        ("long_session", {"k": 12}, 12),
+    ],
+)
+@pytest.mark.parametrize("populated", [False, True])
+def test_service_receipt_records_effective_recipe_depth(
+    recipe: str, kwargs: dict, expected_k: int, populated: bool,
+) -> None:
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    service.store.get_or_create_workspace("receipt-empty")
+    if populated:
+        service.remember("The deployment label is canary-7.", workspace="receipt-empty")
+
+    result = service.recall(
+        "deployment label", workspace="receipt-empty", retrieval_recipe=recipe, **kwargs,
+    )
+
+    assert result["count"] == int(populated)
+    assert result["effective_k"] == expected_k
+    assert result["retrieval_recipe"] == recipe
+    assert result["receipt"]["metadata"]["k"] == expected_k
+    assert result["receipt"]["metadata"]["retrieval_recipe"] == recipe
+    assert service.store.verify_receipts(
+        workspace_id=service._lookup_workspace("receipt-empty"),
+    )["valid"] is True
+
+
+def test_unknown_scope_reports_effective_recipe_depth_without_receipt() -> None:
+    service = MemoryService.create(":memory:", graph_extractor="none")
+
+    result = service.recall(
+        "missing", workspace="unknown", retrieval_recipe="conversation",
+    )
+
+    assert result["count"] == 0
+    assert result["effective_k"] == 20
+    assert result["retrieval_recipe"] == "conversation"
+    assert "receipt" not in result
+
+
 def test_service_persists_exact_value_and_reports_opt_in_controls() -> None:
     service = MemoryService.create(":memory:", graph_extractor="none")
     stored = service.remember(

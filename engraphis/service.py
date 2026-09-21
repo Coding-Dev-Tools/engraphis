@@ -3969,15 +3969,13 @@ class MemoryService:
         if retrieval_recipe not in RETRIEVAL_RECIPES:
             choices = ", ".join(sorted(RETRIEVAL_RECIPES))
             raise ValidationError(f"retrieval_recipe must be one of: {choices}")
-        empty_token_budget = token_budget
-        if not token_budget_supplied and retrieval_recipe != "default":
-            _, empty_token_budget, _ = apply_retrieval_recipe(
-                retrieval_recipe,
-                k=k,
-                token_budget=token_budget,
-                k_supplied=k_supplied,
-                token_budget_supplied=False,
-            )
+        empty_effective_k, empty_token_budget, _ = apply_retrieval_recipe(
+            retrieval_recipe,
+            k=k,
+            token_budget=token_budget,
+            k_supplied=k_supplied,
+            token_budget_supplied=token_budget_supplied,
+        )
         response_mode = str(response_mode or "full").strip().casefold()
         if response_mode not in RESPONSE_MODES:
             raise ValidationError("response_mode must be one of: compact, full")
@@ -4000,6 +3998,7 @@ class MemoryService:
                     query, token_budget=empty_token_budget, response_mode=response_mode,
                     retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
                     packing_mode=packing_mode, retrieval_recipe=retrieval_recipe,
+                    effective_k=empty_effective_k,
                     planning=planning, mtype_limits=mtype_limits,
                     valid_at=valid_at,
                     known_at=known_at, note=f"no workspace named '{ws}' yet",
@@ -4012,6 +4011,7 @@ class MemoryService:
                         query, token_budget=empty_token_budget, response_mode=response_mode,
                         retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
                         packing_mode=packing_mode, retrieval_recipe=retrieval_recipe,
+                        effective_k=empty_effective_k,
                         planning=planning, mtype_limits=mtype_limits,
                         valid_at=valid_at,
                         known_at=known_at,
@@ -4027,6 +4027,7 @@ class MemoryService:
                         query, token_budget=empty_token_budget, response_mode=response_mode,
                         retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
                         packing_mode=packing_mode, retrieval_recipe=retrieval_recipe,
+                        effective_k=empty_effective_k,
                         planning=planning, mtype_limits=mtype_limits,
                         valid_at=valid_at,
                         known_at=known_at, note=f"no session with id '{sid}'",
@@ -4146,6 +4147,7 @@ class MemoryService:
             "packed_candidate_coverage": result.packed_candidate_coverage,
             "packing_mode": result.packing_mode,
             "retrieval_recipe": result.retrieval_recipe,
+            "effective_k": result.effective_k,
             "context_revision": result.context_revision,
             "planning": result.planning_mode,
             "mtype_limits": dict(mtype_limits),
@@ -4179,7 +4181,9 @@ class MemoryService:
                 "recall", response=out, workspace_id=wid or "", repo_id=rid or "",
                 actor="agent",
                 target_count=result.count, status="ok",
-                metadata={"intent": str(intent or "recall")[:80], "k": k,
+                metadata={"intent": str(intent or "recall")[:80],
+                          "k": result.effective_k,
+                          "retrieval_recipe": result.retrieval_recipe,
                           "result_count": result.count,
                           "graph_layers": [layer.value for layer in layers] if layers else [],
                           "retrieval_profile": result.retrieval_profile,
@@ -12334,7 +12338,8 @@ def _empty_recall(query: str, *, token_budget: int, response_mode: str,
                   known_at: Optional[float], note: str, planning: str = "off",
                   mtype_limits: Optional[dict] = None,
                   packing_mode: str = "legacy",
-                  retrieval_recipe: str = "default") -> dict:
+                  retrieval_recipe: str = "default",
+                  effective_k: int = 8) -> dict:
     """Stable empty response for unknown scopes, including additive v2 accounting."""
     return {
         "query": query,
@@ -12359,6 +12364,7 @@ def _empty_recall(query: str, *, token_budget: int, response_mode: str,
         "candidate_depth": candidate_depth,
         "candidate_k_requested": 50,
         "candidate_k_used": 50,
+        "effective_k": effective_k,
         "candidate_depth_reason": "no retrieval for unknown scope",
         "packing_mode": packing_mode,
         "retrieval_recipe": retrieval_recipe,

@@ -104,6 +104,14 @@ def _finite_timestamp(value: Any, *, name: str) -> Optional[float]:
     return result
 
 
+def _strict_bool(value: Any, *, name: str) -> bool:
+    """Accept only an actual bool for campaign-owned boolean fields."""
+
+    if not isinstance(value, bool):
+        raise ValueError(f"{name} must be a boolean")
+    return value
+
+
 @contextmanager
 def _engraphis_clock(now: Optional[float]):
     """Inject an evaluation clock into the v2 modules for one operation.
@@ -174,6 +182,17 @@ class CampaignRecord:
     trusted: bool = True
     corrects: Optional[str] = None
 
+    def __post_init__(self) -> None:
+        _strict_bool(self.trusted, name="campaign record trusted")
+        if not isinstance(self.metadata, Mapping):
+            raise ValueError("campaign record metadata must be an object")
+        if "trusted" in self.metadata:
+            metadata_trusted = _strict_bool(
+                self.metadata["trusted"], name="campaign record metadata trusted"
+            )
+            if metadata_trusted != self.trusted:
+                raise ValueError("campaign record metadata trusted conflicts with trusted")
+
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any], *, ordinal: int = 0) -> "CampaignRecord":
         if not isinstance(value, Mapping):
@@ -197,6 +216,7 @@ class CampaignRecord:
         metadata = value.get("metadata", {})
         if not isinstance(metadata, Mapping):
             raise ValueError("campaign record metadata must be an object")
+        trusted = _strict_bool(value.get("trusted", True), name="campaign record trusted")
         scope = str(value.get("scope", "workspace") or "workspace").strip().casefold()
         if scope not in {"workspace", "repo", "session"}:
             raise ValueError("campaign record scope must be workspace, repo, or session")
@@ -204,7 +224,7 @@ class CampaignRecord:
         metadata_out = dict(metadata)
         metadata_out.setdefault("operation", operation)
         metadata_out.setdefault("scope", scope)
-        metadata_out.setdefault("trusted", bool(value.get("trusted", True)))
+        metadata_out.setdefault("trusted", trusted)
         if corrects is not None:
             metadata_out.setdefault("corrects", str(corrects))
         return cls(
@@ -224,7 +244,7 @@ class CampaignRecord:
             workspace=str(value.get("workspace", value.get("workspace_id", "")) or ""),
             repo=str(value.get("repo", value.get("repo_id", "")) or ""),
             session=str(value.get("session", value.get("session_id", "")) or ""),
-            trusted=bool(value.get("trusted", True)),
+            trusted=trusted,
             corrects=str(corrects) if corrects is not None else None,
         )
 
@@ -395,12 +415,18 @@ def _campaign_source_id(
     memory_ids: Mapping[str, str],
 ) -> Optional[str]:
     """Map a backend result to the fixture evidence id, never to a UUID gold key."""
+    backend_id = None
+    for name in ("source_id", "memory_id", "uuid", "id"):
+        value = _value(item, name)
+        if value is not None and str(value):
+            backend_id = str(value)
+            break
     metadata = _value(item, "metadata", default={})
     if isinstance(metadata, Mapping):
         source = metadata.get("campaign_record_id", metadata.get("record_id"))
-        if source:
-            return str(source)
-    backend_id = _source_id(item, ordinal)
+        if (isinstance(source, str) and source in memory_ids
+                and (backend_id is None or memory_ids[source] == backend_id)):
+            return source
     for record_id, candidate in memory_ids.items():
         if candidate == backend_id:
             return record_id
@@ -414,8 +440,8 @@ def _campaign_source_id(
             for record_id, candidate in memory_ids.items():
                 if candidate == str(episode_id):
                     return record_id
-    # Graph edges and Mem0 projections may omit the original record id.  Keep the
-    # context for qualitative inspection, but omit an ungrounded citation key.
+    # An unbound projection is omitted from scored context rather than gaining
+    # a citation through an unknown or contradictory metadata label.
     return None
 
 
@@ -426,6 +452,9 @@ def _campaign_trust(
 ) -> Optional[bool]:
     """Resolve the campaign trust label without trusting backend display text."""
 
+    if trust_by_id is not None:
+        raw = trust_by_id.get(source_id)
+        return raw if isinstance(raw, bool) else None
     metadata = _value(item, "metadata", default={})
     raw: Any = None
     if isinstance(metadata, Mapping):
@@ -433,8 +462,6 @@ def _campaign_trust(
         provenance = metadata.get("provenance")
         if raw is None and isinstance(provenance, Mapping):
             raw = provenance.get("trusted")
-    if raw is None and trust_by_id is not None:
-        raw = trust_by_id.get(source_id)
     if isinstance(raw, bool):
         return raw
     if isinstance(raw, str):
@@ -444,9 +471,7 @@ def _campaign_trust(
         if normalized in {"false", "0", "no", "untrusted"}:
             return False
         return None
-    if raw is None:
-        return None
-    return bool(raw)
+    return None
 
 
 def _merge_peer_result_pages(pages: Sequence[Sequence[Any]]) -> list[Any]:

@@ -503,6 +503,7 @@ _PUBLIC_RECEIPT_LABELS_BY_KEY = {
     },
     "layer": {"temporal", "entity", "causal", "semantic"},
     "retrieval_profile": {"balanced", "auto", "lexical", "graph", "code"},
+    "retrieval_recipe": {"default", "conversation", "long_session"},
     "candidate_depth": {"fixed", "adaptive"},
     "response_mode": {"full", "compact"},
     "adaptive_mode": {
@@ -527,7 +528,7 @@ def _receipt_metadata(metadata: dict) -> dict:
         "attachments", "wikilinks", "aliases", "tags", "symbols", "edges",
         "entities", "relations", "tables", "dry_run", "error_count",
         "entities_added", "relations_added",
-        "retrieval_profile", "candidate_depth", "candidate_k_requested",
+        "retrieval_profile", "retrieval_recipe", "candidate_depth", "candidate_k_requested",
         "candidate_k_used", "response_mode", "historical", "token_usage",
         "adaptive_mode", "action_id", "schema_version", "result_mode",
     }
@@ -607,7 +608,8 @@ _PUBLIC_RECEIPT_METADATA_KEYS = {
     "files_rejected", "files_missing", "files_errored", "conflicts",
     "warnings", "attachments", "wikilinks", "aliases", "tags",
     "entities", "relations", "tables", "dry_run", "error_count",
-    "entities_added", "relations_added", "retrieval_profile", "candidate_depth",
+    "entities_added", "relations_added", "retrieval_profile", "retrieval_recipe",
+    "candidate_depth",
     "candidate_k_requested", "candidate_k_used", "response_mode", "historical",
     "token_usage", "adaptive_mode", "action_id", "schema_version", "result_mode",
 }

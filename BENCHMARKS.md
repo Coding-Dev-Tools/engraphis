@@ -17,7 +17,7 @@ The current measured improvement priorities and their evidence boundaries are in
 [`docs/BENCHMARK_IMPROVEMENT_PRIORITIES.md`](docs/BENCHMARK_IMPROVEMENT_PRIORITIES.md).
 The implementation exposes three opt-in comparison controls: `packing_mode="coverage"`
 for complete evidence units across sources, source-bound `exact_value` fields on the
-Classic/service write path, and `retrieval_recipe="conversation"` or `"long_session"`
+Smart/Classic/service write paths, and `retrieval_recipe="conversation"` or `"long_session"`
 for the measured depth/budget starting points. `"legacy"` packing and `"default"`
 retrieval remain the defaults until development, validation and untouched-holdout gates
 show a workload-specific benefit.
@@ -50,6 +50,12 @@ and source attribution remain inside the budget; incomplete detected groups cann
 regain exact-value metadata during expansion.
 
 Corpus replay rejects non-boolean trust and answerability labels before execution.
+Direct campaign records also require boolean trust labels and reject contradictory
+nested trust metadata. Peer evidence IDs must match recorded backend identities;
+frozen campaign trust takes precedence over peer labels, and unrecognized labels
+remain unknown. Core/service recall results report the recipe's effective output
+limit as `effective_k`; recall receipts preserve it as `metadata.k` together with
+`retrieval_recipe`, independently of the number of results actually returned.
 Campaign adapters report the frozen manifest's evaluated revision; direct adapters
 retain `unknown` provenance unless explicitly bound. These checks protect result
 interpretation and do not count as additional benchmark-quality gains.
@@ -57,14 +63,14 @@ interpretation and do not count as additional benchmark-quality gains.
 ### Public numeric evidence registry
 
 Every exact public aggregate retained below comes from the checked-in, public-safe
-[`offline-fixtures-v52.json`](docs/benchmark-evidence/offline-fixtures-v52.json) artifact. Its
+[`offline-fixtures-v53.json`](docs/benchmark-evidence/offline-fixtures-v53.json) artifact. Its
 SHA-256 is
-`f7babafdfc2f73ca8bea69312af9adbc8d24ebe9586c67d949a70138336b6cc4`, also recorded in the
+`a9fb7a131c00c2e6361878388b5f1853213027021cc0c91fe279660a45c7296d`, also recorded in the
 adjacent `.sha256` file. The artifact contains no raw questions, answers, prompts, customer data,
 or per-record content fingerprints.
 
 The fixture-suite digest is
-`740a8bc8284f1a615a1bf66c0f2fe2c87c06d8262c70c246641402c1a252754e`. The artifact defines
+`1b3f6bc1929c55f1acab851f7f8753d24f23884d44420434b6e71e5c8c2435c1`. The artifact defines
 the digest algorithm and records the SHA-256 of every suite and dataset file. Each evidence ID
 also binds its exact command through `sha256(UTF-8 exact command)`:
 
@@ -86,10 +92,10 @@ Historical LoCoMo, graph, handoff, consolidation, and security figures remain pr
 source artifacts but are omitted from the current chart until each has a matching immutable,
 public-safe artifact. The chart labels coding outcomes, external datasets, and operational
 capacity as pending evaluation tracks rather than implying scores. Regenerate it with
-`python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-v52.json --output docs/images/context-efficiency.svg` after selecting the report to publish.
+`python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-v53.json --output docs/images/context-efficiency.svg` after selecting the report to publish.
 
 The companion examples are also generated from that artifact with
-`python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-v52.json --output docs/images/evidence-backed-agent-examples.svg`.
+`python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-v53.json --output docs/images/evidence-backed-agent-examples.svg`.
 The historical-to-executable mapping is in
 [`docs/BENCHMARK_CHANGE_COVERAGE.md`](docs/BENCHMARK_CHANGE_COVERAGE.md).
 

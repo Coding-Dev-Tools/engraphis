@@ -165,6 +165,9 @@ class RecallResult:
     vector_index_repairs_pending: Optional[int] = None
     vector_search_source: str = "configured"
     diagnostics_v1: Optional[dict] = None
+    # Effective output limit after applying retrieval_recipe. Appended for
+    # compatibility with callers that construct RecallResult positionally.
+    effective_k: int = 8
 
 
 class RecallEngine:
@@ -663,6 +666,7 @@ class RecallEngine:
                 ),
                 packing_mode=requested_packing_mode,
                 retrieval_recipe=selected_recipe,
+                effective_k=requested_k,
                 retrieval_trace=[] if diagnostics else None,
                 context_revision=_context_revision(usage, packed, context),
                 planning_mode=planning_mode,
@@ -993,6 +997,7 @@ class RecallEngine:
             ),
             packing_mode=requested_packing_mode,
             retrieval_recipe=selected_recipe,
+            effective_k=requested_k,
             retrieval_trace=trace,
             context_revision=_context_revision(usage, packed_chunks, context),
             planning_mode=planning_mode,
