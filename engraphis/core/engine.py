@@ -3135,6 +3135,21 @@ class MemoryEngine:
                 raise MemoryConflict("only a current or quarantined memory can be corrected")
             return None
         metadata = dict(old.metadata)
+        if "exact_value" in metadata:
+            bound = exact_value_binding(old.metadata, content=old.content)
+            metadata.pop("exact_value")
+            if bound is not None:
+                if new_content == old.content:
+                    # Descriptive-only revisions preserve explicit occurrence choices.
+                    metadata["exact_value"] = bound
+                else:
+                    try:
+                        metadata["exact_value"] = make_exact_value_binding(
+                            new_content, bound["value"], bound["type"],
+                        )
+                    except ValueError:
+                        # A removed or repeated literal has no unambiguous successor.
+                        pass
         metadata["corrects"] = memory_id
         metadata["supersedes"] = [memory_id]
         # Missing/legacy provenance must not fall through to the direct-engine trusted

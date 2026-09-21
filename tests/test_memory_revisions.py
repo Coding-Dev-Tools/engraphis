@@ -1,7 +1,10 @@
 """A complete edit has one durable result, even when its response is lost."""
+import json
+
 import pytest
 
 from engraphis.core.interfaces import MemoryType
+from engraphis.core.evidence import exact_value_binding, make_exact_value_binding
 from engraphis.core.mutations import MemoryConflict, memory_version
 from engraphis.service import MemoryService
 
@@ -17,6 +20,69 @@ def seed(svc):
     result = svc.remember("The cache expires after 30 days.", workspace="w", repo="api", source="web", trusted=False)
     record = svc.store.get_memory(result["id"])
     return record.id, memory_version(record)
+
+
+@pytest.mark.parametrize("operation", ["correct", "revise"])
+@pytest.mark.parametrize("value", ["canary-7", 'Δ-42\n{"mode": "approved"}'])
+def test_content_revision_rebinds_the_retained_literal_and_preserves_history(svc, operation, value):
+    original = "Release payload: " + value
+    first = svc.remember(original, workspace="w", exact_value=value, exact_value_type="literal")
+    old = svc.store.get_memory(first["id"])
+    prior = exact_value_binding(old.metadata, content=old.content)
+    changed = "The revised release policy requires payload: " + value
+    if operation == "correct":
+        result = svc.correct(old.id, changed, workspace="w")
+    else:
+        kwargs = {"workspace": "w", "expected_version": memory_version(old),
+                  "operation_id": "shift-literal", "content": changed}
+        result = svc.revise_memory(old.id, **kwargs)
+        assert svc.revise_memory(old.id, **kwargs) == result
+    successor = svc.store.get_memory(result["id"])
+    rebound = exact_value_binding(successor.metadata, content=successor.content)
+    assert rebound == make_exact_value_binding(changed, value)
+    assert rebound["start"] != prior["start"]
+    predecessor = svc.store.get_memory(old.id)
+    assert predecessor.valid_to is not None
+    assert predecessor.content == original
+    assert exact_value_binding(predecessor.metadata, content=predecessor.content) == prior
+
+
+@pytest.mark.parametrize("operation", ["correct", "revise"])
+@pytest.mark.parametrize("changed", ["Release payload is stable.", "canary-7 or canary-7"])
+def test_content_revision_clears_removed_or_ambiguous_literal_binding(svc, operation, changed):
+    first = svc.remember("Release payload is canary-7.", workspace="w", exact_value="canary-7")
+    old = svc.store.get_memory(first["id"])
+    if operation == "correct":
+        result = svc.correct(old.id, changed, workspace="w")
+    else:
+        result = svc.revise_memory(old.id, workspace="w", expected_version=memory_version(old),
+                                   operation_id="changed-literal", content=changed)
+    successor = svc.store.get_memory(result["id"])
+    assert "exact_value" not in successor.metadata
+    assert exact_value_binding(svc.store.get_memory(old.id).metadata, content=old.content) is not None
+
+
+def test_title_only_revision_preserves_an_explicit_repeated_literal_occurrence(svc):
+    content = "First Δ-42. Second Δ-42."
+    start = content.rindex("Δ-42")
+    first = svc.remember(content, workspace="w", exact_value="Δ-42", exact_value_span=(start, start + 4))
+    old = svc.store.get_memory(first["id"])
+    result = svc.revise_memory(old.id, workspace="w", expected_version=memory_version(old),
+                               operation_id="rename", title="Deployment")
+    successor = svc.store.get_memory(result["id"])
+    assert successor.content == content
+    assert exact_value_binding(successor.metadata, content=content) == old.metadata["exact_value"]
+
+
+def test_content_revision_does_not_legitimize_an_invalid_old_binding(svc):
+    first = svc.remember("Release payload is canary-7.", workspace="w")
+    old = svc.store.get_memory(first["id"])
+    old.metadata["exact_value"] = make_exact_value_binding("canary-7", "canary-7")
+    svc.store.conn.execute("UPDATE memories SET metadata=? WHERE id=?",
+                           (json.dumps(old.metadata), old.id))
+    svc.store.conn.commit()
+    result = svc.correct(old.id, "The new release payload is canary-7.", workspace="w")
+    assert "exact_value" not in svc.store.get_memory(result["id"]).metadata
 
 
 def test_complete_revision_and_retry_after_reopening(svc, monkeypatch):

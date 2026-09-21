@@ -26,25 +26,29 @@ show a workload-specific benefit.
 legacy and coverage packing on small deterministic development fixtures. It runs
 in the full offline CI matrix and the NumPy-only Python 3.9 job. These fixtures
 test boundary correctness; they do not estimate external QA or model task success. The
-[current diagnostic](docs/benchmark-evidence/evidence-contracts-20260920-v6.json)
+[current diagnostic](docs/benchmark-evidence/evidence-contracts-20260920-v7.json)
 also preserves a verified literal and nearby conditions from an oversized sentence
 inside a 24-token context. This is one development case, not a general quality estimate.
 Action contracts also require the host to supply the actual source text when creating
 and validating a contract. The source revision digest and literal offsets must match;
 four additional diagnostic cases reject forged or stale bindings. Authorization
 remains the responsibility of the trusted host.
+Eight fixed query-window cases also check that unrelated bound values cannot displace the
+requested evidence. At the same token budgets, correctness improves from 4/8 on commit
+`0244c45f` to 8/8 with query-first coverage selection. The diagnostic retains both outcomes
+and source hashes. This is a regression comparison on development fixtures.
 
 ### Public numeric evidence registry
 
 Every exact public aggregate retained below comes from the checked-in, public-safe
-[`offline-fixtures-v47.json`](docs/benchmark-evidence/offline-fixtures-v47.json) artifact. Its
+[`offline-fixtures-v48.json`](docs/benchmark-evidence/offline-fixtures-v48.json) artifact. Its
 SHA-256 is
-`b4a4726bca323b1bc897c310a062b606c1b1e0acc2ed83b4a5eab2ea8858a417`, also recorded in the
+`c3e92f038b225fe94dc8c018685c7c0288a2380fd131be42adcd4af4d9f8492f`, also recorded in the
 adjacent `.sha256` file. The artifact contains no raw questions, answers, prompts, customer data,
 or per-record content fingerprints.
 
 The fixture-suite digest is
-`e75d301a6605d7b79593120b962f0c10c1135e8fc4799a83b46851029e2ae555`. The artifact defines
+`1415123d0eaa6b9fe6e2eda55e76c419a50514870f786865a5b829cd3962fc37`. The artifact defines
 the digest algorithm and records the SHA-256 of every suite and dataset file. Each evidence ID
 also binds its exact command through `sha256(UTF-8 exact command)`:
 
@@ -66,10 +70,10 @@ Historical LoCoMo, graph, handoff, consolidation, and security figures remain pr
 source artifacts but are omitted from the current chart until each has a matching immutable,
 public-safe artifact. The chart labels coding outcomes, external datasets, and operational
 capacity as pending evaluation tracks rather than implying scores. Regenerate it with
-`python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-v47.json --output docs/images/context-efficiency.svg` after selecting the report to publish.
+`python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-v48.json --output docs/images/context-efficiency.svg` after selecting the report to publish.
 
 The companion examples are also generated from that artifact with
-`python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-v47.json --output docs/images/evidence-backed-agent-examples.svg`.
+`python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-v48.json --output docs/images/evidence-backed-agent-examples.svg`.
 The historical-to-executable mapping is in
 [`docs/BENCHMARK_CHANGE_COVERAGE.md`](docs/BENCHMARK_CHANGE_COVERAGE.md).
 

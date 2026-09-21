@@ -1,5 +1,6 @@
 import hashlib
 import json
+from pathlib import Path
 
 import pytest
 
@@ -162,6 +163,64 @@ def test_renderer_binds_an_unannotated_input_to_its_file_hash(tmp_path):
         report_path.read_bytes()
     ).hexdigest()
     assert loaded["performance"]["packed_quality"]["sample_count"] == 2
+
+
+def test_loader_hashes_and_parses_one_snapshot_during_atomic_replacement(tmp_path, monkeypatch):
+    payload = _renderer_input()
+    payload.pop("source")
+    report_path = tmp_path / "selected-report.json"
+    original = json.dumps(payload).encode()
+    report_path.write_bytes(original)
+    digest = hashlib.sha256(original).hexdigest()
+    report_path.with_suffix(".json.sha256").write_text(digest + "  " + report_path.name)
+    payload["performance"]["quality"]["recall_at_k"] = 0.0
+    replacement = json.dumps(payload).encode()
+    original_bytes, original_text = Path.read_bytes, Path.read_text
+    reads = []
+
+    def replace_after_read(path, method, *args, **kwargs):
+        result = method(path, *args, **kwargs)
+        if path == report_path:
+            reads.append(path)
+            report_path.write_bytes(replacement)
+        return result
+
+    monkeypatch.setattr(Path, "read_bytes", lambda path: replace_after_read(path, original_bytes))
+    monkeypatch.setattr(Path, "read_text", lambda path, *a, **kw: replace_after_read(path, original_text, *a, **kw))
+    selected = load_report(report_path)
+    assert selected["performance"]["quality"]["recall_at_k"] == 0.75
+    assert selected["source"]["artifact_sha256"] == digest
+    assert len(reads) == 1
+
+
+def test_example_cards_use_the_validated_snapshot_after_source_replacement(tmp_path, monkeypatch):
+    from scripts import render_benchmark_examples as examples
+
+    fixture = Path(__file__).resolve().parents[1] / "docs/benchmark-evidence/offline-fixtures-v47.json"
+    original = fixture.read_bytes()
+    report_path = tmp_path / "fixtures.json"
+    report_path.write_bytes(original)
+    digest = hashlib.sha256(original).hexdigest()
+    report_path.with_suffix(".json.sha256").write_text(digest + "  " + report_path.name)
+    original_loader = examples.load_report_snapshot
+    captured = {}
+
+    def replace_after_validation(path):
+        selected, raw = original_loader(path)
+        replacement = json.loads(original)
+        grounded = next(row["result"] for row in replacement["runs"] if row["id"] == "offline-grounded")
+        captured["grounded"] = grounded["grounded"]
+        captured["answerable"] = grounded["answerable"]
+        grounded["grounded"] = 0
+        report_path.write_text(json.dumps(replacement), encoding="utf-8")
+        return selected, raw
+
+    monkeypatch.setattr(examples, "load_report_snapshot", replace_after_validation)
+    output = tmp_path / "examples.svg"
+    examples.render(report_path, output)
+    rendered = output.read_text(encoding="utf-8")
+    assert f'{captured["grounded"]}/{captured["answerable"]} grounded' in rendered
+    assert digest in rendered
 
 
 def test_renderer_normalizes_flat_registry_context_fields():
