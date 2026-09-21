@@ -9,7 +9,7 @@ from __future__ import annotations
 import argparse
 import copy
 from collections import Counter, defaultdict
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
 import hashlib
@@ -206,6 +206,7 @@ def source_snapshot(root: Path = ROOT) -> dict:
         "eval/coding_corpus.py", "eval/coding_acceptance.py", "eval/benchmark.py",
         "eval/harness.py", "eval/task_pairs.py", "eval/rework_statistics.py", "eval/metrics.py",
         "eval/campaign_oracle.py", "eval/campaign_storage.py",
+        "eval/external_checkpoints.py",
     )]
     for optional in ("eval/codex_oauth.py", "eval/campaign_continuation.py"):
         optional_path = root / optional
@@ -889,20 +890,28 @@ def _attempt_error_row(cell: dict, exc: Exception, attempt_row: Optional[dict] =
     return row
 
 
+@contextmanager
+def _campaign_execution_lock(path: Path):
+    """Keep a durable campaign marker while holding an OS-owned lock."""
+    from eval.external_checkpoints import RunnerLockBusy, UnrecognizedRunnerLock, _runner_lock
+
+    with ExitStack() as stack:
+        try:
+            stack.enter_context(_runner_lock(path))
+        except (RunnerLockBusy, UnrecognizedRunnerLock) as exc:
+            raise ValueError(
+                "another campaign runner owns this results directory or its lock is "
+                "unrecognized; inspect the abandoned lock"
+            ) from exc
+        yield
+
+
 def execute(manifest: dict, stage_name: str, results: Path, corpus: Any, client: Any,
             *, maximum_attempts: Optional[int] = None,
             attempt_runner: Callable[..., dict] = run_attempt) -> dict:
     results.mkdir(parents=True, exist_ok=True)
     lock = results / ".campaign-execution.lock"
-    try:
-        handle = lock.open("x", encoding="utf-8")
-    except FileExistsError as exc:
-        raise ValueError("another campaign runner owns this results directory; inspect abandoned lock") from exc
-    try:
-        with handle:
-            handle.write(str(os.getpid()))
-            handle.flush()
-            os.fsync(handle.fileno())
+    with _campaign_execution_lock(lock):
         directory = results / stage_name
         directory.mkdir(exist_ok=True)
         executed = 0
@@ -951,8 +960,6 @@ def execute(manifest: dict, stage_name: str, results: Path, corpus: Any, client:
             raise ValueError("implementation source changed during campaign execution")
         _verify_frozen_corpus(manifest, corpus)
         return summary
-    finally:
-        lock.unlink(missing_ok=True)
 
 
 def validate_row(row: dict, cell: dict) -> None:
