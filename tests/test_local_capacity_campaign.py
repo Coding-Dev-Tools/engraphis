@@ -6,6 +6,14 @@ from pathlib import Path
 import pytest
 
 from eval import local_capacity_campaign as campaign
+from eval.external_checkpoints import RUNNER_LOCK_MARKER, _runner_lock
+
+
+def test_capacity_source_snapshot_binds_the_shared_runner_lock(monkeypatch):
+    monkeypatch.setattr(campaign, "_engine_snapshot", lambda: {"engine.py": "a" * 64})
+    expected = campaign.sha256_file(Path(campaign.__file__).with_name("external_checkpoints.py"))
+    assert campaign._snapshot() == {"engine.py": "a" * 64,
+                                    "eval/external_checkpoints.py": expected}
 
 
 @pytest.fixture
@@ -60,7 +68,9 @@ def test_unknown_started_cell_is_not_replayed(plan, tmp_path):
     (tmp_path / (first + ".started.json")).write_text("{}")
     with pytest.raises(ValueError, match="unfinished cell reservation"):
         campaign.execute(plan, tmp_path, runner=lambda *_a, **_k: pytest.fail("replayed"))
-    assert not (tmp_path / ".runner.lock").exists()
+    assert (tmp_path / ".runner.lock").read_bytes() == RUNNER_LOCK_MARKER
+    with pytest.raises(ValueError, match="unfinished cell reservation"):
+        campaign.execute(plan, tmp_path, runner=lambda *_a, **_k: pytest.fail("replayed"))
 
 
 def test_saved_cell_with_residual_reservation_is_not_accepted(plan, tmp_path, monkeypatch):
@@ -86,11 +96,18 @@ def test_completed_cell_removes_reservation_after_verified_artifact(plan, tmp_pa
     assert not (tmp_path / (first + ".started.json")).exists()
 
 
-def test_timing_lock_prevents_parallel_execution(plan, tmp_path):
+def test_legacy_timing_lock_is_not_reclaimed(plan, tmp_path):
     (tmp_path / ".runner.lock").write_text("123")
-    with pytest.raises(ValueError, match="runner lock exists"):
+    with pytest.raises(ValueError, match="manual inspection"):
         campaign.execute(plan, tmp_path, runner=lambda *_a, **_k: pytest.fail("ran"))
     assert (tmp_path / ".runner.lock").read_text() == "123"
+
+
+def test_timing_lock_prevents_parallel_execution_before_summary_writes(plan, tmp_path):
+    with _runner_lock(tmp_path / ".runner.lock"):
+        with pytest.raises(ValueError, match="already owns"):
+            campaign.execute(plan, tmp_path, runner=lambda *_a, **_k: pytest.fail("ran"))
+        assert sorted(path.name for path in tmp_path.iterdir()) == [".runner.lock"]
 
 
 def test_rehashed_incomplete_or_duplicate_matrix_still_rejected(plan):

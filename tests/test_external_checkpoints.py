@@ -252,6 +252,55 @@ def test_hardlinked_marker_is_rejected_without_writing_target(tmp_path):
     assert not (tmp_path / "manifest.json").exists()
 
 
+def test_existing_only_lock_probe_never_creates_a_directory_or_marker(tmp_path):
+    marker = tmp_path / "missing" / ".runner.lock"
+    with pytest.raises(FileNotFoundError):
+        with external_checkpoints._runner_lock(marker, create=False):
+            pytest.fail("missing marker was accepted")
+    assert not marker.parent.exists()
+
+
+@pytest.mark.parametrize("payload", [b"", b"123", b"unknown",
+                                    external_checkpoints.RUNNER_LOCK_MARKER[:1]])
+def test_existing_only_probe_does_not_repair_or_reclaim_markers(tmp_path, payload):
+    marker = tmp_path / ".runner.lock"
+    marker.write_bytes(payload)
+    before = marker.stat()
+    with pytest.raises(external_checkpoints.UnrecognizedRunnerLock):
+        with external_checkpoints._runner_lock(marker, create=False):
+            pytest.fail("unrecognized producer marker was accepted")
+    assert marker.read_bytes() == payload
+    assert marker.stat().st_mtime_ns == before.st_mtime_ns
+    assert marker.stat().st_ino == before.st_ino
+
+
+def test_existing_only_probe_rejects_a_dangling_symlink(tmp_path):
+    marker = tmp_path / ".runner.lock"
+    missing = tmp_path / "missing"
+    try:
+        marker.symlink_to(missing)
+    except OSError:
+        pytest.skip("symlink creation unavailable")
+    with pytest.raises(ValueError, match="unsafe"):
+        with external_checkpoints._runner_lock(marker, create=False):
+            pytest.fail("dangling marker was treated as a completed producer")
+    assert marker.is_symlink()
+    assert not missing.exists()
+
+
+def test_existing_only_probe_rejects_hardlinks_without_mutation(tmp_path):
+    marker = tmp_path / ".runner.lock"
+    target = tmp_path / "target"
+    target.write_bytes(external_checkpoints.RUNNER_LOCK_MARKER)
+    os.link(target, marker)
+    before = target.stat()
+    with pytest.raises(ValueError, match="unsafe"):
+        with external_checkpoints._runner_lock(marker, create=False):
+            pytest.fail("aliased marker was accepted")
+    assert target.read_bytes() == external_checkpoints.RUNNER_LOCK_MARKER
+    assert target.stat().st_mtime_ns == before.st_mtime_ns
+
+
 @pytest.mark.parametrize("body_error", [False, True])
 def test_lock_release_failure_preserves_an_active_runner_error(tmp_path, monkeypatch, body_error):
     if sys.platform == "win32":

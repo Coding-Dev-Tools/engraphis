@@ -23,8 +23,9 @@ from typing import Callable, Optional
 from eval.benchmark import canonical_json, read_artifact_snapshot, sha256_file, validate_report, write_canonical_artifact
 from eval.capacity_matrix import _cell_identity, _validate_repeat
 from eval.engine_capacity import (
-    Cell, HARDWARE, _snapshot, acceptance_policy, host_observation, operation_plan, protocol, run_cell,
+    Cell, HARDWARE, _snapshot as _engine_snapshot, acceptance_policy, host_observation, operation_plan, protocol, run_cell,
 )
+from eval.external_checkpoints import _runner_lock
 from eval.rework_statistics import blocked_mean_interval
 
 
@@ -36,6 +37,12 @@ _RUNTIME_PACKAGES = (
     "engraphis", "numpy", "torch", "sentence-transformers", "transformers",
     "sqlite-vec", "psutil",
 )
+
+
+def _snapshot() -> dict:
+    """Bind the shared lock implementation alongside the measured engine."""
+    return {**_engine_snapshot(),
+            "eval/external_checkpoints.py": sha256_file(Path(__file__).with_name("external_checkpoints.py"))}
 
 
 def _digest(value: object) -> str:
@@ -438,13 +445,7 @@ def execute(plan: dict, directory: Path, *, max_cells: Optional[int] = None,
         raise ValueError("max_cells must be a positive integer")
     directory.mkdir(parents=True, exist_ok=True)
     lock = directory / ".runner.lock"
-    try:
-        descriptor = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    except FileExistsError as exc:
-        raise ValueError("capacity runner lock exists; do not launch concurrent timings") from exc
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write(str(os.getpid()))
+    with _runner_lock(lock):
         summarize(plan, directory, write_summary=True)
         executed = 0
         for config in plan["cells"]:
@@ -487,8 +488,6 @@ def execute(plan: dict, directory: Path, *, max_cells: Optional[int] = None,
             if max_cells is not None and executed >= max_cells:
                 break
         return summarize(plan, directory, write_summary=True)
-    finally:
-        lock.unlink(missing_ok=True)
 
 
 def main(argv=None) -> int:

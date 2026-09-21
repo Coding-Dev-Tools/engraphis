@@ -6,6 +6,7 @@ never dispatched concurrently or silently repeated after an interrupted attempt.
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 import hashlib
 import importlib.metadata
 import json
@@ -20,6 +21,7 @@ import time
 from typing import Callable, Optional
 
 from eval.benchmark import canonical_json, sha256_file, validate_report
+from eval.external_checkpoints import RunnerLockBusy, UnrecognizedRunnerLock, _runner_lock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -113,10 +115,22 @@ def _job_artifacts(job: dict) -> list[str]:
     return artifacts
 
 
+def _prerequisite_paths(wait: object) -> Optional[tuple[Path, Path]]:
+    if wait is None:
+        return None
+    if not isinstance(wait, dict) or set(wait) != {"artifact", "producer_lock"}:
+        raise ValueError("queue prerequisite requires artifact and producer_lock paths")
+    artifact = _artifact_path(wait["artifact"])
+    _artifact_path(wait["producer_lock"])
+    # Preserve the named lock path so the lock helper can reject symlink aliases.
+    return artifact, ROOT / wait["producer_lock"]
+
+
 def validate(plan: dict, *, live: bool = True) -> None:
     if plan.get("schema") != SCHEMA or plan.get("binding_sha256") != digest(
             {key: value for key, value in plan.items() if key != "binding_sha256"}):
         raise ValueError("queue manifest checksum/schema mismatch")
+    _prerequisite_paths(plan.get("wait_for"))
     ids = set()
     if not isinstance(plan.get("jobs"), list):
         raise ValueError("queue requires a job list")
@@ -328,6 +342,24 @@ def _run_subprocess(command: list[str], *, cwd: Path, env: dict, log, timeout_se
         time.sleep(min(poll_seconds, max(0.001, timeout_seconds - elapsed)))
 
 
+def _prerequisite_ready(artifact: Path, producer_lock: Path) -> bool:
+    """Verify a finished producer without mistaking its persistent marker for activity."""
+    with ExitStack() as ownership:
+        try:
+            ownership.enter_context(_runner_lock(producer_lock, create=False))
+        except FileNotFoundError:
+            # Legacy producers removed their marker on exit. An existing-only
+            # probe neither creates a replacement nor follows a dangling link.
+            pass
+        except (RunnerLockBusy, UnrecognizedRunnerLock):
+            # Legacy ephemeral markers must disappear; never reclaim one by PID.
+            return False
+        if not artifact.exists():
+            raise ValueError("prerequisite producer stopped before completing its artifact")
+        _verified_artifact(artifact)
+        return True
+
+
 def execute(plan: dict, directory: Path, *, runner: Callable = subprocess.run,
             poll_seconds: float = 10, wait_timeout: float = 21600,
             stop_after_job: Optional[str] = None,
@@ -340,9 +372,23 @@ def execute(plan: dict, directory: Path, *, runner: Callable = subprocess.run,
     if stop_after_job is not None and stop_after_job not in job_ids:
         raise ValueError("stop-after-job must name a queued job")
     directory.mkdir(parents=True, exist_ok=True)
-    lock = directory / ".runner.lock"
-    with lock.open("x", encoding="utf-8") as handle:
-        handle.write(str(os.getpid()))
+    # The marker remains as a durable identity; the OS-held lock releases on crash.
+    with _runner_lock(directory / ".runner.lock"):
+        return _execute_locked(
+            plan,
+            directory,
+            runner=runner,
+            poll_seconds=poll_seconds,
+            wait_timeout=wait_timeout,
+            stop_after_job=stop_after_job,
+            default_timeout_seconds=default_timeout_seconds,
+        )
+
+
+def _execute_locked(plan: dict, directory: Path, *, runner: Callable,
+                    poll_seconds: float, wait_timeout: float,
+                    stop_after_job: Optional[str],
+                    default_timeout_seconds: float) -> dict:
     completed = []
     environment = {**os.environ, "OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"}
     runtime = runtime_identity(environment)
@@ -353,24 +399,19 @@ def execute(plan: dict, directory: Path, *, runner: Callable = subprocess.run,
 
     try:
         wait = plan.get("wait_for")
-        if wait:
+        prerequisite = _prerequisite_paths(wait)
+        if prerequisite is not None:
             deadline = time.monotonic() + wait_timeout
-            artifact = ROOT / wait["artifact"]
-            producer_lock = ROOT / wait["producer_lock"]
-            while not artifact.exists() or producer_lock.exists():
+            artifact, producer_lock = prerequisite
+            while not _prerequisite_ready(artifact, producer_lock):
                 if time.monotonic() >= deadline:
                     if artifact.exists():
                         raise ValueError("prerequisite producer has not released its timing lock")
-                    raise ValueError("prerequisite producer stopped or exceeded its wait window")
-                if not artifact.exists() and not producer_lock.exists():
                     raise ValueError("prerequisite producer stopped or exceeded its wait window")
                 _status(directory, status="PARTIAL", phase="waiting_for_existing_diagnostic",
                         completed_jobs=completed, current_artifact=wait["artifact"], runtime=runtime,
                         heartbeat_unix=time.time())
                 time.sleep(poll_seconds)
-            # Verify only after the producer has released its lock and completed
-            # the JSON plus checksum sidecar write.
-            _verified_artifact(artifact)
         for job in plan["jobs"]:
             validate(plan)
             checkpoint = directory / f"{job['id']}.json"
@@ -459,8 +500,6 @@ def execute(plan: dict, directory: Path, *, runner: Callable = subprocess.run,
                 error_class=type(exc).__name__, reason=str(exc), runtime=runtime,
                 heartbeat_unix=time.time(), **details)
         raise
-    finally:
-        lock.unlink(missing_ok=True)
 
 
 def main(argv: Optional[list[str]] = None) -> int:
