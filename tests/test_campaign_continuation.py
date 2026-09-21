@@ -141,6 +141,62 @@ def test_duplicate_checkpoint_is_skipped(tmp_path):
     assert report["metrics"]["valid_missing_attempts"] == 0
 
 
+def test_checkpoint_digest_and_validation_use_one_byte_snapshot(monkeypatch, tmp_path):
+    cell = {"scenario_id": "x:a", "arm": "hybrid", "token_budget": 512, "repetition": 0}
+    directory = tmp_path / "checkpoints"
+    directory.mkdir()
+    row = _row(cell)
+    checkpoint = {
+        "binding_sha256": "a" * 64,
+        "cell": cell,
+        "row": row,
+        "row_sha256": cc._digest(row),
+    }
+    path = directory / f"{cc.campaign.digest(cell)}.json"
+    cc._save_new(path, checkpoint)
+    original_payload = path.read_bytes()
+    original_read_bytes = Path.read_bytes
+    mutation_seen = False
+
+    def replace_after_snapshot(candidate):
+        nonlocal mutation_seen
+        payload = original_read_bytes(candidate)
+        if candidate == path and not mutation_seen:
+            mutation_seen = True
+            candidate.write_text("{}\n", encoding="utf-8")
+        return payload
+
+    monkeypatch.setattr(Path, "read_bytes", replace_after_snapshot)
+    monkeypatch.setattr(cc.campaign, "validate_row", lambda value, expected: None)
+
+    rows, digest = cc._load_checkpoints(
+        directory,
+        "a" * 64,
+        {cc._cell_key(cell): cell},
+        expected_count=1,
+    )
+
+    assert mutation_seen
+    assert rows[cc._cell_key(cell)] == row
+    assert digest == cc._digest([{
+        "name": path.name, "sha256": hashlib.sha256(original_payload).hexdigest()
+    }])
+
+
+def test_combined_report_rejects_parent_replacement_during_envelope(monkeypatch, tmp_path):
+    cell = {"scenario_id": "x:a", "arm": "hybrid", "token_budget": 512, "repetition": 0}
+    plan = _plan(tmp_path, (cell,))
+    original_report_envelope = cc.report_envelope
+
+    def replace_before_envelope(**kwargs):
+        plan.parent_manifest_path.write_text('{"changed":true}\n', encoding="utf-8")
+        return original_report_envelope(**kwargs)
+
+    monkeypatch.setattr(cc, "report_envelope", replace_before_envelope)
+    with pytest.raises(cc.ContinuationError, match="evidence sources changed"):
+        cc.combined_report(plan)
+
+
 def test_continuation_cli_fails_on_critical_violations(monkeypatch, tmp_path, capsys):
     plan = object()
     monkeypatch.setattr(cc, "prepare_plan", lambda **kwargs: plan)

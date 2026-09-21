@@ -70,15 +70,18 @@ def _sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _question_ids(path: Path, *, jsonl: bool) -> list[str]:
+def _question_ids_snapshot(path: Path, *, jsonl: bool) -> tuple[list[str], str]:
+    """Parse IDs and compute the receipt digest from one byte snapshot."""
+    payload = path.read_bytes()
+    digest = hashlib.sha256(payload).hexdigest()
     if jsonl:
         values = [
             json.loads(line)
-            for line in path.read_text(encoding="utf-8").splitlines()
+            for line in payload.decode("utf-8").splitlines()
             if line.strip()
         ]
     else:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(payload.decode("utf-8"))
         values = value if isinstance(value, list) else (
             value.get("questions") if isinstance(value, dict) else None
         )
@@ -92,7 +95,11 @@ def _question_ids(path: Path, *, jsonl: bool) -> list[str]:
         result.append(question_id)
     if len(set(result)) != len(result):
         raise ValueError(f"{path.name} contains duplicate question_id values")
-    return result
+    return result, digest
+
+
+def _question_ids(path: Path, *, jsonl: bool) -> list[str]:
+    return _question_ids_snapshot(path, jsonl=jsonl)[0]
 
 
 def write_execution_manifest(
@@ -129,8 +136,8 @@ def write_execution_manifest(
         "memory_config": Path(memory_config),
         "matrix_manifest": Path(matrix_manifest),
     }
-    source_ids = _question_ids(paths["questions"], jsonl=False)
-    output_ids = _question_ids(paths["per_question"], jsonl=True)
+    source_ids, questions_sha256 = _question_ids_snapshot(paths["questions"], jsonl=False)
+    output_ids, per_question_sha256 = _question_ids_snapshot(paths["per_question"], jsonl=True)
     if len(output_ids) != len(source_ids) or set(output_ids) != set(source_ids):
         raise ValueError("official output does not exactly cover the source question IDs")
     payload: dict[str, object] = {
@@ -140,12 +147,12 @@ def write_execution_manifest(
         "official_checkout": checkout,
         "environment": environment_provenance(),
         "seed": seed,
-        "questions_sha256": _sha256_file(paths["questions"]),
+        "questions_sha256": questions_sha256,
         "haystack_sha256": _sha256_file(paths["haystack"]),
         "trajectories_sha256": _sha256_file(paths["trajectories"]),
         "memory_config_sha256": _sha256_file(paths["memory_config"]),
         "matrix_manifest_sha256": _sha256_file(paths["matrix_manifest"]),
-        "per_question_sha256": _sha256_file(paths["per_question"]),
+        "per_question_sha256": per_question_sha256,
         "source_question_count": len(source_ids),
         "output_row_count": len(output_ids),
         "delegated_argv": list(delegated_argv),

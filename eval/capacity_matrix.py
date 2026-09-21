@@ -12,7 +12,7 @@ from pathlib import Path
 import re
 from typing import Optional
 
-from eval.benchmark import canonical_json, report_envelope, sha256_file, validate_report, write_canonical_artifact
+from eval.benchmark import canonical_json, read_artifact_snapshot, report_envelope, sha256_file, validate_report, write_canonical_artifact
 from eval.engine_capacity import (
     BACKLOG_INTERVAL_S, RSS_INTERVAL_S, RESOURCE_PHASES, Cell, HARDWARE, SCHEMA as CELL_SCHEMA,
     _backlog_assessment, acceptance_policy, operation_plan, protocol, validate_reference_hosts,
@@ -526,11 +526,8 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     reports = []
     for path in args.inputs:
-        digest = sha256_file(path)
-        checksum = path.with_name(path.name + ".sha256").read_text(encoding="utf-8").split()[0]
-        if digest != checksum:
-            raise ValueError("input artifact checksum does not match")
-        reports.append(json.loads(path.read_text(encoding="utf-8")))
+        report, _ = read_artifact_snapshot(path)
+        reports.append(report)
     references = json.loads(args.reference_hosts.read_text(encoding="utf-8")) if args.reference_hosts else None
     report = aggregate_capacity(reports, fixture=args.fixture, reference_hosts=references)
     print(json.dumps(write_canonical_artifact(report, args.output)))

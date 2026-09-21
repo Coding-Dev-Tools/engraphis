@@ -27,10 +27,12 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from dataclasses import dataclass
+import hashlib
 import json
 from pathlib import Path
 import re
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Union
 
 from engraphis.backends import DeterministicEmbedder
 from engraphis.backends.embedder_st import get_embedder
@@ -42,13 +44,23 @@ from eval.harness import run
 _PINNED_EMBED_REVISION = re.compile(r"[0-9a-f]{40}\Z")
 
 
-def _read_records(path: str) -> list[dict[str, Any]]:
+@dataclass(frozen=True)
+class _RecordsSnapshot:
+    """Normalized records and their digest from one immutable byte read."""
+
+    path: Path
+    records: list[dict[str, Any]]
+    sha256: str
+
+
+def _read_records_snapshot(path: Union[str, Path]) -> _RecordsSnapshot:
     """Read a JSON list/object or JSONL file, rejecting non-object rows."""
     source = Path(path)
     try:
-        text = source.read_text(encoding="utf-8")
+        payload = source.read_bytes()
     except OSError as exc:
         raise ValueError(f"could not read {source}: {exc}") from exc
+    text = payload.decode("utf-8")
     try:
         parsed = json.loads(text)
     except json.JSONDecodeError:
@@ -69,12 +81,26 @@ def _read_records(path: str) -> list[dict[str, Any]]:
             for item in rows
         ):
             raise ValueError(f"{source} has a malformed Hugging Face rows envelope")
-        return [item["row"] for item in rows]
-    if isinstance(parsed, dict):
-        return [parsed]
-    if not isinstance(parsed, list) or not all(isinstance(row, dict) for row in parsed):
+        records = [item["row"] for item in rows]
+    elif isinstance(parsed, dict):
+        records = [parsed]
+    elif isinstance(parsed, list) and all(isinstance(row, dict) for row in parsed):
+        records = parsed
+    else:
         raise ValueError(f"{source} must contain a JSON object, JSON list of objects, or JSONL objects")
-    return parsed
+    return _RecordsSnapshot(
+        path=source,
+        records=records,
+        sha256=hashlib.sha256(payload).hexdigest(),
+    )
+
+
+def _read_records(
+    path: str,
+    *,
+    snapshot: Optional[_RecordsSnapshot] = None,
+) -> list[dict[str, Any]]:
+    return (snapshot or _read_records_snapshot(path)).records
 
 
 def _text(value: Any, label: str) -> str:
@@ -155,7 +181,12 @@ def _limited_rows(rows: list[dict[str, Any]], limit: Optional[int]) -> list[dict
     return rows[:limit]
 
 
-def load_memoryagentbench(path: str, *, limit: Optional[int] = None) -> list[dict]:
+def load_memoryagentbench(
+    path: str,
+    *,
+    limit: Optional[int] = None,
+    snapshot: Optional[_RecordsSnapshot] = None,
+) -> list[dict]:
     """Load MemoryAgentBench's public context/question export.
 
     Its upstream conversation creator accepts a top-level ``data`` array, then
@@ -164,7 +195,7 @@ def load_memoryagentbench(path: str, *, limit: Optional[int] = None) -> list[dic
     them directly so ``subject_key``/``claim_kind`` can exercise the actual
     conflict-resolution write path.
     """
-    roots = _read_records(path)
+    roots = _read_records(path, snapshot=snapshot)
     if len(roots) == 1 and isinstance(roots[0].get("data"), list):
         rows = roots[0]["data"]
     else:
@@ -303,6 +334,7 @@ def load_locomo_plus(
     *,
     limit: Optional[int] = None,
     include_original_locomo: bool = False,
+    snapshot: Optional[_RecordsSnapshot] = None,
 ) -> list[dict]:
     """Load Locomo-Plus unified input and score cue retrieval deterministically.
 
@@ -310,7 +342,7 @@ def load_locomo_plus(
     The default selects only the new Cognitive category so a run measures implicit
     cue-to-trigger memory instead of quietly becoming another factual LoCoMo run.
     """
-    rows = _read_records(path)
+    rows = _read_records(path, snapshot=snapshot)
     if len(rows) == 1 and isinstance(rows[0].get("data"), list):
         rows = rows[0]["data"]
     if not include_original_locomo:
@@ -356,9 +388,16 @@ def _tool_call_text(call: dict[str, Any], label: str) -> str:
     return json.dumps({"name": name, "arguments": arguments}, ensure_ascii=False, sort_keys=True)
 
 
-def load_mem2actbench(qa_path: str, conversation_path: str, *, limit: Optional[int] = None) -> list[dict]:
+def load_mem2actbench(
+    qa_path: str,
+    conversation_path: str,
+    *,
+    limit: Optional[int] = None,
+    qa_snapshot: Optional[_RecordsSnapshot] = None,
+    conversation_snapshot: Optional[_RecordsSnapshot] = None,
+) -> list[dict]:
     """Load Mem2ActBench's paired QA/session JSONL exports."""
-    sessions = _read_records(conversation_path)
+    sessions = _read_records(conversation_path, snapshot=conversation_snapshot)
     by_source: dict[str, list[dict[str, str]]] = {}
     for number, session in enumerate(sessions):
         session_id = _case_id(session, "mem2act-session", number)
@@ -381,7 +420,9 @@ def load_mem2actbench(qa_path: str, conversation_path: str, *, limit: Optional[i
                 by_source.setdefault(source, []).append({"tag": source, "text": "\n".join(lines)})
 
     cases = []
-    for number, qa in enumerate(_limited_rows(_read_records(qa_path), limit)):
+    for number, qa in enumerate(
+        _limited_rows(_read_records(qa_path, snapshot=qa_snapshot), limit)
+    ):
         qa_id = _case_id(qa, "mem2act", number)
         source_ids = qa.get("source_conversation_ids")
         if not isinstance(source_ids, list) or not source_ids:
@@ -624,19 +665,32 @@ def main(argv: Optional[list[str]] = None) -> int:
         if args.embed_revision and _PINNED_EMBED_REVISION.fullmatch(args.embed_revision) is None:
             raise ValueError("--embed-revision must be an immutable lowercase 40-character commit")
         source_before = _producer_snapshot()
-        data_before = {name: sha256_file(name) for name in (args.dataset, args.conversations) if name}
+        data_snapshots = {
+            name: _read_records_snapshot(name)
+            for name in (args.dataset, args.conversations) if name
+        }
+        data_before = {name: snapshot.sha256 for name, snapshot in data_snapshots.items()}
         if args.format == "mem2actbench":
             if not args.conversations:
                 raise ValueError("--conversations is required for mem2actbench")
-            cases = load_mem2actbench(args.dataset, args.conversations, limit=args.limit)
+            cases = load_mem2actbench(
+                args.dataset,
+                args.conversations,
+                limit=args.limit,
+                qa_snapshot=data_snapshots[args.dataset],
+                conversation_snapshot=data_snapshots[args.conversations],
+            )
         elif args.format == "locomo_plus":
             cases = load_locomo_plus(
                 args.dataset,
                 limit=args.limit,
                 include_original_locomo=args.include_original_locomo,
+                snapshot=data_snapshots[args.dataset],
             )
         else:
-            cases = LOADERS[args.format](args.dataset, limit=args.limit)
+            cases = LOADERS[args.format](
+                args.dataset, limit=args.limit, snapshot=data_snapshots[args.dataset]
+            )
         embedder = (
             get_embedder(args.embed_model, revision=args.embed_revision)
             if args.embed_model else None

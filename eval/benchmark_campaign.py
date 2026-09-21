@@ -7,7 +7,9 @@ The legacy five-arm corpus contract stays intact; peers live in a companion.
 from __future__ import annotations
 
 import argparse
+import copy
 from collections import Counter, defaultdict
+from dataclasses import replace
 from datetime import datetime, timezone
 import hashlib
 import math
@@ -85,11 +87,21 @@ def _oauth_attempt_timeout(value: Any) -> float:
     return float(value)
 
 
-def _read(path: Path) -> dict:
-    value = json.loads(path.read_text(encoding="utf-8"))
+def _read_json_snapshot(path: Path) -> tuple[dict, str]:
+    """Parse and hash one exact byte read of a JSON artifact."""
+
+    payload = Path(path).read_bytes()
+    try:
+        value = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid JSON artifact: {path}") from exc
     if not isinstance(value, dict):
         raise ValueError("artifact must contain an object")
-    return value
+    return value, hashlib.sha256(payload).hexdigest()
+
+
+def _read(path: Path) -> dict:
+    return _read_json_snapshot(path)[0]
 
 
 def _save_new(path: Path, value: dict) -> None:
@@ -230,8 +242,8 @@ def make_manifest(*, corpus_root: Path = DATASET_ROOT, embed_model: str,
         "automatic_retries": 0, "docker_image": DOCKER_IMAGE,
         "graph_store_image": NEO4J_IMAGE,
         "reader_instructions_sha256": digest(READER_INSTRUCTIONS),
-        "corpus": {"manifest_sha256": sha256_file(corpus_root / "manifest.json"),
-                   "runtime_sha256": sha256_file(corpus_root / "runtime.json"),
+        "corpus": {"manifest_sha256": corpus.manifest_sha256,
+                   "runtime_sha256": corpus.runtime_sha256,
                    "scenario_count": 400, "family_count": 40,
                    "template_groups": corpus.runtime.get("template_groups", []),
                    "limitation": "project-authored synthetic fixtures; shared templates are not independent real repositories"},
@@ -290,7 +302,8 @@ def validate_manifest(manifest: dict, companion: dict, *, corpus_root: Path = DA
         raise ValueError("implementation corpus cannot claim independent acceptance")
     corpus = load_corpus(corpus_root)
     for name in ("manifest", "runtime"):
-        if sha256_file(corpus_root / f"{name}.json") != manifest["corpus"][f"{name}_sha256"]:
+        actual_sha256 = getattr(corpus, f"{name}_sha256", None)
+        if actual_sha256 != manifest["corpus"][f"{name}_sha256"]:
             raise ValueError("corpus bytes changed after campaign freeze")
     if set(manifest["stages"]) != {item[0] for item in STAGE_CONTRACTS}:
         raise ValueError("stage inventory differs from the frozen protocol")
@@ -330,9 +343,11 @@ def validate_manifest(manifest: dict, companion: dict, *, corpus_root: Path = DA
         if manifest["repository_revision"] != subprocess.check_output(
                 ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip():
             raise ValueError("repository revision changed after campaign freeze")
-        if dependency_lock is None or sha256_file(dependency_lock) != manifest["dependency_lock_sha256"]:
+        if dependency_lock is None:
             raise ValueError("exact dependency lock is required and must match")
-        environment = _read(dependency_lock)
+        environment, dependency_sha256 = _read_json_snapshot(dependency_lock)
+        if dependency_sha256 != manifest["dependency_lock_sha256"]:
+            raise ValueError("exact dependency lock is required and must match")
         for package, expected in environment["distributions"].items():
             try:
                 observed = importlib.metadata.version(package)
@@ -546,13 +561,31 @@ def _full_history(scenario: Any, budget: int) -> tuple[str, list[str]]:
     return context, [op.evidence_id for op in records]
 
 
+def _snapshot_scenario(scenario: Any) -> Any:
+    """Read and verify source/oracle bytes once for this attempt."""
+
+    def read_verified(path: Path, expected: str) -> bytes:
+        payload = Path(path).read_bytes()
+        if hashlib.sha256(payload).hexdigest() != expected:
+            raise ValueError("selected source/oracle changed after corpus load")
+        return payload
+
+    source_bytes = read_verified(scenario.source_path, scenario.source_sha256)
+    oracle_bytes = read_verified(scenario.oracle_path, scenario.oracle_sha256)
+    try:
+        return replace(scenario, source_bytes=source_bytes, oracle_bytes=oracle_bytes)
+    except TypeError:
+        # Keep lightweight test doubles and older callers source-compatible.
+        bound = copy.copy(scenario)
+        bound.source_bytes = source_bytes
+        bound.oracle_bytes = oracle_bytes
+        return bound
+
+
 def run_attempt(manifest: dict, stage_name: str, cell: dict, corpus: Any, client: Any,
                 *, adapter_factory: Callable[..., Any] = create_adapter,
                 oracle: Callable[..., dict] = docker_oracle) -> dict:
-    scenario = corpus.get(cell["scenario_id"])
-    if (sha256_file(scenario.source_path) != scenario.source_sha256
-            or sha256_file(scenario.oracle_path) != scenario.oracle_sha256):
-        raise ValueError("selected source/oracle changed after corpus load")
+    scenario = _snapshot_scenario(corpus.get(cell["scenario_id"]))
     stage = manifest["stages"][stage_name]
     # Ledger labels must start with a letter; a bare hex digest may start with a digit.
     attempt_id = "attempt-" + digest({"campaign": manifest["binding_sha256"], "stage": stage_name, **cell})[:32]
@@ -709,6 +742,9 @@ def _verify_frozen_corpus(manifest: dict, corpus: Any) -> None:
     if corpus is None:
         raise ValueError("campaign requires its frozen loaded corpus")
     for name in ("manifest", "runtime"):
+        captured_digest = getattr(corpus, f"{name}_sha256", None)
+        if captured_digest is not None and captured_digest != manifest["corpus"][f"{name}_sha256"]:
+            raise ValueError("corpus bytes differ from the evaluated campaign snapshot")
         payload = (corpus.root / f"{name}.json").read_bytes()
         if (hashlib.sha256(payload).hexdigest() != manifest["corpus"][f"{name}_sha256"]
                 or json.loads(payload) != getattr(corpus, name)):

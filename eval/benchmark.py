@@ -97,6 +97,21 @@ def sha256_file(path: Union[str, Path]) -> str:
     return digest.hexdigest()
 
 
+def read_artifact_snapshot(path: Union[str, Path]) -> tuple[dict[str, Any], str]:
+    """Read a JSON object and its verified SHA from one immutable byte buffer."""
+    source = Path(path)
+    payload = source.read_bytes()
+    digest = hashlib.sha256(payload).hexdigest()
+    sidecar = source.with_suffix(source.suffix + ".sha256")
+    fields = sidecar.read_text(encoding="utf-8").split() if sidecar.is_file() else []
+    if not fields or fields[0] != digest:
+        raise ValueError("artifact checksum missing or mismatched")
+    value = json.loads(payload.decode("utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError("artifact must be a JSON object")
+    return value, digest
+
+
 def source_digest(path: Union[str, Path]) -> dict[str, Union[str, int]]:
     """Return content-only provenance for one benchmark input.
 

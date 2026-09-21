@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from typing import Any, Callable, Mapping, Optional
 
 from eval import benchmark_campaign as campaign
@@ -43,13 +44,20 @@ class ContinuationError(ValueError):
 
 
 def _read(path: Path) -> dict[str, Any]:
+    return _read_snapshot(path)[0]
+
+
+def _read_snapshot(path: Path) -> tuple[dict[str, Any], str]:
+    """Read, hash, and parse one artifact byte snapshot."""
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        payload = path.read_bytes()
+        digest = hashlib.sha256(payload).hexdigest()
+        value = json.loads(payload.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ContinuationError(f"cannot read artifact: {path}") from exc
     if not isinstance(value, dict):
         raise ContinuationError(f"artifact must be an object: {path}")
-    return value
+    return value, digest
 
 
 def _save_new(path: Path, value: Mapping[str, Any]) -> None:
@@ -203,12 +211,29 @@ def derive_child_approval(
 
 
 def _checkpoint_digest(directory: Path) -> str:
+    snapshots = _checkpoint_snapshots(directory)
+    return _digest([{"name": path.name, "sha256": digest} for path, _, digest in snapshots])
+
+
+def _checkpoint_snapshots(directory: Path) -> list[tuple[Path, dict[str, Any], str]]:
+    """Return checkpoint objects and hashes parsed from the same byte reads."""
     if not directory.is_dir():
         raise ContinuationError(f"checkpoint directory missing: {directory}")
     if list(directory.glob("*.started")):
         raise ContinuationError("unfinished checkpoint reservation requires reconciliation")
     files = sorted(directory.glob("*.json"), key=lambda path: path.name)
-    return _digest([{"name": path.name, "sha256": sha256_file(path)} for path in files])
+    snapshots = []
+    for path in files:
+        try:
+            payload = path.read_bytes()
+            digest = hashlib.sha256(payload).hexdigest()
+            value = json.loads(payload.decode("utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ContinuationError(f"cannot read checkpoint: {path}") from exc
+        if not isinstance(value, dict):
+            raise ContinuationError(f"checkpoint must be an object: {path}")
+        snapshots.append((path, value, digest))
+    return snapshots
 
 
 def _load_checkpoints(
@@ -218,11 +243,13 @@ def _load_checkpoints(
     *,
     expected_count: Optional[int] = None,
 ) -> tuple[dict[str, dict[str, Any]], str]:
-    checkpoint_hash = _checkpoint_digest(directory)
+    snapshots = _checkpoint_snapshots(directory)
+    checkpoint_hash = _digest([
+        {"name": path.name, "sha256": digest} for path, _, digest in snapshots
+    ])
     rows: dict[str, dict[str, Any]] = {}
-    for path in sorted(directory.glob("*.json"), key=lambda item: item.name):
+    for path, checkpoint, _ in snapshots:
         try:
-            checkpoint = _read(path)
             cell, row = checkpoint["cell"], checkpoint["row"]
             if (checkpoint.get("binding_sha256") != binding_sha256
                     or not isinstance(cell, dict) or not isinstance(row, dict)):
@@ -247,8 +274,8 @@ def _load_checkpoints(
     return rows, checkpoint_hash
 
 
-def _validate_public(path: Path, binding_sha256: str, expected: Mapping[str, Any]) -> None:
-    report = _read(path)
+def _validate_public(path: Path, binding_sha256: str, expected: Mapping[str, Any]) -> str:
+    report, report_digest = _read_snapshot(path)
     sidecar_path = Path(str(path) + ".sha256")
     if not sidecar_path.is_file():
         raise ContinuationError("parent public report checksum sidecar is missing")
@@ -256,7 +283,7 @@ def _validate_public(path: Path, binding_sha256: str, expected: Mapping[str, Any
         sidecar = sidecar_path.read_text(encoding="utf-8").split()[0]
     except (OSError, IndexError) as exc:
         raise ContinuationError("parent public report checksum sidecar is unreadable") from exc
-    if sidecar != sha256_file(path):
+    if sidecar != report_digest:
         raise ContinuationError("parent public report checksum mismatch")
     metrics, protocol = report.get("metrics"), report.get("protocol", {})
     if (not isinstance(metrics, dict) or not isinstance(protocol, dict)
@@ -279,6 +306,7 @@ def _validate_public(path: Path, binding_sha256: str, expected: Mapping[str, Any
         if key not in expected or key in seen:
             raise ContinuationError("parent public row cell mismatch")
         seen.add(key)
+    return report_digest
 
 
 def _validate_parent_approval(
@@ -380,29 +408,44 @@ def prepare_plan(
         raise ContinuationError("continuation is frozen to development_pilot")
     if child_results == parent_results or child_results.is_relative_to(parent_results):
         raise ContinuationError("child results must be a sibling tree")
-    parent, companion, eligibility = (
-        _read(parent_manifest_path), _read(companion_path), _read(eligibility_path)
-    )
+    parent, parent_manifest_digest = _read_snapshot(parent_manifest_path)
+    companion, companion_digest = _read_snapshot(companion_path)
+    eligibility, eligibility_digest = _read_snapshot(eligibility_path)
     try:
         campaign.validate_manifest(parent, companion, corpus_root=corpus_root, live=False)
     except (OSError, ValueError) as exc:
         raise ContinuationError("frozen parent manifest validation failed") from exc
     excluded = validate_eligibility(parent, eligibility, audit_artifact_path=audit_artifact_path)
+    audit_artifact_digest = (
+        _require_sha(eligibility.get("audit_artifact_sha256"), "audit_artifact_sha256")
+        if audit_artifact_path is not None else ""
+    )
     all_cells = _cells(parent, stage_name)
     expected = {_cell_key(cell): cell for cell in all_cells}
     parent_rows, checkpoint_hash = _load_checkpoints(
         parent_results / stage_name, parent["binding_sha256"], expected,
         expected_count=PARENT_TERMINAL_CHECKPOINTS,
     )
-    _validate_public(public_artifact_path, parent["binding_sha256"], expected)
+    public_artifact_digest = _validate_public(public_artifact_path, parent["binding_sha256"], expected)
+    parent_approval_value, parent_approval_digest = _read_snapshot(parent_approval_path)
     ledger_path = parent_results / "spending" / f"{stage_name}.jsonl"
     parent_approval = _validate_parent_approval(
-        _read(parent_approval_path), parent, stage_name, ledger_path
+        parent_approval_value, parent, stage_name, ledger_path
     )
     try:
-        ledger = CampaignLedger(ledger_path, _binding(parent, stage_name), parent_approval)
-        ledger_summary = ledger.summary()
-    except ValueError as exc:
+        parent_ledger_bytes = ledger_path.read_bytes()
+    except OSError as exc:
+        raise ContinuationError("parent ledger validation failed") from exc
+    parent_ledger_hash = hashlib.sha256(parent_ledger_bytes).hexdigest()
+    try:
+        with tempfile.TemporaryDirectory(prefix="engraphis-parent-ledger-") as temp_dir:
+            private_ledger_path = Path(temp_dir) / ledger_path.name
+            private_ledger_path.write_bytes(parent_ledger_bytes)
+            ledger = CampaignLedger(
+                private_ledger_path, _binding(parent, stage_name), parent_approval
+            )
+            ledger_summary = ledger.summary()
+    except (OSError, ValueError) as exc:
         raise ContinuationError("parent ledger validation failed") from exc
     if (ledger_summary.get("calls") != PARENT_TERMINAL_CALLS
             or ledger_summary.get("by_status") != {"completed": PARENT_COMPLETED_CALLS, "uncertain": PARENT_UNCERTAIN_CALLS}):
@@ -412,17 +455,16 @@ def prepare_plan(
     )
     if len(eligible) != 90 or len(excluded_missing) != 1:
         raise ContinuationError("parent boundary does not derive 90 valid and one excluded missing cell")
-    parent_ledger_hash = sha256_file(ledger_path)
     parent_input_hashes = {
-        "manifest": sha256_file(parent_manifest_path),
-        "companion": sha256_file(companion_path),
-        "eligibility": sha256_file(eligibility_path),
-        "public_artifact": sha256_file(public_artifact_path),
-        "approval": sha256_file(parent_approval_path),
+        "manifest": parent_manifest_digest,
+        "companion": companion_digest,
+        "eligibility": eligibility_digest,
+        "public_artifact": public_artifact_digest,
+        "approval": parent_approval_digest,
         "ledger": parent_ledger_hash,
     }
     if audit_artifact_path is not None:
-        parent_input_hashes["audit_artifact"] = sha256_file(audit_artifact_path)
+        parent_input_hashes["audit_artifact"] = audit_artifact_digest
     child = _child_manifest(
         parent, eligibility, parent_manifest_sha256=parent_input_hashes["manifest"],
         parent_checkpoint_sha256=checkpoint_hash,
@@ -445,7 +487,7 @@ def prepare_plan(
     return ContinuationPlan(
         parent_manifest_path, companion_path, eligibility_path, public_artifact_path,
         parent_approval_path, parent_results, child_results, stage_name, parent, companion,
-        eligibility, child, parent_rows, checkpoint_hash, ledger_path, sha256_file(ledger_path),
+        eligibility, child, parent_rows, checkpoint_hash, ledger_path, parent_ledger_hash,
         ledger_summary, parent_approval, child_approval, tuple(all_cells), tuple(excluded),
         tuple(eligible),
         parent_manifest_file_sha256=parent_input_hashes["manifest"],
@@ -520,6 +562,15 @@ def _assert_parent_unchanged(plan: ContinuationPlan) -> None:
         sha256_file(plan.audit_artifact_path) != plan.audit_artifact_file_sha256
     ):
         raise ContinuationError("immutable corpus audit input changed during continuation")
+
+
+def _validate_current_parent_approval(plan: ContinuationPlan) -> None:
+    approval, digest = _read_snapshot(plan.parent_approval_path)
+    if plan.parent_approval_file_sha256 and digest != plan.parent_approval_file_sha256:
+        raise ContinuationError("immutable parent input changed during continuation")
+    _validate_parent_approval(
+        approval, plan.parent_manifest, plan.stage_name, plan.parent_ledger_path
+    )
 
 
 def _claim_allocation(plan: ContinuationPlan) -> None:
@@ -650,8 +701,7 @@ def run_continuation(
         if enforce_source:
             _assert_child_source(plan)
         if plan.parent_approval_file_sha256:
-            _validate_parent_approval(_read(plan.parent_approval_path), plan.parent_manifest,
-                                      plan.stage_name, plan.parent_ledger_path)
+            _validate_current_parent_approval(plan)
     guarded_client = _GuardedClient(client, before_dispatch)
     plan.child_results.mkdir(parents=True, exist_ok=True)
     with _execution_lock(plan.parent_results, "parent"), _execution_lock(plan.child_results, "continuation"):
@@ -677,8 +727,7 @@ def run_continuation(
                 break
             _assert_parent_unchanged(plan)
             if plan.parent_approval_file_sha256:
-                _validate_parent_approval(_read(plan.parent_approval_path), plan.parent_manifest,
-                                          plan.stage_name, plan.parent_ledger_path)
+                _validate_current_parent_approval(plan)
             output = plan.child_results / plan.stage_name / f"{campaign.digest(cell)}.json"
             marker = output.with_suffix(".started")
             if marker.exists():
@@ -740,6 +789,27 @@ def _safe_record(row: Mapping[str, Any], plan: ContinuationPlan, *, cohort: str,
 
 def combined_report(plan: ContinuationPlan) -> dict[str, Any]:
     """Combine raw rows with a safe, explicit quality mask."""
+    _assert_parent_unchanged(plan)
+    parent_manifest_sha256 = plan.parent_manifest_file_sha256 or sha256_file(
+        plan.parent_manifest_path
+    )
+    parent_public_artifact_sha256 = plan.public_artifact_file_sha256 or sha256_file(
+        plan.public_artifact_path
+    )
+    continuation_source_path = Path(__file__).resolve()
+    continuation_source = plan.child_manifest.get("continuation_source")
+    if continuation_source is None:
+        continuation_source_sha256 = sha256_file(continuation_source_path)
+    elif (
+        not isinstance(continuation_source, Mapping)
+        or continuation_source.get("eval/campaign_continuation.py") is None
+        or not _SHA256.fullmatch(str(continuation_source["eval/campaign_continuation.py"]))
+    ):
+        raise ContinuationError("continuation source snapshot is invalid")
+    else:
+        continuation_source_sha256 = str(
+            continuation_source["eval/campaign_continuation.py"]
+        )
     child_rows = _load_child(plan)
     raw: dict[str, tuple[dict[str, Any], str]] = {
         key: (row, "original") for key, row in plan.parent_rows.items()
@@ -820,14 +890,15 @@ def combined_report(plan: ContinuationPlan) -> dict[str, Any]:
     }
     config = {
         "campaign_sha256": plan.parent_manifest["binding_sha256"], "continuation_campaign_sha256": plan.child_manifest["binding_sha256"],
-        "parent_manifest_sha256": sha256_file(plan.parent_manifest_path), "parent_public_artifact_sha256": sha256_file(plan.public_artifact_path),
+        "parent_manifest_sha256": parent_manifest_sha256,
+        "parent_public_artifact_sha256": parent_public_artifact_sha256,
         "parent_checkpoint_sha256": plan.parent_checkpoint_sha256, "parent_ledger_sha256": plan.parent_ledger_sha256,
         "eligibility_sha256": plan.eligibility["binding_sha256"], "stage": plan.stage_name,
         "original_timeout_seconds": DEFAULT_TIMEOUT_SECONDS, "continuation_timeout_seconds": CONTINUATION_TIMEOUT_SECONDS,
         "raw_expected_attempts": len(plan.all_cells), "quality_expected_attempts": len(valid_expected),
         "fixture_exclusion_policy": "whole_scenario",
     }
-    return report_envelope(
+    report = report_envelope(
         suite="implementation-team coding campaign continuation", dataset_path=plan.parent_manifest_path,
         config=config, records=records, metrics=metrics, exclusions=exclusion_rows,
         git_commit=plan.child_manifest.get("repository_revision", plan.parent_manifest["repository_revision"]),
@@ -836,6 +907,22 @@ def combined_report(plan: ContinuationPlan) -> dict[str, Any]:
         models={"reader": {"model": plan.child_manifest["model"], "requested_model": plan.child_manifest["model"], "effective_model": plan.child_manifest["model"], "reasoning_effort": plan.child_manifest["reasoning_effort"], "transport": "codex_oauth", "provider": "engraphis_benchmark_oauth", "automatic_retries": 0}},
         token_accounting={"identity": "engraphis.codex_oauth.usage.v1", "revision": None, "scope": "reader_and_correction_calls_only", "method": "native app-server usage counters; failed calls without counters remain explicit", "transport": "codex_oauth", "billing_basis": "subscription_usage_api_price_proxy_not_invoice"},
     )
+    suite = report.get("suite")
+    actual_sources = [
+        (item.get("name"), item.get("sha256"))
+        for item in suite.get("sources", [])
+    ] if isinstance(suite, dict) else []
+    expected_sources = [
+        (continuation_source_path.name, continuation_source_sha256),
+        (plan.parent_manifest_path.name, parent_manifest_sha256),
+    ]
+    if (
+        not isinstance(suite, dict)
+        or suite.get("sha256") != parent_manifest_sha256
+        or actual_sources != expected_sources
+    ):
+        raise ContinuationError("continuation evidence sources changed during export")
+    return report
 
 
 def write_combined_artifact(plan: ContinuationPlan, output: Path) -> dict[str, Any]:

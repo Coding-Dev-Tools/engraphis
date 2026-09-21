@@ -23,10 +23,12 @@ _MEMORY_TYPES = frozenset({"working", "episodic", "semantic", "procedural"})
 _CLEAN_DIRTY_STATE_SHA256 = hashlib.sha256(b"").hexdigest()
 
 
-def _load_jsonl(path: Path) -> list[dict[str, Any]]:
+def _load_jsonl_snapshot(path: Path) -> tuple[list[dict[str, Any]], str]:
+    payload = path.read_bytes()
+    digest = hashlib.sha256(payload).hexdigest()
     records: list[dict[str, Any]] = []
     for line_number, line in enumerate(
-        path.read_text(encoding="utf-8").splitlines(), start=1
+        payload.decode("utf-8").splitlines(), start=1
     ):
         if not line.strip():
             continue
@@ -41,15 +43,25 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
         raise ValueError("per-question output contains no records")
     if len({record["question_id"] for record in records}) != len(records):
         raise ValueError("per-question output has duplicate question_id values")
-    return records
+    return records, digest
+
+
+def _load_jsonl(path: Path) -> list[dict[str, Any]]:
+    return _load_jsonl_snapshot(path)[0]
 
 
 def _sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _source_question_ids(path: Path) -> list[str]:
-    value = json.loads(path.read_text(encoding="utf-8"))
+def _json_snapshot(path: Path) -> tuple[Any, str]:
+    payload = path.read_bytes()
+    digest = hashlib.sha256(payload).hexdigest()
+    return json.loads(payload.decode("utf-8")), digest
+
+
+def _source_question_ids_snapshot(path: Path) -> tuple[list[str], str]:
+    value, digest = _json_snapshot(path)
     rows = value if isinstance(value, list) else (
         value.get("questions") if isinstance(value, dict) else None
     )
@@ -63,7 +75,11 @@ def _source_question_ids(path: Path) -> list[str]:
         question_ids.append(question_id)
     if len(set(question_ids)) != len(question_ids):
         raise ValueError("questions source has duplicate question_id values")
-    return question_ids
+    return question_ids, digest
+
+
+def _source_question_ids(path: Path) -> list[str]:
+    return _source_question_ids_snapshot(path)[0]
 
 
 def _finite_number(value: Any, label: str) -> float:
@@ -113,10 +129,26 @@ def _verify_execution_manifest(
     seed: int,
     source_questions: int,
     output_rows: int,
+    source_hashes: Optional[dict[Path, str]] = None,
+    manifest_snapshot: Optional[tuple[dict[str, Any], str]] = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    manifest = json.loads(path.read_text(encoding="utf-8"))
+    if manifest_snapshot is None:
+        manifest_value, manifest_digest = _json_snapshot(path)
+    else:
+        manifest_value, manifest_digest = manifest_snapshot
+    manifest = manifest_value
     if not isinstance(manifest, dict):
         raise ValueError("execution manifest must be an object")
+    source_hashes = {
+        source.resolve(): digest for source, digest in (source_hashes or {}).items()
+    }
+
+    def source_digest(source: Path) -> str:
+        key = source.resolve()
+        if key in source_hashes:
+            return source_hashes[key]
+        return _sha256_file(source)
+
     environment = manifest.get("environment")
     if (
         not isinstance(environment, dict)
@@ -145,12 +177,12 @@ def _verify_execution_manifest(
         "status": "complete",
         "upstream_revision": upstream_revision,
         "seed": seed,
-        "questions_sha256": _sha256_file(questions),
-        "haystack_sha256": _sha256_file(haystack),
-        "trajectories_sha256": _sha256_file(trajectories),
-        "memory_config_sha256": _sha256_file(memory_config),
-        "matrix_manifest_sha256": _sha256_file(matrix_manifest),
-        "per_question_sha256": _sha256_file(per_question),
+        "questions_sha256": source_digest(questions),
+        "haystack_sha256": source_digest(haystack),
+        "trajectories_sha256": source_digest(trajectories),
+        "memory_config_sha256": source_digest(memory_config),
+        "matrix_manifest_sha256": source_digest(matrix_manifest),
+        "per_question_sha256": source_digest(per_question),
         "source_question_count": source_questions,
         "output_row_count": output_rows,
     }
@@ -168,7 +200,7 @@ def _verify_execution_manifest(
     binding = {
         "verified": True,
         "schema": _EXECUTION_MANIFEST_SCHEMA,
-        "manifest_sha256": _sha256_file(path),
+        "manifest_sha256": manifest_digest,
         "status": "complete",
         "source_questions": source_questions,
         "output_rows": output_rows,
@@ -410,7 +442,8 @@ def build_evidence_report(
     )
     config_sha256 = hashlib.sha256(memory_config_bytes).hexdigest()
 
-    manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+    manifest_value, matrix_manifest_digest = _json_snapshot(manifest_file)
+    manifest = manifest_value
     if not isinstance(manifest, dict) or not isinstance(manifest.get("runs"), list):
         raise ValueError("matrix manifest must contain a runs list")
     if (
@@ -432,14 +465,14 @@ def build_evidence_report(
     matrix_binding = {
         "verified": True,
         "manifest_name": str(manifest.get("name") or ""),
-        "manifest_sha256": _sha256_file(manifest_file),
+        "manifest_sha256": matrix_manifest_digest,
         "ablation": ablation,
         "token_budget": token_budget,
         "config_sha256": config_sha256,
     }
 
-    private_rows = _load_jsonl(per_question)
-    expected_question_ids = _source_question_ids(questions_file)
+    private_rows, per_question_digest = _load_jsonl_snapshot(per_question)
+    expected_question_ids, questions_digest = _source_question_ids_snapshot(questions_file)
     output_ids = [row["question_id"] for row in private_rows]
     if (
         set(output_ids) != set(expected_question_ids)
@@ -451,6 +484,15 @@ def build_evidence_report(
             "per-question output must cover the source question IDs exactly "
             f"(missing={missing}, unknown={unknown})"
         )
+    execution_manifest_snapshot = _json_snapshot(execution_manifest_file)
+    source_hashes = {
+        questions_file: questions_digest,
+        haystack_file: _sha256_file(haystack_file),
+        trajectories_file: _sha256_file(trajectories_file),
+        memory_config_file: config_sha256,
+        manifest_file: matrix_manifest_digest,
+        per_question: per_question_digest,
+    }
     execution_binding, execution_environment = _verify_execution_manifest(
         execution_manifest_file,
         per_question=per_question,
@@ -463,6 +505,8 @@ def build_evidence_report(
         seed=seed,
         source_questions=len(expected_question_ids),
         output_rows=len(private_rows),
+        source_hashes=source_hashes,
+        manifest_snapshot=execution_manifest_snapshot,
     )
     tokenizer_identity = f"{reader_model}@{reader_revision}"
     records = [
@@ -548,6 +592,20 @@ def build_evidence_report(
     )
     report["environment"] = execution_environment
     report["protocol"]["source_questions"] = len(expected_question_ids)
+    expected_sources = [
+        (per_question.name, per_question_digest),
+        (haystack_file.name, source_hashes[haystack_file]),
+        (trajectories_file.name, source_hashes[trajectories_file]),
+        (memory_config_file.name, config_sha256),
+        (manifest_file.name, matrix_manifest_digest),
+        (execution_manifest_file.name, execution_manifest_snapshot[1]),
+    ]
+    actual_sources = [
+        (item.get("name"), item.get("sha256"))
+        for item in report.get("suite", {}).get("sources", [])
+    ]
+    if report.get("suite", {}).get("sha256") != questions_digest or actual_sources != expected_sources:
+        raise ValueError("LongMemEval evidence sources changed during export")
     return report
 
 

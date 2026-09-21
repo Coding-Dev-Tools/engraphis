@@ -41,14 +41,14 @@ and source hashes. This is a regression comparison on development fixtures.
 ### Public numeric evidence registry
 
 Every exact public aggregate retained below comes from the checked-in, public-safe
-[`offline-fixtures-v48.json`](docs/benchmark-evidence/offline-fixtures-v48.json) artifact. Its
+[`offline-fixtures-v49.json`](docs/benchmark-evidence/offline-fixtures-v49.json) artifact. Its
 SHA-256 is
-`c3e92f038b225fe94dc8c018685c7c0288a2380fd131be42adcd4af4d9f8492f`, also recorded in the
+`f7450524d9fea117d64abecbe8136ff95e1443189336b37b6612f67e7cfc85fe`, also recorded in the
 adjacent `.sha256` file. The artifact contains no raw questions, answers, prompts, customer data,
 or per-record content fingerprints.
 
 The fixture-suite digest is
-`1415123d0eaa6b9fe6e2eda55e76c419a50514870f786865a5b829cd3962fc37`. The artifact defines
+`1ff490643a23c1faf9c934e3b5f756d915513d4351a27978ba3e999b66440d1c`. The artifact defines
 the digest algorithm and records the SHA-256 of every suite and dataset file. Each evidence ID
 also binds its exact command through `sha256(UTF-8 exact command)`:
 
@@ -70,10 +70,10 @@ Historical LoCoMo, graph, handoff, consolidation, and security figures remain pr
 source artifacts but are omitted from the current chart until each has a matching immutable,
 public-safe artifact. The chart labels coding outcomes, external datasets, and operational
 capacity as pending evaluation tracks rather than implying scores. Regenerate it with
-`python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-v48.json --output docs/images/context-efficiency.svg` after selecting the report to publish.
+`python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-v49.json --output docs/images/context-efficiency.svg` after selecting the report to publish.
 
 The companion examples are also generated from that artifact with
-`python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-v48.json --output docs/images/evidence-backed-agent-examples.svg`.
+`python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-v49.json --output docs/images/evidence-backed-agent-examples.svg`.
 The historical-to-executable mapping is in
 [`docs/BENCHMARK_CHANGE_COVERAGE.md`](docs/BENCHMARK_CHANGE_COVERAGE.md).
 
