@@ -84,9 +84,9 @@ neither is an end-to-end question-answer score. Coding outcomes, external datase
 operational capacity remain separate pending evaluation tracks until their artifacts are selected.
 
 These values are evidence IDs `offline-chunking` and `offline-performance` in
-[`offline-fixtures-v47.json`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/benchmark-evidence/offline-fixtures-v47.json),
+[`offline-fixtures-v48.json`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/benchmark-evidence/offline-fixtures-v48.json),
 SHA-256
-`b4a4726bca323b1bc897c310a062b606c1b1e0acc2ed83b4a5eab2ea8858a417`.
+`c3e92f038b225fe94dc8c018685c7c0288a2380fd131be42adcd4af4d9f8492f`.
 [`BENCHMARKS.md`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/BENCHMARKS.md#public-numeric-evidence-registry)
 records the matching suite digest, exact commands, and per-command config digests. The offline
 fixture registry intentionally excludes external, model-dependent, consolidation, productivity,
@@ -566,6 +566,10 @@ units from more source memories, while `retrieval_recipe="conversation"` and
 historical `legacy`/`default` settings remain unchanged. For a value that must survive a file
 edit or tool call exactly, Classic `engraphis_remember` and the Python/service write APIs accept
 source-bound `exact_value` plus its `exact_value_type`; ambiguous repeated literals are rejected.
+Coverage packing follows the query and advertises the binding only when its source occurrence
+is included. Corrections and content revisions rebind a retained unique literal at its new
+offsets; removed, repeated, or invalid literals lose the successor's binding while history
+preserves the original record.
 
 For bi-temporal reads, `valid_at` selects what was true at a Unix timestamp and `known_at` selects
 what Engraphis had learned then. `as_of` remains a compatibility alias for `valid_at`; supplying

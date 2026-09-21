@@ -13,6 +13,51 @@ from engraphis.core.context import DeterministicContextPacker
 from engraphis.core.interfaces import Candidate, MemoryRecord
 
 
+def coverage_query_diagnostic(*, packer_type=DeterministicContextPacker) -> dict:
+    """Fixed query windows expose irrelevant-literal selection and span mistakes."""
+    phone = "Support phone is 555-1234."
+    contact = "Deployment token is ALPHA. " + phone
+    duplicate = "First ALPHA. Second ALPHA."
+    payload = '{\n  "mode": "canary"\n}'
+    multiline = "Payload:\n" + payload + "\n" + phone
+    expansion = "ALPHA. Support phone is 555-1234 with ALPHA today."
+    cases = [
+        ("unbound_phone", contact, "ALPHA", None, "support phone", 11, phone, False, False),
+        ("bound_token", contact, "ALPHA", None, "deployment token", 9,
+         "Deployment token is ALPHA.", True, False),
+        ("both_sentences", contact, "ALPHA", None, "support phone", 24, contact, True, False),
+        ("unbound_duplicate", duplicate, "ALPHA", (6, 11), "second", 8,
+         "Second ALPHA.", False, False),
+        ("bound_duplicate", duplicate, "ALPHA", (20, 25), "second", 8,
+         "Second ALPHA.", True, False),
+        ("unbound_multiline", multiline, payload, None, "support phone", 11, phone, False, False),
+        ("bound_multiline", multiline, payload, None, "mode canary", 14, payload, True, False),
+        ("expansion_rebind", expansion, "ALPHA", (0, 5), "support phone", 18,
+         "Support phone is 555-1234 with ALPHA today.", False, True),
+    ]
+    outcomes = []
+    for name, content, value, span, query, budget, expected, bound, extra_source in cases:
+        binding = evidence.make_exact_value_binding(content, value, source_span=span)
+        record = MemoryRecord(id=name, content=content, metadata={"exact_value": binding})
+        candidates = [Candidate(name, 1.0, "lexical", record)]
+        if extra_source:
+            candidates.append(Candidate("other", 0.5, "lexical",
+                                        MemoryRecord(id="other", content="Unrelated.")))
+        packed = packer_type().pack_coverage(query, candidates, budget)
+        selected = next((chunk for chunk in packed.chunks if chunk.id == name), None)
+        excerpt = selected.excerpt if selected else ""
+        actual_binding = selected.exact_value if selected else None
+        expected_binding = binding if bound else None
+        correct = (expected in excerpt and actual_binding == expected_binding
+                   and packed.usage.context_tokens <= budget)
+        outcomes.append({"case": name, "query": query, "budget": budget,
+                         "tokens": packed.usage.context_tokens, "excerpt": excerpt,
+                         "expected_excerpt": expected, "expected_bound": bound,
+                         "actual_bound": actual_binding is not None, "correct": correct})
+    return {"cases": len(outcomes), "correct": sum(row["correct"] for row in outcomes),
+            "outcomes": outcomes}
+
+
 def run(*, evidence_module=evidence, packer_type=DeterministicContextPacker) -> dict:
     binding = evidence_module.make_exact_value_binding("label=Δ-42", "Δ-42", "identifier")
     contract = evidence_module.make_action_contract(
@@ -105,6 +150,7 @@ def run(*, evidence_module=evidence, packer_type=DeterministicContextPacker) -> 
             "correct": sum(row["actual"] == row["expected"] for row in source_outcomes),
             "outcomes": source_outcomes,
         },
+        "coverage_queries": coverage_query_diagnostic(packer_type=packer_type),
         "packing": {
             name: {"sources": len(result.chunks), "tokens": result.usage.context_tokens,
                    "budget": 35, "budget_honored": result.usage.context_tokens <= 35}
@@ -127,6 +173,7 @@ def main() -> int:
     validation = report["action_validation"]
     return 0 if (validation["correct"] == validation["cases"]
                  and report["source_validation"]["correct"] == report["source_validation"]["cases"]
+                 and report["coverage_queries"]["correct"] == report["coverage_queries"]["cases"]
                  and all(row["budget_honored"] for row in report["packing"].values())
                  and all(report["oversized_exact"][key] for key in (
                      "literal_preserved", "nearby_qualifiers_preserved", "budget_honored",

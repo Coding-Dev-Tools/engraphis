@@ -79,10 +79,6 @@ def _percent(value: Any, places: int = 2) -> str:
     return f"{number * 100:.{places}f}%" if number is not None else "pending"
 
 
-def _artifact_hash(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
 def _require_sha256(value: Any, label: str) -> str:
     if not isinstance(value, str) or not _SHA256.fullmatch(value):
         raise ValueError(f"{label} must be a 64-character SHA-256")
@@ -177,8 +173,7 @@ def _validate_envelope(raw: dict[str, Any]) -> None:
         raise ValueError(f"unsupported benchmark report schema: {schema!r}")
 
 
-def _source_binding(raw: dict[str, Any], report_path: Path) -> dict[str, Any]:
-    actual = _artifact_hash(report_path)
+def _source_binding(raw: dict[str, Any], report_path: Path, actual: str) -> dict[str, Any]:
     supplied_source = raw.get("source")
     if supplied_source is not None and not isinstance(supplied_source, dict):
         raise ValueError("report.source must be an object")
@@ -403,14 +398,20 @@ def _normalize_performance(value: dict[str, Any]) -> dict[str, Any]:
 
 def load_report(path: Union[str, Path]) -> dict[str, Any]:
     """Load and normalize a report without executing benchmark code."""
+    return load_report_snapshot(path)[0]
+
+
+def load_report_snapshot(path: Union[str, Path]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return normalized and raw views bound to the same artifact bytes."""
     report_path = Path(path)
     try:
-        raw = json.loads(report_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        payload = report_path.read_bytes()
+        raw = json.loads(payload.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"cannot read benchmark report {report_path}: {exc}") from exc
     raw = _require_mapping(raw, "report")
     _validate_envelope(raw)
-    source = _source_binding(raw, report_path)
+    source = _source_binding(raw, report_path, hashlib.sha256(payload).hexdigest())
 
     if isinstance(raw.get("runs"), list):
         runs = {
@@ -429,7 +430,7 @@ def load_report(path: Union[str, Path]) -> dict[str, Any]:
             "performance": _normalize_performance(performance),
         }
         _validate_normalized(normalized)
-        return normalized
+        return normalized, raw
 
     performance = raw.get("performance", raw)
     performance = _normalize_performance(_require_mapping(performance, "performance"))
@@ -441,7 +442,7 @@ def load_report(path: Union[str, Path]) -> dict[str, Any]:
         "performance": performance,
     }
     _validate_normalized(normalized)
-    return normalized
+    return normalized, raw
 
 
 def _text(

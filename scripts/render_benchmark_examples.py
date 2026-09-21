@@ -2,16 +2,14 @@
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
 from string import Template
 
-from scripts.render_benchmark_report import _integer, _number, _validate_rate, load_report
+from scripts.render_benchmark_report import _integer, _number, _validate_rate, load_report_snapshot
 
 
 def render(source: Path, output: Path) -> None:
-    selected = load_report(source)  # validates schema, provenance and checksum sidecar
-    raw = json.loads(source.read_text(encoding="utf-8"))
+    selected, raw = load_report_snapshot(source)
     runs = {row["id"]: row["result"] for row in raw["runs"]}
     chunking, grounded = runs["offline-chunking"], runs["offline-grounded"]
     values = {name: _integer(grounded[name]) for name in

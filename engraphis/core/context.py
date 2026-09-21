@@ -424,7 +424,6 @@ class DeterministicContextPacker:
                     continue
                 record = candidate.record
                 current_excerpt = chunk.excerpt
-                current_exact = chunk.exact_value
                 current_reason = chunk.reason
                 expanded, reason, exact = self._coverage_excerpt(
                     query, candidate, max_tokens=budget,
@@ -437,7 +436,7 @@ class DeterministicContextPacker:
                 if not expanded or self._count(expanded) <= self._count(current_excerpt):
                     continue
                 exact, source_span, evidence_unit_id, evidence_unit = self._evidence_details(
-                    candidate, expanded, attribution=chunk.attribution, binding=exact or current_exact,
+                    candidate, expanded, attribution=chunk.attribution, binding=exact,
                 )
                 trial = list(packed)
                 trial[index] = PackedChunk(
@@ -447,7 +446,7 @@ class DeterministicContextPacker:
                     ), reason=reason or current_reason,
                     attribution=chunk.attribution, exact_value=exact,
                     title=_normalize_title(chunk.title or record.title),
-                    source_span=source_span or chunk.source_span,
+                    source_span=source_span,
                     evidence_unit_id=evidence_unit_id or chunk.evidence_unit_id,
                     evidence_unit=evidence_unit or chunk.evidence_unit,
                 )
@@ -567,80 +566,70 @@ class DeterministicContextPacker:
                 rendered_fits is None or rendered_fits(text)
             )
 
-        # A JSON/string exact value may itself contain line breaks.  Sentence
-        # splitting normalizes those separators, so grow a verbatim window around
-        # the bound span. Keep surrounding restrictions whenever space permits;
-        # a bare value is reserved for budgets that cannot fit nearby context.
-        if binding and any(separator in exact_value for separator in ("\n", "\r")):
-            if fits(exact_value):
-                excerpt = self._exact_window(record.content, binding, query_terms, fits)
-                if self._count(excerpt) >= minimum_tokens:
-                    return excerpt, "coverage_exact", binding
-            return "", "", None
-        sentences = [part.strip() for part in _SENTENCE_RE.split(source) if part.strip()]
-        if not sentences:
-            return "", "", None
+        # Keep source coordinates through sentence splitting. A bound literal
+        # spanning multiple sentences/lines is one atomic unit, so selecting it
+        # never normalizes or truncates the authored value.
         sentence_spans = []
         offset = 0
-        for sentence in sentences:
+        for part in _SENTENCE_RE.split(source):
+            sentence = part.strip()
+            if not sentence:
+                continue
             start = source.index(sentence, offset)
             offset = start + len(sentence)
             sentence_spans.append((start, offset))
-        ranked = sorted(
-            range(len(sentences)),
-            key=lambda index: (
-                -(len(_terms(sentences[index]) & query_terms)
-                  + (4 if exact_value and exact_value in sentences[index] else 0)
-                  + (2 if _terms(sentences[index]) & _QUALIFIER_TERMS else 0)),
-                index,
-            ),
-        )
+        bound_unit = ""
+        if binding:
+            left, right = cast(int, binding["start"]), cast(int, binding["end"])
+            overlaps = [index for index, (start, end) in enumerate(sentence_spans)
+                        if start < right and left < end]
+            if overlaps:
+                first, last = overlaps[0], overlaps[-1]
+                unit_span = (min(left, sentence_spans[first][0]),
+                             max(right, sentence_spans[last][1]))
+                sentence_spans[first:last + 1] = [unit_span]
+                bound_unit = source[unit_span[0]:unit_span[1]]
+            else:
+                # Even an all-whitespace literal must retain its exact span.
+                sentence_spans.append((left, right))
+                sentence_spans.sort()
+                bound_unit = source[left:right]
         best = ""
-        best_score = -1
-        best_reason = "coverage_unit"
-        # A short adjacent window keeps subject, value, condition and date in
-        # the same evidence unit without falling back to arbitrary token prefixes.
-        for seed in ranked:
-            for width in (3, 2, 1):
-                start = max(0, min(seed, len(sentences) - width))
-                end = start + width
-                window_spans = sentence_spans[start:end]
-                if binding and not (
-                    window_spans[0][0] <= cast(int, binding["start"])
-                    and cast(int, binding["end"]) <= window_spans[-1][1]
-                ):
+        best_score = (-1, -1, -1)
+        best_binding = None
+        # Query coverage comes first. Exact metadata describes the selected
+        # evidence; it must not force an unrelated sentence into every recall.
+        for width in (3, 2, 1):
+            for start in range(max(0, len(sentence_spans) - width) + 1):
+                window = sentence_spans[start:start + width]
+                if not window:
                     continue
-                excerpt = " ".join(sentences[start:end])
-                if exact_value and exact_value in source and exact_value not in excerpt:
-                    continue
+                left, right = window[0][0], window[-1][1]
+                excerpt = source[left:right]
                 if not fits(excerpt) or self._count(excerpt) < minimum_tokens:
                     continue
-                score = sum(len(_terms(part) & query_terms) for part in sentences[start:end])
-                score += sum(2 for part in sentences[start:end] if _terms(part) & _QUALIFIER_TERMS)
-                if exact_value and exact_value in excerpt:
-                    score += 8
+                covers_binding = bool(binding and left <= cast(int, binding["start"])
+                                      and cast(int, binding["end"]) <= right)
+                terms = _terms(excerpt)
+                score = (len(terms & query_terms), len(terms & _QUALIFIER_TERMS),
+                         int(covers_binding))
                 if score > best_score:
                     best, best_score = excerpt, score
-                    best_reason = "coverage_exact" if exact_value and exact_value in excerpt else "coverage_unit"
-        if not best and binding and exact_value and fits(exact_value):
-            # An oversized sentence must not hide a small verified literal.
-            # Grow a verbatim source window from its bound coordinates, choosing
-            # nearby qualifier/query tokens first and balancing both sides.
-            best = self._exact_window(record.content, binding, query_terms, fits)
-            best_reason = "coverage_exact"
-        if not best or self._count(best) < minimum_tokens:
+                    best_binding = binding if covers_binding else None
+        if binding and exact_value and fits(exact_value):
+            # Grow a verified literal when nearby complete units cannot fit. Score its
+            # own unit's query terms, so growth into an adjacent sentence cannot
+            # displace that sentence's complete, more relevant evidence.
+            excerpt = self._exact_window(record.content, binding, query_terms, fits)
+            terms = _terms(excerpt)
+            score = (len(terms & query_terms & _terms(bound_unit)),
+                     len(terms & _QUALIFIER_TERMS), 1)
+            if self._count(excerpt) >= minimum_tokens and score > best_score:
+                best, best_score, best_binding = excerpt, score, binding
+        if not best:
             return "", "", None
-        # Make the literal independently visible to the reader. This is only in
-        # the opt-in coverage path and is charged to the same hard token budget.
-        if binding and exact_value and exact_value not in best:
-            line = f"Exact value (copy exactly): {exact_value}"
-            proposed = f"{line}\n{best}"
-            if fits(proposed):
-                best = proposed
-                best_reason = "coverage_exact"
-            else:
-                return "", "", None
-        return best, best_reason, binding
+        reason = "coverage_exact" if best_binding is not None else "coverage_unit"
+        return best, reason, best_binding
 
     def _exact_window(
         self, source: str, binding: dict[str, object], query_terms: set[str],
