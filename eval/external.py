@@ -692,7 +692,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--checkpoint-dir", type=Path, default=None,
                     help="Private resumable per-case retrieval checkpoints; includes raw dataset text.")
     ap.add_argument("--restart-interrupted", action="store_true",
-                    help="Explicitly restart an interrupted local retrieval case, retaining its failed attempt.")
+                    help="Restart interrupted local retrieval cases in --checkpoint-dir, retaining prior attempts.")
     ap.add_argument("--token-budget", type=int, default=1500)
     ap.add_argument('--embed-revision', default=None,
                     help='Optional immutable model revision; required by --canonical.')
@@ -703,6 +703,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument('--longmemeval-repair-manifest', default=None,
                     help='Hash-bound omissions of empty non-answer turns in LongMemEval.')
     args = ap.parse_args(argv)
+    if args.restart_interrupted and args.checkpoint_dir is None:
+        ap.error('--restart-interrupted requires --checkpoint-dir')
     if args.k <= 0:
         ap.error('--k must be a positive integer')
     if args.token_budget < 0:

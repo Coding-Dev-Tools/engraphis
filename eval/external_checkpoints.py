@@ -6,13 +6,21 @@ interrupted local-only cases can be explicitly restarted with their attempt reta
 from __future__ import annotations
 
 from collections import defaultdict
+from contextlib import contextmanager
 import json
 import math
 import os
 import re
 from pathlib import Path
+import stat
+import sys
 import time
 from typing import Callable, Optional
+
+try:  # pragma: no cover - the Windows branch is exercised on release hosts.
+    import fcntl  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover
+    fcntl = None  # type: ignore[assignment]
 
 from engraphis.core.interfaces import embedding_space_fingerprint
 from eval.benchmark import canonical_json, environment_provenance, sha256_file, sha256_text
@@ -20,6 +28,7 @@ from eval.harness import run
 
 
 SCHEMA = "engraphis-external-checkpoints/v2"
+RUNNER_LOCK_MARKER = b"engraphis-external-runner-lock/v1\n"
 
 
 def _write(path: Path, payload: dict) -> None:
@@ -35,6 +44,73 @@ def _read(path: Path) -> dict:
     if not isinstance(value, dict):
         raise ValueError("checkpoint must contain an object")
     return value
+
+
+@contextmanager
+def _runner_lock(path: Path):
+    """Hold an OS lock whose release is automatic if the process dies.
+
+    The fixed marker is initialized once under the lock; a prefix left by an
+    interrupted first write can be completed without truncating the file.
+    Existing empty files, legacy PID markers and other unrecognized bytes
+    require manual inspection.
+    Cooperating runners must keep the lock file in place, even after exiting.
+    """
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    created = False
+    try:
+        try:
+            handle = path.open("x+b")
+            created = True
+        except FileExistsError:
+            handle = path.open("r+b")
+    except OSError as exc:
+        raise ValueError("external diagnostic runner lock is unsafe or unavailable") from exc
+    acquired = False
+    try:
+        handle.seek(0)
+        try:
+            if sys.platform == "win32":
+                import msvcrt
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                if fcntl is None:
+                    raise OSError("POSIX file locking is unavailable")
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (OSError, BlockingIOError) as exc:
+            raise ValueError("external diagnostic runner already owns this directory") from exc
+        acquired = True
+
+        opened, named = os.fstat(handle.fileno()), path.lstat()
+        if (not stat.S_ISREG(named.st_mode) or opened.st_nlink != 1
+                or not os.path.samestat(opened, named)):
+            raise ValueError("external diagnostic runner lock is unsafe or changed")
+        handle.seek(0)
+        raw = handle.read(len(RUNNER_LOCK_MARKER) + 1)
+        if (not raw and not created) or not RUNNER_LOCK_MARKER.startswith(raw):
+            raise ValueError("legacy or unrecognized external runner lock requires manual inspection")
+        if raw != RUNNER_LOCK_MARKER:
+            handle.write(RUNNER_LOCK_MARKER[len(raw):])
+            handle.flush()
+            os.fsync(handle.fileno())
+        yield
+    finally:
+        active_error = sys.exc_info()[1]
+        try:
+            try:
+                if acquired:
+                    handle.seek(0)
+                    if sys.platform == "win32":
+                        import msvcrt
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                    elif fcntl is not None:
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            finally:
+                handle.close()
+        except OSError:
+            if active_error is None:
+                raise
 
 
 def producer_snapshot() -> dict:
@@ -146,27 +222,19 @@ def run_resumable(cases: list[dict], *, directory: Path, binding: dict, embedder
                   snapshot: Callable[[], dict] = producer_snapshot,
                   maximum_cases: Optional[int] = None) -> dict:
     directory.mkdir(parents=True, exist_ok=True)
-    identity = {"schema": SCHEMA, **binding, "producer": snapshot(), "k": k,
-                "runtime": _runtime_identity(embedder),
-                "token_budget": token_budget, "resolve_conflicts": resolve_conflicts,
-                "normalized_cases_sha256": sha256_text(canonical_json(cases))}
-    header = directory / "manifest.json"
-    if header.exists():
-        if _read(header) != identity:
-            raise ValueError("external checkpoint source/model/configuration drift")
-    else:
-        _write(header, identity)
     lock = directory / ".runner.lock"
-    try:
-        handle = lock.open("x", encoding="utf-8")
-    except FileExistsError as exc:
-        raise ValueError("external diagnostic runner already owns this directory") from exc
-    reports, executed = [], 0
-    try:
-        with handle:
-            handle.write(str(os.getpid()))
-            handle.flush()
-            os.fsync(handle.fileno())
+    with _runner_lock(lock):
+        identity = {"schema": SCHEMA, **binding, "producer": snapshot(), "k": k,
+                    "runtime": _runtime_identity(embedder),
+                    "token_budget": token_budget, "resolve_conflicts": resolve_conflicts,
+                    "normalized_cases_sha256": sha256_text(canonical_json(cases))}
+        header = directory / "manifest.json"
+        if header.exists():
+            if _read(header) != identity:
+                raise ValueError("external checkpoint source/model/configuration drift")
+        else:
+            _write(header, identity)
+        reports, executed = [], 0
         case_hashes = [sha256_text(canonical_json(case)) for case in cases]
         retries = _retained_restart_counts(directory, case_hashes)
         for ordinal, case in enumerate(cases):
@@ -216,5 +284,3 @@ def run_resumable(cases: list[dict], *, directory: Path, binding: dict, embedder
         if snapshot() != identity["producer"] or _runtime_identity(embedder) != identity["runtime"]:
             raise ValueError("external producer or runtime changed during checkpoint aggregation")
         return result
-    finally:
-        lock.unlink(missing_ok=True)
