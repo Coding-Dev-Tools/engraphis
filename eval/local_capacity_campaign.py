@@ -20,7 +20,7 @@ import time
 import traceback
 from typing import Callable, Optional
 
-from eval.benchmark import canonical_json, sha256_file, validate_report, write_canonical_artifact
+from eval.benchmark import canonical_json, read_artifact_snapshot, sha256_file, validate_report, write_canonical_artifact
 from eval.capacity_matrix import _cell_identity, _validate_repeat
 from eval.engine_capacity import (
     Cell, HARDWARE, _snapshot, acceptance_policy, host_observation, operation_plan, protocol, run_cell,
@@ -262,14 +262,15 @@ def validate_plan(plan: dict, *, live: bool = True) -> None:
 
 
 def _read_verified(path: Path) -> dict:
-    sidecar = path.with_suffix(path.suffix + ".sha256")
-    if not sidecar.is_file() or sidecar.read_text(encoding="utf-8").split()[0] != sha256_file(path):
-        raise ValueError("capacity artifact checksum missing or mismatched")
-    report = json.loads(path.read_text(encoding="utf-8"))
+    return _read_verified_snapshot(path)[0]
+
+
+def _read_verified_snapshot(path: Path) -> tuple[dict, str]:
+    report, digest = read_artifact_snapshot(path)
     errors = validate_report(report)
     if errors:
         raise ValueError("invalid capacity artifact: " + errors[0])
-    return report
+    return report, digest
 
 
 def _repetition_gate_statuses(summaries: list[dict], cell: Cell, hardware: dict) -> dict:
@@ -385,7 +386,7 @@ def summarize(plan: dict, directory: Path, *, write_summary: bool = True) -> dic
         if not path.exists():
             cells.append({"id": key, "status": "PENDING"})
             continue
-        report = _read_verified(path)
+        report, artifact_digest = _read_verified_snapshot(path)
         if report["protocol"]["config"] != config:
             raise ValueError("saved cell does not match frozen configuration")
         metrics = report["metrics"]
@@ -402,7 +403,7 @@ def summarize(plan: dict, directory: Path, *, write_summary: bool = True) -> dic
             identity_hash = _digest(identity)
             runtime_identities[identity_hash] = identity
         cells.append({"id": key, "status": "COMPLETE" if statistics["execution_integrity_pass"] else "FAILED",
-                      "sha256": sha256_file(path), **statistics,
+                      "sha256": artifact_digest, **statistics,
                       "wall_latency_ms": metrics.get("wall_latency_ms"),
                       "hardware_matches": metrics.get("hardware_matches_declared_target")})
     done = sum(c["status"] == "COMPLETE" for c in cells)

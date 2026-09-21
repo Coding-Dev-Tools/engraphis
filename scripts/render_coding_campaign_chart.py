@@ -4,10 +4,9 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 import itertools
-import json
 from pathlib import Path
 
-from eval.benchmark import canonical_json, sha256_file, sha256_text, validate_report
+from eval.benchmark import canonical_json, read_artifact_snapshot, sha256_text, validate_report
 
 
 def chart_data(report: dict, manifest: dict, eligibility: dict = None) -> dict:
@@ -98,16 +97,19 @@ def chart_data(report: dict, manifest: dict, eligibility: dict = None) -> dict:
             "families": len({row["family_id"] for row in rows.values() if row.get("family_id")})}
 
 
-def render(report_path: Path, manifest_path: Path, output: Path, eligibility_path: Path = None) -> None:
-    for path in (report_path, manifest_path, *([eligibility_path] if eligibility_path else [])):
-        if path.with_suffix(path.suffix + ".sha256").read_text().split()[0] != sha256_file(path):
-            raise ValueError("artifact checksum mismatch")
-    report = json.loads(report_path.read_text(encoding="utf-8"))
+def _read_chart_inputs(report_path: Path, manifest_path: Path, eligibility_path: Path = None) -> tuple[dict, dict]:
+    report, report_digest = read_artifact_snapshot(report_path)
+    manifest, _ = read_artifact_snapshot(manifest_path)
     errors = validate_report(report)
     if errors:
         raise ValueError("invalid public artifact: " + "; ".join(errors))
-    eligibility = json.loads(eligibility_path.read_text(encoding="utf-8")) if eligibility_path else None
-    data = chart_data(report, json.loads(manifest_path.read_text(encoding="utf-8")), eligibility)
+    eligibility, eligibility_digest = read_artifact_snapshot(eligibility_path) if eligibility_path else (None, None)
+    data = chart_data(report, manifest, eligibility)
+    return data, {"report": report_digest, "eligibility": eligibility_digest}
+
+
+def render(report_path: Path, manifest_path: Path, output: Path, eligibility_path: Path = None) -> None:
+    data, digests = _read_chart_inputs(report_path, manifest_path, eligibility_path)
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -158,9 +160,9 @@ def render(report_path: Path, manifest_path: Path, output: Path, eligibility_pat
                  f"Whole-scenario exclusions are retrospective; raw outcomes are retained. {correction_cap}\n"
                  "No inferential family interval shown; non-inferiority is indeterminate. No independent acceptance.",
                  color=muted, fontsize=9)
-        fig.text(.025, .04, f"Source SHA-256: {sha256_file(report_path)}", color=muted, fontsize=8)
+        fig.text(.025, .04, f"Source SHA-256: {digests['report']}", color=muted, fontsize=8)
         if eligibility_path:
-            fig.text(.025, .015, f"Eligibility SHA-256: {sha256_file(eligibility_path)}", color=muted, fontsize=8)
+            fig.text(.025, .015, f"Eligibility SHA-256: {digests['eligibility']}", color=muted, fontsize=8)
         fig.subplots_adjust(left=.095, right=.98, top=.78, bottom=.36, wspace=.63)
         output.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(output, metadata={"Title": "Engraphis coding pilot observed outcomes"})

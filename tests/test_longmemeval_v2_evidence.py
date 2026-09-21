@@ -5,6 +5,8 @@ from pathlib import Path
 import pytest
 
 from eval.benchmark import validate_report, write_canonical_artifact
+from eval import longmemeval_v2_evidence as evidence
+from eval import run_longmemeval_v2 as runner
 from eval.longmemeval_v2_evidence import build_evidence_report
 from eval.public_readiness import validate_public_readiness
 from eval.run_longmemeval_v2 import (
@@ -203,6 +205,68 @@ def test_official_v2_evidence_export_is_redacted_and_run_bound(
     artifact = tmp_path / "public.json"
     written = write_canonical_artifact(report, artifact)
     assert written["sha256"] in artifact.with_name("public.json.sha256").read_text("ascii")
+
+
+def test_execution_receipt_hashes_question_id_snapshot(monkeypatch, tmp_path):
+    kwargs = _fixture(tmp_path)
+    execution_manifest = Path(kwargs["execution_manifest_path"])
+    execution_manifest.unlink()
+    per_question = Path(kwargs["per_question_path"])
+    original_payload = per_question.read_bytes()
+    original_read_bytes = Path.read_bytes
+    mutation_seen = False
+
+    def replace_after_snapshot(path):
+        nonlocal mutation_seen
+        payload = original_read_bytes(path)
+        if path == per_question and not mutation_seen:
+            mutation_seen = True
+            path.write_text('{"question_id":"q2"}\n', encoding="utf-8")
+        return payload
+
+    monkeypatch.setattr(Path, "read_bytes", replace_after_snapshot)
+    payload = runner.write_execution_manifest(
+        execution_manifest,
+        checkout={
+            "revision": PINNED_LONGMEMEVAL_V2_REVISION,
+            "dirty": False,
+            "dirty_state_sha256": hashlib.sha256(b"").hexdigest(),
+        },
+        per_question=per_question,
+        questions=kwargs["questions_path"],
+        haystack=kwargs["haystack_path"],
+        trajectories=kwargs["trajectories_path"],
+        memory_config=kwargs["memory_config_path"],
+        matrix_manifest=kwargs["matrix_manifest_path"],
+        seed=42,
+        delegated_argv=["--memory-type", "engraphis"],
+    )
+
+    assert mutation_seen
+    assert payload["per_question_sha256"] == hashlib.sha256(original_payload).hexdigest()
+
+
+def test_evidence_export_uses_per_question_snapshot_for_receipt_binding(
+    monkeypatch, tmp_path,
+):
+    kwargs = _fixture(tmp_path)
+    per_question = Path(kwargs["per_question_path"])
+    original_read_bytes = Path.read_bytes
+    mutation_seen = False
+
+    def replace_after_snapshot(path):
+        nonlocal mutation_seen
+        payload = original_read_bytes(path)
+        if path == per_question and not mutation_seen:
+            mutation_seen = True
+            path.write_text('{"question_id":"q2"}\n', encoding="utf-8")
+        return payload
+
+    monkeypatch.setattr(Path, "read_bytes", replace_after_snapshot)
+    with pytest.raises(ValueError, match="sources changed during export"):
+        evidence.build_evidence_report(**kwargs)
+
+    assert mutation_seen
 
 
 def test_official_v2_evidence_rejects_dirty_execution_attestation(tmp_path):

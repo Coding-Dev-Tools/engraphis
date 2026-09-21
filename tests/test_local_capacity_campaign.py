@@ -108,6 +108,32 @@ def test_checksum_required_for_existing_cell(plan, tmp_path):
         campaign.summarize(plan, tmp_path)
 
 
+def test_summary_keeps_the_verified_cell_digest_when_file_changes_during_analysis(plan, tmp_path, monkeypatch):
+    config = plan["cells"][0]
+    key = campaign.cell_id(config)
+    path = tmp_path / (key + ".json")
+    report = {"protocol": {"config": config}, "models": {"embedding": plan["model"]},
+              "metrics": {"source_before": plan["source"], "source_after": plan["source"],
+                          "source_stable": True, "model_stable": True, "wall_latency_ms": 7,
+                          "host_identity_sha256": plan["host"]["host_identity_sha256"]}}
+    payload = json.dumps(report).encode()
+    digest = hashlib.sha256(payload).hexdigest()
+    path.write_bytes(payload)
+    path.with_suffix(".json.sha256").write_text(digest)
+    monkeypatch.setattr(campaign, "validate_report", lambda _report: [])
+
+    def replace_during_statistics(observed, *_args):
+        assert observed == report
+        path.write_text('{"replacement": true}')
+        return {"execution_integrity_pass": True}
+
+    monkeypatch.setattr(campaign, "_repetition_statistics", replace_during_statistics)
+    result = campaign.summarize(plan, tmp_path, write_summary=False)
+    assert result["cells"][0]["wall_latency_ms"] == 7
+    assert result["cells"][0]["sha256"] == digest
+    assert result["cell_artifact_sha256"][key] == digest
+
+
 def test_wrong_ram_profile_rejected(monkeypatch):
     monkeypatch.setattr(campaign, "host_observation", lambda:
                         {"hardware": {"physical_ram_bytes": 32 * 1024 ** 3}})

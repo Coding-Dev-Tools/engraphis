@@ -110,9 +110,41 @@ def _add_issue(issues: list[str], code: str) -> None:
         issues.append(code)
 
 
-def _read_json(path: Path, issues: list[str], code: str) -> Optional[dict]:
+class _InputSnapshots:
+    """One audit observes each input once, including discovery and receipts."""
+
+    def __init__(self) -> None:
+        self._payloads: dict[Path, bytes] = {}
+        self._errors: dict[Path, OSError] = {}
+
+    def read(self, path: Path) -> bytes:
+        if path in self._errors:
+            raise self._errors[path]
+        if path not in self._payloads:
+            try:
+                self._payloads[path] = path.read_bytes()
+            except OSError as exc:
+                self._errors[path] = exc
+                raise
+        return self._payloads[path]
+
+    def text(self, path: Path, encoding: str = "utf-8") -> str:
+        return self.read(path).decode(encoding)
+
+    def digest(self, path: Path) -> str:
+        return sha256_bytes(self.read(path))
+
+    def digest_if_present(self, path: Path) -> Optional[str]:
+        try:
+            return self.digest(path)
+        except OSError:
+            return None
+
+
+def _read_json(path: Path, issues: list[str], code: str,
+               snapshots: Optional[_InputSnapshots] = None) -> Optional[dict]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads((snapshots or _InputSnapshots()).text(path))
     except (OSError, UnicodeError, json.JSONDecodeError):
         _add_issue(issues, code)
         return None
@@ -122,9 +154,10 @@ def _read_json(path: Path, issues: list[str], code: str) -> Optional[dict]:
     return value
 
 
-def _read_jsonl(path: Path, issues: list[str]) -> Optional[list[dict]]:
+def _read_jsonl(path: Path, issues: list[str],
+                snapshots: Optional[_InputSnapshots] = None) -> Optional[list[dict]]:
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        lines = (snapshots or _InputSnapshots()).text(path).splitlines()
     except (OSError, UnicodeError):
         _add_issue(issues, "jsonl_unreadable")
         return None
@@ -184,8 +217,9 @@ def _sidecar_matches(path: Path, digest: str) -> bool:
     return bool(fields) and fields[0] == digest
 
 
-def _manifest(path: Path, issues: list[str]) -> tuple[dict, dict]:
-    value = _read_json(path, issues, "manifest_unreadable")
+def _manifest(path: Path, issues: list[str], snapshots: Optional[_InputSnapshots] = None) -> tuple[dict, dict]:
+    snapshots = snapshots or _InputSnapshots()
+    value = _read_json(path, issues, "manifest_unreadable", snapshots)
     if value is None:
         return {}, {}
     if value.get("schema") != MANIFEST_SCHEMA:
@@ -219,8 +253,9 @@ def _manifest(path: Path, issues: list[str]) -> tuple[dict, dict]:
     return value, expected
 
 
-def _report(path: Path, manifest: dict, issues: list[str]) -> dict:
-    value = _read_json(path, issues, "report_unreadable")
+def _report(path: Path, manifest: dict, issues: list[str], snapshots: Optional[_InputSnapshots] = None) -> dict:
+    snapshots = snapshots or _InputSnapshots()
+    value = _read_json(path, issues, "report_unreadable", snapshots)
     if value is None:
         return {}
     if value.get("schema") != REPORT_SCHEMA:
@@ -252,7 +287,7 @@ def _report(path: Path, manifest: dict, issues: list[str]) -> dict:
             _add_issue(issues, "report_envelope")
     except Exception:
         _add_issue(issues, "report_validator_unavailable")
-    if not _sidecar_matches(path, sha256_file(path)):
+    if not _sidecar_matches(path, snapshots.digest(path)):
         _add_issue(issues, "report_sidecar")
     models = value.get("models")
     reader = models.get("reader") if isinstance(models, dict) else None
@@ -269,7 +304,8 @@ def _report(path: Path, manifest: dict, issues: list[str]) -> dict:
     return value
 
 
-def _discover(root: Path) -> tuple[list[Path], list[Path], list[Path], list[Path]]:
+def _discover(root: Path, snapshots: Optional[_InputSnapshots] = None) -> tuple[list[Path], list[Path], list[Path], list[Path]]:
+    snapshots = snapshots or _InputSnapshots()
     checkpoints: list[Path] = []
     ledgers: list[Path] = []
     journals = sorted(root.rglob("events.jsonl")) if root.exists() else []
@@ -278,7 +314,7 @@ def _discover(root: Path) -> tuple[list[Path], list[Path], list[Path], list[Path
         return checkpoints, ledgers, journals, pending
     for path in sorted(root.rglob("*.json")):
         try:
-            value = json.loads(path.read_text(encoding="utf-8"))
+            value = json.loads(snapshots.text(path))
         except (OSError, UnicodeError, json.JSONDecodeError):
             continue
         if (isinstance(value, dict) and isinstance(value.get("row"), dict)
@@ -289,7 +325,7 @@ def _discover(root: Path) -> tuple[list[Path], list[Path], list[Path], list[Path
         if path.name == "events.jsonl":
             continue
         try:
-            lines = path.read_text(encoding="utf-8").splitlines()
+            lines = snapshots.text(path).splitlines()
             first = json.loads(lines[0]) if lines else None
         except (OSError, UnicodeError, IndexError, json.JSONDecodeError):
             continue
@@ -346,13 +382,15 @@ def _parse_checkpoints(
     root: Path,
     manifest: dict,
     issues: list[str],
+    snapshots: Optional[_InputSnapshots] = None,
 ) -> tuple[list[dict], dict[str, dict], dict]:
+    snapshots = snapshots or _InputSnapshots()
     rows: list[dict] = []
     by_question: dict[str, dict] = {}
     by_attempt: dict[str, dict] = {}
     inventory: list[dict] = []
     for path in paths:
-        value = _read_json(path, issues, "checkpoint_unreadable")
+        value = _read_json(path, issues, "checkpoint_unreadable", snapshots)
         if value is None:
             continue
         row = value.get("row")
@@ -411,7 +449,7 @@ def _parse_checkpoints(
                     _add_issue(issues, "checkpoint_oracle_count")
         inventory.append({
             "relative_path": _relative(path, root),
-            "sha256": sha256_file(path),
+            "sha256": snapshots.digest(path),
             "row_sha256": value.get("row_sha256"),
             "question_id_sha256": sha256_text(question_id),
             "status": row.get("status"),
@@ -453,12 +491,14 @@ def _parse_ledgers(
     root: Path,
     manifest: dict,
     issues: list[str],
+    snapshots: Optional[_InputSnapshots] = None,
 ) -> tuple[dict[str, dict], dict]:
+    snapshots = snapshots or _InputSnapshots()
     states: dict[str, dict] = {}
     inventory: list[dict] = []
     path_list = list(paths)
     for path in path_list:
-        rows = _read_jsonl(path, issues)
+        rows = _read_jsonl(path, issues, snapshots)
         if rows is None:
             continue
         if not rows or rows[0].get("kind") != "header" or rows[0].get("schema_version") != LEDGER_SCHEMA:
@@ -538,7 +578,7 @@ def _parse_ledgers(
                 _add_issue(issues, "ledger_event")
         inventory.append({
             "relative_path": _relative(path, root),
-            "sha256": sha256_file(path),
+            "sha256": snapshots.digest(path),
             "call_count": len(local_ids),
             "completed_count": sum(
                 1 for item in states.values()
@@ -559,17 +599,19 @@ def _parse_journals(
     root: Path,
     manifest_expected: dict,
     issues: list[str],
+    snapshots: Optional[_InputSnapshots] = None,
 ) -> tuple[dict[str, dict], dict]:
+    snapshots = snapshots or _InputSnapshots()
     journals: dict[str, dict] = {}
     inventory: list[dict] = []
     path_list = list(paths)
     for path in path_list:
-        rows = _read_jsonl(path, issues)
+        rows = _read_jsonl(path, issues, snapshots)
         if rows is None:
             continue
         entry = {
             "relative_path": _relative(path, root),
-            "sha256": sha256_file(path),
+            "sha256": snapshots.digest(path),
             "event_count": len(rows),
             "call_id": None,
             "request_sha256": None,
@@ -851,16 +893,18 @@ def audit_run(
 ) -> dict:
     """Audit private post-run evidence and write private/public artifacts."""
     issues: list[str] = []
-    manifest, expected = _manifest(manifest_path, issues)
-    report = _report(report_path, manifest, issues)
-    manifest_digest = sha256_file(manifest_path) if manifest_path.exists() else None
-    report_digest = sha256_file(report_path) if report_path.exists() else None
-    checkpoints, ledgers, journals, pending = _discover(results)
+    snapshots = _InputSnapshots()
+    auditor_digest = sha256_file(Path(__file__))
+    manifest, expected = _manifest(manifest_path, issues, snapshots)
+    report = _report(report_path, manifest, issues, snapshots)
+    manifest_digest = snapshots.digest_if_present(manifest_path)
+    report_digest = snapshots.digest_if_present(report_path)
+    checkpoints, ledgers, journals, pending = _discover(results, snapshots)
     checkpoint_rows, rows_by_attempt, checkpoint_inventory = _parse_checkpoints(
-        checkpoints, results, manifest, issues
+        checkpoints, results, manifest, issues, snapshots
     )
-    ledger_states, ledger_inventory = _parse_ledgers(ledgers, results, manifest, issues)
-    journal_states, journal_inventory = _parse_journals(journals, results, expected, issues)
+    ledger_states, ledger_inventory = _parse_ledgers(ledgers, results, manifest, issues, snapshots)
+    journal_states, journal_inventory = _parse_journals(journals, results, expected, issues, snapshots)
     stage_names = sorted({
         _relative(item["path"], results).split("/")[0]
         for item in checkpoint_rows if item.get("path")
@@ -872,16 +916,18 @@ def audit_run(
     joins = _join_evidence(rows_by_attempt, ledger_states, journal_states, issues)
     oracle_counts = _parse_oracles(checkpoint_rows, issues)
     pending_inventory = [
-        {"relative_path": _relative(path, results), "sha256": sha256_file(path)}
+        {"relative_path": _relative(path, results), "sha256": snapshots.digest(path)}
         for path in pending
     ]
     if pending_inventory:
         _add_issue(issues, "pending_checkpoint")
     if not checkpoint_rows:
         _add_issue(issues, "checkpoint_missing")
+    if sha256_file(Path(__file__)) != auditor_digest:
+        _add_issue(issues, "auditor_source_changed")
     private_inventory_value = {
         "schema": PRIVATE_SCHEMA,
-        "auditor_source_sha256": sha256_file(Path(__file__)),
+        "auditor_source_sha256": auditor_digest,
         "claim_boundary": (
             "post-run file hashes only; transport dispatch-time journal sealing was not retained; "
             "final-turn model identity was not captured"
@@ -929,7 +975,7 @@ def audit_run(
     usage_totals = _usage_totals(ledger_states)
     public = {
         "schema": AUDIT_SCHEMA,
-        "auditor_source_sha256": sha256_file(Path(__file__)),
+        "auditor_source_sha256": auditor_digest,
         "status": "COMPLETE" if not issues else "BLOCKED",
         "claim_boundary": (
             "post-run inventory and ledger/event consistency only; no dispatch-time sealing, "

@@ -1,5 +1,6 @@
 import hashlib
 import json
+from pathlib import Path
 
 import pytest
 
@@ -237,6 +238,106 @@ def test_post_run_audit_binds_fake_journal_ledger_and_checkpoint(tmp_path):
     assert private["journals"][0]["sha256"]
     assert private["checkpoints"][0]["sha256"]
     assert private["ledgers"][0]["sha256"]
+
+
+@pytest.mark.parametrize("source", ["manifest", "report", "checkpoint", "ledger", "journal"])
+def test_audit_receipts_bind_the_bytes_parsed_before_replacement(tmp_path, monkeypatch, source):
+    manifest, report, results = make_fixture(tmp_path)
+    inputs = {
+        "manifest": manifest,
+        "report": report,
+        "checkpoint": results / "development_pilot" / "checkpoint.json",
+        "ledger": results / "spending" / "development_pilot.jsonl",
+        "journal": results / "oauth-transport" / "attempt-test" / "events.jsonl",
+    }
+    target = inputs[source]
+    original = target.read_bytes()
+    original_digest = hashlib.sha256(original).hexdigest()
+    if source == "report":
+        target.with_suffix(".json.sha256").write_text(original_digest, encoding="utf-8")
+    read_bytes = Path.read_bytes
+    reads = []
+
+    def replace_after_read(path):
+        payload = read_bytes(path)
+        if path == target:
+            reads.append(path)
+            replacement = target.with_suffix(".replacement")
+            replacement.write_bytes(b'{"replacement":true}\n')
+            replacement.replace(target)
+        return payload
+
+    monkeypatch.setattr(Path, "read_bytes", replace_after_read)
+    result = audit_run(
+        manifest_path=manifest, report_path=report, results=results,
+        private_inventory=tmp_path / "private-inventory.json",
+        output=tmp_path / "public-audit.json",
+    )
+    assert result["status"] == "COMPLETE"
+    assert result["counts"]["completed_calls"] == 1
+    assert result["usage"]["total_tokens"] == 14
+    private = json.loads((tmp_path / "private-inventory.json").read_text(encoding="utf-8"))
+    if source in {"manifest", "report"}:
+        assert result[f"{source}_sha256"] == original_digest
+        assert private[f"{source}_sha256"] == original_digest
+    else:
+        assert private[f"{source}s"][0]["sha256"] == original_digest
+    assert reads == [target]
+
+
+@pytest.mark.parametrize("source", ["manifest", "report"])
+def test_audit_does_not_attribute_bytes_after_an_unreadable_input(tmp_path, monkeypatch, source):
+    manifest, report, results = make_fixture(tmp_path)
+    target = manifest if source == "manifest" else report
+    read_bytes = Path.read_bytes
+    reads = []
+
+    def fail_first_read(path):
+        if path == target:
+            reads.append(path)
+            if len(reads) == 1:
+                raise OSError("input temporarily unavailable")
+        return read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", fail_first_read)
+    result = audit_run(
+        manifest_path=manifest, report_path=report, results=results,
+        private_inventory=tmp_path / "private-inventory.json",
+        output=tmp_path / "public-audit.json",
+    )
+    assert result["status"] == "BLOCKED"
+    assert f"{source}_unreadable" in result["issues"]
+    assert result[f"{source}_sha256"] is None
+    assert reads == [target]
+
+
+def test_audit_blocks_changed_auditor_source_without_rebinding_receipts(tmp_path, monkeypatch):
+    from scripts import audit_coding_oauth_run as auditor
+
+    manifest, report, results = make_fixture(tmp_path)
+    source_path = Path(auditor.__file__)
+    original_digest = auditor.sha256_file(source_path)
+    sha256_file = auditor.sha256_file
+    reads = []
+
+    def changing_source_digest(path):
+        if path == source_path:
+            reads.append(path)
+            return original_digest if len(reads) == 1 else "f" * 64
+        return sha256_file(path)
+
+    monkeypatch.setattr(auditor, "sha256_file", changing_source_digest)
+    result = audit_run(
+        manifest_path=manifest, report_path=report, results=results,
+        private_inventory=tmp_path / "private-inventory.json",
+        output=tmp_path / "public-audit.json",
+    )
+    assert result["status"] == "BLOCKED"
+    assert "auditor_source_changed" in result["issues"]
+    assert result["auditor_source_sha256"] == original_digest
+    private = json.loads((tmp_path / "private-inventory.json").read_text(encoding="utf-8"))
+    assert private["auditor_source_sha256"] == original_digest
+    assert reads == [source_path, source_path]
 
 
 def test_oracle_timeout_and_nonzero_exit_block_complete_audit(tmp_path):

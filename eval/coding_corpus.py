@@ -14,12 +14,11 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 import json
 import os
 from pathlib import Path
-import shutil
 import string
 import subprocess
 import sys
@@ -62,8 +61,35 @@ def _digest_text(value: str) -> str:
     return _digest_bytes(value.encode("utf-8"))
 
 
+@dataclass(frozen=True)
+class ArtifactSnapshot:
+    """One immutable read of a corpus artifact and its byte digest."""
+
+    path: Path
+    data: bytes = field(repr=False)
+    sha256: str
+
+
+def _snapshot_bytes(path: Path) -> ArtifactSnapshot:
+    path = Path(path)
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise ValueError(f"cannot read artifact: {path}") from exc
+    return ArtifactSnapshot(path=path, data=data, sha256=_digest_bytes(data))
+
+
+def _read_json_snapshot(path: Path) -> Tuple[Any, ArtifactSnapshot]:
+    snapshot = _snapshot_bytes(path)
+    try:
+        value = json.loads(snapshot.data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid JSON artifact: {path}") from exc
+    return value, snapshot
+
+
 def _read_json(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8"))
+    return _read_json_snapshot(path)[0]
 
 
 def _write_json(path: Path, value: Any) -> bytes:
@@ -137,6 +163,10 @@ class Scenario:
     operations: Tuple[SessionOperation, ...]
     source_sha256: str
     oracle_sha256: str
+    # Keep the exact bytes accepted during corpus load.  ``repr=False`` avoids
+    # copying fixture source/oracle contents into diagnostics or logs.
+    source_bytes: bytes = field(default=b"", repr=False)
+    oracle_bytes: bytes = field(default=b"", repr=False)
 
 
 @dataclass(frozen=True)
@@ -374,10 +404,33 @@ Reader = Callable[[ReaderRequest], Union[str, ReaderResponse, Mapping[str, Any]]
 
 
 class Corpus:
-    def __init__(self, root: Path, manifest: Mapping[str, Any], runtime: Mapping[str, Any]) -> None:
+    def __init__(
+        self,
+        root: Path,
+        manifest: Mapping[str, Any],
+        runtime: Mapping[str, Any],
+        *,
+        manifest_bytes: Optional[bytes] = None,
+        runtime_bytes: Optional[bytes] = None,
+        attestation_bytes: Optional[bytes] = None,
+    ) -> None:
         self.root = root.resolve()
         self.manifest = dict(manifest)
         self.runtime = dict(runtime)
+        # The optional fields preserve the public three-argument constructor
+        # while allowing load_corpus() to retain the exact parsed bytes.
+        self.manifest_bytes = manifest_bytes
+        self.runtime_bytes = runtime_bytes
+        self.attestation_bytes = attestation_bytes
+        self.manifest_sha256 = (
+            _digest_bytes(manifest_bytes) if isinstance(manifest_bytes, bytes) else None
+        )
+        self.runtime_sha256 = (
+            _digest_bytes(runtime_bytes) if isinstance(runtime_bytes, bytes) else None
+        )
+        self.attestation_sha256 = (
+            _digest_bytes(attestation_bytes) if isinstance(attestation_bytes, bytes) else None
+        )
         self._scenarios: Dict[str, Scenario] = {}
         rows = runtime.get("scenarios")
         if not isinstance(rows, list):
@@ -404,8 +457,10 @@ class Corpus:
         oracle = self.root / oracle_rel
         if not source.is_file() or not oracle.is_file():
             raise ValueError(f"missing source/oracle bytes for {scenario_id}")
-        source_digest = _digest_bytes(source.read_bytes())
-        oracle_digest = _digest_bytes(oracle.read_bytes())
+        source_snapshot = _snapshot_bytes(source)
+        oracle_snapshot = _snapshot_bytes(oracle)
+        source_digest = source_snapshot.sha256
+        oracle_digest = oracle_snapshot.sha256
         if source_digest != manifest_row.get("source_sha256") or oracle_digest != manifest_row.get("oracle_sha256"):
             raise ValueError(f"source/oracle digest mismatch for {scenario_id}")
         task_row = row.get("task")
@@ -440,6 +495,8 @@ class Corpus:
             operations=operations,
             source_sha256=source_digest,
             oracle_sha256=oracle_digest,
+            source_bytes=source_snapshot.data,
+            oracle_bytes=oracle_snapshot.data,
         )
 
     @staticmethod
@@ -503,13 +560,45 @@ class Corpus:
         return response, score_response(selected, response, context, oracle_passed=oracle_passed)
 
 
-def _materialize_source(source_path: Path, destination: Path) -> None:
-    source = _read_json(source_path)
-    if not isinstance(source, Mapping) or source.get("schema") != SOURCE_SCHEMA:
-        raise ValueError(f"invalid source artifact: {source_path}")
-    files = source.get("files")
+def _scenario_artifact_bytes(scenario: Any, kind: str) -> bytes:
+    """Return one bound scenario artifact, with a compatibility fallback."""
+
+    attribute = f"{kind}_bytes"
+    payload = getattr(scenario, attribute, None)
+    expected = getattr(scenario, f"{kind}_sha256", None)
+    if isinstance(payload, bytes) and payload:
+        if isinstance(expected, str) and _digest_bytes(payload) != expected:
+            raise ValueError(f"{kind} changed after corpus load")
+        return payload
+    path = Path(getattr(scenario, f"{kind}_path"))
+    snapshot = _snapshot_bytes(path)
+    if isinstance(expected, str) and snapshot.sha256 != expected:
+        raise ValueError(f"{kind} changed after corpus load")
+    return snapshot.data
+
+
+def _materialize_source(
+    source: Union[Path, bytes, ArtifactSnapshot], destination: Path
+) -> None:
+    if isinstance(source, ArtifactSnapshot):
+        source_label = source.path
+        payload = source.data
+    elif isinstance(source, bytes):
+        source_label = Path("<snapshot>")
+        payload = source
+    else:
+        snapshot = _snapshot_bytes(Path(source))
+        source_label = snapshot.path
+        payload = snapshot.data
+    try:
+        source_value = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid source artifact: {source_label}") from exc
+    if not isinstance(source_value, Mapping) or source_value.get("schema") != SOURCE_SCHEMA:
+        raise ValueError(f"invalid source artifact: {source_label}")
+    files = source_value.get("files")
     if not isinstance(files, Mapping) or not files:
-        raise ValueError(f"source artifact has no files: {source_path}")
+        raise ValueError(f"source artifact has no files: {source_label}")
     for relative, content in files.items():
         path = destination / _safe_relative(str(relative))
         if not isinstance(content, str):
@@ -531,12 +620,12 @@ def scenario_workspace(
         target = Path(directory).resolve()
         target.mkdir(parents=True, exist_ok=True)
         if not reuse_existing or not (target / "service.py").is_file():
-            _materialize_source(scenario.source_path, target)
+            _materialize_source(_scenario_artifact_bytes(scenario, "source"), target)
         yield target
         return
     with tempfile.TemporaryDirectory(prefix="engraphis-coding-scenario-") as temporary:
         target = Path(temporary)
-        _materialize_source(scenario.source_path, target)
+        _materialize_source(_scenario_artifact_bytes(scenario, "source"), target)
         yield target
 
 
@@ -552,7 +641,7 @@ def run_oracle(
     with scenario_workspace(scenario, workspace, reuse_existing=workspace is not None) as target:
         with tempfile.TemporaryDirectory(prefix="engraphis-coding-oracle-") as oracle_dir:
             oracle_path = Path(oracle_dir) / scenario.oracle_path.name
-            shutil.copyfile(scenario.oracle_path, oracle_path)
+            oracle_path.write_bytes(_scenario_artifact_bytes(scenario, "oracle"))
             env = os.environ.copy()
             existing = env.get("PYTHONPATH", "")
             env["PYTHONPATH"] = str(target) + (os.pathsep + existing if existing else "")
@@ -1197,8 +1286,8 @@ def load_corpus(root: Union[str, Path] = DATASET_ROOT, *, materialize: bool = Fa
             "coding corpus requires manifest.json and runtime.json; "
             "run the explicit --materialize build step first"
         )
-    manifest = _read_json(manifest_path)
-    runtime = _read_json(runtime_path)
+    manifest, manifest_snapshot = _read_json_snapshot(manifest_path)
+    runtime, runtime_snapshot = _read_json_snapshot(runtime_path)
     runtime_schema = runtime.get("schema")
     runtime_version = runtime.get("version")
     if (
@@ -1208,7 +1297,7 @@ def load_corpus(root: Union[str, Path] = DATASET_ROOT, *, materialize: bool = Fa
         or _VERSION_CONTRACTS.get(runtime_version) != runtime_schema
     ):
         raise ValueError("coding corpus schema/version mismatch")
-    if runtime.get("manifest_sha256") != _digest_bytes(manifest_path.read_bytes()):
+    if runtime.get("manifest_sha256") != manifest_snapshot.sha256:
         raise ValueError("runtime manifest digest does not match manifest bytes")
     if runtime.get("origin") != "implementation_team" or manifest.get("origin") != "implementation_team":
         raise ValueError("implementation corpus origin must remain implementation_team")
@@ -1216,9 +1305,17 @@ def load_corpus(root: Union[str, Path] = DATASET_ROOT, *, materialize: bool = Fa
     attestation_path = destination / attestation_rel
     if not attestation_path.is_file():
         raise ValueError("coding corpus attestation bytes are missing")
-    if _digest_bytes(attestation_path.read_bytes()) != manifest.get("attestation_sha256"):
+    attestation_snapshot = _snapshot_bytes(attestation_path)
+    if attestation_snapshot.sha256 != manifest.get("attestation_sha256"):
         raise ValueError("coding corpus attestation digest does not match manifest")
-    corpus = Corpus(destination, manifest, runtime)
+    corpus = Corpus(
+        destination,
+        manifest,
+        runtime,
+        manifest_bytes=manifest_snapshot.data,
+        runtime_bytes=runtime_snapshot.data,
+        attestation_bytes=attestation_snapshot.data,
+    )
     scenarios = corpus.scenarios()
     if len(scenarios) != 400 or len({item.family_id for item in scenarios}) != 40:
         raise ValueError("coding corpus must contain exactly 400 scenarios in 40 families")

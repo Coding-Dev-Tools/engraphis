@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+from pathlib import Path
 
 import pytest
 
@@ -24,6 +26,42 @@ def _write_json(path, value):
 def _write_jsonl(path, rows):
     path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
     return str(path)
+
+
+def test_agent_loader_uses_the_same_bytes_as_the_initial_digest(tmp_path, monkeypatch):
+    source = Path(_write_json(tmp_path / "plus.json", [{
+        "id": "cognitive-original",
+        "input_prompt": "Morgan previously said oat milk is required.",
+        "trigger": "What milk should Morgan receive?",
+        "evidence": "Morgan previously said oat milk is required.",
+        "category": "Cognitive",
+    }]))
+    original = source.read_bytes()
+    replacement = json.dumps([{
+        "id": "cognitive-replacement",
+        "input_prompt": "A replacement source with different evidence.",
+        "trigger": "What is in the replacement source?",
+        "evidence": "A replacement source with different evidence.",
+        "category": "Cognitive",
+    }]).encode("utf-8")
+    read_bytes = Path.read_bytes
+    reads = 0
+
+    def replace_after_read(path, *args, **kwargs):
+        nonlocal reads
+        payload = read_bytes(path)
+        if path == source:
+            reads += 1
+            source.write_bytes(replacement)
+        return payload
+
+    monkeypatch.setattr(Path, "read_bytes", replace_after_read)
+    snapshot = agent_benchmarks._read_records_snapshot(str(source))
+    cases = load_locomo_plus(str(source), snapshot=snapshot)
+
+    assert reads == 1
+    assert snapshot.sha256 == hashlib.sha256(original).hexdigest()
+    assert cases[0]["id"] == "cognitive-original"
 
 
 def test_memoryagentbench_context_export_and_structured_conflict_events(tmp_path):

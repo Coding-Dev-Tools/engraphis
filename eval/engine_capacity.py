@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 import hashlib
 import importlib.metadata
@@ -19,7 +20,7 @@ import tempfile
 import threading
 import time
 import traceback
-from typing import Optional
+from typing import Iterator, Optional
 import uuid
 
 from engraphis.core.engine import MemoryEngine
@@ -166,7 +167,8 @@ def _snapshot() -> dict:
     return {path.relative_to(ROOT).as_posix(): sha256_file(path) for path in sorted(paths)}
 
 
-def _local_model(path: Optional[str], expected_digest: Optional[str]) -> dict:
+def _local_model(path: Optional[str], expected_digest: Optional[str], *,
+                 snapshot_directory: Optional[Path] = None) -> dict:
     if path is None:
         if expected_digest is not None:
             raise ValueError("model digest requires a local model directory")
@@ -178,12 +180,36 @@ def _local_model(path: Optional[str], expected_digest: Optional[str]) -> dict:
     for item in sorted(directory.rglob("*")):
         if item.is_symlink():
             raise ValueError("model directory must be self-contained, without symlinks")
+        if snapshot_directory is not None and item.is_dir():
+            (snapshot_directory / item.relative_to(directory)).mkdir(parents=True, exist_ok=True)
         if item.is_file():
-            files[item.relative_to(directory).as_posix()] = sha256_file(item)
+            relative = item.relative_to(directory)
+            if snapshot_directory is None:
+                files[relative.as_posix()] = sha256_file(item)
+            else:
+                destination = snapshot_directory / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                digest = hashlib.sha256()
+                with item.open("rb") as source, destination.open("xb") as target:
+                    for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                        target.write(chunk)
+                files[relative.as_posix()] = digest.hexdigest()
     actual = hashlib.sha256(canonical_json(files).encode()).hexdigest()
     if not files or expected_digest != actual:
         raise ValueError("local model directory digest does not match the frozen identity")
     return {"identity": "local_directory", "sha256": actual, "semantic": True}
+
+
+@contextmanager
+def _model_snapshot(path: Optional[str], expected_digest: Optional[str]) -> Iterator[tuple[Optional[str], dict]]:
+    """Run every repeat against the exact model bytes verified before measurement."""
+    if path is None:
+        yield None, _local_model(path, expected_digest)
+        return
+    with tempfile.TemporaryDirectory(prefix="engraphis-capacity-model-") as directory:
+        identity = _local_model(path, expected_digest, snapshot_directory=Path(directory))
+        yield directory, identity
 
 
 def _engine(path: str, cell: Cell, model: Optional[str]) -> MemoryEngine:
@@ -792,21 +818,21 @@ def run_cell(cell: Cell, *, model_dir: Optional[str] = None,
     if reference_hosts is not None:
         validate_reference_hosts(reference_hosts)
     host_before = host_observation()
-    identity = _local_model(model_dir, model_sha256)
-    if not cell.smoke and not identity["semantic"]:
-        raise ValueError("protocol cells require a pinned existing local semantic model")
-    if not cell.smoke and importlib.util.find_spec("psutil") is None:
-        raise ValueError("protocol cells require psutil process-tree memory sampling")
-    if cell.backend == "sqlite-vec" and importlib.util.find_spec("sqlite_vec") is None:
-        raise ModuleNotFoundError("explicit sqlite-vec backend requires installed sqlite_vec")
-    before = _snapshot()
-    repeats = [{**_repeat(cell, model_dir), "repeat_number": number}
-               for number in range(cell.repeats)]
-    after = _snapshot()
-    try:
-        model_stable = identity == _local_model(model_dir, model_sha256)
-    except (OSError, ValueError):
-        model_stable = False
+    with _model_snapshot(model_dir, model_sha256) as (execution_model, identity):
+        if not cell.smoke and not identity["semantic"]:
+            raise ValueError("protocol cells require a pinned existing local semantic model")
+        if not cell.smoke and importlib.util.find_spec("psutil") is None:
+            raise ValueError("protocol cells require psutil process-tree memory sampling")
+        if cell.backend == "sqlite-vec" and importlib.util.find_spec("sqlite_vec") is None:
+            raise ModuleNotFoundError("explicit sqlite-vec backend requires installed sqlite_vec")
+        before = _snapshot()
+        repeats = [{**_repeat(cell, execution_model), "repeat_number": number}
+                   for number in range(cell.repeats)]
+        after = _snapshot()
+        try:
+            model_stable = identity == _local_model(execution_model, model_sha256)
+        except (OSError, ValueError):
+            model_stable = False
     hardware = host_before["hardware"]
     dependencies = {}
     for distribution in ("sqlite-vec", "psutil"):
@@ -848,6 +874,8 @@ def run_cell(cell: Cell, *, model_dir: Optional[str] = None,
                      "before seeding through engine startup, workload and teardown; shared pages "
                      "may be counted more than once; not an allocation high-water mark",
                  "startup_boundary": "fresh process and connection with warm OS page cache",
+                 "model_materialization": ("verified private copy before seeding and measurement" if model_dir else
+                                           "deterministic hashing; no model files"),
                  "unmeasured": ["phase-level embedding/ranking/packing timings", "agent task success",
                                 "production workload representativeness", "cold OS cache", "restore drills",
                                 "unsampled transient allocation peaks", "seeding hard deadline",

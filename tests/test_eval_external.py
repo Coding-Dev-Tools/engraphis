@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pytest
 
@@ -87,6 +88,119 @@ def test_load_longmemeval_sessions_and_abstention(tmp_path):
     assert case["questions"][0]["supporting"] == ["s1"]
     assert cases[1]["questions"][0]["category"] == "abstention"
     assert cases[1]["questions"][0]["answerable"] is False
+
+
+def test_longmemeval_repair_binding_uses_one_dataset_byte_snapshot(tmp_path, monkeypatch):
+    dataset = Path(_longmemeval_fixture(tmp_path))
+    original_dataset = dataset.read_bytes()
+    replacement = json.loads(original_dataset.decode("utf-8"))
+    replacement[0]["answer"] = "Wednesday"
+    replacement_dataset = json.dumps(replacement).encode("utf-8")
+    manifest = tmp_path / "longmem-repairs.json"
+    manifest.write_text(json.dumps({
+        "schema": "engraphis-longmemeval-repair/v1",
+        "dataset_sha256": external.dataset_sha256(str(dataset)),
+        "empty_turn_omissions": [],
+    }), encoding="utf-8")
+    read_bytes = Path.read_bytes
+    read_text = Path.read_text
+    replaced = False
+
+    def replace_after_read(path, *args, **kwargs):
+        nonlocal replaced
+        payload = read_bytes(path)
+        if path == dataset and not replaced:
+            replaced = True
+            dataset.write_bytes(replacement_dataset)
+        return payload
+
+    def replace_after_text(path, *args, **kwargs):
+        nonlocal replaced
+        text = read_text(path, *args, **kwargs)
+        if path == dataset and not replaced:
+            replaced = True
+            dataset.write_bytes(replacement_dataset)
+        return text
+
+    monkeypatch.setattr(Path, "read_bytes", replace_after_read)
+    monkeypatch.setattr(Path, "read_text", replace_after_text)
+    cases = load_longmemeval(str(dataset), repair_manifest=str(manifest))
+
+    assert cases[0]["questions"][0]["answer"] == "pnpm"
+    assert dataset.read_bytes() == replacement_dataset
+    assert original_dataset != replacement_dataset
+
+
+def test_diagnostic_artifact_rejects_replacement_during_envelope_read(tmp_path, monkeypatch):
+    from eval import benchmark
+
+    dataset = tmp_path / "dataset.json"
+    original_bytes = b'{"sample": "original"}'
+    replacement_bytes = b'{"sample": "replacement"}'
+    dataset.write_bytes(original_bytes)
+    snapshot = external._read_json_snapshot(dataset)
+    report = {
+        "format": "locomo",
+        "dataset_sha256": snapshot.sha256,
+        "detail": [],
+        "configuration": {},
+        "embedding": "offline",
+    }
+
+    original_sha256_file = benchmark.sha256_file
+    replaced = False
+
+    def replace_before_envelope_hash(path):
+        nonlocal replaced
+        if Path(path) == dataset and not replaced:
+            dataset.write_bytes(replacement_bytes)
+            replaced = True
+        return original_sha256_file(path)
+
+    monkeypatch.setattr(benchmark, "sha256_file", replace_before_envelope_hash)
+    with pytest.raises(ValueError, match="evaluated source snapshot"):
+        external.diagnostic_artifact(
+            report,
+            dataset=str(dataset),
+            source_snapshot={},
+            dataset_snapshot=snapshot,
+        )
+    assert replaced
+
+
+def test_diagnostic_repair_config_retains_the_verified_digest_during_replacement(tmp_path, monkeypatch):
+    dataset = tmp_path / "dataset.json"
+    dataset.write_text("{}")
+    manifest = tmp_path / "repair.json"
+    original = b'{"repairs": []}'
+    manifest.write_bytes(original)
+    repair_digest = external.dataset_sha256(str(manifest))
+    report = {"format": "locomo", "dataset_sha256": external.dataset_sha256(str(dataset)),
+              "detail": [], "configuration": {}, "embedding": "offline"}
+    sha256_file = external.sha256_file
+    report_envelope = external.report_envelope
+    observed = []
+
+    def replace_after_hash(path):
+        digest = sha256_file(path)
+        if Path(path) == manifest:
+            observed.append(digest)
+            manifest.write_bytes(b'{"replacement": true}')
+        return digest
+
+    def restore_before_envelope(**kwargs):
+        assert manifest.read_bytes() != original
+        manifest.write_bytes(original)
+        return report_envelope(**kwargs)
+
+    monkeypatch.setattr(external, "sha256_file", replace_after_hash)
+    monkeypatch.setattr(external, "report_envelope", restore_before_envelope)
+    artifact = external.diagnostic_artifact(
+        report, dataset=str(dataset), repair_manifest=str(manifest), source_snapshot={},
+    )
+    assert artifact["protocol"]["config"]["repair_manifest_sha256"] == repair_digest
+    assert artifact["suite"]["sources"][0]["sha256"] == repair_digest
+    assert observed == [repair_digest]
 
 
 def test_load_longmemeval_collapses_identical_duplicate_session_ids(tmp_path):

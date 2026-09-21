@@ -1,4 +1,6 @@
+import hashlib
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -522,3 +524,96 @@ def test_manifest_rejects_secret_oauth_fields_before_binding(tmp_path, monkeypat
             embed_model="test", embed_revision="a" * 40, dependency_lock=lock,
             oauth_configuration=oauth,
         )
+
+
+def test_run_attempt_materializes_the_verified_source_snapshot(tmp_path, monkeypatch):
+    source = tmp_path / "source.json"
+    original_payload = {
+        "schema": "engraphis-coding-source/v1",
+        "files": {"service.py": "VALUE = 'original'\n"},
+    }
+    changed_payload = {
+        "schema": "engraphis-coding-source/v1",
+        "files": {"service.py": "VALUE = 'changed-after-verification'\n"},
+    }
+    source.write_text(json.dumps(original_payload), encoding="utf-8")
+    oracle_path = tmp_path / "oracle.py"
+    oracle_path.write_text("# fixture oracle\n", encoding="utf-8")
+    task = SimpleNamespace(
+        prompt="Fix service.py.", target_files=("service.py",),
+        required_evidence_ids=(), forbidden_evidence_ids=(),
+        untrusted_evidence_ids=(), answer_tokens=(), answerable=True,
+        scope="repo", valid_at=None, known_at=None, expected_change="change",
+    )
+    scenario = SimpleNamespace(
+        id="fixture-a", source_path=source, source_sha256=sha256_file(source),
+        oracle_path=oracle_path, oracle_sha256=sha256_file(oracle_path),
+        task=task, family_id="family-a", category="corrections", operations=(),
+    )
+    original_snapshot = campaign._snapshot_scenario
+
+    def snapshot_then_replace(value):
+        bound = original_snapshot(value)
+        source.write_text(json.dumps(changed_payload), encoding="utf-8")
+        return bound
+
+    monkeypatch.setattr(campaign, "_snapshot_scenario", snapshot_then_replace)
+    observed_inputs = []
+
+    class Client:
+        def complete(self, **kwargs):
+            observed_inputs.append(json.loads(kwargs["input"]))
+            return SimpleNamespace(
+                text=json.dumps({"answer": "done", "citations": [], "files": {}}),
+                usage=SimpleNamespace(as_dict=lambda: {"input_tokens": 1, "output_tokens": 1}),
+            )
+
+    manifest = {**small_manifest(), "source": {}, "docker_image": "unused"}
+    cell = campaign.cells(manifest, "development_pilot")[0]
+    result = campaign.run_attempt(
+        manifest, "development_pilot", cell,
+        SimpleNamespace(get=lambda _: scenario), Client(),
+        oracle=lambda *args: {"passed": True, "timed_out": False},
+    )
+
+    assert result["task_success"] is True
+    assert observed_inputs[0]["repository_files"]["service.py"] == "VALUE = 'original'\n"
+
+
+
+def test_dependency_lock_snapshot_hashes_the_bytes_it_parses(tmp_path, monkeypatch):
+    path = tmp_path / "environment.json"
+    original = b'{"distributions":{"fixture-package":"1.0"}}'
+    replacement = b'{"distributions":{"different-package":"9.0"}}'
+    path.write_bytes(original)
+    original_read_bytes = Path.read_bytes
+    mutated = []
+
+    def racing_read_bytes(candidate):
+        payload = original_read_bytes(candidate)
+        if Path(candidate).resolve() == path.resolve() and not mutated:
+            path.write_bytes(replacement)
+            mutated.append(True)
+        return payload
+
+    monkeypatch.setattr(Path, "read_bytes", racing_read_bytes)
+    value, observed_sha256 = campaign._read_json_snapshot(path)
+
+    assert mutated == [True]
+    assert value == {"distributions": {"fixture-package": "1.0"}}
+    assert observed_sha256 == hashlib.sha256(original).hexdigest()
+
+
+@pytest.mark.parametrize("changed", ["manifest", "runtime"])
+def test_frozen_corpus_rejects_different_loaded_bytes_even_when_json_values_match(tmp_path, changed):
+    current = b"{}"
+    captured = b" { }\n"
+    current_digest = hashlib.sha256(current).hexdigest()
+    corpus = SimpleNamespace(root=tmp_path, manifest={}, runtime={},
+                             manifest_sha256=current_digest, runtime_sha256=current_digest)
+    for name in ("manifest", "runtime"):
+        (tmp_path / f"{name}.json").write_bytes(current)
+    setattr(corpus, f"{changed}_sha256", hashlib.sha256(captured).hexdigest())
+    manifest = {"corpus": {"manifest_sha256": current_digest, "runtime_sha256": current_digest}}
+    with pytest.raises(ValueError, match="evaluated campaign snapshot"):
+        campaign._verify_frozen_corpus(manifest, corpus)

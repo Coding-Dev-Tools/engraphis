@@ -1,3 +1,5 @@
+import hashlib
+from dataclasses import replace
 import json
 from pathlib import Path
 import shutil
@@ -247,3 +249,63 @@ def test_injectable_reader_scores_answer_abstention_and_poisoning_separately():
     )
     assert leaked.task_success is True
     assert "untrusted_evidence_cited" in leaked.critical_violations
+
+
+
+def test_materialization_and_oracle_use_bound_snapshot_bytes(tmp_path):
+    copied = tmp_path / "coding_memory_v1"
+    shutil.copytree(DATASET_ROOT, copied)
+    corpus = load_corpus(copied)
+    scenario = next(item for item in corpus.scenarios("development") if item.category == "corrections")
+    baseline = run_oracle(scenario)
+    original_source = json.loads(scenario.source_bytes.decode("utf-8"))
+    relative = next(iter(original_source["files"]))
+    changed_source = dict(original_source)
+    changed_source["files"] = dict(original_source["files"])
+    changed_source["files"][relative] += "\n# replaced after load\n"
+    scenario.source_path.write_text(json.dumps(changed_source), encoding="utf-8")
+    scenario.oracle_path.write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
+
+    with scenario_workspace(scenario) as workspace:
+        materialized = (workspace / relative).read_text(encoding="utf-8")
+    replayed = run_oracle(scenario)
+
+    assert materialized == original_source["files"][relative]
+    assert replayed.passed == baseline.passed
+
+    tampered = replace(scenario, source_bytes=scenario.source_bytes + b"\n")
+    with pytest.raises(ValueError, match="source changed after corpus load"):
+        with scenario_workspace(tampered):
+            pass
+
+
+def test_load_corpus_retains_the_parsed_manifest_and_runtime_bytes(tmp_path, monkeypatch):
+    copied = tmp_path / "coding_memory_v1"
+    shutil.copytree(DATASET_ROOT, copied)
+    manifest_path = copied / "manifest.json"
+    runtime_path = copied / "runtime.json"
+    original_read_bytes = Path.read_bytes
+    replacements = {
+        manifest_path.resolve(): b"manifest replacement",
+        runtime_path.resolve(): b"runtime replacement",
+    }
+    mutated = []
+
+    def racing_read_bytes(path):
+        payload = original_read_bytes(path)
+        resolved = Path(path).resolve()
+        if resolved in replacements and resolved not in mutated:
+            resolved.write_bytes(replacements[resolved])
+            mutated.append(resolved)
+        return payload
+
+    monkeypatch.setattr(Path, "read_bytes", racing_read_bytes)
+    corpus = load_corpus(copied)
+
+    assert set(mutated) == set(replacements)
+    assert corpus.manifest_bytes is not None
+    assert corpus.runtime_bytes is not None
+    assert corpus.manifest == json.loads(corpus.manifest_bytes.decode("utf-8"))
+    assert corpus.runtime == json.loads(corpus.runtime_bytes.decode("utf-8"))
+    assert corpus.manifest_sha256 == hashlib.sha256(corpus.manifest_bytes).hexdigest()
+    assert corpus.runtime_sha256 == hashlib.sha256(corpus.runtime_bytes).hexdigest()

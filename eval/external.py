@@ -37,26 +37,56 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from dataclasses import dataclass
 import hashlib
 import json
 import re
 import sys
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 from engraphis.backends.embedder_st import get_embedder
 from engraphis.core.secrets import redact_secrets
 from eval.harness import run
-from eval.benchmark import report_envelope, sha256_file, write_canonical_artifact
+from eval.benchmark import (
+    report_envelope,
+    sha256_file,
+    verify_report_snapshot,
+    write_canonical_artifact,
+)
 from eval.external_checkpoints import aggregate, producer_snapshot
+
+
+@dataclass(frozen=True)
+class _JsonSnapshot:
+    """Parsed JSON and its digest from one immutable byte read."""
+
+    path: Path
+    value: Any
+    sha256: str
+
+
+def _read_json_snapshot(path: Union[str, Path]) -> _JsonSnapshot:
+    source = Path(path)
+    payload = source.read_bytes()
+    value = json.loads(payload.decode("utf-8"))
+    return _JsonSnapshot(
+        path=source,
+        value=value,
+        sha256=hashlib.sha256(payload).hexdigest(),
+    )
 
 
 def diagnostic_artifact(report: dict, *, dataset: str,
                         repair_manifest: Optional[str] = None,
-                        source_snapshot: Optional[dict[str, str]] = None) -> dict:
+                        source_snapshot: Optional[dict[str, str]] = None,
+                        dataset_snapshot: Optional[_JsonSnapshot] = None,
+                        repair_manifest_snapshot: Optional[_JsonSnapshot] = None) -> dict:
     """Export retrieval observations without turning them into official QA evidence."""
-    if report.get("dataset_sha256") != sha256_file(dataset):
+    dataset_hash = (dataset_snapshot.sha256 if dataset_snapshot is not None
+                    else sha256_file(dataset))
+    if report.get("dataset_sha256") != dataset_hash:
         raise ValueError("dataset changed during evaluation")
     detail = report.get("detail", [])
     usage = detail[0].get("usage", {}) if detail else {}
@@ -87,23 +117,36 @@ def diagnostic_artifact(report: dict, *, dataset: str,
             integrity["repair_manifest"].pop("path", None)
         metrics["dataset_integrity"] = integrity
     root = Path(__file__).resolve().parents[1]
-    paths = [root / name for name in (source_snapshot if source_snapshot is not None else producer_snapshot())]
+    producer_digests = (
+        source_snapshot if source_snapshot is not None else producer_snapshot()
+    )
+    paths = [root / name for name in producer_digests]
+    expected_sources = [
+        (Path(name).name, digest) for name, digest in producer_digests.items()
+    ]
+    repair_digest = None
     if repair_manifest:
         paths.append(Path(repair_manifest))
-    return report_envelope(
+        repair_digest = (repair_manifest_snapshot.sha256 if repair_manifest_snapshot is not None
+                         else sha256_file(repair_manifest))
+        expected_sources.append((Path(repair_manifest).name, repair_digest))
+    envelope = report_envelope(
         suite=f"Engraphis {report['format']} retrieval diagnostic", dataset_path=dataset,
         source_paths=paths, records=detail, metrics=metrics,
         config={**report["configuration"], "measurement_scope": "retrieval_only",
                 "source_case_identity": "explicit",
                 "format": report["format"], "embedding": report["embedding"],
                 "complete_source_required": bool(report.get("canonical")),
-                "repair_manifest_sha256": sha256_file(repair_manifest) if repair_manifest else None},
+                "repair_manifest_sha256": repair_digest},
         models={"embedding": report["embedding"]},
         token_accounting={"identity": usage.get("token_counter", "engraphis.regex.v1"),
                           "revision": None, "scope": "packed memory context",
                           "method": "named deterministic context estimator; not provider billing"},
         command=["python", "-m", "eval.external", "--format", report["format"],
                  "--dataset", "<pinned-dataset>", "--artifact", "<public-artifact>"],
+    )
+    return verify_report_snapshot(
+        envelope, dataset_sha256=dataset_hash, sources=expected_sources
     )
 
 
@@ -177,9 +220,11 @@ def _load_locomo_repair_manifest(
     path: str,
     *,
     dataset_hash: str,
+    snapshot: Optional[_JsonSnapshot] = None,
 ) -> tuple[dict[tuple[str, int, str], Optional[str]], dict[str, Any]]:
-    manifest_path = Path(path)
-    payload = json.loads(manifest_path.read_text(encoding='utf-8'))
+    snapshot = snapshot or _read_json_snapshot(path)
+    manifest_path = snapshot.path
+    payload = snapshot.value
     if not isinstance(payload, dict) or payload.get('schema') not in {
         _LOCOMO_REPAIR_SCHEMA, 'engraphis-locomo-repair/v2',
     }:
@@ -242,7 +287,7 @@ def _load_locomo_repair_manifest(
     return repairs, {
         'schema': payload['schema'],
         'path': str(manifest_path),
-        'sha256': dataset_sha256(str(manifest_path)),
+        'sha256': snapshot.sha256,
         'dataset_sha256': dataset_hash,
         'declared_repairs': normalized_rows,
         **({'declared_deduplications': deduplications} if deduplications else {}),
@@ -254,23 +299,27 @@ def _load_locomo_with_integrity(
     *,
     limit: Optional[int] = None,
     repair_manifest: Optional[str] = None,
+    dataset_snapshot: Optional[_JsonSnapshot] = None,
+    repair_manifest_snapshot: Optional[_JsonSnapshot] = None,
 ) -> tuple[list[dict], dict[str, Any]]:
     if limit is not None and (
         isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0
     ):
         raise ValueError('limit must be a positive integer')
-    raw = json.loads(Path(path).read_text(encoding='utf-8'))
+    dataset_snapshot = dataset_snapshot or _read_json_snapshot(path)
+    raw = dataset_snapshot.value
     if isinstance(raw, dict):
         raw = [raw]
     if not isinstance(raw, list):
         raise ValueError('LoCoMo source must be a JSON object or list')
 
-    source_hash = dataset_sha256(path)
+    source_hash = dataset_snapshot.sha256
     repairs: dict[tuple[str, int, str], Optional[str]] = {}
     manifest_info: Optional[dict[str, Any]] = None
     if repair_manifest:
         repairs, manifest_info = _load_locomo_repair_manifest(
             repair_manifest, dataset_hash=source_hash,
+            snapshot=repair_manifest_snapshot,
         )
 
     used_repairs: set[tuple[str, int, str]] = set()
@@ -436,7 +485,9 @@ def _load_locomo_with_integrity(
 
 
 def load_longmemeval(path: str, *, limit: Optional[int] = None,
-                    repair_manifest: Optional[str] = None) -> list[dict]:
+                    repair_manifest: Optional[str] = None,
+                    dataset_snapshot: Optional[_JsonSnapshot] = None,
+                    repair_manifest_snapshot: Optional[_JsonSnapshot] = None) -> list[dict]:
     """LongMemEval (S/M) → harness cases.
 
     Each haystack *session* becomes one memory (turns joined, newline-separated),
@@ -448,18 +499,20 @@ def load_longmemeval(path: str, *, limit: Optional[int] = None,
         isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0
     ):
         raise ValueError('limit must be a positive integer')
-    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    dataset_snapshot = dataset_snapshot or _read_json_snapshot(path)
+    raw = dataset_snapshot.value
     if isinstance(raw, dict):
         raw = [raw]
     if not isinstance(raw, list):
         raise ValueError('LongMemEval source must be a JSON object or list')
     omissions = set()
     if repair_manifest:
-        declaration = json.loads(Path(repair_manifest).read_text(encoding='utf-8'))
+        repair_manifest_snapshot = repair_manifest_snapshot or _read_json_snapshot(repair_manifest)
+        declaration = repair_manifest_snapshot.value
         if (not isinstance(declaration, dict)
                 or set(declaration) != {'schema', 'dataset_sha256', 'empty_turn_omissions'}
                 or declaration['schema'] != 'engraphis-longmemeval-repair/v1'
-                or declaration['dataset_sha256'] != dataset_sha256(path)
+                or declaration['dataset_sha256'] != dataset_snapshot.sha256
                 or not isinstance(declaration['empty_turn_omissions'], list)):
             raise ValueError('LongMemEval repair manifest schema or dataset digest mismatch')
         for item in declaration['empty_turn_omissions']:
@@ -598,9 +651,10 @@ LOADERS = {"locomo": load_locomo, "longmemeval": load_longmemeval}
 _PINNED_REVISION = re.compile(r'[0-9a-f]{40}\Z')
 
 
-def source_case_count(path: str) -> int:
+def source_case_count(path: str, *, snapshot: Optional[_JsonSnapshot] = None) -> int:
     """Count source cases before normalization so canonical runs catch drops."""
-    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    snapshot = snapshot or _read_json_snapshot(path)
+    raw = snapshot.value
     return 1 if isinstance(raw, dict) else len(raw) if isinstance(raw, list) else 0
 
 
@@ -674,24 +728,34 @@ def main(argv: Optional[list[str]] = None) -> int:
     repair_manifest_before: Optional[str] = None
     try:
         source_before = producer_snapshot()
-        dataset_before = dataset_sha256(args.dataset)
-        if repair_manifest:
-            repair_manifest_before = sha256_file(repair_manifest)
+        dataset_snapshot = _read_json_snapshot(args.dataset)
+        dataset_before = dataset_snapshot.sha256
+        repair_manifest_snapshot = (
+            _read_json_snapshot(repair_manifest) if repair_manifest else None
+        )
+        if repair_manifest_snapshot is not None:
+            repair_manifest_before = repair_manifest_snapshot.sha256
         if args.format == 'locomo':
             cases, dataset_integrity = _load_locomo_with_integrity(
                 args.dataset,
                 limit=args.limit,
                 repair_manifest=args.locomo_repair_manifest,
+                dataset_snapshot=dataset_snapshot,
+                repair_manifest_snapshot=repair_manifest_snapshot,
             )
         else:
             cases = load_longmemeval(args.dataset, limit=args.limit,
-                                    repair_manifest=args.longmemeval_repair_manifest)
+                                    repair_manifest=args.longmemeval_repair_manifest,
+                                    dataset_snapshot=dataset_snapshot,
+                                    repair_manifest_snapshot=repair_manifest_snapshot)
             if args.longmemeval_repair_manifest:
                 if sha256_file(args.longmemeval_repair_manifest) != repair_manifest_before:
                     raise ValueError("repair manifest changed during normalization")
-                declaration = json.loads(Path(args.longmemeval_repair_manifest).read_text(encoding='utf-8'))
+                if repair_manifest_snapshot is None:
+                    raise ValueError("repair manifest snapshot unavailable")
+                declaration = repair_manifest_snapshot.value
                 dataset_integrity = {"repair_manifest": {
-                    **declaration, "sha256": sha256_file(args.longmemeval_repair_manifest),
+                    **declaration, "sha256": repair_manifest_snapshot.sha256,
                     "applied_empty_turn_omissions": len(declaration['empty_turn_omissions']),
                 }}
         if repair_manifest and sha256_file(repair_manifest) != repair_manifest_before:
@@ -700,7 +764,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f'external dataset rejected: {redact_secrets(str(exc))}', file=sys.stderr)
         return 2
     try:
-        source_cases = source_case_count(args.dataset)
+        source_cases = source_case_count(args.dataset, snapshot=dataset_snapshot)
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         print(f'external dataset rejected: {redact_secrets(str(exc))}', file=sys.stderr)
         return 2
@@ -817,6 +881,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                 report, dataset=args.dataset,
                 repair_manifest=args.locomo_repair_manifest or args.longmemeval_repair_manifest,
                 source_snapshot=source_before,
+                dataset_snapshot=dataset_snapshot,
+                repair_manifest_snapshot=repair_manifest_snapshot,
             )
             expected_sources = [
                 (Path(name).name, digest) for name, digest in source_before.items()
