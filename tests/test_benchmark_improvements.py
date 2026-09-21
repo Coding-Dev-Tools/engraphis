@@ -218,17 +218,18 @@ def test_coverage_withholds_an_unpunctuated_oversized_restriction_group(counter,
     assert packed.usage.context_tokens == counter(packed.context) <= budget
 
 
-def test_coverage_exact_literal_accounts_for_header_at_a_tight_budget() -> None:
+def test_coverage_complete_bound_source_accounts_for_header_at_a_tight_budget() -> None:
     content = "noise " * 60 + "Δ-42 " + "suffix " * 60
     binding = make_exact_value_binding(content, "Δ-42", "identifier")
     record = MemoryRecord(id="tight", title="Deployment", content=content,
                           metadata={"exact_value": binding})
     candidate = Candidate(record.id, 1, "lexical", record)
     packer = DeterministicContextPacker()
-    minimum = packer.count_tokens("[1] Deployment\nΔ-42")
+    minimum = packer.count_tokens("[1] Deployment\n" + content.strip())
 
     packed = packer.pack_coverage("deployment", [candidate], minimum)
-    assert packed.chunks[0].excerpt == "Δ-42"
+    assert packed.chunks[0].excerpt == content.strip()
+    assert packed.chunks[0].exact_value == binding
     assert packed.usage.context_tokens == minimum
     assert not packer.pack_coverage("deployment", [candidate], minimum - 1).chunks
 
@@ -241,15 +242,21 @@ def test_coverage_tracks_the_selected_occurrence_when_literals_repeat(bound_labe
     binding = make_exact_value_binding(content, "Δ-42", "identifier", source_span=(start, start + 4))
     record = MemoryRecord(id="duplicate", title="Deployment", content=content,
                           metadata={"exact_value": binding})
-    packed = DeterministicContextPacker().pack_coverage(
-        query, [Candidate(record.id, 1, "lexical", record)], 9,
-    )
+    packer = DeterministicContextPacker()
+    candidates = [Candidate(record.id, 1, "lexical", record)]
+    packed = packer.pack_coverage(query, candidates, 9)
     chunk = packed.chunks[0]
-    assert chunk.excerpt == f"{query.title()} Δ-42."
-    selected_binding = bound_label.casefold() == query
-    assert chunk.exact_value == (binding if selected_binding else None)
-    assert chunk.source_span == ((start, start + 4) if selected_binding else None)
-    assert chunk.evidence_unit["value"] == ("Δ-42" if selected_binding else None)
+    unbound_label = "Second" if bound_label == "First" else "First"
+    assert chunk.excerpt == f"{unbound_label} Δ-42."
+    assert chunk.exact_value is None
+    assert chunk.source_span is None
+    assert chunk.evidence_unit["value"] is None
+    roomy = packer.pack_coverage(
+        query, candidates, packer.count_tokens("[1] Deployment\n" + content.strip()),
+    )
+    assert roomy.chunks[0].excerpt == content.strip()
+    assert roomy.chunks[0].exact_value == binding
+    assert roomy.chunks[0].source_span == (start, start + 4)
 
 
 def test_coverage_preserves_bound_coordinates_across_identical_sentences() -> None:
@@ -257,14 +264,19 @@ def test_coverage_preserves_bound_coordinates_across_identical_sentences() -> No
     start = content.rindex("Δ-42")
     binding = make_exact_value_binding(content, "Δ-42", source_span=(start, start + 4))
     record = MemoryRecord(id="repeated", content=content, metadata={"exact_value": binding})
-    packed = DeterministicContextPacker().pack_coverage(
-        "deployment", [Candidate(record.id, 1, "lexical", record)], 6,
-    )
+    packer = DeterministicContextPacker()
+    candidates = [Candidate(record.id, 1, "lexical", record)]
+    tight = packer.pack_coverage("deployment", candidates, 6)
+    assert all(chunk.exact_value is None and chunk.source_span is None
+               and chunk.evidence_unit["value"] is None for chunk in tight.chunks)
+    budget = packer.count_tokens("[1]\n" + content)
+    packed = packer.pack_coverage("deployment", candidates, budget)
     chunk = packed.chunks[0]
+    assert chunk.excerpt == content
     assert chunk.exact_value == binding
     assert chunk.source_span == (start, start + 4)
     assert chunk.evidence_unit["source_span"] == [start, start + 4]
-    assert packed.usage.context_tokens <= 6
+    assert packed.usage.context_tokens == budget
 
 
 @pytest.mark.parametrize("counter,budget", [(RegexTokenCounter(), 11), (RegexTokenCounter(), 14), (len, 35)])
@@ -304,7 +316,11 @@ def test_coverage_bound_values_are_atomic_without_forcing_unrelated_evidence(val
     assert unrelated.excerpt == "Support phone is 555-1234."
     assert unrelated.exact_value is None
     assert unrelated.source_span is None
-    selected = packer.pack_coverage(value.strip(), [candidate], packer.count_tokens("[1]\n" + value))
+    tight = packer.pack_coverage(value.strip(), [candidate], packer.count_tokens("[1]\n" + value))
+    assert value not in tight.context
+    assert all(chunk.exact_value is None for chunk in tight.chunks)
+    selected = packer.pack_coverage(value.strip(), [candidate], packer.count_tokens("[1]\n" + content))
+    assert selected.chunks[0].excerpt == content
     assert value in selected.context
     assert selected.chunks[0].exact_value == binding
 

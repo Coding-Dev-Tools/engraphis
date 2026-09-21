@@ -36,6 +36,28 @@ def _insert_receipt_fork(store: Store, workspace_id: str) -> None:
     store.conn.commit()
 
 
+def _rewrite_receipt_packing_mode(
+    store: Store, receipt_id: str, workspace_id: str, value,
+) -> None:
+    row = store.conn.execute(
+        "SELECT payload FROM operation_receipts WHERE id=?", (receipt_id,)
+    ).fetchone()
+    assert row is not None
+    payload = json.loads(row["payload"])
+    payload["metadata"]["packing_mode"] = value
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    receipt_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    store.conn.execute(
+        "UPDATE operation_receipts SET payload=?, receipt_hash=? WHERE id=?",
+        (raw, receipt_hash, receipt_id),
+    )
+    store.conn.execute(
+        "UPDATE receipt_chain_heads SET head_hash=? WHERE workspace_id=?",
+        (receipt_hash, workspace_id),
+    )
+    store.conn.commit()
+
+
 def test_empty_context_savings_scope_has_valid_receipt_chain():
     summary = Store(":memory:").context_savings()
 
@@ -837,6 +859,41 @@ def test_direct_receipt_packing_mode_hashes_unknown_string_labels():
 
     assert private_label not in json.dumps(receipt)
     assert receipt["metadata"]["packing_mode"].startswith("sha256:")
+    assert store.verify_receipts(workspace_id=workspace_id)["valid"] is True
+
+
+@pytest.mark.parametrize("value", [True, None, 1.25, ["coverage"], {"mode": "coverage"}])
+def test_persisted_receipt_rejects_non_string_packing_mode(value):
+    store = Store(":memory:")
+    workspace_id = store.get_or_create_workspace("packing-mode-persisted")
+    receipt = store.record_receipt(
+        "recall", workspace_id=workspace_id, metadata={"packing_mode": "legacy"},
+    )
+    _rewrite_receipt_packing_mode(store, receipt["id"], workspace_id, value)
+
+    listed = store.list_receipts(workspace_id=workspace_id)
+    assert listed[0]["invalid_payload"] is True
+    verification = store.verify_receipts(workspace_id=workspace_id)
+    assert verification["valid"] is False
+    assert any(error["error"] == "payload_schema_invalid"
+               for error in verification["errors"])
+
+
+@pytest.mark.parametrize("value", [
+    "legacy",
+    "coverage",
+    "sha256:" + hashlib.sha256(b"private-mode").hexdigest(),
+])
+def test_persisted_receipt_accepts_valid_packing_mode_labels(value):
+    store = Store(":memory:")
+    workspace_id = store.get_or_create_workspace("packing-mode-persisted")
+    receipt = store.record_receipt(
+        "recall", workspace_id=workspace_id, metadata={"packing_mode": "legacy"},
+    )
+    _rewrite_receipt_packing_mode(store, receipt["id"], workspace_id, value)
+
+    listed = store.list_receipts(workspace_id=workspace_id)
+    assert listed[0]["metadata"]["packing_mode"] == value
     assert store.verify_receipts(workspace_id=workspace_id)["valid"] is True
 
 

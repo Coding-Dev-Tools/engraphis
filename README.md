@@ -84,9 +84,9 @@ neither is an end-to-end question-answer score. Coding outcomes, external datase
 operational capacity remain separate pending evaluation tracks until their artifacts are selected.
 
 These values are evidence IDs `offline-chunking` and `offline-performance` in
-[`offline-fixtures-v62.json`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/benchmark-evidence/offline-fixtures-v62.json),
+[`offline-fixtures-v63.json`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/benchmark-evidence/offline-fixtures-v63.json),
 SHA-256
-`f09b4f9eb253582263ab425fd1d80bbea6d8cc8df47ad7f3415573a8da69c8fe`.
+`d0da947955bf587a3e1da852caa0fad84cd0c49b963806b52a0b43c90358730d`.
 [`BENCHMARKS.md`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/BENCHMARKS.md#public-numeric-evidence-registry)
 records the matching suite digest, exact commands, and per-command config digests. The offline
 fixture registry intentionally excludes external, model-dependent, consolidation, productivity,
@@ -567,8 +567,10 @@ historical `legacy`/`default` settings remain unchanged. For a value that must s
 edit or tool call exactly, Smart and Classic `engraphis_remember` and the Python/service write
 APIs accept source-bound `exact_value` plus its `exact_value_type`. MCP remember requires a
 unique occurrence; Python/service writes can select a repeated occurrence with `exact_value_span`.
-Coverage packing follows the query and advertises the binding only when its source occurrence
-is included. Corrections and content revisions clear the old binding when content changes;
+Packed binding metadata requires the complete memory source, preserving conditions in any
+language. Boundary whitespace outside the bound value may be trimmed. Coverage withholds a
+bound group that cannot fit; legacy keeps its selected text but omits the incomplete binding.
+Corrections and content revisions clear the old binding when content changes;
 pass `exact_value` to explicitly bind the replacement, with `exact_value_span=[start,end]`
 for a repeated occurrence, or `clear_exact_value=true` to remove a binding. Unchanged content
 and title-only revisions preserve valid bindings. History preserves the original record.

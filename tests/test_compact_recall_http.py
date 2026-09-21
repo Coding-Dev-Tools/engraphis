@@ -1,6 +1,7 @@
 """Compact REST candidates cannot detach exact bindings from packed evidence."""
 import pytest
 
+from engraphis.core.context import RegexTokenCounter
 from engraphis.service import MemoryService
 
 
@@ -98,3 +99,57 @@ def test_compact_http_legacy_withholds_binding_when_restriction_is_truncated(
     assert "exact_value" not in source
     assert "source_span" not in source
     assert source["evidence_unit"]["value"] is None
+
+
+@pytest.mark.parametrize("route", ["recall", "intent/recall"])
+def test_compact_http_unknown_language_requires_the_complete_source(client, service, route):
+    content = "Credential is ALPHA. Utilisez-le uniquement en production."
+    stored = service.remember(
+        content,
+        workspace="w",
+        repo="api",
+        exact_value="ALPHA",
+        exact_value_type="identifier",
+    )
+
+    params = {
+        "workspace": "w",
+        "repo": "api",
+        "token_budget": 7,
+        "response_mode": "compact",
+        "k": 1,
+    }
+    if route == "recall":
+        response = client.get("/api/recall", params={**params, "q": "ALPHA"})
+    else:
+        response = client.post(
+            "/api/intent/recall",
+            json={**params, "query": "ALPHA"},
+        )
+    assert response.status_code == 200, response.text
+    tight = response.json()
+    assert tight["memories"] and tight["memories"][0]["id"] == stored["id"]
+    assert "Credential is ALPHA." in tight["context"]
+    source = tight["packed_sources"][0]
+    assert "exact_value" not in source
+    assert "source_span" not in source
+    assert source["evidence_unit"]["value"] is None
+    assert source["evidence_unit"]["source_span"] is None
+    assert tight["usage"]["context_tokens"] == RegexTokenCounter()(tight["context"]) <= 7
+    assert all("exact_value" not in row for row in tight["memories"])
+
+    params["token_budget"] = RegexTokenCounter()("[1]\n" + content)
+    if route == "recall":
+        response = client.get("/api/recall", params={**params, "q": "ALPHA"})
+    else:
+        response = client.post(
+            "/api/intent/recall",
+            json={**params, "query": "ALPHA"},
+        )
+    assert response.status_code == 200, response.text
+    roomy = response.json()
+    source = roomy["packed_sources"][0]
+    assert source["id"] == stored["id"]
+    assert source["exact_value"]["value"] == "ALPHA"
+    assert source["source_span"] == [content.index("ALPHA"), content.index("ALPHA") + 5]
+    assert content in roomy["context"]

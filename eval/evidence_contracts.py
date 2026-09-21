@@ -13,46 +13,69 @@ from engraphis.core.context import DeterministicContextPacker, RegexTokenCounter
 from engraphis.core.interfaces import Candidate, MemoryRecord
 
 
-def coverage_query_diagnostic(*, packer_type=DeterministicContextPacker) -> dict:
-    """Fixed query windows expose irrelevant-literal selection and span mistakes."""
+def _coverage_query_cases() -> list[dict[str, object]]:
     phone = "Support phone is 555-1234."
     contact = "Deployment token is ALPHA. " + phone
     duplicate = "First ALPHA. Second ALPHA."
     payload = '{\n  "mode": "canary"\n}'
     multiline = "Payload:\n" + payload + "\n" + phone
     expansion = "ALPHA. Support phone is 555-1234 with ALPHA today."
-    cases = [
-        ("unbound_phone", contact, "ALPHA", None, "support phone", 11, phone, False, False),
-        ("bound_token", contact, "ALPHA", None, "deployment token", 9,
-         "Deployment token is ALPHA.", True, False),
-        ("both_sentences", contact, "ALPHA", None, "support phone", 24, contact, True, False),
-        ("unbound_duplicate", duplicate, "ALPHA", (6, 11), "second", 8,
-         "Second ALPHA.", False, False),
-        ("bound_duplicate", duplicate, "ALPHA", (20, 25), "second", 8,
-         "Second ALPHA.", True, False),
-        ("unbound_multiline", multiline, payload, None, "support phone", 11, phone, False, False),
-        ("bound_multiline", multiline, payload, None, "mode canary", 14, payload, True, False),
-        ("expansion_rebind", expansion, "ALPHA", (0, 5), "support phone", 18,
-         "Support phone is 555-1234 with ALPHA today.", False, True),
+    return [
+        {"case": "unbound_phone", "source": contact, "value": "ALPHA", "span": None,
+         "query": "support phone", "budget": 11, "expected_excerpt": phone,
+         "expected_bound": False, "safety_expected_bound": False, "extra_source": False},
+        {"case": "bound_token", "source": contact, "value": "ALPHA", "span": None,
+         "query": "deployment token", "budget": 9,
+         "expected_excerpt": "Deployment token is ALPHA.",
+         "expected_bound": True, "safety_expected_bound": False, "extra_source": False},
+        {"case": "both_sentences", "source": contact, "value": "ALPHA", "span": None,
+         "query": "support phone", "budget": 24, "expected_excerpt": contact,
+         "expected_bound": True, "safety_expected_bound": True, "extra_source": False},
+        {"case": "unbound_duplicate", "source": duplicate, "value": "ALPHA", "span": (6, 11),
+         "query": "second", "budget": 8, "expected_excerpt": "Second ALPHA.",
+         "expected_bound": False, "safety_expected_bound": False, "extra_source": False},
+        {"case": "bound_duplicate", "source": duplicate, "value": "ALPHA", "span": (20, 25),
+         "query": "second", "budget": 8, "expected_excerpt": "Second ALPHA.",
+         "expected_bound": True, "safety_expected_bound": False, "extra_source": False},
+        {"case": "unbound_multiline", "source": multiline, "value": payload, "span": None,
+         "query": "support phone", "budget": 11, "expected_excerpt": phone,
+         "expected_bound": False, "safety_expected_bound": False, "extra_source": False},
+        {"case": "bound_multiline", "source": multiline, "value": payload, "span": None,
+         "query": "mode canary", "budget": 14, "expected_excerpt": payload,
+         "expected_bound": True, "safety_expected_bound": False, "extra_source": False},
+        {"case": "expansion_rebind", "source": expansion, "value": "ALPHA", "span": (0, 5),
+         "query": "support phone", "budget": 18,
+         "expected_excerpt": "Support phone is 555-1234 with ALPHA today.",
+         "expected_bound": False, "safety_expected_bound": False, "extra_source": True},
     ]
+
+
+def coverage_query_diagnostic(*, packer_type=DeterministicContextPacker) -> dict:
+    """Fixed query windows expose irrelevant-literal selection and span mistakes."""
     outcomes = []
-    for name, content, value, span, query, budget, expected, bound, extra_source in cases:
+    for case in _coverage_query_cases():
+        name = case["case"]
+        content = case["source"]
+        value = case["value"]
+        span = case["span"]
         binding = evidence.make_exact_value_binding(content, value, source_span=span)
         record = MemoryRecord(id=name, content=content, metadata={"exact_value": binding})
         candidates = [Candidate(name, 1.0, "lexical", record)]
-        if extra_source:
+        if case["extra_source"]:
             candidates.append(Candidate("other", 0.5, "lexical",
                                         MemoryRecord(id="other", content="Unrelated.")))
-        packed = packer_type().pack_coverage(query, candidates, budget)
+        packed = packer_type().pack_coverage(case["query"], candidates, case["budget"])
         selected = next((chunk for chunk in packed.chunks if chunk.id == name), None)
         excerpt = selected.excerpt if selected else ""
         actual_binding = selected.exact_value if selected else None
-        expected_binding = binding if bound else None
-        correct = (expected in excerpt and actual_binding == expected_binding
-                   and packed.usage.context_tokens <= budget)
-        outcomes.append({"case": name, "query": query, "budget": budget,
+        expected_binding = binding if case["expected_bound"] else None
+        correct = (case["expected_excerpt"] in excerpt
+                   and actual_binding == expected_binding
+                   and packed.usage.context_tokens <= case["budget"])
+        outcomes.append({"case": name, "query": case["query"], "budget": case["budget"],
                          "tokens": packed.usage.context_tokens, "excerpt": excerpt,
-                         "expected_excerpt": expected, "expected_bound": bound,
+                         "expected_excerpt": case["expected_excerpt"],
+                         "expected_bound": case["expected_bound"],
                          "actual_bound": actual_binding is not None, "correct": correct})
     return {"cases": len(outcomes), "correct": sum(row["correct"] for row in outcomes),
             "outcomes": outcomes}
@@ -540,6 +563,300 @@ def legacy_binding_safety_diagnostic(*, packer_type=DeterministicContextPacker) 
         "outcomes": outcomes,
     }
 
+
+_UNKNOWN_QUALIFIER_CASES = (
+    {
+        "case": "same_fr_tight", "language": "fr", "distance": "same_unit",
+        "content": "Utilisez ALPHA uniquement en production", "query": "ALPHA",
+        "value": "ALPHA", "budget": 4, "expected_bound": False,
+    },
+    {
+        "case": "same_fr_roomy", "language": "fr", "distance": "same_unit",
+        "content": "Utilisez ALPHA uniquement en production", "query": "ALPHA",
+        "value": "ALPHA", "budget": 8, "expected_bound": True,
+    },
+    {
+        "case": "same_synonym_tight", "language": "en_synonym", "distance": "same_unit",
+        "content": "Use ALPHA exclusively in production", "query": "ALPHA",
+        "value": "ALPHA", "budget": 4, "expected_bound": False,
+    },
+    {
+        "case": "same_synonym_roomy", "language": "en_synonym", "distance": "same_unit",
+        "content": "Use ALPHA exclusively in production", "query": "ALPHA",
+        "value": "ALPHA", "budget": 8, "expected_bound": True,
+    },
+    {
+        "case": "same_zh_tight", "language": "zh", "distance": "same_unit",
+        "content": "仅在生产环境使用 ALPHA。", "query": "ALPHA",
+        "value": "ALPHA", "budget": 4, "expected_bound": False,
+    },
+    {
+        "case": "same_zh_roomy", "language": "zh", "distance": "same_unit",
+        "content": "仅在生产环境使用 ALPHA。", "query": "ALPHA",
+        "value": "ALPHA", "budget": 6, "expected_bound": True,
+    },
+    {
+        "case": "distant_fr_tight", "language": "fr", "distance": "distant_unit",
+        "content": "Credential is ALPHA. Utilisation reservee a la production.",
+        "query": "ALPHA", "value": "ALPHA", "budget": 4, "expected_bound": False,
+    },
+    {
+        "case": "distant_fr_mid", "language": "fr", "distance": "distant_unit",
+        "content": "Credential is ALPHA. Utilisation reservee a la production.",
+        "query": "ALPHA", "value": "ALPHA", "budget": 8, "expected_bound": False,
+    },
+    {
+        "case": "distant_fr_roomy", "language": "fr", "distance": "distant_unit",
+        "content": "Credential is ALPHA. Utilisation reservee a la production.",
+        "query": "ALPHA", "value": "ALPHA", "budget": 13, "expected_bound": True,
+    },
+    {
+        "case": "distant_synonym_tight", "language": "en_synonym", "distance": "distant_unit",
+        "content": "Credential is ALPHA. Neutral note. Usage restricted to production.",
+        "query": "ALPHA", "value": "ALPHA", "budget": 4, "expected_bound": False,
+    },
+    {
+        "case": "distant_synonym_mid", "language": "en_synonym", "distance": "distant_unit",
+        "content": "Credential is ALPHA. Neutral note. Usage restricted to production.",
+        "query": "ALPHA", "value": "ALPHA", "budget": 8, "expected_bound": False,
+    },
+    {
+        "case": "distant_synonym_roomy", "language": "en_synonym", "distance": "distant_unit",
+        "content": "Credential is ALPHA. Neutral note. Usage restricted to production.",
+        "query": "ALPHA", "value": "ALPHA", "budget": 15, "expected_bound": True,
+    },
+)
+
+
+def _binding_fields(chunk) -> tuple[object, object, object, object]:
+    if chunk is None:
+        return None, None, None, None
+    unit = chunk.evidence_unit if isinstance(chunk.evidence_unit, dict) else {}
+    return (
+        chunk.exact_value,
+        chunk.source_span,
+        unit.get("value"),
+        unit.get("source_span"),
+    )
+
+
+def _unknown_qualifier_mode(*, packer, mode: str) -> dict:
+    counter = RegexTokenCounter()
+    outcomes = []
+    for case in _UNKNOWN_QUALIFIER_CASES:
+        content = case["content"]
+        value = case["value"]
+        binding = evidence.make_exact_value_binding(content, value, "identifier")
+        record = MemoryRecord(
+            id=case["case"], content=content, metadata={"exact_value": binding},
+        )
+        candidate = Candidate(record.id, 1.0, "lexical", record)
+        method = packer.pack if mode == "legacy" else packer.pack_coverage
+        packed = method(case["query"], [candidate], case["budget"])
+        selected = next((chunk for chunk in packed.chunks if chunk.id == record.id), None)
+        actual_binding, source_span, evidence_value, evidence_span = _binding_fields(selected)
+        actual_bound = actual_binding is not None
+        literal_present = value in packed.context
+        expected_bound = bool(case["expected_bound"])
+        source_tokens = counter("\n" + content)
+        full_source_tokens = counter("[1]\n" + content)
+        context_tokens = counter(packed.context)
+        counter_matches_usage = context_tokens == packed.usage.context_tokens
+        budget_honored = context_tokens <= case["budget"]
+        suppression_complete = (
+            not actual_bound
+            and source_span is None
+            and evidence_value is None
+            and evidence_span is None
+            and (mode == "legacy" or not literal_present)
+            and counter_matches_usage
+            and budget_honored
+        )
+        retained_complete = (
+            expected_bound
+            and actual_binding == binding
+            and selected is not None
+            and selected.excerpt.strip() == content.strip()
+            and source_span == (binding["start"], binding["end"])
+            and evidence_value == value
+            and evidence_span == [binding["start"], binding["end"]]
+            and counter_matches_usage
+            and budget_honored
+        )
+        unsafe_binding = not expected_bound and actual_bound
+        roomy_omission = expected_bound and not actual_bound
+        row_safe = (
+            (not expected_bound and suppression_complete)
+            or (expected_bound and retained_complete)
+        )
+        outcomes.append({
+            "case": case["case"],
+            "language": case["language"],
+            "distance": case["distance"],
+            "source": content,
+            "query": case["query"],
+            "value": value,
+            "budget": case["budget"],
+            "expected_bound": expected_bound,
+            "source_tokens": source_tokens,
+            "full_source_tokens": full_source_tokens,
+            "tokens": packed.usage.context_tokens,
+            "counter_context_tokens": context_tokens,
+            "counter_matches_usage": counter_matches_usage,
+            "budget_honored": budget_honored,
+            "context": packed.context,
+            "excerpt": selected.excerpt if selected else "",
+            "actual_bound": actual_bound,
+            "literal_present": literal_present,
+            "actual_binding": actual_binding,
+            "source_span": list(source_span) if source_span is not None else None,
+            "evidence_value": evidence_value,
+            "evidence_source_span": evidence_span,
+            "suppression_complete": suppression_complete,
+            "retained_complete": retained_complete,
+            "unsafe_binding": unsafe_binding,
+            "roomy_omission": roomy_omission,
+            "safe": row_safe,
+        })
+    roomy = [row for row in outcomes if row["expected_bound"]]
+    tight = [row for row in outcomes if not row["expected_bound"]]
+    return {
+        "mode": mode,
+        "cases": len(outcomes),
+        "correct": sum(row["safe"] for row in outcomes),
+        "tight_cases": len(tight),
+        "tight_suppressed": sum(row["suppression_complete"] for row in tight),
+        "unsafe_binding_count": sum(row["unsafe_binding"] for row in outcomes),
+        "coverage_literal_leak_count": sum(
+            mode == "coverage" and row["literal_present"]
+            for row in tight
+        ),
+        "token_accounting_errors": sum(
+            not row["counter_matches_usage"] for row in outcomes
+        ),
+        "budget_errors": sum(not row["budget_honored"] for row in outcomes),
+        "legacy_literal_without_binding": sum(
+            mode == "legacy" and row["literal_present"] and not row["actual_bound"]
+            for row in tight
+        ),
+        "roomy_cases": len(roomy),
+        "roomy_retained": sum(row["retained_complete"] for row in roomy),
+        "roomy_omission_count": sum(row["roomy_omission"] for row in roomy),
+        "outcomes": outcomes,
+    }
+
+
+def unknown_qualifier_diagnostic(*, packer_type=DeterministicContextPacker) -> dict:
+    """Gate unknown-language/synonym exact binding without changing v10 populations.
+
+    Tight fixtures require complete suppression. Coverage must withhold the bound
+    literal; legacy packing may show ordinary literal text, but never its binding.
+    Roomy retention checks the exact binding and both source-span fields. A roomy
+    omission is reported separately from unsafe binding leakage.
+    """
+    packer = packer_type()
+    legacy = _unknown_qualifier_mode(packer=packer, mode="legacy")
+    coverage = _unknown_qualifier_mode(packer=packer, mode="coverage")
+    return {
+        "boundary": (
+            "Fixed multilingual/synonym development fixtures; not semantic language "
+            "classification, QA quality, or provider performance."
+        ),
+        "reference_policy": "full meaningful source required for every exact binding",
+        "cases": len(_UNKNOWN_QUALIFIER_CASES),
+        "legacy": legacy,
+        "coverage": coverage,
+    }
+
+
+def coverage_query_safety_diagnostic(*, packer_type=DeterministicContextPacker) -> dict:
+    """Gate full-source exact binding while retaining the original query score."""
+    counter = RegexTokenCounter()
+    outcomes = []
+    for case in _coverage_query_cases():
+        binding = evidence.make_exact_value_binding(
+            case["source"], case["value"], source_span=case["span"],
+        )
+        record = MemoryRecord(
+            id=case["case"], content=case["source"],
+            metadata={"exact_value": binding},
+        )
+        candidates = [Candidate(record.id, 1.0, "lexical", record)]
+        if case["extra_source"]:
+            candidates.append(Candidate("other", 0.5, "lexical",
+                                        MemoryRecord(id="other", content="Unrelated.")))
+        packed = packer_type().pack_coverage(
+            case["query"], candidates, case["budget"],
+        )
+        selected = next((chunk for chunk in packed.chunks if chunk.id == record.id), None)
+        actual_binding, source_span, evidence_value, evidence_span = _binding_fields(selected)
+        actual_bound = actual_binding is not None
+        excerpt = selected.excerpt if selected else ""
+        old_correct = (
+            case["expected_excerpt"] in excerpt
+            and actual_binding == (binding if case["expected_bound"] else None)
+            and packed.usage.context_tokens <= case["budget"]
+        )
+        counter_context_tokens = counter(packed.context)
+        counter_matches_usage = counter_context_tokens == packed.usage.context_tokens
+        budget_honored = counter_context_tokens <= case["budget"]
+        complete_source = bool(
+            selected is not None and selected.excerpt.strip() == case["source"].strip()
+        )
+        safety_expected = bool(case["safety_expected_bound"])
+        safety_correct = (
+            actual_bound is safety_expected
+            and counter_matches_usage
+            and budget_honored
+            and (
+                (not safety_expected and source_span is None
+                 and evidence_value is None and evidence_span is None)
+                or (safety_expected and complete_source
+                    and actual_binding == binding
+                    and source_span == (binding["start"], binding["end"])
+                    and evidence_value == case["value"]
+                    and evidence_span == [binding["start"], binding["end"]])
+            )
+        )
+        outcomes.append({
+            "case": case["case"],
+            "source": case["source"],
+            "query": case["query"],
+            "budget": case["budget"],
+            "expected_excerpt": case["expected_excerpt"],
+            "expected_bound": case["expected_bound"],
+            "safety_expected_bound": safety_expected,
+            "tokens": packed.usage.context_tokens,
+            "counter_context_tokens": counter_context_tokens,
+            "counter_matches_usage": counter_matches_usage,
+            "budget_honored": budget_honored,
+            "excerpt": excerpt,
+            "complete_source": complete_source,
+            "actual_bound": actual_bound,
+            "actual_binding": actual_binding,
+            "source_span": list(source_span) if source_span is not None else None,
+            "evidence_value": evidence_value,
+            "evidence_source_span": evidence_span,
+            "old_correct": old_correct,
+            "safety_correct": safety_correct,
+        })
+    return {
+        "boundary": (
+            "The original query expectations remain a retention population; the "
+            "safety expectation is the separate full-source contract."
+        ),
+        "cases": len(outcomes),
+        "correct": sum(row["old_correct"] for row in outcomes),
+        "safety_cases": len(outcomes),
+        "safety_correct": sum(row["safety_correct"] for row in outcomes),
+        "token_accounting_errors": sum(
+            not row["counter_matches_usage"] for row in outcomes
+        ),
+        "budget_errors": sum(not row["budget_honored"] for row in outcomes),
+        "outcomes": outcomes,
+    }
+
+
 def run(*, evidence_module=evidence, packer_type=DeterministicContextPacker) -> dict:
     binding = evidence_module.make_exact_value_binding("label=Δ-42", "Δ-42", "identifier")
     contract = evidence_module.make_action_contract(
@@ -633,6 +950,8 @@ def run(*, evidence_module=evidence, packer_type=DeterministicContextPacker) -> 
             "outcomes": source_outcomes,
         },
         "coverage_queries": coverage_query_diagnostic(packer_type=packer_type),
+        "coverage_query_safety": coverage_query_safety_diagnostic(packer_type=packer_type),
+        "unknown_qualifiers": unknown_qualifier_diagnostic(packer_type=packer_type),
         "coverage_restrictions": coverage_restriction_diagnostic(packer_type=packer_type),
         "coverage_binding_safety": coverage_binding_safety_diagnostic(packer_type=packer_type),
         "coverage_distant_restrictions": coverage_distant_restriction_diagnostic(packer_type=packer_type),
@@ -660,12 +979,26 @@ def main() -> int:
     report = run()
     print(json.dumps(report, sort_keys=True))
     validation = report["action_validation"]
-    # Preserve the old five-case retention score without treating unsafe partial
-    # units as the target behavior. Complete-unit safety and roomy retention are
-    # separately required below, including those same sources and tight budgets.
+    # Preserve the old five-case and eight-case retention scores without treating
+    # partial bindings as the target behavior. Source completeness, suppression,
+    # accounting and roomy retention are separate gates on the unchanged inputs.
     return 0 if (validation["correct"] == validation["cases"]
                  and report["source_validation"]["correct"] == report["source_validation"]["cases"]
-                 and report["coverage_queries"]["correct"] == report["coverage_queries"]["cases"]
+                 and report["coverage_queries"]["cases"] == 8
+                 and report["coverage_query_safety"]["safety_correct"] == report["coverage_query_safety"]["safety_cases"]
+                 and report["coverage_query_safety"]["token_accounting_errors"] == 0
+                 and report["coverage_query_safety"]["budget_errors"] == 0
+                 and report["unknown_qualifiers"]["legacy"]["correct"] == report["unknown_qualifiers"]["legacy"]["cases"]
+                 and report["unknown_qualifiers"]["coverage"]["correct"] == report["unknown_qualifiers"]["coverage"]["cases"]
+                 and report["unknown_qualifiers"]["legacy"]["unsafe_binding_count"] == 0
+                 and report["unknown_qualifiers"]["coverage"]["unsafe_binding_count"] == 0
+                 and report["unknown_qualifiers"]["coverage"]["coverage_literal_leak_count"] == 0
+                 and report["unknown_qualifiers"]["legacy"]["roomy_omission_count"] == 0
+                 and report["unknown_qualifiers"]["coverage"]["roomy_omission_count"] == 0
+                 and report["unknown_qualifiers"]["legacy"]["token_accounting_errors"] == 0
+                 and report["unknown_qualifiers"]["coverage"]["token_accounting_errors"] == 0
+                 and report["unknown_qualifiers"]["legacy"]["budget_errors"] == 0
+                 and report["unknown_qualifiers"]["coverage"]["budget_errors"] == 0
                  and report["coverage_binding_safety"]["correct"] == report["coverage_binding_safety"]["cases"]
                  and report["coverage_distant_restrictions"]["correct"] == report["coverage_distant_restrictions"]["cases"]
                  and report["coverage_complete_units"]["correct"] == report["coverage_complete_units"]["cases"]

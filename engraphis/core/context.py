@@ -23,7 +23,6 @@ from engraphis.core.evidence import exact_value_binding
 
 _TOKEN_RE = re.compile(r"\w+|[^\w\s]", re.UNICODE)
 _SENTENCE_RE = re.compile(r"(?<=[.!?])(?:[\"')\]]*)\s+|\n+")
-_RESTRICTION_SENTENCE_RE = re.compile(r"(?<=[.!?])(?:[\"')\]]*)\s+")
 _WORD_RE = re.compile(r"\w+", re.UNICODE)
 _BRIDGE_TERMS = frozenset({
     "call", "calls", "called", "caller", "dependency", "depends", "flow",
@@ -61,47 +60,18 @@ def _protected_sentence(text: str) -> bool:
 
 
 def _exact_group_span(source: str, binding: dict[str, object]) -> tuple[int, int]:
-    """Bind complete qualifier units around a bound literal.
+    """Require all source text before publishing a bound value.
 
-    The source is the only authority available at packing time. A fixed-distance
-    neighborhood can miss a qualifier separated from a bound literal by neutral
-    sentences, then expose the literal without its condition. Treat every
-    punctuation-delimited qualifier-bearing unit outside the literal as potentially
-    governing and include complete units from the outermost qualifier through the
-    complete bound unit. Line breaks remain soft wrapping; an ambiguous
-    unpunctuated record therefore falls back to its whole record, preserving the
-    fail-closed rule.
+    Conditions may use any language or appear outside the literal's sentence.
+    Lexical matches cannot establish that omitted text is irrelevant, so the
+    complete meaningful source is the binding boundary. Preserve any boundary
+    whitespace inside the authored literal as well as its original coordinates.
     """
     left, right = cast(int, binding["start"]), cast(int, binding["end"])
-    units = []
-    start = 0
-    for separator in _RESTRICTION_SENTENCE_RE.finditer(source):
-        # Preserve closing quotes/brackets before the separating whitespace.
-        end = separator.start() + len(separator.group().rstrip())
-        units.append((start, end))
-        start = separator.end()
-    units.append((start, len(source)))
-    units = [(start + len(source[start:end]) - len(source[start:end].lstrip()),
-              start + len(source[start:end].rstrip())) for start, end in units]
-    units = [(start, end) for start, end in units if start < end]
-    overlaps = [index for index, (start, end) in enumerate(units)
-                if start < right and left < end]
-    qualifier_units = []
-    # Scan the bounded source once. Qualifiers inside the literal are data, so
-    # inspect only the portions of a unit outside [left, right).
-    for index, (start, end) in enumerate(units):
-        before = source[start:min(end, left)] if start < left else ""
-        after = source[max(start, right):end] if right < end else ""
-        if _terms(before) & _QUALIFIER_TERMS or _terms(after) & _QUALIFIER_TERMS:
-            qualifier_units.append(index)
-    if not qualifier_units:
-        return left, right
-    if not overlaps:
-        # A whitespace literal between units has no proven sentence boundary.
-        return 0, len(source)
-    first = min(qualifier_units[0], overlaps[0])
-    last = max(qualifier_units[-1], overlaps[-1])
-    return min(left, units[first][0]), max(right, units[last][1])
+    return (
+        min(left, len(source) - len(source.lstrip())),
+        max(right, len(source.rstrip())),
+    )
 
 
 def _normalize_title(title: Optional[str]) -> str:
@@ -530,9 +500,9 @@ class DeterministicContextPacker:
 
         The unit is intentionally derived only from the retrieved record and the
         rendered excerpt.  Gold labels and arbitrary metadata never cross this
-        packing boundary. A literal is advertised only when its bound occurrence
-        is present. Coverage supplies a coordinate-validated binding; legacy
-        excerpts must map unambiguously to a contiguous source span.
+        packing boundary. A literal is advertised only when the complete meaningful
+        source and its bound occurrence are present. Coverage supplies a validated
+        binding; legacy excerpts must map unambiguously to a contiguous source span.
         """
         record = candidate.record
         if record is None:
@@ -553,7 +523,12 @@ class DeterministicContextPacker:
                 # sentence. The source-wide group is the safety boundary for
                 # exact metadata; keep the established excerpt selection, but
                 # withhold the binding until that whole group is rendered.
-                source_excerpt = excerpt.removesuffix(" […]")
+                source_excerpt = excerpt
+                if excerpt.endswith(" […]") and excerpt.strip() != record.content.strip():
+                    # The marker is a renderer suffix only when the rendered
+                    # text is not already the complete authored source. Keep an
+                    # authored trailing marker in a full-source exact binding.
+                    source_excerpt = excerpt.removesuffix(" […]")
                 excerpt_start = record.content.find(source_excerpt) if source_excerpt else -1
                 required_span = _exact_group_span(record.content, checked)
                 group_complete = (
@@ -679,11 +654,11 @@ class DeterministicContextPacker:
                     best, best_score = excerpt, score
                     best_binding = binding if covers_binding else None
         if binding and exact_value and fits(exact_value):
-            # Grow a verified literal when nearby complete units cannot fit. Score its
-            # own unit's query terms, so growth into an adjacent sentence cannot
-            # displace that sentence's complete, more relevant evidence.
+            # Try the complete source when a bound value is relevant. Score the
+            # bound unit's query terms so unrelated full-source text cannot displace
+            # a more relevant unbound evidence window.
             excerpt = self._exact_window(
-                record.content, binding, query_terms, fits, required_span=required_span,
+                record.content, binding, fits, required_span=required_span,
             )
             terms = _terms(excerpt)
             score = (len(terms & query_terms & _terms(bound_unit)),
@@ -696,40 +671,14 @@ class DeterministicContextPacker:
         return best, reason, best_binding
 
     def _exact_window(
-        self, source: str, binding: dict[str, object], query_terms: set[str],
+        self, source: str, binding: dict[str, object],
         fits: Callable[[str], bool],
         *, required_span: Optional[tuple[int, int]] = None,
     ) -> str:
-        """Reserve complete detected restriction units, then expand the literal."""
-        if fits(source):
-            return source
+        """Return the complete source boundary if it fits the rendered budget."""
         left, right = required_span or _exact_group_span(source, binding)
-        if not fits(source[left:right]):
-            return ""
-        before = list(_TOKEN_RE.finditer(source, 0, left))
-        after = list(_TOKEN_RE.finditer(source, right))
-        taken = [0, 0]
-        best = source[left:right]
-        while True:
-            options = []
-            # Repeated query terms add no coverage after their first occurrence.
-            covered = _terms(best)
-            for side, matches in enumerate((before, after)):
-                if taken[side] >= len(matches):
-                    continue
-                token = matches[-taken[side] - 1] if side == 0 else matches[taken[side]]
-                start, end = (token.start(), right) if side == 0 else (left, token.end())
-                excerpt = source[start:end]
-                if fits(excerpt):
-                    terms = _terms(token.group())
-                    rank = (2 * len(terms & _QUALIFIER_TERMS) + len((terms - covered) & query_terms),
-                            -taken[side], -side)
-                    options.append((rank, side, start, end, excerpt))
-            if not options:
-                break
-            _, side, left, right, best = max(options)
-            taken[side] += 1
-        return best
+        excerpt = source[left:right]
+        return excerpt if fits(excerpt) else ""
 
     def _render_packed(self, chunks: list[PackedChunk]) -> str:
         parts = []

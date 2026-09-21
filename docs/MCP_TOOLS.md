@@ -36,7 +36,7 @@ namesakes; advanced controls are discoverable rather than routine:
 | `engraphis_recall_context` | `query`, `workspace`, `repo`, `session_id`, `k`, `token_budget`, `packing_mode`, `retrieval_recipe`, `format`; always compact, no `response_mode` |
 
 `format="gist"` is a compatibility option for the same budgeted, cited evidence as
-`full`. It preserves complete conditions and code whitespace; it does not apply an
+`full`. It preserves the same selected text and whitespace; it does not apply an
 additional summary or promise extra token savings. Source IDs remain in `sources`.
 
 
@@ -160,7 +160,11 @@ the original query.
 Compact service and REST recall candidate rows contain identities and scores, without
 `exact_value`. Literal bindings appear only in `packed_sources` for admitted evidence;
 `engraphis_recall_context` exposes these admitted bindings in `sources`. A candidate's presence
-alone does not establish that its bound occurrence was included in the returned context.
+alone does not establish that its complete source was included in the returned context.
+An exact binding requires the complete memory source, with boundary whitespace trimming
+permitted only outside the bound value. This retains conditions without inferring their
+meaning or authorizing an action. Partial legacy excerpts remain ordinary context without
+binding metadata; coverage withholds bound groups that cannot fit.
 
 For parameter details and return shapes, see the tool descriptions exposed by the MCP server. The
 [agent connection guide](AGENT_CONNECT.md) explains local and hosted connections, and the

@@ -186,6 +186,11 @@ def test_literal_whitespace_outside_a_unit_is_still_atomic_with_custom_counter()
     tight = packer.pack_coverage("ALPHA", [candidate], budget - 1)
     assert "ALPHA" not in tight.context
     assert all(chunk.exact_value is None for chunk in tight.chunks)
-    fitted = packer.pack_coverage("ALPHA", [candidate], budget)
-    assert fitted.chunks[0].excerpt == complete
+    partial = packer.pack_coverage("ALPHA", [candidate], budget)
+    assert "ALPHA" not in partial.context
+    assert all(chunk.exact_value is None for chunk in partial.chunks)
+    full_budget = len("[1]\n" + content.strip())
+    fitted = packer.pack_coverage("ALPHA", [candidate], full_budget)
+    assert fitted.chunks[0].excerpt == content.strip()
     assert fitted.chunks[0].exact_value == binding
+    assert fitted.usage.context_tokens == full_budget

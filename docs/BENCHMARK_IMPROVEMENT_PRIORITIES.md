@@ -48,8 +48,10 @@ The first implementation pass keeps the production and benchmark defaults unchan
   within its existing payload budget. Compact recall candidate rows omit exact bindings;
   admitted bindings remain in `packed_sources` (or MCP `recall_context`'s `sources`) alongside
   the returned context.
-  Legacy packing also withholds exact binding metadata when its excerpt omits part of
-  the detected restriction group. Its selected text and token accounting are unchanged;
+  Both modes require the complete memory source to publish an exact binding, keeping
+  conditions in any language with the value. Boundary whitespace outside the bound value
+  may be trimmed. Legacy packing withholds binding metadata for partial excerpts.
+  Its selected text and token accounting are unchanged;
   visible literal text alone does not establish a safe exact-copy binding.
 - `retrieval_recipe="conversation"` selects the measured `k=20` / 1,500-token starting
   point, while `"long_session"` selects `k=10` / 4,096 tokens when the caller leaves
