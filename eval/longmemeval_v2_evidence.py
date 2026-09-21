@@ -541,6 +541,14 @@ def build_evidence_report(
             manifest_file,
             execution_manifest_file,
         ],
+        source_names=(
+            "inputs/per_question",
+            "inputs/haystack",
+            "inputs/trajectories",
+            "inputs/memory_config",
+            "inputs/matrix_manifest",
+            "inputs/execution_manifest",
+        ),
         config={
             "measurement_scope": "end_to_end",
             "claim_boundary": (
@@ -593,12 +601,12 @@ def build_evidence_report(
     report["environment"] = execution_environment
     report["protocol"]["source_questions"] = len(expected_question_ids)
     expected_sources = [
-        (per_question.name, per_question_digest),
-        (haystack_file.name, source_hashes[haystack_file]),
-        (trajectories_file.name, source_hashes[trajectories_file]),
-        (memory_config_file.name, config_sha256),
-        (manifest_file.name, matrix_manifest_digest),
-        (execution_manifest_file.name, execution_manifest_snapshot[1]),
+        ("inputs/per_question", per_question_digest),
+        ("inputs/haystack", source_hashes[haystack_file]),
+        ("inputs/trajectories", source_hashes[trajectories_file]),
+        ("inputs/memory_config", config_sha256),
+        ("inputs/matrix_manifest", matrix_manifest_digest),
+        ("inputs/execution_manifest", execution_manifest_snapshot[1]),
     ]
     actual_sources = [
         (item.get("name"), item.get("sha256"))

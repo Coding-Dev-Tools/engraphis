@@ -17,7 +17,7 @@ import re
 import subprocess
 import sys
 from copy import deepcopy
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable, Optional, Protocol, Sequence, Union
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -130,6 +130,31 @@ def source_digest(path: Union[str, Path]) -> dict[str, Union[str, int]]:
         "sha256": digest.hexdigest(),
         "bytes": byte_count,
     }
+
+
+def _source_digests(
+    paths: Sequence[Union[str, Path]], names: Optional[Sequence[str]],
+) -> list[dict[str, Union[str, int]]]:
+    """Allow explicit public identities without exposing private source paths."""
+    paths = tuple(paths)
+    if names is not None:
+        if isinstance(names, (str, bytes)) or len(names) != len(paths):
+            raise ValueError("source_names must contain one public name per source")
+        names = tuple(names)
+        for name in names:
+            if (not isinstance(name, str) or not name
+                    or not name.isprintable() or "\\" in name or ":" in name
+                    or PurePosixPath(name).is_absolute()
+                    or PurePosixPath(name).as_posix() != name
+                    or any(part in (".", "..") for part in name.split("/"))):
+                raise ValueError("source_names must be safe relative POSIX public names")
+        if len(set(names)) != len(names):
+            raise ValueError("source_names must be unique")
+    sources = [source_digest(path) for path in paths]
+    if names is not None:
+        for source, name in zip(sources, names):
+            source["name"] = name
+    return sources
 
 
 def verify_report_snapshot(report: dict, *, dataset_sha256: str,
@@ -1328,6 +1353,7 @@ def report_envelope(
     git_commit: Optional[str] = None,
     command: Optional[Sequence[str]] = None,
     source_paths: Optional[Sequence[Union[str, Path]]] = None,
+    source_names: Optional[Sequence[str]] = None,
     models: Optional[dict] = None,
     token_accounting: Optional[dict] = None,
 ) -> dict:
@@ -1335,7 +1361,9 @@ def report_envelope(
 
     This is intentionally the one path through which public reports obtain
     provenance. It redacts raw question/answer/context fields before any caller
-    can persist the returned envelope.
+    can persist the returned envelope. Source names default to basenames for
+    privacy; callers may explicitly supply unique public repository paths or
+    role identifiers, never private input paths, via ``source_names``.
     """
     path = Path(dataset_path)
     observed_git = git_provenance()
@@ -1364,7 +1392,7 @@ def report_envelope(
             "name": suite,
             "dataset": path.name,
             "sha256": sha256_file(path),
-            "sources": [source_digest(item) for item in source_paths or ()],
+            "sources": _source_digests(source_paths or (), source_names),
         },
         "system": {
             "git_commit": resolved_commit,

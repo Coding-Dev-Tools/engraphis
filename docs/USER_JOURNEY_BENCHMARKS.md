@@ -64,9 +64,14 @@ and any production-like embedding or capacity campaign require their own
 frozen protocol and reporting boundary.
 
 The retained current invocation passed all seven journeys:
-[public artifact](benchmark-evidence/user-journeys-20260917-review-fix.json), with its adjacent checksum.
+[public artifact](benchmark-evidence/user-journeys-20260921.json), with its adjacent checksum.
 Reproduce the export with
 `python -m scripts.export_user_journey_evidence --output <new-artifact.json>`.
+
+Each public producer has a unique repository-relative source name with its SHA-256
+and byte count, so modules sharing names such as `__init__.py` remain distinguishable.
+Absolute checkout paths and private runtime paths are omitted. Earlier artifacts
+retain their original basename-only source entries and checksums.
 
 The retained artifact is the full MCP-enabled path.  In the Python 3.9 core-floor
 environment, `mcp_context_budget` cannot load the optional MCP package; the runner

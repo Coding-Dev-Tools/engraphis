@@ -199,8 +199,45 @@ def test_diagnostic_repair_config_retains_the_verified_digest_during_replacement
         report, dataset=str(dataset), repair_manifest=str(manifest), source_snapshot={},
     )
     assert artifact["protocol"]["config"]["repair_manifest_sha256"] == repair_digest
-    assert artifact["suite"]["sources"][0]["sha256"] == repair_digest
+    assert [item["name"] for item in artifact["suite"]["sources"]] == [
+        "inputs/dataset", "inputs/repair_manifest",
+    ]
+    assert artifact["suite"]["sources"][1]["sha256"] == repair_digest
     assert observed == [repair_digest]
+
+
+def test_diagnostic_artifact_labels_private_inputs_and_duplicate_producers_without_paths(tmp_path):
+    dataset = tmp_path / "dataset.json"
+    dataset.write_text("{}", encoding="utf-8")
+    root = Path(external.__file__).resolve().parents[1]
+    producer_names = ["engraphis/core/__init__.py", "engraphis/backends/__init__.py"]
+    producer_snapshot = {
+        name: external.sha256_file(root / name) for name in producer_names
+    }
+    dataset_snapshot = external._read_json_snapshot(dataset)
+    report = {
+        "format": "locomo",
+        "dataset_sha256": dataset_snapshot.sha256,
+        "detail": [],
+        "configuration": {},
+        "embedding": "offline",
+    }
+
+    artifact = external.diagnostic_artifact(
+        report,
+        dataset=str(dataset),
+        source_snapshot=producer_snapshot,
+        dataset_snapshot=dataset_snapshot,
+    )
+
+    assert [item["name"] for item in artifact["suite"]["sources"]] == [
+        "inputs/dataset", *producer_names,
+    ]
+    assert [(item["name"], item["sha256"]) for item in artifact["suite"]["sources"]] == [
+        ("inputs/dataset", dataset_snapshot.sha256), *producer_snapshot.items(),
+    ]
+    assert len({item["name"] for item in artifact["suite"]["sources"]}) == 3
+    assert str(tmp_path) not in json.dumps(artifact)
 
 
 def test_load_longmemeval_collapses_identical_duplicate_session_ids(tmp_path):

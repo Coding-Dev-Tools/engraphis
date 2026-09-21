@@ -279,6 +279,8 @@ and erasure/restart. See [USER_JOURNEY_BENCHMARKS.md](USER_JOURNEY_BENCHMARKS.md
 They establish functional evidence and do not replace capacity or coding outcome measurements.
 Retain a public source-bound artifact with
 `python -m scripts.export_user_journey_evidence --output <new-artifact.json>`.
+The artifact identifies public producers by unique repository-relative names and
+verifies their bytes against the evaluated snapshot without publishing checkout paths.
 
 ## Durable serial local queue
 
