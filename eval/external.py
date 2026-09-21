@@ -43,7 +43,7 @@ import json
 import re
 import sys
 import time
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Optional, Union
 
 from engraphis.backends.embedder_st import get_embedder
@@ -76,6 +76,30 @@ def _read_json_snapshot(path: Union[str, Path]) -> _JsonSnapshot:
         value=value,
         sha256=hashlib.sha256(payload).hexdigest(),
     )
+
+
+def _producer_source_manifest(
+    root: Path, producer_digests: dict[str, str],
+) -> tuple[list[Path], list[str]]:
+    """Resolve producer paths while keeping only safe public source names."""
+    paths: list[Path] = []
+    names: list[str] = []
+    for name in producer_digests:
+        candidate = Path(name)
+        windows_candidate = PureWindowsPath(name)
+        if candidate.is_absolute() or windows_candidate.is_absolute():
+            # The production snapshot is repository-relative.  Keep this
+            # basename fallback for test-injected/private snapshots without
+            # ever publishing their absolute path; source_names still rejects
+            # collisions and unsafe labels in the shared envelope builder.
+            paths.append(candidate)
+            names.append(
+                windows_candidate.name if windows_candidate.is_absolute() else candidate.name
+            )
+        else:
+            paths.append(root / candidate)
+            names.append(name)
+    return paths, names
 
 
 def diagnostic_artifact(report: dict, *, dataset: str,
@@ -120,19 +144,20 @@ def diagnostic_artifact(report: dict, *, dataset: str,
     producer_digests = (
         source_snapshot if source_snapshot is not None else producer_snapshot()
     )
-    paths = [root / name for name in producer_digests]
-    expected_sources = [
-        (Path(name).name, digest) for name, digest in producer_digests.items()
-    ]
+    producer_paths, producer_names = _producer_source_manifest(root, producer_digests)
+    paths = [Path(dataset), *producer_paths]
+    source_names = ["inputs/dataset", *producer_names]
+    expected_sources = [("inputs/dataset", dataset_hash), *zip(producer_names, producer_digests.values())]
     repair_digest = None
     if repair_manifest:
         paths.append(Path(repair_manifest))
+        source_names.append("inputs/repair_manifest")
         repair_digest = (repair_manifest_snapshot.sha256 if repair_manifest_snapshot is not None
                          else sha256_file(repair_manifest))
-        expected_sources.append((Path(repair_manifest).name, repair_digest))
+        expected_sources.append(("inputs/repair_manifest", repair_digest))
     envelope = report_envelope(
         suite=f"Engraphis {report['format']} retrieval diagnostic", dataset_path=dataset,
-        source_paths=paths, records=detail, metrics=metrics,
+        source_paths=paths, source_names=source_names, records=detail, metrics=metrics,
         config={**report["configuration"], "measurement_scope": "retrieval_only",
                 "source_case_identity": "explicit",
                 "format": report["format"], "embedding": report["embedding"],
@@ -886,11 +911,12 @@ def main(argv: Optional[list[str]] = None) -> int:
                 dataset_snapshot=dataset_snapshot,
                 repair_manifest_snapshot=repair_manifest_snapshot,
             )
-            expected_sources = [
-                (Path(name).name, digest) for name, digest in source_before.items()
-            ]
+            _, producer_names = _producer_source_manifest(Path(__file__).resolve().parents[1], source_before)
+            expected_sources = [("inputs/dataset", dataset_before)] + list(
+                zip(producer_names, source_before.values())
+            )
             if repair_manifest:
-                expected_sources.append((Path(repair_manifest).name, repair_manifest_before))
+                expected_sources.append(("inputs/repair_manifest", repair_manifest_before))
             observed_sources = [(item["name"], item["sha256"]) for item in artifact["suite"]["sources"]]
             if (artifact["suite"]["sha256"] != dataset_before
                     or observed_sources != expected_sources

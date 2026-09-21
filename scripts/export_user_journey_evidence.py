@@ -11,12 +11,41 @@ from eval.user_journeys import AVAILABLE_JOURNEYS, run_journeys, verify_envelope
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _source_label(path: Path) -> str:
+    """Return a stable public repo-relative label for one producer source."""
+    root = ROOT.resolve()
+    resolved = path.resolve()
+    try:
+        relative = resolved.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("journey producer source is outside the repository root") from exc
+    label = relative.as_posix()
+    if not label or label == "." or label.startswith("../"):
+        raise ValueError("journey producer source has no stable relative label")
+    return label
+
+
+def _producer_sources() -> tuple[list[Path], list[str]]:
+    paths = [
+        *ROOT.joinpath("engraphis").rglob("*.py"),
+        ROOT / "eval/user_journeys.py",
+        ROOT / "eval/benchmark.py",
+        Path(__file__),
+    ]
+    labeled = sorted(((_source_label(path), path) for path in paths), key=lambda item: item[0])
+    labels = [label for label, _ in labeled]
+    if len(labels) != len(set(labels)):
+        raise ValueError("journey producer source labels are not unique")
+    return [path for _, path in labeled], labels
+
+
 def export(output: Path) -> dict:
-    sources = sorted([*ROOT.joinpath("engraphis").rglob("*.py"),
-                      ROOT / "eval/user_journeys.py", ROOT / "eval/benchmark.py", Path(__file__)])
+    sources, labels = _producer_sources()
     before = {str(path): sha256_file(path) for path in sources}
     observed = run_journeys()
-    if not verify_envelope(observed) or before != {str(path): sha256_file(path) for path in sources}:
+    after_sources, after_labels = _producer_sources()
+    after = {str(path): sha256_file(path) for path in after_sources}
+    if (not verify_envelope(observed) or labels != after_labels or before != after):
         raise ValueError("journey evidence or producer source changed during execution")
     payload = observed["payload"]
     report = report_envelope(
@@ -29,15 +58,19 @@ def export(output: Path) -> dict:
         metrics={**payload, "status": "COMPLETE" if payload["failed"] == 0 else "BLOCKED",
                  "source_stable": True, "independent_acceptance_eligible": False,
                  "leadership_eligible": False},
-        source_paths=sources,
+        source_paths=sources, source_names=labels,
         models={"embedding": {"identity": "deterministic hashing", "semantic": False}},
         token_accounting={"identity": "engraphis.regex.v1", "revision": None,
                           "scope": "journey context checks only", "method": "not provider billing"},
         command=["python", "-m", "scripts.export_user_journey_evidence", "--output", "<new-artifact>"],
     )
-    expected_sources = [(path.name, before[str(path)]) for path in sources]
+    expected_sources = list(zip(labels, (before[str(path)] for path in sources)))
+    observed_sources = [
+        (item.get("name"), item.get("sha256"))
+        for item in report["suite"]["sources"]
+    ]
     if (report["suite"]["sha256"] != before[str(ROOT / "eval/user_journeys.py")]
-            or [(item["name"], item["sha256"]) for item in report["suite"]["sources"]] != expected_sources):
+            or observed_sources != expected_sources):
         raise ValueError("journey artifact does not match the evaluated source snapshot")
     write_canonical_artifact(report, output)
     return report

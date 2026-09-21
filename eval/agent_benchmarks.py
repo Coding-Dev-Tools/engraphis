@@ -30,13 +30,13 @@ from collections import Counter
 from dataclasses import dataclass
 import hashlib
 import json
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import re
 from typing import Any, Callable, Optional, Union
 
 from engraphis.backends import DeterministicEmbedder
 from engraphis.backends.embedder_st import get_embedder
-from eval.benchmark import report_envelope, sha256_file, write_canonical_artifact
+from eval.benchmark import report_envelope, sha256_file, verify_report_snapshot, write_canonical_artifact
 from eval.external_checkpoints import producer_snapshot, run_resumable
 from eval.harness import run
 
@@ -493,6 +493,29 @@ def _producer_snapshot() -> dict:
     return {**producer_snapshot(), "eval/agent_benchmarks.py": sha256_file(Path(__file__))}
 
 
+def _producer_source_manifest(
+    root: Path, producer_digests: dict[str, str],
+) -> tuple[list[Path], list[str]]:
+    """Resolve producer paths and retain only stable public source names."""
+    paths: list[Path] = []
+    names: list[str] = []
+    for name in producer_digests:
+        candidate = Path(name)
+        windows_candidate = PureWindowsPath(name)
+        if candidate.is_absolute() or windows_candidate.is_absolute():
+            # Production snapshots are repository-relative. A basename-only
+            # fallback keeps private/test-injected snapshots from leaking an
+            # absolute path; the shared envelope rejects collisions/unsafe names.
+            paths.append(candidate)
+            names.append(
+                windows_candidate.name if windows_candidate.is_absolute() else candidate.name
+            )
+        else:
+            paths.append(root / candidate)
+            names.append(name)
+    return paths, names
+
+
 def _separate_unlabeled_retrieval(report: dict) -> None:
     """Do not award perfect retrieval to questions with no gold evidence IDs."""
     detail = list(report.get("detail") or [])
@@ -532,6 +555,7 @@ def public_artifact(
     embedder: Optional[object],
     resolve_conflicts: bool,
     token_budget: int = 1500,
+    source_snapshot: Optional[dict[str, str]] = None,
 ) -> dict:
     """Build a redacted immutable envelope from a private adapter report."""
     if bool(embed_model) != bool(embed_revision):
@@ -562,8 +586,17 @@ def public_artifact(
     metrics = {name: report[name] for name in metric_names if name in report}
     metrics["claim_boundary"] = _claim_boundary(fmt)
     root = Path(__file__).resolve().parents[1]
-    source_paths = [dataset, *([conversations] if conversations else []),
-                    *(root / name for name in _producer_snapshot())]
+    producer_digests = source_snapshot if source_snapshot is not None else _producer_snapshot()
+    producer_paths, producer_names = _producer_source_manifest(root, producer_digests)
+    source_paths = [Path(dataset), *([Path(conversations)] if conversations else []),
+                    *producer_paths]
+    source_names = ["inputs/dataset", *(["inputs/conversations"] if conversations else []),
+                    *producer_names]
+    dataset_digest = sha256_file(dataset)
+    expected_sources = [("inputs/dataset", dataset_digest)]
+    if conversations:
+        expected_sources.append(("inputs/conversations", sha256_file(conversations)))
+    expected_sources.extend(zip(producer_names, producer_digests.values()))
     command = [
         "python", "-m", "eval.agent_benchmarks",
         "--dataset", "<dataset>",
@@ -585,10 +618,11 @@ def public_artifact(
     selected_embedder = embedder or DeterministicEmbedder()
     model_id = getattr(selected_embedder, "model_name", type(selected_embedder).__name__)
     revision = getattr(selected_embedder, "revision", None)
-    return report_envelope(
+    envelope = report_envelope(
         suite=f"Engraphis {fmt}",
         dataset_path=dataset,
         source_paths=source_paths,
+        source_names=source_names,
         config={
             "measurement_scope": "retrieval_only",
             "source_case_identity": "explicit",
@@ -622,6 +656,7 @@ def public_artifact(
         records=detail,
         metrics=metrics,
     )
+    return verify_report_snapshot(envelope, dataset_sha256=dataset_digest, sources=expected_sources)
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -735,27 +770,34 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.json_out:
         Path(args.json_out).write_text(output + "\n", encoding="utf-8")
     if args.artifact:
-        artifact = public_artifact(
-            report,
-            fmt=args.format,
-            dataset=args.dataset,
-            conversations=args.conversations,
-            k=args.k,
-            limit=args.limit,
-            embed_model=args.embed_model,
-            embed_revision=args.embed_revision,
-            include_original_locomo=bool(args.include_original_locomo),
-            embedder=embedder,
-            resolve_conflicts=not args.no_resolve,
-            token_budget=args.token_budget,
-        )
+        try:
+            artifact = public_artifact(
+                report,
+                fmt=args.format,
+                dataset=args.dataset,
+                conversations=args.conversations,
+                k=args.k,
+                limit=args.limit,
+                embed_model=args.embed_model,
+                embed_revision=args.embed_revision,
+                include_original_locomo=bool(args.include_original_locomo),
+                embedder=embedder,
+                resolve_conflicts=not args.no_resolve,
+                token_budget=args.token_budget,
+                source_snapshot=source_before,
+            )
+        except ValueError as exc:
+            parser.error(f"diagnostic artifact cannot bind the evaluated producer or data snapshots: {exc}")
         # Envelope construction reads files again. Verify the completed envelope
         # against the snapshots that actually bounded this evaluation, including
         # changes made while the private report was serialized or printed.
-        expected_sources = [
-            (Path(name).name, data_before[name])
-            for name in (args.dataset, args.conversations) if name
-        ] + [(Path(name).name, digest) for name, digest in source_before.items()]
+        _, producer_names = _producer_source_manifest(
+            Path(__file__).resolve().parents[1], source_before,
+        )
+        expected_sources = [("inputs/dataset", data_before[args.dataset])]
+        if args.conversations:
+            expected_sources.append(("inputs/conversations", data_before[args.conversations]))
+        expected_sources.extend(zip(producer_names, source_before.values()))
         observed_sources = [(item["name"], item["sha256"])
                             for item in artifact["suite"]["sources"]]
         if (artifact["suite"]["sha256"] != data_before[args.dataset]

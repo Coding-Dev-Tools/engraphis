@@ -344,12 +344,58 @@ def test_cli_writes_redacted_immutable_artifact(tmp_path, capsys):
     serialized = json.dumps(artifact)
     assert query not in serialized
     assert "query_sha256" not in artifact["records"][0]
-    assert artifact["suite"]["sources"][0]["name"] == "plus.json"
+    assert artifact["suite"]["sources"][0]["name"] == "inputs/dataset"
     assert artifact["metrics"]["claim_boundary"].startswith("Cue-evidence retrieval")
     assert "not generated-answer correctness" in artifact["metrics"]["sufficient_evidence_proxy_boundary"]
     assert artifact["protocol"]["config"]["limit"] is None
     assert "--limit" not in artifact["protocol"]["command"]
     assert artifact_path.with_name("artifact.json.sha256").is_file()
+
+
+@pytest.mark.parametrize("stale_producer", [False, True])
+def test_public_artifact_labels_private_inputs_and_duplicate_producers_without_paths(tmp_path, stale_producer):
+    dataset = tmp_path / "dataset.json"
+    conversations = tmp_path / "conversations.jsonl"
+    dataset.write_text("{}", encoding="utf-8")
+    conversations.write_text("{}\n", encoding="utf-8")
+    root = Path(agent_benchmarks.__file__).resolve().parents[1]
+    producer_names = ["engraphis/core/__init__.py", "engraphis/backends/__init__.py"]
+    producer_snapshot = {
+        name: agent_benchmarks.sha256_file(root / name) for name in producer_names
+    }
+    if stale_producer:
+        producer_snapshot[producer_names[0]] = "0" * 64
+
+    arguments = dict(
+        fmt="mem2actbench",
+        dataset=str(dataset),
+        conversations=str(conversations),
+        k=1,
+        limit=None,
+        embed_model=None,
+        embed_revision=None,
+        include_original_locomo=False,
+        embedder=None,
+        resolve_conflicts=True,
+        source_snapshot=producer_snapshot,
+    )
+    report = {"format": "mem2actbench", "detail": []}
+    if stale_producer:
+        with pytest.raises(ValueError, match="evaluated source snapshot"):
+            agent_benchmarks.public_artifact(report, **arguments)
+        return
+    artifact = agent_benchmarks.public_artifact(report, **arguments)
+
+    assert [item["name"] for item in artifact["suite"]["sources"]] == [
+        "inputs/dataset", "inputs/conversations", *producer_names,
+    ]
+    assert [(item["name"], item["sha256"]) for item in artifact["suite"]["sources"]] == [
+        ("inputs/dataset", agent_benchmarks.sha256_file(dataset)),
+        ("inputs/conversations", agent_benchmarks.sha256_file(conversations)),
+        *producer_snapshot.items(),
+    ]
+    assert len({item["name"] for item in artifact["suite"]["sources"]}) == 4
+    assert str(tmp_path) not in json.dumps(artifact)
 
 
 @pytest.mark.parametrize("changed", ["dataset", "conversations", "producer"])

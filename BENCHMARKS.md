@@ -74,14 +74,14 @@ interpretation and do not count as additional benchmark-quality gains.
 ### Public numeric evidence registry
 
 Every exact public aggregate retained below comes from the checked-in, public-safe
-[`offline-fixtures-v59.json`](docs/benchmark-evidence/offline-fixtures-v59.json) artifact. Its
+[`offline-fixtures-v60.json`](docs/benchmark-evidence/offline-fixtures-v60.json) artifact. Its
 SHA-256 is
-`a566e26b38cff5aca4edd986fb46ee755241588d9d82bb336855b24ca95f7401`, also recorded in the
+`91707e5c9e86c9849304a249834d886af4663571f2dec1df3e754ca2018590b5`, also recorded in the
 adjacent `.sha256` file. The artifact contains no raw questions, answers, prompts, customer data,
 or per-record content fingerprints.
 
 The fixture-suite digest is
-`7d1f895964dec9a8554224f2ff13695fa7875ece44eb4e2ef99b517d28c44bc7`. The artifact defines
+`63ebe4d789d6a597fde53b97f5cdde840ce6831802b9bb89edf30fbb40cb82d1`. The artifact defines
 the digest algorithm and records the SHA-256 of every suite and dataset file. Each evidence ID
 also binds its exact command through `sha256(UTF-8 exact command)`:
 
@@ -103,10 +103,10 @@ Historical LoCoMo, graph, handoff, consolidation, and security figures remain pr
 source artifacts but are omitted from the current chart until each has a matching immutable,
 public-safe artifact. The chart labels coding outcomes, external datasets, and operational
 capacity as pending evaluation tracks rather than implying scores. Regenerate it with
-`python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-v59.json --output docs/images/context-efficiency.svg` after selecting the report to publish.
+`python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-v60.json --output docs/images/context-efficiency.svg` after selecting the report to publish.
 
 The companion examples are also generated from that artifact with
-`python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-v59.json --output docs/images/evidence-backed-agent-examples.svg`.
+`python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-v60.json --output docs/images/evidence-backed-agent-examples.svg`.
 The historical-to-executable mapping is in
 [`docs/BENCHMARK_CHANGE_COVERAGE.md`](docs/BENCHMARK_CHANGE_COVERAGE.md).
 
@@ -288,6 +288,14 @@ stratified or paired bootstrap confidence intervals. Every run names its token c
 Noncanonical offline fixtures may identify a deterministic estimate; canonical public evidence
 requires the exact pinned reader tokenizer and immutable model revision. The lightweight CI
 fixtures validate that machinery; they are not a claim about external benchmark performance.
+
+Public journey and external retrieval exports identify producer code by unique
+repository-relative source names. Private dataset, conversation, repair, and
+LongMemEval-V2 inputs use stable role names such as `inputs/dataset` or
+`inputs/haystack`; their directories are never published.
+Each name remains bound to its SHA-256 and byte count. The shared envelope keeps
+basename-only defaults for other callers and historical artifacts; exporters opt in
+with explicit `source_names` and verify the completed envelope against evaluated bytes.
 
 The benchmark context metric reads strict recall usage fields rather than inferring prompt size:
 `budget_tokens`, `context_tokens`, `source_tokens`, `saved_tokens`, `savings_ratio`,
