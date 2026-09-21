@@ -87,6 +87,18 @@ accounting blocks publication. Failed attempts keep valid observations and mark
 missing measurements explicitly; an explicit zero-invocation result cannot be
 scored as complete. Reservation estimates remain distinct from observed usage.
 
+Replay corrections and invalidations must target an existing memory in the same
+effective workspace, repo and session scope. Scope validation precedes successor
+creation and predecessor invalidation. Correction lineage uses stored memory IDs;
+the original fixture identifier remains separate campaign provenance.
+Write IDs are unique, while repeated invalidation preserves the earliest close.
+The adapter validates declared batch history before its first memory write, and
+the canonical replay ledger rejects invalid intervals and mutations without
+changing its records. Target revalidation and validity closures participate in
+the engine's memory-write transaction. Default-time corrections close the
+predecessor at the stored successor's start. These guards preserve valid fixture outcomes;
+they do not imply whole-batch rollback for arbitrary backend failures.
+
 ## Spending and recovery
 
 Every model-using stage needs separate owner authorization of its generated proposal. See

@@ -1029,6 +1029,22 @@ class _BaseAdapter:
                 # records with no timestamp.
             )
         )
+        # Record IDs are the campaign's durable evidence keys.  Reusing one for
+        # two writes makes the later mapping hide the earlier memory while the
+        # store still contains both rows.  Invalidation is the one intentional
+        # reuse: it addresses the existing ID and is idempotent at the store
+        # boundary, so repeated invalidation requests remain auditable.
+        seen_write_ids = set(self._memory_ids)
+        for record in normalized:
+            if record.operation == "invalidate":
+                # Invalidation addresses an existing or earlier declared ID;
+                # repeated requests remain legal and auditable.
+                continue
+            if record.record_id in seen_write_ids:
+                raise ValueError(
+                    f"duplicate campaign record id: {record.record_id!r}"
+                )
+            seen_write_ids.add(record.record_id)
         return normalized
 
     def _check_record_scope(self, record: CampaignRecord) -> None:
@@ -1442,23 +1458,86 @@ class EngraphisAdapter(_BaseAdapter):
             return self._resolve_workspace(store, record.workspace)
         return record.workspace
 
-    def _record_repo(self, record: CampaignRecord) -> Optional[str]:
-        if not record.repo or record.repo in {self._repo_label, self.repo_id}:
-            return self.repo_id
-        store = getattr(self.engine, "store", None)
-        if store is not None and self._record_workspace(record):
-            return self._resolve_repo(store, self._record_workspace(record), record.repo)
-        return record.repo
+    def _record_scope_ids(
+        self, record: CampaignRecord,
+    ) -> tuple[str, Optional[str], Optional[str]]:
+        """Resolve one effective parent tuple without creating unused descendants."""
+        workspace_id = self._record_workspace(record)
+        repo_id = self._record_repo(record, workspace_id=workspace_id)
+        session_id = self._record_session(
+            record, workspace_id=workspace_id, repo_id=repo_id,
+        )
+        return workspace_id, repo_id, session_id
 
-    def _record_session(self, record: CampaignRecord) -> Optional[str]:
-        if not record.session:
+    def _record_repo(
+        self, record: CampaignRecord, *, workspace_id: Optional[str] = None,
+    ) -> Optional[str]:
+        # Workspace records deliberately have no repo parent.  Resolving an
+        # explicit repo label here would create an unrelated row before ingest
+        # clears it below.
+        if record.scope == "workspace":
+            return None
+        effective_workspace = (
+            workspace_id if workspace_id is not None else self._record_workspace(record)
+        )
+        requested = str(record.repo or "").strip()
+        prepared_workspace = str(self.workspace_id or "")
+        if effective_workspace == prepared_workspace:
+            if not requested or requested in {self._repo_label, self.repo_id}:
+                return self.repo_id
+        # A matching prepared label is a logical fixture name.  Resolve it in
+        # the record's effective workspace instead of reusing the prepared
+        # durable repo ID from a different workspace.  A repo_* value remains a
+        # physical identity and is rejected by _resolve_repo when foreign.
+        candidate = requested or self._repo_label
+        if not candidate:
+            return None
+        store = getattr(self.engine, "store", None)
+        if store is not None:
+            return self._resolve_repo(store, effective_workspace, candidate)
+        return candidate
+
+    def _record_session(
+        self, record: CampaignRecord, *, workspace_id: Optional[str] = None,
+        repo_id: Optional[str] = None,
+    ) -> Optional[str]:
+        # Repo and workspace records cannot carry a session parent.  In
+        # particular, do not create a logical session that ingest will discard.
+        if record.scope != "session":
+            return None
+        effective_workspace = (
+            workspace_id if workspace_id is not None else self._record_workspace(record)
+        )
+        # A caller that supplies workspace_id is passing the already resolved
+        # parent tuple, so None is an intentional repo-less parent.  Direct
+        # helper callers without that effective workspace still get the
+        # historical repo resolution behavior.
+        effective_repo = (
+            repo_id
+            if workspace_id is not None
+            else self._record_repo(record, workspace_id=effective_workspace)
+        )
+        requested = str(record.session or "").strip()
+        prepared_parent = (
+            effective_workspace == str(self.workspace_id or "")
+            and effective_repo == self.repo_id
+        )
+        if prepared_parent and (
+            not requested or requested in {self._session_label, self.session_id}
+        ):
             return self.session_id
+        # An omitted session inherits the prepared logical label only within the
+        # effective parent.  _resolve_session rejects a foreign/unknown ses_ ID;
+        # it must never be recreated as a logical name in another parent.
+        candidate = requested or self._session_label
+        if not candidate:
+            return None
         store = getattr(self.engine, "store", None)
         if store is not None:
             return self._resolve_session(
-                store, self._record_workspace(record), self._record_repo(record), record.session,
+                store, effective_workspace, effective_repo, candidate,
             )
-        return record.session
+        return candidate
 
     @staticmethod
     def _resolve_workspace(store: Any, value: str) -> str:
@@ -1483,6 +1562,9 @@ class EngraphisAdapter(_BaseAdapter):
             ).fetchone()
             if row is not None:
                 return candidate
+            raise AdapterConfigurationError(
+                "Engraphis repo physical ID is unknown or belongs to a different workspace"
+            )
         return str(store.get_or_create_repo(workspace_id, candidate))
 
     def _resolve_session(
@@ -1493,35 +1575,279 @@ class EngraphisAdapter(_BaseAdapter):
         candidate = str(value).strip()
         if candidate.startswith("ses_"):
             row = store.get_session(candidate)
-            if row is not None:
-                if row.get("workspace_id") != workspace_id or row.get("repo_id") != repo_id:
-                    raise AdapterConfigurationError("Engraphis session belongs to a different scope")
-                return candidate
+            if row is None:
+                raise AdapterConfigurationError("Engraphis session physical ID is unknown")
+            if row.get("workspace_id") != workspace_id or row.get("repo_id") != repo_id:
+                raise AdapterConfigurationError("Engraphis session belongs to a different scope")
+            return candidate
         key = (workspace_id, repo_id, candidate)
         if key not in self._session_ids:
             self._session_ids[key] = str(store.start_session(workspace_id, repo_id, agent="campaign"))
         return self._session_ids[key]
+
+    def _revalidate_history_target(
+        self, record: CampaignRecord, *, target_id: str,
+        workspace_id: str, repo_id: Optional[str], session_id: Optional[str],
+        scope: Any, at: Optional[float] = None, reject_closed: bool = False,
+    ) -> Any:
+        """Re-read a target at the engine/store write boundary.
+
+        The batch preflight is useful for rejecting bad fixtures early, but it is
+        not a lock.  Corrections therefore validate the target again from the
+        transaction that will insert the successor, and invalidations perform the
+        same check inside their existing store transaction.  ``None`` means that
+        the store will select its own current close time.
+        """
+        target = self.engine.store.get_memory(target_id)
+        operation_label = "correction" if record.operation == "correct" else "invalidation"
+        missing_label = repr(record.corrects) if record.operation == "correct" else record.record_id
+        if target is None:
+            raise AdapterError(
+                f"{operation_label} target is missing: {missing_label}"
+            )
+        requested = (workspace_id, repo_id, session_id, scope)
+        existing = (
+            target.workspace_id, target.repo_id, target.session_id, target.scope,
+        )
+        if requested != existing:
+            raise AdapterError(
+                f"campaign {record.operation} target crosses the declared scope boundary"
+            )
+        if (
+            at is not None
+            and target.valid_from is not None
+            and at < target.valid_from
+        ):
+            if record.operation == "correct":
+                raise AdapterError("correction valid_at cannot predate target valid_at")
+            raise ValueError("invalidation valid_at cannot predate target")
+        if (
+            reject_closed
+            and at is not None
+            and target.valid_to is not None
+            and target.valid_to <= at
+        ):
+            raise AdapterError("correction target is already closed")
+        return target
+
+    def _validate_history_target_scope(
+        self, record: CampaignRecord, *, target_record_id: str,
+        workspace_id: str, repo_id: Optional[str], session_id: Optional[str],
+        scope: Any,
+    ) -> str:
+        """Resolve a history target and prove its exact incoming scope."""
+        target_id = self._memory_ids.get(target_record_id)
+        operation_label = "correction" if record.operation == "correct" else "invalidation"
+        if target_id is None:
+            missing_label = repr(target_record_id) if record.operation == "correct" else target_record_id
+            raise AdapterError(
+                f"{operation_label} target is missing: {missing_label}"
+            )
+        self._revalidate_history_target(
+            record,
+            target_id=target_id,
+            workspace_id=workspace_id,
+            repo_id=repo_id,
+            session_id=session_id,
+            scope=scope,
+        )
+        return target_id
+
+    def _effective_record_scope(self, record: CampaignRecord) -> tuple[Any, ...]:
+        """Resolve only the dimensions represented by a campaign scope."""
+        from engraphis.core.interfaces import Scope
+
+        workspace_id, repo_id, session_id = self._record_scope_ids(record)
+        scope = Scope(record.scope)
+        if scope == Scope.REPO and not repo_id:
+            raise AdapterConfigurationError("repo scope requires repo_id")
+        if scope == Scope.SESSION and not session_id:
+            raise AdapterConfigurationError("session scope requires session_id")
+        return workspace_id, repo_id, session_id, scope
+
+    def _preflight_history(self, records: Sequence[CampaignRecord]) -> None:
+        """Validate declared batch history before the first memory write.
+
+        This is deliberately a validation pass, not a transaction substitute: it
+        checks declared identity, scope and time errors, leaving the per-operation store
+        lookup in ``_validate_history_target_scope`` as the final authority.  A
+        target created earlier in this batch is represented by its declaration;
+        a target named only by a future record is rejected as missing rather than
+        guessing a not-yet-created backend ID.
+        """
+        planned: dict[str, tuple[tuple[Any, ...], float]] = {}
+        planned_closes: dict[str, float] = {}
+        saved_clock = (self._fixture_clock_current, self._fixture_clock_max)
+        try:
+            for record in records:
+                self._check_record_scope(record)
+                effective_now = (
+                    self._fixture_now_for(record)
+                    if self._fixture_clock_enabled else time.time()
+                )
+                _finite_timestamp(effective_now, name="effective system time")
+                effective_valid_at = (
+                    self._map_fixture_time(record.valid_at)
+                    if record.valid_at is not None else effective_now
+                )
+                effective_valid_at = _finite_timestamp(
+                    effective_valid_at, name="effective valid_at"
+                )
+                if effective_valid_at is None:
+                    raise ValueError("effective valid_at is missing")
+                effective_valid_to = (
+                    self._map_fixture_time(record.valid_to)
+                    if record.operation != "invalidate" else None
+                )
+                effective_valid_to = _finite_timestamp(
+                    effective_valid_to, name="effective valid_to"
+                )
+                if (
+                    record.operation != "invalidate"
+                    and effective_valid_to is not None
+                    and effective_valid_to < effective_valid_at
+                ):
+                    raise ValueError("valid_to cannot predate effective valid_at")
+                scope_key = self._effective_record_scope(record)
+                target_record_id: Optional[str] = None
+                if record.operation == "correct":
+                    if not record.corrects:
+                        raise AdapterError(
+                            f"correction target is missing: {record.corrects!r}"
+                        )
+                    target_record_id = record.corrects
+                elif record.operation == "invalidate":
+                    target_record_id = record.record_id
+
+                if target_record_id is not None:
+                    planned_target = planned.get(target_record_id)
+                    if planned_target is not None:
+                        target_scope, target_valid_from = planned_target
+                        if target_scope != scope_key:
+                            raise AdapterError(
+                                f"campaign {record.operation} target crosses the declared scope boundary"
+                            )
+                        target_close = planned_closes.get(target_record_id)
+                    else:
+                        target_id = self._memory_ids.get(target_record_id)
+                        missing_label = (
+                            repr(target_record_id)
+                            if record.operation == "correct" else target_record_id
+                        )
+                        operation_label = (
+                            "correction" if record.operation == "correct" else "invalidation"
+                        )
+                        if target_id is None:
+                            raise AdapterError(
+                                f"{operation_label} target is missing: {missing_label}"
+                            )
+                        target_memory = self.engine.store.get_memory(target_id)
+                        if target_memory is None:
+                            raise AdapterError(
+                                f"{operation_label} target is missing: {missing_label}"
+                            )
+                        if (
+                            target_memory.workspace_id,
+                            target_memory.repo_id,
+                            target_memory.session_id,
+                            target_memory.scope,
+                        ) != scope_key:
+                            raise AdapterError(
+                                f"campaign {record.operation} target crosses the declared scope boundary"
+                            )
+                        target_valid_from = target_memory.valid_from
+                        target_close = target_memory.valid_to
+                        planned_close = planned_closes.get(target_record_id)
+                        if planned_close is not None:
+                            target_close = (
+                                planned_close
+                                if target_close is None
+                                else min(target_close, planned_close)
+                            )
+
+                    if record.operation == "correct":
+                        if (
+                            target_close is not None
+                            and target_close <= effective_valid_at
+                        ):
+                            raise AdapterError("correction target is already closed")
+                        if (
+                            target_valid_from is not None
+                            and effective_valid_at < target_valid_from
+                        ):
+                            raise AdapterError(
+                                "correction valid_at cannot predate target valid_at"
+                            )
+                    elif (
+                        target_valid_from is not None
+                        and effective_valid_at < target_valid_from
+                    ):
+                        # Repeated invalidation remains allowed; only an invalid
+                        # timestamp that the store would reject is blocked here.
+                        raise ValueError("invalidation valid_at cannot predate target")
+
+                if record.operation != "invalidate":
+                    planned[record.record_id] = (
+                        scope_key, effective_valid_at
+                    )
+                if (
+                    record.operation != "invalidate"
+                    and effective_valid_to is not None
+                ):
+                    prior_close = planned_closes.get(record.record_id)
+                    planned_closes[record.record_id] = (
+                        effective_valid_to
+                        if prior_close is None else min(prior_close, effective_valid_to)
+                    )
+                if record.operation == "correct" and record.corrects is not None:
+                    prior_close = planned_closes.get(record.corrects)
+                    planned_closes[record.corrects] = (
+                        effective_valid_at
+                        if prior_close is None else min(prior_close, effective_valid_at)
+                    )
+                elif record.operation == "invalidate":
+                    prior_close = planned_closes.get(record.record_id)
+                    planned_closes[record.record_id] = (
+                        effective_valid_at
+                        if prior_close is None else min(prior_close, effective_valid_at)
+                    )
+        finally:
+            self._fixture_clock_current, self._fixture_clock_max = saved_clock
 
     def ingest(self, records: Iterable[Mapping[str, Any]]) -> list[str]:
         self._ensure_prepared()
         from engraphis.core.interfaces import MemoryType, Scope
 
         normalized = self._normalize_records(records)
+        self._preflight_history(normalized)
         result_ids: list[str] = []
         for record in normalized:
             self._check_record_scope(record)
             self._fixture_now_for(record)
             valid_at = self._map_fixture_time(record.valid_at)
             valid_to = self._map_fixture_time(record.valid_to)
-            workspace_id = self._record_workspace(record)
-            repo_id = self._record_repo(record)
-            session_id = self._record_session(record)
+            workspace_id, repo_id, session_id = self._record_scope_ids(record)
             if record.scope == "workspace":
                 repo_id = None
                 session_id = None
             elif record.scope == "repo":
                 session_id = None
             scope = Scope(record.scope)
+            history_target_id = None
+            if record.operation == "correct":
+                if not record.corrects:
+                    raise AdapterError(f"correction target is missing: {record.corrects!r}")
+                history_target_id = self._validate_history_target_scope(
+                    record, target_record_id=record.corrects,
+                    workspace_id=workspace_id, repo_id=repo_id,
+                    session_id=session_id, scope=scope,
+                )
+            elif record.operation == "invalidate":
+                history_target_id = self._validate_history_target_scope(
+                    record, target_record_id=record.record_id,
+                    workspace_id=workspace_id, repo_id=repo_id,
+                    session_id=session_id, scope=scope,
+                )
             metadata = dict(record.metadata)
             provenance = {
                 "source": "campaign",
@@ -1551,8 +1877,14 @@ class EngraphisAdapter(_BaseAdapter):
                 "provenance": provenance,
             })
             if record.corrects is not None:
-                metadata["corrects"] = record.corrects
-                metadata["supersedes"] = [record.corrects]
+                # Fixture labels are campaign provenance. Core history follows
+                # the mapped stored memory IDs in its lineage fields.
+                metadata["campaign_corrects"] = record.corrects
+                metadata.pop("corrects", None)
+                metadata.pop("supersedes", None)
+                if record.operation == "correct":
+                    metadata["corrects"] = history_target_id
+                    metadata["supersedes"] = [history_target_id]
             if record.known_at is not None and not self._fixture_clock_enabled:
                 # The public engine write path stamps system time at dispatch.  Do
                 # not rewrite that clock in production measurement; expose the
@@ -1573,17 +1905,30 @@ class EngraphisAdapter(_BaseAdapter):
                     ),
                 )
                 metadata["event_id"] = str(event_id)
+
+            def _store_operation_time() -> float:
+                if valid_at is not None:
+                    return valid_at
+                from engraphis.core.store import now_ts as store_now_ts
+                return float(store_now_ts())
+
             if record.operation == "invalidate":
-                target = self._memory_ids.get(record.record_id)
-                if target is None:
-                    raise AdapterError(
-                        f"invalidation target is missing: {record.record_id}"
-                    )
+                target = history_target_id
                 def _invalidate() -> None:
                     with self.engine.store.write_transaction():
+                        close_at = _store_operation_time()
+                        self._revalidate_history_target(
+                            record,
+                            target_id=target,
+                            workspace_id=workspace_id,
+                            repo_id=repo_id,
+                            session_id=session_id,
+                            scope=scope,
+                            at=close_at,
+                        )
                         self.engine.store.close_validity(
                             target,
-                            at=valid_at,
+                            at=close_at,
                             actor="campaign",
                             reason="campaign invalidation",
                         )
@@ -1592,11 +1937,7 @@ class EngraphisAdapter(_BaseAdapter):
                 self._counters["invalidate"] += 1
                 continue
             if record.operation == "correct":
-                if not record.corrects or record.corrects not in self._memory_ids:
-                    raise AdapterError(
-                        f"correction target is missing: {record.corrects!r}"
-                    )
-                target = self._memory_ids[record.corrects]
+                target = history_target_id
                 resolve_conflicts = False
             else:
                 target = None
@@ -1604,44 +1945,94 @@ class EngraphisAdapter(_BaseAdapter):
             mtype = MemoryType.EPISODIC if (
                 record.role in {"assistant", "tool"} or record.operation == "event"
             ) else MemoryType.SEMANTIC
-            result = self._run_clocked(
-                record,
-                lambda: self.engine.remember_with_resolution(
-                    record.content,
-                    workspace_id=workspace_id,
-                    repo_id=repo_id,
-                    session_id=session_id,
-                    scope=scope,
-                    mtype=mtype,
-                    title=record.title,
-                    metadata=metadata,
-                    valid_from=valid_at,
-                    resolve_conflicts=resolve_conflicts,
-                    subject_key=record.subject_key,
-                    claim_kind=record.claim_kind,
-                ),
-            )
-            memory_id = str(result["id"])
-            if target is not None:
-                def _correct() -> None:
-                    with self.engine.store.write_transaction():
+            remember_kwargs: dict[str, Any] = {
+                "workspace_id": workspace_id,
+                "repo_id": repo_id,
+                "session_id": session_id,
+                "scope": scope,
+                "mtype": mtype,
+                "title": record.title,
+                "metadata": metadata,
+                "valid_from": valid_at,
+                "resolve_conflicts": resolve_conflicts,
+                "subject_key": record.subject_key,
+                "claim_kind": record.claim_kind,
+            }
+            if target is not None or valid_to is not None:
+                correction_close_at: Optional[float] = None
+
+                def _transactional_validator() -> Optional[dict]:
+                    nonlocal correction_close_at
+                    if target is None:
+                        return None
+                    correction_close_at = _store_operation_time()
+                    self._revalidate_history_target(
+                        record,
+                        target_id=target,
+                        workspace_id=workspace_id,
+                        repo_id=repo_id,
+                        session_id=session_id,
+                        scope=scope,
+                        at=correction_close_at,
+                        reject_closed=True,
+                    )
+                    return None
+
+                def _transactional_finalizer(memory_id: str) -> None:
+                    successor = self.engine.store.get_memory(memory_id)
+                    if successor is None:
+                        raise AdapterError(
+                            "campaign successor disappeared before validity closure"
+                        )
+                    if (
+                        valid_to is not None
+                        and successor.valid_from is not None
+                        and valid_to < successor.valid_from
+                    ):
+                        raise ValueError("valid_to cannot predate valid_from")
+                    if target is not None:
+                        close_at = (
+                            successor.valid_from
+                            if successor.valid_from is not None
+                            else correction_close_at
+                            if correction_close_at is not None
+                            else _store_operation_time()
+                        )
+                        self._revalidate_history_target(
+                            record,
+                            target_id=target,
+                            workspace_id=workspace_id,
+                            repo_id=repo_id,
+                            session_id=session_id,
+                            scope=scope,
+                            at=close_at,
+                            reject_closed=True,
+                        )
                         self.engine.store.close_validity(
                             target,
-                            at=valid_at,
+                            at=close_at,
                             actor="campaign",
                             reason="campaign correction",
                         )
-                self._run_clocked(record, _correct)
-            if valid_to is not None:
-                def _close_fixture_interval() -> None:
-                    with self.engine.store.write_transaction():
+                    if valid_to is not None:
                         self.engine.store.close_validity(
                             memory_id,
                             at=valid_to,
                             actor="campaign",
                             reason="fixture validity boundary",
                         )
-                self._run_clocked(record, _close_fixture_interval)
+
+                remember_kwargs["_transactional_finalizer"] = _transactional_finalizer
+                if target is not None:
+                    remember_kwargs["_transactional_validator"] = _transactional_validator
+            result = self._run_clocked(
+                record,
+                lambda: self.engine.remember_with_resolution(
+                    record.content,
+                    **remember_kwargs,
+                ),
+            )
+            memory_id = str(result["id"])
             self._memory_ids[record.record_id] = memory_id
             result_ids.append(memory_id)
             self._counters["ingest"] += 1
