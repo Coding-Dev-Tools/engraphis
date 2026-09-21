@@ -659,17 +659,18 @@ def _lineage(row: Mapping[str, Any], plan: ContinuationPlan, *, cohort: str, eli
     return value
 
 
-def _error_row(cell: Mapping[str, Any], exc: BaseException, plan: ContinuationPlan) -> dict[str, Any]:
+def _error_row(
+    cell: Mapping[str, Any], exc: Exception, plan: ContinuationPlan,
+    attempt_row: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
     attempt_id = "attempt-" + campaign.digest({
         "campaign": plan.child_manifest["binding_sha256"],
         "stage": plan.stage_name,
         **dict(cell),
     })[:32]
-    return _lineage({
-        **dict(cell), "attempt_id": attempt_id, "status": "error",
-        "error_class": type(exc).__name__, "task_success": None,
-        "critical_violations": [], "provider_usage": [],
-    }, plan, cohort="continuation", eligible=True)
+    row = campaign._attempt_error_row(dict(cell), exc, attempt_row)
+    row.setdefault("attempt_id", attempt_id)
+    return _lineage(row, plan, cohort="continuation", eligible=True)
 
 
 class _GuardedClient:
@@ -736,17 +737,20 @@ def run_continuation(
                 "parent_campaign_sha256": plan.parent_manifest["binding_sha256"],
                 "child_campaign_sha256": plan.child_manifest["binding_sha256"], "cell": cell,
             })
+            attempt_row = None
             try:
-                row = attempt_runner(plan.child_manifest, plan.stage_name, dict(cell), corpus, guarded_client)
+                attempt_row = attempt_runner(plan.child_manifest, plan.stage_name, dict(cell), corpus, guarded_client)
                 if enforce_source:
                     _assert_child_source(plan)
                 _assert_parent_unchanged(plan)
-                campaign.validate_row(row, cell)
-                row = _lineage(row, plan, cohort="continuation", eligible=True)
+                campaign.validate_row(attempt_row, cell)
+                row = _lineage(attempt_row, plan, cohort="continuation", eligible=True)
             except ContinuationError:
                 raise
             except Exception as exc:
-                row = _error_row(cell, exc, plan)
+                if isinstance(exc, campaign._AttemptExecutionError) and isinstance(exc.cause, ContinuationError):
+                    raise exc.cause
+                row = _error_row(cell, exc, plan, attempt_row)
                 campaign.validate_row(row, cell)
             _save_new(output, {
                 "binding_sha256": plan.child_manifest["binding_sha256"],

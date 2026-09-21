@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import copy
 from collections import Counter, defaultdict
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
 import hashlib
@@ -542,6 +543,36 @@ class AttemptBudgetClient:
         return self.client.complete(**request)
 
 
+class _AttemptExecutionError(RuntimeError):
+    """A terminal attempt failure with the usage observed before it."""
+
+    def __init__(self, cause: Exception, *, usage_rows: list[dict],
+                 provider_usage_attempted: int,
+                 row_fields: Optional[dict[str, Any]] = None) -> None:
+        self.cause = cause
+        self.error_class = type(cause).__name__
+        self.status = "unsupported" if isinstance(cause, AdapterCapabilityError) else "error"
+        self.provider_usage = list(usage_rows)
+        self.provider_usage_attempted = provider_usage_attempted
+        observed, missing, usage_status = _usage_state(usage_rows, provider_usage_attempted)
+        self.provider_usage_observed = observed
+        self.provider_usage_missing = missing
+        self.provider_usage_status = usage_status
+        self.row_fields = dict(row_fields or {})
+        # Do not carry provider or oracle exception text into checkpoints.
+        super().__init__(self.error_class)
+
+
+def _usage_state(usage_rows: list[Any], attempted: int) -> tuple[int, int, str]:
+    """Return observed/missing reader-counter state without inventing values."""
+
+    observed = sum(isinstance(item, dict) for item in usage_rows)
+    missing = max(attempted - observed, 0)
+    status = ("not_attempted" if attempted == 0 else
+              "missing" if observed == 0 else "partial" if missing else "complete")
+    return observed, missing, status
+
+
 def _full_history(scenario: Any, budget: int) -> tuple[str, list[str]]:
     first = scenario.operations[0]
     # Replay the accessible history including superseded facts, with chronology
@@ -592,11 +623,51 @@ def run_attempt(manifest: dict, stage_name: str, cell: dict, corpus: Any, client
     started = time.perf_counter()
     adapter = None
     usage_rows, responses, oracle_rows = [], [], []
+    critical: list[str] = []
+    provider_usage_attempted = 0
+    active_error = False
     oracle_unscored: Optional[str] = None
     context, ids = "", []
     adapter_metrics = {}
-    with tempfile.TemporaryDirectory(prefix="engraphis-campaign-") as temporary:
-        directory = Path(temporary)
+
+    def attempt_error_fields() -> dict[str, Any]:
+        # Keep only parsed responses and actual oracle observations.  A usage
+        # record may exist even when its response cannot be parsed.
+        return {
+            "attempt_id": attempt_id,
+            "family_id": getattr(scenario, "family_id", None),
+            "category": getattr(scenario, "category", None),
+            "reader_calls": len(usage_rows),
+            "correction_calls": max(0, len(usage_rows) - 1),
+            "oracle_calls": len(oracle_rows),
+            "private_responses": list(responses),
+            "private_oracles": list(oracle_rows),
+            "critical_violations": list(critical),
+        }
+
+    @contextmanager
+    def attempt_workspace():
+        primary_error = None
+        try:
+            with tempfile.TemporaryDirectory(prefix="engraphis-campaign-") as temporary:
+                try:
+                    yield Path(temporary)
+                except BaseException as exc:
+                    primary_error = exc
+                    raise
+        except BaseException as exc:
+            # Directory cleanup can fail after a metered response or while
+            # unwinding a guard/interruption. Preserve the original failure.
+            cause = primary_error if primary_error is not None else exc
+            if not isinstance(cause, Exception) or isinstance(cause, _AttemptExecutionError):
+                raise cause
+            raise _AttemptExecutionError(
+                cause, usage_rows=usage_rows, provider_usage_attempted=provider_usage_attempted,
+                row_fields={key: value for key, value in attempt_error_fields().items()
+                            if value is not None},
+            ) from cause
+
+    with attempt_workspace() as directory:
         try:
             if cell["arm"] == "full_history":
                 context, ids = _full_history(scenario, cell["token_budget"])
@@ -666,6 +737,9 @@ def run_attempt(manifest: dict, stage_name: str, cell: dict, corpus: Any, client
                     tokens = estimate_input_tokens(complete_input)
                     if tokens > stage["max_input_tokens"]:
                         raise ValueError("complete reader input exceeds the frozen stage ceiling")
+                    # Count client invocations, not confirmed provider dispatch
+                    # or billing. A failed invocation may return no counters.
+                    provider_usage_attempted += 1
                     response = client.complete(call_id=f"{attempt_id}-reader-{turn}",
                                                kind="reader" if turn == 0 else "correction",
                                                input=serialized_input, instructions=READER_INSTRUCTIONS,
@@ -706,6 +780,8 @@ def run_attempt(manifest: dict, stage_name: str, cell: dict, corpus: Any, client
                     if oracle_unscored is not None
                     else raw_oracle_outcome if isinstance(raw_oracle_outcome, str) else None
                 )
+                usage_observed, usage_missing, usage_status = _usage_state(
+                    usage_rows, provider_usage_attempted)
                 result_row = {
                     **cell, "attempt_id": attempt_id, "family_id": scenario.family_id,
                     "category": scenario.category,
@@ -731,14 +807,28 @@ def run_attempt(manifest: dict, stage_name: str, cell: dict, corpus: Any, client
                     "source_sha256": scenario.source_sha256, "oracle_sha256": scenario.oracle_sha256,
                     "implementation_sha256": digest(manifest["source"]),
                     "provider_usage": usage_rows, "adapter_metrics": adapter_metrics,
+                    "provider_usage_attempted": provider_usage_attempted,
+                    "provider_usage_observed": usage_observed,
+                    "provider_usage_missing": usage_missing,
+                    "provider_usage_status": usage_status,
                     "oracle_outcome": final_oracle_outcome,
                     "unscored_reason": f"oracle_{oracle_unscored}" if oracle_unscored is not None else None,
                     "private_responses": responses, "private_oracles": oracle_rows,
                 }
                 return result_row
+        except BaseException:
+            active_error = True
+            raise
         finally:
             if adapter is not None:
-                adapter.close()
+                try:
+                    adapter.close()
+                except Exception:
+                    # Preserve the original parse/oracle/guard failure when
+                    # cleanup also fails.  On a clean return, cleanup itself
+                    # is a typed attempt failure with the observed counters.
+                    if not active_error:
+                        raise
 
 
 def _verify_frozen_corpus(manifest: dict, corpus: Any) -> None:
@@ -754,6 +844,44 @@ def _verify_frozen_corpus(manifest: dict, corpus: Any) -> None:
         if (hashlib.sha256(payload).hexdigest() != manifest["corpus"][f"{name}_sha256"]
                 or json.loads(payload) != getattr(corpus, name)):
             raise ValueError("corpus bytes differ from the evaluated campaign snapshot")
+
+
+_ATTEMPT_ERROR_FIELDS = (
+    "attempt_id", "family_id", "category", "reader_calls", "correction_calls", "oracle_calls",
+    "private_responses", "private_oracles",
+)
+
+
+def _attempt_error_row(cell: dict, exc: Exception, attempt_row: Optional[dict] = None) -> dict:
+    """Build a terminal row while retaining only observed attempt evidence."""
+
+    preserved = attempt_row if isinstance(attempt_row, dict) else {}
+    typed = exc if isinstance(exc, _AttemptExecutionError) else None
+    source_fields = typed.row_fields if typed is not None else preserved
+    row = {
+        **cell,
+        **{key: source_fields[key] for key in _ATTEMPT_ERROR_FIELDS if key in source_fields},
+        "status": typed.status if typed is not None
+        else "unsupported" if isinstance(exc, AdapterCapabilityError) else "error",
+        "error_class": typed.error_class if typed is not None else type(exc).__name__,
+        "task_success": None,
+    }
+    violations = preserved.get("critical_violations", source_fields.get("critical_violations", []))
+    row["critical_violations"] = list(violations) if isinstance(violations, list) else []
+    usage = typed.provider_usage if typed is not None else preserved.get("provider_usage", [])
+    row["provider_usage"] = list(usage) if isinstance(usage, list) else []
+    attempted = typed.provider_usage_attempted if typed is not None else preserved.get("provider_usage_attempted")
+    if isinstance(attempted, bool) or not isinstance(attempted, int) or attempted < 0:
+        attempted = len(row["provider_usage"]) if attempt_row is not None else 0
+    observed, missing, usage_status = _usage_state(row["provider_usage"], attempted)
+    if typed is not None or attempt_row is not None:
+        row.update({
+            "provider_usage_attempted": attempted,
+            "provider_usage_observed": observed,
+            "provider_usage_missing": missing,
+            "provider_usage_status": usage_status,
+        })
+    return row
 
 
 def execute(manifest: dict, stage_name: str, results: Path, corpus: Any, client: Any,
@@ -793,15 +921,15 @@ def execute(manifest: dict, stage_name: str, results: Path, corpus: Any, client:
             if reservation.exists():
                 raise ValueError("unfinished attempt reservation: reconcile spending; automatic replay is forbidden")
             _save_new(reservation, {"binding_sha256": manifest["binding_sha256"], "cell": cell})
+            attempt_row = None
             try:
-                row = attempt_runner(manifest, stage_name, cell, corpus, client)
+                attempt_row = attempt_runner(manifest, stage_name, cell, corpus, client)
                 if "source" in manifest and manifest["source"] != source_snapshot():
                     raise ValueError("implementation source changed during attempt")
-                validate_row(row, cell)
+                validate_row(attempt_row, cell)
+                row = attempt_row
             except Exception as exc:
-                row = {**cell, "status": "unsupported" if isinstance(exc, AdapterCapabilityError) else "error",
-                       "error_class": type(exc).__name__, "task_success": None,
-                       "critical_violations": [], "provider_usage": []}
+                row = _attempt_error_row(cell, exc, attempt_row)
             _save_new(output, {"binding_sha256": manifest["binding_sha256"], "cell": cell,
                                "row": row, "row_sha256": digest(row)})
             # Completed and failed attempts have a durable terminal checkpoint;
@@ -876,10 +1004,32 @@ def _provider_usage_summary(rows: list[dict]) -> dict:
     totals = {field: 0 for field in fields}
     entries = []
     rows_without_usage = 0
+    rows_with_incomplete_usage = 0
+    rows_not_attempted = 0
+    legacy_rows_without_usage = 0
+    usage_attempted = usage_observed = usage_missing = 0
     for row in rows:
         usage = row.get("provider_usage")
+        fallback_observed = sum(isinstance(item, dict) for item in usage) if isinstance(usage, list) else 0
+        attempted = row.get("provider_usage_attempted")
+        known_not_attempted = type(attempted) is int and attempted == 0 and fallback_observed == 0
+        if isinstance(attempted, bool) or not isinstance(attempted, int) or attempted < 0:
+            attempted = fallback_observed
+        # Derive both values from the retained list.  Redundant row counters
+        # are descriptive output and cannot manufacture observed usage.
+        observed = fallback_observed
+        missing = max(attempted - observed, 0)
+        usage_attempted += attempted
+        usage_observed += observed
+        usage_missing += missing
+        if known_not_attempted:
+            rows_not_attempted += 1
+        if missing:
+            rows_with_incomplete_usage += 1
         if not isinstance(usage, list) or not usage:
             rows_without_usage += 1
+            if "provider_usage_status" not in row and "provider_usage_attempted" not in row:
+                legacy_rows_without_usage += 1
             continue
         for item in usage:
             if not isinstance(item, dict):
@@ -891,8 +1041,8 @@ def _provider_usage_summary(rows: list[dict]) -> dict:
                     totals[field] += value
     complete_rows = sum(row.get("status") == "complete" for row in rows)
     if not entries:
-        status = "missing"
-    elif rows_without_usage:
+        status = "not_attempted" if rows and rows_not_attempted == len(rows) else "missing"
+    elif rows_without_usage > rows_not_attempted or rows_with_incomplete_usage:
         status = "partial"
     else:
         status = "complete"
@@ -908,9 +1058,16 @@ def _provider_usage_summary(rows: list[dict]) -> dict:
         "api_price_proxy_micros": totals["cost_micros"],
         "status": status,
         "scope": "reader_and_correction_calls_only",
+        "provider_usage_attempted": usage_attempted,
+        "provider_usage_observed": usage_observed,
+        "provider_usage_missing": usage_missing,
+        "provider_usage_status": status,
         "calls_observed": len(entries),
         "complete_rows": complete_rows,
         "rows_without_usage": rows_without_usage,
+        "rows_with_incomplete_usage": rows_with_incomplete_usage,
+        "rows_not_attempted": rows_not_attempted,
+        "legacy_rows_without_usage": legacy_rows_without_usage,
         "failed_rows_without_usage": sum(
             row.get("status") in {"error", "unsupported"} and not row.get("provider_usage")
             for row in rows

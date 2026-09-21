@@ -372,6 +372,314 @@ def test_usage_summary_marks_missing_failed_call_counters_explicitly():
     assert summary["unmetered_peer_internal_calls"] == "not surfaced by the row contract"
 
 
+def _attempt_fixture(tmp_path, monkeypatch, *, operations=()):
+    from contextlib import contextmanager
+
+    source = tmp_path / "source.json"
+    source.write_text("{}", encoding="utf-8")
+    oracle_path = tmp_path / "oracle.py"
+    oracle_path.write_text("# SECRET_ORACLE", encoding="utf-8")
+    task = SimpleNamespace(
+        prompt="Fix the public function.", target_files=("service.py",),
+        required_evidence_ids=(), forbidden_evidence_ids=(), untrusted_evidence_ids=(),
+        answer_tokens=("ANSWER_KEY",), answerable=True, valid_at=None, known_at=None,
+    )
+    scenario = SimpleNamespace(
+        id="fixture-a", source_path=source, source_sha256=sha256_file(source),
+        oracle_path=oracle_path, oracle_sha256=sha256_file(oracle_path), task=task,
+        family_id="family-a", category="corrections", operations=tuple(operations),
+    )
+
+    @contextmanager
+    def workspace(_scenario, target):
+        target.mkdir()
+        (target / "service.py").write_text("def result(): return 0", encoding="utf-8")
+        yield target
+
+    monkeypatch.setattr(campaign, "scenario_workspace", workspace)
+    return scenario
+
+
+def test_usage_summary_distinguishes_no_invocation_from_missing_counters():
+    no_invocation = {
+        "status": "error", "provider_usage": [], "provider_usage_attempted": 0,
+        "provider_usage_status": "not_attempted",
+    }
+    observed = {
+        "status": "error", "provider_usage": [{"input_tokens": 10}],
+        "provider_usage_attempted": 1,
+    }
+    legacy_unknown = {"status": "error", "provider_usage": []}
+    assert campaign._provider_usage_summary([no_invocation])["status"] == "not_attempted"
+    known = campaign._provider_usage_summary([observed, no_invocation])
+    assert known["status"] == "complete"
+    assert known["provider_usage_attempted"] == 1
+    assert known["provider_usage_missing"] == 0
+    assert known["rows_not_attempted"] == 1
+    unknown = campaign._provider_usage_summary([observed, legacy_unknown])
+    assert unknown["status"] == "partial"
+    assert unknown["legacy_rows_without_usage"] == 1
+
+
+def test_failed_post_response_attempt_retains_observed_usage(tmp_path, monkeypatch):
+    scenario = _attempt_fixture(tmp_path, monkeypatch)
+    usage = {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15,
+             "transport_identity": "codex_oauth", "billing_basis": campaign.OAUTH_BILLING_BASIS}
+
+    class Client:
+        def complete(self, **_kwargs):
+            return SimpleNamespace(text="{malformed", usage=SimpleNamespace(as_dict=lambda: usage))
+
+    manifest = {**small_manifest(), "source": {}, "docker_image": "unused"}
+    monkeypatch.setattr(campaign, "source_snapshot", lambda: {})
+    summary = campaign.execute(
+        manifest, "development_pilot", tmp_path / "results", SimpleNamespace(get=lambda _: scenario), Client(),
+        attempt_runner=lambda m, s, c, corpus, client: campaign.run_attempt(
+            m, s, c, corpus, client, oracle=lambda *args: {"passed": True, "timed_out": False}),
+    )
+    checkpoint = next((tmp_path / "results" / "development_pilot").glob("*.json"))
+    row_data = json.loads(checkpoint.read_text(encoding="utf-8"))["row"]
+    assert row_data["status"] == "error"
+    assert row_data["error_class"] == "JSONDecodeError"
+    assert row_data["provider_usage"] == [usage]
+    assert row_data["provider_usage_attempted"] == 1
+    assert row_data["provider_usage_observed"] == 1
+    assert row_data["provider_usage_missing"] == 0
+    assert row_data["provider_usage_status"] == "complete"
+    assert row_data["reader_calls"] == 1
+    assert row_data["correction_calls"] == 0
+    assert row_data["oracle_calls"] == 0
+    assert row_data["private_responses"] == []
+    assert row_data["private_oracles"] == []
+    assert summary["provider_usage"]["status"] == "complete"
+    assert summary["provider_usage"]["calls_observed"] == 1
+
+
+def test_failed_correction_call_marks_retained_usage_incomplete(tmp_path, monkeypatch):
+    scenario = _attempt_fixture(tmp_path, monkeypatch)
+    usage = {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15,
+             "transport_identity": "codex_oauth", "billing_basis": campaign.OAUTH_BILLING_BASIS}
+    calls = 0
+
+    class Client:
+        def complete(self, **_kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError("second call failed")
+            return SimpleNamespace(
+                text=json.dumps({"answer": "retry", "citations": [], "files": {}}),
+                usage=SimpleNamespace(as_dict=lambda: usage),
+            )
+
+    manifest = {**small_manifest(), "source": {}, "docker_image": "unused"}
+    monkeypatch.setattr(campaign, "source_snapshot", lambda: {})
+    summary = campaign.execute(
+        manifest, "development_pilot", tmp_path / "results", SimpleNamespace(get=lambda _: scenario), Client(),
+        attempt_runner=lambda m, s, c, corpus, client: campaign.run_attempt(
+            m, s, c, corpus, client, oracle=lambda *args: {"passed": False, "timed_out": False}),
+    )
+    checkpoint = next((tmp_path / "results" / "development_pilot").glob("*.json"))
+    row_data = json.loads(checkpoint.read_text(encoding="utf-8"))["row"]
+    assert calls == 2
+    assert row_data["error_class"] == "RuntimeError"
+    assert row_data["provider_usage"] == [usage]
+    assert row_data["provider_usage_attempted"] == 2
+    assert row_data["provider_usage_observed"] == 1
+    assert row_data["provider_usage_missing"] == 1
+    assert row_data["provider_usage_status"] == "partial"
+    assert row_data["reader_calls"] == 1
+    assert row_data["correction_calls"] == 0
+    assert row_data["oracle_calls"] == 1
+    assert len(row_data["private_responses"]) == 1
+    assert len(row_data["private_oracles"]) == 1
+    assert summary["provider_usage"]["status"] == "partial"
+    assert summary["provider_usage"]["calls_observed"] == 1
+    assert summary["provider_usage"]["rows_with_incomplete_usage"] == 1
+
+
+def test_source_validation_failure_preserves_returned_usage(tmp_path, monkeypatch):
+    manifest = small_manifest()
+    manifest["source"] = {}
+    observed = 0
+    usage = [{"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}]
+
+    def source_snapshot():
+        nonlocal observed
+        observed += 1
+        return {} if observed in {1, 3} else {"changed.py": "a" * 64}
+
+    monkeypatch.setattr(campaign, "source_snapshot", source_snapshot)
+    summary = campaign.execute(
+        manifest, "development_pilot", tmp_path, None, None,
+        attempt_runner=lambda _m, _s, cell, *_args: row(
+            cell, provider_usage=usage, provider_usage_attempted=1,
+            provider_usage_observed=1, provider_usage_missing=0,
+            provider_usage_status="complete", reader_calls=1, correction_calls=0,
+            oracle_calls=0, private_responses=[{"answer": "parsed"}], private_oracles=[]),
+    )
+    checkpoint = next((tmp_path / "development_pilot").glob("*.json"))
+    row_data = json.loads(checkpoint.read_text(encoding="utf-8"))["row"]
+    assert row_data["status"] == "error"
+    assert row_data["error_class"] == "ValueError"
+    assert row_data["provider_usage"] == usage
+    assert row_data["provider_usage_attempted"] == 1
+    assert row_data["provider_usage_observed"] == 1
+    assert row_data["provider_usage_missing"] == 0
+    assert row_data["provider_usage_status"] == "complete"
+    assert row_data["reader_calls"] == 1
+    assert row_data["private_responses"] == [{"answer": "parsed"}]
+    assert summary["provider_usage"]["status"] == "complete"
+
+
+def test_adapter_close_failure_retains_observed_usage(tmp_path, monkeypatch):
+    operation = SimpleNamespace(
+        evidence_id="e1", content="trusted context", valid_from=0, valid_to=None, known_at=None,
+        workspace="workspace", repo="repo", session=None, scope="repo", op="add",
+        corrects=None, trusted=True,
+    )
+    scenario = _attempt_fixture(tmp_path, monkeypatch, operations=(operation,))
+    manifest = {
+        **small_manifest(), "source": {}, "docker_image": "unused",
+        "created_at": "2025-01-01T00:00:00+00:00",
+        "embedding": {"model": "test", "revision": "a" * 40},
+    }
+    manifest["stages"]["development_pilot"]["arms"] = ["hybrid"]
+    usage = {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
+
+    class Adapter:
+        capabilities = SimpleNamespace(supports_valid_at=True, supports_known_at=True)
+
+        def prepare(self, **_kwargs):
+            return {}
+
+        def ingest(self, _records):
+            return []
+
+        def recall(self, _query, **_kwargs):
+            return SimpleNamespace(context="", source_ids=(), usage=SimpleNamespace(context_tokens=0))
+
+        def metrics(self):
+            return {}
+
+        def close(self):
+            raise RuntimeError("close failed")
+
+    def factory(_name, **_kwargs):
+        return Adapter()
+
+    class Client:
+        def complete(self, **_kwargs):
+            return SimpleNamespace(
+                text=json.dumps({"answer": "done", "citations": [], "files": {}}),
+                usage=SimpleNamespace(as_dict=lambda: usage),
+            )
+
+    monkeypatch.setattr(campaign, "source_snapshot", lambda: {})
+    summary = campaign.execute(
+        manifest, "development_pilot", tmp_path / "results", SimpleNamespace(get=lambda _: scenario), Client(),
+        attempt_runner=lambda m, s, c, corpus, client: campaign.run_attempt(
+            m, s, c, corpus, client, adapter_factory=factory,
+            oracle=lambda *args: {"passed": True, "timed_out": False}),
+    )
+    checkpoint = next((tmp_path / "results" / "development_pilot").glob("*.json"))
+    row_data = json.loads(checkpoint.read_text(encoding="utf-8"))["row"]
+    assert row_data["error_class"] == "RuntimeError"
+    assert row_data["provider_usage"] == [usage]
+    assert row_data["provider_usage_attempted"] == 1
+    assert row_data["provider_usage_observed"] == 1
+    assert row_data["provider_usage_missing"] == 0
+    assert row_data["provider_usage_status"] == "complete"
+    assert row_data["reader_calls"] == 1
+    assert row_data["correction_calls"] == 0
+    assert row_data["oracle_calls"] == 1
+    assert summary["provider_usage"]["calls_observed"] == 1
+
+
+@pytest.mark.parametrize("failure", ["cleanup", "invalid_json", "interrupted"])
+def test_workspace_cleanup_preserves_usage_and_primary_failure(tmp_path, monkeypatch, failure):
+    scenario = _attempt_fixture(tmp_path, monkeypatch)
+    original_temporary_directory = campaign.tempfile.TemporaryDirectory
+
+    class BrokenCleanup(original_temporary_directory):
+        def __exit__(self, *args):
+            super().__exit__(*args)
+            raise OSError("private cleanup error")
+
+    monkeypatch.setattr(campaign.tempfile, "TemporaryDirectory", BrokenCleanup)
+    monkeypatch.setattr(campaign, "source_snapshot", lambda: {})
+    monkeypatch.setattr(campaign, "score_response", lambda *_args, **_kwargs: SimpleNamespace(
+        critical_violations=["forbidden_evidence_exposed"], citation_validity=False,
+        abstention_correct=None,
+    ))
+    usage = {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
+    calls = []
+
+    def complete(**kwargs):
+        calls.append(kwargs)
+        text = "{malformed" if failure == "invalid_json" else json.dumps({
+            "answer": "done", "citations": [], "files": {},
+        })
+        return SimpleNamespace(text=text, usage=SimpleNamespace(as_dict=lambda: usage))
+
+    def oracle(*_args):
+        if failure == "interrupted":
+            raise KeyboardInterrupt()
+        return {"passed": True, "timed_out": False}
+
+    manifest = {**small_manifest(), "source": {}, "docker_image": "unused"}
+    results = tmp_path / "results"
+
+    def execute():
+        return campaign.execute(
+            manifest, "development_pilot", results, SimpleNamespace(get=lambda _: scenario),
+            SimpleNamespace(complete=complete),
+            attempt_runner=lambda m, s, c, corpus, client: campaign.run_attempt(
+                m, s, c, corpus, client, oracle=oracle),
+        )
+
+    if failure == "interrupted":
+        with pytest.raises(KeyboardInterrupt):
+            execute()
+        assert list((results / "development_pilot").glob("*.started"))
+        assert not list((results / "development_pilot").glob("*.json"))
+    else:
+        summary = execute()
+        checkpoint = next((results / "development_pilot").glob("*.json"))
+        saved = json.loads(checkpoint.read_text(encoding="utf-8"))["row"]
+        assert saved["status"] == "error"
+        assert saved["error_class"] == ("JSONDecodeError" if failure == "invalid_json" else "OSError")
+        assert saved["provider_usage"] == [usage]
+        assert saved["provider_usage_status"] == "complete"
+        assert saved["critical_violations"] == ([] if failure == "invalid_json" else ["forbidden_evidence_exposed"])
+        assert summary["provider_usage"]["calls_observed"] == 1
+        assert "private cleanup error" not in json.dumps(summary)
+    assert len(calls) == 1
+
+
+def test_continuation_stop_is_not_converted_to_terminal_attempt_error(tmp_path, monkeypatch):
+    from eval.campaign_continuation import ContinuationError
+
+    scenario = _attempt_fixture(tmp_path, monkeypatch)
+    manifest = {**small_manifest(), "source": {}, "docker_image": "unused"}
+
+    class Client:
+        def complete(self, **_kwargs):
+            raise ContinuationError("unsafe stop")
+
+    monkeypatch.setattr(campaign, "source_snapshot", lambda: {})
+    cell = campaign.cells(manifest, "development_pilot")[0]
+    with pytest.raises(campaign._AttemptExecutionError) as caught:
+        campaign.run_attempt(
+            manifest, "development_pilot", cell, SimpleNamespace(get=lambda _: scenario), Client(),
+            oracle=lambda *args: {"passed": True, "timed_out": False},
+        )
+    assert isinstance(caught.value.cause, ContinuationError)
+    assert caught.value.provider_usage_attempted == 1
+    assert caught.value.provider_usage_observed == 0
+    assert caught.value.provider_usage_missing == 1
+
+
 def test_reader_cannot_escape_declared_task_files(tmp_path):
     scenario = SimpleNamespace(task=SimpleNamespace(target_files=("service.py",)))
     response = {"answer": "", "citations": [], "files": {"../oracle.py": "pass"}}
