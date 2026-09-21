@@ -414,6 +414,65 @@ def test_proposal_includes_ingestion_corrections_and_cache_write_ceiling():
     assert proposal["max_cost_micros"] == 68 * 13108
 
 
+def test_run_attempt_binds_manifest_revision_to_engraphis_adapter():
+    from eval.coding_corpus import load_corpus
+
+    corpus = load_corpus()
+    scenario = corpus.scenarios("development")[0]
+    revision = "b" * 40
+    manifest = {
+        **small_manifest(),
+        "created_at": "2025-01-01T00:00:00+00:00",
+        "repository_revision": revision,
+        "source": {},
+        "docker_image": "unused",
+        "embedding": {"model": "test", "revision": "a" * 40},
+    }
+    cell = {"scenario_id": scenario.id, "arm": "hybrid", "token_budget": 512, "repetition": 0}
+    observed = []
+
+    class Adapter:
+        capabilities = SimpleNamespace(supports_valid_at=True, supports_known_at=True)
+
+        def prepare(self, **_kwargs):
+            return {}
+
+        def ingest(self, _records):
+            return []
+
+        def recall(self, _query, **_kwargs):
+            return SimpleNamespace(
+                context="", source_ids=(),
+                usage=SimpleNamespace(context_tokens=0), provenance={},
+            )
+
+        def metrics(self):
+            return {"capabilities": {"source_revision": observed[-1][1]["source_revision"]}}
+
+        def close(self):
+            pass
+
+    def factory(name, **kwargs):
+        observed.append((name, kwargs))
+        return Adapter()
+
+    class Client:
+        def complete(self, **_kwargs):
+            return SimpleNamespace(
+                text=json.dumps({"answer": "done", "citations": [], "files": {}}),
+                usage=SimpleNamespace(as_dict=lambda: {"input_tokens": 1, "output_tokens": 1}),
+            )
+
+    result = campaign.run_attempt(
+        manifest, "development_pilot", cell, corpus, Client(), adapter_factory=factory,
+        oracle=lambda *args: {"passed": True, "timed_out": False},
+    )
+    assert observed[0][0] == "engraphis"
+    assert observed[0][1]["source_revision"] == revision
+    assert "source_revision" not in observed[0][1]["config"]
+    assert result["adapter_metrics"]["capabilities"]["source_revision"] == revision
+
+
 def test_run_attempt_does_not_send_oracle_or_answers_to_reader(tmp_path, monkeypatch):
     source = tmp_path / "source.json"
     source.write_text("{}")

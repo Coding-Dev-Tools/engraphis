@@ -18,7 +18,7 @@ import re
 import threading
 import time
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Optional, Protocol, Sequence
@@ -41,6 +41,27 @@ class AdapterCapabilityError(AdapterError):
 
 class AdapterConfigurationError(AdapterError):
     """A backend would otherwise use an unbudgeted or ambiguous configuration."""
+
+
+_UNKNOWN_SOURCE_REVISION = "unknown"
+_SOURCE_REVISION_RE = re.compile(r"[a-f0-9]{40}")
+
+
+def _bound_source_revision(value: Optional[str]) -> str:
+    """Return only an explicit immutable source identity; never infer a checkout."""
+
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return _UNKNOWN_SOURCE_REVISION
+    if not isinstance(value, str):
+        raise AdapterConfigurationError("source_revision must be an immutable revision or unknown")
+    revision = value.strip()
+    if revision == _UNKNOWN_SOURCE_REVISION:
+        return revision
+    if not _SOURCE_REVISION_RE.fullmatch(revision):
+        raise AdapterConfigurationError(
+            "source_revision must be a lowercase 40-character revision or unknown"
+        )
+    return revision
 
 
 class BudgetedLLM(Protocol):
@@ -1230,7 +1251,7 @@ class EngraphisAdapter(_BaseAdapter):
         adapter="engraphis",
         version="1.7.4",
         source="https://github.com/Coding-Dev-Tools/engraphis",
-        source_revision="ca790261f499e0d124cdc7131235ffff89637248",
+        source_revision=_UNKNOWN_SOURCE_REVISION,
         scopes=("workspace", "repo", "session"),
         supports_valid_at=True,
         supports_known_at=True,
@@ -1247,8 +1268,17 @@ class EngraphisAdapter(_BaseAdapter):
         engine_factory: Optional[Callable[..., Any]] = None,
         engine_kwargs: Optional[Mapping[str, Any]] = None,
         baseline_label: Optional[str] = None,
+        source_revision: Optional[str] = None,
     ) -> None:
         super().__init__()
+        # A direct adapter has no provenance authority.  Campaign execution
+        # supplies the exact revision from its validated manifest; do not read
+        # the ambient checkout here because it may differ from the evaluated
+        # snapshot (and would turn unknown provenance into a false claim).
+        self.capabilities = replace(
+            type(self).capabilities,
+            source_revision=_bound_source_revision(source_revision),
+        )
         self._engine = engine
         self._owned_engine = engine is None
         self._db_path = db_path

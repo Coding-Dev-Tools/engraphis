@@ -42,22 +42,29 @@ and source hashes. This is a regression comparison on development fixtures.
 
 Two separate five-case comparisons against `65f4becd` improve from 0/5 to 5/5:
 complete restriction retention under competing query terms, and safe withholding when
-the complete group cannot fit. Coverage uses nearby punctuation-delimited units and
-recognized qualifier terms, treating line breaks as wrapping. It is not a general
-semantic parser. Headers, titles, and source attribution remain inside the budget;
-incomplete bound groups cannot regain exact-value metadata during expansion.
+the complete detected group cannot fit. Coverage recognizes qualifier terms in the
+literal's punctuation-delimited units and up to two neighboring units on each side,
+treating line breaks as wrapping. It does not establish conditions outside that
+neighborhood or infer their semantic relationship to the literal. Headers, titles,
+and source attribution remain inside the budget; incomplete detected groups cannot
+regain exact-value metadata during expansion.
+
+Corpus replay rejects non-boolean trust and answerability labels before execution.
+Campaign adapters report the frozen manifest's evaluated revision; direct adapters
+retain `unknown` provenance unless explicitly bound. These checks protect result
+interpretation and do not count as additional benchmark-quality gains.
 
 ### Public numeric evidence registry
 
 Every exact public aggregate retained below comes from the checked-in, public-safe
-[`offline-fixtures-v50.json`](docs/benchmark-evidence/offline-fixtures-v50.json) artifact. Its
+[`offline-fixtures-v51.json`](docs/benchmark-evidence/offline-fixtures-v51.json) artifact. Its
 SHA-256 is
-`729b74ba02cac3048c032c684d305c351d7800debdffc53aea2200dfafaa4120`, also recorded in the
+`eee59631f04edb56d92d5ea5db93b908d1f94ae2172fa350df66ad7822fb6214`, also recorded in the
 adjacent `.sha256` file. The artifact contains no raw questions, answers, prompts, customer data,
 or per-record content fingerprints.
 
 The fixture-suite digest is
-`71715cf33e47e03f630b59f2151d0f28d41b5738bbff5bce272d5e95bec1baf4`. The artifact defines
+`feaa998407a6a01866ed3e5ac8a1499ad1779e3d21817fe9f10b4d6015b15bf1`. The artifact defines
 the digest algorithm and records the SHA-256 of every suite and dataset file. Each evidence ID
 also binds its exact command through `sha256(UTF-8 exact command)`:
 
@@ -79,10 +86,10 @@ Historical LoCoMo, graph, handoff, consolidation, and security figures remain pr
 source artifacts but are omitted from the current chart until each has a matching immutable,
 public-safe artifact. The chart labels coding outcomes, external datasets, and operational
 capacity as pending evaluation tracks rather than implying scores. Regenerate it with
-`python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-v50.json --output docs/images/context-efficiency.svg` after selecting the report to publish.
+`python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-v51.json --output docs/images/context-efficiency.svg` after selecting the report to publish.
 
 The companion examples are also generated from that artifact with
-`python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-v50.json --output docs/images/evidence-backed-agent-examples.svg`.
+`python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-v51.json --output docs/images/evidence-backed-agent-examples.svg`.
 The historical-to-executable mapping is in
 [`docs/BENCHMARK_CHANGE_COVERAGE.md`](docs/BENCHMARK_CHANGE_COVERAGE.md).
 
