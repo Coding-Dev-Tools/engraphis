@@ -153,6 +153,13 @@ new location, or silently replace an error with a successful retry. Archive a re
 and obtain approval for any replay or additional stage. Continuing never-attempted cells within
 the already approved pilot requires a bound recovery receipt, not a second authorization.
 
+Original and continuation runners share a persistent OS-held execution lock. Process
+termination releases ownership without removing the marker; a later authorized invocation
+can inspect the retained state. Lock recovery does not clear unfinished reservations, replay
+completed calls, enlarge the approved allowance, or permit another child allocation. Legacy
+PID markers and unrecognized lock contents still require operator inspection. Keep the marker
+in place, and bind the shared lock implementation in each new campaign source snapshot.
+
 After execution, `python -m scripts.audit_coding_oauth_run --manifest <manifest.json>
 --report <public-report.json> --results <private-results> --private-inventory <new-private.json>
 --output <new-public-audit.json>` joins checkpoint, ledger and native journal evidence without

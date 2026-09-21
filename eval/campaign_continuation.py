@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -608,20 +608,17 @@ def _assert_child_source(plan: ContinuationPlan) -> None:
 
 @contextmanager
 def _execution_lock(path: Path, label: str):
-    path.mkdir(parents=True, exist_ok=True)
     marker = path / ".campaign-execution.lock"
-    try:
-        handle = marker.open("x", encoding="utf-8")
-    except FileExistsError as exc:
-        raise ContinuationError(f"{label} execution lock already exists") from exc
-    try:
-        handle.write(f"{label}:{os.getpid()}\n")
-        handle.flush()
-        os.fsync(handle.fileno())
+    from eval.external_checkpoints import RunnerLockBusy, UnrecognizedRunnerLock, _runner_lock
+
+    with ExitStack() as stack:
+        try:
+            stack.enter_context(_runner_lock(marker))
+        except (RunnerLockBusy, UnrecognizedRunnerLock) as exc:
+            raise ContinuationError(
+                f"{label} execution lock is busy or unrecognized; inspect the abandoned lock"
+            ) from exc
         yield
-    finally:
-        handle.close()
-        marker.unlink(missing_ok=True)
 
 
 def _load_child(plan: ContinuationPlan) -> dict[str, dict[str, Any]]:

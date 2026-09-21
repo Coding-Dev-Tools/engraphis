@@ -360,6 +360,93 @@ def test_external_analysis_rejects_omitted_scoring_flags(tmp_path):
         analysis._read_verified_snapshot(path)
 
 
+@pytest.mark.parametrize("field", [
+    "recall_at_k",
+    "packed_recall_at_k",
+    "answer_token_recall",
+    "packed_answer_token_recall",
+])
+@pytest.mark.parametrize(
+    "value", [2.0, -0.1, "0.5", True, None, float("nan"), float("inf"), -float("inf")]
+)
+def test_external_analysis_rejects_malformed_row_rates(tmp_path, field, value):
+    path = tmp_path / "malformed-rate.json"
+    report = _scoring_flag_report()
+    report["records"][0][field] = value
+    _write_report(path, report)
+    with pytest.raises(ValueError, match="finite numeric rate"):
+        analysis._read_verified_snapshot(path)
+
+
+@pytest.mark.parametrize("field", [
+    "recall_at_k",
+    "packed_recall_at_k",
+    "answer_token_recall",
+    "packed_answer_token_recall",
+])
+@pytest.mark.parametrize("value", [2.0, float("nan"), float("inf"), -float("inf"), None])
+def test_external_analysis_rejects_malformed_aggregate_rates(tmp_path, field, value):
+    path = tmp_path / "malformed-aggregate-rate.json"
+    report = _scoring_flag_report()
+    report["metrics"][field] = value
+    _write_report(path, report)
+    with pytest.raises(ValueError, match="rate"):
+        analysis._read_verified_snapshot(path)
+
+
+def test_external_analysis_preserves_undefined_unscored_aggregates(tmp_path):
+    path = tmp_path / "unscored.json"
+    report = _scoring_flag_report(retrieval_scored=False, answer_scored=False)
+    for field in analysis._RATE_FIELDS:
+        report["metrics"][field] = None
+    _write_report(path, report)
+
+    assert analysis.read_verified(path)["records"]
+
+
+def test_external_analysis_rejects_missing_row_rate(tmp_path):
+    path = tmp_path / "missing-rate.json"
+    report = _scoring_flag_report()
+    report["records"][0].pop("answer_token_recall")
+    _write_report(path, report)
+
+    with pytest.raises(ValueError, match="missing answer_token_recall"):
+        analysis._read_verified_snapshot(path)
+
+
+def test_external_analysis_rejects_huge_integer_rate_without_overflow(tmp_path):
+    path = tmp_path / "huge-rate.json"
+    report = _scoring_flag_report()
+    report["records"][0]["answer_token_recall"] = 10**1000
+    _write_report(path, report)
+
+    with pytest.raises(ValueError, match="finite numeric rate"):
+        analysis._read_verified_snapshot(path)
+
+
+def test_external_analysis_rejects_missing_aggregate_rate(tmp_path):
+    path = tmp_path / "missing-aggregate-rate.json"
+    report = _scoring_flag_report()
+    report["metrics"].pop("answer_token_recall")
+    _write_report(path, report)
+
+    with pytest.raises(ValueError, match="missing aggregate answer_token_recall"):
+        analysis._read_verified_snapshot(path)
+
+
+@pytest.mark.parametrize("field", ["answer_token_recall", "packed_answer_token_recall"])
+@pytest.mark.parametrize("scored", [False, True])
+def test_external_analysis_rejects_invalid_rate_even_when_aggregate_agrees(tmp_path, field, scored):
+    report = _scoring_flag_report(answer_scored=scored)
+    report["records"][0][field] = 2.0
+    report["metrics"][field] = 2.0 if scored else None
+    path = tmp_path / "self-consistent-invalid-rate.json"
+    _write_report(path, report)
+
+    with pytest.raises(ValueError, match="finite numeric rate"):
+        analysis.read_verified(path)
+
+
 def _write_report(path, report):
     path.write_text(json.dumps(report), encoding="utf-8")
     path.with_suffix(".json.sha256").write_text(sha256_file(path), encoding="utf-8")

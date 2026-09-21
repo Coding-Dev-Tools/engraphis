@@ -208,21 +208,35 @@ def _validate_capacity_summary(report: dict) -> None:
             and report.get("schema") != CAPACITY_SUMMARY_SCHEMA):
         raise ValueError("queued capacity summary has the wrong schema")
     _require_sha(report.get("binding_sha256"), "capacity summary binding_sha256")
-    if report.get("status") != "COMPLETE" or report.get("completed_cells") != 24:
+    if (report.get("status") != "COMPLETE"
+            or type(report.get("completed_cells")) is not int
+            or report["completed_cells"] != 24):
         raise ValueError("queued capacity summary is incomplete")
-    if report.get("declared_cells") != 24 or not isinstance(report.get("cells"), list):
+    if (type(report.get("declared_cells")) is not int
+            or report["declared_cells"] != 24
+            or not isinstance(report.get("cells"), list)):
         raise ValueError("queued capacity summary has an invalid cell matrix")
     hashes = report.get("cell_artifact_sha256")
     if not isinstance(hashes, dict) or len(hashes) != 24:
         raise ValueError("queued capacity summary lacks per-cell artifact hashes")
+    if any(not isinstance(key, str) or not key.strip() for key in hashes):
+        raise ValueError("queued capacity summary has invalid artifact hash keys")
     if len(report["cells"]) != 24:
         raise ValueError("queued capacity summary has an incomplete cell list")
+    cell_ids: set[str] = set()
     for cell in report["cells"]:
         if (not isinstance(cell, dict) or not isinstance(cell.get("id"), str)
                 or cell.get("status") != "COMPLETE"):
             raise ValueError("queued capacity summary contains an incomplete cell")
+        cell_id = cell["id"]
+        if not cell_id.strip() or cell_id in cell_ids:
+            raise ValueError("queued capacity summary contains an empty or duplicate cell ID")
+        cell_ids.add(cell_id)
         _require_sha(cell.get("sha256"), "capacity cell sha256")
-        if hashes.get(cell["id"]) != cell["sha256"]:
+    if cell_ids != set(hashes):
+        raise ValueError("queued capacity summary cell IDs do not match artifact hash keys")
+    for cell in report["cells"]:
+        if hashes[cell["id"]] != cell["sha256"]:
             raise ValueError("capacity cell hash index disagrees with its cell entry")
     statuses = report.get("gate_status", {})
     if not isinstance(statuses, dict):

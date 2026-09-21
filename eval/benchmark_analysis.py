@@ -23,6 +23,12 @@ _HISTORICAL_REPAIR_SOURCE_NAMES = {
     "locomo": frozenset({"locomo10_repair_manifest_v2.json"}),
     "longmemeval": frozenset({"longmemeval_s_cleaned_repair_manifest.json"}),
 }
+_RATE_FIELDS = (
+    "recall_at_k",
+    "packed_recall_at_k",
+    "answer_token_recall",
+    "packed_answer_token_recall",
+)
 
 
 def _is_sha256(value: object) -> bool:
@@ -31,6 +37,16 @@ def _is_sha256(value: object) -> bool:
         and len(value) == 64
         and all(character in "0123456789abcdefABCDEF" for character in value)
     )
+
+
+def _validate_rate(value: object, *, label: str) -> None:
+    """Reject malformed diagnostic rates without coercing JSON values."""
+    valid = (
+        (type(value) is int and 0 <= value <= 1)
+        or (type(value) is float and math.isfinite(value) and 0 <= value <= 1)
+    )
+    if not valid:
+        raise ValueError(f"{label} must be a finite numeric rate in [0, 1]")
 
 
 def _validate_repair_manifest_binding(report: dict) -> None:
@@ -104,6 +120,10 @@ def _read_verified_snapshot(path: Path) -> tuple[dict, str]:
                 raise ValueError(
                     "external diagnostic requires explicit boolean retrieval_scored and answer_scored"
                 )
+        for field in _RATE_FIELDS:
+            if field not in row:
+                raise ValueError(f"external diagnostic record is missing {field}")
+            _validate_rate(row[field], label=f"record {field}")
         if not set(row["packed_ids"]) <= set(row["retrieved_ids"]):
             raise ValueError("packed evidence was not retrieved")
         if row["retrieval_scored"] is True:
@@ -120,12 +140,17 @@ def _read_verified_snapshot(path: Path) -> tuple[dict, str]:
     for field, eligible in (("recall_at_k", "retrieval_scored"), ("packed_recall_at_k", "retrieval_scored"),
                             ("answer_token_recall", "answer_scored"), ("packed_answer_token_recall", "answer_scored")):
         values = [row[field] for row in rows if row[eligible] is True]
+        if field not in report["metrics"]:
+            raise ValueError(f"external diagnostic is missing aggregate {field}")
         aggregate = report["metrics"][field]
+        if aggregate is not None:
+            _validate_rate(aggregate, label=f"aggregate {field}")
         if not values:
             if aggregate is not None:
                 raise ValueError("unscored aggregate must be undefined")
-        elif (type(aggregate) not in {int, float}
-              or not math.isclose(aggregate, sum(values) / len(values), abs_tol=5e-6)):
+        elif aggregate is None:
+            raise ValueError(f"aggregate {field} rate must be defined for scored records")
+        elif not math.isclose(aggregate, sum(values) / len(values), abs_tol=5e-6):
             raise ValueError("aggregate does not match its scored records")
     return report, input_digest
 

@@ -687,3 +687,96 @@ def test_queue_waits_for_legacy_ephemeral_producer_marker_until_removed(tmp_path
                 _stop_process(queue_process)
             else:
                 queue_process.communicate(timeout=10)
+
+
+def _complete_capacity_summary():
+    cells = []
+    hashes = {}
+    for index in range(24):
+        cell_id = f"cell-{index}"
+        sha = str(index + 1).zfill(64)
+        cells.append({"id": cell_id, "status": "COMPLETE", "sha256": sha})
+        hashes[cell_id] = sha
+    return {
+        "summary_schema": queue.CAPACITY_SUMMARY_SCHEMA,
+        "binding_sha256": "a" * 64,
+        "status": "COMPLETE",
+        "completed_cells": 24,
+        "declared_cells": 24,
+        "cells": cells,
+        "cell_artifact_sha256": hashes,
+        "gate_status": {
+            "integrity": "PASS", "resource": "PASS", "latency": "PASS", "backlog": "PASS",
+        },
+    }
+
+
+def test_capacity_summary_accepts_unique_cells_with_exact_hash_keys():
+    report = _complete_capacity_summary()
+
+    queue._validate_capacity_summary(report)
+
+
+def test_capacity_summary_rejects_duplicate_cells_and_unused_hash_keys():
+    report = _complete_capacity_summary()
+    first = report["cells"][0]
+    report["cells"] = [first] * 24
+    report["cell_artifact_sha256"] = {
+        "cell-0": first["sha256"],
+        **{f"unused-{index}": first["sha256"] for index in range(23)},
+    }
+
+    with pytest.raises(ValueError, match="empty or duplicate cell ID"):
+        queue._validate_capacity_summary(report)
+
+
+def test_capacity_summary_rejects_hash_key_set_mismatch():
+    report = _complete_capacity_summary()
+    report["cell_artifact_sha256"].pop("cell-23")
+    report["cell_artifact_sha256"]["unused"] = "f" * 64
+
+    with pytest.raises(ValueError, match="do not match artifact hash keys"):
+        queue._validate_capacity_summary(report)
+
+
+@pytest.mark.parametrize("field", ["completed_cells", "declared_cells"])
+def test_capacity_summary_rejects_non_integer_cell_counts(field):
+    report = _complete_capacity_summary()
+    report[field] = 24.0
+
+    with pytest.raises(ValueError, match="incomplete|invalid cell matrix"):
+        queue._validate_capacity_summary(report)
+
+
+@pytest.mark.parametrize("cell_id", ["", "   "])
+def test_capacity_summary_rejects_empty_or_whitespace_cell_ids(cell_id):
+    report = _complete_capacity_summary()
+    report["cells"][0]["id"] = cell_id
+
+    with pytest.raises(ValueError, match="empty or duplicate cell ID"):
+        queue._validate_capacity_summary(report)
+
+
+def test_capacity_summary_rejects_non_string_hash_keys_before_lookup():
+    report = _complete_capacity_summary()
+    digest = report["cell_artifact_sha256"].pop("cell-0")
+    report["cell_artifact_sha256"][0] = digest
+
+    with pytest.raises(ValueError, match="invalid artifact hash keys"):
+        queue._validate_capacity_summary(report)
+
+
+@pytest.mark.parametrize("duplicate", [False, True])
+def test_checksummed_capacity_artifact_requires_distinct_cells(tmp_path, duplicate):
+    report = _complete_capacity_summary()
+    if duplicate:
+        report["cells"] = [report["cells"][0]] * 24
+    path = tmp_path / "capacity.json"
+    path.write_text(json.dumps(report), encoding="utf-8")
+    path.with_suffix(".json.sha256").write_text(queue.sha256_file(path), encoding="utf-8")
+
+    if duplicate:
+        with pytest.raises(ValueError, match="duplicate cell ID"):
+            queue._verified_artifact(path)
+    else:
+        assert queue._verified_artifact(path) == report
