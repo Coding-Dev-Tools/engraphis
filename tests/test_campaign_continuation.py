@@ -387,3 +387,130 @@ def test_parent_drift_blocks_second_reader_call(tmp_path):
     with pytest.raises(cc.ContinuationError, match="immutable parent"):
         cc.run_continuation(plan, corpus=None, client=client, attempt_runner=runner, enforce_source=False)
     assert client.calls == 1
+
+
+def _real_attempt_plan(tmp_path):
+    from eval.coding_corpus import load_corpus
+
+    corpus = load_corpus()
+    scenario = corpus.scenarios("development")[0]
+    cell = {"scenario_id": scenario.id, "arm": "no_memory", "token_budget": 512, "repetition": 0}
+    plan = _plan(tmp_path, (cell,))
+    plan.child_manifest.update({
+        "docker_image": "unused",
+        "stages": {plan.stage_name: {
+            "max_reader_turns": 2, "max_input_tokens": 64000, "max_output_tokens": 4000,
+        }},
+    })
+    return plan, corpus
+
+
+@pytest.mark.parametrize("failure", [
+    "invalid_json", "undeclared_file", "oracle", "correction", "post_return_validation",
+])
+def test_failed_real_attempt_usage_survives_continuation_and_resume(tmp_path, failure):
+    from types import SimpleNamespace
+
+    plan, corpus = _real_attempt_plan(tmp_path)
+    usage = {
+        "input_tokens": 11, "cached_input_tokens": 3, "output_tokens": 5,
+        "reasoning_output_tokens": 2, "total_tokens": 16, "latency_ms": 7.5,
+        "cost_micros": 123, "transport_identity": "codex_oauth",
+        "billing_basis": cc.campaign.OAUTH_BILLING_BASIS,
+    }
+    calls = []
+
+    def complete(**kwargs):
+        calls.append(kwargs)
+        if failure == "correction" and len(calls) == 2:
+            raise RuntimeError("private provider error")
+        content = "invalid provider body" if failure == "invalid_json" else json.dumps({
+            "answer": "done", "citations": [],
+            "files": {"undeclared.txt": "private file"} if failure == "undeclared_file" else {},
+        })
+        return SimpleNamespace(text=content, usage=SimpleNamespace(as_dict=lambda: dict(usage)))
+
+    def oracle(*_args):
+        if failure == "oracle":
+            raise RuntimeError("private oracle error")
+        return {"passed": failure != "correction", "timed_out": False}
+
+    def runner(manifest, stage, cell, corpus, guarded):
+        result = cc.campaign.run_attempt(
+            manifest, stage, cell, corpus, guarded,
+            oracle=oracle,
+        )
+        if failure == "post_return_validation":
+            result["context_tokens"] = cell["token_budget"] + 1
+        return result
+
+    report = cc.run_continuation(
+        plan, corpus=corpus, client=SimpleNamespace(complete=complete),
+        attempt_runner=runner, enforce_source=False,
+    )
+    expected_calls = 2 if failure == "correction" else 1
+    assert len(calls) == expected_calls
+    checkpoint = cc._read(next((plan.child_results / plan.stage_name).glob("*.json")))
+    assert checkpoint["row"]["status"] == "error"
+    assert checkpoint["row"]["provider_usage"] == [usage]
+    assert checkpoint["row"]["provider_usage_attempted"] == expected_calls
+    assert checkpoint["row"]["provider_usage_observed"] == 1
+    assert checkpoint["row"]["provider_usage_missing"] == expected_calls - 1
+    aggregate = report["metrics"]["provider_usage"]
+    assert aggregate["calls_observed"] == 1
+    assert aggregate["input_tokens"] == 11
+    assert aggregate["api_price_proxy_micros"] == 123
+    assert aggregate["status"] == ("partial" if failure == "correction" else "complete")
+    assert aggregate["provider_usage_attempted"] == expected_calls
+    assert aggregate["provider_usage_missing"] == expected_calls - 1
+    assert report["metrics"]["status"] == "BLOCKED"
+    assert report["protocol"]["n_scored"] == 0
+    for private_text in ("invalid provider body", "private provider error", "private oracle error", "private file"):
+        assert private_text not in json.dumps(report)
+    resumed = cc.run_continuation(
+        plan, corpus=corpus, client=object(),
+        attempt_runner=lambda *_args: pytest.fail("terminal attempt was replayed"),
+        enforce_source=False,
+    )
+    assert resumed["metrics"]["provider_usage"] == aggregate
+    assert len(calls) == expected_calls
+
+
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+def test_real_attempt_preserves_continuation_guard_stop_after_metered_response(tmp_path, monkeypatch, cleanup_fails):
+    from types import SimpleNamespace
+
+    plan, corpus = _real_attempt_plan(tmp_path)
+    if cleanup_fails:
+        original_temporary_directory = cc.campaign.tempfile.TemporaryDirectory
+
+        class BrokenCleanup(original_temporary_directory):
+            def __exit__(self, *args):
+                super().__exit__(*args)
+                raise OSError("cleanup after guard stop")
+
+        monkeypatch.setattr(cc.campaign.tempfile, "TemporaryDirectory", BrokenCleanup)
+    calls = []
+
+    def complete(**kwargs):
+        calls.append(kwargs)
+        plan.parent_ledger_path.write_text("changed after first call", encoding="utf-8")
+        return SimpleNamespace(
+            text=json.dumps({"answer": "done", "citations": [], "files": {}}),
+            usage=SimpleNamespace(as_dict=lambda: {"input_tokens": 11, "output_tokens": 5}),
+        )
+
+    def runner(manifest, stage, cell, corpus, guarded):
+        return cc.campaign.run_attempt(
+            manifest, stage, cell, corpus, guarded,
+            oracle=lambda *_args: {"passed": False, "timed_out": False},
+        )
+
+    with pytest.raises(cc.ContinuationError, match="immutable parent"):
+        cc.run_continuation(
+            plan, corpus=corpus, client=SimpleNamespace(complete=complete),
+            attempt_runner=runner, enforce_source=False,
+        )
+    assert len(calls) == 1
+    assert list((plan.child_results / plan.stage_name).glob("*.started"))
+    assert not list((plan.child_results / plan.stage_name).glob("*.json"))
