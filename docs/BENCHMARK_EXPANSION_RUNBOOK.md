@@ -292,6 +292,23 @@ Failed or interrupted jobs require reconciliation; they are never automatically 
 Closing the app does not intentionally terminate a separately launched queue process, but
 Windows shutdown or process termination interrupts it and is not reported as completion.
 
+The queue holds a nonblocking operating-system lock for its entire execution. Its marker
+stays in the results directory; process death releases ownership without deleting evidence.
+A retained `.started` receipt still blocks automatic replay, and completed checkpoints are
+validated before being reused. Legacy PID-only, empty, unrecognized, or aliased lock files
+remain blocked for inspection. Keep marker files in place, and use a fresh results directory
+after producer-source changes rather than modifying a frozen plan or prior receipts.
+The local capacity child uses the same lock protocol and retains its separate unfinished-cell
+guard. Its source snapshot includes the shared lock implementation; completed cells are not
+rerun when ownership is reacquired.
+
+For an upstream diagnostic with a persistent marker, the queue waits while its producer
+holds the operating-system lock, then holds that lock itself while verifying the artifact
+and checksum. This probe never creates, repairs, or removes producer markers. Legacy
+ephemeral markers must disappear before verification; unsafe or changed marker paths fail
+closed. An absent marker requires an already completed, valid artifact.
+Both prerequisite paths must stay inside the repository, just like declared job artifacts.
+
 ```powershell
 & $py -m eval.local_benchmark_queue --manifest <new-local-queue.json> --prepare-from <job-spec.json>
 & $py -m eval.local_benchmark_queue --manifest <local-queue.json> --execute --results <private-queue-directory>

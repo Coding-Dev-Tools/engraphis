@@ -31,6 +31,14 @@ SCHEMA = "engraphis-external-checkpoints/v2"
 RUNNER_LOCK_MARKER = b"engraphis-external-runner-lock/v1\n"
 
 
+class RunnerLockBusy(ValueError):
+    """Another process still owns the runner lock."""
+
+
+class UnrecognizedRunnerLock(ValueError):
+    """A marker does not establish the cooperating OS-lock protocol."""
+
+
 def _write(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("x", encoding="utf-8", newline="\n") as handle:
@@ -47,7 +55,7 @@ def _read(path: Path) -> dict:
 
 
 @contextmanager
-def _runner_lock(path: Path):
+def _runner_lock(path: Path, *, create: bool = True):
     """Hold an OS lock whose release is automatic if the process dies.
 
     The fixed marker is initialized once under the lock; a prefix left by an
@@ -55,16 +63,30 @@ def _runner_lock(path: Path):
     Existing empty files, legacy PID markers and other unrecognized bytes
     require manual inspection.
     Cooperating runners must keep the lock file in place, even after exiting.
+    An existing-only probe (create=False) never creates or repairs a marker and
+    raises FileNotFoundError for an absent path. Ownership must cover the read
+    that depends on the producer having finished.
     """
 
-    path.parent.mkdir(parents=True, exist_ok=True)
+    if create:
+        path.parent.mkdir(parents=True, exist_ok=True)
     created = False
     try:
-        try:
-            handle = path.open("x+b")
-            created = True
-        except FileExistsError:
+        if not create:
+            named = path.lstat()
+            if not stat.S_ISREG(named.st_mode) or named.st_nlink != 1:
+                raise ValueError("external diagnostic runner lock is unsafe or changed")
             handle = path.open("r+b")
+        else:
+            try:
+                handle = path.open("x+b")
+                created = True
+            except FileExistsError:
+                handle = path.open("r+b")
+    except FileNotFoundError as exc:
+        if not create and not os.path.lexists(path):
+            raise
+        raise ValueError("external diagnostic runner lock is unsafe or unavailable") from exc
     except OSError as exc:
         raise ValueError("external diagnostic runner lock is unsafe or unavailable") from exc
     acquired = False
@@ -79,17 +101,23 @@ def _runner_lock(path: Path):
                     raise OSError("POSIX file locking is unavailable")
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except (OSError, BlockingIOError) as exc:
-            raise ValueError("external diagnostic runner already owns this directory") from exc
+            raise RunnerLockBusy("external diagnostic runner already owns this directory") from exc
         acquired = True
 
-        opened, named = os.fstat(handle.fileno()), path.lstat()
+        try:
+            opened, named = os.fstat(handle.fileno()), path.lstat()
+        except OSError as exc:
+            # Once a handle has been acquired, disappearance is a changed inode,
+            # not the absent-marker compatibility case for an existing-only probe.
+            raise ValueError("external diagnostic runner lock is unsafe or changed") from exc
         if (not stat.S_ISREG(named.st_mode) or opened.st_nlink != 1
                 or not os.path.samestat(opened, named)):
             raise ValueError("external diagnostic runner lock is unsafe or changed")
         handle.seek(0)
         raw = handle.read(len(RUNNER_LOCK_MARKER) + 1)
-        if (not raw and not created) or not RUNNER_LOCK_MARKER.startswith(raw):
-            raise ValueError("legacy or unrecognized external runner lock requires manual inspection")
+        if ((not raw and not created) or not RUNNER_LOCK_MARKER.startswith(raw)
+                or (not create and raw != RUNNER_LOCK_MARKER)):
+            raise UnrecognizedRunnerLock("legacy or unrecognized external runner lock requires manual inspection")
         if raw != RUNNER_LOCK_MARKER:
             handle.write(RUNNER_LOCK_MARKER[len(raw):])
             handle.flush()
