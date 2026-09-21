@@ -21,14 +21,19 @@ def _bound(content, *, value="VALUE", title="", score=1.0):
     ("VALUE filler never for production", False, 14),
     ("VALUE filler only if approved, and never for production", False, 16),
 ])
-def test_repeated_query_words_do_not_displace_complete_restrictions(expected, prefix, budget):
+def test_unpunctuated_restrictions_withhold_until_the_complete_unit_fits(expected, prefix, budget):
     noise = "deployment " * 8
     content = expected + " " + noise if prefix else noise + expected
     candidate, binding = _bound(content)
-    result = DeterministicContextPacker().pack_coverage("deployment", [candidate], budget)
+    packer = DeterministicContextPacker()
+    tight = packer.pack_coverage("deployment", [candidate], budget)
+    assert "VALUE" not in tight.context
+    assert all(chunk.exact_value is None and chunk.source_span is None for chunk in tight.chunks)
+    assert tight.usage.context_tokens <= budget
+    budget = packer.count_tokens("[1]\n" + content.strip())
+    result = packer.pack_coverage("deployment", [candidate], budget)
     chunk = result.chunks[0]
-    assert expected in chunk.excerpt
-    assert chunk.excerpt in content
+    assert chunk.excerpt == content.strip()
     assert chunk.exact_value == binding
     assert chunk.source_span == (binding["start"], binding["end"])
     assert result.usage.context_tokens <= budget
@@ -44,8 +49,14 @@ def test_wrapped_restrictions_continue_to_a_hard_boundary(separator, prefix, per
     candidate, binding = _bound(content)
     packer = DeterministicContextPacker()
     budget = packer.count_tokens("[1]\n" + expected)
+    tight = packer.pack_coverage("deployment", [candidate], budget)
+    assert "VALUE" not in tight.context
+    assert all(chunk.exact_value is None and chunk.source_span is None for chunk in tight.chunks)
+    assert tight.usage.context_tokens <= budget
+    # A line wrap cannot detach the repeated words from the complete bound unit.
+    budget = packer.count_tokens("[1]\n" + content.strip())
     result = packer.pack_coverage("deployment", [candidate], budget)
-    assert result.chunks[0].excerpt == expected
+    assert result.chunks[0].excerpt.strip() == content.strip()
     assert result.chunks[0].exact_value == binding
     assert result.usage.context_tokens == budget
 
@@ -108,7 +119,11 @@ def test_complete_group_charges_title_and_custom_counter_without_outer_whitespac
     candidate, binding = _bound(content, title="Release")
     packer = DeterministicContextPacker(token_counter=len)
     budget = len("[1] Release\n" + expected)
+    tight = packer.pack_coverage("deployment", [candidate], budget)
+    assert "VALUE" not in tight.context
+    assert all(chunk.exact_value is None and chunk.source_span is None for chunk in tight.chunks)
+    budget = len("[1] Release\n" + content.strip())
     result = packer.pack_coverage("deployment", [candidate], budget)
-    assert result.chunks[0].excerpt == expected
+    assert result.chunks[0].excerpt == content.strip()
     assert result.chunks[0].exact_value == binding
     assert result.usage.context_tokens == budget

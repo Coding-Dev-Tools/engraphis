@@ -59,12 +59,12 @@ def coverage_query_diagnostic(*, packer_type=DeterministicContextPacker) -> dict
 
 
 def coverage_restriction_diagnostic(*, packer_type=DeterministicContextPacker) -> dict:
-    """Keep repeated query terms from displacing a bound restriction phrase.
+    """Retain the original literal-retention expectations at fixed budgets.
 
-    This is a separate development denominator from ``coverage_query_diagnostic``:
-    the fixtures exercise the bounded expansion fallback for an oversized source,
-    while the older eight cases cover query selection, occurrence identity, and
-    multiline values.
+    These unpunctuated sources expose the retention cost of complete-unit safety.
+    Inputs and expected excerpts stay unchanged even when the safer packer omits
+    the value. The separate complete-unit diagnostic gates safe omission and
+    roomy retention; this population continues to report literal retention.
     """
     cases = [
         ("suffix_repeated_query", "deployment " * 8 + "VALUE filler only if approved",
@@ -155,6 +155,177 @@ def coverage_binding_safety_diagnostic(*, packer_type=DeterministicContextPacker
     )
     return {"cases": len(outcomes), "correct": sum(row["correct"] for row in outcomes),
             "outcomes": outcomes}
+
+
+def coverage_distant_restriction_diagnostic(*, packer_type=DeterministicContextPacker) -> dict:
+    """Require source-wide qualifier groups for distant bound literals.
+
+    Tight budgets must withhold both the literal and its binding when a qualifier
+    is separated by neutral units; a roomy budget must retain the whole
+    punctuation-delimited group. This is a development boundary fixture, not a
+    semantic claim that every qualifier is related to the literal.
+    """
+    cases = [
+        (
+            "prefix_tight",
+            "Only use this credential in production. Neutral one. Neutral two. "
+            "Credential is ALPHA.",
+            8,
+            False,
+        ),
+        (
+            "prefix_roomy",
+            "Only use this credential in production. Neutral one. Neutral two. "
+            "Credential is ALPHA.",
+            20,
+            True,
+        ),
+        (
+            "suffix_tight",
+            "Credential is ALPHA. Neutral one. Neutral two. "
+            "Never use this credential in staging.",
+            8,
+            False,
+        ),
+        (
+            "suffix_roomy",
+            "Credential is ALPHA. Neutral one. Neutral two. "
+            "Never use this credential in staging.",
+            20,
+            True,
+        ),
+        (
+            "both_tight",
+            "Only use this credential in production. Neutral one. "
+            "Credential is ALPHA. Neutral two. Never use this credential in staging.",
+            20,
+            False,
+        ),
+        (
+            "both_roomy",
+            "Only use this credential in production. Neutral one. "
+            "Credential is ALPHA. Neutral two. Never use this credential in staging.",
+            27,
+            True,
+        ),
+        (
+            "wrapped_prefix_tight",
+            "Only use this credential in production.\nNeutral one.\nNeutral two.\n"
+            "Credential is ALPHA.",
+            8,
+            False,
+        ),
+        (
+            "wrapped_prefix_roomy",
+            "Only use this credential in production.\nNeutral one.\nNeutral two.\n"
+            "Credential is ALPHA.",
+            20,
+            True,
+        ),
+    ]
+    outcomes = []
+    for name, content, budget, expected_bound in cases:
+        binding = evidence.make_exact_value_binding(content, "ALPHA", "identifier")
+        record = MemoryRecord(id=name, content=content, metadata={"exact_value": binding})
+        packed = packer_type().pack_coverage(
+            "ALPHA", [Candidate(name, 1.0, "lexical", record)], budget,
+        )
+        selected = next((chunk for chunk in packed.chunks if chunk.id == name), None)
+        excerpt = selected.excerpt if selected else ""
+        actual_bound = bool(selected and selected.exact_value is not None)
+        actual_literal = "ALPHA" in packed.context
+        correct = (
+            actual_bound is expected_bound
+            and actual_literal is expected_bound
+            and packed.usage.context_tokens <= budget
+            and (not expected_bound or excerpt == content)
+        )
+        outcomes.append({
+            "case": name,
+            "budget": budget,
+            "tokens": packed.usage.context_tokens,
+            "expected_bound": expected_bound,
+            "actual_bound": actual_bound,
+            "literal_present": actual_literal,
+            "excerpt": excerpt,
+            "correct": correct,
+        })
+    return {
+        "cases": len(outcomes),
+        "correct": sum(row["correct"] for row in outcomes),
+        "outcomes": outcomes,
+    }
+
+
+def coverage_complete_unit_diagnostic(*, packer_type=DeterministicContextPacker) -> dict:
+    """Require complete qualifier units for exact-value retention.
+
+    The historical unpunctuated restriction fixtures are retained as a separate
+    safety population: their original tight budgets must withhold the value, while
+    a budget large enough for the full source may retain it. Same-unit prefix and
+    suffix controls catch partial windows on either side of a literal.
+    """
+    tight_cases = [
+        ("suffix_repeated_query", "deployment " * 8 + "VALUE filler only if approved",
+         "deployment", "VALUE", 14),
+        ("prefix_repeated_query", "only if approved VALUE " + "deployment " * 8,
+         "deployment", "VALUE", 14),
+        ("suffix_competing_queries",
+         "deployment " * 5 + "VALUE neutral gap only if approved and never share",
+         "deployment", "VALUE", 16),
+        ("prefix_long_condition", "must use only if approved VALUE " + "deployment " * 8,
+         "deployment", "VALUE", 14),
+        ("tight_suffix", "deployment " * 6 + "VALUE only if approved",
+         "deployment", "VALUE", 12),
+    ]
+    cases = [
+        *((case[0] + "_tight",) + case[1:] + (False,) for case in tight_cases),
+        *((case[0] + "_roomy",) + case[1:4] + (packer_type().count_tokens("[1]\n" + case[1]), True)
+          for case in tight_cases),
+        ("same_unit_prefix_tight", "Only use ALPHA in production", "ALPHA", "ALPHA", 6, False),
+        ("same_unit_prefix_roomy", "Only use ALPHA in production", "ALPHA", "ALPHA", 8, True),
+        ("same_unit_suffix_tight", "Use ALPHA only in production", "ALPHA", "ALPHA", 7, False),
+        ("same_unit_suffix_roomy", "Use ALPHA only in production", "ALPHA", "ALPHA", 8, True),
+        ("bound_unit_suffix_tight", "Only use this credential. Credential is ALPHA in production.",
+         "ALPHA", "ALPHA", 11, False),
+        ("bound_unit_suffix_roomy", "Only use this credential. Credential is ALPHA in production.",
+         "ALPHA", "ALPHA", 14, True),
+    ]
+    outcomes = []
+    for name, content, query, value, budget, expected_bound in cases:
+        binding = evidence.make_exact_value_binding(content, value, "identifier")
+        record = MemoryRecord(id=name, content=content, metadata={"exact_value": binding})
+        packed = packer_type().pack_coverage(
+            query, [Candidate(name, 1.0, "lexical", record)], budget,
+        )
+        selected = next((chunk for chunk in packed.chunks if chunk.id == name), None)
+        excerpt = selected.excerpt if selected else ""
+        actual_bound = bool(selected and selected.exact_value is not None)
+        literal_present = value in packed.context
+        complete = not expected_bound or excerpt == content.strip()
+        correct = (
+            actual_bound is expected_bound
+            and literal_present is expected_bound
+            and complete
+            and packed.usage.context_tokens <= budget
+        )
+        outcomes.append({
+            "case": name,
+            "query": query,
+            "budget": budget,
+            "tokens": packed.usage.context_tokens,
+            "expected_bound": expected_bound,
+            "actual_bound": actual_bound,
+            "literal_present": literal_present,
+            "excerpt": excerpt,
+            "complete_excerpt": complete,
+            "correct": correct,
+        })
+    return {
+        "cases": len(outcomes),
+        "correct": sum(row["correct"] for row in outcomes),
+        "outcomes": outcomes,
+    }
 
 
 def run(*, evidence_module=evidence, packer_type=DeterministicContextPacker) -> dict:
@@ -252,6 +423,8 @@ def run(*, evidence_module=evidence, packer_type=DeterministicContextPacker) -> 
         "coverage_queries": coverage_query_diagnostic(packer_type=packer_type),
         "coverage_restrictions": coverage_restriction_diagnostic(packer_type=packer_type),
         "coverage_binding_safety": coverage_binding_safety_diagnostic(packer_type=packer_type),
+        "coverage_distant_restrictions": coverage_distant_restriction_diagnostic(packer_type=packer_type),
+        "coverage_complete_units": coverage_complete_unit_diagnostic(packer_type=packer_type),
         "packing": {
             name: {"sources": len(result.chunks), "tokens": result.usage.context_tokens,
                    "budget": 35, "budget_honored": result.usage.context_tokens <= 35}
@@ -274,11 +447,15 @@ def main() -> int:
     report = run()
     print(json.dumps(report, sort_keys=True))
     validation = report["action_validation"]
+    # Preserve the old five-case retention score without treating unsafe partial
+    # units as the target behavior. Complete-unit safety and roomy retention are
+    # separately required below, including those same sources and tight budgets.
     return 0 if (validation["correct"] == validation["cases"]
                  and report["source_validation"]["correct"] == report["source_validation"]["cases"]
                  and report["coverage_queries"]["correct"] == report["coverage_queries"]["cases"]
-                 and report["coverage_restrictions"]["correct"] == report["coverage_restrictions"]["cases"]
                  and report["coverage_binding_safety"]["correct"] == report["coverage_binding_safety"]["cases"]
+                 and report["coverage_distant_restrictions"]["correct"] == report["coverage_distant_restrictions"]["cases"]
+                 and report["coverage_complete_units"]["correct"] == report["coverage_complete_units"]["cases"]
                  and all(row["budget_honored"] for row in report["packing"].values())
                  and report["oversized_exact"]["withheld_boundary"]
                  and not report["oversized_exact"]["literal_preserved"]
