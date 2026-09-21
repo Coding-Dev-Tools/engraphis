@@ -424,6 +424,59 @@ def test_peer_repo_partition_is_explicit_and_keeps_sibling_facts_out():
     assert len(client.search_calls) == 2
 
 
+@pytest.mark.parametrize("shape", ["metadata_only", "episode"])
+@pytest.mark.parametrize("repo", ["repo-a", "repo-b"])
+def test_peer_projection_scope_comes_from_the_recorded_source(shape, repo):
+    adapter = Mem0Adapter(
+        client=FakeMem0(), config={"namespace": "scope-proof", "scope_partition": "repo"},
+    )
+    adapter.prepare(workspace_id="workspace-a", repo_id="repo-a")
+    adapter.ingest([{
+        "record_id": "fact", "content": "scoped fact", "scope": "repo",
+        "workspace": "workspace-a", "repo": repo,
+    }])
+    # Return a contradictory peer partition in both directions: it must neither
+    # admit a sibling's fact nor suppress evidence from the requested repo.
+    claimed_partition = (
+        "unselected-partition" if repo == "repo-a" else adapter._workspace_partition
+    )
+    item = {"memory": "scoped fact", "metadata": {"campaign_partition": claimed_partition}}
+    if shape == "metadata_only":
+        item["metadata"]["campaign_record_id"] = "fact"
+    else:
+        item.update({"id": "derived-edge", "episodes": [adapter._memory_ids["fact"]]})
+
+    filtered = adapter._filter_partition_items([item])
+    context, source_ids, _, _ = _pack_peer_items(
+        filtered, query="fact", k=1, token_budget=50,
+        memory_ids=adapter._memory_ids, trust_by_id=adapter._record_trust,
+    )
+    assert source_ids == (("fact",) if repo == "repo-a" else ())
+    assert ("scoped fact" in context) is (repo == "repo-a")
+
+
+@pytest.mark.parametrize("claimed_source", ["fact", "unknown"])
+def test_unbound_peer_projection_cannot_contaminate_scope_accounting(claimed_source):
+    client = FakeMem0()
+    adapter = Mem0Adapter(
+        client=client, config={"namespace": "unbound-scope", "scope_partition": "repo"},
+    )
+    adapter.prepare(workspace_id="workspace-a", repo_id="repo-a")
+    adapter.ingest([{
+        "record_id": "fact", "content": "scoped fact", "scope": "repo",
+        "workspace": "workspace-a", "repo": "repo-a",
+    }])
+    item = {"id": "backend-evil", "memory": "unbound private fact", "metadata": {
+        "campaign_record_id": claimed_source, "campaign_partition": adapter._repo_partition,
+    }}
+    client.search = lambda *_args, **_kwargs: {"results": [item]}
+    result = adapter.recall("fact", k=1, token_budget=50)
+    assert result.context == ""
+    assert result.source_ids == ()
+    assert result.usage.source_tokens == 0
+    assert result.usage.omitted_count == 0
+
+
 def test_peer_temporal_filter_is_explicitly_unsupported():
     adapter = Mem0Adapter(client=FakeMem0())
     adapter.prepare(workspace_id="workspace-a")

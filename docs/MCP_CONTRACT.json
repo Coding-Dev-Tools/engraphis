@@ -1,6 +1,6 @@
 {
   "schema": "engraphis-mcp-contract/v1",
-  "sha256": "2938df9ea945fbc2c87d0757e5db8b5239476745fdb919baac57adab18ef2dae",
+  "sha256": "3199e565fee3f7bde60979ceb11ad436b7f905870e2d4c6f68dd5c53e9ec8ba8",
   "surfaces": {
     "classic": [
       {
@@ -581,9 +581,59 @@
           "readOnlyHint": false,
           "title": "Correct a memory"
         },
-        "description": "Replace a memory's content without losing history: the old content is closed\n(bi-temporal invalidate, not deleted) and the correction is stored as a new memory\nthat records what it corrects \u2014 so the audit trail and ``engraphis_why`` both still\nwork afterward. Prefer this over retire+remember for fixes.\n\nReturns:\n    str: JSON ``{\"id\",\"superseded\":[old_id],\"reason\"}`` or an actionable error if the\n    id is unknown or doesn't belong to ``workspace``/``repo``.",
+        "description": "Replace a memory's content without losing history: the old content is closed\n(bi-temporal invalidate, not deleted) and the correction is stored as a new memory\nthat records what it corrects \u2014 so the audit trail and ``engraphis_why`` both still\nwork afterward. Prefer this over retire+remember for fixes. Changed content clears\nthe previous exact-value binding unless ``exact_value`` explicitly replaces it.\n\nReturns:\n    str: JSON ``{\"id\",\"superseded\":[old_id],\"reason\"}`` or an actionable error if the\n    id is unknown or doesn't belong to ``workspace``/``repo``.",
         "inputSchema": {
           "properties": {
+            "clear_exact_value": {
+              "default": false,
+              "description": "Explicitly remove the literal binding. Cannot be combined with a replacement literal.",
+              "title": "Clear Exact Value",
+              "type": "boolean"
+            },
+            "exact_value": {
+              "anyOf": [
+                {
+                  "maxLength": 4096,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Replacement literal copied verbatim from new_content. Content changes clear the previous binding unless a new literal is supplied.",
+              "title": "Exact Value"
+            },
+            "exact_value_span": {
+              "anyOf": [
+                {
+                  "maxItems": 2,
+                  "minItems": 2,
+                  "prefixItems": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "integer"
+                    }
+                  ],
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional [start,end) character offsets for the literal in new_content; required when its occurrence is ambiguous.",
+              "title": "Exact Value Span"
+            },
+            "exact_value_type": {
+              "default": "literal",
+              "description": "Type of the replacement literal.",
+              "maxLength": 32,
+              "title": "Exact Value Type",
+              "type": "string"
+            },
             "memory_id": {
               "description": "The memory id to correct.",
               "maxLength": 200,

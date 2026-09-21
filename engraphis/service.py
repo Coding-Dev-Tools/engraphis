@@ -643,6 +643,26 @@ def _strict_bool(value: Any, *, field: str) -> bool:
     return value
 
 
+def _validate_exact_edit_request(
+    exact_value: Optional[str], exact_value_type: str,
+    exact_value_span: Optional[tuple[int, int]], clear_exact_value: bool,
+) -> bool:
+    """Validate edit intent shape before resolving or mutating a memory."""
+    clear = _strict_bool(clear_exact_value, field="clear_exact_value")
+    normalized_type = str(exact_value_type or "literal").strip().casefold()
+    if exact_value is None and (normalized_type != "literal" or exact_value_span is not None):
+        raise ValidationError("exact_value_type and exact_value_span require exact_value")
+    if exact_value is not None and clear:
+        raise ValidationError("exact_value and clear_exact_value cannot be combined")
+    if exact_value_span is not None and (
+        not isinstance(exact_value_span, tuple)
+        or len(exact_value_span) != 2
+        or any(type(item) is not int for item in exact_value_span)
+    ):
+        raise ValidationError("exact_value_span must be a (start, end) integer pair")
+    return clear
+
+
 def _canonical_write_provenance(
     source: Any, trusted: Any, *, raw_ingest: bool, ingress: str = "service"
 ) -> dict:
@@ -4694,7 +4714,11 @@ class MemoryService:
                       expected_version: str, operation_id: str,
                       repo: Optional[str] = None, content: Optional[str] = None,
                       title: Optional[str] = None, mtype: Optional[str] = None,
-                      importance: Optional[float] = None, reason: str = "",
+                      importance: Optional[float] = None,
+                      exact_value: Optional[str] = None,
+                      exact_value_type: str = "literal",
+                      exact_value_span: Optional[tuple[int, int]] = None,
+                      clear_exact_value: bool = False, reason: str = "",
                       actor: str = "user") -> dict:
         """One recoverable revision: content, labels, provenance and history commit together."""
         mid = _clean_text(memory_id, field="memory_id", max_chars=MAX_NAME_CHARS)
@@ -4704,6 +4728,9 @@ class MemoryService:
             content = _clean_text(content, field="content", max_chars=MAX_CONTENT_CHARS)
         if title is not None:
             title = _clean_text(title, field="title", max_chars=MAX_TITLE_CHARS, required=False)
+        clear_exact_value = _validate_exact_edit_request(
+            exact_value, exact_value_type, exact_value_span, clear_exact_value,
+        )
         _reject_secret_capture((
             ("content", content or ""), ("title", title or ""),
         ))
@@ -4716,7 +4743,9 @@ class MemoryService:
                 mid, expected_version=expected_version, operation_id=operation_id,
                 content=content, title=title,
                 mtype=_enum(mtype, MemoryType, "memory_type") if mtype is not None else None,
-                importance=importance, reason=reason, actor=actor,
+                importance=importance, exact_value=exact_value,
+                exact_value_type=exact_value_type, exact_value_span=exact_value_span,
+                clear_exact_value=clear_exact_value, reason=reason, actor=actor,
             )
         except MemoryConflict:
             raise
@@ -4732,9 +4761,16 @@ class MemoryService:
         return {"workspace": ws, "repos": repos}
 
     def correct(self, memory_id: str, new_content: str, *, workspace: str,
-               repo: Optional[str] = None, reason: str = "", actor: str = "user") -> dict:
+               repo: Optional[str] = None, reason: str = "", actor: str = "user",
+               exact_value: Optional[str] = None,
+               exact_value_type: str = "literal",
+               exact_value_span: Optional[tuple[int, int]] = None,
+               clear_exact_value: bool = False) -> dict:
         mid = _clean_text(memory_id, field="memory_id", max_chars=MAX_NAME_CHARS)
         new_content = _clean_text(new_content, field="new_content", max_chars=MAX_CONTENT_CHARS)
+        clear_exact_value = _validate_exact_edit_request(
+            exact_value, exact_value_type, exact_value_span, clear_exact_value,
+        )
         _reject_secret_capture((("new_content", new_content),))
         reason = _clean_text(reason, field="reason", max_chars=MAX_TITLE_CHARS, required=False)
         actor = _clean_text(actor, field="actor", max_chars=MAX_NAME_CHARS,
@@ -4742,7 +4778,11 @@ class MemoryService:
         wid, rid = self._require_scope(workspace, repo)
         self._check_owns(mid, wid, rid)
         try:
-            return self.engine.correct(mid, new_content, reason=reason, actor=actor)
+            return self.engine.correct(
+                mid, new_content, reason=reason, actor=actor,
+                exact_value=exact_value, exact_value_type=exact_value_type,
+                exact_value_span=exact_value_span, clear_exact_value=clear_exact_value,
+            )
         except MemoryConflict:
             raise
         except (KeyError, ValueError) as exc:

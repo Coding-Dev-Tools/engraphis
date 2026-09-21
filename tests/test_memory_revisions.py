@@ -6,7 +6,7 @@ import pytest
 from engraphis.core.interfaces import MemoryType
 from engraphis.core.evidence import exact_value_binding, make_exact_value_binding
 from engraphis.core.mutations import MemoryConflict, memory_version
-from engraphis.service import MemoryService
+from engraphis.service import MemoryService, ValidationError
 
 
 @pytest.fixture
@@ -31,10 +31,12 @@ def test_content_revision_rebinds_the_retained_literal_and_preserves_history(svc
     prior = exact_value_binding(old.metadata, content=old.content)
     changed = "The revised release policy requires payload: " + value
     if operation == "correct":
-        result = svc.correct(old.id, changed, workspace="w")
+        result = svc.correct(old.id, changed, workspace="w", exact_value=value,
+                              exact_value_type="literal")
     else:
         kwargs = {"workspace": "w", "expected_version": memory_version(old),
-                  "operation_id": "shift-literal", "content": changed}
+                  "operation_id": "shift-literal", "content": changed,
+                  "exact_value": value, "exact_value_type": "literal"}
         result = svc.revise_memory(old.id, **kwargs)
         assert svc.revise_memory(old.id, **kwargs) == result
     successor = svc.store.get_memory(result["id"])
@@ -48,7 +50,9 @@ def test_content_revision_rebinds_the_retained_literal_and_preserves_history(svc
 
 
 @pytest.mark.parametrize("operation", ["correct", "revise"])
-@pytest.mark.parametrize("changed", ["Release payload is stable.", "canary-7 or canary-7"])
+@pytest.mark.parametrize("changed", [
+    "Release payload is stable.", "canary-7 or canary-7",
+])
 def test_content_revision_clears_removed_or_ambiguous_literal_binding(svc, operation, changed):
     first = svc.remember("Release payload is canary-7.", workspace="w", exact_value="canary-7")
     old = svc.store.get_memory(first["id"])
@@ -60,6 +64,122 @@ def test_content_revision_clears_removed_or_ambiguous_literal_binding(svc, opera
     successor = svc.store.get_memory(result["id"])
     assert "exact_value" not in successor.metadata
     assert exact_value_binding(svc.store.get_memory(old.id).metadata, content=old.content) is not None
+
+
+@pytest.mark.parametrize("operation", ["correct", "revise"])
+def test_content_revision_without_fresh_binding_clears_replaced_literal(svc, operation):
+    first = svc.remember("Deploy ALPHA", workspace="w", exact_value="ALPHA")
+    old = svc.store.get_memory(first["id"])
+    changed = "Deploy BETA, not ALPHA"
+    if operation == "correct":
+        result = svc.correct(old.id, changed, workspace="w")
+    else:
+        result = svc.revise_memory(
+            old.id, workspace="w", expected_version=memory_version(old),
+            operation_id="implicit-clear", content=changed,
+        )
+    successor = svc.store.get_memory(result["id"])
+    assert "exact_value" not in successor.metadata
+    assert exact_value_binding(
+        svc.store.get_memory(old.id).metadata, content=old.content,
+    ) is not None
+
+
+@pytest.mark.parametrize("operation", ["correct", "revise"])
+def test_content_revision_explicitly_rebinds_a_replacement_literal(svc, operation):
+    first = svc.remember("Deploy ALPHA", workspace="w", exact_value="ALPHA")
+    old = svc.store.get_memory(first["id"])
+    changed = "Deploy BETA, not ALPHA"
+    if operation == "correct":
+        result = svc.correct(
+            old.id, changed, workspace="w", exact_value="BETA",
+            exact_value_type="identifier",
+        )
+    else:
+        result = svc.revise_memory(
+            old.id, workspace="w", expected_version=memory_version(old),
+            operation_id="replace-literal", content=changed,
+            exact_value="BETA", exact_value_type="identifier",
+        )
+    successor = svc.store.get_memory(result["id"])
+    assert exact_value_binding(successor.metadata, content=successor.content) == (
+        make_exact_value_binding(changed, "BETA", "identifier")
+    )
+
+
+@pytest.mark.parametrize("operation", ["correct", "revise"])
+def test_content_revision_explicitly_clears_exact_value(svc, operation):
+    first = svc.remember("Deploy ALPHA", workspace="w", exact_value="ALPHA")
+    old = svc.store.get_memory(first["id"])
+    changed = "Deploy BETA"
+    if operation == "correct":
+        result = svc.correct(old.id, changed, workspace="w", clear_exact_value=True)
+    else:
+        result = svc.revise_memory(
+            old.id, workspace="w", expected_version=memory_version(old),
+            operation_id="clear-literal", content=changed, clear_exact_value=True,
+        )
+    successor = svc.store.get_memory(result["id"])
+    assert "exact_value" not in successor.metadata
+
+
+@pytest.mark.parametrize("operation", ["correct", "revise"])
+def test_invalid_exact_edit_controls_fail_before_mutation(svc, operation):
+    first = svc.remember("Deploy ALPHA", workspace="w", exact_value="ALPHA")
+    old = svc.store.get_memory(first["id"])
+    before_version = memory_version(old)
+    changed = "Deploy BETA"
+    with pytest.raises(ValidationError):
+        if operation == "correct":
+            svc.correct(
+                old.id, changed, workspace="w", exact_value="BETA",
+                clear_exact_value=True,
+            )
+        else:
+            svc.revise_memory(
+                old.id, workspace="w", expected_version=before_version,
+                operation_id="invalid-controls", content=changed,
+                exact_value="BETA", clear_exact_value=True,
+            )
+    assert svc.store.conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == 1
+    current = svc.store.get_memory(old.id)
+    assert memory_version(current) == before_version
+    assert exact_value_binding(current.metadata, content=current.content) is not None
+
+
+@pytest.mark.parametrize("operation", ["correct", "revise"])
+def test_exact_edit_span_rejects_json_list_and_bool_indices(svc, operation):
+    first = svc.remember("Deploy ALPHA", workspace="w", exact_value="ALPHA")
+    old = svc.store.get_memory(first["id"])
+    with pytest.raises(ValidationError, match="integer pair"):
+        if operation == "correct":
+            svc.correct(
+                old.id, "Deploy BETA", workspace="w", exact_value="BETA",
+                exact_value_span=[7, 11],
+            )
+        else:
+            svc.revise_memory(
+                old.id, workspace="w", expected_version=memory_version(old),
+                operation_id="invalid-span", content="Deploy BETA",
+                exact_value="BETA", exact_value_span=(True, 11),
+            )
+    assert svc.store.conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == 1
+
+
+def test_revision_exact_intent_conflicts_with_reused_operation_id(svc):
+    first = svc.remember("Deploy ALPHA", workspace="w", exact_value="ALPHA")
+    old = svc.store.get_memory(first["id"])
+    kwargs = dict(
+        workspace="w", expected_version=memory_version(old),
+        operation_id="intent-conflict", content="Deploy BETA, not ALPHA",
+        exact_value="BETA", exact_value_type="identifier",
+    )
+    committed = svc.revise_memory(old.id, **kwargs)
+    with pytest.raises(MemoryConflict) as caught:
+        svc.revise_memory(old.id, **{**kwargs, "clear_exact_value": True,
+                                    "exact_value": None, "exact_value_type": "literal"})
+    assert caught.value.code == "operation_conflict"
+    assert svc.store.get_memory(committed["id"]).metadata["exact_value"]["value"] == "BETA"
 
 
 def test_title_only_revision_preserves_an_explicit_repeated_literal_occurrence(svc):

@@ -84,9 +84,9 @@ neither is an end-to-end question-answer score. Coding outcomes, external datase
 operational capacity remain separate pending evaluation tracks until their artifacts are selected.
 
 These values are evidence IDs `offline-chunking` and `offline-performance` in
-[`offline-fixtures-v53.json`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/benchmark-evidence/offline-fixtures-v53.json),
+[`offline-fixtures-v54.json`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/benchmark-evidence/offline-fixtures-v54.json),
 SHA-256
-`a9fb7a131c00c2e6361878388b5f1853213027021cc0c91fe279660a45c7296d`.
+`980d31d7885e4e70af34983f2fd435c0171f737f5928540870311ffc39e8f02d`.
 [`BENCHMARKS.md`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/BENCHMARKS.md#public-numeric-evidence-registry)
 records the matching suite digest, exact commands, and per-command config digests. The offline
 fixture registry intentionally excludes external, model-dependent, consolidation, productivity,
@@ -564,12 +564,15 @@ Benchmark-driven alternatives are opt-in: `packing_mode="coverage"` keeps comple
 units from more source memories, while `retrieval_recipe="conversation"` and
 `retrieval_recipe="long_session"` select the measured depth/budget starting points. The
 historical `legacy`/`default` settings remain unchanged. For a value that must survive a file
-edit or tool call exactly, Classic `engraphis_remember` and the Python/service write APIs accept
-source-bound `exact_value` plus its `exact_value_type`; ambiguous repeated literals are rejected.
+edit or tool call exactly, Smart and Classic `engraphis_remember` and the Python/service write
+APIs accept source-bound `exact_value` plus its `exact_value_type`. MCP remember requires a
+unique occurrence; Python/service writes can select a repeated occurrence with `exact_value_span`.
 Coverage packing follows the query and advertises the binding only when its source occurrence
-is included. Corrections and content revisions rebind a retained unique literal at its new
-offsets; removed, repeated, or invalid literals lose the successor's binding while history
-preserves the original record.
+is included. Corrections and content revisions clear the old binding when content changes;
+pass `exact_value` to explicitly bind the replacement, with `exact_value_span=[start,end]`
+for a repeated occurrence, or `clear_exact_value=true` to remove a binding. Unchanged content
+and title-only revisions preserve valid bindings. History preserves the original record.
+MCP response trimming removes binding metadata whenever its supporting context is omitted.
 
 For bi-temporal reads, `valid_at` selects what was true at a Unix timestamp and `known_at` selects
 what Engraphis had learned then. `as_of` remains a compatibility alias for `valid_at`; supplying
