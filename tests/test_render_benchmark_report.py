@@ -151,6 +151,46 @@ def test_renderer_reflects_a_report_that_measures_transport():
     assert "MCP transport not measured" not in svg
 
 
+@pytest.mark.parametrize("flag", ["false", "true", 0, 1, 0.0, 1.0, None, [], [False], {}, {"value": True}])
+@pytest.mark.parametrize("form", ["render", "nested", "flat"])
+def test_renderer_rejects_nonboolean_transport_flags(tmp_path, flag, form):
+    payload = _renderer_input()
+    payload["performance"]["payload_boundary"]["transport_measured"] = flag
+    if form == "render":
+        with pytest.raises(ValueError, match="transport_measured must be a JSON boolean"):
+            render_report(payload)
+        return
+    payload.pop("source")
+    if form == "flat":
+        payload["performance"].pop("context")
+    path = tmp_path / "report.json"
+    data = json.dumps(payload).encode("utf-8")
+    path.write_bytes(data)
+    path.with_suffix(".json.sha256").write_text(hashlib.sha256(data).hexdigest() + "  report.json")
+    with pytest.raises(ValueError, match="transport_measured must be a JSON boolean"):
+        load_report(path)
+
+
+@pytest.mark.parametrize("boundary", [None, False, [], "false"])
+def test_renderer_rejects_malformed_payload_boundary(boundary):
+    payload = _renderer_input()
+    payload["performance"]["payload_boundary"] = boundary
+    with pytest.raises(ValueError, match="payload_boundary must be a JSON object"):
+        render_report(payload)
+
+
+@pytest.mark.parametrize("omission", ["flag", "boundary"])
+def test_legacy_transport_omission_never_claims_a_measurement(omission):
+    payload = _renderer_input()
+    if omission == "flag":
+        payload["performance"]["payload_boundary"].pop("transport_measured")
+    else:
+        payload["performance"].pop("payload_boundary")
+    svg = render_report(payload)
+    assert "MCP transport not measured" in svg
+    assert "JSON proxy only" in svg
+
+
 def test_renderer_binds_an_unannotated_input_to_its_file_hash(tmp_path):
     payload = _renderer_input()
     payload.pop("source")

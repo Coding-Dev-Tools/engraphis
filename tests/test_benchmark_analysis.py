@@ -3,7 +3,7 @@ import json
 import pytest
 
 from eval import benchmark_analysis as analysis
-from eval.benchmark import canonical_json, sha256_file, sha256_text
+from eval.benchmark import canonical_json, sha256_file, sha256_text, validate_report
 
 
 def test_case_bootstrap_keeps_question_weights_and_matches_mean():
@@ -236,3 +236,268 @@ def test_analysis_binds_repair_sources_without_blocking_producer_changes(tmp_pat
     else:
         with pytest.raises(ValueError, match="repair manifest source binding"):
             analysis.paired_difference(baseline, candidate)
+
+
+def _scoring_flag_report(*, retrieval_scored=True, answer_scored=True):
+    config = {"format": "locomo", "token_budget": 8}
+    record = {
+        "question_id": "q0",
+        "category": "test",
+        "retrieved_ids": ["memory-0"],
+        "packed_ids": ["memory-0"],
+        "supporting_ids": ["memory-0"] if retrieval_scored is True else [],
+        "context_tokens": 0,
+        "recall_at_k": 1.0,
+        "packed_recall_at_k": 1.0,
+        "answer_token_recall": 1.0,
+        "packed_answer_token_recall": 1.0,
+        "retrieval_scored": retrieval_scored,
+        "answer_scored": answer_scored,
+    }
+    return {
+        "schema": "engraphis-benchmark/v2",
+        "suite": {"name": "test", "dataset": "test.jsonl", "sha256": "a" * 64},
+        "system": {
+            "git_commit": "unknown",
+            "config_sha256": sha256_text(canonical_json(config)),
+        },
+        "environment": {},
+        "protocol": {"config": config, "n_total": 1, "n_scored": 1},
+        "metrics": {
+            "claim_boundary": (
+                "evidence retrieval diagnostic; not generated-answer accuracy"
+            ),
+            "checkpoint_status": "COMPLETE",
+            "questions": 1,
+            "recall_at_k": 1.0 if retrieval_scored is True else None,
+            "packed_recall_at_k": 1.0 if retrieval_scored is True else None,
+            "answer_token_recall": 1.0 if answer_scored is True else None,
+            "packed_answer_token_recall": 1.0 if answer_scored is True else None,
+        },
+        "models": {},
+        "exclusions": [],
+        "records": [record],
+    }
+
+
+def _write_scoring_flag_report(path, report):
+    path.write_text(canonical_json(report), encoding="utf-8")
+    path.with_suffix(path.suffix + ".sha256").write_text(
+        sha256_file(path) + "\n", encoding="utf-8"
+    )
+
+
+@pytest.mark.parametrize("field", ["retrieval_scored", "answer_scored"])
+@pytest.mark.parametrize("value", ["false", 0, 1, None, [], {}])
+def test_validate_report_rejects_non_boolean_scoring_flags(field, value):
+    report = _scoring_flag_report()
+    report["records"][0][field] = value
+    errors = validate_report(report)
+    assert any(field in error and "boolean" in error for error in errors)
+
+
+def test_validate_report_preserves_omitted_historical_scoring_flags():
+    report = _scoring_flag_report()
+    report["records"][0].pop("retrieval_scored")
+    report["records"][0].pop("answer_scored")
+    assert validate_report(report) == []
+
+
+@pytest.mark.parametrize("flag", ["false", 1, None, {}])
+def test_direct_interval_rejects_malformed_eligibility(flag):
+    with pytest.raises(ValueError, match="eligibility.*boolean"):
+        analysis.clustered_interval([{"question_id": "case:0", "retrieval_scored": flag,
+                                      "value": 1.0}], "value")
+
+
+def test_direct_interval_preserves_omitted_and_false_eligibility():
+    result = analysis.clustered_interval([
+        {"question_id": "case:0", "value": 1000},
+        {"question_id": "case:1", "retrieval_scored": False, "value": 1000},
+        {"question_id": "case:2", "retrieval_scored": True, "value": 0.5},
+    ], "value")
+    assert result["point"] == 0.5
+    assert result["scored_questions"] == 1
+
+
+@pytest.mark.parametrize(
+    ("retrieval_scored", "answer_scored"),
+    [(True, True), (True, False), (False, True), (False, False)],
+)
+def test_external_analysis_accepts_explicit_boolean_scoring_flags(
+    tmp_path, retrieval_scored, answer_scored
+):
+    path = tmp_path / "diagnostic.json"
+    _write_scoring_flag_report(
+        path,
+        _scoring_flag_report(
+            retrieval_scored=retrieval_scored, answer_scored=answer_scored
+        ),
+    )
+    report, _ = analysis._read_verified_snapshot(path)
+    assert report["records"][0]["retrieval_scored"] is retrieval_scored
+    assert report["records"][0]["answer_scored"] is answer_scored
+
+
+@pytest.mark.parametrize("field", ["retrieval_scored", "answer_scored"])
+@pytest.mark.parametrize("value", ["false", 0, 1, None, [], {}])
+def test_external_analysis_rejects_non_boolean_scoring_flags(tmp_path, field, value):
+    path = tmp_path / "malformed.json"
+    report = _scoring_flag_report()
+    report["records"][0][field] = value
+    _write_scoring_flag_report(path, report)
+    with pytest.raises(ValueError, match="boolean"):
+        analysis._read_verified_snapshot(path)
+
+
+def test_external_analysis_rejects_omitted_scoring_flags(tmp_path):
+    path = tmp_path / "historical.json"
+    report = _scoring_flag_report()
+    report["records"][0].pop("retrieval_scored")
+    report["records"][0].pop("answer_scored")
+    _write_scoring_flag_report(path, report)
+    with pytest.raises(ValueError, match="explicit boolean"):
+        analysis._read_verified_snapshot(path)
+
+
+def _write_report(path, report):
+    path.write_text(json.dumps(report), encoding="utf-8")
+    path.with_suffix(".json.sha256").write_text(sha256_file(path), encoding="utf-8")
+
+
+@pytest.mark.parametrize("artifact", [
+    "locomo-full-20260916.json",
+    "longmemeval-full-20260916.json",
+])
+def test_analysis_accepts_supported_historical_repair_source_labels(tmp_path, artifact):
+    source = analysis.Path(__file__).parents[1] / "docs/benchmark-evidence" / artifact
+    target = tmp_path / artifact
+    target.write_bytes(source.read_bytes())
+    target.with_suffix(".json.sha256").write_text(sha256_file(target), encoding="utf-8")
+
+    assert analysis.read_verified(target)["records"]
+
+
+def test_analysis_accepts_current_repair_source_role(tmp_path):
+    source = analysis.Path(__file__).parents[1] / "docs/benchmark-evidence/locomo-full-20260916.json"
+    report = json.loads(source.read_text(encoding="utf-8"))
+    repair_digest = report["protocol"]["config"]["repair_manifest_sha256"]
+    repair_source = next(item for item in report["suite"]["sources"] if item["sha256"] == repair_digest)
+    repair_source["name"] = "inputs/repair_manifest"
+    target = tmp_path / "current.json"
+    _write_report(target, report)
+
+    assert analysis.read_verified(target)["records"]
+
+
+def test_analysis_rejects_repair_digest_hidden_in_unrelated_producer(tmp_path):
+    source = analysis.Path(__file__).parents[1] / "docs/benchmark-evidence/locomo-full-20260916.json"
+    report = json.loads(source.read_text(encoding="utf-8"))
+    repair_digest = report["protocol"]["config"]["repair_manifest_sha256"]
+    report["suite"]["sources"] = [
+        item for item in report["suite"]["sources"] if item["sha256"] != repair_digest
+    ]
+    report["suite"]["sources"][0]["sha256"] = repair_digest
+    target = tmp_path / "forged-producer.json"
+    _write_report(target, report)
+
+    with pytest.raises(ValueError, match="repair manifest source binding"):
+        analysis.read_verified(target)
+
+
+def test_analysis_rejects_wrong_named_repair_source(tmp_path):
+    source = analysis.Path(__file__).parents[1] / "docs/benchmark-evidence/locomo-full-20260916.json"
+    report = json.loads(source.read_text(encoding="utf-8"))
+    repair_digest = report["protocol"]["config"]["repair_manifest_sha256"]
+    repair_source = next(item for item in report["suite"]["sources"] if item["sha256"] == repair_digest)
+    repair_source["name"] = "wrong-repair-manifest.json"
+    target = tmp_path / "wrong-name.json"
+    _write_report(target, report)
+
+    with pytest.raises(ValueError, match="repair manifest source binding"):
+        analysis.read_verified(target)
+
+
+@pytest.mark.parametrize("configured", [None, "not-a-sha256"])
+def test_analysis_rejects_missing_or_malformed_repair_binding(tmp_path, configured):
+    source = analysis.Path(__file__).parents[1] / "docs/benchmark-evidence/locomo-full-20260916.json"
+    report = json.loads(source.read_text(encoding="utf-8"))
+    report["protocol"]["config"]["repair_manifest_sha256"] = configured
+    report["system"]["config_sha256"] = sha256_text(canonical_json(report["protocol"]["config"]))
+    target = tmp_path / "invalid-binding.json"
+    _write_report(target, report)
+
+    with pytest.raises(ValueError, match="repair manifest"):
+        analysis.read_verified(target)
+
+
+def test_analysis_rejects_duplicate_repair_source_identities(tmp_path):
+    source = analysis.Path(__file__).parents[1] / "docs/benchmark-evidence/locomo-full-20260916.json"
+    report = json.loads(source.read_text(encoding="utf-8"))
+    repair_digest = report["protocol"]["config"]["repair_manifest_sha256"]
+    repair_source = next(item for item in report["suite"]["sources"] if item["sha256"] == repair_digest)
+    report["suite"]["sources"].append(dict(repair_source))
+    target = tmp_path / "duplicate-binding.json"
+    _write_report(target, report)
+
+    with pytest.raises(ValueError, match="ambiguous repair manifest"):
+        analysis.read_verified(target)
+
+
+@pytest.mark.parametrize("retained", [None, {}, [], "manifest", {"sha256": None},
+                                     {"sha256": "invalid"}, {"sha256": "b" * 64}])
+def test_analysis_rejects_conflicting_or_malformed_retained_repair(tmp_path, retained):
+    path = tmp_path / "diagnostic.json"
+    _copy_diagnostic(path)
+    report = json.loads(path.read_text(encoding="utf-8"))
+    report["metrics"]["dataset_integrity"]["repair_manifest"] = retained
+    _write_report(path, report)
+
+    with pytest.raises(ValueError, match="repair manifest"):
+        analysis.read_verified(path)
+
+
+def test_analysis_rejects_retained_repair_without_configured_binding(tmp_path):
+    path = tmp_path / "diagnostic.json"
+    _copy_diagnostic(path)
+    report = json.loads(path.read_text(encoding="utf-8"))
+    report["protocol"]["config"]["repair_manifest_sha256"] = None
+    report["system"]["config_sha256"] = sha256_text(canonical_json(report["protocol"]["config"]))
+    report["suite"]["sources"] = [item for item in report["suite"]["sources"]
+                                  if item["name"] != "locomo10_repair_manifest_v2.json"]
+    _write_report(path, report)
+
+    with pytest.raises(ValueError, match="repair manifest"):
+        analysis.read_verified(path)
+
+
+@pytest.mark.parametrize("integrity", [None, {}, {"repair_manifest": None}])
+def test_analysis_accepts_unrepaired_diagnostics(tmp_path, integrity):
+    report = _scoring_flag_report()
+    report["metrics"]["dataset_integrity"] = integrity
+    path = tmp_path / "diagnostic.json"
+    _write_report(path, report)
+
+    assert analysis.read_verified(path)["records"]
+
+
+def test_analysis_accepts_legacy_omitted_repair_metadata(tmp_path):
+    path = tmp_path / "diagnostic.json"
+    _copy_diagnostic(path)
+    report = json.loads(path.read_text(encoding="utf-8"))
+    report["metrics"].pop("dataset_integrity")
+    _write_report(path, report)
+
+    assert analysis.read_verified(path)["records"]
+
+
+@pytest.mark.parametrize("format_name", [[], {}, 1, False, None])
+def test_analysis_rejects_malformed_dataset_format_cleanly(tmp_path, format_name):
+    report = _scoring_flag_report()
+    report["protocol"]["config"]["format"] = format_name
+    report["system"]["config_sha256"] = sha256_text(canonical_json(report["protocol"]["config"]))
+    path = tmp_path / "diagnostic.json"
+    _write_report(path, report)
+
+    with pytest.raises(ValueError, match="dataset format"):
+        analysis.read_verified(path)

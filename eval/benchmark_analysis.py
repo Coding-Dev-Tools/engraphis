@@ -18,6 +18,59 @@ from eval.benchmark import canonical_json, sha256_file, validate_report
 
 
 SCHEMA = "engraphis-external-analysis/v1"
+_CURRENT_REPAIR_SOURCE_NAME = "inputs/repair_manifest"
+_HISTORICAL_REPAIR_SOURCE_NAMES = {
+    "locomo": frozenset({"locomo10_repair_manifest_v2.json"}),
+    "longmemeval": frozenset({"longmemeval_s_cleaned_repair_manifest.json"}),
+}
+
+
+def _is_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdefABCDEF" for character in value)
+    )
+
+
+def _validate_repair_manifest_binding(report: dict) -> None:
+    """Bind a configured repair digest to one identified manifest source."""
+    config = report["protocol"]["config"]
+    repair_digest = config.get("repair_manifest_sha256")
+    if repair_digest is not None and not _is_sha256(repair_digest):
+        raise ValueError("repair manifest digest is malformed")
+
+    format_name = config.get("format")
+    if "format" in config and not isinstance(format_name, str):
+        raise ValueError("repair manifest source binding requires a string dataset format")
+    source_names = {_CURRENT_REPAIR_SOURCE_NAME}
+    source_names.update(_HISTORICAL_REPAIR_SOURCE_NAMES.get(format_name, ()))
+    sources = report["suite"].get("sources") or []
+    identified = [source for source in sources if source.get("name") in source_names]
+    if len(identified) > 1:
+        raise ValueError("ambiguous repair manifest source binding")
+    if identified:
+        if repair_digest is None:
+            raise ValueError("repair manifest source binding has no configured digest")
+        if identified[0].get("sha256") != repair_digest:
+            raise ValueError("repair manifest source binding differs from configured digest")
+    elif repair_digest is not None:
+        raise ValueError("repair manifest source binding lacks an identified source")
+
+    integrity = report["metrics"].get("dataset_integrity")
+    if integrity is None:
+        return
+    if not isinstance(integrity, dict):
+        raise ValueError("repair manifest dataset integrity must be an object")
+    if "repair_manifest" not in integrity:
+        return
+    retained = integrity["repair_manifest"]
+    if retained is None and repair_digest is None:
+        return
+    if not isinstance(retained, dict) or not _is_sha256(retained.get("sha256")):
+        raise ValueError("retained repair manifest digest is missing or malformed")
+    if retained["sha256"] != repair_digest:
+        raise ValueError("retained repair manifest digest differs from configured digest")
 
 
 def read_verified(path: Path) -> dict:
@@ -38,11 +91,7 @@ def _read_verified_snapshot(path: Path) -> tuple[dict, str]:
         raise ValueError("invalid diagnostic envelope: " + errors[0])
     if report["metrics"].get("claim_boundary") != "evidence retrieval diagnostic; not generated-answer accuracy":
         raise ValueError("only external retrieval diagnostics are accepted")
-    repair_digest = report["protocol"]["config"].get("repair_manifest_sha256")
-    if repair_digest is not None and not any(
-        source["sha256"] == repair_digest for source in report["suite"]["sources"]
-    ):
-        raise ValueError("repair manifest source binding differs from configured digest")
+    _validate_repair_manifest_binding(report)
     rows = report["records"]
     if report["metrics"]["questions"] != len(rows):
         raise ValueError("question count differs from records")
@@ -50,9 +99,14 @@ def _read_verified_snapshot(path: Path) -> tuple[dict, str]:
     if len(ids) != len(set(ids)):
         raise ValueError("duplicate diagnostic question")
     for row in rows:
+        for field in ("retrieval_scored", "answer_scored"):
+            if field not in row or type(row[field]) is not bool:
+                raise ValueError(
+                    "external diagnostic requires explicit boolean retrieval_scored and answer_scored"
+                )
         if not set(row["packed_ids"]) <= set(row["retrieved_ids"]):
             raise ValueError("packed evidence was not retrieved")
-        if row["retrieval_scored"]:
+        if row["retrieval_scored"] is True:
             gold = set(row["supporting_ids"])
             if not gold:
                 raise ValueError("scored retrieval requires gold evidence")
@@ -65,7 +119,7 @@ def _read_verified_snapshot(path: Path) -> tuple[dict, str]:
             raise ValueError("record context exceeds its frozen budget")
     for field, eligible in (("recall_at_k", "retrieval_scored"), ("packed_recall_at_k", "retrieval_scored"),
                             ("answer_token_recall", "answer_scored"), ("packed_answer_token_recall", "answer_scored")):
-        values = [row[field] for row in rows if row[eligible]]
+        values = [row[field] for row in rows if row[eligible] is True]
         aggregate = report["metrics"][field]
         if not values:
             if aggregate is not None:
@@ -81,7 +135,9 @@ def clustered_interval(rows: list[dict], field: str, *, eligible: str = "retriev
     """Bootstrap whole source cases, retaining each sampled case's question weight."""
     groups: dict[str, list[float]] = defaultdict(list)
     for row in rows:
-        if row.get(eligible):
+        if eligible in row and type(row[eligible]) is not bool:
+            raise ValueError(f"scoring eligibility {eligible} must be boolean when supplied")
+        if row.get(eligible) is True:
             # Current harness artifacts retain a public-safe case identity.  Use
             # it instead of parsing question IDs: MemoryAgentBench upstream QA
             # IDs may contain colons, and collision-qualified IDs add another
@@ -126,7 +182,7 @@ def _summarize_snapshot(path: Path, report: dict, input_digest: str) -> dict:
     categories = {}
     for category in sorted({str(row["category"]) for row in rows}):
         selected = [row for row in rows if str(row["category"]) == category]
-        scored = [row for row in selected if row["retrieval_scored"]]
+        scored = [row for row in selected if row["retrieval_scored"] is True]
         categories[category] = {"questions": len(selected), "scored": len(scored),
                                 "recall_at_k": sum(row["recall_at_k"] for row in scored) / len(scored) if scored else None,
                                 "packed_recall_at_k": sum(row["packed_recall_at_k"] for row in scored) / len(scored) if scored else None}
@@ -134,9 +190,9 @@ def _summarize_snapshot(path: Path, report: dict, input_digest: str) -> dict:
             "dataset": report["suite"]["dataset"], "dataset_sha256": report["suite"]["sha256"],
             "configuration": report["protocol"]["config"], "models": report["models"],
             "status": metrics["checkpoint_status"], "questions": len(rows),
-            "retrieval_scored_questions": sum(bool(row["retrieval_scored"]) for row in rows),
-            "answer_token_scored_questions": sum(bool(row["answer_scored"]) for row in rows),
-            "retrieval_exclusions": sum(not row["retrieval_scored"] for row in rows),
+            "retrieval_scored_questions": sum(row["retrieval_scored"] is True for row in rows),
+            "answer_token_scored_questions": sum(row["answer_scored"] is True for row in rows),
+            "retrieval_exclusions": sum(row["retrieval_scored"] is False for row in rows),
             "recall": clustered_interval(rows, "recall_at_k"),
             "packed_recall": clustered_interval(rows, "packed_recall_at_k"),
             "answer_token_evidence": clustered_interval(rows, "answer_token_recall", eligible="answer_scored"),

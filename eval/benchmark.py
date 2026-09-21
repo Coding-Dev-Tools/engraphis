@@ -589,6 +589,9 @@ def validate_report(report: Any, *, canonical: bool = False) -> list[str]:
             errors.append("each record question_id must be non-empty")
             continue
         record_ids.append(question_id)
+        for field in ("retrieval_scored", "answer_scored"):
+            if field in record and type(record[field]) is not bool:
+                errors.append(f"record {field} must be boolean when supplied")
         if explicit_cases or "case" in record:
             case = record.get("case")
             if not isinstance(case, str) or not case.strip() or case != case.strip():

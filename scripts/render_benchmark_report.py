@@ -261,9 +261,18 @@ def _derive_payload_savings(context: dict[str, Any]) -> tuple[Optional[int], Opt
     return derived_saved, derived_ratio
 
 
+def _validate_payload_boundary(performance: dict[str, Any]) -> None:
+    if "payload_boundary" not in performance:
+        return
+    boundary = _require_mapping(performance["payload_boundary"], "performance.payload_boundary")
+    if "transport_measured" in boundary and type(boundary["transport_measured"]) is not bool:
+        raise ValueError("performance.payload_boundary.transport_measured must be a JSON boolean")
+
+
 def _validate_normalized(report: dict[str, Any]) -> None:
     chunking = _require_mapping(report.get("chunking"), "report.chunking")
     performance = _require_mapping(report.get("performance"), "report.performance")
+    _validate_payload_boundary(performance)
     whole = _require_mapping(chunking.get("whole"), "report.chunking.whole")
     chunked = _require_mapping(chunking.get("chunked"), "report.chunking.chunked")
     context = _require_mapping(performance.get("context"), "report.performance.context")
@@ -335,6 +344,7 @@ def _normalize_chunking(value: Optional[dict[str, Any]]) -> dict[str, Any]:
 
 def _normalize_performance(value: dict[str, Any]) -> dict[str, Any]:
     """Accept both the nested performance report and the flattened v9 registry row."""
+    _validate_payload_boundary(value)
     if isinstance(value.get("context"), dict):
         return value
     context = {
@@ -508,7 +518,7 @@ def render_report(report: dict[str, Any]) -> str:
             "transport_measured": False,
             "mcp_envelope_serialized": False,
         }
-    transport_measured = bool(payload_boundary.get("transport_measured"))
+    transport_measured = payload_boundary.get("transport_measured", False) is True
     transport_label = (
         "MCP transport measured"
         if transport_measured
