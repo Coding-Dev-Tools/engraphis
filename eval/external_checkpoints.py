@@ -64,17 +64,18 @@ def _runner_lock(path: Path, *, create: bool = True):
     require manual inspection.
     Cooperating runners must keep the lock file in place, even after exiting.
     An existing-only probe (create=False) never creates or repairs a marker and
-    raises FileNotFoundError for an absent path. Ownership must cover the read
+    raises FileNotFoundError only for an initially absent path. Ownership covers the read
     that depends on the producer having finished.
     """
 
     if create:
         path.parent.mkdir(parents=True, exist_ok=True)
     created = False
+    initial = None
     try:
         if not create:
-            named = path.lstat()
-            if not stat.S_ISREG(named.st_mode) or named.st_nlink != 1:
+            initial = path.lstat()
+            if not stat.S_ISREG(initial.st_mode) or initial.st_nlink != 1:
                 raise ValueError("external diagnostic runner lock is unsafe or changed")
             handle = path.open("r+b")
         else:
@@ -84,6 +85,8 @@ def _runner_lock(path: Path, *, create: bool = True):
             except FileExistsError:
                 handle = path.open("r+b")
     except FileNotFoundError as exc:
+        if initial is not None:
+            raise ValueError("external diagnostic runner lock is unsafe or changed") from exc
         if not create and not os.path.lexists(path):
             raise
         raise ValueError("external diagnostic runner lock is unsafe or unavailable") from exc
@@ -111,7 +114,8 @@ def _runner_lock(path: Path, *, create: bool = True):
             # not the absent-marker compatibility case for an existing-only probe.
             raise ValueError("external diagnostic runner lock is unsafe or changed") from exc
         if (not stat.S_ISREG(named.st_mode) or opened.st_nlink != 1
-                or not os.path.samestat(opened, named)):
+                or not os.path.samestat(opened, named)
+                or (initial is not None and not os.path.samestat(opened, initial))):
             raise ValueError("external diagnostic runner lock is unsafe or changed")
         handle.seek(0)
         raw = handle.read(len(RUNNER_LOCK_MARKER) + 1)
