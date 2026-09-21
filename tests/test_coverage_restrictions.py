@@ -95,6 +95,29 @@ def test_second_pass_cannot_restore_an_incomplete_exact_group():
     assert result.usage.context_tokens <= 15
 
 
+def test_legacy_packing_withholds_binding_when_a_later_restriction_is_omitted():
+    content = (
+        "Credential is ALPHA only in production. "
+        "Never use this credential in staging environments under any circumstances whatsoever."
+    )
+    candidate, binding = _bound(content, value="ALPHA")
+    packer = DeterministicContextPacker()
+
+    tight = packer.pack("ALPHA production", [candidate], 13)
+    assert tight.chunks[0].excerpt.startswith("Credential is ALPHA only in production.")
+    assert "Never use this credential" not in tight.chunks[0].excerpt
+    assert tight.chunks[0].exact_value is None
+    assert tight.chunks[0].source_span is None
+    assert tight.chunks[0].evidence_unit["value"] is None
+
+    roomy = packer.pack(
+        "ALPHA production", [candidate], packer.count_tokens("[1]\n" + content)
+    )
+    assert roomy.chunks[0].excerpt == content
+    assert roomy.chunks[0].exact_value == binding
+    assert roomy.chunks[0].source_span == (binding["start"], binding["end"])
+
+
 def test_qualifier_words_inside_a_literal_are_not_surrounding_conditions():
     candidate, binding = _bound("deployment " * 8 + "ONLY plain suffix", value="ONLY")
     result = DeterministicContextPacker().pack_coverage("deployment", [candidate], 4)

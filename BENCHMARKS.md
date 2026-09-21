@@ -26,7 +26,7 @@ show a workload-specific benefit.
 legacy and coverage packing on small deterministic development fixtures. It runs
 in the full offline CI matrix and the NumPy-only Python 3.9 job. These fixtures
 test boundary correctness; they do not estimate external QA or model task success. The
-[current diagnostic](docs/benchmark-evidence/evidence-contracts-20260921-v9.json)
+[current diagnostic](docs/benchmark-evidence/evidence-contracts-20260921-v10.json)
 withholds the unchanged oversized, unpunctuated fixture at its 24-token budget:
 no fitting sentence boundary proves that the remaining condition text can be dropped.
 The prior literal-preservation result remains in the historical artifact. Tight budgets
@@ -59,6 +59,13 @@ infer semantic relationships or recognize every possible condition. Headers,
 titles and source attribution remain inside the budget; incomplete detected groups
 cannot regain exact-value metadata during expansion.
 
+The default legacy packer also withholds exact binding metadata when its selected
+excerpt omits part of the detected restriction group. Eight fixed cases improve
+from 4/8 on `833e3e92` to 8/8: four incomplete bindings are suppressed and four
+complete bindings remain. All eight retain identical context text and token
+accounting. The literal can still appear as ordinary text; this diagnostic measures
+binding safety, not a retrieval or answer-quality gain.
+
 Corpus replay rejects non-boolean trust and answerability labels before execution.
 Direct campaign records also require boolean trust labels and reject contradictory
 nested trust metadata. Peer evidence IDs must name a recorded source; returned
@@ -66,7 +73,9 @@ backend IDs must agree with that source or resolve through recorded episode line
 Frozen campaign scope and trust take precedence over peer labels, and unrecognized labels
 remain unknown. Core/service recall results report the recipe's effective output
 limit as `effective_k`; recall receipts preserve it as `metadata.k` together with
-`retrieval_recipe`, independently of the number of results actually returned.
+`retrieval_recipe` and normalized `packing_mode`, independently of the number of
+results actually returned. Historical receipts without a mode remain valid and
+do not acquire an inferred value.
 Campaign adapters report the frozen manifest's evaluated revision; direct adapters
 retain `unknown` provenance unless explicitly bound. These checks protect result
 interpretation and do not count as additional benchmark-quality gains.
@@ -74,14 +83,14 @@ interpretation and do not count as additional benchmark-quality gains.
 ### Public numeric evidence registry
 
 Every exact public aggregate retained below comes from the checked-in, public-safe
-[`offline-fixtures-v61.json`](docs/benchmark-evidence/offline-fixtures-v61.json) artifact. Its
+[`offline-fixtures-v62.json`](docs/benchmark-evidence/offline-fixtures-v62.json) artifact. Its
 SHA-256 is
-`2787ee47acb120a5d0fa08ff08eb917ec2fbd40743544841b69b1754d5da5a9e`, also recorded in the
+`f09b4f9eb253582263ab425fd1d80bbea6d8cc8df47ad7f3415573a8da69c8fe`, also recorded in the
 adjacent `.sha256` file. The artifact contains no raw questions, answers, prompts, customer data,
 or per-record content fingerprints.
 
 The fixture-suite digest is
-`3454570efef007463355c645e52b272a8b3b2811463698bc63eef65c2397645b`. The artifact defines
+`d04bf76d05a964e08c446024ae78d1f776ce5cc0f99f63a4995b587c49580e47`. The artifact defines
 the digest algorithm and records the SHA-256 of every suite and dataset file. Each evidence ID
 also binds its exact command through `sha256(UTF-8 exact command)`:
 
@@ -103,10 +112,10 @@ Historical LoCoMo, graph, handoff, consolidation, and security figures remain pr
 source artifacts but are omitted from the current chart until each has a matching immutable,
 public-safe artifact. The chart labels coding outcomes, external datasets, and operational
 capacity as pending evaluation tracks rather than implying scores. Regenerate it with
-`python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-v61.json --output docs/images/context-efficiency.svg` after selecting the report to publish.
+`python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-v62.json --output docs/images/context-efficiency.svg` after selecting the report to publish.
 
 The companion examples are also generated from that artifact with
-`python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-v61.json --output docs/images/evidence-backed-agent-examples.svg`.
+`python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-v62.json --output docs/images/evidence-backed-agent-examples.svg`.
 The historical-to-executable mapping is in
 [`docs/BENCHMARK_CHANGE_COVERAGE.md`](docs/BENCHMARK_CHANGE_COVERAGE.md).
 

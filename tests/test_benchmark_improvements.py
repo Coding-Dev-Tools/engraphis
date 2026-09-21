@@ -252,6 +252,21 @@ def test_coverage_tracks_the_selected_occurrence_when_literals_repeat(bound_labe
     assert chunk.evidence_unit["value"] == ("Δ-42" if selected_binding else None)
 
 
+def test_coverage_preserves_bound_coordinates_across_identical_sentences() -> None:
+    content = "Intro. Label Δ-42. Label Δ-42. Tail."
+    start = content.rindex("Δ-42")
+    binding = make_exact_value_binding(content, "Δ-42", source_span=(start, start + 4))
+    record = MemoryRecord(id="repeated", content=content, metadata={"exact_value": binding})
+    packed = DeterministicContextPacker().pack_coverage(
+        "deployment", [Candidate(record.id, 1, "lexical", record)], 6,
+    )
+    chunk = packed.chunks[0]
+    assert chunk.exact_value == binding
+    assert chunk.source_span == (start, start + 4)
+    assert chunk.evidence_unit["source_span"] == [start, start + 4]
+    assert packed.usage.context_tokens <= 6
+
+
 @pytest.mark.parametrize("counter,budget", [(RegexTokenCounter(), 11), (RegexTokenCounter(), 14), (len, 35)])
 def test_coverage_prioritizes_an_unbound_query_sentence(counter, budget) -> None:
     content = "Deployment token is ALPHA. Support phone is 555-1234."

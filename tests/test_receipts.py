@@ -7,7 +7,7 @@ import pytest
 
 from engraphis.core.ids import new_id
 from engraphis.core.store import Store
-from engraphis.service import MemoryService
+from engraphis.service import MemoryService, ValidationError
 
 
 def _insert_receipt_fork(store: Store, workspace_id: str) -> None:
@@ -759,6 +759,85 @@ def test_service_records_and_exports_operation_receipts():
     assert exported["format"] == "engraphis-receipts/1"
     assert exported["verification"]["valid"] is True
     assert {entry["operation"] for entry in exported["entries"]} == {"remember", "recall"}
+
+
+@pytest.mark.parametrize(
+    ("requested_mode", "expected_mode"),
+    [(None, "legacy"), ("legacy", "legacy"), (" cOvErAgE ", "coverage")],
+)
+@pytest.mark.parametrize("populated", [False, True])
+def test_service_recall_receipt_records_normalized_packing_mode(
+    requested_mode, expected_mode, populated,
+):
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    workspace_id = service.store.get_or_create_workspace("packing-receipt")
+    # Historical receipts remain valid without this optional field.
+    historical = service.store.record_receipt("recall", workspace_id=workspace_id)
+    if populated:
+        service.remember("The deployment label is ALPHA.", workspace="packing-receipt")
+    kwargs = {} if requested_mode is None else {"packing_mode": requested_mode}
+
+    result = service.recall("deployment label", workspace="packing-receipt", **kwargs)
+
+    assert result["count"] == int(populated)
+    assert result["packing_mode"] == expected_mode
+    assert result["receipt"]["metadata"]["packing_mode"] == expected_mode
+    listed = service.store.list_receipts(workspace_id=workspace_id)
+    current = next(row for row in listed if row["id"] == result["receipt"]["id"])
+    assert current["metadata"]["packing_mode"] == expected_mode
+    exported = service.export_receipts(workspace="packing-receipt")
+    assert exported["format"] == "engraphis-receipts/1"
+    assert exported["verification"]["valid"] is True
+    exported_current = next(
+        row for row in exported["entries"] if row["id"] == result["receipt"]["id"]
+    )
+    assert exported_current["metadata"]["packing_mode"] == expected_mode
+    exported_historical = next(
+        row for row in exported["entries"] if row["id"] == historical["id"]
+    )
+    assert exported_historical == historical
+    assert "packing_mode" not in exported_historical["metadata"]
+    assert service.store.verify_receipts(workspace_id=workspace_id)["valid"] is True
+
+
+def test_invalid_recall_packing_mode_does_not_append_a_receipt():
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    workspace_id = service.store.get_or_create_workspace("packing-receipt")
+    before = service.export_receipts(workspace="packing-receipt")
+
+    with pytest.raises(ValidationError, match="packing_mode"):
+        service.recall("deployment label", workspace="packing-receipt", packing_mode="private")
+
+    assert service.export_receipts(workspace="packing-receipt") == before
+    assert service.store.list_receipts(workspace_id=workspace_id) == []
+
+
+@pytest.mark.parametrize("value", [None, True, 1, ["coverage"], {"mode": "coverage"}])
+def test_direct_receipt_packing_mode_rejects_non_string_metadata(value):
+    store = Store(":memory:")
+    workspace_id = store.get_or_create_workspace("packing-mode-direct")
+
+    receipt = store.record_receipt(
+        "recall", workspace_id=workspace_id, metadata={"packing_mode": value},
+    )
+
+    assert "packing_mode" not in receipt["metadata"]
+    assert store.list_receipts(workspace_id=workspace_id)[0]["metadata"] == {}
+    assert store.verify_receipts(workspace_id=workspace_id)["valid"] is True
+
+
+def test_direct_receipt_packing_mode_hashes_unknown_string_labels():
+    store = Store(":memory:")
+    workspace_id = store.get_or_create_workspace("packing-mode-label")
+    private_label = "customer-specific-mode"
+
+    receipt = store.record_receipt(
+        "recall", workspace_id=workspace_id, metadata={"packing_mode": private_label},
+    )
+
+    assert private_label not in json.dumps(receipt)
+    assert receipt["metadata"]["packing_mode"].startswith("sha256:")
+    assert store.verify_receipts(workspace_id=workspace_id)["valid"] is True
 
 
 def test_store_and_service_share_strict_receipt_projection():

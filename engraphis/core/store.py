@@ -504,6 +504,7 @@ _PUBLIC_RECEIPT_LABELS_BY_KEY = {
     "layer": {"temporal", "entity", "causal", "semantic"},
     "retrieval_profile": {"balanced", "auto", "lexical", "graph", "code"},
     "retrieval_recipe": {"default", "conversation", "long_session"},
+    "packing_mode": {"legacy", "coverage"},
     "candidate_depth": {"fixed", "adaptive"},
     "response_mode": {"full", "compact"},
     "adaptive_mode": {
@@ -528,7 +529,8 @@ def _receipt_metadata(metadata: dict) -> dict:
         "attachments", "wikilinks", "aliases", "tags", "symbols", "edges",
         "entities", "relations", "tables", "dry_run", "error_count",
         "entities_added", "relations_added",
-        "retrieval_profile", "retrieval_recipe", "candidate_depth", "candidate_k_requested",
+        "retrieval_profile", "retrieval_recipe", "packing_mode", "candidate_depth",
+        "candidate_k_requested",
         "candidate_k_used", "response_mode", "historical", "token_usage",
         "adaptive_mode", "action_id", "schema_version", "result_mode",
     }
@@ -544,6 +546,13 @@ def _receipt_metadata(metadata: dict) -> dict:
         if safe_key not in allowed:
             continue
         value = metadata[key]
+        if safe_key == "packing_mode":
+            # This is a public label, never a generic count or arbitrary scalar.
+            # Service callers pass the already-normalized validated mode; direct
+            # store callers with another type must not create a mode-shaped value.
+            if isinstance(value, str):
+                out[safe_key] = content_free_label(safe_key, value)
+            continue
         if safe_key in _IMPORT_RECEIPT_COUNT_KEYS:
             # Import summaries are counts, never arbitrary floats/labels.  Reject
             # booleans and clamp adversarially large values so the durable public
@@ -609,6 +618,7 @@ _PUBLIC_RECEIPT_METADATA_KEYS = {
     "warnings", "attachments", "wikilinks", "aliases", "tags",
     "entities", "relations", "tables", "dry_run", "error_count",
     "entities_added", "relations_added", "retrieval_profile", "retrieval_recipe",
+    "packing_mode",
     "candidate_depth",
     "candidate_k_requested", "candidate_k_used", "response_mode", "historical",
     "token_usage", "adaptive_mode", "action_id", "schema_version", "result_mode",

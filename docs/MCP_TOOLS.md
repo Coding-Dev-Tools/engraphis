@@ -100,6 +100,10 @@ not be recorded. Its JSON result contains `"receipt": null` and a content-free
 `"receipt_warning":{"code":"receipt_chain_integrity_failure",...}` marker. Repair or restore
 the receipt chain before treating subsequent receipt continuity as audit evidence.
 
+Emitted recall receipts include the normalized `packing_mode` (`legacy` or `coverage`)
+alongside the retrieval recipe and effective depth. Historical receipts remain valid;
+an omitted mode means it was not recorded, and is not inferred from current defaults.
+
 | Category | Tool | What it does |
 |---|---|---|
 | Write | `engraphis_remember` | Stores a fact and resolves it as a new memory, reinforcement, safe supersession, or related memory. |

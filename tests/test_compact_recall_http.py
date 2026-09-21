@@ -56,3 +56,45 @@ def test_compact_http_bindings_appear_only_in_admitted_packed_sources(client, se
     after = service.store.get_memory(stored["id"])
     assert after.content == before.content
     assert after.metadata["exact_value"] == before.metadata["exact_value"]
+
+
+@pytest.mark.parametrize("route", ["recall", "intent/recall"])
+def test_compact_http_legacy_withholds_binding_when_restriction_is_truncated(
+    client, service, route,
+):
+    content = (
+        "Credential is ALPHA only in production. "
+        "Never use this credential in staging environments under any circumstances whatsoever."
+    )
+    stored = service.remember(
+        content,
+        workspace="w",
+        repo="api",
+        exact_value="ALPHA",
+        exact_value_type="identifier",
+    )
+    params = {
+        "workspace": "w",
+        "repo": "api",
+        "token_budget": 13,
+        "response_mode": "compact",
+        "k": 1,
+    }
+    if route == "recall":
+        response = client.get(
+            "/api/recall", params={**params, "q": "ALPHA production"}
+        )
+    else:
+        response = client.post(
+            "/api/intent/recall",
+            json={**params, "query": "ALPHA production"},
+        )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["memories"] and payload["memories"][0]["id"] == stored["id"]
+    assert "Credential is ALPHA only in production." in payload["context"]
+    assert "Never use this credential" not in payload["context"]
+    source = payload["packed_sources"][0]
+    assert "exact_value" not in source
+    assert "source_span" not in source
+    assert source["evidence_unit"]["value"] is None
