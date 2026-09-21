@@ -36,6 +36,7 @@ from eval.campaign_adapters import (
 from eval.campaign_api import LunaResponsesClient, estimate_input_tokens
 from eval.campaign_ledger import BudgetApproval, CampaignBinding, CampaignLedger
 from eval.campaign_storage import NEO4J_IMAGE, graph_store
+from eval.campaign_candidate import CONTRACT as CANDIDATE_EXECUTION_CONTRACT
 from eval.rework_statistics import blocked_mean_interval
 
 
@@ -60,9 +61,17 @@ READER_INSTRUCTIONS = (
     "conditions, and trust annotations. Return one JSON object with answer (string), citations "
     "(array of supplied evidence IDs), and files (object mapping allowed relative paths to complete "
     "replacement file text). Only edit allowed files. For an unsupported question, leave answer "
-    "empty and citations empty. Never invent a source. Do not include Markdown fences."
+    "empty and citations empty. Never invent a source. Do not include Markdown fences. "
+    f"service.py uses {CANDIDATE_EXECUTION_CONTRACT}: module constants and unannotated "
+    "functions, local name assignment, return, if/else, literals, lists/tuples/dicts, indexing, "
+    "value comparisons (is/is not only with None/True/False), boolean expressions and basic arithmetic (+ - * / // % for numbers). "
+    "Use helper functions or str/int/float/bool/len; the only methods are str.strip/casefold/"
+    "lower/startswith and dict.get. print supports sep/end and is diagnostic only. "
+    "No imports, classes, decorators, annotations, loops, comprehensions, reflection, "
+    "function aliases, container mutation, I/O, or process APIs. Function results must be JSON-compatible. Unsupported code is unscored."
 )
-ORACLE_UNSCORED_OUTCOMES = frozenset({"timeout_unknown", "ambiguous_nonzero", "ambiguous_zero_exit"})
+ORACLE_UNSCORED_OUTCOMES = frozenset({"timeout_unknown", "ambiguous_nonzero", "ambiguous_zero_exit",
+                                     "candidate_contract_unknown"})
 _TRANSPORT_METADATA_FIELDS = frozenset({
     "transport", "provider", "executable", "resolved_executable", "executable_sha256",
     "version", "instruction_sha256", "global_instruction_sha256", "forced_login_method",
@@ -324,7 +333,7 @@ def source_snapshot(root: Path = ROOT) -> dict:
         "eval/campaign_adapters.py", "eval/campaign_api.py", "eval/campaign_ledger.py",
         "eval/coding_corpus.py", "eval/coding_acceptance.py", "eval/benchmark.py",
         "eval/harness.py", "eval/task_pairs.py", "eval/rework_statistics.py", "eval/metrics.py",
-        "eval/campaign_oracle.py", "eval/campaign_storage.py",
+        "eval/campaign_oracle.py", "eval/campaign_candidate.py", "eval/campaign_storage.py",
         "eval/external_checkpoints.py",
     )]
     for optional in ("eval/codex_oauth.py", "eval/campaign_continuation.py"):
@@ -1246,6 +1255,7 @@ def _oracle_summary(rows: list[dict]) -> dict:
         "passed": counts["passed"] + counts["legacy_passed"],
         "value_mismatches": counts["value_mismatch"],
         "candidate_exceptions": counts["candidate_exception"],
+        "candidate_contract_unknown": counts["candidate_contract_unknown"],
         "timeouts": counts["timeout_unknown"],
         "ambiguous_nonzero": counts["ambiguous_nonzero"],
         "ambiguous_zero_exit": counts["ambiguous_zero_exit"],

@@ -247,7 +247,8 @@ def test_oracle_fails_on_fixture_and_passes_after_real_source_change(tmp_path):
     scenario = next(item for item in corpus.scenarios() if item.category == "corrections")
     initial = run_oracle(scenario)
     assert initial.passed is False
-    assert initial.returncode != 0
+    assert initial.returncode == 0  # The host comparison owns the verdict.
+    assert initial.oracle_outcome == "value_mismatch"
 
     workspace = tmp_path / "repository"
     with scenario_workspace(scenario, workspace) as prepared:

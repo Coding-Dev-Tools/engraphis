@@ -18,11 +18,8 @@ from dataclasses import dataclass, field
 import hashlib
 import json
 import math
-import os
 from pathlib import Path
 import string
-import subprocess
-import sys
 import tempfile
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
 
@@ -192,12 +189,13 @@ class ReaderResponse:
 
 @dataclass(frozen=True)
 class OracleResult:
-    passed: bool
+    passed: Optional[bool]
     returncode: Optional[int]
     timed_out: bool
     stdout: str
     stderr: str
     workspace: str
+    oracle_outcome: str = "unknown"
 
 
 @dataclass(frozen=True)
@@ -702,43 +700,25 @@ def run_oracle(
     workspace: Optional[Union[str, Path]] = None,
     timeout_seconds: float = 20.0,
 ) -> OracleResult:
-    """Execute the immutable scenario oracle against a disposable workspace."""
-    if timeout_seconds <= 0:
-        raise ValueError("timeout_seconds must be positive")
+    """Interpret the candidate and compare on the host; unknown outcomes are None."""
+    from eval.campaign_oracle import local_oracle, parse_oracle
+
+    if (type(timeout_seconds) not in (int, float) or not math.isfinite(timeout_seconds)
+            or timeout_seconds <= 0):
+        raise ValueError("timeout_seconds must be finite and positive")
     with scenario_workspace(scenario, workspace, reuse_existing=workspace is not None) as target:
         with tempfile.TemporaryDirectory(prefix="engraphis-coding-oracle-") as oracle_dir:
             oracle_path = Path(oracle_dir) / scenario.oracle_path.name
             oracle_path.write_bytes(_scenario_artifact_bytes(scenario, "oracle"))
-            env = os.environ.copy()
-            existing = env.get("PYTHONPATH", "")
-            env["PYTHONPATH"] = str(target) + (os.pathsep + existing if existing else "")
-            try:
-                completed = subprocess.run(
-                    [sys.executable, str(oracle_path)],
-                    cwd=oracle_dir,
-                    env=env,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout_seconds,
-                    check=False,
-                )
-                return OracleResult(
-                    passed=completed.returncode == 0,
-                    returncode=completed.returncode,
-                    timed_out=False,
-                    stdout=completed.stdout,
-                    stderr=completed.stderr,
-                    workspace=str(target),
-                )
-            except subprocess.TimeoutExpired as exc:
-                return OracleResult(
-                    passed=False,
-                    returncode=None,
-                    timed_out=True,
-                    stdout=str(exc.stdout or ""),
-                    stderr=str(exc.stderr or ""),
-                    workspace=str(target),
-                )
+            spec = parse_oracle(oracle_path, scenario.oracle_sha256)
+            result = local_oracle(spec, target, timeout_seconds)
+            scored = result["oracle_outcome"] in {"passed", "value_mismatch", "candidate_exception"}
+            return OracleResult(
+                passed=result["passed"] if scored else None,
+                returncode=result["returncode"], timed_out=result["timed_out"],
+                stdout=result["stdout"], stderr=result["stderr"], workspace=str(target),
+                oracle_outcome=result["oracle_outcome"],
+            )
 
 
 def run_reader(
@@ -1398,6 +1378,8 @@ def load_corpus(root: Union[str, Path] = DATASET_ROOT, *, materialize: bool = Fa
 
 
 def verify_artifacts(root: Union[str, Path] = DATASET_ROOT) -> Dict[str, Any]:
+    from eval.campaign_candidate import CONTRACT
+
     corpus = load_corpus(root)
     families = {item.family_id for item in corpus.scenarios()}
     categories = {item.category for item in corpus.scenarios()}
@@ -1412,6 +1394,7 @@ def verify_artifacts(root: Union[str, Path] = DATASET_ROOT) -> Dict[str, Any]:
         "source_artifacts": len(source_ids),
         "oracle_artifacts": len(oracle_ids),
         "executable_oracles": True,
+        "oracle_execution_contract": CONTRACT,
         "independent_evidence": False,
     }
 

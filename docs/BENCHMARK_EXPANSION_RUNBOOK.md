@@ -34,8 +34,34 @@ The 400 scenarios have 40 family labels and the frozen 80/80/240 split. They are
 shared templates. Family counts therefore do not imply 40 independent real repositories.
 The corpus is `implementation_team`, and cannot satisfy independent-human acceptance or
 leadership gates. Answer keys and oracle sources are verified by SHA-256 and never supplied
-as reader context. Candidate code runs inside the declared Docker image; oracle expected
-values remain outside that container. Only declared source files can be edited.
+as reader context. A trusted interpreter runs inside the declared Docker image; oracle
+expected values remain outside that container. Only declared source files can be edited.
+
+New campaigns use `engraphis-candidate-expressions/v1`, advertised in the hashed reader
+instructions and bound through `eval/campaign_candidate.py` in the producer snapshot.
+The interpreter parses `service.py` as data and never imports or executes candidate Python.
+It supports module constants, unannotated functions (including helpers, defaults and keyword
+arguments), local name assignments, returns, `if`/conditional expressions, primitive literals,
+lists/tuples/dicts, indexing, comparisons, boolean operations and basic arithmetic. The callable
+builtins are `str`, `int`, `float`, `bool` and `len`; methods are `str.strip`, `casefold`, `lower`,
+`startswith` and `dict.get`. `is`/`is not` comparisons require a `None` or boolean literal
+on the right; implementation-dependent object identity is unsupported. Function results must
+be JSON-compatible. `print` supports `sep`/`end` and writes diagnostic stderr only.
+Imports, annotations, decorators, classes, loops, comprehensions, container mutation,
+callable aliases, reflection, file access, process APIs and other syntax are unsupported.
+Source size, syntax nodes, expression steps, call depth, primitive values and result frames
+are bounded. Unsupported syntax or resource limits produce `candidate_contract_unknown`,
+an unscored outcome that cannot trigger correction or enter task-success denominators.
+Supported operations that raise ordinary exceptions remain scored failures. The host accepts
+one complete trusted result frame and compares its returned value; printed markers, process
+exit alone and additional frames cannot establish success. This is a restricted task language,
+not a sandbox for arbitrary Python. Docker retains the campaign's OS isolation.
+
+This changes the evaluation contract. Prepare a new manifest and obtain the usual separate
+execution approval; do not resume old paid checkpoints under the new interpreter. Retained
+campaigns keep their original producer, instructions and outcomes. Compatibility checks on
+all 400 stale and deterministically repaired fixtures test the interpreter contract only;
+they are not new model-quality results or untouched held-out evidence.
 
 Prepare into new paths after all relevant code and dependency changes are finished:
 
