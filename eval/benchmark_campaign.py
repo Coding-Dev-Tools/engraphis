@@ -625,7 +625,7 @@ def run_attempt(manifest: dict, stage_name: str, cell: dict, corpus: Any, client
     usage_rows, responses, oracle_rows = [], [], []
     critical: list[str] = []
     provider_usage_attempted = 0
-    active_error = False
+    active_error: Optional[BaseException] = None
     oracle_unscored: Optional[str] = None
     context, ids = "", []
     adapter_metrics = {}
@@ -816,18 +816,23 @@ def run_attempt(manifest: dict, stage_name: str, cell: dict, corpus: Any, client
                     "private_responses": responses, "private_oracles": oracle_rows,
                 }
                 return result_row
-        except BaseException:
-            active_error = True
+        except BaseException as exc:
+            active_error = exc
             raise
         finally:
             if adapter is not None:
                 try:
                     adapter.close()
-                except Exception:
+                except BaseException as close_exc:
                     # Preserve the original parse/oracle/guard failure when
                     # cleanup also fails.  On a clean return, cleanup itself
                     # is a typed attempt failure with the observed counters.
-                    if not active_error:
+                    # A fresh process interruption still takes precedence over
+                    # an ordinary attempt error. Preserve an existing interrupt
+                    # if cleanup raises another exception while unwinding it.
+                    if active_error is None or (
+                        isinstance(active_error, Exception) and not isinstance(close_exc, Exception)
+                    ):
                         raise
 
 

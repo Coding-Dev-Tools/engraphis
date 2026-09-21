@@ -104,10 +104,10 @@ def test_codeql_gate_waives_only_the_three_exact_nonsecurity_hash_calls(tmp_path
             ),
             _weak_hash_result(
                 "eval/benchmark_campaign.py",
-                80,
+                81,
                 "approved public integrity digest",
             ),
-            _weak_hash_result("eval/benchmark_campaign.py", 78, "old line"),
+            _weak_hash_result("eval/benchmark_campaign.py", 80, "old line"),
             _weak_hash_result(
                 "engraphis/backends/embedder_deterministic.py",
                 37,
@@ -118,7 +118,7 @@ def test_codeql_gate_waives_only_the_three_exact_nonsecurity_hash_calls(tmp_path
     )
 
     assert findings_in(path) == [
-        "py/weak-sensitive-data-hashing at eval/benchmark_campaign.py:78: old line",
+        "py/weak-sensitive-data-hashing at eval/benchmark_campaign.py:80: old line",
         "py/weak-sensitive-data-hashing at "
         "engraphis/backends/embedder_deterministic.py:37: wrong line",
         "py/weak-sensitive-data-hashing at engraphis/security.py:36: wrong file",
@@ -134,7 +134,7 @@ def test_codeql_filter_removes_only_exact_approved_nonsecurity_hash_calls(tmp_pa
         [
             _weak_hash_result(
                 "eval/benchmark_campaign.py",
-                80,
+                81,
                 "approved public integrity digest",
             ),
             {

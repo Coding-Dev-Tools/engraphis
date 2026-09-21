@@ -532,7 +532,8 @@ def test_source_validation_failure_preserves_returned_usage(tmp_path, monkeypatc
     assert summary["provider_usage"]["status"] == "complete"
 
 
-def test_adapter_close_failure_retains_observed_usage(tmp_path, monkeypatch):
+@pytest.mark.parametrize("failure", ["close_only", "primary_keyboard", "primary_exit", "cleanup_interrupt"])
+def test_adapter_close_failure_retains_observed_usage(tmp_path, monkeypatch, failure):
     operation = SimpleNamespace(
         evidence_id="e1", content="trusted context", valid_from=0, valid_to=None, known_at=None,
         workspace="workspace", repo="repo", session=None, scope="repo", op="add",
@@ -563,6 +564,10 @@ def test_adapter_close_failure_retains_observed_usage(tmp_path, monkeypatch):
             return {}
 
         def close(self):
+            if failure == "cleanup_interrupt":
+                raise KeyboardInterrupt("cleanup interruption")
+            if failure != "close_only":
+                raise SystemExit("cleanup interruption")
             raise RuntimeError("close failed")
 
     def factory(_name, **_kwargs):
@@ -576,12 +581,31 @@ def test_adapter_close_failure_retains_observed_usage(tmp_path, monkeypatch):
             )
 
     monkeypatch.setattr(campaign, "source_snapshot", lambda: {})
-    summary = campaign.execute(
-        manifest, "development_pilot", tmp_path / "results", SimpleNamespace(get=lambda _: scenario), Client(),
-        attempt_runner=lambda m, s, c, corpus, client: campaign.run_attempt(
-            m, s, c, corpus, client, adapter_factory=factory,
-            oracle=lambda *args: {"passed": True, "timed_out": False}),
-    )
+    def oracle(*_args):
+        if failure == "primary_keyboard":
+            raise KeyboardInterrupt("primary interruption")
+        if failure == "primary_exit":
+            raise SystemExit("primary interruption")
+        if failure == "cleanup_interrupt":
+            raise ValueError("ordinary attempt error")
+        return {"passed": True, "timed_out": False}
+
+    def execute():
+        return campaign.execute(
+            manifest, "development_pilot", tmp_path / "results", SimpleNamespace(get=lambda _: scenario), Client(),
+            attempt_runner=lambda m, s, c, corpus, client: campaign.run_attempt(
+                m, s, c, corpus, client, adapter_factory=factory, oracle=oracle),
+        )
+
+    if failure != "close_only":
+        expected = SystemExit if failure == "primary_exit" else KeyboardInterrupt
+        message = "cleanup interruption" if failure == "cleanup_interrupt" else "primary interruption"
+        with pytest.raises(expected, match=message):
+            execute()
+        assert list((tmp_path / "results" / "development_pilot").glob("*.started"))
+        assert not list((tmp_path / "results" / "development_pilot").glob("*.json"))
+        return
+    summary = execute()
     checkpoint = next((tmp_path / "results" / "development_pilot").glob("*.json"))
     row_data = json.loads(checkpoint.read_text(encoding="utf-8"))["row"]
     assert row_data["error_class"] == "RuntimeError"

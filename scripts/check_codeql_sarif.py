@@ -24,7 +24,7 @@ _APPROVED_WEAK_HASH_SITES = {
     ),
     "eval/benchmark_campaign.py": (
         "digest",
-        frozenset({80}),
+        frozenset({81}),
         "sha256",
     ),
 }
