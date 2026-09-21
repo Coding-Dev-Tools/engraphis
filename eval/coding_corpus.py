@@ -17,6 +17,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import string
@@ -226,10 +227,57 @@ class SessionLedger:
         self._records: Dict[str, Evidence] = {}
         self.events: List[Mapping[str, Any]] = []
 
+    @staticmethod
+    def _effective_scope(value: Union[Evidence, SessionOperation]) -> Tuple[str, ...]:
+        """Return the scope dimensions that can distinguish this record."""
+        if value.scope == "workspace":
+            return (value.scope, value.workspace)
+        if value.scope == "repo":
+            return (value.scope, value.workspace, value.repo)
+        if value.scope == "session":
+            return (value.scope, value.workspace, value.repo, value.session)
+        if value.scope == "user":
+            return (value.scope, value.workspace)
+        raise ValueError(f"unsupported session scope: {value.scope!r}")
+
+    @staticmethod
+    def _validate_temporal_fields(
+        value: Union[Evidence, SessionOperation], *, label: str,
+    ) -> None:
+        for field_name in ("valid_from", "valid_to", "known_at"):
+            timestamp = getattr(value, field_name)
+            if timestamp is None and field_name != "valid_from":
+                continue
+            try:
+                finite = type(timestamp) in (int, float) and math.isfinite(timestamp)
+            except (TypeError, ValueError, OverflowError):
+                finite = False
+            if not finite:
+                raise ValueError(f"{label} {field_name} must be finite")
+
+    @classmethod
+    def _validate_new_interval(cls, operation: SessionOperation) -> None:
+        cls._effective_scope(operation)
+        cls._validate_temporal_fields(operation, label="session operation")
+        if operation.valid_to is not None and operation.valid_to < operation.valid_from:
+            raise ValueError("session operation valid_to cannot predate valid_from")
+
+    @classmethod
+    def _validate_history_mutation(
+        cls, operation: SessionOperation, previous: Evidence, *, action: str,
+    ) -> None:
+        cls._validate_temporal_fields(operation, label=f"{action} operation")
+        cls._validate_temporal_fields(previous, label="history target")
+        if cls._effective_scope(operation) != cls._effective_scope(previous):
+            raise ValueError(f"{action} target crosses effective scope boundary")
+        if operation.valid_from < previous.valid_from:
+            raise ValueError(f"{action} valid_from predates target")
+
     def apply(self, operation: SessionOperation) -> None:
         if operation.op in {"remember", "event"}:
             if operation.evidence_id in self._records:
                 raise ValueError(f"duplicate session evidence id: {operation.evidence_id}")
+            self._validate_new_interval(operation)
             self._records[operation.evidence_id] = Evidence(
                 id=operation.evidence_id,
                 content=operation.content,
@@ -248,13 +296,15 @@ class SessionLedger:
             if not operation.corrects or operation.corrects not in self._records:
                 raise ValueError(f"correction target is missing: {operation.corrects!r}")
             previous = self._records[operation.corrects]
+            if operation.evidence_id in self._records:
+                raise ValueError(f"duplicate correction evidence id: {operation.evidence_id}")
+            self._validate_new_interval(operation)
+            self._validate_history_mutation(operation, previous, action="correction")
             if previous.valid_to is not None and previous.valid_to <= operation.valid_from:
                 raise ValueError("correction target is already closed")
             self._records[operation.corrects] = Evidence(
                 **{**previous.__dict__, "valid_to": operation.valid_from}
             )
-            if operation.evidence_id in self._records:
-                raise ValueError(f"duplicate correction evidence id: {operation.evidence_id}")
             self._records[operation.evidence_id] = Evidence(
                 id=operation.evidence_id,
                 content=operation.content,
@@ -273,8 +323,12 @@ class SessionLedger:
             if operation.evidence_id not in self._records:
                 raise ValueError(f"invalidation target is missing: {operation.evidence_id}")
             previous = self._records[operation.evidence_id]
+            self._validate_history_mutation(operation, previous, action="invalidation")
+            close_at = operation.valid_from
+            if previous.valid_to is not None:
+                close_at = min(previous.valid_to, close_at)
             self._records[operation.evidence_id] = Evidence(
-                **{**previous.__dict__, "valid_to": operation.valid_from}
+                **{**previous.__dict__, "valid_to": close_at}
             )
             self.events.append({"op": operation.op, "id": operation.evidence_id})
             return
