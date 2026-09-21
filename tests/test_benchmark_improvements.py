@@ -7,6 +7,7 @@ import json
 import pytest
 
 from engraphis.core.context import DeterministicContextPacker, RegexTokenCounter
+from engraphis.core.engine import MemoryEngine
 from engraphis.core.evidence import (
     exact_value_binding,
     make_action_contract,
@@ -492,6 +493,73 @@ def test_engine_recipe_distinguishes_omitted_k_from_explicit_k(monkeypatch: pyte
 
     assert captured["k"] is None
     assert captured["k_supplied"] is False
+
+
+def test_engine_noop_rejects_exact_value_absent_from_duplicate_source() -> None:
+    engine = MemoryEngine.create(":memory:")
+    try:
+        workspace_id = engine.store.get_or_create_workspace("exact-noop-source")
+        common = " ".join(f"word{index}" for index in range(8))
+        retained_content = f"The deployment {common} alpha in production."
+        duplicate_content = f"The deployment {common} in production."
+        first = engine.remember_with_resolution(
+            retained_content, workspace_id=workspace_id,
+            metadata={"retained_marker": "keep"},
+        )
+        alpha_start = retained_content.index("alpha")
+        result = engine.remember_with_resolution(
+            duplicate_content,
+            workspace_id=workspace_id,
+            metadata={"exact_value": {
+                "value": "alpha", "type": "identifier", "source": "content",
+                "start": alpha_start, "end": alpha_start + len("alpha"),
+                "copy_exactly": True,
+            }},
+        )
+
+        assert result["op"] == "noop"
+        assert result["id"] == first["id"]
+        assert result["exact_value_bound"] is False
+        retained = engine.store.get_memory(first["id"])
+        assert retained is not None
+        assert retained.metadata["retained_marker"] == "keep"
+        assert "exact_value" not in retained.metadata
+    finally:
+        engine.store.close()
+
+
+def test_engine_noop_rebinds_a_valid_incoming_exact_value_to_retained_content() -> None:
+    engine = MemoryEngine.create(":memory:")
+    try:
+        workspace_id = engine.store.get_or_create_workspace("exact-noop-rebind")
+        common = " ".join(f"word{index}" for index in range(8))
+        retained_content = f"The deployment {common} alpha in production."
+        duplicate_content = f"alpha The deployment {common} in production."
+        first = engine.remember_with_resolution(
+            retained_content, workspace_id=workspace_id,
+            metadata={"retained_marker": "keep"},
+        )
+        incoming_binding = make_exact_value_binding(
+            duplicate_content, "alpha", "identifier",
+        )
+        result = engine.remember_with_resolution(
+            duplicate_content,
+            workspace_id=workspace_id,
+            metadata={"exact_value": incoming_binding},
+        )
+
+        assert result["op"] == "noop"
+        assert result["id"] == first["id"]
+        assert result["exact_value_bound"] is True
+        retained = engine.store.get_memory(first["id"])
+        assert retained is not None
+        expected = make_exact_value_binding(
+            retained_content, "alpha", "identifier",
+        )
+        assert exact_value_binding(retained.metadata, content=retained.content) == expected
+        assert retained.metadata["retained_marker"] == "keep"
+    finally:
+        engine.store.close()
 
 
 @pytest.mark.parametrize("invalid", [None, "untrusted", {}, {"value": "canary-7", "start": 999, "end": 1007}])

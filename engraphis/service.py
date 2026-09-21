@@ -453,6 +453,20 @@ def _reject_secret_capture(fields) -> None:
         raise ValidationError(str(exc)) from None
 
 
+def _exact_binding_for_write(
+    content: str,
+    value: str,
+    value_type: str,
+    *,
+    source_span: Optional[tuple[int, int]] = None,
+) -> dict[str, Any]:
+    """Expose only the core binding validator's content-free input failures."""
+    try:
+        return make_exact_value_binding(content, value, value_type, source_span=source_span)
+    except ValueError as exc:
+        raise ValidationError(str(exc)) from None
+
+
 def _code_query_capacity(value: Any) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValidationError("capacity must be an integer")
@@ -1813,7 +1827,7 @@ class MemoryService:
         kws = _clean_keywords(keywords)
         meta = _clean_metadata(metadata)
         if exact_value is not None:
-            binding = make_exact_value_binding(
+            binding = _exact_binding_for_write(
                 content,
                 exact_value,
                 exact_value_type,
@@ -2137,7 +2151,7 @@ class MemoryService:
                 exact_span = fact.get("exact_value_span")
                 if isinstance(exact_span, list):
                     exact_span = tuple(exact_span)
-                fact_metadata["exact_value"] = make_exact_value_binding(
+                fact_metadata["exact_value"] = _exact_binding_for_write(
                     content,
                     exact_value,
                     fact.get("exact_value_type", "literal"),

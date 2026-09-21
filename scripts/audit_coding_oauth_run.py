@@ -276,10 +276,12 @@ def _report(path: Path, manifest: dict, issues: list[str], snapshots: Optional[_
             _add_issue(issues, "report_denominator")
     metrics = value.get("metrics") if isinstance(value.get("metrics"), dict) else {}
     config = protocol.get("config") if isinstance(protocol, dict) else {}
+    if not isinstance(config, dict):
+        config = {}
     binding = manifest.get("binding_sha256")
-    if metrics.get("campaign_sha256") not in (None, binding):
+    if not _is_sha(binding) or metrics.get("campaign_sha256") != binding:
         _add_issue(issues, "report_campaign_binding")
-    if config.get("campaign_sha256") not in (None, binding):
+    if not _is_sha(binding) or config.get("campaign_sha256") != binding:
         _add_issue(issues, "report_campaign_binding")
     try:
         from eval.benchmark import validate_report

@@ -223,6 +223,58 @@ def run_fixture(tmp_path, **kwargs):
     )
 
 
+@pytest.mark.parametrize(
+    ("location", "value"),
+    [
+        ("metrics", "removed"),
+        ("metrics", None),
+        ("metrics", "f" * 64),
+        ("protocol.config", "removed"),
+        ("protocol.config", None),
+        ("protocol.config", "f" * 64),
+    ],
+)
+def test_report_campaign_binding_is_required_and_matches_manifest(tmp_path, location, value):
+    manifest, report_path, results = make_fixture(tmp_path)
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    target = report["metrics"] if location == "metrics" else report["protocol"]["config"]
+    if value == "removed":
+        target.pop("campaign_sha256")
+    else:
+        target["campaign_sha256"] = value
+    if location == "protocol.config":
+        report["system"]["config_sha256"] = digest(target)
+    report_path.write_text(canonical_json(report) + "\n", encoding="utf-8")
+
+    result = audit_run(
+        manifest_path=manifest,
+        report_path=report_path,
+        results=results,
+        private_inventory=tmp_path / "private-inventory.json",
+        output=tmp_path / "public-audit.json",
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["issues"] == ["report_campaign_binding"]
+    public = json.loads((tmp_path / "public-audit.json").read_text(encoding="utf-8"))
+    assert public["issues"] == ["report_campaign_binding"]
+
+
+@pytest.mark.parametrize("config", [None, []])
+def test_report_without_a_config_object_is_blocked(tmp_path, config):
+    manifest, report_path, results = make_fixture(tmp_path)
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report["protocol"]["config"] = config
+    report_path.write_text(canonical_json(report) + "\n", encoding="utf-8")
+    result = audit_run(
+        manifest_path=manifest, report_path=report_path, results=results,
+        private_inventory=tmp_path / "private-inventory.json",
+        output=tmp_path / "public-audit.json",
+    )
+    assert result["status"] == "BLOCKED"
+    assert {"report_config", "report_campaign_binding"} <= set(result["issues"])
+
+
 def test_post_run_audit_binds_fake_journal_ledger_and_checkpoint(tmp_path):
     result = run_fixture(tmp_path)
     assert result["status"] == "COMPLETE"
