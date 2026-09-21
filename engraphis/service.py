@@ -4085,11 +4085,12 @@ class MemoryService:
         memories = []
         for chunk in result.chunks:
             if response_mode == "compact":
+                # Candidate rows omit source text; admitted bindings live in packed_sources.
                 item = {
                     key: chunk.get(key)
                     for key in (
                         "id", "title", "scope", "mtype", "repo_id", "score",
-                        "relative_score", "absolute_support", "arm", "exact_value"
+                        "relative_score", "absolute_support", "arm"
                     )
                 }
                 item["provenance"] = _compact_provenance(chunk.get("provenance"))

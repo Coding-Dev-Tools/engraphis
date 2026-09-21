@@ -141,16 +141,22 @@ the receipt chain before treating subsequent receipt continuity as audit evidenc
 The classic recall, grounded, and answer tools (`engraphis_recall`,
 `engraphis_recall_grounded`, and the `engraphis_answer` alias) accept `planning="off"|"auto"`,
 optional `mtype_limits` such as `{"working": 1, "semantic": 3}`, and optional
-`max_response_tokens` from `2` through `1000000`. `response_mode="full"` returns the classic
-response; `"compact"` removes packed context and citation/memory bodies from the end while
-preserving source/citation references. `engraphis_recall_context` is always compact and does
-not accept `response_mode`; it shares the same `max_response_tokens` floor. Responses include
-a stable `context_revision`. Planner
+`max_response_tokens` from `2` through `1000000`. `response_mode="full"` retains complete
+memory/citation bodies; `"compact"` omits those duplicate bodies. If the serialized response
+cap cannot hold the packed context, it removes that context and its exact-binding metadata
+together while preserving source/citation references when they fit. `engraphis_recall_context`
+is always compact and does not accept `response_mode`; it shares the same
+`max_response_tokens` floor. Responses include a stable `context_revision`. Planner
 details, per-query rankings, type-limit drops, and fallback reasons are returned only when
 `diagnostics=true`. Type limits are post-rank maxima and can intentionally return fewer than `k`;
 they do not raise a memory type's relevance. Every planned query remains inside the caller's scope,
 temporal, trust, and prompt-eligibility filters, and grounded recall still measures support against
 the original query.
+
+Compact service and REST recall candidate rows contain identities and scores, without
+`exact_value`. Literal bindings appear only in `packed_sources` for admitted evidence;
+`engraphis_recall_context` exposes these admitted bindings in `sources`. A candidate's presence
+alone does not establish that its bound occurrence was included in the returned context.
 
 For parameter details and return shapes, see the tool descriptions exposed by the MCP server. The
 [agent connection guide](AGENT_CONNECT.md) explains local and hosted connections, and the
