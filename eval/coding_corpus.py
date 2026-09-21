@@ -61,6 +61,13 @@ def _digest_text(value: str) -> str:
     return _digest_bytes(value.encode("utf-8"))
 
 
+def _json_bool(value: Any, *, field: str) -> bool:
+    """Accept only a JSON boolean; callers supply omitted-field defaults."""
+    if type(value) is not bool:
+        raise ValueError(f"{field} must be a JSON boolean")
+    return value
+
+
 @dataclass(frozen=True)
 class ArtifactSnapshot:
     """One immutable read of a corpus artifact and its byte digest."""
@@ -471,7 +478,10 @@ class Corpus:
             prompt=str(task_row.get("prompt") or ""),
             target_files=tuple(str(item) for item in task_row.get("target_files", [])),
             expected_change=str(task_row.get("expected_change") or ""),
-            answerable=bool(task_row.get("answerable", True)),
+            answerable=_json_bool(
+                task_row.get("answerable", True),
+                field=f"{scenario_id}.task.answerable",
+            ),
             answer_tokens=tuple(str(item) for item in task_row.get("answer_tokens", [])),
             required_evidence_ids=tuple(str(item) for item in task_row.get("required_evidence_ids", manifest_row.get("required_evidence_ids", []))),
             forbidden_evidence_ids=tuple(str(item) for item in task_row.get("forbidden_evidence_ids", [])),
@@ -511,7 +521,10 @@ class Corpus:
             workspace=str(row.get("workspace") or "workspace"),
             repo=str(row.get("repo") or "repo"),
             session=str(row.get("session") or "session"),
-            trusted=bool(row.get("trusted", True)),
+            trusted=_json_bool(
+                row.get("trusted", True),
+                field=f"{scenario_id}.session_operation.trusted",
+            ),
             valid_from=float(row.get("valid_from", 0.0)),
             valid_to=float(row["valid_to"]) if row.get("valid_to") is not None else None,
             known_at=float(row["known_at"]) if row.get("known_at") is not None else None,

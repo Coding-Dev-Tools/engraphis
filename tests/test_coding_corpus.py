@@ -98,6 +98,69 @@ def test_v2_development_fixture_uses_structural_long_document_contract(tmp_path)
     assert "retains" not in oracle_text
 
 
+@pytest.mark.parametrize(
+    ("field", "raw"),
+    [
+        ("trusted", "false"),
+        ("trusted", "true"),
+        ("trusted", 0),
+        ("trusted", 1),
+        ("trusted", None),
+        ("answerable", "false"),
+        ("answerable", "true"),
+        ("answerable", 0),
+        ("answerable", 1),
+        ("answerable", None),
+    ],
+)
+def test_corpus_rejects_non_boolean_security_flags(tmp_path, field, raw):
+    root = tmp_path / "coding_memory_v2"
+    generated = build_artifacts(
+        root,
+        version=CORPUS_VERSION_V2,
+        family_ids=("atlas-north",),
+    )
+    runtime = json.loads(json.dumps(generated["runtime"]))
+    row = next(item for item in runtime["scenarios"] if item["session_operations"])
+    if field == "trusted":
+        row["session_operations"][0][field] = raw
+    else:
+        row["task"][field] = raw
+
+    with pytest.raises(ValueError, match=r"must be a JSON boolean"):
+        Corpus(root, generated["manifest"], runtime)
+
+
+def test_corpus_preserves_boolean_values_and_omitted_defaults(tmp_path):
+    root = tmp_path / "coding_memory_v2"
+    generated = build_artifacts(
+        root,
+        version=CORPUS_VERSION_V2,
+        family_ids=("atlas-north",),
+    )
+    runtime = json.loads(json.dumps(generated["runtime"]))
+    row = next(item for item in runtime["scenarios"] if item["session_operations"])
+    row["task"]["answerable"] = False
+    row["session_operations"][0]["trusted"] = False
+    corpus = Corpus(root, generated["manifest"], runtime)
+    selected = corpus.get(row["id"])
+    assert selected.task.answerable is False
+    assert selected.operations[0].trusted is False
+
+    omitted = json.loads(json.dumps(generated["runtime"]))
+    for item in omitted["scenarios"]:
+        item["task"].pop("answerable", None)
+        for operation in item["session_operations"]:
+            operation.pop("trusted", None)
+    defaulted = Corpus(root, generated["manifest"], omitted)
+    assert all(item.task.answerable is True for item in defaulted.scenarios())
+    assert all(
+        operation.trusted is True
+        for item in defaulted.scenarios()
+        for operation in item.operations
+    )
+
+
 def test_v2_build_refuses_to_overwrite_existing_output(tmp_path):
     root = tmp_path / "existing"
     root.mkdir()

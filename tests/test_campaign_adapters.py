@@ -9,6 +9,7 @@ from eval.campaign_adapters import (
     EngraphisAdapter,
     GraphitiAdapter,
     Mem0Adapter,
+    create_adapter,
     _call_with_fallbacks,
     _merge_peer_result_pages,
     _pack_peer_items,
@@ -317,6 +318,29 @@ def test_peer_requires_budgeted_client_for_real_constructor():
         Mem0Adapter(client_factory=lambda **_: object())
     with pytest.raises(AdapterConfigurationError, match="budgeted"):
         GraphitiAdapter(client_factory=lambda **_: object())
+
+
+def test_engraphis_source_revision_is_unknown_until_explicitly_bound():
+    direct = EngraphisAdapter()
+    try:
+        assert direct.capabilities.source_revision == "unknown"
+        assert direct.metrics()["capabilities"]["source_revision"] == "unknown"
+    finally:
+        direct.close()
+
+    revision = "a" * 40
+    bound = create_adapter("engraphis", source_revision=revision)
+    try:
+        prepared = bound.prepare(workspace_id="revision-check")
+        assert prepared["capabilities"]["source_revision"] == revision
+        assert bound.capabilities.source_revision == revision
+        assert bound.metrics()["capabilities"]["source_revision"] == revision
+        assert direct.capabilities.source_revision == "unknown"
+    finally:
+        bound.close()
+
+    with pytest.raises(AdapterConfigurationError, match="lowercase 40-character"):
+        EngraphisAdapter(source_revision="ambient-worktree")
 
 
 def test_engraphis_real_engine_uses_packed_chunks_and_scopes(tmp_path):

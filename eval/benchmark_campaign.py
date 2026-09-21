@@ -634,6 +634,11 @@ def run_attempt(manifest: dict, stage_name: str, cell: dict, corpus: Any, client
                     "baseline_label": {"lexical": "lexical_only", "dense": "dense_only",
                                        "dense_lexical": "dense_lexical_rrf", "hybrid": "full_hybrid"}[cell["arm"]],
                 }
+                if not peer and "repository_revision" in manifest:
+                    # The manifest was validated before execution.  Bind the
+                    # adapter report to that frozen checkout; never infer the
+                    # revision from the possibly changed ambient worktree.
+                    options["source_revision"] = manifest.get("repository_revision")
                 adapter = adapter_factory(cell["arm"] if peer else "engraphis", config=config, **options)
                 first = scenario.operations[0]
                 adapter.prepare(workspace_id=first.workspace, repo_id=first.repo)
