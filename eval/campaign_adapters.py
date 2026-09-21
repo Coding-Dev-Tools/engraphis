@@ -1194,29 +1194,14 @@ class _PeerAdapter(_BaseAdapter):
         admitted: list[Any] = []
         seen: set[str] = set()
         for item in items:
-            backend_id = _source_id(item, len(admitted))
-            partition = self._backend_partitions.get(backend_id)
-            if partition is None:
-                metadata = _value(item, "metadata", default={})
-                if isinstance(metadata, Mapping):
-                    partition = str(metadata.get("campaign_partition", "") or "")
-                    record_id = str(
-                        metadata.get("campaign_record_id", metadata.get("record_id", ""))
-                        or ""
-                    )
-                    if not partition and record_id:
-                        partition = self._record_partitions.get(record_id)
-                episodes = _value(item, "episodes", default=())
-                if not partition and isinstance(episodes, Sequence) and not isinstance(
-                    episodes, (str, bytes, bytearray)
-                ):
-                    for episode_id in episodes:
-                        candidate = self._backend_partitions.get(str(episode_id))
-                        if candidate:
-                            partition = candidate
-                            break
-            # Unknown backend results cannot be safely attributed to a selected
-            # campaign partition, so they remain qualitative omissions.
+            source_id = _campaign_source_id(item, len(admitted), self._memory_ids)
+            # Projections may omit a direct backend ID; their recorded source
+            # scope still takes precedence over a peer's claimed partition.
+            if source_id is None:
+                continue
+            partition = self._record_partitions.get(source_id)
+            # Unbound results cannot enter either scored context or its token
+            # accounting through a peer's claimed campaign partition.
             if partition not in allowed:
                 continue
             dedupe_key = _source_id(item, len(admitted))

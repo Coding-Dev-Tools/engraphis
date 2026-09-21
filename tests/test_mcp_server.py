@@ -172,6 +172,94 @@ def test_response_budget_ignores_unbounded_citation_numbers():
     assert _response_tokens(result) <= 2
 
 
+def test_response_budget_drops_exact_bindings_when_context_is_omitted():
+    from engraphis.mcp_server import _apply_response_budget
+
+    def payload():
+        return {
+            "context": "[1]\nDeployment token is ALPHA only if approved.",
+            "sources": [{
+                "n": 1,
+                "id": "mem_1",
+                "tokens": 7,
+                "exact_value": {"value": "ALPHA", "type": "identifier"},
+                "source_span": [20, 25],
+                "evidence_unit_id": "literal",
+                "evidence_unit": {"value": "ALPHA", "qualifiers": ["only", "if"]},
+            }],
+            "usage": {
+                "token_counter": "engraphis.regex.v1",
+                "source_tokens": 7,
+                "context_tokens": 8,
+                "saved_tokens": 0,
+                "savings_ratio": 0.0,
+                "packed_count": 1,
+                "omitted_count": 0,
+            },
+        }
+
+    roomy = _apply_response_budget(payload(), 1_000_000)
+    assert roomy["context"]
+    assert roomy["sources"][0]["exact_value"]["value"] == "ALPHA"
+    bounded = _apply_response_budget(
+        payload(), roomy["usage"]["actual_response_tokens"] - 1,
+    )
+    assert bounded["context"] == ""
+    assert bounded["sources"]
+    assert all(
+        field not in bounded["sources"][0]
+        for field in ("exact_value", "source_span", "evidence_unit_id", "evidence_unit")
+    )
+    already_omitted = payload()
+    already_omitted["context"] = ""
+    result = _apply_response_budget(already_omitted, 1_000_000)
+    assert all(
+        field not in result["sources"][0]
+        for field in ("exact_value", "source_span", "evidence_unit_id", "evidence_unit")
+    )
+
+
+@pytest.mark.parametrize("registered", [False, True])
+def test_public_recall_context_keeps_binding_only_with_retained_context(monkeypatch, registered):
+    import asyncio
+
+    srv = _module_with_memory_db(monkeypatch)
+    srv.service().remember(
+        "Deployment token is ALPHA and expires after approval.",
+        workspace="acme",
+        exact_value="ALPHA",
+        exact_value_type="identifier",
+    )
+
+    if registered:
+        tool = srv.classic_mcp._tool_manager._tools["engraphis_recall_context"]
+
+        def call(**kwargs):
+            return asyncio.run(tool.run(kwargs))
+    else:
+        call = srv.engraphis_recall_context
+
+    roomy = json.loads(call(
+        query="deployment token", workspace="acme", token_budget=1000,
+        max_response_tokens=1_000_000,
+    ))
+    assert roomy["context"]
+    assert roomy["sources"]
+    assert roomy["sources"][0]["exact_value"]["value"] == "ALPHA"
+    cap = roomy["usage"]["actual_response_tokens"] - 5
+
+    bounded = json.loads(call(
+        query="deployment token", workspace="acme", token_budget=1000,
+        max_response_tokens=cap,
+    ))
+    assert bounded["context"] == ""
+    assert bounded["sources"]
+    assert all(
+        field not in bounded["sources"][0]
+        for field in ("exact_value", "source_span", "evidence_unit_id", "evidence_unit")
+    )
+
+
 
 @pytest.mark.parametrize(
     ("host", "host_header", "origin", "classic"),

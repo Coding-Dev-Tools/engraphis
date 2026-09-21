@@ -51,8 +51,9 @@ regain exact-value metadata during expansion.
 
 Corpus replay rejects non-boolean trust and answerability labels before execution.
 Direct campaign records also require boolean trust labels and reject contradictory
-nested trust metadata. Peer evidence IDs must match recorded backend identities;
-frozen campaign trust takes precedence over peer labels, and unrecognized labels
+nested trust metadata. Peer evidence IDs must name a recorded source; returned
+backend IDs must agree with that source or resolve through recorded episode lineage.
+Frozen campaign scope and trust take precedence over peer labels, and unrecognized labels
 remain unknown. Core/service recall results report the recipe's effective output
 limit as `effective_k`; recall receipts preserve it as `metadata.k` together with
 `retrieval_recipe`, independently of the number of results actually returned.
@@ -63,14 +64,14 @@ interpretation and do not count as additional benchmark-quality gains.
 ### Public numeric evidence registry
 
 Every exact public aggregate retained below comes from the checked-in, public-safe
-[`offline-fixtures-v53.json`](docs/benchmark-evidence/offline-fixtures-v53.json) artifact. Its
+[`offline-fixtures-v54.json`](docs/benchmark-evidence/offline-fixtures-v54.json) artifact. Its
 SHA-256 is
-`a9fb7a131c00c2e6361878388b5f1853213027021cc0c91fe279660a45c7296d`, also recorded in the
+`980d31d7885e4e70af34983f2fd435c0171f737f5928540870311ffc39e8f02d`, also recorded in the
 adjacent `.sha256` file. The artifact contains no raw questions, answers, prompts, customer data,
 or per-record content fingerprints.
 
 The fixture-suite digest is
-`1b3f6bc1929c55f1acab851f7f8753d24f23884d44420434b6e71e5c8c2435c1`. The artifact defines
+`f136bd2bc90ac44ad79f1d7ae401622b297b4cb1e6902683ac9a52748dee90b2`. The artifact defines
 the digest algorithm and records the SHA-256 of every suite and dataset file. Each evidence ID
 also binds its exact command through `sha256(UTF-8 exact command)`:
 
@@ -92,10 +93,10 @@ Historical LoCoMo, graph, handoff, consolidation, and security figures remain pr
 source artifacts but are omitted from the current chart until each has a matching immutable,
 public-safe artifact. The chart labels coding outcomes, external datasets, and operational
 capacity as pending evaluation tracks rather than implying scores. Regenerate it with
-`python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-v53.json --output docs/images/context-efficiency.svg` after selecting the report to publish.
+`python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-v54.json --output docs/images/context-efficiency.svg` after selecting the report to publish.
 
 The companion examples are also generated from that artifact with
-`python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-v53.json --output docs/images/evidence-backed-agent-examples.svg`.
+`python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-v54.json --output docs/images/evidence-backed-agent-examples.svg`.
 The historical-to-executable mapping is in
 [`docs/BENCHMARK_CHANGE_COVERAGE.md`](docs/BENCHMARK_CHANGE_COVERAGE.md).
 

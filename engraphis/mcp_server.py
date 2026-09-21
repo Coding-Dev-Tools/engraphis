@@ -206,6 +206,21 @@ def _apply_response_budget(payload: dict, max_response_tokens: Optional[int]) ->
         serialized = json.dumps(payload, indent=2, default=str, ensure_ascii=False)
         return counter(serialized)
 
+    def drop_detached_evidence_bindings() -> None:
+        """Do not expose exact-value metadata without its supporting context."""
+        if payload.get("context"):
+            return
+        for records_key in ("memories", "sources", "packed_sources"):
+            records = payload.get(records_key)
+            if not isinstance(records, list):
+                continue
+            for record in records:
+                if not isinstance(record, dict):
+                    continue
+                for field in ("exact_value", "source_span", "evidence_unit_id", "evidence_unit"):
+                    record.pop(field, None)
+
+    drop_detached_evidence_bindings()
     current_tokens = measure()
 
     if max_response_tokens is None or max_response_tokens <= 0:
@@ -283,6 +298,7 @@ def _apply_response_budget(payload: dict, max_response_tokens: Optional[int]) ->
     # condition from its claim. Keep the admitted context intact or omit it whole.
     if current_tokens > max_response_tokens and payload.get("context"):
         payload["context"] = ""
+        drop_detached_evidence_bindings()
         if usage.get("token_counter") != counter.identity:
             # Empty text has no evidence tokens under any supported counter.
             baseline = int(usage.get("source_tokens") or 0)
@@ -1409,11 +1425,23 @@ def engraphis_correct(
                                          max_length=200)] = None,
     reason: Annotated[str, Field(description="Why this is being corrected (e.g. 'typo', "
                       "'the user clarified').", max_length=1_000)] = "",
+    exact_value: Annotated[Optional[str], Field(
+        description="Replacement literal copied verbatim from new_content. Content changes "
+        "clear the previous binding unless a new literal is supplied.", max_length=4096)] = None,
+    exact_value_type: Annotated[str, Field(
+        description="Type of the replacement literal.", max_length=32)] = "literal",
+    exact_value_span: Annotated[Optional[tuple[StrictInt, StrictInt]], Field(
+        description="Optional [start,end) character offsets for the literal in new_content; "
+        "required when its occurrence is ambiguous.")] = None,
+    clear_exact_value: Annotated[StrictBool, Field(
+        description="Explicitly remove the literal binding. Cannot be combined with a "
+        "replacement literal.")] = False,
 ) -> str:
     """Replace a memory's content without losing history: the old content is closed
     (bi-temporal invalidate, not deleted) and the correction is stored as a new memory
     that records what it corrects — so the audit trail and ``engraphis_why`` both still
-    work afterward. Prefer this over retire+remember for fixes.
+    work afterward. Prefer this over retire+remember for fixes. Changed content clears
+    the previous exact-value binding unless ``exact_value`` explicitly replaces it.
 
     Returns:
         str: JSON ``{"id","superseded":[old_id],"reason"}`` or an actionable error if the
@@ -1421,7 +1449,10 @@ def engraphis_correct(
     """
     try:
         return _ok(service().correct(memory_id, new_content, workspace=workspace, repo=repo,
-                                     reason=reason))
+                                     reason=reason, exact_value=exact_value,
+                                     exact_value_type=exact_value_type,
+                                     exact_value_span=exact_value_span,
+                                     clear_exact_value=clear_exact_value))
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
 

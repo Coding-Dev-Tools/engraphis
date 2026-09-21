@@ -272,6 +272,14 @@ Replace a memory's content without losing history: old content is closed, the co
 as a new memory that records what it corrected, so the audit trail and `engraphis_why` still work.
 
 - `memory_id (str)`, `new_content (str)`, `workspace (str)`, `repo (str, None)`, `reason (str, "")`.
+- `exact_value (str, None)`, `exact_value_type (str, "literal")`,
+  `exact_value_span ([start,end], None)`: explicitly bind a literal in the corrected content;
+  integer character offsets select one occurrence when it is repeated.
+- `clear_exact_value (bool, false)`: remove the binding; cannot be combined with a replacement.
+
+Changed content clears the previous binding unless a replacement is supplied, even if the old
+literal still occurs (for example, "BETA, not ALPHA"). Unchanged content preserves a valid binding
+unless explicitly cleared. Neither operation changes the predecessor's content or binding.
 
 Returns `{id, superseded:[old_id], reason}`. Prefer this over retire-then-remember.
 

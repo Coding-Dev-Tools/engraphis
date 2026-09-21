@@ -131,7 +131,7 @@ the receipt chain before treating subsequent receipt continuity as audit evidenc
 | Governance | `engraphis_secure_erase` | Irreversibly removes one leaked memory and local indexes; reports local-backup and external-copy limitations. |
 | Compatibility | `engraphis_forget` | Deprecated alias for `engraphis_retire`; preserves the legacy response shape. |
 | Governance | `engraphis_pin` | Prevents future automatic decay or pruning. |
-| Governance | `engraphis_correct` | Replaces memory content without losing the previous version; governed provenance remains pending unless separately approved. |
+| Governance | `engraphis_correct` | Replaces memory content without losing the previous version. Changed content clears the old literal binding; `exact_value`, `exact_value_type`, and optional `exact_value_span` explicitly bind a replacement, or `clear_exact_value=true` removes it. Governed provenance remains pending unless separately approved. |
 | Governance | `engraphis_promote` | Widens an explicitly approved memory's scope while preserving and linking its narrower history. |
 | Session | `engraphis_start_session` | Starts a work session. Exact retries are safe; `force_new=true` creates another session. |
 | Session | `engraphis_end_session` | Closes a work session with a summary and open threads. |
