@@ -6,6 +6,7 @@ from eval.campaign_adapters import (
     AdapterCapabilityError,
     AdapterConfigurationError,
     AdapterError,
+    CampaignRecord,
     EngraphisAdapter,
     GraphitiAdapter,
     Mem0Adapter,
@@ -101,6 +102,91 @@ def test_mem0_namespace_and_common_packing_contract():
     assert client.search_calls[0][1]["filters"]["user_id"] == prepared["workspace_id"]
 
 
+def test_campaign_record_mapping_trust_requires_actual_boolean_and_preserves_defaults():
+    assert CampaignRecord.from_mapping({"record_id": "default", "content": "fact"}).trusted is True
+    assert CampaignRecord.from_mapping(
+        {"record_id": "false", "content": "fact", "trusted": False}
+    ).trusted is False
+    matching_metadata = CampaignRecord.from_mapping(
+        {
+            "record_id": "false-with-metadata",
+            "content": "fact",
+            "trusted": False,
+            "metadata": {"trusted": False},
+        }
+    )
+    assert matching_metadata.metadata["trusted"] is False
+
+    for raw in ("false", "true", 0, 1, None):
+        with pytest.raises(ValueError, match="trusted.*boolean"):
+            CampaignRecord.from_mapping(
+                {"record_id": "invalid", "content": "fact", "trusted": raw}
+            )
+
+
+def test_campaign_record_direct_trust_requires_actual_boolean():
+    assert CampaignRecord(record_id="false", content="fact", trusted=False).trusted is False
+    for raw in ("false", 0, 1, None):
+        with pytest.raises(ValueError, match="trusted.*boolean"):
+            CampaignRecord(record_id="invalid", content="fact", trusted=raw)
+    with pytest.raises(ValueError, match="metadata trusted conflicts"):
+        CampaignRecord(
+            record_id="conflict",
+            content="fact",
+            trusted=False,
+            metadata={"trusted": True},
+        )
+    with pytest.raises(ValueError, match="metadata trusted.*boolean"):
+        CampaignRecord(
+            record_id="invalid-metadata",
+            content="fact",
+            metadata={"trusted": "false"},
+        )
+
+
+def test_campaign_record_rejects_conflicting_or_non_boolean_metadata_trust():
+    with pytest.raises(ValueError, match="metadata trusted conflicts"):
+        CampaignRecord.from_mapping(
+            {
+                "record_id": "conflict",
+                "content": "fact",
+                "trusted": False,
+                "metadata": {"trusted": True},
+            }
+        )
+    with pytest.raises(ValueError, match="metadata trusted.*boolean"):
+        CampaignRecord.from_mapping(
+            {
+                "record_id": "invalid-metadata",
+                "content": "fact",
+                "metadata": {"trusted": "false"},
+            }
+        )
+
+
+def test_adapter_ingress_preserves_false_and_rejects_string_trust_before_writes():
+    client = FakeMem0()
+    adapter = Mem0Adapter(client=client)
+    adapter.prepare(workspace_id="workspace-a")
+    adapter.ingest([{
+        "record_id": "valid-false", "content": "private fact",
+        "workspace": "workspace-a", "trusted": False,
+    }])
+    assert client.add_calls[0][1]["metadata"]["campaign_trusted"] is False
+
+    with pytest.raises(ValueError, match="trusted.*boolean"):
+        adapter.ingest([{
+            "record_id": "preceding-valid", "content": "also must not write",
+            "workspace": "workspace-a", "trusted": True,
+        }, {
+            "record_id": "string-false",
+            "content": "must reject",
+            "workspace": "workspace-a",
+            "trusted": "false",
+        }])
+    assert len(client.add_calls) == 1
+
+
 def test_adapter_signature_fallback_does_not_retry_an_in_body_type_error():
     class FailingMem0:
         def __init__(self):
@@ -156,6 +242,58 @@ def test_peer_packing_omits_unmapped_text_instead_of_shifting_citations():
     assert unmapped == 1
 
 
+@pytest.mark.parametrize(("item", "expected"), [
+    ({"id": "backend-evil", "metadata": {"campaign_record_id": "record-1"}}, ()),
+    ({"metadata": {"campaign_record_id": "unknown"}}, ()),
+    ({"id": "backend-1", "metadata": {"campaign_record_id": "unknown"}}, ("record-1",)),
+    ({"metadata": {"campaign_record_id": "record-1"}}, ("record-1",)),
+    ({"id": "backend-2", "metadata": {"campaign_record_id": "record-1"}}, ("record-2",)),
+    ({"uuid": "edge-1", "episodes": ["backend-1"],
+      "metadata": {"campaign_record_id": "unknown"}}, ("record-1",)),
+    ({"source_id": None, "id": "backend-evil",
+      "metadata": {"campaign_record_id": "record-1"}}, ()),
+])
+def test_peer_source_labels_must_agree_with_recorded_backend_identity(item, expected):
+    context, source_ids, usage, unmapped = _pack_peer_items(
+        [{**item, "memory": "peer fact"}], query="fact", k=1, token_budget=50,
+        memory_ids={"record-1": "backend-1", "record-2": "backend-2"},
+        trust_by_id={"record-1": False, "record-2": True},
+    )
+    assert source_ids == expected
+    assert usage.packed_count == len(expected)
+    assert unmapped == (0 if expected else 1)
+    if expected:
+        assert context.startswith(f"[{expected[0]}]")
+    else:
+        assert context == ""
+
+
+@pytest.mark.parametrize(("canonical", "peer", "expected"), [
+    ({"record-1": False}, True, "false"),
+    ({"record-1": True}, False, "true"),
+    ({"record-1": "false"}, True, "unknown"),
+    ({"record-1": 1}, True, "unknown"),
+    ({}, True, "unknown"),
+    (None, True, "true"),
+    (None, False, "false"),
+    (None, "false", "false"),
+    (None, "trusted", "true"),
+    (None, 1, "unknown"),
+    (None, 0, "unknown"),
+    (None, {"trusted": True}, "unknown"),
+    (None, [True], "unknown"),
+])
+def test_peer_trust_preserves_canonical_truth_and_unknown_labels(canonical, peer, expected):
+    context, source_ids, _, _ = _pack_peer_items(
+        [{"id": "backend-1", "memory": "peer fact",
+          "metadata": {"campaign_trusted": peer}}],
+        query="fact", k=1, token_budget=50,
+        memory_ids={"record-1": "backend-1"}, trust_by_id=canonical,
+    )
+    assert source_ids == ("record-1",)
+    assert context == f"[record-1] trusted={expected}\npeer fact"
+
+
 def test_mem0_preflights_unsupported_scope_before_any_add():
     client = FakeMem0()
     adapter = Mem0Adapter(client=client)
@@ -209,7 +347,7 @@ def test_mem0_repo_partition_results_are_merged_by_score_before_k_limit():
             partition = (kwargs.get("filters") or {}).get("user_id")
             if partition == adapter._workspace_partition:
                 result["results"] = [{
-                    "id": "workspace-backend",
+                    "id": result["results"][0]["id"],
                     "memory": "workspace distractor",
                     "score": 0.1,
                     "metadata": {"campaign_record_id": "workspace-fact",
@@ -218,7 +356,7 @@ def test_mem0_repo_partition_results_are_merged_by_score_before_k_limit():
                 }]
             else:
                 result["results"] = [{
-                    "id": "repo-backend",
+                    "id": result["results"][0]["id"],
                     "memory": "repo-specific evidence",
                     "score": 0.9,
                     "metadata": {"campaign_record_id": "repo-fact",
