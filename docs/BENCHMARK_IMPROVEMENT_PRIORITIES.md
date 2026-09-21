@@ -39,13 +39,14 @@ The first implementation pass keeps the production and benchmark defaults unchan
   evidence units across distinct sources before expanding them. It reports the selected
   mode, packed IDs, exact token usage and source-bound exact-value metadata. The existing
   `"legacy"` mode remains the default and is still used by existing callers.
-- Classic `engraphis_remember` and the Python/service APIs accept `exact_value` plus an
+- Smart/Classic `engraphis_remember` and the Python/service APIs accept `exact_value` plus an
   `exact_value_type`. The value must be copied verbatim from the authorized source (or be
   accompanied by an explicit source span); ambiguous matches are rejected. Coverage
   packing carries the binding with the evidence so an integration can validate a file or
   tool argument after the model proposes an action. The compact Smart write schema stays
-  within its existing payload budget; use the Classic or service surface when a typed
-  exact-value write is needed.
+  within its existing payload budget. Compact recall candidate rows omit exact bindings;
+  admitted bindings remain in `packed_sources` (or MCP `recall_context`'s `sources`) alongside
+  the returned context.
 - `retrieval_recipe="conversation"` selects the measured `k=20` / 1,500-token starting
   point, while `"long_session"` selects `k=10` / 4,096 tokens when the caller leaves
   `k` and the token budget at their defaults. An explicit caller value always wins, and
