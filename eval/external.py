@@ -915,7 +915,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             expected_sources = [("inputs/dataset", dataset_before)] + list(
                 zip(producer_names, source_before.values())
             )
-            if repair_manifest:
+            if repair_manifest_before is not None:
                 expected_sources.append(("inputs/repair_manifest", repair_manifest_before))
             observed_sources = [(item["name"], item["sha256"]) for item in artifact["suite"]["sources"]]
             if (artifact["suite"]["sha256"] != dataset_before
