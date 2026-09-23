@@ -17,7 +17,7 @@ import re
 import subprocess
 import sys
 from copy import deepcopy
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable, Optional, Protocol, Sequence, Union
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -97,6 +97,21 @@ def sha256_file(path: Union[str, Path]) -> str:
     return digest.hexdigest()
 
 
+def read_artifact_snapshot(path: Union[str, Path]) -> tuple[dict[str, Any], str]:
+    """Read a JSON object and its verified SHA from one immutable byte buffer."""
+    source = Path(path)
+    payload = source.read_bytes()
+    digest = hashlib.sha256(payload).hexdigest()
+    sidecar = source.with_suffix(source.suffix + ".sha256")
+    fields = sidecar.read_text(encoding="utf-8").split() if sidecar.is_file() else []
+    if not fields or fields[0] != digest:
+        raise ValueError("artifact checksum missing or mismatched")
+    value = json.loads(payload.decode("utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError("artifact must be a JSON object")
+    return value, digest
+
+
 def source_digest(path: Union[str, Path]) -> dict[str, Union[str, int]]:
     """Return content-only provenance for one benchmark input.
 
@@ -104,11 +119,51 @@ def source_digest(path: Union[str, Path]) -> dict[str, Union[str, int]]:
     the bytes used, not disclose an operator's directory layout.
     """
     resolved = Path(path)
+    digest = hashlib.sha256()
+    byte_count = 0
+    with resolved.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+            byte_count += len(block)
     return {
         "name": resolved.name,
-        "sha256": sha256_file(resolved),
-        "bytes": resolved.stat().st_size,
+        "sha256": digest.hexdigest(),
+        "bytes": byte_count,
     }
+
+
+def _source_digests(
+    paths: Sequence[Union[str, Path]], names: Optional[Sequence[str]],
+) -> list[dict[str, Union[str, int]]]:
+    """Allow explicit public identities without exposing private source paths."""
+    paths = tuple(paths)
+    if names is not None:
+        if isinstance(names, (str, bytes)) or len(names) != len(paths):
+            raise ValueError("source_names must contain one public name per source")
+        names = tuple(names)
+        for name in names:
+            if (not isinstance(name, str) or not name
+                    or not name.isprintable() or "\\" in name or ":" in name
+                    or PurePosixPath(name).is_absolute()
+                    or PurePosixPath(name).as_posix() != name
+                    or any(part in (".", "..") for part in name.split("/"))):
+                raise ValueError("source_names must be safe relative POSIX public names")
+        if len(set(names)) != len(names):
+            raise ValueError("source_names must be unique")
+    sources = [source_digest(path) for path in paths]
+    if names is not None:
+        for source, name in zip(sources, names):
+            source["name"] = name
+    return sources
+
+
+def verify_report_snapshot(report: dict, *, dataset_sha256: str,
+                           sources: Sequence[tuple[str, str]]) -> dict:
+    """Reject envelopes that identify bytes other than the evaluated snapshot."""
+    if (report["suite"]["sha256"] != dataset_sha256
+            or [(item["name"], item["sha256"]) for item in report["suite"]["sources"]] != list(sources)):
+        raise ValueError("report artifact does not match the evaluated source snapshot")
+    return report
 
 
 def git_provenance(cwd: Optional[Union[str, Path]] = None) -> dict[str, Union[str, bool]]:
@@ -149,12 +204,22 @@ def environment_provenance() -> dict[str, Any]:
 
 
 _PUBLIC_RECORD_FIELDS = frozenset({
-    "question_id", "category", "retrieved_ids", "supporting_ids", "context_tokens",
+    "question_id", "case", "category", "retrieved_ids", "supporting_ids", "context_tokens",
     "latency_ms", "abstained", "excluded", "answerable", "answer_scored", "grounded",
     "grounded_support", "answer_token_recall", "context_token_method",
     "context_tokenizer_identity", "qa_score", "qa_correct", "retrieval_excluded",
     "retrieval_scored", "inserted_memory_type_counts", "retrieved_memory_type_counts",
-    "usage",
+    "usage", "packed_ids", "packed_recall_at_k", "packed_hit_at_k",
+    "packed_mrr_at_k", "packed_ndcg_at_k", "packed_answer_token_recall",
+    "evidence_label_provenance", "evidence_label_count", "evidence_label_ceiling_at_k",
+    "evidence_label_method", "sufficient_evidence_proxy",
+    "sufficient_evidence_proxy_method",
+    "scenario_id", "family_id", "arm", "token_budget", "repetition", "status",
+    "task_success", "citation_validity", "citation_support", "evidence_retention",
+    "abstention_correct", "reader_calls", "correction_calls", "oracle_calls",
+    "oracle_outcome", "unscored_reason", "critical_violation_count",
+    "cohort", "campaign_sha256", "source_manifest_sha256", "deadline_seconds",
+    "validity", "eligible_for_quality",
 })
 _PUBLIC_METRIC_PREFIXES = ("recall_at_", "hit_at_", "mrr_at_", "ndcg_at_")
 _PUBLIC_USAGE_FIELDS = frozenset({
@@ -511,6 +576,10 @@ def validate_report(report: Any, *, canonical: bool = False) -> list[str]:
             errors.append("protocol.token_accounting fields have invalid types")
     record_ids: list[str] = []
     embedded_exclusions: dict[str, dict] = {}
+    config = protocol.get("config") if isinstance(protocol.get("config"), dict) else {}
+    explicit_cases = config.get("source_case_identity") == "explicit"
+    if "source_case_identity" in config and not explicit_cases:
+        errors.append("protocol.config.source_case_identity must be explicit when supplied")
     for record in records:
         if not isinstance(record, dict) or not isinstance(record.get("question_id"), str):
             errors.append("each record requires a string question_id")
@@ -520,6 +589,13 @@ def validate_report(report: Any, *, canonical: bool = False) -> list[str]:
             errors.append("each record question_id must be non-empty")
             continue
         record_ids.append(question_id)
+        for field in ("retrieval_scored", "answer_scored"):
+            if field in record and type(record[field]) is not bool:
+                errors.append(f"record {field} must be boolean when supplied")
+        if explicit_cases or "case" in record:
+            case = record.get("case")
+            if not isinstance(case, str) or not case.strip() or case != case.strip():
+                errors.append("each source-case record requires a non-empty case identity")
         fingerprints = sorted(set(record) & _CONTENT_FINGERPRINT_FIELDS)
         if fingerprints:
             errors.append(
@@ -1280,6 +1356,7 @@ def report_envelope(
     git_commit: Optional[str] = None,
     command: Optional[Sequence[str]] = None,
     source_paths: Optional[Sequence[Union[str, Path]]] = None,
+    source_names: Optional[Sequence[str]] = None,
     models: Optional[dict] = None,
     token_accounting: Optional[dict] = None,
 ) -> dict:
@@ -1287,7 +1364,9 @@ def report_envelope(
 
     This is intentionally the one path through which public reports obtain
     provenance. It redacts raw question/answer/context fields before any caller
-    can persist the returned envelope.
+    can persist the returned envelope. Source names default to basenames for
+    privacy; callers may explicitly supply unique public repository paths or
+    role identifiers, never private input paths, via ``source_names``.
     """
     path = Path(dataset_path)
     observed_git = git_provenance()
@@ -1316,7 +1395,7 @@ def report_envelope(
             "name": suite,
             "dataset": path.name,
             "sha256": sha256_file(path),
-            "sources": [source_digest(item) for item in source_paths or ()],
+            "sources": _source_digests(source_paths or (), source_names),
         },
         "system": {
             "git_commit": resolved_commit,

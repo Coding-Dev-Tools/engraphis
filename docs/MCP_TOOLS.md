@@ -32,11 +32,11 @@ namesakes; advanced controls are discoverable rather than routine:
 
 | Smart tool | Accepted parameters |
 |---|---|
-| `engraphis_remember` | `content`, `workspace`, `repo`, `session_id`, `mtype`, `importance`, `subject_key`, `claim_kind`; safe provenance is fixed internally |
-| `engraphis_recall_context` | `query`, `workspace`, `repo`, `session_id`, `k`, `token_budget`, `format`; always compact, no `response_mode` |
+| `engraphis_remember` | `content`, `workspace`, `repo`, `session_id`, `mtype`, `importance`, `subject_key`, `claim_kind`, optional source-bound `exact_value`/`exact_value_type`; safe provenance is fixed internally |
+| `engraphis_recall_context` | `query`, `workspace`, `repo`, `session_id`, `k`, `token_budget`, `packing_mode`, `retrieval_recipe`, `format`; always compact, no `response_mode` |
 
 `format="gist"` is a compatibility option for the same budgeted, cited evidence as
-`full`. It preserves complete conditions and code whitespace; it does not apply an
+`full`. It preserves the same selected text and whitespace; it does not apply an
 additional summary or promise extra token savings. Source IDs remain in `sources`.
 
 
@@ -90,6 +90,20 @@ not a transport permission.
 For the full memory trust model, automatic schema-11 classification, and operator recovery, see
 the [memory write trust model](WRITE_REVIEW.md) and [recall recovery guide](RECALL_RECOVERY.md).
 
+### Receipt-chain failure behavior
+
+Receipt recording is deliberately fail-closed: if verification finds a fork, cycle, or
+disconnected chain with no safe predecessor, the Store refuses to append and
+`engraphis_verify_receipts` continues to report the invalid chain. The completed service
+operation is not rolled back or reported as failed solely because its follow-up receipt could
+not be recorded. Its JSON result contains `"receipt": null` and a content-free
+`"receipt_warning":{"code":"receipt_chain_integrity_failure",...}` marker. Repair or restore
+the receipt chain before treating subsequent receipt continuity as audit evidence.
+
+Emitted recall receipts include the normalized `packing_mode` (`legacy` or `coverage`)
+alongside the retrieval recipe and effective depth. Historical receipts remain valid;
+an omitted mode means it was not recorded, and is not inferred from current defaults.
+
 | Category | Tool | What it does |
 |---|---|---|
 | Write | `engraphis_remember` | Stores a fact and resolves it as a new memory, reinforcement, safe supersession, or related memory. |
@@ -100,14 +114,14 @@ the [memory write trust model](WRITE_REVIEW.md) and [recall recovery guide](RECA
 | Write | `engraphis_ingest_postgres_schema` | Stores a PostgreSQL schema snapshot and typed graph. The DSN is never stored. |
 | Write | `engraphis_consolidate` | Runs a dry-run or live consolidation sweep. A live call can write resolved facts and receipts. |
 | Stateful read | `engraphis_recall_context` | Returns hard-budget context, compact sources, token usage, and optional diagnostics. Recommended for agent prompts. Compact-only: it never accepts `response_mode` and never returns full memory bodies. |
-| Stateful read | `engraphis_recall` | Runs hybrid vector, lexical, and graph recall. It records a receipt without strengthening weak matches. |
-| Stateful read | `engraphis_recall_grounded` | Returns a cited answer or abstains when the evidence is too weak. It records a receipt and reinforces cited memories. |
+| Stateful read | `engraphis_recall` | Runs hybrid vector, lexical, and graph recall. It attempts a receipt without strengthening weak matches. |
+| Stateful read | `engraphis_recall_grounded` | Returns a cited answer or abstains when the evidence is too weak. It attempts a receipt and reinforces cited memories. |
 | Stateful read | `engraphis_answer` | Backward-compatible alias for `engraphis_recall_grounded`. |
 | Pure read | `engraphis_recall_proactive` | Returns high-signal, queryless context and a last-session handoff. It does not reinforce or record a receipt. |
-| Stateful read | `engraphis_proactive_context` | Builds task-aware cited context and records a receipt without reinforcement. |
+| Stateful read | `engraphis_proactive_context` | Builds task-aware cited context and attempts a receipt without reinforcement. |
 | Read | `engraphis_why` | Returns the current answer and the memories it superseded. |
 | Read | `engraphis_timeline` | Returns complete bi-temporal history, oldest first. |
-| Code | `engraphis_index_repo` | Incrementally parses a repository into the code and memory graph. Each run records a receipt. |
+| Code | `engraphis_index_repo` | Incrementally parses a repository into the code and memory graph. Each run attempts a receipt. |
 | Code | `engraphis_search_code` | Finds symbols, callers, and linked memories. |
 | Code | `engraphis_code_path` | Finds a path across definitions, calls, imports, and memories. |
 | Code | `engraphis_code_impact` | Ranks changed-file impact using dependents, communities, memories, and hotspots. |
@@ -121,7 +135,7 @@ the [memory write trust model](WRITE_REVIEW.md) and [recall recovery guide](RECA
 | Governance | `engraphis_secure_erase` | Irreversibly removes one leaked memory and local indexes; reports local-backup and external-copy limitations. |
 | Compatibility | `engraphis_forget` | Deprecated alias for `engraphis_retire`; preserves the legacy response shape. |
 | Governance | `engraphis_pin` | Prevents future automatic decay or pruning. |
-| Governance | `engraphis_correct` | Replaces memory content without losing the previous version; governed provenance remains pending unless separately approved. |
+| Governance | `engraphis_correct` | Replaces memory content without losing the previous version. Changed content clears the old literal binding; `exact_value`, `exact_value_type`, and optional `exact_value_span` explicitly bind a replacement, or `clear_exact_value=true` removes it. Governed provenance remains pending unless separately approved. |
 | Governance | `engraphis_promote` | Widens an explicitly approved memory's scope while preserving and linking its narrower history. |
 | Session | `engraphis_start_session` | Starts a work session. Exact retries are safe; `force_new=true` creates another session. |
 | Session | `engraphis_end_session` | Closes a work session with a summary and open threads. |
@@ -131,16 +145,26 @@ the [memory write trust model](WRITE_REVIEW.md) and [recall recovery guide](RECA
 The classic recall, grounded, and answer tools (`engraphis_recall`,
 `engraphis_recall_grounded`, and the `engraphis_answer` alias) accept `planning="off"|"auto"`,
 optional `mtype_limits` such as `{"working": 1, "semantic": 3}`, and optional
-`max_response_tokens` from `2` through `1000000`. `response_mode="full"` returns the classic
-response; `"compact"` removes packed context and citation/memory bodies from the end while
-preserving source/citation references. `engraphis_recall_context` is always compact and does
-not accept `response_mode`; it shares the same `max_response_tokens` floor. Responses include
-a stable `context_revision`. Planner
+`max_response_tokens` from `2` through `1000000`. `response_mode="full"` retains complete
+memory/citation bodies; `"compact"` omits those duplicate bodies. If the serialized response
+cap cannot hold the packed context, it removes that context and its exact-binding metadata
+together while preserving source/citation references when they fit. `engraphis_recall_context`
+is always compact and does not accept `response_mode`; it shares the same
+`max_response_tokens` floor. Responses include a stable `context_revision`. Planner
 details, per-query rankings, type-limit drops, and fallback reasons are returned only when
 `diagnostics=true`. Type limits are post-rank maxima and can intentionally return fewer than `k`;
 they do not raise a memory type's relevance. Every planned query remains inside the caller's scope,
 temporal, trust, and prompt-eligibility filters, and grounded recall still measures support against
 the original query.
+
+Compact service and REST recall candidate rows contain identities and scores, without
+`exact_value`. Literal bindings appear only in `packed_sources` for admitted evidence;
+`engraphis_recall_context` exposes these admitted bindings in `sources`. A candidate's presence
+alone does not establish that its complete source was included in the returned context.
+An exact binding requires the complete memory source, with boundary whitespace trimming
+permitted only outside the bound value. This retains conditions without inferring their
+meaning or authorizing an action. Partial legacy excerpts remain ordinary context without
+binding metadata; coverage withholds bound groups that cannot fit.
 
 For parameter details and return shapes, see the tool descriptions exposed by the MCP server. The
 [agent connection guide](AGENT_CONNECT.md) explains local and hosted connections, and the

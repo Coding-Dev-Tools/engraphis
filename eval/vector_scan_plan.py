@@ -12,7 +12,7 @@ import numpy as np
 from engraphis.backends.vector_numpy import NumpyVectorIndex
 from engraphis.core.interfaces import SearchFilter
 from engraphis.core.store import Store, VECTOR_SCAN_BATCH
-from eval.benchmark import report_envelope, write_canonical_artifact
+from eval.benchmark import report_envelope, sha256_file, verify_report_snapshot, write_canonical_artifact
 from eval.vector_scale import _normalized_random, parse_sizes
 from eval.vector_scale_storage import _ROOT, _SOURCES, _hardware, _insert, _source_snapshot
 
@@ -67,6 +67,7 @@ def run_comparison(sizes, *, dim=256, batch_size=500, seed=20260731):
     if min(dim, batch_size) < 1:
         raise ValueError("dimension and batch_size must be positive")
     before, cells = _source_snapshot(), []
+    runner_before = sha256_file(Path(__file__))
     for size in sizes:
         with tempfile.TemporaryDirectory(prefix="egr-plan-") as folder:
             store = Store(str(Path(folder) / "corpus.db"))
@@ -106,14 +107,15 @@ def run_comparison(sizes, *, dim=256, batch_size=500, seed=20260731):
             finally:
                 store.close()
     after = _source_snapshot()
-    return report_envelope(
+    report = report_envelope(
         suite="vector-scan-plan/counterfactual-v1", dataset_path=Path(__file__),
         config={"sizes": sizes, "dimension": dim, "batch_size": batch_size, "seed": seed,
                 "target_scope_percentages": [0.1, 1, 2.1, 5, 25, 100]},
         records=[{"question_id": f"{cell['strategy']}-{cell['corpus_size']}-{cell['target_scope_percent']}",
                   "category": "scoped_vector_scan"} for cell in cells],
         metrics={"cells": cells, "hardware": _hardware(), "source_before": before,
-                 "source_after": after, "source_stable": before == after,
+                 "source_after": after,
+                 "source_stable": before == after and runner_before == sha256_file(Path(__file__)),
                  "measurement_scope": "same scoped bounded vector scan; only join order differs",
                  "unmeasured": ["historical release behavior", "independent process repetitions",
                                 "external contention", "end-to-end recall"]},
@@ -121,6 +123,9 @@ def run_comparison(sizes, *, dim=256, batch_size=500, seed=20260731):
         command=["python", "-m", "eval.vector_scan_plan", "--sizes", ",".join(map(str, sizes)),
                  "--dim", str(dim), "--batch-size", str(batch_size), "--seed", str(seed)],
     )
+    return verify_report_snapshot(report, dataset_sha256=runner_before,
+        sources=[(Path(name).name, value) for name, value in before["files"].items()]
+                + [(Path(__file__).name, runner_before)])
 
 
 def main(argv=None):

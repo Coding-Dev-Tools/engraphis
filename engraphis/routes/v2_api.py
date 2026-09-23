@@ -1553,6 +1553,10 @@ class _ReviseMemoryReq(BaseModel):
     mtype: Optional[str] = None
     importance: Optional[float] = None
     reason: str = ""
+    exact_value: Optional[str] = Field(default=None, max_length=4096)
+    exact_value_type: str = Field(default="literal", max_length=32)
+    exact_value_span: Optional[tuple[StrictInt, StrictInt]] = None
+    clear_exact_value: StrictBool = False
 
 
 @router.post("/memory/revise")
@@ -1562,6 +1566,8 @@ def revise_memory(req: _ReviseMemoryReq):
         repo=req.repo, expected_version=req.expected_version, operation_id=req.operation_id,
         content=req.content, title=req.title, mtype=req.mtype,
         importance=req.importance, reason=req.reason,
+        exact_value=req.exact_value, exact_value_type=req.exact_value_type,
+        exact_value_span=req.exact_value_span, clear_exact_value=req.clear_exact_value,
     )
 
 
@@ -1841,10 +1847,26 @@ def secure_erase(req: _IdReq):
                 confirmed=req.confirmed)
 
 
+class _CorrectReq(BaseModel):
+    id: str
+    workspace: Optional[str] = None
+    repo: Optional[str] = None
+    reason: str = ""
+    content: str = ""
+    exact_value: Optional[str] = Field(default=None, max_length=4096)
+    exact_value_type: str = Field(default="literal", max_length=32)
+    exact_value_span: Optional[tuple[StrictInt, StrictInt]] = None
+    clear_exact_value: StrictBool = False
+
+
 @router.post("/correct")
-def correct(req: _IdReq):
+def correct(req: _CorrectReq):
     ws = req.workspace or _default_ws()
-    return _run(service().correct, req.id, req.content, workspace=ws, repo=req.repo, reason=req.reason)
+    return _run(
+        service().correct, req.id, req.content, workspace=ws, repo=req.repo,
+        reason=req.reason, exact_value=req.exact_value, exact_value_type=req.exact_value_type,
+        exact_value_span=req.exact_value_span, clear_exact_value=req.clear_exact_value,
+    )
 
 
 @router.post("/promote")
