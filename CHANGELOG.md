@@ -5,6 +5,18 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [1.7.6] - 2026-09-23
+
+- Hardened Railway container startup persistence and readiness: entrypoint revalidates
+  trusted paths before ownership changes, enforces private 0700 permissions, preserves
+  ownership of external container state directories, rejects unsafe ownership markers
+  and hard-linked privileged startup inputs, and initializes private state for rootless
+  container execution.
+- Improved agent-memory evidence and benchmark integrity: expanded evaluation harness,
+  local capacity campaign runners, campaign oracles and candidate compatibility, exact
+  value correction surfaces, compact recall HTTP endpoints, and comprehensive evidence
+  verification contracts.
+- Upgraded tree-sitter-language-pack to 1.20.0, openai-codex to 0.154.0, and pyright to 1.1.414.
 - Receipt-chain structural corruption remains fail-closed at the Store boundary without
   bricking a completed service operation: affected responses now carry a content-free
   `receipt_warning`, and graph/import workers preserve their completed state.

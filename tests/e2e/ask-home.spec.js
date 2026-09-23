@@ -18,7 +18,7 @@ async function fixture(page, { coverage, answerFailures = 0, previewFailures = 0
     const body = req.method() === 'POST' ? req.postDataJSON() : null;
     requests.push({ path, body, query: Object.fromEntries(url.searchParams) });
     const ok = json => route.fulfill({ json });
-    if (path === '/bootstrap') return ok({ version: '1.7.4', workspaces: [{ name: 'home-work', memories: 12 }], license: { plan: 'local', features: [], known_features: {} } });
+    if (path === '/bootstrap') return ok({ version: '1.7.6', workspaces: [{ name: 'home-work', memories: 12 }], license: { plan: 'local', features: [], known_features: {} } });
     if (path === '/repos') return ok({ repos: [{ id: 'repo_alpha', name: 'alpha' }, { id: 'repo_beta', name: 'beta' }] });
     if (path === '/stats') return statsUnavailable ? route.fulfill({ status: 503, json: { detail: 'Stats unavailable' } }) : ok({ memories: 12, total_rows: 15, sessions: 3, workspaces: 1, by_type: { semantic: 12 } });
     if (path === '/memories') return ok({ memories: [], count: 0, total_count: 0, next_cursor: null });
