@@ -8,7 +8,9 @@ issuer, relay, managed compute, Auto Dreaming, Auto Consolidation, or Team ident
 
 - Source: `Coding-Dev-Tools/engraphis`, branch `main`, `Dockerfile` build.
 - Service mode: `customer`.
+- Bind host: `0.0.0.0` so Railway's injected `PORT` and public health probes reach the process.
 - Persistent volume: `/data`.
+- Trusted runtime settings: `/data/.engraphis/config.env` on the persistent volume.
 - Health check: `/api/ready`.
 - `ENGRAPHIS_DASHBOARD_URL` derived from Railway's generated public domain (override it with the
   canonical HTTPS custom domain once one is active so public MCP origin checks remain strict).

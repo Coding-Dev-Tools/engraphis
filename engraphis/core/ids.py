@@ -33,8 +33,9 @@ def _reset_ulid_state_after_fork() -> None:
     _LAST_RANDOM = -1
 
 
-if hasattr(os, "register_at_fork"):
-    os.register_at_fork(after_in_child=_reset_ulid_state_after_fork)
+_register_at_fork = getattr(os, "register_at_fork", None)
+if callable(_register_at_fork):
+    _register_at_fork(after_in_child=_reset_ulid_state_after_fork)
 
 
 # Canonical prefixes for each entity kind.

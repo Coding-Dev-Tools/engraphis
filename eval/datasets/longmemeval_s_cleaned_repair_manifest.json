@@ -1,0 +1,66 @@
+{
+  "schema": "engraphis-longmemeval-repair/v1",
+  "dataset_sha256": "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442",
+  "empty_turn_omissions": [
+    {
+      "question_id": "dd2973ad",
+      "session_id": "sharegpt_ADHo6Ob_0",
+      "turn_index": 8
+    },
+    {
+      "question_id": "gpt4_7fce9456",
+      "session_id": "sharegpt_348azga_0",
+      "turn_index": 3
+    },
+    {
+      "question_id": "gpt4_7fce9456",
+      "session_id": "sharegpt_348azga_0",
+      "turn_index": 4
+    },
+    {
+      "question_id": "gpt4_7fce9456",
+      "session_id": "sharegpt_348azga_0",
+      "turn_index": 7
+    },
+    {
+      "question_id": "gpt4_7fce9456",
+      "session_id": "sharegpt_348azga_0",
+      "turn_index": 8
+    },
+    {
+      "question_id": "gpt4_d6585ce9",
+      "session_id": "sharegpt_8whn8Qy_0",
+      "turn_index": 0
+    },
+    {
+      "question_id": "gpt4_4edbafa2",
+      "session_id": "sharegpt_XRsEKS0_0",
+      "turn_index": 16
+    },
+    {
+      "question_id": "gpt4_fe651585_abs",
+      "session_id": "sharegpt_8whn8Qy_0",
+      "turn_index": 0
+    },
+    {
+      "question_id": "affe2881",
+      "session_id": "sharegpt_8Epqr4a_1",
+      "turn_index": 2
+    },
+    {
+      "question_id": "affe2881",
+      "session_id": "sharegpt_8Epqr4a_1",
+      "turn_index": 4
+    },
+    {
+      "question_id": "affe2881",
+      "session_id": "sharegpt_8Epqr4a_1",
+      "turn_index": 6
+    },
+    {
+      "question_id": "41275add",
+      "session_id": "sharegpt_ADHo6Ob_0",
+      "turn_index": 8
+    }
+  ]
+}

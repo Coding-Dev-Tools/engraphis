@@ -1,0 +1,1796 @@
+{
+  "command": "python -m eval.evidence_contracts",
+  "coverage_binding_safety_comparison": {
+    "after": {
+      "cases": 5,
+      "correct": 5,
+      "outcomes": [
+        {
+          "actual_bound": false,
+          "budget": 6,
+          "case": "tight_suffix",
+          "correct": true,
+          "excerpt": "",
+          "omitted_bound_group": true,
+          "query": "deployment",
+          "tokens": 0
+        },
+        {
+          "actual_bound": false,
+          "budget": 6,
+          "case": "tight_prefix",
+          "correct": true,
+          "excerpt": "",
+          "omitted_bound_group": true,
+          "query": "deployment",
+          "tokens": 0
+        },
+        {
+          "actual_bound": false,
+          "budget": 9,
+          "case": "tight_both_sides",
+          "correct": true,
+          "excerpt": "",
+          "omitted_bound_group": true,
+          "query": "deployment",
+          "tokens": 0
+        },
+        {
+          "actual_bound": false,
+          "budget": 6,
+          "case": "tight_multiline",
+          "correct": true,
+          "excerpt": "approved",
+          "omitted_bound_group": true,
+          "query": "deployment",
+          "tokens": 4
+        },
+        {
+          "actual_bound": false,
+          "budget": 14,
+          "case": "second_pass_bound",
+          "correct": true,
+          "excerpt": "",
+          "omitted_bound_group": true,
+          "query": "deployment",
+          "tokens": 9
+        }
+      ]
+    },
+    "baseline_commit": "65f4becdb93ef333afd5ac5bc2b7689f9e79e2a0",
+    "baseline_context_sha256": "0ea7f01b5bb0831adccec97166a7260400d09d17cd9b565e4e0f7192530e0fa9",
+    "before": {
+      "cases": 5,
+      "correct": 0,
+      "outcomes": [
+        {
+          "actual_bound": true,
+          "budget": 6,
+          "case": "tight_suffix",
+          "correct": false,
+          "excerpt": "VALUE only if",
+          "omitted_bound_group": false,
+          "query": "deployment",
+          "tokens": 6
+        },
+        {
+          "actual_bound": true,
+          "budget": 6,
+          "case": "tight_prefix",
+          "correct": false,
+          "excerpt": "if approved VALUE",
+          "omitted_bound_group": false,
+          "query": "deployment",
+          "tokens": 6
+        },
+        {
+          "actual_bound": true,
+          "budget": 9,
+          "case": "tight_both_sides",
+          "correct": false,
+          "excerpt": "only if approved VALUE only if",
+          "omitted_bound_group": false,
+          "query": "deployment",
+          "tokens": 9
+        },
+        {
+          "actual_bound": true,
+          "budget": 6,
+          "case": "tight_multiline",
+          "correct": false,
+          "excerpt": "VALUE only if",
+          "omitted_bound_group": false,
+          "query": "deployment",
+          "tokens": 6
+        },
+        {
+          "actual_bound": true,
+          "budget": 14,
+          "case": "second_pass_bound",
+          "correct": false,
+          "excerpt": "VALUE",
+          "omitted_bound_group": false,
+          "query": "deployment",
+          "tokens": 14
+        }
+      ]
+    },
+    "boundary": "Fixed development fixtures; identical inputs, budgets, and deterministic token counter in each comparison. Separate case populations; not external benchmark performance.",
+    "current_context_sha256": "b0a0492d605015adee59c97c378f1cc9b45a88e26706dbb3dd39e7513254bd88",
+    "diagnostic_sha256": "f0aac00f9d8381f8b98ffa5483a1768f97bcd8cfd9f9cd62c41500ee9bb44656"
+  },
+  "coverage_complete_unit_comparison": {
+    "after": {
+      "cases": 16,
+      "correct": 16,
+      "outcomes": [
+        {
+          "actual_bound": false,
+          "budget": 14,
+          "case": "suffix_repeated_query_tight",
+          "complete_excerpt": true,
+          "correct": true,
+          "excerpt": "",
+          "expected_bound": false,
+          "literal_present": false,
+          "query": "deployment",
+          "tokens": 0
+        },
+        {
+          "actual_bound": false,
+          "budget": 14,
+          "case": "prefix_repeated_query_tight",
+          "complete_excerpt": true,
+          "correct": true,
+          "excerpt": "",
+          "expected_bound": false,
+          "literal_present": false,
+          "query": "deployment",
+          "tokens": 0
+        },
+        {
+          "actual_bound": false,
+          "budget": 16,
+          "case": "suffix_competing_queries_tight",
+          "complete_excerpt": true,
+          "correct": true,
+          "excerpt": "",
+          "expected_bound": false,
+          "literal_present": false,
+          "query": "deployment",
+          "tokens": 0
+        },
+        {
+          "actual_bound": false,
+          "budget": 14,
+          "case": "prefix_long_condition_tight",
+          "complete_excerpt": true,
+          "correct": true,
+          "excerpt": "",
+          "expected_bound": false,
+          "literal_present": false,
+          "query": "deployment",
+          "tokens": 0
+        },
+        {
+          "actual_bound": false,
+          "budget": 12,
+          "case": "tight_suffix_tight",
+          "complete_excerpt": true,
+          "correct": true,
+          "excerpt": "",
+          "expected_bound": false,
+          "literal_present": false,
+          "query": "deployment",
+          "tokens": 0
+        },
+        {
+          "actual_bound": true,
+          "budget": 16,
+          "case": "suffix_repeated_query_roomy",
+          "complete_excerpt": true,
+          "correct": true,
+          "excerpt": "deployment deployment deployment deployment deployment deployment deployment deployment VALUE filler only if approved",
+          "expected_bound": true,
+          "literal_present": true,
+          "query": "deployment",
+          "tokens": 16
+        },
+        {
+          "actual_bound": true,
+          "budget": 15,
+          "case": "prefix_repeated_query_roomy",
+          "complete_excerpt": true,
+          "correct": true,
+          "excerpt": "only if approved VALUE deployment deployment deployment deployment deployment deployment deployment deployment",
+          "expected_bound": true,
+          "literal_present": true,
+          "query": "deployment",
+          "tokens": 15
+        },
+        {
+          "actual_bound": true,
+          "budget": 17,
+          "case": "suffix_competing_queries_roomy",
+          "complete_excerpt": true,
+          "correct": true,
+          "excerpt": "deployment deployment deployment deployment deployment VALUE neutral gap only if approved and never share",
+          "expected_bound": true,
+          "literal_present": true,
+          "query": "deployment",
+          "tokens": 17
+        },
+        {
+          "actual_bound": true,
+          "budget": 17,
+          "case": "prefix_long_condition_roomy",
+          "complete_excerpt": true,
+          "correct": true,
+          "excerpt": "must use only if approved VALUE deployment deployment deployment deployment deployment deployment deployment deployment",
+          "expected_bound": true,
+          "literal_present": true,
+          "query": "deployment",
+          "tokens": 17
+        },
+        {
+          "actual_bound": true,
+          "budget": 13,
+          "case": "tight_suffix_roomy",
+          "complete_excerpt": true,
+          "correct": true,
+          "excerpt": "deployment deployment deployment deployment deployment deployment VALUE only if approved",
+          "expected_bound": true,
+          "literal_present": true,
+          "query": "deployment",
+          "tokens": 13
+        },
+        {
+          "actual_bound": false,
+          "budget": 6,
+          "case": "same_unit_prefix_tight",
+          "complete_excerpt": true,
+          "correct": true,
+          "excerpt": "",
+          "expected_bound": false,
+          "literal_present": false,
+          "query": "ALPHA",
+          "tokens": 0
+        },
+        {
+          "actual_bound": true,
+          "budget": 8,
+          "case": "same_unit_prefix_roomy",
+          "complete_excerpt": true,
+          "correct": true,
+          "excerpt": "Only use ALPHA in production",
+          "expected_bound": true,
+          "literal_present": true,
+          "query": "ALPHA",
+          "tokens": 8
+        },
+        {
+          "actual_bound": false,
+          "budget": 7,
+          "case": "same_unit_suffix_tight",
+          "complete_excerpt": true,
+          "correct": true,
+          "excerpt": "",
+          "expected_bound": false,
+          "literal_present": false,
+          "query": "ALPHA",
+          "tokens": 0
+        },
+        {
+          "actual_bound": true,
+          "budget": 8,
+          "case": "same_unit_suffix_roomy",
+          "complete_excerpt": true,
+          "correct": true,
+          "excerpt": "Use ALPHA only in production",
+          "expected_bound": true,
+          "literal_present": true,
+          "query": "ALPHA",
+          "tokens": 8
+        },
+        {
+          "actual_bound": false,
+          "budget": 11,
+          "case": "bound_unit_suffix_tight",
+          "complete_excerpt": true,
+          "correct": true,
+          "excerpt": "Only use this credential.",
+          "expected_bound": false,
+          "literal_present": false,
+          "query": "ALPHA",
+          "tokens": 8
+        },
+        {
+          "actual_bound": true,
+          "budget": 14,
+          "case": "bound_unit_suffix_roomy",
+          "complete_excerpt": true,
+          "correct": true,
+          "excerpt": "Only use this credential. Credential is ALPHA in production.",
+          "expected_bound": true,
+          "literal_present": true,
+          "query": "ALPHA",
+          "tokens": 14
+        }
+      ]
+    },
+    "baseline_commit": "98e8f5c241db3d3de2618d91320d63a863622200",
+    "baseline_context_sha256": "eedd0076b66b74c9fb68bf0a5576c48462366ecfbaef2b906f60e5b3162a6373",
+    "before": {
+      "cases": 16,
+      "correct": 8,
+      "outcomes": [
+        {
+          "actual_bound": true,
+          "budget": 14,
+          "case": "suffix_repeated_query_tight",
+          "complete_excerpt": true,
+          "correct": false,
+          "excerpt": "deployment deployment deployment deployment deployment deployment VALUE filler only if approved",
+          "expected_bound": false,
+          "literal_present": true,
+          "query": "deployment",
+          "tokens": 14
+        },
+        {
+          "actual_bound": true,
+          "budget": 14,
+          "case": "prefix_repeated_query_tight",
+          "complete_excerpt": true,
+          "correct": false,
+          "excerpt": "only if approved VALUE deployment deployment deployment deployment deployment deployment deployment",
+          "expected_bound": false,
+          "literal_present": true,
+          "query": "deployment",
+          "tokens": 14
+        },
+        {
+          "actual_bound": true,
+          "budget": 16,
+          "case": "suffix_competing_queries_tight",
+          "complete_excerpt": true,
+          "correct": false,
+          "excerpt": "deployment deployment deployment deployment VALUE neutral gap only if approved and never share",
+          "expected_bound": false,
+          "literal_present": true,
+          "query": "deployment",
+          "tokens": 16
+        },
+        {
+          "actual_bound": true,
+          "budget": 14,
+          "case": "prefix_long_condition_tight",
+          "complete_excerpt": true,
+          "correct": false,
+          "excerpt": "must use only if approved VALUE deployment deployment deployment deployment deployment",
+          "expected_bound": false,
+          "literal_present": true,
+          "query": "deployment",
+          "tokens": 14
+        },
+        {
+          "actual_bound": true,
+          "budget": 12,
+          "case": "tight_suffix_tight",
+          "complete_excerpt": true,
+          "correct": false,
+          "excerpt": "deployment deployment deployment deployment deployment VALUE only if approved",
+          "expected_bound": false,
+          "literal_present": true,
+          "query": "deployment",
+          "tokens": 12
+        },
+        {
+          "actual_bound": true,
+          "budget": 16,
+          "case": "suffix_repeated_query_roomy",
+          "complete_excerpt": true,
+          "correct": true,
+          "excerpt": "deployment deployment deployment deployment deployment deployment deployment deployment VALUE filler only if approved",
+          "expected_bound": true,
+          "literal_present": true,
+          "query": "deployment",
+          "tokens": 16
+        },
+        {
+          "actual_bound": true,
+          "budget": 15,
+          "case": "prefix_repeated_query_roomy",
+          "complete_excerpt": true,
+          "correct": true,
+          "excerpt": "only if approved VALUE deployment deployment deployment deployment deployment deployment deployment deployment",
+          "expected_bound": true,
+          "literal_present": true,
+          "query": "deployment",
+          "tokens": 15
+        },
+        {
+          "actual_bound": true,
+          "budget": 17,
+          "case": "suffix_competing_queries_roomy",
+          "complete_excerpt": true,
+          "correct": true,
+          "excerpt": "deployment deployment deployment deployment deployment VALUE neutral gap only if approved and never share",
+          "expected_bound": true,
+          "literal_present": true,
+          "query": "deployment",
+          "tokens": 17
+        },
+        {
+          "actual_bound": true,
+          "budget": 17,
+          "case": "prefix_long_condition_roomy",
+          "complete_excerpt": true,
+          "correct": true,
+          "excerpt": "must use only if approved VALUE deployment deployment deployment deployment deployment deployment deployment deployment",
+          "expected_bound": true,
+          "literal_present": true,
+          "query": "deployment",
+          "tokens": 17
+        },
+        {
+          "actual_bound": true,
+          "budget": 13,
+          "case": "tight_suffix_roomy",
+          "complete_excerpt": true,
+          "correct": true,
+          "excerpt": "deployment deployment deployment deployment deployment deployment VALUE only if approved",
+          "expected_bound": true,
+          "literal_present": true,
+          "query": "deployment",
+          "tokens": 13
+        },
+        {
+          "actual_bound": true,
+          "budget": 6,
+          "case": "same_unit_prefix_tight",
+          "complete_excerpt": true,
+          "correct": false,
+          "excerpt": "Only use ALPHA",
+          "expected_bound": false,
+          "literal_present": true,
+          "query": "ALPHA",
+          "tokens": 6
+        },
+        {
+          "actual_bound": true,
+          "budget": 8,
+          "case": "same_unit_prefix_roomy",
+          "complete_excerpt": true,
+          "correct": true,
+          "excerpt": "Only use ALPHA in production",
+          "expected_bound": true,
+          "literal_present": true,
+          "query": "ALPHA",
+          "tokens": 8
+        },
+        {
+          "actual_bound": true,
+          "budget": 7,
+          "case": "same_unit_suffix_tight",
+          "complete_excerpt": true,
+          "correct": false,
+          "excerpt": "ALPHA only in production",
+          "expected_bound": false,
+          "literal_present": true,
+          "query": "ALPHA",
+          "tokens": 7
+        },
+        {
+          "actual_bound": true,
+          "budget": 8,
+          "case": "same_unit_suffix_roomy",
+          "complete_excerpt": true,
+          "correct": true,
+          "excerpt": "Use ALPHA only in production",
+          "expected_bound": true,
+          "literal_present": true,
+          "query": "ALPHA",
+          "tokens": 8
+        },
+        {
+          "actual_bound": true,
+          "budget": 11,
+          "case": "bound_unit_suffix_tight",
+          "complete_excerpt": true,
+          "correct": false,
+          "excerpt": "Only use this credential. Credential is ALPHA",
+          "expected_bound": false,
+          "literal_present": true,
+          "query": "ALPHA",
+          "tokens": 11
+        },
+        {
+          "actual_bound": true,
+          "budget": 14,
+          "case": "bound_unit_suffix_roomy",
+          "complete_excerpt": true,
+          "correct": true,
+          "excerpt": "Only use this credential. Credential is ALPHA in production.",
+          "expected_bound": true,
+          "literal_present": true,
+          "query": "ALPHA",
+          "tokens": 14
+        }
+      ]
+    },
+    "boundary": "Fixed development fixtures; identical source bytes, query, budget, and deterministic token counter. Retention tradeoff reports the original expected bound-value outcomes unchanged; tighter complete-unit safety can withhold values. Separate safety populations include tight-budget withholding and roomy retention. Not semantic condition inference or external benchmark performance.",
+    "current_context_sha256": "b0a0492d605015adee59c97c378f1cc9b45a88e26706dbb3dd39e7513254bd88",
+    "diagnostic_sha256": "f0aac00f9d8381f8b98ffa5483a1768f97bcd8cfd9f9cd62c41500ee9bb44656"
+  },
+  "coverage_distant_restriction_comparison": {
+    "after": {
+      "cases": 8,
+      "correct": 8,
+      "outcomes": [
+        {
+          "actual_bound": false,
+          "budget": 8,
+          "case": "prefix_tight",
+          "correct": true,
+          "excerpt": "Neutral one.",
+          "expected_bound": false,
+          "literal_present": false,
+          "tokens": 6
+        },
+        {
+          "actual_bound": true,
+          "budget": 20,
+          "case": "prefix_roomy",
+          "correct": true,
+          "excerpt": "Only use this credential in production. Neutral one. Neutral two. Credential is ALPHA.",
+          "expected_bound": true,
+          "literal_present": true,
+          "tokens": 20
+        },
+        {
+          "actual_bound": false,
+          "budget": 8,
+          "case": "suffix_tight",
+          "correct": true,
+          "excerpt": "Neutral one.",
+          "expected_bound": false,
+          "literal_present": false,
+          "tokens": 6
+        },
+        {
+          "actual_bound": true,
+          "budget": 20,
+          "case": "suffix_roomy",
+          "correct": true,
+          "excerpt": "Credential is ALPHA. Neutral one. Neutral two. Never use this credential in staging.",
+          "expected_bound": true,
+          "literal_present": true,
+          "tokens": 20
+        },
+        {
+          "actual_bound": false,
+          "budget": 20,
+          "case": "both_tight",
+          "correct": true,
+          "excerpt": "Only use this credential in production. Neutral one.",
+          "expected_bound": false,
+          "literal_present": false,
+          "tokens": 13
+        },
+        {
+          "actual_bound": true,
+          "budget": 27,
+          "case": "both_roomy",
+          "correct": true,
+          "excerpt": "Only use this credential in production. Neutral one. Credential is ALPHA. Neutral two. Never use this credential in staging.",
+          "expected_bound": true,
+          "literal_present": true,
+          "tokens": 27
+        },
+        {
+          "actual_bound": false,
+          "budget": 8,
+          "case": "wrapped_prefix_tight",
+          "correct": true,
+          "excerpt": "Neutral one.",
+          "expected_bound": false,
+          "literal_present": false,
+          "tokens": 6
+        },
+        {
+          "actual_bound": true,
+          "budget": 20,
+          "case": "wrapped_prefix_roomy",
+          "correct": true,
+          "excerpt": "Only use this credential in production.\nNeutral one.\nNeutral two.\nCredential is ALPHA.",
+          "expected_bound": true,
+          "literal_present": true,
+          "tokens": 20
+        }
+      ]
+    },
+    "baseline_commit": "98e8f5c241db3d3de2618d91320d63a863622200",
+    "baseline_context_sha256": "eedd0076b66b74c9fb68bf0a5576c48462366ecfbaef2b906f60e5b3162a6373",
+    "before": {
+      "cases": 8,
+      "correct": 5,
+      "outcomes": [
+        {
+          "actual_bound": true,
+          "budget": 8,
+          "case": "prefix_tight",
+          "correct": false,
+          "excerpt": "Credential is ALPHA.",
+          "expected_bound": false,
+          "literal_present": true,
+          "tokens": 7
+        },
+        {
+          "actual_bound": true,
+          "budget": 20,
+          "case": "prefix_roomy",
+          "correct": true,
+          "excerpt": "Only use this credential in production. Neutral one. Neutral two. Credential is ALPHA.",
+          "expected_bound": true,
+          "literal_present": true,
+          "tokens": 20
+        },
+        {
+          "actual_bound": true,
+          "budget": 8,
+          "case": "suffix_tight",
+          "correct": false,
+          "excerpt": "Credential is ALPHA.",
+          "expected_bound": false,
+          "literal_present": true,
+          "tokens": 7
+        },
+        {
+          "actual_bound": true,
+          "budget": 20,
+          "case": "suffix_roomy",
+          "correct": true,
+          "excerpt": "Credential is ALPHA. Neutral one. Neutral two. Never use this credential in staging.",
+          "expected_bound": true,
+          "literal_present": true,
+          "tokens": 20
+        },
+        {
+          "actual_bound": false,
+          "budget": 20,
+          "case": "both_tight",
+          "correct": true,
+          "excerpt": "Only use this credential in production. Neutral one.",
+          "expected_bound": false,
+          "literal_present": false,
+          "tokens": 13
+        },
+        {
+          "actual_bound": true,
+          "budget": 27,
+          "case": "both_roomy",
+          "correct": true,
+          "excerpt": "Only use this credential in production. Neutral one. Credential is ALPHA. Neutral two. Never use this credential in staging.",
+          "expected_bound": true,
+          "literal_present": true,
+          "tokens": 27
+        },
+        {
+          "actual_bound": true,
+          "budget": 8,
+          "case": "wrapped_prefix_tight",
+          "correct": false,
+          "excerpt": "Credential is ALPHA.",
+          "expected_bound": false,
+          "literal_present": true,
+          "tokens": 7
+        },
+        {
+          "actual_bound": true,
+          "budget": 20,
+          "case": "wrapped_prefix_roomy",
+          "correct": true,
+          "excerpt": "Only use this credential in production.\nNeutral one.\nNeutral two.\nCredential is ALPHA.",
+          "expected_bound": true,
+          "literal_present": true,
+          "tokens": 20
+        }
+      ]
+    },
+    "boundary": "Fixed development fixtures; identical source bytes, query, budget, and deterministic token counter. Retention tradeoff reports the original expected bound-value outcomes unchanged; tighter complete-unit safety can withhold values. Separate safety populations include tight-budget withholding and roomy retention. Not semantic condition inference or external benchmark performance.",
+    "current_context_sha256": "b0a0492d605015adee59c97c378f1cc9b45a88e26706dbb3dd39e7513254bd88",
+    "diagnostic_sha256": "f0aac00f9d8381f8b98ffa5483a1768f97bcd8cfd9f9cd62c41500ee9bb44656"
+  },
+  "coverage_query_comparison": {
+    "after": {
+      "cases": 8,
+      "correct": 8,
+      "outcomes": [
+        {
+          "actual_bound": false,
+          "budget": 11,
+          "case": "unbound_phone",
+          "correct": true,
+          "excerpt": "Support phone is 555-1234.",
+          "expected_bound": false,
+          "expected_excerpt": "Support phone is 555-1234.",
+          "query": "support phone",
+          "tokens": 10
+        },
+        {
+          "actual_bound": true,
+          "budget": 9,
+          "case": "bound_token",
+          "correct": true,
+          "excerpt": "Deployment token is ALPHA.",
+          "expected_bound": true,
+          "expected_excerpt": "Deployment token is ALPHA.",
+          "query": "deployment token",
+          "tokens": 8
+        },
+        {
+          "actual_bound": true,
+          "budget": 24,
+          "case": "both_sentences",
+          "correct": true,
+          "excerpt": "Deployment token is ALPHA. Support phone is 555-1234.",
+          "expected_bound": true,
+          "expected_excerpt": "Deployment token is ALPHA. Support phone is 555-1234.",
+          "query": "support phone",
+          "tokens": 15
+        },
+        {
+          "actual_bound": false,
+          "budget": 8,
+          "case": "unbound_duplicate",
+          "correct": true,
+          "excerpt": "Second ALPHA.",
+          "expected_bound": false,
+          "expected_excerpt": "Second ALPHA.",
+          "query": "second",
+          "tokens": 6
+        },
+        {
+          "actual_bound": true,
+          "budget": 8,
+          "case": "bound_duplicate",
+          "correct": true,
+          "excerpt": "Second ALPHA.",
+          "expected_bound": true,
+          "expected_excerpt": "Second ALPHA.",
+          "query": "second",
+          "tokens": 6
+        },
+        {
+          "actual_bound": false,
+          "budget": 11,
+          "case": "unbound_multiline",
+          "correct": true,
+          "excerpt": "Support phone is 555-1234.",
+          "expected_bound": false,
+          "expected_excerpt": "Support phone is 555-1234.",
+          "query": "support phone",
+          "tokens": 10
+        },
+        {
+          "actual_bound": true,
+          "budget": 14,
+          "case": "bound_multiline",
+          "correct": true,
+          "excerpt": "Payload:\n{\n  \"mode\": \"canary\"\n}",
+          "expected_bound": true,
+          "expected_excerpt": "{\n  \"mode\": \"canary\"\n}",
+          "query": "mode canary",
+          "tokens": 14
+        },
+        {
+          "actual_bound": false,
+          "budget": 18,
+          "case": "expansion_rebind",
+          "correct": true,
+          "excerpt": "Support phone is 555-1234 with ALPHA today.",
+          "expected_bound": false,
+          "expected_excerpt": "Support phone is 555-1234 with ALPHA today.",
+          "query": "support phone",
+          "tokens": 18
+        }
+      ]
+    },
+    "baseline_commit": "0244c45f00be334f2068d07e1f7f7442221006ed",
+    "baseline_context_sha256": "b2a1a828bce8756a2004611365479700b8b6a024928664c93bda365ab83cbf39",
+    "before": {
+      "cases": 8,
+      "correct": 4,
+      "outcomes": [
+        {
+          "actual_bound": true,
+          "budget": 11,
+          "case": "unbound_phone",
+          "correct": false,
+          "excerpt": "Deployment token is ALPHA.",
+          "expected_bound": false,
+          "expected_excerpt": "Support phone is 555-1234.",
+          "query": "support phone",
+          "tokens": 8
+        },
+        {
+          "actual_bound": true,
+          "budget": 9,
+          "case": "bound_token",
+          "correct": true,
+          "excerpt": "Deployment token is ALPHA.",
+          "expected_bound": true,
+          "expected_excerpt": "Deployment token is ALPHA.",
+          "query": "deployment token",
+          "tokens": 8
+        },
+        {
+          "actual_bound": true,
+          "budget": 24,
+          "case": "both_sentences",
+          "correct": true,
+          "excerpt": "Deployment token is ALPHA. Support phone is 555-1234.",
+          "expected_bound": true,
+          "expected_excerpt": "Deployment token is ALPHA. Support phone is 555-1234.",
+          "query": "support phone",
+          "tokens": 15
+        },
+        {
+          "actual_bound": true,
+          "budget": 8,
+          "case": "unbound_duplicate",
+          "correct": false,
+          "excerpt": "First ALPHA.",
+          "expected_bound": false,
+          "expected_excerpt": "Second ALPHA.",
+          "query": "second",
+          "tokens": 6
+        },
+        {
+          "actual_bound": true,
+          "budget": 8,
+          "case": "bound_duplicate",
+          "correct": true,
+          "excerpt": "Second ALPHA.",
+          "expected_bound": true,
+          "expected_excerpt": "Second ALPHA.",
+          "query": "second",
+          "tokens": 6
+        },
+        {
+          "actual_bound": false,
+          "budget": 11,
+          "case": "unbound_multiline",
+          "correct": false,
+          "excerpt": "",
+          "expected_bound": false,
+          "expected_excerpt": "Support phone is 555-1234.",
+          "query": "support phone",
+          "tokens": 0
+        },
+        {
+          "actual_bound": true,
+          "budget": 14,
+          "case": "bound_multiline",
+          "correct": true,
+          "excerpt": ":\n{\n  \"mode\": \"canary\"\n}\nSupport",
+          "expected_bound": true,
+          "expected_excerpt": "{\n  \"mode\": \"canary\"\n}",
+          "query": "mode canary",
+          "tokens": 14
+        },
+        {
+          "actual_bound": true,
+          "budget": 18,
+          "case": "expansion_rebind",
+          "correct": false,
+          "excerpt": "ALPHA.",
+          "expected_bound": false,
+          "expected_excerpt": "Support phone is 555-1234 with ALPHA today.",
+          "query": "support phone",
+          "tokens": 10
+        }
+      ]
+    },
+    "boundary": "Fixed development fixtures; identical inputs, budgets, and deterministic token counter in each comparison. Separate case populations; not external benchmark performance.",
+    "current_context_sha256": "b0a0492d605015adee59c97c378f1cc9b45a88e26706dbb3dd39e7513254bd88",
+    "diagnostic_sha256": "f0aac00f9d8381f8b98ffa5483a1768f97bcd8cfd9f9cd62c41500ee9bb44656"
+  },
+  "coverage_restriction_comparison": {
+    "after": {
+      "cases": 5,
+      "correct": 0,
+      "outcomes": [
+        {
+          "actual_bound": false,
+          "budget": 14,
+          "case": "suffix_repeated_query",
+          "correct": false,
+          "excerpt": "",
+          "expected_bound": true,
+          "expected_excerpt": "VALUE filler only if approved",
+          "query": "deployment",
+          "tokens": 0
+        },
+        {
+          "actual_bound": false,
+          "budget": 14,
+          "case": "prefix_repeated_query",
+          "correct": false,
+          "excerpt": "",
+          "expected_bound": true,
+          "expected_excerpt": "only if approved VALUE",
+          "query": "deployment",
+          "tokens": 0
+        },
+        {
+          "actual_bound": false,
+          "budget": 16,
+          "case": "suffix_competing_queries",
+          "correct": false,
+          "excerpt": "",
+          "expected_bound": true,
+          "expected_excerpt": "VALUE neutral gap only if approved and never share",
+          "query": "deployment",
+          "tokens": 0
+        },
+        {
+          "actual_bound": false,
+          "budget": 14,
+          "case": "prefix_long_condition",
+          "correct": false,
+          "excerpt": "",
+          "expected_bound": true,
+          "expected_excerpt": "must use only if approved VALUE",
+          "query": "deployment",
+          "tokens": 0
+        },
+        {
+          "actual_bound": false,
+          "budget": 12,
+          "case": "tight_suffix",
+          "correct": false,
+          "excerpt": "",
+          "expected_bound": true,
+          "expected_excerpt": "VALUE only if approved",
+          "query": "deployment",
+          "tokens": 0
+        }
+      ]
+    },
+    "baseline_commit": "65f4becdb93ef333afd5ac5bc2b7689f9e79e2a0",
+    "baseline_context_sha256": "0ea7f01b5bb0831adccec97166a7260400d09d17cd9b565e4e0f7192530e0fa9",
+    "before": {
+      "cases": 5,
+      "correct": 0,
+      "outcomes": [
+        {
+          "actual_bound": true,
+          "budget": 14,
+          "case": "suffix_repeated_query",
+          "correct": false,
+          "excerpt": "deployment deployment deployment deployment deployment deployment deployment deployment VALUE filler only",
+          "expected_bound": true,
+          "expected_excerpt": "VALUE filler only if approved",
+          "query": "deployment",
+          "tokens": 14
+        },
+        {
+          "actual_bound": true,
+          "budget": 14,
+          "case": "prefix_repeated_query",
+          "correct": false,
+          "excerpt": "if approved VALUE deployment deployment deployment deployment deployment deployment deployment deployment",
+          "expected_bound": true,
+          "expected_excerpt": "only if approved VALUE",
+          "query": "deployment",
+          "tokens": 14
+        },
+        {
+          "actual_bound": true,
+          "budget": 16,
+          "case": "suffix_competing_queries",
+          "correct": false,
+          "excerpt": "deployment deployment deployment deployment deployment VALUE neutral gap only if approved and never",
+          "expected_bound": true,
+          "expected_excerpt": "VALUE neutral gap only if approved and never share",
+          "query": "deployment",
+          "tokens": 16
+        },
+        {
+          "actual_bound": true,
+          "budget": 14,
+          "case": "prefix_long_condition",
+          "correct": false,
+          "excerpt": "if approved VALUE deployment deployment deployment deployment deployment deployment deployment deployment",
+          "expected_bound": true,
+          "expected_excerpt": "must use only if approved VALUE",
+          "query": "deployment",
+          "tokens": 14
+        },
+        {
+          "actual_bound": true,
+          "budget": 12,
+          "case": "tight_suffix",
+          "correct": false,
+          "excerpt": "deployment deployment deployment deployment deployment deployment VALUE only if",
+          "expected_bound": true,
+          "expected_excerpt": "VALUE only if approved",
+          "query": "deployment",
+          "tokens": 12
+        }
+      ]
+    },
+    "boundary": "Fixed development fixtures; identical inputs, budgets, and deterministic token counter in each comparison. Separate case populations; not external benchmark performance.",
+    "current_context_sha256": "b0a0492d605015adee59c97c378f1cc9b45a88e26706dbb3dd39e7513254bd88",
+    "diagnostic_sha256": "f0aac00f9d8381f8b98ffa5483a1768f97bcd8cfd9f9cd62c41500ee9bb44656"
+  },
+  "coverage_restriction_retention_tradeoff": {
+    "after": {
+      "cases": 5,
+      "correct": 0,
+      "outcomes": [
+        {
+          "actual_bound": false,
+          "budget": 14,
+          "case": "suffix_repeated_query",
+          "correct": false,
+          "excerpt": "",
+          "expected_bound": true,
+          "expected_excerpt": "VALUE filler only if approved",
+          "query": "deployment",
+          "tokens": 0
+        },
+        {
+          "actual_bound": false,
+          "budget": 14,
+          "case": "prefix_repeated_query",
+          "correct": false,
+          "excerpt": "",
+          "expected_bound": true,
+          "expected_excerpt": "only if approved VALUE",
+          "query": "deployment",
+          "tokens": 0
+        },
+        {
+          "actual_bound": false,
+          "budget": 16,
+          "case": "suffix_competing_queries",
+          "correct": false,
+          "excerpt": "",
+          "expected_bound": true,
+          "expected_excerpt": "VALUE neutral gap only if approved and never share",
+          "query": "deployment",
+          "tokens": 0
+        },
+        {
+          "actual_bound": false,
+          "budget": 14,
+          "case": "prefix_long_condition",
+          "correct": false,
+          "excerpt": "",
+          "expected_bound": true,
+          "expected_excerpt": "must use only if approved VALUE",
+          "query": "deployment",
+          "tokens": 0
+        },
+        {
+          "actual_bound": false,
+          "budget": 12,
+          "case": "tight_suffix",
+          "correct": false,
+          "excerpt": "",
+          "expected_bound": true,
+          "expected_excerpt": "VALUE only if approved",
+          "query": "deployment",
+          "tokens": 0
+        }
+      ]
+    },
+    "baseline_commit": "98e8f5c241db3d3de2618d91320d63a863622200",
+    "baseline_context_sha256": "eedd0076b66b74c9fb68bf0a5576c48462366ecfbaef2b906f60e5b3162a6373",
+    "before": {
+      "cases": 5,
+      "correct": 5,
+      "outcomes": [
+        {
+          "actual_bound": true,
+          "budget": 14,
+          "case": "suffix_repeated_query",
+          "correct": true,
+          "excerpt": "deployment deployment deployment deployment deployment deployment VALUE filler only if approved",
+          "expected_bound": true,
+          "expected_excerpt": "VALUE filler only if approved",
+          "query": "deployment",
+          "tokens": 14
+        },
+        {
+          "actual_bound": true,
+          "budget": 14,
+          "case": "prefix_repeated_query",
+          "correct": true,
+          "excerpt": "only if approved VALUE deployment deployment deployment deployment deployment deployment deployment",
+          "expected_bound": true,
+          "expected_excerpt": "only if approved VALUE",
+          "query": "deployment",
+          "tokens": 14
+        },
+        {
+          "actual_bound": true,
+          "budget": 16,
+          "case": "suffix_competing_queries",
+          "correct": true,
+          "excerpt": "deployment deployment deployment deployment VALUE neutral gap only if approved and never share",
+          "expected_bound": true,
+          "expected_excerpt": "VALUE neutral gap only if approved and never share",
+          "query": "deployment",
+          "tokens": 16
+        },
+        {
+          "actual_bound": true,
+          "budget": 14,
+          "case": "prefix_long_condition",
+          "correct": true,
+          "excerpt": "must use only if approved VALUE deployment deployment deployment deployment deployment",
+          "expected_bound": true,
+          "expected_excerpt": "must use only if approved VALUE",
+          "query": "deployment",
+          "tokens": 14
+        },
+        {
+          "actual_bound": true,
+          "budget": 12,
+          "case": "tight_suffix",
+          "correct": true,
+          "excerpt": "deployment deployment deployment deployment deployment VALUE only if approved",
+          "expected_bound": true,
+          "expected_excerpt": "VALUE only if approved",
+          "query": "deployment",
+          "tokens": 12
+        }
+      ]
+    },
+    "boundary": "Fixed development fixtures; identical source bytes, query, budget, and deterministic token counter. Retention tradeoff reports the original expected bound-value outcomes unchanged; tighter complete-unit safety can withhold values. Separate safety populations include tight-budget withholding and roomy retention. Not semantic condition inference or external benchmark performance.",
+    "current_context_sha256": "b0a0492d605015adee59c97c378f1cc9b45a88e26706dbb3dd39e7513254bd88",
+    "diagnostic_sha256": "f0aac00f9d8381f8b98ffa5483a1768f97bcd8cfd9f9cd62c41500ee9bb44656"
+  },
+  "result": {
+    "action_validation": {
+      "cases": 14,
+      "correct": 14,
+      "false_acceptances": 0,
+      "false_rejections": 0,
+      "outcomes": [
+        {
+          "actual": true,
+          "case": "mapping_accept",
+          "expected": true
+        },
+        {
+          "actual": true,
+          "case": "json_accept",
+          "expected": true
+        },
+        {
+          "actual": true,
+          "case": "escaped_unicode_accept",
+          "expected": true
+        },
+        {
+          "actual": false,
+          "case": "mapping_wrong_field",
+          "expected": false
+        },
+        {
+          "actual": false,
+          "case": "json_wrong_field",
+          "expected": false
+        },
+        {
+          "actual": false,
+          "case": "mapping_wrong_source",
+          "expected": false
+        },
+        {
+          "actual": false,
+          "case": "json_wrong_source",
+          "expected": false
+        },
+        {
+          "actual": false,
+          "case": "mapping_changed_literal",
+          "expected": false
+        },
+        {
+          "actual": false,
+          "case": "json_changed_literal",
+          "expected": false
+        },
+        {
+          "actual": false,
+          "case": "unstructured_output",
+          "expected": false
+        },
+        {
+          "actual": false,
+          "case": "string_false",
+          "expected": false
+        },
+        {
+          "actual": false,
+          "case": "integer_one",
+          "expected": false
+        },
+        {
+          "actual": false,
+          "case": "boolean_false",
+          "expected": false
+        },
+        {
+          "actual": false,
+          "case": "inconsistent_source_span",
+          "expected": false
+        }
+      ]
+    },
+    "boundary": "Development fixtures; not external QA, generated-answer quality, or provider savings.",
+    "coverage_binding_safety": {
+      "cases": 5,
+      "correct": 5,
+      "outcomes": [
+        {
+          "actual_bound": false,
+          "budget": 6,
+          "case": "tight_suffix",
+          "correct": true,
+          "excerpt": "",
+          "omitted_bound_group": true,
+          "query": "deployment",
+          "tokens": 0
+        },
+        {
+          "actual_bound": false,
+          "budget": 6,
+          "case": "tight_prefix",
+          "correct": true,
+          "excerpt": "",
+          "omitted_bound_group": true,
+          "query": "deployment",
+          "tokens": 0
+        },
+        {
+          "actual_bound": false,
+          "budget": 9,
+          "case": "tight_both_sides",
+          "correct": true,
+          "excerpt": "",
+          "omitted_bound_group": true,
+          "query": "deployment",
+          "tokens": 0
+        },
+        {
+          "actual_bound": false,
+          "budget": 6,
+          "case": "tight_multiline",
+          "correct": true,
+          "excerpt": "approved",
+          "omitted_bound_group": true,
+          "query": "deployment",
+          "tokens": 4
+        },
+        {
+          "actual_bound": false,
+          "budget": 14,
+          "case": "second_pass_bound",
+          "correct": true,
+          "excerpt": "",
+          "omitted_bound_group": true,
+          "query": "deployment",
+          "tokens": 9
+        }
+      ]
+    },
+    "coverage_complete_units": {
+      "cases": 16,
+      "correct": 16,
+      "outcomes": [
+        {
+          "actual_bound": false,
+          "budget": 14,
+          "case": "suffix_repeated_query_tight",
+          "complete_excerpt": true,
+          "correct": true,
+          "excerpt": "",
+          "expected_bound": false,
+          "literal_present": false,
+          "query": "deployment",
+          "tokens": 0
+        },
+        {
+          "actual_bound": false,
+          "budget": 14,
+          "case": "prefix_repeated_query_tight",
+          "complete_excerpt": true,
+          "correct": true,
+          "excerpt": "",
+          "expected_bound": false,
+          "literal_present": false,
+          "query": "deployment",
+          "tokens": 0
+        },
+        {
+          "actual_bound": false,
+          "budget": 16,
+          "case": "suffix_competing_queries_tight",
+          "complete_excerpt": true,
+          "correct": true,
+          "excerpt": "",
+          "expected_bound": false,
+          "literal_present": false,
+          "query": "deployment",
+          "tokens": 0
+        },
+        {
+          "actual_bound": false,
+          "budget": 14,
+          "case": "prefix_long_condition_tight",
+          "complete_excerpt": true,
+          "correct": true,
+          "excerpt": "",
+          "expected_bound": false,
+          "literal_present": false,
+          "query": "deployment",
+          "tokens": 0
+        },
+        {
+          "actual_bound": false,
+          "budget": 12,
+          "case": "tight_suffix_tight",
+          "complete_excerpt": true,
+          "correct": true,
+          "excerpt": "",
+          "expected_bound": false,
+          "literal_present": false,
+          "query": "deployment",
+          "tokens": 0
+        },
+        {
+          "actual_bound": true,
+          "budget": 16,
+          "case": "suffix_repeated_query_roomy",
+          "complete_excerpt": true,
+          "correct": true,
+          "excerpt": "deployment deployment deployment deployment deployment deployment deployment deployment VALUE filler only if approved",
+          "expected_bound": true,
+          "literal_present": true,
+          "query": "deployment",
+          "tokens": 16
+        },
+        {
+          "actual_bound": true,
+          "budget": 15,
+          "case": "prefix_repeated_query_roomy",
+          "complete_excerpt": true,
+          "correct": true,
+          "excerpt": "only if approved VALUE deployment deployment deployment deployment deployment deployment deployment deployment",
+          "expected_bound": true,
+          "literal_present": true,
+          "query": "deployment",
+          "tokens": 15
+        },
+        {
+          "actual_bound": true,
+          "budget": 17,
+          "case": "suffix_competing_queries_roomy",
+          "complete_excerpt": true,
+          "correct": true,
+          "excerpt": "deployment deployment deployment deployment deployment VALUE neutral gap only if approved and never share",
+          "expected_bound": true,
+          "literal_present": true,
+          "query": "deployment",
+          "tokens": 17
+        },
+        {
+          "actual_bound": true,
+          "budget": 17,
+          "case": "prefix_long_condition_roomy",
+          "complete_excerpt": true,
+          "correct": true,
+          "excerpt": "must use only if approved VALUE deployment deployment deployment deployment deployment deployment deployment deployment",
+          "expected_bound": true,
+          "literal_present": true,
+          "query": "deployment",
+          "tokens": 17
+        },
+        {
+          "actual_bound": true,
+          "budget": 13,
+          "case": "tight_suffix_roomy",
+          "complete_excerpt": true,
+          "correct": true,
+          "excerpt": "deployment deployment deployment deployment deployment deployment VALUE only if approved",
+          "expected_bound": true,
+          "literal_present": true,
+          "query": "deployment",
+          "tokens": 13
+        },
+        {
+          "actual_bound": false,
+          "budget": 6,
+          "case": "same_unit_prefix_tight",
+          "complete_excerpt": true,
+          "correct": true,
+          "excerpt": "",
+          "expected_bound": false,
+          "literal_present": false,
+          "query": "ALPHA",
+          "tokens": 0
+        },
+        {
+          "actual_bound": true,
+          "budget": 8,
+          "case": "same_unit_prefix_roomy",
+          "complete_excerpt": true,
+          "correct": true,
+          "excerpt": "Only use ALPHA in production",
+          "expected_bound": true,
+          "literal_present": true,
+          "query": "ALPHA",
+          "tokens": 8
+        },
+        {
+          "actual_bound": false,
+          "budget": 7,
+          "case": "same_unit_suffix_tight",
+          "complete_excerpt": true,
+          "correct": true,
+          "excerpt": "",
+          "expected_bound": false,
+          "literal_present": false,
+          "query": "ALPHA",
+          "tokens": 0
+        },
+        {
+          "actual_bound": true,
+          "budget": 8,
+          "case": "same_unit_suffix_roomy",
+          "complete_excerpt": true,
+          "correct": true,
+          "excerpt": "Use ALPHA only in production",
+          "expected_bound": true,
+          "literal_present": true,
+          "query": "ALPHA",
+          "tokens": 8
+        },
+        {
+          "actual_bound": false,
+          "budget": 11,
+          "case": "bound_unit_suffix_tight",
+          "complete_excerpt": true,
+          "correct": true,
+          "excerpt": "Only use this credential.",
+          "expected_bound": false,
+          "literal_present": false,
+          "query": "ALPHA",
+          "tokens": 8
+        },
+        {
+          "actual_bound": true,
+          "budget": 14,
+          "case": "bound_unit_suffix_roomy",
+          "complete_excerpt": true,
+          "correct": true,
+          "excerpt": "Only use this credential. Credential is ALPHA in production.",
+          "expected_bound": true,
+          "literal_present": true,
+          "query": "ALPHA",
+          "tokens": 14
+        }
+      ]
+    },
+    "coverage_distant_restrictions": {
+      "cases": 8,
+      "correct": 8,
+      "outcomes": [
+        {
+          "actual_bound": false,
+          "budget": 8,
+          "case": "prefix_tight",
+          "correct": true,
+          "excerpt": "Neutral one.",
+          "expected_bound": false,
+          "literal_present": false,
+          "tokens": 6
+        },
+        {
+          "actual_bound": true,
+          "budget": 20,
+          "case": "prefix_roomy",
+          "correct": true,
+          "excerpt": "Only use this credential in production. Neutral one. Neutral two. Credential is ALPHA.",
+          "expected_bound": true,
+          "literal_present": true,
+          "tokens": 20
+        },
+        {
+          "actual_bound": false,
+          "budget": 8,
+          "case": "suffix_tight",
+          "correct": true,
+          "excerpt": "Neutral one.",
+          "expected_bound": false,
+          "literal_present": false,
+          "tokens": 6
+        },
+        {
+          "actual_bound": true,
+          "budget": 20,
+          "case": "suffix_roomy",
+          "correct": true,
+          "excerpt": "Credential is ALPHA. Neutral one. Neutral two. Never use this credential in staging.",
+          "expected_bound": true,
+          "literal_present": true,
+          "tokens": 20
+        },
+        {
+          "actual_bound": false,
+          "budget": 20,
+          "case": "both_tight",
+          "correct": true,
+          "excerpt": "Only use this credential in production. Neutral one.",
+          "expected_bound": false,
+          "literal_present": false,
+          "tokens": 13
+        },
+        {
+          "actual_bound": true,
+          "budget": 27,
+          "case": "both_roomy",
+          "correct": true,
+          "excerpt": "Only use this credential in production. Neutral one. Credential is ALPHA. Neutral two. Never use this credential in staging.",
+          "expected_bound": true,
+          "literal_present": true,
+          "tokens": 27
+        },
+        {
+          "actual_bound": false,
+          "budget": 8,
+          "case": "wrapped_prefix_tight",
+          "correct": true,
+          "excerpt": "Neutral one.",
+          "expected_bound": false,
+          "literal_present": false,
+          "tokens": 6
+        },
+        {
+          "actual_bound": true,
+          "budget": 20,
+          "case": "wrapped_prefix_roomy",
+          "correct": true,
+          "excerpt": "Only use this credential in production.\nNeutral one.\nNeutral two.\nCredential is ALPHA.",
+          "expected_bound": true,
+          "literal_present": true,
+          "tokens": 20
+        }
+      ]
+    },
+    "coverage_queries": {
+      "cases": 8,
+      "correct": 8,
+      "outcomes": [
+        {
+          "actual_bound": false,
+          "budget": 11,
+          "case": "unbound_phone",
+          "correct": true,
+          "excerpt": "Support phone is 555-1234.",
+          "expected_bound": false,
+          "expected_excerpt": "Support phone is 555-1234.",
+          "query": "support phone",
+          "tokens": 10
+        },
+        {
+          "actual_bound": true,
+          "budget": 9,
+          "case": "bound_token",
+          "correct": true,
+          "excerpt": "Deployment token is ALPHA.",
+          "expected_bound": true,
+          "expected_excerpt": "Deployment token is ALPHA.",
+          "query": "deployment token",
+          "tokens": 8
+        },
+        {
+          "actual_bound": true,
+          "budget": 24,
+          "case": "both_sentences",
+          "correct": true,
+          "excerpt": "Deployment token is ALPHA. Support phone is 555-1234.",
+          "expected_bound": true,
+          "expected_excerpt": "Deployment token is ALPHA. Support phone is 555-1234.",
+          "query": "support phone",
+          "tokens": 15
+        },
+        {
+          "actual_bound": false,
+          "budget": 8,
+          "case": "unbound_duplicate",
+          "correct": true,
+          "excerpt": "Second ALPHA.",
+          "expected_bound": false,
+          "expected_excerpt": "Second ALPHA.",
+          "query": "second",
+          "tokens": 6
+        },
+        {
+          "actual_bound": true,
+          "budget": 8,
+          "case": "bound_duplicate",
+          "correct": true,
+          "excerpt": "Second ALPHA.",
+          "expected_bound": true,
+          "expected_excerpt": "Second ALPHA.",
+          "query": "second",
+          "tokens": 6
+        },
+        {
+          "actual_bound": false,
+          "budget": 11,
+          "case": "unbound_multiline",
+          "correct": true,
+          "excerpt": "Support phone is 555-1234.",
+          "expected_bound": false,
+          "expected_excerpt": "Support phone is 555-1234.",
+          "query": "support phone",
+          "tokens": 10
+        },
+        {
+          "actual_bound": true,
+          "budget": 14,
+          "case": "bound_multiline",
+          "correct": true,
+          "excerpt": "Payload:\n{\n  \"mode\": \"canary\"\n}",
+          "expected_bound": true,
+          "expected_excerpt": "{\n  \"mode\": \"canary\"\n}",
+          "query": "mode canary",
+          "tokens": 14
+        },
+        {
+          "actual_bound": false,
+          "budget": 18,
+          "case": "expansion_rebind",
+          "correct": true,
+          "excerpt": "Support phone is 555-1234 with ALPHA today.",
+          "expected_bound": false,
+          "expected_excerpt": "Support phone is 555-1234 with ALPHA today.",
+          "query": "support phone",
+          "tokens": 18
+        }
+      ]
+    },
+    "coverage_restrictions": {
+      "cases": 5,
+      "correct": 0,
+      "outcomes": [
+        {
+          "actual_bound": false,
+          "budget": 14,
+          "case": "suffix_repeated_query",
+          "correct": false,
+          "excerpt": "",
+          "expected_bound": true,
+          "expected_excerpt": "VALUE filler only if approved",
+          "query": "deployment",
+          "tokens": 0
+        },
+        {
+          "actual_bound": false,
+          "budget": 14,
+          "case": "prefix_repeated_query",
+          "correct": false,
+          "excerpt": "",
+          "expected_bound": true,
+          "expected_excerpt": "only if approved VALUE",
+          "query": "deployment",
+          "tokens": 0
+        },
+        {
+          "actual_bound": false,
+          "budget": 16,
+          "case": "suffix_competing_queries",
+          "correct": false,
+          "excerpt": "",
+          "expected_bound": true,
+          "expected_excerpt": "VALUE neutral gap only if approved and never share",
+          "query": "deployment",
+          "tokens": 0
+        },
+        {
+          "actual_bound": false,
+          "budget": 14,
+          "case": "prefix_long_condition",
+          "correct": false,
+          "excerpt": "",
+          "expected_bound": true,
+          "expected_excerpt": "must use only if approved VALUE",
+          "query": "deployment",
+          "tokens": 0
+        },
+        {
+          "actual_bound": false,
+          "budget": 12,
+          "case": "tight_suffix",
+          "correct": false,
+          "excerpt": "",
+          "expected_bound": true,
+          "expected_excerpt": "VALUE only if approved",
+          "query": "deployment",
+          "tokens": 0
+        }
+      ]
+    },
+    "oversized_exact": {
+      "budget": 24,
+      "budget_honored": true,
+      "literal_preserved": false,
+      "nearby_qualifiers_preserved": false,
+      "omission_reasons": {
+        "budget": 0,
+        "duplicate": 0,
+        "missing_record": 0,
+        "score_tail": 0,
+        "unit_too_large": 1
+      },
+      "sources": 0,
+      "tokens": 0,
+      "withheld_boundary": true
+    },
+    "packing": {
+      "coverage": {
+        "budget": 35,
+        "budget_honored": true,
+        "sources": 3,
+        "tokens": 33
+      },
+      "legacy": {
+        "budget": 35,
+        "budget_honored": true,
+        "sources": 1,
+        "tokens": 35
+      }
+    },
+    "schema": "engraphis-evidence-contract-diagnostic/v1",
+    "source_validation": {
+      "cases": 4,
+      "correct": 4,
+      "outcomes": [
+        {
+          "actual": false,
+          "case": "forged_source_span",
+          "expected": false
+        },
+        {
+          "actual": false,
+          "case": "changed_source_revision",
+          "expected": false
+        },
+        {
+          "actual": false,
+          "case": "missing_source_digest",
+          "expected": false
+        },
+        {
+          "actual": false,
+          "case": "tampered_contract_span",
+          "expected": false
+        }
+      ]
+    }
+  },
+  "schema": "engraphis-evidence-contract-report/v1",
+  "source_sha256": {
+    "engraphis/core/context.py": "b0a0492d605015adee59c97c378f1cc9b45a88e26706dbb3dd39e7513254bd88",
+    "engraphis/core/evidence.py": "97912b52a3d22de909218f83c09c92572ed695d7b3c2117e5330271c6d84a7bd",
+    "eval/evidence_contracts.py": "f0aac00f9d8381f8b98ffa5483a1768f97bcd8cfd9f9cd62c41500ee9bb44656"
+  }
+}

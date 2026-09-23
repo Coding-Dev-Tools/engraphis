@@ -15,6 +15,11 @@
     }
   },
   "variables": {
+    "ENGRAPHIS_HOST": {
+      "value": "0.0.0.0",
+      "prompt": "Bind the public Railway service on all IPv4 interfaces so the platform PORT and health probe are reachable.",
+      "required": true
+    },
     "ENGRAPHIS_SERVICE_MODE": {
       "value": "customer",
       "required": true
@@ -25,6 +30,10 @@
     },
     "ENGRAPHIS_STATE_DIR": {
       "value": "/data/.engraphis",
+      "required": true
+    },
+    "ENGRAPHIS_ENV_FILE": {
+      "value": "/data/.engraphis/config.env",
       "required": true
     },
     "ENGRAPHIS_API_TOKEN": {

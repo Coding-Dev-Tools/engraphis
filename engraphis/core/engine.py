@@ -28,6 +28,7 @@ import numpy as np
 from engraphis.core import scoring
 from engraphis.core.adaptive_context import AdaptiveContextResult, fit_recent_history
 from engraphis.core.conflicts import detect_conflicts
+from engraphis.core.evidence import exact_value_binding, make_exact_value_binding
 from engraphis.core.interfaces import (
     MemoryRecord,
     MemoryType,
@@ -104,6 +105,28 @@ def _safe_upsert(index, ids, vecs, meta=None, *, commit=True):
                 index.upsert(ids, vecs, commit=commit)
             except TypeError:
                 index.upsert(ids, vecs)
+
+
+def _validate_exact_edit_controls(
+    exact_value: Optional[str], exact_value_type: str,
+    exact_value_span: Optional[tuple[int, int]], clear_exact_value: bool,
+) -> str:
+    """Validate exact-value edit intent before a correction can mutate storage."""
+    if type(clear_exact_value) is not bool:
+        raise ValueError("clear_exact_value must be a boolean")
+    normalized_type = str(exact_value_type or "literal").strip().casefold()
+    if exact_value is None and (normalized_type != "literal" or exact_value_span is not None):
+        raise ValueError("exact_value_type and exact_value_span require exact_value")
+    if exact_value is not None and clear_exact_value:
+        raise ValueError("exact_value and clear_exact_value cannot be combined")
+    if exact_value_span is not None and (
+        not isinstance(exact_value_span, tuple)
+        or len(exact_value_span) != 2
+        or any(type(item) is not int for item in exact_value_span)
+    ):
+        raise ValueError("exact_value_span must be a (start, end) integer pair")
+    return normalized_type
+
 
 logger = logging.getLogger("engraphis.core.engine")
 
@@ -1500,11 +1523,50 @@ class MemoryEngine:
 
         if decision is not None and decision.op == ResolutionOp.NOOP:
             target_id = _required_resolution_target(decision)
+            exact_value_bound = False
+            incoming_exact = (metadata or {}).get("exact_value")
+            if isinstance(incoming_exact, dict):
+                target = self.store.get_memory(target_id)
+                current_metadata = dict(target.metadata or {}) if target is not None else {}
+                if (target is not None
+                        and exact_value_binding(current_metadata, content=target.content) is None):
+                    # The incoming offsets are relative to the duplicate's source
+                    # content, not necessarily to the retained record.  Validate the
+                    # caller's binding against that source before rebinding it against
+                    # the record that will actually be recalled; otherwise a forged
+                    # value absent from the duplicate can be legitimized merely because
+                    # it happens to occur uniquely in the retained content.
+                    incoming_binding = exact_value_binding(
+                        {"exact_value": incoming_exact}, content=content,
+                    )
+                    rebound = None
+                    if incoming_binding is not None:
+                        rebound = exact_value_binding(
+                            {"exact_value": incoming_binding}, content=target.content,
+                        )
+                        if rebound is None:
+                            try:
+                                rebound = make_exact_value_binding(
+                                    target.content,
+                                    incoming_binding["value"],
+                                    incoming_binding["type"],
+                                )
+                            except (TypeError, ValueError):
+                                rebound = None
+                    if rebound is not None:
+                        target.metadata = {**current_metadata, "exact_value": rebound}
+                        # Keep the annotation in the same transaction as the NOOP
+                        # reinforcement. ``add_memory`` updates the descriptive HLC and
+                        # mirrors without replacing the existing vector when it is absent
+                        # from the row snapshot.
+                        self.store.add_memory(target, audit=False, commit=False)
+                        exact_value_bound = True
             self.store.reinforce(target_id, boost=scoring.INTERACTION_BOOST["create"])
             self.store.audit("resolver", "noop", target_id, decision.reason)
             if transactional_finalizer is not None:
                 transactional_finalizer(target_id)
-            return {"id": target_id, "op": "noop", "reason": decision.reason}
+            return {"id": target_id, "op": "noop", "reason": decision.reason,
+                    "exact_value_bound": exact_value_bound}
 
         # Before anything reads it: demote graph hints this write cannot prove came from
         # an Extractor, so the "structured_extractor" feed below can only ever see
@@ -2418,8 +2480,10 @@ class MemoryEngine:
                scopes: Optional[list] = None,
                mtypes: Optional[list] = None, as_of: Optional[float] = None,
                valid_at: Optional[float] = None, known_at: Optional[float] = None,
-               k: int = 8, token_budget: Optional[int] = None,
+               k: Optional[int] = None, token_budget: Optional[int] = None,
                retrieval_profile: str = "balanced", candidate_depth: str = "fixed",
+               packing_mode: str = "legacy",
+               retrieval_recipe: str = "default",
                diagnostics: bool = False,
                include_untrusted: bool = False,
                prompt_only: bool = False,
@@ -2437,7 +2501,11 @@ class MemoryEngine:
         result = self.recall_engine.recall(
             query, flt, k=k, reinforce=bool(reinforce) and not flt.historical,
             token_budget=token_budget, retrieval_profile=retrieval_profile,
+            k_supplied=k is not None,
+            token_budget_supplied=token_budget is not None,
             candidate_depth=candidate_depth,
+            packing_mode=packing_mode,
+            retrieval_recipe=retrieval_recipe,
             diagnostics=diagnostics,
             include_untrusted=bool(include_untrusted),
             prompt_only=bool(prompt_only),
@@ -3009,10 +3077,15 @@ class MemoryEngine:
         return {"id": memory_id, "pinned": pinned}
 
     def correct(self, memory_id: str, new_content: str, *, reason: str = "",
-                actor: str = "user") -> dict:
+                actor: str = "user", exact_value: Optional[str] = None,
+                exact_value_type: str = "literal",
+                exact_value_span: Optional[tuple[int, int]] = None,
+                clear_exact_value: bool = False) -> dict:
         with self._write_lock:
             return self._correct_locked(
                 memory_id, new_content, reason=reason, actor=actor,
+                exact_value=exact_value, exact_value_type=exact_value_type,
+                exact_value_span=exact_value_span, clear_exact_value=clear_exact_value,
             )
 
     def can_revise_memory(self, memory_id: str) -> bool:
@@ -3022,14 +3095,24 @@ class MemoryEngine:
     def revise_memory(self, memory_id: str, *, expected_version: str,
                       operation_id: str, content: Optional[str] = None,
                       title: Optional[str] = None, mtype: Optional[MemoryType] = None,
-                      importance: Optional[float] = None, reason: str = "",
+                      importance: Optional[float] = None,
+                      exact_value: Optional[str] = None,
+                      exact_value_type: str = "literal",
+                      exact_value_span: Optional[tuple[int, int]] = None,
+                      clear_exact_value: bool = False, reason: str = "",
                       actor: str = "user") -> dict:
         """Apply all descriptive changes as one versioned, idempotent revision."""
         if not isinstance(operation_id, str) or not 1 <= len(operation_id) <= 200:
             raise ValueError("operation_id must contain between 1 and 200 characters")
         if not isinstance(expected_version, str) or not expected_version.startswith("mv1:"):
             raise ValueError("expected_version is required")
-        if content is None and title is None and mtype is None and importance is None:
+        _validate_exact_edit_controls(
+            exact_value, exact_value_type, exact_value_span, clear_exact_value,
+        )
+        if (
+            content is None and title is None and mtype is None and importance is None
+            and exact_value is None and not clear_exact_value
+        ):
             raise ValueError("nothing to revise")
         if importance is not None and (
             isinstance(importance, bool) or not isinstance(importance, (int, float))
@@ -3044,26 +3127,56 @@ class MemoryEngine:
                 memory_id, old.content if content is None else content,
                 reason=reason, actor=actor, expected_version=expected_version,
                 operation_id=operation_id, title=title, mtype=mtype, importance=importance,
+                exact_value=exact_value, exact_value_type=exact_value_type,
+                exact_value_span=exact_value_span, clear_exact_value=clear_exact_value,
             )
 
     def _correct_locked(self, memory_id: str, new_content: str, *, reason: str,
                         actor: str, expected_version: Optional[str] = None,
                         operation_id: Optional[str] = None, title: Optional[str] = None,
                         mtype: Optional[MemoryType] = None,
-                        importance: Optional[float] = None) -> dict:
+                        importance: Optional[float] = None,
+                        exact_value: Optional[str] = None,
+                        exact_value_type: str = "literal",
+                        exact_value_span: Optional[tuple[int, int]] = None,
+                        clear_exact_value: bool = False) -> dict:
         """Insert a replacement and close its predecessor as one atomic transition."""
         old = self.store.get_memory(memory_id)
         if old is None:
             raise KeyError(f"no memory with id '{memory_id}'")
+        normalized_exact_type = _validate_exact_edit_controls(
+            exact_value, exact_value_type, exact_value_span, clear_exact_value,
+        )
+        prepared_exact = None
+        if exact_value is not None:
+            prepared_exact = make_exact_value_binding(
+                new_content, exact_value, normalized_exact_type,
+                source_span=exact_value_span,
+            )
         effective_at = now_ts()
         final_title = old.title if title is None else title
         final_type = old.mtype if mtype is None else MemoryType(mtype)
         final_importance = old.importance if importance is None else importance
-        command = MemoryCommand(self.store, "revise" if operation_id else "correct", [old], {
+        command_payload = {
             "content": new_content, "title": final_title, "mtype": final_type.value,
             "importance": final_importance, "reason": reason, "actor": actor,
             "expected_version": expected_version,
-        }, operation_id=operation_id)
+        }
+        # Omitted controls preserve the request hash used by older revisions. Explicit
+        # intent participates in idempotency, so a changed binding cannot replay an old
+        # operation result under the same operation_id.
+        if exact_value is not None:
+            command_payload["exact_value"] = exact_value
+            if normalized_exact_type != "literal":
+                command_payload["exact_value_type"] = normalized_exact_type
+            if exact_value_span is not None:
+                command_payload["exact_value_span"] = exact_value_span
+        elif clear_exact_value:
+            command_payload["clear_exact_value"] = True
+        command = MemoryCommand(
+            self.store, "revise" if operation_id else "correct", [old], command_payload,
+            operation_id=operation_id,
+        )
 
         def correction_result(new_id: str) -> dict:
             result = {"id": new_id, "superseded": [memory_id], "reason": reason}
@@ -3094,6 +3207,14 @@ class MemoryEngine:
                 raise MemoryConflict("only a current or quarantined memory can be corrected")
             return None
         metadata = dict(old.metadata)
+        old_bound = exact_value_binding(old.metadata, content=old.content)
+        metadata.pop("exact_value", None)
+        if prepared_exact is not None:
+            metadata["exact_value"] = prepared_exact
+        elif not clear_exact_value and new_content == old.content and old_bound is not None:
+            # Descriptive-only revisions preserve explicit occurrence choices. A content
+            # edit without a fresh binding deliberately clears inherited evidence.
+            metadata["exact_value"] = old_bound
         metadata["corrects"] = memory_id
         metadata["supersedes"] = [memory_id]
         # Missing/legacy provenance must not fall through to the direct-engine trusted

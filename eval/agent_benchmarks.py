@@ -26,27 +26,41 @@ deterministic plumbing/contract checks, not external leaderboard results.
 from __future__ import annotations
 
 import argparse
+from collections import Counter
+from dataclasses import dataclass
+import hashlib
 import json
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import re
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Union
 
 from engraphis.backends import DeterministicEmbedder
 from engraphis.backends.embedder_st import get_embedder
-from eval.benchmark import report_envelope, write_canonical_artifact
+from eval.benchmark import report_envelope, sha256_file, verify_report_snapshot, write_canonical_artifact
+from eval.external_checkpoints import producer_snapshot, run_resumable
 from eval.harness import run
 
 
 _PINNED_EMBED_REVISION = re.compile(r"[0-9a-f]{40}\Z")
 
 
-def _read_records(path: str) -> list[dict[str, Any]]:
+@dataclass(frozen=True)
+class _RecordsSnapshot:
+    """Normalized records and their digest from one immutable byte read."""
+
+    path: Path
+    records: list[dict[str, Any]]
+    sha256: str
+
+
+def _read_records_snapshot(path: Union[str, Path]) -> _RecordsSnapshot:
     """Read a JSON list/object or JSONL file, rejecting non-object rows."""
     source = Path(path)
     try:
-        text = source.read_text(encoding="utf-8")
+        payload = source.read_bytes()
     except OSError as exc:
         raise ValueError(f"could not read {source}: {exc}") from exc
+    text = payload.decode("utf-8")
     try:
         parsed = json.loads(text)
     except json.JSONDecodeError:
@@ -67,12 +81,26 @@ def _read_records(path: str) -> list[dict[str, Any]]:
             for item in rows
         ):
             raise ValueError(f"{source} has a malformed Hugging Face rows envelope")
-        return [item["row"] for item in rows]
-    if isinstance(parsed, dict):
-        return [parsed]
-    if not isinstance(parsed, list) or not all(isinstance(row, dict) for row in parsed):
+        records = [item["row"] for item in rows]
+    elif isinstance(parsed, dict):
+        records = [parsed]
+    elif isinstance(parsed, list) and all(isinstance(row, dict) for row in parsed):
+        records = parsed
+    else:
         raise ValueError(f"{source} must contain a JSON object, JSON list of objects, or JSONL objects")
-    return parsed
+    return _RecordsSnapshot(
+        path=source,
+        records=records,
+        sha256=hashlib.sha256(payload).hexdigest(),
+    )
+
+
+def _read_records(
+    path: str,
+    *,
+    snapshot: Optional[_RecordsSnapshot] = None,
+) -> list[dict[str, Any]]:
+    return (snapshot or _read_records_snapshot(path)).records
 
 
 def _text(value: Any, label: str) -> str:
@@ -95,7 +123,9 @@ def _answer_rows(value: Any, label: str) -> list[tuple[str, list[str]]]:
         raise ValueError(f"{label} must be a non-empty list")
     output = []
     for number, item in enumerate(value):
-        variants = _as_texts(item, f"{label}[{number}]")
+        # Upstream exports repeat accepted answers. Exact deduplication changes
+        # no accepted response, preserves order, and leaves source bytes intact.
+        variants = list(dict.fromkeys(_as_texts(item, f"{label}[{number}]")))
         output.append((variants[0], variants))
     return output
 
@@ -151,7 +181,12 @@ def _limited_rows(rows: list[dict[str, Any]], limit: Optional[int]) -> list[dict
     return rows[:limit]
 
 
-def load_memoryagentbench(path: str, *, limit: Optional[int] = None) -> list[dict]:
+def load_memoryagentbench(
+    path: str,
+    *,
+    limit: Optional[int] = None,
+    snapshot: Optional[_RecordsSnapshot] = None,
+) -> list[dict]:
     """Load MemoryAgentBench's public context/question export.
 
     Its upstream conversation creator accepts a top-level ``data`` array, then
@@ -160,7 +195,7 @@ def load_memoryagentbench(path: str, *, limit: Optional[int] = None) -> list[dic
     them directly so ``subject_key``/``claim_kind`` can exercise the actual
     conflict-resolution write path.
     """
-    roots = _read_records(path)
+    roots = _read_records(path, snapshot=snapshot)
     if len(roots) == 1 and isinstance(roots[0].get("data"), list):
         rows = roots[0]["data"]
     else:
@@ -204,6 +239,7 @@ def load_memoryagentbench(path: str, *, limit: Optional[int] = None) -> list[dic
         if ids and (not isinstance(ids, list) or len(ids) != len(questions)):
             raise ValueError(f"MemoryAgentBench {case_id}: qa_pair_ids must align with questions")
         supporting_rows = row.get("supporting_ids") or row.get("evidence_ids") or []
+        label_source = "explicit_ids" if supporting_rows else "derived_answer_substring"
         if supporting_rows and (not isinstance(supporting_rows, list) or len(supporting_rows) != len(questions)):
             raise ValueError(f"MemoryAgentBench {case_id}: supporting_ids must align with questions")
         normalized_questions = []
@@ -225,12 +261,23 @@ def load_memoryagentbench(path: str, *, limit: Optional[int] = None) -> list[dic
                         for variant in answer_variants
                     )
                 ]
+            label_provenance = label_source if supporting else "unlabeled"
             normalized_questions.append({
                 "id": str(ids[q_number]) if ids else f"{case_id}:q:{q_number}",
                 "q": question,
                 "answer": answer,
                 "answer_variants": answer_variants,
                 "supporting": supporting,
+                # MAB exports frequently lack adjudicated source IDs.  Preserve
+                # the derivation method so a high-cardinality substring label is
+                # never mistaken for an authoritative sufficient-evidence set.
+                "evidence_label_provenance": label_provenance,
+                "evidence_label_count": len(set(supporting)),
+                "evidence_label_method": (
+                    "provided_source_ids" if label_provenance == "explicit_ids"
+                    else "answer_variant_substring" if label_provenance == "derived_answer_substring"
+                    else "none"
+                ),
                 "category": str(
                     row.get("sub_dataset")
                     or row.get("dataset")
@@ -244,6 +291,14 @@ def load_memoryagentbench(path: str, *, limit: Optional[int] = None) -> list[dic
         cases.append({"id": case_id, "memories": memories, "questions": normalized_questions})
     if not cases:
         raise ValueError("MemoryAgentBench source contained no cases")
+    # Upstream reuses QA IDs across context-length/source variants. They are
+    # distinct observations; qualify colliding IDs instead of dropping rows.
+    counts = Counter(question["id"] for case in cases for question in case["questions"])
+    for case in cases:
+        for ordinal, question in enumerate(case["questions"]):
+            if counts[question["id"]] > 1:
+                question["source_question_id"] = question["id"]
+                question["id"] = f"{case['id']}:q:{ordinal}:{question['id']}"
     return cases
 
 
@@ -279,6 +334,7 @@ def load_locomo_plus(
     *,
     limit: Optional[int] = None,
     include_original_locomo: bool = False,
+    snapshot: Optional[_RecordsSnapshot] = None,
 ) -> list[dict]:
     """Load Locomo-Plus unified input and score cue retrieval deterministically.
 
@@ -286,7 +342,7 @@ def load_locomo_plus(
     The default selects only the new Cognitive category so a run measures implicit
     cue-to-trigger memory instead of quietly becoming another factual LoCoMo run.
     """
-    rows = _read_records(path)
+    rows = _read_records(path, snapshot=snapshot)
     if len(rows) == 1 and isinstance(rows[0].get("data"), list):
         rows = rows[0]["data"]
     if not include_original_locomo:
@@ -332,9 +388,16 @@ def _tool_call_text(call: dict[str, Any], label: str) -> str:
     return json.dumps({"name": name, "arguments": arguments}, ensure_ascii=False, sort_keys=True)
 
 
-def load_mem2actbench(qa_path: str, conversation_path: str, *, limit: Optional[int] = None) -> list[dict]:
+def load_mem2actbench(
+    qa_path: str,
+    conversation_path: str,
+    *,
+    limit: Optional[int] = None,
+    qa_snapshot: Optional[_RecordsSnapshot] = None,
+    conversation_snapshot: Optional[_RecordsSnapshot] = None,
+) -> list[dict]:
     """Load Mem2ActBench's paired QA/session JSONL exports."""
-    sessions = _read_records(conversation_path)
+    sessions = _read_records(conversation_path, snapshot=conversation_snapshot)
     by_source: dict[str, list[dict[str, str]]] = {}
     for number, session in enumerate(sessions):
         session_id = _case_id(session, "mem2act-session", number)
@@ -357,7 +420,9 @@ def load_mem2actbench(qa_path: str, conversation_path: str, *, limit: Optional[i
                 by_source.setdefault(source, []).append({"tag": source, "text": "\n".join(lines)})
 
     cases = []
-    for number, qa in enumerate(_limited_rows(_read_records(qa_path), limit)):
+    for number, qa in enumerate(
+        _limited_rows(_read_records(qa_path, snapshot=qa_snapshot), limit)
+    ):
         qa_id = _case_id(qa, "mem2act", number)
         source_ids = qa.get("source_conversation_ids")
         if not isinstance(source_ids, list) or not source_ids:
@@ -419,6 +484,36 @@ _RETRIEVAL_METRICS = (
     "ndcg_at_5",
     "ndcg_at_10",
 )
+_PACKED_RETRIEVAL_METRICS = (
+    "packed_recall_at_k", "packed_hit_at_k", "packed_mrr_at_k", "packed_ndcg_at_k",
+)
+
+
+def _producer_snapshot() -> dict:
+    return {**producer_snapshot(), "eval/agent_benchmarks.py": sha256_file(Path(__file__))}
+
+
+def _producer_source_manifest(
+    root: Path, producer_digests: dict[str, str],
+) -> tuple[list[Path], list[str]]:
+    """Resolve producer paths and retain only stable public source names."""
+    paths: list[Path] = []
+    names: list[str] = []
+    for name in producer_digests:
+        candidate = Path(name)
+        windows_candidate = PureWindowsPath(name)
+        if candidate.is_absolute() or windows_candidate.is_absolute():
+            # Production snapshots are repository-relative. A basename-only
+            # fallback keeps private/test-injected snapshots from leaking an
+            # absolute path; the shared envelope rejects collisions/unsafe names.
+            paths.append(candidate)
+            names.append(
+                windows_candidate.name if windows_candidate.is_absolute() else candidate.name
+            )
+        else:
+            paths.append(root / candidate)
+            names.append(name)
+    return paths, names
 
 
 def _separate_unlabeled_retrieval(report: dict) -> None:
@@ -426,14 +521,15 @@ def _separate_unlabeled_retrieval(report: dict) -> None:
     detail = list(report.get("detail") or [])
     retrieval_rows = []
     for row in detail:
-        if row.get("supporting_ids"):
+        row["retrieval_scored"] = bool(row.get("supporting_ids")) and row.get("retrieval_scored") is not False
+        if row["retrieval_scored"]:
             retrieval_rows.append(row)
         else:
             row["retrieval_excluded"] = "no_gold_evidence"
-            for field in _RETRIEVAL_METRICS:
+            for field in _RETRIEVAL_METRICS + _PACKED_RETRIEVAL_METRICS:
                 row.pop(field, None)
     report["retrieval_scored_questions"] = len(retrieval_rows)
-    for field in ("recall_at_k", "hit_at_k", "mrr_at_k", "ndcg_at_k"):
+    for field in ("recall_at_k", "hit_at_k", "mrr_at_k", "ndcg_at_k") + _PACKED_RETRIEVAL_METRICS:
         report[field] = (
             round(
                 sum(float(row[field]) for row in retrieval_rows)
@@ -458,6 +554,8 @@ def public_artifact(
     include_original_locomo: bool,
     embedder: Optional[object],
     resolve_conflicts: bool,
+    token_budget: int = 1500,
+    source_snapshot: Optional[dict[str, str]] = None,
 ) -> dict:
     """Build a redacted immutable envelope from a private adapter report."""
     if bool(embed_model) != bool(embed_revision):
@@ -477,15 +575,34 @@ def public_artifact(
         "mrr_at_k",
         "ndcg_at_k",
         "answer_token_recall",
+        "answer_scored_questions", "packed_recall_at_k", "packed_hit_at_k",
+        "packed_mrr_at_k", "packed_ndcg_at_k", "packed_answer_token_recall",
+        "sufficient_evidence_proxy_rate", "sufficient_evidence_proxy_questions",
+        "sufficient_evidence_proxy_boundary",
+        "evidence_label_provenance", "evidence_label_cardinality",
+        "checkpoint_status", "completed_cases", "expected_cases", "explicit_local_restarts",
+        "case_wall_seconds", "query_latency_ms_sum", "latency_boundary",
     )
     metrics = {name: report[name] for name in metric_names if name in report}
     metrics["claim_boundary"] = _claim_boundary(fmt)
-    source_paths = [dataset, *([conversations] if conversations else [])]
+    root = Path(__file__).resolve().parents[1]
+    producer_digests = source_snapshot if source_snapshot is not None else _producer_snapshot()
+    producer_paths, producer_names = _producer_source_manifest(root, producer_digests)
+    source_paths = [Path(dataset), *([Path(conversations)] if conversations else []),
+                    *producer_paths]
+    source_names = ["inputs/dataset", *(["inputs/conversations"] if conversations else []),
+                    *producer_names]
+    dataset_digest = sha256_file(dataset)
+    expected_sources = [("inputs/dataset", dataset_digest)]
+    if conversations:
+        expected_sources.append(("inputs/conversations", sha256_file(conversations)))
+    expected_sources.extend(zip(producer_names, producer_digests.values()))
     command = [
         "python", "-m", "eval.agent_benchmarks",
         "--dataset", "<dataset>",
         "--format", fmt,
         "--k", str(k),
+        "--token-budget", str(token_budget),
     ]
     if limit is not None:
         command.extend(["--limit", str(limit)])
@@ -501,14 +618,17 @@ def public_artifact(
     selected_embedder = embedder or DeterministicEmbedder()
     model_id = getattr(selected_embedder, "model_name", type(selected_embedder).__name__)
     revision = getattr(selected_embedder, "revision", None)
-    return report_envelope(
+    envelope = report_envelope(
         suite=f"Engraphis {fmt}",
         dataset_path=dataset,
         source_paths=source_paths,
+        source_names=source_names,
         config={
             "measurement_scope": "retrieval_only",
+            "source_case_identity": "explicit",
             "format": fmt,
             "k": k,
+            "token_budget": token_budget,
             "limit": limit,
             "embed_model": model_id,
             "embedder_revision": revision,
@@ -536,6 +656,7 @@ def public_artifact(
         records=detail,
         metrics=metrics,
     )
+    return verify_report_snapshot(envelope, dataset_sha256=dataset_digest, sources=expected_sources)
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -544,6 +665,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--format", required=True, choices=sorted(LOADERS))
     parser.add_argument("--conversations", help="Mem2ActBench toolmem_conversation.jsonl (required there).")
     parser.add_argument("--k", type=int, default=10)
+    parser.add_argument("--token-budget", type=int, default=1500)
+    parser.add_argument("--checkpoint-dir", type=Path,
+                        help="Private per-case recovery directory; immutable source/model/config binding.")
+    parser.add_argument("--restart-interrupted", action="store_true",
+                        help="Explicitly retain and restart an interrupted local-only case.")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--embed-model", default=None, help="Optional sentence-transformers model.")
     parser.add_argument(
@@ -565,29 +691,63 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     args = parser.parse_args(argv)
     try:
-        if args.k <= 0:
-            raise ValueError("k must be a positive integer")
+        if args.k <= 0 or args.token_budget <= 0:
+            raise ValueError("k and token budget must be positive integers")
+        if args.restart_interrupted and not args.checkpoint_dir:
+            raise ValueError("restart-interrupted requires a checkpoint directory")
         if bool(args.embed_model) != bool(args.embed_revision):
             raise ValueError("--embed-model and --embed-revision must be used together")
         if args.embed_revision and _PINNED_EMBED_REVISION.fullmatch(args.embed_revision) is None:
             raise ValueError("--embed-revision must be an immutable lowercase 40-character commit")
+        source_before = _producer_snapshot()
+        data_snapshots = {
+            name: _read_records_snapshot(name)
+            for name in (args.dataset, args.conversations) if name
+        }
+        data_before = {name: snapshot.sha256 for name, snapshot in data_snapshots.items()}
         if args.format == "mem2actbench":
             if not args.conversations:
                 raise ValueError("--conversations is required for mem2actbench")
-            cases = load_mem2actbench(args.dataset, args.conversations, limit=args.limit)
+            cases = load_mem2actbench(
+                args.dataset,
+                args.conversations,
+                limit=args.limit,
+                qa_snapshot=data_snapshots[args.dataset],
+                conversation_snapshot=data_snapshots[args.conversations],
+            )
         elif args.format == "locomo_plus":
             cases = load_locomo_plus(
                 args.dataset,
                 limit=args.limit,
                 include_original_locomo=args.include_original_locomo,
+                snapshot=data_snapshots[args.dataset],
             )
         else:
-            cases = LOADERS[args.format](args.dataset, limit=args.limit)
+            cases = LOADERS[args.format](
+                args.dataset, limit=args.limit, snapshot=data_snapshots[args.dataset]
+            )
         embedder = (
             get_embedder(args.embed_model, revision=args.embed_revision)
             if args.embed_model else None
         )
-        report = run(cases, k=args.k, embedder=embedder, resolve_conflicts=not args.no_resolve)
+        if args.checkpoint_dir:
+            report = run_resumable(
+                cases, directory=args.checkpoint_dir,
+                binding={"format": args.format, "data_sha256": data_before,
+                         "limit": args.limit, "include_original_locomo": args.include_original_locomo,
+                         "embed_model": getattr(embedder, "model_name", "DeterministicEmbedder"),
+                         "embed_revision": getattr(embedder, "revision", None)},
+                embedder=embedder if embedder is not None else DeterministicEmbedder(),
+                k=args.k, token_budget=args.token_budget,
+                resolve_conflicts=not args.no_resolve, snapshot=_producer_snapshot,
+                restart_interrupted=args.restart_interrupted,
+            )
+        else:
+            report = run(cases, k=args.k, token_budget=args.token_budget,
+                         embedder=embedder, resolve_conflicts=not args.no_resolve)
+        if (source_before != _producer_snapshot()
+                or data_before != {name: sha256_file(name) for name in data_before}):
+            raise ValueError("diagnostic producer or data changed during execution")
     except ValueError as exc:
         parser.error(str(exc))
     report.update({
@@ -610,19 +770,39 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.json_out:
         Path(args.json_out).write_text(output + "\n", encoding="utf-8")
     if args.artifact:
-        artifact = public_artifact(
-            report,
-            fmt=args.format,
-            dataset=args.dataset,
-            conversations=args.conversations,
-            k=args.k,
-            limit=args.limit,
-            embed_model=args.embed_model,
-            embed_revision=args.embed_revision,
-            include_original_locomo=bool(args.include_original_locomo),
-            embedder=embedder,
-            resolve_conflicts=not args.no_resolve,
+        try:
+            artifact = public_artifact(
+                report,
+                fmt=args.format,
+                dataset=args.dataset,
+                conversations=args.conversations,
+                k=args.k,
+                limit=args.limit,
+                embed_model=args.embed_model,
+                embed_revision=args.embed_revision,
+                include_original_locomo=bool(args.include_original_locomo),
+                embedder=embedder,
+                resolve_conflicts=not args.no_resolve,
+                token_budget=args.token_budget,
+                source_snapshot=source_before,
+            )
+        except ValueError as exc:
+            parser.error(f"diagnostic artifact cannot bind the evaluated producer or data snapshots: {exc}")
+        # Envelope construction reads files again. Verify the completed envelope
+        # against the snapshots that actually bounded this evaluation, including
+        # changes made while the private report was serialized or printed.
+        _, producer_names = _producer_source_manifest(
+            Path(__file__).resolve().parents[1], source_before,
         )
+        expected_sources = [("inputs/dataset", data_before[args.dataset])]
+        if args.conversations:
+            expected_sources.append(("inputs/conversations", data_before[args.conversations]))
+        expected_sources.extend(zip(producer_names, source_before.values()))
+        observed_sources = [(item["name"], item["sha256"])
+                            for item in artifact["suite"]["sources"]]
+        if (artifact["suite"]["sha256"] != data_before[args.dataset]
+                or observed_sources != expected_sources):
+            parser.error("diagnostic artifact does not match the evaluated producer or data snapshots")
         write_canonical_artifact(artifact, args.artifact)
     return 0
 

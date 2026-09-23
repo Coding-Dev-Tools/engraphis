@@ -52,6 +52,8 @@ jobs:
         run: python -m eval.grounded
       - name: Code-agent arm gate
         run: python -m eval.code_arm
+      - name: Evidence contract boundary gate
+        run: python -m eval.evidence_contracts
 
   typecheck:
     name: core + backends typecheck (Python 3.11)
@@ -125,6 +127,8 @@ jobs:
         run: python -m eval.reinforcement
       - name: Adversarial memory prompt-boundary gate
         run: python -m eval.adversarial_memory_security
+      - name: Evidence contract boundary gate
+        run: python -m eval.evidence_contracts
       - name: Build and smoke installed core artifacts
         shell: bash
         run: |

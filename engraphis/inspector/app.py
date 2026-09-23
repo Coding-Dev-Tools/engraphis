@@ -23,7 +23,7 @@ from typing import Optional
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool, StrictInt
 
 from engraphis import __version__, http_security
 from engraphis.config import settings
@@ -42,6 +42,10 @@ class _CorrectBody(BaseModel):
     workspace: str = Field(min_length=1, max_length=200)
     repo: Optional[str] = Field(default=None, max_length=200)
     reason: str = Field(default="", max_length=1_000)
+    exact_value: Optional[str] = Field(default=None, max_length=4096)
+    exact_value_type: str = Field(default="literal", max_length=32)
+    exact_value_span: Optional[tuple[StrictInt, StrictInt]] = None
+    clear_exact_value: StrictBool = False
 
 
 class _GovernBody(BaseModel):
@@ -404,6 +408,10 @@ def create_app(
             repo=body.repo,
             reason=body.reason,
             actor="inspector-local",
+            exact_value=body.exact_value,
+            exact_value_type=body.exact_value_type,
+            exact_value_span=body.exact_value_span,
+            clear_exact_value=body.clear_exact_value,
         )
 
     @app.post("/api/promote")

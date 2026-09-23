@@ -36,17 +36,143 @@ resolution behaviour is identical to the CI gate.
 from __future__ import annotations
 
 import argparse
+from collections import Counter
+from dataclasses import dataclass
 import hashlib
 import json
 import re
 import sys
 import time
-from pathlib import Path
-from typing import Any, Optional
+from pathlib import Path, PureWindowsPath
+from typing import Any, Optional, Union
 
 from engraphis.backends.embedder_st import get_embedder
 from engraphis.core.secrets import redact_secrets
 from eval.harness import run
+from eval.benchmark import (
+    report_envelope,
+    sha256_file,
+    verify_report_snapshot,
+    write_canonical_artifact,
+)
+from eval.external_checkpoints import aggregate, producer_snapshot
+
+
+@dataclass(frozen=True)
+class _JsonSnapshot:
+    """Parsed JSON and its digest from one immutable byte read."""
+
+    path: Path
+    value: Any
+    sha256: str
+
+
+def _read_json_snapshot(path: Union[str, Path]) -> _JsonSnapshot:
+    source = Path(path)
+    payload = source.read_bytes()
+    value = json.loads(payload.decode("utf-8"))
+    return _JsonSnapshot(
+        path=source,
+        value=value,
+        sha256=hashlib.sha256(payload).hexdigest(),
+    )
+
+
+def _producer_source_manifest(
+    root: Path, producer_digests: dict[str, str],
+) -> tuple[list[Path], list[str]]:
+    """Resolve producer paths while keeping only safe public source names."""
+    paths: list[Path] = []
+    names: list[str] = []
+    for name in producer_digests:
+        candidate = Path(name)
+        windows_candidate = PureWindowsPath(name)
+        if candidate.is_absolute() or windows_candidate.is_absolute():
+            # The production snapshot is repository-relative.  Keep this
+            # basename fallback for test-injected/private snapshots without
+            # ever publishing their absolute path; source_names still rejects
+            # collisions and unsafe labels in the shared envelope builder.
+            paths.append(candidate)
+            names.append(
+                windows_candidate.name if windows_candidate.is_absolute() else candidate.name
+            )
+        else:
+            paths.append(root / candidate)
+            names.append(name)
+    return paths, names
+
+
+def diagnostic_artifact(report: dict, *, dataset: str,
+                        repair_manifest: Optional[str] = None,
+                        source_snapshot: Optional[dict[str, str]] = None,
+                        dataset_snapshot: Optional[_JsonSnapshot] = None,
+                        repair_manifest_snapshot: Optional[_JsonSnapshot] = None) -> dict:
+    """Export retrieval observations without turning them into official QA evidence."""
+    dataset_hash = (dataset_snapshot.sha256 if dataset_snapshot is not None
+                    else sha256_file(dataset))
+    if report.get("dataset_sha256") != dataset_hash:
+        raise ValueError("dataset changed during evaluation")
+    detail = report.get("detail", [])
+    usage = detail[0].get("usage", {}) if detail else {}
+    names = ("questions", "scored_questions", "answer_scored_questions", "recall_at_k", "hit_at_k", "mrr_at_k",
+             "ndcg_at_k", "answer_token_recall", "source_cases", "normalized_cases",
+             "source_secret_redactions", "wall_seconds", "packed_recall_at_k",
+             "packed_hit_at_k", "packed_mrr_at_k", "packed_ndcg_at_k",
+             "packed_answer_token_recall", "category_metrics", "case_wall_seconds",
+             "query_latency_ms_sum", "latency_boundary", "checkpoint_status", "completed_cases",
+             "expected_cases", "explicit_local_restarts")
+    metrics = {name: report[name] for name in names if name in report}
+    # Public aggregates retain enough precision for independent record checks,
+    # even when the compact console report rounds a mean to four places.
+    aggregated = aggregate([report])
+    for name in ("recall_at_k", "hit_at_k", "mrr_at_k", "ndcg_at_k", "packed_recall_at_k",
+                 "packed_hit_at_k", "packed_mrr_at_k", "packed_ndcg_at_k",
+                 "answer_token_recall", "packed_answer_token_recall"):
+        metrics[name] = aggregated[name]
+    metrics.update({"claim_boundary": "evidence retrieval diagnostic; not generated-answer accuracy",
+                    "official_qa_complete": False,
+                    "source_case_coverage_complete": report.get("source_cases") == report.get("normalized_cases"),
+                    "semantic_embedding": report.get("semantic_embedding", False)})
+    integrity = report.get("dataset_integrity")
+    if integrity is not None:
+        # Keep whole-file hashes and annotation IDs, but not private filesystem paths.
+        integrity = json.loads(json.dumps(integrity))
+        if isinstance(integrity.get("repair_manifest"), dict):
+            integrity["repair_manifest"].pop("path", None)
+        metrics["dataset_integrity"] = integrity
+    root = Path(__file__).resolve().parents[1]
+    producer_digests = (
+        source_snapshot if source_snapshot is not None else producer_snapshot()
+    )
+    producer_paths, producer_names = _producer_source_manifest(root, producer_digests)
+    paths = [Path(dataset), *producer_paths]
+    source_names = ["inputs/dataset", *producer_names]
+    expected_sources = [("inputs/dataset", dataset_hash), *zip(producer_names, producer_digests.values())]
+    repair_digest = None
+    if repair_manifest:
+        paths.append(Path(repair_manifest))
+        source_names.append("inputs/repair_manifest")
+        repair_digest = (repair_manifest_snapshot.sha256 if repair_manifest_snapshot is not None
+                         else sha256_file(repair_manifest))
+        expected_sources.append(("inputs/repair_manifest", repair_digest))
+    envelope = report_envelope(
+        suite=f"Engraphis {report['format']} retrieval diagnostic", dataset_path=dataset,
+        source_paths=paths, source_names=source_names, records=detail, metrics=metrics,
+        config={**report["configuration"], "measurement_scope": "retrieval_only",
+                "source_case_identity": "explicit",
+                "format": report["format"], "embedding": report["embedding"],
+                "complete_source_required": bool(report.get("canonical")),
+                "repair_manifest_sha256": repair_digest},
+        models={"embedding": report["embedding"]},
+        token_accounting={"identity": usage.get("token_counter", "engraphis.regex.v1"),
+                          "revision": None, "scope": "packed memory context",
+                          "method": "named deterministic context estimator; not provider billing"},
+        command=["python", "-m", "eval.external", "--format", report["format"],
+                 "--dataset", "<pinned-dataset>", "--artifact", "<public-artifact>"],
+    )
+    return verify_report_snapshot(
+        envelope, dataset_sha256=dataset_hash, sources=expected_sources
+    )
 
 
 # ── LoCoMo ─────────────────────────────────────────────────────────────────────
@@ -119,10 +245,14 @@ def _load_locomo_repair_manifest(
     path: str,
     *,
     dataset_hash: str,
+    snapshot: Optional[_JsonSnapshot] = None,
 ) -> tuple[dict[tuple[str, int, str], Optional[str]], dict[str, Any]]:
-    manifest_path = Path(path)
-    payload = json.loads(manifest_path.read_text(encoding='utf-8'))
-    if not isinstance(payload, dict) or payload.get('schema') != _LOCOMO_REPAIR_SCHEMA:
+    snapshot = snapshot or _read_json_snapshot(path)
+    manifest_path = snapshot.path
+    payload = snapshot.value
+    if not isinstance(payload, dict) or payload.get('schema') not in {
+        _LOCOMO_REPAIR_SCHEMA, 'engraphis-locomo-repair/v2',
+    }:
         raise ValueError(f'LoCoMo repair manifest must use schema {_LOCOMO_REPAIR_SCHEMA!r}')
     if payload.get('dataset_sha256') != dataset_hash:
         raise ValueError('LoCoMo repair manifest does not match the source dataset SHA-256')
@@ -162,12 +292,30 @@ def _load_locomo_repair_manifest(
             'to': target,
         })
 
+    deduplications = payload.get('deduplications', [])
+    if payload['schema'] == _LOCOMO_REPAIR_SCHEMA and deduplications:
+        raise ValueError('declared deduplications require repair schema v2')
+    if not isinstance(deduplications, list):
+        raise ValueError('declared deduplications must be a list')
+    seen = set()
+    for row in deduplications:
+        if (not isinstance(row, dict) or set(row) != {'case_id', 'question_index', 'id', 'occurrences'}
+                or not isinstance(row['case_id'], str) or not row['case_id']
+                or type(row['question_index']) is not int or row['question_index'] < 0
+                or not isinstance(row['id'], str) or not _LOCOMO_DIA_ID.fullmatch(row['id'])
+                or type(row['occurrences']) is not int or row['occurrences'] < 2):
+            raise ValueError('declared deduplication has invalid fields')
+        identity = (row['case_id'], row['question_index'], row['id'])
+        if identity in seen:
+            raise ValueError('duplicate deduplication declaration')
+        seen.add(identity)
     return repairs, {
-        'schema': _LOCOMO_REPAIR_SCHEMA,
+        'schema': payload['schema'],
         'path': str(manifest_path),
-        'sha256': dataset_sha256(str(manifest_path)),
+        'sha256': snapshot.sha256,
         'dataset_sha256': dataset_hash,
         'declared_repairs': normalized_rows,
+        **({'declared_deduplications': deduplications} if deduplications else {}),
     }
 
 
@@ -176,27 +324,37 @@ def _load_locomo_with_integrity(
     *,
     limit: Optional[int] = None,
     repair_manifest: Optional[str] = None,
+    dataset_snapshot: Optional[_JsonSnapshot] = None,
+    repair_manifest_snapshot: Optional[_JsonSnapshot] = None,
 ) -> tuple[list[dict], dict[str, Any]]:
     if limit is not None and (
         isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0
     ):
         raise ValueError('limit must be a positive integer')
-    raw = json.loads(Path(path).read_text(encoding='utf-8'))
+    dataset_snapshot = dataset_snapshot or _read_json_snapshot(path)
+    raw = dataset_snapshot.value
     if isinstance(raw, dict):
         raw = [raw]
     if not isinstance(raw, list):
         raise ValueError('LoCoMo source must be a JSON object or list')
 
-    source_hash = dataset_sha256(path)
+    source_hash = dataset_snapshot.sha256
     repairs: dict[tuple[str, int, str], Optional[str]] = {}
     manifest_info: Optional[dict[str, Any]] = None
     if repair_manifest:
         repairs, manifest_info = _load_locomo_repair_manifest(
             repair_manifest, dataset_hash=source_hash,
+            snapshot=repair_manifest_snapshot,
         )
 
     used_repairs: set[tuple[str, int, str]] = set()
     applied_repairs: list[dict[str, Any]] = []
+    declared_deduplications = {
+        (row['case_id'], row['question_index'], row['id']): row
+        for row in (manifest_info or {}).get('declared_deduplications', [])
+    }
+    applied_deduplications: list[dict[str, Any]] = []
+    used_deduplications = set()
     mechanical_normalizations = 0
     unknown: list[str] = []
     cases: list[dict] = []
@@ -288,6 +446,19 @@ def _load_locomo_with_integrity(
                 if target is not None:
                     repaired.append(target)
             supporting = repaired
+            counts = Counter(supporting)
+            for evidence_id, count in counts.items():
+                identity = (case_id, question_number, evidence_id)
+                declared = declared_deduplications.get(identity)
+                if declared is not None:
+                    if count != declared['occurrences']:
+                        raise ValueError('LoCoMo deduplication occurrence count differs from declaration')
+                    supporting = list(dict.fromkeys(supporting)) if all(
+                        value == 1 or (case_id, question_number, key) in declared_deduplications
+                        for key, value in counts.items()
+                    ) else supporting
+                    applied_deduplications.append(declared)
+                    used_deduplications.add(identity)
             if len(set(supporting)) != len(supporting):
                 raise ValueError(
                     f'{case_id}:{question_number}: duplicate supporting dialogue IDs after repair'
@@ -316,6 +487,8 @@ def _load_locomo_with_integrity(
     unused = sorted(set(repairs) - used_repairs)
     if unused:
         raise ValueError(f'LoCoMo repair manifest contains unused repairs: {unused!r}')
+    if set(declared_deduplications) != used_deduplications:
+        raise ValueError('LoCoMo repair manifest contains unused deduplications')
     if unknown:
         detail = '; '.join(unknown)
         hint = (
@@ -330,11 +503,16 @@ def _load_locomo_with_integrity(
     }
     if manifest_info is not None:
         manifest_info['applied_repairs'] = applied_repairs
+        if declared_deduplications:
+            manifest_info['applied_deduplications'] = applied_deduplications
         integrity['repair_manifest'] = manifest_info
     return cases, integrity
 
 
-def load_longmemeval(path: str, *, limit: Optional[int] = None) -> list[dict]:
+def load_longmemeval(path: str, *, limit: Optional[int] = None,
+                    repair_manifest: Optional[str] = None,
+                    dataset_snapshot: Optional[_JsonSnapshot] = None,
+                    repair_manifest_snapshot: Optional[_JsonSnapshot] = None) -> list[dict]:
     """LongMemEval (S/M) → harness cases.
 
     Each haystack *session* becomes one memory (turns joined, newline-separated),
@@ -346,11 +524,33 @@ def load_longmemeval(path: str, *, limit: Optional[int] = None) -> list[dict]:
         isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0
     ):
         raise ValueError('limit must be a positive integer')
-    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    dataset_snapshot = dataset_snapshot or _read_json_snapshot(path)
+    raw = dataset_snapshot.value
     if isinstance(raw, dict):
         raw = [raw]
     if not isinstance(raw, list):
         raise ValueError('LongMemEval source must be a JSON object or list')
+    omissions = set()
+    if repair_manifest:
+        repair_manifest_snapshot = repair_manifest_snapshot or _read_json_snapshot(repair_manifest)
+        declaration = repair_manifest_snapshot.value
+        if (not isinstance(declaration, dict)
+                or set(declaration) != {'schema', 'dataset_sha256', 'empty_turn_omissions'}
+                or declaration['schema'] != 'engraphis-longmemeval-repair/v1'
+                or declaration['dataset_sha256'] != dataset_snapshot.sha256
+                or not isinstance(declaration['empty_turn_omissions'], list)):
+            raise ValueError('LongMemEval repair manifest schema or dataset digest mismatch')
+        for item in declaration['empty_turn_omissions']:
+            if (not isinstance(item, dict) or set(item) != {'question_id', 'session_id', 'turn_index'}
+                    or not isinstance(item['question_id'], str) or not item['question_id']
+                    or not isinstance(item['session_id'], str) or not item['session_id']
+                    or type(item['turn_index']) is not int or item['turn_index'] < 0):
+                raise ValueError('invalid LongMemEval empty-turn omission')
+            identity = (item['question_id'], item['session_id'], item['turn_index'])
+            if identity in omissions:
+                raise ValueError('duplicate LongMemEval empty-turn omission')
+            omissions.add(identity)
+    used_omissions = set()
     cases = []
     seen_question_ids: set[str] = set()
     selected = raw[:limit] if limit is not None else raw
@@ -400,10 +600,16 @@ def load_longmemeval(path: str, *, limit: Optional[int] = None) -> list[dict]:
             if date is not None and not isinstance(date, str):
                 raise ValueError(f'{qid}: haystack_dates must contain strings')
             lines = []
-            for turn in session:
+            for turn_index, turn in enumerate(session):
                 if not isinstance(turn, dict):
                     raise ValueError(f'{qid}: session {session_id!r} contains a non-object turn')
                 content = turn.get('content')
+                omission = (qid, session_id, turn_index)
+                if omission in omissions:
+                    if not isinstance(content, str) or content.strip() or turn.get('has_answer'):
+                        raise ValueError('LongMemEval omission is not an empty, non-answer turn')
+                    used_omissions.add(omission)
+                    continue
                 if not isinstance(content, str) or not content.strip():
                     raise ValueError(
                         f'{qid}: session {session_id!r} turns require non-empty content'
@@ -459,6 +665,8 @@ def load_longmemeval(path: str, *, limit: Optional[int] = None) -> list[dict]:
                                          "abstention_no_gold_evidence"
                                          if qid.endswith("_abs") else ""
                                      )}]})
+    if used_omissions != omissions:
+        raise ValueError('LongMemEval repair manifest contains unused empty-turn omissions')
     return cases
 
 
@@ -468,9 +676,10 @@ LOADERS = {"locomo": load_locomo, "longmemeval": load_longmemeval}
 _PINNED_REVISION = re.compile(r'[0-9a-f]{40}\Z')
 
 
-def source_case_count(path: str) -> int:
+def source_case_count(path: str, *, snapshot: Optional[_JsonSnapshot] = None) -> int:
     """Count source cases before normalization so canonical runs catch drops."""
-    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    snapshot = snapshot or _read_json_snapshot(path)
+    raw = snapshot.value
     return 1 if isinstance(raw, dict) else len(raw) if isinstance(raw, list) else 0
 
 
@@ -503,15 +712,28 @@ def main(argv: Optional[list[str]] = None) -> int:
                          "recommended for turn-level dialogue datasets).")
     ap.add_argument("--json", dest="json_out", default=None,
                     help="Also write the full JSON report to this path.")
+    ap.add_argument("--artifact", default=None,
+                    help="Write a redacted immutable retrieval diagnostic and checksum; never QA.")
+    ap.add_argument("--checkpoint-dir", type=Path, default=None,
+                    help="Private resumable per-case retrieval checkpoints; includes raw dataset text.")
+    ap.add_argument("--restart-interrupted", action="store_true",
+                    help="Restart interrupted local retrieval cases in --checkpoint-dir, retaining prior attempts.")
+    ap.add_argument("--token-budget", type=int, default=1500)
     ap.add_argument('--embed-revision', default=None,
                     help='Optional immutable model revision; required by --canonical.')
     ap.add_argument(
         '--locomo-repair-manifest', default=None,
         help='Hash-bound evidence-reference repairs for a LoCoMo source file.',
     )
+    ap.add_argument('--longmemeval-repair-manifest', default=None,
+                    help='Hash-bound omissions of empty non-answer turns in LongMemEval.')
     args = ap.parse_args(argv)
+    if args.restart_interrupted and args.checkpoint_dir is None:
+        ap.error('--restart-interrupted requires --checkpoint-dir')
     if args.k <= 0:
         ap.error('--k must be a positive integer')
+    if args.token_budget < 0:
+        ap.error('--token-budget must be nonnegative')
     if args.limit is not None and args.limit <= 0:
         ap.error('--limit must be a positive integer')
     if args.canonical and args.limit is not None:
@@ -525,22 +747,51 @@ def main(argv: Optional[list[str]] = None) -> int:
         ap.error('--canonical requires --embed-revision as a lowercase 40-character commit')
     if args.locomo_repair_manifest and args.format != 'locomo':
         ap.error('--locomo-repair-manifest is valid only with --format locomo')
+    if args.longmemeval_repair_manifest and args.format != 'longmemeval':
+        ap.error('--longmemeval-repair-manifest is valid only with --format longmemeval')
 
     dataset_integrity: Optional[dict[str, Any]] = None
+    repair_manifest = args.locomo_repair_manifest or args.longmemeval_repair_manifest
+    repair_manifest_before: Optional[str] = None
     try:
+        source_before = producer_snapshot()
+        dataset_snapshot = _read_json_snapshot(args.dataset)
+        dataset_before = dataset_snapshot.sha256
+        repair_manifest_snapshot = (
+            _read_json_snapshot(repair_manifest) if repair_manifest else None
+        )
+        if repair_manifest_snapshot is not None:
+            repair_manifest_before = repair_manifest_snapshot.sha256
         if args.format == 'locomo':
             cases, dataset_integrity = _load_locomo_with_integrity(
                 args.dataset,
                 limit=args.limit,
                 repair_manifest=args.locomo_repair_manifest,
+                dataset_snapshot=dataset_snapshot,
+                repair_manifest_snapshot=repair_manifest_snapshot,
             )
         else:
-            cases = load_longmemeval(args.dataset, limit=args.limit)
+            cases = load_longmemeval(args.dataset, limit=args.limit,
+                                    repair_manifest=args.longmemeval_repair_manifest,
+                                    dataset_snapshot=dataset_snapshot,
+                                    repair_manifest_snapshot=repair_manifest_snapshot)
+            if args.longmemeval_repair_manifest:
+                if sha256_file(args.longmemeval_repair_manifest) != repair_manifest_before:
+                    raise ValueError("repair manifest changed during normalization")
+                if repair_manifest_snapshot is None:
+                    raise ValueError("repair manifest snapshot unavailable")
+                declaration = repair_manifest_snapshot.value
+                dataset_integrity = {"repair_manifest": {
+                    **declaration, "sha256": repair_manifest_snapshot.sha256,
+                    "applied_empty_turn_omissions": len(declaration['empty_turn_omissions']),
+                }}
+        if repair_manifest and sha256_file(repair_manifest) != repair_manifest_before:
+            raise ValueError("repair manifest changed during normalization")
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         print(f'external dataset rejected: {redact_secrets(str(exc))}', file=sys.stderr)
         return 2
     try:
-        source_cases = source_case_count(args.dataset)
+        source_cases = source_case_count(args.dataset, snapshot=dataset_snapshot)
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         print(f'external dataset rejected: {redact_secrets(str(exc))}', file=sys.stderr)
         return 2
@@ -581,8 +832,22 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     try:
         t0 = time.time()
-        report = run(cases, k=args.k, embedder=embedder,
-                     resolve_conflicts=not args.no_resolve)
+        if args.checkpoint_dir:
+            from eval.external_checkpoints import run_resumable
+            repair = args.locomo_repair_manifest or args.longmemeval_repair_manifest
+            report = run_resumable(cases, directory=args.checkpoint_dir, embedder=embedder,
+                                   k=args.k, token_budget=args.token_budget,
+                                   resolve_conflicts=not args.no_resolve,
+                                   restart_interrupted=args.restart_interrupted,
+                                   binding={"dataset_sha256": dataset_before, "format": args.format,
+                                            "model": args.embed_model if not args.offline else "hashing",
+                                            "revision": args.embed_revision,
+                                            "repair_sha256": repair_manifest_before if repair else None})
+        else:
+            report = run(cases, k=args.k, embedder=embedder, token_budget=args.token_budget,
+                         resolve_conflicts=not args.no_resolve)
+            report.update(checkpoint_status="COMPLETE", completed_cases=len(cases), expected_cases=len(cases),
+                          explicit_local_restarts=0)
         dt = time.time() - t0
         report['embedding'] = {
             'model_id': getattr(embedder, 'model_name', None),
@@ -590,6 +855,12 @@ def main(argv: Optional[list[str]] = None) -> int:
             'dimension': getattr(embedder, 'dim', None),
         }
         report['dataset_sha256'] = dataset_sha256(args.dataset)
+        if report['dataset_sha256'] != dataset_before:
+            raise ValueError("dataset changed during evaluation")
+        if repair_manifest and sha256_file(repair_manifest) != repair_manifest_before:
+            raise ValueError("repair manifest changed during evaluation")
+        if producer_snapshot() != source_before:
+            raise ValueError("producer changed during evaluation")
     except Exception as exc:
         print(f'external evaluation failed ({type(exc).__name__})', file=sys.stderr)
         return 2
@@ -599,6 +870,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         'k': args.k,
         'limit': args.limit,
         'resolve_conflicts': not args.no_resolve,
+        'token_budget': args.token_budget,
     }
     if dataset_integrity is not None:
         report['dataset_integrity'] = dataset_integrity
@@ -609,12 +881,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     report["wall_seconds"] = round(dt, 1)
     report["canonical"] = bool(args.canonical)
     report["source_secret_redactions"] = source_secret_redactions
+    report["semantic_embedding"] = bool(getattr(embedder, 'supports_semantic_search', False))
 
     print(f"\nEngraphis × {args.format} — {report['questions']} questions @ k={args.k} "
           f"({dt:.1f}s)")
-    print(f"  evidence recall@k   : {report['recall_at_k']:.3f}")
-    print(f"  evidence hit@k      : {report['hit_at_k']:.3f}")
-    print(f"  answer_token_recall : {report['answer_token_recall']:.3f}")
+    for label, key in (("evidence recall@k", "recall_at_k"), ("evidence hit@k", "hit_at_k"),
+                       ("answer_token_recall", "answer_token_recall")):
+        value = report[key]
+        display = "unscored" if value is None else f"{value:.3f}"
+        print(f"  {label:<19} : {display}")
     print(f"  retrieval scored    : {report['scored_questions']}/{report['questions']} "
           f"(exclusions={len(report['exclusions'])})")
     if source_secret_redactions:
@@ -627,6 +902,34 @@ def main(argv: Optional[list[str]] = None) -> int:
             print(f'external report could not be written: {exc}', file=sys.stderr)
             return 2
         print(f"  report written      : {args.json_out}")
+    if args.artifact:
+        try:
+            artifact = diagnostic_artifact(
+                report, dataset=args.dataset,
+                repair_manifest=args.locomo_repair_manifest or args.longmemeval_repair_manifest,
+                source_snapshot=source_before,
+                dataset_snapshot=dataset_snapshot,
+                repair_manifest_snapshot=repair_manifest_snapshot,
+            )
+            _, producer_names = _producer_source_manifest(Path(__file__).resolve().parents[1], source_before)
+            expected_sources = [("inputs/dataset", dataset_before)] + list(
+                zip(producer_names, source_before.values())
+            )
+            if repair_manifest_before is not None:
+                expected_sources.append(("inputs/repair_manifest", repair_manifest_before))
+            observed_sources = [(item["name"], item["sha256"]) for item in artifact["suite"]["sources"]]
+            if (artifact["suite"]["sha256"] != dataset_before
+                    or observed_sources != expected_sources
+                    or artifact["protocol"]["config"]["repair_manifest_sha256"] != repair_manifest_before):
+                raise ValueError("diagnostic artifact does not match the evaluated producer or data snapshots")
+            write_canonical_artifact(artifact, args.artifact)
+        except (OSError, TypeError, ValueError) as exc:
+            print(
+                f'external artifact could not be written: {redact_secrets(str(exc))}',
+                file=sys.stderr,
+            )
+            return 2
+        print(f"  public diagnostic   : {args.artifact}")
     return 0
 
 

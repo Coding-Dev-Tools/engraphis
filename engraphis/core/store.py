@@ -84,6 +84,16 @@ class SavepointError(RuntimeError):
     """A sub-operation could not settle; its enclosing transaction must abort."""
 
 
+class ReceiptChainIntegrityError(sqlite3.IntegrityError):
+    """The receipt chain has no safe predecessor for a new append.
+
+    The Store deliberately refuses to guess which branch is authoritative when a
+    chain is forked, cyclic, or disconnected.  High-level service operations may
+    catch this specific error after their primary work has completed and report the
+    missing audit receipt without hiding the underlying verification failure.
+    """
+
+
 # Rows materialized per locked batch when streaming the vector table (see iter_vectors).
 VECTOR_SCAN_BATCH = 2000
 _STARTUP_GRAPH_TRANSFORMS = {"edge_supports": 1, "live_edge_deduplication": 1}
@@ -493,6 +503,8 @@ _PUBLIC_RECEIPT_LABELS_BY_KEY = {
     },
     "layer": {"temporal", "entity", "causal", "semantic"},
     "retrieval_profile": {"balanced", "auto", "lexical", "graph", "code"},
+    "retrieval_recipe": {"default", "conversation", "long_session"},
+    "packing_mode": {"legacy", "coverage"},
     "candidate_depth": {"fixed", "adaptive"},
     "response_mode": {"full", "compact"},
     "adaptive_mode": {
@@ -517,7 +529,8 @@ def _receipt_metadata(metadata: dict) -> dict:
         "attachments", "wikilinks", "aliases", "tags", "symbols", "edges",
         "entities", "relations", "tables", "dry_run", "error_count",
         "entities_added", "relations_added",
-        "retrieval_profile", "candidate_depth", "candidate_k_requested",
+        "retrieval_profile", "retrieval_recipe", "packing_mode", "candidate_depth",
+        "candidate_k_requested",
         "candidate_k_used", "response_mode", "historical", "token_usage",
         "adaptive_mode", "action_id", "schema_version", "result_mode",
     }
@@ -533,6 +546,13 @@ def _receipt_metadata(metadata: dict) -> dict:
         if safe_key not in allowed:
             continue
         value = metadata[key]
+        if safe_key == "packing_mode":
+            # This is a public label, never a generic count or arbitrary scalar.
+            # Service callers pass the already-normalized validated mode; direct
+            # store callers with another type must not create a mode-shaped value.
+            if isinstance(value, str):
+                out[safe_key] = content_free_label(safe_key, value)
+            continue
         if safe_key in _IMPORT_RECEIPT_COUNT_KEYS:
             # Import summaries are counts, never arbitrary floats/labels.  Reject
             # booleans and clamp adversarially large values so the durable public
@@ -597,7 +617,9 @@ _PUBLIC_RECEIPT_METADATA_KEYS = {
     "files_rejected", "files_missing", "files_errored", "conflicts",
     "warnings", "attachments", "wikilinks", "aliases", "tags",
     "entities", "relations", "tables", "dry_run", "error_count",
-    "entities_added", "relations_added", "retrieval_profile", "candidate_depth",
+    "entities_added", "relations_added", "retrieval_profile", "retrieval_recipe",
+    "packing_mode",
+    "candidate_depth",
     "candidate_k_requested", "candidate_k_used", "response_mode", "historical",
     "token_usage", "adaptive_mode", "action_id", "schema_version", "result_mode",
 }
@@ -761,6 +783,15 @@ def _public_receipt_row(row: dict) -> dict:
                     or not math.isfinite(float(usage_value))
                 ):
                     return invalid
+        elif key == "packing_mode":
+            if not (
+                isinstance(value, str)
+                and (
+                    value in _PUBLIC_RECEIPT_LABELS_BY_KEY["packing_mode"]
+                    or _PUBLIC_RECEIPT_HASHED_LABEL.fullmatch(value)
+                )
+            ):
+                return invalid
         elif isinstance(value, str):
             public_labels = _PUBLIC_RECEIPT_LABELS_BY_KEY.get(key, set())
             if not (
@@ -8643,7 +8674,9 @@ class Store:
         workspace/repo names, raw ids, and actor identity. Scope and actor are represented
         by one-way digests. Receipts are chained per workspace and the current count/head
         is anchored independently, so modification, reordering, interior deletion, and
-        tail truncation are detectable during verification.
+        tail truncation are detectable during verification. If a fork, cycle, or disconnected
+        chain leaves no unique structural head, this method raises ``ReceiptChainIntegrityError``
+        instead of guessing which branch to extend.
         """
         operation = str(operation or "unknown")
         operation_normalized = operation.strip().casefold()
@@ -8733,7 +8766,7 @@ class Store:
                     # predecessor can still be extended without retrying the memory action.
                     chain = self._receipt_chain_state(workspace_id)
                     if chain["structure_errors"]:
-                        raise sqlite3.IntegrityError(
+                        raise ReceiptChainIntegrityError(
                             "receipt chain has no unique structural head; append refused"
                         )
                     current_count = len(chain["rows"])

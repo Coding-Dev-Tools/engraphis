@@ -18,7 +18,9 @@ ENV PYTHONUNBUFFERED=1 \
     # Customer-side cloud session and entitlement display cache. Keep it on /data rather
     # than the container's ephemeral home so reconnects do not lose rotated credentials.
     # License issuance, trial state, leases, and revocations remain private services.
-    ENGRAPHIS_STATE_DIR=/data/.engraphis
+    ENGRAPHIS_STATE_DIR=/data/.engraphis \
+    # Dashboard-managed non-secret settings must survive a Railway redeploy with the volume.
+    ENGRAPHIS_ENV_FILE=/data/.engraphis/config.env
 
 WORKDIR /app
 
@@ -33,6 +35,8 @@ RUN apt-get update \
 COPY pyproject.toml README.md LICENSE NOTICE ./
 COPY engraphis ./engraphis
 COPY scripts ./scripts
+# The declared distribution license assets are part of the package build metadata.
+COPY deploy ./deploy
 
 # Railway runs CPU workloads.  Install the CPU-only PyTorch wheel before the embedding
 # stack so pip cannot select PyPI's multi-gigabyte CUDA dependency chain.  The public
