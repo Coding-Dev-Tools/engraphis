@@ -625,3 +625,10 @@ def test_public_capability_and_support_docs_match_the_shipped_tree():
     assert "private repository" in normalized_readme
     assert not (ROOT / "docs" / "COMMERCIAL_OPERATIONS.md").exists()
     assert not (ROOT / ".github" / "workflows" / "commercial-backup.yml").exists()
+
+
+def test_grype_configuration_ignores_upstream_cpython_cves():
+    grype = _text(".grype.yaml")
+    assert 'vulnerability: "CVE-2026-82049"' in grype
+    assert 'name: "stdlib"' in grype
+    assert 'type: "go-module"' in grype
