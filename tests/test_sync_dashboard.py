@@ -5,6 +5,8 @@ fresh DB per test, mirroring tests/test_dashboard_v2.py. The relay is stubbed wi
 transport so no network is touched; the real client↔server round-trip is covered by
 tests/test_sync_relay.py.
 """
+import base64
+
 import pytest
 
 pytest.importorskip("fastapi", reason="full-stack extra not installed")
@@ -16,12 +18,18 @@ from engraphis.config import DEFAULT_RELAY_URL, settings  # noqa: E402
 from engraphis.service import MemoryService  # noqa: E402
 
 
-def _client(monkeypatch, tmp_path, *, cloud=False):
+VALID_SYNC_KEY = base64.urlsafe_b64encode(bytes(range(32))).decode().rstrip("=")
+
+
+def _client(monkeypatch, tmp_path, *, cloud=False, key=None):
     db = str(tmp_path / "dash.db")
     monkeypatch.setattr(settings, "db_path", db)
     monkeypatch.setattr(settings, "embed_model", "")
     monkeypatch.setenv("ENGRAPHIS_EMBED_MODEL", "")
     monkeypatch.setenv("ENGRAPHIS_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.delenv("ENGRAPHIS_SYNC_E2EE_KEY", raising=False)
+    if key is not None:
+        monkeypatch.setenv("ENGRAPHIS_SYNC_E2EE_KEY", key)
     if cloud:
         monkeypatch.setenv("ENGRAPHIS_CLOUD_ACCESS_TOKEN", "cloud-access-token-" + "x" * 32)
         monkeypatch.setenv("ENGRAPHIS_CLOUD_ORGANIZATION_ID", "org_test")
@@ -57,8 +65,11 @@ class _FakeTransport:
 def test_sync_status_locked_without_key(monkeypatch, tmp_path):
     with _client(monkeypatch, tmp_path) as c:
         d = c.get("/api/sync/status").json()
-        assert d["available"] is False        # no plan/key → button shows "sign in"
+        assert d["available"] is False
+        assert d["ready"] is False
         assert d["has_key"] is False
+        assert d["key_state"] == "missing"
+        assert d["local_prerequisites_ready"] is False
         assert d["relay_url"].startswith("https://")   # defaults to the managed relay
         assert d["last"] is None
 
@@ -81,12 +92,56 @@ def test_sync_run_requires_license(monkeypatch, tmp_path):
         assert c.post("/api/sync/run", json={}).status_code == 402
 
 
-def test_sync_status_ready_with_cloud_session(monkeypatch, tmp_path):
+def test_sync_status_connected_without_key_is_not_ready(monkeypatch, tmp_path):
     with _client(monkeypatch, tmp_path, cloud=True) as c:
         d = c.get("/api/sync/status").json()
         assert d["available"] is True
+        assert d["ready"] is False
         assert d["has_key"] is False
+        assert d["key_state"] == "missing"
         assert d["has_cloud_session"] is True
+
+
+def test_sync_status_rejects_invalid_key_without_echoing_it(monkeypatch, tmp_path):
+    invalid_key = "malformed-sync-key"
+    with _client(monkeypatch, tmp_path, cloud=True, key=invalid_key) as c:
+        d = c.get("/api/sync/status").json()
+    assert d["available"] is True
+    assert d["ready"] is False
+    assert d["has_key"] is False
+    assert d["key_state"] == "invalid"
+    assert invalid_key not in repr(d)
+
+
+def test_sync_status_ready_with_valid_key_and_read_only_pull(monkeypatch, tmp_path):
+    pytest.importorskip("cryptography.hazmat.primitives.ciphers.aead")
+    monkeypatch.setenv("ENGRAPHIS_SYNC_READ_ONLY", "1")
+    with _client(monkeypatch, tmp_path, cloud=True, key=VALID_SYNC_KEY) as c:
+        d = c.get("/api/sync/status").json()
+    assert d["available"] is True
+    assert d["ready"] is True
+    assert d["has_key"] is True
+    assert d["key_state"] == "ready"
+    assert d["encryption_available"] is True
+    assert d["local_prerequisites_ready"] is True
+    assert d["read_only"] is True
+    assert VALID_SYNC_KEY not in repr(d)
+
+
+def test_sync_status_detects_missing_encryption_dependency(monkeypatch, tmp_path):
+    from engraphis.backends import sync_relay
+
+    def missing_crypto(_key):
+        raise sync_relay.RelayError("encryption dependency unavailable", status=409)
+
+    monkeypatch.setattr(sync_relay, "_new_e2ee_cipher", missing_crypto)
+    with _client(monkeypatch, tmp_path, cloud=True, key=VALID_SYNC_KEY) as c:
+        d = c.get("/api/sync/status").json()
+    assert d["has_key"] is True
+    assert d["key_state"] == "ready"
+    assert d["encryption_available"] is False
+    assert d["local_prerequisites_ready"] is False
+    assert d["ready"] is False
 
 
 def test_sync_run_pushes_and_records_summary(monkeypatch, tmp_path):

@@ -80,6 +80,12 @@ credential cannot be redirected. The CLI intentionally has no secret-valued `--r
 `--relay-e2ee-key` flags. A missing or malformed key stops Cloud Sync rather than uploading a
 plaintext bundle.
 
+`engraphis connect --token ...` saves the Cloud account session; it does not create or save the
+separate encryption key. Set `ENGRAPHIS_SYNC_E2EE_KEY` in the process environment or the
+owner-private `~/.engraphis/config.env`, then restart the local dashboard. The Sync status shows
+only whether the key is valid and the local encryption dependency is installed, never the key
+itself. A read-only pull still needs the same key to decrypt received bundles.
+
 ```bash
 python -c "import base64, secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode().rstrip('='))"
 ```
