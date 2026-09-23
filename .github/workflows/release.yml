@@ -661,6 +661,7 @@ jobs:
         # production image only for this check.
         shell: bash
         run: |
+          set -euo pipefail
           audit_dir="$(mktemp -d)"
           container="engraphis-release-audit-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           cleanup() {
@@ -672,7 +673,9 @@ jobs:
           docker create --name "$container" engraphis:release >/dev/null
           site_packages=$(docker run --rm engraphis:release python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))")
           docker cp "$container:$site_packages/." "$audit_dir"
-          python -m pip_audit --path "$audit_dir"
+          python scripts/pin_installed_audit_requirements.py "$audit_dir" > "$RUNNER_TEMP/published-audit-requirements.txt"
+          python -m pip_audit --vulnerability-service osv --path "$audit_dir"
+          python -m pip_audit --vulnerability-service pypi --no-deps --disable-pip -r "$RUNNER_TEMP/published-audit-requirements.txt"
       - name: Run customer-mode readiness smoke
         shell: bash
         run: |
