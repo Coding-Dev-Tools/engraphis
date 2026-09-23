@@ -1,4 +1,6 @@
+import hashlib
 import json
+from pathlib import Path
 
 import pytest
 
@@ -85,6 +87,53 @@ def test_hash_bound_manifest_applies_exact_repair_and_records_provenance(tmp_pat
     assert provenance["sha256"] == external.dataset_sha256(str(manifest))
     assert provenance["dataset_sha256"] == external.dataset_sha256(str(dataset))
     assert provenance["applied_repairs"] == repairs
+
+
+def test_locomo_manifest_receipt_stays_bound_to_the_parsed_bytes(tmp_path, monkeypatch):
+    dataset = _write_locomo(tmp_path, ["BROKEN"])
+    repairs = [{
+        "case_id": "conv-test", "question_index": 0,
+        "from": "BROKEN", "to": "D1:2",
+    }]
+    manifest = _write_manifest(tmp_path, dataset, repairs)
+    original_manifest = manifest.read_bytes()
+    replacement_manifest = json.dumps({
+        "schema": "engraphis-locomo-repair/v1",
+        "dataset_sha256": external.dataset_sha256(str(dataset)),
+        "repairs": [{**repairs[0], "to": "D1:1"}],
+    }).encode("utf-8")
+    read_bytes = Path.read_bytes
+    read_text = Path.read_text
+    replaced = False
+
+    def replace_after_read(path, *args, **kwargs):
+        nonlocal replaced
+        payload = read_bytes(path) if path == manifest else None
+        if path == manifest:
+            if not replaced:
+                replaced = True
+                manifest.write_bytes(replacement_manifest)
+            return payload
+        return read_bytes(path)
+
+    def replace_after_text(path, *args, **kwargs):
+        nonlocal replaced
+        text = read_text(path, *args, **kwargs)
+        if path == manifest and not replaced:
+            replaced = True
+            manifest.write_bytes(replacement_manifest)
+        return text
+
+    monkeypatch.setattr(Path, "read_bytes", replace_after_read)
+    monkeypatch.setattr(Path, "read_text", replace_after_text)
+    cases, integrity = external._load_locomo_with_integrity(
+        str(dataset), repair_manifest=str(manifest),
+    )
+
+    assert cases[0]["questions"][0]["supporting"] == ["D1:2"]
+    assert integrity["repair_manifest"]["applied_repairs"] == repairs
+    assert integrity["repair_manifest"]["sha256"] == hashlib.sha256(original_manifest).hexdigest()
+    assert manifest.read_bytes() == replacement_manifest
 
 
 def test_repair_manifest_can_remove_a_stray_token_without_dropping_the_question(tmp_path):

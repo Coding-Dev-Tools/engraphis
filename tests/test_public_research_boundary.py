@@ -125,6 +125,14 @@ def test_public_narrative_has_no_named_competitor_positioning():
         ROOT / "CHANGELOG.md",
         ROOT / "docs" / "DOCUMENT_IMPORT.md",
         ROOT / "docs" / "OBSIDIAN_IMPORT.md",
+        ROOT / "docs" / "BENCHMARK_CHANGE_COVERAGE.md",
+    }
+    # Explicit benchmark methods and observed-result boundaries must identify the
+    # products under test. This is not an exception for product positioning or
+    # private research, and it deliberately does not cover README/BENCHMARKS.
+    named_benchmark_docs = {
+        ROOT / "docs" / "BENCHMARK_EXPANSION_RUNBOOK.md",
+        ROOT / "docs" / "BENCHMARK_EXPANSION_RESULTS.md",
     }
     private_research_phrases = (
         "commercial audit",
@@ -137,9 +145,12 @@ def test_public_narrative_has_no_named_competitor_positioning():
     )
     for path in public_markdown:
         content = path.read_text(encoding="utf-8").casefold()
-        forbidden_names = (
-            named_competitors[1:]
-            if path in obsidian_integration_docs else named_competitors
+        forbidden_names = ("obsidian", "letta") if path in named_benchmark_docs else (
+            named_competitors[1:] if path in obsidian_integration_docs else named_competitors
         )
+        if path in named_benchmark_docs:
+            assert "mem0 oss" in content and "graphiti" in content
+            assert "pin" in content and "unsupported" in content
+            assert "BENCHMARK_STAGE_BUDGETS.md".casefold() in content
         assert all(name not in content for name in forbidden_names), path
         assert all(phrase not in content for phrase in private_research_phrases), path

@@ -158,6 +158,23 @@ def test_compact_payload_mirrors_packed_mcp_sources_in_ordinal_order():
     assert compact["usage"]["context_tokens"] == 12
 
 
+def test_packed_quality_scores_the_rendered_context(monkeypatch):
+    calls = []
+
+    def fake_quality(tags, texts, question):
+        calls.append((tags, texts))
+        return {"recall_at_k": 1.0, "hit_at_k": 1.0, "answer_token_recall": 1.0}
+
+    monkeypatch.setattr(performance, "_quality_metrics", fake_quality)
+    performance.run(DATASET, k=2, warmups=0, iterations=1)
+
+    assert len(calls) == 2
+    packed_texts = calls[1][1]
+    assert len(packed_texts) == 1
+    assert packed_texts[0].startswith("[1]")
+    assert "PASETO v4" in packed_texts[0]
+
+
 @pytest.mark.parametrize(
     ("config", "question_count", "message"),
     [

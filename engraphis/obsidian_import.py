@@ -29,6 +29,7 @@ from engraphis.core.obsidian import (
     normalize_obsidian_path,
     parse_obsidian_note,
 )
+from engraphis.core.store import ReceiptChainIntegrityError
 
 
 _SAFE_ERROR = "note import failed"
@@ -1555,11 +1556,13 @@ class ObsidianImporter:
     ) -> None:
         counts = report.get("counts", {})
         summary = report.get("summary", {})
-        self.store.record_receipt(
-            self.RECEIPT_OPERATION, workspace_id=workspace_id, repo_id=repo_id or "",
-            actor=actor, target_count=int(counts.get(self.COUNT_KEY, 0)),
-            status=str(report.get("state") or "partial"),
-            metadata={
+        receipt_kwargs = {
+            "workspace_id": workspace_id,
+            "repo_id": repo_id or "",
+            "actor": actor,
+            "target_count": int(counts.get(self.COUNT_KEY, 0)),
+            "status": str(report.get("state") or "partial"),
+            "metadata": {
                 "files_imported": int(counts.get("imported", 0)),
                 "files_updated": int(counts.get("updated", 0)),
                 "files_renamed": int(counts.get("renamed", 0)),
@@ -1574,7 +1577,22 @@ class ObsidianImporter:
                 "aliases": int(summary.get("aliases", 0)),
                 "tags": len(summary.get("tags", [])),
             },
-        )
+        }
+        recorder = getattr(self.service, "_record_receipt", None)
+        if callable(recorder):
+            recorder(self.RECEIPT_OPERATION, response=report, **receipt_kwargs)
+            return
+        try:
+            self.store.record_receipt(self.RECEIPT_OPERATION, **receipt_kwargs)
+        except ReceiptChainIntegrityError:
+            report["receipt"] = None
+            report["receipt_warning"] = {
+                "code": "receipt_chain_integrity_failure",
+                "message": (
+                    "operation completed, but its audit receipt was not recorded because "
+                    "the existing receipt chain is structurally invalid"
+                ),
+            }
 
 
 __all__ = [

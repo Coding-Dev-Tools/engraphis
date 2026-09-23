@@ -3,20 +3,105 @@
 This guide explains what Engraphis measures, how to reproduce each evaluation, and the limits of
 those results. When this document and the code disagree, the code is the source of truth.
 
+The current expansion has a separate [results and workload report](docs/BENCHMARK_EXPANSION_RESULTS.md),
+[execution runbook](docs/BENCHMARK_EXPANSION_RUNBOOK.md), and
+[proposed stage budgets](docs/BENCHMARK_STAGE_BUDGETS.md). Completed external retrieval diagnostics
+are review artifacts with explicit denominators and uncertainty. The coding pilot uses Codex
+OAuth only and retains fixture exclusions and interrupted calls. Official QA, competitor
+scores and capacity qualification remain separate experiments.
+
 For the locked operator sequence for a public canonical run, see
 [`docs/PUBLIC_BENCHMARK_RUNBOOK.md`](docs/PUBLIC_BENCHMARK_RUNBOOK.md).
+
+The current measured improvement priorities and their evidence boundaries are in
+[`docs/BENCHMARK_IMPROVEMENT_PRIORITIES.md`](docs/BENCHMARK_IMPROVEMENT_PRIORITIES.md).
+The implementation exposes three opt-in comparison controls: `packing_mode="coverage"`
+for complete evidence units across sources, source-bound `exact_value` fields on the
+Smart/Classic/service write paths, and `retrieval_recipe="conversation"` or `"long_session"`
+for the measured depth/budget starting points. `"legacy"` packing and `"default"`
+retrieval remain the defaults until development, validation and untouched-holdout gates
+show a workload-specific benefit.
+
+`python -m eval.evidence_contracts` checks exact-action validation and compares
+legacy and coverage packing on small deterministic development fixtures. It runs
+in the full offline CI matrix and the NumPy-only Python 3.9 job. These fixtures
+test boundary correctness; they do not estimate external QA or model task success. The
+[current diagnostic](docs/benchmark-evidence/evidence-contracts-20260921-v11.json)
+withholds the unchanged oversized, unpunctuated fixture at its 24-token budget:
+no fitting sentence boundary proves that the remaining condition text can be dropped.
+The prior literal-preservation result remains in the historical artifact. Tight budgets
+can therefore return fewer exact values under the complete-group contract.
+Action contracts also require the host to supply the actual source text when creating
+and validating a contract. The source revision digest and literal offsets must match;
+four additional diagnostic cases reject forged or stale bindings. Authorization
+remains the responsibility of the trusted host.
+Eight fixed query-window cases also check that unrelated bound values cannot displace the
+requested evidence. Their original retention expectations remain unchanged: 4/8 passed on
+`0244c45f`, 8/8 on `c3a86295`, and 5/8 under the current complete-source rule. Three tight
+bound-value cases now withhold their binding. A separate source-completeness gate checks
+the same eight inputs, improving from 5/8 to 8/8, including roomy binding controls.
+These development fixtures and their source hashes remain separate from external quality
+measurements.
+
+Five safe-withholding cases improve from 0/5 against `65f4becd` to 5/5. A separate
+five-case retention population exposes a tradeoff: the earlier v8 implementation
+retained the expected literals in 5/5 cases, while the complete-unit rule retains
+0/5 at those unchanged tight budgets. These unpunctuated records do not fit as
+complete units. Their original inputs, expected literals and outcomes remain in
+the diagnostic; safe omission is not counted as successful literal retention.
+
+Eight distant-restriction cases improve from 5/8 on `98e8f5c2` to 8/8, including
+roomy retention controls. Exact binding now requires the complete meaningful source,
+regardless of language or recognized qualifier words. Boundary whitespace may be trimmed
+only outside the literal. Coverage withholds the bound occurrence when that source cannot
+fit, while it may still select other unbound evidence. This also prevents
+`Only use ALPHA in production` from becoming `Only use ALPHA`. Complete-unit safety
+remains 16/16 against 8/16 on `98e8f5c2` in its separate diagnostic and CI gate.
+Headers, titles and source attribution remain inside the budget; expansion cannot restore
+an incomplete binding. This conservative rule retains source text without inferring its
+meaning or authorizing a downstream action.
+
+The default legacy packer also withholds exact binding metadata when its selected
+excerpt omits part of the complete source. Eight fixed cases improve
+from 4/8 on `833e3e92` to 8/8: four incomplete bindings are suppressed and four
+complete bindings remain. All eight retain identical context text and token
+accounting. The literal can still appear as ordinary text; this diagnostic measures
+binding safety, not a retrieval or answer-quality gain.
+
+Twelve additional French, Chinese and English-synonym cases exercise both modes at fixed
+budgets. Against `c3a86295`, the complete binding contract improves from 10/12 to 12/12
+for legacy and from 5/12 to 12/12 for coverage. Unsafe bindings fall from two to zero
+and seven to zero, respectively. Coverage literal leaks fall from seven to zero; all five
+roomy controls retain their exact bindings in both modes. Independent token accounting
+matches the rendered context and all budgets are honored. The gate separately rejects
+omitted roomy bindings, incorrect spans and token-accounting errors. This is a fixed
+development population, not a claim of general multilingual understanding.
+
+Corpus replay rejects non-boolean trust and answerability labels before execution.
+Direct campaign records also require boolean trust labels and reject contradictory
+nested trust metadata. Peer evidence IDs must name a recorded source; returned
+backend IDs must agree with that source or resolve through recorded episode lineage.
+Frozen campaign scope and trust take precedence over peer labels, and unrecognized labels
+remain unknown. Core/service recall results report the recipe's effective output
+limit as `effective_k`; recall receipts preserve it as `metadata.k` together with
+`retrieval_recipe` and normalized `packing_mode`, independently of the number of
+results actually returned. Historical receipts without a mode remain valid and
+do not acquire an inferred value.
+Campaign adapters report the frozen manifest's evaluated revision; direct adapters
+retain `unknown` provenance unless explicitly bound. These checks protect result
+interpretation and do not count as additional benchmark-quality gains.
 
 ### Public numeric evidence registry
 
 Every exact public aggregate retained below comes from the checked-in, public-safe
-[`offline-fixtures-v9.json`](docs/benchmark-evidence/offline-fixtures-v9.json) artifact. Its
+[`offline-fixtures-v70.json`](docs/benchmark-evidence/offline-fixtures-v70.json) artifact. Its
 SHA-256 is
-`455fc9d32a236e582a49aaaf9b84f30cae2573dc6ed982f4dd7dd845afcaf24c`, also recorded in the
+`a8a96cb4d096ee72131d60307cc95b95f5b09716e813d9ee07090578dc1439c3`, also recorded in the
 adjacent `.sha256` file. The artifact contains no raw questions, answers, prompts, customer data,
 or per-record content fingerprints.
 
 The fixture-suite digest is
-`c8976cf0989e82f57810b99bf19f2ee3f860d07726bcb28479a319a19f00f94f`. The artifact defines
+`6e2db2abb278af9a48ac8309564fc3fca315806861d5739d3a24a02034f19305`. The artifact defines
 the digest algorithm and records the SHA-256 of every suite and dataset file. Each evidence ID
 also binds its exact command through `sha256(UTF-8 exact command)`:
 
@@ -26,10 +111,31 @@ also binds its exact command through `sha256(UTF-8 exact command)`:
 | `offline-performance` | `python -m eval.performance --dataset eval/datasets/codemem.jsonl --k 5 --iterations 10 --json` | `bbe4aca81e58d4830e50a8fc7729a1d15b71d97a6299bccd79432b7f119677d7` |
 | `offline-grounded` | `python -m eval.grounded` | `590442e51e3642c10489165759919dc86ffac62c182937330c153e7f8d5fc26f` |
 
-External, model-dependent, latency, consolidation, and productivity numbers are not published
-until a redacted immutable artifact with the same three bindings exists. Use the
-[public benchmark runbook](docs/PUBLIC_BENCHMARK_RUNBOOK.md) to produce that evidence; absence
-from this registry means no public number is claimed.
+External, model-dependent, latency, consolidation, and productivity numbers are not included in
+this offline registry unless a redacted immutable artifact with the same three bindings exists. Use
+the [public benchmark runbook](docs/PUBLIC_BENCHMARK_RUNBOOK.md) to produce registry evidence.
+Completed retrieval-only diagnostics are documented separately in the
+[benchmark expansion results](docs/BENCHMARK_EXPANSION_RESULTS.md); absence from this registry
+means no number is claimed in this offline registry.
+
+The context-efficiency chart is generated from the registry values and the selected report schema.
+Historical LoCoMo, graph, handoff, consolidation, and security figures remain preserved in their
+source artifacts but are omitted from the current chart until each has a matching immutable,
+public-safe artifact. The chart labels coding outcomes, external datasets, and operational
+capacity as pending evaluation tracks rather than implying scores. Regenerate it with
+`python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-v70.json --output docs/images/context-efficiency.svg` after selecting the report to publish.
+
+The companion examples are also generated from that artifact with
+`python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-v70.json --output docs/images/evidence-backed-agent-examples.svg`.
+The historical-to-executable mapping is in
+[`docs/BENCHMARK_CHANGE_COVERAGE.md`](docs/BENCHMARK_CHANGE_COVERAGE.md).
+
+Fresh diagnostics retain explicit source-case identities so confidence intervals
+cluster whole conversations even when question IDs do not encode their case.
+Metrics with no eligible questions remain `null` (unscored), including fresh and
+resumed runs. Artifact parsing, checksum validation, and queue receipts bind the
+same byte snapshot. Comparisons require consistent dataset and repair bindings
+while allowing the producer implementation to change between versions.
 
 ## What we measure today (all offline, no API key)
 
@@ -69,13 +175,17 @@ frontier-model QA score.
   lexical + graph + fusion + scoring + rerank + packing path after warmup, with reinforcement
   disabled so repeated measurements do not mutate their corpus. It reports p50/p95/p99 latency,
   retrieval quality, packed context tokens, and full/compact JSON-shape payload proxies in one
-  JSON-safe schema. Payload proxies are sampled once per question, independently of the number
-  of timed iterations; they are not serialized MCP envelopes or transport responses. In the
-  registered CodeMem run, 26 payload samples total **23,810** full-proxy
-  `engraphis.regex.v1` tokens versus **10,982** compact-proxy tokens, avoiding **12,828** proxy
-  tokens (**53.88% lower**), while 260 recalls are timed. Packed context across the same 26
+  JSON-safe schema. Its legacy `quality` fields score all candidate chunks returned before
+  context packing; additive `packed_quality` fields score only chunks admitted to reader context.
+  Payload proxies are sampled once per question, independently of the number of timed iterations;
+  they are not serialized MCP envelopes or transport responses. In the
+  registered CodeMem run, 26 payload samples total **24,590** full-proxy
+  `engraphis.regex.v1` tokens versus **11,138** compact-proxy tokens, avoiding **13,452** proxy
+  tokens (**54.71% lower**), while 260 recalls are timed. Packed context across the same 26
   samples averages **85.38** tokens and reaches **108** under a 1,500-token cap; Recall@5,
-  hit@5, and answer-token recall remain 1.000. These aggregates are evidence ID
+  hit@5, and answer-token recall remain 1.000 for the legacy candidate-page view. The registered
+  v9 artifact predates `packed_quality`, so no packed-quality aggregate is published from it.
+  These aggregates are evidence ID
   `offline-performance` in the registry above. `--filler-memories`, `--candidate-k`, and
   `--retrieval-profile` make scaling and routing experiments executable, but their results need
   separate evidence before publication.
@@ -149,8 +259,9 @@ python -m eval.performance --dataset fixed-1000-plus.jsonl --acceptance-matrix -
 # External retrieval diagnostics (downloads all-MiniLM-L6-v2; not QA/leaderboard results)
 python -m eval.external --dataset longmemeval_s.json --format longmemeval --k 10
 python -m eval.external --dataset locomo10.json      --format locomo      --k 10
-# Complete external-dataset coverage with an immutable embedding revision. This remains a
-# private diagnostic; it is not an official benchmark-harness or public evidence artifact.
+# Complete external-dataset coverage with an immutable embedding revision. These runs are
+# retrieval-only diagnostics, not official benchmark-harness or leaderboard results. Completed
+# public-safe artifacts and measured results are listed in the benchmark expansion report.
 python -m eval.external --dataset longmemeval_s.json --format longmemeval --canonical \
   --embed-revision <40-character-model-commit> --json external-longmemeval.json
 python -m eval.external --dataset locomo10.json --format locomo --canonical --no-resolve \
@@ -173,12 +284,11 @@ names every remaining replacement/removal, must be fully consumed, and is record
 report with its own hash. Any source update, unused repair, or unresolved ID fails the run. This
 repairs retrieval references only; it does not claim to correct LoCoMo's semantic answer labels.
 
-A private pinned retrieval diagnostic was inspected during development, but its result artifact is
-not checked into the public evidence registry. This document therefore publishes none of that
-run's workload counts or scores. Reproduce it from the hash-bound source and repair manifest,
-export a public-safe immutable artifact, and validate its checksum before adding quantitative
-claims. Any future values remain evidence-retrieval metrics, not end-to-end QA accuracy or an
-official LoCoMo leaderboard score.
+The earlier private pinned retrieval diagnostic was the pre-publication state. Current complete
+LoCoMo and LongMemEval retrieval diagnostics are retained as separate public-safe artifacts in the
+[benchmark expansion report](docs/BENCHMARK_EXPANSION_RESULTS.md), with source, model, configuration
+and checksum boundaries. Those values remain evidence-retrieval metrics, not end-to-end QA accuracy
+or an official LoCoMo leaderboard score.
 
 ## What we do NOT yet claim
 
@@ -198,6 +308,14 @@ stratified or paired bootstrap confidence intervals. Every run names its token c
 Noncanonical offline fixtures may identify a deterministic estimate; canonical public evidence
 requires the exact pinned reader tokenizer and immutable model revision. The lightweight CI
 fixtures validate that machinery; they are not a claim about external benchmark performance.
+
+Public journey and external retrieval exports identify producer code by unique
+repository-relative source names. Private dataset, conversation, repair, and
+LongMemEval-V2 inputs use stable role names such as `inputs/dataset` or
+`inputs/haystack`; their directories are never published.
+Each name remains bound to its SHA-256 and byte count. The shared envelope keeps
+basename-only defaults for other callers and historical artifacts; exporters opt in
+with explicit `source_names` and verify the completed envelope against evaluated bytes.
 
 The benchmark context metric reads strict recall usage fields rather than inferring prompt size:
 `budget_tokens`, `context_tokens`, `source_tokens`, `saved_tokens`, `savings_ratio`,
@@ -314,15 +432,15 @@ Use `--artifact` on any of these commands to write a redacted, immutable evidenc
 an adjacent SHA256 file. The ordinary console/`--json` report is private run material and may
 contain source questions for debugging.
 
-### Upstream-data diagnostics awaiting public artifacts
+### Upstream-data diagnostics and publication scope
 
-The LoCoMo-Plus, MemoryAgentBench, and Mem2ActBench adapters have been exercised against upstream
-data and exposed useful product gaps. Their earlier local envelopes are not present in the
-checked-in evidence registry, so this document withholds their case counts, retrieval scores,
-token coverage, and throughput measurements. Rerun each adapter with `--artifact`, publish the
-redacted immutable envelope and checksum, and add its suite/config binding before quoting a
-number. Until then these lanes demonstrate executable plumbing only, not leaderboard,
-answer-quality, or marketing results.
+The LoCoMo-Plus and MemoryAgentBench adapters have been exercised against upstream data and remain
+queued for their own public-safe retrieval artifacts. Rerun each pending adapter with `--artifact`,
+publish the redacted immutable envelope and checksum, and add its suite/config binding before
+quoting a number. Mem2ActBench's declared small retrieval diagnostic is complete and has a checked-in
+artifact; its exclusion and memory-cardinality figures are source-preparation metadata in the
+public source lock, not product or action-success metrics. None of these lanes is an official
+leaderboard, answer-quality, or marketing result.
 
 The MemoryAgentBench loader accepts both its aligned public JSON export and the Hugging Face
 dataset-server `rows[].row` envelope. Rows without gold evidence remain useful for answer-token

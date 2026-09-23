@@ -284,6 +284,21 @@ class PackedChunk:
     truncated: bool = False
     reason: str = ""
     attribution: str = ""            # complete ownership label when context spans scopes
+    # Source-bound literal that an action/edit contract must copy exactly.
+    # Kept optional so legacy callers and positional construction remain compatible.
+    exact_value: Optional[dict[str, Any]] = None
+    # Coverage packing preserves the source title through its final render pass.
+    # Appended after the established fields so legacy positional construction stays valid.
+    title: str = ""
+    # Optional source-bound coordinates for an evidence unit.  These are offsets into
+    # the original memory content, never offsets into the rendered prompt.
+    source_span: Optional[tuple[int, int]] = None
+    # Stable identity for the unit represented by this chunk.  The memory id is the
+    # conservative fallback when a caller has not supplied a finer-grained unit id.
+    evidence_unit_id: str = ""
+    # Bounded, typed evidence metadata used by opt-in readers/action validators.
+    # It is deliberately optional so legacy packers and positional callers remain valid.
+    evidence_unit: Optional[dict[str, Any]] = None
 
 
 @dataclass

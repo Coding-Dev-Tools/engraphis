@@ -26,12 +26,13 @@ import threading
 import time
 from dataclasses import dataclass, field, replace
 from itertools import islice
-from typing import Any, Callable, Optional, SupportsFloat, SupportsIndex
+from typing import Any, Callable, Optional, SupportsFloat, SupportsIndex, cast
 
 import numpy as np
 
 from engraphis.core import scoring
 from engraphis.core.context import DeterministicContextPacker
+from engraphis.core.evidence import exact_value_binding
 from engraphis.core.graph_policy import UniformGraphTraversalPolicy
 from engraphis.core.graphrank import personalized_pagerank
 from engraphis.core.interfaces import (
@@ -59,6 +60,7 @@ from engraphis.core.retrieval_policy import (
     DeterministicRetrievalPolicy,
     ProfileConfig,
     RETRIEVAL_PROFILES,
+    apply_retrieval_recipe,
     profile_config,
 )
 from engraphis.core.query_planner import (
@@ -136,6 +138,13 @@ class RecallResult:
     candidate_k_requested: int = 50
     candidate_k_used: int = 50
     candidate_depth_reason: str = "fixed requested depth"
+    adaptive_stop_reason: str = ""
+    # This is a diagnostic ratio over the selected packing input, not a gold-evidence
+    # score.  It makes the budget/depth tradeoff visible without claiming answer
+    # correctness from a reader-independent recall call.
+    packed_candidate_coverage: Optional[float] = None
+    packing_mode: str = "legacy"
+    retrieval_recipe: str = "default"
     retrieval_trace: Optional[list[dict[str, Any]]] = None
     context_revision: str = ""
     planning_mode: str = "off"
@@ -156,6 +165,9 @@ class RecallResult:
     vector_index_repairs_pending: Optional[int] = None
     vector_search_source: str = "configured"
     diagnostics_v1: Optional[dict] = None
+    # Effective output limit after applying retrieval_recipe. Appended for
+    # compatibility with callers that construct RecallResult positionally.
+    effective_k: int = 8
 
 
 class RecallEngine:
@@ -219,17 +231,22 @@ class RecallEngine:
         # "1hop" = the Phase-1 entity expansion, kept for fallback and ablation.
         self.graph_mode = graph_mode
 
-    def recall(self, query: str, flt: Optional[SearchFilter] = None, *, k: int = 8,
+    def recall(self, query: str, flt: Optional[SearchFilter] = None, *, k: Optional[int] = None,
                candidate_k: int = 50, reinforce: bool = False,
                token_budget: Optional[int] = None,
                retrieval_profile: str = "balanced",
                candidate_depth: str = "fixed",
+               packing_mode: str = "legacy",
+               retrieval_recipe: str = "default",
                diagnostics: bool = False,
                include_untrusted: bool = False,
                prompt_only: bool = False,
                planning: str = "off",
                mtype_limits: Optional[dict] = None,
-               arm_config: Optional[ProfileConfig] = None) -> RecallResult:
+               arm_config: Optional[ProfileConfig] = None,
+               k_supplied: Optional[bool] = None,
+               token_budget_supplied: Optional[bool] = None,
+               default_token_budget: Optional[int] = None) -> RecallResult:
         started = time.perf_counter()
         phase_started = started
         phase_ms: dict[str, float] = {}
@@ -268,7 +285,28 @@ class RecallEngine:
             known_at=effective_known_at,
         )
         now = effective_valid_at
-        budget = self.token_budget if token_budget is None else max(0, int(token_budget))
+        supplied_token_budget = (
+            token_budget is not None
+            if token_budget_supplied is None
+            else bool(token_budget_supplied)
+        )
+        if token_budget is None:
+            base_budget = self.token_budget if default_token_budget is None else default_token_budget
+        else:
+            base_budget = token_budget
+        budget = max(0, int(base_budget))
+        supplied_k = k is not None if k_supplied is None else bool(k_supplied)
+        requested_k, budget, selected_recipe = apply_retrieval_recipe(
+            retrieval_recipe,
+            k=max(1, int(8 if k is None else k)),
+            token_budget=budget,
+            k_supplied=supplied_k,
+            token_budget_supplied=supplied_token_budget,
+        )
+        k = requested_k
+        requested_packing_mode = str(packing_mode or "legacy").strip().casefold()
+        if requested_packing_mode not in {"legacy", "coverage"}:
+            raise ValueError("packing_mode must be one of: legacy, coverage")
         requested_profile = str(retrieval_profile or "balanced").strip().casefold()
         if requested_profile not in RETRIEVAL_PROFILES:
             choices = ", ".join(sorted(RETRIEVAL_PROFILES))
@@ -379,6 +417,7 @@ class RecallEngine:
             if self._arm_candidate_k_cap is not None:
                 ceiling_bound = min(ceiling_bound, self._arm_candidate_k_cap)
             candidate_ceiling = max(arm_candidate_k, ceiling_bound)
+        adaptive_stop_reason = ""
         run_configs = [
             config if index == 0 and arm_config is not None else profile_config(item.profile)
             for index, item in enumerate(planned_queries)
@@ -575,15 +614,23 @@ class RecallEngine:
                 )
                 if enabled
             )
-            if (
-                not prompt_only
-                or (
-                    len(recs) >= prompt_target
-                    and _mtype_limits_can_fill(recs, effective_limits, prompt_target)
-                )
-                or arm_candidate_k >= candidate_ceiling
-                or not can_expand
-            ):
+            enough_records = (
+                len(recs) >= prompt_target
+                and _mtype_limits_can_fill(recs, effective_limits, prompt_target)
+            )
+            budget_exhausted = requested_depth_mode == "adaptive" and budget <= 0
+            if not prompt_only or enough_records or budget_exhausted or arm_candidate_k >= candidate_ceiling or not can_expand:
+                if requested_depth_mode == "adaptive":
+                    if budget_exhausted:
+                        adaptive_stop_reason = "context_budget_exhausted"
+                    elif enough_records:
+                        adaptive_stop_reason = "sufficient_records_and_type_limits"
+                    elif arm_candidate_k >= candidate_ceiling:
+                        adaptive_stop_reason = "candidate_ceiling"
+                    elif not can_expand:
+                        adaptive_stop_reason = "retrieval_exhausted"
+                    else:
+                        adaptive_stop_reason = "fixed_scope"
                 break
             arm_candidate_k = candidate_ceiling
         mark_phase("candidate_filtering")
@@ -595,7 +642,9 @@ class RecallEngine:
                 arm_candidate_k, False, 0,
             )
             mark_phase("response_metadata")
-            context, packed, usage = self.context_packer.pack(query, [], budget)
+            context, packed, usage = _pack_context(
+                self.context_packer, query, [], budget, requested_packing_mode,
+            )
             mark_phase("packing")
             return finish(RecallResult(
                 context=context,
@@ -611,6 +660,13 @@ class RecallEngine:
                 # prompt-only recall may have widened it to find approved evidence.
                 candidate_k_used=arm_candidate_k,
                 candidate_depth_reason=candidate_depth_reason,
+                adaptive_stop_reason=adaptive_stop_reason,
+                packed_candidate_coverage=(
+                    len(packed) / max(len(recs), 1) if requested_depth_mode == "adaptive" else None
+                ),
+                packing_mode=requested_packing_mode,
+                retrieval_recipe=selected_recipe,
+                effective_k=requested_k,
                 retrieval_trace=[] if diagnostics else None,
                 context_revision=_context_revision(usage, packed, context),
                 planning_mode=planning_mode,
@@ -900,6 +956,7 @@ class RecallEngine:
             "absolute_support": round(support[c.id], 4),
             "subject_key": record.subject_key,
             "claim_kind": record.claim_kind,
+            "exact_value": exact_value_binding(record.metadata, content=record.content),
             "retention": round(scoring.retention(record.stability, record.last_access, now), 4),
             "provenance": record.provenance,
             # Consolidated digests/profiles expose the ids of the source memories
@@ -908,7 +965,9 @@ class RecallEngine:
             "consolidation_source_ids": list(final_consolidation_evidence[c.id]),
         } for c, record in final_records]
         mark_phase("support_and_provenance")
-        context, packed_chunks, usage = self.context_packer.pack(query, final, budget)
+        context, packed_chunks, usage = _pack_context(
+            self.context_packer, query, final, budget, requested_packing_mode,
+        )
         mark_phase("packing")
         trace = None
         if diagnostics:
@@ -932,6 +991,13 @@ class RecallEngine:
             # initial candidate depth.  This is diagnostic telemetry, not a limit.
             candidate_k_used=arm_candidate_k,
             candidate_depth_reason=candidate_depth_reason,
+            adaptive_stop_reason=adaptive_stop_reason,
+            packed_candidate_coverage=(
+                len(packed_chunks) / max(len(final), 1) if requested_depth_mode == "adaptive" else None
+            ),
+            packing_mode=requested_packing_mode,
+            retrieval_recipe=selected_recipe,
+            effective_k=requested_k,
             retrieval_trace=trace,
             context_revision=_context_revision(usage, packed_chunks, context),
             planning_mode=planning_mode,
@@ -2152,6 +2218,29 @@ def _context_revision(
     }
     canonical = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _pack_context(
+    packer: ContextPacker,
+    query: str,
+    candidates: list[Candidate],
+    budget: int,
+    packing_mode: str,
+) -> tuple[str, list[PackedChunk], ContextUsage]:
+    """Dispatch the opt-in packer without changing the ContextPacker protocol."""
+    if packing_mode == "coverage":
+        coverage = cast(
+            Optional[Callable[[str, list[Candidate], int], tuple[
+                str, list[PackedChunk], ContextUsage,
+            ]]],
+            getattr(packer, "pack_coverage", None),
+        )
+        if coverage is None:
+            raise ValueError(
+                "packing_mode=coverage requires a ContextPacker with pack_coverage"
+            )
+        return coverage(query, candidates, budget)
+    return packer.pack(query, candidates, budget)
 
 
 def _arm_counts(query_runs: list[dict[str, Any]]) -> dict[str, int]:

@@ -206,6 +206,21 @@ def _apply_response_budget(payload: dict, max_response_tokens: Optional[int]) ->
         serialized = json.dumps(payload, indent=2, default=str, ensure_ascii=False)
         return counter(serialized)
 
+    def drop_detached_evidence_bindings() -> None:
+        """Do not expose exact-value metadata without its supporting context."""
+        if payload.get("context"):
+            return
+        for records_key in ("memories", "sources", "packed_sources"):
+            records = payload.get(records_key)
+            if not isinstance(records, list):
+                continue
+            for record in records:
+                if not isinstance(record, dict):
+                    continue
+                for field in ("exact_value", "source_span", "evidence_unit_id", "evidence_unit"):
+                    record.pop(field, None)
+
+    drop_detached_evidence_bindings()
     current_tokens = measure()
 
     if max_response_tokens is None or max_response_tokens <= 0:
@@ -283,6 +298,7 @@ def _apply_response_budget(payload: dict, max_response_tokens: Optional[int]) ->
     # condition from its claim. Keep the admitted context intact or omit it whole.
     if current_tokens > max_response_tokens and payload.get("context"):
         payload["context"] = ""
+        drop_detached_evidence_bindings()
         if usage.get("token_counter") != counter.identity:
             # Empty text has no evidence tokens under any supported counter.
             baseline = int(usage.get("source_tokens") or 0)
@@ -498,6 +514,12 @@ def engraphis_remember(
     claim_kind: Annotated[str, Field(
         description="Optional claim predicate/category (for example 'configured_value').",
         max_length=200)] = "",
+    exact_value: Annotated[Optional[str], Field(
+        description="Optional verbatim source value to copy exactly.",
+        max_length=4_096)] = None,
+    exact_value_type: Annotated[str, Field(
+        description="Literal type: literal, string, identifier, path, number, date, enum, or json.",
+        max_length=32)] = "literal",
 ) -> str:
     """Store a memory so it can be recalled in later turns, sessions, or repos.
 
@@ -526,6 +548,7 @@ def engraphis_remember(
             retention_class=retention_class, retention_reason=retention_reason,
             valid_from=valid_from,
             subject_key=subject_key, claim_kind=claim_kind,
+            exact_value=exact_value, exact_value_type=exact_value_type,
             resolve_conflicts=dedupe,
             # Stdio is an operator-launched local capability. The dashboard's
             # MCP-over-HTTP mount is protected by its loopback/token/role gate before
@@ -552,7 +575,9 @@ def engraphis_remember_many(
                                      "like 'api.rate_limit'), 'claim_kind', "
                                      "'evidence_source' (per-fact origin label; facts "
                                      "sharing one get evidence-labeled links), and "
-                                     "'valid_from' (Unix timestamp). All facts are "
+                                     "'valid_from' (Unix timestamp), plus optional "
+                                     "'exact_value' and 'exact_value_type' for a unique "
+                                     "verbatim source literal. All facts are "
                                      "stored in one transaction; each is deduplicated "
                                      "against the others, and facts that share a "
                                      "subject_key or evidence_source are linked with "
@@ -627,7 +652,9 @@ def engraphis_recall(
                     "its repo/workspace ancestors; requires workspace.")] = None,
     mtypes: Annotated[Optional[List[str]], Field(description="Restrict to these memory types "
                       "(semantic/episodic/procedural/working).")] = None,
-    k: Annotated[int, Field(description="Max memories to return (1-50).", ge=1, le=50)] = 8,
+    k: Annotated[Optional[int], Field(
+        description="Max memories to return (1-50).",
+        ge=1, le=50, json_schema_extra={"default": 8})] = None,
     as_of: Annotated[Optional[float], Field(
         description="Compatibility alias for valid_at. If both are supplied they must "
                     "match.")] = None,
@@ -646,6 +673,11 @@ def engraphis_recall(
     candidate_depth: Annotated[str, Field(
         description="Candidate depth: fixed preserves the legacy pool; adaptive is an opt-in "
                     "profile-aware performance experiment.")] = "fixed",
+    packing_mode: Annotated[str, Field(
+        description="Context packing: legacy preserves the established packer; coverage "
+                    "spreads complete evidence units across sources.")] = "legacy",
+    retrieval_recipe: Annotated[str, Field(
+        description="Measured opt-in workload recipe: default, conversation, or long_session.")] = "default",
     response_mode: Annotated[str, Field(
         description="full preserves legacy memory bodies; compact omits bodies already "
                     "represented in the packed context.")] = "full",
@@ -668,9 +700,12 @@ def engraphis_recall(
 
     Call this before answering or acting when prior context would help — to avoid re-asking
     the user, to recover decisions/conventions, or to resume earlier work.
-    Successful calls append a privacy-safe recall receipt but do not strengthen weak
-    neighbors merely because they were returned. Grounded recall reinforces cited
-    evidence; an explicit-use caller can opt into reinforcement through the Python API.
+    Successful calls attempt to append a privacy-safe recall receipt but do not strengthen weak
+    neighbors merely because they were returned. If the existing receipt chain is structurally
+    invalid, the recall result still completes with ``receipt: null`` and a ``receipt_warning``;
+    the Store remains fail-closed rather than guessing a chain predecessor. Grounded recall
+    reinforces cited evidence; an explicit-use caller can opt into reinforcement through the
+    Python API.
     Because the receipt is stateful, this surface is neither read-only nor idempotent.
 
     Returns:
@@ -689,6 +724,7 @@ def engraphis_recall(
             mtypes=mtypes, k=k, as_of=as_of, valid_at=valid_at,
             known_at=known_at, token_budget=token_budget,
             retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
+            packing_mode=packing_mode, retrieval_recipe=retrieval_recipe,
             response_mode=response_mode,
             diagnostics=diagnostics,
             planning=planning,
@@ -717,14 +753,18 @@ def engraphis_recall_context(
         description="Optional active session; includes its repo/workspace ancestors.")] = None,
     mtypes: Annotated[Optional[List[str]], Field(
         description="Optional memory types: semantic/episodic/procedural/working.")] = None,
-    k: Annotated[int, Field(description="Max candidate memories (1-50).", ge=1, le=50)] = 50,
-    token_budget: Annotated[int, Field(
+    k: Annotated[Optional[int], Field(
+        description="Max candidate memories (1-50).",
+        ge=1, le=50, json_schema_extra={"default": 50})] = None,
+    token_budget: Annotated[Optional[int], Field(
         description="Hard packed-context budget under the reported token counter.",
-        ge=0, le=32_768)] = 1024,
+        ge=0, le=32_768, json_schema_extra={"default": 1024})] = None,
     retrieval_profile: Annotated[str, Field(
         description="balanced, fast, auto, lexical, graph, or code.")] = "balanced",
     candidate_depth: Annotated[str, Field(
         description="fixed preserves the legacy pool; adaptive is profile-aware and opt-in.")] = "fixed",
+    packing_mode: Annotated[str, Field()] = "legacy",
+    retrieval_recipe: Annotated[str, Field()] = "default",
     as_of: Annotated[Optional[float], Field(
         description="Compatibility alias for valid_at.")] = None,
     valid_at: Annotated[Optional[float], Field(
@@ -771,12 +811,16 @@ def engraphis_recall_context(
             session_id=session_id,
             mtypes=mtypes,
             k=k,
+            _default_k=50,
             as_of=as_of,
             valid_at=valid_at,
             known_at=known_at,
             token_budget=token_budget,
+            _default_token_budget=1024,
             retrieval_profile=retrieval_profile,
             candidate_depth=candidate_depth,
+            packing_mode=packing_mode,
+            retrieval_recipe=retrieval_recipe,
             response_mode="compact",
             diagnostics=diagnostics,
             planning=planning,
@@ -795,6 +839,16 @@ def engraphis_recall_context(
                 "id": packed.get("id"),
                 "tokens": packed.get("tokens"),
             }
+            if packed.get("exact_value"):
+                source["exact_value"] = packed["exact_value"]
+            if packed.get("source_span") is not None:
+                source["source_span"] = packed["source_span"]
+            if packed.get("evidence_unit_id"):
+                source["evidence_unit_id"] = packed["evidence_unit_id"]
+            if packed.get("evidence_unit"):
+                source["evidence_unit"] = packed["evidence_unit"]
+            if packed.get("attribution"):
+                source["attribution"] = packed["attribution"]
             if detail.get("title"):
                 source["title"] = detail["title"]
             # Compact recall omits source bodies, but keeps both scoring contracts so
@@ -846,6 +900,8 @@ def engraphis_recall_context(
             default_settings = {
                 "retrieval_profile": "balanced",
                 "candidate_depth": "fixed",
+                "packing_mode": "legacy",
+                "retrieval_recipe": "default",
                 "planning": "off",
                 "response_mode": "compact",
                 "historical": False,
@@ -946,8 +1002,9 @@ def engraphis_recall_grounded(
     When ``degraded_mode`` is true, its feature-hashing fallback is treated as lexical-only:
     semantic vector retrieval and semantic cosine support are disabled.
     With ``synthesize=True``, configured LLM prose is accepted only when citations hold.
-    Every resolved call appends a privacy-safe receipt (including abstentions), and a
-    grounded answer reinforces cited memories.
+    Every resolved call attempts to append a privacy-safe receipt (including abstentions), and a
+    grounded answer reinforces cited memories. A structurally invalid receipt chain is reported
+    in ``receipt_warning`` without turning the completed answer into an API failure.
 
     Returns:
         str: JSON ``{"query","grounded","abstained","answer","support","reason",
@@ -1167,9 +1224,10 @@ def engraphis_proactive_context(
     Combines proactive recall, optional task-specific recall, and last-session handoff
     into a cited ``context_summary`` plus ``suggested_queries``. Deterministic by
     default; LLM synthesis is opt-in and accepted only when it cites source memories.
-    When ``task`` or ``agent_state`` is supplied, the task-specific recall appends a
+    When ``task`` or ``agent_state`` is supplied, the task-specific recall attempts a
     privacy-safe receipt (without reinforcing memories), so the tool is conservatively
-    annotated as mutating and non-idempotent.
+    annotated as mutating and non-idempotent. If receipt continuity is already invalid, the
+    context result still completes with a content-free ``receipt_warning``.
     """
     try:
         return _ok(service().proactive_context(
@@ -1367,11 +1425,23 @@ def engraphis_correct(
                                          max_length=200)] = None,
     reason: Annotated[str, Field(description="Why this is being corrected (e.g. 'typo', "
                       "'the user clarified').", max_length=1_000)] = "",
+    exact_value: Annotated[Optional[str], Field(
+        description="Replacement literal copied verbatim from new_content. Content changes "
+        "clear the previous binding unless a new literal is supplied.", max_length=4096)] = None,
+    exact_value_type: Annotated[str, Field(
+        description="Type of the replacement literal.", max_length=32)] = "literal",
+    exact_value_span: Annotated[Optional[tuple[StrictInt, StrictInt]], Field(
+        description="Optional [start,end) character offsets for the literal in new_content; "
+        "required when its occurrence is ambiguous.")] = None,
+    clear_exact_value: Annotated[StrictBool, Field(
+        description="Explicitly remove the literal binding. Cannot be combined with a "
+        "replacement literal.")] = False,
 ) -> str:
     """Replace a memory's content without losing history: the old content is closed
     (bi-temporal invalidate, not deleted) and the correction is stored as a new memory
     that records what it corrects — so the audit trail and ``engraphis_why`` both still
-    work afterward. Prefer this over retire+remember for fixes.
+    work afterward. Prefer this over retire+remember for fixes. Changed content clears
+    the previous exact-value binding unless ``exact_value`` explicitly replaces it.
 
     Returns:
         str: JSON ``{"id","superseded":[old_id],"reason"}`` or an actionable error if the
@@ -1379,7 +1449,10 @@ def engraphis_correct(
     """
     try:
         return _ok(service().correct(memory_id, new_content, workspace=workspace, repo=repo,
-                                     reason=reason))
+                                     reason=reason, exact_value=exact_value,
+                                     exact_value_type=exact_value_type,
+                                     exact_value_span=exact_value_span,
+                                     clear_exact_value=clear_exact_value))
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
 
@@ -1415,7 +1488,8 @@ def engraphis_promote(
 
     Returns:
         str: JSON ``{"id","promoted_from","from_scope","scope","op","reason"}``
-        plus a privacy receipt, or an actionable validation error.
+        plus a privacy receipt (or a content-free ``receipt_warning`` when the existing
+        receipt chain cannot safely be extended), or an actionable validation error.
     """
     try:
         return _ok(service().promote(
@@ -1454,6 +1528,7 @@ def engraphis_link(
 
     Returns:
         str: JSON ``{"a","b","relation","layer","reason","linked":true,"receipt":...}``
+        (with ``receipt_warning`` if receipt continuity is unavailable)
         or an actionable error if either id is unknown or doesn't belong to
         ``workspace``/``repo``.
     """
@@ -1536,8 +1611,9 @@ def engraphis_index_repo(
     the same trust boundary as any other local tool you have, nothing is sent anywhere.
     Set ``ENGRAPHIS_INDEX_ROOTS`` to a path-separator-delimited absolute-path allow-list when
     repositories live outside the working, home, or temporary directories, or to narrow the
-    defaults. Each completed scan appends a fresh operation receipt, so the MCP call is
-    non-idempotent even when the code graph itself is unchanged.
+    defaults. Each completed scan attempts a fresh operation receipt, so the MCP call is
+    non-idempotent even when the code graph itself is unchanged; a pre-existing receipt-chain
+    integrity failure is returned as a content-free warning instead of failing the scan.
 
     Returns:
         str: JSON ``{"files_indexed","symbols","edges","backend"}``.
@@ -2029,8 +2105,9 @@ def engraphis_ingest_postgres_schema(
 ) -> str:
     """Convert tables, columns, constraints, and foreign keys into a schema memory and
     entity graph. Requires the optional psycopg backend. An exact retry reuses its live
-    point-in-time schema snapshot, but every invocation appends audit/receipt records,
-    so the tool as a whole is not idempotent."""
+    point-in-time schema snapshot, but every invocation attempts audit/receipt records,
+    so the tool as a whole is not idempotent. A structurally invalid receipt chain is surfaced
+    as a content-free warning after the completed import."""
     try:
         return _ok(service().import_postgres_schema(
             dsn, workspace=workspace, repo=repo, schemas=schemas, actor="agent",
@@ -2756,23 +2833,23 @@ def engraphis_session(
     action: Annotated[
         str,
         BeforeValidator(_normalize_session_action),
-        Field(description="start to resume work, or end to save its handoff.",
+        Field(description="Start/resume, or end with handoff.",
               pattern="^(start|end)$"),
     ] = "start",
-    workspace: Annotated[str, Field(description="Workspace for a started session.", max_length=200)] = "default",
-    repo: Annotated[Optional[str], Field(description="Optional repository scope.", max_length=200)] = None,
-    agent: Annotated[str, Field(description="Optional agent name.", max_length=200)] = "",
-    goal: Annotated[str, Field(description="Task goal; start returns bounded relevant context.",
+    workspace: Annotated[str, Field(description="Workspace.", max_length=200)] = "default",
+    repo: Annotated[Optional[str], Field(description="Optional repo.", max_length=200)] = None,
+    agent: Annotated[str, Field(description="Optional agent.", max_length=200)] = "",
+    goal: Annotated[str, Field(description="Goal; start returns bounded context.",
                                max_length=1_000)] = "",
-    session_id: Annotated[str, Field(description="Session id required to end a session.",
+    session_id: Annotated[str, Field(description="Session id for end.",
                                     max_length=200)] = "",
-    summary: Annotated[str, Field(description="Short final handoff.", max_length=100_000)] = "",
-    outcome: Annotated[str, Field(description="Optional outcome label.", max_length=1_000)] = "",
+    summary: Annotated[str, Field(description="Final handoff.", max_length=100_000)] = "",
+    outcome: Annotated[str, Field(description="Outcome label.", max_length=1_000)] = "",
     open_threads: Annotated[Optional[List[str]], Field(description="Unresolved follow-ups.")] = None,
     force_new: Annotated[StrictBool, Field(
-        description="Start only: branch a new session instead of reusing an exact active task."
+        description="Start only: create a session even if this task is already active."
     )] = False,
-    token_budget: Annotated[int, Field(description="Goal-context budget when starting.", ge=0,
+    token_budget: Annotated[int, Field(description="Start context token budget.", ge=0,
                                       le=32_768)] = 512,
 ) -> str:
     """Start/resume a session or end it with its next-session handoff."""
@@ -2824,20 +2901,26 @@ def engraphis_session(
     structured_output=False,
 )
 def smart_recall_context(
-    query: Annotated[str, Field(description="Question or task needing prior context.", min_length=1,
+    query: Annotated[str, Field(description="Question/task needing context.", min_length=1,
                                 max_length=100_000)],
     workspace: Annotated[Optional[str], Field(description="Optional workspace.", max_length=200)] = None,
-    repo: Annotated[Optional[str], Field(description="Optional repository.", max_length=200)] = None,
+    repo: Annotated[Optional[str], Field(description="Optional repo.", max_length=200)] = None,
     session_id: Annotated[Optional[str], Field(description="Optional active session.")] = None,
-    k: Annotated[int, Field(description="Maximum source memories.", ge=1, le=50)] = 50,
-    token_budget: Annotated[int, Field(description="Hard returned-context token budget.", ge=0,
-                                      le=32_768)] = 1024,
-    format: Annotated[str, Field(description="Context format: 'full' or 'gist'.")] = "full",
+    k: Annotated[Optional[int], Field(
+        description="Max source memories.",
+        ge=1, le=50, json_schema_extra={"default": 50})] = None,
+    token_budget: Annotated[Optional[int], Field(
+        description="Hard returned-context token budget.",
+        ge=0, le=32_768, json_schema_extra={"default": 1024})] = None,
+    packing_mode: Annotated[str, Field()] = "legacy",
+    retrieval_recipe: Annotated[str, Field()] = "default",
+    format: Annotated[str, Field(description="Context format: full or gist.")] = "full",
 ) -> str:
     """Return one compact, bounded context packet for routine agent work."""
     result = engraphis_recall_context(
         query=query, workspace=workspace, repo=repo, session_id=session_id, k=k,
-        token_budget=token_budget, format=format,
+        token_budget=token_budget, packing_mode=packing_mode,
+        retrieval_recipe=retrieval_recipe, format=format,
     )
     if isinstance(result, str) and result.startswith("Error:"):
         return _smart_error_from_string(result)
@@ -2853,25 +2936,32 @@ def smart_recall_context(
 def smart_remember(
     content: Annotated[str, Field(description="Durable fact, decision, preference, or procedure.",
                                   min_length=1, max_length=100_000)],
-    workspace: Annotated[str, Field(description="Workspace for the memory.", max_length=200)] = "default",
-    repo: Annotated[Optional[str], Field(description="Optional repository.", max_length=200)] = None,
+    workspace: Annotated[str, Field(description="Memory workspace.", max_length=200)] = "default",
+    repo: Annotated[Optional[str], Field(description="Optional repo.", max_length=200)] = None,
     session_id: Annotated[Optional[str], Field(description="Optional active session.")] = None,
-    mtype: Annotated[str, Field(description="semantic, episodic, procedural, or working.")] = "semantic",
-    importance: Annotated[float, Field(description="Salience from 0 to 1.", ge=0.0,
+    mtype: Annotated[str, Field(description="Type: semantic, episodic, procedural, or working.")] = "semantic",
+    importance: Annotated[float, Field(description="Salience 0 to 1.", ge=0.0,
                                        le=1.0)] = 0.0,
     subject_key: Annotated[str, Field(
-        description="Optional stable claim subject (for example 'api.rate_limit'). "
-                    "Matching keys make supersession safer and deterministic.",
+        description="Optional stable claim subject (e.g. 'api.rate_limit'); keyed supersession "
+                    "is deterministic.",
         max_length=1_000)] = "",
     claim_kind: Annotated[str, Field(
-        description="Optional claim predicate/category (for example 'configured_value').",
+        description="Optional claim predicate/category (e.g. 'configured_value').",
         max_length=200)] = "",
+    exact_value: Annotated[Optional[str], Field(
+        description="Optional verbatim source value to copy exactly.",
+        max_length=4_096)] = None,
+    exact_value_type: Annotated[str, Field(
+        description="Literal type: literal, string, identifier, path, number, date, enum, or json.",
+        max_length=32)] = "literal",
 ) -> str:
-    """Store a routine durable memory with safe default provenance and deduplication."""
+    """Store a durable fact with safe default provenance and deduplication."""
     result = engraphis_remember(
         content=content, workspace=workspace, repo=repo, session_id=session_id,
         mtype=mtype, importance=importance,
         subject_key=subject_key, claim_kind=claim_kind,
+        exact_value=exact_value, exact_value_type=exact_value_type,
     )
     if isinstance(result, str) and result.startswith("Error:"):
         return _smart_error_from_string(result)
@@ -2885,15 +2975,15 @@ def smart_remember(
     structured_output=False,
 )
 def engraphis_discover_actions(
-    task: Annotated[str, Field(description="Describe the capability needed, without pasting memory content.",
+    task: Annotated[str, Field(description="Describe the capability; do not paste memory content.",
                                min_length=1, max_length=2_000)],
     category: Annotated[str, Field(description="Optional area: memory, governance, code, audit, or ops.",
                                   max_length=100)] = "",
-    intent: Annotated[str, Field(description="Optional side effect: any, read, write, admin, or destructive.",
+    intent: Annotated[str, Field(description="Side effect: any, read, write, admin, or destructive.",
                                 pattern="^(any|read|write|admin|destructive)$")] = "any",
     limit: Annotated[int, Field(description="Number of ranked actions to return.", ge=1, le=3)] = 1,
 ) -> str:
-    """Return only the exact schemas needed for a small set of matching advanced actions."""
+    """Return exact schemas for matching advanced actions."""
     actions = _rank_actions(task, category=category, intent=intent)[:limit]
     if not actions:
         return _ok({"actions": [], "note": "No matching action is available."})
@@ -2930,13 +3020,13 @@ def _execute_gateway(capability_id: str, schema_digest: str, arguments: dict[str
     structured_output=False,
 )
 def engraphis_execute_read(
-    capability_id: Annotated[str, Field(description="Capability id returned by discover_actions.",
+    capability_id: Annotated[str, Field(description="Capability id from discover_actions.",
                                         min_length=8, max_length=128)],
-    schema_digest: Annotated[str, Field(description="Schema digest returned by discovery.",
+    schema_digest: Annotated[str, Field(description="Schema digest from discovery.",
                                         min_length=8, max_length=128)],
-    arguments: Annotated[dict[str, Any], Field(description="Arguments matching the discovered schema.")],
+    arguments: Annotated[dict[str, Any], Field(description="Arguments matching its schema.")],
 ) -> str:
-    """Execute only a discovered action that is truthfully read-only and idempotent."""
+    """Run a discovered read-only, idempotent action."""
     return _execute_gateway(capability_id, schema_digest, arguments, expected="read")
 
 
@@ -2947,13 +3037,13 @@ def engraphis_execute_read(
     structured_output=False,
 )
 def engraphis_execute_action(
-    capability_id: Annotated[str, Field(description="Capability id returned by discover_actions.",
+    capability_id: Annotated[str, Field(description="Capability id from discover_actions.",
                                         min_length=8, max_length=128)],
-    schema_digest: Annotated[str, Field(description="Schema digest returned by discovery.",
+    schema_digest: Annotated[str, Field(description="Schema digest from discovery.",
                                         min_length=8, max_length=128)],
-    arguments: Annotated[dict[str, Any], Field(description="Arguments matching the discovered schema.")],
+    arguments: Annotated[dict[str, Any], Field(description="Arguments matching its schema.")],
 ) -> str:
-    """Execute a discovered write, admin, or destructive-capable action safely."""
+    """Run a discovered write/admin/destructive action under its authorization rules."""
     return _execute_gateway(capability_id, schema_digest, arguments, expected="action")
 
 
@@ -2964,18 +3054,17 @@ def engraphis_execute_action(
     structured_output=False,
 )
 def engraphis_get_memory(
-    memory_id: Annotated[str, Field(description="Memory id to read.", min_length=1,
+    memory_id: Annotated[str, Field(description="Memory id.", min_length=1,
                                     max_length=200)],
-    workspace: Annotated[str, Field(description="Workspace containing the memory.",
+    workspace: Annotated[str, Field(description="Memory workspace.",
                                     max_length=200)] = "default",
-    repo: Annotated[Optional[str], Field(description="Optional repository scope.",
+    repo: Annotated[Optional[str], Field(description="Optional repo scope.",
                                          max_length=200)] = None,
 ) -> str:
-    """Return one memory's governed record (content, provenance, scope, temporal fields).
+    """Return one governed memory record (content, provenance, scope, and time).
 
-    Read-only and never reinforces. Pending/quarantined content is NOT returned to an
-    agent — the tool answers ``not_prompt_eligible`` instead, so untrusted content never
-    reaches model context through this surface.
+    Read-only; never reinforces. Pending/quarantined bodies stay hidden; only
+    prompt-eligible content reaches the agent.
     """
     try:
         record = service().inspect(memory_id=memory_id, workspace=workspace, repo=repo)
@@ -3058,27 +3147,26 @@ def engraphis_get_memory(
     structured_output=False,
 )
 def engraphis_update_memory(
-    memory_id: Annotated[str, Field(description="Memory id to update.", min_length=1,
-                                    max_length=200)],
-    workspace: Annotated[str, Field(description="Workspace containing the memory.",
+    memory_id: Annotated[str, Field(description="Memory id.", min_length=1,
+                                   max_length=200)],
+    workspace: Annotated[str, Field(description="Memory workspace.",
                                     max_length=200)] = "default",
-    repo: Annotated[Optional[str], Field(description="Optional repository scope.",
+    repo: Annotated[Optional[str], Field(description="Optional repo scope.",
                                          max_length=200)] = None,
-    title: Annotated[Optional[str], Field(description="Optional new title.",
+    title: Annotated[Optional[str], Field(description="Optional title.",
                                           max_length=500)] = None,
-    mtype: Annotated[Optional[str], Field(description="Optional memory type (working|episodic|semantic|procedural).",
+    mtype: Annotated[Optional[str], Field(description="Optional type: working|episodic|semantic|procedural.",
                                           max_length=50)] = None,
-    importance: Annotated[Optional[float], Field(description="Optional importance 0..1.", ge=0.0,
+    importance: Annotated[Optional[float], Field(description="Optional importance 0 to 1.", ge=0.0,
                                                  le=1.0)] = None,
     actor: Annotated[str, Field(
-        description="Optional local-mode actor label; authenticated team mode uses the caller identity.",
+        description="Local actor label; team mode uses caller identity.",
         max_length=200,
     )] = "user",
 ) -> str:
-    """Edit a memory's metadata fields (title/type/importance). An identical retry is an
-    atomic no-op. Content edits must go through the governed correction path so bi-temporal
-    history is preserved. Secret capture is rejected; provenance/trust/sensitivity are never
-    editable here."""
+    """Edit metadata only (title/type/importance). Identical retries are atomic no-ops. Content uses
+    governed correction to preserve history; secrets are rejected and provenance/trust/
+    sensitivity cannot be edited."""
     if title is None and mtype is None and importance is None:
         return _gateway_error("nothing_to_update")
     try:
@@ -3100,15 +3188,14 @@ def engraphis_update_memory(
 )
 def engraphis_conflict_review(
     workspace: Annotated[str, Field(description="Workspace to review.", max_length=200)] = "default",
-    repo: Annotated[Optional[str], Field(description="Optional repository scope.",
+    repo: Annotated[Optional[str], Field(description="Optional repo scope.",
                                          max_length=200)] = None,
     limit: Annotated[int, Field(description="Max items to return.", ge=1, le=100)] = 50,
 ) -> str:
-    """Read-only inbox of pending/quarantined/conflicting memories for a reviewer.
+    """Read-only review of pending/quarantined/conflicting memories.
 
-    Scope and personal-folder authorization are enforced by ``MemoryService``. Pending
-    and quarantined bodies are never returned to an agent; only approved conflict
-    records may include a short excerpt.
+    Scope and personal-folder authorization apply. Bodies stay hidden; only approved
+    conflicts may expose a short excerpt.
     """
     try:
         return _ok(service().conflict_review(

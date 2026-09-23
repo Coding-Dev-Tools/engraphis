@@ -22,6 +22,11 @@ def test_published_image_and_railway_template_fail_safe_to_customer_mode():
     assert railway["$schema"] == "https://railway.com/railway.schema.json"
     assert template["format"] == "engraphis-railway-template-composer-source/v1"
     assert template["variables"]["ENGRAPHIS_SERVICE_MODE"]["value"] == "customer"
+    assert template["variables"]["ENGRAPHIS_HOST"]["value"] == "0.0.0.0"
+    assert (
+        template["variables"]["ENGRAPHIS_ENV_FILE"]["value"]
+        == "/data/.engraphis/config.env"
+    )
     assert template["service"]["healthcheck"] == "/api/ready"
     assert template["service"]["volume"]["mount_path"] == "/data"
     local_api = template["variables"]["ENGRAPHIS_API_TOKEN"]
