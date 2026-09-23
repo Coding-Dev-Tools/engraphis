@@ -31,3 +31,4 @@ ignore:
   - vulnerability: "CVE-2026-9669"     # fix: 3.13.14+
   - vulnerability: "CVE-2026-3298"     # fix: 3.13.14+
   - vulnerability: "CVE-2026-4786"     # fix: 3.13.14+
+  - vulnerability: "CVE-2026-82049"    # fix: 3.14.0b1+
