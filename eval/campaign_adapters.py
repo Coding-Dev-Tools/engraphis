@@ -1275,7 +1275,7 @@ class _PeerAdapter(_BaseAdapter):
 class EngraphisAdapter(_BaseAdapter):
     capabilities = AdapterCapabilities(
         adapter="engraphis",
-        version="1.7.4",
+        version="1.7.6",
         source="https://github.com/Coding-Dev-Tools/engraphis",
         source_revision=_UNKNOWN_SOURCE_REVISION,
         scopes=("workspace", "repo", "session"),

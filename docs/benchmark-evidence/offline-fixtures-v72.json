@@ -103,7 +103,7 @@
   ],
   "schema": "engraphis-public-offline-fixtures/v1",
   "suite": {
-    "digest": "8307020857603dd991a8b82867660ac9778074b9712c866e3ca20a7accc25ad1",
+    "digest": "c14b75d0770b78677ce1bfeb3301f753abb3af9710924b31dba3c917e3e1668c",
     "digest_method": "sha256(canonical compact JSON mapping each sorted path to its file SHA-256)",
     "files": {
       "engraphis/__init__.py": "96af0a914b76015e1ec71decca546504339985dbe940bf759d168cf8d09187e6",
@@ -130,7 +130,7 @@
       "engraphis/build_info.py": "624c22471e56d4c4047160808c4245488292af611564d1a63ca437605bbb414f",
       "engraphis/classic_assets/__init__.py": "a7c1d52b285e3faa670ce231814b5758754aa0fbd05e1428e74c20c3ec51a4f1",
       "engraphis/cloud_authz.py": "e80500579cb3a1d5fbf30814dc94e3e3967e50b311e8ed2fa56afcc13f7eb565",
-      "engraphis/cloud_features.py": "a1bec76216d4f1276a3313dabc1d29a1666378e11863d05d1a02e695cf6d7293",
+      "engraphis/cloud_features.py": "bbe6f72d0e1f5147e10aa71897242c74774ca0a8f3e6c2c697f4cb58e9bc6484",
       "engraphis/cloud_session.py": "7c83d7b85665c05aa4da2597a6b4ad2b951f1f8f4af20105d9d1750b9b123c2d",
       "engraphis/commercial.py": "184f312066a9e682e51a0abeff042f1c0e8eed2d47470157b23930b5a17633aa",
       "engraphis/config.py": "a46f3a335fad343e7df32942be91c04094fbafaf14b8b11f5fc433ef74743226",
@@ -208,7 +208,7 @@
       "engraphis/redirector.py": "5ba964b81f09008c9369180cb49d247519000763274aabc5e046215b12fa641d",
       "engraphis/routes/__init__.py": "f0d59080212cfa0d9b50877bca28e5832d1ae917899500d52c68b1c8821231af",
       "engraphis/routes/memory.py": "9ca066e1762eeeaafd9790ed57d730efcaceb57742dbe0c830ad8764500ff9e5",
-      "engraphis/routes/v2_api.py": "cf6ce0780c2accbd790e2220e0b7fda0cd429bdf8d0004601efb9d29f4ee9f19",
+      "engraphis/routes/v2_api.py": "4009743dab7b8e243e5a0affa44de667ce35680a754c7e53d3b0cdcee6bd0fda",
       "engraphis/routes/vault.py": "1a7eee7c1a7c7aa11091042756aa2739a3eb963647020f40584a6a38da1988af",
       "engraphis/service.py": "f4a432e823db8dd3561fbe30656d9813e02a8f2eef3347c3e468dd872822e40d",
       "engraphis/service_context.py": "3de9289f49a977cdc206285ac42a9953a104eb1d1b1bc8ea77febd75c7cd82ab",
