@@ -50,12 +50,37 @@ def test_container_runtime_matches_the_railway_persistence_and_port_contract():
     assert "useradd --create-home --uid 10001 engraphis" in dockerfile
     assert "HF_HOME=/data/.cache/huggingface" in dockerfile
     assert "ENGRAPHIS_STATE_DIR=/data/.engraphis" in dockerfile
+    assert "ENGRAPHIS_ENV_FILE=/data/.engraphis/config.env" in dockerfile
+    assert "COPY deploy ./deploy" in dockerfile
 
     assert 'if [ -z "${ENGRAPHIS_HOST:-}" ]; then' in entrypoint
     assert '[ -n "${RAILWAY_SERVICE_NAME:-}" ]' in entrypoint
     assert "ENGRAPHIS_HOST=\"::\"" in entrypoint
     assert "ENGRAPHIS_HOST=\"0.0.0.0\"" in entrypoint
-    assert "chown -R engraphis:engraphis /data" in entrypoint
+    assert "chown -R -h engraphis:engraphis /data" in entrypoint
+    assert ".volume-ownership" in entrypoint
+    assert "reject_linked_path()" in entrypoint
+    assert 'if ! reject_linked_path "$state_dir"; then' in entrypoint
+    assert "refusing linked or unnormalized state path" in entrypoint
+    assert 'if ! reject_linked_path "$config_file"; then' in entrypoint
+    assert "refusing linked or unnormalized trusted config path" in entrypoint
+    assert 'if [ -L "$state_dir" ]; then' in entrypoint
+    assert "refusing symlinked state directory" in entrypoint
+    assert 'elif [ -e "$state_dir" ] && [ ! -d "$state_dir" ]; then' in entrypoint
+    assert "refusing non-directory state path" in entrypoint
+    assert 'if [ -L "$config_parent" ]; then' in entrypoint
+    assert "refusing non-directory trusted config parent" in entrypoint
+    assert "config_owner=$(stat -c '%u' \"$config_parent\"" in entrypoint
+    assert "trusted config directory must be owned by engraphis" in entrypoint
+    assert '[ -L "$ownership_marker" ]' in entrypoint
+    assert "refusing symlinked volume ownership marker" in entrypoint
+    assert 'if [ ! -e "$ownership_marker" ]; then' in entrypoint
+    assert 'elif [ ! -f "$ownership_marker" ]; then' in entrypoint
+    assert "refusing non-regular volume ownership marker" in entrypoint
+    assert 'config_file="${ENGRAPHIS_ENV_FILE:-}"' in entrypoint
+    assert "refusing symlinked trusted config file" in entrypoint
+    assert 'chmod 600 "$config_file"' in entrypoint
+    assert "chown -R engraphis:engraphis /data 2>/dev/null || true" not in entrypoint
     assert 'exec gosu engraphis "$@"' in entrypoint
 
 

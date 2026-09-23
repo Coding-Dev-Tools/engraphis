@@ -5,6 +5,8 @@ from pathlib import Path
 import pytest
 
 from eval.benchmark import validate_report, write_canonical_artifact
+from eval import longmemeval_v2_evidence as evidence
+from eval import run_longmemeval_v2 as runner
 from eval.longmemeval_v2_evidence import build_evidence_report
 from eval.public_readiness import validate_public_readiness
 from eval.run_longmemeval_v2 import (
@@ -182,14 +184,14 @@ def test_official_v2_evidence_export_is_redacted_and_run_bound(
     assert report["environment"] == execution["environment"]
     assert report["protocol"]["source_questions"] == 1
     assert report["privacy"]["content_fingerprint_policy"] == "omitted"
-    assert {item["name"] for item in report["suite"]["sources"]} == {
-        "per_question.jsonl",
-        "haystack.json",
-        "trajectories.json",
-        "memory.json",
-        "matrix.json",
-        "execution.json",
-    }
+    assert [item["name"] for item in report["suite"]["sources"]] == [
+        "inputs/per_question",
+        "inputs/haystack",
+        "inputs/trajectories",
+        "inputs/memory_config",
+        "inputs/matrix_manifest",
+        "inputs/execution_manifest",
+    ]
     serialized = json.dumps(report)
     for private_value in (
         "private question text",
@@ -203,6 +205,111 @@ def test_official_v2_evidence_export_is_redacted_and_run_bound(
     artifact = tmp_path / "public.json"
     written = write_canonical_artifact(report, artifact)
     assert written["sha256"] in artifact.with_name("public.json.sha256").read_text("ascii")
+
+
+def test_evidence_source_roles_survive_duplicate_input_basenames(monkeypatch, tmp_path):
+    kwargs = _fixture(tmp_path)
+    source_root = tmp_path / "duplicate-inputs"
+    haystack = source_root / "haystack-side" / "shared.json"
+    memory_config = source_root / "config-side" / "shared.json"
+    haystack.parent.mkdir(parents=True)
+    memory_config.parent.mkdir(parents=True)
+    haystack.write_bytes(Path(kwargs["haystack_path"]).read_bytes())
+    memory_config.write_bytes(Path(kwargs["memory_config_path"]).read_bytes())
+    kwargs["haystack_path"] = haystack
+    kwargs["memory_config_path"] = memory_config
+    write_execution_manifest(
+        kwargs["execution_manifest_path"],
+        checkout={
+            "revision": PINNED_LONGMEMEVAL_V2_REVISION,
+            "dirty": False,
+            "dirty_state_sha256": hashlib.sha256(b"").hexdigest(),
+        },
+        per_question=kwargs["per_question_path"],
+        questions=kwargs["questions_path"],
+        haystack=haystack,
+        trajectories=kwargs["trajectories_path"],
+        memory_config=memory_config,
+        matrix_manifest=kwargs["matrix_manifest_path"],
+        seed=kwargs["seed"],
+        delegated_argv=["--memory-type", "engraphis"],
+    )
+    monkeypatch.setattr(
+        "eval.benchmark.git_provenance",
+        lambda: {
+            "commit": "a" * 40,
+            "dirty": False,
+            "dirty_state_sha256": hashlib.sha256(b"").hexdigest(),
+        },
+    )
+
+    report = build_evidence_report(**kwargs)
+    sources = {item["name"]: item["sha256"] for item in report["suite"]["sources"]}
+    assert sources["inputs/haystack"] == _sha256(haystack)
+    assert sources["inputs/memory_config"] == _sha256(memory_config)
+    assert sources["inputs/haystack"] != sources["inputs/memory_config"]
+
+
+def test_execution_receipt_hashes_question_id_snapshot(monkeypatch, tmp_path):
+    kwargs = _fixture(tmp_path)
+    execution_manifest = Path(kwargs["execution_manifest_path"])
+    execution_manifest.unlink()
+    per_question = Path(kwargs["per_question_path"])
+    original_payload = per_question.read_bytes()
+    original_read_bytes = Path.read_bytes
+    mutation_seen = False
+
+    def replace_after_snapshot(path):
+        nonlocal mutation_seen
+        payload = original_read_bytes(path)
+        if path == per_question and not mutation_seen:
+            mutation_seen = True
+            path.write_text('{"question_id":"q2"}\n', encoding="utf-8")
+        return payload
+
+    monkeypatch.setattr(Path, "read_bytes", replace_after_snapshot)
+    payload = runner.write_execution_manifest(
+        execution_manifest,
+        checkout={
+            "revision": PINNED_LONGMEMEVAL_V2_REVISION,
+            "dirty": False,
+            "dirty_state_sha256": hashlib.sha256(b"").hexdigest(),
+        },
+        per_question=per_question,
+        questions=kwargs["questions_path"],
+        haystack=kwargs["haystack_path"],
+        trajectories=kwargs["trajectories_path"],
+        memory_config=kwargs["memory_config_path"],
+        matrix_manifest=kwargs["matrix_manifest_path"],
+        seed=42,
+        delegated_argv=["--memory-type", "engraphis"],
+    )
+
+    assert mutation_seen
+    assert payload["per_question_sha256"] == hashlib.sha256(original_payload).hexdigest()
+
+
+def test_evidence_export_uses_per_question_snapshot_for_receipt_binding(
+    monkeypatch, tmp_path,
+):
+    kwargs = _fixture(tmp_path)
+    per_question = Path(kwargs["per_question_path"])
+    original_read_bytes = Path.read_bytes
+    mutation_seen = False
+
+    def replace_after_snapshot(path):
+        nonlocal mutation_seen
+        payload = original_read_bytes(path)
+        if path == per_question and not mutation_seen:
+            mutation_seen = True
+            path.write_text('{"question_id":"q2"}\n', encoding="utf-8")
+        return payload
+
+    monkeypatch.setattr(Path, "read_bytes", replace_after_snapshot)
+    with pytest.raises(ValueError, match="sources changed during export"):
+        evidence.build_evidence_report(**kwargs)
+
+    assert mutation_seen
 
 
 def test_official_v2_evidence_rejects_dirty_execution_attestation(tmp_path):

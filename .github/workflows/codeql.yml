@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: read
+  packages: read
   security-events: write
 
 jobs:
@@ -33,10 +34,23 @@ jobs:
           languages: ${{ matrix.language }}
           build-mode: none
           config-file: ./.github/codeql/codeql-config.yml
+          packs: ${{ matrix.language == 'python' && 'codeql/python-queries:AlertSuppression.ql' || 'codeql/javascript-queries:AlertSuppression.ql' }}
       - name: Analyze
         id: analyze
         uses: github/codeql-action/analyze@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4
         with:
           output: codeql-results
+          upload: never
+          category: ".github/workflows/codeql.yml:analyze/language:${{ matrix.language }}"
       - name: Require clean CodeQL results
         run: python scripts/check_codeql_sarif.py "${{ steps.analyze.outputs.sarif-output }}"
+      - name: Filter approved non-security digest results
+        run: >-
+          python scripts/check_codeql_sarif.py --filter-approved
+          "${{ steps.analyze.outputs.sarif-output }}" codeql-results-filtered
+      - name: Upload CodeQL results
+        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4
+        with:
+          sarif_file: codeql-results-filtered
+          category: ".github/workflows/codeql.yml:analyze/language:${{ matrix.language }}"
+          wait-for-processing: true

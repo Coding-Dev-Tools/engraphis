@@ -63,6 +63,10 @@ def generate() -> dict:
     measured.update({key: context[key] for key in (
         "token_counter", "full_serialized_payload_tokens", "compact_serialized_payload_tokens",
         "saved_serialized_payload_tokens", "serialized_payload_savings_ratio")})
+    # Preserve the additive quality and boundary sections in the next immutable
+    # artifact. The v9 bytes remain historical; this only affects future exports.
+    measured.update({key: performance[key] for key in (
+        "packed_quality", "quality_scope", "payload_boundary")})
     grounded_result = {target: grounded[source] for target, source in (
         ("answerable", "n_answerable"), ("grounded", "grounded_hits"),
         ("off_topic", "n_unanswerable"), ("quarantined", "n_quarantine"),

@@ -1,0 +1,5 @@
+Engraphis implementation-authored coding-memory corpus v1.
+Origin: implementation_team.
+The source fixture repositories, session operations, and oracles are deterministic disposable artifacts.
+This attestation does not claim independent human authorship or real-customer provenance.
+The manifest timestamp is an artifact-version timestamp; a campaign must record its own reviewed freeze.

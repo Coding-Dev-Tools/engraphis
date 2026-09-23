@@ -7,7 +7,55 @@ import pytest
 
 from engraphis.core.ids import new_id
 from engraphis.core.store import Store
-from engraphis.service import MemoryService
+from engraphis.service import MemoryService, ValidationError
+
+
+def _insert_receipt_fork(store: Store, workspace_id: str) -> None:
+    """Create a valid-looking second branch for corruption regression tests."""
+    first = store.record_receipt("remember", workspace_id=workspace_id)
+    second = store.record_receipt("recall", workspace_id=workspace_id)
+    fork = dict(second)
+    fork.pop("hash")
+    fork["id"] = new_id("receipt")
+    fork["prev_hash"] = first["hash"]
+    fork["ts_ms"] += 1
+    payload = json.dumps(
+        fork, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    receipt_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    store.conn.execute(
+        "INSERT INTO operation_receipts(id, ts, operation, workspace_id, repo_id, "
+        "sequence, scope_digest, actor, target_count, status, payload, prev_hash, "
+        "receipt_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            fork["id"], fork["ts_ms"] / 1000.0, fork["operation"], workspace_id, "", 999,
+            fork["scope_digest"], fork["actor_digest"], fork["target_count"],
+            fork["status"], payload, fork["prev_hash"], receipt_hash,
+        ),
+    )
+    store.conn.commit()
+
+
+def _rewrite_receipt_packing_mode(
+    store: Store, receipt_id: str, workspace_id: str, value,
+) -> None:
+    row = store.conn.execute(
+        "SELECT payload FROM operation_receipts WHERE id=?", (receipt_id,)
+    ).fetchone()
+    assert row is not None
+    payload = json.loads(row["payload"])
+    payload["metadata"]["packing_mode"] = value
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    receipt_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    store.conn.execute(
+        "UPDATE operation_receipts SET payload=?, receipt_hash=? WHERE id=?",
+        (raw, receipt_hash, receipt_id),
+    )
+    store.conn.execute(
+        "UPDATE receipt_chain_heads SET head_hash=? WHERE workspace_id=?",
+        (receipt_hash, workspace_id),
+    )
+    store.conn.commit()
 
 
 def test_empty_context_savings_scope_has_valid_receipt_chain():
@@ -317,28 +365,7 @@ def test_receipt_append_after_payload_corruption_is_non_bricking_and_stays_inval
 def test_receipt_fork_has_no_safe_append_head():
     store = Store(":memory:")
     wid = store.get_or_create_workspace("team")
-    first = store.record_receipt("remember", workspace_id=wid)
-    second = store.record_receipt("recall", workspace_id=wid)
-    fork = dict(second)
-    fork.pop("hash")
-    fork["id"] = new_id("receipt")
-    fork["prev_hash"] = first["hash"]
-    fork["ts_ms"] += 1
-    payload = json.dumps(
-        fork, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-    )
-    receipt_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
-    store.conn.execute(
-        "INSERT INTO operation_receipts(id, ts, operation, workspace_id, repo_id, "
-        "sequence, scope_digest, actor, target_count, status, payload, prev_hash, "
-        "receipt_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (
-            fork["id"], fork["ts_ms"] / 1000.0, fork["operation"], wid, "", 999,
-            fork["scope_digest"], fork["actor_digest"], fork["target_count"],
-            fork["status"], payload, fork["prev_hash"], receipt_hash,
-        ),
-    )
-    store.conn.commit()
+    _insert_receipt_fork(store, wid)
 
     with pytest.raises(sqlite3.IntegrityError, match="no unique structural head"):
         store.record_receipt("link", workspace_id=wid)
@@ -346,6 +373,42 @@ def test_receipt_fork_has_no_safe_append_head():
     verification = store.verify_receipts(workspace_id=wid)
     assert verification["valid"] is False
     assert "chain_fork" in {error["error"] for error in verification["errors"]}
+
+
+def test_service_receipt_corruption_does_not_brick_completed_operations():
+    service = MemoryService.create(":memory:")
+    workspace_id = service.store.get_or_create_workspace("team")
+    _insert_receipt_fork(service.store, workspace_id)
+
+    stored = service.remember(
+        "The completed memory operation remains available.",
+        workspace="team",
+        scope="workspace",
+    )
+    assert stored["stored"] is True
+    assert stored["receipt"] is None
+    assert stored["receipt_warning"]["code"] == "receipt_chain_integrity_failure"
+    assert service.store.get_memory(stored["id"]) is not None
+
+    recalled = service.recall("completed memory operation", workspace="team")
+    assert recalled["count"] >= 1
+    assert recalled["receipt"] is None
+    assert recalled["receipt_warning"]["code"] == "receipt_chain_integrity_failure"
+
+    verification = service.store.verify_receipts(workspace_id=workspace_id)
+    assert verification["valid"] is False
+    assert "chain_fork" in {error["error"] for error in verification["errors"]}
+
+
+def test_service_does_not_mask_unrelated_receipt_database_errors(monkeypatch):
+    service = MemoryService.create(":memory:")
+
+    def fail_with_unrelated_error(*_args, **_kwargs):
+        raise sqlite3.IntegrityError("database is locked")
+
+    monkeypatch.setattr(service.store, "record_receipt", fail_with_unrelated_error)
+    with pytest.raises(sqlite3.IntegrityError, match="database is locked"):
+        service.remember("An unrelated receipt error must remain visible.", workspace="team")
 
 
 def test_healthy_receipt_append_does_not_reconstruct_chain(monkeypatch):
@@ -718,6 +781,120 @@ def test_service_records_and_exports_operation_receipts():
     assert exported["format"] == "engraphis-receipts/1"
     assert exported["verification"]["valid"] is True
     assert {entry["operation"] for entry in exported["entries"]} == {"remember", "recall"}
+
+
+@pytest.mark.parametrize(
+    ("requested_mode", "expected_mode"),
+    [(None, "legacy"), ("legacy", "legacy"), (" cOvErAgE ", "coverage")],
+)
+@pytest.mark.parametrize("populated", [False, True])
+def test_service_recall_receipt_records_normalized_packing_mode(
+    requested_mode, expected_mode, populated,
+):
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    workspace_id = service.store.get_or_create_workspace("packing-receipt")
+    # Historical receipts remain valid without this optional field.
+    historical = service.store.record_receipt("recall", workspace_id=workspace_id)
+    if populated:
+        service.remember("The deployment label is ALPHA.", workspace="packing-receipt")
+    kwargs = {} if requested_mode is None else {"packing_mode": requested_mode}
+
+    result = service.recall("deployment label", workspace="packing-receipt", **kwargs)
+
+    assert result["count"] == int(populated)
+    assert result["packing_mode"] == expected_mode
+    assert result["receipt"]["metadata"]["packing_mode"] == expected_mode
+    listed = service.store.list_receipts(workspace_id=workspace_id)
+    current = next(row for row in listed if row["id"] == result["receipt"]["id"])
+    assert current["metadata"]["packing_mode"] == expected_mode
+    exported = service.export_receipts(workspace="packing-receipt")
+    assert exported["format"] == "engraphis-receipts/1"
+    assert exported["verification"]["valid"] is True
+    exported_current = next(
+        row for row in exported["entries"] if row["id"] == result["receipt"]["id"]
+    )
+    assert exported_current["metadata"]["packing_mode"] == expected_mode
+    exported_historical = next(
+        row for row in exported["entries"] if row["id"] == historical["id"]
+    )
+    assert exported_historical == historical
+    assert "packing_mode" not in exported_historical["metadata"]
+    assert service.store.verify_receipts(workspace_id=workspace_id)["valid"] is True
+
+
+def test_invalid_recall_packing_mode_does_not_append_a_receipt():
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    workspace_id = service.store.get_or_create_workspace("packing-receipt")
+    before = service.export_receipts(workspace="packing-receipt")
+
+    with pytest.raises(ValidationError, match="packing_mode"):
+        service.recall("deployment label", workspace="packing-receipt", packing_mode="private")
+
+    assert service.export_receipts(workspace="packing-receipt") == before
+    assert service.store.list_receipts(workspace_id=workspace_id) == []
+
+
+@pytest.mark.parametrize("value", [None, True, 1, ["coverage"], {"mode": "coverage"}])
+def test_direct_receipt_packing_mode_rejects_non_string_metadata(value):
+    store = Store(":memory:")
+    workspace_id = store.get_or_create_workspace("packing-mode-direct")
+
+    receipt = store.record_receipt(
+        "recall", workspace_id=workspace_id, metadata={"packing_mode": value},
+    )
+
+    assert "packing_mode" not in receipt["metadata"]
+    assert store.list_receipts(workspace_id=workspace_id)[0]["metadata"] == {}
+    assert store.verify_receipts(workspace_id=workspace_id)["valid"] is True
+
+
+def test_direct_receipt_packing_mode_hashes_unknown_string_labels():
+    store = Store(":memory:")
+    workspace_id = store.get_or_create_workspace("packing-mode-label")
+    private_label = "customer-specific-mode"
+
+    receipt = store.record_receipt(
+        "recall", workspace_id=workspace_id, metadata={"packing_mode": private_label},
+    )
+
+    assert private_label not in json.dumps(receipt)
+    assert receipt["metadata"]["packing_mode"].startswith("sha256:")
+    assert store.verify_receipts(workspace_id=workspace_id)["valid"] is True
+
+
+@pytest.mark.parametrize("value", [True, None, 1.25, ["coverage"], {"mode": "coverage"}])
+def test_persisted_receipt_rejects_non_string_packing_mode(value):
+    store = Store(":memory:")
+    workspace_id = store.get_or_create_workspace("packing-mode-persisted")
+    receipt = store.record_receipt(
+        "recall", workspace_id=workspace_id, metadata={"packing_mode": "legacy"},
+    )
+    _rewrite_receipt_packing_mode(store, receipt["id"], workspace_id, value)
+
+    listed = store.list_receipts(workspace_id=workspace_id)
+    assert listed[0]["invalid_payload"] is True
+    verification = store.verify_receipts(workspace_id=workspace_id)
+    assert verification["valid"] is False
+    assert any(error["error"] == "payload_schema_invalid"
+               for error in verification["errors"])
+
+
+@pytest.mark.parametrize("value", [
+    "legacy",
+    "coverage",
+    "sha256:" + hashlib.sha256(b"private-mode").hexdigest(),
+])
+def test_persisted_receipt_accepts_valid_packing_mode_labels(value):
+    store = Store(":memory:")
+    workspace_id = store.get_or_create_workspace("packing-mode-persisted")
+    receipt = store.record_receipt(
+        "recall", workspace_id=workspace_id, metadata={"packing_mode": "legacy"},
+    )
+    _rewrite_receipt_packing_mode(store, receipt["id"], workspace_id, value)
+
+    listed = store.list_receipts(workspace_id=workspace_id)
+    assert listed[0]["metadata"]["packing_mode"] == value
+    assert store.verify_receipts(workspace_id=workspace_id)["valid"] is True
 
 
 def test_store_and_service_share_strict_receipt_projection():
