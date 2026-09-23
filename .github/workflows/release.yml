@@ -858,10 +858,10 @@ jobs:
 
       - name: Require signed full-product qualification before PyPI publication
         env:
-          ENGRAPHIS_RELEASE_QUALIFICATION: ${{ vars.ENGRAPHIS_RELEASE_QUALIFICATION }}
-          ENGRAPHIS_RELEASE_VERIFY_KEY: ${{ vars.ENGRAPHIS_RELEASE_VERIFY_KEY }}
-          ENGRAPHIS_RELEASE_CANDIDATE_ID: ${{ vars.ENGRAPHIS_RELEASE_CANDIDATE_ID }}
-          ENGRAPHIS_RELEASE_LEDGER_SHA256: ${{ vars.ENGRAPHIS_RELEASE_LEDGER_SHA256 }}
+          ENGRAPHIS_RELEASE_QUALIFICATION: ${{ secrets.ENGRAPHIS_RELEASE_QUALIFICATION }}
+          ENGRAPHIS_RELEASE_VERIFY_KEY: ${{ secrets.ENGRAPHIS_RELEASE_VERIFY_KEY }}
+          ENGRAPHIS_RELEASE_CANDIDATE_ID: ${{ secrets.ENGRAPHIS_RELEASE_CANDIDATE_ID }}
+          ENGRAPHIS_RELEASE_LEDGER_SHA256: ${{ secrets.ENGRAPHIS_RELEASE_LEDGER_SHA256 }}
         shell: bash
         run: |
           set -euo pipefail
@@ -908,10 +908,10 @@ jobs:
 
       - name: Require signed full-product qualification before GitHub publication
         env:
-          ENGRAPHIS_RELEASE_QUALIFICATION: ${{ vars.ENGRAPHIS_RELEASE_QUALIFICATION }}
-          ENGRAPHIS_RELEASE_VERIFY_KEY: ${{ vars.ENGRAPHIS_RELEASE_VERIFY_KEY }}
-          ENGRAPHIS_RELEASE_CANDIDATE_ID: ${{ vars.ENGRAPHIS_RELEASE_CANDIDATE_ID }}
-          ENGRAPHIS_RELEASE_LEDGER_SHA256: ${{ vars.ENGRAPHIS_RELEASE_LEDGER_SHA256 }}
+          ENGRAPHIS_RELEASE_QUALIFICATION: ${{ secrets.ENGRAPHIS_RELEASE_QUALIFICATION }}
+          ENGRAPHIS_RELEASE_VERIFY_KEY: ${{ secrets.ENGRAPHIS_RELEASE_VERIFY_KEY }}
+          ENGRAPHIS_RELEASE_CANDIDATE_ID: ${{ secrets.ENGRAPHIS_RELEASE_CANDIDATE_ID }}
+          ENGRAPHIS_RELEASE_LEDGER_SHA256: ${{ secrets.ENGRAPHIS_RELEASE_LEDGER_SHA256 }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1105,10 +1105,10 @@ jobs:
       - name: Require signed full-product qualification before PyPI repair
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
-          ENGRAPHIS_RELEASE_QUALIFICATION: ${{ vars.ENGRAPHIS_RELEASE_QUALIFICATION }}
-          ENGRAPHIS_RELEASE_VERIFY_KEY: ${{ vars.ENGRAPHIS_RELEASE_VERIFY_KEY }}
-          ENGRAPHIS_RELEASE_CANDIDATE_ID: ${{ vars.ENGRAPHIS_RELEASE_CANDIDATE_ID }}
-          ENGRAPHIS_RELEASE_LEDGER_SHA256: ${{ vars.ENGRAPHIS_RELEASE_LEDGER_SHA256 }}
+          ENGRAPHIS_RELEASE_QUALIFICATION: ${{ secrets.ENGRAPHIS_RELEASE_QUALIFICATION }}
+          ENGRAPHIS_RELEASE_VERIFY_KEY: ${{ secrets.ENGRAPHIS_RELEASE_VERIFY_KEY }}
+          ENGRAPHIS_RELEASE_CANDIDATE_ID: ${{ secrets.ENGRAPHIS_RELEASE_CANDIDATE_ID }}
+          ENGRAPHIS_RELEASE_LEDGER_SHA256: ${{ secrets.ENGRAPHIS_RELEASE_LEDGER_SHA256 }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1132,10 +1132,10 @@ jobs:
       - name: Require signed full-product qualification before GitHub repair
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
-          ENGRAPHIS_RELEASE_QUALIFICATION: ${{ vars.ENGRAPHIS_RELEASE_QUALIFICATION }}
-          ENGRAPHIS_RELEASE_VERIFY_KEY: ${{ vars.ENGRAPHIS_RELEASE_VERIFY_KEY }}
-          ENGRAPHIS_RELEASE_CANDIDATE_ID: ${{ vars.ENGRAPHIS_RELEASE_CANDIDATE_ID }}
-          ENGRAPHIS_RELEASE_LEDGER_SHA256: ${{ vars.ENGRAPHIS_RELEASE_LEDGER_SHA256 }}
+          ENGRAPHIS_RELEASE_QUALIFICATION: ${{ secrets.ENGRAPHIS_RELEASE_QUALIFICATION }}
+          ENGRAPHIS_RELEASE_VERIFY_KEY: ${{ secrets.ENGRAPHIS_RELEASE_VERIFY_KEY }}
+          ENGRAPHIS_RELEASE_CANDIDATE_ID: ${{ secrets.ENGRAPHIS_RELEASE_CANDIDATE_ID }}
+          ENGRAPHIS_RELEASE_LEDGER_SHA256: ${{ secrets.ENGRAPHIS_RELEASE_LEDGER_SHA256 }}
         shell: bash
         run: |
           set -euo pipefail

@@ -185,10 +185,15 @@ def test_every_publication_write_requires_unconditional_qualification():
         for step in job["steps"]:
             if "scripts.verify_release_qualification" in step.get("run", ""):
                 assert "if" not in step and not step.get("continue-on-error", False)
-                assert set(step["env"]) >= {
+                required = {
                     "ENGRAPHIS_RELEASE_QUALIFICATION", "ENGRAPHIS_RELEASE_VERIFY_KEY",
                     "ENGRAPHIS_RELEASE_CANDIDATE_ID", "ENGRAPHIS_RELEASE_LEDGER_SHA256",
                 }
+                assert set(step["env"]) >= required
+                for key in required:
+                    # Actions prints variable-backed step environment values in public
+                    # logs. Only the protected secret context masks these fields.
+                    assert step["env"][key] == "${{ secrets." + key + " }}"
                 assert '--commit "$ENGRAPHIS_REPAIR_COMMIT"' in step["run"] if name.endswith("repair") else (
                     '--commit "$GITHUB_SHA"' in step["run"])
                 checked = True
@@ -201,3 +206,6 @@ def test_every_publication_write_requires_unconditional_qualification():
         assert writes == expected_writes
     assert workflow["jobs"]["publish"]["needs"] == "release-evidence"
     assert workflow["jobs"]["github-release"]["needs"] == "publish"
+    assert "${{ vars.ENGRAPHIS_RELEASE_" not in (
+        root / ".github/workflows/release.yml"
+    ).read_text(encoding="utf-8")

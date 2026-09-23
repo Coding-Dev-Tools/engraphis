@@ -96,6 +96,16 @@ Before the first upload, keep a separate secure backup and confirm you can retri
 key is lost, previously synced encrypted bundles cannot be decrypted; Engraphis Cloud cannot
 restore it.
 
+For the first device, add a single `ENGRAPHIS_SYNC_E2EE_KEY=<your key>` assignment to its
+owner-private `~/.engraphis/config.env` with a trusted editor, retaining any existing settings.
+Use the path named by `ENGRAPHIS_ENV_FILE` instead when that override is configured. A secrets
+manager may inject the same process variable instead of using the file. Restart the dashboard,
+then check **Settings → Cloud Sync**: Connection must show **Connected**, Encryption key
+**Valid**, and Sync readiness **Ready** before **Sync now** is enabled. If encryption support is
+missing, install `engraphis[cloud-sync]` in the dashboard's Python environment and restart.
+On each additional device, provision the *same* backed-up key through your secure channel;
+generating a different key will make earlier encrypted bundles unreadable there.
+
 The dashboard's **Sync now** action invokes the same customer protocol. The public package does
 not run a local auto-sync loop or ship a cron/Task Scheduler wrapper. Hosted automation belongs
 to the private service. A round with any incomplete workspace is a failure, even when other peers
