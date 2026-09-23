@@ -56,7 +56,9 @@ def test_invalid_matrix_is_rejected_before_opening_storage(monkeypatch):
 
 
 def test_source_drift_is_reported_without_claiming_matching_evidence(monkeypatch):
-    snapshots = iter([{"revision": "before"}, {"revision": "after"}])
+    frozen = scale._source_snapshot()
+    snapshots = iter([{**frozen, "tracked_diff_sha256": "before"},
+                      {**frozen, "tracked_diff_sha256": "after"}])
     monkeypatch.setattr(scale, "_source_snapshot", lambda: next(snapshots))
     report = _run(backend="numpy", concurrencies=[1])
     assert report["metrics"]["source_stable"] is False

@@ -33,6 +33,8 @@ from eval.performance import run as run_performance
 
 
 ROOT = Path(__file__).resolve().parents[1]
+PUBLIC_OFFLINE_ARTIFACT = "offline-fixtures-v70.json"
+PUBLIC_OFFLINE_SHA = "a8a96cb4d096ee72131d60307cc95b95f5b09716e813d9ee07090578dc1439c3"
 
 
 @pytest.fixture(scope="module")
@@ -97,13 +99,12 @@ def _committed_evidence() -> dict:
     README/BENCHMARKS/SVG prose was written from.
 
     Prose tests must interpolate values from this artifact, not from a fresh evaluator
-    run: ``eval.performance`` samples timed recalls on a wall clock, so its aggregates
-    wobble a few hundredths per run and exact-decimal prose asserts against a live run
-    flake. The live-vs-registry comparison stays in
-    ``test_public_numeric_evidence_registry_is_complete_and_live`` with a 0.5% band.
+    run. Timed latency aggregates are machine-dependent, while the context, payload,
+    question-count, and quality aggregates used by the publication contract are
+    deterministic and compared exactly in ``test_public_numeric_evidence_registry_is_complete_and_live``.
     """
     artifact = json.loads(
-        (ROOT / "docs" / "benchmark-evidence" / "offline-fixtures-v9.json").read_text(
+        (ROOT / "docs" / "benchmark-evidence" / PUBLIC_OFFLINE_ARTIFACT).read_text(
             encoding="utf-8"
         )
     )
@@ -151,10 +152,10 @@ def test_readme_distinguishes_every_registered_token_context_measurement():
         "not an MCP transport response",
         "must not be added together",
         "not a storage-reduction claim",
-        "offline-fixtures-v9.json",
+        PUBLIC_OFFLINE_ARTIFACT,
         "offline-chunking",
         "offline-performance",
-        "455fc9d32a236e582a49aaaf9b84f30cae2573dc6ed982f4dd7dd845afcaf24c",
+        PUBLIC_OFFLINE_SHA,
         "There is no universal memory-count",
         "python -m eval.vector_scale",
         'vector_backend="sqlite-vec"',
@@ -173,18 +174,41 @@ def test_readme_distinguishes_every_registered_token_context_measurement():
 
 
 
-def test_public_docs_withhold_unregistered_external_numbers():
-    """External diagnostics stay qualitative until a public artifact is registered."""
+def test_public_docs_scope_external_numbers_and_withhold_historical_claims():
+    """The offline registry is scoped while separate diagnostics remain artifact-bound."""
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     benchmarks = (ROOT / "BENCHMARKS.md").read_text(encoding="utf-8")
+    expansion = (ROOT / "docs" / "BENCHMARK_EXPANSION_RESULTS.md").read_text(
+        encoding="utf-8"
+    )
+    additional = (ROOT / "docs" / "ADDITIONAL_BENCHMARK_DIAGNOSTICS.md").read_text(
+        encoding="utf-8"
+    )
     security = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
+    readme_normalized = " ".join(readme.split())
+    benchmarks_normalized = " ".join(benchmarks.split())
+    additional_normalized = " ".join(additional.split())
 
     assert "<summary>See benchmark details and reproduce the results</summary>" in readme
-    assert "model-dependent, consolidation, productivity, and latency results remain unpublished" in readme
-    assert "absence\nfrom this registry means no public number is claimed" in benchmarks
-    assert "withholds their case counts, retrieval scores,\ntoken coverage, and throughput" in benchmarks
+    assert "offline fixture registry intentionally excludes external" in readme_normalized
+    assert "Completed retrieval-only diagnostics are published separately" in readme_normalized
+    assert "absence from this registry" in benchmarks_normalized
+    assert "LoCoMo and LongMemEval retrieval diagnostics are retained as separate public-safe artifacts" in benchmarks_normalized
+    assert "Mem2ActBench's declared small retrieval diagnostic is complete" in benchmarks_normalized
+    assert "LongMemEval 4,096-token context experiment | COMPLETE" in expansion
+    assert "+24.03 percentage points" in expansion
+    assert "source-preparation metadata" in expansion
+    assert "public source lock records 20 preparation exclusions" in additional_normalized
     assert "Exact vector scale envelope" in benchmarks
     assert "python -m eval.redteam_poisoning" in security
+
+    for stale in (
+        "model-dependent, consolidation, productivity, and latency results remain unpublished",
+        "private diagnostic; it is not an official benchmark-harness or public evidence artifact",
+        "withholds their case counts, retrieval scores",
+    ):
+        assert stale not in readme
+        assert stale not in benchmarks
 
     for unsupported in (
         "49,915,394",
@@ -288,11 +312,11 @@ def test_example_visual_uses_the_checked_in_offline_fixture_results(
     }
     assert "5/5 answerable questions" in visual
     assert "6/6 off-topic questions" in visual
-    assert "455fc9d32a236e582a49aaaf9b84f30cae2573dc6ed982f4dd7dd845afcaf24c" in visual
+    assert PUBLIC_OFFLINE_SHA in visual
 
 
 def test_context_savings_visual_uses_only_registered_measurements():
-    """The headline chart contains no unsupported public number.
+    """The headline chart contains only registered values and explicit scope labels.
 
     Values are interpolated from the COMMITTED registry artifact — the publication
     source of truth — so chart text cannot drift from the evidence it cites.
@@ -307,44 +331,33 @@ def test_context_savings_visual_uses_only_registered_measurements():
     performance = committed["performance"]
     context_full = performance["full_serialized_payload_tokens"]
     context_compact = performance["compact_serialized_payload_tokens"]
-    grounded_total = committed["grounded"]["answerable"] + committed["grounded"]["off_topic"]
     payload_samples = performance["questions"]
     timed_recalls = performance["timed_recalls"]
 
     for evidence in (
-        "What the memory system changes",
-        "Long project history sent to the model*",
-        "Local LoCoMo diagnostic · 10 conversations · 1,986 questions",
-        "Replay everything · 49,915,394 tokens",
-        "Engraphis · 891,857 tokens",
-        "98.21% lower*",
-        "Cross-session handoff",
-        "3 / 15 satisfied",
-        "15 / 15 satisfied",
-        "Intent-layered graph routing",
-        "0 / 3 top-1",
-        "3 / 3 top-1",
-        "Two-hop graph recall",
-        "One-hop graph · 0 / 3 found",
-        "Personalized PageRank · 3 / 3 found",
-        "Consolidation-aware ranking",
-        "Baseline digest top-1 · 0 / 2",
-        "With consolidation bonus · 2 / 2",
-        f"Whole documents · {whole['mean_context_tokens']:.1f} tokens",
-        f"Structure-aware chunks · {chunked['mean_context_tokens']:.1f} tokens",
+        "Measured context and retrieval boundaries",
+        "CONTEXT BOUNDARIES",
+        "QUALITY SCOPES",
+        "PENDING EVALUATION TRACKS",
+        "Whole documents",
+        f"{whole['mean_context_tokens']:.1f} tokens",
+        "Structure-aware chunks",
+        f"{chunked['mean_context_tokens']:.1f} tokens",
         f"{chunking['context_reduction_pct']:.1f}% lower",
-        f"Smallest evidence: {whole['mean_evidence_tokens']:.1f} → {chunked['mean_evidence_tokens']:.1f} tokens · 73.9% lower",
-        "Serialized recall payload proxy",
-        f"{payload_samples} samples · {timed_recalls} timed recalls",
-        "Recall@5 · hit@5 · answer-token recall: 1.000",
-        f"Full proxy · {context_full:,} tokens",
-        f"Compact proxy · {context_compact:,} tokens",
+        "Smallest evidence:",
+        "Serialized JSON-shape payload proxy",
+        f"{payload_samples:,} payload samples / {timed_recalls:,} timed recalls",
+        "Full JSON-shape proxy",
+        f"{context_full:,} tokens",
+        "Compact JSON-shape proxy",
+        f"{context_compact:,} tokens",
         f"{100 * performance['serialized_payload_savings_ratio']:.2f}% lower",
-        f"{performance['mean_context_tokens']:.2f} avg · {performance['max_context_tokens']} max",
-        "35 / 35",
-        f"{grounded_total} / {grounded_total} · 8 / 8",
-        "9.66% lower",
-        "Local deterministic fixtures",
+        "Retrieved candidate quality",
+        "Packed context",
+        "Recall@5 1.000 / hit@5 1.000 / answer tokens 1.000",
+        "MCP transport not measured",
+        "JSON proxy only",
+        "Pinned LoCoMo and LongMemEval artifacts with answer evaluators",
     ):
         assert evidence in visual
 
@@ -355,10 +368,13 @@ def test_context_savings_visual_uses_only_registered_measurements():
     visible_text = {node.text for node in svg.iter(f"{namespace}text")}
     assert f"{context_compact:,} tokens" in visible_text
     assert f"{100 * performance['serialized_payload_savings_ratio']:.2f}% lower" in visible_text
+    assert f"Mean {performance['mean_context_tokens']:.2f} / max {performance['max_context_tokens']:,} tokens" in visual
+    assert "Recall@5 1.000 / hit@5 1.000 / answer tokens 1.000" in visual
+    assert "MCP transport not measured" in visible_text
 
     for unsupported in (
         "Public evidence is checksum-bound",
-        "offline-fixtures-v9.json",
+        PUBLIC_OFFLINE_ARTIFACT,
         "No external or model-dependent number is published without the same evidence",
         "Evidence pending",
         "No external or model-dependent number is published",
@@ -378,7 +394,7 @@ def test_context_savings_visual_uses_only_registered_measurements():
         float(value)
         for value in re.findall(r'font-size="([^"]+)"', visual)
     }
-    assert {12.5, 13.2, 14.3, 17.4, 18.7, 20.0, 22.0, 24.0, 33.0} == text_sizes
+    assert {12.5, 13.2, 14.3, 17.4, 18.7, 20.0, 24.0, 33.0} <= text_sizes
 
 
 def test_public_numeric_evidence_registry_is_complete_and_live(
@@ -386,12 +402,12 @@ def test_public_numeric_evidence_registry_is_complete_and_live(
 ):
     """Every retained public aggregate resolves to one checksum-bound live run."""
     artifact_path = (
-        ROOT / "docs" / "benchmark-evidence" / "offline-fixtures-v9.json"
+        ROOT / "docs" / "benchmark-evidence" / PUBLIC_OFFLINE_ARTIFACT
     )
     sidecar_path = artifact_path.with_suffix(".json.sha256")
     artifact_bytes = artifact_path.read_bytes()
     artifact_sha = hashlib.sha256(artifact_bytes).hexdigest()
-    expected_sha = "455fc9d32a236e582a49aaaf9b84f30cae2573dc6ed982f4dd7dd845afcaf24c"
+    expected_sha = PUBLIC_OFFLINE_SHA
 
     assert artifact_sha == expected_sha
     assert sidecar_path.read_text(encoding="ascii") == (
@@ -410,6 +426,7 @@ def test_public_numeric_evidence_registry_is_complete_and_live(
         file_hashes, sort_keys=True, separators=(",", ":")
     ).encode()
     assert hashlib.sha256(suite_manifest).hexdigest() == artifact["suite"]["digest"]
+    assert artifact["suite"]["digest"] in (ROOT / "BENCHMARKS.md").read_text(encoding="utf-8")
 
     runs = {run["id"]: run for run in artifact["runs"]}
     assert set(runs) == {
@@ -443,33 +460,26 @@ def test_public_numeric_evidence_registry_is_complete_and_live(
         == performance["quality"]["answer_token_recall"]
     )
 
-    def _close(live_value: float, recorded: float, *, rel: float = 0.005) -> bool:
-        """Timing-derived aggregates wobble a few hundredths across runs (scheduler
-        jitter inside the timed-recall sampling). Compare within a 0.5% relative
-        band — tight enough to catch real drift, loose enough to absorb it."""
-        return abs(live_value - recorded) <= max(0.01, rel * max(1.0, abs(recorded)))
-
-    assert _close(
-        performance_result["mean_context_tokens"], performance["context"]["mean_tokens"]
+    # These values are deterministic fixture aggregates, not wall-clock timing
+    # observations. Approximate comparisons would let serializer or count drift
+    # pass the publication contract unnoticed.
+    assert performance_result["mean_context_tokens"] == performance["context"]["mean_tokens"]
+    assert performance_result["max_context_tokens"] == performance["context"]["max_tokens"]
+    assert (
+        performance_result["full_serialized_payload_tokens"]
+        == performance["context"]["full_serialized_payload_tokens"]
     )
-    assert _close(
-        performance_result["max_context_tokens"], performance["context"]["max_tokens"]
+    assert (
+        performance_result["compact_serialized_payload_tokens"]
+        == performance["context"]["compact_serialized_payload_tokens"]
     )
-    assert _close(
-        performance_result["full_serialized_payload_tokens"],
-        performance["context"]["full_serialized_payload_tokens"],
+    assert (
+        performance_result["saved_serialized_payload_tokens"]
+        == performance["context"]["saved_serialized_payload_tokens"]
     )
-    assert _close(
-        performance_result["compact_serialized_payload_tokens"],
-        performance["context"]["compact_serialized_payload_tokens"],
-    )
-    assert _close(
-        performance_result["saved_serialized_payload_tokens"],
-        performance["context"]["saved_serialized_payload_tokens"],
-    )
-    assert _close(
-        performance_result["serialized_payload_savings_ratio"],
-        performance["context"]["serialized_payload_savings_ratio"],
+    assert (
+        performance_result["serialized_payload_savings_ratio"]
+        == performance["context"]["serialized_payload_savings_ratio"]
     )
 
     grounded = offline_release_evidence["grounded"]

@@ -224,3 +224,112 @@ def test_compact_grounded_response_does_not_repeat_cited_bodies():
     assert compact["usage"]["answer_tokens"] == RegexTokenCounter()(compact["answer"])
     assert compact["usage"]["answer_tokens"] <= 48
     assert compact["usage"]["context_tokens"] <= 48
+
+
+@pytest.fixture
+def exact_service():
+    service = MemoryService.create(":memory:")
+    yield service
+    service.close()
+
+
+def test_compact_recall_emits_exact_binding_only_for_admitted_packed_source(exact_service):
+    service = exact_service
+    content = "Deployment label is ALPHA."
+    stored = service.remember(
+        content,
+        workspace="acme",
+        exact_value="ALPHA",
+        exact_value_type="identifier",
+    )
+
+    empty = service.recall(
+        "deployment label",
+        workspace="acme",
+        token_budget=0,
+        response_mode="compact",
+        record_receipt=False,
+    )
+    assert empty["context"] == ""
+    assert empty["packed_sources"] == []
+    assert [row["id"] for row in empty["memories"]] == [stored["id"]]
+    assert all("exact_value" not in memory for memory in empty["memories"])
+
+    full = service.recall(
+        "deployment label",
+        workspace="acme",
+        token_budget=0,
+        response_mode="full",
+        record_receipt=False,
+    )
+    full_memory = next(memory for memory in full["memories"] if memory["id"] == stored["id"])
+    assert full_memory["content"] == content
+    assert full_memory["exact_value"]["value"] == "ALPHA"
+
+    roomy = service.recall(
+        "deployment label",
+        workspace="acme",
+        token_budget=100,
+        response_mode="compact",
+        record_receipt=False,
+    )
+    packed = next(source for source in roomy["packed_sources"] if source["id"] == stored["id"])
+    assert packed["exact_value"] == {
+        "value": "ALPHA",
+        "type": "identifier",
+        "source": "content",
+        "start": content.index("ALPHA"),
+        "end": content.index("ALPHA") + len("ALPHA"),
+        "copy_exactly": True,
+    }
+    assert packed["source_span"] == [content.index("ALPHA"), content.index("ALPHA") + 5]
+    assert all("exact_value" not in memory for memory in roomy["memories"])
+
+
+def test_intent_compact_recall_does_not_detach_exact_binding_from_context(exact_service):
+    service = exact_service
+    stored = service.remember(
+        "Deployment label is ALPHA.",
+        workspace="acme",
+        exact_value="ALPHA",
+        exact_value_type="identifier",
+    )
+
+    result = service.intent_recall(
+        "deployment label",
+        workspace="acme",
+        token_budget=0,
+        response_mode="compact",
+        record_receipt=False,
+    )
+
+    assert result["context"] == ""
+    assert result["packed_sources"] == []
+    assert [row["id"] for row in result["memories"]] == [stored["id"]]
+    assert all("exact_value" not in memory for memory in result["memories"])
+
+
+@pytest.mark.parametrize("budget", [8, 16])
+def test_compact_source_identity_does_not_imply_bound_occurrence_admission(exact_service, budget):
+    content = "First Δ-42. Second Δ-42."
+    start = content.rindex("Δ-42")
+    stored = exact_service.remember(
+        content, workspace="acme", exact_value="Δ-42", exact_value_type="identifier",
+        exact_value_span=(start, start + 4),
+    )
+    result = exact_service.recall(
+        "First", workspace="acme", k=1, token_budget=budget,
+        response_mode="compact", reinforce=False, record_receipt=False,
+    )
+    assert [row["id"] for row in result["memories"]] == [stored["id"]]
+    assert "exact_value" not in result["memories"][0]
+    packed = result["packed_sources"][0]
+    assert packed["id"] == stored["id"]
+    if budget == 8:
+        assert result["context"] == "[1]\nFirst Δ-42."
+        assert "exact_value" not in packed and "source_span" not in packed
+        assert packed["evidence_unit"]["value"] is None
+    else:
+        assert content in result["context"]
+        assert packed["exact_value"]["value"] == "Δ-42"
+        assert packed["source_span"] == [start, start + 4]

@@ -51,6 +51,7 @@ from engraphis.core.graph_scene import (
 )
 from engraphis.core.graph_layers import normalize_graph_layer
 from engraphis.core.context import RegexTokenCounter
+from engraphis.core.evidence import make_exact_value_binding
 from engraphis.core.vector_repair import index_repair_identity
 from engraphis.core.ids import new_id as make_id
 from engraphis.core.savings import annotate_usage, normalize_release_version
@@ -68,17 +69,31 @@ from engraphis.core.poisoning import (
     source_is_external,
 )
 from engraphis.core.query_planner import PLANNING_MODES
-from engraphis.core.retrieval_policy import CANDIDATE_DEPTH_MODES, RETRIEVAL_PROFILES
+from engraphis.core.retrieval_policy import (
+    CANDIDATE_DEPTH_MODES,
+    RETRIEVAL_PROFILES,
+    RETRIEVAL_RECIPES,
+    apply_retrieval_recipe,
+)
 from engraphis.core.secrets import SecretDetectedError, redact_secrets as _redact_secrets, reject_secrets
 from engraphis.core.store import (
     _loads,
     _merge_edge_provenance,
     _public_receipt_row,
     normalize_entity_name,
+    ReceiptChainIntegrityError,
 )
 from engraphis.graphdata import build_graph_payload, empty_graph
 
 logger = logging.getLogger("engraphis.service")
+
+RECEIPT_CHAIN_INTEGRITY_WARNING = {
+    "code": "receipt_chain_integrity_failure",
+    "message": (
+        "operation completed, but its audit receipt was not recorded because the "
+        "existing receipt chain is structurally invalid"
+    ),
+}
 
 
 def _is_memory_database_path(db_path: str) -> bool:
@@ -438,6 +453,20 @@ def _reject_secret_capture(fields) -> None:
         raise ValidationError(str(exc)) from None
 
 
+def _exact_binding_for_write(
+    content: str,
+    value: str,
+    value_type: str,
+    *,
+    source_span: Optional[tuple[int, int]] = None,
+) -> dict[str, Any]:
+    """Expose only the core binding validator's content-free input failures."""
+    try:
+        return make_exact_value_binding(content, value, value_type, source_span=source_span)
+    except ValueError as exc:
+        raise ValidationError(str(exc)) from None
+
+
 def _code_query_capacity(value: Any) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValidationError("capacity must be an integer")
@@ -612,6 +641,26 @@ def _strict_bool(value: Any, *, field: str) -> bool:
     if not isinstance(value, bool):
         raise ValidationError(f"{field} must be a boolean")
     return value
+
+
+def _validate_exact_edit_request(
+    exact_value: Optional[str], exact_value_type: str,
+    exact_value_span: Optional[tuple[int, int]], clear_exact_value: bool,
+) -> bool:
+    """Validate edit intent shape before resolving or mutating a memory."""
+    clear = _strict_bool(clear_exact_value, field="clear_exact_value")
+    normalized_type = str(exact_value_type or "literal").strip().casefold()
+    if exact_value is None and (normalized_type != "literal" or exact_value_span is not None):
+        raise ValidationError("exact_value_type and exact_value_span require exact_value")
+    if exact_value is not None and clear:
+        raise ValidationError("exact_value and clear_exact_value cannot be combined")
+    if exact_value_span is not None and (
+        not isinstance(exact_value_span, tuple)
+        or len(exact_value_span) != 2
+        or any(type(item) is not int for item in exact_value_span)
+    ):
+        raise ValidationError("exact_value_span must be a (start, end) integer pair")
+    return clear
 
 
 def _canonical_write_provenance(
@@ -1243,6 +1292,37 @@ class MemoryService:
         self._closing = False
         self._closed = False
 
+    def _record_receipt(
+        self,
+        operation: str,
+        *,
+        response: Optional[dict[str, Any]] = None,
+        **kwargs: Any,
+    ) -> Optional[dict]:
+        """Append an operation receipt without bricking completed service work.
+
+        Receipt continuity is an audit property, not a prerequisite for the primary
+        memory, retrieval, graph, or import result.  The Store still fails closed and
+        raises :class:`ReceiptChainIntegrityError` when a corrupted chain has no safe
+        predecessor; this boundary catches only that deliberate refusal.  Other
+        database/connector failures continue to propagate normally.
+
+        ``response`` receives a content-free warning when the receipt is unavailable,
+        so callers can distinguish a successful operation with an audit gap from a
+        successful operation whose receipt was written.  The warning contains no
+        database payload, ids, query text, or exception text.
+        """
+        try:
+            return self.store.record_receipt(operation, **kwargs)
+        except ReceiptChainIntegrityError:
+            logger.warning(
+                "operation receipt unavailable because the receipt chain is structurally invalid"
+            )
+            if response is not None:
+                response["receipt"] = None
+                response["receipt_warning"] = dict(RECEIPT_CHAIN_INTEGRITY_WARNING)
+            return None
+
     def close(self, *, timeout: float = GRAPH_INDEX_SHUTDOWN_SECONDS) -> None:
         """Cancel owned graph workers before closing the shared Store.
 
@@ -1725,6 +1805,9 @@ class MemoryService:
                  retention_reason: str = "",
                  valid_from: Optional[float] = None,
                  subject_key: str = "", claim_kind: str = "",
+                 exact_value: Optional[str] = None,
+                 exact_value_type: str = "literal",
+                 exact_value_span: Optional[tuple[int, int]] = None,
                  _local_cli_operator: bool = False,
                  _local_agent_operator: bool = False,
                  _ingress: str = "service",
@@ -1763,6 +1846,14 @@ class MemoryService:
         sc = _write_scope(scope, repo=rp, session_id=session_id)
         kws = _clean_keywords(keywords)
         meta = _clean_metadata(metadata)
+        if exact_value is not None:
+            binding = _exact_binding_for_write(
+                content,
+                exact_value,
+                exact_value_type,
+                source_span=exact_value_span,
+            )
+            meta = {**meta, "exact_value": binding}
         valid_from = _optional_timestamp(valid_from, field="valid_from")
         subject_key = _clean_text(
             subject_key, field="subject_key", max_chars=MAX_TITLE_CHARS, required=False
@@ -1837,6 +1928,8 @@ class MemoryService:
         }
         if result["op"] in ("noop", "invalidate", "relate"):
             out["resolution"] = result.get("reason", "")
+        if result.get("exact_value_bound"):
+            out["exact_value_bound"] = True
         if result["op"] == "invalidate":
             out["superseded"] = result["superseded"]
             if "superseded_detail" in result:
@@ -1851,8 +1944,9 @@ class MemoryService:
                 "policy": result.get("policy", ""),
                 "reasons": list(result.get("reasons") or []),
             })
-        out["receipt"] = self.store.record_receipt(
-            "remember", workspace_id=wid, repo_id=rid or "", actor=provenance["source"],
+        out["receipt"] = self._record_receipt(
+            "remember", response=out, workspace_id=wid, repo_id=rid or "",
+            actor=provenance["source"],
             target_count=1, status=result["op"],
             metadata={"mtype": mt.value, "scope": sc.value, "resolution": result["op"],
                       "retention": (retention or {}).get("label", ""),
@@ -1945,6 +2039,13 @@ class MemoryService:
                     valid_from=mem.get("valid_from"),
                     subject_key=mem.get("subject_key", ""),
                     claim_kind=mem.get("claim_kind", ""),
+                    exact_value=mem.get("exact_value"),
+                    exact_value_type=mem.get("exact_value_type", "literal"),
+                    exact_value_span=(
+                        tuple(mem["exact_value_span"])
+                        if isinstance(mem.get("exact_value_span"), list)
+                        else mem.get("exact_value_span")
+                    ),
                     redact_secrets=redact_secrets,
                 )
                 results.append({"index": idx, "status": "ok", **result})
@@ -2064,6 +2165,18 @@ class MemoryService:
                 fact.get("evidence_source", ""), field="evidence_source",
                 max_chars=MAX_NAME_CHARS, required=False,
             )
+            fact_metadata = _clean_metadata(fact.get("metadata"))
+            exact_value = fact.get("exact_value")
+            if exact_value is not None:
+                exact_span = fact.get("exact_value_span")
+                if isinstance(exact_span, list):
+                    exact_span = tuple(exact_span)
+                fact_metadata["exact_value"] = _exact_binding_for_write(
+                    content,
+                    exact_value,
+                    fact.get("exact_value_type", "literal"),
+                    source_span=exact_span,
+                )
             specs.append(FactSpec(
                 content=content,
                 title=title,
@@ -2071,7 +2184,7 @@ class MemoryService:
                 importance=importance,
                 keywords=_clean_keywords(fact.get("keywords")),
                 metadata={
-                    **_clean_metadata(fact.get("metadata")),
+                    **fact_metadata,
                     "provenance": provenance,
                 },
                 subject_key=_clean_text(
@@ -2113,8 +2226,8 @@ class MemoryService:
                 for r in results
             ],
         }
-        self.store.record_receipt(
-            "remember_many", workspace_id=wid, repo_id=rid or "",
+        self._record_receipt(
+            "remember_many", response=out, workspace_id=wid, repo_id=rid or "",
             actor=provenance["source"], target_count=len(results),
             status="batch", metadata={"scope": sc.value, "ops": ops},
         )
@@ -2192,8 +2305,9 @@ class MemoryService:
                                  "reasons": list(r.get("reasons") or [])}
                                 if r.get("quarantined") else {})}
                             for r in out["facts"]]}
-        result["receipt"] = self.store.record_receipt(
-            "remember", workspace_id=wid, repo_id=rid or "", actor=provenance["source"],
+        result["receipt"] = self._record_receipt(
+            "remember", response=result, workspace_id=wid, repo_id=rid or "",
+            actor=provenance["source"],
             target_count=out["count"], status="ingested",
             metadata={"extracted": bool(out["extracted"]), "mtype": mt.value,
                       "scope": sc.value},
@@ -3733,8 +3847,14 @@ class MemoryService:
             actor, "import_postgres_schema", stored["id"],
             f"{len(actual_ids)} entities, {relations_written} relations",
         )
-        receipt = self.store.record_receipt(
-            "remember", workspace_id=wid, repo_id=rid or "",
+        result = {
+            "workspace": workspace, "repo": repo, "id": stored["id"],
+            "memory_ids": [row["id"] for row in stored_rows],
+            "entities": len(actual_ids), "relations": relations_written,
+            "schema": snapshot.metadata,
+        }
+        receipt = self._record_receipt(
+            "remember", response=result, workspace_id=wid, repo_id=rid or "",
             actor=actor, target_count=len(stored_rows), status="postgres_schema",
             metadata={
                 "entities": len(actual_ids),
@@ -3742,12 +3862,8 @@ class MemoryService:
                 "tables": snapshot.metadata.get("tables", 0),
             },
         )
-        return {
-            "workspace": workspace, "repo": repo, "id": stored["id"],
-            "memory_ids": [row["id"] for row in stored_rows],
-            "entities": len(actual_ids), "relations": relations_written,
-            "schema": snapshot.metadata, "receipt": receipt,
-        }
+        result["receipt"] = receipt
+        return result
 
     def consolidate(self, *, workspace: str, repo: Optional[str] = None,
                     dry_run: bool = False, min_cluster: int = 3,
@@ -3809,7 +3925,7 @@ class MemoryService:
     def recall(self, query: str, *, workspace: Optional[str] = None,
                repo: Optional[str] = None, session_id: Optional[str] = None,
                mtypes: Optional[list] = None,
-               k: int = 8, as_of: Optional[float] = None,
+               k: Optional[int] = None, as_of: Optional[float] = None,
                valid_at: Optional[float] = None,
                known_at: Optional[float] = None,
                reinforce: bool = False, intent: str = "recall",
@@ -3817,16 +3933,21 @@ class MemoryService:
                token_budget: Optional[int] = None,
                retrieval_profile: str = "balanced",
                candidate_depth: str = "fixed",
+               packing_mode: str = "legacy",
+               retrieval_recipe: str = "default",
                response_mode: str = "full",
                diagnostics: bool = False,
                include_untrusted: bool = False,
                planning: str = "off",
                mtype_limits: Optional[dict] = None,
-               record_receipt: bool = True) -> dict:
+               record_receipt: bool = True,
+               _default_k: int = 8,
+               _default_token_budget: Optional[int] = None) -> dict:
         """Retrieve the most relevant memories for ``query`` within scope."""
         query = _clean_text(query, field="query", max_chars=MAX_CONTENT_CHARS)
+        k_supplied = k is not None
         try:
-            k = int(k)
+            k = int(_default_k if k is None else k)
         except (TypeError, ValueError, OverflowError):
             raise ValidationError("k must be an integer")
         k = max(1, min(MAX_K, k))
@@ -3841,10 +3962,14 @@ class MemoryService:
         if as_of is not None and valid_at is not None and as_of != valid_at:
             raise ValidationError("as_of and valid_at must match when both are supplied")
         valid_at = valid_at if valid_at is not None else as_of
+        token_budget_supplied = token_budget is not None
         try:
             token_budget = (
                 self.engine.recall_engine.token_budget
-                if token_budget is None else int(token_budget)
+                if token_budget is None and _default_token_budget is None
+                else _default_token_budget
+                if token_budget is None
+                else int(token_budget)
             )
         except (TypeError, ValueError, OverflowError):
             raise ValidationError("token_budget must be an integer")
@@ -3857,6 +3982,20 @@ class MemoryService:
         if candidate_depth not in CANDIDATE_DEPTH_MODES:
             choices = ", ".join(sorted(CANDIDATE_DEPTH_MODES))
             raise ValidationError(f"candidate_depth must be one of: {choices}")
+        packing_mode = str(packing_mode or "legacy").strip().casefold()
+        if packing_mode not in {"legacy", "coverage"}:
+            raise ValidationError("packing_mode must be one of: legacy, coverage")
+        retrieval_recipe = str(retrieval_recipe or "default").strip().casefold()
+        if retrieval_recipe not in RETRIEVAL_RECIPES:
+            choices = ", ".join(sorted(RETRIEVAL_RECIPES))
+            raise ValidationError(f"retrieval_recipe must be one of: {choices}")
+        empty_effective_k, empty_token_budget, _ = apply_retrieval_recipe(
+            retrieval_recipe,
+            k=k,
+            token_budget=token_budget,
+            k_supplied=k_supplied,
+            token_budget_supplied=token_budget_supplied,
+        )
         response_mode = str(response_mode or "full").strip().casefold()
         if response_mode not in RESPONSE_MODES:
             raise ValidationError("response_mode must be one of: compact, full")
@@ -3876,8 +4015,10 @@ class MemoryService:
             wid = self._lookup_workspace(ws)
             if wid is None:
                 return _with_retrieval_capabilities(_empty_recall(
-                    query, token_budget=token_budget, response_mode=response_mode,
+                    query, token_budget=empty_token_budget, response_mode=response_mode,
                     retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
+                    packing_mode=packing_mode, retrieval_recipe=retrieval_recipe,
+                    effective_k=empty_effective_k,
                     planning=planning, mtype_limits=mtype_limits,
                     valid_at=valid_at,
                     known_at=known_at, note=f"no workspace named '{ws}' yet",
@@ -3887,8 +4028,10 @@ class MemoryService:
                 rid = self._lookup_repo(wid, rp)
                 if rid is None:
                     return _with_retrieval_capabilities(_empty_recall(
-                        query, token_budget=token_budget, response_mode=response_mode,
+                        query, token_budget=empty_token_budget, response_mode=response_mode,
                         retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
+                        packing_mode=packing_mode, retrieval_recipe=retrieval_recipe,
+                        effective_k=empty_effective_k,
                         planning=planning, mtype_limits=mtype_limits,
                         valid_at=valid_at,
                         known_at=known_at,
@@ -3901,8 +4044,10 @@ class MemoryService:
                 session = self.store.get_session(sid)
                 if session is None:
                     return _with_retrieval_capabilities(_empty_recall(
-                        query, token_budget=token_budget, response_mode=response_mode,
+                        query, token_budget=empty_token_budget, response_mode=response_mode,
                         retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
+                        packing_mode=packing_mode, retrieval_recipe=retrieval_recipe,
+                        effective_k=empty_effective_k,
                         planning=planning, mtype_limits=mtype_limits,
                         valid_at=valid_at,
                         known_at=known_at, note=f"no session with id '{sid}'",
@@ -3919,13 +4064,19 @@ class MemoryService:
             wid, rid, mts, as_of, layers, session_id=sid,
             valid_at=valid_at, known_at=known_at,
         )
+        engine_token_budget = token_budget if token_budget_supplied else None
         result = self.engine.recall_engine.recall(
             query,
             recall_filter,
             k=k, reinforce=reinforce,
-            token_budget=token_budget,
+            token_budget=engine_token_budget,
+            k_supplied=k_supplied,
+            token_budget_supplied=token_budget_supplied,
+            default_token_budget=_default_token_budget,
             retrieval_profile=retrieval_profile,
             candidate_depth=candidate_depth,
+            packing_mode=packing_mode,
+            retrieval_recipe=retrieval_recipe,
             diagnostics=bool(diagnostics),
             include_untrusted=include_untrusted,
             planning=planning,
@@ -3934,6 +4085,7 @@ class MemoryService:
         memories = []
         for chunk in result.chunks:
             if response_mode == "compact":
+                # Candidate rows omit source text; admitted bindings live in packed_sources.
                 item = {
                     key: chunk.get(key)
                     for key in (
@@ -3967,12 +4119,27 @@ class MemoryService:
             operation="recall",
             intent=str(intent or "recall"),
         )
-        packed_sources = [{
-            "id": packed.id,
-            "tokens": packed.tokens,
-            "truncated": packed.truncated,
-            "reason": packed.reason,
-        } for packed in result.packed_chunks]
+        packed_sources = []
+        for packed in result.packed_chunks:
+            source = {
+                "id": packed.id,
+                "tokens": packed.tokens,
+                "truncated": packed.truncated,
+                "reason": packed.reason,
+            }
+            if packed.exact_value is not None:
+                source["exact_value"] = packed.exact_value
+            if packed.source_span is not None:
+                source["source_span"] = list(packed.source_span)
+            if packed.evidence_unit_id:
+                source["evidence_unit_id"] = packed.evidence_unit_id
+            if packed.evidence_unit is not None:
+                source["evidence_unit"] = packed.evidence_unit
+            if packed.attribution:
+                source["attribution"] = packed.attribution
+            if packed.title:
+                source["title"] = packed.title
+            packed_sources.append(source)
         capabilities = {
             "degraded_mode": result.degraded_mode,
             "semantic_support": result.semantic_support,
@@ -3997,6 +4164,11 @@ class MemoryService:
             "candidate_k_requested": result.candidate_k_requested,
             "candidate_k_used": result.candidate_k_used,
             "candidate_depth_reason": result.candidate_depth_reason,
+            "adaptive_stop_reason": result.adaptive_stop_reason,
+            "packed_candidate_coverage": result.packed_candidate_coverage,
+            "packing_mode": result.packing_mode,
+            "retrieval_recipe": result.retrieval_recipe,
+            "effective_k": result.effective_k,
             "context_revision": result.context_revision,
             "planning": result.planning_mode,
             "mtype_limits": dict(mtype_limits),
@@ -4026,10 +4198,14 @@ class MemoryService:
             out["planning_details"] = result.planning_details or {}
             out["graph_traversal_details"] = result.graph_traversal_details or []
         if record_receipt:
-            out["receipt"] = self.store.record_receipt(
-                "recall", workspace_id=wid or "", repo_id=rid or "", actor="agent",
+            out["receipt"] = self._record_receipt(
+                "recall", response=out, workspace_id=wid or "", repo_id=rid or "",
+                actor="agent",
                 target_count=result.count, status="ok",
-                metadata={"intent": str(intent or "recall")[:80], "k": k,
+                metadata={"intent": str(intent or "recall")[:80],
+                          "k": result.effective_k,
+                          "retrieval_recipe": result.retrieval_recipe,
+                          "packing_mode": result.packing_mode,
                           "result_count": result.count,
                           "graph_layers": [layer.value for layer in layers] if layers else [],
                           "retrieval_profile": result.retrieval_profile,
@@ -4208,8 +4384,9 @@ class MemoryService:
             out["retrieval_trace"] = result.recall.retrieval_trace or []
             out["planning_details"] = result.recall.planning_details or {}
             out["graph_traversal_details"] = result.recall.graph_traversal_details or []
-        out["receipt"] = self.store.record_receipt(
-            "adaptive_context", workspace_id=wid, repo_id=rid or "", actor="agent",
+        out["receipt"] = self._record_receipt(
+            "adaptive_context", response=out, workspace_id=wid, repo_id=rid or "",
+            actor="agent",
             target_count=len(sources), status="ok",
             metadata={
                 "adaptive_mode": result.mode,
@@ -4375,8 +4552,9 @@ class MemoryService:
                 item["provenance"] = _compact_provenance(item.get("provenance"))
                 compact_citations.append(item)
             out["citations"] = compact_citations
-        out["receipt"] = self.store.record_receipt(
-            "grounded_recall", workspace_id=wid or "", repo_id=rid or "", actor="agent",
+        out["receipt"] = self._record_receipt(
+            "grounded_recall", response=out, workspace_id=wid or "", repo_id=rid or "",
+            actor="agent",
             target_count=len(out.get("citations") or []),
             status="grounded" if out.get("grounded") else "abstained",
             metadata={"intent": "grounded", "grounded": bool(out.get("grounded")),
@@ -4538,7 +4716,11 @@ class MemoryService:
                       expected_version: str, operation_id: str,
                       repo: Optional[str] = None, content: Optional[str] = None,
                       title: Optional[str] = None, mtype: Optional[str] = None,
-                      importance: Optional[float] = None, reason: str = "",
+                      importance: Optional[float] = None,
+                      exact_value: Optional[str] = None,
+                      exact_value_type: str = "literal",
+                      exact_value_span: Optional[tuple[int, int]] = None,
+                      clear_exact_value: bool = False, reason: str = "",
                       actor: str = "user") -> dict:
         """One recoverable revision: content, labels, provenance and history commit together."""
         mid = _clean_text(memory_id, field="memory_id", max_chars=MAX_NAME_CHARS)
@@ -4548,6 +4730,9 @@ class MemoryService:
             content = _clean_text(content, field="content", max_chars=MAX_CONTENT_CHARS)
         if title is not None:
             title = _clean_text(title, field="title", max_chars=MAX_TITLE_CHARS, required=False)
+        clear_exact_value = _validate_exact_edit_request(
+            exact_value, exact_value_type, exact_value_span, clear_exact_value,
+        )
         _reject_secret_capture((
             ("content", content or ""), ("title", title or ""),
         ))
@@ -4560,7 +4745,9 @@ class MemoryService:
                 mid, expected_version=expected_version, operation_id=operation_id,
                 content=content, title=title,
                 mtype=_enum(mtype, MemoryType, "memory_type") if mtype is not None else None,
-                importance=importance, reason=reason, actor=actor,
+                importance=importance, exact_value=exact_value,
+                exact_value_type=exact_value_type, exact_value_span=exact_value_span,
+                clear_exact_value=clear_exact_value, reason=reason, actor=actor,
             )
         except MemoryConflict:
             raise
@@ -4576,9 +4763,16 @@ class MemoryService:
         return {"workspace": ws, "repos": repos}
 
     def correct(self, memory_id: str, new_content: str, *, workspace: str,
-               repo: Optional[str] = None, reason: str = "", actor: str = "user") -> dict:
+               repo: Optional[str] = None, reason: str = "", actor: str = "user",
+               exact_value: Optional[str] = None,
+               exact_value_type: str = "literal",
+               exact_value_span: Optional[tuple[int, int]] = None,
+               clear_exact_value: bool = False) -> dict:
         mid = _clean_text(memory_id, field="memory_id", max_chars=MAX_NAME_CHARS)
         new_content = _clean_text(new_content, field="new_content", max_chars=MAX_CONTENT_CHARS)
+        clear_exact_value = _validate_exact_edit_request(
+            exact_value, exact_value_type, exact_value_span, clear_exact_value,
+        )
         _reject_secret_capture((("new_content", new_content),))
         reason = _clean_text(reason, field="reason", max_chars=MAX_TITLE_CHARS, required=False)
         actor = _clean_text(actor, field="actor", max_chars=MAX_NAME_CHARS,
@@ -4586,7 +4780,11 @@ class MemoryService:
         wid, rid = self._require_scope(workspace, repo)
         self._check_owns(mid, wid, rid)
         try:
-            return self.engine.correct(mid, new_content, reason=reason, actor=actor)
+            return self.engine.correct(
+                mid, new_content, reason=reason, actor=actor,
+                exact_value=exact_value, exact_value_type=exact_value_type,
+                exact_value_span=exact_value_span, clear_exact_value=clear_exact_value,
+            )
         except MemoryConflict:
             raise
         except (KeyError, ValueError) as exc:
@@ -4621,8 +4819,8 @@ class MemoryService:
                     "SELECT name FROM repos WHERE id=?", (promoted.repo_id,)
                 ).fetchone()
                 out["repo"] = row["name"] if row else repo
-        out["receipt"] = self.store.record_receipt(
-            "promote", workspace_id=wid, repo_id=rid or "", actor=actor,
+        out["receipt"] = self._record_receipt(
+            "promote", response=out, workspace_id=wid, repo_id=rid or "", actor=actor,
             target_count=1, status=out["op"],
             metadata={"scope": target.value, "resolution": "promotion"},
         )
@@ -4852,17 +5050,7 @@ class MemoryService:
             usage,
             operation="proactive_context",
         )
-        self.store.record_receipt(
-            "proactive_context", workspace_id=wid, repo_id=rid or "", actor="agent",
-            target_count=len(sources), status="ok",
-            metadata={
-                "response_mode": "compact",
-                "grounded": grounded,
-                "synthesized": bool(out.get("synthesized")),
-                "token_usage": usage,
-            },
-        )
-        return {
+        result = {
             "workspace": workspace_name,
             "repo": repo,
             "context": context,
@@ -4874,6 +5062,18 @@ class MemoryService:
                 if grounded else "context budget omitted cited sources"
             ),
         }
+        self._record_receipt(
+            "proactive_context", response=result, workspace_id=wid, repo_id=rid or "",
+            actor="agent",
+            target_count=len(sources), status="ok",
+            metadata={
+                "response_mode": "compact",
+                "grounded": grounded,
+                "synthesized": bool(out.get("synthesized")),
+                "token_usage": usage,
+            },
+        )
+        return result
 
     # ── linking & events (A-MEM-style) ───────────────────────────────────────────
     def record_event(self, kind: str, content: str, *, workspace: str,
@@ -4927,8 +5127,8 @@ class MemoryService:
         out = {"a": a, "b": b, "relation": relation,
                "layer": graph_layer.value,
                "reason": reason, "linked": True}
-        out["receipt"] = self.store.record_receipt(
-            "link", workspace_id=wid, repo_id=rid or "", actor="agent",
+        out["receipt"] = self._record_receipt(
+            "link", response=out, workspace_id=wid, repo_id=rid or "", actor="agent",
             target_count=2, status="ok",
             metadata={"relation": relation, "layer": graph_layer.value},
         )
@@ -4965,8 +5165,8 @@ class MemoryService:
         out = self.engine.index_repo(rid, root_path, languages=langs)
         out["workspace"] = ws
         out["repo"] = rp
-        out["receipt"] = self.store.record_receipt(
-            "index_repo", workspace_id=wid, repo_id=rid, actor="agent",
+        out["receipt"] = self._record_receipt(
+            "index_repo", response=out, workspace_id=wid, repo_id=rid, actor="agent",
             target_count=out["files_indexed"], status="ok",
             metadata={"files_scanned": out["files_scanned"],
                       "files_indexed": out["files_indexed"],
@@ -5014,8 +5214,8 @@ class MemoryService:
         out = self.engine.index_repo_incremental(rid, root_path, cleaned_paths, languages=langs)
         out["workspace"] = ws
         out["repo"] = rp
-        out["receipt"] = self.store.record_receipt(
-            "index_repo", workspace_id=wid, repo_id=rid, actor="agent",
+        out["receipt"] = self._record_receipt(
+            "index_repo", response=out, workspace_id=wid, repo_id=rid, actor="agent",
             target_count=out["files_indexed"], status="ok",
             metadata={"files_scanned": out["files_scanned"],
                       "files_indexed": out["files_indexed"],
@@ -5170,8 +5370,13 @@ class MemoryService:
         )
         principal = _authenticated_principal()
         actor = principal["id"] if principal is not None else "agent"
-        receipt = self.store.record_receipt(
-            "link", workspace_id=wid, repo_id=rid, actor=actor,
+        response = {
+            "link_id": link_id, "symbol_id": symbol["id"],
+            "memory_id": memory_id, "relation": relation,
+            "reason": reason, "workspace": workspace, "repo": repo,
+        }
+        receipt = self._record_receipt(
+            "link", response=response, workspace_id=wid, repo_id=rid, actor=actor,
             target_count=1, status="ok",
             metadata={
                 "relation": relation, "result_count": 1,
@@ -5184,10 +5389,8 @@ class MemoryService:
             f"symbol_id={symbol['id']}; memory_id={memory_id}; "
             f"relation={relation}; confidence={confidence:.6f}; reason={reason}",
         )
-        return {"link_id": link_id, "symbol_id": symbol["id"],
-                "memory_id": memory_id, "relation": relation,
-                "reason": reason, "workspace": workspace, "repo": repo,
-                "receipt": receipt}
+        response["receipt"] = receipt
+        return response
 
     # ── inspection (powers the Memory Inspector UI) ─────────────────────────────
     def list_memories(self, *, workspace: str, q: str = "", mtype: Optional[str] = None,
@@ -8634,7 +8837,7 @@ class MemoryService:
                     f"job={job_id}; dry_run={int(dry_run)}; "
                     f"processed={int(counts.get('memories_scanned') or 0)}",
                 )
-                self.store.record_receipt(
+                self._record_receipt(
                     "graph_index",
                     workspace_id=wid,
                     repo_id=rid or "",
@@ -12175,7 +12378,10 @@ def _empty_context_revision() -> str:
 def _empty_recall(query: str, *, token_budget: int, response_mode: str,
                   retrieval_profile: str, candidate_depth: str, valid_at: Optional[float],
                   known_at: Optional[float], note: str, planning: str = "off",
-                  mtype_limits: Optional[dict] = None) -> dict:
+                  mtype_limits: Optional[dict] = None,
+                  packing_mode: str = "legacy",
+                  retrieval_recipe: str = "default",
+                  effective_k: int = 8) -> dict:
     """Stable empty response for unknown scopes, including additive v2 accounting."""
     return {
         "query": query,
@@ -12200,7 +12406,10 @@ def _empty_recall(query: str, *, token_budget: int, response_mode: str,
         "candidate_depth": candidate_depth,
         "candidate_k_requested": 50,
         "candidate_k_used": 50,
+        "effective_k": effective_k,
         "candidate_depth_reason": "no retrieval for unknown scope",
+        "packing_mode": packing_mode,
+        "retrieval_recipe": retrieval_recipe,
         "context_revision": _empty_context_revision(),
         "planning": planning,
         "mtype_limits": dict(mtype_limits or {}),
