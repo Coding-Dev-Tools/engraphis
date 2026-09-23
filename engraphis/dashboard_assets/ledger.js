@@ -4508,6 +4508,9 @@
 
   function renderSyncStatus(status, message = '') {
     state.syncStatus = status || {};
+    const connected = state.syncStatus.available === true;
+    const ready = connected && state.syncStatus.ready === true;
+    const hasKey = state.syncStatus.has_key === true;
     const target = byId('sync-result');
     if (!target) return;
     target.replaceChildren();
@@ -4515,7 +4518,10 @@
     target.append(
       node('p', 'automation-policy-note', syncSummaryMessage(state.syncStatus.last)),
       definitionList([
-        ['Connection', state.syncStatus.available ? 'Connected' : 'Not connected'],
+        ['Connection', connected ? 'Connected' : 'Not connected'],
+        ['Encryption key', hasKey ? 'Valid' : state.syncStatus.key_state === 'invalid'
+          ? 'Invalid' : 'Not configured'],
+        ['Sync readiness', ready ? 'Ready' : 'Needs setup'],
         ['Mode', state.syncStatus.read_only ? 'Read only · pull without upload' : 'Push and pull'],
         ['Credential', state.syncStatus.has_cloud_session
           ? 'Managed Cloud session'
@@ -4526,9 +4532,9 @@
     const actions = node('div', 'automation-policy-actions');
     const run = button('Sync now', 'primary-button', runCloudSync);
     run.id = 'sync-now';
-    run.disabled = !state.syncStatus.available;
+    run.disabled = !ready;
     actions.append(run);
-    if (!state.syncStatus.available) {
+    if (!connected) {
       const url = safeUrl(state.syncStatus.upgrade_url) || hostedAccountUrl('sync');
       if (url) {
         const connect = node('a', 'secondary-button', 'Connect Engraphis Cloud');
@@ -4537,6 +4543,19 @@
         connect.rel = 'noopener';
         actions.append(connect);
       }
+    } else if (!ready) {
+      const missingKey = !hasKey;
+      const detail = missingKey
+        ? state.syncStatus.key_state === 'invalid'
+          ? 'The configured Cloud Sync encryption key is invalid. Replace it with a 32-byte URL-safe base64 key, then restart this dashboard.'
+          : 'Cloud Sync needs a user-held encryption key. Configure ENGRAPHIS_SYNC_E2EE_KEY on this device, then restart this dashboard.'
+        : 'Cloud Sync encryption support is unavailable. Install engraphis[cloud-sync] and restart this dashboard.';
+      target.append(node('p', 'automation-policy-note', detail));
+      const guide = node('a', 'secondary-button', 'Cloud Sync setup guide');
+      guide.href = 'https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/SYNC.md#configure-a-customer-installation';
+      guide.target = '_blank';
+      guide.rel = 'noopener';
+      actions.append(guide);
     }
     target.append(actions);
   }

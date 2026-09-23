@@ -1050,6 +1050,11 @@ test('Ledger exposes Cloud Sync status and reports partial runs as incomplete', 
   const requests = await mockApi(page, {
     syncStatus: {
       available: true,
+      ready: true,
+      has_key: true,
+      key_state: 'ready',
+      encryption_available: true,
+      local_prerequisites_ready: true,
       last: {
         summary: {
           complete: true, attempted: 2, succeeded: 2, exported: 1,
@@ -1076,7 +1081,10 @@ test('Ledger exposes Cloud Sync status and reports partial runs as incomplete', 
 
 test('Ledger treats a Cloud Sync ok:false response as incomplete', async ({ page }) => {
   await mockApi(page, {
-    syncStatus: { available: true, last: null },
+    syncStatus: {
+      available: true, ready: true, has_key: true, key_state: 'ready',
+      encryption_available: true, local_prerequisites_ready: true, last: null,
+    },
     syncRunOk: false,
     syncRun: {
       complete: true, attempted: 1, succeeded: 1, exported: 1,
@@ -1090,6 +1098,66 @@ test('Ledger treats a Cloud Sync ok:false response as incomplete', async ({ page
 
   await expect(page.locator('#sync-result')).toContainText('Last sync incomplete');
   await expect(page.locator('#notice-text')).toContainText('Cloud Sync is incomplete');
+});
+
+test('Ledger guides a connected account with a missing Cloud Sync key', async ({ page }) => {
+  const requests = await mockApi(page, {
+    syncStatus: {
+      available: true, ready: false, has_key: false, key_state: 'missing',
+      encryption_available: false, local_prerequisites_ready: false, last: null,
+    },
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('tab', { name: 'Cloud Sync' }).click();
+
+  const result = page.locator('#sync-result');
+  await expect(result).toContainText('ConnectionConnected');
+  await expect(result).toContainText('Encryption keyNot configured');
+  await expect(result).toContainText('ENGRAPHIS_SYNC_E2EE_KEY');
+  await expect(result.getByRole('button', { name: 'Sync now' })).toBeDisabled();
+  await expect(result.getByRole('link', { name: 'Cloud Sync setup guide' })).toHaveAttribute(
+    'href', /docs\/SYNC\.md#configure-a-customer-installation$/,
+  );
+  expect(requests.syncRuns).toEqual([]);
+});
+
+test('Ledger explains an invalid Cloud Sync key without exposing it', async ({ page }) => {
+  const requests = await mockApi(page, {
+    syncStatus: {
+      available: true, ready: false, has_key: false, key_state: 'invalid',
+      encryption_available: false, local_prerequisites_ready: false, last: null,
+    },
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('tab', { name: 'Cloud Sync' }).click();
+
+  const result = page.locator('#sync-result');
+  await expect(result).toContainText('Encryption keyInvalid');
+  await expect(result).toContainText('Replace it with a 32-byte URL-safe base64 key');
+  await expect(result.getByRole('button', { name: 'Sync now' })).toBeDisabled();
+  expect(requests.syncRuns).toEqual([]);
+});
+
+test('Ledger keeps a ready read-only Cloud Sync pull actionable', async ({ page }) => {
+  const requests = await mockApi(page, {
+    syncStatus: {
+      available: true, ready: true, has_key: true, key_state: 'ready',
+      encryption_available: true, local_prerequisites_ready: true,
+      read_only: true, last: null,
+    },
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('tab', { name: 'Cloud Sync' }).click();
+
+  const result = page.locator('#sync-result');
+  await expect(result).toContainText('ModeRead only · pull without upload');
+  await expect(result).toContainText('Sync readinessReady');
+  await result.getByRole('button', { name: 'Sync now' }).click();
+  await expect(result).toContainText('Last sync complete');
+  expect(requests.syncRuns).toEqual([{}]);
 });
 
 test('Ledger initializes hosted automation only after an explicit upload action', async ({ page }) => {
