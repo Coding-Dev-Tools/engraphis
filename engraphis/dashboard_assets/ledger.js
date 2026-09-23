@@ -61,6 +61,7 @@
     analyticsStarting: new Set(),
     analyticsJobs: new Map(),
     analyticsResults: new Map(),
+    analyticsStartErrors: new Map(),
     scopedRequests: Object.create(null),
     scopedControllers: Object.create(null),
     syncStatus: null,
@@ -4291,7 +4292,17 @@
     if (workspace !== state.workspace) return;
     state.analyticsJobs.delete(workspace);
     state.analyticsResults.delete(workspace);
+    state.analyticsStartErrors.delete(workspace);
     void loadHosted('analytics');
+  }
+
+  function renderAnalyticsStartError(target, workspace, message) {
+    target.replaceChildren(
+      node('h3', '', 'Analytics request unconfirmed'),
+      node('p', 'automation-policy-note',
+        `Could not confirm the Analytics run: ${message} It may still be processing in Cloud. Starting a fresh analysis creates another run.`),
+      button('Run fresh analysis', 'secondary-button', () => runFreshAnalytics(workspace)),
+    );
   }
 
   function hasAnalyticsMetrics(result) {
@@ -4599,6 +4610,11 @@
         await refreshAnalyticsResult(workspace, pendingJob);
         return;
       }
+      const previousError = state.analyticsStartErrors.get(workspace);
+      if (previousError) {
+        renderAnalyticsStartError(target, workspace, previousError);
+        return;
+      }
     } else if (state.hostedLoaded.has(cacheKey)) return;
     target.replaceChildren(empty(`Checking ${kind} availability…`));
     try {
@@ -4620,8 +4636,13 @@
       } else {
         if (kind === 'analytics') state.analyticsStarting.add(workspace);
         const result = await api(`/${kind}?${query(workspace)}`,
-          kind === 'analytics' ? { signal: request.signal, timeoutMs: 90_000 } : {});
-        if (!isCurrentScopedRequest(request)) return;
+          kind === 'analytics' ? { timeoutMs: 90_000 } : {});
+        // A submitted Analytics job can outlive a workspace selection change. Keep its
+        // identifier/result for that workspace even when the visible panel has moved on.
+        if (kind !== 'analytics' && !isCurrentScopedRequest(request)) return;
+        if (kind === 'analytics' && !state.workspaces.some(item => workspaceName(item) === workspace)) return;
+        const showAnalytics = kind === 'analytics' && state.workspace === workspace
+          && state.view === 'manage' && state.manageTab === 'analytics';
         if (kind === 'automation') renderAutomationPolicy(result, workspace);
         else if (kind === 'analytics' && result.pending === true) {
           const jobId = text(result.job_id);
@@ -4629,19 +4650,27 @@
             throw new Error('Engraphis Cloud did not return a usable Analytics job.');
           }
           state.analyticsJobs.set(workspace, jobId);
-          renderAnalyticsPending(target, workspace, jobId, result.state);
+          state.analyticsStartErrors.delete(workspace);
+          if (showAnalytics) renderAnalyticsPending(target, workspace, jobId, result.state);
         } else if (kind === 'analytics') {
           if (!hasAnalyticsMetrics(result)) {
             throw new Error('Engraphis Cloud did not return a completed Analytics result.');
           }
           state.analyticsResults.set(workspace, { result, stale: false });
-          renderAnalyticsResult(target, result, workspace);
+          state.analyticsStartErrors.delete(workspace);
+          if (showAnalytics) renderAnalyticsResult(target, result, workspace);
         } else renderObject(target, result, `${kind[0].toUpperCase()}${kind.slice(1)} status`);
       }
       if (kind !== 'analytics' && isCurrentScopedRequest(request)) state.hostedLoaded.add(cacheKey);
     } catch (error) {
-      if (!isCurrentScopedRequest(request)) return;
-      target.replaceChildren(empty(`${kind[0].toUpperCase()}${kind.slice(1)} is not active: ${error.message}`));
+      if (kind === 'analytics') {
+        state.analyticsStartErrors.set(workspace, error.message);
+        if (state.workspace === workspace && state.view === 'manage' && state.manageTab === 'analytics') {
+          renderAnalyticsStartError(target, workspace, error.message);
+        }
+      } else if (isCurrentScopedRequest(request)) {
+        target.replaceChildren(empty(`${kind[0].toUpperCase()}${kind.slice(1)} is not active: ${error.message}`));
+      }
     } finally {
       if (kind === 'analytics') state.analyticsStarting.delete(workspace);
     }
