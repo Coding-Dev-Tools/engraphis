@@ -434,6 +434,53 @@ test('Opening Analytics twice while its first request runs submits only once', a
   await expect(page.locator('#analytics-result')).toContainText('Analytics is processing');
 });
 
+test('Changing workspaces while Analytics starts retains its original job', async ({ page }) => {
+  const second = 'another-workspace';
+  let release;
+  const waitForRelease = new Promise(resolve => { release = resolve; });
+  const requests = await mockApi(page, {
+    workspaces: [{ name: workspace, memories: 2 }, { name: second, memories: 1 }],
+    analyticsStart: { job_id: 'job_before_switch', state: 'queued', pending: true },
+    deferAnalyticsStart: () => waitForRelease,
+  });
+  await page.goto('/?view=manage&tab=analytics');
+  await expect.poll(() => requests.analyticsStarts.length).toBe(1);
+  await page.getByRole('tab', { name: 'Workspaces' }).click();
+  await page.locator('#workspace-select').selectOption(second);
+  await expect(page.locator('#workspace-select')).toHaveValue(second);
+  await page.locator('#workspace-select').selectOption(workspace);
+  await expect(page.locator('#workspace-select')).toHaveValue(workspace);
+  release();
+  await page.getByRole('tab', { name: 'Analytics' }).click();
+  await expect(page.locator('#analytics-result')).toContainText('Refresh result');
+  expect(requests.analyticsStarts).toEqual([workspace]);
+});
+
+test('An unconfirmed Analytics start requires an explicit new run', async ({ page }) => {
+  await mockApi(page);
+  let starts = 0;
+  await page.route(/\/api\/analytics\?/, route => {
+    starts += 1;
+    return route.fulfill({
+      status: 503,
+      contentType: 'application/json',
+      body: JSON.stringify({ detail: { error: 'Cloud connection was interrupted.' } }),
+    });
+  });
+  await page.goto('/?view=manage&tab=analytics');
+  const result = page.locator('#analytics-result');
+  await expect(result).toContainText('Analytics request unconfirmed');
+  await expect(result).toContainText('Starting a fresh analysis creates another run');
+  expect(starts).toBe(1);
+
+  await page.getByRole('tab', { name: 'Settings' }).click();
+  await page.getByRole('tab', { name: 'Analytics' }).click();
+  await expect(result).toContainText('Analytics request unconfirmed');
+  expect(starts).toBe(1);
+  await result.getByRole('button', { name: 'Run fresh analysis' }).click();
+  await expect.poll(() => starts).toBe(2);
+});
+
 test('An empty Analytics result asks for an eligible memory', async ({ page }) => {
   await mockApi(page, {
     analyticsStart: {

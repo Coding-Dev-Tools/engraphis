@@ -54,8 +54,8 @@ change the Apache license or prevent a fork from modifying code already released
 
 ## Trial, grace, and recovery
 
-The server-issued Pro or Team trial lasts **exactly 3 active days**. Grace is a separately
-named operational state and never turns that into a four-day trial.
+The server-issued trial lasts **3 active days for Pro or 10 active days for Team**. Grace is a
+separately named operational state and never extends either trial.
 
 `workspace_write_grace` can preserve bounded continuity operations for an already authorized
 hosted account after entitlement expiry or denial for **up to 24 hours**. The private control
