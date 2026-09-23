@@ -88,7 +88,7 @@ def test_codeql_gate_reports_path_problem_endpoints(tmp_path) -> None:
     ]
 
 
-def test_codeql_gate_waives_only_the_two_exact_nonsecurity_hash_calls(tmp_path) -> None:
+def test_codeql_gate_waives_only_the_three_exact_nonsecurity_hash_calls(tmp_path) -> None:
     path = _write_sarif(
         tmp_path,
         [
@@ -103,6 +103,12 @@ def test_codeql_gate_waives_only_the_two_exact_nonsecurity_hash_calls(tmp_path) 
                 "approved code hash",
             ),
             _weak_hash_result(
+                "eval/benchmark_campaign.py",
+                90,
+                "approved public integrity digest",
+            ),
+            _weak_hash_result("eval/benchmark_campaign.py", 81, "old line"),
+            _weak_hash_result(
                 "engraphis/backends/embedder_deterministic.py",
                 37,
                 "wrong line",
@@ -112,10 +118,42 @@ def test_codeql_gate_waives_only_the_two_exact_nonsecurity_hash_calls(tmp_path) 
     )
 
     assert findings_in(path) == [
+        "py/weak-sensitive-data-hashing at eval/benchmark_campaign.py:81: old line",
         "py/weak-sensitive-data-hashing at "
         "engraphis/backends/embedder_deterministic.py:37: wrong line",
         "py/weak-sensitive-data-hashing at engraphis/security.py:36: wrong file",
     ]
+
+
+def test_codeql_filter_removes_only_exact_approved_nonsecurity_hash_calls(tmp_path) -> None:
+    source = tmp_path / "raw"
+    filtered = tmp_path / "filtered"
+    source.mkdir()
+    _write_sarif(
+        source,
+        [
+            _weak_hash_result(
+                "eval/benchmark_campaign.py",
+                90,
+                "approved public integrity digest",
+            ),
+            {
+                "ruleId": "py/example",
+                "message": {"text": "unsafe example"},
+                "locations": [{
+                    "physicalLocation": {
+                        "artifactLocation": {"uri": "eval/example.py"},
+                        "region": {"startLine": 12},
+                    },
+                }],
+            },
+        ],
+    )
+
+    assert main(["--filter-approved", str(source), str(filtered)]) == 0
+    document = json.loads((filtered / "python.sarif").read_text(encoding="utf-8"))
+    results = document["runs"][0]["results"]
+    assert [result["ruleId"] for result in results] == ["py/example"]
 
 
 def test_codeql_gate_does_not_waive_ambiguous_multilocation_result(tmp_path) -> None:
@@ -143,6 +181,24 @@ def test_codeql_query_remains_enabled_globally() -> None:
 
     assert "query-filters:" not in config
     assert "py/weak-sensitive-data-hashing" not in config
+
+
+def test_codeql_workflow_loads_alert_suppression_packs() -> None:
+    workflow = (
+        Path(__file__).resolve().parents[1]
+        / ".github"
+        / "workflows"
+        / "codeql.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "codeql/python-queries:AlertSuppression.ql" in workflow
+    assert "codeql/javascript-queries:AlertSuppression.ql" in workflow
+    assert "language: [\"python\", \"javascript-typescript\"]" in workflow
+    assert "matrix.alert_suppression_pack" not in workflow
+    assert 'category: ".github/workflows/codeql.yml:analyze/language:${{ matrix.language }}"' in workflow
+    assert "upload: never" in workflow
+    assert "--filter-approved" in workflow
+    assert "github/codeql-action/upload-sarif@" in workflow
 
 
 def test_codeql_gate_rejects_baselined_and_source_suppressed_findings(tmp_path, capsys) -> None:

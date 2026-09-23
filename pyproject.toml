@@ -241,8 +241,15 @@ include = ["engraphis*", "scripts*", "eval*"]
     "BASELINES.md",
     "EVIDENCE.md",
     "configs/*.json",
+    "configs/*.txt",
     "datasets/*.jsonl",
     "datasets/locomo10_repair_manifest.json",
+    "datasets/locomo10_repair_manifest_v2.json",
+    "datasets/longmemeval_s_cleaned_repair_manifest.json",
+    "datasets/coding_memory_v1/*.json",
+    "datasets/coding_memory_v1/*.txt",
+    "datasets/coding_memory_v1/families/*.json",
+    "datasets/coding_memory_v1/oracles/*.py",
 ]
 
 [tool.setuptools.exclude-package-data]

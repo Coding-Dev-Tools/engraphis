@@ -1,0 +1,194 @@
+{
+  "schema": "engraphis-additional-benchmark-sources/v1",
+  "retrieved_on": "2026-09-15",
+  "data_root": ".private-eval/benchmark-20260915/additional-data",
+  "sources": [
+    {
+      "name": "MemoryAgentBench",
+      "code_url": "https://github.com/HUST-AI-HYZ/MemoryAgentBench",
+      "code_revision": "fe1735de8cf8b9908e1e3d3b5612afc815698062",
+      "data_url": "https://huggingface.co/datasets/ai-hyz/MemoryAgentBench",
+      "data_revision": "7ea066982b140a19337e17e60d45d4076e042faf",
+      "inputs": [
+        {
+          "file": "raw/memoryagentbench/Accurate_Retrieval-00000-of-00001.parquet",
+          "url": "https://huggingface.co/datasets/ai-hyz/MemoryAgentBench/resolve/7ea066982b140a19337e17e60d45d4076e042faf/data/Accurate_Retrieval-00000-of-00001.parquet",
+          "sha256": "56c3cd80fb6731a3e53cd1a6be3148f54df60ff2d290ee50e28f8acebf9655c1",
+          "bytes": 20024386,
+          "rows": 22
+        },
+        {
+          "file": "raw/memoryagentbench/Conflict_Resolution-00000-of-00001.parquet",
+          "url": "https://huggingface.co/datasets/ai-hyz/MemoryAgentBench/resolve/7ea066982b140a19337e17e60d45d4076e042faf/data/Conflict_Resolution-00000-of-00001.parquet",
+          "sha256": "24d5c3f09ce0ce15625cb9f8a98f44f0d864ca6c94d7b4ad04eb697ca3a5ff45",
+          "bytes": 1491588,
+          "rows": 8
+        },
+        {
+          "file": "raw/memoryagentbench/Long_Range_Understanding-00000-of-00001.parquet",
+          "url": "https://huggingface.co/datasets/ai-hyz/MemoryAgentBench/resolve/7ea066982b140a19337e17e60d45d4076e042faf/data/Long_Range_Understanding-00000-of-00001.parquet",
+          "sha256": "5ab175461954db67770d4a4cb69e569b513ebb96aceb9ee79b57f67488bcd539",
+          "bytes": 49342452,
+          "rows": 110
+        },
+        {
+          "file": "raw/memoryagentbench/Test_Time_Learning-00000-of-00001.parquet",
+          "url": "https://huggingface.co/datasets/ai-hyz/MemoryAgentBench/resolve/7ea066982b140a19337e17e60d45d4076e042faf/data/Test_Time_Learning-00000-of-00001.parquet",
+          "sha256": "5338753be48f925d03318eed66117286e3489025fabe050a547bd086cd7d79c0",
+          "bytes": 3947476,
+          "rows": 6
+        }
+      ],
+      "derived": [
+        {
+          "file": "prepared/memoryagentbench/accurate_retrieval.jsonl",
+          "sha256": "b54fbc14ea19605ee0fa409a3a4e08b876e202bfe061d029b82d57574cede60e",
+          "bytes": 38127731,
+          "rows": 22,
+          "questions": 2000
+        },
+        {
+          "file": "prepared/memoryagentbench/conflict_resolution.jsonl",
+          "sha256": "970395bf22da8051de13f4cd9e10b7e3ff84f23b799f14add119d22a68300a16",
+          "bytes": 3261248,
+          "rows": 8,
+          "questions": 800
+        },
+        {
+          "file": "prepared/memoryagentbench/long_range_understanding.jsonl",
+          "sha256": "1bfa43c3c56f7150de17af4c4e91c3387c3028dec702b8d633bde5ce8c7aeeac",
+          "bytes": 84375014,
+          "rows": 110,
+          "questions": 171
+        },
+        {
+          "file": "prepared/memoryagentbench/test_time_learning.jsonl",
+          "sha256": "2b3de8bcaa222e529bb37c3d82b415da123842ec3a3b52a352f74e48a0e0be32",
+          "bytes": 7951671,
+          "rows": 6,
+          "questions": 700
+        }
+      ],
+      "loader_cases": 146,
+      "loader_questions": 3671
+    },
+    {
+      "name": "LoCoMo-Plus",
+      "code_url": "https://github.com/xjtuleeyf/Locomo-Plus",
+      "code_revision": "059f4e3d38f7f1f96765e8e2cb7de3097551bffb",
+      "inputs": [
+        {
+          "file": "raw/locomo-plus/data/locomo10.json",
+          "url": "https://raw.githubusercontent.com/xjtuleeyf/Locomo-Plus/059f4e3d38f7f1f96765e8e2cb7de3097551bffb/data/locomo10.json",
+          "sha256": "79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4",
+          "bytes": 2805274,
+          "rows": 10,
+          "samples": 1986
+        },
+        {
+          "file": "raw/locomo-plus/data/locomo_plus.json",
+          "url": "https://raw.githubusercontent.com/xjtuleeyf/Locomo-Plus/059f4e3d38f7f1f96765e8e2cb7de3097551bffb/data/locomo_plus.json",
+          "sha256": "af2fc6e5e0e88735e28d8dd1ef474b718861a73beb21779809e3b9e1a4fe3d23",
+          "bytes": 305737,
+          "rows": 401,
+          "samples": 401
+        },
+        {
+          "file": "raw/locomo-plus/data/build_conv.py",
+          "url": "https://raw.githubusercontent.com/xjtuleeyf/Locomo-Plus/059f4e3d38f7f1f96765e8e2cb7de3097551bffb/data/build_conv.py",
+          "sha256": "23820304c2089d3fe63fe6200e8a8e3731ea8a599a65545d7cd3d28ee3c54015",
+          "bytes": 4622,
+          "lines": 187
+        },
+        {
+          "file": "raw/locomo-plus/data/unified_input.py",
+          "url": "https://raw.githubusercontent.com/xjtuleeyf/Locomo-Plus/059f4e3d38f7f1f96765e8e2cb7de3097551bffb/data/unified_input.py",
+          "sha256": "cb0614d72c897834cc41e9f62c8c2d528ec8dd4f38c3fafcda061a60ab51beac",
+          "bytes": 9141,
+          "lines": 237
+        }
+      ],
+      "derived": [
+        {
+          "file": "prepared/locomo-plus/unified_input_samples_v2.json",
+          "sha256": "5627ad7a5d10d7e25f3f3a3d5daa0e64d4053c04191c671a54f473091f40e6a0",
+          "bytes": 223287469,
+          "rows": 2387,
+          "cognitive": 401,
+          "original": 1986,
+          "missing_evidence": 4
+        }
+      ],
+      "loader_cases": 401,
+      "loader_questions": 401
+    },
+    {
+      "name": "Mem2ActBench",
+      "code_url": "https://github.com/Cantaloupe-M/Mem2ActBench",
+      "code_revision": "b00726940b5abbe9bd324bdd7a2cb272f5c62a29",
+      "inputs": [
+        {
+          "file": "raw/mem2actbench/toolmembench_small/qa_dataset.jsonl",
+          "url": "https://raw.githubusercontent.com/Cantaloupe-M/Mem2ActBench/b00726940b5abbe9bd324bdd7a2cb272f5c62a29/toolmembench_small/qa_dataset.jsonl",
+          "sha256": "c5e3f47799d850b607d0ff56829335f843e208ad4d3b1eae89a814eae1974b09",
+          "bytes": 694161,
+          "rows": 400
+        },
+        {
+          "file": "raw/mem2actbench/toolmembench_small/toolmem_conversation.jsonl",
+          "url": "https://raw.githubusercontent.com/Cantaloupe-M/Mem2ActBench/b00726940b5abbe9bd324bdd7a2cb272f5c62a29/toolmembench_small/toolmem_conversation.jsonl",
+          "sha256": "c935adfbe0e1743b8eb373eba31611b97cf396ee09516f68f6621e49365cbcaf",
+          "bytes": 7345243,
+          "rows": 429
+        },
+        {
+          "file": "raw/mem2actbench/toolmembench_small/benchmark_statistics.json",
+          "url": "https://raw.githubusercontent.com/Cantaloupe-M/Mem2ActBench/b00726940b5abbe9bd324bdd7a2cb272f5c62a29/toolmembench_small/benchmark_statistics.json",
+          "sha256": "a66ae640bb34e1bc1eb2362f8a0ede511017782002ce3f288b73ae2c9fc3c600",
+          "bytes": 267,
+          "rows": 1
+        }
+      ],
+      "derived": [
+        {
+          "file": "prepared/mem2actbench/toolmembench_small/qa_dataset_validated_v2.jsonl",
+          "sha256": "42fbaa40510e96c506cc415d119bd05be9f326a3ab90b44715c8cb89fc855f8d",
+          "bytes": 662855,
+          "rows": 380
+        },
+        {
+          "file": "prepared/mem2actbench/toolmembench_small/toolmem_conversation.jsonl",
+          "sha256": "c935adfbe0e1743b8eb373eba31611b97cf396ee09516f68f6621e49365cbcaf",
+          "bytes": 7345243,
+          "rows": 429
+        },
+        {
+          "file": "prepared/mem2actbench/toolmembench_small/benchmark_statistics.json",
+          "sha256": "a66ae640bb34e1bc1eb2362f8a0ede511017782002ce3f288b73ae2c9fc3c600",
+          "bytes": 267,
+          "rows": 1
+        }
+      ],
+      "excluded_rows": 20,
+      "excluded_by_reason": {
+        "empty_source_conversation_ids": 7,
+        "no_matching_session_source": 9,
+        "empty_tool_name": 1,
+        "missing_gold_source": 3
+      },
+      "loader_cases": 380,
+      "loader_questions": 380,
+      "loader_memories": 482,
+      "intermediates": [
+        {
+          "file": "prepared/mem2actbench/toolmembench_small/qa_dataset.jsonl",
+          "sha256": "542126a708e54be688719324bfbad8dbe49d6b138570db124ceef01bce7c11a2",
+          "bytes": 668747,
+          "rows": 383
+        }
+      ],
+      "harness_exclusions_sha256": "b925d6d6f884b9bcf4c38fd5b7be5e4a005781b6abdc1176ad17e0ca02dac6ee",
+      "preparation_boundary": "All 400 raw rows retained; excluded malformed/unmatched source rows are explicit, not model failures."
+    }
+  ]
+}

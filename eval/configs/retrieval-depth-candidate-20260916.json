@@ -1,0 +1,12 @@
+{
+  "schema": "engraphis-opt-in-retrieval-recipe/v1",
+  "opt_in": true,
+  "api": "MemoryEngine.recall",
+  "arguments": {
+    "k": 20,
+    "token_budget": 1500
+  },
+  "comparison_sha256": "bd721fc3bee07fb3c1a2315cd7fb15fc4808525121f682203d32ae665c00b410",
+  "source_dataset": "LoCoMo",
+  "boundary": "exploratory retrieval diagnostic; no default promotion or answer-quality claim"
+}
