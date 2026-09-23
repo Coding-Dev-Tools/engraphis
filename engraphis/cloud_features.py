@@ -648,3 +648,40 @@ def run_managed_job(service: Any, workspace: str, kind: str, *,
     receipt = cloud.upload_snapshot(workspace_id, snapshot)
     generation = int(receipt.get("generation", snapshot["generation"]))
     return cloud.run_job(workspace_id, kind, generation, wait_seconds=wait_seconds)
+
+
+def get_analytics_job_result(service: Any, workspace: str, job_id: str, *,
+                             client: Optional[CloudFeatureClient] = None) -> dict:
+    """Read one existing analytics job; never upload a snapshot or submit a new job."""
+    if not isinstance(job_id, str) or re.fullmatch(r"[A-Za-z0-9_-]{1,64}", job_id) is None:
+        raise CloudFeatureError("The Analytics job identifier is invalid.", status=400)
+    clean_workspace = service._clean_ws(workspace)
+    workspace_id = service._lookup_workspace(clean_workspace)
+    if not workspace_id:
+        raise CloudFeatureError("The selected workspace does not exist.", status=404)
+    if not managed_compute_consent(service, clean_workspace):
+        raise CloudFeatureError(
+            "Managed processing requires approval for this workspace. No workspace content "
+            "was uploaded. Review the workspace processing controls to enable it.",
+            status=409,
+            code="consent_required",
+        )
+    cloud = client or CloudFeatureClient.from_environment(workspace_id)
+    job = cloud.get_job(workspace_id, job_id)
+    if job.get("job_id") != job_id or job.get("kind") != "analytics":
+        raise CloudFeatureError("The Analytics job was not found for this workspace.", status=404)
+    state = str(job.get("state") or "")
+    if state in {"failed", "canceled"}:
+        return {"job_id": job_id, "state": state, "pending": False, "failed": True}
+    if state in {"succeeded", "stale"}:
+        envelope = cloud.get_result(workspace_id, job_id)
+        result = envelope.get("result")
+        if not isinstance(result, dict) or result.get("kind") != "analytics":
+            raise CloudFeatureError("Engraphis Cloud returned an invalid Analytics result.",
+                                    status=503)
+        return {"job_id": job_id, "state": state, "pending": False, "result": result}
+    return {
+        "job_id": job_id,
+        "state": state if state in {"queued", "running"} else "queued",
+        "pending": True,
+    }

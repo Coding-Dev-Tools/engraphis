@@ -90,6 +90,12 @@ itself. A read-only pull still needs the same key to decrypt received bundles.
 python -c "import base64, secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode().rstrip('='))"
 ```
 
+Treat the command output as a secret: use a trusted terminal without transcript or log capture,
+store it in your secret manager, and never paste it into the Cloud portal or a support request.
+Before the first upload, keep a separate secure backup and confirm you can retrieve it. If the
+key is lost, previously synced encrypted bundles cannot be decrypted; Engraphis Cloud cannot
+restore it.
+
 The dashboard's **Sync now** action invokes the same customer protocol. The public package does
 not run a local auto-sync loop or ship a cron/Task Scheduler wrapper. Hosted automation belongs
 to the private service. A round with any incomplete workspace is a failure, even when other peers

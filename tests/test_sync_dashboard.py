@@ -171,6 +171,31 @@ def test_sync_run_pushes_and_records_summary(monkeypatch, tmp_path):
         assert st["last"] and st["last"]["exported"] >= 1
 
 
+def test_open_mode_new_workspace_is_sync_eligible_without_team_sharing(monkeypatch, tmp_path):
+    """A local Pro owner has no Team principal: creating a workspace must not
+    strand it as a personal folder that the Sync relay always skips.
+    """
+    synced = []
+
+    def fake_get_transport(kind="folder", **kw):
+        synced.append(kw.get("workspace_id"))
+        return _FakeTransport()
+
+    monkeypatch.setattr("engraphis.backends.sync_folder.get_transport", fake_get_transport)
+    with _client(monkeypatch, tmp_path, cloud=True) as c:
+        created = c.post("/api/workspaces/create", json={
+            "workspace": "local-pro", "visibility": "personal", "confirmed": False,
+        })
+        assert created.status_code == 200, created.text
+        assert created.json()["visibility"] == "shared"
+        listed = c.get("/api/workspaces").json()
+        assert {w["name"]: w["visibility"] for w in listed["workspaces"]}["local-pro"] == "shared"
+        attempt = c.post("/api/sync/run", json={})
+        assert attempt.status_code == 200, attempt.text
+        assert "local-pro" in synced
+
+
+
 def test_sync_never_pushes_personal_folders(monkeypatch, tmp_path):
     """A personal folder is private to its owner and must never leave the device over the
     hosted relay. _sync_all skips it; only shared folders are namespaced onto the relay with
