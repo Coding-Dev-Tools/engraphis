@@ -99,14 +99,21 @@ def test_railway_image_is_cpu_only_and_installs_only_its_runtime_surface():
 
 def test_ci_audits_the_stripped_image_without_mutating_it():
     workflow = _text(".github/workflows/ci.yml")
+    image_audit = workflow.split("  docker-smoke:\n", 1)[1].split("  build:\n", 1)[0]
 
     # The audit copies the installed site-packages out of a created (not running) container.
     # The path is resolved dynamically via sysconfig so it survives base-image Python bumps.
-    assert "sysconfig.get_path('purelib')" in workflow or 'sysconfig.get_path("purelib")' in workflow
-    assert 'docker cp "$container:$site_packages/."' in workflow
-    assert 'python -m pip_audit --path "$audit_dir"' in workflow
-    assert 'python -m pip install --disable-pip-version-check --no-cache-dir' in workflow
-    assert 'pip-audit==2.10.1' in workflow
+    assert "sysconfig.get_path('purelib')" in image_audit
+    assert 'docker cp "$container:$site_packages/."' in image_audit
+    assert "set -euo pipefail" in image_audit
+    assert 'python scripts/pin_installed_audit_requirements.py "$audit_dir"' in image_audit
+    assert 'python -m pip_audit --vulnerability-service osv --path "$audit_dir"' in image_audit
+    assert (
+        'python -m pip_audit --vulnerability-service pypi --no-deps '
+        '--disable-pip -r "$RUNNER_TEMP/published-audit-requirements.txt"'
+    ) in image_audit
+    assert 'python -m pip install --disable-pip-version-check --no-cache-dir' in image_audit
+    assert 'pip-audit==2.10.1' in image_audit
 
 
 def test_platform_port_precedes_a_fixed_engraphis_port(monkeypatch):
