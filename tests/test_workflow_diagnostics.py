@@ -5,6 +5,8 @@ import time
 import pytest
 
 from engraphis.service import MemoryService
+from engraphis.core.diagnostics import recall_diagnostics
+from engraphis.core.recall import RecallResult
 
 
 @pytest.fixture
@@ -90,6 +92,30 @@ def test_empty_recall_reports_only_executed_phases(svc):
     assert phases["packing"] >= 0
     assert "fusion_scoring" not in phases
     assert measured["count"] == 0
+
+
+def test_adaptive_diagnostics_distinguish_empty_budget_and_packing_input(svc):
+    for content in ("Atlas deploys canary builds.", "Atlas uses release approvals.",
+                    "Atlas retains configuration history."):
+        svc.remember(content, workspace="w", resolve_conflicts=False)
+    zero = svc.recall("Atlas", workspace="w", candidate_depth="adaptive",
+                      token_budget=0, diagnostics=True)
+    assert zero["adaptive_stop_reason"] == "context_budget_exhausted"
+    assert zero["packed_candidate_coverage"] == 0.0
+    selected = svc.recall("Atlas", workspace="w", candidate_depth="adaptive",
+                          k=1, token_budget=128, diagnostics=True)
+    assert selected["count"] == 1
+    assert selected["packed_candidate_coverage"] == 1.0
+    assert "selected packing input" in selected["diagnostics"]["adaptive"]["boundary"]
+
+
+@pytest.mark.parametrize("coverage", [float("nan"), float("inf"), -0.1, 1.1, True])
+def test_adaptive_diagnostics_reject_invalid_ratios_and_unbounded_labels(coverage):
+    result = RecallResult(packed_candidate_coverage=coverage, adaptive_stop_reason="private query")
+    diagnostic = recall_diagnostics(result, elapsed_ms=0)
+    assert diagnostic["adaptive"]["packed_candidate_coverage"] is None
+    assert diagnostic["adaptive"]["stop_reason"] == "other"
+    assert "private query" not in json.dumps(diagnostic, allow_nan=False)
 
 
 def test_build_and_review_routes_do_not_expose_secrets(svc, monkeypatch):

@@ -11,13 +11,25 @@ def recall_diagnostics(result, *, elapsed_ms: float,
     raw = getattr(usage, "omission_reasons", {}) or {}
     counts: dict[str, Optional[int]] = {
         name: min(1_000_000_000, max(0, int(raw.get(name, 0))))
-        for name in ("duplicate", "budget", "score_tail", "missing_record")
+        for name in ("duplicate", "budget", "score_tail", "missing_record", "unit_too_large")
     }
     counts["truncated"] = sum(bool(chunk.truncated) for chunk in result.packed_chunks)
     # Candidate discovery is bounded. Counting all invisible records would both
     # expand the scan and disclose facts about data outside the authorized scope.
     counts.update({"scope": None, "time": None, "trust": None, "supersession": None})
     elapsed = max(0.0, elapsed_ms) if math.isfinite(elapsed_ms) else 0.0
+    coverage = getattr(result, "packed_candidate_coverage", None)
+    coverage = (
+        round(float(coverage), 6)
+        if isinstance(coverage, (int, float)) and not isinstance(coverage, bool)
+        and math.isfinite(coverage) and 0.0 <= coverage <= 1.0 else None
+    )
+    stop_reason = getattr(result, "adaptive_stop_reason", "")
+    if stop_reason not in {
+        "", "context_budget_exhausted", "sufficient_records_and_type_limits",
+        "candidate_ceiling", "retrieval_exhausted", "fixed_scope",
+    }:
+        stop_reason = "other"
     phases = {"engine_recall": round(elapsed, 3)}
     # Only fixed phase names cross this content-free diagnostic boundary.
     for name in ("preparation", "planning", "embedding", "candidate_filtering",
@@ -39,5 +51,10 @@ def recall_diagnostics(result, *, elapsed_ms: float,
             "repair_pending": result.vector_index_repairs_pending,
             "source": result.vector_search_source if result.vector_search_source in
                       {"configured", "canonical", "canonical_fallback", "disabled"} else "other",
+        },
+        "adaptive": {
+            "stop_reason": stop_reason,
+            "packed_candidate_coverage": coverage,
+            "boundary": "packed candidates divided by selected packing input; not gold evidence coverage",
         },
     }

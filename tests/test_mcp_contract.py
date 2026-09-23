@@ -16,7 +16,8 @@ def test_generated_artifacts_match_registered_tools():
     schemas = {item["name"]: item["inputSchema"] for item in contract["surfaces"]["smart"]}
     assert schemas["engraphis_recall_context"]["properties"]["k"]["default"] == 50
     assert schemas["engraphis_recall_context"]["properties"]["format"]["default"] == "full"
-    assert {"subject_key", "claim_kind"} <= schemas["engraphis_remember"]["properties"].keys()
+    assert {"subject_key", "claim_kind", "exact_value", "exact_value_type"} <= (
+        schemas["engraphis_remember"]["properties"].keys())
     classic = {item["name"] for item in contract["surfaces"]["classic"]}
     assert "engraphis_recall" in classic
     assert "engraphis_discover_actions" not in classic

@@ -98,6 +98,45 @@ def test_normal_mcp_exposes_only_the_smart_gateway_tools(monkeypatch):
     props = tools["engraphis_remember"].inputSchema.get("properties", {})
     assert "subject_key" in props
     assert "claim_kind" in props
+    assert "exact_value" in props
+    assert props["exact_value_type"]["default"] == "literal"
+
+
+def test_smart_remember_tool_persists_exact_source_binding(monkeypatch):
+    from engraphis.core.evidence import exact_value_binding
+
+    server = _memory_server(monkeypatch)
+    content = "The approved deployment token is Δ-42."
+    response = asyncio.run(server.mcp.call_tool("engraphis_remember", {
+        "content": content, "workspace": "acme", "repo": "api",
+        "exact_value": "Δ-42", "exact_value_type": "identifier",
+    }))
+    stored = _payload(response[0].text)
+    record = server._service.store.get_memory(stored["id"])
+    assert record is not None
+    binding = exact_value_binding(record.metadata, content=record.content)
+    assert binding is not None
+    assert binding["value"] == "Δ-42"
+    assert binding["type"] == "identifier"
+    assert record.content[binding["start"]:binding["end"]] == "Δ-42"
+
+
+@pytest.mark.parametrize(("content", "value", "value_type"), [
+    ("Deployment token is Δ-42.", "absent", "identifier"),
+    ("Deployment token is Δ-42.", "Δ-42", "unsupported-type"),
+    ("Δ-42 or Δ-42", "Δ-42", "identifier"),
+])
+def test_smart_remember_rejects_invalid_exact_values(monkeypatch, content, value, value_type):
+    server = _memory_server(monkeypatch)
+    response = server.smart_remember(
+        content=content, workspace="acme", exact_value=value,
+        exact_value_type=value_type,
+    )
+    code, message, retryable = _error_envelope(response)
+    assert code == "E_VALIDATION"
+    assert "exact_value" in message
+    assert retryable is False
+    assert server._service.store.conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == 0
 
 
 def test_classic_mcp_retains_the_34_named_tool_compatibility_surface(monkeypatch):

@@ -56,7 +56,8 @@ def main() -> int:
                 stale.append(path.relative_to(ROOT).as_posix())
         else:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(expected, encoding="utf-8", newline="\n")
+            with path.open("w", encoding="utf-8", newline="\n") as handle:
+                handle.write(expected)
     if stale:
         print("MCP contract drift: " + ", ".join(stale))
         return 1

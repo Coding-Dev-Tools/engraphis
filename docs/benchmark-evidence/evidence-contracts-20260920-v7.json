@@ -1,0 +1,428 @@
+{
+  "command": "python -m eval.evidence_contracts",
+  "coverage_query_comparison": {
+    "after": {
+      "cases": 8,
+      "correct": 8,
+      "outcomes": [
+        {
+          "actual_bound": false,
+          "budget": 11,
+          "case": "unbound_phone",
+          "correct": true,
+          "excerpt": "Support phone is 555-1234.",
+          "expected_bound": false,
+          "expected_excerpt": "Support phone is 555-1234.",
+          "query": "support phone",
+          "tokens": 10
+        },
+        {
+          "actual_bound": true,
+          "budget": 9,
+          "case": "bound_token",
+          "correct": true,
+          "excerpt": "Deployment token is ALPHA.",
+          "expected_bound": true,
+          "expected_excerpt": "Deployment token is ALPHA.",
+          "query": "deployment token",
+          "tokens": 8
+        },
+        {
+          "actual_bound": true,
+          "budget": 24,
+          "case": "both_sentences",
+          "correct": true,
+          "excerpt": "Deployment token is ALPHA. Support phone is 555-1234.",
+          "expected_bound": true,
+          "expected_excerpt": "Deployment token is ALPHA. Support phone is 555-1234.",
+          "query": "support phone",
+          "tokens": 15
+        },
+        {
+          "actual_bound": false,
+          "budget": 8,
+          "case": "unbound_duplicate",
+          "correct": true,
+          "excerpt": "Second ALPHA.",
+          "expected_bound": false,
+          "expected_excerpt": "Second ALPHA.",
+          "query": "second",
+          "tokens": 6
+        },
+        {
+          "actual_bound": true,
+          "budget": 8,
+          "case": "bound_duplicate",
+          "correct": true,
+          "excerpt": "Second ALPHA.",
+          "expected_bound": true,
+          "expected_excerpt": "Second ALPHA.",
+          "query": "second",
+          "tokens": 6
+        },
+        {
+          "actual_bound": false,
+          "budget": 11,
+          "case": "unbound_multiline",
+          "correct": true,
+          "excerpt": "Support phone is 555-1234.",
+          "expected_bound": false,
+          "expected_excerpt": "Support phone is 555-1234.",
+          "query": "support phone",
+          "tokens": 10
+        },
+        {
+          "actual_bound": true,
+          "budget": 14,
+          "case": "bound_multiline",
+          "correct": true,
+          "excerpt": "Payload:\n{\n  \"mode\": \"canary\"\n}",
+          "expected_bound": true,
+          "expected_excerpt": "{\n  \"mode\": \"canary\"\n}",
+          "query": "mode canary",
+          "tokens": 14
+        },
+        {
+          "actual_bound": false,
+          "budget": 18,
+          "case": "expansion_rebind",
+          "correct": true,
+          "excerpt": "Support phone is 555-1234 with ALPHA today.",
+          "expected_bound": false,
+          "expected_excerpt": "Support phone is 555-1234 with ALPHA today.",
+          "query": "support phone",
+          "tokens": 18
+        }
+      ]
+    },
+    "baseline_commit": "0244c45f00be334f2068d07e1f7f7442221006ed",
+    "baseline_context_sha256": "b2a1a828bce8756a2004611365479700b8b6a024928664c93bda365ab83cbf39",
+    "before": {
+      "cases": 8,
+      "correct": 4,
+      "outcomes": [
+        {
+          "actual_bound": true,
+          "budget": 11,
+          "case": "unbound_phone",
+          "correct": false,
+          "excerpt": "Deployment token is ALPHA.",
+          "expected_bound": false,
+          "expected_excerpt": "Support phone is 555-1234.",
+          "query": "support phone",
+          "tokens": 8
+        },
+        {
+          "actual_bound": true,
+          "budget": 9,
+          "case": "bound_token",
+          "correct": true,
+          "excerpt": "Deployment token is ALPHA.",
+          "expected_bound": true,
+          "expected_excerpt": "Deployment token is ALPHA.",
+          "query": "deployment token",
+          "tokens": 8
+        },
+        {
+          "actual_bound": true,
+          "budget": 24,
+          "case": "both_sentences",
+          "correct": true,
+          "excerpt": "Deployment token is ALPHA. Support phone is 555-1234.",
+          "expected_bound": true,
+          "expected_excerpt": "Deployment token is ALPHA. Support phone is 555-1234.",
+          "query": "support phone",
+          "tokens": 15
+        },
+        {
+          "actual_bound": true,
+          "budget": 8,
+          "case": "unbound_duplicate",
+          "correct": false,
+          "excerpt": "First ALPHA.",
+          "expected_bound": false,
+          "expected_excerpt": "Second ALPHA.",
+          "query": "second",
+          "tokens": 6
+        },
+        {
+          "actual_bound": true,
+          "budget": 8,
+          "case": "bound_duplicate",
+          "correct": true,
+          "excerpt": "Second ALPHA.",
+          "expected_bound": true,
+          "expected_excerpt": "Second ALPHA.",
+          "query": "second",
+          "tokens": 6
+        },
+        {
+          "actual_bound": false,
+          "budget": 11,
+          "case": "unbound_multiline",
+          "correct": false,
+          "excerpt": "",
+          "expected_bound": false,
+          "expected_excerpt": "Support phone is 555-1234.",
+          "query": "support phone",
+          "tokens": 0
+        },
+        {
+          "actual_bound": true,
+          "budget": 14,
+          "case": "bound_multiline",
+          "correct": true,
+          "excerpt": ":\n{\n  \"mode\": \"canary\"\n}\nSupport",
+          "expected_bound": true,
+          "expected_excerpt": "{\n  \"mode\": \"canary\"\n}",
+          "query": "mode canary",
+          "tokens": 14
+        },
+        {
+          "actual_bound": true,
+          "budget": 18,
+          "case": "expansion_rebind",
+          "correct": false,
+          "excerpt": "ALPHA.",
+          "expected_bound": false,
+          "expected_excerpt": "Support phone is 555-1234 with ALPHA today.",
+          "query": "support phone",
+          "tokens": 10
+        }
+      ]
+    },
+    "boundary": "Eight fixed development fixtures; same queries, budgets, and deterministic token counter. Not external benchmark performance.",
+    "current_context_sha256": "0ea7f01b5bb0831adccec97166a7260400d09d17cd9b565e4e0f7192530e0fa9",
+    "diagnostic_sha256": "d00bc00b50a93bb2ef250e4d897173d24ccf408d2060e06dd62c2278e4786cb9"
+  },
+  "result": {
+    "action_validation": {
+      "cases": 14,
+      "correct": 14,
+      "false_acceptances": 0,
+      "false_rejections": 0,
+      "outcomes": [
+        {
+          "actual": true,
+          "case": "mapping_accept",
+          "expected": true
+        },
+        {
+          "actual": true,
+          "case": "json_accept",
+          "expected": true
+        },
+        {
+          "actual": true,
+          "case": "escaped_unicode_accept",
+          "expected": true
+        },
+        {
+          "actual": false,
+          "case": "mapping_wrong_field",
+          "expected": false
+        },
+        {
+          "actual": false,
+          "case": "json_wrong_field",
+          "expected": false
+        },
+        {
+          "actual": false,
+          "case": "mapping_wrong_source",
+          "expected": false
+        },
+        {
+          "actual": false,
+          "case": "json_wrong_source",
+          "expected": false
+        },
+        {
+          "actual": false,
+          "case": "mapping_changed_literal",
+          "expected": false
+        },
+        {
+          "actual": false,
+          "case": "json_changed_literal",
+          "expected": false
+        },
+        {
+          "actual": false,
+          "case": "unstructured_output",
+          "expected": false
+        },
+        {
+          "actual": false,
+          "case": "string_false",
+          "expected": false
+        },
+        {
+          "actual": false,
+          "case": "integer_one",
+          "expected": false
+        },
+        {
+          "actual": false,
+          "case": "boolean_false",
+          "expected": false
+        },
+        {
+          "actual": false,
+          "case": "inconsistent_source_span",
+          "expected": false
+        }
+      ]
+    },
+    "boundary": "Development fixtures; not external QA, generated-answer quality, or provider savings.",
+    "coverage_queries": {
+      "cases": 8,
+      "correct": 8,
+      "outcomes": [
+        {
+          "actual_bound": false,
+          "budget": 11,
+          "case": "unbound_phone",
+          "correct": true,
+          "excerpt": "Support phone is 555-1234.",
+          "expected_bound": false,
+          "expected_excerpt": "Support phone is 555-1234.",
+          "query": "support phone",
+          "tokens": 10
+        },
+        {
+          "actual_bound": true,
+          "budget": 9,
+          "case": "bound_token",
+          "correct": true,
+          "excerpt": "Deployment token is ALPHA.",
+          "expected_bound": true,
+          "expected_excerpt": "Deployment token is ALPHA.",
+          "query": "deployment token",
+          "tokens": 8
+        },
+        {
+          "actual_bound": true,
+          "budget": 24,
+          "case": "both_sentences",
+          "correct": true,
+          "excerpt": "Deployment token is ALPHA. Support phone is 555-1234.",
+          "expected_bound": true,
+          "expected_excerpt": "Deployment token is ALPHA. Support phone is 555-1234.",
+          "query": "support phone",
+          "tokens": 15
+        },
+        {
+          "actual_bound": false,
+          "budget": 8,
+          "case": "unbound_duplicate",
+          "correct": true,
+          "excerpt": "Second ALPHA.",
+          "expected_bound": false,
+          "expected_excerpt": "Second ALPHA.",
+          "query": "second",
+          "tokens": 6
+        },
+        {
+          "actual_bound": true,
+          "budget": 8,
+          "case": "bound_duplicate",
+          "correct": true,
+          "excerpt": "Second ALPHA.",
+          "expected_bound": true,
+          "expected_excerpt": "Second ALPHA.",
+          "query": "second",
+          "tokens": 6
+        },
+        {
+          "actual_bound": false,
+          "budget": 11,
+          "case": "unbound_multiline",
+          "correct": true,
+          "excerpt": "Support phone is 555-1234.",
+          "expected_bound": false,
+          "expected_excerpt": "Support phone is 555-1234.",
+          "query": "support phone",
+          "tokens": 10
+        },
+        {
+          "actual_bound": true,
+          "budget": 14,
+          "case": "bound_multiline",
+          "correct": true,
+          "excerpt": "Payload:\n{\n  \"mode\": \"canary\"\n}",
+          "expected_bound": true,
+          "expected_excerpt": "{\n  \"mode\": \"canary\"\n}",
+          "query": "mode canary",
+          "tokens": 14
+        },
+        {
+          "actual_bound": false,
+          "budget": 18,
+          "case": "expansion_rebind",
+          "correct": true,
+          "excerpt": "Support phone is 555-1234 with ALPHA today.",
+          "expected_bound": false,
+          "expected_excerpt": "Support phone is 555-1234 with ALPHA today.",
+          "query": "support phone",
+          "tokens": 18
+        }
+      ]
+    },
+    "oversized_exact": {
+      "budget": 24,
+      "budget_honored": true,
+      "literal_preserved": true,
+      "nearby_qualifiers_preserved": true,
+      "sources": 1,
+      "tokens": 24
+    },
+    "packing": {
+      "coverage": {
+        "budget": 35,
+        "budget_honored": true,
+        "sources": 3,
+        "tokens": 33
+      },
+      "legacy": {
+        "budget": 35,
+        "budget_honored": true,
+        "sources": 1,
+        "tokens": 35
+      }
+    },
+    "schema": "engraphis-evidence-contract-diagnostic/v1",
+    "source_validation": {
+      "cases": 4,
+      "correct": 4,
+      "outcomes": [
+        {
+          "actual": false,
+          "case": "forged_source_span",
+          "expected": false
+        },
+        {
+          "actual": false,
+          "case": "changed_source_revision",
+          "expected": false
+        },
+        {
+          "actual": false,
+          "case": "missing_source_digest",
+          "expected": false
+        },
+        {
+          "actual": false,
+          "case": "tampered_contract_span",
+          "expected": false
+        }
+      ]
+    }
+  },
+  "schema": "engraphis-evidence-contract-report/v1",
+  "source_sha256": {
+    "engraphis/core/context.py": "0ea7f01b5bb0831adccec97166a7260400d09d17cd9b565e4e0f7192530e0fa9",
+    "engraphis/core/evidence.py": "97912b52a3d22de909218f83c09c92572ed695d7b3c2117e5330271c6d84a7bd",
+    "eval/evidence_contracts.py": "d00bc00b50a93bb2ef250e4d897173d24ccf408d2060e06dd62c2278e4786cb9"
+  }
+}

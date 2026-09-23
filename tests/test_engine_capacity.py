@@ -1,13 +1,14 @@
 import importlib.util
 import hashlib
 import json
+from pathlib import Path
 import queue
 
 import pytest
 
 from eval.benchmark import canonical_json, sha256_file, validate_report, write_canonical_artifact
 from eval.engine_capacity import (
-    Cell, RESOURCE_PHASES, _LifecycleObserver, _backlog_assessment, _local_model,
+    Cell, RESOURCE_PHASES, _LifecycleObserver, _backlog_assessment, _local_model, _model_snapshot,
     _identity_digest, _repeat, acceptance_policy, host_observation, main, operation_plan,
     protocol, run_cell, validate_reference_hosts,
 )
@@ -310,6 +311,61 @@ def test_model_manifest_binds_existing_bytes_without_loading_a_model(tmp_path):
     artifact.write_text('{"changed": true}', encoding="utf-8")
     with pytest.raises(ValueError, match="digest"):
         _local_model(str(tmp_path), digest)
+
+
+def test_model_snapshot_uses_verified_copy_after_original_changes(tmp_path):
+    artifact = tmp_path / "nested" / "config.json"
+    artifact.parent.mkdir()
+    (tmp_path / "empty").mkdir()
+    original = b'{"test_fixture": true}'
+    artifact.write_bytes(original)
+    digest = hashlib.sha256(canonical_json({"nested/config.json": sha256_file(artifact)}).encode()).hexdigest()
+    with _model_snapshot(str(tmp_path), digest) as (directory, identity):
+        assert identity["sha256"] == digest
+        assert directory != str(tmp_path)
+        assert (Path(directory) / "empty").is_dir()
+        artifact.write_bytes(b'{"replacement": true}')
+        assert (Path(directory) / "nested" / "config.json").read_bytes() == original
+        assert _local_model(directory, digest) == identity
+    assert not Path(directory).exists()
+
+
+def test_model_snapshot_rejects_replacement_before_materialization(tmp_path, monkeypatch):
+    artifact = tmp_path / "config.json"
+    artifact.write_bytes(b'{"test_fixture": true}')
+    digest = hashlib.sha256(canonical_json({"config.json": sha256_file(artifact)}).encode()).hexdigest()
+    open_path = Path.open
+
+    def replace_before_open(path, *args, **kwargs):
+        if path == artifact and args == ("rb",):
+            artifact.write_bytes(b'{"replacement": true}')
+        return open_path(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", replace_before_open)
+    with pytest.raises(ValueError, match="digest"):
+        with _model_snapshot(str(tmp_path), digest):
+            pytest.fail("unverified model reached execution")
+
+
+def test_capacity_repeats_load_the_same_verified_model_copy(tmp_path, monkeypatch):
+    artifact = tmp_path / "config.json"
+    original = b'{"test_fixture": true}'
+    artifact.write_bytes(original)
+    digest = hashlib.sha256(canonical_json({"config.json": sha256_file(artifact)}).encode()).hexdigest()
+    model_paths = []
+
+    def observe_model(_cell, directory):
+        model_paths.append(directory)
+        assert directory != str(tmp_path)
+        artifact.write_bytes(b'{"replacement": true}')
+        assert (Path(directory) / "config.json").read_bytes() == original
+        return {"operations": [], "status": "complete"}
+
+    monkeypatch.setattr("eval.engine_capacity._repeat", observe_model)
+    report = run_cell(Cell(repeats=2), model_dir=str(tmp_path), model_sha256=digest)
+    assert report["models"]["embedding"]["sha256"] == digest
+    assert report["metrics"]["model_stable"] is True
+    assert len(model_paths) == 2 and len(set(model_paths)) == 1
 
 
 def test_full_protocol_refuses_hashing_as_semantic_evidence():

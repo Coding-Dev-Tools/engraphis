@@ -113,6 +113,11 @@ model selection. Full cells require a pre-existing semantic model directory,
 its exact digest, and `psutil`. The digest is SHA-256 of `canonical_json` for the
 mapping of relative POSIX file names to file SHA-256 values, sorted by name.
 Symlinks are rejected. Freeze and review that inventory before execution.
+Before measurement, the runner copies the model into a private temporary directory
+and verifies the digest from the exact bytes copied. Every repeat loads that copy;
+changes to the original directory cannot change the measured model. This setup
+needs temporary disk space equal to the model size and is outside the reported
+seeding, startup, and workload measurements.
 
 ```console
 python -m eval.engine_capacity --run-cell cell.json --reference-hosts reference-hosts.json --model-dir EXISTING_LOCAL_MODEL --model-sha256 FROZEN_DIRECTORY_DIGEST --output cell-evidence.json
@@ -173,8 +178,10 @@ failure after otherwise correct operations.
 Each scheduled operation has an outcome even if a worker fails. Missing timing
 observations stay absent, not zero. Report measured counts and failures alongside
 per-operation and aggregate p50/p95/p99, received-operation throughput and all five
-repeat results. Source or model-byte drift invalidates the run. A host matching the declared
-RAM range is a reported observation, not proof of representative hardware.
+repeat results. Producer-source drift or drift in the private model copy
+invalidates the run. Changes to the original model directory after materialization
+are isolated from the measured workload. A host matching the declared RAM range
+is a reported observation, not proof of representative hardware.
 
 The backlog assessment is deliberately finite and predeclared. For a positive
 offered rate, it uses the active arrival interval (ending before post-arrival
