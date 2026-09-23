@@ -50,6 +50,10 @@ async function mockApi(page, options = {}) {
   requests.contextSavingsQueries = [];
   requests.graphQueries = [];
   requests.libraryQueries = [];
+  requests.analyticsStarts = [];
+  requests.analyticsChecks = [];
+  requests.visibilityChanges = [];
+  const analyticsResults = Array.isArray(options.analyticsResults) ? [...options.analyticsResults] : [];
   const audit = options.audit || [];
   const receipts = options.receipts || [];
   const workspaceList = options.workspaces || [{ name: workspace, memories: memories.length }];
@@ -99,6 +103,13 @@ async function mockApi(page, options = {}) {
         },
         embedder: { semantic: true },
       });
+    }
+    if (path === '/workspaces/visibility') {
+      const body = JSON.parse(request.postData() || '{}');
+      requests.visibilityChanges.push(body);
+      const target = workspaceList.find(item => item.name === body.workspace);
+      if (target && body.confirmed === true) target.visibility = body.visibility;
+      return ok({ workspace: body.workspace, visibility: body.visibility, changed: true });
     }
     if (path === '/stats') {
       return ok({
@@ -272,7 +283,19 @@ async function mockApi(page, options = {}) {
       return ok({ ok: options.syncRunOk ?? summary.complete !== false, summary });
     }
     if (path === '/analytics') {
-      return ok({ totals: {}, entities: [], series: [] });
+      requests.analyticsStarts.push(requestUrl.searchParams.get('workspace'));
+      if (typeof options.deferAnalyticsStart === 'function') await options.deferAnalyticsStart();
+      return ok(options.analyticsStart || {
+        kind: 'analytics', memory_count: 2,
+        totals: { live: 2, avg_retention: 0.8, pinned: 0 },
+        decay_forecast: { at_risk_7d: 0 },
+      });
+    }
+    if (path === '/analytics/job-result') {
+      requests.analyticsChecks.push(Object.fromEntries(requestUrl.searchParams));
+      return ok(analyticsResults.shift() || {
+        job_id: requestUrl.searchParams.get('job_id'), state: 'queued', pending: true,
+      });
     }
     if (path === '/automation/bootstrap') {
       requests.automationBootstraps.push(requestUrl.searchParams.get('workspace'));
@@ -347,6 +370,83 @@ test('A processing-controls link opens the named authorized workspace without en
   await page.goto('/?view=manage&tab=settings&workspace=not-permitted');
   await expect(page.locator('#workspace-select')).not.toHaveValue('not-permitted');
   await expect(page.locator('#managed-processing-enable')).toBeDisabled();
+});
+
+test('Portal deep links open only allowlisted local Manage tabs', async ({ page }) => {
+  await mockApi(page);
+  for (const tab of ['sync', 'analytics']) {
+    await page.goto(`/?view=manage&tab=${tab}`);
+    await expect(page.locator(`#manage-${tab}-tab`)).toHaveAttribute('aria-selected', 'true');
+    await expect(page.locator(`#manage-${tab}-panel`)).toHaveClass(/active/);
+  }
+  await page.goto('/?view=manage&tab=not-a-panel');
+  await expect(page.locator('#manage-workspaces-tab')).toHaveAttribute('aria-selected', 'true');
+});
+
+test('Pending Analytics checks the same job and shows a completed result', async ({ page }) => {
+  const requests = await mockApi(page, {
+    analyticsStart: { job_id: 'job_existing', state: 'queued', pending: true },
+    analyticsResults: [
+      { job_id: 'job_existing', state: 'running', pending: true },
+      { job_id: 'job_existing', state: 'succeeded', pending: false, result: {
+        kind: 'analytics', memory_count: 1,
+        totals: { live: 1, avg_retention: 0.82, pinned: 0 },
+        decay_forecast: { at_risk_7d: 0 },
+      } },
+    ],
+  });
+  await page.goto('/?view=manage&tab=analytics');
+  const result = page.locator('#analytics-result');
+  await expect(result).toContainText('Analytics is processing');
+  await expect(result).not.toContainText('Analytics result');
+  expect(requests.analyticsStarts).toEqual([workspace]);
+
+  await result.getByRole('button', { name: 'Refresh result' }).click();
+  await expect(result).toContainText('The Cloud job is running');
+  await page.getByRole('tab', { name: 'Settings' }).click();
+  await page.getByRole('tab', { name: 'Analytics' }).click();
+  await expect(result).toContainText('Live memories1');
+  await expect(result).toContainText('Average retention82%');
+  expect(requests.analyticsStarts).toEqual([workspace]);
+  expect(requests.analyticsChecks).toEqual([
+    { workspace, job_id: 'job_existing' },
+    { workspace, job_id: 'job_existing' },
+  ]);
+
+  await result.getByRole('button', { name: 'Run fresh analysis' }).click();
+  await expect(result).toContainText('Analytics is processing');
+  expect(requests.analyticsStarts).toEqual([workspace, workspace]);
+});
+
+test('Opening Analytics twice while its first request runs submits only once', async ({ page }) => {
+  let release;
+  const waitForRelease = new Promise(resolve => { release = resolve; });
+  const requests = await mockApi(page, {
+    analyticsStart: { job_id: 'job_slow', state: 'queued', pending: true },
+    deferAnalyticsStart: () => waitForRelease,
+  });
+  await page.goto('/?view=manage&tab=analytics');
+  await expect(page.locator('#analytics-result')).toContainText('Checking analytics availability');
+  await expect.poll(() => requests.analyticsStarts.length).toBe(1);
+  await page.getByRole('tab', { name: 'Analytics' }).click();
+  expect(requests.analyticsStarts).toEqual([workspace]);
+  release();
+  await expect(page.locator('#analytics-result')).toContainText('Analytics is processing');
+});
+
+test('An empty Analytics result asks for an eligible memory', async ({ page }) => {
+  await mockApi(page, {
+    analyticsStart: {
+      kind: 'analytics', memory_count: 0,
+      totals: { live: 0, avg_retention: 0, pinned: 0 },
+      decay_forecast: { at_risk_7d: 0 },
+    },
+  });
+  await page.goto('/?view=manage&tab=analytics');
+  const result = page.locator('#analytics-result');
+  await expect(result).toContainText('Analytics has no eligible memories');
+  await expect(result).toContainText('Add a workspace memory');
+  await expect(result).not.toContainText('Analytics result');
 });
 
 test('Managed processing stays off until explicit approval receives a backend acknowledgement', async ({ page }) => {
@@ -1056,10 +1156,8 @@ test('Ledger exposes Cloud Sync status and reports partial runs as incomplete', 
       encryption_available: true,
       local_prerequisites_ready: true,
       last: {
-        summary: {
-          complete: true, attempted: 2, succeeded: 2, exported: 1,
-          added: 1, updated: 0, errors: [],
-        },
+        complete: true, attempted: 2, succeeded: 2, exported: 1,
+        added: 1, updated: 0, errors: [],
       },
     },
     syncRun: {
@@ -1158,6 +1256,66 @@ test('Ledger keeps a ready read-only Cloud Sync pull actionable', async ({ page 
   await result.getByRole('button', { name: 'Sync now' }).click();
   await expect(result).toContainText('Last sync complete');
   expect(requests.syncRuns).toEqual([{}]);
+});
+
+test('Ledger does not present a 0/0 Cloud Sync round as first value', async ({ page }) => {
+  await mockApi(page, {
+    syncStatus: {
+      available: true, ready: true, has_key: true, key_state: 'ready',
+      encryption_available: true, local_prerequisites_ready: true, last: null,
+    },
+    syncRun: {
+      complete: true, attempted: 0, succeeded: 0, exported: 0,
+      added: 0, updated: 0, errors: [],
+    },
+  });
+  await page.goto('/?view=manage&tab=sync');
+  await page.getByRole('button', { name: 'Sync now' }).click();
+  await expect(page.locator('#sync-result')).toContainText('no eligible shared workspaces');
+  await expect(page.locator('#notice-text')).toContainText('No eligible shared workspaces were synced');
+  await page.getByRole('button', { name: 'Review workspaces' }).click();
+  await expect(page.getByRole('tab', { name: 'Workspaces' })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByRole('button', { name: 'Share for Cloud Sync' })).toHaveCount(0);
+});
+
+test('A personal Team workspace needs explicit consent before sharing for Cloud Sync', async ({ page }) => {
+  const requests = await mockApi(page, { workspaces: [
+    { name: workspace, memories: 2, visibility: 'personal', can_change_access: true },
+    { name: 'shared-team', memories: 1, visibility: 'shared', can_change_access: false },
+  ] });
+  await page.goto('/?view=manage');
+  await page.getByRole('tab', { name: 'Workspaces' }).click();
+  const share = page.getByRole('button', { name: 'Share for Cloud Sync' });
+  await expect(share).toHaveCount(1);
+
+  page.once('dialog', async dialog => {
+    expect(dialog.message()).toContain('signed-in Team members');
+    expect(dialog.message()).toContain('encrypted Cloud Sync');
+    await dialog.dismiss();
+  });
+  await share.click();
+  expect(requests.visibilityChanges).toEqual([]);
+
+  page.once('dialog', dialog => dialog.accept());
+  await share.click();
+  await expect(page.locator('#notice-text')).toContainText('shared and eligible for Cloud Sync');
+  expect(requests.visibilityChanges).toEqual([
+    { workspace, visibility: 'shared', confirmed: true },
+  ]);
+  await expect(share).toHaveCount(0);
+
+  const unshare = page.getByRole('button', { name: 'Make personal' });
+  await expect(unshare).toHaveCount(1);
+  page.once('dialog', async dialog => {
+    expect(dialog.message()).toContain('does not erase data already uploaded');
+    await dialog.accept();
+  });
+  await unshare.click();
+  await expect(page.locator('#notice-text')).toContainText('excluded from future Cloud Sync');
+  expect(requests.visibilityChanges).toEqual([
+    { workspace, visibility: 'shared', confirmed: true },
+    { workspace, visibility: 'personal', confirmed: true },
+  ]);
 });
 
 test('Ledger initializes hosted automation only after an explicit upload action', async ({ page }) => {

@@ -2081,6 +2081,15 @@ def analytics(workspace: Optional[str] = None):
     return envelope.get("result", envelope)
 
 
+@router.get("/analytics/job-result")
+def analytics_job_result(job_id: str, workspace: Optional[str] = None):
+    """Check the exact submitted Analytics job without another snapshot or run."""
+    from engraphis.cloud_features import get_analytics_job_result
+
+    ws = workspace or _require_ws()
+    return _managed_call(get_analytics_job_result, service(), ws, job_id)
+
+
 @router.get("/analytics/export")
 def analytics_export(workspace: Optional[str] = None):
     """Not implemented here; use the same analytics data as JSON instead."""
