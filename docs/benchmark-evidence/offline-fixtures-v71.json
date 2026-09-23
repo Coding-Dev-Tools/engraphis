@@ -103,7 +103,7 @@
   ],
   "schema": "engraphis-public-offline-fixtures/v1",
   "suite": {
-    "digest": "0ea6ead6543508bea636f1e57a817fe41ad01d22488288e75c8966061d396316",
+    "digest": "8307020857603dd991a8b82867660ac9778074b9712c866e3ca20a7accc25ad1",
     "digest_method": "sha256(canonical compact JSON mapping each sorted path to its file SHA-256)",
     "files": {
       "engraphis/__init__.py": "96af0a914b76015e1ec71decca546504339985dbe940bf759d168cf8d09187e6",
@@ -226,7 +226,7 @@
       "eval/benchmark.py": "b71832affdf87d23bc1db7b522a669a7888571b3989b03a235c70f5da9952bd6",
       "eval/benchmark_analysis.py": "1200791425d029695fee0b7da1f188a8962f337aa31eb4217d50e4503641d2b3",
       "eval/benchmark_campaign.py": "033dbebfb47df5fcd3a6588b29ea4ab5fd44d4387ae45334379278ab30f3e57f",
-      "eval/campaign_adapters.py": "4d30cfcec7cfe12e4aafbb7853ec5a89a977193c79eb8cd848b5b2c95119d9d8",
+      "eval/campaign_adapters.py": "5f6dcec225cf181bfc29e3a0f423b9bd40a2b208bd8d6c40e2a88cd841d89699",
       "eval/campaign_api.py": "323be4e1d9520e8047ab54c9cbb158013785402b06ee4e93e55227971c54bf95",
       "eval/campaign_candidate.py": "88541840d16c3b7368586ed0ee3566054214b1f594826b746b28d0e407cb812a",
       "eval/campaign_continuation.py": "7f77a20ac8f85cd96729bba0cf45872c98a3421af005bd735434b7b416dd7e1f",

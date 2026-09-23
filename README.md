@@ -86,7 +86,7 @@ operational capacity remain separate pending evaluation tracks until their artif
 These values are evidence IDs `offline-chunking` and `offline-performance` in
 [`offline-fixtures-v71.json`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/benchmark-evidence/offline-fixtures-v71.json),
 SHA-256
-`6e834528b09ee922ec5946f0d793a92194d3bcd8c604a0ec271fa02e4c5f5790`.
+`cdbdf80befe00a38656c7f26fc0082ac1c9408c415e15fde9c87b303509ab123`.
 [`BENCHMARKS.md`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/BENCHMARKS.md#public-numeric-evidence-registry)
 records the matching suite digest, exact commands, and per-command config digests. The offline
 fixture registry intentionally excludes external, model-dependent, consolidation, productivity,
