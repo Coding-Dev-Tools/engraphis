@@ -31,6 +31,7 @@ facts stop being treated as current.
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
@@ -529,6 +530,10 @@ def _mean(records: list[dict], field: str) -> float:
     return sum(float(item.get(field, 0.0)) for item in records) / max(len(records), 1)
 
 
+def _rounded_mean(records: list[dict], field: str, digits: int = 4) -> Optional[float]:
+    return round(_mean(records, field), digits) if records else None
+
+
 def _v2_metrics(records: list[dict], *, bootstrap_iterations: int) -> dict:
     """Aggregate retrieval and answer coverage over their distinct gold labels."""
     retrieval_scored = [
@@ -541,12 +546,10 @@ def _v2_metrics(records: list[dict], *, bootstrap_iterations: int) -> dict:
         "ndcg_at_1", "ndcg_at_5", "ndcg_at_10",
     ]
     summary: dict[str, Any] = {
-        field: round(_mean(retrieval_scored, field), 6) for field in metric_fields
+        field: _rounded_mean(retrieval_scored, field, 6) for field in metric_fields
     }
     summary["retrieval_scored_questions"] = len(retrieval_scored)
-    summary["answer_token_recall"] = round(
-        _mean(answer_scored, "answer_token_recall"), 6
-    )
+    summary["answer_token_recall"] = _rounded_mean(answer_scored, "answer_token_recall", 6)
     summary["answer_token_recall_n"] = len(answer_scored)
     summary["confidence_intervals"] = {
         field: stratified_bootstrap_ci(
@@ -556,6 +559,9 @@ def _v2_metrics(records: list[dict], *, bootstrap_iterations: int) -> dict:
         )
         for field in metric_fields
     }
+    if not retrieval_scored:
+        for interval in summary["confidence_intervals"].values():
+            interval.update(point=None, low=None, high=None)
     # A paired interval is meaningful only when a baseline contains the same
     # question IDs.  Keep the stable field present so artifact consumers never
     # mistake an absent comparison for a zero-effect result.
@@ -802,6 +808,13 @@ def run(dataset: list[dict], *, k: int = 5, dim: int = 256,
             retrieved_ids = [c["id"] for c in res.chunks]
             retrieved_tags = [t for i in retrieved_ids for t in id_to_tags.get(i, [])]
             retrieved_texts = [id_to_text.get(i, "") for i in retrieved_ids]
+            packed_tags = [
+                tag for chunk in res.packed_chunks for tag in id_to_tags.get(chunk.id, [])
+            ]
+            # Score the context actually emitted to the reader.  Titles and
+            # ownership headers can carry required answer tokens even when the
+            # chunk excerpt is only a value or procedure body.
+            packed_texts = [res.context] if res.context else []
             retrieval_scored = bool(supporting)
             accepted_answer = (
                 q.get("answer_variants")
@@ -825,6 +838,19 @@ def run(dataset: list[dict], *, k: int = 5, dim: int = 256,
             usage = _usage_dict(
                 res.usage,
                 budget=(token_budget if token_budget is not None else 1500),
+            )
+            label_provenance = str(q.get("evidence_label_provenance") or (
+                "explicit_ids" if supporting else "unlabeled"
+            ))
+            label_count = int(q.get("evidence_label_count") or len(set(supporting)))
+            label_ceiling = (
+                min(1.0, float(k) / label_count) if label_count > 0 else None
+            )
+            packed_answer_recall = metrics.answer_token_recall(
+                packed_texts, accepted_answer,
+            )
+            sufficient_evidence_proxy = bool(
+                answer_scored and packed_answer_recall >= 1.0
             )
             record = question_record(
                 question_id,
@@ -851,6 +877,20 @@ def run(dataset: list[dict], *, k: int = 5, dim: int = 256,
                 answer_token_recall=metrics.answer_token_recall(
                     retrieved_texts, accepted_answer,
                 ),
+                packed_ids=[tag for tag in packed_tags if tag],
+                packed_recall_at_k=metrics.recall_at_k(packed_tags, supporting),
+                packed_hit_at_k=metrics.hit_at_k(packed_tags, supporting),
+                packed_mrr_at_k=metrics.mrr_at_k(packed_tags, supporting, k),
+                packed_ndcg_at_k=metrics.ndcg_at_k(packed_tags, supporting, k),
+                packed_answer_token_recall=packed_answer_recall,
+                evidence_label_provenance=label_provenance,
+                evidence_label_count=label_count,
+                evidence_label_ceiling_at_k=label_ceiling,
+                evidence_label_method=str(q.get("evidence_label_method") or (
+                    "provided_source_ids" if supporting else "none"
+                )),
+                sufficient_evidence_proxy=sufficient_evidence_proxy,
+                sufficient_evidence_proxy_method="all_answer_tokens_in_packed_context",
                 usage=usage,
                 **depth_metrics,
             )
@@ -896,28 +936,47 @@ def run(dataset: list[dict], *, k: int = 5, dim: int = 256,
         item for item in per_q if item.get("retrieval_scored") is True
     ]
     answer_rows = [item for item in per_q if item.get("answer_scored") is True]
-    retrieval_n = max(len(retrieval_rows), 1)
-    answer_n = max(len(answer_rows), 1)
     report = {
         "questions": len(per_q),
         "scored_questions": len(retrieval_rows),
         "answer_scored_questions": len(answer_rows),
         "exclusions": [item["excluded"] for item in per_q if item.get("excluded")],
-        "recall_at_k": round(
-            sum(x["recall_at_k"] for x in retrieval_rows) / retrieval_n, 4
-        ),
-        "hit_at_k": round(sum(x["hit_at_k"] for x in retrieval_rows) / retrieval_n, 4),
-        "mrr_at_k": round(sum(x["mrr_at_k"] for x in retrieval_rows) / retrieval_n, 4),
-        "ndcg_at_k": round(sum(x["ndcg_at_k"] for x in retrieval_rows) / retrieval_n, 4),
-        "answer_token_recall": round(
-            sum(x["answer_token_recall"] for x in answer_rows) / answer_n, 4
-        ),
+        **{field: _rounded_mean(retrieval_rows, field) for field in (
+            "recall_at_k", "hit_at_k", "mrr_at_k", "ndcg_at_k",
+        )},
+        "answer_token_recall": _rounded_mean(answer_rows, "answer_token_recall"),
         "k": k,
         "baseline_label": baseline.label,
         "baseline_execution": baseline.as_dict(),
         "grounded_recall": bool(grounded),
         "detail": per_q,
     }
+    for metric in ("recall_at_k", "hit_at_k", "mrr_at_k", "ndcg_at_k"):
+        report[f"packed_{metric}"] = _rounded_mean(retrieval_rows, f"packed_{metric}")
+    report["packed_answer_token_recall"] = _rounded_mean(answer_rows, "packed_answer_token_recall")
+    labeled = [item for item in per_q if item.get("evidence_label_count", 0) > 0]
+    label_counts = [int(item["evidence_label_count"]) for item in labeled]
+    report["evidence_label_provenance"] = dict(Counter(
+        str(item.get("evidence_label_provenance") or "unknown") for item in per_q
+    ))
+    report["evidence_label_cardinality"] = {
+        "questions": len(labeled),
+        "mean": round(sum(label_counts) / len(label_counts), 4) if label_counts else None,
+        "max": max(label_counts, default=0),
+        "ceiling_at_k_mean": round(
+            sum(float(item["evidence_label_ceiling_at_k"]) for item in labeled) / len(labeled), 4
+        ) if labeled else None,
+        "boundary": "label-cardinality ceiling assumes perfect top-k selection; it is not a quality score",
+    }
+    sufficient_rows = [item for item in per_q if item.get("answer_scored") is True]
+    report["sufficient_evidence_proxy_rate"] = round(
+        sum(bool(item.get("sufficient_evidence_proxy")) for item in sufficient_rows)
+        / len(sufficient_rows), 4,
+    ) if sufficient_rows else None
+    report["sufficient_evidence_proxy_questions"] = len(sufficient_rows)
+    report["sufficient_evidence_proxy_boundary"] = (
+        "packed answer-token coverage diagnostic; not generated-answer correctness or citation entailment"
+    )
     if not v2:
         return report
 
@@ -948,6 +1007,12 @@ def run(dataset: list[dict], *, k: int = 5, dim: int = 256,
         public_record.pop("q", None)
         public_records.append(public_record)
     v2_metrics = _v2_metrics(per_q, bootstrap_iterations=max(0, int(bootstrap_iterations)))
+    v2_metrics["packed_evidence"] = {
+        key: report[key] for key in (
+            "packed_recall_at_k", "packed_hit_at_k", "packed_mrr_at_k", "packed_ndcg_at_k",
+            "packed_answer_token_recall",
+        )
+    }
     if canonical:
         v2_metrics["fixed_budget_curve"] = _measured_fixed_budget_curve(curve_measurements)
     envelope = report_envelope(
@@ -994,7 +1059,7 @@ def _measured_fixed_budget_curve(measurements: dict[int, list[dict]]) -> dict:
             "n_scored": len(scored),
             "records": records,
         }
-        row.update({field: round(_mean(scored, field), 6) for field in (
+        row.update({field: _rounded_mean(scored, field, 6) for field in (
             "recall_at_1", "recall_at_5", "recall_at_10",
             "mrr_at_1", "mrr_at_5", "mrr_at_10",
             "ndcg_at_1", "ndcg_at_5", "ndcg_at_10",
@@ -1074,11 +1139,13 @@ def _print(report: dict) -> None:
     # ASCII-only output: the Windows console's default cp1252 encoding cannot
     # emit a Unicode em dash, which would crash the documented offline gate.
     print(f"\nEngraphis eval - {report['questions']} questions @ k={report['k']}")
-    print(f"  recall@k            : {report['recall_at_k']:.3f}")
-    print(f"  hit@k               : {report['hit_at_k']:.3f}")
-    print(f"  mrr@k               : {report['mrr_at_k']:.3f}")
-    print(f"  ndcg@k              : {report['ndcg_at_k']:.3f}")
-    print(f"  answer_token_recall : {report['answer_token_recall']:.3f}\n")
+    for label, key in (("recall@k", "recall_at_k"), ("hit@k", "hit_at_k"),
+                       ("mrr@k", "mrr_at_k"), ("ndcg@k", "ndcg_at_k"),
+                       ("answer_token_recall", "answer_token_recall")):
+        value = report[key]
+        display = "unscored" if value is None else f"{value:.3f}"
+        print(f"  {label:<19} : {display}")
+    print()
 
 
 #: Minimum recall@k / hit@k enforced by the CLI gate per bundled dataset. Both
@@ -1101,6 +1168,9 @@ def _enforce_metric_floors(report: dict, dataset_path: str) -> None:
     for metric in sorted(floors):
         if metric not in summary:
             continue
+        if summary[metric] is None:
+            print(f"FLOOR VIOLATION: {Path(dataset_path).stem} {metric} is unscored", file=sys.stderr)
+            raise SystemExit(1)
         value = float(summary[metric])
         if value < floors[metric]:
             stem = Path(dataset_path).stem

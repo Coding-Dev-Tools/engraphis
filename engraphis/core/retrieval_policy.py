@@ -15,6 +15,37 @@ from dataclasses import dataclass
 
 RETRIEVAL_PROFILES = frozenset({"balanced", "auto", "fast", "lexical", "graph", "code"})
 CANDIDATE_DEPTH_MODES = frozenset({"fixed", "adaptive"})
+# Measured, opt-in recipes.  They change only the default result depth and
+# context budget when the caller leaves those values at the historical defaults.
+RETRIEVAL_RECIPES = frozenset({"default", "conversation", "long_session"})
+
+
+def apply_retrieval_recipe(
+    recipe: str,
+    *,
+    k: int,
+    token_budget: int,
+    k_supplied: bool,
+    token_budget_supplied: bool,
+) -> tuple[int, int, str]:
+    """Apply a measured workload recipe without changing explicit caller values."""
+    selected = str(recipe or "default").strip().casefold()
+    if selected not in RETRIEVAL_RECIPES:
+        choices = ", ".join(sorted(RETRIEVAL_RECIPES))
+        raise ValueError(f"retrieval_recipe must be one of: {choices}")
+    output_k = max(1, int(k))
+    budget = max(0, int(token_budget))
+    if not k_supplied:
+        if selected == "conversation":
+            output_k = 20
+        elif selected == "long_session":
+            output_k = 10
+    if not token_budget_supplied:
+        if selected == "conversation":
+            budget = 1_500
+        elif selected == "long_session":
+            budget = 4_096
+    return output_k, budget, selected
 
 _CODE_RE = re.compile(
     r"(?:\w+[./\\])+\w+|::|->|\b(?:class|def|function|import|interface|module|struct)\b|"

@@ -9,7 +9,7 @@ SMART_SCHEMAS = {'engraphis_conflict_review': {'properties': {'limit': {'default
                                                                   'type': 'string'},
                                                                  {'type': 'null'}],
                                                        'default': None,
-                                                       'description': 'Optional repository scope.',
+                                                       'description': 'Optional repo scope.',
                                                        'title': 'Repo'},
                                               'workspace': {'default': 'default',
                                                             'description': 'Workspace to review.',
@@ -26,9 +26,9 @@ SMART_SCHEMAS = {'engraphis_conflict_review': {'properties': {'limit': {'default
                                                             'title': 'Category',
                                                             'type': 'string'},
                                                'intent': {'default': 'any',
-                                                          'description': 'Optional side effect: '
-                                                                         'any, read, write, admin, '
-                                                                         'or destructive.',
+                                                          'description': 'Side effect: any, read, '
+                                                                         'write, admin, or '
+                                                                         'destructive.',
                                                           'pattern': '^(any|read|write|admin|destructive)$',
                                                           'title': 'Intent',
                                                           'type': 'string'},
@@ -39,9 +39,9 @@ SMART_SCHEMAS = {'engraphis_conflict_review': {'properties': {'limit': {'default
                                                          'minimum': 1,
                                                          'title': 'Limit',
                                                          'type': 'integer'},
-                                               'task': {'description': 'Describe the capability '
-                                                                       'needed, without pasting '
-                                                                       'memory content.',
+                                               'task': {'description': 'Describe the capability; '
+                                                                       'do not paste memory '
+                                                                       'content.',
                                                         'maxLength': 2000,
                                                         'minLength': 1,
                                                         'title': 'Task',
@@ -50,19 +50,17 @@ SMART_SCHEMAS = {'engraphis_conflict_review': {'properties': {'limit': {'default
                                 'title': 'engraphis_discover_actionsArguments',
                                 'type': 'object'},
  'engraphis_execute_action': {'properties': {'arguments': {'additionalProperties': True,
-                                                           'description': 'Arguments matching the '
-                                                                          'discovered schema.',
+                                                           'description': 'Arguments matching its '
+                                                                          'schema.',
                                                            'title': 'Arguments',
                                                            'type': 'object'},
-                                             'capability_id': {'description': 'Capability id '
-                                                                              'returned by '
+                                             'capability_id': {'description': 'Capability id from '
                                                                               'discover_actions.',
                                                                'maxLength': 128,
                                                                'minLength': 8,
                                                                'title': 'Capability Id',
                                                                'type': 'string'},
-                                             'schema_digest': {'description': 'Schema digest '
-                                                                              'returned by '
+                                             'schema_digest': {'description': 'Schema digest from '
                                                                               'discovery.',
                                                                'maxLength': 128,
                                                                'minLength': 8,
@@ -72,19 +70,17 @@ SMART_SCHEMAS = {'engraphis_conflict_review': {'properties': {'limit': {'default
                               'title': 'engraphis_execute_actionArguments',
                               'type': 'object'},
  'engraphis_execute_read': {'properties': {'arguments': {'additionalProperties': True,
-                                                         'description': 'Arguments matching the '
-                                                                        'discovered schema.',
+                                                         'description': 'Arguments matching its '
+                                                                        'schema.',
                                                          'title': 'Arguments',
                                                          'type': 'object'},
-                                           'capability_id': {'description': 'Capability id '
-                                                                            'returned by '
+                                           'capability_id': {'description': 'Capability id from '
                                                                             'discover_actions.',
                                                              'maxLength': 128,
                                                              'minLength': 8,
                                                              'title': 'Capability Id',
                                                              'type': 'string'},
-                                           'schema_digest': {'description': 'Schema digest '
-                                                                            'returned by '
+                                           'schema_digest': {'description': 'Schema digest from '
                                                                             'discovery.',
                                                              'maxLength': 128,
                                                              'minLength': 8,
@@ -93,7 +89,7 @@ SMART_SCHEMAS = {'engraphis_conflict_review': {'properties': {'limit': {'default
                             'required': ['capability_id', 'schema_digest', 'arguments'],
                             'title': 'engraphis_execute_readArguments',
                             'type': 'object'},
- 'engraphis_get_memory': {'properties': {'memory_id': {'description': 'Memory id to read.',
+ 'engraphis_get_memory': {'properties': {'memory_id': {'description': 'Memory id.',
                                                        'maxLength': 200,
                                                        'minLength': 1,
                                                        'title': 'Memory Id',
@@ -101,11 +97,10 @@ SMART_SCHEMAS = {'engraphis_conflict_review': {'properties': {'limit': {'default
                                          'repo': {'anyOf': [{'maxLength': 200, 'type': 'string'},
                                                             {'type': 'null'}],
                                                   'default': None,
-                                                  'description': 'Optional repository scope.',
+                                                  'description': 'Optional repo scope.',
                                                   'title': 'Repo'},
                                          'workspace': {'default': 'default',
-                                                       'description': 'Workspace containing the '
-                                                                      'memory.',
+                                                       'description': 'Memory workspace.',
                                                        'maxLength': 200,
                                                        'title': 'Workspace',
                                                        'type': 'string'}},
@@ -113,18 +108,22 @@ SMART_SCHEMAS = {'engraphis_conflict_review': {'properties': {'limit': {'default
                           'title': 'engraphis_get_memoryArguments',
                           'type': 'object'},
  'engraphis_recall_context': {'properties': {'format': {'default': 'full',
-                                                        'description': "Context format: 'full' or "
-                                                                       "'gist'.",
+                                                        'description': 'Context format: full or '
+                                                                       'gist.',
                                                         'title': 'Format',
                                                         'type': 'string'},
-                                             'k': {'default': 50,
-                                                   'description': 'Maximum source memories.',
-                                                   'maximum': 50,
-                                                   'minimum': 1,
-                                                   'title': 'K',
-                                                   'type': 'integer'},
-                                             'query': {'description': 'Question or task needing '
-                                                                      'prior context.',
+                                             'k': {'anyOf': [{'maximum': 50,
+                                                              'minimum': 1,
+                                                              'type': 'integer'},
+                                                             {'type': 'null'}],
+                                                   'default': 50,
+                                                   'description': 'Max source memories.',
+                                                   'title': 'K'},
+                                             'packing_mode': {'default': 'legacy',
+                                                              'title': 'Packing Mode',
+                                                              'type': 'string'},
+                                             'query': {'description': 'Question/task needing '
+                                                                      'context.',
                                                        'maxLength': 100000,
                                                        'minLength': 1,
                                                        'title': 'Query',
@@ -133,22 +132,26 @@ SMART_SCHEMAS = {'engraphis_conflict_review': {'properties': {'limit': {'default
                                                                  'type': 'string'},
                                                                 {'type': 'null'}],
                                                       'default': None,
-                                                      'description': 'Optional repository.',
+                                                      'description': 'Optional repo.',
                                                       'title': 'Repo'},
+                                             'retrieval_recipe': {'default': 'default',
+                                                                  'title': 'Retrieval Recipe',
+                                                                  'type': 'string'},
                                              'session_id': {'anyOf': [{'type': 'string'},
                                                                       {'type': 'null'}],
                                                             'default': None,
                                                             'description': 'Optional active '
                                                                            'session.',
                                                             'title': 'Session Id'},
-                                             'token_budget': {'default': 1024,
+                                             'token_budget': {'anyOf': [{'maximum': 32768,
+                                                                         'minimum': 0,
+                                                                         'type': 'integer'},
+                                                                        {'type': 'null'}],
+                                                              'default': 1024,
                                                               'description': 'Hard '
                                                                              'returned-context '
                                                                              'token budget.',
-                                                              'maximum': 32768,
-                                                              'minimum': 0,
-                                                              'title': 'Token Budget',
-                                                              'type': 'integer'},
+                                                              'title': 'Token Budget'},
                                              'workspace': {'anyOf': [{'maxLength': 200,
                                                                       'type': 'string'},
                                                                      {'type': 'null'}],
@@ -160,8 +163,8 @@ SMART_SCHEMAS = {'engraphis_conflict_review': {'properties': {'limit': {'default
                               'type': 'object'},
  'engraphis_remember': {'properties': {'claim_kind': {'default': '',
                                                       'description': 'Optional claim '
-                                                                     'predicate/category (for '
-                                                                     "example 'configured_value').",
+                                                                     'predicate/category (e.g. '
+                                                                     "'configured_value').",
                                                       'maxLength': 200,
                                                       'title': 'Claim Kind',
                                                       'type': 'string'},
@@ -171,21 +174,36 @@ SMART_SCHEMAS = {'engraphis_conflict_review': {'properties': {'limit': {'default
                                                    'minLength': 1,
                                                    'title': 'Content',
                                                    'type': 'string'},
+                                       'exact_value': {'anyOf': [{'maxLength': 4096,
+                                                                  'type': 'string'},
+                                                                 {'type': 'null'}],
+                                                       'default': None,
+                                                       'description': 'Optional verbatim source '
+                                                                      'value to copy exactly.',
+                                                       'title': 'Exact Value'},
+                                       'exact_value_type': {'default': 'literal',
+                                                            'description': 'Literal type: literal, '
+                                                                           'string, identifier, '
+                                                                           'path, number, date, '
+                                                                           'enum, or json.',
+                                                            'maxLength': 32,
+                                                            'title': 'Exact Value Type',
+                                                            'type': 'string'},
                                        'importance': {'default': 0.0,
-                                                      'description': 'Salience from 0 to 1.',
+                                                      'description': 'Salience 0 to 1.',
                                                       'maximum': 1.0,
                                                       'minimum': 0.0,
                                                       'title': 'Importance',
                                                       'type': 'number'},
                                        'mtype': {'default': 'semantic',
-                                                 'description': 'semantic, episodic, procedural, '
-                                                                'or working.',
+                                                 'description': 'Type: semantic, episodic, '
+                                                                'procedural, or working.',
                                                  'title': 'Mtype',
                                                  'type': 'string'},
                                        'repo': {'anyOf': [{'maxLength': 200, 'type': 'string'},
                                                           {'type': 'null'}],
                                                 'default': None,
-                                                'description': 'Optional repository.',
+                                                'description': 'Optional repo.',
                                                 'title': 'Repo'},
                                        'session_id': {'anyOf': [{'type': 'string'},
                                                                 {'type': 'null'}],
@@ -194,15 +212,15 @@ SMART_SCHEMAS = {'engraphis_conflict_review': {'properties': {'limit': {'default
                                                       'title': 'Session Id'},
                                        'subject_key': {'default': '',
                                                        'description': 'Optional stable claim '
-                                                                      'subject (for example '
-                                                                      "'api.rate_limit'). Matching "
-                                                                      'keys make supersession '
-                                                                      'safer and deterministic.',
+                                                                      'subject (e.g. '
+                                                                      "'api.rate_limit'); keyed "
+                                                                      'supersession is '
+                                                                      'deterministic.',
                                                        'maxLength': 1000,
                                                        'title': 'Subject Key',
                                                        'type': 'string'},
                                        'workspace': {'default': 'default',
-                                                     'description': 'Workspace for the memory.',
+                                                     'description': 'Memory workspace.',
                                                      'maxLength': 200,
                                                      'title': 'Workspace',
                                                      'type': 'string'}},
@@ -210,24 +228,24 @@ SMART_SCHEMAS = {'engraphis_conflict_review': {'properties': {'limit': {'default
                         'title': 'smart_rememberArguments',
                         'type': 'object'},
  'engraphis_session': {'properties': {'action': {'default': 'start',
-                                                 'description': 'start to resume work, or end to '
-                                                                'save its handoff.',
+                                                 'description': 'Start/resume, or end with '
+                                                                'handoff.',
                                                  'title': 'Action',
                                                  'type': 'string'},
                                       'agent': {'default': '',
-                                                'description': 'Optional agent name.',
+                                                'description': 'Optional agent.',
                                                 'maxLength': 200,
                                                 'title': 'Agent',
                                                 'type': 'string'},
                                       'force_new': {'default': False,
-                                                    'description': 'Start only: branch a new '
-                                                                   'session instead of reusing an '
-                                                                   'exact active task.',
+                                                    'description': 'Start only: create a session '
+                                                                   'even if this task is already '
+                                                                   'active.',
                                                     'title': 'Force New',
                                                     'type': 'boolean'},
                                       'goal': {'default': '',
-                                               'description': 'Task goal; start returns bounded '
-                                                              'relevant context.',
+                                               'description': 'Goal; start returns bounded '
+                                                              'context.',
                                                'maxLength': 1000,
                                                'title': 'Goal',
                                                'type': 'string'},
@@ -238,46 +256,41 @@ SMART_SCHEMAS = {'engraphis_conflict_review': {'properties': {'limit': {'default
                                                        'description': 'Unresolved follow-ups.',
                                                        'title': 'Open Threads'},
                                       'outcome': {'default': '',
-                                                  'description': 'Optional outcome label.',
+                                                  'description': 'Outcome label.',
                                                   'maxLength': 1000,
                                                   'title': 'Outcome',
                                                   'type': 'string'},
                                       'repo': {'anyOf': [{'maxLength': 200, 'type': 'string'},
                                                          {'type': 'null'}],
                                                'default': None,
-                                               'description': 'Optional repository scope.',
+                                               'description': 'Optional repo.',
                                                'title': 'Repo'},
                                       'session_id': {'default': '',
-                                                     'description': 'Session id required to end a '
-                                                                    'session.',
+                                                     'description': 'Session id for end.',
                                                      'maxLength': 200,
                                                      'title': 'Session Id',
                                                      'type': 'string'},
                                       'summary': {'default': '',
-                                                  'description': 'Short final handoff.',
+                                                  'description': 'Final handoff.',
                                                   'maxLength': 100000,
                                                   'title': 'Summary',
                                                   'type': 'string'},
                                       'token_budget': {'default': 512,
-                                                       'description': 'Goal-context budget when '
-                                                                      'starting.',
+                                                       'description': 'Start context token budget.',
                                                        'maximum': 32768,
                                                        'minimum': 0,
                                                        'title': 'Token Budget',
                                                        'type': 'integer'},
                                       'workspace': {'default': 'default',
-                                                    'description': 'Workspace for a started '
-                                                                   'session.',
+                                                    'description': 'Workspace.',
                                                     'maxLength': 200,
                                                     'title': 'Workspace',
                                                     'type': 'string'}},
                        'title': 'engraphis_sessionArguments',
                        'type': 'object'},
  'engraphis_update_memory': {'properties': {'actor': {'default': 'user',
-                                                      'description': 'Optional local-mode actor '
-                                                                     'label; authenticated team '
-                                                                     'mode uses the caller '
-                                                                     'identity.',
+                                                      'description': 'Local actor label; team mode '
+                                                                     'uses caller identity.',
                                                       'maxLength': 200,
                                                       'title': 'Actor',
                                                       'type': 'string'},
@@ -286,10 +299,10 @@ SMART_SCHEMAS = {'engraphis_conflict_review': {'properties': {'limit': {'default
                                                                       'type': 'number'},
                                                                      {'type': 'null'}],
                                                            'default': None,
-                                                           'description': 'Optional importance '
-                                                                          '0..1.',
+                                                           'description': 'Optional importance 0 '
+                                                                          'to 1.',
                                                            'title': 'Importance'},
-                                            'memory_id': {'description': 'Memory id to update.',
+                                            'memory_id': {'description': 'Memory id.',
                                                           'maxLength': 200,
                                                           'minLength': 1,
                                                           'title': 'Memory Id',
@@ -297,23 +310,22 @@ SMART_SCHEMAS = {'engraphis_conflict_review': {'properties': {'limit': {'default
                                             'mtype': {'anyOf': [{'maxLength': 50, 'type': 'string'},
                                                                 {'type': 'null'}],
                                                       'default': None,
-                                                      'description': 'Optional memory type '
-                                                                     '(working|episodic|semantic|procedural).',
+                                                      'description': 'Optional type: '
+                                                                     'working|episodic|semantic|procedural.',
                                                       'title': 'Mtype'},
                                             'repo': {'anyOf': [{'maxLength': 200, 'type': 'string'},
                                                                {'type': 'null'}],
                                                      'default': None,
-                                                     'description': 'Optional repository scope.',
+                                                     'description': 'Optional repo scope.',
                                                      'title': 'Repo'},
                                             'title': {'anyOf': [{'maxLength': 500,
                                                                  'type': 'string'},
                                                                 {'type': 'null'}],
                                                       'default': None,
-                                                      'description': 'Optional new title.',
+                                                      'description': 'Optional title.',
                                                       'title': 'Title'},
                                             'workspace': {'default': 'default',
-                                                          'description': 'Workspace containing the '
-                                                                         'memory.',
+                                                          'description': 'Memory workspace.',
                                                           'maxLength': 200,
                                                           'title': 'Workspace',
                                                           'type': 'string'}},
