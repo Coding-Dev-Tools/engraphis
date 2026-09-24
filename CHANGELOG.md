@@ -5,6 +5,18 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [1.7.7] - 2026-09-23
+
+- Cloud Sync shows local encryption-key and dependency readiness before enabling Sync now,
+  guides first-device key setup, and identifies shared workspaces eligible for upload.
+  Partial workspace rounds remain visibly incomplete.
+- Pro Analytics resumes the exact submitted job across workspace switches and displays
+  its completed result without submitting a duplicate snapshot or run.
+- Release auditing checks an unpublished wheel with OSV and its installed published
+  dependencies with PyPI. Qualification inputs now use protected Actions secrets so
+  variable-backed step logs cannot disclose the signed receipt. Owner-signed,
+  exact-artifact full-product qualification remains required before publication.
+
 ## [1.7.6] - 2026-09-23
 
 - Hardened Railway container startup persistence and readiness: entrypoint revalidates
