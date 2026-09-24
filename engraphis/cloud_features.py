@@ -616,7 +616,15 @@ class CloudFeatureClient:
             state = self.get_job(workspace_id, job_id)
             status = str(state.get("state") or "")
             if status in {"succeeded", "stale"}:
-                return self.get_result(workspace_id, job_id)
+                envelope = self.get_result(workspace_id, job_id)
+                if isinstance(envelope, dict):
+                    envelope.setdefault("state", status)
+                    envelope.setdefault("job_id", job_id)
+                    envelope.setdefault("pending", False)
+                    result = envelope.get("result")
+                    if isinstance(result, dict):
+                        result.setdefault("state", status)
+                return envelope
             if status in {"failed", "canceled"}:
                 raise CloudFeatureError(
                     "Managed %s did not complete (%s)." % (kind, status),

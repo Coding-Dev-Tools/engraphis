@@ -496,6 +496,20 @@ test('An empty Analytics result asks for an eligible memory', async ({ page }) =
   await expect(result).not.toContainText('Analytics result');
 });
 
+test('A stale Analytics result shows the newer snapshot warning', async ({ page }) => {
+  await mockApi(page, {
+    analyticsStart: {
+      kind: 'analytics', state: 'stale', memory_count: 2,
+      totals: { live: 2, avg_retention: 0.8, pinned: 0 },
+      decay_forecast: { at_risk_7d: 0 },
+    },
+  });
+  await page.goto('/?view=manage&tab=analytics');
+  const result = page.locator('#analytics-result');
+  await expect(result).toContainText('Analytics result');
+  await expect(result).toContainText('A newer workspace snapshot exists. Run a fresh analysis to see current data.');
+});
+
 test('Managed processing stays off until explicit approval receives a backend acknowledgement', async ({ page }) => {
   await mockApi(page);
   let releaseApproval;
