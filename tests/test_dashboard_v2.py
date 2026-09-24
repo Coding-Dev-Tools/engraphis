@@ -1531,6 +1531,40 @@ def test_analytics_route_delegates_to_managed_compute(monkeypatch, tmp_path):
         assert response.json()["generation"] == 4
 
 
+def test_analytics_route_propagates_stale_job_state(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "engraphis.cloud_features.run_managed_job",
+        lambda service, workspace, kind: {
+            "state": "stale",
+            "result": {
+                "kind": kind,
+                "generation": 4,
+                "totals": {"live": 1},
+            },
+        },
+    )
+    with _client(monkeypatch, tmp_path) as client:
+        response = client.get("/api/analytics?workspace=demo")
+        assert response.status_code == 200
+        assert response.json()["kind"] == "analytics"
+        assert response.json()["state"] == "stale"
+
+
+def test_analytics_job_result_route_reads_the_existing_job(monkeypatch, tmp_path):
+    calls = []
+
+    def read_job(service, workspace, job_id):
+        calls.append((workspace, job_id))
+        return {"job_id": job_id, "state": "queued", "pending": True}
+
+    monkeypatch.setattr("engraphis.cloud_features.get_analytics_job_result", read_job)
+    with _client(monkeypatch, tmp_path) as client:
+        response = client.get("/api/analytics/job-result?workspace=demo&job_id=job_existing")
+        assert response.status_code == 200
+        assert response.json() == {"job_id": "job_existing", "state": "queued", "pending": True}
+    assert calls == [("demo", "job_existing")]
+
+
 def test_unconnected_automation_returns_a_structured_auth_error(monkeypatch, tmp_path):
     for name in (
         "ENGRAPHIS_CLOUD_ACCESS_TOKEN",

@@ -2078,7 +2078,20 @@ def analytics(workspace: Optional[str] = None):
 
     ws = workspace or _require_ws()
     envelope = _managed_call(run_managed_job, service(), ws, "analytics")
-    return envelope.get("result", envelope)
+    result = envelope.get("result", envelope)
+    if isinstance(result, dict) and isinstance(envelope, dict):
+        if "state" in envelope and "state" not in result:
+            result["state"] = envelope["state"]
+    return result
+
+
+@router.get("/analytics/job-result")
+def analytics_job_result(job_id: str, workspace: Optional[str] = None):
+    """Check the exact submitted Analytics job without another snapshot or run."""
+    from engraphis.cloud_features import get_analytics_job_result
+
+    ws = workspace or _require_ws()
+    return _managed_call(get_analytics_job_result, service(), ws, job_id)
 
 
 @router.get("/analytics/export")
@@ -3912,8 +3925,15 @@ def _relay_url() -> str:
 
 @router.get("/sync/status")
 def sync_status():
-    """Whether one-click cloud sync is ready, plus the last-sync summary for the button."""
-    from engraphis.backends.sync_relay import has_sync_token, sync_read_only
+    """Report local sync readiness without disclosing the encryption key."""
+    from engraphis.backends.sync_relay import (
+        SYNC_E2EE_KEY_ENV,
+        RelayError,
+        _new_e2ee_cipher,
+        configured_sync_e2ee_key,
+        has_sync_token,
+        sync_read_only,
+    )
     from engraphis.cloud_session import CloudSessionError, configured
 
     has_token = has_sync_token()
@@ -3921,9 +3941,34 @@ def sync_status():
         has_cloud_session = configured(require_compute=False)
     except CloudSessionError:
         has_cloud_session = False
+    available = bool(has_token or has_cloud_session)
+    # A connected account cannot sync without the separate, user-held E2EE key.
+    # Validate the same key shape and optional crypto backend as the relay transport,
+    # but return only bounded status labels; never serialize key bytes or input.
+    key_state = "missing" if not os.environ.get(SYNC_E2EE_KEY_ENV, "").strip() else "invalid"
+    has_key = False
+    encryption_available = False
+    try:
+        key = configured_sync_e2ee_key()
+    except RelayError:
+        pass
+    else:
+        has_key = True
+        key_state = "ready"
+        try:
+            _new_e2ee_cipher(key)
+        except RelayError:
+            pass
+        else:
+            encryption_available = True
+    local_prerequisites_ready = has_key and encryption_available
     return {
-        "available": bool(has_token or has_cloud_session),
-        "has_key": False,
+        "available": available,
+        "ready": available and local_prerequisites_ready,
+        "has_key": has_key,
+        "key_state": key_state,
+        "encryption_available": encryption_available,
+        "local_prerequisites_ready": local_prerequisites_ready,
         "has_cloud_session": has_cloud_session,
         "has_user_token": has_token,
         "read_only": sync_read_only(),
