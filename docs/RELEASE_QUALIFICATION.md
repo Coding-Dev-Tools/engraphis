@@ -31,8 +31,8 @@ will remain blocked until the release owner completes them.
    the final engine commit. A build/check-only workflow may produce these artifacts
    before a release tag is published; later builds must reproduce the approved bytes.
 4. Use the private authority to issue the envelope below with a bounded UTC
-   validity window and explicit release approval. Set these protected environment
-   variables together for the selected candidate:
+   validity window and explicit release approval. Set these four values as GitHub
+   **environment secrets** in `release-qualification` for the selected candidate:
 
 | Variable | Required value |
 | --- | --- |
@@ -41,11 +41,15 @@ will remain blocked until the release owner completes them.
 | `ENGRAPHIS_RELEASE_CANDIDATE_ID` | The expected full-product candidate ID from the validated private ledger. |
 | `ENGRAPHIS_RELEASE_LEDGER_SHA256` | SHA-256 of the exact private ledger file bytes the owner reviewed. |
 
-GitHub repository variables can supply the same values where the organization's
-governance protects them equivalently. The jobs always enter the protected
-`release-qualification` environment. No private key or raw evidence belongs in
-any of these variables. The verifier reads them from its environment and never
-prints the envelope or public key.
+The jobs always enter the protected `release-qualification` environment. Do not
+use GitHub Actions variables for these values: Actions logs render variable-backed
+step environment values, including a signed receipt, even when the verifier itself
+does not print them. Migrate any existing variable-backed configuration to protected
+environment secrets and remove the variable copies. Missing secrets fail closed.
+No private signing key or raw evidence belongs in the workflow secrets or runner.
+The verifier reads the four values from its process environment and never prints
+them. Review earlier public logs for exposed receipts; revoke a still-valid receipt
+before issuing a new candidate approval.
 
 To revoke future attempts, remove the receipt or rotate the configured authority;
 cancel any already-running publication job separately. An expired approval needs

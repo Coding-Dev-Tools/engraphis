@@ -331,6 +331,7 @@ jobs:
         # exact installed distributions to the runner and audit that set instead of mutating
         # the production image just to run the audit.
         run: |
+          set -euo pipefail
           audit_dir="$(mktemp -d)"
           container="engraphis-audit-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           cleanup() {
@@ -342,7 +343,9 @@ jobs:
           docker create --name "$container" engraphis:ci >/dev/null
           site_packages=$(docker run --rm engraphis:ci python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))")
           docker cp "$container:$site_packages/." "$audit_dir"
-          python -m pip_audit --path "$audit_dir"
+          python scripts/pin_installed_audit_requirements.py "$audit_dir" > "$RUNNER_TEMP/published-audit-requirements.txt"
+          python -m pip_audit --vulnerability-service osv --path "$audit_dir"
+          python -m pip_audit --vulnerability-service pypi --no-deps --disable-pip -r "$RUNNER_TEMP/published-audit-requirements.txt"
       - name: Run container (offline deterministic embedder — no model downloads)
         run: |
           docker run -d --name engraphis -p 8700:8700 \
@@ -384,14 +387,17 @@ jobs:
           "build==1.5.0" "pip-audit==2.10.1"
       - name: Build sdist + wheel and verify a clean install
         run: |
+          set -euo pipefail
           export SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$GITHUB_SHA")"
           python -m build
           python scripts/verify_distribution_contents.py dist/*
           python -m venv .audit-venv
           .audit-venv/bin/python -m pip install --upgrade "pip>=26.1.2" "setuptools>=83"
           .audit-venv/bin/python -m pip install dist/*.whl
-          AUDIT_SITE=$(.audit-venv/bin/python -c "import site; print(site.getsitepackages()[0])")
-          python -m pip_audit --path "$AUDIT_SITE"
+          AUDIT_SITE=$(.audit-venv/bin/python -c "import sysconfig; print(sysconfig.get_path('purelib'))")
+          python scripts/pin_installed_audit_requirements.py "$AUDIT_SITE" > "$RUNNER_TEMP/published-audit-requirements.txt"
+          python -m pip_audit --vulnerability-service osv --path "$AUDIT_SITE"
+          python -m pip_audit --vulnerability-service pypi --no-deps --disable-pip -r "$RUNNER_TEMP/published-audit-requirements.txt"
           .audit-venv/bin/python -c "import engraphis, eval.harness; print('wheel imports OK')"
 
   installed-journeys:
