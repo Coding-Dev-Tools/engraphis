@@ -4656,9 +4656,10 @@
           if (!hasAnalyticsMetrics(result)) {
             throw new Error('Engraphis Cloud did not return a completed Analytics result.');
           }
-          state.analyticsResults.set(workspace, { result, stale: false });
+          const stale = result.state === 'stale';
+          state.analyticsResults.set(workspace, { result, stale });
           state.analyticsStartErrors.delete(workspace);
-          if (showAnalytics) renderAnalyticsResult(target, result, workspace);
+          if (showAnalytics) renderAnalyticsResult(target, result, workspace, stale);
         } else renderObject(target, result, `${kind[0].toUpperCase()}${kind.slice(1)} status`);
       }
       if (kind !== 'analytics' && isCurrentScopedRequest(request)) state.hostedLoaded.add(cacheKey);

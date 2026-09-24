@@ -2078,7 +2078,11 @@ def analytics(workspace: Optional[str] = None):
 
     ws = workspace or _require_ws()
     envelope = _managed_call(run_managed_job, service(), ws, "analytics")
-    return envelope.get("result", envelope)
+    result = envelope.get("result", envelope)
+    if isinstance(result, dict) and isinstance(envelope, dict):
+        if "state" in envelope and "state" not in result:
+            result["state"] = envelope["state"]
+    return result
 
 
 @router.get("/analytics/job-result")
