@@ -15,6 +15,7 @@ from engraphis.cloud_features import (
     CloudFeatureClient,
     CloudFeatureError,
     build_managed_snapshot,
+    get_analytics_job_result,
     run_managed_job,
 )
 from engraphis.service import MemoryService, set_current_user
@@ -410,6 +411,64 @@ def test_run_managed_job_checks_entitlement_before_reserving_generation(monkeypa
         "SELECT COUNT(*) FROM sync_state WHERE key LIKE 'managed_snapshot_generation:%'"
     ).fetchone()[0]
     assert reserved == 0
+
+
+def test_analytics_job_refresh_reads_only_the_existing_job() -> None:
+    class _ReadOnlyCloud(_FakeCloud):
+        def __init__(self) -> None:
+            super().__init__()
+            object.__setattr__(self, "state", "queued")
+            object.__setattr__(self, "kind", "analytics")
+            object.__setattr__(self, "reads", [])
+
+        def get_job(self, workspace_id, job_id):
+            self.reads.append(("job", workspace_id, job_id))
+            return {"job_id": job_id, "kind": self.kind, "state": self.state}
+
+        def get_result(self, workspace_id, job_id):
+            self.reads.append(("result", workspace_id, job_id))
+            return {"result": {"kind": "analytics", "memory_count": 1}}
+
+        def upload_snapshot(self, workspace_id, snapshot):
+            raise AssertionError("refresh must not upload a snapshot")
+
+        def submit_job(self, workspace_id, kind, generation, *, operation_id=None):
+            raise AssertionError("refresh must not submit another job")
+
+    service = _service()
+    workspace_id = service._lookup_workspace("acme")
+    cloud = _ReadOnlyCloud()
+    pending = get_analytics_job_result(service, "acme", "job_existing", client=cloud)
+    assert pending == {"job_id": "job_existing", "state": "queued", "pending": True}
+    object.__setattr__(cloud, "state", "succeeded")
+    complete = get_analytics_job_result(service, "acme", "job_existing", client=cloud)
+    assert complete == {
+        "job_id": "job_existing", "state": "succeeded", "pending": False,
+        "result": {"kind": "analytics", "memory_count": 1},
+    }
+    assert cloud.reads == [
+        ("job", workspace_id, "job_existing"),
+        ("job", workspace_id, "job_existing"),
+        ("result", workspace_id, "job_existing"),
+    ]
+    assert service.store.conn.execute(
+        "SELECT COUNT(*) FROM sync_state WHERE key LIKE 'managed_snapshot_generation:%'"
+    ).fetchone()[0] == 0
+    object.__setattr__(cloud, "kind", "dream")
+    with pytest.raises(CloudFeatureError) as wrong_kind:
+        get_analytics_job_result(service, "acme", "job_existing", client=cloud)
+    assert wrong_kind.value.status == 404
+
+
+def test_analytics_job_refresh_rejects_unapproved_and_invalid_requests() -> None:
+    service = _service(approved=False)
+    cloud = _FakeCloud()
+    with pytest.raises(CloudFeatureError) as invalid:
+        get_analytics_job_result(service, "acme", "../another-job", client=cloud)
+    assert invalid.value.status == 400
+    with pytest.raises(CloudFeatureError) as unapproved:
+        get_analytics_job_result(service, "acme", "job_existing", client=cloud)
+    assert unapproved.value.code == "consent_required"
 
 
 def test_response_loss_retry_reuses_one_cost_bearing_job() -> None:

@@ -58,6 +58,10 @@
     consolidationReview: null,
     reviewCsrf: '',
     hostedLoaded: new Set(),
+    analyticsStarting: new Set(),
+    analyticsJobs: new Map(),
+    analyticsResults: new Map(),
+    analyticsStartErrors: new Map(),
     scopedRequests: Object.create(null),
     scopedControllers: Object.create(null),
     syncStatus: null,
@@ -4175,7 +4179,12 @@
       const copy = node('div');
       copy.append(
         node('h3', '', name),
-        node('p', '', item.description || `${number(item.memories).toLocaleString()} memories · ${item.visibility || 'local'}`),
+        ...(item.description ? [node('p', '', item.description)] : []),
+        node('p', '', `${number(item.memories).toLocaleString()} memories · ${item.visibility === 'personal'
+          ? 'Personal · excluded from Cloud Sync'
+          : item.visibility === 'shared'
+            ? 'Shared · eligible for encrypted Cloud Sync'
+            : 'Local workspace'}`),
       );
       const actions = node('div', 'workspace-card-actions');
       if (name !== state.workspace) actions.append(button('Switch to', 'secondary-button', () => selectWorkspace(name)));
@@ -4183,6 +4192,11 @@
         button('Rename', 'secondary-button', () => renameWorkspace(name)),
         button('Copy', 'secondary-button', () => copyWorkspace(name)),
       );
+      if (item.visibility === 'personal' && item.can_change_access === true) {
+        actions.append(button('Share for Cloud Sync', 'secondary-button', () => changeWorkspaceVisibility(name, 'shared')));
+      } else if (item.visibility === 'shared' && item.can_change_access === true) {
+        actions.append(button('Make personal', 'secondary-button', () => changeWorkspaceVisibility(name, 'personal')));
+      }
       if (name !== state.workspace) actions.append(button('Delete', 'danger-button', () => deleteWorkspace(name)));
       card.append(copy, actions);
       target.append(card);
@@ -4210,6 +4224,26 @@
       await refreshBootstrap(name);
     } catch (error) {
       showNotice(`Could not create workspace: ${error.message}`);
+    }
+  }
+
+  async function changeWorkspaceVisibility(name, visibility) {
+    const sharing = visibility === 'shared';
+    const question = sharing
+      ? `Share “${name}” with signed-in Team members and make it eligible for encrypted Cloud Sync? Other Team members with access can read this workspace. This changes its visibility from personal to shared.`
+      : `Make “${name}” personal? Other Team members will lose access and future Cloud Sync rounds will exclude it. This does not erase data already uploaded to the encrypted relay.`;
+    if (!window.confirm(question)) return;
+    try {
+      await api('/workspaces/visibility', {
+        method: 'POST',
+        body: { workspace: name, visibility, confirmed: true },
+      });
+      await refreshBootstrap(state.workspace);
+      showNotice(sharing
+        ? `Workspace ${name} is shared and eligible for Cloud Sync. Run Sync now to upload eligible changes.`
+        : `Workspace ${name} is personal and excluded from future Cloud Sync rounds.`);
+    } catch (error) {
+      showNotice(`Could not change access for workspace ${name}: ${error.message}`);
     }
   }
 
@@ -4252,6 +4286,103 @@
     const entries = Object.entries(payload || {}).filter(([, value]) => ['string', 'number', 'boolean'].includes(typeof value)).slice(0, 12);
     if (entries.length) target.append(definitionList(entries.map(([key, value]) => [key.replaceAll('_', ' '), text(value)])));
     else target.append(node('p', '', 'The operation completed.'));
+  }
+
+  function runFreshAnalytics(workspace) {
+    if (workspace !== state.workspace) return;
+    state.analyticsJobs.delete(workspace);
+    state.analyticsResults.delete(workspace);
+    state.analyticsStartErrors.delete(workspace);
+    void loadHosted('analytics');
+  }
+
+  function renderAnalyticsStartError(target, workspace, message) {
+    target.replaceChildren(
+      node('h3', '', 'Analytics request unconfirmed'),
+      node('p', 'automation-policy-note',
+        `Could not confirm the Analytics run: ${message} It may still be processing in Cloud. Starting a fresh analysis creates another run.`),
+      button('Run fresh analysis', 'secondary-button', () => runFreshAnalytics(workspace)),
+    );
+  }
+
+  function hasAnalyticsMetrics(result) {
+    const totals = result && result.totals;
+    const forecast = result && result.decay_forecast;
+    return result && result.kind === 'analytics'
+      && Number.isInteger(result.memory_count) && result.memory_count >= 0
+      && totals && Number.isInteger(totals.live) && totals.live >= 0
+      && Number.isInteger(totals.pinned) && totals.pinned >= 0
+      && Number.isFinite(totals.avg_retention)
+      && forecast && Number.isInteger(forecast.at_risk_7d);
+  }
+
+  function renderAnalyticsResult(target, result, workspace, stale = false) {
+    const totals = result.totals;
+    const live = totals.live;
+    target.replaceChildren(node('h3', '', live === 0 ? 'Analytics has no eligible memories' : 'Analytics result'));
+    if (live === 0) {
+      target.append(node('p', 'automation-policy-note',
+        'This result has no eligible memories. Add a workspace memory, then run a fresh analysis.'));
+    } else {
+      const metrics = [
+        ['Live memories', live.toLocaleString()],
+        ['Average retention', `${Math.round(totals.avg_retention * 100)}%`],
+        ['At risk within 7 days', result.decay_forecast.at_risk_7d.toLocaleString()],
+        ['Pinned memories', totals.pinned.toLocaleString()],
+      ];
+      const grid = node('div', 'stat-grid');
+      metrics.forEach(([label, value]) => {
+        const item = node('div', 'stat-item');
+        item.append(node('span', '', label), node('strong', '', value));
+        grid.append(item);
+      });
+      target.append(grid);
+    }
+    if (stale) target.append(node('p', 'automation-policy-note',
+      'A newer workspace snapshot exists. Run a fresh analysis to see current data.'));
+    target.append(button('Run fresh analysis', 'secondary-button', () => runFreshAnalytics(workspace)));
+  }
+
+  function renderAnalyticsPending(target, workspace, jobId, status, error = '') {
+    target.replaceChildren(
+      node('h3', '', error ? 'Analytics result unavailable' : 'Analytics is processing'),
+      node('p', 'automation-policy-note', error ||
+        `The Cloud job is ${status === 'running' ? 'running' : 'queued'}. Check this result again without starting another run.`),
+      button('Refresh result', 'secondary-button', () => { void refreshAnalyticsResult(workspace, jobId); }),
+    );
+    if (error) target.append(button('Run fresh analysis', 'secondary-button',
+      () => runFreshAnalytics(workspace)));
+  }
+
+  async function refreshAnalyticsResult(workspace, jobId) {
+    if (workspace !== state.workspace || state.analyticsJobs.get(workspace) !== jobId) return;
+    const request = beginScopedRequest('hosted-analytics');
+    const target = byId('analytics-result');
+    target.replaceChildren(empty('Checking the existing Analytics job…'));
+    try {
+      const status = await api(`/analytics/job-result?${query(workspace)}&job_id=${encodeURIComponent(jobId)}`,
+        { signal: request.signal, timeoutMs: 45_000 });
+      if (!isCurrentScopedRequest(request)) return;
+      if (status.pending === true) {
+        renderAnalyticsPending(target, workspace, jobId, status.state);
+      } else if (status.failed === true) {
+        state.analyticsJobs.delete(workspace);
+        target.replaceChildren(
+          node('p', 'automation-policy-note', 'This Analytics run did not complete.'),
+          button('Run fresh analysis', 'secondary-button', () => runFreshAnalytics(workspace)),
+        );
+      } else if (hasAnalyticsMetrics(status.result)) {
+        state.analyticsJobs.delete(workspace);
+        state.analyticsResults.set(workspace, { result: status.result, stale: status.state === 'stale' });
+        renderAnalyticsResult(target, status.result, workspace, status.state === 'stale');
+      } else {
+        throw new Error('The Analytics result is unavailable.');
+      }
+    } catch (error) {
+      if (isCurrentScopedRequest(request)) {
+        renderAnalyticsPending(target, workspace, jobId, '', `Could not check this result: ${error.message}`);
+      }
+    }
   }
 
   function consolidationOptions() {
@@ -4460,11 +4591,31 @@
   }
 
   async function loadHosted(kind) {
+    if (kind === 'analytics' && state.analyticsStarting.has(state.workspace)) {
+      byId('analytics-result').replaceChildren(empty('An Analytics request is already running. Reopen this tab if it does not update.'));
+      return;
+    }
     const request = beginScopedRequest(`hosted-${kind}`);
     const workspace = request.workspace;
     const cacheKey = `${kind}:${workspace}`;
     const target = byId(`${kind}-result`);
-    if (state.hostedLoaded.has(cacheKey)) return;
+    if (kind === 'analytics') {
+      const completed = state.analyticsResults.get(workspace);
+      if (completed) {
+        renderAnalyticsResult(target, completed.result, workspace, completed.stale);
+        return;
+      }
+      const pendingJob = state.analyticsJobs.get(workspace);
+      if (pendingJob) {
+        await refreshAnalyticsResult(workspace, pendingJob);
+        return;
+      }
+      const previousError = state.analyticsStartErrors.get(workspace);
+      if (previousError) {
+        renderAnalyticsStartError(target, workspace, previousError);
+        return;
+      }
+    } else if (state.hostedLoaded.has(cacheKey)) return;
     target.replaceChildren(empty(`Checking ${kind} availability…`));
     try {
       if (kind === 'team') {
@@ -4483,15 +4634,46 @@
           plan: license.plan || 'local',
         }, 'Connection state');
       } else {
-        const result = await api(`/${kind}?${query(workspace)}`);
-        if (!isCurrentScopedRequest(request)) return;
+        if (kind === 'analytics') state.analyticsStarting.add(workspace);
+        const result = await api(`/${kind}?${query(workspace)}`,
+          kind === 'analytics' ? { timeoutMs: 90_000 } : {});
+        // A submitted Analytics job can outlive a workspace selection change. Keep its
+        // identifier/result for that workspace even when the visible panel has moved on.
+        if (kind !== 'analytics' && !isCurrentScopedRequest(request)) return;
+        if (kind === 'analytics' && !state.workspaces.some(item => workspaceName(item) === workspace)) return;
+        const showAnalytics = kind === 'analytics' && state.workspace === workspace
+          && state.view === 'manage' && state.manageTab === 'analytics';
         if (kind === 'automation') renderAutomationPolicy(result, workspace);
-        else renderObject(target, result, `${kind[0].toUpperCase()}${kind.slice(1)} status`);
+        else if (kind === 'analytics' && result.pending === true) {
+          const jobId = text(result.job_id);
+          if (!/^[A-Za-z0-9_-]{1,64}$/.test(jobId)) {
+            throw new Error('Engraphis Cloud did not return a usable Analytics job.');
+          }
+          state.analyticsJobs.set(workspace, jobId);
+          state.analyticsStartErrors.delete(workspace);
+          if (showAnalytics) renderAnalyticsPending(target, workspace, jobId, result.state);
+        } else if (kind === 'analytics') {
+          if (!hasAnalyticsMetrics(result)) {
+            throw new Error('Engraphis Cloud did not return a completed Analytics result.');
+          }
+          const stale = result.state === 'stale';
+          state.analyticsResults.set(workspace, { result, stale });
+          state.analyticsStartErrors.delete(workspace);
+          if (showAnalytics) renderAnalyticsResult(target, result, workspace, stale);
+        } else renderObject(target, result, `${kind[0].toUpperCase()}${kind.slice(1)} status`);
       }
-      if (isCurrentScopedRequest(request)) state.hostedLoaded.add(cacheKey);
+      if (kind !== 'analytics' && isCurrentScopedRequest(request)) state.hostedLoaded.add(cacheKey);
     } catch (error) {
-      if (!isCurrentScopedRequest(request)) return;
-      target.replaceChildren(empty(`${kind[0].toUpperCase()}${kind.slice(1)} is not active: ${error.message}`));
+      if (kind === 'analytics') {
+        state.analyticsStartErrors.set(workspace, error.message);
+        if (state.workspace === workspace && state.view === 'manage' && state.manageTab === 'analytics') {
+          renderAnalyticsStartError(target, workspace, error.message);
+        }
+      } else if (isCurrentScopedRequest(request)) {
+        target.replaceChildren(empty(`${kind[0].toUpperCase()}${kind.slice(1)} is not active: ${error.message}`));
+      }
+    } finally {
+      if (kind === 'analytics') state.analyticsStarting.delete(workspace);
     }
   }
   function syncSummaryMessage(summary) {
@@ -4501,6 +4683,9 @@
     const errors = Array.isArray(summary.errors) ? summary.errors : [];
     const complete = summary.complete === true
       || (summary.complete !== false && errors.length === 0 && succeeded >= attempted);
+    if (complete && attempted === 0) {
+      return 'Last sync found no eligible shared workspaces · 0/0 completed. Create a workspace, or share a personal Team workspace you own, then try again.';
+    }
     const counts = `${succeeded}/${attempted} eligible workspaces completed`;
     const changes = `${number(summary.added)} added · ${number(summary.updated)} updated · ${number(summary.exported)} exported`;
     return `${complete ? 'Last sync complete' : 'Last sync incomplete'} · ${counts} · ${changes}${errors.length ? ` · ${errors.length} ${errors.length === 1 ? 'error' : 'errors'}` : ''}.`;
@@ -4508,6 +4693,9 @@
 
   function renderSyncStatus(status, message = '') {
     state.syncStatus = status || {};
+    const connected = state.syncStatus.available === true;
+    const ready = connected && state.syncStatus.ready === true;
+    const hasKey = state.syncStatus.has_key === true;
     const target = byId('sync-result');
     if (!target) return;
     target.replaceChildren();
@@ -4515,7 +4703,10 @@
     target.append(
       node('p', 'automation-policy-note', syncSummaryMessage(state.syncStatus.last)),
       definitionList([
-        ['Connection', state.syncStatus.available ? 'Connected' : 'Not connected'],
+        ['Connection', connected ? 'Connected' : 'Not connected'],
+        ['Encryption key', hasKey ? 'Valid' : state.syncStatus.key_state === 'invalid'
+          ? 'Invalid' : 'Not configured'],
+        ['Sync readiness', ready ? 'Ready' : 'Needs setup'],
         ['Mode', state.syncStatus.read_only ? 'Read only · pull without upload' : 'Push and pull'],
         ['Credential', state.syncStatus.has_cloud_session
           ? 'Managed Cloud session'
@@ -4526,9 +4717,12 @@
     const actions = node('div', 'automation-policy-actions');
     const run = button('Sync now', 'primary-button', runCloudSync);
     run.id = 'sync-now';
-    run.disabled = !state.syncStatus.available;
+    run.disabled = !ready;
     actions.append(run);
-    if (!state.syncStatus.available) {
+    if (state.syncStatus.last && number(state.syncStatus.last.attempted) === 0) {
+      actions.append(button('Review workspaces', 'secondary-button', () => switchManageTab('workspaces')));
+    }
+    if (!connected) {
       const url = safeUrl(state.syncStatus.upgrade_url) || hostedAccountUrl('sync');
       if (url) {
         const connect = node('a', 'secondary-button', 'Connect Engraphis Cloud');
@@ -4537,6 +4731,19 @@
         connect.rel = 'noopener';
         actions.append(connect);
       }
+    } else if (!ready) {
+      const missingKey = !hasKey;
+      const detail = missingKey
+        ? state.syncStatus.key_state === 'invalid'
+          ? 'The configured Cloud Sync encryption key is invalid. Replace it with a 32-byte URL-safe base64 key, then restart this dashboard.'
+          : 'Cloud Sync needs a user-held encryption key. Configure ENGRAPHIS_SYNC_E2EE_KEY on this device, then restart this dashboard.'
+        : 'Cloud Sync encryption support is unavailable. Install engraphis[cloud-sync] and restart this dashboard.';
+      target.append(node('p', 'automation-policy-note', detail));
+      const guide = node('a', 'secondary-button', 'Cloud Sync setup guide');
+      guide.href = 'https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/SYNC.md#configure-a-customer-installation';
+      guide.target = '_blank';
+      guide.rel = 'noopener';
+      actions.append(guide);
     }
     target.append(actions);
   }
@@ -4574,9 +4781,11 @@
       const complete = responseOk && (summary.complete === true
         || (summary.complete !== false && errors.length === 0
           && number(summary.succeeded) >= number(summary.attempted)));
-      showNotice(complete
-        ? 'Cloud Sync completed for every eligible workspace.'
-        : 'Cloud Sync is incomplete. Review the status before retrying.');
+      showNotice(complete && number(summary.attempted) === 0
+        ? 'No eligible shared workspaces were synced.'
+        : complete
+          ? 'Cloud Sync completed for every eligible workspace.'
+          : 'Cloud Sync is incomplete. Review the status before retrying.');
     } catch (error) {
       if (!isCurrentScopedRequest(request)) return;
       renderSyncStatus(state.syncStatus || {}, `Cloud Sync failed: ${error.message}`);
@@ -4942,8 +5151,9 @@
       } catch (_) {}
       const urlView = new URL(location.href).searchParams.get('view');
       switchView(['today', 'ask', 'library', 'connections', 'relations', 'provenance', 'manage'].includes(urlView) ? urlView : view, { pushHistory: false });
-      if (urlView === 'manage' && entry.searchParams.get('tab') === 'settings') {
-        switchManageTab('settings');
+      const requestedManageTab = entry.searchParams.get('tab');
+      if (urlView === 'manage' && ['settings', 'sync', 'analytics'].includes(requestedManageTab)) {
+        switchManageTab(requestedManageTab);
       }
     } catch (error) {
       if (error.status === 401 && await authenticateBrowser()) {

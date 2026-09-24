@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from engraphis.commercial import BILLING_AUTHORITY, expected_checkout_targets
+from engraphis.commercial import BILLING_AUTHORITY, expected_checkout_targets, trial_days_by_plan
 from engraphis.hosted_client import TRIAL_DAYS
 
 
@@ -87,7 +87,10 @@ def test_public_docs_state_the_license_and_lapse_boundaries():
     plain_hosted_plans = " ".join(hosted_plans.replace("**", "").split())
     plain_licensing = " ".join(licensing.replace("**", "").split())
 
-    assert "exactly 3 active days" in combined
+    days = trial_days_by_plan()
+    plan_specific_trial = f"{days['pro']} active days for Pro or {days['team']} active days for Team"
+    for path in ("docs/AGENT_CONNECT.md", "docs/HOSTING_RAILWAY.md", "docs/LICENSING.md"):
+        assert plan_specific_trial in _text(path)
     assert "at most 24 hours" in plain_hosted_plans or "up to 24 hours" in plain_hosted_plans
     assert "up to 24 hours" in plain_licensing
     assert "workspace_write_grace" in hosted_plans and "workspace_write_grace" in licensing

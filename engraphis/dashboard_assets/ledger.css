@@ -1020,6 +1020,10 @@ body[data-theme="paper"] .graph-header {
 .stat-item { display: grid; gap: 2px; padding: 9px; border: 1px solid var(--c-line); background: var(--c-bg); }
 .stat-item span { color: var(--c-dim); font-size: 10px; text-transform: uppercase; }
 .stat-item strong { font: 500 18px/1.2 var(--serif); }
+#analytics-result > h3,
+#analytics-result > p,
+#analytics-result > .stat-grid,
+#analytics-result > button { grid-column: 1 / -1; }
 
 @container (min-width: 560px) {
   .graph-rail { padding-right: 14px; padding-left: 14px; }

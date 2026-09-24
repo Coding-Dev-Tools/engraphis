@@ -197,7 +197,20 @@ def test_ci_and_release_audit_production_image_dependencies():
     assert "Validate Compose configuration" in ci
     assert "docker compose config --quiet" in ci
     assert "docker run --rm --entrypoint sh engraphis:ci" in ci
-    assert 'python -m pip_audit --path "$audit_dir"' in ci
+    ci_build = ci.split("  build:\n", 1)[1].split("  installed-journeys:\n", 1)[0]
+    ci_docker = ci.split("  docker-smoke:\n", 1)[1].split("  build:\n", 1)[0]
+    for audit_step, site in (
+        (ci_build, "$AUDIT_SITE"),
+        (ci_docker, "$audit_dir"),
+        (release_docker, "$audit_dir"),
+    ):
+        assert "set -euo pipefail" in audit_step
+        assert f'python scripts/pin_installed_audit_requirements.py "{site}"' in audit_step
+        assert f'python -m pip_audit --vulnerability-service osv --path "{site}"' in audit_step
+        assert (
+            'python -m pip_audit --vulnerability-service pypi --no-deps '
+            '--disable-pip -r "$RUNNER_TEMP/published-audit-requirements.txt"'
+        ) in audit_step
     assert 'docker cp "$container:$site_packages/."' in ci
     legacy_audit_path = 'docker cp "$container":/usr/local/lib/python3.11/site-packages/.'
     assert legacy_audit_path not in ci
@@ -236,7 +249,6 @@ def test_ci_and_release_audit_production_image_dependencies():
     assert 'docker create --name "$container" engraphis:release' in release_docker
     assert 'docker cp "$container:$site_packages/."' in release_docker
     assert legacy_audit_path not in release_docker
-    assert 'python -m pip_audit --path "$audit_dir"' in release_docker
     assert "reproducibility-check" in release_evidence.split("needs:", 1)[1].splitlines()[0]
     assert "installed-artifact-platform-smoke" in (
         release_evidence.split("needs:", 1)[1].splitlines()[0]

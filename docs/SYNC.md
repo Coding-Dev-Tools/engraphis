@@ -80,9 +80,31 @@ credential cannot be redirected. The CLI intentionally has no secret-valued `--r
 `--relay-e2ee-key` flags. A missing or malformed key stops Cloud Sync rather than uploading a
 plaintext bundle.
 
+`engraphis connect --token ...` saves the Cloud account session; it does not create or save the
+separate encryption key. Set `ENGRAPHIS_SYNC_E2EE_KEY` in the process environment or the
+owner-private `~/.engraphis/config.env`, then restart the local dashboard. The Sync status shows
+only whether the key is valid and the local encryption dependency is installed, never the key
+itself. A read-only pull still needs the same key to decrypt received bundles.
+
 ```bash
 python -c "import base64, secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode().rstrip('='))"
 ```
+
+Treat the command output as a secret: use a trusted terminal without transcript or log capture,
+store it in your secret manager, and never paste it into the Cloud portal or a support request.
+Before the first upload, keep a separate secure backup and confirm you can retrieve it. If the
+key is lost, previously synced encrypted bundles cannot be decrypted; Engraphis Cloud cannot
+restore it.
+
+For the first device, add a single `ENGRAPHIS_SYNC_E2EE_KEY=<your key>` assignment to its
+owner-private `~/.engraphis/config.env` with a trusted editor, retaining any existing settings.
+Use the path named by `ENGRAPHIS_ENV_FILE` instead when that override is configured. A secrets
+manager may inject the same process variable instead of using the file. Restart the dashboard,
+then check **Settings → Cloud Sync**: Connection must show **Connected**, Encryption key
+**Valid**, and Sync readiness **Ready** before **Sync now** is enabled. If encryption support is
+missing, install `engraphis[cloud-sync]` in the dashboard's Python environment and restart.
+On each additional device, provision the *same* backed-up key through your secure channel;
+generating a different key will make earlier encrypted bundles unreadable there.
 
 The dashboard's **Sync now** action invokes the same customer protocol. The public package does
 not run a local auto-sync loop or ship a cron/Task Scheduler wrapper. Hosted automation belongs
