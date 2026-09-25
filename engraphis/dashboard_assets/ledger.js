@@ -475,7 +475,7 @@
     if (!graphAllAssetsPromise) {
       const controller = new AbortController();
       const attempt = loadScript(
-        graphAssetSource('/v2-assets/engraphis-graph-every.js?v=20260905-every-20'),
+        graphAssetSource('/v2-assets/engraphis-graph-every.js?v=20260925-evidence-mass-1'),
         'EngraphisEveryGraph', controller.signal,
       );
       graphAllAssetsPromise = attempt;
