@@ -102,8 +102,8 @@ def _hash_record(
     """Return a deterministic hash view of an emitted scene record.
 
     Layout coordinates are derived from ``scene_hash`` and therefore must not be fed back
-    into it. All other fields are part of the public scene identity, including optional
-    repository and temporal metadata.
+    into it. Derived renderer aliases may likewise be excluded. All other fields are part of
+    the public scene identity, including optional repository and temporal metadata.
     """
     def normalize(value: Any) -> Any:
         if isinstance(value, Mapping):
@@ -120,7 +120,7 @@ def _hash_record(
             return [normalize(item) for item in value]
         return value
 
-    ignored = {"x", "y", *exclude}
+    ignored = {"x", "y", "evidence_mass", *exclude}
     return {
         str(key): normalize(value) for key, value in sorted(record.items())
         if key not in ignored
@@ -1416,6 +1416,7 @@ def build_canonical_graph(
             "entity_quality": quality,
             "mass_score": public_score,
             "gravity_mass": gravity_mass,
+            "evidence_mass": gravity_mass,
             "visual_radius": visual_radius,
             "anchor_eligible": bool(quality),
         })
@@ -1427,6 +1428,7 @@ def build_canonical_graph(
                 "entity_quality": 0.0,
                 "mass_score": 0.0,
                 "gravity_mass": 0.0,
+                "evidence_mass": 0.0,
                 "visual_radius": 0.0,
                 "anchor_eligible": False,
             })
@@ -2254,6 +2256,7 @@ def _build_complete_scene(
             "entity_quality": 1.0,
             "mass_score": public_score,
             "gravity_mass": gravity_mass,
+            "evidence_mass": gravity_mass,
             "visual_radius": visual_radius,
             "component_id": f"component_memory_{memory_id}",
             "community_id": memory_community[memory_id],
@@ -2276,6 +2279,7 @@ def _build_complete_scene(
         if node.get("ghost"):
             node["mass_score"] = 0.0
             node["gravity_mass"] = 0.0
+            node["evidence_mass"] = 0.0
             node["weighted_degree"] = 0.0
             node["pagerank"] = 0.0
             node["support_count"] = 0
@@ -2591,6 +2595,7 @@ def build_graph_scene(
             node["ghost"] = True
             node["mass_score"] = 0.0
             node["gravity_mass"] = 0.0
+            node["evidence_mass"] = 0.0
             node["weighted_degree"] = 0.0
             node["pagerank"] = 0.0
             node["support_count"] = 0
@@ -3065,10 +3070,11 @@ _ALL_PRESENTATION_NODE_FIELDS = (
     "x", "y", "gravity_mass", "visual_radius", "mass_score",
     "weighted_degree", "pagerank", "support_count", "scene_rank",
     "anchor_role", "system_anchor_id", "orbit_tier", "orbit_radius",
+    "evidence_mass", "galactic_radius", "galactic_target_radius",
 )
 _ALL_PRESENTATION_EDGE_FIELDS = (
     "id", "source", "target", "relation", "layer", "ghost", "strength",
-    "rest_length", "spring_strength",
+    "rest_length", "spring_strength", "weight",
 )
 _ALL_PRESENTATION_META_FIELDS = (
     "workspace", "level", "scene_hash", "index_generation",

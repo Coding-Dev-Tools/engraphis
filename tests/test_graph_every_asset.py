@@ -79,6 +79,34 @@ setTimeout(() => {
     assert report["bridges"] == [0, 1]
 
 
+def test_worker_uses_visual_weight_for_zero_strength_ghost_edges() -> None:
+    script = """
+send({ type: 'prepare', payload: {
+  nodes: [
+    { id: 'a', community_id: 'a' },
+    { id: 'b', community_id: 'b' },
+    { id: 'c', community_id: 'c' },
+  ],
+  links: [
+    { source: 'a', target: 'b', weight: 4, strength: 0, ghost: true },
+    { source: 'a', target: 'c', weight: 1, strength: 8 },
+  ],
+}});
+setTimeout(() => {
+  const ready = latest('ready');
+  console.log(JSON.stringify({
+    weights: Array.from(ready.edgeWeights),
+    ghosts: Array.from(ready.edgeGhosts),
+    bridges: Array.from(ready.edgeBridges),
+  }));
+}, 50);
+"""
+    report = _run_worker(script)
+    assert report["weights"] == [4.0, 1.0]
+    assert report["ghosts"] == [1, 0]
+    assert report["bridges"][0] == 1
+
+
 def test_worker_refuses_over_capacity_with_explicit_response() -> None:
     script = """
 const big = Array.from({ length: 20001 }, (_, i) => ({ id: `n${i}` }));

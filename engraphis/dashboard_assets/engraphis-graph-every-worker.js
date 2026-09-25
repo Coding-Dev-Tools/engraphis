@@ -93,7 +93,7 @@
         ? String(node.community_id) : null;
       if (!communityIndex.has(group)) communityIndex.set(group, communityIndex.size);
       communities[index] = communityIndex.get(group);
-      const mass = Number(node.evidence_mass);
+      const mass = Number(node.evidence_mass != null ? node.evidence_mass : (node.gravity_mass != null ? node.gravity_mass : node.mass_score));
       evidenceMass[index] = Number.isFinite(mass) && mass > 0 ? mass : 0;
     }
 
@@ -111,7 +111,7 @@
       if (source === undefined || target === undefined) continue;
       sources.push(source);
       targets.push(target);
-      const weight = Number(link.weight);
+      const weight = Number(link.weight != null ? link.weight : (link.strength != null ? link.strength : 1));
       weights.push(Number.isFinite(weight) && weight > 0 ? weight : 1);
       relations.push(String(link.relation || link.label || ""));
       edgeLayers.push(String(link.layer || 'semantic'));
