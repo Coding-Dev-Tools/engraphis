@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from engraphis.config import settings
 from engraphis.core.interfaces import Edge, GraphLayer, Node
 from engraphis.read_only_api import MAX_READ_ONLY_BODY_BYTES, create_read_only_app
-from engraphis.service import MemoryService
+from engraphis.service import GraphSceneCapacityExceeded, MemoryService
 from engraphis.backends.graph_extractor import RegexGraphExtractor
 
 
@@ -90,6 +90,22 @@ def test_tokenless_read_only_factory_rejects_remote_peers():
     response = client.get("/recall", params={"query": "database", "workspace": "w"})
     assert response.status_code == 403
     assert response.json() == {"detail": "remote access requires a bearer token"}
+
+
+def test_read_only_graph_capacity_error_uses_stable_code():
+    class _Service:
+        def graph(self, **_kwargs):
+            raise GraphSceneCapacityExceeded(
+                resource="graph edges", count=5_001, limit=5_000
+            )
+
+    response = TestClient(create_read_only_app(_Service())).get(
+        "/graph", params={"workspace": "w", "limit": 5_000}
+    )
+
+    assert response.status_code == 413
+    assert response.json()["detail"]["code"] == "GRAPH_CAPACITY"
+    assert response.json()["detail"]["resource"] == "graph edges"
 
 
 def test_read_only_api_serves_graph_and_intent_recall():

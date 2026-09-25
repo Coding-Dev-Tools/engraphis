@@ -8,7 +8,7 @@
 (function () {
   'use strict';
 
-  const WORKER_URL = '/v2-assets/engraphis-graph-every-worker.js?v=20260830-spacetime-controls-20';
+  const WORKER_URL = '/v2-assets/engraphis-graph-every-worker.js?v=20260925-evidence-mass-1';
   const MAX_NODES = 20000;
   const MAX_LINKS = 200000;
   const LABEL_MAX = 220;

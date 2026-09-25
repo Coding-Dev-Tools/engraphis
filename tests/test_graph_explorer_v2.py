@@ -1751,6 +1751,7 @@ def test_complete_scene_capacity_error_is_explicit_and_never_samples(monkeypatch
 
     assert response.status_code == 413
     detail = response.json()["detail"]
+    assert detail["code"] == "GRAPH_CAPACITY"
     assert detail["safety_state"] == "capacity_exceeded"
     assert detail["degraded"] is True
     assert detail["truncated"] is False
@@ -2003,7 +2004,9 @@ def test_graph_scene_history_is_zero_physics_and_does_not_change_live_mass():
     beta_history = next(node for node in history["nodes"] if node["id"] == beta)
     assert alpha_node["ghost"] is True
     assert alpha_node["gravity_mass"] == 0.0
+    assert alpha_node["evidence_mass"] == 0.0
     assert beta_history["gravity_mass"] == beta_live["gravity_mass"]
+    assert beta_history["evidence_mass"] == beta_live["evidence_mass"]
     assert (beta_history["x"], beta_history["y"]) == (
         beta_live["x"], beta_live["y"]
     )
