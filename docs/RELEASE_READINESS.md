@@ -92,9 +92,9 @@ engine checkout; `--require-leadership` requires both decisions. All modes retai
 Actual publication additionally requires the protected, owner-signed approval in
 [RELEASE_QUALIFICATION.md](RELEASE_QUALIFICATION.md), verified immediately before each
 normal or repair write. Its environment, authority and approval remain owner setup;
-this source change does not configure or issue them. The owner-authorized v1.7.6
-repair waiver documented there is an explicit exception and does not establish
-full-product readiness or change any gate status.
+this source change does not configure or issue them. The owner-authorized repair
+waivers for the exact v1.7.6 and v1.7.8 candidates documented there are explicit
+exceptions and do not establish full-product readiness or change any gate status.
 
 Planner experiments remain off by default. To require their existing optimization gate:
 
