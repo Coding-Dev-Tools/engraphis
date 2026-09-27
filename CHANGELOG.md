@@ -5,6 +5,20 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [1.7.8] - 2026-09-27
+
+- Improved graph rendering and overlay scheduling, preserved saved Compact and custom
+  slider preferences, and corrected orbit radii, focus validation, and worker force limits.
+- Hardened Windows MCP startup by preloading configured embedding and reranking
+  dependencies before background warmup, while retaining exact-backend requirements,
+  source-integrity validation, and an explicit preload opt-out.
+- Added an experimental, explicitly authorized Jev decision adapter with fail-closed
+  response validation; it does not write memories or participate in grounded recall.
+- Corrected API capacity and evidence projections and refreshed immutable offline
+  evidence and charts against the release source. Offline fixtures do not establish
+  live hosted-service or full-product qualification.
+- Updated the optional Codex SDK to 0.155.1 and pinned CodeQL actions to 4.38.2.
+
 ## [1.7.7] - 2026-09-23
 
 - Cloud Sync shows local encryption-key and dependency readiness before enabling Sync now,

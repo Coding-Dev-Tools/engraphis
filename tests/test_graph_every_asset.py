@@ -79,6 +79,34 @@ setTimeout(() => {
     assert report["bridges"] == [0, 1]
 
 
+def test_worker_uses_visual_weight_for_zero_strength_ghost_edges() -> None:
+    script = """
+send({ type: 'prepare', payload: {
+  nodes: [
+    { id: 'a', community_id: 'a' },
+    { id: 'b', community_id: 'b' },
+    { id: 'c', community_id: 'c' },
+  ],
+  links: [
+    { source: 'a', target: 'b', weight: 4, strength: 0, ghost: true },
+    { source: 'a', target: 'c', weight: 1, strength: 8 },
+  ],
+}});
+setTimeout(() => {
+  const ready = latest('ready');
+  console.log(JSON.stringify({
+    weights: Array.from(ready.edgeWeights),
+    ghosts: Array.from(ready.edgeGhosts),
+    bridges: Array.from(ready.edgeBridges),
+  }));
+}, 50);
+"""
+    report = _run_worker(script)
+    assert report["weights"] == [4.0, 1.0]
+    assert report["ghosts"] == [1, 0]
+    assert report["bridges"][0] == 1
+
+
 def test_worker_refuses_over_capacity_with_explicit_response() -> None:
     script = """
 const big = Array.from({ length: 20001 }, (_, i) => ({ id: `n${i}` }));
@@ -319,7 +347,7 @@ def test_renderer_export_is_synchronous_and_composites_every_layer() -> None:
     renderer = RENDERER.read_text(encoding="utf-8")
     body = renderer[renderer.index("function exportImageCanvas"):renderer.index("function destroyGraph")]
     assert "caf(state.labelFrame)" in body  # pending overlay frame must not leak stale paint
-    assert "drawOverlay(now)" in body       # overlay painted synchronously
+    assert "drawOverlay(now, true)" in body  # bypass the flow throttle during export
     assert "context.drawImage(underlay, 0, 0)" in body
     assert "context.drawImage(canvas, 0, 0)" in body
     assert "context.drawImage(labels, 0, 0)" in body

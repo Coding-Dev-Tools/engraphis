@@ -5,13 +5,18 @@ import json
 import math
 from pathlib import Path
 
-from engraphis.core.graph_scene import project_all_presentation
+from engraphis.core.graph_scene import _hash_record, project_all_presentation
 
 FIXTURE = Path(__file__).with_name("graph_scene_fixture.json")
 
 
 def _scene() -> dict:
     return json.loads(FIXTURE.read_text(encoding="utf-8"))
+
+
+def test_hash_record_ignores_derived_evidence_alias() -> None:
+    base = {"id": "n1", "gravity_mass": 3.0, "visual_radius": 4.0}
+    assert _hash_record(base) == _hash_record({**base, "evidence_mass": 3.0})
 
 
 def test_graph_scene_fixture_has_stable_public_shape():
@@ -120,8 +125,10 @@ def test_all_presentation_projects_only_renderer_fields_without_mutating_scene()
     scene = _scene()
     scene["nodes"][0]["private_evidence"] = [{"memory": "must stay server-side"}]
     scene["nodes"][0]["ghost"] = True
+    scene["nodes"][0]["evidence_mass"] = 4.0
     scene["nodes"][0]["member_ids"] = ["member-primary", "member-extra"]
     scene["edges"][0]["support_ids"] = ["mem_private"]
+    scene["edges"][0]["weight"] = 3.0
     projected = project_all_presentation(scene)
 
     assert projected["meta"]["all_projected"] is True
@@ -132,11 +139,12 @@ def test_all_presentation_projects_only_renderer_fields_without_mutating_scene()
     assert projected["nodes"][0]["member_ids"] == ["member-primary"]
     assert {
         "id", "label", "type", "community_id", "x", "y",
-        "anchor_role", "system_anchor_id", "gravity_mass", "visual_radius",
+        "anchor_role", "system_anchor_id", "gravity_mass", "evidence_mass",
+        "visual_radius",
     } <= projected["nodes"][0].keys()
     assert {
-        "id", "source", "target", "relation", "layer", "strength", "rest_length",
-        "spring_strength", "bridge",
+        "id", "source", "target", "relation", "layer", "strength", "weight",
+        "rest_length", "spring_strength", "bridge",
     } <= projected["edges"][0].keys()
     assert projected["edges"][0]["relation"] == scene["edges"][0]["relation"]
     assert set(projected) == {"meta", "nodes", "edges"}
