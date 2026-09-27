@@ -8,7 +8,7 @@
 (function () {
   'use strict';
 
-  const WORKER_URL = '/v2-assets/engraphis-graph-every-worker.js?v=20260927-unmerged-readiness-1';
+  const WORKER_URL = '/v2-assets/engraphis-graph-every-worker.js?v=20260927-unmerged-readiness-2';
   const MAX_NODES = 20000;
   const MAX_LINKS = 200000;
   const LABEL_MAX = 220;

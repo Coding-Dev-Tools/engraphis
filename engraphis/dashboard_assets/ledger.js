@@ -475,7 +475,7 @@
     if (!graphAllAssetsPromise) {
       const controller = new AbortController();
       const attempt = loadScript(
-        graphAssetSource('/v2-assets/engraphis-graph-every.js?v=20260927-unmerged-readiness-1'),
+        graphAssetSource('/v2-assets/engraphis-graph-every.js?v=20260927-unmerged-readiness-2'),
         'EngraphisEveryGraph', controller.signal,
       );
       graphAllAssetsPromise = attempt;
@@ -508,10 +508,10 @@
         graphAssetSource('/v2-assets/vendor/force-graph.min.js?v=20260727-final'),
         'ForceGraph', controller.signal,
       )).then(() => loadScript(
-        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260927-unmerged-readiness-1'),
+        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260927-unmerged-readiness-2'),
         'EngraphisGraph', controller.signal,
       )).then(() => loadScript(
-        graphAssetSource('/v2-assets/engraphis-spacetime.js?v=20260927-unmerged-readiness-1'),
+        graphAssetSource('/v2-assets/engraphis-spacetime.js?v=20260927-unmerged-readiness-2'),
         'EngraphisSpacetime', controller.signal,
       ));
       graphAssetsPromise = attempt;
@@ -3202,11 +3202,14 @@
       };
       const savedSpacetime = savedSpacetimeTuning && typeof savedSpacetimeTuning === 'object'
         ? savedSpacetimeTuning : {};
-      Object.keys(retiredSpacetimeDefaults).forEach(key => {
-        if (Number(savedSpacetime[key]) === retiredSpacetimeDefaults[key]) {
+      const retiredKeys = Object.keys(retiredSpacetimeDefaults);
+      const hasRetiredVector = retiredKeys.every(key =>
+        Number(savedSpacetime[key]) === retiredSpacetimeDefaults[key]);
+      if (hasRetiredVector) {
+        retiredKeys.forEach(key => {
           savedSpacetime[key] = GRAPH_SPACETIME_TUNING.find(item => item.key === key).fallback;
-        }
-      });
+        });
+      }
     }
     syncGraphTuning({
       ...graphPresetTuning(preset),

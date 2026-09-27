@@ -471,7 +471,7 @@ def test_graph_engine_deep_link_reaches_the_next_engine_after_a_lazy_load() -> N
     report = _run_routing("loads")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260927-unmerged-readiness-1"
+        "/v2-assets/engraphis-graph.js?v=20260927-unmerged-readiness-2"
     ]
     # It waits rather than rendering something wrong in the meantime.
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
@@ -486,7 +486,7 @@ def test_classic_route_reaches_the_canonical_engine_without_a_query_flag() -> No
     report = _run_routing("classic")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260927-unmerged-readiness-1"
+        "/v2-assets/engraphis-graph.js?v=20260927-unmerged-readiness-2"
     ]
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
     assert report["engine"] == 1
@@ -500,7 +500,7 @@ def test_show_all_lazily_loads_its_renderer_after_the_main_engine_is_ready() -> 
     report = _run_routing("all-loaded")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph-every.js?v=20260927-unmerged-readiness-1"
+        "/v2-assets/engraphis-graph-every.js?v=20260927-unmerged-readiness-2"
     ]
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
     assert report["engine"] == 1
@@ -10580,10 +10580,10 @@ def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
     d3 = loader.index("'/v2-assets/vendor/d3.min.js?v=20260727-final'")
     force_graph = loader.index("'/v2-assets/vendor/force-graph.min.js?v=20260727-final'")
     renderer = loader.index(
-        "'/v2-assets/engraphis-graph.js?v=20260927-unmerged-readiness-1'"
+        "'/v2-assets/engraphis-graph.js?v=20260927-unmerged-readiness-2'"
     )
     assert d3 < force_graph < renderer
-    assert '/v2-assets/ledger.js?v=20260927-unmerged-readiness-1' in markup
+    assert '/v2-assets/ledger.js?v=20260927-unmerged-readiness-2' in markup
     assert "if (graphAssetsPromise === attempt) releaseGraphAssetsAttempt(attempt)" in loader
     assert "graphAssetsRetry = Math.min(graphAssetsRetry + 1, 10)" in loader
     all_loader = source[source.index("function ensureGraphAllAsset()"):
@@ -10689,6 +10689,40 @@ def test_focusing_an_entity_the_canvas_is_not_showing_does_not_report_success() 
     assert report["collapsed"] is False
     assert "c" in report["afterFocus"], "the entity is still not on the canvas"
     assert report["collapses"][-1] is False, "the dashboard was never told the view expanded"
+
+
+@requires_node
+def test_synthetic_cluster_focus_preserves_the_current_view() -> None:
+    """Reject synthetic bubbles without poisoning the raw-entity focus filter."""
+    report = _run_engine(
+        """
+        const api = G.create(el, { reducedMotion: () => true });
+        api.setPreset('compact');
+        api.setData({ nodes: [{ id: 'cluster-real' }, { id: 'a' }, { id: 'lonely' }],
+          links: [{ source: 'cluster-real', target: 'a' }] });
+        api.setCollapse(true);
+        api.setHighlight('a');
+        const shown = () => store.graphData.nodes.map(node => node.id);
+        const before = { ids: shown(), state: api.state() };
+        const cluster = store.graphData.nodes.find(node => node.cluster === true);
+        const rejected = api.focus(cluster.id);
+        const after = { ids: shown(), state: api.state() };
+        api.setCollapse(false);
+        api.setScope({ showUnlinked: false, minDegree: 1 });
+        store.graphData.nodes.forEach((node, index) => { node.x = index * 10; node.y = index; });
+        const filtered = api.focus('lonely');
+        const accepted = api.focus('cluster-real');
+        emit({ before, after, rejected, filtered, accepted,
+          focus: api.state().focusId, finalIds: shown() });
+        """
+    )
+    assert set(report["before"]["ids"]) == {"cluster-0", "cluster-1"}
+    assert report["rejected"] is False
+    assert report["after"] == report["before"]
+    assert report["filtered"] is False
+    assert report["accepted"] is True
+    assert report["focus"] == "cluster-real"
+    assert set(report["finalIds"]) == {"cluster-real", "a"}
 
 
 @requires_node
@@ -12225,7 +12259,9 @@ def test_every_node_worker_consumes_all_full_mode_spacetime_controls() -> None:
             ['localGravitationalConstant', 1.8], ['damping', 8], ['springStiffness', 2.4],
           ]) {
             const start = messages.length;
-            self.onmessage({ data: { type: 'settings', settings: { [key]: value }, relayout: true, fit: true } });
+            self.onmessage({ data: { type: 'settings', settings: { gravitationalConstant: 1, blackHoleMass: 1,
+              localGravitationalConstant: 1, damping: 1, springStiffness: 1, [key]: value },
+              relayout: true, fit: true } });
             const positions = await waitForFit(start);
             changes[key] = Math.max(...positions.map((item, index) => Math.abs(item - baseline[index])));
           }
@@ -12656,3 +12692,83 @@ def test_oversized_full_layout_consumes_every_spacetime_control() -> None:
         assert report[key] > 1e-6, f"static full layout ignored {key}"
     assert report["subQuarterDelta"] > 1e-6
     assert report["finite"] is True
+
+
+@requires_node
+def test_every_node_worker_high_force_ranges_remain_independently_responsive() -> None:
+    """Isolate each force so earlier settings cannot disguise an inert control."""
+    report = _run_every_worker(
+        """
+        const nodes = Array.from({ length: 8 }, (_, index) => ({ id: `n${index}`, community_id: 'a' }));
+        const waitForFit = start => new Promise(resolve => {
+          const poll = () => {
+            const final = messages.slice(start).find(item => item.type === 'layout' && item.fit === true);
+            if (final) resolve(Array.from(final.positions));
+            else setTimeout(poll, 1);
+          };
+          poll();
+        });
+        (async () => {
+          self.onmessage({ data: { type: 'prepare', payload: { nodes, links: [] } } });
+          await waitForFit(0);
+          const samples = {};
+          for (const [key, values] of [
+            ['gravitationalConstant', [4, 5, 200 / 30]],
+            ['blackHoleMass', [4.4, 4.7, 5.04]],
+            ['localGravitationalConstant', [3, 4, 5, 200 / 30]],
+          ]) {
+            samples[key] = [];
+            for (const value of values) {
+              const settings = { repel: 0, link: 8, gravity: 48,
+                gravitationalConstant: 1, blackHoleMass: 1, localGravitationalConstant: 1,
+                damping: 1, springStiffness: 0 };
+              if (key === 'localGravitationalConstant') { settings.gravity = 0; settings.repel = 100; }
+              settings[key] = value;
+              const start = messages.length;
+              self.onmessage({ data: { type: 'settings', settings, relayout: true, fit: true } });
+              const positions = await waitForFit(start);
+              let radius = 0;
+              for (let i = 0; i < positions.length; i += 2) radius += Math.hypot(positions[i], positions[i + 1]);
+              samples[key].push({ radius: radius / nodes.length, finite: positions.every(Number.isFinite) });
+            }
+          }
+          emit(samples);
+        })();
+        """
+    )
+    for key, samples in report.items():
+        assert all(sample["finite"] for sample in samples), key
+        radii = [sample["radius"] for sample in samples]
+        assert all(left - right > 1e-5 for left, right in zip(radii, radii[1:])), (key, radii)
+
+
+@requires_node
+def test_oversized_full_layout_accepts_upper_spacetime_ranges() -> None:
+    report = _run_engine(
+        """
+        const api = G.create(el, {});
+        api.setPreset('compact');
+        api.setRenderMode('full');
+        api.setData(chain(600));
+        const samples = {};
+        for (const [key, values] of [
+          ['gravitationalConstant', [4, 5, 200 / 30]],
+          ['blackHoleMass', [4.4, 4.7, 5.04]],
+          ['localGravitationalConstant', [3, 4, 5, 200 / 30]],
+        ]) {
+          samples[key] = [];
+          for (const value of values) {
+            api.setSettings({ gravitationalConstant: 1, blackHoleMass: 1,
+              localGravitationalConstant: 1, damping: 1, springStiffness: 1, [key]: value });
+            samples[key].push(store.graphData.nodes.map(node => [node.x, node.y]));
+          }
+        }
+        emit(samples);
+        """
+    )
+    for key, samples in report.items():
+        for sample in samples:
+            assert all(math.isfinite(value) for point in sample for value in point), key
+        for before, after in zip(samples, samples[1:]):
+            assert max(math.hypot(a[0] - b[0], a[1] - b[1])
+                       for a, b in zip(before, after)) > 1e-6, key
