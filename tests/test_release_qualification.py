@@ -173,10 +173,14 @@ def test_cli_requires_configuration_and_never_prints_receipt(qualification, monk
     assert configuration["ENGRAPHIS_RELEASE_QUALIFICATION"] not in output.out + output.err
 
 
-def test_every_publication_write_requires_unconditional_qualification():
+def test_publication_writes_require_qualification_except_scoped_v176_waiver():
     yaml = pytest.importorskip("yaml")
     root = Path(__file__).resolve().parents[1]
     workflow = yaml.safe_load((root / ".github/workflows/release.yml").read_text(encoding="utf-8"))
+    dispatch = workflow.get("on", workflow.get(True, {})).get("workflow_dispatch", {})
+    waiver_input = dispatch.get("inputs", {}).get("waive_v176_qualification", {})
+    assert waiver_input.get("type") == "boolean"
+    assert waiver_input.get("default") is False
     for name, expected_writes in (("publish", 1), ("github-release", 1), ("github-release-repair", 2)):
         job = workflow["jobs"][name]
         assert job["environment"] == "release-qualification"
@@ -184,7 +188,11 @@ def test_every_publication_write_requires_unconditional_qualification():
         writes = 0
         for step in job["steps"]:
             if "scripts.verify_release_qualification" in step.get("run", ""):
-                assert "if" not in step and not step.get("continue-on-error", False)
+                if name == "github-release-repair":
+                    assert step.get("if") == "${{ !inputs.waive_v176_qualification }}"
+                else:
+                    assert "if" not in step
+                assert not step.get("continue-on-error", False)
                 required = {
                     "ENGRAPHIS_RELEASE_QUALIFICATION", "ENGRAPHIS_RELEASE_VERIFY_KEY",
                     "ENGRAPHIS_RELEASE_CANDIDATE_ID", "ENGRAPHIS_RELEASE_LEDGER_SHA256",
@@ -206,6 +214,13 @@ def test_every_publication_write_requires_unconditional_qualification():
         assert writes == expected_writes
     assert workflow["jobs"]["publish"]["needs"] == "release-evidence"
     assert workflow["jobs"]["github-release"]["needs"] == "publish"
+    repair_steps = workflow["jobs"]["github-release-repair"]["steps"]
+    waiver_guard = next(step for step in repair_steps
+                        if step.get("name") == "Enforce and record the v1.7.6-only qualification waiver")
+    assert waiver_guard.get("if") == "inputs.waive_v176_qualification"
+    assert 'test "$RELEASE_TAG" = "v1.7.6"' in waiver_guard["run"]
+    assert any(step.get("name") == "Disclose the qualification waiver in GitHub Release notes"
+               and step.get("if") == "inputs.waive_v176_qualification" for step in repair_steps)
     assert "${{ vars.ENGRAPHIS_RELEASE_" not in (
         root / ".github/workflows/release.yml"
     ).read_text(encoding="utf-8")

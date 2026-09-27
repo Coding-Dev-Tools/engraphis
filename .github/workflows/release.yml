@@ -8,9 +8,14 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Existing tag to repair as a GitHub Release"
+        description: "Existing tag to repair on PyPI and GitHub"
         required: false
         type: string
+      waive_v176_qualification:
+        description: "Owner-authorized one-time qualification waiver; valid only for v1.7.6"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -959,6 +964,23 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
+      - name: Enforce and record the v1.7.6-only qualification waiver
+        if: inputs.waive_v176_qualification
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          GH_ACTOR: ${{ github.actor }}
+          GH_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RELEASE_TAG" = "v1.7.6"
+          {
+            printf '# Release qualification waiver\n\n'
+            printf 'Tag: `%s`\n' "$RELEASE_TAG"
+            printf 'Authorized by: `%s`\n' "$GH_ACTOR"
+            printf 'Workflow run: %s\n\n' "$GH_RUN_URL"
+            printf 'The owner explicitly waived full-product qualification for this repair. No unverified release gate is represented as passed.\n'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Download published distributions
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1103,6 +1125,7 @@ jobs:
           cp dist/*.whl dist/*.tar.gz verified-dist/
 
       - name: Require signed full-product qualification before PyPI repair
+        if: ${{ !inputs.waive_v176_qualification }}
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
           ENGRAPHIS_RELEASE_QUALIFICATION: ${{ secrets.ENGRAPHIS_RELEASE_QUALIFICATION }}
@@ -1130,6 +1153,7 @@ jobs:
           --version "${RELEASE_TAG#v}" --retries 18 --delay 10
 
       - name: Require signed full-product qualification before GitHub repair
+        if: ${{ !inputs.waive_v176_qualification }}
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
           ENGRAPHIS_RELEASE_QUALIFICATION: ${{ secrets.ENGRAPHIS_RELEASE_QUALIFICATION }}
@@ -1161,3 +1185,24 @@ jobs:
               --title "Engraphis ${RELEASE_TAG#v}" \
               --latest
           fi
+
+      - name: Disclose the qualification waiver in GitHub Release notes
+        if: inputs.waive_v176_qualification
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          GH_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" --repo "$GH_REPO" --json body --jq .body \
+            > "$RUNNER_TEMP/release-notes-existing.md"
+          {
+            cat "$RUNNER_TEMP/release-notes-existing.md"
+            printf '\n\n## Release qualification\n\n'
+            printf 'The owner waived full-product qualification for this release. Mandatory full-product gates are not represented as passed.\n\n'
+            printf 'Waiver record: %s\n' "$GH_RUN_URL"
+          } > "$RUNNER_TEMP/release-notes.md"
+          gh release edit "$RELEASE_TAG" --repo "$GH_REPO" \
+            --notes-file "$RUNNER_TEMP/release-notes.md"
