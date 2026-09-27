@@ -1,4 +1,5 @@
 import json
+from contextlib import contextmanager
 from pathlib import Path
 import subprocess
 import sys
@@ -687,6 +688,25 @@ def test_queue_waits_for_legacy_ephemeral_producer_marker_until_removed(tmp_path
                 _stop_process(queue_process)
             else:
                 queue_process.communicate(timeout=10)
+
+
+def test_queue_accepts_legacy_marker_removed_during_probe(tmp_path, monkeypatch):
+    artifact = tmp_path / "diagnostic.json"
+    artifact.write_text("{}", encoding="utf-8")
+    producer_lock = tmp_path / "legacy-producer.lock"
+    producer_lock.write_text("running", encoding="utf-8")
+
+    @contextmanager
+    def disappearing_probe(path, *, create=True):
+        assert path == producer_lock
+        assert not create
+        producer_lock.unlink()
+        raise ValueError("external diagnostic runner lock is unsafe or changed")
+        yield  # pragma: no cover - the probe always raises
+
+    monkeypatch.setattr(queue, "_runner_lock", disappearing_probe)
+    monkeypatch.setattr(queue, "_verified_artifact", lambda path: {"verified": True})
+    assert queue._prerequisite_ready(artifact, producer_lock)
 
 
 def _complete_capacity_summary():
