@@ -4,8 +4,8 @@ Every ordinary PyPI publication, GitHub release write, and repair requires a val
 full-product qualification. Passing the public build jobs is necessary but does
 not replace the mandatory private readiness evidence. The workflow fails closed
 when qualification configuration is missing, malformed, expired or inconsistent
-with the selected source and distribution bytes. The owner-authorized v1.7.6
-repair waiver is the one-time exception documented below.
+with the selected source and distribution bytes. The owner-authorized repair
+waivers for the retained v1.7.6 and v1.7.8 candidates are documented below.
 
 The public verifier is `scripts/verify_release_qualification.py`. It verifies
 Ed25519 signatures using `cryptography==50.0.0` in release jobs. It contains no
@@ -107,16 +107,31 @@ a matching historical push run and verifies its exact public distribution/eviden
 hashes, then checks the current owner approval before both repair writes. It uses
 the peeled release tag commit, never the repair workflow's `main` checkout commit.
 
-For the existing `v1.7.6` release only, the repository owner explicitly directed a
-qualification waiver on 2026-09-27. The `workflow_dispatch` input
-`waive_v176_qualification` skips the owner qualification verifier only when repairing
-`v1.7.6` at commit `6a441a75c8dd159607fa3933da83f600864b9146`. Reusing that
-tag for another commit cannot use this exception. The workflow records the actor
+On 2026-09-27, the repository owner explicitly authorized qualification waivers
+for these retained release candidates:
+
+| Dispatch input | Release tag | Required source commit |
+| --- | --- | --- |
+| `waive_v176_qualification` | `v1.7.6` | `6a441a75c8dd159607fa3933da83f600864b9146` |
+| `waive_v178_qualification` | `v1.7.8` | `dce68e1602e580cd51b71e26db2ab04238df7df4` |
+
+Select exactly one waiver input together with its matching `release_tag`. Both
+inputs default to false. Combining them, selecting the wrong version, or reusing
+a tag for another commit fails before any public write. The v1.7.8 waiver follows
+the owner's explicit instruction to remove publication blockers after integrating
+and reviewing the beneficial local work. It reuses the distributions and evidence
+from the successful automated validations of that tagged source.
+
+The protected environment approval, exact distribution/evidence verification,
+and PyPI file identity checks remain required. The workflow records the actor
 and run URL, and publishes the waiver in GitHub Release notes before the first
-PyPI write. A failed disclosure prevents publication; a later repair failure
-leaves the public disclosure in place. This is not a qualification and
-does not mark any unverified gate as passing. All ordinary tag publications and
-repairs for other versions still require a valid owner-signed qualification.
+PyPI write. An existing draft must already be public before publication can
+proceed; a successful notes edit alone is insufficient. A failed disclosure
+prevents publication; a later repair failure
+leaves the public disclosure in place. These waivers are not qualifications and
+do not mark any unverified gate as passing. All ordinary tag publications and
+repairs outside these exact candidates still require a valid owner-signed
+qualification.
 
 ## Public installed evidence
 
