@@ -1,6 +1,7 @@
 """Prerequisite verification must retain producer ownership throughout the read."""
 
 import pytest
+import os
 from pathlib import Path
 
 from eval import local_benchmark_queue as queue
@@ -171,3 +172,34 @@ def test_preopen_inode_replacement_is_unsafe_and_does_not_verify(tmp_path, monke
     assert verified == []
     assert marker.read_bytes() == marker_before
     assert artifact.read_bytes() == artifact_before
+
+
+@pytest.mark.skipif(os.name == "nt", reason="requires unlink of an open file")
+@pytest.mark.parametrize("payload", [b"12345", RUNNER_LOCK_MARKER, RUNNER_LOCK_MARKER[:8], b"", b"running", b"0"])
+def test_postopen_unlink_retries_only_a_verified_legacy_pid_inode(tmp_path, monkeypatch, payload):
+    marker = tmp_path / ".runner.lock"
+    marker.write_bytes(payload)
+    artifact = tmp_path / "artifact.json"
+    artifact.write_bytes(b"retained-artifact")
+    original_lstat = Path.lstat
+    inspections = []
+
+    def unlink_opened_marker(path, *args, **kwargs):
+        if path == marker:
+            inspections.append(path)
+            if len(inspections) == 2:
+                marker.unlink()
+        return original_lstat(path, *args, **kwargs)
+
+    verified = []
+    monkeypatch.setattr(Path, "lstat", unlink_opened_marker)
+    monkeypatch.setattr(queue, "_verified_artifact", lambda path: verified.append(path))
+    if payload == b"12345":
+        assert not queue._prerequisite_ready(artifact, marker)
+        assert verified == []
+        assert queue._prerequisite_ready(artifact, marker)
+        assert verified == [artifact]
+    else:
+        with pytest.raises(ValueError, match="unsafe or changed"):
+            queue._prerequisite_ready(artifact, marker)
+        assert verified == []

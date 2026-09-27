@@ -1,10 +1,11 @@
 # Owner-signed release qualification
 
-Every new PyPI publication, GitHub release write, and repair requires a valid
+Every ordinary PyPI publication, GitHub release write, and repair requires a valid
 full-product qualification. Passing the public build jobs is necessary but does
 not replace the mandatory private readiness evidence. The workflow fails closed
 when qualification configuration is missing, malformed, expired or inconsistent
-with the selected source and distribution bytes.
+with the selected source and distribution bytes. The owner-authorized v1.7.6
+repair waiver is the one-time exception documented below.
 
 The public verifier is `scripts/verify_release_qualification.py`. It verifies
 Ed25519 signatures using `cryptography==50.0.0` in release jobs. It contains no
@@ -15,8 +16,8 @@ independent proof that each observation happened.
 
 ## Pending owner setup
 
-These operations have **not been performed** by this source change. Publication
-will remain blocked until the release owner completes them.
+These operations have **not been performed** by this source change. Ordinary
+publication will remain blocked until the release owner completes them.
 
 1. Create and protect the GitHub environment `release-qualification`. Restrict its
    deployment branches/tags to the protected release sources, require an authorized
@@ -105,7 +106,17 @@ The normal workflow checks before both PyPI and GitHub writes. Repair first sele
 a matching historical push run and verifies its exact public distribution/evidence
 hashes, then checks the current owner approval before both repair writes. It uses
 the peeled release tag commit, never the repair workflow's `main` checkout commit.
-No workflow switch makes the qualification optional.
+
+For the existing `v1.7.6` release only, the repository owner explicitly directed a
+qualification waiver on 2026-09-27. The `workflow_dispatch` input
+`waive_v176_qualification` skips the owner qualification verifier only when repairing
+`v1.7.6` at commit `6a441a75c8dd159607fa3933da83f600864b9146`. Reusing that
+tag for another commit cannot use this exception. The workflow records the actor
+and run URL, and publishes the waiver in GitHub Release notes before the first
+PyPI write. A failed disclosure prevents publication; a later repair failure
+leaves the public disclosure in place. This is not a qualification and
+does not mark any unverified gate as passing. All ordinary tag publications and
+repairs for other versions still require a valid owner-signed qualification.
 
 ## Public installed evidence
 
