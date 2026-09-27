@@ -1171,9 +1171,32 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ inputs.release_tag }}
+          WAIVE_QUALIFICATION: ${{ inputs.waive_v176_qualification }}
+          GH_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         shell: bash
         run: |
+          set -euo pipefail
+          notes_args=()
+          if [ "$WAIVE_QUALIFICATION" = "true" ]; then
+            {
+              printf '## Release qualification\n\n'
+              printf 'The owner waived full-product qualification for this release. Mandatory full-product gates are not represented as passed.\n\n'
+              printf 'Waiver record: %s\n' "$GH_RUN_URL"
+            } > "$RUNNER_TEMP/release-waiver.md"
+            notes_args=(--notes-file "$RUNNER_TEMP/release-waiver.md")
+          fi
           if gh release view "$RELEASE_TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
+            if [ "$WAIVE_QUALIFICATION" = "true" ]; then
+              gh release view "$RELEASE_TAG" --repo "$GH_REPO" --json body --jq .body \
+                > "$RUNNER_TEMP/release-notes-existing.md"
+              {
+                cat "$RUNNER_TEMP/release-notes-existing.md"
+                printf '\n\n'
+                cat "$RUNNER_TEMP/release-waiver.md"
+              } > "$RUNNER_TEMP/release-notes.md"
+              gh release edit "$RELEASE_TAG" --repo "$GH_REPO" \
+                --notes-file "$RUNNER_TEMP/release-notes.md"
+            fi
             gh release upload "$RELEASE_TAG" verified-dist/* release-evidence/* \
               --repo "$GH_REPO" \
               --clobber
@@ -1182,27 +1205,7 @@ jobs:
               --repo "$GH_REPO" \
               --verify-tag \
               --generate-notes \
+              "${notes_args[@]}" \
               --title "Engraphis ${RELEASE_TAG#v}" \
               --latest
           fi
-
-      - name: Disclose the qualification waiver in GitHub Release notes
-        if: inputs.waive_v176_qualification
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
-          GH_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          gh release view "$RELEASE_TAG" --repo "$GH_REPO" --json body --jq .body \
-            > "$RUNNER_TEMP/release-notes-existing.md"
-          {
-            cat "$RUNNER_TEMP/release-notes-existing.md"
-            printf '\n\n## Release qualification\n\n'
-            printf 'The owner waived full-product qualification for this release. Mandatory full-product gates are not represented as passed.\n\n'
-            printf 'Waiver record: %s\n' "$GH_RUN_URL"
-          } > "$RUNNER_TEMP/release-notes.md"
-          gh release edit "$RELEASE_TAG" --repo "$GH_REPO" \
-            --notes-file "$RUNNER_TEMP/release-notes.md"

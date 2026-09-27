@@ -6,7 +6,10 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
+import shutil
+import subprocess
 
 import pytest
 
@@ -219,8 +222,63 @@ def test_publication_writes_require_qualification_except_scoped_v176_waiver():
                         if step.get("name") == "Enforce and record the v1.7.6-only qualification waiver")
     assert waiver_guard.get("if") == "inputs.waive_v176_qualification"
     assert 'test "$RELEASE_TAG" = "v1.7.6"' in waiver_guard["run"]
-    assert any(step.get("name") == "Disclose the qualification waiver in GitHub Release notes"
-               and step.get("if") == "inputs.waive_v176_qualification" for step in repair_steps)
+    repair = next(step for step in repair_steps if step.get("name") == "Repair GitHub Release")
+    assert repair["env"]["WAIVE_QUALIFICATION"] == "${{ inputs.waive_v176_qualification }}"
+    assert repair["run"].index("gh release edit") < repair["run"].index("gh release upload")
+    assert '"${notes_args[@]}"' in repair["run"].split("gh release create", 1)[1]
     assert "${{ vars.ENGRAPHIS_RELEASE_" not in (
         root / ".github/workflows/release.yml"
     ).read_text(encoding="utf-8")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="release workflow executes in Linux bash")
+@pytest.mark.parametrize("existing,edit_fails", [(False, False), (True, False), (True, True)])
+def test_waiver_disclosure_cannot_follow_github_publication(tmp_path, existing, edit_fails):
+    yaml = pytest.importorskip("yaml")
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash is unavailable")
+    root = Path(__file__).resolve().parents[1]
+    workflow = yaml.safe_load((root / ".github/workflows/release.yml").read_text(encoding="utf-8"))
+    repair = next(step for step in workflow["jobs"]["github-release-repair"]["steps"]
+                  if step.get("name") == "Repair GitHub Release")
+    executable = tmp_path / "gh"
+    executable.write_text("""#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> "$GH_CALLS"
+case "$2" in
+  view)
+    if [ "$EXISTING" != true ]; then exit 1; fi
+    printf 'Existing release notes\\n'
+    ;;
+  edit)
+    if [ "$EDIT_FAILS" = true ]; then exit 7; fi
+    ;;
+esac
+""", encoding="utf-8")
+    executable.chmod(0o700)
+    script = tmp_path / "repair.sh"
+    script.write_text(repair["run"], encoding="utf-8")
+    calls_path = tmp_path / "calls.txt"
+    result = subprocess.run([bash, str(script)], cwd=tmp_path, capture_output=True, text=True,
+                            timeout=20, env={**os.environ, "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
+                                             "RUNNER_TEMP": str(tmp_path), "RELEASE_TAG": "v1.7.6",
+                                             "WAIVE_QUALIFICATION": "true", "GH_REPO": "test/repo",
+                                             "GH_RUN_URL": "https://example.test/run/1", "GH_CALLS": str(calls_path),
+                                             "EXISTING": str(existing).lower(), "EDIT_FAILS": str(edit_fails).lower()})
+    calls = calls_path.read_text(encoding="utf-8").splitlines()
+    assert result.returncode == (7 if edit_fails else 0), result.stderr
+    if existing:
+        edits = [index for index, call in enumerate(calls) if call.startswith("release edit ")]
+        uploads = [index for index, call in enumerate(calls) if call.startswith("release upload ")]
+        assert len(edits) == 1
+        assert not uploads if edit_fails else len(uploads) == 1 and edits[0] < uploads[0]
+        notes = (tmp_path / "release-notes.md").read_text(encoding="utf-8")
+        assert notes.startswith("Existing release notes")
+    else:
+        creation = next(call for call in calls if call.startswith("release create "))
+        assert "--notes-file " in creation
+        assert not any(call.startswith("release edit ") for call in calls)
+        notes = (tmp_path / "release-waiver.md").read_text(encoding="utf-8")
+    assert "Mandatory full-product gates are not represented as passed." in notes
+    assert "https://example.test/run/1" in notes
