@@ -1,4 +1,5 @@
 import json
+from contextlib import contextmanager
 from pathlib import Path
 import subprocess
 import sys
@@ -365,6 +366,7 @@ with _runner_lock(lock):
 _WAIT_QUEUE = r"""
 import json
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -394,6 +396,22 @@ def runner(*_args, **_kwargs):
 
 
 queue._verified_artifact = verify
+if len(sys.argv) == 9:
+    paused, resume = Path(sys.argv[7]), Path(sys.argv[8])
+    original_probe = queue._prerequisite_ready
+
+    def probe_between_barriers(*args):
+        ready = original_probe(*args)
+        if not ready and not paused.exists():
+            paused.write_text("paused", encoding="utf-8")
+            deadline = time.monotonic() + 20
+            while not resume.exists():
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("parent did not release the between-probe barrier")
+                time.sleep(0.01)
+        return ready
+
+    queue._prerequisite_ready = probe_between_barriers
 try:
     queue.execute(plan, directory, runner=runner, poll_seconds=0.02,
                   wait_timeout=60, default_timeout_seconds=60)
@@ -487,10 +505,11 @@ def _start_owner(plan_path, result_dir, ready, calls, error):
     )
 
 
-def _start_wait_queue(plan_path, result_dir, started, verified, done, error):
+def _start_wait_queue(plan_path, result_dir, started, verified, done, error, *, barrier=None):
     return subprocess.Popen(
         [sys.executable, "-c", _WAIT_QUEUE, str(result_dir), str(plan_path),
-         str(started), str(verified), str(done), str(error)],
+         str(started), str(verified), str(done), str(error)]
+        + ([] if barrier is None else [str(path) for path in barrier]),
         cwd=Path.cwd(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         **_SUBPROCESS_OPTIONS,
     )
@@ -663,6 +682,7 @@ def test_queue_waits_for_legacy_ephemeral_producer_marker_until_removed(tmp_path
     verified = tmp_path / "verified"
     done = tmp_path / "done"
     queue_error = tmp_path / "queue-error"
+    paused, resume = tmp_path / "probe-paused", tmp_path / "probe-resume"
     queue_plan = _wait_plan(producer_lock, artifact)
     plan_path = tmp_path / "wait-plan.json"
     plan_path.write_text(json.dumps(queue_plan), encoding="utf-8")
@@ -670,12 +690,14 @@ def test_queue_waits_for_legacy_ephemeral_producer_marker_until_removed(tmp_path
     try:
         queue_process = _start_wait_queue(
             plan_path, tmp_path / "results", queue_ready, verified, done, queue_error,
+            barrier=(paused, resume),
         )
         _wait_for_marker(queue_ready, queue_process)
-        _wait_for_prerequisite_status(tmp_path / "results", queue_process)
+        _wait_for_marker(paused, queue_process)
         assert queue_process.poll() is None
         assert not verified.exists()
         producer_lock.unlink()
+        resume.write_text("resume", encoding="utf-8")
         _wait_for_marker(done, queue_process)
         queue_process.wait(timeout=10)
         stdout, stderr = queue_process.communicate(timeout=10)
@@ -687,6 +709,50 @@ def test_queue_waits_for_legacy_ephemeral_producer_marker_until_removed(tmp_path
                 _stop_process(queue_process)
             else:
                 queue_process.communicate(timeout=10)
+
+
+def test_queue_retries_a_verified_legacy_removal_without_verifying_during_the_probe(tmp_path, monkeypatch):
+    from eval.external_checkpoints import LegacyRunnerLockRemoved
+
+    artifact = tmp_path / "diagnostic.json"
+    artifact.write_text("{}", encoding="utf-8")
+    producer_lock = tmp_path / "legacy-producer.lock"
+    producer_lock.write_text("running", encoding="utf-8")
+
+    @contextmanager
+    def disappearing_probe(path, *, create=True):
+        assert path == producer_lock
+        assert not create
+        producer_lock.unlink()
+        raise LegacyRunnerLockRemoved("legacy external runner marker was removed; probe again")
+        yield  # pragma: no cover - the probe always raises
+
+    monkeypatch.setattr(queue, "_runner_lock", disappearing_probe)
+    monkeypatch.setattr(queue, "_verified_artifact", lambda path: pytest.fail("verified during changed probe"))
+    assert not queue._prerequisite_ready(artifact, producer_lock)
+
+
+@pytest.mark.parametrize("error", [PermissionError("denied"), OSError("unreadable")])
+def test_queue_does_not_treat_an_unreadable_marker_as_removed(tmp_path, monkeypatch, error):
+    artifact = tmp_path / "diagnostic.json"
+    artifact.write_text("{}", encoding="utf-8")
+    producer_lock = tmp_path / "legacy-producer.lock"
+    producer_lock.write_text("running", encoding="utf-8")
+
+    original_lstat = Path.lstat
+    calls = []
+
+    def unreadable_marker(path, *args, **kwargs):
+        if Path(path) == producer_lock:
+            calls.append(path)
+            if len(calls) == 2:
+                raise error
+        return original_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "lstat", unreadable_marker)
+    monkeypatch.setattr(queue, "_verified_artifact", lambda path: pytest.fail("unsafe producer was accepted"))
+    with pytest.raises(ValueError, match="unsafe or changed"):
+        queue._prerequisite_ready(artifact, producer_lock)
 
 
 def _complete_capacity_summary():
