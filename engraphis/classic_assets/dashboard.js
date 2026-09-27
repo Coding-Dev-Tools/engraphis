@@ -618,8 +618,8 @@ window.GSET.frozen=false;
 function graphNodeRadius(node,base,metric){
  const size=Number.isFinite(+base)&&+base>0?+base:3;
  const normalized=Math.max(0,Math.min(1,Number(metric)||0));
- const radius=size*.45*(.55+Math.min(1.6,normalized*1.9));
- return Math.max(.8,Math.min(size*1.1,radius));
+ const radius=size*.45*(.6+Math.min(1.6,normalized*1.9));
+ return Math.max(.25,Math.min(size*1.1,radius));
 }
 const ETYPE_TOKEN={person_or_concept:'--entity-concept',mention:'--entity-mention',hashtag:'--entity-hashtag',email:'--entity-email',organization:'--entity-organization',location:'--entity-location'};
 const GRAPH_PALETTES={
@@ -1220,7 +1220,7 @@ function loadAllGraphEngine(){
  if(typeof EngraphisEveryGraph!=='undefined')return Promise.resolve();
  if(!ALL_GRAPH_ENGINE_LOADING){
   ALL_GRAPH_ENGINE_LOADING=new Promise((resolve,reject)=>{
-   const script=document.createElement('script');script.src='/v2-assets/engraphis-graph-every.js?v=20260925-evidence-mass-1';
+   const script=document.createElement('script');script.src='/v2-assets/engraphis-graph-every.js?v=20260927-unmerged-readiness-1';
    script.onload=()=>{typeof EngraphisEveryGraph==='undefined'?reject(new Error('Every-node graph asset loaded without registering EngraphisEveryGraph')):resolve()};
    script.onerror=()=>reject(new Error('Every-node graph asset could not load'));
    document.head.appendChild(script);
@@ -1237,7 +1237,7 @@ function loadGraphEngine(loadAll=false){
    GRAPH_ENGINE_LOADING=new Promise((resolve,reject)=>{
     const script=document.createElement('script');
     const bust=GRAPH_ENGINE_RETRY>0?'&r='+GRAPH_ENGINE_RETRY:'';
-    script.src='/v2-assets/engraphis-graph.js?v=20260906-galaxy-boundaries-1'+bust;
+    script.src='/v2-assets/engraphis-graph.js?v=20260927-unmerged-readiness-1'+bust;
     /* A 200 that never registers the global is a corrupt/truncated asset, not a success —
        resolving there would hand graphRenderEngine() an undefined EngraphisGraph. Failed
        attempts drop the script node and clear the memo so the next call retries with a

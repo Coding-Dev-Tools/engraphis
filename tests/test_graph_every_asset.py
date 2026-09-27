@@ -347,7 +347,7 @@ def test_renderer_export_is_synchronous_and_composites_every_layer() -> None:
     renderer = RENDERER.read_text(encoding="utf-8")
     body = renderer[renderer.index("function exportImageCanvas"):renderer.index("function destroyGraph")]
     assert "caf(state.labelFrame)" in body  # pending overlay frame must not leak stale paint
-    assert "drawOverlay(now)" in body       # overlay painted synchronously
+    assert "drawOverlay(now, true)" in body  # bypass the flow throttle during export
     assert "context.drawImage(underlay, 0, 0)" in body
     assert "context.drawImage(canvas, 0, 0)" in body
     assert "context.drawImage(labels, 0, 0)" in body

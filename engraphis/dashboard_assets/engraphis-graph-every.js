@@ -8,7 +8,7 @@
 (function () {
   'use strict';
 
-  const WORKER_URL = '/v2-assets/engraphis-graph-every-worker.js?v=20260925-evidence-mass-1';
+  const WORKER_URL = '/v2-assets/engraphis-graph-every-worker.js?v=20260927-unmerged-readiness-1';
   const MAX_NODES = 20000;
   const MAX_LINKS = 200000;
   const LABEL_MAX = 220;
@@ -159,8 +159,8 @@
       collapse: false, collapsed: false,
       focus: -1, hover: -1, hoverPoint: [0, 0], focusPoint: [0, 0],
       neighbors: null, incidentEdges: null, connectionHighlights: null, ready: false, visibleCount: 0,
-      frame: 0, labelFrame: 0, flowPaintAt: 0, layoutPending: false, lastLabelKey: '', labelLayout: [],
-      drag: null, pickGrid: null, pickDirty: true,
+      frame: 0, labelFrame: 0, flowPaintAt: 0, overlayPaintAt: 0, layoutPending: false, lastLabelKey: '', labelLayout: [],
+      underlayKey: '', drag: null, pickGrid: null, pickDirty: true,
       destroyed: false, paused: false, unsupported: !gl, error: null,
       labelMetrics: new Map(),
     };
@@ -479,9 +479,13 @@
         });
       }
       state.communityRegions = regions.sort((a, b) => b.count - a.count).slice(0, REGION_LIMIT);
+      state.underlayKey = '';
     }
     function drawRegions() {
       if (!underlayContext || !state.ready) return;
+      const key = `${state.camera.x}|${state.camera.y}|${state.camera.scale}|${state.width}|${state.height}|${state.dpr}|${state.styleName}|${state.palette}|${state.colorBy}`;
+      if (key === state.underlayKey) return;
+      state.underlayKey = key;
       if (!state.communityRegions.length) {
         underlayContext.setTransform(state.dpr, 0, 0, state.dpr, 0, 0);
         underlayContext.clearRect(0, 0, state.width, state.height);
@@ -492,9 +496,9 @@
          out and get out of the way of close reading. Strong enough to survive the edge
          field painted over them. */
       const strength = clamp(1 - Math.abs(ratio - 0.9) / 1.4, 0, 1) * 0.26;
-      if (strength <= 0.005) { underlayContext.clearRect(0, 0, state.width, state.height); return; }
       underlayContext.setTransform(state.dpr, 0, 0, state.dpr, 0, 0);
       underlayContext.clearRect(0, 0, state.width, state.height);
+      if (strength <= 0.005) return;
       const viewRadius = Math.hypot(state.width / (2 * state.camera.scale), state.height / (2 * state.camera.scale)) + 80;
       for (const region of state.communityRegions) {
         const point = screen(region.x, region.y);
@@ -586,23 +590,41 @@
 
     /* ── Overlay: decluttered labels + capped relation flow ─────────────────────── */
     function labelText(index) { return state.labels[index] || state.ids[index]; }
-    function drawOverlay(now = 0) {
+    function drawOverlay(now, force = false) {
       state.labelFrame = 0;
       if (!labelContext || state.destroyed || state.paused) return;
+      const stamp = typeof now === 'number' && now > 0
+        ? now
+        : (typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now());
+      if (!force && flowAnimating() && state.overlayPaintAt
+        && stamp - state.overlayPaintAt < FLOW_FRAME_MS) {
+        if (flowAnimating() && !state.destroyed && !state.paused) {
+          state.labelFrame = raf(runOverlayFrame);
+        }
+        return;
+      }
+      state.overlayPaintAt = stamp;
       labelContext.setTransform(state.dpr, 0, 0, state.dpr, 0, 0);
       labelContext.clearRect(0, 0, state.width, state.height);
-      drawRelationFlow(now);
+      drawRelationFlow(stamp);
       drawFocusRing();
       drawDeclutteredLabels();
       /* Lit paths and their arrows paint above background structure... */
       drawHotEdgeDecorations();
       /* ...and the hover card paints above absolutely everything. */
       drawHoverCardLayer();
+      if (flowAnimating() && !state.destroyed && !state.paused) {
+        state.labelFrame = raf(runOverlayFrame);
+      }
     }
+    function runOverlayFrame(now) { drawOverlay(now); }
     function scheduleLabels(immediate = false) {
       if (state.destroyed || state.paused || !labelContext) return;
-      if (immediate) { if (state.labelFrame) caf(state.labelFrame); state.labelFrame = raf(() => drawOverlay()); return; }
-      if (!state.labelFrame) state.labelFrame = raf(() => drawOverlay());
+      if (state.labelFrame) {
+        if (!immediate) return;
+        caf(state.labelFrame);
+      }
+      state.labelFrame = raf(nextStamp => drawOverlay(nextStamp, immediate));
     }
     /* Lit-path decorations: the hovered/highlighted node's relations get direction arrows
        and their relation name, so reading a connection does not require opening anything. */
@@ -788,9 +810,13 @@
       const cacheKey = `${font}|${key}`;
       labelContext.font = font;
       labelContext.textBaseline = 'middle';
-      labelContext.shadowColor = 'rgba(4,8,12,0.85)';
-      labelContext.shadowBlur = 3;
-      labelContext.fillStyle = 'rgba(224,236,241,0.86)';
+      const isLight = state.themeColors && state.themeColors.canvas && (
+        state.themeColors.canvas === '#fbfaf8' || state.themeColors.canvas === '#f0eee8'
+        || state.themeColors.canvas.startsWith('#f') || state.themeColors.canvas.startsWith('#e')
+      );
+      labelContext.shadowColor = isLight ? 'rgba(255,255,255,0.95)' : 'rgba(4,8,12,0.85)';
+      labelContext.shadowBlur = isLight ? 4 : 3;
+      labelContext.fillStyle = (state.themeColors && state.themeColors.label) || (isLight ? '#1c1f24' : 'rgba(224,236,241,0.86)');
       if (cacheKey === state.lastLabelKey && state.labelLayout.length) {
         state.labelLayout.forEach(item => labelContext.fillText(item.text, item.x, item.y));
         labelContext.shadowColor = 'transparent';
@@ -951,6 +977,7 @@
         target.width = Math.max(1, Math.floor(state.width * state.dpr));
         target.height = Math.max(1, Math.floor(state.height * state.dpr));
       });
+      state.underlayKey = '';
       state.lastLabelKey = '';
       if (state.ready) { schedule(); scheduleLabels(true); }
     }
@@ -1279,7 +1306,8 @@
     element.addEventListener('keydown', handleKeydown);
 
     const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(resize) : null;
-    if (observer) observer.observe(element); else window.addEventListener('resize', resize);
+    if (observer) observer.observe(element);
+    window.addEventListener('resize', resize);
 
     initWebgl();
     if (gl && nodeProgram) {
@@ -1304,7 +1332,9 @@
       const now = typeof performance !== 'undefined' ? performance.now() : 0;
       draw(now);
       drawRegions();
-      drawOverlay(now);
+      /* draw() may have queued an overlay frame; the forced paint below supersedes it. */
+      if (state.labelFrame) { caf(state.labelFrame); state.labelFrame = 0; }
+      drawOverlay(now, true);
       const output = document.createElement('canvas');
       output.width = canvas.width;
       output.height = canvas.height;
@@ -1331,7 +1361,7 @@
         worker = null;
       }
       if (observer) observer.disconnect();
-      else window.removeEventListener('resize', resize);
+      window.removeEventListener('resize', resize);
       element.removeEventListener('keydown', handleKeydown);
       if (gl) {
         [nodeBuffers.position, nodeBuffers.color, nodeBuffers.size, nodeBuffers.flag,
@@ -1489,7 +1519,12 @@
         return api;
       },
       freeze(value = true) { state.settings.frozen = value !== false; return api.setSettings({ frozen: state.settings.frozen }); },
-      pause() { state.paused = true; if (state.frame) { caf(state.frame); state.frame = 0; } return api; },
+      pause() {
+        state.paused = true;
+        if (state.frame) { caf(state.frame); state.frame = 0; }
+        if (state.labelFrame) { caf(state.labelFrame); state.labelFrame = 0; }
+        return api;
+      },
       resume() { state.paused = false; schedule(); scheduleLabels(); return api; },
       state() {
         return {
