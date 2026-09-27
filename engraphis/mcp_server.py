@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import importlib
 import json
 import logging
 import math
@@ -56,6 +57,7 @@ except ImportError:  # pragma: no cover - exercised only without the optional de
         "Install it with:  pip install \"engraphis[mcp]\"   (or: pip install mcp)"
     )
 
+from engraphis.backends.model_source import validate_model_source
 from engraphis.config import settings
 from engraphis.core.context import RegexTokenCounter
 from engraphis.core.poisoning import prompt_eligible
@@ -3235,6 +3237,44 @@ def _start_background_warmup() -> None:
     thread.start()
 
 
+def _preload_sentence_transformers() -> None:
+    """Import semantic dependencies on the launcher thread before serving MCP.
+
+    On Windows, a first native import in an MCP worker or warmup thread can stall
+    the first tool call. Keep model construction lazy; this imports only the
+    optional package. The factory still decides whether a failed import may
+    fall back or must fail under exact-backend mode.
+    """
+    policy = os.environ.get("ENGRAPHIS_MCP_PRELOAD_EMBEDDER", "auto").strip().lower()
+    if policy in {"0", "false", "no", "off"}:
+        return
+    if policy not in {"1", "true", "yes", "on"} and sys.platform != "win32":
+        return
+    sources = [
+        (getattr(settings, "embed_model", ""), getattr(settings, "embed_revision", None)),
+        (getattr(settings, "rerank_model", ""), getattr(settings, "rerank_revision", None)),
+    ]
+    if not any(str(model or "").strip() for model, _revision in sources):
+        return
+    # Strict provenance must fail before optional loaders are imported, even when
+    # ordinary backend failures are allowed to fall back to offline behavior.
+    for model, revision in sources:
+        validate_model_source(
+            model, revision,
+            require_immutable_models=getattr(settings, "require_immutable_models", False),
+            loader="MCP semantic dependency preload",
+        )
+
+    try:
+        # Dependencies may print during import; stdout is the JSON-RPC wire.
+        from contextlib import redirect_stdout
+
+        with redirect_stdout(sys.stderr):
+            importlib.import_module("sentence_transformers")
+    except Exception as exc:  # noqa: BLE001 - optional dependency; factory owns policy
+        logger.debug("MCP embedding dependency preload skipped (%s)", type(exc).__name__)
+
+
 async def _safe_run_stdio_async(server: FastMCP) -> None:
     """Run stdio transport with pure wire protocol isolation.
 
@@ -3253,6 +3293,7 @@ async def _safe_run_stdio_async(server: FastMCP) -> None:
     # dependency may write diagnostics to stdout while it imports; stdio MCP
     # reserves that stream exclusively for JSON-RPC frames.
     sys.stdout = sys.stderr
+    _preload_sentence_transformers()
     _eager_exact_backend_check()
     _start_background_warmup()
     if real_stdout_buffer is not None and real_stdin_buffer is not None:

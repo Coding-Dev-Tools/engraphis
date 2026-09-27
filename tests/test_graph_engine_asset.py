@@ -471,7 +471,7 @@ def test_graph_engine_deep_link_reaches_the_next_engine_after_a_lazy_load() -> N
     report = _run_routing("loads")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260927-unmerged-readiness-2"
+        "/v2-assets/engraphis-graph.js?v=20260927-unmerged-readiness-3"
     ]
     # It waits rather than rendering something wrong in the meantime.
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
@@ -486,7 +486,7 @@ def test_classic_route_reaches_the_canonical_engine_without_a_query_flag() -> No
     report = _run_routing("classic")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260927-unmerged-readiness-2"
+        "/v2-assets/engraphis-graph.js?v=20260927-unmerged-readiness-3"
     ]
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
     assert report["engine"] == 1
@@ -500,7 +500,7 @@ def test_show_all_lazily_loads_its_renderer_after_the_main_engine_is_ready() -> 
     report = _run_routing("all-loaded")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph-every.js?v=20260927-unmerged-readiness-2"
+        "/v2-assets/engraphis-graph-every.js?v=20260927-unmerged-readiness-3"
     ]
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
     assert report["engine"] == 1
@@ -2565,6 +2565,105 @@ def test_spacetime_canvas_warps_the_grid_and_bounds_trails_without_dom_nodes(pus
     assert report["snapshotReads"] == (1 if push_snapshots else 6)
     assert report["listenerDetached"] is True
     assert report["visibilityDetached"] is True
+
+
+@requires_node
+@pytest.mark.parametrize("replace_paused_engine", [False, True])
+def test_spacetime_lifecycle_clears_disabled_canvas_and_wakes_replacements(replace_paused_engine) -> None:
+    report = _run_spacetime_node(
+        """
+        const replacePausedEngine = REPLACE_PAUSED_ENGINE;
+        const frames = new Map();
+        let nextFrame = 0, clears = 0, strokes = 0;
+        const reads = { a: 0, b: 0, c: 0, d: 0 };
+        const ctx = new Proxy({}, {
+          get(_target, key) {
+            if (key === 'clearRect') return () => { clears++; };
+            if (key === 'stroke') return () => { strokes++; };
+            return () => ({ addColorStop() {} });
+          },
+          set() { return true; },
+        });
+        globalThis.requestAnimationFrame = callback => {
+          const id = ++nextFrame;
+          frames.set(id, callback);
+          return id;
+        };
+        globalThis.cancelAnimationFrame = id => frames.delete(id);
+        globalThis.window = { devicePixelRatio: 1 };
+        globalThis.document = {
+          hidden: false, addEventListener() {}, removeEventListener() {},
+          createElement: () => ({
+            width: 0, height: 0, setAttribute() {}, remove() {},
+            getContext: () => ctx,
+          }),
+        };
+        const container = {
+          clientWidth: 900, clientHeight: 600, appendChild() {},
+          addEventListener() {}, removeEventListener() {},
+        };
+        const tick = stamp => {
+          const entry = frames.entries().next().value;
+          if (!entry) return false;
+          frames.delete(entry[0]);
+          entry[1](stamp);
+          return true;
+        };
+        const snapshot = paused => ({
+          paused, nodes: [], systemAnchors: [],
+          center: { x: 0, y: 0, radius: 11 },
+          viewport: { x: 450, y: 300, zoom: 1 },
+        });
+        const engine = (key, paused) => ({
+          getPhysicsSnapshot() { reads[key]++; return snapshot(paused); },
+        });
+        new Function('window', source)(window);
+        const overlay = window.EngraphisSpacetime.create(container, engine('a', replacePausedEngine));
+        if (replacePausedEngine) overlay.setSnapshot(snapshot(true));
+        overlay.setEnabled(true);
+        tick(100);
+        const first = { frames: frames.size, clears, strokes, aReads: reads.a };
+        let replacementQueued = null;
+        if (replacePausedEngine) {
+          overlay.setEngine(engine('b', false));
+          replacementQueued = frames.size;
+          tick(140);
+        }
+        const beforeDisable = { frames: frames.size, clears, strokes, bReads: reads.b };
+        overlay.setEnabled(false);
+        const disabled = { frames: frames.size, clears, strokes, reads: { ...reads } };
+        tick(replacePausedEngine ? 156 : 116);
+        tick(190);
+        const afterTicks = { frames: frames.size, clears, strokes, reads: { ...reads } };
+        overlay.setEngine(engine('c', true));
+        overlay.setEngine(null);
+        const disabledReplacement = { frames: frames.size, cReads: reads.c };
+        overlay.setEnabled(true);
+        tick(220);
+        const reenabled = { frames: frames.size, cReads: reads.c };
+        overlay.destroy();
+        overlay.setEngine(engine('d', false));
+        overlay.setEnabled(true);
+        overlay.setSnapshot(snapshot(false));
+        const destroyed = { frames: frames.size, cReads: reads.c, dReads: reads.d };
+        emit({ first, replacementQueued, beforeDisable, disabled, afterTicks,
+          disabledReplacement, reenabled, destroyed });
+        """.replace("REPLACE_PAUSED_ENGINE", "true" if replace_paused_engine else "false")
+    )
+    assert report["first"]["frames"] == (0 if replace_paused_engine else 1)
+    assert report["first"]["aReads"] == (0 if replace_paused_engine else 2)
+    assert report["first"]["strokes"] > 0
+    if replace_paused_engine:
+        assert report["replacementQueued"] == 1
+        assert report["beforeDisable"]["bReads"] == 1
+    assert report["beforeDisable"]["frames"] == 1
+    assert report["disabled"]["clears"] == report["beforeDisable"]["clears"] + 1
+    assert report["disabled"]["strokes"] == report["beforeDisable"]["strokes"]
+    assert report["disabled"]["frames"] == 0
+    assert report["afterTicks"] == report["disabled"]
+    assert report["disabledReplacement"] == {"frames": 0, "cReads": 0}
+    assert report["reenabled"] == {"frames": 0, "cReads": 2}
+    assert report["destroyed"] == {"frames": 0, "cReads": 2, "dReads": 0}
 
 
 @requires_node
@@ -10580,10 +10679,10 @@ def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
     d3 = loader.index("'/v2-assets/vendor/d3.min.js?v=20260727-final'")
     force_graph = loader.index("'/v2-assets/vendor/force-graph.min.js?v=20260727-final'")
     renderer = loader.index(
-        "'/v2-assets/engraphis-graph.js?v=20260927-unmerged-readiness-2'"
+        "'/v2-assets/engraphis-graph.js?v=20260927-unmerged-readiness-3'"
     )
     assert d3 < force_graph < renderer
-    assert '/v2-assets/ledger.js?v=20260927-unmerged-readiness-2' in markup
+    assert '/v2-assets/ledger.js?v=20260927-unmerged-readiness-3' in markup
     assert "if (graphAssetsPromise === attempt) releaseGraphAssetsAttempt(attempt)" in loader
     assert "graphAssetsRetry = Math.min(graphAssetsRetry + 1, 10)" in loader
     all_loader = source[source.index("function ensureGraphAllAsset()"):
