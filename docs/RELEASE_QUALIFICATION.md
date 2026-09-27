@@ -110,8 +110,11 @@ the peeled release tag commit, never the repair workflow's `main` checkout commi
 For the existing `v1.7.6` release only, the repository owner explicitly directed a
 qualification waiver on 2026-09-27. The `workflow_dispatch` input
 `waive_v176_qualification` skips the owner qualification verifier only when repairing
-`v1.7.6`; the workflow records the actor and run URL, and the GitHub Release notes
-state that full-product qualification was waived. This is not a qualification and
+`v1.7.6` at commit `6a441a75c8dd159607fa3933da83f600864b9146`. Reusing that
+tag for another commit cannot use this exception. The workflow records the actor
+and run URL, and publishes the waiver in GitHub Release notes before the first
+PyPI write. A failed disclosure prevents publication; a later repair failure
+leaves the public disclosure in place. This is not a qualification and
 does not mark any unverified gate as passing. All ordinary tag publications and
 repairs for other versions still require a valid owner-signed qualification.
 

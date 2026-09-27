@@ -1139,6 +1139,43 @@ jobs:
           python -m scripts.verify_release_qualification --dist dist \
             --commit "$ENGRAPHIS_REPAIR_COMMIT" --tag "$RELEASE_TAG"
 
+      - name: Disclose the qualification waiver before PyPI repair
+        if: inputs.waive_v176_qualification
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          GH_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RELEASE_TAG" = "v1.7.6"
+          # The exception covers this retained candidate, not future reuse of its tag.
+          test "$ENGRAPHIS_REPAIR_COMMIT" = "6a441a75c8dd159607fa3933da83f600864b9146"
+          {
+            printf '## Release qualification\n\n'
+            printf 'The owner waived full-product qualification for this release. Mandatory full-product gates are not represented as passed.\n\n'
+            printf 'Source commit: `%s`\n\n' "$ENGRAPHIS_REPAIR_COMMIT"
+            printf 'Waiver record: %s\n' "$GH_RUN_URL"
+          } > "$RUNNER_TEMP/release-waiver.md"
+          if gh release view "$RELEASE_TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
+            gh release view "$RELEASE_TAG" --repo "$GH_REPO" --json body --jq .body \
+              > "$RUNNER_TEMP/release-notes-existing.md"
+            {
+              cat "$RUNNER_TEMP/release-notes-existing.md"
+              printf '\n\n'
+              cat "$RUNNER_TEMP/release-waiver.md"
+            } > "$RUNNER_TEMP/release-notes.md"
+            gh release edit "$RELEASE_TAG" --repo "$GH_REPO" \
+              --notes-file "$RUNNER_TEMP/release-notes.md"
+          else
+            # The public notice survives a later PyPI or verification failure. Assets
+            # and latest-release promotion still wait for successful publication.
+            gh release create "$RELEASE_TAG" --repo "$GH_REPO" --verify-tag \
+              --generate-notes --notes-file "$RUNNER_TEMP/release-waiver.md" \
+              --title "Engraphis ${RELEASE_TAG#v}" --latest=false
+          fi
+
       - name: Publish only missing verified distributions
         uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # v1.14.1
         with:
@@ -1200,6 +1237,9 @@ jobs:
             gh release upload "$RELEASE_TAG" verified-dist/* release-evidence/* \
               --repo "$GH_REPO" \
               --clobber
+            if [ "$WAIVE_QUALIFICATION" = "true" ]; then
+              gh release edit "$RELEASE_TAG" --repo "$GH_REPO" --latest
+            fi
           else
             gh release create "$RELEASE_TAG" verified-dist/* release-evidence/* \
               --repo "$GH_REPO" \
