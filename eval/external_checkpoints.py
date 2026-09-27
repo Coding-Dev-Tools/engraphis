@@ -39,6 +39,10 @@ class UnrecognizedRunnerLock(ValueError):
     """A marker does not establish the cooperating OS-lock protocol."""
 
 
+class LegacyRunnerLockRemoved(UnrecognizedRunnerLock):
+    """A verified legacy PID inode was unlinked during an existing-only probe."""
+
+
 def _write(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("x", encoding="utf-8", newline="\n") as handle:
@@ -64,8 +68,9 @@ def _runner_lock(path: Path, *, create: bool = True):
     require manual inspection.
     Cooperating runners must keep the lock file in place, even after exiting.
     An existing-only probe (create=False) never creates or repairs a marker and
-    raises FileNotFoundError only for an initially absent path. Ownership covers the read
-    that depends on the producer having finished.
+    raises FileNotFoundError only for an initially absent path. A legacy PID
+    inode removed after opening asks the caller to probe again; it never grants
+    ownership. Ownership covers the read that depends on the producer having finished.
     """
 
     if create:
@@ -108,7 +113,23 @@ def _runner_lock(path: Path, *, create: bool = True):
         acquired = True
 
         try:
-            opened, named = os.fstat(handle.fileno()), path.lstat()
+            opened = os.fstat(handle.fileno())
+            try:
+                named = path.lstat()
+            except FileNotFoundError as exc:
+                # Only a known legacy PID file can disappear as normal shutdown.
+                # Check the opened inode, not a second pathname-existence guess.
+                unlinked = os.fstat(handle.fileno())
+                if (not create and initial is not None
+                        and stat.S_ISREG(unlinked.st_mode)
+                        and os.path.samestat(opened, initial)
+                        and os.path.samestat(unlinked, opened) and unlinked.st_nlink == 0):
+                    handle.seek(0)
+                    legacy = handle.read(21)
+                    if 0 < len(legacy) <= 20 and legacy.isdigit() and int(legacy) > 0:
+                        raise LegacyRunnerLockRemoved(
+                            "legacy external runner marker was removed; probe again") from exc
+                raise
         except OSError as exc:
             # Once a handle has been acquired, disappearance is a changed inode,
             # not the absent-marker compatibility case for an existing-only probe.

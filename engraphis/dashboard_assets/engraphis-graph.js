@@ -9013,9 +9013,9 @@
       const compactness = galaxyLayoutCompactness(s.gravity);
       const control = (value, fallback, min, max) => Number.isFinite(Number(value))
         ? clamp(value, min, max) : fallback;
-      const coreAttraction = control(s.gravitationalConstant, 1, 0, 2);
-      const coreMass = control(s.blackHoleMass, 1, 0, 2);
-      const clusterCohesion = control(s.localGravitationalConstant, 1, 0, 2);
+      const coreAttraction = control(s.gravitationalConstant, 1, 0, 8);
+      const coreMass = control(s.blackHoleMass, 1, 0, 16);
+      const clusterCohesion = control(s.localGravitationalConstant, 1, 0, 8);
       const settlingResistance = control(s.damping, 1, 0, 15);
       const linkSpring = control(s.springStiffness, 1, 0, 100 / 32);
       /* Keep zero-force endpoints finite without flattening the lower slider range. The 0.5
@@ -11363,7 +11363,9 @@
        delayed zoom-to-fit: callers that also centre a node otherwise start two competing
        camera animations, and the late fit wins by dragging the selected entity away. */
     api.focus = id => {
-      if (destroyed || !renderedNode(id)) return false;
+      if (destroyed || !raw.nodes.some(node => node.id === id)) return false;
+      const target = renderedNode(id);
+      if (!target || target.cluster === true) return false;
       state.focusId = id;
       hilite = id;
       hoverSet = new Set([id].concat(adj[id] || []));

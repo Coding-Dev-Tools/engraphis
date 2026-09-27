@@ -1027,14 +1027,14 @@ test('Ledger cache-busts a graph renderer that fetched but did not register', as
   await expect(page.locator('#graph-empty')).toContainText('Graph unavailable');
   expect(rendererRequests).toHaveLength(1);
   const first = new URL(rendererRequests[0]);
-  expect(first.searchParams.get('v')).toBe('20260927-unmerged-readiness-1');
+  expect(first.searchParams.get('v')).toBe('20260927-unmerged-readiness-2');
   expect(first.searchParams.has('retry')).toBe(false);
 
   await page.getByRole('button', { name: 'Reload data' }).click();
   await expect(page.locator('#graph-count')).toContainText('3 entities · 1 relations');
   expect(rendererRequests).toHaveLength(2);
   const second = new URL(rendererRequests[1]);
-  expect(second.searchParams.get('v')).toBe('20260927-unmerged-readiness-1');
+  expect(second.searchParams.get('v')).toBe('20260927-unmerged-readiness-2');
   expect(second.searchParams.get('retry')).toBe('1');
 });
 
@@ -1146,6 +1146,33 @@ test('Ledger applies each Galaxy preference migration once', async ({ page }) =>
     const saved = await readPreferences();
     expect(saved.tuning).toMatchObject({ repel: 400, link: 80, gravity: 400 });
     expect(saved.spacetimeTuning).toMatchObject(spacetimeTuning);
+  }
+});
+
+test('Ledger migrates only the complete retired spacetime vector', async ({ page }) => {
+  const key = 'engraphis-ledger-graph-preferences-v1';
+  await mockApi(page);
+  await page.goto('/');
+  const readPreferences = () => page.evaluate(storageKey =>
+    JSON.parse(localStorage.getItem(storageKey)), key);
+  const cases = [
+    [{ gravitationalConstant: 100, blackHoleMass: 160, localGravitationalConstant: 100 },
+      { gravitationalConstant: 60, blackHoleMass: 96, localGravitationalConstant: 60 }],
+    [{ gravitationalConstant: 100, blackHoleMass: 240, localGravitationalConstant: 100 }],
+    [{ gravitationalConstant: 150, blackHoleMass: 160, localGravitationalConstant: 75 }],
+    [{ gravitationalConstant: 100, blackHoleMass: 250 }],
+  ];
+  for (const [saved, migrated = saved] of cases) {
+    const spacetimeTuning = { ...saved, damping: 7, springStiffness: 25 };
+    await page.evaluate(({ storageKey, value }) => {
+      localStorage.setItem(storageKey, JSON.stringify(value));
+    }, { storageKey: key, value: { physicsVersion: 5, preset: 'galaxy', spacetimeTuning } });
+    await page.reload();
+    const actual = await readPreferences();
+    expect(actual.physicsVersion).toBe(6);
+    expect(actual.spacetimeTuning).toMatchObject({ ...migrated, damping: 7, springStiffness: 25 });
+    await page.reload();
+    expect(await readPreferences()).toEqual(actual);
   }
 });
 
