@@ -9,7 +9,7 @@
    with both the dashboard adapter and standalone scene payloads. */
 (function () {
   const PRESETS = {
-    galaxy: { label: 'Galaxy gravity', repel: 100, link: 8, gravity: 120, font: 12, size: 3, linkw: 0.72, labelDensity: 24, curve: 0.12, particles: 0 },
+    galaxy: { label: 'Galaxy gravity', repel: 100, link: 8, gravity: 72, font: 12, size: 3, linkw: 0.72, labelDensity: 24, curve: 0.12, particles: 0 },
     original: { label: 'Original force', repel: 120, link: 30, gravity: 14, font: 13, size: 3, linkw: 1, labelDensity: 40, curve: 0, particles: 0 },
     compact: { label: 'Compact clusters', repel: 42, link: 20, gravity: 26, font: 12, size: 3, linkw: 0.7, labelDensity: 30, curve: 0.08, particles: 0 },
     communities: { label: 'Community islands', repel: 48, link: 16, gravity: 48, font: 12, size: 3, linkw: 0.72, labelDensity: 24, curve: 0.12, particles: 0 },
@@ -91,7 +91,7 @@
   const GALAXY_EXACT_LIMIT = 64;
   const GALAXY_BARNES_HUT_THETA = 0.85;
   const GALAXY_GRAVITY_MAXIMUM = 400;
-  const GALAXY_GRAVITY_MAX_STRENGTH_GAIN = 1.5;
+  const GALAXY_GRAVITY_MAX_STRENGTH_GAIN = 1.65;
   const GALAXY_GRAVITY_STRENGTH_GAIN_START = 200;
   /* The emergency acceleration cap follows the full visible strength range. Direct callers can
      still pass pathological values, but those values clamp to the same 0..400 physics ceiling. */
@@ -108,7 +108,7 @@
   }
   /* Keep the established calibration through 200, then make the extended range tighten the
      field smoothly. Multiplying the normalized high-end span by 1.5 makes the stronger response
-     arrive 50% sooner while the maximum remains capped at exactly 1.5x. */
+     arrive 50% sooner while the maximum remains capped at exactly 1.65x (+43% at max gravity). */
   const GALAXY_GRAVITY_RESPONSE_RATE_MULTIPLIER = 1.5;
   function galaxyGravityStrengthMultiplier(setting) {
     const raw = Number(setting);
@@ -125,10 +125,10 @@
     const base = value * (772 + 11 * value) / 2600;
     const boost = 1 + 0.25 * galaxySmoothstep(value / 48)
       + 0.25 * galaxySmoothstep((value - 48) / 52);
-    /* Calibrate the compact Galaxy layout with a 1.875 base-field scale. The independent
-       carrier clock below keeps central motion calm while the local stellar clock remains
-       visible; neither clock changes this slider's strictly increasing response. */
-    return base * boost * 4 * galaxyGravityStrengthMultiplier(value) * 1.875;
+    /* Calibrate the compact Galaxy layout with a 2.4375 base-field scale (+30% at baseline).
+       The independent carrier clock below keeps central motion calm while the local stellar clock
+       remains visible; neither clock changes this slider's strictly increasing response. */
+    return base * boost * 4 * galaxyGravityStrengthMultiplier(value) * 2.4375;
   }
   /* Gravity strength is the galaxy-wide black-hole control. The dashboard's Gravity slider
      flows to the explicit global anchor: zero user gravity is a real zero field, and the
@@ -758,8 +758,7 @@
     const maxAngularSpeed = 3.5;
     const angularCappedSpeed = Math.min(circularSpeed, maxAngularSpeed * localRadius);
     return kinematicCap
-      ? Math.min(angularCappedSpeed * multiplier,
-        GALAXY_LOCAL_RELATIVE_SPEED_LIMIT * multiplier)
+      ? Math.min(GALAXY_LOCAL_RELATIVE_SPEED_LIMIT, angularCappedSpeed * multiplier)
       : Math.min(GALAXY_LOCAL_RELATIVE_SPEED_LIMIT, angularCappedSpeed) * multiplier;
   }
 
@@ -823,8 +822,8 @@
       return Math.max(2, Math.min(size * 2.7, radius));
     }
     const normalized = Math.max(0, Math.min(1, Number(metric) || 0));
-    const radius = size * 0.45 * (0.55 + Math.min(1.6, normalized * 1.9));
-    return Math.max(0.8, Math.min(size * 1.1, radius));
+    const radius = size * 0.45 * (0.60 + Math.min(1.6, normalized * 1.9));
+    return Math.max(0.25, Math.min(size * 1.1, radius));
   }
   function finitePositive(value, fallback, ceiling) {
     const number = Number(value);
@@ -2700,9 +2699,10 @@
        open headroom from there. The 4x ceiling keeps direct engine values
        (up to 8xG/16x mass) presentable. */
     const liveDefaultG = 2;
-    const centralScale = Math.min(4, Math.sqrt(Math.max(0.25,
-      Number(field.gravitationalConstantMultiplier) || 1) / liveDefaultG)
-      * Math.sqrt(Math.max(0.25, Number(field.blackHoleMassMultiplier) || 1)));
+    const gMult = (field && Number(field.gravitationalConstantMultiplier)) || 1;
+    const mMult = (field && Number(field.blackHoleMassMultiplier)) || 1;
+    const centralScale = Math.min(4, Math.sqrt(Math.max(0.25, gMult) / liveDefaultG)
+      * Math.sqrt(Math.max(0.25, mMult)));
     return Math.min(GALAXY_CARRIER_FRAME_SPEED_LIMIT * centralScale * multiplier,
       galaxyCarrierOrbitCurve(field, radius).circularSpeed * multiplier);
   }
@@ -8000,6 +8000,45 @@
       || left.tier - right.tier);
   }
 
+  function prepareGalaxyOrbitLaneTopology(nodes) {
+    const values = (nodes || []).filter(node => node && !node.ghost);
+    const byId = new Map(values.map(node => [String(node.id), node]));
+    const lanes = new Map();
+    values.forEach(node => {
+      const tier = Number(node.orbit_tier);
+      const parentId = node.system_anchor_id === undefined
+        || node.system_anchor_id === null ? '' : String(node.system_anchor_id);
+      if (!(tier > 0) || !parentId || parentId === String(node.id)) return;
+      const anchor = byId.get(parentId);
+      if (!anchor) return;
+      const measured = Number.isFinite(node.x) && Number.isFinite(node.y)
+        && Number.isFinite(anchor.x) && Number.isFinite(anchor.y)
+        ? Math.hypot(node.x - anchor.x, node.y - anchor.y) : 0;
+      const authoredRadius = finitePositive(node.__galaxyOrbitBaseRadius,
+        finitePositive(node.orbit_radius, 0, Infinity), Infinity);
+      const radius = authoredRadius > 0 ? authoredRadius : measured;
+      if (!(radius > 0)) return;
+      const key = parentId + ':' + tier + ':' + Math.round(radius * 1000);
+      if (!lanes.has(key)) {
+        lanes.set(key, {
+          anchorId: parentId, anchor, tier, radius: 0, samples: 0,
+          dynamicRadius: authoredRadius <= 0, members: [],
+        });
+      }
+      const lane = lanes.get(key);
+      lane.radius += radius;
+      lane.samples += 1;
+      lane.members.push(node);
+    });
+    return [...lanes.values()].map(lane => ({
+      anchorId: lane.anchorId, anchor: lane.anchor, tier: lane.tier,
+      radius: lane.radius / Math.max(1, lane.samples), members: lane.samples,
+      dynamicRadius: lane.dynamicRadius, memberNodes: lane.members,
+      x: lane.anchor.x, y: lane.anchor.y, color: lane.anchor.color,
+    })).sort((left, right) => left.anchorId.localeCompare(right.anchorId)
+      || left.tier - right.tier);
+  }
+
   function galaxyStarAnchorIds(lanes) {
     const connected = new Map();
     (lanes || []).forEach(lane => {
@@ -8144,6 +8183,13 @@
       path: null, asOf: null, ghost: true, sizeBy: 'mass', bridges: false, suggestions: false,
       collapse: 'auto', renderMode: opts.renderMode === 'full' || opts.renderMode === 'all' ? 'full' : 'overview'
     };
+    function notifyPhysicsState(paused) {
+      try {
+        if (el && typeof el.dispatchEvent === 'function') {
+          el.dispatchEvent(new CustomEvent('engraphisgraphphysicschange', { detail: { paused: !!paused } }));
+        }
+      } catch (_) {}
+    }
     let raw = { nodes: [], links: [], suggestions: [], communities: [], community_bridges: [], meta: {} };
     /* Only anchors with more than two direct orbiting nodes are painted as stars. Smaller
        systems and singleton communities keep the ordinary node material. */
@@ -8151,6 +8197,31 @@
     /* Every visible body with at least one direct orbiter is a primary rendering landmark.
        This includes planets with moons without incorrectly turning them into stars. */
     let galaxyPrimaryNodeIds = new Set();
+    let galaxyLaneTopology = null;
+    function refreshGalaxyLaneTopology(nodes) {
+      galaxyLaneTopology = prepareGalaxyOrbitLaneTopology(nodes);
+      galaxyVisibleStarIds = galaxyStarAnchorIds(galaxyLaneTopology);
+      galaxyPrimaryNodeIds = galaxyPrimaryAnchorIds(galaxyLaneTopology);
+    }
+    function currentGalaxyOrbitLanes() {
+      if (!galaxyLaneTopology) return [];
+      galaxyLaneTopology.forEach(lane => {
+        lane.x = lane.anchor.x;
+        lane.y = lane.anchor.y;
+        lane.color = lane.anchor.color;
+        if (!lane.dynamicRadius) return;
+        let total = 0;
+        let count = 0;
+        lane.memberNodes.forEach(node => {
+          if (!Number.isFinite(node.x) || !Number.isFinite(node.y)
+            || !Number.isFinite(lane.anchor.x) || !Number.isFinite(lane.anchor.y)) return;
+          total += Math.hypot(node.x - lane.anchor.x, node.y - lane.anchor.y);
+          count += 1;
+        });
+        if (count) lane.radius = total / count;
+      });
+      return galaxyLaneTopology;
+    }
     const galaxyServerPhase = new Map();
     const galaxySavedPhase = new Map();
     /* Mode restoration is a transactional hand-off: a same-task freeze must still expose the
@@ -8762,12 +8833,16 @@
       const gcRaw = Number(state.settings.gravitationalConstant);
       const lgcRaw = Number(state.settings.localGravitationalConstant);
       const bhmRaw = Number(state.settings.blackHoleMass);
-      /* The dashboard adapter emits 0..4 for gravity/local (raw/50) and up to 4.4 for
-         mass, so clamping at 2 saturated the upper half of all three sliders (PR #177
-         review threads at this site). Accept the full emitted engine ranges. */
-      const gravityMultiplier = Number.isFinite(gcRaw) ? clamp(gcRaw, 0, 4) : 1;
-      const massMultiplier = Number.isFinite(bhmRaw) ? clamp(bhmRaw, 0, 4.4) : 1;
-      const localMultiplier = Number.isFinite(lgcRaw) ? clamp(lgcRaw, 0, 4) : 1;
+      const springRaw = Number(state.settings.springStiffness);
+      /* The dashboard adapter emits 0..6.67 for gravity/local (raw/30), 0..5.04 for mass, and
+         0..3.13 for spring stiffness. `setSettings` accepts up to 8/8/16/8, so these ceilings
+         are safety bounds only: clamping below the accepted range silently plateaued the upper
+         half of every slider (PR #177 review threads at this site). Keep the two ranges equal
+         so no value the engine accepts is ever dropped here. */
+      const gravityMultiplier = Number.isFinite(gcRaw) ? clamp(gcRaw, 0, 8) : 1;
+      const massMultiplier = Number.isFinite(bhmRaw) ? clamp(bhmRaw, 0, 16) : 1;
+      const localMultiplier = Number.isFinite(lgcRaw) ? clamp(lgcRaw, 0, 8) : 1;
+      const springMultiplier = Number.isFinite(springRaw) ? clamp(springRaw, 0, 8) : 1;
       const baseRepel = mode === 'communities' ? Math.max(10, s.repel * 0.68) : s.repel;
       /* Galactic gravity is an attractive control. Keep the separate Repel slider on the
          negative many-body charge, and apply this multiplier to the attractive anchor forces
@@ -8780,7 +8855,7 @@
         const base = 1 / Math.max(1, Math.min(
           source && source.degree || 1, target && target.degree || 1
         ));
-        return base * localMultiplier;
+        return base * localMultiplier * springMultiplier;
       });
       /* Space friction (the dashboard's "damping" slider) maps onto d3's velocityDecay. The
          slider's 0..15 visible range must reach the full d3 decay range so the lower quarter
@@ -8938,9 +9013,9 @@
       const compactness = galaxyLayoutCompactness(s.gravity);
       const control = (value, fallback, min, max) => Number.isFinite(Number(value))
         ? clamp(value, min, max) : fallback;
-      const coreAttraction = control(s.gravitationalConstant, 1, 0, 2);
-      const coreMass = control(s.blackHoleMass, 1, 0, 2);
-      const clusterCohesion = control(s.localGravitationalConstant, 1, 0, 2);
+      const coreAttraction = control(s.gravitationalConstant, 1, 0, 8);
+      const coreMass = control(s.blackHoleMass, 1, 0, 16);
+      const clusterCohesion = control(s.localGravitationalConstant, 1, 0, 8);
       const settlingResistance = control(s.damping, 1, 0, 15);
       const linkSpring = control(s.springStiffness, 1, 0, 100 / 32);
       /* Keep zero-force endpoints finite without flattening the lower slider range. The 0.5
@@ -9358,6 +9433,7 @@
       cancelFrame(galaxyFrame);
       galaxyFrame = 0;
       if (resetClock) resetGalaxyClock();
+      notifyPhysicsState(true);
     }
 
     function galaxyIntegratorOptions() {
@@ -9817,7 +9893,9 @@
         galaxyFrames++;
         invalidate();
         if (typeof opts.onPhysics === 'function') opts.onPhysics(physicsDiagnostics());
-        if (typeof opts.onPhysicsFrame === 'function') opts.onPhysicsFrame(api.getPhysicsSnapshot());
+        if (typeof opts.onPhysicsFrame === 'function') {
+          opts.onPhysicsFrame(api.getPhysicsSnapshot());
+        }
       }
       if (galaxyDynamicsEligible()) galaxyFrame = requestFrame(runGalaxyFrame);
     }
@@ -9828,6 +9906,7 @@
         cancelGalaxyDynamics(resetClock);
         return;
       }
+      notifyPhysicsState(false);
       if (!galaxyFrame) galaxyFrame = requestFrame(runGalaxyFrame);
     }
 
@@ -10012,6 +10091,11 @@
       const data = reused ? seeded : next;
       const fullGraph = state.renderMode === 'full';
       const galaxyMode = state.settings.mode === 'galaxy';
+      if (!galaxyMode && galaxyLaneTopology) {
+        galaxyLaneTopology = null;
+        galaxyVisibleStarIds = new Set();
+        galaxyPrimaryNodeIds = new Set();
+      }
       const wasStatic = staticFullLayout;
       const overGalaxyLiveLimit = !galaxySceneWithinLiveLimit(data);
       const overFullForceLimit = data.nodes.length > FULL_FORCE_NODE_LIMIT
@@ -10158,6 +10242,7 @@
             [prePaintHorizon, postOuterHorizon, postStarHorizon]
           );
         }
+        if (galaxyMode) refreshGalaxyLaneTopology(data.nodes);
         fg.graphData(data);
         seeded = data;
       } else if (staticFullLayout && fullLayoutDirty) {
@@ -10296,6 +10381,9 @@
           outwardVelocityRemoved: 0, tangentialVelocityRemoved: 0,
           annulus: { innerCorrectedNodes: 0, outerCorrectedNodes: 0, infeasibleNodes: 0 },
         };
+      }
+      if (galaxyMode && reused && !galaxyLaneTopology) {
+        refreshGalaxyLaneTopology(data.nodes);
       }
       applyForces();
       fg.autoPauseRedraw(!needsContinuousFrames());
@@ -10511,11 +10599,9 @@
       .onRenderFramePre((ctx, scale) => {
         try {
           styleBackground(ctx, scale);
+          const currentData = fg.graphData() || {};
           if (state.settings.mode === 'galaxy') {
-            const currentData = fg.graphData() || {};
-            const lanes = galaxyOrbitLaneGeometry(currentData.nodes || []);
-            galaxyVisibleStarIds = galaxyStarAnchorIds(lanes);
-            galaxyPrimaryNodeIds = galaxyPrimaryAnchorIds(lanes);
+            const lanes = currentGalaxyOrbitLanes();
             paintGalaxyOrbitLanes(ctx, currentData.nodes || [], scale,
               state.themeColors.accent, lanes);
           } else {
@@ -10527,7 +10613,7 @@
       .onRenderFramePost((ctx, scale) => {
         try {
           const currentData = fg.graphData() || {};
-          if (Array.isArray(currentData.nodes)) {
+          if ((state.settings.labels || hilite !== null) && Array.isArray(currentData.nodes)) {
             for (const node of currentData.nodes) paintNodeLabel(node, ctx, scale);
           }
         } catch (e) { /* label pass must never break the render loop */ }
@@ -10943,6 +11029,7 @@
       const previousGravity = Number(state.settings.gravity);
       if (layoutChanged) {
         fullLayoutDirty = true;
+        galaxyLaneTopology = null;
         cancelAutoFit();
       }
       /* Capture the pre-patch central multipliers BEFORE Object.assign applies the patch:
@@ -10957,6 +11044,7 @@
       if (next.orbitPaused !== undefined && previousMode === 'galaxy') {
         if (state.settings.orbitPaused) cancelGalaxyDynamics(true);
         else if (wasOrbitPaused) scheduleGalaxyDynamics(true);
+        notifyPhysicsState(state.settings.orbitPaused);
       }
       transitionGalaxyMode(previousMode, state.settings.mode);
       const nextGravity = Number(state.settings.gravity);
@@ -11276,14 +11364,17 @@
        camera animations, and the late fit wins by dragging the selected entity away. */
     api.focus = id => {
       if (destroyed || !raw.nodes.some(node => node.id === id)) return false;
+      const target = renderedNode(id);
+      if (!target || target.cluster === true) return false;
       state.focusId = id;
       hilite = id;
       hoverSet = new Set([id].concat(adj[id] || []));
       clearTimeout(fitTimer);
       fitTimer = 0;
       render(false, true);
-      return true;
+      return centerRenderedNode(id);
     };
+    api.centerNode = id => centerRenderedNode(id);
     api.clearFocus = () => {
       state.focusId = null;
       hilite = null;
@@ -11315,6 +11406,9 @@
     api.graphToScreen = (x, y) => {
       if (!fg.graph2ScreenCoords) return { x: Number(x) || 0, y: Number(y) || 0 };
       const point = fg.graph2ScreenCoords(Number(x) || 0, Number(y) || 0);
+      if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) {
+        return { x: Number(x) || 0, y: Number(y) || 0 };
+      }
       return { x: point.x, y: point.y };
     };
     let cachedPhysicsSnapshot = null;
@@ -11521,12 +11615,20 @@
       raw.nodes.forEach(n => { map[n.id] = n.community || 0; });
       return map;
     };
-    api.setGhosts = on => { state.ghost = on === true; render(false, false); };
+    api.setGhosts = on => {
+      state.ghost = on === true;
+      galaxyLaneTopology = null;
+      render(false, false);
+    };
     api.setRepoFilter = repo => {
       state.repo = typeof repo === 'string' ? repo.trim().toLowerCase() : '';
       render(false, true);
     };
-    api.setAsOf = date => { state.asOf = asOfValue(date); render(false, true); };
+    api.setAsOf = date => {
+      state.asOf = asOfValue(date);
+      galaxyLaneTopology = null;
+      render(false, true);
+    };
     api.setSizeBy = metric => {
       if (state.settings.mode === 'galaxy') state.sizeBy = 'mass';
       else {
@@ -11722,7 +11824,7 @@
       fallbackCommunityBridges, paintFlowArrow,
       nodeName, linkEndpoint, asOfValue, materialRecipe, materialTier,
       paintMaterialDirect, paintMaterialSurface, paintGalaxyAnchorAdornment,
-      galaxyOrbitLaneGeometry, paintGalaxyOrbitLanes, galaxyOrbitalLinkRole,
+      prepareGalaxyOrbitLaneTopology, galaxyOrbitLaneGeometry, paintGalaxyOrbitLanes, galaxyOrbitalLinkRole,
       galaxyAnchorAdornmentEligible, galaxyStarAnchorIds, galaxyPrimaryAnchorIds,
       renderMaterialSample, sampleMaterialColour,
       materialCacheStats, clearMaterialCache, setMaterialCanvasFactory

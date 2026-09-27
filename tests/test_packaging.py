@@ -83,7 +83,11 @@ def test_http_mcp_cli_configures_the_packaged_transport(monkeypatch):
         "_transport_security",
         lambda host, port: security_calls.append((host, port)) or transport_security,
     )
-    monkeypatch.setitem(sys.modules, "engraphis.mcp_server", types.SimpleNamespace(mcp=fake_mcp))
+    fake_module = types.ModuleType("engraphis.mcp_server")
+    fake_module.mcp = fake_mcp
+    fake_module._preload_sentence_transformers = lambda: calls.append("preload")
+    fake_module._eager_exact_backend_check = lambda: calls.append("exact")
+    monkeypatch.setitem(sys.modules, "engraphis.mcp_server", fake_module)
 
     mcp_http_cli.main(["--host", "::1", "--port", "9876", "--transport", "sse"])
 
@@ -91,7 +95,7 @@ def test_http_mcp_cli_configures_the_packaged_transport(monkeypatch):
     assert fake_mcp.settings.port == 9876
     assert fake_mcp.settings.transport_security is transport_security
     assert security_calls == [("::1", 9876)]
-    assert calls == ["sse"]
+    assert calls == ["preload", "exact", "sse"]
 
 
 def test_http_mcp_console_entrypoint_is_packaged_and_client_neutral():

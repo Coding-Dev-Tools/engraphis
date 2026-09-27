@@ -186,6 +186,7 @@ def _run(fn, *a, **k):
         logger.info("graph scene exceeds capacity (%s, resource=%s, count=%s, limit=%s)",
                     type(exc).__name__, exc.resource, exc.count, exc.limit)
         raise HTTPException(status_code=413, detail={
+            "code": "GRAPH_CAPACITY",
             "error": "graph scene exceeds the safety limit",
             "safety_state": "capacity_exceeded",
             "degraded": True,

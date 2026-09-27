@@ -54,7 +54,7 @@
     graphOrbitPaused: false,
     graphSpacetimeOverlay: null,
     graphIncludeCode: false,
-    graphSavedView: 'schema',
+    graphSavedView: '',
     consolidationReview: null,
     reviewCsrf: '',
     hostedLoaded: new Set(),
@@ -150,23 +150,23 @@
   const GRAPH_FULL_LOAD_TIMEOUT_MS = 90_000;
   const GRAPH_CONNECTION_MEMORIES_TIMEOUT_MS = 8_000;
   const GRAPH_PREFERENCES_KEY = 'engraphis-ledger-graph-preferences-v1';
-  const GRAPH_PHYSICS_VERSION = 5;
+  const GRAPH_PHYSICS_VERSION = 6;
   const GRAPH_CUSTOM_VIEW_KEY = 'engraphis-ledger-graph-custom-view-v1';
   const GRAPH_LAYERS = ['temporal', 'entity', 'causal', 'semantic', 'code'];
   const GRAPH_DEFAULT_LAYERS = { temporal: true, entity: true, causal: true, semantic: true, code: false };
   const GRAPH_TUNING = [
     { id: 'graph-repel', key: 'repel', fallback: 100 },
     { id: 'graph-link', key: 'link', fallback: 8 },
-    { id: 'graph-gravity', key: 'gravity', fallback: 120 },
+    { id: 'graph-gravity', key: 'gravity', fallback: 72 },
     { id: 'graph-node-size', key: 'size', fallback: 3 },
     { id: 'graph-text-size', key: 'font', fallback: 12 },
     { id: 'graph-line-width', key: 'linkw', fallback: 0.72, precision: 2 },
     { id: 'graph-label-density', key: 'labelDensity', fallback: 24 },
   ];
   const GRAPH_SPACETIME_TUNING = [
-    { id: 'graph-gravitational-constant', key: 'gravitationalConstant', fallback: 100 },
-    { id: 'graph-black-hole-mass', key: 'blackHoleMass', fallback: 160 },
-    { id: 'graph-local-gravitational-constant', key: 'localGravitationalConstant', fallback: 100 },
+    { id: 'graph-gravitational-constant', key: 'gravitationalConstant', fallback: 60 },
+    { id: 'graph-black-hole-mass', key: 'blackHoleMass', fallback: 96 },
+    { id: 'graph-local-gravitational-constant', key: 'localGravitationalConstant', fallback: 60 },
     { id: 'graph-space-damping', key: 'damping', fallback: 1, precision: 1 },
     { id: 'graph-spring-stiffness', key: 'springStiffness', fallback: 32 },
   ];
@@ -174,7 +174,7 @@
     original: { repel: 120, link: 30, gravity: 14, font: 13, size: 3, linkw: 1, labelDensity: 40 },
     compact: { repel: 42, link: 20, gravity: 26, font: 12, size: 3, linkw: 0.7, labelDensity: 30 },
     communities: { repel: 48, link: 16, gravity: 48, font: 12, size: 3, linkw: 0.72, labelDensity: 24 },
-    galaxy: { repel: 100, link: 8, gravity: 120, font: 12, size: 3, linkw: 0.72, labelDensity: 24 },
+    galaxy: { repel: 100, link: 8, gravity: 72, font: 12, size: 3, linkw: 0.72, labelDensity: 24 },
     radial: { repel: 68, link: 26, gravity: 12, font: 13, size: 3, linkw: 0.75, labelDensity: 55 },
     constellation: { repel: 34, link: 16, gravity: 38, font: 12, size: 3, linkw: 0.65, labelDensity: 35 },
   };
@@ -475,7 +475,7 @@
     if (!graphAllAssetsPromise) {
       const controller = new AbortController();
       const attempt = loadScript(
-        graphAssetSource('/v2-assets/engraphis-graph-every.js?v=20260905-every-20'),
+        graphAssetSource('/v2-assets/engraphis-graph-every.js?v=20260927-unmerged-readiness-3'),
         'EngraphisEveryGraph', controller.signal,
       );
       graphAllAssetsPromise = attempt;
@@ -508,10 +508,10 @@
         graphAssetSource('/v2-assets/vendor/force-graph.min.js?v=20260727-final'),
         'ForceGraph', controller.signal,
       )).then(() => loadScript(
-        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260906-galaxy-boundaries-1'),
+        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260927-unmerged-readiness-3'),
         'EngraphisGraph', controller.signal,
       )).then(() => loadScript(
-        graphAssetSource('/v2-assets/engraphis-spacetime.js?v=20260812-stable-orbit-lanes-7'),
+        graphAssetSource('/v2-assets/engraphis-spacetime.js?v=20260927-unmerged-readiness-3'),
         'EngraphisSpacetime', controller.signal,
       ));
       graphAssetsPromise = attempt;
@@ -1605,9 +1605,12 @@
     importanceControl.value = String(graphSliderInputValue(
       'editor-memory-importance', storedImportance, 0.5,
     ));
-    importanceControl.setAttribute('aria-valuetext', `${graphSliderResponseValue(
+    const respVal = graphSliderResponseValue(
       'editor-memory-importance', importanceControl.value, 0.5,
-    ).toFixed(2)} importance`);
+    );
+    importanceControl.setAttribute('aria-valuetext', `${respVal.toFixed(2)} importance`);
+    const importanceOutput = byId('editor-memory-importance-output');
+    if (importanceOutput) importanceOutput.textContent = respVal.toFixed(2);
     if (state.editorSession.conflicted) {
       byId('editor-error').textContent = 'This version cannot be revised. Refresh saved versions and choose an editing base; your draft will be retained.';
       byId('editor-error').hidden = false;
@@ -2362,6 +2365,7 @@
         : (item.community != null ? graphCommunityIndex(item.community) : undefined),
       community_id: item.community_id == null ? item.community : item.community_id,
       gravity_mass: optionalGraphNumber(item.gravity_mass),
+      evidence_mass: optionalGraphNumber(item.evidence_mass ?? item.gravity_mass ?? item.mass_score),
       visual_radius: optionalGraphNumber(item.visual_radius),
       anchor_role: item.anchor_role || '',
       x: Number.isFinite(Number(item.x)) ? Number(item.x) : undefined,
@@ -2421,6 +2425,20 @@
       showNotice(`${label} is outside the current graph scope.`);
     };
     reveal();
+  }
+
+  function focusGraphNode(id, label = 'Selected entity') {
+    const engine = state.graphEngine;
+    if (!engine) return;
+    let attempted = false;
+    const focus = () => {
+      if (state.graphEngine !== engine || attempted) return;
+      attempted = true;
+      if (typeof engine.focus === 'function' && engine.focus(id)) return;
+      if (typeof engine.reveal === 'function' && engine.reveal(id)) return;
+      showNotice(`${label} is outside the current graph scope.`);
+    };
+    focus();
   }
 
   function cancelGraphConnectionMemoryLoad() {
@@ -2794,6 +2812,7 @@
     const control = byId(id);
     const raw = Number(value);
     const safe = Number.isFinite(raw) ? raw : fallback;
+    if (!control) return safe;
     const min = Number(control.min);
     const max = Number(control.max);
     return Math.min(Number.isFinite(max) ? max : safe, Math.max(Number.isFinite(min) ? min : safe, safe));
@@ -2876,9 +2895,9 @@
       return settings;
     }, {});
     return {
-      gravitationalConstant: controls.gravitationalConstant / 50,
+      gravitationalConstant: controls.gravitationalConstant / 30,
       blackHoleMass: graphBlackHoleMassMultiplier(controls.blackHoleMass),
-      localGravitationalConstant: controls.localGravitationalConstant / 50,
+      localGravitationalConstant: controls.localGravitationalConstant / 30,
       damping: controls.damping,
       springStiffness: controls.springStiffness / 32,
       orbitPaused: state.graphOrbitPaused,
@@ -2963,11 +2982,11 @@
   }
 
 
-  const GRAPH_BLACK_HOLE_MASS_BASELINE = 160;
+  const GRAPH_BLACK_HOLE_MASS_BASELINE = 96;
   function graphBlackHoleMassMultiplier(controlValue) {
     const value = number(controlValue);
-    /* Keep the established lower half and neutral default. Above 160, every +10 slider units
-       adds exactly +0.10 to the compact central-mass multiplier: 160→1.0, 170→1.1, 180→1.2.
+    /* Below the 96 baseline the multiplier scales linearly. Above it, every +10 slider units
+       adds exactly +0.10 to the compact central-mass multiplier: 96→1.0, 106→1.1, 116→1.2.
        Local stellar wells remain owned exclusively by Local solar gravity. */
     return value <= GRAPH_BLACK_HOLE_MASS_BASELINE
       ? Math.max(0, value / GRAPH_BLACK_HOLE_MASS_BASELINE)
@@ -3167,10 +3186,30 @@
       && [48, 60].includes(Number(effectiveTuning.repel))) {
       effectiveTuning.repel = 100;
     }
-    /* Physics v5 makes 120 the Galaxy gravity default. Migrate only the exact retired default;
+    /* Physics v5 made 120 the Galaxy gravity default. Migrate only the exact retired default;
        a saved 96 in an already-versioned v5 snapshot remains an intentional user choice. */
     if (needsPhysicsMigration(5) && preset === 'galaxy' && Number(effectiveTuning.gravity) === 96) {
       effectiveTuning.gravity = 120;
+    }
+    /* Physics v6 recalibrates Galaxy gravity to 72 and the spacetime panel to 60/96/60. Move
+       only the exact retired default vector, so a value the person actually chose survives. */
+    if (needsPhysicsMigration(6)) {
+      if (preset === 'galaxy' && Number(effectiveTuning.gravity) === 120) {
+        effectiveTuning.gravity = 72;
+      }
+      const retiredSpacetimeDefaults = {
+        gravitationalConstant: 100, blackHoleMass: 160, localGravitationalConstant: 100,
+      };
+      const savedSpacetime = savedSpacetimeTuning && typeof savedSpacetimeTuning === 'object'
+        ? savedSpacetimeTuning : {};
+      const retiredKeys = Object.keys(retiredSpacetimeDefaults);
+      const hasRetiredVector = retiredKeys.every(key =>
+        Number(savedSpacetime[key]) === retiredSpacetimeDefaults[key]);
+      if (hasRetiredVector) {
+        retiredKeys.forEach(key => {
+          savedSpacetime[key] = GRAPH_SPACETIME_TUNING.find(item => item.key === key).fallback;
+        });
+      }
     }
     syncGraphTuning({
       ...graphPresetTuning(preset),
@@ -3214,7 +3253,7 @@
       return layers;
     }, {}));
     state.graphIncludeCode = graphPreference('includeCode', false) === true;
-    state.graphSavedView = graphPreference('savedView', 'schema', ['', ...Object.keys(GRAPH_SAVED_VIEWS)]);
+    state.graphSavedView = graphPreference('savedView', '', ['', ...Object.keys(GRAPH_SAVED_VIEWS)]);
     syncGraphSavedViews();
     if (legacyPhysics) saveGraphPreferences();
   }
@@ -3260,7 +3299,7 @@
     byId('graph-as-of').value = asOf;
     byId('graph-repo-filter').value = repoFilter;
     if (typeof view.ghosts === 'boolean') byId('graph-ghosts').checked = view.ghosts;
-    if (['degree', 'betweenness'].includes(view.size)) byId('graph-size').value = view.size;
+    if (['degree', 'betweenness', 'evidence_mass'].includes(view.size)) byId('graph-size').value = view.size;
     if (typeof view.bridges === 'boolean') byId('graph-bridges').checked = view.bridges;
     if (typeof view.collapse === 'boolean') byId('graph-collapse').checked = view.collapse;
     if (typeof view.flow === 'boolean') setGraphSwitch('graph-flow', view.flow);
@@ -3648,7 +3687,8 @@
       state.graphEngine.freeze(true);
     }
     if (state.graphSpacetimeOverlay) state.graphSpacetimeOverlay.setEnabled(false);
-    byId('graph-canvas').setAttribute('aria-busy', 'true');
+    const canvasEl = byId('graph-canvas');
+    if (canvasEl) canvasEl.setAttribute('aria-busy', 'true');
     byId('graph-empty').hidden = false;
     byId('graph-empty').textContent = fullGraph
       ? 'Loading all nodes with progressive level of detail…'
@@ -3677,6 +3717,7 @@
       let candidateOverlay = null;
       let candidateStats = null;
       let candidateMetrics = null;
+      let candidatePhysicsSnapshot = null;
       const destroyCandidate = () => {
         if (!candidateEngine) {
           candidateOverlay = null;
@@ -3765,6 +3806,7 @@
         const responseIncludeCode = sceneMeta.include_code === false ? false : targetIncludeCode;
         const codeOverlayDegraded = targetIncludeCode && !responseIncludeCode;
         const oldHost = byId('graph-canvas');
+        if (!oldHost) throw new Error('graph canvas container missing');
         // oldEngine was captured before the first await so the failure path
         // can restore the exact committed renderer even when candidate setup never begins.
         candidateHost = oldHost.cloneNode(false);
@@ -3804,6 +3846,10 @@
               && state.graphLoadRequest === request.id) graphMetricsChanged(metrics);
             else if (state.graphLoadRequest === request.id) candidateMetrics = metrics;
           },
+          onPhysicsFrame: snapshot => {
+            candidatePhysicsSnapshot = snapshot;
+            if (candidateOverlay) candidateOverlay.setSnapshot(snapshot);
+          },
           onError: error => {
             if (state.graphEngine !== candidateEngine || !fullGraph
               || state.graphLoadRequest !== request.id || state.graphMode !== 'full') return;
@@ -3831,7 +3877,8 @@
           },
         });
         candidateEngine.apply(graph => {
-          graph.setPreset(byId('graph-preset').value);
+          const preset = byId('graph-preset').value;
+          graph.setPreset(galaxyQuality && preset === 'every' ? 'galaxy' : preset);
           graph.setStyle(byId('graph-style').value);
           graph.setColorBy(byId('graph-color').value);
           graph.setThemeColors(graphThemeColors());
@@ -3862,6 +3909,7 @@
             candidateHost, candidateEngine
           );
           candidateOverlay.setEnabled(galaxyQuality || graphIsGalaxy());
+          if (candidatePhysicsSnapshot) candidateOverlay.setSnapshot(candidatePhysicsSnapshot);
         }
         // Pending renderers also follow visibility while finite worker preparation finishes.
         graphLifecycle.track(candidateEngine, candidateOverlay, () => graphOverlayEnabled(galaxyQuality));
@@ -3948,7 +3996,8 @@
         destroyCandidate();
         window.clearTimeout(timeout);
         if (state.graphLoadRequest === request.id && state.graphLoadController === controller) {
-          byId('graph-canvas').setAttribute('aria-busy', 'false');
+          const canvasEl = byId('graph-canvas');
+          if (canvasEl) canvasEl.setAttribute('aria-busy', 'false');
           setGraphLoadControlsBusy(false);
         }
         if (state.graphLoadController === controller) state.graphLoadController = null;
@@ -5249,6 +5298,8 @@
       'editor-memory-importance', event.target.value, 0.5,
     );
     event.target.setAttribute('aria-valuetext', `${effective.toFixed(2)} importance`);
+    const importanceOutput = byId('editor-memory-importance-output');
+    if (importanceOutput) importanceOutput.textContent = effective.toFixed(2);
   });
   byId('import-button').addEventListener('click', () => byId('import-files').click());
   byId('import-files').addEventListener('change', event => importFiles(event.target.files));
@@ -5317,7 +5368,7 @@
   byId('graph-repo-filter').addEventListener('input', event => {
     if (state.graphEngine) state.graphEngine.setRepoFilter(event.target.value);
     clearGraphSavedView();
-    saveGraphPreferences();
+    scheduleGraphPreferencesSave();
     // Repository-scoped payloads need a server reload, but do not issue a 20k-node request
     // for every keystroke. The current input is still reflected immediately by the renderer.
     if (state.graphMode === 'full') {
@@ -5509,23 +5560,28 @@
   byId('graph-reset-tuning').addEventListener('click', resetGraphTuning);
   byId('graph-retry').addEventListener('click', retryGraphLoad);
   byId('graph-bridges').addEventListener('change', event => {
+    clearGraphSavedView();
     if (state.graphEngine) state.graphEngine.setBridges(event.target.checked);
     saveGraphPreferences();
   });
   byId('graph-collapse').addEventListener('change', event => {
+    clearGraphSavedView();
     if (state.graphEngine) state.graphEngine.setCollapse(event.target.checked ? 'auto' : false);
     saveGraphPreferences();
   });
   byId('graph-as-of').addEventListener('change', event => {
+    clearGraphSavedView();
     if (state.graphEngine) state.graphEngine.setAsOf(graphAsOfTimestamp());
     saveGraphPreferences();
     loadGraph({ force: true });
   });
   byId('graph-ghosts').addEventListener('change', event => {
+    clearGraphSavedView();
     if (state.graphEngine) state.graphEngine.setGhosts(event.target.checked);
     saveGraphPreferences();
   });
   byId('graph-size').addEventListener('change', event => {
+    clearGraphSavedView();
     if (state.graphEngine) state.graphEngine.setSizeBy(graphSizeBy());
     saveGraphPreferences();
   });
@@ -5562,7 +5618,7 @@
     const id = state.graphConnectionsFocusId;
     if (!id) return;
     closeGraphConnections();
-    revealGraphNode(id, state.graphConnectionsFocusLabel || 'Selected entity');
+    focusGraphNode(id, state.graphConnectionsFocusLabel || 'Selected entity');
   });
   byId('graph-connections-dialog').addEventListener('click', event => {
     if (event.target === event.currentTarget) closeGraphConnections();

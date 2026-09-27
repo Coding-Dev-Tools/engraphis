@@ -324,13 +324,23 @@ test.describe('Ledger Dashboard Sliders, Gravity Physics, Themes, and Options', 
       expect(currentStyle).toBe(s);
     }
 
-    // Palettes
+    // Colour by / palette. The advanced drawer's colour chips are gone, so the engine
+    // contract is asserted directly: every mode and palette must still reach the renderer.
+    const colourModes = ['type', 'connections', 'community'];
+    for (const mode of colourModes) {
+      expect(await page.evaluate(value => {
+        window.__engraphisGraph.setColorBy(value);
+        return window.__engraphisGraph.state().colorBy;
+      }, mode)).toBe(mode);
+    }
     const palettes = ['aurora', 'ocean', 'ember', 'contrast', 'theme'];
     for (const pal of palettes) {
-      await page.locator(`[data-graph-palette-choice="${pal}"]`).click();
-      const currentPal = await page.evaluate(() => window.__engraphisGraph.state().palette);
-      expect(currentPal).toBe(pal);
+      expect(await page.evaluate(value => {
+        window.__engraphisGraph.setPalette(value);
+        return window.__engraphisGraph.state().palette;
+      }, pal)).toBe(pal);
     }
+    await page.evaluate(() => window.__engraphisGraph.setColorBy('community'));
 
     // 8. Test Action Buttons
     await page.locator('#graph-reheat').click();
@@ -346,7 +356,7 @@ test.describe('Ledger Dashboard Sliders, Gravity Physics, Themes, and Options', 
     }));
     expect(defaults.repel).toBe(100);
     expect(defaults.link).toBe(8);
-    expect(defaults.gravity).toBe(120);
+    expect(defaults.gravity).toBe(72);
 
     // 9. Test Memory Importance Slider in Library View
     await page.locator('.nav-item[data-view="library"]').click();

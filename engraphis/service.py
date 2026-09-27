@@ -11501,14 +11501,6 @@ class MemoryService:
             ]
             selected_layers = {layer.value for layer in selected_graph_layers}
 
-        selected_graph_layers = None
-        selected_layers = None
-        if layers is not None:
-            selected_graph_layers = [
-                _enum(layer, GraphLayer, "layer") for layer in layers
-            ]
-            selected_layers = {layer.value for layer in selected_graph_layers}
-
         def temporal_sql(alias: str, *, history: bool = False
                          ) -> tuple[str, list[float]]:
             """Parameterized world/system visibility for graph-owned SQL.
@@ -11556,14 +11548,6 @@ class MemoryService:
                 "AND COALESCE(visibility_memory.scope, 'workspace')!='session'))",
                 [*support_params, *memory_params],
             )
-
-        selected_graph_layers = None
-        selected_layers = None
-        if layers is not None:
-            selected_graph_layers = [
-                _enum(layer, GraphLayer, "layer") for layer in layers
-            ]
-            selected_layers = {layer.value for layer in selected_graph_layers}
 
         def visible_entities():
             """Return public entities under both temporal anchors in one bounded query.

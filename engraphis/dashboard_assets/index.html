@@ -314,7 +314,7 @@
                 <p id="editor-error" class="form-error" role="alert" hidden></p>
                 <button id="editor-refresh" class="secondary-button" type="button" hidden>Refresh saved versions</button>
                 <div id="editor-history" hidden></div>
-                <label for="editor-memory-importance">Importance<input id="editor-memory-importance" type="range" min="0" max="1" step="0.025" value="0.5" aria-label="Memory importance"></label>
+                <label for="editor-memory-importance">Importance<input id="editor-memory-importance" type="range" min="0" max="1" step="0.025" value="0.5" aria-label="Memory importance"><output id="editor-memory-importance-output">0.5</output></label>
                 <div class="form-actions">
                   <button id="editor-cancel" class="secondary-button" type="button">Cancel</button>
                   <button class="primary-button" type="submit">Save memory</button>
@@ -366,7 +366,7 @@
                 <button id="graph-fit" class="graph-action" type="button">Fit to view</button>
                 <button id="graph-reheat" class="graph-action" type="button">Reheat layout</button>
                 <button id="graph-clear-focus" class="graph-action" type="button">Clear focus</button>
-                <button id="graph-show-unlinked" class="graph-action" type="button" aria-pressed="true" title="Hide entities that have no relations in this graph view">Hide unlinked nodes</button>
+                <button id="graph-show-unlinked" class="graph-action" type="button" aria-pressed="true" title="Hide entities that have no relations in this graph view">Unlinked nodes</button>
                 <button id="graph-retry" class="graph-action" type="button">Reload data</button>
                 <div class="graph-export-wrap">
                   <button id="graph-export" class="graph-action graph-export" type="button" aria-expanded="false" aria-controls="graph-export-menu">Export PNG or JSON</button>
@@ -406,23 +406,6 @@
                 </div>
               </section>
 
-              <section class="graph-drawer-section" aria-labelledby="graph-colour-title">
-                <h2 id="graph-colour-title">Colour</h2>
-                <div class="graph-segmented" role="group" aria-label="Colour graph by">
-                  <button class="graph-segment active" type="button" data-graph-color-choice="community" aria-pressed="true">Cluster</button>
-                  <button class="graph-segment" type="button" data-graph-color-choice="connections" aria-pressed="false">Links</button>
-                  <button class="graph-segment" type="button" data-graph-color-choice="type" aria-pressed="false">Type</button>
-                </div>
-                <div class="graph-palette-grid" role="group" aria-label="Colour palette">
-                  <button class="graph-palette-chip active" type="button" data-graph-palette-choice="theme" aria-pressed="true"><span class="palette-preview theme"><i></i><i></i><i></i><i></i></span>theme</button>
-                  <button class="graph-palette-chip" type="button" data-graph-palette-choice="aurora" aria-pressed="false"><span class="palette-preview aurora"><i></i><i></i><i></i><i></i></span>aurora</button>
-                  <button class="graph-palette-chip" type="button" data-graph-palette-choice="ocean" aria-pressed="false"><span class="palette-preview ocean"><i></i><i></i><i></i><i></i></span>ocean</button>
-                  <button class="graph-palette-chip" type="button" data-graph-palette-choice="ember" aria-pressed="false"><span class="palette-preview ember"><i></i><i></i><i></i><i></i></span>ember</button>
-                  <button class="graph-palette-chip" type="button" data-graph-palette-choice="contrast" aria-pressed="false"><span class="palette-preview contrast"><i></i><i></i><i></i><i></i></span>contrast</button>
-                  <button class="graph-palette-chip" type="button" data-graph-palette-choice="custom" aria-pressed="false"><span class="palette-preview custom"><i></i><i></i><i></i><i></i></span>custom</button>
-                </div>
-              </section>
-
               <section class="graph-drawer-section graph-motion" aria-labelledby="graph-motion-title">
                 <h2 id="graph-motion-title">Motion</h2>
                 <div class="graph-motion-row"><button id="graph-flow" class="graph-switch on" type="button" role="switch" aria-label="Relation flow" aria-checked="true"><span></span></button><span>Relation flow</span><small>direction</small></div>
@@ -435,7 +418,7 @@
                 <h2 id="graph-saved-views-title">Saved views</h2>
                 <div class="graph-saved-grid" role="group" aria-label="Saved graph views">
                   <button class="graph-saved-view" type="button" data-graph-saved-view="operations" aria-pressed="false">Operations</button>
-                  <button class="graph-saved-view active" type="button" data-graph-saved-view="schema" aria-pressed="true">Schema drift</button>
+                  <button class="graph-saved-view" type="button" data-graph-saved-view="schema" aria-pressed="false">Schema drift</button>
                   <button class="graph-saved-view" type="button" data-graph-saved-view="people" aria-pressed="false">People</button>
                   <button class="graph-saved-view" type="button" data-graph-saved-view="code" aria-pressed="false">Code ↔ memory</button>
                   <button id="graph-save-view" class="graph-saved-view graph-save-view" type="button">Save current</button>
@@ -448,7 +431,7 @@
                 <div class="graph-tuning-grid">
                   <label for="graph-repel"><span id="graph-repel-label">Orbital speed</span><input id="graph-repel" type="range" min="0" max="400" value="100" aria-labelledby="graph-repel-label"><output id="graph-repel-output">100</output></label>
                   <label for="graph-link"><span id="graph-link-label">Link distance · tight ↔ loose</span><input id="graph-link" type="range" min="4" max="80" value="8" aria-labelledby="graph-link-label"><output id="graph-link-output">8</output></label>
-                  <label for="graph-gravity"><span id="graph-gravity-label">Galactic gravity · loose ↔ tight</span><input id="graph-gravity" type="range" min="0" max="400" value="120" aria-labelledby="graph-gravity-label"><output id="graph-gravity-output">120</output></label>
+                  <label for="graph-gravity"><span id="graph-gravity-label">Galactic gravity · loose ↔ tight</span><input id="graph-gravity" type="range" min="0" max="400" value="72" aria-labelledby="graph-gravity-label"><output id="graph-gravity-output">72</output></label>
                   <label for="graph-node-size"><span id="graph-node-size-label">Node size</span><input id="graph-node-size" type="range" min="1" max="12" value="3" aria-labelledby="graph-node-size-label"><output id="graph-node-size-output">3</output></label>
                   <label for="graph-text-size"><span id="graph-text-size-label">Text size</span><input id="graph-text-size" type="range" min="6" max="24" value="12" aria-labelledby="graph-text-size-label"><output id="graph-text-size-output">12</output></label>
                   <label for="graph-line-width"><span id="graph-line-width-label">Line width</span><input id="graph-line-width" type="range" min="0.1" max="2" step="0.01" value="0.72" aria-labelledby="graph-line-width-label"><output id="graph-line-width-output">0.72</output></label>
@@ -466,9 +449,9 @@
                 <details id="graph-spacetime-tuning" class="graph-spacetime-tuning" open>
                   <summary id="graph-spacetime-summary">Spacetime · black-hole orbit controls</summary>
                   <div class="graph-tuning-grid">
-                    <label for="graph-gravitational-constant"><span id="graph-gravitational-constant-label">Galactic gravity</span><input id="graph-gravitational-constant" type="range" min="0" max="200" value="100"><output id="graph-gravitational-constant-output">100</output></label>
-                    <label for="graph-black-hole-mass"><span id="graph-black-hole-mass-label">Black hole mass</span><input id="graph-black-hole-mass" type="range" min="20" max="500" value="160"><output id="graph-black-hole-mass-output">160</output></label>
-                    <label for="graph-local-gravitational-constant"><span id="graph-local-gravitational-constant-label">Local solar gravity</span><input id="graph-local-gravitational-constant" type="range" min="0" max="200" value="100"><output id="graph-local-gravitational-constant-output">100</output></label>
+                    <label for="graph-gravitational-constant"><span id="graph-gravitational-constant-label">Galactic gravity</span><input id="graph-gravitational-constant" type="range" min="0" max="200" value="60"><output id="graph-gravitational-constant-output">60</output></label>
+                    <label for="graph-black-hole-mass"><span id="graph-black-hole-mass-label">Black hole mass</span><input id="graph-black-hole-mass" type="range" min="20" max="500" value="96"><output id="graph-black-hole-mass-output">96</output></label>
+                    <label for="graph-local-gravitational-constant"><span id="graph-local-gravitational-constant-label">Local solar gravity</span><input id="graph-local-gravitational-constant" type="range" min="0" max="200" value="60"><output id="graph-local-gravitational-constant-output">60</output></label>
                     <label for="graph-space-damping"><span id="graph-space-damping-label">Space friction</span><input id="graph-space-damping" type="range" min="0" max="15" step="0.1" value="1"><output id="graph-space-damping-output">1.0</output></label>
                     <label for="graph-spring-stiffness"><span id="graph-spring-stiffness-label">Spring stiffness</span><input id="graph-spring-stiffness" type="range" min="0" max="100" value="32"><output id="graph-spring-stiffness-output">32</output></label>
                   </div>
@@ -823,6 +806,6 @@
   <script src="/v2-assets/memory-history.js?v=20260906-workflow-1"></script>
   <script src="/v2-assets/ask-requests.js?v=20260906-ask-home-1"></script>
   <script src="/v2-assets/graph-lifecycle.js?v=20260906-lifecycle-1"></script>
-  <script src="/v2-assets/ledger.js?v=20260906-galaxy-boundaries-1"></script>
+  <script src="/v2-assets/ledger.js?v=20260927-unmerged-readiness-3"></script>
 </body>
 </html>

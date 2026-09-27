@@ -93,7 +93,7 @@
         ? String(node.community_id) : null;
       if (!communityIndex.has(group)) communityIndex.set(group, communityIndex.size);
       communities[index] = communityIndex.get(group);
-      const mass = Number(node.evidence_mass);
+      const mass = Number(node.evidence_mass != null ? node.evidence_mass : (node.gravity_mass != null ? node.gravity_mass : node.mass_score));
       evidenceMass[index] = Number.isFinite(mass) && mass > 0 ? mass : 0;
     }
 
@@ -111,7 +111,7 @@
       if (source === undefined || target === undefined) continue;
       sources.push(source);
       targets.push(target);
-      const weight = Number(link.weight);
+      const weight = Number(link.weight != null ? link.weight : (link.strength != null ? link.strength : 1));
       weights.push(Number.isFinite(weight) && weight > 0 ? weight : 1);
       relations.push(String(link.relation || link.label || ""));
       edgeLayers.push(String(link.layer || 'semantic'));
@@ -258,16 +258,13 @@
     const minDist2 = minDist * minDist;
     /* Bumped from /48 to /24 — the Every-node engine now produces 100% more repulsion per
        slider unit, so the upper half of the repel slider is meaningfully more responsive. */
-    /* The dashboard maps the 0..200 Cluster cohesion slider to localGravitationalConstant
-       0..4, so clamping at 2 left the entire upper half of the control inert: it is this
-       worker's only consumer of the setting (PR #177 review thread at this site). Accept
-       the full emitted range and floor the inverted push coefficient at zero so a high
-       cohesion cannot turn the collision-style push into an attraction. */
+    /* Match the responsive renderer's bounds; the dashboard emits 0..200 / 30.
+       Preserve the calibrated response through the default value of 2, then taper
+       repulsion smoothly without reaching a flat zero or reversing into attraction. */
     const cohesion = Number.isFinite(Number(settings.localGravitationalConstant))
-      ? Math.max(0, Math.min(4, Number(settings.localGravitationalConstant))) : 1;
-    /* Cluster cohesion strengthens the attractive spring network above. Invert its influence
-       on the collision-style push so a higher cohesion setting does not spread clusters apart. */
-    const push = Number(settings.repel) / 24 * Math.max(0, 1.5 - 0.5 * cohesion);
+      ? Math.max(0, Math.min(8, Number(settings.localGravitationalConstant))) : 1;
+    const cohesionPush = cohesion <= 2 ? 1.5 - 0.5 * cohesion : 0.5 / (cohesion - 1);
+    const push = Number(settings.repel) / 24 * cohesionPush;
     for (let index = 0; index < count; index += 1) {
       const gx = Math.floor(pos[index * 2] / cell), gy = Math.floor(pos[index * 2 + 1] / cell);
       let checked = 0;
@@ -343,13 +340,12 @@
     /* Bumped from 0.0015 to 0.0033 — combined with the base gravity 25% bump and the
        linear (no-sqrt) mass path, the Every-node worker pulls nodes toward the centre
        ~50% harder at every slider position than the previous 0.0022 calibration.
-       The dashboard emits Core attraction over 0..4 (raw/50) and Core mass up to 4.4;
-       clamping at 2 left the upper half of those controls inert (PR #177 review thread
-       at this site), so the full emitted ranges are consumed. */
+       Accept the responsive renderer's 8/16 bounds so the recalibrated dashboard
+       range (attraction up to 200/30 and mass up to 5.04) stays responsive. */
     const coreAttraction = Number.isFinite(Number(settings.gravitationalConstant))
-      ? Math.max(0, Math.min(4, Number(settings.gravitationalConstant))) : 1;
+      ? Math.max(0, Math.min(8, Number(settings.gravitationalConstant))) : 1;
     const coreMass = Number.isFinite(Number(settings.blackHoleMass))
-      ? Math.max(0, Math.min(4.4, Number(settings.blackHoleMass))) : 1;
+      ? Math.max(0, Math.min(16, Number(settings.blackHoleMass))) : 1;
     const gravity = Number(settings.gravity) / 48 * 0.0033 * coreAttraction * coreMass;
     for (let index = 0; index < count; index += 1) {
       dx[index] += (cx - pos[index * 2]) * gravity;
