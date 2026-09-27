@@ -176,14 +176,16 @@ def test_cli_requires_configuration_and_never_prints_receipt(qualification, monk
     assert configuration["ENGRAPHIS_RELEASE_QUALIFICATION"] not in output.out + output.err
 
 
-def test_publication_writes_require_qualification_except_scoped_v176_waiver():
+def test_publication_writes_require_qualification_except_scoped_release_waivers():
     yaml = pytest.importorskip("yaml")
     root = Path(__file__).resolve().parents[1]
     workflow = yaml.safe_load((root / ".github/workflows/release.yml").read_text(encoding="utf-8"))
     dispatch = workflow.get("on", workflow.get(True, {})).get("workflow_dispatch", {})
-    waiver_input = dispatch.get("inputs", {}).get("waive_v176_qualification", {})
-    assert waiver_input.get("type") == "boolean"
-    assert waiver_input.get("default") is False
+    waiver_condition = "inputs.waive_v176_qualification || inputs.waive_v178_qualification"
+    for input_name in ("waive_v176_qualification", "waive_v178_qualification"):
+        waiver_input = dispatch.get("inputs", {}).get(input_name, {})
+        assert waiver_input.get("type") == "boolean"
+        assert waiver_input.get("default") is False
     for name, expected_writes in (("publish", 1), ("github-release", 1), ("github-release-repair", 2)):
         job = workflow["jobs"][name]
         assert job["environment"] == "release-qualification"
@@ -194,14 +196,19 @@ def test_publication_writes_require_qualification_except_scoped_v176_waiver():
                 # This conditional write publishes only the exception notice. The
                 # ordinary path still needs its signature before any distribution.
                 assert name == "github-release-repair"
-                assert step.get("if") == "inputs.waive_v176_qualification"
+                assert step.get("if") == waiver_condition
                 assert "verified-dist/*" not in step["run"]
                 assert "release-evidence/*" not in step["run"]
-                assert 'test "$ENGRAPHIS_REPAIR_COMMIT" = "6a441a75c8dd159607fa3933da83f600864b9146"' in step["run"]
+                assert "true:false:v1.7.6:6a441a75c8dd159607fa3933da83f600864b9146" in step["run"]
+                assert "false:true:v1.7.8:dce68e1602e580cd51b71e26db2ab04238df7df4" in step["run"]
+                assert step["env"]["WAIVE_V176"] == "${{ inputs.waive_v176_qualification }}"
+                assert step["env"]["WAIVE_V178"] == "${{ inputs.waive_v178_qualification }}"
                 continue
             if "scripts.verify_release_qualification" in step.get("run", ""):
                 if name == "github-release-repair":
-                    assert step.get("if") == "${{ !inputs.waive_v176_qualification }}"
+                    assert step.get("if") == (
+                        "${{ !inputs.waive_v176_qualification && !inputs.waive_v178_qualification }}"
+                    )
                 else:
                     assert "if" not in step
                 assert not step.get("continue-on-error", False)
@@ -228,16 +235,19 @@ def test_publication_writes_require_qualification_except_scoped_v176_waiver():
     assert workflow["jobs"]["github-release"]["needs"] == "publish"
     repair_steps = workflow["jobs"]["github-release-repair"]["steps"]
     waiver_guard = next(step for step in repair_steps
-                        if step.get("name") == "Enforce and record the v1.7.6-only qualification waiver")
-    assert waiver_guard.get("if") == "inputs.waive_v176_qualification"
-    assert 'test "$RELEASE_TAG" = "v1.7.6"' in waiver_guard["run"]
+                        if step.get("name") == "Enforce and record the release-specific qualification waiver")
+    assert waiver_guard.get("if") == waiver_condition
+    assert "true:false:v1.7.6|false:true:v1.7.8" in waiver_guard["run"]
+    assert waiver_guard["env"]["WAIVE_V176"] == "${{ inputs.waive_v176_qualification }}"
+    assert waiver_guard["env"]["WAIVE_V178"] == "${{ inputs.waive_v178_qualification }}"
     disclosure = next(step for step in repair_steps
                       if step.get("name") == "Disclose the qualification waiver before PyPI repair")
     publication = next(step for step in repair_steps
                        if step.get("name") == "Publish only missing verified distributions")
     assert repair_steps.index(disclosure) < repair_steps.index(publication)
+    assert '--json isDraft --jq .isDraft)" = "false"' in disclosure["run"]
     repair = next(step for step in repair_steps if step.get("name") == "Repair GitHub Release")
-    assert repair["env"]["WAIVE_QUALIFICATION"] == "${{ inputs.waive_v176_qualification }}"
+    assert repair["env"]["WAIVE_QUALIFICATION"] == "${{ " + waiver_condition + " }}"
     assert repair["run"].index("gh release edit") < repair["run"].index("gh release upload")
     assert '"${notes_args[@]}"' in repair["run"].split("gh release create", 1)[1]
     assert "${{ vars.ENGRAPHIS_RELEASE_" not in (
@@ -247,7 +257,8 @@ def test_publication_writes_require_qualification_except_scoped_v176_waiver():
 
 @pytest.mark.skipif(os.name == "nt", reason="release workflow executes in Linux bash")
 @pytest.mark.parametrize("existing,edit_fails", [(False, False), (True, False), (True, True)])
-def test_waiver_disclosure_cannot_follow_github_publication(tmp_path, existing, edit_fails):
+@pytest.mark.parametrize("tag", ["v1.7.6", "v1.7.8"])
+def test_waiver_disclosure_cannot_follow_github_publication(tmp_path, existing, edit_fails, tag):
     yaml = pytest.importorskip("yaml")
     bash = shutil.which("bash")
     if bash is None:
@@ -276,7 +287,7 @@ esac
     calls_path = tmp_path / "calls.txt"
     result = subprocess.run([bash, str(script)], cwd=tmp_path, capture_output=True, text=True,
                             timeout=20, env={**os.environ, "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
-                                             "RUNNER_TEMP": str(tmp_path), "RELEASE_TAG": "v1.7.6",
+                                             "RUNNER_TEMP": str(tmp_path), "RELEASE_TAG": tag,
                                              "WAIVE_QUALIFICATION": "true", "GH_REPO": "test/repo",
                                              "GH_RUN_URL": "https://example.test/run/1", "GH_CALLS": str(calls_path),
                                              "EXISTING": str(existing).lower(), "EDIT_FAILS": str(edit_fails).lower()})
@@ -300,8 +311,16 @@ esac
 
 
 @pytest.mark.skipif(os.name == "nt", reason="release workflow executes in Linux bash")
-@pytest.mark.parametrize("existing,edit_fails", [(False, False), (True, False), (True, True)])
-def test_public_waiver_notice_precedes_pypi_even_if_later_repair_fails(tmp_path, existing, edit_fails):
+@pytest.mark.parametrize("existing,edit_fails,draft", [
+    (False, False, False), (True, False, False), (True, True, False), (True, False, True),
+])
+@pytest.mark.parametrize("tag,commit", [
+    ("v1.7.6", "6a441a75c8dd159607fa3933da83f600864b9146"),
+    ("v1.7.8", "dce68e1602e580cd51b71e26db2ab04238df7df4"),
+])
+def test_public_waiver_notice_precedes_pypi_even_if_later_repair_fails(
+    tmp_path, existing, edit_fails, draft, tag, commit,
+):
     yaml = pytest.importorskip("yaml")
     bash = shutil.which("bash")
     if bash is None:
@@ -316,8 +335,12 @@ set -euo pipefail
 printf '%s\\n' "$*" >> "$GH_CALLS"
 case "$2" in
   view)
-    if [ "$EXISTING" != true ]; then exit 1; fi
-    printf 'Existing release notes\\n'
+    if [[ "$*" == *"--json isDraft"* ]]; then
+      printf '%s\\n' "$DRAFT"
+    else
+      if [ "$EXISTING" != true ]; then exit 1; fi
+      printf 'Existing release notes\\n'
+    fi
     ;;
   edit)
     if [ "$EDIT_FAILS" = true ]; then exit 7; fi
@@ -332,16 +355,19 @@ esac
                       encoding="utf-8")
     calls_path = tmp_path / "calls.txt"
     environment = {**os.environ, "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
-                   "RUNNER_TEMP": str(tmp_path), "RELEASE_TAG": "v1.7.6", "GH_REPO": "test/repo",
-                   "ENGRAPHIS_REPAIR_COMMIT": "6a441a75c8dd159607fa3933da83f600864b9146",
+                   "RUNNER_TEMP": str(tmp_path), "RELEASE_TAG": tag, "GH_REPO": "test/repo",
+                   "ENGRAPHIS_REPAIR_COMMIT": commit,
+                   "WAIVE_V176": str(tag == "v1.7.6").lower(),
+                   "WAIVE_V178": str(tag == "v1.7.8").lower(),
                    "GH_RUN_URL": "https://example.test/run/1", "GH_CALLS": str(calls_path),
-                   "EXISTING": str(existing).lower(), "EDIT_FAILS": str(edit_fails).lower()}
+                   "EXISTING": str(existing).lower(), "EDIT_FAILS": str(edit_fails).lower(),
+                   "DRAFT": str(draft).lower()}
     result = subprocess.run([bash, str(script)], cwd=tmp_path, capture_output=True, text=True,
                             timeout=20, env=environment)
     calls = calls_path.read_text(encoding="utf-8").splitlines()
-    assert result.returncode == (7 if edit_fails else 9), result.stderr
+    assert result.returncode == (7 if edit_fails else 1 if draft else 9), result.stderr
     notice = next(index for index, call in enumerate(calls) if "--notes-file " in call)
-    if edit_fails:
+    if edit_fails or draft:
         assert "pypi-publication" not in calls
     else:
         assert notice < calls.index("pypi-publication")
@@ -354,9 +380,18 @@ esac
 
 
 @pytest.mark.skipif(os.name == "nt", reason="release workflow executes in Linux bash")
-@pytest.mark.parametrize("tag,commit", [("v1.7.7", "6a441a75c8dd159607fa3933da83f600864b9146"),
-                                       ("v1.7.6", "a" * 40), ("v1.7.6", "")])
-def test_waiver_rejects_a_different_retained_candidate_before_any_public_write(tmp_path, tag, commit):
+@pytest.mark.parametrize("tag,commit,v176,v178", [
+    ("v1.7.7", "6a441a75c8dd159607fa3933da83f600864b9146", "true", "false"),
+    ("v1.7.6", "a" * 40, "true", "false"),
+    ("v1.7.6", "", "true", "false"),
+    ("v1.7.8", "a" * 40, "false", "true"),
+    ("v1.7.8", "", "false", "true"),
+    ("v1.7.8", "dce68e1602e580cd51b71e26db2ab04238df7df4", "true", "false"),
+    ("v1.7.6", "6a441a75c8dd159607fa3933da83f600864b9146", "false", "true"),
+    ("v1.7.8", "dce68e1602e580cd51b71e26db2ab04238df7df4", "true", "true"),
+    ("v1.7.8", "dce68e1602e580cd51b71e26db2ab04238df7df4", "false", "false"),
+])
+def test_waiver_rejects_a_different_retained_candidate_before_any_public_write(tmp_path, tag, commit, v176, v178):
     yaml = pytest.importorskip("yaml")
     bash = shutil.which("bash")
     if bash is None:
@@ -376,6 +411,42 @@ def test_waiver_rejects_a_different_retained_candidate_before_any_public_write(t
                             timeout=20, env={**os.environ, "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
                                              "RUNNER_TEMP": str(tmp_path), "RELEASE_TAG": tag,
                                              "ENGRAPHIS_REPAIR_COMMIT": commit, "GH_REPO": "test/repo",
+                                             "WAIVE_V176": v176, "WAIVE_V178": v178,
                                              "GH_CALLS": str(calls_path)})
     assert result.returncode != 0
     assert not calls_path.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="release workflow executes in Linux bash")
+@pytest.mark.parametrize("tag,v176,v178,allowed", [
+    ("v1.7.6", "true", "false", True),
+    ("v1.7.8", "false", "true", True),
+    ("v1.7.6", "true", "true", False),
+    ("v1.7.8", "true", "true", False),
+    ("v1.7.8", "true", "false", False),
+    ("v1.7.6", "false", "true", False),
+    ("v1.7.9", "false", "true", False),
+    ("v1.7.8", "false", "false", False),
+])
+def test_waiver_input_guard_rejects_ambiguous_or_unapproved_requests(tmp_path, tag, v176, v178, allowed):
+    yaml = pytest.importorskip("yaml")
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash is unavailable")
+    root = Path(__file__).resolve().parents[1]
+    workflow = yaml.safe_load((root / ".github/workflows/release.yml").read_text(encoding="utf-8"))
+    guard = next(step for step in workflow["jobs"]["github-release-repair"]["steps"]
+                 if step.get("name") == "Enforce and record the release-specific qualification waiver")
+    script = tmp_path / "guard.sh"
+    script.write_text(guard["run"], encoding="utf-8")
+    summary = tmp_path / "summary.md"
+    result = subprocess.run([bash, str(script)], cwd=tmp_path, capture_output=True, text=True,
+                            timeout=20, env={**os.environ, "RELEASE_TAG": tag,
+                                             "WAIVE_V176": v176, "WAIVE_V178": v178,
+                                             "GH_ACTOR": "test-actor", "GH_RUN_URL": "https://example.test/run/1",
+                                             "GITHUB_STEP_SUMMARY": str(summary)})
+    assert (result.returncode == 0) is allowed, result.stderr
+    assert summary.exists() is allowed
+    if allowed:
+        assert f"Tag: `{tag}`" in summary.read_text(encoding="utf-8")
+        assert "Triggered by: `test-actor`" in summary.read_text(encoding="utf-8")
