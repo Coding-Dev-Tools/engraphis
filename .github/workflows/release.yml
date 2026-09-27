@@ -977,7 +977,7 @@ jobs:
           {
             printf '# Release qualification waiver\n\n'
             printf 'Tag: `%s`\n' "$RELEASE_TAG"
-            printf 'Authorized by: `%s`\n' "$GH_ACTOR"
+            printf 'Triggered by: `%s`\n' "$GH_ACTOR"
             printf 'Workflow run: %s\n\n' "$GH_RUN_URL"
             printf 'The owner explicitly waived full-product qualification for this repair. No unverified release gate is represented as passed.\n'
           } >> "$GITHUB_STEP_SUMMARY"
