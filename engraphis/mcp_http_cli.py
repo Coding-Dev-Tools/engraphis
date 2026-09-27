@@ -136,15 +136,11 @@ def main(argv=None) -> None:
 
     # Import only after --help and dependency validation: FastMCP registers tools at
     # module import time, so importing it eagerly would make even help unusable.
-    from engraphis.mcp_server import mcp
-
-    # The eager exact-backend check may be absent from test mocks that replace
-    # engraphis.mcp_server with a minimal stand-in; fall back to a no-op so
-    # those tests stay green while production callers always run the check.
-    try:
-        from engraphis.mcp_server import _eager_exact_backend_check
-    except ImportError:
-        _eager_exact_backend_check = lambda: None  # noqa: E731
+    from engraphis.mcp_server import (
+        _eager_exact_backend_check,
+        _preload_sentence_transformers,
+        mcp,
+    )
 
     server = mcp
     if args.classic:
@@ -163,6 +159,7 @@ def main(argv=None) -> None:
     # healthy process can answer any request. Spec-compliant clients handle the
     # absent GET SSE stream (the server answers 405 and clients skip it).
     server.settings.stateless_http = True
+    _preload_sentence_transformers()
     _eager_exact_backend_check()
     server.run(transport=args.transport)
 

@@ -299,7 +299,8 @@ def test_http_cli_matches_dns_rebinding_guard_to_selected_loopback(
     fake_module = types.ModuleType("engraphis.mcp_server")
     fake_module.mcp = smart_server
     fake_module.classic_mcp = classic_server
-    fake_module._eager_exact_backend_check = lambda: None
+    fake_module._preload_sentence_transformers = lambda: runs.append("preload")
+    fake_module._eager_exact_backend_check = lambda: runs.append("exact")
     monkeypatch.setitem(sys.modules, "engraphis.mcp_server", fake_module)
     monkeypatch.setattr(mcp_http_cli, "_dependency_error", lambda: "")
 
@@ -315,7 +316,7 @@ def test_http_cli_matches_dns_rebinding_guard_to_selected_loopback(
     # with every restart, and the next client request then 404s ("Session
     # terminated"), parking gateway clients with zero registered tools.
     assert selected.settings.stateless_http is True
-    assert runs == [{"transport": "streamable-http"}]
+    assert runs == ["preload", "exact", {"transport": "streamable-http"}]
     middleware = TransportSecurityMiddleware(selected.settings.transport_security)
 
     def request(request_host, request_origin):
@@ -659,7 +660,7 @@ def test_mcp_server_module_entrypoint_runs_stdio_handshake(tmp_path):
         input=payload,
         text=True,
         capture_output=True,
-        timeout=15,
+        timeout=45,
         check=False,
     )
 
@@ -693,6 +694,47 @@ def test_mcp_server_module_entrypoint_serves_first_tool_call(tmp_path):
         assert result["content"]
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows native import startup")
+def test_stdio_first_semantic_tool_call_completes_with_cached_model(tmp_path):
+    """A fresh MCP process must complete its first semantic tool call."""
+    from scripts.smoke_installed_product import _Mcp
+
+    pytest.importorskip("sentence_transformers")
+    hub = pytest.importorskip("huggingface_hub")
+    try:
+        hub.snapshot_download(
+            "sentence-transformers/all-MiniLM-L6-v2", local_files_only=True,
+        )
+    except Exception:
+        pytest.skip("semantic model is not cached locally")
+
+    env = os.environ.copy()
+    env.update({
+        "ENGRAPHIS_DB_PATH": str(tmp_path / "stdio-semantic-first-tool.db"),
+        "ENGRAPHIS_EMBED_MODEL": "local:sentence-transformers/all-MiniLM-L6-v2",
+        "ENGRAPHIS_EXTRACTOR": "none",
+        "ENGRAPHIS_GRAPH_EXTRACTOR": "none",
+        "ENGRAPHIS_VECTOR_BACKEND": "numpy",
+        "ENGRAPHIS_MCP_WARMUP": "1",
+        "ENGRAPHIS_MCP_PRELOAD_EMBEDDER": "auto",
+        "HF_HUB_OFFLINE": "1",
+        "TRANSFORMERS_OFFLINE": "1",
+    })
+    with _Mcp([sys.executable, "-m", "engraphis.mcp_cli"], env, ROOT, 45) as client:
+        started = client.call("engraphis_session", {
+            "action": "start", "workspace": "default", "repo": "engraphis",
+            "agent": "startup-test", "goal": "Verify semantic first call",
+            "token_budget": 64,
+        })
+        assert started["context_status"] == "available"
+        assert started["semantic_support"] is True
+        ended = client.call("engraphis_session", {
+            "action": "end", "session_id": started["session_id"],
+            "summary": "Fresh semantic startup verified", "open_threads": [],
+        })
+        assert ended["status"] == "summarized"
+
+
 def test_classic_mcp_entrypoint_preserves_historical_server_identity(tmp_path):
     payload = json.dumps({
         "jsonrpc": "2.0",
@@ -721,7 +763,7 @@ def test_classic_mcp_entrypoint_preserves_historical_server_identity(tmp_path):
         input=payload,
         text=True,
         capture_output=True,
-        timeout=15,
+        timeout=45,
         check=False,
     )
 
@@ -1429,6 +1471,143 @@ def test_service_singleton_is_thread_safe():
     assert len(instances) == 5
     for inst in instances[1:]:
         assert inst is instances[0]
+
+
+@pytest.mark.parametrize("platform,policy,model,reranker,expected", [
+    ("win32", "auto", "local:model", "", True),
+    ("win32", "auto", "", "local:reranker", True),
+    ("win32", "auto", "local:model", "local:reranker", True),
+    ("linux", "auto", "local:model", "", False),
+    ("win32", "off", "local:model", "local:reranker", False),
+    ("linux", "on", "local:model", "", True),
+    ("win32", "auto", "", "", False),
+    ("win32", "on", "", "", False),
+])
+def test_semantic_preload_policy_preserves_the_protocol(
+    monkeypatch, capsys, platform, policy, model, reranker, expected,
+):
+    import io
+    from types import SimpleNamespace
+    import engraphis.mcp_server as server
+
+    diagnostics = io.StringIO()
+    imported = []
+
+    def import_package(name):
+        imported.append(name)
+        print("optional dependency diagnostic")
+
+    monkeypatch.setenv("ENGRAPHIS_MCP_PRELOAD_EMBEDDER", policy)
+    monkeypatch.setattr(server, "settings", SimpleNamespace(
+        embed_model=model, rerank_model=reranker, require_immutable_models=True,
+    ))
+    monkeypatch.setattr(server, "sys", SimpleNamespace(platform=platform, stderr=diagnostics))
+    monkeypatch.setattr(server, "importlib", SimpleNamespace(import_module=import_package))
+    server._preload_sentence_transformers()
+    assert imported == (["sentence_transformers"] if expected else [])
+    assert diagnostics.getvalue() == ("optional dependency diagnostic\n" if expected else "")
+    assert capsys.readouterr().out == ""
+
+
+def test_semantic_preload_failure_defers_to_backend_policy(monkeypatch, caplog, capsys):
+    import io
+    from types import SimpleNamespace
+    import engraphis.mcp_server as server
+
+    def unavailable(_name):
+        raise ImportError("private dependency path must not enter diagnostics")
+
+    monkeypatch.setenv("ENGRAPHIS_MCP_PRELOAD_EMBEDDER", "on")
+    monkeypatch.setattr(server, "settings", SimpleNamespace(embed_model="local:model"))
+    monkeypatch.setattr(server, "sys", SimpleNamespace(platform="win32", stderr=io.StringIO()))
+    monkeypatch.setattr(server, "importlib", SimpleNamespace(import_module=unavailable))
+    with caplog.at_level(logging.DEBUG, logger=server.logger.name):
+        server._preload_sentence_transformers()
+    assert "preload skipped (ImportError)" in caplog.text
+    assert "private dependency path" not in caplog.text
+    assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize("configured", ["embed", "rerank"])
+@pytest.mark.parametrize("model,revision,allowed", [
+    ("org/model", None, False),
+    ("org/model", "main", False),
+    ("org/model", "A" * 40, False),
+    ("org/model", "a" * 39, False),
+    ("org/model", "a" * 40, True),
+    ("local:cached-model", None, True),
+])
+def test_semantic_preload_validates_sources_before_optional_imports(
+    monkeypatch, configured, model, revision, allowed,
+):
+    import io
+    from types import SimpleNamespace
+    import engraphis.mcp_server as server
+
+    imported = []
+    settings = SimpleNamespace(
+        embed_model="", rerank_model="", require_immutable_models=True,
+    )
+    setattr(settings, configured + "_model", model)
+    setattr(settings, configured + "_revision", revision)
+    monkeypatch.setenv("ENGRAPHIS_MCP_PRELOAD_EMBEDDER", "on")
+    monkeypatch.setattr(server, "settings", settings)
+    monkeypatch.setattr(server, "sys", SimpleNamespace(platform="win32", stderr=io.StringIO()))
+    monkeypatch.setattr(server, "importlib", SimpleNamespace(import_module=imported.append))
+    if allowed:
+        server._preload_sentence_transformers()
+        assert imported == ["sentence_transformers"]
+    else:
+        with pytest.raises(ValueError, match="lowercase 40-character commit revision"):
+            server._preload_sentence_transformers()
+        assert imported == []
+
+
+def test_stdio_startup_validates_before_warming_or_serving(monkeypatch):
+    import io
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+    import anyio
+    import mcp.server.stdio as stdio
+    import engraphis.mcp_server as server
+
+    events = []
+    diagnostics = io.StringIO()
+    monkeypatch.setattr(server, "sys", SimpleNamespace(
+        stdin=io.StringIO(), stdout=io.StringIO(), stderr=diagnostics,
+    ))
+
+    def preload():
+        assert server.sys.stdout is diagnostics
+        events.append("preload")
+
+    @asynccontextmanager
+    async def transport(**kwargs):
+        events.append("transport")
+        yield "reader", "writer"
+
+    async def serve(reader, writer, options):
+        assert (reader, writer, options) == ("reader", "writer", "options")
+        events.append("serve")
+
+    monkeypatch.setattr(server, "_preload_sentence_transformers", preload)
+    monkeypatch.setattr(server, "_eager_exact_backend_check", lambda: events.append("exact"))
+    monkeypatch.setattr(server, "_start_background_warmup", lambda: events.append("warmup"))
+    monkeypatch.setattr(stdio, "stdio_server", transport)
+    fake_server = SimpleNamespace(_mcp_server=SimpleNamespace(
+        run=serve, create_initialization_options=lambda: "options",
+    ))
+    anyio.run(server._safe_run_stdio_async, fake_server)
+    assert events == ["preload", "exact", "warmup", "transport", "serve"]
+
+    def invalid_policy():
+        raise ValueError("invalid model provenance")
+
+    events.clear()
+    monkeypatch.setattr(server, "_preload_sentence_transformers", invalid_policy)
+    with pytest.raises(ValueError, match="invalid model provenance"):
+        anyio.run(server._safe_run_stdio_async, fake_server)
+    assert events == []
 
 
 def test_background_warmup_honors_env(monkeypatch):
