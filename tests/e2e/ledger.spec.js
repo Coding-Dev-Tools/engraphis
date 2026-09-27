@@ -873,8 +873,6 @@ test('Ledger enters Every node from a loaded overview without losing its scope',
   await expect(page.locator('#graph-count')).toContainText('3 entities');
   await page.locator('[data-graph-preset-choice="compact"]').click();
   await expect(page.locator('[data-graph-preset-choice="compact"]')).toHaveAttribute('aria-pressed', 'true');
-  await page.locator('[data-graph-color-choice="type"]').click();
-  await expect(page.locator('[data-graph-color-choice="type"]')).toHaveAttribute('aria-pressed', 'true');
   await page.locator('#graph-flow').click();
   await expect(page.locator('#graph-flow')).toHaveAttribute('aria-checked', 'false');
   await page.locator('#graph-flow').click();
@@ -888,7 +886,6 @@ test('Ledger enters Every node from a loaded overview without losing its scope',
   await expect(page.locator('#graph-count')).toContainText('0 visible of 3 entities');
   await page.locator('#graph-tune-min-degree').fill('1');
   await expect(page.locator('#graph-count')).toContainText('2 visible of 3 entities');
-  await page.locator('[data-graph-palette-choice="ocean"]').click();
   const persistedInAllMode = await page.evaluate(() => JSON.parse(
     localStorage.getItem('engraphis-ledger-graph-preferences-v1') || '{}',
   ));
@@ -951,6 +948,25 @@ test('Ledger keeps authored Galaxy coordinates on the orbit renderer in Every-no
   // Every-node WebGL canvas is reserved for non-Galaxy complete scenes.
   await expect(page.locator('.engraphis-all-canvas')).toHaveCount(0);
   await expect(page.locator('.graph-spacetime-overlay')).toHaveCount(1);
+  await page.locator('[data-graph-preset-choice="compact"]').click();
+  await page.evaluate(() => {
+    const create = window.EngraphisGraph.create;
+    window.__reloadedGraphPresets = [];
+    window.EngraphisGraph.create = function(...args) {
+      const api = create.apply(this, args);
+      const setPreset = api.setPreset;
+      api.setPreset = function(preset) {
+        window.__reloadedGraphPresets.push(preset);
+        return setPreset.call(this, preset);
+      };
+      return api;
+    };
+  });
+  await page.getByRole('button', { name: 'Reload data', exact: true }).click();
+  await expect(page.locator('#graph-canvas')).toHaveAttribute('aria-busy', 'false');
+  await expect.poll(() => page.evaluate(() => window.__reloadedGraphPresets)).toContain('compact');
+  expect(await page.evaluate(() => window.__reloadedGraphPresets)).not.toContain('galaxy');
+  await expect(page.locator('[data-graph-preset-choice="compact"]')).toHaveAttribute('aria-pressed', 'true');
 });
 
 test('Ledger keeps the committed Every-node renderer visible when a superseded load resolves', async ({ page }) => {
@@ -1011,14 +1027,14 @@ test('Ledger cache-busts a graph renderer that fetched but did not register', as
   await expect(page.locator('#graph-empty')).toContainText('Graph unavailable');
   expect(rendererRequests).toHaveLength(1);
   const first = new URL(rendererRequests[0]);
-  expect(first.searchParams.get('v')).toBe('20260906-galaxy-boundaries-1');
+  expect(first.searchParams.get('v')).toBe('20260927-unmerged-readiness-1');
   expect(first.searchParams.has('retry')).toBe(false);
 
   await page.getByRole('button', { name: 'Reload data' }).click();
   await expect(page.locator('#graph-count')).toContainText('3 entities · 1 relations');
   expect(rendererRequests).toHaveLength(2);
   const second = new URL(rendererRequests[1]);
-  expect(second.searchParams.get('v')).toBe('20260906-galaxy-boundaries-1');
+  expect(second.searchParams.get('v')).toBe('20260927-unmerged-readiness-1');
   expect(second.searchParams.get('retry')).toBe('1');
 });
 
@@ -1036,7 +1052,7 @@ test('Ledger applies each Galaxy preference migration once', async ({ page }) =>
   await page.goto('/');
   await expect(page.locator('#graph-repel')).toHaveValue('100');
   await expect(page.locator('#graph-link')).toHaveValue('8');
-  await expect(page.locator('#graph-gravity')).toHaveValue('120');
+  await expect(page.locator('#graph-gravity')).toHaveValue('72');
   // A first-time dashboard may use the new HTML default without manufacturing preferences.
   expect(await readPreferences()).toBeNull();
 
@@ -1051,7 +1067,7 @@ test('Ledger applies each Galaxy preference migration once', async ({ page }) =>
   });
   await expect(page.locator('#graph-repel')).toHaveValue('100');
   await expect(page.locator('#graph-link')).toHaveValue('8');
-  await expect(page.locator('#graph-gravity')).toHaveValue('120');
+  await expect(page.locator('#graph-gravity')).toHaveValue('72');
 
   await writePreferences({
     preset: 'galaxy', style: 'solar', tuning: { repel: 48, link: 8, gravity: 0 },
@@ -1061,7 +1077,7 @@ test('Ledger applies each Galaxy preference migration once', async ({ page }) =>
   await expect(page.locator('#graph-repel')).toHaveValue('100');
   await expect(page.locator('#graph-gravity')).toHaveValue('0');
   const migrated = await readPreferences();
-  expect(migrated.physicsVersion).toBe(5);
+  expect(migrated.physicsVersion).toBe(6);
   expect(migrated.preset).toBe('galaxy');
   expect(migrated.style).toBe('solar');
   expect(migrated.tuning.repel).toBe(100);
@@ -1075,10 +1091,11 @@ test('Ledger applies each Galaxy preference migration once', async ({ page }) =>
     preset: 'galaxy', style: 'solar', tuning: { repel: 100, link: 8, gravity: 96 },
   });
   await page.reload();
-  await expect(page.locator('#graph-gravity')).toHaveValue('120');
+  // v5 raised the retired 96 default to 120; v6 recalibrates that same default to 72.
+  await expect(page.locator('#graph-gravity')).toHaveValue('72');
   const migratedGravity = await readPreferences();
-  expect(migratedGravity.physicsVersion).toBe(5);
-  expect(migratedGravity.tuning.gravity).toBe(120);
+  expect(migratedGravity.physicsVersion).toBe(6);
+  expect(migratedGravity.tuning.gravity).toBe(72);
 
   await writePreferences({
     preset: 'galaxy', style: 'galaxy', tuning: { repel: 73, link: 21, gravity: 0 },
@@ -1088,7 +1105,7 @@ test('Ledger applies each Galaxy preference migration once', async ({ page }) =>
   await expect(page.locator('#graph-link')).toHaveValue('21');
   await expect(page.locator('#graph-gravity')).toHaveValue('0');
   const custom = await readPreferences();
-  expect(custom.physicsVersion).toBe(5);
+  expect(custom.physicsVersion).toBe(6);
   expect(custom.tuning.repel).toBe(73);
   expect(custom.tuning.link).toBe(21);
   expect(custom.tuning.gravity).toBe(0);
@@ -1101,16 +1118,23 @@ test('Ledger applies each Galaxy preference migration once', async ({ page }) =>
       });
       await page.reload();
       await expect(page.locator('#graph-repel')).toHaveValue(String(repel));
-      const expectedGravity = physicsVersion < 5 ? 120 : 96;
+      // Version 4 used 96 by default; in version 5 it is an explicit custom choice.
+      const expectedGravity = physicsVersion < 5 ? 72 : 96;
       await expect(page.locator('#graph-gravity')).toHaveValue(String(expectedGravity));
       const saved = await readPreferences();
-      expect(saved.physicsVersion).toBe(5);
+      expect(saved.physicsVersion).toBe(6);
       expect(saved.tuning.repel).toBe(repel);
       expect(saved.tuning.gravity).toBe(expectedGravity);
     }
   }
 
-  // The v3 reset applies only to snapshots older than v3, even after a v5 upgrade.
+  // A genuinely chosen value that is not a retired default is never rewritten.
+  await writePreferences({ physicsVersion: 5, preset: 'galaxy', tuning: { repel: 100, gravity: 150 } });
+  await page.reload();
+  await expect(page.locator('#graph-gravity')).toHaveValue('150');
+  expect((await readPreferences()).tuning.gravity).toBe(150);
+
+  // The v3 reset applies only to snapshots older than v3, even after a v6 upgrade.
   for (const physicsVersion of [3, 4]) {
     const spacetimeTuning = { gravitationalConstant: 200, blackHoleMass: 500,
       localGravitationalConstant: 200, damping: 0, springStiffness: 100 };
@@ -1888,8 +1912,7 @@ test('Explore uses the visual explorer controls and applies their state', async 
   await expect(page.locator('#graph-link-label')).toHaveText('Link distance · tight ↔ loose');
   await expect(page.locator('#graph-link')).toHaveValue('8');
   await expect(page.locator('#graph-gravity-label')).toHaveText('Galactic gravity · loose ↔ tight');
-  await expect(page.locator('#graph-gravity')).toHaveValue('120');
-  await expect(page.getByRole('button', { name: 'Schema drift' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('#graph-gravity')).toHaveValue('72');
   await expect(page.getByRole('button', { name: 'Operations' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'People' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Code ↔ memory' })).toBeVisible();
@@ -1899,10 +1922,6 @@ test('Explore uses the visual explorer controls and applies their state', async 
   await expect(page.getByRole('button', { name: 'Every node' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Unlinked nodes' })).toHaveAttribute('aria-pressed', 'true');
   await expect(page.locator('#graph-count')).toContainText('3 entities · 1 relations');
-  const paletteNotice = page.locator('#notice-banner');
-  await page.locator('[data-graph-palette-choice="ember"]').click();
-  await expect(paletteNotice).toHaveText('ember palette applied to the graph.');
-  await expect(paletteNotice).toBeHidden({ timeout: 4500 });
   const hideUnlinkedRequest = page.waitForRequest(request => {
     const url = new URL(request.url());
     return url.pathname === '/api/graph/scene' && url.searchParams.get('connected_only') === 'true';
@@ -1951,8 +1970,7 @@ test('Explore uses the visual explorer controls and applies their state', async 
   await expect(page.locator('#graph-canvas')).toHaveAttribute('data-graph-style', 'galaxy');
   await page.getByRole('button', { name: 'Compact' }).click();
   await expect(page.locator('#graph-mode')).toContainText('Compact');
-  await page.getByRole('button', { name: 'Type' }).click();
-  await expect(page.getByRole('button', { name: 'Type' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('#graph-color')).toHaveValue('community');
 
   const flow = page.getByRole('switch', { name: 'Relation flow' });
   await flow.click();
@@ -2025,7 +2043,7 @@ test('Explore uses the visual explorer controls and applies their state', async 
   await revealAdvancedGraphControls(page);
   await expect(page.getByRole('button', { name: 'Galaxy', exact: true })).toHaveAttribute('aria-pressed', 'true');
   await expect(page.getByRole('button', { name: 'Compact' })).toHaveAttribute('aria-pressed', 'true');
-  await expect(page.getByRole('button', { name: 'Type' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('#graph-color')).toHaveValue('community');
   await expect(page.locator('#graph-flow-speed')).toHaveValue('45');
   await expect(page.getByRole('switch', { name: 'Relation flow' })).toHaveAttribute('aria-checked', 'false');
   await expect(page.getByRole('switch', { name: 'Freeze simulation' })).toHaveAttribute('aria-checked', 'false');
@@ -2256,7 +2274,8 @@ test('a custom graph view restores every saved control and server filter', async
 
   await expect(page.getByRole('button', { name: 'Galaxy', exact: true })).toHaveAttribute('aria-pressed', 'true');
   await expect(page.getByRole('button', { name: 'Radial' })).toHaveAttribute('aria-pressed', 'true');
-  await expect(page.getByRole('button', { name: 'Type' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('#graph-color')).toHaveValue('type');
+  await expect(page.locator('#graph-palette')).toHaveValue('ocean');
   await expect(page.locator('#graph-flow-speed')).toHaveValue('67');
   await expect(page.locator('#graph-repel')).toHaveValue('80');
   await expect(page.getByRole('switch', { name: 'Relation flow' })).toHaveAttribute('aria-checked', 'false');

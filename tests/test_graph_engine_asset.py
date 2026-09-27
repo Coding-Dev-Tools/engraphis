@@ -225,6 +225,96 @@ def test_every_node_visibility_response_refreshes_webgl_node_buffers() -> None:
     assert handler.index("uploadNodePositions()") < handler.index("uploadEdges()")
 
 
+@requires_node
+def test_galaxy_lane_cache_preserves_star_and_primary_classification() -> None:
+    report = _run_engine(
+        """
+        const api = G.create(el, { reducedMotion: () => true });
+        const nodes = [
+          { id: 'center', anchor_role: 'global', community_id: 'core', gravity_mass: 8,
+            x: 0, y: 0, vx: 0, vy: 0 },
+          { id: 'star', anchor_role: 'community', system_anchor_id: 'star',
+            community_id: 'star-system', gravity_mass: 4, x: 180, y: 0, vx: 0, vy: 0 },
+          { id: 'p1', system_anchor_id: 'star', orbit_tier: 1, orbit_radius: 30,
+            community_id: 'star-system', gravity_mass: 1, x: 210, y: 0, vx: 0, vy: 0 },
+          { id: 'p2', system_anchor_id: 'star', orbit_tier: 1, orbit_radius: 30,
+            community_id: 'star-system', gravity_mass: 1, x: 210, y: 0, vx: 0, vy: 0 },
+          { id: 'p3', system_anchor_id: 'star', orbit_tier: 1, orbit_radius: 30,
+            community_id: 'star-system', gravity_mass: 1, x: 210, y: 0, vx: 0, vy: 0 },
+        ];
+        api.setData({ nodes, links: [
+          { source: 'center', target: 'star', layer: 'semantic' },
+          { source: 'star', target: 'p1', layer: 'semantic' },
+          { source: 'star', target: 'p2', layer: 'semantic' },
+          { source: 'star', target: 'p3', layer: 'semantic' },
+        ] });
+        const lanes = I.prepareGalaxyOrbitLaneTopology(store.graphData.nodes);
+        const stars = I.galaxyStarAnchorIds(lanes);
+        const primaries = I.galaxyPrimaryAnchorIds(lanes);
+        emit({ lanes: lanes.map(lane => ({ anchorId: lane.anchorId, members: lane.members,
+          radius: lane.radius })), stars: [...stars], primaries: [...primaries] });
+        """
+    )
+    assert report["lanes"] == [{"anchorId": "star", "members": 3, "radius": 30.0}]
+    assert report["stars"] == ["star"]
+    assert report["primaries"] == ["star"]
+
+
+@requires_node
+def test_hidden_labels_skip_the_entire_post_render_node_scan() -> None:
+    report = _run_engine(
+        """
+        let fills = 0;
+        const ctx = {
+          save() {}, restore() {}, fillText() { fills += 1; }, beginPath() {}, arc() {},
+          fill() {}, stroke() {}, createRadialGradient() { return { addColorStop() {} }; },
+          createLinearGradient() { return { addColorStop() {} }; },
+        };
+        const api = G.create(el, { reducedMotion: () => true });
+        api.setData(chain(20));
+        store.onRenderFramePost(ctx, 1);
+        const hidden = fills;
+        api.setSettings({ labels: true, labelDensity: 3 });
+        store.onRenderFramePost(ctx, 1);
+        const shown = fills - hidden;
+        emit({ hidden, shown });
+        """
+    )
+    assert report["hidden"] == 0
+    assert report["shown"] == 6
+
+
+def test_every_node_overlay_keeps_a_bounded_self_rescheduling_flow_clock() -> None:
+    source = EVERY_ASSET.read_text(encoding="utf-8")
+    overlay = source[source.index("function drawOverlay("):source.index("/* Lit-path decorations", source.index("function drawOverlay("))]
+    assert overlay.count("state.labelFrame = raf(runOverlayFrame);") == 2
+    assert "stamp - state.overlayPaintAt < FLOW_FRAME_MS" in overlay
+    assert "if (flowAnimating() && !state.destroyed && !state.paused)" in overlay
+    # A synchronous export must not skip the overlay because of the flow throttle.
+    export = source[source.index("function exportImageCanvas("):source.index("function destroyGraph()")]
+    assert "drawOverlay(now, true);" in export
+    # Pausing must release the overlay clock, not wait for a pending callback to notice.
+    pause = source[source.index("pause() {", source.index("const api =")):source.index("resume()", source.index("const api ="))]
+    assert "state.labelFrame" in pause and "caf(state.labelFrame)" in pause
+
+
+def test_every_node_underlay_cache_includes_backing_scale() -> None:
+    source = EVERY_ASSET.read_text(encoding="utf-8")
+    regions = source[source.index("function drawRegions("):source.index("/* ── Picking", source.index("function drawRegions("))]
+    assert "${state.dpr}" in regions.split("if (key === state.underlayKey) return;", 1)[0]
+    lifecycle = source[source.index("const observer ="):source.index("initWebgl();", source.index("const observer ="))]
+    assert "observer.observe(element)" in lifecycle
+    assert "window.addEventListener('resize', resize)" in lifecycle
+    destroy = source[source.index("function destroyGraph()"):source.index("const api =", source.index("function destroyGraph()"))]
+    assert "window.removeEventListener('resize', resize)" in destroy
+
+
+def test_authored_galaxy_candidate_keeps_the_physics_snapshot_source_active() -> None:
+    source = PRIMARY_LEDGER.read_text(encoding="utf-8")
+    assert "graph.setPreset(galaxyQuality && preset === 'every' ? 'galaxy' : preset);" in source
+    assert "onPhysicsFrame: snapshot =>" in source
+
+
 def test_v1_graph_asset_is_only_a_compatibility_adapter() -> None:
     """New renderer code stays on the v2 dashboard surface, not the legacy server."""
     adapter = LEGACY_ADAPTER.read_text(encoding="utf-8")
@@ -381,7 +471,7 @@ def test_graph_engine_deep_link_reaches_the_next_engine_after_a_lazy_load() -> N
     report = _run_routing("loads")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260906-galaxy-boundaries-1"
+        "/v2-assets/engraphis-graph.js?v=20260927-unmerged-readiness-1"
     ]
     # It waits rather than rendering something wrong in the meantime.
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
@@ -396,7 +486,7 @@ def test_classic_route_reaches_the_canonical_engine_without_a_query_flag() -> No
     report = _run_routing("classic")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260906-galaxy-boundaries-1"
+        "/v2-assets/engraphis-graph.js?v=20260927-unmerged-readiness-1"
     ]
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
     assert report["engine"] == 1
@@ -410,7 +500,7 @@ def test_show_all_lazily_loads_its_renderer_after_the_main_engine_is_ready() -> 
     report = _run_routing("all-loaded")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph-every.js?v=20260925-evidence-mass-1"
+        "/v2-assets/engraphis-graph-every.js?v=20260927-unmerged-readiness-1"
     ]
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
     assert report["engine"] == 1
@@ -861,8 +951,8 @@ def test_gravity_slider_response_has_exact_endpoints_and_scales_every_physics_la
           };
           const boost = 1 + 0.25 * smoothstep(value / 48)
             + 0.25 * smoothstep((value - 48) / 52);
-          const highEndGain = 1 + 0.5 * smoothstep((value - 200) / 200 * 1.5);
-          return base * boost * 4 * highEndGain * 1.875;
+          const highEndGain = 1 + 0.65 * smoothstep((value - 200) / 200 * 1.5);
+          return base * boost * 4 * highEndGain * 2.4375;
         };
         const fullRange = Array.from({ length: 401 }, (_, setting) => setting);
         const centralCap = (gravity, explicit) => {
@@ -937,27 +1027,27 @@ def test_gravity_slider_response_has_exact_endpoints_and_scales_every_physics_la
         });
         """
     )
-    assert report["endpoints"][:2] == [225, 810]
-    assert report["endpoints"][2] == pytest.approx(2571.9230769230767)
-    assert report["endpoints"][3] == pytest.approx(13427.307692307693)
+    assert report["endpoints"][:2] == pytest.approx([292.5, 1053])
+    assert report["endpoints"][2] == pytest.approx(3343.5)
+    assert report["endpoints"][3] == pytest.approx(19201.05)
     assert report["split"]["blackHole"] == pytest.approx(
-        [292.5, 1053, 3343.5, 17455.5]
+        [380.25, 1368.9, 4346.55, 24961.365]
     )
     assert report["split"]["local"] == pytest.approx(
-        [146.25, 526.5, 1671.75, 8727.75]
+        [190.125, 684.45, 2173.275, 12480.6825]
     )
     assert report["split"]["local"] == [
         value * 0.5 for value in report["split"]["blackHole"]
     ]
-    assert report["clamps"] == pytest.approx([0, 13427.307692307693, 0, 0])
+    assert report["clamps"] == pytest.approx([0, 19201.05, 0, 0])
     assert report["layoutCompactness"] == pytest.approx([1.75, 1.5616, 0.965, 0.18])
     assert all(
         right < left
         for left, right in zip(report["layoutCompactness"], report["layoutCompactness"][1:])
     )
-    assert report["caps"] == pytest.approx([12.1875, 43.875, 1])
-    assert report["compatibilityCaps"] == pytest.approx([12.1875, 43.875])
-    assert report["localCaps"] == pytest.approx([6.09375, 21.9375])
+    assert report["caps"] == pytest.approx([15.84375, 57.0375, 1])
+    assert report["compatibilityCaps"] == pytest.approx([15.84375, 57.0375])
+    assert report["localCaps"] == pytest.approx([7.921875, 28.51875])
     assert report["response"][0] == 0
     assert all(
         right > left
@@ -971,7 +1061,7 @@ def test_gravity_slider_response_has_exact_endpoints_and_scales_every_physics_la
     source = ASSET.read_text(encoding="utf-8")
     assert "const GALAXY_FAR_FIELD_ENVELOPE_SCALE = 2;" in source
     assert "const GALAXY_GRAVITY_MAXIMUM = 400;" in source
-    assert "const GALAXY_GRAVITY_MAX_STRENGTH_GAIN = 1.5;" in source
+    assert "const GALAXY_GRAVITY_MAX_STRENGTH_GAIN = 1.65;" in source
     assert "const GALAXY_GRAVITY_RESPONSE_RATE_MULTIPLIER = 1.5;" in source
 
 
@@ -1171,7 +1261,7 @@ def test_default_orbital_speed_preserves_cached_star_relative_direction() -> Non
     assert math.copysign(1, report["repairedTangent"]) == report["cachedDirection"]
     assert abs(report["repairedTangent"]) > 1e-5
     assert report["repairedRadius"] == pytest.approx(report["initialRadius"])
-    assert report["stellarSpeedGain"] == pytest.approx(math.sqrt(5265 / 750))
+    assert report["stellarSpeedGain"] == pytest.approx(math.sqrt(6844.5 / 750))
     assert report["starAfter"] == pytest.approx(report["starBefore"])
 
 
@@ -1448,7 +1538,11 @@ def test_orbital_speed_scales_live_carrier_and_kinematic_phase_rates() -> None:
     assert report["naturalKinematic"]["systemTravel"] > 0
     assert report["naturalKinematic"]["localTravel"] > 0
     assert report["kinematicSystemRatio"] > 1.8
-    assert report["kinematicLocalRatio"] > 1.25
+    assert report["kinematicLocalRatio"] > 1.20
+    # Local motion must track the system orbit rather than diverge from it: a kinematic local
+    # clock that ignores the system ratio would ping-pong satellites while carriers turn. This
+    # keeps the response monotone without pinning a brittle exact product.
+    assert report["kinematicLocalRatio"] < report["kinematicSystemRatio"]
     assert report["naturalCarrier"] > 0
     assert report["carrierRatio"] == pytest.approx(2.5, rel=0.02)
 
@@ -2077,7 +2171,7 @@ def test_black_hole_field_is_twice_local_gravity_and_uses_only_anchor_mass() -> 
         });
         """
     )
-    assert report["constants"] == [292.5, 146.25]
+    assert report["constants"] == [380.25, 190.125]
     assert report["accelerationRatio"] == pytest.approx(2, rel=1e-12)
     assert report["masses"] == [8, 101, 109]
 
@@ -2419,43 +2513,53 @@ def test_spacetime_canvas_warps_the_grid_and_bounds_trails_without_dom_nodes() -
           viewport: { x: 450, y: 300, zoom: 1 },
         });
         let current = snapshot(180);
+        let snapshotReads = 0;
         const engine = {
-          getPhysicsSnapshot: () => current,
+          getPhysicsSnapshot: () => { snapshotReads += 1; return current; },
           graphToScreen: (x, y) => ({ x: x + 450, y: y + 300 }),
         };
         new Function('window', source)(window);
         const overlay = window.EngraphisSpacetime.create(container, engine);
         overlay.setEnabled(true);
-        frames.shift()(40); // samples the 160 fastest bodies
-        frames.shift()(80); // paints their trails
-        const small = { ...calls, canvasCount: container.children.length };
+        overlay.setSnapshot(current);
+        frames.shift()(40); // immediate enable paint samples the 160 fastest bodies
+        const afterEnable = calls.linearGradients;
+        frames.shift()(72); // unchanged 16ms rAF is throttled without repainting
+        const afterThrottled = calls.linearGradients;
+        frames.shift()(108); // next 36ms physics-rate frame paints their trails
+        const small = { ...calls, canvasCount: container.children.length, afterEnable, afterThrottled };
         reduceMotion = true;
-        frames.shift()(96); // local wells stay visible; trails do not repaint under reduced motion
+        frames.shift()(142); // local wells stay visible; trails do not repaint under reduced motion
         const reduced = { ...calls, queued: frames.length };
         current = snapshot(601);
         reduceMotion = false;
-        frames.shift()(120);
+        overlay.setSnapshot(current);
+        frames.shift()(176);
         const dense = { ...calls };
-        current = { ...snapshot(180), paused: true };
-        frames.shift()(160); // final static paint, then no idle orbit overlay rAF
-        const paused = { queued: frames.length, ellipses: calls.ellipses };
+        listeners.engraphisgraphphysicschange({ detail: { paused: true } });
+        frames.shift()(210); // final static paint, then no idle orbit overlay rAF
+        const paused = { queued: frames.length, ellipses: calls.ellipses, snapshotReads };
         overlay.destroy();
-        emit({ small, reduced, dense, paused, childrenAfterDestroy: container.children.length,
+        emit({ small, reduced, dense, paused, snapshotReads, childrenAfterDestroy: container.children.length,
           listenerDetached: !listeners.engraphisgraphphysicschange,
           visibilityDetached: !documentListeners.visibilitychange });
         """
     )
     assert report["small"]["canvasCount"] == 1
     assert report["small"]["arcs"] > 0 and report["small"]["lines"] > 0
-    # Both sampled frames paint the 24 highest-mass local stars, with two guide rings each.
+    # The 72ms frame is throttled; only the 40ms and 108ms paints occur.
     assert report["small"]["ellipses"] == 24 * 2 * 2
     # Reduced motion removes velocity blur, not the static local solar-system guide rings.
     assert report["reduced"]["ellipses"] == report["small"]["ellipses"] + 24 * 2
     # One capped canvas pass renders at most the 160 selected velocity trails; a >600-node
     # graph clears them rather than paying a linear trail cost in the next paint.
-    assert 0 < report["small"]["linearGradients"] <= 160
+    assert report["small"]["afterEnable"] == 0
+    assert report["small"]["afterThrottled"] == 0
+    assert report["small"]["linearGradients"] == 160
     assert report["dense"]["linearGradients"] == report["small"]["linearGradients"]
     assert report["paused"]["queued"] == 0
+    assert report["paused"]["ellipses"] == report["dense"]["ellipses"] + 24 * 2
+    assert report["snapshotReads"] == 1
     assert report["listenerDetached"] is True
     assert report["visibilityDetached"] is True
 
@@ -2643,7 +2747,7 @@ def test_gravity_zero_leaves_the_galactic_field_weak_and_stellar_floor_intact() 
         "blackHole": 0,
         "compatibilityLocal": 0,
         "stellar": 0,
-        "defaultStellar": pytest.approx(5265.0),
+        "defaultStellar": pytest.approx(6844.5),
     }
     before, after = report["before"], report["after"]
     assert math.hypot(before["relative"]["vx"], before["relative"]["vy"]) > 1
@@ -2993,7 +3097,7 @@ def test_legacy_system_halo_and_anchor_integrator_preserve_free_system_com() -> 
     assert report["pinned"][1]["ax"] == pytest.approx(report["expectedPinned"], rel=1e-12)
     assert report["pinned"][1]["ay"] == pytest.approx(0, abs=1e-12)
     assert report["seedLaw"][0] == pytest.approx(report["seedLaw"][1], rel=1e-12)
-    assert max(report["capped"]) == pytest.approx(363.65625)
+    assert max(report["capped"]) == pytest.approx(520.0284375)
     assert report["cappedMomentum"] == pytest.approx(0, abs=1e-9)
     assert report["finite"] is True
 
@@ -7835,6 +7939,8 @@ def test_reduced_motion_has_exact_dual_scale_orbit_parity_and_star_surface_safet
             const planet = nodes.find(node => node.id === `${id}-planet`);
             return [id, Math.atan2(planet.y - star.y, planet.x - star.x)];
           }));
+          const localTravel = new Map(systemIds.map(id => [id, 0]));
+          let localPrevious = new Map(localBefore);
           const seededMomentum = ['vx', 'vy'].map(axis => nodes.reduce((sum, node) =>
             sum + node.gravity_mass * node[axis], 0));
           let clearance = Infinity, maximumSpeed = 0, envelope = 0;
@@ -7847,6 +7953,9 @@ def test_reduced_motion_has_exact_dual_scale_orbit_parity_and_star_surface_safet
               const planet = nodes.find(node => node.id === `${id}-planet`);
               clearance = Math.min(clearance, Math.hypot(planet.x - star.x, planet.y - star.y)
                 - star.radius - planet.radius - options.systemAnchorExclusionPadding);
+              const angle = Math.atan2(planet.y - star.y, planet.x - star.x);
+              localTravel.set(id, localTravel.get(id) + Math.abs(delta(angle, localPrevious.get(id))));
+              localPrevious.set(id, angle);
             });
           }
           return {
@@ -7854,11 +7963,7 @@ def test_reduced_motion_has_exact_dual_scale_orbit_parity_and_star_surface_safet
               const center = centers().get(id);
               return delta(Math.atan2(center.y, center.x), globalBefore.get(id));
             }),
-            local: systemIds.map(id => {
-              const star = nodes.find(node => node.id === `${id}-star`);
-              const planet = nodes.find(node => node.id === `${id}-planet`);
-              return delta(Math.atan2(planet.y - star.y, planet.x - star.x), localBefore.get(id));
-            }),
+            local: systemIds.map(id => localTravel.get(id)),
             seededMomentum, clearance, maximumSpeed, envelope,
             bounded: nodes.slice(1).every(node => Math.hypot(node.x, node.y) + node.radius
               <= envelope + 1e-8),
@@ -8553,7 +8658,7 @@ def test_galaxy_is_default_and_consumes_the_complete_scene_contract() -> None:
         """
     )
     assert report["mode"] == "galaxy"
-    assert report["settings"] == {"repel": 100, "link": 8, "gravity": 120}
+    assert report["settings"] == {"repel": 100, "link": 8, "gravity": 72}
     assert report["sizeBy"] == "mass"
     assert report["forces"] == {
         "charge": True,
@@ -8574,9 +8679,9 @@ def test_galaxy_is_default_and_consumes_the_complete_scene_contract() -> None:
     assert report["d3Budget"] == [0, 0, 0]
     assert report["diagnostics"]["timestep"] == pytest.approx(0.032)
     assert report["diagnostics"]["velocityDecay"] == pytest.approx(0.0004)
-    assert report["diagnostics"]["gravitySetting"] == 120
-    assert report["diagnostics"]["blackHoleGravity"] == pytest.approx(14.121)
-    assert report["diagnostics"]["localGravity"] == pytest.approx(146.25)
+    assert report["diagnostics"]["gravitySetting"] == 72
+    assert report["diagnostics"]["blackHoleGravity"] == pytest.approx(7.469234, abs=1e-5)
+    assert report["diagnostics"]["localGravity"] == pytest.approx(190.125)
     assert report["diagnostics"]["linkSetting"] == 8
     assert report["diagnostics"]["relationOrbitScale"] == pytest.approx(0.25)
     assert report["diagnostics"]["orbitalSeparationSetting"] == 100
@@ -9008,7 +9113,11 @@ def test_explorer_exports_its_visible_data_and_reports_bridge_metrics() -> None:
         api.setBridges(true);
         api.setRepoFilter('engraphis');
         const filtered = api.exportData();
-        api.focus('a');
+        const visibleFocus = api.focus('a');
+        api.clearFocus();
+        const hiddenFocus = api.focus('c');
+        const afterHiddenFocus = api.state();
+        const afterHiddenExport = api.exportData();
         api.clearFocus();
         api.setRepoFilter('');
         api.setAsOf(250);
@@ -9017,12 +9126,18 @@ def test_explorer_exports_its_visible_data_and_reports_bridge_metrics() -> None:
         api.setGhosts(true);
         const withGhosts = api.exportData();
         emit({
-          bridges: reports[reports.length - 1].bridges,
+          bridges: reports[reports.length - 1].bridges, visibleFocus, hiddenFocus,
+          afterHiddenFocus, afterHiddenExport,
           filtered, state: api.state(), withoutGhosts, withGhosts,
         });
         """
     )
     assert report["bridges"] == 2
+    assert report["visibleFocus"] is True
+    assert report["hiddenFocus"] is False
+    assert report["afterHiddenFocus"]["focusId"] is None
+    assert report["afterHiddenFocus"]["highlight"] is None
+    assert [node["id"] for node in report["afterHiddenExport"]["nodes"]] == ["a", "b"]
     assert [node["id"] for node in report["filtered"]["nodes"]] == ["a", "b"]
     assert [(link["source"], link["target"]) for link in report["filtered"]["links"]] == [
         ("a", "b")
@@ -10450,10 +10565,10 @@ def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
         assert asset not in markup
     assert 'id="graph-repel" type="range" min="0" max="400" value="100"' in markup
     assert 'id="graph-link" type="range" min="4" max="80" value="8"' in markup
-    assert 'id="graph-gravity" type="range" min="0" max="400" value="120"' in markup
+    assert 'id="graph-gravity" type="range" min="0" max="400" value="72"' in markup
     assert "{ id: 'graph-repel', key: 'repel', fallback: 100 }" in source
     assert "{ id: 'graph-link', key: 'link', fallback: 8 }" in source
-    assert "{ id: 'graph-gravity', key: 'gravity', fallback: 120 }" in source
+    assert "{ id: 'graph-gravity', key: 'gravity', fallback: 72 }" in source
 
     loader_start = source.index("function ensureGraphAssets")
     loader = source[
@@ -10462,10 +10577,10 @@ def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
     d3 = loader.index("'/v2-assets/vendor/d3.min.js?v=20260727-final'")
     force_graph = loader.index("'/v2-assets/vendor/force-graph.min.js?v=20260727-final'")
     renderer = loader.index(
-        "'/v2-assets/engraphis-graph.js?v=20260906-galaxy-boundaries-1'"
+        "'/v2-assets/engraphis-graph.js?v=20260927-unmerged-readiness-1'"
     )
     assert d3 < force_graph < renderer
-    assert '/v2-assets/ledger.js?v=20260906-galaxy-boundaries-1' in markup
+    assert '/v2-assets/ledger.js?v=20260927-unmerged-readiness-1' in markup
     assert "if (graphAssetsPromise === attempt) releaseGraphAssetsAttempt(attempt)" in loader
     assert "graphAssetsRetry = Math.min(graphAssetsRetry + 1, 10)" in loader
     all_loader = source[source.index("function ensureGraphAllAsset()"):
@@ -10862,18 +10977,20 @@ def test_spacetime_sliders_reach_d3_forces_in_non_galaxy_mode() -> None:
             f"setSettings({{{key}: ...}}) raised: {entry['error']}"
         )
         assert entry['reheated'] is True, f"setSettings({{{key}: ...}}) did not reheat"
-    # These are numeric observations from the stubbed D3 forces, not source-shape checks:
-    # Galactic gravity is attractive; the multiplier consumes the adapter's full 0..4 range
-    # (150 raw -> 3.0, no 2.0 plateau), so compact's 0.26 origin-centering strength triples
-    # while the separate repel control keeps charge at -42.
+    # These are numeric observations from the stubbed D3 forces, not source-shape checks.
+    # Non-Galaxy centering is `max(0.24, gravity / 100) * massMultiplier * gravityMultiplier`,
+    # and the per-link spring scale is `(1 / min(degree, degree)) * local * spring`. This scene
+    # runs the compact preset, so `gravity` is 26 and the base is 0.26. `setSettings` accepts the
+    # spacetime multipliers up to 8/8/16, so each slider value below must arrive at the force
+    # unclamped: the old 4/4/4.4 ceiling plateaued the upper half of all three sliders.
+    centering_base = max(0.24, 26 / 100)
     assert report['gravitationalConstant']['chargeStrength'] == pytest.approx(-42)
-    # Engine value 150 saturates at the 4.0 ceiling (0.26 * 4).
-    assert report['gravitationalConstant']['xStrength'] == pytest.approx(0.26 * 4)
-    assert report['gravitationalConstant']['yStrength'] == pytest.approx(0.26 * 4)
-    # The local multiplier likewise saturates at 4 (unit link strength * 4).
-    assert report['localGravitationalConstant']['linkStrength'] == pytest.approx(4)
-    assert report['blackHoleMass']['xStrength'] == pytest.approx(0.26 * 4.4)
-    assert report['blackHoleMass']['yStrength'] == pytest.approx(0.26 * 4.4)
+    assert report['gravitationalConstant']['xStrength'] == pytest.approx(centering_base * 8)
+    assert report['gravitationalConstant']['yStrength'] == pytest.approx(centering_base * 8)
+    # n0 has degree 1, so the reciprocal base is 1 and only the local multiplier scales it.
+    assert report['localGravitationalConstant']['linkStrength'] == pytest.approx(8)
+    assert report['blackHoleMass']['xStrength'] == pytest.approx(centering_base * 16)
+    assert report['blackHoleMass']['yStrength'] == pytest.approx(centering_base * 16)
     # damping is a *multiplier* on the size-aware baseline (0.38 small / 0.45 large). At the
     # upper end of the slider (15) the d3 velocityDecay reaches the 0.85 ceiling. At the lower
     # end (0) it reaches the 0.05 floor. The D3 stubs expose the normal strength() getter, so
@@ -10901,7 +11018,7 @@ def test_black_hole_mass_reaches_centering_forces_in_every_non_galaxy_layout() -
     """Black-hole mass must modulate the D3 centering strength in every non-Galaxy layout.
 
     The normalized engine value arrives in ``applyForces()`` as ``massMultiplier``
-    (clamped to the adapter's full 0.125..4.4 interval). Communities and radial consumed it,
+    (clamped to the adapter's full 0.125..5.04 interval). Communities and radial consumed it,
     but compact/original (the default overview branch) and constellation ignored it, so
     dragging the Black hole mass slider changed nothing visible in those modes (PR #185,
     thread 3902779917). This pins the multiplier on the x/y centering forces with the d3
@@ -10951,13 +11068,13 @@ def test_black_hole_mass_reaches_centering_forces_in_every_non_galaxy_layout() -
         strong_x, strong_y = entry['strong']
         assert weak_x is not None and weak_y is not None, f"{mode}: x/y forces missing"
         base = 0.98 if mode == 'compact' else 0.18
-        # The centering strength must carry the mass multiplier: mass 1 -> 1.0x,
-        # mass 400 normalizes to engine setting 16; applyForces clamps the
-        # multiplier at the adapter's 4.4 ceiling, so the response saturates there.
+        # The centering strength must carry the mass multiplier: mass 1 -> 1.0x and the
+        # engine value 16 is inside the adapter's uncapped range, so the response is 16x
+        # with no saturation plateau anywhere in the slider's travel.
         assert weak_x == pytest.approx(base)
         assert weak_y == pytest.approx(base)
-        assert strong_x == pytest.approx(base * 4.4)
-        assert strong_y == pytest.approx(base * 4.4)
+        assert strong_x == pytest.approx(base * 16)
+        assert strong_y == pytest.approx(base * 16)
 
 
 
@@ -11667,8 +11784,9 @@ def test_legacy_node_geometry_is_bounded_like_ledger_for_all_styles() -> None:
 
     The material painter is shared across four styles, so a geometry regression here affects
     every theme even when the newer Ledger engine is correct.  Keep the two legacy copies in
-    lockstep and pin the compact radius contract: normalized degree emphasis, a 0.8 minimum,
-    and a size-slider-relative 1.1 maximum.
+    lockstep and pin the compact radius contract: normalized degree emphasis, a 0.25 minimum
+    (a low-evidence entity must stay hit-testable instead of collapsing below a pixel), and a
+    size-slider-relative 1.1 maximum.
     """
     classic = CLASSIC_DASHBOARD.read_text(encoding="utf-8")
     static = DASHBOARD.read_text(encoding="utf-8")
@@ -11677,7 +11795,7 @@ def test_legacy_node_geometry_is_bounded_like_ledger_for_all_styles() -> None:
     assert static[static.index("function graphNodeRadius("):static.index("const ETYPE_TOKEN", static.index("function graphNodeRadius("))] == classic[helper_start:helper_end]
     assert "const maxDegree=Math.max(1,...nodes.map(node=>node.degree||0));" in classic
     assert "graphNodeRadius(node,window.GSET.size,(node.degree||0)/maxDegree)" in classic
-    assert "return Math.max(.8,Math.min(size*1.1,radius));" in classic
+    assert "return Math.max(.25,Math.min(size*1.1,radius));" in classic
     assert "Math.sqrt(node.val)" not in classic
     assert "Math.sqrt(node.val)" not in static
 

@@ -53,6 +53,7 @@
     let active = false;
     let frame = 0;
     let lastSample = 0;
+    let lastPaint = 0;
     let latest = null;
     let destroyed = false;
 
@@ -68,7 +69,8 @@
       }
       /* A rendering engine that cannot expose its viewport still gets a centred, harmless
          lens/grid rather than an incorrect coordinate transform. */
-      return { x: canvas.width / (2 * devicePixelRatio), y: canvas.height / (2 * devicePixelRatio) };
+      const dpr = typeof window !== 'undefined' && window.devicePixelRatio ? window.devicePixelRatio : 1;
+      return { x: canvas.width / (2 * dpr), y: canvas.height / (2 * dpr) };
     };
 
     const screenRadius = physicalCenter => {
@@ -218,13 +220,17 @@
       trails.forEach((_points, id) => { if (!seen.has(id)) trails.delete(id); });
     };
 
-    const draw = stamp => {
+    const draw = (stamp, force = false) => {
       if (destroyed) return;
+      frame = 0;
+      const paused = Boolean(latest && latest.paused);
+      if (!force && lastPaint && stamp - lastPaint < SAMPLE_INTERVAL) {
+        if (active && !document.hidden && !paused) frame = requestAnimationFrame(draw);
+        return;
+      }
+      lastPaint = stamp;
       const bounds = resize();
       ctx.clearRect(0, 0, bounds.width, bounds.height);
-      if (active && engine && typeof engine.getPhysicsSnapshot === 'function') {
-        latest = engine.getPhysicsSnapshot() || latest;
-      }
       if (active && latest) {
         sample(stamp);
         const physicalCenter = snapshotCenter(latest);
@@ -236,19 +242,30 @@
       /* Paused physics retains one static spacetime paint, then releases the compositor.
          Local wells and guide rings are deliberately still visible under reduced motion;
          only sampled velocity trails are suppressed there. */
-      if (active && !document.hidden && !(latest && latest.paused)) frame = requestAnimationFrame(draw);
+      if (active && !document.hidden && !paused) frame = requestAnimationFrame(draw);
       else frame = 0;
     };
 
-    const wake = () => {
+    const wake = (force = false) => {
+      if (force) lastPaint = 0;
       if (!frame && !destroyed && active && !document.hidden) frame = requestAnimationFrame(draw);
     };
     const onFrame = event => {
-      latest = event && event.detail ? event.detail : latest;
+      const detail = event && event.detail;
+      if (detail && (Array.isArray(detail.nodes) || detail.center)) latest = detail;
+      else if (detail && typeof detail.paused === 'boolean') {
+        latest = { ...(latest || {}), paused: detail.paused };
+        wake(true);
+        return;
+      }
       if (active) wake();
     };
+    const refreshSnapshot = () => {
+      if (!active || !engine || typeof engine.getPhysicsSnapshot !== 'function') return;
+      latest = engine.getPhysicsSnapshot() || latest;
+    };
     container.addEventListener('engraphisgraphphysicschange', onFrame);
-    const onVisibilityChange = () => { if (!document.hidden) wake(); };
+    const onVisibilityChange = () => { if (!document.hidden) { refreshSnapshot(); wake(true); } };
     document.addEventListener('visibilitychange', onVisibilityChange);
     const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(resize);
     if (observer) observer.observe(container);
@@ -257,7 +274,8 @@
       setEnabled(on) {
         active = on === true;
         if (!active) trails.clear();
-        wake();
+        else { refreshSnapshot(); wake(true); }
+        return;
       },
       setSnapshot(snapshot) { latest = snapshot || null; if (active) wake(); },
       destroy() {

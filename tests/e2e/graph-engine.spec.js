@@ -20,7 +20,7 @@ const { test, expect } = require('@playwright/test');
  */
 
 const workspace = 'graph-e2e';
-const stellarOrbitAssetVersion = '20260906-galaxy-boundaries-1';
+const stellarOrbitAssetVersion = '20260927-unmerged-readiness-1';
 
 // A small connected store: two clusters joined by one bridge, so communities, the legend and
 // the bridge detector all have something real to work on.
@@ -1885,7 +1885,7 @@ for (const reducedMotion of [false, true]) {
       expect(diagnostics.renderedNodes).toBe(542);
       expect(before.collapsed).toBe(false);
       expect(before.settings).toMatchObject({
-        mode: 'galaxy', frozen: false, gravity: 120, repel: 100, link: 8,
+        mode: 'galaxy', frozen: false, gravity: 72, repel: 100, link: 8,
       });
       expect(diagnostics.orbitalSeparationSetting).toBe(100);
       expect(diagnostics.orbitalSeparationPadding).toBe(15);
@@ -1893,9 +1893,9 @@ for (const reducedMotion of [false, true]) {
       expect(diagnostics.crossSystemRepulsionStrength).toBe(0);
       expect(diagnostics.linkSetting).toBe(8);
       expect(diagnostics.relationOrbitScale).toBeCloseTo(0.25, 12);
-      expect(diagnostics.gravitySetting).toBe(120);
-      expect(diagnostics.blackHoleGravity).toBeCloseTo(28.242, 12);
-      expect(diagnostics.localGravity).toBeCloseTo(146.25, 12);
+      expect(diagnostics.gravitySetting).toBe(72);
+      expect(diagnostics.blackHoleGravity).toBeCloseTo(14.938467337278107, 12);
+      expect(diagnostics.localGravity).toBeCloseTo(190.125, 12);
       expect(diagnostics.systemOrbitSeedSpeedLimit).toBeCloseTo(23.4, 12);
 
       const assetRequests = fetched(session.requested, '/v2-assets/engraphis-graph.js');
@@ -1933,7 +1933,7 @@ test('served Ledger wires normalized spacetime controls, overlay, and orbit paus
     await expect.poll(() => page.evaluate(() => {
       const control = document.getElementById('graph-black-hole-mass');
       const previous = control.value;
-      control.value = '170';
+      control.value = '106';
       control.dispatchEvent(new Event('input', { bubbles: true }));
       const applied = window.__engraphisGraph.state().settings.blackHoleMass;
       control.value = previous;
@@ -1943,7 +1943,7 @@ test('served Ledger wires normalized spacetime controls, overlay, and orbit paus
 
     const massSteps = await page.evaluate(() => {
       const massControl = document.getElementById('graph-black-hole-mass');
-      const samples = [160, 170, 180].map(value => {
+      const samples = [96, 106, 116].map(value => {
         massControl.value = String(value);
         massControl.dispatchEvent(new Event('input', { bubbles: true }));
         return {
@@ -1966,13 +1966,13 @@ test('served Ledger wires normalized spacetime controls, overlay, and orbit paus
       return samples;
     });
     expect(massSteps).toEqual([
-      { control: 160, multiplier: 1 },
-      { control: 170, multiplier: 1.1 },
-      { control: 180, multiplier: 1.2 },
+      { control: 96, multiplier: 1 },
+      { control: 106, multiplier: 1.1 },
+      { control: 116, multiplier: 1.2 },
     ]);
     await expect.poll(() => page.evaluate(() => window.__engraphisGraph.state().settings))
-      .toMatchObject({ gravitationalConstant: 3, blackHoleMass: 1.8,
-        localGravitationalConstant: 2.5, damping: 2, springStiffness: 2, orbitPaused: false });
+      .toMatchObject({ gravitationalConstant: 5, blackHoleMass: 2.44,
+        localGravitationalConstant: 125 / 30, damping: 2, springStiffness: 2, orbitPaused: false });
     const rangeResponse = await page.evaluate(() => {
       const set = (id, value) => {
         const control = document.getElementById(id);
@@ -2997,7 +2997,7 @@ test('served non-Galaxy spacetime controls keep their full normalized range', as
       control.value = String(value);
       control.dispatchEvent(new Event('input', { bubbles: true }));
     };
-    const mass = [20, 40, 160, 460, 500].map(value => {
+    const mass = [20, 40, 96, 160, 460, 500].map(value => {
       set('graph-black-hole-mass', value);
       return { value, multiplier: window.__engraphisGraph.state().settings.blackHoleMass };
     });
@@ -3008,13 +3008,13 @@ test('served non-Galaxy spacetime controls keep their full normalized range', as
     return { mass, damping };
   });
 
-  expect(report.mass).toEqual([
-    { value: 20, multiplier: 0.125 },
-    { value: 40, multiplier: 0.25 },
-    { value: 160, multiplier: 1 },
-    { value: 460, multiplier: 4 },
-    { value: 500, multiplier: 4.4 },
-  ]);
+  const expectedMass = [[20, 20 / 96], [40, 40 / 96], [96, 1],
+    [160, 1.64], [460, 4.64], [500, 5.04]];
+  expect(report.mass).toHaveLength(expectedMass.length);
+  expectedMass.forEach(([value, multiplier], index) => {
+    expect(report.mass[index].value).toBe(value);
+    expect(report.mass[index].multiplier).toBeCloseTo(multiplier, 12);
+  });
   /* The merged engine interpolates damping onto d3's velocityDecay with a size-aware
      baseline: damping=0 -> 0.05 floor, damping=1 -> the neutral settling baseline
      (0.38 small / 0.45 large), damping=15 -> 0.85 ceiling. This served graph is small. */
@@ -3533,26 +3533,33 @@ test('Galaxy sliders retain full ranges with orbital-speed and radius response',
   });
   const immediate = await page.evaluate(scene => {
     const api = window.__engraphisGraph;
-    const I = window.EngraphisGraph._internals;
     api.freeze(true);
     api.setPreset('galaxy');
     api.setData(scene);
     api.setScope({ showUnlinked: true, minDegree: 0 });
     const nodes = window.__fg.graphData().nodes;
-    const radii = () => Object.fromEntries([...I.communityCenters(nodes).entries()]
-      .filter(([id]) => id !== 'core')
-      .map(([id, center]) => [id, Math.hypot(center.x, center.y)]));
+    const anchor = nodes.find(node => node.anchor_role === 'global');
+    const stars = new Map(nodes.filter(node => node.anchor_role === 'community')
+      .map(node => [node.community_id, node]));
+    const radii = () => Object.fromEntries([...stars.entries()]
+      .map(([id, star]) => [id, Math.hypot(star.x - anchor.x, star.y - anchor.y)]));
+    const offsets = () => nodes.filter(node => stars.has(node.community_id))
+      .map(node => {
+        const star = stars.get(node.community_id);
+        return [node.id, node.x - star.x, node.y - star.y];
+      });
     const diameter = () => {
       const star = nodes.find(node => node.id === 'aurora-star');
       const planet = nodes.find(node => node.id === 'aurora-planet');
       return Math.hypot(star.x - planet.x, star.y - planet.y);
     };
     const velocities = () => nodes.map(node => [node.id, node.vx, node.vy]);
-    const before = { radii: radii(), diameter: diameter(), velocities: velocities() };
+    const before = { radii: radii(), diameter: diameter(), velocities: velocities(),
+      offsets: offsets(), diagnostics: api.physicsDiagnostics() };
     api.freeze(false);
     api.setSettings({ gravity: 200, size: 1 });
     const after = { radii: radii(), diameter: diameter(), velocities: velocities(),
-      diagnostics: api.physicsDiagnostics() };
+      offsets: offsets(), diagnostics: api.physicsDiagnostics() };
     api.freeze(true);
     return { before, after };
   }, blackHoleGalaxyScene);
@@ -3583,29 +3590,29 @@ test('Galaxy sliders retain full ranges with orbital-speed and radius response',
 
   expect(baseline.curve.setting).toBe(48);
   expect(strong.curve.setting).toBe(200);
-  expect(baseline.curve.baseline).toBe(292.5);
-  expect(baseline.curve.maximum).toBeCloseTo(3343.5, 12);
-  expect(baseline.curve.localBaseline).toBe(146.25);
-  expect(baseline.curve.localMaximum).toBeCloseTo(1671.75, 12);
+  expect(baseline.curve.baseline).toBe(380.25);
+  expect(baseline.curve.maximum).toBeCloseTo(4346.55, 12);
+  expect(baseline.curve.localBaseline).toBe(190.125);
+  expect(baseline.curve.localMaximum).toBeCloseTo(2173.275, 12);
   expect(baseline.curve.localBaseline).toBe(baseline.curve.baseline * 0.5);
   expect(baseline.curve.localMaximum).toBe(baseline.curve.maximum * 0.5);
   expect(baseline.curve.maximum / baseline.curve.baseline).toBeCloseTo(
     11.430769230769231, 12,
   );
   expect(baseline.before.diagnostics.gravitySetting).toBe(48);
-  expect(baseline.before.diagnostics.effectiveGravity).toBeCloseTo(2.925, 12);
+  expect(baseline.before.diagnostics.effectiveGravity).toBeCloseTo(3.8025, 12);
   expect(baseline.before.diagnostics.blackHoleGravity).toBeCloseTo(
     baseline.curve.baseline * 0.1 ** 2, 12,
   );
-  expect(baseline.before.diagnostics.localGravity).toBe(146.25);
+  expect(baseline.before.diagnostics.localGravity).toBe(190.125);
   expect(strong.before.diagnostics.gravitySetting).toBe(200);
-  expect(strong.before.diagnostics.effectiveGravity).toBeCloseTo(33.435, 12);
+  expect(strong.before.diagnostics.effectiveGravity).toBeCloseTo(43.4655, 12);
   expect(strong.before.diagnostics.blackHoleGravity).toBeCloseTo(
     baseline.curve.maximum * 0.1 ** 2, 12,
   );
   // The visible Galaxy gravity slider owns the central field; local stellar gravity stays on
   // the calibrated baseline and only the dedicated local control can change it.
-  expect(strong.before.diagnostics.localGravity).toBe(146.25);
+  expect(strong.before.diagnostics.localGravity).toBe(190.125);
   expect(naturalOrbits.before.diagnostics.orbitalSeparationSetting).toBe(100);
   expect(naturalOrbits.before.diagnostics.orbitalSpeedMultiplier).toBe(1);
   expect(naturalOrbits.before.diagnostics.orbitalRadiusMultiplier).toBe(1);
@@ -3647,11 +3654,18 @@ test('Galaxy sliders retain full ranges with orbital-speed and radius response',
   expect(physicalField.linkScales).toEqual([1 / 16, 0.25, 25]);
   for (const [id, radius] of Object.entries(immediate.before.radii)) {
     expect(immediate.after.radii[id] / radius, id)
-      .toBeCloseTo(immediateResponse.ratio, 2);
+      .toBeCloseTo(immediateResponse.ratio, 12);
   }
   // The central response translates each solar system as a rigid carrier; its local orbit
   // geometry remains unchanged while the system moves radially around the black hole.
   expect(immediate.after.diameter / immediate.before.diameter).toBeCloseTo(1, 12);
+  expect(immediate.after.diagnostics.steps).toBe(immediate.before.diagnostics.steps);
+  for (const [index, [id, x, y]] of immediate.before.offsets.entries()) {
+    const [afterId, afterX, afterY] = immediate.after.offsets[index];
+    expect(afterId).toBe(id);
+    expect(afterX, id).toBeCloseTo(x, 12);
+    expect(afterY, id).toBeCloseTo(y, 12);
+  }
   for (const [index, [id, vx, vy]] of immediate.before.velocities.entries()) {
     const [afterId, afterVx, afterVy] = immediate.after.velocities[index];
     expect(afterId).toBe(id);
