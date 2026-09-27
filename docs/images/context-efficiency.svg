@@ -105,7 +105,7 @@
 <text x="562" y="935" font-size="12.5" class="muted" text-anchor="start">mcp transport not measured</text>
 <rect x="814" y="864" width="263" height="82" fill="#0e1114" stroke="#252c36"/>
 <text x="826" y="885" font-size="12.5" class="muted" text-anchor="start">SOURCE ARTIFACT</text>
-<text x="826" y="913" font-size="20" class="heading" text-anchor="start">7a5dafabf4ef</text>
+<text x="826" y="913" font-size="20" class="heading" text-anchor="start">dc901f5d0fc9</text>
 <text x="826" y="935" font-size="12.5" class="muted" text-anchor="start">SHA-256 prefix</text>
 <text x="1080" y="70" font-size="18.7" class="muted" text-anchor="end">Artifact-driven local measurements</text>
 </svg>
