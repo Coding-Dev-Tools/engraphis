@@ -190,6 +190,15 @@ def test_publication_writes_require_qualification_except_scoped_v176_waiver():
         checked = False
         writes = 0
         for step in job["steps"]:
+            if step.get("name") == "Disclose the qualification waiver before PyPI repair":
+                # This conditional write publishes only the exception notice. The
+                # ordinary path still needs its signature before any distribution.
+                assert name == "github-release-repair"
+                assert step.get("if") == "inputs.waive_v176_qualification"
+                assert "verified-dist/*" not in step["run"]
+                assert "release-evidence/*" not in step["run"]
+                assert 'test "$ENGRAPHIS_REPAIR_COMMIT" = "6a441a75c8dd159607fa3933da83f600864b9146"' in step["run"]
+                continue
             if "scripts.verify_release_qualification" in step.get("run", ""):
                 if name == "github-release-repair":
                     assert step.get("if") == "${{ !inputs.waive_v176_qualification }}"
@@ -222,6 +231,11 @@ def test_publication_writes_require_qualification_except_scoped_v176_waiver():
                         if step.get("name") == "Enforce and record the v1.7.6-only qualification waiver")
     assert waiver_guard.get("if") == "inputs.waive_v176_qualification"
     assert 'test "$RELEASE_TAG" = "v1.7.6"' in waiver_guard["run"]
+    disclosure = next(step for step in repair_steps
+                      if step.get("name") == "Disclose the qualification waiver before PyPI repair")
+    publication = next(step for step in repair_steps
+                       if step.get("name") == "Publish only missing verified distributions")
+    assert repair_steps.index(disclosure) < repair_steps.index(publication)
     repair = next(step for step in repair_steps if step.get("name") == "Repair GitHub Release")
     assert repair["env"]["WAIVE_QUALIFICATION"] == "${{ inputs.waive_v176_qualification }}"
     assert repair["run"].index("gh release edit") < repair["run"].index("gh release upload")
@@ -269,7 +283,8 @@ esac
     calls = calls_path.read_text(encoding="utf-8").splitlines()
     assert result.returncode == (7 if edit_fails else 0), result.stderr
     if existing:
-        edits = [index for index, call in enumerate(calls) if call.startswith("release edit ")]
+        edits = [index for index, call in enumerate(calls)
+                 if call.startswith("release edit ") and "--notes-file " in call]
         uploads = [index for index, call in enumerate(calls) if call.startswith("release upload ")]
         assert len(edits) == 1
         assert not uploads if edit_fails else len(uploads) == 1 and edits[0] < uploads[0]
@@ -282,3 +297,85 @@ esac
         notes = (tmp_path / "release-waiver.md").read_text(encoding="utf-8")
     assert "Mandatory full-product gates are not represented as passed." in notes
     assert "https://example.test/run/1" in notes
+
+
+@pytest.mark.skipif(os.name == "nt", reason="release workflow executes in Linux bash")
+@pytest.mark.parametrize("existing,edit_fails", [(False, False), (True, False), (True, True)])
+def test_public_waiver_notice_precedes_pypi_even_if_later_repair_fails(tmp_path, existing, edit_fails):
+    yaml = pytest.importorskip("yaml")
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash is unavailable")
+    root = Path(__file__).resolve().parents[1]
+    workflow = yaml.safe_load((root / ".github/workflows/release.yml").read_text(encoding="utf-8"))
+    disclosure = next(step for step in workflow["jobs"]["github-release-repair"]["steps"]
+                      if step.get("name") == "Disclose the qualification waiver before PyPI repair")
+    executable = tmp_path / "gh"
+    executable.write_text("""#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> "$GH_CALLS"
+case "$2" in
+  view)
+    if [ "$EXISTING" != true ]; then exit 1; fi
+    printf 'Existing release notes\\n'
+    ;;
+  edit)
+    if [ "$EDIT_FAILS" = true ]; then exit 7; fi
+    ;;
+esac
+""", encoding="utf-8")
+    executable.chmod(0o700)
+    script = tmp_path / "disclose.sh"
+    # A later publication/verification failure must leave the already public
+    # notice in place; a failed notice write must prevent publication altogether.
+    script.write_text(disclosure["run"] + '\nprintf "pypi-publication\\n" >> "$GH_CALLS"\nexit 9\n',
+                      encoding="utf-8")
+    calls_path = tmp_path / "calls.txt"
+    environment = {**os.environ, "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
+                   "RUNNER_TEMP": str(tmp_path), "RELEASE_TAG": "v1.7.6", "GH_REPO": "test/repo",
+                   "ENGRAPHIS_REPAIR_COMMIT": "6a441a75c8dd159607fa3933da83f600864b9146",
+                   "GH_RUN_URL": "https://example.test/run/1", "GH_CALLS": str(calls_path),
+                   "EXISTING": str(existing).lower(), "EDIT_FAILS": str(edit_fails).lower()}
+    result = subprocess.run([bash, str(script)], cwd=tmp_path, capture_output=True, text=True,
+                            timeout=20, env=environment)
+    calls = calls_path.read_text(encoding="utf-8").splitlines()
+    assert result.returncode == (7 if edit_fails else 9), result.stderr
+    notice = next(index for index, call in enumerate(calls) if "--notes-file " in call)
+    if edit_fails:
+        assert "pypi-publication" not in calls
+    else:
+        assert notice < calls.index("pypi-publication")
+    assert not any("verified-dist/" in call or "release-evidence/" in call for call in calls)
+    if not existing:
+        assert "--latest=false" in calls[notice]
+    notes = (tmp_path / "release-waiver.md").read_text(encoding="utf-8")
+    assert "Mandatory full-product gates are not represented as passed." in notes
+    assert environment["ENGRAPHIS_REPAIR_COMMIT"] in notes
+
+
+@pytest.mark.skipif(os.name == "nt", reason="release workflow executes in Linux bash")
+@pytest.mark.parametrize("tag,commit", [("v1.7.7", "6a441a75c8dd159607fa3933da83f600864b9146"),
+                                       ("v1.7.6", "a" * 40), ("v1.7.6", "")])
+def test_waiver_rejects_a_different_retained_candidate_before_any_public_write(tmp_path, tag, commit):
+    yaml = pytest.importorskip("yaml")
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash is unavailable")
+    root = Path(__file__).resolve().parents[1]
+    workflow = yaml.safe_load((root / ".github/workflows/release.yml").read_text(encoding="utf-8"))
+    disclosure = next(step for step in workflow["jobs"]["github-release-repair"]["steps"]
+                      if step.get("name") == "Disclose the qualification waiver before PyPI repair")
+    executable = tmp_path / "gh"
+    executable.write_text('#!/usr/bin/env bash\nprintf "unexpected call\\n" >> "$GH_CALLS"\n',
+                          encoding="utf-8")
+    executable.chmod(0o700)
+    script = tmp_path / "disclose.sh"
+    script.write_text(disclosure["run"], encoding="utf-8")
+    calls_path = tmp_path / "calls.txt"
+    result = subprocess.run([bash, str(script)], cwd=tmp_path, capture_output=True, text=True,
+                            timeout=20, env={**os.environ, "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
+                                             "RUNNER_TEMP": str(tmp_path), "RELEASE_TAG": tag,
+                                             "ENGRAPHIS_REPAIR_COMMIT": commit, "GH_REPO": "test/repo",
+                                             "GH_CALLS": str(calls_path)})
+    assert result.returncode != 0
+    assert not calls_path.exists()

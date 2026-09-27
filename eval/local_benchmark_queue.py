@@ -368,12 +368,6 @@ def _prerequisite_ready(artifact: Path, producer_lock: Path) -> bool:
         except (RunnerLockBusy, UnrecognizedRunnerLock):
             # Legacy ephemeral markers must disappear; never reclaim one by PID.
             return False
-        except ValueError:
-            # A legacy marker may be removed after the probe opens it but before
-            # it can validate the pathname. Accept only confirmed disappearance;
-            # a marker that still exists but changed remains a hard failure.
-            if os.path.lexists(producer_lock):
-                raise
         if not artifact.exists():
             raise ValueError("prerequisite producer stopped before completing its artifact")
         _verified_artifact(artifact)
