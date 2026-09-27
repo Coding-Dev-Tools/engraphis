@@ -2464,10 +2464,12 @@ def test_slingshot_capture_preserves_authored_star_and_high_speed_release_escape
 
 
 @requires_node
-def test_spacetime_canvas_warps_the_grid_and_bounds_trails_without_dom_nodes() -> None:
+@pytest.mark.parametrize("push_snapshots", [False, True])
+def test_spacetime_canvas_warps_the_grid_and_bounds_trails_without_dom_nodes(push_snapshots) -> None:
     """The visual layer is one bounded canvas, not a hidden second graph implementation."""
     report = _run_spacetime_node(
         """
+        const pushSnapshots = PUSH_SNAPSHOTS;
         const calls = { arcs: 0, ellipses: 0, lines: 0, gradients: 0, linearGradients: 0 };
         const gradient = { addColorStop() {} };
         const ctx = {
@@ -2521,7 +2523,7 @@ def test_spacetime_canvas_warps_the_grid_and_bounds_trails_without_dom_nodes() -
         new Function('window', source)(window);
         const overlay = window.EngraphisSpacetime.create(container, engine);
         overlay.setEnabled(true);
-        overlay.setSnapshot(current);
+        if (pushSnapshots) overlay.setSnapshot(current);
         frames.shift()(40); // immediate enable paint samples the 160 fastest bodies
         const afterEnable = calls.linearGradients;
         frames.shift()(72); // unchanged 16ms rAF is throttled without repainting
@@ -2533,9 +2535,10 @@ def test_spacetime_canvas_warps_the_grid_and_bounds_trails_without_dom_nodes() -
         const reduced = { ...calls, queued: frames.length };
         current = snapshot(601);
         reduceMotion = false;
-        overlay.setSnapshot(current);
+        if (pushSnapshots) overlay.setSnapshot(current);
         frames.shift()(176);
         const dense = { ...calls };
+        current = { ...current, paused: true };
         listeners.engraphisgraphphysicschange({ detail: { paused: true } });
         frames.shift()(210); // final static paint, then no idle orbit overlay rAF
         const paused = { queued: frames.length, ellipses: calls.ellipses, snapshotReads };
@@ -2543,7 +2546,7 @@ def test_spacetime_canvas_warps_the_grid_and_bounds_trails_without_dom_nodes() -
         emit({ small, reduced, dense, paused, snapshotReads, childrenAfterDestroy: container.children.length,
           listenerDetached: !listeners.engraphisgraphphysicschange,
           visibilityDetached: !documentListeners.visibilitychange });
-        """
+        """.replace("PUSH_SNAPSHOTS", "true" if push_snapshots else "false")
     )
     assert report["small"]["canvasCount"] == 1
     assert report["small"]["arcs"] > 0 and report["small"]["lines"] > 0
@@ -2559,7 +2562,7 @@ def test_spacetime_canvas_warps_the_grid_and_bounds_trails_without_dom_nodes() -
     assert report["dense"]["linearGradients"] == report["small"]["linearGradients"]
     assert report["paused"]["queued"] == 0
     assert report["paused"]["ellipses"] == report["dense"]["ellipses"] + 24 * 2
-    assert report["snapshotReads"] == 1
+    assert report["snapshotReads"] == (1 if push_snapshots else 6)
     assert report["listenerDetached"] is True
     assert report["visibilityDetached"] is True
 

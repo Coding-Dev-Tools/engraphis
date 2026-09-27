@@ -55,6 +55,7 @@
     let lastSample = 0;
     let lastPaint = 0;
     let latest = null;
+    let pushedSnapshots = false;
     let destroyed = false;
 
     const physicalToScreen = point => {
@@ -223,11 +224,14 @@
     const draw = (stamp, force = false) => {
       if (destroyed) return;
       frame = 0;
-      const paused = Boolean(latest && latest.paused);
       if (!force && lastPaint && stamp - lastPaint < SAMPLE_INTERVAL) {
-        if (active && !document.hidden && !paused) frame = requestAnimationFrame(draw);
+        if (active && !document.hidden && !(latest && latest.paused)) frame = requestAnimationFrame(draw);
         return;
       }
+      // Standalone getter consumers still need a current snapshot. Ledger pushes
+      // each physics frame, so it avoids a redundant read during cosmetic paints.
+      if (!pushedSnapshots) refreshSnapshot();
+      const paused = Boolean(latest && latest.paused);
       lastPaint = stamp;
       const bounds = resize();
       ctx.clearRect(0, 0, bounds.width, bounds.height);
@@ -252,7 +256,10 @@
     };
     const onFrame = event => {
       const detail = event && event.detail;
-      if (detail && (Array.isArray(detail.nodes) || detail.center)) latest = detail;
+      if (detail && (Array.isArray(detail.nodes) || detail.center)) {
+        latest = detail;
+        pushedSnapshots = true;
+      }
       else if (detail && typeof detail.paused === 'boolean') {
         latest = { ...(latest || {}), paused: detail.paused };
         wake(true);
@@ -261,7 +268,7 @@
       if (active) wake();
     };
     const refreshSnapshot = () => {
-      if (!active || !engine || typeof engine.getPhysicsSnapshot !== 'function') return;
+      if (!active || pushedSnapshots || !engine || typeof engine.getPhysicsSnapshot !== 'function') return;
       latest = engine.getPhysicsSnapshot() || latest;
     };
     container.addEventListener('engraphisgraphphysicschange', onFrame);
@@ -270,14 +277,20 @@
     const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(resize);
     if (observer) observer.observe(container);
     return {
-      setEngine(next) { engine = next || engine; },
+      setEngine(next) {
+        if (next && next !== engine) { engine = next; pushedSnapshots = false; latest = null; }
+      },
       setEnabled(on) {
         active = on === true;
         if (!active) trails.clear();
         else { refreshSnapshot(); wake(true); }
         return;
       },
-      setSnapshot(snapshot) { latest = snapshot || null; if (active) wake(); },
+      setSnapshot(snapshot) {
+        latest = snapshot || null;
+        pushedSnapshots = snapshot != null;
+        if (active) wake();
+      },
       destroy() {
         destroyed = true;
         cancelAnimationFrame(frame);

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import re
 import xml.etree.ElementTree as ET
@@ -106,13 +107,18 @@ def test_core_backend_imports_stay_behind_outer_composition_root() -> None:
 
 def test_benchmark_text_alternatives_match_registered_fixture_boundary() -> None:
     """The current image and its alt text expose only current registered boundaries."""
-    registry = json.loads(_read("docs/benchmark-evidence/offline-fixtures-v75.json"))
+    registry_path = ROOT / "docs/benchmark-evidence/offline-fixtures-v75.json"
+    registry_bytes = registry_path.read_bytes()
+    registry = json.loads(registry_bytes)
     measurements = {run["id"]: run["result"] for run in registry["runs"]}
     payload = measurements["offline-performance"]
     readme = _read("README.md")
     svg_text = _read("docs/images/context-efficiency.svg")
     svg_root = ET.fromstring(svg_text)
     namespace = {"svg": "http://www.w3.org/2000/svg"}
+    visible_labels = {"".join(node.itertext()).strip()
+                      for node in svg_root.findall(".//svg:text", namespace)}
+    assert hashlib.sha256(registry_bytes).hexdigest()[:12] in visible_labels
     description_node = svg_root.find("svg:desc", namespace)
     assert description_node is not None
     description = " ".join("".join(description_node.itertext()).lower().split())
