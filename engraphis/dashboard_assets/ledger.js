@@ -475,7 +475,7 @@
     if (!graphAllAssetsPromise) {
       const controller = new AbortController();
       const attempt = loadScript(
-        graphAssetSource('/v2-assets/engraphis-graph-every.js?v=20260927-unmerged-readiness-2'),
+        graphAssetSource('/v2-assets/engraphis-graph-every.js?v=20260927-unmerged-readiness-3'),
         'EngraphisEveryGraph', controller.signal,
       );
       graphAllAssetsPromise = attempt;
@@ -508,10 +508,10 @@
         graphAssetSource('/v2-assets/vendor/force-graph.min.js?v=20260727-final'),
         'ForceGraph', controller.signal,
       )).then(() => loadScript(
-        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260927-unmerged-readiness-2'),
+        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260927-unmerged-readiness-3'),
         'EngraphisGraph', controller.signal,
       )).then(() => loadScript(
-        graphAssetSource('/v2-assets/engraphis-spacetime.js?v=20260927-unmerged-readiness-2'),
+        graphAssetSource('/v2-assets/engraphis-spacetime.js?v=20260927-unmerged-readiness-3'),
         'EngraphisSpacetime', controller.signal,
       ));
       graphAssetsPromise = attempt;

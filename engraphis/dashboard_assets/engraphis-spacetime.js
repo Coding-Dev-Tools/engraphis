@@ -278,15 +278,28 @@
     if (observer) observer.observe(container);
     return {
       setEngine(next) {
-        if (next && next !== engine) { engine = next; pushedSnapshots = false; latest = null; }
+        if (destroyed || !next || next === engine) return;
+        engine = next;
+        pushedSnapshots = false;
+        latest = null;
+        if (active) wake(true);
       },
       setEnabled(on) {
+        if (destroyed) return;
         active = on === true;
-        if (!active) trails.clear();
-        else { refreshSnapshot(); wake(true); }
-        return;
+        if (!active) {
+          cancelAnimationFrame(frame);
+          frame = 0;
+          trails.clear();
+          const bounds = resize();
+          ctx.clearRect(0, 0, bounds.width, bounds.height);
+          return;
+        }
+        refreshSnapshot();
+        wake(true);
       },
       setSnapshot(snapshot) {
+        if (destroyed) return;
         latest = snapshot || null;
         pushedSnapshots = snapshot != null;
         if (active) wake();

@@ -49,6 +49,20 @@ Hosts which already own chat history should use `POST /api/adaptive-context`, no
 The gateway works in general MCP clients without native deferred tool search; clients that
 explicitly support OpenAI's deferred `tool_search` can apply it as an optional host optimization.
 
+### Standalone semantic startup
+
+On Windows, the standalone stdio and HTTP launchers import optional semantic dependencies
+on the launcher thread before serving MCP requests. This prevents the first semantic tool
+call from stalling during a native dependency import in a worker thread. Models are still
+loaded lazily, and exact-backend validation retains its normal failure policy. Dependency
+import diagnostics go to stderr so stdout stays reserved for the stdio protocol.
+
+`ENGRAPHIS_MCP_PRELOAD_EMBEDDER=auto` enables this startup step on Windows when a semantic
+embedding or reranking model is configured. Configured sources are validated before
+optional imports, including the immutable revision policy. Set `0` to disable it or `1` to
+enable it on other platforms. An unavailable optional dependency is left to the configured
+backend fallback policy.
+
 ## Classic direct-tool inventory
 
 The following inventory applies to the Classic compatibility server. Start with
