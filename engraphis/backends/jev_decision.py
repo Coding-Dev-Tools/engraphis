@@ -121,8 +121,49 @@ def _socket_deadline(sock, deadline: float):
 
 def _deadline_handlers(deadline: float):
     import http.client
+    import socket
     import urllib.request
     from engraphis.hosted_client import PinnedHTTPSConnection, PinnedHTTPSHandler
+
+    def connect_socket(address, timeout=None, source_address=None):
+        # socket.create_connection renews its timeout for each resolved address.
+        # Share the request budget across direct, loopback and proxy dial retries.
+        _remaining_time(deadline)
+        host, port = address
+        candidates = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
+        last_error = None
+        for family, kind, protocol, _, target in candidates:
+            remaining = _remaining_time(deadline)
+            sock = None
+            try:
+                sock = socket.socket(family, kind, protocol)
+                sock.settimeout(remaining)
+                if source_address is not None:
+                    sock.bind(source_address)
+                sock.connect(target)
+                # TLS must receive only the budget left after the TCP dial.
+                sock.settimeout(_remaining_time(deadline))
+                return sock
+            except OSError as exc:
+                if sock is not None:
+                    sock.close()
+                last_error = exc
+        if last_error is not None:
+            raise last_error
+        raise OSError("decision endpoint has no connectable address")
+
+    def send_with_deadline(connection, send, data):
+        if connection.sock is None:
+            if not connection.auto_open:
+                raise http.client.NotConnected()
+            connection.connect()
+        if connection.sock is None:
+            raise http.client.NotConnected()
+        connection.sock.settimeout(_remaining_time(deadline))
+        # Headers and bodies are separate sends; SSL/file sends may also loop.
+        with _socket_deadline(connection.sock, deadline):
+            send(data)
+            _remaining_time(deadline)
 
     class DeadlineResponse(http.client.HTTPResponse):
         def __init__(self, sock, *args, **kwargs):
@@ -139,15 +180,37 @@ def _deadline_handlers(deadline: float):
     class DeadlineHTTPConnection(http.client.HTTPConnection):
         response_class = DeadlineResponse
 
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._create_connection = connect_socket
+
+        def send(self, data):
+            send_with_deadline(self, super().send, data)
+
     class DeadlineHTTPSConnection(PinnedHTTPSConnection):
         response_class = DeadlineResponse
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._create_connection = connect_socket
+
+        def _connect_deadline(self):
+            return deadline
+
+        def _attempt_timeout(self, connect_deadline):
+            # The shared hosted client has a 500 ms floor; decisions do not.
+            return _remaining_time(deadline)
+
+        def send(self, data):
+            send_with_deadline(self, super().send, data)
 
         def _tunnel(self):
             # CONNECT parses its response directly, bypassing response.begin().
             with _socket_deadline(self.sock, deadline):
                 # typeshed omits this private standard-library method.
                 getattr(super(), "_tunnel")()
-                _remaining_time(deadline)
+                # TLS follows CONNECT and shares its remaining budget.
+                self.sock.settimeout(_remaining_time(deadline))
 
     class DeadlineHTTPHandler(urllib.request.HTTPHandler):
         def http_open(self, req):
