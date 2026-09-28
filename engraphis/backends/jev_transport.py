@@ -322,14 +322,21 @@ class EngraphisCloudDecisionClient:
         payload = _request_payload(state, questions, model, allow_remote=allow_remote,
                                    purpose=purpose, data_classification=data_classification)
         from engraphis import cloud_session
+        from engraphis.hosted_client import validate_cloud_base_url
         try:
             before = cloud_session.credential_bound_control_url()
+            _remaining_time(deadline)
+            # The first refresh persists this validated form. Compare the same
+            # full base URL before and after bootstrap, including its path/port.
+            before = validate_cloud_base_url(before)
             _remaining_time(deadline)
             token, _organization, _compute = cloud_session.access_for_workspace(
                 None, require_compute=False, deadline=deadline,
             )
             _remaining_time(deadline)
             control = cloud_session.credential_bound_control_url()
+            _remaining_time(deadline)
+            control = validate_cloud_base_url(control)
             _remaining_time(deadline)
             if not before or control != before:
                 raise DecisionClientError("session_changed")
