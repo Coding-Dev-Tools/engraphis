@@ -148,7 +148,7 @@ def test_cloud_decision_client_configuration(monkeypatch):
     assert client_configured.allow_fallback is False
 
     # Mock evaluate response
-    mock_payload = b'{"decisions": {"q1": {"type": "choice", "selected": "reinforces", "confidence": 0.95}}}'
+    mock_payload = b'{"is_fallback":false,"decisions":{"q1":{"type":"choice","selected":"reinforces","confidence":0.95}}}'
     mock_resp = io.BytesIO(mock_payload)
     mock_resp.status = 200
 
@@ -179,7 +179,7 @@ def cloud_backend(monkeypatch, payload):
 ])
 def test_cloud_malformed_numeric_fields_never_certify(monkeypatch, field, value):
     decision = {"type": "noul", "probability": 0.9, "confidence": 0.9, field: value}
-    adapter = cloud_backend(monkeypatch, {"decisions": {"has_support": decision}})
+    adapter = cloud_backend(monkeypatch, {"is_fallback": False, "decisions": {"has_support": decision}})
     assert adapter.verify_grounded_support("database?", "Postgres", allow_remote=True) == (False, 0.0)
 
 
@@ -191,13 +191,18 @@ def test_cloud_malformed_numeric_fields_never_certify(monkeypatch, field, value)
     b"not json", pytest.param(b"x" * (MAX_RESPONSE_BYTES + 1), id="oversized"),
 ])
 def test_cloud_invalid_or_oversized_responses_defer(monkeypatch, payload):
+    if isinstance(payload, dict):
+        payload = {"is_fallback": False, **payload}
     adapter = cloud_backend(monkeypatch, payload)
     assert adapter.verify_grounded_support("database?", "Postgres", allow_remote=True) == (False, 0.0)
 
 
-@pytest.mark.parametrize("fallback", [True, "false", None, 0])
-def test_cloud_fallbacks_and_malformed_flags_defer(monkeypatch, fallback):
-    adapter = cloud_backend(monkeypatch, {"is_fallback": fallback, "decisions": {
+@pytest.mark.parametrize("flag_fields", [
+    pytest.param({}, id="missing"), {"is_fallback": True}, {"is_fallback": "false"},
+    {"is_fallback": None}, {"is_fallback": 0},
+])
+def test_cloud_fallbacks_and_malformed_flags_defer(monkeypatch, flag_fields):
+    adapter = cloud_backend(monkeypatch, {**flag_fields, "decisions": {
         "has_support": {"type": "noul", "probability": 0.9, "confidence": 0.9},
         "verdict": {"type": "choice", "selected": "reinforces", "confidence": 0.9},
     }})

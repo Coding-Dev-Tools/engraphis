@@ -13,7 +13,7 @@ All notable changes to Engraphis are documented here. Format loosely follows
   proxy handshakes, slow headers, and chunk framing. Preserved HTTP 413 for streamed oversized read-only
   requests across parser versions.
 - Prevented retained-release waiver repairs from replacing a newer GitHub Latest release.
-- Reran the public offline fixtures into immutable v86 evidence and refreshed its
+- Reran the public offline fixtures into immutable v87 evidence and refreshed its
   source bindings, documentation, and charts.
 
 ## [1.7.8] - 2026-09-27
