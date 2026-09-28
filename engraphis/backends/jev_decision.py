@@ -363,7 +363,7 @@ class EngraphisCloudDecisionClient:
         ) as resp:
             raw = _read_response(resp, deadline)
         body = json.loads(raw.decode("utf-8"))
-        if not isinstance(body, dict) or body.get("is_fallback", False) is not False:
+        if not isinstance(body, dict) or body.get("is_fallback") is not False:
             return CloudDecisionBatch(is_fallback=True, choices={}, nouls={})
         raw_decisions = body.get("decisions")
         if not isinstance(raw_decisions, dict):
