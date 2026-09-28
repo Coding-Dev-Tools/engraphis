@@ -160,3 +160,47 @@ def test_cloud_decision_client_configuration(monkeypatch):
     assert batch.get_choice("q1").confidence == 0.95
 
 
+def test_typesafe_decision_client_configuration(monkeypatch):
+    import io
+    import urllib.request
+    from engraphis.backends.jev_decision import create_typesafe_decision_client, DecisionQuestion, JevDecisionBackend
+
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    monkeypatch.delenv("JEV_API_KEY", raising=False)
+
+    # Unconfigured
+    client = create_typesafe_decision_client(api_key="")
+    assert client.is_configured is False
+    assert client.allow_fallback is False
+
+    # Configured via env
+    monkeypatch.setenv("TYPESAFE_API_KEY", "test-api-key-xyz")
+    client_env = create_typesafe_decision_client()
+    assert client_env.is_configured is True
+    assert client_env.allow_fallback is False
+
+    # Mock evaluate response with TypeSafe official 'answers' format
+    mock_payload = (
+        b'{"model":"jev-1.13.0","answers":{'
+        b'"safe":{"type":"noul","noul":0.97},'
+        b'"rel":{"type":"choice","choice":"reinforces","confidence":0.99}'
+        b'}}'
+    )
+    mock_resp = io.BytesIO(mock_payload)
+    mock_resp.status = 200
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout: mock_resp)
+
+    q1 = DecisionQuestion("safe", "Is safe?", "noul")
+    q2 = DecisionQuestion("rel", "Relation?", "choice", ("reinforces", "orthogonal"))
+    batch = client_env.evaluate("some state", [q1, q2], model="jev-1.13.0")
+    assert batch.is_fallback is False
+    assert batch.get_noul("safe").probability == 0.97
+    assert batch.get_choice("rel").selected == "reinforces"
+    assert batch.get_choice("rel").confidence == 0.99
+
+    # Verify integration with JevDecisionBackend
+    backend = JevDecisionBackend(client=client_env, model="jev-1.13.0")
+    assert backend.is_available is True
+
+
+

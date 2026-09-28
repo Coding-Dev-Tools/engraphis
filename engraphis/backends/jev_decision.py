@@ -182,6 +182,99 @@ def create_cloud_decision_client(
     return EngraphisCloudDecisionClient(control_url=control_url, token=token, timeout_s=timeout_s)
 
 
+class TypeSafeDecisionClient:
+    """DecisionClient connecting directly to TypeSafe AI via an API key (Bring Your Own Key).
+
+    Implements the DecisionClient protocol using only standard library urllib.
+    Loads TYPESAFE_API_KEY or JEV_API_KEY from the process environment if not supplied explicitly.
+    """
+
+    def __init__(
+        self,
+        *,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+        timeout_s: float = 2.0,
+    ) -> None:
+        self.api_key = api_key or os.environ.get("TYPESAFE_API_KEY") or os.environ.get("JEV_API_KEY") or ""
+        self.base_url = (base_url or os.environ.get("TYPESAFE_BASE_URL") or "https://api.typesafe.ai").rstrip("/")
+        self.timeout_s = timeout_s
+
+    @property
+    def is_configured(self) -> bool:
+        return bool(self.api_key and self.api_key.strip() and self.api_key not in ("mock", "offline"))
+
+    @property
+    def allow_fallback(self) -> bool:
+        return False
+
+    def evaluate(
+        self, state: str, questions: Sequence[DecisionQuestion], *, model: str,
+    ) -> DecisionBatch:
+        import json
+        import urllib.request
+
+        questions_payload: Dict[str, object] = {}
+        for q in questions:
+            if q.kind == "choice":
+                criteria = {opt: opt for opt in q.options} if q.options else {"yes": "yes", "no": "no"}
+                questions_payload[q.id] = {
+                    "type": "choice",
+                    "instructions": q.prompt,
+                    "criteria": criteria,
+                }
+            elif q.kind == "score":
+                questions_payload[q.id] = {
+                    "type": "score",
+                    "instructions": q.prompt,
+                }
+            else:
+                questions_payload[q.id] = {
+                    "type": "noul",
+                    "instructions": q.prompt,
+                }
+
+        payload = {
+            "model": model,
+            "state": state,
+            "questions": questions_payload,
+        }
+        url = f"{self.base_url}/v1/systemone"
+        data = json.dumps(payload).encode("utf-8")
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}",
+            "User-Agent": "engraphis-typesafe-client/1.0",
+        }
+        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+            raw = body.get("answers") or body.get("decisions") or {}
+            choices: Dict[str, SimpleChoiceDecision] = {}
+            nouls: Dict[str, SimpleSupportDecision] = {}
+            for q_id, val in raw.items():
+                kind = val.get("type")
+                conf = float(val.get("confidence", 1.0))
+                if kind == "choice":
+                    selected = str(val.get("choice") if "choice" in val else val.get("selected", ""))
+                    choices[q_id] = SimpleChoiceDecision(selected=selected, confidence=conf)
+                elif kind == "noul":
+                    prob = float(val.get("noul") if "noul" in val else val.get("probability", 0.0))
+                    nouls[q_id] = SimpleSupportDecision(probability=prob, confidence=conf)
+            return CloudDecisionBatch(is_fallback=False, choices=choices, nouls=nouls)
+
+
+def create_typesafe_decision_client(
+    *,
+    api_key: Optional[str] = None,
+    base_url: Optional[str] = None,
+    timeout_s: float = 2.0,
+) -> TypeSafeDecisionClient:
+    """Create a DecisionClient that connects directly to TypeSafe AI using an API key."""
+    return TypeSafeDecisionClient(api_key=api_key, base_url=base_url, timeout_s=timeout_s)
+
+
+
 
 class JevDecisionBackend:
     """Advisory decisions only; zero confidence means defer to the core."""
