@@ -435,7 +435,7 @@ def test_init_jev_key_roundtrips_trusted_parser(tmp_path, monkeypatch, capsys, e
     assert key not in captured.out + captured.err
 
 
-@pytest.mark.parametrize("key", ["key with space", "synthetic\nsecret", "synthetic\x00secret",
+@pytest.mark.parametrize("key", ["", "key with space", "synthetic\nsecret", "synthetic\x00secret",
                                  "synthetic\tsecret", "synthetic\u00e9secret"])
 def test_init_rejects_malformed_jev_key(tmp_path, monkeypatch, capsys, key):
     monkeypatch.chdir(tmp_path)
@@ -443,7 +443,80 @@ def test_init_rejects_malformed_jev_key(tmp_path, monkeypatch, capsys, key):
     assert not _config_env(tmp_path).exists()
     captured = capsys.readouterr()
     assert "key must be printable ASCII without whitespace" in captured.out
-    assert key not in captured.out + captured.err
+    if key:
+        assert key not in captured.out + captured.err
+
+
+@pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.parametrize("source", ["argument", "stdin"])
+def test_init_rejects_oversized_jev_key_without_writing(tmp_path, monkeypatch, capsys, existing, source):
+    import io
+
+    monkeypatch.chdir(tmp_path)
+    env_file = _config_env(tmp_path)
+    original = b"ENGRAPHIS_DB_PATH=/keep/database.db\n"
+    if existing:
+        _write_private(env_file, original.decode())
+        original = env_file.read_bytes()
+    key = "synthetic-" + "x" * (600 * 1024)
+    stream = io.StringIO(key + "\n")
+    monkeypatch.setattr(sys, "stdin", stream)
+    assert main(["--jev-key", "-" if source == "stdin" else key, "--no-encryption"]) == 1
+    if source == "stdin":
+        assert stream.tell() == init_script._MAX_JEV_KEY_CHARS + 3
+    assert env_file.read_bytes() == original if existing else not env_file.exists()
+    captured = capsys.readouterr()
+    assert "at most 4096 characters" in captured.out
+    assert "synthetic-" not in captured.out + captured.err
+
+
+@pytest.mark.parametrize("source", ["argument", "stdin"])
+def test_init_maximum_jev_key_roundtrips_with_escaping(tmp_path, monkeypatch, capsys, source):
+    import io
+    from engraphis.config import _parse_trusted_env
+
+    monkeypatch.chdir(tmp_path)
+    key = '\\"' * (init_script._MAX_JEV_KEY_CHARS // 2)
+    assert len(key) == init_script._MAX_JEV_KEY_CHARS
+    monkeypatch.setattr(sys, "stdin", io.StringIO(key + "\r\n"))
+    assert main(["--jev-key", "-" if source == "stdin" else key, "--no-encryption"]) == 0
+    content = _config_env(tmp_path).read_text()
+    values = _parse_trusted_env(content)
+    assert values["TYPESAFE_API_KEY"] == values["JEV_API_KEY"] == key
+    assert len(content.encode()) <= 1024 * 1024
+    assert key not in capsys.readouterr().out
+
+
+def test_init_jev_update_preserves_a_near_limit_config(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    env_file = _config_env(tmp_path)
+    prefix = "ENGRAPHIS_DB_PATH=/keep/database.db\n#"
+    original = prefix + "x" * (1024 * 1024 - len(prefix) - 1) + "\n"
+    _write_private(env_file, original)
+    env_file.write_bytes(original.encode())
+    before = env_file.read_bytes()
+    assert len(before) == 1024 * 1024
+    mode = env_file.stat().st_mode
+    assert main(["--jev-key", "synthetic-small-key", "--no-encryption"]) == 1
+    assert env_file.read_bytes() == before
+    assert env_file.stat().st_mode == mode
+    captured = capsys.readouterr()
+    assert "1 MiB size limit" in captured.out
+    assert "synthetic-small-key" not in captured.out + captured.err
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_init_rejects_oversized_rendered_config_before_publication(tmp_path, monkeypatch, capsys, existing):
+    monkeypatch.chdir(tmp_path)
+    env_file = _config_env(tmp_path)
+    original = b"ENGRAPHIS_DB_PATH=/keep/database.db\n"
+    if existing:
+        _write_private(env_file, original.decode())
+        original = env_file.read_bytes()
+    monkeypatch.setattr(init_script, "_env_content", lambda *args, **kwargs: "\u00e9" * (512 * 1024 + 1))
+    assert main(["--force", "--no-encryption"]) == 1
+    assert env_file.read_bytes() == original if existing else not env_file.exists()
+    assert "1 MiB size limit" in capsys.readouterr().out
 
 
 def test_doctor_reports_jev_decision_status(tmp_path, monkeypatch, capsys):

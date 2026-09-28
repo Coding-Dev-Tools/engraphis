@@ -35,6 +35,12 @@ _CONFIG_ENV_ASSIGNMENT = re.compile(
 )
 
 
+def _validate_trusted_env_size(content: str) -> None:
+    """Never publish configuration that the bounded reader cannot load."""
+    if len(content.encode("utf-8")) > _MAX_CONFIG_ENV_BYTES:
+        raise UnsafeStateFile("trusted config file exceeds the 1 MiB size limit")
+
+
 def _resolve_config_env_path(
     *,
     environ: Optional[dict] = None,
@@ -809,7 +815,7 @@ def _env_bool(key: str, default: bool) -> bool:
 
 
 def persist_project_env(values: dict[str, str], path: Optional[Path] = None) -> Path:
-    """Upsert non-secret runtime settings in the trusted config file atomically.
+    """Upsert runtime settings in the trusted config file atomically.
 
     With no explicit *path*, dashboard controls persist beside other owner-private
     Engraphis state. The process-fixed ``ENGRAPHIS_ENV_FILE`` override is selected
@@ -866,11 +872,13 @@ def persist_project_env(values: dict[str, str], path: Optional[Path] = None) -> 
         if key not in found:
             rendered.append(f"{key}={value}")
 
+    content = "\n".join(rendered).rstrip() + "\n"
+    _validate_trusted_env_size(content)
     if trusted_target:
         ensure_owner_private_dir(target.parent)
     atomic_private_text(
         target,
-        "\n".join(rendered).rstrip() + "\n",
+        content,
         mode=mode,
         expected_stat=source_stat,
     )

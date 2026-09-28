@@ -36,6 +36,7 @@ from engraphis.private_state import (
 
 
 _HEX64 = set("0123456789abcdef")
+_MAX_JEV_KEY_CHARS = 4096
 
 
 def _ok(label: str, detail: str = "") -> None:
@@ -260,6 +261,8 @@ def _write_env(
 ) -> None:
     """Atomically replace one private configuration or key file."""
     if owner_private_parent:
+        from engraphis.config import _validate_trusted_env_size
+        _validate_trusted_env_size(content)
         ensure_owner_private_dir(path.parent)
     atomic_private_text(path, content)
 
@@ -388,15 +391,23 @@ def main(argv=None) -> int:
     if args.prefetch:
         return cmd_prefetch()
 
-    raw_jev_key = args.jev_key or args.typesafe_key
+    raw_jev_key = args.jev_key if args.jev_key is not None else args.typesafe_key
     resolved_jev_key: Optional[str] = None
     if raw_jev_key is not None:
         if raw_jev_key == "-":
             if sys.stdin is None or sys.stdin.isatty():
                 _fail("Jev API key", "--jev-key - reads the key from stdin; pipe it in, e.g. `echo $KEY | engraphis-init --jev-key -`.")
                 return 1
-            raw_jev_key = sys.stdin.readline().strip("\r\n")
+            # Allow a full key plus CRLF, but never consume an unbounded pipe.
+            raw_jev_key = sys.stdin.readline(_MAX_JEV_KEY_CHARS + 3)
+            if len(raw_jev_key) == _MAX_JEV_KEY_CHARS + 3:
+                _fail("Jev API key", f"key must contain at most {_MAX_JEV_KEY_CHARS} characters")
+                return 1
+            raw_jev_key = raw_jev_key.strip("\r\n")
         cleaned_key = str(raw_jev_key).strip()
+        if len(cleaned_key) > _MAX_JEV_KEY_CHARS:
+            _fail("Jev API key", f"key must contain at most {_MAX_JEV_KEY_CHARS} characters")
+            return 1
         if not cleaned_key or not cleaned_key.isascii() or not cleaned_key.isprintable() or " " in cleaned_key:
             _fail("Jev API key", "key must be printable ASCII without whitespace")
             return 1
@@ -439,16 +450,19 @@ def main(argv=None) -> int:
             key_path = Path(existing_key).expanduser()
         if resolved_jev_key:
             from engraphis.config import persist_project_env
-            persist_project_env(
-                {
-                    # Keys are printable ASCII, so JSON's quote/backslash escapes
-                    # exactly match the trusted-env parser without expansion.
-                    "TYPESAFE_API_KEY": json.dumps(resolved_jev_key),
-                    "JEV_API_KEY": json.dumps(resolved_jev_key),
-                    "ENGRAPHIS_DECISION_BACKEND": "byok",
-                },
-                env_file,
-            )
+            try:
+                persist_project_env(
+                    {
+                        # JSON's escapes match the trusted-env parser without expansion.
+                        "TYPESAFE_API_KEY": json.dumps(resolved_jev_key),
+                        "JEV_API_KEY": json.dumps(resolved_jev_key),
+                        "ENGRAPHIS_DECISION_BACKEND": "byok",
+                    },
+                    env_file,
+                )
+            except OSError as exc:
+                _fail("trusted configuration", str(exc))
+                return 1
             print("  jev api key -> updated in trusted config (TypeSafe BYOK configured; not verified)")
     else:
         if use_encryption:

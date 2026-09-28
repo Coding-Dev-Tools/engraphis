@@ -71,6 +71,59 @@ def _evaluate(client):
 
 
 @pytest.mark.parametrize("source", ["environment", "saved"])
+def test_managed_decisions_survive_compute_dns_outage_and_preserve_binding(bootstrap, monkeypatch, source):
+    control = "https://api.engraphis.com"
+    compute = "https://unavailable-compute.example.test/base/"
+    client, calls = bootstrap(control, control, source=source)
+    if source == "saved":
+        saved = cloud_session._load()
+        saved["compute_url"] = compute
+        cloud_session._save(saved)
+    else:
+        monkeypatch.setenv("ENGRAPHIS_CLOUD_COMPUTE_URL", compute)
+    resolved = []
+    healthy_dns = socket.getaddrinfo
+
+    def dns(host, *args, **kwargs):
+        resolved.append(host)
+        if host == "unavailable-compute.example.test":
+            raise socket.gaierror("synthetic compute outage")
+        return healthy_dns(host, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", dns)
+    assert client.is_configured
+    for _ in range(2):
+        assert _evaluate(client).get_noul("q").probability == 0.9
+    assert "unavailable-compute.example.test" not in resolved
+    saved = cloud_session._load()
+    assert saved["compute_url"] == compute
+    assert saved["refresh_credential"] == "synthetic-rotated-2"
+    # Compute use still validates the saved destination before spending a refresh.
+    with pytest.raises(cloud_session.CloudSessionError, match="temporarily unreachable"):
+        cloud_session.access_for_workspace(None)
+    assert len(calls["refresh"]) == len(calls["decision"]) == 2
+    assert cloud_session._load()["refresh_credential"] == "synthetic-rotated-2"
+
+
+def test_direct_control_access_does_not_resolve_unused_compute(monkeypatch):
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_ACCESS_TOKEN", "synthetic-access")
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_ORGANIZATION_ID", "org_synthetic")
+    compute = "https://unavailable-compute.example.test"
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_COMPUTE_URL", compute)
+
+    def unavailable(*args, **kwargs):
+        raise socket.gaierror("synthetic compute outage")
+
+    monkeypatch.setattr(socket, "getaddrinfo", unavailable)
+    monkeypatch.setattr(cloud_session, "_load", lambda: pytest.fail("direct access must not load saved credentials"))
+    assert cloud_session.access_for_workspace(None, require_compute=False) == (
+        "synthetic-access", "org_synthetic", compute,
+    )
+    with pytest.raises(cloud_session.CloudSessionError, match="temporarily unreachable"):
+        cloud_session.access_for_workspace(None)
+
+
+@pytest.mark.parametrize("source", ["environment", "saved"])
 @pytest.mark.parametrize("raw,canonical", [
     ("https://api.engraphis.com/", "https://api.engraphis.com"),
     ("HTTPS://api.engraphis.com/", "https://api.engraphis.com"),

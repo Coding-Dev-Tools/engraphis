@@ -2433,14 +2433,14 @@ def engraphis_decide(
         if kind == "guard_command":
             # Prefix heuristics do not parse shell syntax and cannot authorize it.
             result.update({"allow_auto": False, "escalate_to_user": True})
-        elif kind == "custom":
+        elif kind == "custom" or reason == "invalid_request":
             result["selected"] = None
         return _ok(result)
 
-    if offline_mode or allow_remote is not True:
-        return fallback("offline" if offline_mode else "remote_not_authorized")
     if kind not in {"guard_command", "classify_contradiction", "verify_support", "verify_completion", "custom"}:
         return fallback("invalid_request")
+    if offline_mode or allow_remote is not True:
+        return fallback("offline" if offline_mode else "remote_not_authorized")
     relevant_inputs = {
         "guard_command": (state,),
         "classify_contradiction": (state, existing_content),
