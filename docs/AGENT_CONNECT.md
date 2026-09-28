@@ -156,7 +156,7 @@ Environment secrets are for non-interactive deployments that cannot run the conn
 
 ## Trial and grace
 
-The no-card trial starts after email confirmation and lasts **3 active days for Pro or 10 active days for Team**.
+The no-card trial starts after email confirmation and lasts **7 active days for Pro or 14 active days for Team**.
 `workspace_write_grace` is a private-control-plane account-continuity state capped at **24
 hours**. It never extends the trial, hosted agent access, Team membership, seats, Cloud Sync, or
 managed compute, and it does not restrict the free local MCP server.

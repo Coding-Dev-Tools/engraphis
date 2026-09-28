@@ -265,7 +265,7 @@ Smart command shown above.
 | **Ops** | `engraphis_stats` | Memory counts by type/workspace: health/onboarding checks. |
 | Ops | `engraphis_check_update` | Check the release source and refresh the persistent update cache. |
 | Maintenance | `engraphis_consolidate` | Pure dry-run or live sweep; structured calls may process a large cluster across retries. |
-| Decision | `engraphis_decide` | Fast sub-300ms System 1 decision gating (command safety, contradiction check, support check, completion check). |
+| Decision | `engraphis_decide` | Advisory command, contradiction, support, and completion checks. Remote processing requires backend selection and explicit permission for each call. |
 
 ---
 

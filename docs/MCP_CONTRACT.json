@@ -1,6 +1,6 @@
 {
   "schema": "engraphis-mcp-contract/v1",
-  "sha256": "eb10e4abaf5f236608db9082e8b2ea7e139281dadfd7fb1060baf74def40ff6e",
+  "sha256": "4d5affd83c11269820ee77145c5395827eff7afd437ba722966cdd82d6eaeffa",
   "surfaces": {
     "classic": [
       {
@@ -690,14 +690,26 @@
       {
         "annotations": {
           "destructiveHint": false,
-          "idempotentHint": true,
-          "openWorldHint": false,
-          "readOnlyHint": true,
+          "idempotentHint": false,
+          "openWorldHint": true,
+          "readOnlyHint": false,
           "title": "System 1 decision gating (Jev / TypeSafe AI)"
         },
-        "description": "Execute a fast (sub-300ms) System 1 micro-decision powered by Jev / TypeSafe AI.\n\nEvaluates command safety guardrails, fact contradiction screening, grounded evidence\nsupport verification, or turn completion without frontier LLM token waste.",
+        "description": "Request advisory typed decisions, with deterministic local fallback.\n\nBackend selection and per-call permission are both required for remote processing.\nDecisions do not authorize shell execution, memory mutation, or task completion.",
         "inputSchema": {
           "properties": {
+            "allow_remote": {
+              "default": false,
+              "description": "Explicitly permit this call's supplied text to leave this device.",
+              "title": "Allow Remote",
+              "type": "boolean"
+            },
+            "data_classification": {
+              "default": "internal",
+              "description": "Remote text must be public or internal; secrets are rejected.",
+              "title": "Data Classification",
+              "type": "string"
+            },
             "existing_content": {
               "default": "",
               "description": "Existing memory content (used for 'classify_contradiction').",
@@ -722,7 +734,7 @@
             },
             "offline_mode": {
               "default": false,
-              "description": "Force deterministic local heuristics without remote calls.",
+              "description": "Use local heuristics; no remote calls.",
               "title": "Offline Mode",
               "type": "boolean"
             },

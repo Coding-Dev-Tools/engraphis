@@ -1963,14 +1963,14 @@ def test_license_discloses_manifest_trial_days_by_plan_and_retains_legacy_days(m
     from engraphis import commercial
 
     payload = v2_api.get_license()
-    assert payload["trial"]["days_by_plan"] == {"pro": 3, "team": 10}
-    assert payload["trial"]["trial_days"] == 3
-    assert payload["trial_seconds"] == 3 * 24 * 60 * 60
+    assert payload["trial"]["days_by_plan"] == {"pro": 7, "team": 14}
+    assert payload["trial"]["trial_days"] == 7
+    assert payload["trial_seconds"] == 7 * 24 * 60 * 60
     monkeypatch.setattr(commercial, "manifest", lambda: {
         "trial": {"days_by_plan": {"pro": 5, "team": 17}},
     })
     assert v2_api.get_license()["trial"]["days_by_plan"] == {"pro": 5, "team": 17}
-    assert v2_api.get_license()["trial"]["trial_days"] == 3
+    assert v2_api.get_license()["trial"]["trial_days"] == 7
 
 
 @pytest.mark.parametrize("trial", [{}, None, {"days_by_plan": {"pro": 3, "team": "10"}},
@@ -1982,7 +1982,7 @@ def test_unknown_team_trial_duration_is_never_inferred_from_legacy_days(monkeypa
     monkeypatch.setattr(commercial, "manifest", lambda: {"trial": trial})
     payload = v2_api.get_license()
     assert "team" not in payload["trial"]["days_by_plan"]
-    assert payload["trial"]["trial_days"] == 3
+    assert payload["trial"]["trial_days"] == 7
 
 
 def test_a_connected_but_unanswered_installation_offers_no_trial(monkeypatch) -> None:

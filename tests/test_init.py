@@ -235,7 +235,7 @@ def test_doctor_reports_connected_cloud_install(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("ENGRAPHIS_CLOUD_ORGANIZATION_ID", "org_test")
     assert main(["--check"]) == 0
     out = capsys.readouterr().out
-    assert "Engraphis Cloud - installation connected" in out
+    assert "Engraphis Cloud - configuration present; connection not verified" in out
 
 
 def test_doctor_reports_functional_embedder(tmp_path, monkeypatch, capsys):
@@ -372,7 +372,7 @@ def test_init_configures_jev_key_on_fresh_setup(tmp_path, monkeypatch, capsys):
     env_content = _config_env(tmp_path).read_text()
     assert "TYPESAFE_API_KEY=test-typesafe-key-123" in env_content
     assert "JEV_API_KEY=test-typesafe-key-123" in env_content
-    assert "ENGRAPHIS_DECISION_BACKEND=typesafe" in env_content
+    assert "ENGRAPHIS_DECISION_BACKEND=byok" in env_content
     out = capsys.readouterr().out
     assert "jev api key -> configured in trusted config" in out
     assert "test-typesafe-key-123" not in out
@@ -387,7 +387,7 @@ def test_init_updates_jev_key_on_existing_setup(tmp_path, monkeypatch, capsys):
     assert "ENGRAPHIS_DB_PATH=/keep/database.db" in updated_env
     assert "TYPESAFE_API_KEY=updated-key-456" in updated_env
     assert "JEV_API_KEY=updated-key-456" in updated_env
-    assert "ENGRAPHIS_DECISION_BACKEND=typesafe" in updated_env
+    assert "ENGRAPHIS_DECISION_BACKEND=byok" in updated_env
     out = capsys.readouterr().out
     assert "jev api key -> updated in trusted config" in out
     assert "updated-key-456" not in out
@@ -425,9 +425,10 @@ def test_doctor_reports_jev_decision_status(tmp_path, monkeypatch, capsys):
 
     # Configured
     monkeypatch.setenv("TYPESAFE_API_KEY", "apikey_test_123")
+    monkeypatch.setenv("ENGRAPHIS_DECISION_BACKEND", "byok")
     assert main(["--check", "--json"]) == 0
     report_conf = json.loads(capsys.readouterr().out)
     jev_check_conf = next(c for c in report_conf["checks"] if c["code"] == "jev_decision")
     assert jev_check_conf["status"] == "ok"
-    assert "active (TypeSafe AI BYOK)" in jev_check_conf["detail"]
+    assert "configured (TypeSafe AI BYOK); not verified" in jev_check_conf["detail"]
 

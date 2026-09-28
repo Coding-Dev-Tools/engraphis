@@ -155,7 +155,7 @@ an omitted mode means it was not recorded, and is not inferred from current defa
 | Session | `engraphis_end_session` | Closes a work session with a summary and open threads. |
 | Operations | `engraphis_stats` | Returns memory counts for health checks. |
 | Operations | `engraphis_check_update` | Refreshes the release cache and reports whether a newer version is available. Update checks are OFF unless `ENGRAPHIS_UPDATE_CHECK` is set to an affirmative value; `=0` keeps them off. |
-| Decision | `engraphis_decide` | Fast sub-300ms System 1 decision gating (command safety, contradiction classification, grounded support verification, completion checks) via TypeSafe Jev or local heuristics. |
+| Decision | `engraphis_decide` | Advisory typed decisions with local fallback. Remote Jev requires an explicit backend and per-call `allow_remote=true`; missing, malformed, and uncertain answers stay visible. Smart discovery routes it through `engraphis_execute_action` because a remote call may consume allowance. |
 
 The classic recall, grounded, and answer tools (`engraphis_recall`,
 `engraphis_recall_grounded`, and the `engraphis_answer` alias) accept `planning="off"|"auto"`,
