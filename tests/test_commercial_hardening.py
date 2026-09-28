@@ -169,7 +169,8 @@ def test_the_published_trial_and_grace_seconds_track_their_constants() -> None:
     for text in sources:
         assert '"trial_seconds": 259_200' not in text
         assert '"grace_seconds": 86_400' not in text
-    assert licensing.TRIAL_SECONDS == 3 * 24 * 60 * 60
+    assert licensing.TRIAL_SECONDS == 7 * 24 * 60 * 60
+    assert commercial.manifest()["trial"]["days_by_plan"] == {"pro": 7, "team": 14}
     assert licensing.MAX_HOSTED_ACCOUNT_GRACE_SECONDS == 24 * 60 * 60
     assert (
         licensing.MAX_LOCAL_WRITE_GRACE_SECONDS
