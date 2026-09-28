@@ -966,7 +966,8 @@ def _post_refresh(control_url: str, refresh: str, workspace_id: Optional[str],
         with response:
             raw = (
                 response.read(_MAX_RESPONSE_BYTES + 1) if deadline is None
-                else read_response(response, deadline, max_bytes=_MAX_RESPONSE_BYTES)
+                else read_response(response, deadline, max_bytes=_MAX_RESPONSE_BYTES,
+                                   preserve_complete=True)
             )
     except (OSError, ValueError, http.client.HTTPException) as exc:
         # Post-response, and therefore NOT a transient outage. The server answered, so the

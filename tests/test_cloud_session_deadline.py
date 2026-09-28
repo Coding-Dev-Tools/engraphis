@@ -4,6 +4,7 @@ All credentials and responses are synthetic; real sockets target loopback only.
 """
 from __future__ import annotations
 
+import http.client
 import io
 import json
 import multiprocessing
@@ -169,6 +170,95 @@ def test_completed_rotation_is_saved_before_reporting_timeout(
     assert "refresh_unusable" not in saved
 
 
+def _http_body_at_deadline(monkeypatch, framing, *, incomplete=False):
+    raw = json.dumps(_rotation()).encode()
+    if framing == "length":
+        headers = b"Content-Length: " + str(len(raw) + int(incomplete)).encode() + b"\r\n"
+        body = raw
+    elif framing == "chunked":
+        headers = b"Transfer-Encoding: chunked\r\n"
+        body = ("%x\r\n" % len(raw)).encode() + raw + b"\r\n0\r\n\r\n"
+    else:
+        headers = b"Connection: close\r\n"
+        body = raw
+
+    class SyntheticSocket:
+        def makefile(self, *args, **kwargs):
+            return io.BytesIO(b"HTTP/1.1 200 OK\r\n" + headers + b"\r\n" + body)
+
+    response = http.client.HTTPResponse(SyntheticSocket())
+    response.begin()
+    clock = [100.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    read = response.read1
+    calls = []
+
+    def read_chunk(size=-1):
+        chunk = read(min(size, 17))
+        calls.append(chunk)
+        if response.length == 0 or not chunk:
+            clock[0] = 105.0
+        return chunk
+
+    monkeypatch.setattr(response, "read1", read_chunk)
+    return response, calls, raw, clock
+
+
+@pytest.mark.parametrize("framing", ["length", "close", "chunked"])
+def test_completed_http_rotation_is_saved_at_body_deadline(monkeypatch, saved_session, framing):
+    response, reads, raw, _clock = _http_body_at_deadline(monkeypatch, framing)
+    monkeypatch.setattr(cloud_session, "build_pinned_https_opener",
+                        lambda *handlers: SimpleNamespace(open=lambda *args, **kwargs: response))
+    monkeypatch.setattr(jev_transport, "_post_json", _no_network)
+
+    with pytest.raises(jev_transport.DecisionClientError, match="^remote_timeout$"):
+        _evaluate(5)
+
+    saved = cloud_session._load()
+    assert saved["refresh_credential"] == "synthetic-rotated"
+    assert not cloud_session._refresh_is_unusable(saved, "synthetic-rotated")
+    assert "refresh_unusable" not in saved
+    assert response.closed
+    assert b"".join(reads) == raw
+    assert (reads[-1] == b"") is (framing != "length")
+
+
+@pytest.mark.parametrize("failure", ["truncated", "partial", "oversized"])
+def test_unfinished_http_rotation_at_deadline_is_not_saved(monkeypatch, saved_session, failure):
+    response, _reads, raw, clock = _http_body_at_deadline(
+        monkeypatch, "length", incomplete=failure == "truncated",
+    )
+    if failure == "partial":
+        read = response.read1
+
+        def read_partial(size=-1):
+            chunk = read(size)
+            clock[0] = 105.0
+            return chunk
+
+        monkeypatch.setattr(response, "read1", read_partial)
+    elif failure == "oversized":
+        monkeypatch.setattr(cloud_session, "_MAX_RESPONSE_BYTES", len(raw) - 1)
+    monkeypatch.setattr(cloud_session, "build_pinned_https_opener",
+                        lambda *handlers: SimpleNamespace(open=lambda *args, **kwargs: response))
+    monkeypatch.setattr(jev_transport, "_post_json", _no_network)
+
+    with pytest.raises(jev_transport.DecisionClientError, match="^remote_timeout$"):
+        _evaluate(5)
+
+    saved = cloud_session._load()
+    assert saved.get("refresh_credential") != "synthetic-rotated"
+    assert cloud_session._refresh_is_unusable(saved, "synthetic-unspent")
+    assert response.closed
+
+
+@pytest.mark.parametrize("framing", ["length", "close", "chunked"])
+def test_ordinary_decision_reader_keeps_strict_deadline(monkeypatch, framing):
+    response, _reads, _raw, _clock = _http_body_at_deadline(monkeypatch, framing)
+    with response, pytest.raises(TimeoutError):
+        jev_transport._read_response(response, 105.0)
+
+
 @pytest.mark.parametrize("expiry_phase", ["origin", "url_validation"])
 def test_exhausted_preflight_never_spends_refresh(monkeypatch, saved_session, expiry_phase):
     clock = [100.0]
@@ -244,7 +334,7 @@ def test_uncertain_refresh_timeout_retires_spent_credential_without_decision(
         cloud_session.access_for_workspace(None, require_compute=False)
 
 
-@pytest.mark.parametrize("phase", ["complete", "headers", "chunk_framing"])
+@pytest.mark.parametrize("phase", ["complete", "headers", "chunk_framing", "chunk_trailer", "eof_body"])
 def test_real_loopback_refresh_shares_deadline_and_never_uses_proxy(
     monkeypatch, saved_session, phase,
 ):
@@ -258,13 +348,21 @@ def test_real_loopback_refresh_shares_deadline_and_never_uses_proxy(
             ))))
             try:
                 if self.path == "/v1/tokens/refresh" and phase != "complete":
-                    prefix = (b"HTTP/1.1 200 OK\r\nX-Slow: " if phase == "headers" else
-                              b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+                    raw = json.dumps(_rotation()).encode()
+                    if phase == "headers":
+                        prefix = b"HTTP/1.1 200 OK\r\nX-Slow: "
+                    elif phase == "eof_body":
+                        prefix = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n" + raw
+                    else:
+                        prefix = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                        if phase == "chunk_trailer":
+                            prefix += ("%x\r\n" % len(raw)).encode() + raw + b"\r\n0\r\nX-Slow: "
                     self.wfile.write(prefix)
                     self.wfile.flush()
-                    # More bytes arrive continuously, but no header/chunk finishes.
+                    # Continuous progress must not turn watchdog shutdown into
+                    # proof of EOF or a complete chunk trailer.
                     while not stopped.wait(0.01):
-                        self.wfile.write(b"0")
+                        self.wfile.write(b" " if phase == "eof_body" else b"0")
                         self.wfile.flush()
                     return
                 value = _rotation() if self.path == "/v1/tokens/refresh" else _decision()
