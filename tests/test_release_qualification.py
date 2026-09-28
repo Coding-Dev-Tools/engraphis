@@ -334,6 +334,22 @@ def test_waiver_latest_comparison_is_numeric_and_fails_closed(candidate, latest,
         assert result.stdout.strip() == expected
 
 
+def test_github_release_writers_share_publication_queue():
+    yaml = pytest.importorskip("yaml")
+    root = Path(__file__).resolve().parents[1]
+    workflow = yaml.safe_load((root / ".github/workflows/release.yml").read_text(encoding="utf-8"))
+    writers = {name: job for name, job in workflow["jobs"].items()
+               if any(command in step.get("run", "")
+                      for step in job.get("steps", [])
+                      for command in ("gh release create", "gh release edit"))}
+    assert set(writers) == {"github-release", "github-release-repair"}
+    for job in writers.values():
+        assert job["concurrency"] == {
+            "group": "engraphis-github-release-publication", "cancel-in-progress": False,
+            "queue": "max",
+        }
+
+
 @pytest.mark.skipif(os.name == "nt", reason="release workflow executes in Linux bash")
 @pytest.mark.parametrize("latest,lookup_fails,expected", [
     ("v1.7.4", False, True), ("v1.7.8", False, True),
