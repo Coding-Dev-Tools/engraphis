@@ -892,6 +892,11 @@ jobs:
 
   github-release:
     name: Publish GitHub Release
+    # Share one publication lock with repairs, including runs on other refs.
+    concurrency:
+      group: engraphis-github-release-publication
+      cancel-in-progress: false
+      queue: max
     needs: publish
     environment: release-qualification
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
@@ -953,6 +958,11 @@ jobs:
 
   github-release-repair:
     name: Repair GitHub Release
+    # Hold the lock from the Latest lookup through all GitHub release writes.
+    concurrency:
+      group: engraphis-github-release-publication
+      cancel-in-progress: false
+      queue: max
     environment: release-qualification
     if: >-
       github.event_name == 'workflow_dispatch' &&
