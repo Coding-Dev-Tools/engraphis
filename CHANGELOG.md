@@ -5,6 +5,13 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+- Kept managed Jev available when an unrelated compute endpoint cannot resolve,
+  while retaining destination validation for requests that use compute.
+- Bounded Jev key input and serialized configuration before publication, preserving
+  existing setup on rejection. Invalid decision kinds now defer without a fabricated
+  selection in direct, Classic, and Smart calls.
+- Refreshed the public offline fixtures and source bindings in immutable v98 evidence.
+
 - Added saved project-to-workspace routing and connection instructions so agents can use the
   user's selected workspace. Routine MCP calls inherit an omitted workspace from an authorized
   session or repo mapping, report the resolved destination, and reject session mismatches.
@@ -22,7 +29,7 @@ All notable changes to Engraphis are documented here. Format loosely follows
   proxy handshakes, slow headers, and chunk framing. Preserved HTTP 413 for streamed oversized read-only
   requests across parser versions.
 - Prevented retained-release waiver repairs from replacing a newer GitHub Latest
-  release, with a shared publication queue to serialize GitHub release writes.
+  release, with a shared publication lock to serialize GitHub release writes.
 - Reran the public offline fixtures into immutable v88 evidence and refreshed its
   source bindings, documentation, and charts.
 

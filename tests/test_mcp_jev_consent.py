@@ -10,6 +10,39 @@ from engraphis import mcp_server as server
 from engraphis.backends import jev_transport as transport
 
 
+@pytest.mark.parametrize("dispatch", ["direct", "classic", "smart"])
+@pytest.mark.parametrize("consent", [{}, {"offline_mode": True, "allow_remote": True},
+                                     {"allow_remote": True}])
+def test_invalid_kind_never_fabricates_a_decision_or_inspects_credentials(
+    monkeypatch, dispatch, consent,
+):
+    def forbidden(*args, **kwargs):
+        pytest.fail("invalid requests must not inspect credentials or call a backend")
+
+    monkeypatch.setattr(transport, "select_decision_client", forbidden)
+    arguments = {"kind": "unknown", "state": "Synthetic", **consent}
+    if dispatch == "direct":
+        raw = server.engraphis_decide(**arguments)
+    elif dispatch == "classic":
+        response = asyncio.run(server.classic_mcp.call_tool("engraphis_decide", arguments))
+        content = response[0] if isinstance(response, tuple) else response
+        raw = content[0].text
+    else:
+        action = server._action_payload(server.ACTION_SPECS["decide"])
+        response = server.engraphis_execute_action(
+            capability_id=action["capability_id"], schema_digest=action["schema_digest"],
+            arguments=arguments,
+        )
+        raw = response if isinstance(response, str) else response.content[0].text
+    result = json.loads(raw)
+    if dispatch == "smart":
+        result = result["result"]
+    assert result["fallback_reason"] == "invalid_request"
+    assert result["selected"] is None
+    assert result["confidence"] is None
+    assert result["is_fallback"] is True
+
+
 @pytest.mark.parametrize("kwargs", ({}, {"allow_remote": False},
                                     {"offline_mode": True, "allow_remote": True}))
 def test_unapproved_or_offline_mcp_never_discovers_credentials(monkeypatch, kwargs):

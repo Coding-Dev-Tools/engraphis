@@ -101,6 +101,24 @@ def test_persist_project_env_rejects_oversized_existing_file(tmp_path):
         persist_project_env({"ENGRAPHIS_EXTRACTOR": "none"}, path=target)
 
 
+def test_persist_project_env_bounds_rendered_utf8_bytes_without_replacing_file(tmp_path, monkeypatch):
+    from engraphis import config
+
+    monkeypatch.setattr(config, "_MAX_CONFIG_ENV_BYTES", 64)
+    target = tmp_path / ".env"
+    with pytest.raises(UnsafeStateFile, match="size limit"):
+        persist_project_env({"KEY": "\u00e9" * 30}, path=target)
+    assert not target.exists()
+    persist_project_env({"KEY": "\u00e9" * 29 + "x"}, path=target)
+    before = target.read_bytes()
+    assert len(before) == 64
+    mode = target.stat().st_mode
+    with pytest.raises(UnsafeStateFile, match="size limit"):
+        persist_project_env({"KEY": "\u00e9" * 30}, path=target)
+    assert target.read_bytes() == before
+    assert target.stat().st_mode == mode
+
+
 def test_llm_auto_extract_defaults_off_and_accepts_explicit_on(monkeypatch):
     monkeypatch.delenv("ENGRAPHIS_LLM_AUTO_EXTRACT", raising=False)
     assert Settings().llm_auto_extract is False

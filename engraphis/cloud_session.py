@@ -1052,6 +1052,8 @@ def access_for_workspace(
     Completed rotations are persisted even if time expires, before a timeout is raised.
     OS filesystem/DNS calls cannot be preempted; their elapsed time is charged before
     another phase starts. Callers omitting the deadline retain the existing behavior.
+    Control-only callers leave compute metadata unresolved; compute callers must use
+    ``require_compute=True`` to validate that destination before sending credentials.
     """
 
     _check_deadline(deadline)
@@ -1062,7 +1064,10 @@ def access_for_workspace(
     if raw_direct_token.strip() and not direct_token:
         raise CloudSessionError("The cloud access credential is invalid.", status=409)
     if direct_token and direct_org and (direct_compute or not require_compute):
-        compute_url = _reachable_cloud_base_url(direct_compute) if direct_compute else ""
+        compute_url = (
+            _reachable_cloud_base_url(direct_compute)
+            if require_compute and direct_compute else direct_compute
+        )
         _check_deadline(deadline)
         return direct_token, direct_org, compute_url
 
@@ -1112,7 +1117,10 @@ def access_for_workspace(
             )
         control = _reachable_cloud_base_url(control)
         _check_deadline(deadline)
-        compute = _reachable_cloud_base_url(compute) if compute else ""
+        # A compute outage must not block control-only services such as Jev or sync.
+        # Preserve the binding so a later compute request still validates it normally.
+        if require_compute and compute:
+            compute = _reachable_cloud_base_url(compute)
         _check_deadline(deadline)
         token_subject = _token_subject(saved)
         try:
