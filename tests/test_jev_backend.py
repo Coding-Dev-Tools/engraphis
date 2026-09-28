@@ -23,7 +23,7 @@ class FakeClient:
             get_noul=lambda _: SimpleNamespace(probability=probability, confidence=confidence),
         )
 
-    def evaluate(self, state, questions, *, model):
+    def evaluate(self, state, questions, *, model, allow_remote=False, purpose="custom", data_classification="internal"):
         self.calls.append((state, [question.to_dict() for question in questions], model))
         return self.batch
 
@@ -130,77 +130,22 @@ def test_empty_and_oversized_inputs_do_not_leave_the_process(query, evidence):
     assert client.calls == []
 
 
-def test_cloud_decision_client_configuration(monkeypatch):
-    import io
-    from engraphis.backends.jev_decision import create_cloud_decision_client, DecisionQuestion
-
-    # Unconfigured
-    monkeypatch.delenv("ENGRAPHIS_CLOUD_ACCESS_TOKEN", raising=False)
-    client = create_cloud_decision_client(token="")
-    assert client.is_configured is False
+def test_cloud_decision_client_uses_saved_session_configuration(monkeypatch):
+    from engraphis import cloud_session
+    from engraphis.backends.jev_decision import create_cloud_decision_client
+    configured = []
+    monkeypatch.setattr(cloud_session, "configured", lambda **kw: configured.append(kw) or True)
+    client = create_cloud_decision_client()
+    assert configured == []
+    assert client.is_configured is True
+    assert configured == [{"require_compute": False}]
     assert client.allow_fallback is False
 
-    # Configured
-    client_configured = create_cloud_decision_client(token="test-token", control_url="https://api.engraphis.com")
-    assert client_configured.is_configured is True
-    assert client_configured.allow_fallback is False
 
-    # Mock evaluate response
-    mock_payload = b'{"decisions": {"q1": {"type": "choice", "selected": "reinforces", "confidence": 0.95}}}'
-    mock_resp = io.BytesIO(mock_payload)
-    mock_resp.status = 200
-
-    import urllib.request
-    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout: mock_resp)
-
-    q = DecisionQuestion("q1", "prompt", "choice", ("reinforces", "orthogonal"))
-    batch = client_configured.evaluate("test state", [q], model="test-model-1.0")
-    assert batch.is_fallback is False
-    assert batch.get_choice("q1").selected == "reinforces"
-    assert batch.get_choice("q1").confidence == 0.95
-
-
-def test_typesafe_decision_client_configuration(monkeypatch):
-    import io
-    import urllib.request
-    from engraphis.backends.jev_decision import create_typesafe_decision_client, DecisionQuestion, JevDecisionBackend
-
-    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
-    monkeypatch.delenv("JEV_API_KEY", raising=False)
-
-    # Unconfigured
-    client = create_typesafe_decision_client(api_key="")
-    assert client.is_configured is False
-    assert client.allow_fallback is False
-
-    # Configured via env
-    monkeypatch.setenv("TYPESAFE_API_KEY", "test-api-key-xyz")
-    client_env = create_typesafe_decision_client()
-    assert client_env.is_configured is True
-    assert client_env.allow_fallback is False
-
-    # Mock evaluate response with TypeSafe official 'answers' format
-    mock_payload = (
-        b'{"model":"jev-1.13.0","answers":{'
-        b'"safe":{"type":"noul","noul":0.97},'
-        b'"rel":{"type":"choice","choice":"reinforces","confidence":0.99}'
-        b'}}'
-    )
-    mock_resp = io.BytesIO(mock_payload)
-    mock_resp.status = 200
-    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout: mock_resp)
-
-    q1 = DecisionQuestion("safe", "Is safe?", "noul")
-    q2 = DecisionQuestion("rel", "Relation?", "choice", ("reinforces", "orthogonal"))
-    batch = client_env.evaluate("some state", [q1, q2], model="jev-1.13.0")
-    assert batch.is_fallback is False
-    assert batch.get_noul("safe").probability == 0.97
-    assert batch.get_choice("rel").selected == "reinforces"
-    assert batch.get_choice("rel").confidence == 0.99
-
-    # Verify integration with JevDecisionBackend
-    backend = JevDecisionBackend(client=client_env, model="jev-1.13.0")
-    assert backend.is_available is True
-
-
-
+def test_typesafe_key_presence_is_not_an_implicit_backend_selection(monkeypatch):
+    from engraphis.backends.jev_transport import select_decision_client
+    monkeypatch.setenv("TYPESAFE_API_KEY", "synthetic-key")
+    monkeypatch.setenv("ENGRAPHIS_DECISION_BACKEND", "none")
+    assert select_decision_client() == (None, "local_heuristic")
+    client, name = select_decision_client("byok")
+    assert client.is_configured and name == "typesafe_byok"

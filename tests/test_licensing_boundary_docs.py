@@ -30,7 +30,7 @@ def test_manifest_keeps_trial_and_grace_as_separate_clocks():
     trial = manifest["trial"]
     lifecycle = manifest["entitlement_lifecycle"]
 
-    assert TRIAL_DAYS == trial["days"] == 3
+    assert TRIAL_DAYS == trial["days"] == 7
     assert "max_grace_hours" not in trial
     assert lifecycle["max_grace_hours"] == 24
     assert lifecycle["grace_mode"] == "workspace_write_grace"

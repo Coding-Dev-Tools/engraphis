@@ -1759,6 +1759,7 @@ def test_mcp_decide_tool_registration_and_offline_guardrails(monkeypatch):
         classic_mcp,
         engraphis_decide,
         engraphis_discover_actions,
+        engraphis_execute_action,
         engraphis_execute_read,
         minimum_role,
     )
@@ -1769,7 +1770,8 @@ def test_mcp_decide_tool_registration_and_offline_guardrails(monkeypatch):
 
     # 2. Discovery
     assert "decide" in ACTION_SPECS
-    assert ACTION_SPECS["decide"].side_effect == "read"
+    # Remote Jev may consume allowance, so discovery uses the stateful executor.
+    assert ACTION_SPECS["decide"].side_effect == "write"
     raw_disc = engraphis_discover_actions(task="guard command safety")
     disc = json.loads(raw_disc)
     action = next((a for a in disc.get("actions", []) if a["canonical_action"] == "decide"), None)
@@ -1808,8 +1810,15 @@ def test_mcp_decide_tool_registration_and_offline_guardrails(monkeypatch):
     ))
     assert supp_out["supported"] is True
 
-    # 4. Smart MCP Execution via execute_read
-    exec_raw = engraphis_execute_read(
+    # 4. Smart MCP execution follows the discovered side-effect boundary.
+    read_raw = engraphis_execute_read(
+        capability_id=action["capability_id"],
+        schema_digest=action["schema_digest"],
+        arguments={"kind": "guard_command", "state": "git diff", "offline_mode": True},
+    )
+    assert read_raw.isError is True
+    assert "action_requires_execute_action" in read_raw.content[0].text
+    exec_raw = engraphis_execute_action(
         capability_id=action["capability_id"],
         schema_digest=action["schema_digest"],
         arguments={"kind": "guard_command", "state": "git diff", "offline_mode": True},

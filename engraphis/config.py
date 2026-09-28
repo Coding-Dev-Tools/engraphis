@@ -979,8 +979,8 @@ class Settings:
         default_factory=lambda: _env_bool("ENGRAPHIS_LLM_AUTO_EXTRACT", False)
     )
 
-    # System 1 decision engine (Jev / TypeSafe AI): "none" (default), "typesafe" (BYOK),
-    # "cloud" (Engraphis Cloud Pro/Team proxy), or "auto"
+    # Advisory Jev decisions: "none" (default), "local", "managed", "auto" (managed
+    # when configured), or explicit "byok". Every remote call also needs permission.
     decision_backend: str = field(
         default_factory=lambda: _env("ENGRAPHIS_DECISION_BACKEND", "none").strip().lower()
     )
@@ -1071,8 +1071,19 @@ class Settings:
 
     @property
     def has_decision_backend(self) -> bool:
-        """Whether a System 1 decision engine backend is configured (BYOK or Cloud)."""
-        return bool(self.typesafe_api_key) or bool(os.environ.get("ENGRAPHIS_CLOUD_ACCESS_TOKEN"))
+        """Configuration presence, not provider health or permission to send a request."""
+        if self.decision_backend in {"byok", "typesafe", "jev", "system1"}:
+            from engraphis.backends.jev_transport import TypeSafeDecisionClient
+            return TypeSafeDecisionClient(
+                api_key=self.typesafe_api_key, base_url=self.typesafe_base_url,
+            ).is_configured
+        if self.decision_backend in {"managed", "auto"}:
+            from engraphis.cloud_session import configured
+            try:
+                return configured(require_compute=False)
+            except Exception:
+                return False
+        return False
 
     def __post_init__(self) -> None:
         """Validate critical settings and fail fast on configuration errors."""

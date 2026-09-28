@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import secrets
 import shutil
 import sqlite3
@@ -157,31 +156,24 @@ def cmd_check(*, json_output: bool = False) -> int:
     try:
         from engraphis.cloud_session import configured
         if configured(require_compute=False):
-            report("cloud", "ok", "Engraphis Cloud", "installation connected")
+            report("cloud", "ok", "Engraphis Cloud", "configuration present; connection not verified")
         else:
             report("cloud", "optional", "Engraphis Cloud", "not connected (optional for the local core)")
     except Exception:
         report("cloud", "optional", "Engraphis Cloud", "saved session unavailable; reconnect if needed")
 
-    jev_key = os.environ.get("TYPESAFE_API_KEY") or os.environ.get("JEV_API_KEY")
-    if jev_key:
-        report("jev_decision", "ok", "Jev System 1", "active (TypeSafe AI BYOK)")
-    else:
-        cloud_active = False
-        try:
-            from engraphis.cloud_session import configured
-            cloud_active = configured(require_compute=False)
-        except Exception:
-            pass
-        if cloud_active:
-            report("jev_decision", "ok", "Jev System 1", "active (Engraphis Cloud Pro/Team)")
+    try:
+        from engraphis.backends.jev_transport import select_decision_client
+        client, backend = select_decision_client()
+        if client is None:
+            report("jev_decision", "optional", "Jev System 1",
+                   "local only or not configured; remote calls require an explicit backend and allow_remote")
         else:
-            report(
-                "jev_decision",
-                "optional",
-                "Jev System 1",
-                "optional: sub-300ms decision acceleration (install: engraphis-init --jev-key <KEY>)",
-            )
+            label = "Engraphis managed Jev" if backend == "engraphis_cloud" else "TypeSafe AI BYOK"
+            report("jev_decision", "ok", "Jev System 1",
+                   f"configured ({label}); not verified; each remote call requires allow_remote=true")
+    except Exception:
+        report("jev_decision", "optional", "Jev System 1", "configuration unavailable; remote service not verified")
 
     try:
         from engraphis.backends.embedder_st import get_embedder
@@ -249,7 +241,7 @@ def _env_content(
             "# TypeSafe Jev System 1 Decision Engine (BYOK):",
             f"TYPESAFE_API_KEY={jev_key}",
             f"JEV_API_KEY={jev_key}",
-            "ENGRAPHIS_DECISION_BACKEND=typesafe",
+            "ENGRAPHIS_DECISION_BACKEND=byok",
         ]
     lines += [
         "# Pro and Team are hosted. Connect through the Engraphis Cloud account portal;",
@@ -379,7 +371,7 @@ def main(argv=None) -> int:
         "--jev-key",
         dest="jev_key",
         metavar="KEY",
-        help="configure TypeSafe Jev API key for System 1 decision acceleration (use '-' for stdin)",
+        help="configure TypeSafe Jev BYOK for advisory decisions (use '-' for stdin)",
     )
     ap.add_argument(
         "--typesafe-key",
@@ -451,11 +443,11 @@ def main(argv=None) -> int:
                 {
                     "TYPESAFE_API_KEY": resolved_jev_key,
                     "JEV_API_KEY": resolved_jev_key,
-                    "ENGRAPHIS_DECISION_BACKEND": "typesafe",
+                    "ENGRAPHIS_DECISION_BACKEND": "byok",
                 },
                 env_file,
             )
-            print("  jev api key -> updated in trusted config (TypeSafe System 1 active)")
+            print("  jev api key -> updated in trusted config (TypeSafe BYOK configured; not verified)")
     else:
         if use_encryption:
             try:
@@ -475,7 +467,7 @@ def main(argv=None) -> int:
         print(f"wrote {env_file}")
         print(f"  database -> {db_path}")
         if resolved_jev_key:
-            print("  jev api key -> configured in trusted config (TypeSafe System 1 active)")
+            print("  jev api key -> configured in trusted config (TypeSafe BYOK configured; not verified)")
         if db_path.parent == Path.cwd():
             print("  note: this database path is pinned to the current directory; "
                   "runtime tools will use this pinned path (ENGRAPHIS_DB_PATH "
@@ -520,7 +512,7 @@ def main(argv=None) -> int:
     print("  In the dashboard: create a workspace, save one project decision, review its source and Approve for prompt.")
     print("  Then Ask about the decision to see its cited source.")
     print("  Open its citation to review the source; edit the record when the decision changes.")
-    print("  Free forever at the core - start the 3-day Pro trial or subscribe at "
+    print("  Free forever at the core - start the 7-day Pro trial or subscribe at "
           "https://api.engraphis.com/account?plan=pro&interval=monthly#billing")
     return 0
 

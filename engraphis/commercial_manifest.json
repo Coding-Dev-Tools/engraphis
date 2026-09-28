@@ -12,15 +12,15 @@
     "provider_price_ids_public": false
   },
   "trial": {
-    "days": 3,
+    "days": 7,
     "card_required": false,
     "plans": [
       "pro",
       "team"
     ],
     "days_by_plan": {
-      "pro": 3,
-      "team": 10
+      "pro": 7,
+      "team": 14
     }
   },
   "entitlement_lifecycle": {

@@ -2268,10 +2268,10 @@ def _heuristic_decision(
     name="engraphis_decide",
     annotations={
         "title": "System 1 decision gating (Jev / TypeSafe AI)",
-        "readOnlyHint": True,
+        "readOnlyHint": False,
         "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
     },
 )
 def engraphis_decide(
@@ -2345,152 +2345,118 @@ def engraphis_decide(
         ),
     ] = None,
     offline_mode: Annotated[
-        bool,
-        Field(
-            default=False,
-            description="Force deterministic local heuristics without remote calls.",
-        ),
+        bool, Field(description="Use local heuristics; no remote calls."),
     ] = False,
+    allow_remote: Annotated[
+        bool, Field(description="Explicitly permit this call's supplied text to leave this device."),
+    ] = False,
+    data_classification: Annotated[
+        str, Field(description="Remote text must be public or internal; secrets are rejected."),
+    ] = "internal",
 ) -> str:
-    """Execute a fast (sub-300ms) System 1 micro-decision powered by Jev / TypeSafe AI.
+    """Request advisory typed decisions, with deterministic local fallback.
 
-    Evaluates command safety guardrails, fact contradiction screening, grounded evidence
-    support verification, or turn completion without frontier LLM token waste.
+    Backend selection and per-call permission are both required for remote processing.
+    Decisions do not authorize shell execution, memory mutation, or task completion.
     """
+    from engraphis.backends.jev_decision import DecisionQuestion, _probability
+    from engraphis.backends.jev_transport import (
+        MODEL, DecisionClientError, select_decision_client,
+    )
+
+    def fallback(reason: str) -> str:
+        result = _heuristic_decision(kind, state, query, existing_content, goal, recent_actions)
+        result.update({"decision_status": "local_fallback", "fallback_reason": reason,
+                       "advisory_only": True, "confidence": None,
+                       "confidence_source": "unmeasured_heuristic",
+                       "probability_source": "heuristic"})
+        if kind == "custom":
+            result["selected"] = None
+        return _ok(result)
+
+    if offline_mode or allow_remote is not True:
+        return fallback("offline" if offline_mode else "remote_not_authorized")
+    if kind not in {"guard_command", "classify_contradiction", "verify_support", "verify_completion", "custom"}:
+        return fallback("invalid_request")
     try:
-        if not offline_mode:
-            from engraphis.backends.jev_decision import (
-                DecisionQuestion,
-                JevDecisionBackend,
-                create_cloud_decision_client,
-                create_typesafe_decision_client,
-            )
-            from engraphis.core.interfaces import MemoryRecord, MemoryType, Scope
-
-            client = None
-            backend_name = "none"
-            if os.environ.get("TYPESAFE_API_KEY") or os.environ.get("JEV_API_KEY"):
-                client = create_typesafe_decision_client()
-                backend_name = "typesafe_byok"
-            elif os.environ.get("ENGRAPHIS_CLOUD_ACCESS_TOKEN"):
-                client = create_cloud_decision_client()
-                backend_name = "engraphis_cloud"
-
-            model = os.environ.get("ENGRAPHIS_DECISION_MODEL", "jev-1.13.0")
-            backend = JevDecisionBackend(client=client, model=model) if client else None
-
-            if backend is not None and backend.is_available:
-                if kind == "guard_command":
-                    q_safe = DecisionQuestion(
-                        "is_safe",
-                        "Is this shell command safe to execute in automated agent mode without destructive data loss or secret leakage?",
-                        "noul",
-                    )
-                    q_cat = DecisionQuestion(
-                        "category",
-                        "Categorize this operation",
-                        "choice",
-                        ("read_only", "state_change", "destructive_or_leak"),
-                    )
-                    batch = client.evaluate(state, [q_safe, q_cat], model=model)
-                    if batch and not batch.is_fallback:
-                        safe_noul = batch.get_noul("is_safe")
-                        cat_choice = batch.get_choice("category")
-                        prob = safe_noul.probability if safe_noul else 0.5
-                        cat = cat_choice.selected if cat_choice else "state_change"
-                        allow = prob >= 0.90 and cat != "destructive_or_leak"
-                        return _ok({
-                            "kind": kind,
-                            "allow_auto": allow,
-                            "escalate_to_user": not allow,
-                            "safety_probability": prob,
-                            "category": cat,
-                            "confidence": safe_noul.confidence if safe_noul else 1.0,
-                            "is_fallback": False,
-                            "backend": backend_name,
-                        })
-
-                elif kind == "classify_contradiction":
-                    mem = MemoryRecord(
-                        id="mem_target",
-                        scope=Scope.WORKSPACE,
-                        workspace_id="ws_1",
-                        mtype=MemoryType.SEMANTIC,
-                        title="Existing memory",
-                        content=existing_content,
-                    )
-                    verdict, conf = backend.classify_contradiction(state, mem, allow_remote=True)
-                    return _ok({
-                        "kind": kind,
-                        "verdict": verdict,
-                        "confidence": conf,
-                        "is_fallback": False,
-                        "backend": backend_name,
-                    })
-
-                elif kind == "verify_support":
-                    supported, prob = backend.verify_grounded_support(query, state, allow_remote=True)
-                    return _ok({
-                        "kind": kind,
-                        "supported": supported,
-                        "probability": prob,
-                        "confidence": 1.0,
-                        "is_fallback": False,
-                        "backend": backend_name,
-                    })
-
-                elif kind == "verify_completion":
-                    full_state = f"GOAL: {goal}\nACTIONS: {recent_actions}\nOUTPUT: {state}"
-                    q_comp = DecisionQuestion(
-                        "is_complete",
-                        "Has the task goal been verified and completely achieved?",
-                        "noul",
-                    )
-                    batch = client.evaluate(full_state, [q_comp], model=model)
-                    if batch and not batch.is_fallback:
-                        comp_noul = batch.get_noul("is_complete")
-                        prob = comp_noul.probability if comp_noul else 0.5
-                        return _ok({
-                            "kind": kind,
-                            "is_complete": prob >= 0.85,
-                            "completion_probability": prob,
-                            "confidence": comp_noul.confidence if comp_noul else 1.0,
-                            "is_fallback": False,
-                            "backend": backend_name,
-                        })
-
-                elif kind == "custom":
-                    q = DecisionQuestion(
-                        "custom",
-                        question or "Evaluate state",
-                        "choice" if options else "noul",
-                        tuple(options) if options else (),
-                    )
-                    batch = client.evaluate(state, [q], model=model)
-                    if batch and not batch.is_fallback:
-                        if options:
-                            c = batch.get_choice("custom")
-                            return _ok({
-                                "kind": kind,
-                                "selected": c.selected if c else "",
-                                "confidence": c.confidence if c else 1.0,
-                                "is_fallback": False,
-                                "backend": backend_name,
-                            })
-                        else:
-                            n = batch.get_noul("custom")
-                            return _ok({
-                                "kind": kind,
-                                "probability": n.probability if n else 0.5,
-                                "confidence": n.confidence if n else 1.0,
-                                "is_fallback": False,
-                                "backend": backend_name,
-                            })
-
-        # Fallback to local heuristic
-        return _ok(_heuristic_decision(kind, state, query, existing_content, goal, recent_actions))
-    except Exception as exc:  # noqa: BLE001
-        return _err(exc)
+        client, backend_name = select_decision_client()
+        if client is None:
+            return fallback("backend_not_configured")
+        model = os.environ.get("ENGRAPHIS_DECISION_MODEL", MODEL)
+        full_state = state
+        if kind == "guard_command":
+            questions = [
+                DecisionQuestion("is_safe", "Is this command free of destructive data loss or secret leakage?", "noul"),
+                DecisionQuestion("category", "Categorize this operation", "choice",
+                                 ("read_only", "state_change", "destructive_or_leak")),
+            ]
+        elif kind == "classify_contradiction":
+            full_state = f"EXISTING FACT: {existing_content}\nNEW CANDIDATE FACT: {state}"
+            questions = [DecisionQuestion("verdict", "Classify the relationship between the facts.",
+                                          "choice", ("contradicts_and_supersedes", "reinforces", "orthogonal"))]
+        elif kind == "verify_support":
+            full_state = f"QUERY: {query}\nEVIDENCE: {state}"
+            questions = [DecisionQuestion("has_support", "Does this evidence directly support answering the query?", "noul")]
+        elif kind == "verify_completion":
+            full_state = f"GOAL: {goal}\nACTIONS: {recent_actions}\nOUTPUT: {state}"
+            questions = [DecisionQuestion("is_complete", "Does the supplied evidence establish the task goal?", "noul")]
+        else:
+            questions = [DecisionQuestion("custom", question or "Evaluate state",
+                                          "choice" if options else "noul", tuple(options or ()))]
+        batch = client.evaluate(full_state, questions, model=model, allow_remote=True,
+                                purpose=kind, data_classification=data_classification)
+        if batch.is_fallback is not False:
+            return fallback("provider_fallback")
+        result = {"kind": kind, "backend": backend_name, "model": model,
+                  "is_fallback": False, "advisory_only": True}
+        if kind == "classify_contradiction" or (kind == "custom" and options):
+            name = "verdict" if kind == "classify_contradiction" else "custom"
+            choice = batch.get_choice(name)
+            if (choice is None or choice.selected not in questions[0].options
+                    or not _probability(choice.confidence)):
+                raise DecisionClientError("malformed_response")
+            result.update({"verdict" if kind == "classify_contradiction" else "selected": choice.selected,
+                           "confidence": choice.confidence,
+                           "confidence_source": getattr(choice, "confidence_source", "unknown"),
+                           "decision_status": "decision" if choice.confidence > 0.5 else "uncertain"})
+        else:
+            name = {"guard_command": "is_safe", "verify_support": "has_support",
+                    "verify_completion": "is_complete", "custom": "custom"}[kind]
+            value = batch.get_noul(name)
+            if (value is None or not _probability(value.probability)
+                    or not _probability(value.confidence)):
+                raise DecisionClientError("malformed_response")
+            probability = value.probability
+            certain = value.confidence > 0.5 and probability != 0.5
+            result.update({"confidence": value.confidence,
+                           "confidence_source": getattr(value, "confidence_source", "unknown"),
+                           "decision_status": "decision" if certain else "uncertain"})
+            if kind == "guard_command":
+                category = batch.get_choice("category")
+                if (category is None or category.selected not in questions[1].options
+                        or not _probability(category.confidence)):
+                    raise DecisionClientError("malformed_response")
+                if category.confidence <= 0.5:
+                    result["decision_status"] = "uncertain"
+                allow = (certain and probability >= 0.90 and category.confidence > 0.5
+                         and category.selected == "read_only"
+                         and not any(pattern.search(state) for pattern in _DESTRUCTIVE_PATTERNS))
+                result.update({"allow_auto": allow, "escalate_to_user": not allow,
+                               "safety_probability": probability, "category": category.selected,
+                               "category_confidence": category.confidence})
+            elif kind == "verify_support":
+                result.update({"supported": probability > 0.5 if certain else None,
+                               "probability": probability})
+            elif kind == "verify_completion":
+                result.update({"is_complete": probability >= 0.85 if certain else None,
+                               "completion_probability": probability})
+            else:
+                result["probability"] = probability
+        return _ok(result)
+    except DecisionClientError as exc:
+        return fallback(exc.code)
+    except Exception:  # noqa: BLE001 - remote exceptions may contain private input or credentials
+        return fallback("remote_unavailable")
 
 
 @dataclass(frozen=True)
