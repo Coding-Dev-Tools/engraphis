@@ -28,5 +28,14 @@ The email-confirmed, no-card trial lasts three active days for Pro and ten activ
 24 hours. It does not extend a trial or subscription, grant cloud access, or affect the free
 local tools. `recovery_read_only` supports hosted account recovery and export after grace.
 
+## Experimental decision adapter
+
+The source includes an opt-in Jev advisory adapter and a client for the experimental
+`POST /v1/jev/decide` Cloud endpoint. It is not connected to core memory writes or
+grounded recall. Callers supply a client and pinned model and explicitly authorize
+each remote request; offline mode keeps these calls local by declining the request.
+Managed availability, plan entitlements, quotas, latency, and savings require separate
+service verification and are not established by this client implementation.
+
 See [Licensing and commercial service boundary](LICENSING.md) for the full source and service
 boundary, and [Cloud Sync](SYNC.md) for the sync security model.
