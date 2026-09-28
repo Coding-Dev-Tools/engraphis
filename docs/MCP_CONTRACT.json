@@ -1,6 +1,6 @@
 {
   "schema": "engraphis-mcp-contract/v1",
-  "sha256": "3199e565fee3f7bde60979ceb11ad436b7f905870e2d4c6f68dd5c53e9ec8ba8",
+  "sha256": "9baaed42f67b5718d36f6156c1f915531c5973c12a1b7e2f34c7a9a33086238f",
   "surfaces": {
     "classic": [
       {
@@ -910,6 +910,33 @@
       {
         "annotations": {
           "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "Read a project's workspace choice"
+        },
+        "description": "Read your saved project workspace routing without changing memories or sessions.",
+        "inputSchema": {
+          "properties": {
+            "repo": {
+              "description": "Exact repository name.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Repo",
+              "type": "string"
+            }
+          },
+          "required": [
+            "repo"
+          ],
+          "title": "engraphis_get_workspace_routingArguments",
+          "type": "object"
+        },
+        "name": "engraphis_get_workspace_routing"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
           "idempotentHint": false,
           "openWorldHint": false,
           "readOnlyHint": false,
@@ -1268,6 +1295,22 @@
           "type": "object"
         },
         "name": "engraphis_link_symbol"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "List available memory workspaces"
+        },
+        "description": "List authorized workspaces and repositories to choose a memory destination.",
+        "inputSchema": {
+          "properties": {},
+          "title": "engraphis_list_workspacesArguments",
+          "type": "object"
+        },
+        "name": "engraphis_list_workspaces"
       },
       {
         "annotations": {
@@ -2506,12 +2549,19 @@
               "title": "Valid From"
             },
             "workspace": {
-              "default": "default",
-              "description": "Top-level scope, e.g. an org or product name ('acme'). Defaults to 'default' if omitted.",
-              "maxLength": 200,
-              "minLength": 1,
-              "title": "Workspace",
-              "type": "string"
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Workspace name. Omit to inherit the supplied session or saved project choice, then 'default'.",
+              "title": "Workspace"
             }
           },
           "required": [
@@ -2830,6 +2880,47 @@
       {
         "annotations": {
           "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false,
+          "title": "Save a project's workspace choice"
+        },
+        "description": "Save your project workspace routing for future omitted-workspace calls across clients.",
+        "inputSchema": {
+          "properties": {
+            "enabled": {
+              "default": true,
+              "description": "Save this choice, or remove it when false.",
+              "title": "Enabled",
+              "type": "boolean"
+            },
+            "repo": {
+              "description": "Exact repository name.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Repo",
+              "type": "string"
+            },
+            "workspace": {
+              "description": "Existing workspace to select.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Workspace",
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace",
+            "repo"
+          ],
+          "title": "engraphis_set_workspace_routingArguments",
+          "type": "object"
+        },
+        "name": "engraphis_set_workspace_routing"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
           "idempotentHint": false,
           "openWorldHint": false,
           "readOnlyHint": false,
@@ -2873,12 +2964,19 @@
               "title": "Repo"
             },
             "workspace": {
-              "default": "default",
-              "description": "Workspace the session belongs to. Defaults to 'default' if omitted (cron jobs often omit it).",
-              "maxLength": 200,
-              "minLength": 1,
-              "title": "Workspace",
-              "type": "string"
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Workspace the session belongs to. Omit to use the saved project choice, then 'default'.",
+              "title": "Workspace"
             }
           },
           "title": "engraphis_start_sessionArguments",
@@ -3524,11 +3622,19 @@
               "type": "string"
             },
             "workspace": {
-              "default": "default",
-              "description": "Memory workspace.",
-              "maxLength": 200,
-              "title": "Workspace",
-              "type": "string"
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Chosen workspace; omit for session or project routing.",
+              "title": "Workspace"
             }
           },
           "required": [
@@ -3636,11 +3742,19 @@
               "type": "integer"
             },
             "workspace": {
-              "default": "default",
-              "description": "Workspace.",
-              "maxLength": 200,
-              "title": "Workspace",
-              "type": "string"
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Chosen workspace; omit for saved project routing.",
+              "title": "Workspace"
             }
           },
           "title": "engraphis_sessionArguments",

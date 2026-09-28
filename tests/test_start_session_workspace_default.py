@@ -4,7 +4,7 @@ Cron jobs (hourly-dev-engineer, ops-heartbeat, dashboard-refresh, vault-cron-hea
 ...) call engraphis_start_session WITHOUT the workspace argument. The MCP tool must
 default workspace to 'default' rather than rejecting the call with
 "workspace Field required" (the fleet-wide contract bug, 200+ occurrences in
-gateway.log). This test locks that behavior and the fail-loud contract for empty/None.
+gateway.log). This test locks that fallback and rejection of empty workspace names.
 """
 import json
 
@@ -43,12 +43,12 @@ def test_start_session_explicit_named_workspace(monkeypatch):
     assert out["workspace"] == "acme"
 
 
-def test_start_session_explicit_none_workspace_rejected(monkeypatch):
+def test_start_session_none_workspace_uses_default_fallback(monkeypatch):
     srv = _module_with_memory_db(monkeypatch)
-    # Explicit None (vs omitted, which legitimately defaults to 'default') must
-    # fail-loud, never silently coerce to 'default' or crash ungracefully.
-    out = srv.engraphis_start_session(workspace=None)
-    assert out.startswith("Error:")
+    # None is the omission sentinel, allowing session/project routing before fallback.
+    out = json.loads(srv.engraphis_start_session(workspace=None))
+    assert out["workspace"] == "default"
+    assert out["workspace_source"] == "default"
 
 
 def test_start_session_empty_workspace_rejected(monkeypatch):

@@ -85,6 +85,9 @@ project MCP configuration files or embed database paths and credentials in sourc
 
 Set `ENGRAPHIS_WORKSPACE` and (optionally) `ENGRAPHIS_REPO` to provide default scopes
 for routine Smart tools. Model-supplied values always take precedence.
+To follow a saved project default, set only `ENGRAPHIS_REPO` and leave
+`ENGRAPHIS_WORKSPACE` unset. A supplied session inherits its own workspace and repo.
+See [workspace setup](../../docs/WORKSPACE_ORGANIZATION.md).
 
 ## Trust model
 

@@ -10682,7 +10682,7 @@ def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
         "'/v2-assets/engraphis-graph.js?v=20260927-unmerged-readiness-3'"
     )
     assert d3 < force_graph < renderer
-    assert '/v2-assets/ledger.js?v=20260927-unmerged-readiness-3' in markup
+    assert '/v2-assets/ledger.js?v=20260928-workspace-routing-1' in markup
     assert "if (graphAssetsPromise === attempt) releaseGraphAssetsAttempt(attempt)" in loader
     assert "graphAssetsRetry = Math.min(graphAssetsRetry + 1, 10)" in loader
     all_loader = source[source.index("function ensureGraphAllAsset()"):

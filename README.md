@@ -84,9 +84,9 @@ neither is an end-to-end question-answer score. Coding outcomes, external datase
 operational capacity remain separate pending evaluation tracks until their artifacts are selected.
 
 These values are evidence IDs `offline-chunking` and `offline-performance` in
-[`offline-fixtures-v80.json`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/benchmark-evidence/offline-fixtures-v80.json),
+[`offline-fixtures-workspace-routing-20260928.json`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/benchmark-evidence/offline-fixtures-workspace-routing-20260928.json),
 SHA-256
-`ac63dac1e34c66b658eeb5846599ef42d774a5e212860b2a909941f364c82bc2`.
+`8e50e02ecdeecdf9c323e06316bc7d1b3307caf2ce3e88fb26fdd1f68470c09e`.
 [`BENCHMARKS.md`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/BENCHMARKS.md#public-numeric-evidence-registry)
 records the matching suite digest, exact commands, and per-command config digests. The offline
 fixture registry intentionally excludes external, model-dependent, consolidation, productivity,
@@ -415,9 +415,19 @@ the indicated read or action executor; no profile selection is required. The gat
 the discovered capability again before it runs it, and clients remain responsible for their
 normal destructive-action approval boundary.
 
-Existing clients that pin the historical 35 named tools can use
+Existing clients that use named tools can use
 `engraphis-mcp-classic` (or `engraphis-mcp-http --classic`). The complete classic inventory,
 including `engraphis_check_update`, is in the [MCP tool reference](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/MCP_TOOLS.md).
+
+### Choose where agent memories belong
+
+Use the dashboard's agent connection setup to choose a workspace, save a repo-to-workspace
+mapping, and copy project-specific agent instructions. Routine MCP calls with an omitted
+workspace can inherit the supplied session or saved repo mapping. Explicit workspace values,
+including `"default"`, take precedence; update older instructions or hooks that hardcode them.
+Memory types describe the kind of memory, not its destination. See
+[workspace organization](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/WORKSPACE_ORGANIZATION.md)
+for setup, routing precedence, and previewing moves of existing memories.
 
 ### Pi extension
 
@@ -429,6 +439,9 @@ For installation, configuration, lifecycle commands, and the local trust boundar
 `integrations/commandcode/` ships a SessionStart hook that warms up a new
 session with bounded, recalled context from the local Engraphis gateway. Fails
 open on timeout and is installed via `python scripts/install_cc_hook.py`.
+The hook sends the nearest Git root's name as `repo` and lets the server apply a saved workspace
+mapping. Set `ENGRAPHIS_HOOK_WORKSPACE` only for an explicit override; a previous `default`
+override must be cleared to use the mapping. Its context header shows the resolved workspace.
 
 ### prime-agent fleet
 
@@ -651,7 +664,7 @@ when you are ready to evaluate the service boundary and billing options.
 | | Free (available now) | Pro: $10/mo or $100/yr | Team: $20/seat/mo or $200/seat/yr |
 |---|---|---|---|
 | Dashboard WebUI (with built-in inspector) | ✓ | ✓ | ✓ |
-| Memory engine + Smart MCP (Classic 35-tool compatibility) | ✓ | ✓ | ✓ |
+| Memory engine + Smart MCP (Classic 38-tool compatibility) | ✓ | ✓ | ✓ |
 | Version-chain diffs, offline knowledge graph | ✓ | ✓ | ✓ |
 | Manual local consolidation (dry-run by default) | ✓ | ✓ | ✓ |
 | Local workspace export (portable v2 JSON: memories, source manifests, graph/code evidence, sessions, audit, and receipts) | ✓ | ✓ | ✓ |
@@ -669,7 +682,7 @@ when you are ready to evaluate the service boundary and billing options.
 
 ## MCP tools
 
-Engraphis exposes a zero-configuration Smart MCP gateway plus a 35-tool Classic compatibility
+Engraphis exposes a zero-configuration Smart MCP gateway plus a 38-tool Classic compatibility
 server across memory, recall, code graphs, governance, sessions, and privacy-safe audit receipts.
 The focused [MCP tool reference](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/MCP_TOOLS.md) is the source for
 the full inventory and parameters.
@@ -859,7 +872,7 @@ engraphis/
 │   ├── backends/            # pluggable embedder / vector index / reranker / codegraph / sync transports / encryption
 │   ├── factory.py           # outer v2 composition root; selects and injects concrete backends
 │   ├── service.py           # validated MemoryService facade
-│   ├── mcp_server.py        # Smart MCP gateway + 35-tool Classic compatibility server
+│   ├── mcp_server.py        # Smart MCP gateway + 38-tool Classic compatibility server
 │   ├── dashboard_app.py     # dashboard WebUI (FastAPI)
 │   ├── dashboard_assets/    # primary Ledger interface + graph engine
 │   ├── classic_assets/      # selectable full operator dashboard backup

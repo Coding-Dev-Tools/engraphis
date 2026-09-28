@@ -223,10 +223,10 @@ class, and the appropriate executor revalidates all of it before running.
 | `engraphis_conflict_review` | List pending/quarantined/conflicted records for review (read-only inbox). |
 
 `engraphis-mcp-classic` is only for an existing configuration that pins direct tool names. It
-preserves the former 35-tool surface below; new Kilo Code installations should keep the zero-config
+preserves the named-tool compatibility surface below; new Kilo Code installations should keep the zero-config
 Smart command shown above.
 
-### Classic 35-tool inventory
+### Classic 38-tool inventory
 
 | Category | Tool | What it does |
 |---|---|---|
@@ -262,6 +262,9 @@ Smart command shown above.
 | Governance | `engraphis_promote` | Widen scope while preserving and linking the narrow-scope history. |
 | **Session** | `engraphis_start_session` | Exact retries reuse by default; `force_new=true` creates another session every call. |
 | Session | `engraphis_end_session` | Close with a summary + `open_threads`; an identical retry is a no-op. |
+| **Workspace** | `engraphis_list_workspaces` | List destinations visible to the current caller. |
+| Workspace | `engraphis_get_workspace_routing` | Read the saved workspace for an exact repo name. |
+| Workspace | `engraphis_set_workspace_routing` | Save or remove the current caller's repo-to-workspace mapping. |
 | **Ops** | `engraphis_stats` | Memory counts by type/workspace: health/onboarding checks. |
 | Ops | `engraphis_check_update` | Check the release source and refresh the persistent update cache. |
 | Maintenance | `engraphis_consolidate` | Pure dry-run or live sweep; structured calls may process a large cluster across retries. |
@@ -301,7 +304,8 @@ are unnecessary; both recall surfaces accept `diagnostics=true` for a retrieval 
 
 `workspace → repo → session → memory`. On every write, choose:
 
-- **workspace**: the org or product (e.g. `acme`). Always required.
+- **workspace**: the org or product (e.g. `acme`). Every write belongs to one; routine MCP calls
+  can resolve an omitted workspace from the supplied session or a saved repo mapping.
 - **repo**: the repository (e.g. `backend`). Omit only for genuinely workspace-wide facts.
 - **session**: one unit of work; pass its `session_id` so memories group and resume.
 
@@ -312,6 +316,11 @@ for private preferences. Over-scoping pollutes unrelated work; under-scoping at 
 nothing survives the task.
 
 **Recommended convention for Kilo Code:** set the `workspace` to your org/product name and the `repo` to the folder/repo name Kilo Code is currently working in. Keep those two stable and the whole hierarchy works itself out. A tidy way to enforce this is a project-level `.kilo/kilo.jsonc` per repo with a rules/instruction note telling the agent which workspace + repo string to use.
+
+Alternatively, save a project mapping in **Connections** and have the agent supply its stable
+`repo` while omitting `workspace`. An explicit `workspace="default"` overrides that mapping,
+so remove conflicting hardcoded instructions. Keep the returned `session_id` on later recall
+and remember calls. See [workspace organization](WORKSPACE_ORGANIZATION.md) for the full setup.
 
 ### 5.3 What to remember and what not to
 
