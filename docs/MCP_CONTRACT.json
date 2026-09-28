@@ -1,6 +1,6 @@
 {
   "schema": "engraphis-mcp-contract/v1",
-  "sha256": "a880c8ca2612724ed4432a13488fed90023b3f2019c6c71f18c6259058eca77c",
+  "sha256": "a8788edc08967e96c789348445018423cd12f1deecddbd2dafbc5389c5a18791",
   "surfaces": {
     "classic": [
       {
@@ -763,8 +763,8 @@
             },
             "question": {
               "default": "",
-              "description": "Custom prompt or question to answer (used for 'custom').",
-              "maxLength": 4096,
+              "description": "Custom prompt or question to answer (used for 'custom'). Also supplies state when state is blank.",
+              "maxLength": 1024,
               "title": "Question",
               "type": "string"
             },
@@ -777,7 +777,7 @@
             },
             "state": {
               "default": "",
-              "description": "Input state, shell command, or evidence text to evaluate.",
+              "description": "Input state, shell command, or evidence text to evaluate. For remote processing, the combined state, labels, and kind-specific context must fit within 16,000 characters.",
               "maxLength": 16000,
               "title": "State",
               "type": "string"

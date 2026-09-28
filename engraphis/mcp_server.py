@@ -2346,7 +2346,11 @@ def engraphis_decide(
         str,
         Field(
             default="",
-            description="Input state, shell command, or evidence text to evaluate.",
+            description=(
+                "Input state, shell command, or evidence text to evaluate. For remote "
+                "processing, the combined state, labels, and kind-specific context "
+                "must fit within 16,000 characters."
+            ),
             max_length=16_000,
         ),
     ] = "",
@@ -2386,8 +2390,11 @@ def engraphis_decide(
         str,
         Field(
             default="",
-            description="Custom prompt or question to answer (used for 'custom').",
-            max_length=4096,
+            description=(
+                "Custom prompt or question to answer (used for 'custom'). Also supplies "
+                "state when state is blank."
+            ),
+            max_length=1024,
         ),
     ] = "",
     options: Annotated[
@@ -2434,6 +2441,15 @@ def engraphis_decide(
         return fallback("offline" if offline_mode else "remote_not_authorized")
     if kind not in {"guard_command", "classify_contradiction", "verify_support", "verify_completion", "custom"}:
         return fallback("invalid_request")
+    relevant_inputs = {
+        "guard_command": (state,),
+        "classify_contradiction": (state, existing_content),
+        "verify_support": (state, query),
+        "verify_completion": (state, goal, recent_actions),
+        "custom": (state, question),
+    }
+    if not any(value.strip() for value in relevant_inputs[kind]):
+        return fallback("invalid_request")
     try:
         client, backend_name = select_decision_client()
         if client is None:
@@ -2457,7 +2473,8 @@ def engraphis_decide(
             full_state = f"GOAL: {goal}\nACTIONS: {recent_actions}\nOUTPUT: {state}"
             questions = [DecisionQuestion("is_complete", "Does the supplied evidence establish the task goal?", "noul")]
         else:
-            questions = [DecisionQuestion("custom", question or "Evaluate state",
+            full_state = state if state.strip() else question
+            questions = [DecisionQuestion("custom", question if question.strip() else "Evaluate state",
                                           "choice" if options else "noul", tuple(options or ()))]
         batch = client.evaluate(full_state, questions, model=model, allow_remote=True,
                                 purpose=kind, data_classification=data_classification)
