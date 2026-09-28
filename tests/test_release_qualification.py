@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -273,6 +274,7 @@ set -euo pipefail
 printf '%s\\n' "$*" >> "$GH_CALLS"
 case "$2" in
   view)
+    if [ "$3" = --repo ]; then printf 'v1.7.8\\n'; exit 0; fi
     if [ "$EXISTING" != true ]; then exit 1; fi
     printf 'Existing release notes\\n'
     ;;
@@ -308,6 +310,83 @@ esac
         notes = (tmp_path / "release-waiver.md").read_text(encoding="utf-8")
     assert "Mandatory full-product gates are not represented as passed." in notes
     assert "https://example.test/run/1" in notes
+
+
+@pytest.mark.parametrize("candidate,latest,expected", [
+    ("v1.7.6", "v1.7.8", "false"), ("v1.7.8", "v1.7.6", "true"),
+    ("v1.7.8", "v1.7.8", "true"), ("v1.7.8", "v1.7.10", "false"),
+    ("v1.7.8", "", None), ("v1.7.8", "v1.7.9-rc1", None),
+    ("v1.7.8", "unknown", None), ("v1.07.8", "v1.7.6", None),
+])
+def test_waiver_latest_comparison_is_numeric_and_fails_closed(candidate, latest, expected):
+    yaml = pytest.importorskip("yaml")
+    root = Path(__file__).resolve().parents[1]
+    workflow = yaml.safe_load((root / ".github/workflows/release.yml").read_text(encoding="utf-8"))
+    repair = next(step for step in workflow["jobs"]["github-release-repair"]["steps"]
+                  if step.get("name") == "Repair GitHub Release")
+    code = repair["run"].split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    result = subprocess.run([sys.executable, "-c", code, candidate, latest],
+                            capture_output=True, text=True, timeout=10)
+    if expected is None:
+        assert result.returncode != 0
+    else:
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == expected
+
+
+@pytest.mark.skipif(os.name == "nt", reason="release workflow executes in Linux bash")
+@pytest.mark.parametrize("latest,lookup_fails,expected", [
+    ("v1.7.4", False, True), ("v1.7.8", False, True),
+    ("v1.7.9", False, False), ("v1.7.10", False, False),
+    ("", True, None), ("unknown", False, None),
+])
+@pytest.mark.parametrize("existing", [False, True])
+def test_waiver_repair_preserves_newer_latest(tmp_path, latest, lookup_fails, expected, existing):
+    yaml = pytest.importorskip("yaml")
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash is unavailable")
+    root = Path(__file__).resolve().parents[1]
+    workflow = yaml.safe_load((root / ".github/workflows/release.yml").read_text(encoding="utf-8"))
+    repair = next(step for step in workflow["jobs"]["github-release-repair"]["steps"]
+                  if step.get("name") == "Repair GitHub Release")
+    executable = tmp_path / "gh"
+    executable.write_text("""#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> "$GH_CALLS"
+if [ "$2" = view ]; then
+  if [ "$3" = --repo ]; then
+    if [ "$LOOKUP_FAILS" = true ]; then exit 7; fi
+    printf '%s\\n' "$CURRENT_LATEST"
+  else
+    if [ "$EXISTING" != true ]; then exit 1; fi
+    printf 'Existing release notes\\n'
+  fi
+fi
+""", encoding="utf-8")
+    executable.chmod(0o700)
+    script = tmp_path / "repair.sh"
+    script.write_text(repair["run"], encoding="utf-8")
+    calls_path = tmp_path / "calls.txt"
+    result = subprocess.run([bash, str(script)], cwd=tmp_path, capture_output=True, text=True,
+                            timeout=20, env={**os.environ,
+                                "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
+                                "RUNNER_TEMP": str(tmp_path), "RELEASE_TAG": "v1.7.8",
+                                "WAIVE_QUALIFICATION": "true", "GH_REPO": "test/repo",
+                                "GH_RUN_URL": "https://example.test/run/1", "GH_CALLS": str(calls_path),
+                                "CURRENT_LATEST": latest, "LOOKUP_FAILS": str(lookup_fails).lower(),
+                                "EXISTING": str(existing).lower()})
+    calls = calls_path.read_text(encoding="utf-8").splitlines()
+    writes = [call for call in calls if call.startswith(("release edit", "release create", "release upload"))]
+    if expected is None:
+        assert result.returncode != 0
+        assert writes == []
+    else:
+        assert result.returncode == 0, result.stderr
+        assert writes
+        assert any(call.endswith(" --latest") for call in writes) is expected
+        if not existing and not expected:
+            assert writes[-1].endswith(" --latest=false")
 
 
 @pytest.mark.skipif(os.name == "nt", reason="release workflow executes in Linux bash")

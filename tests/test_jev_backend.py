@@ -1,13 +1,18 @@
 """The experimental adapter is offline-safe and never trusts fallback decisions."""
 from __future__ import annotations
 
+import io
+import json
 import subprocess
 import sys
 from types import SimpleNamespace
 
 import pytest
 
-from engraphis.backends.jev_decision import MAX_STATE_CHARS, JevDecisionBackend, get_decision_backend
+from engraphis.backends.jev_decision import (
+    MAX_RESPONSE_BYTES, MAX_STATE_CHARS, DecisionQuestion, JevDecisionBackend,
+    create_cloud_decision_client, get_decision_backend,
+)
 from engraphis.core.interfaces import MemoryRecord, MemoryType, Scope
 
 
@@ -131,9 +136,6 @@ def test_empty_and_oversized_inputs_do_not_leave_the_process(query, evidence):
 
 
 def test_cloud_decision_client_configuration(monkeypatch):
-    import io
-    from engraphis.backends.jev_decision import create_cloud_decision_client, DecisionQuestion
-
     # Unconfigured
     monkeypatch.delenv("ENGRAPHIS_CLOUD_ACCESS_TOKEN", raising=False)
     client = create_cloud_decision_client(token="")
@@ -150,8 +152,8 @@ def test_cloud_decision_client_configuration(monkeypatch):
     mock_resp = io.BytesIO(mock_payload)
     mock_resp.status = 200
 
-    import urllib.request
-    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout: mock_resp)
+    monkeypatch.setattr("engraphis.hosted_client.build_pinned_https_opener",
+                        lambda *handlers: SimpleNamespace(open=lambda req, timeout: mock_resp))
 
     q = DecisionQuestion("q1", "prompt", "choice", ("reinforces", "orthogonal"))
     batch = client_configured.evaluate("test state", [q], model="test-model-1.0")
@@ -160,3 +162,109 @@ def test_cloud_decision_client_configuration(monkeypatch):
     assert batch.get_choice("q1").confidence == 0.95
 
 
+def cloud_backend(monkeypatch, payload):
+    raw = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
+    monkeypatch.setattr("engraphis.hosted_client.build_pinned_https_opener",
+                        lambda *handlers: SimpleNamespace(open=lambda req, timeout: io.BytesIO(raw)))
+    return backend(create_cloud_decision_client(token="test-token"))
+
+
+@pytest.mark.parametrize("field,value", [
+    ("confidence", None), ("confidence", True), ("confidence", "0.9"),
+    ("confidence", float("nan")), ("confidence", float("inf")),
+    ("confidence", -0.1), ("confidence", 1.1),
+    ("probability", None), ("probability", True), ("probability", "0.9"),
+    ("probability", float("nan")), ("probability", float("inf")),
+    ("probability", -0.1), ("probability", 1.1),
+])
+def test_cloud_malformed_numeric_fields_never_certify(monkeypatch, field, value):
+    decision = {"type": "noul", "probability": 0.9, "confidence": 0.9, field: value}
+    adapter = cloud_backend(monkeypatch, {"decisions": {"has_support": decision}})
+    assert adapter.verify_grounded_support("database?", "Postgres", allow_remote=True) == (False, 0.0)
+
+
+@pytest.mark.parametrize("payload", [
+    [], None, {}, {"decisions": []}, {"decisions": {"has_support": []}},
+    {"decisions": {"has_support": {"type": "noul", "probability": 0.9}}},
+    {"decisions": {"has_support": {"type": "noul", "confidence": 0.9}}},
+    {"decisions": {"has_support": {"type": "choice", "probability": 0.9, "confidence": 0.9}}},
+    b"not json", pytest.param(b"x" * (MAX_RESPONSE_BYTES + 1), id="oversized"),
+])
+def test_cloud_invalid_or_oversized_responses_defer(monkeypatch, payload):
+    adapter = cloud_backend(monkeypatch, payload)
+    assert adapter.verify_grounded_support("database?", "Postgres", allow_remote=True) == (False, 0.0)
+
+
+@pytest.mark.parametrize("fallback", [True, "false", None, 0])
+def test_cloud_fallbacks_and_malformed_flags_defer(monkeypatch, fallback):
+    adapter = cloud_backend(monkeypatch, {"is_fallback": fallback, "decisions": {
+        "has_support": {"type": "noul", "probability": 0.9, "confidence": 0.9},
+        "verdict": {"type": "choice", "selected": "reinforces", "confidence": 0.9},
+    }})
+    assert adapter.verify_grounded_support("database?", "Postgres", allow_remote=True) == (False, 0.0)
+    assert adapter.classify_contradiction("Use Postgres", memory(), allow_remote=True) == ("orthogonal", 0.0)
+
+
+def test_cloud_valid_response_and_bounded_transport(monkeypatch):
+    import urllib.request
+
+    seen = []
+    class Response(io.BytesIO):
+        def read(self, size=-1):
+            assert size == MAX_RESPONSE_BYTES + 1
+            return super().read(size)
+
+    def opener(handler):
+        def open_request(req, timeout):
+            assert req.full_url == "https://api.engraphis.com/v1/jev/decide"
+            assert req.get_header("Authorization") == "Bearer test-token"
+            assert timeout == 2.0
+            assert json.loads(req.data)["model"] == "test-model-1.0"
+            assert handler.redirect_request(req, None, 302, "Found", {},
+                                            "https://unrelated.example/") is None
+            seen.append(req)
+            return Response(b'{"is_fallback":false,"decisions":{"has_support":'
+                            b'{"type":"noul","probability":0.9,"confidence":0.95}}}')
+        assert isinstance(handler, urllib.request.HTTPRedirectHandler)
+        return SimpleNamespace(open=open_request)
+
+    monkeypatch.setattr("engraphis.hosted_client.build_pinned_https_opener", opener)
+    adapter = backend(create_cloud_decision_client(token="test-token"))
+    assert adapter.verify_grounded_support("database?", "Postgres", allow_remote=True) == (True, 0.9)
+    assert len(seen) == 1
+
+
+@pytest.mark.parametrize("url", [
+    "http://api.engraphis.com", "https://192.168.1.1", "https://user:secret@example.com",
+    "https://example.com?other=1", "https://example.com#other", "file:///tmp/decision",
+])
+def test_cloud_unsafe_destinations_never_receive_credentials(monkeypatch, url):
+    def unexpected(*args, **kwargs):
+        pytest.fail("unsafe destination reached transport")
+    monkeypatch.setattr("engraphis.hosted_client.build_pinned_https_opener", unexpected)
+    adapter = backend(create_cloud_decision_client(token="test-token", control_url=url))
+    assert adapter.verify_grounded_support("database?", "Postgres", allow_remote=True) == (False, 0.0)
+
+
+def test_cloud_disabled_calls_do_not_resolve_or_send(monkeypatch):
+    def unexpected(*args, **kwargs):
+        pytest.fail("disabled cloud client performed network work")
+    monkeypatch.setattr("engraphis.hosted_client.validate_cloud_base_url", unexpected)
+    monkeypatch.setattr("engraphis.hosted_client.build_pinned_https_opener", unexpected)
+    client = create_cloud_decision_client(token="test-token")
+    assert backend(client).verify_grounded_support("database?", "Postgres") == (False, 0.0)
+    assert backend(client, offline_mode=True).verify_grounded_support(
+        "database?", "Postgres", allow_remote=True,
+    ) == (False, 0.0)
+
+
+def test_cloud_explicit_empty_configuration_does_not_load_ambient_credentials(monkeypatch):
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_ACCESS_TOKEN", "ambient-token")
+    assert not create_cloud_decision_client(token="").is_configured
+    assert not create_cloud_decision_client(control_url="").is_configured
+
+
+@pytest.mark.parametrize("timeout", [None, True, 0, -1, float("nan"), float("inf"), 31])
+def test_cloud_timeout_is_bounded(timeout):
+    with pytest.raises(ValueError, match="timeout"):
+        create_cloud_decision_client(timeout_s=timeout)

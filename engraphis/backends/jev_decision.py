@@ -1,8 +1,8 @@
 """Experimental, opt-in decision adapter; never an authority for core memory writes.
 
-The caller supplies a configured client and a pinned model. This module neither
-imports an optional SDK nor discovers credentials or sibling repositories. No
-request is made without explicit per-call authorization. Offline, unavailable,
+The caller supplies a configured client and a pinned model. Importing this module
+does not load an optional SDK or discover credentials or sibling repositories. No
+backend request is made without explicit per-call authorization. Offline, unavailable,
 fallback, uncertain and malformed responses defer to deterministic core behavior.
 The adapter is intentionally not wired into the write or grounded-recall paths.
 """
@@ -16,6 +16,7 @@ from typing import Dict, Optional, Protocol, Sequence, Tuple
 from engraphis.core.interfaces import MemoryRecord
 
 MAX_STATE_CHARS = 16_000
+MAX_RESPONSE_BYTES = 64 * 1024
 _VERDICTS = frozenset(("contradicts_and_supersedes", "reinforces", "orthogonal"))
 
 
@@ -36,13 +37,19 @@ class DecisionQuestion:
 
 
 class ChoiceDecision(Protocol):
-    selected: str
-    confidence: float
+    @property
+    def selected(self) -> str: ...
+
+    @property
+    def confidence(self) -> float: ...
 
 
 class SupportDecision(Protocol):
-    probability: float
-    confidence: float
+    @property
+    def probability(self) -> float: ...
+
+    @property
+    def confidence(self) -> float: ...
 
 
 class DecisionBatch(Protocol):
@@ -114,9 +121,10 @@ class CloudDecisionBatch:
 
 
 class EngraphisCloudDecisionClient:
-    """DecisionClient that proxies requests through the Engraphis Cloud control plane.
+    """Experimental transport for an explicitly selected Cloud decision endpoint.
 
-    Included for Pro and Team subscriptions without requiring a separate TypeSafe API key.
+    Construction never performs network I/O. Calling evaluate authorizes a remote
+    request; use JevDecisionBackend for offline and per-call consent checks.
     """
 
     def __init__(
@@ -126,13 +134,19 @@ class EngraphisCloudDecisionClient:
         token: Optional[str] = None,
         timeout_s: float = 2.0,
     ) -> None:
-        self.control_url = (control_url or os.environ.get("ENGRAPHIS_CLOUD_CONTROL_URL", "https://api.engraphis.com")).rstrip("/")
-        self.token = token or os.environ.get("ENGRAPHIS_CLOUD_ACCESS_TOKEN", "")
+        self.control_url = (control_url if control_url is not None else os.environ.get(
+            "ENGRAPHIS_CLOUD_CONTROL_URL", "https://api.engraphis.com",
+        )).rstrip("/")
+        self.token = token if token is not None else os.environ.get("ENGRAPHIS_CLOUD_ACCESS_TOKEN", "")
+        if (type(timeout_s) not in (int, float) or not math.isfinite(timeout_s)
+                or not 0 < timeout_s <= 30):
+            raise ValueError("decision timeout must be finite and within (0, 30] seconds")
         self.timeout_s = timeout_s
 
     @property
     def is_configured(self) -> bool:
-        return bool(self.token and self.token.strip() and self.control_url)
+        return bool(self.control_url and 0 < len(self.token) <= 8192
+                    and all(33 <= ord(char) <= 126 for char in self.token))
 
     @property
     def allow_fallback(self) -> bool:
@@ -143,13 +157,25 @@ class EngraphisCloudDecisionClient:
     ) -> DecisionBatch:
         import json
         import urllib.request
+        from engraphis.hosted_client import build_pinned_https_opener, validate_cloud_base_url
+
+        if not self.is_configured:
+            raise ValueError("decision client is not configured")
+        if len(state) > MAX_STATE_CHARS:
+            raise ValueError("decision state exceeds the size limit")
+        if not questions or len({q.id for q in questions}) != len(questions):
+            raise ValueError("decision questions must be nonempty and have unique IDs")
+
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
 
         payload = {
             "model": model,
             "state": state,
             "questions": [q.to_dict() for q in questions],
         }
-        url = f"{self.control_url}/v1/jev/decide"
+        url = validate_cloud_base_url(self.control_url) + "/v1/jev/decide"
         data = json.dumps(payload).encode("utf-8")
         headers = {
             "Content-Type": "application/json",
@@ -157,19 +183,34 @@ class EngraphisCloudDecisionClient:
             "User-Agent": "engraphis-cloud-decision/1.0",
         }
         req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
-            body = json.loads(resp.read().decode("utf-8"))
-            raw_decisions = body.get("decisions", {})
-            choices: Dict[str, SimpleChoiceDecision] = {}
-            nouls: Dict[str, SimpleSupportDecision] = {}
-            for q_id, val in raw_decisions.items():
-                kind = val.get("type")
-                conf = float(val.get("confidence", 1.0))
-                if kind == "choice":
-                    choices[q_id] = SimpleChoiceDecision(selected=str(val.get("selected", "")), confidence=conf)
-                elif kind == "noul":
-                    nouls[q_id] = SimpleSupportDecision(probability=float(val.get("probability", 0.0)), confidence=conf)
-            return CloudDecisionBatch(is_fallback=False, choices=choices, nouls=nouls)
+        with build_pinned_https_opener(NoRedirect()).open(req, timeout=self.timeout_s) as resp:
+            raw = resp.read(MAX_RESPONSE_BYTES + 1)
+        if len(raw) > MAX_RESPONSE_BYTES:
+            raise ValueError("decision response exceeds the size limit")
+        body = json.loads(raw.decode("utf-8"))
+        if not isinstance(body, dict) or body.get("is_fallback", False) is not False:
+            return CloudDecisionBatch(is_fallback=True, choices={}, nouls={})
+        raw_decisions = body.get("decisions")
+        if not isinstance(raw_decisions, dict):
+            raise ValueError("invalid decision response")
+        choices: Dict[str, SimpleChoiceDecision] = {}
+        nouls: Dict[str, SimpleSupportDecision] = {}
+        for question in questions:
+            val = raw_decisions.get(question.id)
+            if not isinstance(val, dict) or val.get("type") != question.kind:
+                continue
+            conf = val.get("confidence")
+            if not isinstance(conf, (int, float)) or not _probability(conf):
+                continue
+            if question.kind == "choice":
+                selected = val.get("selected")
+                if isinstance(selected, str) and selected in question.options:
+                    choices[question.id] = SimpleChoiceDecision(selected=selected, confidence=conf)
+            elif question.kind == "noul":
+                probability = val.get("probability")
+                if isinstance(probability, (int, float)) and _probability(probability):
+                    nouls[question.id] = SimpleSupportDecision(probability=probability, confidence=conf)
+        return CloudDecisionBatch(is_fallback=False, choices=choices, nouls=nouls)
 
 
 def create_cloud_decision_client(
@@ -178,10 +219,8 @@ def create_cloud_decision_client(
     token: Optional[str] = None,
     timeout_s: float = 2.0,
 ) -> EngraphisCloudDecisionClient:
-    """Create a DecisionClient that proxies Jev decisions via Engraphis Cloud (Pro/Team)."""
+    """Create an experimental client; service availability is separately verified."""
     return EngraphisCloudDecisionClient(control_url=control_url, token=token, timeout_s=timeout_s)
-
-
 
 class JevDecisionBackend:
     """Advisory decisions only; zero confidence means defer to the core."""
