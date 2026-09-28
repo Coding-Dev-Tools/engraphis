@@ -180,4 +180,3 @@ def read_response_chunks(response, deadline: float, *, max_bytes: int) -> bytes:
             break
         data.extend(chunk)
     return bytes(data)
-

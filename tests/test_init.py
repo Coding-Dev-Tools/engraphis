@@ -464,4 +464,3 @@ def test_doctor_reports_jev_decision_status(tmp_path, monkeypatch, capsys):
     jev_check_conf = next(c for c in report_conf["checks"] if c["code"] == "jev_decision")
     assert jev_check_conf["status"] == "ok"
     assert "configured (TypeSafe AI BYOK); not verified" in jev_check_conf["detail"]
-

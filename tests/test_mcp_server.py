@@ -1827,4 +1827,3 @@ def test_mcp_decide_tool_registration_and_offline_guardrails(monkeypatch):
     )
     exec_res = json.loads(exec_raw)
     assert exec_res["result"]["allow_auto"] is False
-
