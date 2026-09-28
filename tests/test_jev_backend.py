@@ -214,7 +214,7 @@ def test_cloud_valid_response_and_bounded_transport(monkeypatch):
             assert 0 < size <= 4096
             return super().read1(size)
 
-    def opener(handler):
+    def opener(handler, *deadline_handlers):
         def open_request(req, timeout):
             assert req.full_url == "https://api.engraphis.com/v1/jev/decide"
             assert req.get_header("Authorization") == "Bearer test-token"
@@ -226,6 +226,7 @@ def test_cloud_valid_response_and_bounded_transport(monkeypatch):
             return Response(b'{"is_fallback":false,"decisions":{"has_support":'
                             b'{"type":"noul","probability":0.9,"confidence":0.95}}}')
         assert isinstance(handler, urllib.request.HTTPRedirectHandler)
+        assert len(deadline_handlers) == 2
         return SimpleNamespace(open=open_request)
 
     monkeypatch.setattr("engraphis.hosted_client.build_pinned_https_opener", opener)
@@ -350,6 +351,61 @@ def test_cloud_deadline_interrupts_slow_chunk_framing():
     finally:
         stopped.set()
         response.close()
+        reader.close()
+        writer.close()
+        producer.join(timeout=2)
+    assert not producer.is_alive()
+
+
+@pytest.mark.parametrize("header_prefix", [b"HTTP/1.1 ", b"HTTP/1.1 200 OK\r\nX-Slow: "])
+@pytest.mark.parametrize("transport", ["http", "https"])
+def test_cloud_deadline_interrupts_status_and_headers(monkeypatch, header_prefix, transport):
+    import http.client
+    import socket
+    import threading
+    import time
+    import urllib.request
+    from engraphis.backends.jev_decision import _deadline_handlers
+
+    reader, writer = socket.socketpair()
+    stopped = threading.Event()
+    writer.sendall(header_prefix)
+
+    def drip_header():
+        try:
+            for _ in range(200):
+                if stopped.wait(0.01):
+                    return
+                writer.sendall(b"x")
+            writer.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
+
+    producer = threading.Thread(target=drip_header, daemon=True)
+    producer.start()
+    started = time.monotonic()
+    response = None
+    try:
+        http_handler, https_handler = _deadline_handlers(started + 0.1)
+        # Exercise the actual HTTP and pinned HTTPS response classes selected by
+        # the handlers, without needing network access or a TLS certificate.
+        selected = []
+        def inspect_connection(self, connection_class, req, **kwargs):
+            selected.append(connection_class)
+        monkeypatch.setattr(urllib.request.AbstractHTTPHandler, "do_open", inspect_connection)
+        if transport == "http":
+            http_handler.http_open(None)
+        else:
+            https_handler.https_open(None)
+        response = selected[0].response_class(reader)
+        with pytest.raises((TimeoutError, OSError, http.client.HTTPException)):
+            response.begin()
+        assert time.monotonic() - started < 1.5
+        assert https_handler.handler_order < 500
+    finally:
+        stopped.set()
+        if response is not None:
+            response.close()
         reader.close()
         writer.close()
         producer.join(timeout=2)
