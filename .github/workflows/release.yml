@@ -896,6 +896,7 @@ jobs:
     concurrency:
       group: engraphis-github-release-publication
       cancel-in-progress: false
+      queue: max
     needs: publish
     environment: release-qualification
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
@@ -961,6 +962,7 @@ jobs:
     concurrency:
       group: engraphis-github-release-publication
       cancel-in-progress: false
+      queue: max
     environment: release-qualification
     if: >-
       github.event_name == 'workflow_dispatch' &&
@@ -1283,22 +1285,7 @@ jobs:
               --repo "$GH_REPO" \
               --clobber
             if [ "$WAIVE_QUALIFICATION" = "true" ] && [ "$promote_latest" = "true" ]; then
-              current_latest="$(gh release view --repo "$GH_REPO" --json tagName --jq .tagName)"
-              promote_latest="$(python - "$RELEASE_TAG" "$current_latest" <<'PY'
-          import re
-          import sys
-
-          def version(tag):
-              if re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", tag) is None:
-                  raise SystemExit("Latest release comparison requires stable version tags")
-              return tuple(map(int, tag[1:].split(".")))
-
-          print("true" if version(sys.argv[1]) >= version(sys.argv[2]) else "false")
-          PY
-          )"
-              if [ "$promote_latest" = "true" ]; then
-                gh release edit "$RELEASE_TAG" --repo "$GH_REPO" --latest
-              fi
+              gh release edit "$RELEASE_TAG" --repo "$GH_REPO" --latest
             fi
           else
             gh release create "$RELEASE_TAG" verified-dist/* release-evidence/* \
