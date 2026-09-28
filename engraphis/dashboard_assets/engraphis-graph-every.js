@@ -1309,6 +1309,25 @@
     if (observer) observer.observe(element);
     window.addEventListener('resize', resize);
 
+    const handleContextLost = event => {
+      event.preventDefault();
+      state.paused = true;
+      if (state.frame) { caf(state.frame); state.frame = 0; }
+    };
+    const handleContextRestored = () => {
+      initWebgl();
+      state.paused = false;
+      if (state.ready) {
+        uploadNodePositions();
+        uploadNodeMeta();
+        uploadEdges();
+        uploadEdgePositions();
+        schedule();
+      }
+    };
+    canvas.addEventListener('webglcontextlost', handleContextLost);
+    canvas.addEventListener('webglcontextrestored', handleContextRestored);
+
     initWebgl();
     if (gl && nodeProgram) {
       worker = new Worker(WORKER_URL);
@@ -1361,6 +1380,8 @@
         worker = null;
       }
       if (observer) observer.disconnect();
+      canvas.removeEventListener('webglcontextlost', handleContextLost);
+      canvas.removeEventListener('webglcontextrestored', handleContextRestored);
       window.removeEventListener('resize', resize);
       element.removeEventListener('keydown', handleKeydown);
       if (gl) {

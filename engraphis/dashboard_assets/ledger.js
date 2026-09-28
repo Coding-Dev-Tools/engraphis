@@ -5853,6 +5853,7 @@
     exportGraphJson();
   });
   byId('graph-connections-close').addEventListener('click', closeGraphConnections);
+  byId('graph-connections-dialog').addEventListener('close', cancelGraphConnectionMemoryLoad);
   byId('graph-connections-focus').addEventListener('click', () => {
     const id = state.graphConnectionsFocusId;
     if (!id) return;

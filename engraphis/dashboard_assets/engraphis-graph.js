@@ -11401,6 +11401,31 @@
         })),
       };
     };
+    api.exportImageCanvas = () => {
+      if (destroyed) return null;
+      const graphCanvas = el.querySelector('.force-graph-container canvas') || el.querySelector('canvas');
+      if (!graphCanvas) return null;
+      const spacetimeCanvas = el.querySelector('.graph-spacetime-overlay');
+      const output = document.createElement('canvas');
+      output.width = graphCanvas.width;
+      output.height = graphCanvas.height;
+      const ctx = output.getContext('2d');
+      if (!ctx) return null;
+      const styleAttr = el.getAttribute('data-graph-style') || (state.settings && state.settings.style) || 'cyber';
+      const bgColors = {
+        cyber: '#080c14',
+        galaxy: '#070a12',
+        solar: '#120d09',
+        classic: '#0e1014',
+      };
+      ctx.fillStyle = bgColors[styleAttr] || '#0e1014';
+      ctx.fillRect(0, 0, output.width, output.height);
+      if (spacetimeCanvas && spacetimeCanvas.width > 0 && spacetimeCanvas.height > 0) {
+        ctx.drawImage(spacetimeCanvas, 0, 0, output.width, output.height);
+      }
+      ctx.drawImage(graphCanvas, 0, 0);
+      return output;
+    };
     api.fit = () => { if (!destroyed) fg.zoomToFit(reduced() ? 0 : 500, 40); };
     api.physicsDiagnostics = () => physicsDiagnostics();
     api.graphToScreen = (x, y) => {
