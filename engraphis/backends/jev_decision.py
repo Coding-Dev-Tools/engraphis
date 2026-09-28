@@ -1,8 +1,8 @@
 """Experimental, opt-in decision adapter; never an authority for core memory writes.
 
-The caller supplies a configured client and a pinned model. This module neither
-imports an optional SDK nor discovers credentials or sibling repositories. No
-request is made without explicit per-call authorization. Offline, unavailable,
+The caller supplies a configured client and a pinned model. Importing this module
+does not load an optional SDK or discover credentials or sibling repositories. No
+backend request is made without explicit per-call authorization. Offline, unavailable,
 fallback, uncertain and malformed responses defer to deterministic core behavior.
 The adapter is intentionally not wired into the write or grounded-recall paths.
 """
@@ -10,12 +10,15 @@ from __future__ import annotations
 
 import math
 import os
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Dict, Optional, Protocol, Sequence, Tuple
 
 from engraphis.core.interfaces import MemoryRecord
 
 MAX_STATE_CHARS = 16_000
+MAX_RESPONSE_BYTES = 64 * 1024
 _VERDICTS = frozenset(("contradicts_and_supersedes", "reinforces", "orthogonal"))
 
 
@@ -36,13 +39,19 @@ class DecisionQuestion:
 
 
 class ChoiceDecision(Protocol):
-    selected: str
-    confidence: float
+    @property
+    def selected(self) -> str: ...
+
+    @property
+    def confidence(self) -> float: ...
 
 
 class SupportDecision(Protocol):
-    probability: float
-    confidence: float
+    @property
+    def probability(self) -> float: ...
+
+    @property
+    def confidence(self) -> float: ...
 
 
 class DecisionBatch(Protocol):
@@ -76,6 +85,180 @@ def _probability(value: object) -> bool:
             and math.isfinite(value) and 0 <= value <= 1)
 
 
+def _remaining_time(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("decision request deadline exceeded")
+    return remaining
+
+
+@contextmanager
+def _socket_deadline(sock, deadline: float):
+    """Interrupt a blocking HTTP parser even when every receive makes progress."""
+    import socket
+    import threading
+
+    timer = None
+    if isinstance(sock, socket.socket):
+        # Even read1() can consume several reads while parsing chunk framing.
+        # Interrupt the socket at the deadline so slow chunk headers cannot keep
+        # a single read1() alive. Shutdown does not acquire the reader's lock.
+        def expire():
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+        timer = threading.Timer(_remaining_time(deadline), expire)
+        timer.daemon = True
+        timer.start()
+    try:
+        yield
+    finally:
+        if timer is not None:
+            timer.cancel()
+
+
+def _deadline_handlers(deadline: float, *, loopback_only: bool = False):
+    import http.client
+    import ipaddress
+    import socket
+    import urllib.request
+    from functools import partial
+    from engraphis.hosted_client import PinnedHTTPSConnection, PinnedHTTPSHandler
+
+    def connect_socket(address, timeout=None, source_address=None, *, loopback_only=False):
+        # socket.create_connection renews its timeout for each resolved address.
+        # Share the request budget across direct, loopback and proxy dial retries.
+        _remaining_time(deadline)
+        host, port = address
+        candidates = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
+        last_error = None
+        for family, kind, protocol, _, target in candidates:
+            remaining = _remaining_time(deadline)
+            if loopback_only and not ipaddress.ip_address(target[0]).is_loopback:
+                raise ValueError("loopback decisions must connect to loopback")
+            sock = None
+            try:
+                sock = socket.socket(family, kind, protocol)
+                sock.settimeout(remaining)
+                if source_address is not None:
+                    sock.bind(source_address)
+                sock.connect(target)
+                # TLS must receive only the budget left after the TCP dial.
+                sock.settimeout(_remaining_time(deadline))
+                return sock
+            except OSError as exc:
+                if sock is not None:
+                    sock.close()
+                last_error = exc
+        if last_error is not None:
+            raise last_error
+        raise OSError("decision endpoint has no connectable address")
+
+    def send_with_deadline(connection, send, data):
+        if connection.sock is None:
+            if not connection.auto_open:
+                raise http.client.NotConnected()
+            connection.connect()
+        if connection.sock is None:
+            raise http.client.NotConnected()
+        connection.sock.settimeout(_remaining_time(deadline))
+        # Headers and bodies are separate sends; SSL/file sends may also loop.
+        with _socket_deadline(connection.sock, deadline):
+            send(data)
+            _remaining_time(deadline)
+
+    class DeadlineResponse(http.client.HTTPResponse):
+        def __init__(self, sock, *args, **kwargs):
+            self._deadline_socket = sock
+            super().__init__(sock, *args, **kwargs)
+
+        def begin(self):
+            # getresponse() parses status and headers before urllib.open()
+            # returns. Protect that phase before a response body is available.
+            with _socket_deadline(self._deadline_socket, deadline):
+                super().begin()
+                _remaining_time(deadline)
+
+    class DeadlineHTTPConnection(http.client.HTTPConnection):
+        response_class = DeadlineResponse
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._create_connection = partial(connect_socket, loopback_only=True)
+
+        def send(self, data):
+            send_with_deadline(self, super().send, data)
+
+    class DeadlineHTTPSConnection(PinnedHTTPSConnection):
+        response_class = DeadlineResponse
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._create_connection = partial(connect_socket, loopback_only=loopback_only)
+
+        def _connect_deadline(self):
+            return deadline
+
+        def _attempt_timeout(self, connect_deadline):
+            # The shared hosted client has a 500 ms floor; decisions do not.
+            return _remaining_time(deadline)
+
+        def send(self, data):
+            send_with_deadline(self, super().send, data)
+
+        def _tunnel(self):
+            # CONNECT parses its response directly, bypassing response.begin().
+            with _socket_deadline(self.sock, deadline):
+                # typeshed omits this private standard-library method.
+                getattr(super(), "_tunnel")()
+                # TLS follows CONNECT and shares its remaining budget.
+                self.sock.settimeout(_remaining_time(deadline))
+
+    class DeadlineHTTPHandler(urllib.request.HTTPHandler):
+        def http_open(self, req):
+            return self.do_open(DeadlineHTTPConnection, req)
+
+    class DeadlineHTTPSHandler(PinnedHTTPSHandler):
+        # Run before the shared opener's ordinary pinned HTTPS handler.
+        handler_order = 499
+
+        def do_open(self, http_class, req, **kwargs):
+            return super().do_open(DeadlineHTTPSConnection, req, **kwargs)
+
+    return DeadlineHTTPHandler(), DeadlineHTTPSHandler()
+
+
+def _read_response(response, deadline: float) -> bytes:
+    """Bound total body-read time, including a peer that continuously drips bytes."""
+    sock = getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None)
+    with _socket_deadline(sock, deadline):
+        return _read_response_chunks(response, deadline)
+
+
+def _read_response_chunks(response, deadline: float) -> bytes:
+    data = bytearray()
+    while len(data) <= MAX_RESPONSE_BYTES:
+        remaining = _remaining_time(deadline)
+        # urllib's HTTPResponse wraps SocketIO in a BufferedReader. Tighten the
+        # underlying socket deadline for each read rather than renewing the full
+        # timeout. fp is None after a length-delimited response reaches EOF.
+        sock = getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None)
+        if sock is not None:
+            sock.settimeout(remaining)
+        # read() tries to fill its entire buffer; read1() returns after a single
+        # buffered/socket read, letting the absolute deadline run between chunks.
+        chunk = response.read1(min(4096, MAX_RESPONSE_BYTES + 1 - len(data)))
+        _remaining_time(deadline)
+        if not chunk:
+            break
+        data.extend(chunk)
+    if len(data) > MAX_RESPONSE_BYTES:
+        raise ValueError("decision response exceeds the size limit")
+    return bytes(data)
+
+
 def get_decision_backend(
     name: Optional[str] = None, *, client: Optional[DecisionClient] = None,
     model: Optional[str] = None, offline_mode: bool = False,
@@ -87,6 +270,145 @@ def get_decision_backend(
             return backend
     return None
 
+
+@dataclass(frozen=True)
+class SimpleChoiceDecision:
+    selected: str
+    confidence: float
+
+
+@dataclass(frozen=True)
+class SimpleSupportDecision:
+    probability: float
+    confidence: float
+
+
+@dataclass
+class CloudDecisionBatch:
+    is_fallback: bool
+    choices: Dict[str, SimpleChoiceDecision]
+    nouls: Dict[str, SimpleSupportDecision]
+
+    def get_choice(self, question_id: str) -> Optional[ChoiceDecision]:
+        return self.choices.get(question_id)
+
+    def get_noul(self, question_id: str) -> Optional[SupportDecision]:
+        return self.nouls.get(question_id)
+
+
+class EngraphisCloudDecisionClient:
+    """Experimental transport for an explicitly selected Cloud decision endpoint.
+
+    Construction never performs network I/O. Calling evaluate authorizes a remote
+    request; use JevDecisionBackend for offline and per-call consent checks.
+    The timeout bounds socket operations and total HTTP response time. System
+    DNS resolution itself cannot be interrupted by urllib.
+    """
+
+    def __init__(
+        self,
+        *,
+        control_url: Optional[str] = None,
+        token: Optional[str] = None,
+        timeout_s: float = 2.0,
+    ) -> None:
+        self.control_url = (control_url if control_url is not None else os.environ.get(
+            "ENGRAPHIS_CLOUD_CONTROL_URL", "https://api.engraphis.com",
+        )).rstrip("/")
+        self.token = token if token is not None else os.environ.get("ENGRAPHIS_CLOUD_ACCESS_TOKEN", "")
+        if (type(timeout_s) not in (int, float) or not math.isfinite(timeout_s)
+                or not 0 < timeout_s <= 30):
+            raise ValueError("decision timeout must be finite and within (0, 30] seconds")
+        self.timeout_s = timeout_s
+
+    @property
+    def is_configured(self) -> bool:
+        return bool(self.control_url and 0 < len(self.token) <= 8192
+                    and all(33 <= ord(char) <= 126 for char in self.token))
+
+    @property
+    def allow_fallback(self) -> bool:
+        return False
+
+    def evaluate(
+        self, state: str, questions: Sequence[DecisionQuestion], *, model: str,
+    ) -> DecisionBatch:
+        import json
+        import urllib.request
+        from urllib.parse import urlsplit
+        from engraphis.hosted_client import (
+            _is_loopback_host, build_pinned_https_opener, validate_cloud_base_url,
+        )
+
+        if not self.is_configured:
+            raise ValueError("decision client is not configured")
+        if len(state) > MAX_STATE_CHARS:
+            raise ValueError("decision state exceeds the size limit")
+        if not questions or len({q.id for q in questions}) != len(questions):
+            raise ValueError("decision questions must be nonempty and have unique IDs")
+
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+
+        payload = {
+            "model": model,
+            "state": state,
+            "questions": [q.to_dict() for q in questions],
+        }
+        deadline = time.monotonic() + self.timeout_s
+        url = validate_cloud_base_url(self.control_url) + "/v1/jev/decide"
+        data = json.dumps(payload).encode("utf-8")
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.token}",
+            "User-Agent": "engraphis-cloud-decision/1.0",
+        }
+        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        loopback_only = _is_loopback_host(urlsplit(url).hostname or "")
+        handlers = [NoRedirect(), *_deadline_handlers(deadline, loopback_only=loopback_only)]
+        if loopback_only:
+            # A local HTTP endpoint must never send its bearer through an
+            # ambient proxy, even when NO_PROXY is missing or misconfigured.
+            handlers.append(urllib.request.ProxyHandler({}))
+        with build_pinned_https_opener(*handlers).open(
+            req, timeout=_remaining_time(deadline),
+        ) as resp:
+            raw = _read_response(resp, deadline)
+        body = json.loads(raw.decode("utf-8"))
+        if not isinstance(body, dict) or body.get("is_fallback") is not False:
+            return CloudDecisionBatch(is_fallback=True, choices={}, nouls={})
+        raw_decisions = body.get("decisions")
+        if not isinstance(raw_decisions, dict):
+            raise ValueError("invalid decision response")
+        choices: Dict[str, SimpleChoiceDecision] = {}
+        nouls: Dict[str, SimpleSupportDecision] = {}
+        for question in questions:
+            val = raw_decisions.get(question.id)
+            if not isinstance(val, dict) or val.get("type") != question.kind:
+                continue
+            conf = val.get("confidence")
+            if not isinstance(conf, (int, float)) or not _probability(conf):
+                continue
+            if question.kind == "choice":
+                selected = val.get("selected")
+                if isinstance(selected, str) and selected in question.options:
+                    choices[question.id] = SimpleChoiceDecision(selected=selected, confidence=conf)
+            elif question.kind == "noul":
+                probability = val.get("probability")
+                if isinstance(probability, (int, float)) and _probability(probability):
+                    nouls[question.id] = SimpleSupportDecision(probability=probability, confidence=conf)
+        return CloudDecisionBatch(is_fallback=False, choices=choices, nouls=nouls)
+
+
+def create_cloud_decision_client(
+    *,
+    control_url: Optional[str] = None,
+    token: Optional[str] = None,
+    timeout_s: float = 2.0,
+) -> EngraphisCloudDecisionClient:
+    """Create an experimental client; service availability is separately verified."""
+    return EngraphisCloudDecisionClient(control_url=control_url, token=token, timeout_s=timeout_s)
 
 class JevDecisionBackend:
     """Advisory decisions only; zero confidence means defer to the core."""
