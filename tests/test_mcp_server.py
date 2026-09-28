@@ -531,6 +531,8 @@ def _recall_side_effect_snapshot(srv):
 
 
 _ALL_TOOLS = {
+    "engraphis_list_workspaces", "engraphis_get_workspace_routing",
+    "engraphis_set_workspace_routing",
     "engraphis_remember", "engraphis_remember_many",
     "engraphis_recall", "engraphis_recall_context",
     "engraphis_why", "engraphis_timeline",
@@ -575,11 +577,11 @@ def test_server_identity_and_tools_registered():
 
     classic = {t.name: t for t in asyncio.run(srv.classic_mcp.list_tools())}
     assert srv.classic_mcp.name == "engraphis_mcp"
-    assert len(_ALL_TOOLS) == 36
+    assert len(_ALL_TOOLS) == 39
     assert set(classic) == _ALL_TOOLS
     assert srv.minimum_role("engraphis_context_savings") == "viewer"
     kilo = (ROOT / "docs" / "KILO_CODE_INTEGRATION.md").read_text(encoding="utf-8")
-    full_surface = kilo.split("### Classic 36-tool inventory", 1)[1].split("\n---", 1)[0]
+    full_surface = kilo.split("### Classic 39-tool inventory", 1)[1].split("\n---", 1)[0]
     assert set(re.findall(r"`(engraphis_[a-z_]+)`", full_surface)) == _ALL_TOOLS
     # Flat schema (not a nested "params" object) so agents can call fields directly.
     props = classic["engraphis_remember"].inputSchema.get("properties", {})

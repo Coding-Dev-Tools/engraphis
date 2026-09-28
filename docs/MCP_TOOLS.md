@@ -42,12 +42,35 @@ additional summary or promise extra token savings. Source IDs remain in `sources
 
 No user profile choice or tool switching is required. The dashboard `/mcp` endpoint and
 `engraphis-mcp-http` use this Smart surface by default. `engraphis-mcp-classic` (or
-`engraphis-mcp-http --classic`) preserves the 36 direct tools below for integrations that pin
+`engraphis-mcp-http --classic`) preserves the 39 direct tools below for integrations that pin
 their historical names and response shapes.
 
 Hosts which already own chat history should use `POST /api/adaptive-context`, not an MCP action.
 The gateway works in general MCP clients without native deferred tool search; clients that
 explicitly support OpenAI's deferred `tool_search` can apply it as an optional host optimization.
+
+### Workspace routing
+
+Session starts accept an omitted workspace, resolving an explicit value, then the saved repo
+mapping, then `default`. Routine remember and recall calls also inherit an omitted workspace
+from an authorized supplied session before consulting the repo mapping. Local recall with no
+workspace, repo, or session stays broad.
+Explicit workspace/repo values that conflict with a supplied session are rejected; invalid or
+unauthorized sessions never fall back. An explicit `workspace="default"` overrides a mapping.
+
+Session and remember responses report the resolved workspace and `workspace_source` (`explicit`,
+`project`, or `default`, plus `session` on inherited writes) so the agent can show its destination.
+Pass the returned `session_id` on subsequent recall and write calls to retain that scope.
+There is no implicit server-global current session, and changing the dashboard workspace
+selector does not change agent arguments. See [workspace organization](WORKSPACE_ORGANIZATION.md)
+for project setup, hook overrides, and organizing existing memories.
+
+Saved project mappings live in the shared database, per authenticated caller or standalone
+local context. The Classic `engraphis_list_workspaces`, `engraphis_get_workspace_routing`, and
+`engraphis_set_workspace_routing` capabilities are available through Smart discovery and the
+validated executors; saving a mapping still requires workspace access. Classic batch remember,
+record-event, ingest, and proactive recall retain their explicit workspace contract: pass the
+resolved destination returned by the session.
 
 ### Standalone semantic startup
 
@@ -152,6 +175,9 @@ an omitted mode means it was not recorded, and is not inferred from current defa
 | Governance | `engraphis_correct` | Replaces memory content without losing the previous version. Changed content clears the old literal binding; `exact_value`, `exact_value_type`, and optional `exact_value_span` explicitly bind a replacement, or `clear_exact_value=true` removes it. Governed provenance remains pending unless separately approved. |
 | Governance | `engraphis_promote` | Widens an explicitly approved memory's scope while preserving and linking its narrower history. |
 | Session | `engraphis_start_session` | Starts a work session. Exact retries are safe; `force_new=true` creates another session. |
+| Workspace | `engraphis_list_workspaces` | Lists visible workspaces for choosing a destination. |
+| Workspace | `engraphis_get_workspace_routing` | Returns the current caller's saved destination for an exact `repo` name. |
+| Workspace | `engraphis_set_workspace_routing` | Saves or removes a repo-to-workspace mapping; takes `workspace`, `repo`, and `enabled` (default `true`). |
 | Session | `engraphis_end_session` | Closes a work session with a summary and open threads. |
 | Operations | `engraphis_stats` | Returns memory counts for health checks. |
 | Operations | `engraphis_check_update` | Refreshes the release cache and reports whether a newer version is available. Update checks are OFF unless `ENGRAPHIS_UPDATE_CHECK` is set to an affirmative value; `=0` keeps them off. |

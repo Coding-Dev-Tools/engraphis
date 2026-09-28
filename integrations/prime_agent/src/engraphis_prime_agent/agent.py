@@ -51,11 +51,11 @@ class EngraphisPrimeAgent:
         self.name = name.strip()
         self.client = client
         self.config = config
-        # Workspace precedence: explicit per-agent kwarg > config default.
-        # > the literal "default" placeholder so the Smart server always
-        # sees an explicit workspace (the "default" workspace is the
-        # server's own well-known scope for the Smart MCP gateway).
-        self.workspace = workspace or config.default_workspace or "default"
+        # Leave an unconfigured workspace omitted so saved project routing applies.
+        # Keep the requested default separate from a session's resolved workspace:
+        # a later session must be able to follow a changed project mapping.
+        self._requested_workspace = workspace if workspace is not None else config.default_workspace
+        self.workspace = self._requested_workspace
         # Repo precedence: explicit per-agent kwarg > config default > sub-agent
         # name. A single effective repo must be used for both session creation
         # and the tool-call defaults — a session opened in `researcher` while
@@ -120,7 +120,7 @@ class EngraphisPrimeAgent:
         # (and concurrent get_tool() callers that read self._session_id).
         async with self._session_lock:
             self._ensure_open()
-            requested_workspace = self.workspace if workspace is None else workspace
+            requested_workspace = self._requested_workspace if workspace is None else workspace
             requested_repo = self.repo if isinstance(repo, _UnsetRepo) else repo
             requested_agent = self._session_agent if agent is None else agent
             requested_goal = self.goal if goal is None else goal
@@ -148,7 +148,8 @@ class EngraphisPrimeAgent:
             if requested_repo is not None:
                 args["repo"] = requested_repo
             response = await self.client.call_tool("engraphis_session", args)
-            session_id = self._extract_session_id(response)
+            details = self._extract_session_details(response)
+            session_id = details.get("session_id") or details.get("sessionId")
             if not session_id:
                 raise EngraphisMcpToolError(
                     f"engraphis_session(start) for agent={self.name!r} returned no session_id."
@@ -165,7 +166,8 @@ class EngraphisPrimeAgent:
             # the now-cached session) and double the latency.
             self._last_session_response = response
             self._session_agent = requested_agent
-            self.workspace = requested_workspace
+            self._requested_workspace = requested_workspace
+            self.workspace = details.get("workspace") or requested_workspace
             self.repo = requested_repo
             self.goal = requested_goal
             self.token_budget = requested_budget
@@ -196,6 +198,7 @@ class EngraphisPrimeAgent:
                 self._session_id = None
                 self._last_session_response = None
                 self._tools = None
+                self.workspace = self._requested_workspace
             end_args: dict[str, Any] = {
                 "action": "end",
                 "agent": self._session_agent if agent is None else agent,
@@ -476,6 +479,11 @@ class EngraphisPrimeAgent:
 
     @staticmethod
     def _extract_session_id(response: dict[str, Any]) -> str | None:
+        details = EngraphisPrimeAgent._extract_session_details(response)
+        return details.get("session_id") or details.get("sessionId")
+
+    @staticmethod
+    def _extract_session_details(response: dict[str, Any]) -> dict[str, Any]:
         for block in response.get("content", []) or []:
             text = block.get("text")
             if not isinstance(text, str):
@@ -487,8 +495,8 @@ class EngraphisPrimeAgent:
             if isinstance(parsed, dict):
                 sid = parsed.get("session_id") or parsed.get("sessionId")
                 if isinstance(sid, str) and sid:
-                    return sid
-        return None
+                    return parsed
+        return {}
 
 
 class PrimeAgentFleet:
