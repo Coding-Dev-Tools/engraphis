@@ -1768,7 +1768,11 @@ def test_mcp_decide_tool_registration_and_offline_guardrails(monkeypatch):
 
     # 1. Registration
     assert "engraphis_decide" in classic_mcp._tool_manager._tools
-    assert minimum_role("engraphis_decide") == "viewer"
+    assert minimum_role("engraphis_decide") == "member"
+    annotations = classic_mcp._tool_manager._tools["engraphis_decide"].annotations
+    assert annotations.readOnlyHint is False
+    assert annotations.idempotentHint is False
+    assert annotations.openWorldHint is True
 
     # 2. Discovery
     assert "decide" in ACTION_SPECS
