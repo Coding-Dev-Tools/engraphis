@@ -334,7 +334,7 @@ def test_waiver_latest_comparison_is_numeric_and_fails_closed(candidate, latest,
         assert result.stdout.strip() == expected
 
 
-def test_github_release_writers_share_publication_lock():
+def test_github_release_writers_share_publication_queue():
     yaml = pytest.importorskip("yaml")
     root = Path(__file__).resolve().parents[1]
     workflow = yaml.safe_load((root / ".github/workflows/release.yml").read_text(encoding="utf-8"))
@@ -346,6 +346,7 @@ def test_github_release_writers_share_publication_lock():
     for job in writers.values():
         assert job["concurrency"] == {
             "group": "engraphis-github-release-publication", "cancel-in-progress": False,
+            "queue": "max",
         }
 
 
