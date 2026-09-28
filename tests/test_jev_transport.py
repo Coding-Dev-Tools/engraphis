@@ -56,7 +56,9 @@ def test_constructor_and_configuration_are_network_free_and_managed_refresh_is_b
     assert client.is_configured and managed == []
     batch = client.evaluate("A synthetic statement", [_question()], model=transport.MODEL,
                             allow_remote=True, purpose="verify_support", data_classification="public")
-    assert managed[0] == ("refresh", None, {"require_compute": False})
+    assert managed[0][:2] == ("refresh", None)
+    assert managed[0][2]["require_compute"] is False
+    assert 0 < managed[0][2]["deadline"] - transport.time.monotonic() <= client.timeout_s
     _, request, timeout = managed[-1]
     assert request.full_url == "https://control.example.invalid/v1/jev/decide"
     assert request.get_header("Authorization") == "Bearer synthetic-access-token"
@@ -283,10 +285,11 @@ def test_http_loopback_managed_request_uses_saved_origin_without_proxy(monkeypat
         assert host == "127.0.0.1", "test attempted non-loopback resolution"
         return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (host, port))]
 
-    def refresh(control_url, credential, workspace_id, token_subject):
+    def refresh(control_url, credential, workspace_id, token_subject, *, deadline):
         assert (control_url, credential, workspace_id, token_subject) == (
             control, "synthetic-refresh", None, "member",
         )
+        assert 0 < deadline - transport.time.monotonic() <= 2
         return {"access_token": "synthetic-access", "refresh_credential": "synthetic-rotated",
                 "organization_id": "org_synthetic"}
 

@@ -13,10 +13,15 @@ import re
 import time
 import urllib.error
 import urllib.request
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Dict, Optional, Sequence
 from urllib.parse import urlsplit
+
+from engraphis.http_deadline import (
+    deadline_handlers as _deadline_handlers,
+    read_response as _read_deadline_response,
+    remaining_time as _remaining_time,
+)
 
 if TYPE_CHECKING:
     from engraphis.backends.jev_decision import DecisionQuestion
@@ -200,178 +205,11 @@ def _timeout(value: float) -> float:
     return float(value)
 
 
-def _remaining_time(deadline: float) -> float:
-    remaining = deadline - time.monotonic()
-    if remaining <= 0:
-        raise TimeoutError("decision request deadline exceeded")
-    return remaining
-
-
-@contextmanager
-def _socket_deadline(sock, deadline: float):
-    """Interrupt a blocking HTTP parser even when every receive makes progress."""
-    import socket
-    import threading
-
-    timer = None
-    if isinstance(sock, socket.socket):
-        # Even read1() can consume several reads while parsing chunk framing.
-        # Interrupt the socket at the deadline so slow chunk headers cannot keep
-        # a single read1() alive. Shutdown does not acquire the reader's lock.
-        def expire():
-            try:
-                sock.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-
-        timer = threading.Timer(_remaining_time(deadline), expire)
-        timer.daemon = True
-        timer.start()
-    try:
-        yield
-    finally:
-        if timer is not None:
-            timer.cancel()
-
-
-def _deadline_handlers(deadline: float, *, loopback_only: bool = False):
-    import http.client
-    import ipaddress
-    import socket
-    import urllib.request
-    from functools import partial
-    from engraphis.hosted_client import PinnedHTTPSConnection, PinnedHTTPSHandler
-
-    def connect_socket(address, timeout=None, source_address=None, *, loopback_only=False):
-        # socket.create_connection renews its timeout for each resolved address.
-        # Share the request budget across direct, loopback and proxy dial retries.
-        _remaining_time(deadline)
-        host, port = address
-        candidates = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
-        last_error = None
-        for family, kind, protocol, _, target in candidates:
-            remaining = _remaining_time(deadline)
-            if loopback_only and not ipaddress.ip_address(target[0]).is_loopback:
-                raise ValueError("loopback decisions must connect to loopback")
-            sock = None
-            try:
-                sock = socket.socket(family, kind, protocol)
-                sock.settimeout(remaining)
-                if source_address is not None:
-                    sock.bind(source_address)
-                sock.connect(target)
-                # TLS must receive only the budget left after the TCP dial.
-                sock.settimeout(_remaining_time(deadline))
-                return sock
-            except OSError as exc:
-                if sock is not None:
-                    sock.close()
-                last_error = exc
-        if last_error is not None:
-            raise last_error
-        raise OSError("decision endpoint has no connectable address")
-
-    def send_with_deadline(connection, send, data):
-        if connection.sock is None:
-            if not connection.auto_open:
-                raise http.client.NotConnected()
-            connection.connect()
-        if connection.sock is None:
-            raise http.client.NotConnected()
-        connection.sock.settimeout(_remaining_time(deadline))
-        # Headers and bodies are separate sends; SSL/file sends may also loop.
-        with _socket_deadline(connection.sock, deadline):
-            send(data)
-            _remaining_time(deadline)
-
-    class DeadlineResponse(http.client.HTTPResponse):
-        def __init__(self, sock, *args, **kwargs):
-            self._deadline_socket = sock
-            super().__init__(sock, *args, **kwargs)
-
-        def begin(self):
-            # getresponse() parses status and headers before urllib.open()
-            # returns. Protect that phase before a response body is available.
-            with _socket_deadline(self._deadline_socket, deadline):
-                super().begin()
-                _remaining_time(deadline)
-
-    class DeadlineHTTPConnection(http.client.HTTPConnection):
-        response_class = DeadlineResponse
-
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            self._create_connection = partial(connect_socket, loopback_only=True)
-
-        def send(self, data):
-            send_with_deadline(self, super().send, data)
-
-    class DeadlineHTTPSConnection(PinnedHTTPSConnection):
-        response_class = DeadlineResponse
-
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            self._create_connection = partial(connect_socket, loopback_only=loopback_only)
-
-        def _connect_deadline(self):
-            return deadline
-
-        def _attempt_timeout(self, connect_deadline):
-            # The shared hosted client has a 500 ms floor; decisions do not.
-            return _remaining_time(deadline)
-
-        def send(self, data):
-            send_with_deadline(self, super().send, data)
-
-        def _tunnel(self):
-            # CONNECT parses its response directly, bypassing response.begin().
-            with _socket_deadline(self.sock, deadline):
-                # typeshed omits this private standard-library method.
-                getattr(super(), "_tunnel")()
-                # TLS follows CONNECT and shares its remaining budget.
-                self.sock.settimeout(_remaining_time(deadline))
-
-    class DeadlineHTTPHandler(urllib.request.HTTPHandler):
-        def http_open(self, req):
-            return self.do_open(DeadlineHTTPConnection, req)
-
-    class DeadlineHTTPSHandler(PinnedHTTPSHandler):
-        # Run before the shared opener's ordinary pinned HTTPS handler.
-        handler_order = 499
-
-        def do_open(self, http_class, req, **kwargs):
-            return super().do_open(DeadlineHTTPSConnection, req, **kwargs)
-
-    return DeadlineHTTPHandler(), DeadlineHTTPSHandler()
-
-
 def _read_response(response, deadline: float) -> bytes:
-    """Bound total body-read time, including a peer that continuously drips bytes."""
-    sock = getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None)
-    with _socket_deadline(sock, deadline):
-        return _read_response_chunks(response, deadline)
-
-
-def _read_response_chunks(response, deadline: float) -> bytes:
-    data = bytearray()
-    while len(data) <= MAX_RESPONSE_BYTES:
-        remaining = _remaining_time(deadline)
-        # urllib's HTTPResponse wraps SocketIO in a BufferedReader. Tighten the
-        # underlying socket deadline for each read rather than renewing the full
-        # timeout. fp is None after a length-delimited response reaches EOF.
-        sock = getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None)
-        if sock is not None:
-            sock.settimeout(remaining)
-        # read() tries to fill its entire buffer; read1() returns after a single
-        # buffered/socket read, letting the absolute deadline run between chunks.
-        chunk = response.read1(min(4096, MAX_RESPONSE_BYTES + 1 - len(data)))
-        _remaining_time(deadline)
-        if not chunk:
-            break
-        data.extend(chunk)
-    if len(data) > MAX_RESPONSE_BYTES:
+    raw = _read_deadline_response(response, deadline, max_bytes=MAX_RESPONSE_BYTES)
+    if len(raw) > MAX_RESPONSE_BYTES:
         raise DecisionClientError("malformed_response")
-    return bytes(data)
+    return raw
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -379,13 +217,17 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         raise DecisionClientError("remote_unavailable")
 
 
-def _post_json(url: str, token: str, payload: dict, timeout_s: float) -> object:
+def _post_json(
+    url: str, token: str, payload: dict, timeout_s: float, *, deadline: Optional[float] = None,
+) -> object:
     from engraphis.hosted_client import (
         _is_loopback_host, build_pinned_https_opener, validate_cloud_base_url,
     )
 
-    deadline = time.monotonic() + timeout_s
+    if deadline is None:
+        deadline = time.monotonic() + timeout_s
     try:
+        _remaining_time(deadline)
         parts = urlsplit(url)
         permitted_transport = parts.scheme == "https" or (
             parts.scheme == "http" and _is_loopback_host(parts.hostname or "")
@@ -468,23 +310,33 @@ class EngraphisCloudDecisionClient:
     def evaluate(self, state: str, questions: Sequence[DecisionQuestion], *, model: str,
                  allow_remote: bool = False, purpose: str = "custom",
                  data_classification: str = "internal") -> CloudDecisionBatch:
+        deadline = time.monotonic() + self.timeout_s
         payload = _request_payload(state, questions, model, allow_remote=allow_remote,
                                    purpose=purpose, data_classification=data_classification)
         from engraphis import cloud_session
         try:
             before = cloud_session.credential_bound_control_url()
+            _remaining_time(deadline)
             token, _organization, _compute = cloud_session.access_for_workspace(
-                None, require_compute=False,
+                None, require_compute=False, deadline=deadline,
             )
+            _remaining_time(deadline)
             control = cloud_session.credential_bound_control_url()
+            _remaining_time(deadline)
             if not before or control != before:
                 raise DecisionClientError("session_changed")
-            body = _post_json(control.rstrip("/") + "/v1/jev/decide", token, payload, self.timeout_s)
-            return parse_decision_batch(body, questions, normalized=True)
+            body = _post_json(control.rstrip("/") + "/v1/jev/decide", token, payload,
+                              self.timeout_s, deadline=deadline)
+            result = parse_decision_batch(body, questions, normalized=True)
+            _remaining_time(deadline)
+            return result
         except DecisionClientError:
             raise
+        except TimeoutError:
+            raise DecisionClientError("remote_timeout") from None
         except Exception:
-            raise DecisionClientError("remote_unavailable") from None
+            code = "remote_timeout" if time.monotonic() >= deadline else "remote_unavailable"
+            raise DecisionClientError(code) from None
 
 
 class TypeSafeDecisionClient:
