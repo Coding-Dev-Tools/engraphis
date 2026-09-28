@@ -2370,7 +2370,10 @@ def engraphis_decide(
                        "advisory_only": True, "confidence": None,
                        "confidence_source": "unmeasured_heuristic",
                        "probability_source": "heuristic"})
-        if kind == "custom":
+        if kind == "guard_command":
+            # Prefix heuristics do not parse shell syntax and cannot authorize it.
+            result.update({"allow_auto": False, "escalate_to_user": True})
+        elif kind == "custom":
             result["selected"] = None
         return _ok(result)
 

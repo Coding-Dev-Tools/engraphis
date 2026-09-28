@@ -117,7 +117,7 @@ returned executor; the routine session, recall-context, and remember tools remai
 | Privacy-safe audit | `engraphis_receipts` / `engraphis_verify_receipts` | Content-free hash chain; export with `engraphis_export_receipts`. |
 | Verify context savings | `engraphis_context_savings` | Aggregate all visible usage receipts by default, or one workspace, without returning prompts or memory content. |
 | Store health | `engraphis_stats` | Counts by type/workspace; good for onboarding checks. |
-| Fast decision gating | `engraphis_decide` | Sub-300ms System 1 gating (shell command guard, contradiction check, support check, completion check). |
+| Advisory decisions | `engraphis_decide` | Command, contradiction, support, and completion checks. Remote requests require an explicit backend and per-call permission; fallback results never authorize execution. |
 
 Full signatures, parameters, defaults, and return shapes: [TOOLS.md](references/TOOLS.md).
 

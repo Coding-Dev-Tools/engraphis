@@ -1780,8 +1780,8 @@ def test_mcp_decide_tool_registration_and_offline_guardrails(monkeypatch):
     # 3. Offline Guardrail Decisions
     # Safe command
     safe_out = json.loads(engraphis_decide(kind="guard_command", state="git status", offline_mode=True))
-    assert safe_out["allow_auto"] is True
-    assert safe_out["escalate_to_user"] is False
+    assert safe_out["allow_auto"] is False
+    assert safe_out["escalate_to_user"] is True
     assert safe_out["safety_probability"] >= 0.90
     assert safe_out["is_fallback"] is True
     assert safe_out["backend"] == "local_heuristic"
@@ -1824,5 +1824,5 @@ def test_mcp_decide_tool_registration_and_offline_guardrails(monkeypatch):
         arguments={"kind": "guard_command", "state": "git diff", "offline_mode": True},
     )
     exec_res = json.loads(exec_raw)
-    assert exec_res["result"]["allow_auto"] is True
+    assert exec_res["result"]["allow_auto"] is False
 
