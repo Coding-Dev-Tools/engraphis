@@ -119,13 +119,15 @@ def _socket_deadline(sock, deadline: float):
             timer.cancel()
 
 
-def _deadline_handlers(deadline: float):
+def _deadline_handlers(deadline: float, *, loopback_only: bool = False):
     import http.client
+    import ipaddress
     import socket
     import urllib.request
+    from functools import partial
     from engraphis.hosted_client import PinnedHTTPSConnection, PinnedHTTPSHandler
 
-    def connect_socket(address, timeout=None, source_address=None):
+    def connect_socket(address, timeout=None, source_address=None, *, loopback_only=False):
         # socket.create_connection renews its timeout for each resolved address.
         # Share the request budget across direct, loopback and proxy dial retries.
         _remaining_time(deadline)
@@ -134,6 +136,8 @@ def _deadline_handlers(deadline: float):
         last_error = None
         for family, kind, protocol, _, target in candidates:
             remaining = _remaining_time(deadline)
+            if loopback_only and not ipaddress.ip_address(target[0]).is_loopback:
+                raise ValueError("loopback decisions must connect to loopback")
             sock = None
             try:
                 sock = socket.socket(family, kind, protocol)
@@ -182,7 +186,7 @@ def _deadline_handlers(deadline: float):
 
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
-            self._create_connection = connect_socket
+            self._create_connection = partial(connect_socket, loopback_only=True)
 
         def send(self, data):
             send_with_deadline(self, super().send, data)
@@ -192,7 +196,7 @@ def _deadline_handlers(deadline: float):
 
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
-            self._create_connection = connect_socket
+            self._create_connection = partial(connect_socket, loopback_only=loopback_only)
 
         def _connect_deadline(self):
             return deadline
@@ -331,7 +335,10 @@ class EngraphisCloudDecisionClient:
     ) -> DecisionBatch:
         import json
         import urllib.request
-        from engraphis.hosted_client import build_pinned_https_opener, validate_cloud_base_url
+        from urllib.parse import urlsplit
+        from engraphis.hosted_client import (
+            _is_loopback_host, build_pinned_https_opener, validate_cloud_base_url,
+        )
 
         if not self.is_configured:
             raise ValueError("decision client is not configured")
@@ -358,7 +365,13 @@ class EngraphisCloudDecisionClient:
             "User-Agent": "engraphis-cloud-decision/1.0",
         }
         req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-        with build_pinned_https_opener(NoRedirect(), *_deadline_handlers(deadline)).open(
+        loopback_only = _is_loopback_host(urlsplit(url).hostname or "")
+        handlers = [NoRedirect(), *_deadline_handlers(deadline, loopback_only=loopback_only)]
+        if loopback_only:
+            # A local HTTP endpoint must never send its bearer through an
+            # ambient proxy, even when NO_PROXY is missing or misconfigured.
+            handlers.append(urllib.request.ProxyHandler({}))
+        with build_pinned_https_opener(*handlers).open(
             req, timeout=_remaining_time(deadline),
         ) as resp:
             raw = _read_response(resp, deadline)

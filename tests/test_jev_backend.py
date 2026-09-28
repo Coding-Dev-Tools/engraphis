@@ -252,6 +252,119 @@ def test_cloud_unsafe_destinations_never_receive_credentials(monkeypatch, url):
     assert adapter.verify_grounded_support("database?", "Postgres", allow_remote=True) == (False, 0.0)
 
 
+@pytest.mark.parametrize("url", [
+    "http://localhost:9000", "http://127.0.0.1:9000", "http://[::1]:9000",
+    "https://localhost:9000", "https://127.0.0.1:9000", "https://[::1]:9000",
+    "https://api.engraphis.com",
+])
+def test_cloud_loopback_bypasses_ambient_proxies(monkeypatch, url):
+    import urllib.request
+    from urllib.parse import urlsplit
+    from urllib.response import addinfourl
+
+    monkeypatch.setattr(urllib.request, "getproxies", lambda: {
+        "http": "http://recording-proxy.example:8080",
+        "https": "http://recording-proxy.example:8080",
+    })
+    monkeypatch.setattr(urllib.request, "proxy_bypass", lambda host: False)
+    routes = []
+
+    def capture_route(self, connection_class, req, **kwargs):
+        routes.append((req.host, req._tunnel_host, req.get_header("Authorization")))
+        response = addinfourl(io.BytesIO(b'{"is_fallback":false,"decisions":{"has_support":'
+                                        b'{"type":"noul","probability":0.9,"confidence":0.95}}}'),
+                             {}, req.full_url, 200)
+        response.msg = "OK"
+        return response
+
+    monkeypatch.setattr(urllib.request.AbstractHTTPHandler, "do_open", capture_route)
+    client = create_cloud_decision_client(control_url=url, token="local-test-token")
+    assert backend(client).verify_grounded_support("database?", "Postgres", allow_remote=True) == (True, 0.9)
+    expected = ("recording-proxy.example:8080", "api.engraphis.com") if url.endswith("engraphis.com") else (
+        urlsplit(url).netloc, None,
+    )
+    assert routes == [(*expected, "Bearer local-test-token")]
+
+
+def test_cloud_loopback_token_never_reaches_recording_proxy(monkeypatch):
+    import socket
+    import threading
+    import urllib.request
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    requests = []
+
+    def handler_for(destination):
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                requests.append((destination, self.headers.get("Authorization")))
+                payload = b'{"is_fallback":false,"decisions":{"has_support":'
+                payload += b'{"type":"noul","probability":0.9,"confidence":0.95}}}'
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, *args):
+                pass
+
+        return Handler
+
+    endpoint = ThreadingHTTPServer(("127.0.0.1", 0), handler_for("endpoint"))
+    proxy = ThreadingHTTPServer(("127.0.0.1", 0), handler_for("proxy"))
+    threads = [threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+               for server in (endpoint, proxy)]
+    for thread in threads:
+        thread.start()
+    monkeypatch.setattr(urllib.request, "getproxies", lambda: {"http": f"http://127.0.0.1:{proxy.server_port}"})
+    monkeypatch.setattr(urllib.request, "proxy_bypass", lambda host: False)
+
+    def resolve(host, port, *args):
+        assert host == "127.0.0.1"
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (host, port))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
+    try:
+        client = create_cloud_decision_client(control_url=f"http://127.0.0.1:{endpoint.server_port}", token="synthetic-test-token")
+        assert backend(client).verify_grounded_support("database?", "Postgres", allow_remote=True) == (True, 0.9)
+        assert requests == [("endpoint", "Bearer synthetic-test-token")]
+    finally:
+        for server in (endpoint, proxy):
+            server.shutdown()
+            server.server_close()
+        for thread in threads:
+            thread.join(timeout=2)
+    assert all(not thread.is_alive() for thread in threads)
+
+
+@pytest.mark.parametrize("transport", ["http", "https"])
+@pytest.mark.parametrize("hosts", [["93.184.216.34"], ["127.0.0.1", "93.184.216.34"]])
+def test_cloud_loopback_resolution_cannot_dial_external_addresses(monkeypatch, transport, hosts):
+    import socket
+    import time
+
+    connection = deadline_connection(monkeypatch, time.monotonic() + 2, transport, loopback_only=True)
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *args: [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", (host, 9000)) for host in hosts
+    ])
+    dials = []
+    closed = []
+
+    def connect(target):
+        dials.append(target)
+        raise OSError("loopback endpoint unavailable")
+
+    monkeypatch.setattr(socket, "socket", lambda *args: SimpleNamespace(
+        settimeout=lambda value: None, connect=connect, close=lambda: closed.append(True),
+    ))
+    with pytest.raises(ValueError, match="must connect to loopback"):
+        connection._create_connection(("localhost", 9000))
+    expected = [("127.0.0.1", 9000)] if len(hosts) == 2 else []
+    assert dials == expected
+    assert len(closed) == len(expected)
+
+
 def test_cloud_disabled_calls_do_not_resolve_or_send(monkeypatch):
     def unexpected(*args, **kwargs):
         pytest.fail("disabled cloud client performed network work")
@@ -425,14 +538,14 @@ def test_cloud_deadline_interrupts_status_and_headers(monkeypatch, header_prefix
     assert not producer.is_alive()
 
 
-def deadline_connection(monkeypatch, deadline, transport="https"):
+def deadline_connection(monkeypatch, deadline, transport="https", *, loopback_only=False):
     import urllib.request
     from engraphis.backends.jev_decision import _deadline_handlers
 
     selected = []
     monkeypatch.setattr(urllib.request.AbstractHTTPHandler, "do_open",
                         lambda self, connection_class, req, **kwargs: selected.append(connection_class))
-    http_handler, https_handler = _deadline_handlers(deadline)
+    http_handler, https_handler = _deadline_handlers(deadline, loopback_only=loopback_only)
     if transport == "http":
         http_handler.http_open(None)
     else:
@@ -448,8 +561,8 @@ def test_cloud_dial_retries_and_tls_share_short_budget(monkeypatch, transport):
     clock = [10.0]
     connection = deadline_connection(monkeypatch, 10.05, transport)
     monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])
-    addresses = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (host, 443))
-                 for host in ["93.184.216.34", "93.184.216.35"]]
+    hosts = ["127.0.0.1", "127.0.0.2"] if transport == "http" else ["93.184.216.34", "93.184.216.35"]
+    addresses = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (host, 443)) for host in hosts]
     monkeypatch.setattr(socket, "getaddrinfo", lambda *args: addresses)
     monkeypatch.setattr("engraphis.hosted_client._validated_addresses", lambda host: ["93.184.216.34"])
     sockets = []
