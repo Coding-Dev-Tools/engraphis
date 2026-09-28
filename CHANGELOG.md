@@ -5,6 +5,14 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+- Hardened the experimental Cloud decision client with validated destinations,
+  redirect refusal, bounded responses, strict decision parsing, and read-only
+  result interfaces. Managed availability and performance remain unverified.
+- Fixed the spacetime overlay's final paused frame being skipped by paint throttling.
+- Prevented retained-release waiver repairs from replacing a newer GitHub Latest release.
+- Reran the public offline fixtures into immutable v81 evidence and refreshed its
+  source bindings, documentation, and charts.
+
 ## [1.7.8] - 2026-09-27
 
 - Improved graph rendering and overlay scheduling, preserved saved Compact and custom
