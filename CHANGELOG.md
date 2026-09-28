@@ -7,13 +7,14 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 - Hardened the experimental Cloud decision client with validated destinations,
   redirect refusal, bounded responses, strict decision parsing, and read-only
-  result interfaces. Managed availability and performance remain unverified.
+  result interfaces. Loopback endpoints bypass proxies and reject external DNS
+  destinations. Managed availability and performance remain unverified.
 - Fixed the spacetime overlay's final paused frame being skipped by paint throttling.
 - Enforced a Cloud request deadline across connection retries, TLS, request sends,
   proxy handshakes, slow headers, and chunk framing. Preserved HTTP 413 for streamed oversized read-only
   requests across parser versions.
 - Prevented retained-release waiver repairs from replacing a newer GitHub Latest release.
-- Reran the public offline fixtures into immutable v87 evidence and refreshed its
+- Reran the public offline fixtures into immutable v88 evidence and refreshed its
   source bindings, documentation, and charts.
 
 ## [1.7.8] - 2026-09-27
