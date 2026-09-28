@@ -2,6 +2,7 @@
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -576,7 +577,14 @@ def test_the_budget_holds_even_when_a_grandchild_still_owns_the_pipe():
     assert elapsed < 30, "the budget was not enforced: waited %.1fs" % elapsed
 
 
-def test_a_stalled_uncaptured_step_takes_its_descendants_with_it(tmp_path):
+@pytest.mark.parametrize(
+    ("parent_only", "cleanup_delay"),
+    [(False, 0), (False, 2), (True, 0)],
+    ids=["whole-tree", "delayed-cleanup", "parent-only-negative-control"],
+)
+def test_a_stalled_uncaptured_step_takes_its_descendants_with_it(
+    tmp_path, monkeypatch, parent_only, cleanup_delay,
+):
     """The budget has to bound the *tree*, not just the process we happen to hold.
 
     ``pip install``, ``pipx`` and ``git fetch`` are displayed rather than parsed, so
@@ -590,34 +598,94 @@ def test_a_stalled_uncaptured_step_takes_its_descendants_with_it(tmp_path):
     sentinel = tmp_path / "descendant-outlived-the-budget"
     grandchild = tmp_path / "grandchild.py"
     grandchild.write_text(
-        "import sys, time\n"
-        "time.sleep(3)\n"
-        "open(sys.argv[1], 'w').write('still here')\n",
+        "import socket, sys\n"
+        "with socket.create_connection(('127.0.0.1', int(sys.argv[2])), timeout=30) as peer:\n"
+        "    peer.sendall(b'R')\n"
+        "    if peer.recv(1) == b'W':\n"
+        "        with open(sys.argv[1], 'w') as target:\n"
+        "            target.write('still here')\n"
+        "        peer.sendall(b'W')\n",
         encoding="utf-8",
     )
     child = tmp_path / "child.py"
     child.write_text(
         "import subprocess, sys, time\n"
-        "subprocess.Popen([sys.executable, sys.argv[1], sys.argv[2]])\n"
+        "subprocess.Popen([sys.executable, *sys.argv[1:]])\n"
         "time.sleep(60)\n",
         encoding="utf-8",
     )
 
-    started = time.monotonic()
-    with pytest.raises(update.UpdateTimeout) as exc:
-        update._run([sys.executable, str(child), str(grandchild), str(sentinel)],
-                    "Installing the update", 2)
-    assert "timed out after 2s" in str(exc.value)
-    assert time.monotonic() - started < 30, "the call itself was not bounded"
+    real_popen = subprocess.Popen
+    real_kill_tree = update._kill_process_tree
+    real_terminate_job = update._terminate_windows_job
+    processes = []
+    peer = None
 
-    # Well past the moment the grandchild would have written, had it survived the kill.
-    deadline = time.monotonic() + 6
-    while time.monotonic() < deadline and not sentinel.exists():
-        time.sleep(0.2)
-    assert not sentinel.exists(), (
-        "a descendant outlived the budget and was still touching the environment while "
-        "the updater had already moved on to rollback"
-    )
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        listener.settimeout(15)
+
+        def spawn(command, **kwargs):
+            process = real_popen(command, **kwargs)
+            if command[:2] != [sys.executable, str(child)]:
+                return process  # taskkill must remain an ordinary real subprocess.
+            processes.append(process)
+            communicate = process.communicate
+
+            def wait_until_ready(*args, **kwargs):
+                nonlocal peer
+                if peer is None:
+                    # Job assignment has already happened before communicate is called.
+                    # Begin the short timeout only once a real descendant exists.
+                    peer, _ = listener.accept()
+                    peer.settimeout(15)
+                    assert peer.recv(1) == b"R"
+                return communicate(*args, **kwargs)
+
+            monkeypatch.setattr(process, "communicate", wait_until_ready)
+            return process
+
+        def terminate_job(job):
+            # Scheduler delay may exceed the old 3s sentinel timer. Only activity after
+            # _run returns violates the rollback guarantee, not activity before cleanup.
+            time.sleep(cleanup_delay)
+            real_terminate_job(job)
+
+        monkeypatch.setattr(update.subprocess, "Popen", spawn)
+        monkeypatch.setattr(update, "_terminate_windows_job", terminate_job)
+        if parent_only:
+            monkeypatch.setattr(update, "_start_windows_job", lambda process: None)
+            monkeypatch.setattr(update, "_kill_process_tree", lambda process: process.kill())
+        try:
+            started = time.monotonic()
+            with pytest.raises(update.UpdateTimeout) as exc:
+                update._run(
+                    [sys.executable, str(child), str(grandchild), str(sentinel),
+                     str(listener.getsockname()[1])],
+                    "Installing the update", 2,
+                )
+            assert "timed out after 2s" in str(exc.value)
+            assert time.monotonic() - started < 30, "the call itself was not bounded"
+            assert peer is not None, "a real descendant must participate in the test"
+
+            # A surviving child must answer the post-return probe. EOF/reset proves the
+            # process closed its socket; silence times out and fails instead of passing.
+            try:
+                peer.sendall(b"W")
+                answer = peer.recv(1)
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                answer = b""
+            assert answer == (b"W" if parent_only else b"")
+            assert sentinel.exists() is parent_only, (
+                "a descendant survived cleanup and wrote after the updater returned"
+            )
+        finally:
+            if peer is not None:
+                peer.close()  # EOF also releases the negative-control descendant.
+            for process in processes:
+                real_kill_tree(process)
+                process.wait(timeout=5)
 
 
 # ── the destructive step belongs inside the rollback boundary ─────────────────
