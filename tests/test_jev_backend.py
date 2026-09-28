@@ -128,3 +128,35 @@ def test_empty_and_oversized_inputs_do_not_leave_the_process(query, evidence):
     client = FakeClient()
     assert backend(client).verify_grounded_support(query, evidence, allow_remote=True) == (False, 0.0)
     assert client.calls == []
+
+
+def test_cloud_decision_client_configuration(monkeypatch):
+    import io
+    from engraphis.backends.jev_decision import create_cloud_decision_client, DecisionQuestion
+
+    # Unconfigured
+    monkeypatch.delenv("ENGRAPHIS_CLOUD_ACCESS_TOKEN", raising=False)
+    client = create_cloud_decision_client(token="")
+    assert client.is_configured is False
+    assert client.allow_fallback is False
+
+    # Configured
+    client_configured = create_cloud_decision_client(token="test-token", control_url="https://api.engraphis.com")
+    assert client_configured.is_configured is True
+    assert client_configured.allow_fallback is False
+
+    # Mock evaluate response
+    mock_payload = b'{"decisions": {"q1": {"type": "choice", "selected": "reinforces", "confidence": 0.95}}}'
+    mock_resp = io.BytesIO(mock_payload)
+    mock_resp.status = 200
+
+    import urllib.request
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout: mock_resp)
+
+    q = DecisionQuestion("q1", "prompt", "choice", ("reinforces", "orthogonal"))
+    batch = client_configured.evaluate("test state", [q], model="test-model-1.0")
+    assert batch.is_fallback is False
+    assert batch.get_choice("q1").selected == "reinforces"
+    assert batch.get_choice("q1").confidence == 0.95
+
+

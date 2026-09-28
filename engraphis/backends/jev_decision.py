@@ -88,6 +88,101 @@ def get_decision_backend(
     return None
 
 
+@dataclass(frozen=True)
+class SimpleChoiceDecision:
+    selected: str
+    confidence: float
+
+
+@dataclass(frozen=True)
+class SimpleSupportDecision:
+    probability: float
+    confidence: float
+
+
+@dataclass
+class CloudDecisionBatch:
+    is_fallback: bool
+    choices: Dict[str, SimpleChoiceDecision]
+    nouls: Dict[str, SimpleSupportDecision]
+
+    def get_choice(self, question_id: str) -> Optional[ChoiceDecision]:
+        return self.choices.get(question_id)
+
+    def get_noul(self, question_id: str) -> Optional[SupportDecision]:
+        return self.nouls.get(question_id)
+
+
+class EngraphisCloudDecisionClient:
+    """DecisionClient that proxies requests through the Engraphis Cloud control plane.
+
+    Included for Pro and Team subscriptions without requiring a separate TypeSafe API key.
+    """
+
+    def __init__(
+        self,
+        *,
+        control_url: Optional[str] = None,
+        token: Optional[str] = None,
+        timeout_s: float = 2.0,
+    ) -> None:
+        self.control_url = (control_url or os.environ.get("ENGRAPHIS_CLOUD_CONTROL_URL", "https://api.engraphis.com")).rstrip("/")
+        self.token = token or os.environ.get("ENGRAPHIS_CLOUD_ACCESS_TOKEN", "")
+        self.timeout_s = timeout_s
+
+    @property
+    def is_configured(self) -> bool:
+        return bool(self.token and self.token.strip() and self.control_url)
+
+    @property
+    def allow_fallback(self) -> bool:
+        return False
+
+    def evaluate(
+        self, state: str, questions: Sequence[DecisionQuestion], *, model: str,
+    ) -> DecisionBatch:
+        import json
+        import urllib.request
+
+        payload = {
+            "model": model,
+            "state": state,
+            "questions": [q.to_dict() for q in questions],
+        }
+        url = f"{self.control_url}/v1/jev/decide"
+        data = json.dumps(payload).encode("utf-8")
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.token}",
+            "User-Agent": "engraphis-cloud-decision/1.0",
+        }
+        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+            raw_decisions = body.get("decisions", {})
+            choices: Dict[str, SimpleChoiceDecision] = {}
+            nouls: Dict[str, SimpleSupportDecision] = {}
+            for q_id, val in raw_decisions.items():
+                kind = val.get("type")
+                conf = float(val.get("confidence", 1.0))
+                if kind == "choice":
+                    choices[q_id] = SimpleChoiceDecision(selected=str(val.get("selected", "")), confidence=conf)
+                elif kind == "noul":
+                    nouls[q_id] = SimpleSupportDecision(probability=float(val.get("probability", 0.0)), confidence=conf)
+            return CloudDecisionBatch(is_fallback=False, choices=choices, nouls=nouls)
+
+
+def create_cloud_decision_client(
+    *,
+    control_url: Optional[str] = None,
+    token: Optional[str] = None,
+    timeout_s: float = 2.0,
+) -> EngraphisCloudDecisionClient:
+    """Create a DecisionClient that proxies Jev decisions via Engraphis Cloud (Pro/Team)."""
+    return EngraphisCloudDecisionClient(control_url=control_url, token=token, timeout_s=timeout_s)
+
+
+
 class JevDecisionBackend:
     """Advisory decisions only; zero confidence means defer to the core."""
 
