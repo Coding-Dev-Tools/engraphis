@@ -252,6 +252,87 @@ def test_https_loopback_managed_requests_disable_ambient_proxies(managed, monkey
                for handler in handlers)
 
 
+def test_http_loopback_managed_request_uses_saved_origin_without_proxy(monkeypatch):
+    import socket
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    requests = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            requests.append((self.path, self.headers["Authorization"], json.loads(
+                self.rfile.read(int(self.headers["Content-Length"])),
+            )))
+            body = json.dumps(_normalized()).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+    thread.start()
+    control = "http://127.0.0.1:%s" % server.server_port
+
+    def resolve(host, port, *args, **kwargs):
+        assert host == "127.0.0.1", "test attempted non-loopback resolution"
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (host, port))]
+
+    def refresh(control_url, credential, workspace_id, token_subject):
+        assert (control_url, credential, workspace_id, token_subject) == (
+            control, "synthetic-refresh", None, "member",
+        )
+        return {"access_token": "synthetic-access", "refresh_credential": "synthetic-rotated",
+                "organization_id": "org_synthetic"}
+
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
+    monkeypatch.setattr(cloud_session, "_post_refresh", refresh)
+    for variable in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY"):
+        monkeypatch.setenv(variable, "http://proxy.invalid:8080")
+    for variable in ("NO_PROXY", "no_proxy"):
+        monkeypatch.setenv(variable, "")
+    try:
+        cloud_session.save_bootstrap(
+            {"refresh_credential": "synthetic-refresh", "organization_id": "org_synthetic"},
+            control_url=control,
+        )
+        # Once saved, a changed environment cannot redirect this credential family.
+        monkeypatch.setenv("ENGRAPHIS_CLOUD_CONTROL_URL", "http://other.invalid")
+        client = transport.create_cloud_decision_client(timeout_s=2)
+        assert client.is_configured
+        batch = client.evaluate("Synthetic local evidence", [_question()], model=transport.MODEL,
+                                allow_remote=True, data_classification="public")
+        assert batch.get_noul("q").probability == 0.9
+        assert len(requests) == 1
+        path, authorization, body = requests[0]
+        assert path == "/v1/jev/decide"
+        assert authorization == "Bearer synthetic-access"
+        assert body["state"] == "Synthetic local evidence"
+        assert cloud_session.credential_bound_control_url() == control
+        assert cloud_session._load()["refresh_credential"] == "synthetic-rotated"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+    assert not thread.is_alive()
+
+
+@pytest.mark.parametrize("url", ["http://remote.invalid", "http://192.0.2.1", "http://10.0.0.1"])
+def test_remote_http_rejected_before_validation_or_credentials_sent(monkeypatch, url):
+    def forbidden(*args, **kwargs):
+        pytest.fail("non-loopback HTTP reached the network path")
+
+    monkeypatch.setattr(hosted_client, "validate_cloud_base_url", forbidden)
+    monkeypatch.setattr(hosted_client, "build_pinned_https_opener", forbidden)
+    with pytest.raises(transport.DecisionClientError, match="invalid_configuration"):
+        transport._post_json(url, "synthetic-access", {}, 1)
+
+
 def test_url_validation_consumes_budget_before_network_open(monkeypatch):
     clock = [10.0]
     monkeypatch.setattr(transport.time, "monotonic", lambda: clock[0])

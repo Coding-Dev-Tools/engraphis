@@ -386,7 +386,11 @@ def _post_json(url: str, token: str, payload: dict, timeout_s: float) -> object:
 
     deadline = time.monotonic() + timeout_s
     try:
-        if (urlsplit(url).scheme != "https" or not token or token != token.strip()
+        parts = urlsplit(url)
+        permitted_transport = parts.scheme == "https" or (
+            parts.scheme == "http" and _is_loopback_host(parts.hostname or "")
+        )
+        if (not permitted_transport or not token or token != token.strip()
                 or any(char.isspace() for char in token)):
             raise DecisionClientError("invalid_configuration")
         # Validation and DNS occur only inside an explicitly authorized call.

@@ -233,7 +233,7 @@ const LIC_BASE = {pro_upgrade_url:'https://engraphis.com/pricing',
              upgrade_url:'https://engraphis.com/pricing',
              plan:'local', access_state:'inactive',
              trial:{used:false, active:false, available:true, ends_at:0,
-                    trial_days:3, days_by_plan:{pro:3, team:10}}};
+                    trial_days:7, days_by_plan:{pro:7, team:14}}};
 let LIC = LIC_BASE;
 const location = {href:'https://127.0.0.1:8077/'};
 let THROWN = null;
@@ -308,7 +308,7 @@ def test_a_trial_eligible_local_installation_is_answered_with_the_consent_panel(
     assert 'class="hosted-opportunity"' in rendered["html"]
     assert ("Let your memory improve after you log off." if view == "automation" else
             "See the memory your team is about to lose.") in rendered["html"]
-    assert "Start 3-day Pro trial" in rendered["html"]
+    assert "Start 7-day Pro trial" in rendered["html"]
     assert "Annual Pro option" in rendered["html"]
     assert "explicitly approve each workspace in Manage &gt; Settings" in rendered["html"]
     assert "Secret and session-scoped memories stay local." in rendered["html"]
@@ -335,7 +335,7 @@ def test_a_consent_panel_links_subscribers_to_workspace_approval_without_checkou
     assert "on by default" not in rendered["html"]
     assert "Encrypted Cloud Sync is a separate choice" in rendered["html"]
     assert "Purchase Pro license" not in rendered["html"]
-    assert "Start 3-day Pro trial" not in rendered["html"]
+    assert "Start 7-day Pro trial" not in rendered["html"]
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is required to run the UI")
@@ -349,7 +349,7 @@ def test_classic_hosted_tabs_distinguish_trial_access_from_workspace_approval(tm
     }], script_path=CLASSIC_SCRIPT)["classic-trial"]
 
     html = rendered["html"]
-    assert "Start 3-day Pro trial" in html
+    assert "Start 7-day Pro trial" in html
     assert "explicitly approve each workspace in Manage &gt; Settings" in html
     assert "come on automatically" not in html
     assert 'href="/?view=manage&amp;tab=settings&amp;workspace=workspace"' in html
@@ -378,7 +378,7 @@ def test_a_genuine_entitlement_failure_still_renders_the_upgrade_panel(
     }])["unentitled"]
 
     assert 'class="upgrade-panel"' in rendered["html"]
-    assert "Start 3-day Pro trial" in rendered["html"]
+    assert "Start 7-day Pro trial" in rendered["html"]
     assert "Subscribe to Pro" not in rendered["html"]
     assert rendered["pill"] == "PRO"
 
@@ -421,7 +421,7 @@ def test_the_upgrade_panel_never_offers_a_trial_the_server_would_refuse(
     }[state]
     assert expected_action in rendered["html"]
     # And the one thing that must not.
-    assert "Start 3-day Pro trial" not in rendered["html"]
+    assert "Start 7-day Pro trial" not in rendered["html"]
     assert reason in rendered["html"]
 
 
@@ -495,7 +495,7 @@ const LIC_BASE = {pro_upgrade_url:'https://engraphis.example/checkout/pro',
                   account_url:'https://engraphis.example/account',
                   plan:'local', access_state:'inactive',
                   trial:{used:false, active:false, available:false, ends_at:0,
-                         trial_days:3, days_by_plan:{pro:3, team:10}}};
+                         trial_days:7, days_by_plan:{pro:7, team:14}}};
 let LIC = LIC_BASE;
 const location = {href:'https://127.0.0.1:8700/'};
 """
@@ -545,7 +545,7 @@ def test_a_lapsed_customer_uses_the_plan_neutral_account_portal(tmp_path, plan):
     assert "checkout/" not in html
     assert "?plan=" not in html
     # A lapsed customer is never offered a trial.
-    assert "Start 3-day" not in html
+    assert "Start 7-day" not in html
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is required to run the UI")
@@ -564,10 +564,10 @@ def test_a_lapsed_customer_with_no_readable_plan_still_gets_a_billing_target(tmp
 @pytest.mark.parametrize("state,expected,absent", [
     # The sidebar CTA opens this panel, so inactive and expired accounts keep the
     # matching actionable destination here as well.
-    ("inactive", "Start 3-day Pro trial", "Subscribe to Pro"),
-    ("trial_expired", "Subscribe to Pro", "Start 3-day Pro trial"),
-    ("trial", "Open Engraphis Cloud", "Start 3-day Pro trial"),
-    ("active", "Open Engraphis Cloud", "Start 3-day Pro trial"),
+    ("inactive", "Start 7-day Pro trial", "Subscribe to Pro"),
+    ("trial_expired", "Subscribe to Pro", "Start 7-day Pro trial"),
+    ("trial", "Open Engraphis Cloud", "Start 7-day Pro trial"),
+    ("active", "Open Engraphis Cloud", "Start 7-day Pro trial"),
 ])
 def test_each_access_state_offers_the_one_action_that_can_succeed(
     tmp_path, state, expected, absent,
@@ -577,7 +577,7 @@ def test_each_access_state_offers_the_one_action_that_can_succeed(
         "lic": {"plan": "pro", "access_state": state,
                 "trial": {"used": state != "inactive", "active": state == "trial",
                           "available": state == "inactive", "ends_at": 0,
-                          "trial_days": 3, "days_by_plan": {"pro": 3, "team": 10}}},
+                          "trial_days": 7, "days_by_plan": {"pro": 7, "team": 14}}},
     }])[state]["html"]
 
     if expected:
@@ -610,7 +610,7 @@ def test_a_paying_team_customer_is_not_told_team_is_excluded(tmp_path):
         {"name": "free", "lic": {"plan": "local", "access_state": "inactive",
                                  "trial": {"used": False, "active": False,
                                            "available": True, "ends_at": 0,
-                                           "trial_days": 3, "days_by_plan": {"pro": 3, "team": 10}}}},
+                                           "trial_days": 7, "days_by_plan": {"pro": 7, "team": 14}}}},
     ])
 
     assert rows["team-active"]["teamNote"] == (
@@ -629,7 +629,7 @@ def test_a_paying_team_customer_is_not_told_team_is_excluded(tmp_path):
     assert rows["pro-active"]["teamNote"] == "Your PRO subscription does not include this."
     assert "no longer active" in rows["team-lapsed"]["teamNote"]
     assert "free trial has ended" in rows["team-expired"]["teamNote"]
-    assert "exactly 10 active days" in rows["free"]["teamNote"]
+    assert "exactly 14 active days" in rows["free"]["teamNote"]
 
 
 def test_only_an_entitlement_status_may_draw_the_purchase_panel():

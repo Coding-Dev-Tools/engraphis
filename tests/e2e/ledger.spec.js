@@ -29,7 +29,7 @@ function license() {
     cloud_access_active: false,
     access_state: 'inactive',
     plan_source: 'local',
-    trial: { used: false, active: false, available: true, trial_days: 3, days_by_plan: { pro: 3, team: 10 } },
+    trial: { used: false, active: false, available: true, trial_days: 7, days_by_plan: { pro: 7, team: 14 } },
     pro_upgrade_url: 'https://cloud.engraphis.test/pro',
     team_upgrade_url: 'https://cloud.engraphis.test/team',
     pro_monthly_upgrade_url: 'https://cloud.engraphis.test/account?plan=pro&interval=monthly#billing',
@@ -2502,7 +2502,7 @@ test('Ledger gives active Pro members direct Cloud access and saves hosted polic
     cloud_access_active: true,
     access_state: 'active',
     plan_source: 'cloud',
-    trial: { used: true, active: false, available: false, trial_days: 3 },
+    trial: { used: true, active: false, available: false, trial_days: 7 },
   };
   const requests = await mockApi(page, {
     license: activePro,
@@ -2574,7 +2574,7 @@ test('Ledger omits unknown Team trial duration from an older license response', 
   await page.getByRole('button', { name: 'Settings' }).click();
   await page.getByRole('tab', { name: 'Plans & billing' }).click();
   await expect(page.locator('#plan-cards [data-pro-cta="team"]')).toHaveText('Start Team trial');
-  await expect(page.locator('#plan-cards [data-pro-cta="pro"]')).toHaveText('Start 3-day Pro trial');
+  await expect(page.locator('#plan-cards [data-pro-cta="pro"]')).toHaveText('Start 7-day Pro trial');
   await expect(page.locator('#plan-cards [data-pro-cta="team"]')).toHaveAttribute('href', /trial=team/);
 });
 
@@ -2582,20 +2582,20 @@ test('billing cadence selects the exact Pro and Team checkout target', async ({ 
   await mockApi(page);
   await page.goto('/');
   await expect(page.locator('#plan-badge')).toHaveCount(1);
-  await expect(page.locator('#sidebar-pro-cta')).toHaveText('Start 3-day Pro trial');
+  await expect(page.locator('#sidebar-pro-cta')).toHaveText('Start 7-day Pro trial');
   await expect(page.locator('#sidebar-pro-cta')).toHaveAttribute(
     'href',
     'https://cloud.engraphis.test/account?plan=pro&interval=monthly&trial=pro&utm_source=engraphis&utm_medium=product&utm_campaign=pro_conversion&utm_content=sidebar#billing',
   );
   await page.getByRole('button', { name: 'Settings' }).click();
   await page.getByRole('tab', { name: 'Analytics' }).click();
-  await expect(page.locator('#analytics-pro-cta')).toHaveText('Start 3-day Pro trial');
+  await expect(page.locator('#analytics-pro-cta')).toHaveText('Start 7-day Pro trial');
   await expect(page.locator('#analytics-pro-cta')).toHaveAttribute(
     'href',
     'https://cloud.engraphis.test/account?plan=pro&interval=monthly&trial=pro&utm_source=engraphis&utm_medium=product&utm_campaign=pro_conversion&utm_content=analytics#billing',
   );
   await page.getByRole('tab', { name: 'Automation' }).click();
-  await expect(page.locator('#automation-pro-cta')).toHaveText('Start 3-day Pro trial');
+  await expect(page.locator('#automation-pro-cta')).toHaveText('Start 7-day Pro trial');
   await expect(page.locator('#automation-pro-cta')).toHaveAttribute(
     'href',
     'https://cloud.engraphis.test/account?plan=pro&interval=monthly&trial=pro&utm_source=engraphis&utm_medium=product&utm_campaign=pro_conversion&utm_content=automation#billing',
@@ -2610,8 +2610,8 @@ test('billing cadence selects the exact Pro and Team checkout target', async ({ 
 
   const pro = page.locator('#plan-cards [data-pro-cta="pro"]');
   const team = page.locator('#plan-cards [data-pro-cta="team"]');
-  await expect(pro).toHaveText('Start 3-day Pro trial');
-  await expect(team).toHaveText('Start 10-day Team trial');
+  await expect(pro).toHaveText('Start 7-day Pro trial');
+  await expect(team).toHaveText('Start 14-day Team trial');
   await expect(pro).toHaveAttribute(
     'href',
     'https://cloud.engraphis.test/account?plan=pro&interval=monthly&trial=pro&utm_source=engraphis&utm_medium=product&utm_campaign=pro_conversion&utm_content=plans#billing',

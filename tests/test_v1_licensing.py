@@ -30,7 +30,7 @@ def test_v1_reports_hosted_plan_boundary(monkeypatch):
         license_state = client.get("/memory/license").json()["data"]
         assert license_state["plan"] == "local"
         assert license_state["cloud_managed"] is True
-        assert license_state["trial_seconds"] == 259_200
+        assert license_state["trial_seconds"] == 604_800
         assert license_state["grace_seconds"] == 86_400
 
 

@@ -239,8 +239,8 @@ def _env_content(
     if jev_key:
         lines += [
             "# TypeSafe Jev System 1 Decision Engine (BYOK):",
-            f"TYPESAFE_API_KEY={jev_key}",
-            f"JEV_API_KEY={jev_key}",
+            f"TYPESAFE_API_KEY={json.dumps(jev_key)}",
+            f"JEV_API_KEY={json.dumps(jev_key)}",
             "ENGRAPHIS_DECISION_BACKEND=byok",
         ]
     lines += [
@@ -441,8 +441,10 @@ def main(argv=None) -> int:
             from engraphis.config import persist_project_env
             persist_project_env(
                 {
-                    "TYPESAFE_API_KEY": resolved_jev_key,
-                    "JEV_API_KEY": resolved_jev_key,
+                    # Keys are printable ASCII, so JSON's quote/backslash escapes
+                    # exactly match the trusted-env parser without expansion.
+                    "TYPESAFE_API_KEY": json.dumps(resolved_jev_key),
+                    "JEV_API_KEY": json.dumps(resolved_jev_key),
                     "ENGRAPHIS_DECISION_BACKEND": "byok",
                 },
                 env_file,
