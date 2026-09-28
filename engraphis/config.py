@@ -979,6 +979,21 @@ class Settings:
         default_factory=lambda: _env_bool("ENGRAPHIS_LLM_AUTO_EXTRACT", False)
     )
 
+    # System 1 decision engine (Jev / TypeSafe AI): "none" (default), "typesafe" (BYOK),
+    # "cloud" (Engraphis Cloud Pro/Team proxy), or "auto"
+    decision_backend: str = field(
+        default_factory=lambda: _env("ENGRAPHIS_DECISION_BACKEND", "none").strip().lower()
+    )
+    decision_model: str = field(
+        default_factory=lambda: _env("ENGRAPHIS_DECISION_MODEL", "jev-1.13.0").strip()
+    )
+    typesafe_api_key: str = field(
+        default_factory=lambda: _env("TYPESAFE_API_KEY", "") or _env("JEV_API_KEY", "")
+    )
+    typesafe_base_url: str = field(
+        default_factory=lambda: _env("TYPESAFE_BASE_URL", "https://api.typesafe.ai").strip()
+    )
+
     # Optional cross-encoder reranker model. Empty (default) -> IdentityReranker (offline).
     rerank_model: str = field(default_factory=lambda: _env("ENGRAPHIS_RERANK_MODEL", ""))
     # Optional immutable Hugging Face commit for ENGRAPHIS_RERANK_MODEL. Strict mode
@@ -1053,6 +1068,11 @@ class Settings:
     def vector_backend_identity(self) -> dict:
         """Return the configured vs resolved vector backend identities for health."""
         return {"configured": self.vector_backend, "resolved": self.resolved_vector_backend}
+
+    @property
+    def has_decision_backend(self) -> bool:
+        """Whether a System 1 decision engine backend is configured (BYOK or Cloud)."""
+        return bool(self.typesafe_api_key) or bool(os.environ.get("ENGRAPHIS_CLOUD_ACCESS_TOKEN"))
 
     def __post_init__(self) -> None:
         """Validate critical settings and fail fast on configuration errors."""
