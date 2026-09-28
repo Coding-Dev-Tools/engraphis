@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 import os
+import time
 from dataclasses import dataclass
 from typing import Dict, Optional, Protocol, Sequence, Tuple
 
@@ -83,6 +84,62 @@ def _probability(value: object) -> bool:
             and math.isfinite(value) and 0 <= value <= 1)
 
 
+def _remaining_time(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("decision request deadline exceeded")
+    return remaining
+
+
+def _read_response(response, deadline: float) -> bytes:
+    """Bound total body-read time, including a peer that continuously drips bytes."""
+    import socket
+    import threading
+
+    sock = getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None)
+    timer = None
+    if isinstance(sock, socket.socket):
+        # Even read1() can consume several reads while parsing chunk framing.
+        # Interrupt the socket at the deadline so slow chunk headers cannot keep
+        # a single read1() alive. Shutdown does not acquire the reader's lock.
+        def expire():
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+        timer = threading.Timer(_remaining_time(deadline), expire)
+        timer.daemon = True
+        timer.start()
+    try:
+        return _read_response_chunks(response, deadline)
+    finally:
+        if timer is not None:
+            timer.cancel()
+
+
+def _read_response_chunks(response, deadline: float) -> bytes:
+    data = bytearray()
+    while len(data) <= MAX_RESPONSE_BYTES:
+        remaining = _remaining_time(deadline)
+        # urllib's HTTPResponse wraps SocketIO in a BufferedReader. Tighten the
+        # underlying socket deadline for each read rather than renewing the full
+        # timeout. fp is None after a length-delimited response reaches EOF.
+        sock = getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None)
+        if sock is not None:
+            sock.settimeout(remaining)
+        # read() tries to fill its entire buffer; read1() returns after a single
+        # buffered/socket read, letting the absolute deadline run between chunks.
+        chunk = response.read1(min(4096, MAX_RESPONSE_BYTES + 1 - len(data)))
+        _remaining_time(deadline)
+        if not chunk:
+            break
+        data.extend(chunk)
+    if len(data) > MAX_RESPONSE_BYTES:
+        raise ValueError("decision response exceeds the size limit")
+    return bytes(data)
+
+
 def get_decision_backend(
     name: Optional[str] = None, *, client: Optional[DecisionClient] = None,
     model: Optional[str] = None, offline_mode: bool = False,
@@ -125,6 +182,8 @@ class EngraphisCloudDecisionClient:
 
     Construction never performs network I/O. Calling evaluate authorizes a remote
     request; use JevDecisionBackend for offline and per-call consent checks.
+    The timeout bounds socket operations and total response-body time. System
+    DNS resolution itself cannot be interrupted by urllib.
     """
 
     def __init__(
@@ -175,6 +234,7 @@ class EngraphisCloudDecisionClient:
             "state": state,
             "questions": [q.to_dict() for q in questions],
         }
+        deadline = time.monotonic() + self.timeout_s
         url = validate_cloud_base_url(self.control_url) + "/v1/jev/decide"
         data = json.dumps(payload).encode("utf-8")
         headers = {
@@ -183,10 +243,10 @@ class EngraphisCloudDecisionClient:
             "User-Agent": "engraphis-cloud-decision/1.0",
         }
         req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-        with build_pinned_https_opener(NoRedirect()).open(req, timeout=self.timeout_s) as resp:
-            raw = resp.read(MAX_RESPONSE_BYTES + 1)
-        if len(raw) > MAX_RESPONSE_BYTES:
-            raise ValueError("decision response exceeds the size limit")
+        with build_pinned_https_opener(NoRedirect()).open(
+            req, timeout=_remaining_time(deadline),
+        ) as resp:
+            raw = _read_response(resp, deadline)
         body = json.loads(raw.decode("utf-8"))
         if not isinstance(body, dict) or body.get("is_fallback", False) is not False:
             return CloudDecisionBatch(is_fallback=True, choices={}, nouls={})

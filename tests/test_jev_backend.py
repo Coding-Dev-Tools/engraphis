@@ -210,15 +210,15 @@ def test_cloud_valid_response_and_bounded_transport(monkeypatch):
 
     seen = []
     class Response(io.BytesIO):
-        def read(self, size=-1):
-            assert size == MAX_RESPONSE_BYTES + 1
-            return super().read(size)
+        def read1(self, size=-1):
+            assert 0 < size <= 4096
+            return super().read1(size)
 
     def opener(handler):
         def open_request(req, timeout):
             assert req.full_url == "https://api.engraphis.com/v1/jev/decide"
             assert req.get_header("Authorization") == "Bearer test-token"
-            assert timeout == 2.0
+            assert 0 < timeout <= 2.0
             assert json.loads(req.data)["model"] == "test-model-1.0"
             assert handler.redirect_request(req, None, 302, "Found", {},
                                             "https://unrelated.example/") is None
@@ -268,3 +268,89 @@ def test_cloud_explicit_empty_configuration_does_not_load_ambient_credentials(mo
 def test_cloud_timeout_is_bounded(timeout):
     with pytest.raises(ValueError, match="timeout"):
         create_cloud_decision_client(timeout_s=timeout)
+
+
+def test_cloud_slow_drip_response_obeys_one_deadline(monkeypatch):
+    import engraphis.backends.jev_decision as module
+
+    clock = [10.0]
+    timeouts = []
+    monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])
+
+    class SlowResponse(io.BytesIO):
+        fp = SimpleNamespace(raw=SimpleNamespace(_sock=SimpleNamespace(
+            settimeout=lambda value: timeouts.append(value),
+        )))
+
+        def read1(self, size=-1):
+            # Every receive makes progress inside the original two-second socket
+            # timeout; an unbounded read() would keep waiting for the whole body.
+            clock[0] += 0.75
+            return b" "
+
+    response = SlowResponse()
+    monkeypatch.setattr("engraphis.hosted_client.build_pinned_https_opener",
+                        lambda *handlers: SimpleNamespace(open=lambda req, timeout: response))
+    adapter = backend(create_cloud_decision_client(token="test-token", timeout_s=2))
+    assert adapter.verify_grounded_support("database?", "Postgres", allow_remote=True) == (False, 0.0)
+    assert timeouts == [2.0, 1.25, 0.5]
+    assert response.closed
+
+
+def test_cloud_validation_time_consumes_the_request_budget(monkeypatch):
+    import engraphis.backends.jev_decision as module
+
+    clock = [10.0]
+    monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])
+
+    def delayed_validation(url):
+        clock[0] += 3.0
+        return url
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("expired validation budget reached network transport")
+
+    monkeypatch.setattr("engraphis.hosted_client.validate_cloud_base_url", delayed_validation)
+    monkeypatch.setattr("engraphis.hosted_client.build_pinned_https_opener",
+                        lambda *handlers: SimpleNamespace(open=unexpected))
+    adapter = backend(create_cloud_decision_client(token="test-token", timeout_s=2))
+    assert adapter.verify_grounded_support("database?", "Postgres", allow_remote=True) == (False, 0.0)
+
+
+def test_cloud_deadline_interrupts_slow_chunk_framing():
+    import http.client
+    import socket
+    import threading
+    import time
+    from engraphis.backends.jev_decision import _read_response
+
+    reader, writer = socket.socketpair()
+    stopped = threading.Event()
+    writer.sendall(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+    response = http.client.HTTPResponse(reader)
+    response.begin()
+
+    def drip_chunk_header():
+        try:
+            for _ in range(200):
+                if stopped.wait(0.01):
+                    return
+                writer.sendall(b"0")
+            writer.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
+
+    producer = threading.Thread(target=drip_chunk_header, daemon=True)
+    producer.start()
+    started = time.monotonic()
+    try:
+        with pytest.raises((TimeoutError, OSError, http.client.HTTPException)):
+            _read_response(response, started + 0.1)
+        assert time.monotonic() - started < 1.5
+    finally:
+        stopped.set()
+        response.close()
+        reader.close()
+        writer.close()
+        producer.join(timeout=2)
+    assert not producer.is_alive()
