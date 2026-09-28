@@ -5,6 +5,14 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+- Added saved project-to-workspace routing and connection instructions so agents can use the
+  user's selected workspace. Routine MCP calls inherit an omitted workspace from an authorized
+  session or repo mapping, report the resolved destination, and reject session mismatches.
+- Command Code's SessionStart hook now uses the nearest Git root's repo name, honors saved
+  workspace mappings unless explicitly overridden, and labels recalled context with the
+  server's resolved workspace.
+- Added a previewed selective move workflow for organizing mixed workspaces while retaining
+  source history and enforcing move eligibility and workspace access.
 - Hardened the experimental Cloud decision client with validated destinations,
   redirect refusal, bounded responses, strict decision parsing, and read-only
   result interfaces. Loopback endpoints bypass proxies and reject external DNS

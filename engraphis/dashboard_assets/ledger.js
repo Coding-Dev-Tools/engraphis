@@ -13,6 +13,9 @@
     libraryCursors: [null],
     libraryPage: 0,
     libraryLoading: false,
+    librarySelecting: false,
+    moveMemoryIds: new Set(),
+    memoryMove: null,
     selectedMemory: '',
     editorMemory: null,
     editorSession: null,
@@ -1192,6 +1195,7 @@
   }
 
   async function loadMemories(workspace, epoch, page = 0) {
+    resetMoveSelection();
     const request = beginScopedRequest('library');
     const params = new URLSearchParams({ workspace, limit: '100' });
     if (request.project) params.set('repo', request.project);
@@ -1236,6 +1240,10 @@
     byId('library-next').disabled = state.libraryLoading || !state.libraryNextCursor;
     byId('library-refresh').disabled = state.libraryLoading || !state.workspace;
     byId('library-list').setAttribute('aria-busy', String(state.libraryLoading));
+    byId('library-list').querySelectorAll('.memory-card').forEach(card => {
+      card.disabled = state.librarySelecting && state.libraryLoading;
+    });
+    renderMoveSelection();
   }
 
   function refreshLibrary(page = 0) {
@@ -1320,6 +1328,7 @@
   const processingControls = window.EngraphisProcessingControls.create(api);
   const askRequests = window.EngraphisAskRequests.create({ renderAnswer, renderPreview });
   const workflow = window.EngraphisWorkflow.create({
+    api,
     onProjectChange: () => { void selectWorkspace(state.workspace); },
     onNavigate: view => switchView(view),
     onNewMemory: () => { switchView('library'); openEditor(); },
@@ -1343,6 +1352,7 @@
 
   async function selectWorkspace(name) {
     if (!name) return;
+    resetMoveSelection(true);
     invalidateConsolidationReview();
     const epoch = ++state.refreshEpoch;
     invalidateScopedRequests();
@@ -1420,14 +1430,31 @@
     card.type = 'button';
     card.setAttribute('role', 'option');
     card.dataset.memoryId = memory.id;
-    card.setAttribute('aria-selected', String(state.selectedMemory === memory.id));
-    if (state.selectedMemory === memory.id) card.classList.add('selected');
+    const selected = state.librarySelecting ? state.moveMemoryIds.has(memory.id) : state.selectedMemory === memory.id;
+    card.setAttribute('aria-selected', String(selected));
+    if (selected) card.classList.add('selected');
+    if (state.librarySelecting) {
+      const marker = node('span', 'memory-selection-marker', selected ? 'Selected for move' : 'Select for move');
+      marker.setAttribute('aria-hidden', 'true');
+      card.append(marker);
+    }
     card.append(
       node('h2', '', memoryTitle(memory)),
       node('p', '', truncate(memory.content || memory.summary, 240)),
       memoryMeta(memory),
     );
-    card.addEventListener('click', () => openMemory(memory));
+    card.addEventListener('click', () => {
+      if (!state.librarySelecting) { openMemory(memory); return; }
+      if (state.libraryLoading) return;
+      if (state.moveMemoryIds.has(memory.id)) state.moveMemoryIds.delete(memory.id);
+      else state.moveMemoryIds.add(memory.id);
+      closeMemoryMove();
+      renderLibrary();
+      byId('library-list').querySelectorAll('[data-memory-id]').forEach(item => {
+        if (item.dataset.memoryId === memory.id) { item.tabIndex = 0; item.focus(); }
+        else item.tabIndex = -1;
+      });
+    });
     return card;
   }
 
@@ -1437,6 +1464,8 @@
 
   function renderLibrary() {
     const target = byId('library-list');
+    target.setAttribute('aria-multiselectable', String(state.librarySelecting));
+    renderMoveSelection();
     if (!target.dataset.keyboardBound) {
       target.dataset.keyboardBound = 'true';
       target.addEventListener('keydown', event => {
@@ -1470,6 +1499,198 @@
     const cards = [...target.querySelectorAll('[role="option"]')];
     const selectedIndex = cards.findIndex(card => card.getAttribute('aria-selected') === 'true');
     cards.forEach((card, index) => { card.tabIndex = index === (selectedIndex >= 0 ? selectedIndex : 0) ? 0 : -1; });
+  }
+
+  function renderMoveSelection() {
+    const toggle = byId('library-selection-toggle');
+    toggle.disabled = state.libraryLoading || !state.workspace || !state.memories.length;
+    toggle.setAttribute('aria-pressed', String(state.librarySelecting));
+    toggle.textContent = state.librarySelecting ? 'Cancel selection' : 'Select memories';
+    byId('library-selection-status').textContent = state.librarySelecting
+      ? `${state.moveMemoryIds.size} selected on this page. Changing results clears the selection.`
+      : 'Select memories on this page to move them to another workspace.';
+    byId('library-move').disabled = state.libraryLoading || !state.moveMemoryIds.size;
+  }
+
+  function resetMoveSelection(finish = false) {
+    closeMemoryMove();
+    state.moveMemoryIds.clear();
+    if (finish) state.librarySelecting = false;
+    renderMoveSelection();
+  }
+
+  function closeMemoryMove() {
+    const dialog = byId('memory-move-dialog');
+    const move = state.memoryMove;
+    state.memoryMove = null;
+    beginScopedRequest('memory-move');
+    if (dialog.open) dialog.close();
+    if (move && move.returnFocus && move.returnFocus.isConnected) move.returnFocus.focus();
+  }
+
+  function invalidateMemoryMovePreview() {
+    const move = state.memoryMove;
+    if (!move || move.applying) return;
+    beginScopedRequest('memory-move');
+    move.preview = null;
+    move.loading = false;
+    byId('memory-move-error').hidden = true;
+    byId('memory-move-preview').replaceChildren(empty('Choose a destination, then preview the move.'));
+    renderMemoryMoveControls();
+  }
+
+  function renderMemoryMoveControls() {
+    const move = state.memoryMove;
+    if (!move) return;
+    const busy = move.loading || move.applying;
+    const target = byId('memory-move-target');
+    target.disabled = move.applying;
+    byId('memory-move-cancel').disabled = move.applying;
+    byId('memory-move-preview-button').disabled = busy || !target.value;
+    byId('memory-move-apply').disabled = busy || !move.preview || move.preview.can_move !== true;
+    byId('memory-move-form').setAttribute('aria-busy', String(busy));
+  }
+
+  function openMemoryMove() {
+    if (!state.moveMemoryIds.size || state.libraryLoading) return;
+    closeMemoryMove();
+    state.memoryMove = {
+      workspace: state.workspace, project: state.project,
+      ids: [...state.moveMemoryIds].sort(), preview: null, loading: false, applying: false,
+      returnFocus: document.activeElement,
+    };
+    const target = byId('memory-move-target');
+    target.replaceChildren(option('', 'Choose a workspace'));
+    state.workspaces.filter(item => workspaceName(item) && workspaceName(item) !== state.workspace)
+      .sort((a, b) => workspaceName(a).localeCompare(workspaceName(b))).forEach(item => {
+        const name = workspaceName(item);
+        const access = item.visibility === 'personal' ? 'Personal'
+          : item.visibility === 'shared' ? 'Shared' : 'Access shown in preview';
+        target.append(option(name, `${name} · ${access}`));
+      });
+    byId('memory-move-source').textContent = `From ${JSON.stringify(state.workspace)} · ${state.moveMemoryIds.size} selected`;
+    invalidateMemoryMovePreview();
+    if (target.options.length === 1) {
+      byId('memory-move-preview').replaceChildren(empty('Create another accessible workspace in Settings before moving memories.'));
+    }
+    byId('memory-move-dialog').showModal();
+    target.focus();
+  }
+
+  function memoryMoveBody(move) {
+    return { workspace: move.workspace, target_workspace: byId('memory-move-target').value, memory_ids: move.ids };
+  }
+
+  function renderMemoryMovePreview(preview, move) {
+    const target = byId('memory-move-preview');
+    const rows = [
+      ['From workspace', preview.source], ['To workspace', preview.target],
+      ['Selected memories', move.ids.length], ['Total records to move', preview.count],
+      ['Related memories and history', preview.related_count],
+    ];
+    if (preview.sessions != null) rows.push(['Closed sessions included', preview.sessions]);
+    if (preview.graph_edges != null) rows.push(['Graph relationships included', preview.graph_edges]);
+    if (Array.isArray(preview.repos) && preview.repos.length) rows.push(['Projects preserved', preview.repos.join(', ')]);
+    target.replaceChildren(definitionList(rows.map(([label, value]) => [label, text(value)])));
+    const visibilityLabel = value => value === 'personal' ? 'Personal' : value === 'shared' ? 'Shared' : 'Unknown';
+    target.append(node('p', 'project-help', `Access: ${visibilityLabel(preview.source_visibility)} → ${visibilityLabel(preview.target_visibility)}.`));
+    if (preview.target_visibility === 'shared') {
+      target.append(node('p', 'project-help', 'The destination is shared. Other users with workspace access can read the moved workspace and project memories. Session ownership restrictions still apply.'));
+    } else if (preview.target_visibility === 'personal') {
+      target.append(node('p', 'project-help', 'The destination is personal. Its owner controls access to the moved memories.'));
+    }
+    target.append(node('p', 'project-help', 'Related memories and their history, closed sessions and their events move together. Original identifiers and preserved history stay attached to the memories.'));
+    if (Array.isArray(preview.memories) && preview.memories.length) {
+      const details = node('details', 'memory-move-records');
+      details.append(node('summary', '', `Review all ${preview.memories.length} records`));
+      const list = node('ul');
+      preview.memories.forEach(memory => {
+        const item = node('li');
+        item.append(node('strong', '', memory.title || memory.id),
+          node('span', '', ` · ${memory.id}${memory.related ? ' · related record' : ' · selected'}`));
+        list.append(item);
+      });
+      details.append(list);
+      target.append(details);
+    }
+    const blockers = Array.isArray(preview.blockers) ? preview.blockers : [];
+    if (blockers.length) {
+      target.append(node('p', 'form-error', 'These records cannot be moved yet:'));
+      const list = node('ul', 'memory-move-blockers');
+      blockers.forEach(blocker => list.append(node('li', '', blocker.message || blocker.code || 'Move is blocked.')));
+      target.append(list);
+    } else if (preview.can_move === true) {
+      target.append(node('p', 'project-help', 'Review this destination and complete record list, then choose Move memories.'));
+    }
+  }
+
+  async function previewMemoryMove() {
+    const move = state.memoryMove;
+    if (!move || move.loading || move.applying || !byId('memory-move-target').value) return;
+    const request = beginScopedRequest('memory-move');
+    const body = memoryMoveBody(move);
+    move.preview = null;
+    move.loading = true;
+    byId('memory-move-error').hidden = true;
+    byId('memory-move-preview').replaceChildren(empty('Checking the complete move and its related history…'));
+    renderMemoryMoveControls();
+    try {
+      const preview = await api('/memories/move-preview', { method: 'POST', body, signal: request.signal });
+      if (state.memoryMove !== move || !isCurrentScopedRequest(request) || body.target_workspace !== byId('memory-move-target').value) return;
+      const sameIds = Array.isArray(preview.requested_ids)
+        && JSON.stringify([...preview.requested_ids].sort()) === JSON.stringify(move.ids);
+      if (preview.source !== body.workspace || preview.target !== body.target_workspace || !sameIds
+        || (preview.can_move === true && (typeof preview.preview_token !== 'string' || !preview.preview_token))) {
+        throw new Error('The preview does not match this selection. Request a new preview.');
+      }
+      if (Array.isArray(preview.blockers) && preview.blockers.length) preview.can_move = false;
+      move.preview = preview;
+      renderMemoryMovePreview(preview, move);
+    } catch (error) {
+      if (state.memoryMove !== move || !isCurrentScopedRequest(request)) return;
+      byId('memory-move-preview').replaceChildren(empty('No move has been submitted.'));
+      byId('memory-move-error').textContent = `Could not preview the move: ${error.message}`;
+      byId('memory-move-error').hidden = false;
+    } finally {
+      if (state.memoryMove === move && isCurrentScopedRequest(request)) {
+        move.loading = false;
+        renderMemoryMoveControls();
+      }
+    }
+  }
+
+  async function applyMemoryMove(event) {
+    event.preventDefault();
+    const move = state.memoryMove;
+    if (!move || move.loading || move.applying || !move.preview || move.preview.can_move !== true) return;
+    const request = beginScopedRequest('memory-move');
+    const body = { ...memoryMoveBody(move), preview_token: move.preview.preview_token, confirmed: true };
+    if (body.target_workspace !== move.preview.target || body.workspace !== move.preview.source) {
+      invalidateMemoryMovePreview();
+      return;
+    }
+    move.applying = true;
+    byId('memory-move-error').hidden = true;
+    renderMemoryMoveControls();
+    try {
+      const result = await api('/memories/move', { method: 'POST', body, signal: request.signal });
+      if (state.memoryMove !== move || !isCurrentScopedRequest(request)) return;
+      closeMemoryMove();
+      await selectWorkspace(move.workspace);
+      if (state.workspace === move.workspace) showNotice(`Moved ${number(result.count)} records to ${JSON.stringify(result.workspace)}. History is preserved.`);
+    } catch (error) {
+      if (state.memoryMove !== move || !isCurrentScopedRequest(request)) return;
+      move.preview = null;
+      byId('memory-move-error').textContent = error.status === 409
+        ? 'Memory or workspace state changed. Preview the move again before continuing.'
+        : `The move could not be confirmed: ${error.message} Preview again to check the current records before retrying.`;
+      byId('memory-move-error').hidden = false;
+    } finally {
+      if (state.memoryMove === move && isCurrentScopedRequest(request)) {
+        move.applying = false;
+        renderMemoryMoveControls();
+      }
+    }
   }
 
   function definitionList(entries) {
@@ -2233,7 +2454,8 @@
       delete byId('obsidian-cancel').dataset.workspace;
     }
     byId('obsidian-workspace').value = state.workspace;
-    byId('obsidian-repo').value = '';
+    byId('obsidian-repo').value = state.project;
+    byId('obsidian-scope').value = state.project ? 'repo' : 'workspace';
     byId('obsidian-session').value = '';
     byId('obsidian-vault-label').value = '';
     if (!obsidianImport.running) {
@@ -5268,15 +5490,32 @@
   byId('ask-form').addEventListener('submit', askMemory);
   byId('review-refresh').addEventListener('click', () => { void loadReviewInbox(); });
   byId('library-filter').addEventListener('input', () => {
+    resetMoveSelection();
     window.clearTimeout(librarySearchTimer);
     // Invalidate immediately: an earlier query must not paint while the new one debounces.
     beginScopedRequest('library');
+    state.libraryLoading = Boolean(state.workspace);
+    renderLibraryPaging();
     librarySearchTimer = window.setTimeout(() => refreshLibrary(), 250);
   });
   byId('library-type').addEventListener('change', () => refreshLibrary());
   byId('library-previous').addEventListener('click', () => refreshLibrary(state.libraryPage - 1));
   byId('library-next').addEventListener('click', () => refreshLibrary(state.libraryPage + 1));
   byId('library-refresh').addEventListener('click', () => refreshLibrary());
+  byId('library-selection-toggle').addEventListener('click', () => {
+    state.librarySelecting = !state.librarySelecting;
+    resetMoveSelection();
+    renderLibrary();
+  });
+  byId('library-move').addEventListener('click', openMemoryMove);
+  byId('memory-move-target').addEventListener('change', invalidateMemoryMovePreview);
+  byId('memory-move-preview-button').addEventListener('click', () => { void previewMemoryMove(); });
+  byId('memory-move-form').addEventListener('submit', applyMemoryMove);
+  byId('memory-move-cancel').addEventListener('click', closeMemoryMove);
+  byId('memory-move-dialog').addEventListener('cancel', event => {
+    event.preventDefault();
+    if (!state.memoryMove || !state.memoryMove.applying) closeMemoryMove();
+  });
   byId('first-memory-add').addEventListener('click', () => {
     if (!state.workspace) {
       switchView('manage');

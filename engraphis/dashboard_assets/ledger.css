@@ -563,6 +563,18 @@ input::placeholder, textarea::placeholder { color: var(--c-dim); opacity: 1; }
 .library-layout { display: grid; grid-template-columns: minmax(280px, .85fr) minmax(340px, 1.15fr); gap: 12px; align-items: start; }
 .library-detail-stack { display: grid; gap: 12px; align-content: start; }
 .library-list { max-height: calc(100vh - 235px); overflow-y: auto; padding-right: 3px; }
+.library-selection-toolbar { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin: 0 0 14px; }
+.library-selection-toolbar .project-help { flex: 1; min-width: 180px; }
+.memory-selection-marker { display: block; margin-bottom: 8px; color: var(--c-acc); font-size: 12px; }
+.connection-routing { margin: 18px 0; padding: 20px; border: 1px solid var(--c-line); border-radius: 6px; background: var(--c-surface); }
+.connection-routing > p { color: var(--c-mid); line-height: 1.6; }
+.connection-routing h3 { margin-top: 24px; }
+.memory-move-preview .definition-list div { grid-template-columns: minmax(140px, 1fr) minmax(0, 1fr); }
+.memory-move-preview .definition-list dd { overflow-wrap: anywhere; }
+.memory-move-records summary { cursor: pointer; color: var(--c-acc); }
+.memory-move-records ul { max-height: 240px; overflow-y: auto; padding-left: 22px; }
+.memory-move-records li, .memory-move-blockers li { margin-top: 8px; overflow-wrap: anywhere; }
+.memory-move-records li span { color: var(--c-mid); font-size: 12px; }
 .memory-link-card, .memory-card { position: relative; width: 100%; color: var(--c-fg); text-align: left; cursor: pointer; }
 .memory-link-card:hover, .memory-card.selected { border-color: var(--c-acc); background: var(--c-acc-soft); }
 .memory-card .memory-meta, .detail-meta {

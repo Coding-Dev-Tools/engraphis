@@ -157,6 +157,18 @@ def test_apply_scope_defaults_skips_repo_when_workspace_overridden() -> None:
     assert "repo" not in out
 
 
+def test_repo_only_defaults_allow_routing_without_overriding_sessions() -> None:
+    config = EngraphisRuntimeConfig(command="x", default_repo="backend")
+    assert apply_scope_defaults({}, config) == {"repo": "backend"}
+    assert apply_scope_defaults({"repo": None}, config) == {"repo": None}
+    assert apply_scope_defaults({"workspace": "other"}, config) == {"workspace": "other"}
+    assert apply_scope_defaults({"session_id": "ses_other"}, config) == {"session_id": "ses_other"}
+    configured = EngraphisRuntimeConfig(command="x", default_repo="backend", default_workspace="acme")
+    assert apply_scope_defaults({"session_id": "ses_other"}, configured) == {"session_id": "ses_other"}
+    explicit = {"session_id": "ses_other", "workspace": "default", "repo": None}
+    assert apply_scope_defaults(explicit, configured) == explicit
+
+
 def test_apply_scope_defaults_merges_extra() -> None:
     config = EngraphisRuntimeConfig(command="x")
     out = apply_scope_defaults({}, config, extra={"actor": "user"})
