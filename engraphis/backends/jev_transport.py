@@ -36,8 +36,16 @@ _SECRETS = (
                r"xox[baprs]-[A-Za-z0-9-]{16,}|AKIA[A-Z0-9]{16}|"
                r"engr_(?:rt|dev)_[A-Za-z0-9_-]{16,})\b"),
     re.compile(r"\bBearer\s+[A-Za-z0-9._~-]{12,}", re.IGNORECASE),
-    re.compile(r"(?i)\b(?:api[_ -]?key|password|secret|access[_ -]?token)\b"
-               r"[\"']?\s*[:=]\s*[\"']?[A-Za-z0-9/+_.~-]{8,}"),
+    # Recognize conventional credential assignments in raw text, including
+    # prefixed identifiers, JSON, shell and environment-index forms. This is a
+    # best-effort boundary, not proof that arbitrary prose contains no secrets.
+    re.compile(r"(?i)\b[a-z0-9_]*(?:api[_ -]?key|password|passwd|"
+               r"secret(?:[_ -]?(?:access[_ -]?key|key))?|private[_ -]?key|"
+               r"token|auth(?:orization)?|bearer)\b"
+               r"[\"']?\s*(?:[\]}]\s*)?(?:=(?!=)|:)\s*"
+               r"(?:\"(?:\\[^\r\n]|[^\"\\\r\n])+\""
+               r"|'(?:\\[^\r\n]|[^'\\\r\n])+'"
+               r"|[^\s\"'`;,\[\]{}=]+)"),
     re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"),
 )
 
