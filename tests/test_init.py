@@ -25,8 +25,10 @@ def _write_private(path: Path, content: str) -> None:
 
 @pytest.fixture(autouse=True)
 def _select_trusted_config(tmp_path, monkeypatch):
+    from engraphis import config
+
     path = _config_env(tmp_path)
-    monkeypatch.setattr(init_script, "_trusted_env_file", lambda: path)
+    monkeypatch.setattr(config, "_CONFIG_ENV_PATH", path)
     # Fresh Settings instances must keep the offline test configuration.
     monkeypatch.setenv("ENGRAPHIS_EMBED_MODEL", "")
     return path
@@ -68,6 +70,51 @@ def test_init_rejects_an_insecure_existing_trusted_env(tmp_path, monkeypatch, ca
 
     assert env_file.read_text() == "ENGRAPHIS_DB_PATH=/keep/me.db\n"
     assert "owner-only permissions are required" in capsys.readouterr().out
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits do not apply on Windows")
+def test_jev_update_rejects_permissions_changed_after_initial_read(tmp_path, monkeypatch, capsys):
+    env_file = _config_env(tmp_path)
+    _write_private(env_file, "ENGRAPHIS_DB_PATH=/keep/database.db\n")
+    original = env_file.read_bytes()
+    read = init_script._read_existing_env
+
+    def changed_permissions(path):
+        content = read(path)
+        path.chmod(0o644)
+        return content
+
+    monkeypatch.setattr(init_script, "_read_existing_env", changed_permissions)
+    assert main(["--jev-key", "synthetic-private-key", "--no-encryption"]) == 1
+    assert env_file.read_bytes() == original
+    captured = capsys.readouterr()
+    assert "owner-only permissions are required" in captured.out
+    assert "synthetic-private-key" not in captured.out + captured.err
+
+
+def test_jev_update_keeps_the_original_trusted_override(tmp_path, monkeypatch, capsys):
+    from engraphis import config
+
+    selected = tmp_path / "selected" / "config.env"
+    later = tmp_path / "later" / "config.env"
+    _write_private(selected, "ENGRAPHIS_DB_PATH=/keep/database.db\n")
+    _write_private(later, "ENGRAPHIS_DB_PATH=/other/database.db\n")
+    other_bytes = later.read_bytes()
+    monkeypatch.setattr(config, "_CONFIG_ENV_PATH", selected)
+    monkeypatch.setenv("ENGRAPHIS_ENV_FILE", str(selected))
+    read = init_script._read_existing_env
+
+    def changed_override(path):
+        assert path == selected
+        content = read(path)
+        monkeypatch.setenv("ENGRAPHIS_ENV_FILE", str(later))
+        return content
+
+    monkeypatch.setattr(init_script, "_read_existing_env", changed_override)
+    assert main(["--jev-key", "synthetic-private-key", "--no-encryption"]) == 0
+    assert config._parse_trusted_env(selected.read_text())["JEV_API_KEY"] == "synthetic-private-key"
+    assert later.read_bytes() == other_bytes
+    assert "synthetic-private-key" not in capsys.readouterr().out
 
 
 def test_init_reports_trusted_config_selection_failure(monkeypatch, capsys):
