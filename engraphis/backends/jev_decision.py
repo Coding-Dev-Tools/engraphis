@@ -8,10 +8,11 @@ The adapter is intentionally not wired into the write or grounded-recall paths.
 """
 from __future__ import annotations
 
+import inspect
 import math
 import os
 from dataclasses import dataclass
-from typing import Dict, Optional, Protocol, Sequence, Tuple
+from typing import Callable, Dict, Optional, Protocol, Sequence, Tuple
 
 from engraphis.core.interfaces import MemoryRecord
 
@@ -58,6 +59,8 @@ class DecisionClient(Protocol):
 
     Caller owns immutable model identity, endpoint, deadlines, data filtering and
     credentials. Passing an arbitrary SDK object is not a verified integration.
+    Clients may additionally accept per-call consent and classification keywords;
+    the adapter binds the supported signature before making a single invocation.
     """
 
     @property
@@ -68,8 +71,6 @@ class DecisionClient(Protocol):
 
     def evaluate(
         self, state: str, questions: Sequence[DecisionQuestion], *, model: str,
-        allow_remote: bool = False, purpose: str = "custom",
-        data_classification: str = "internal",
     ) -> DecisionBatch: ...
 
 
@@ -132,14 +133,28 @@ class JevDecisionBackend:
         self, state: str, question: DecisionQuestion, allow_remote: bool,
         purpose: str, data_classification: str,
     ) -> Optional[DecisionBatch]:
-        if allow_remote is not True or len(state) > MAX_STATE_CHARS or not self.is_available:
+        if (allow_remote is not True or not isinstance(data_classification, str)
+                or data_classification not in {"public", "internal"}
+                or len(state) > MAX_STATE_CHARS or not self.is_available):
             return None
         client, model = self.client, self.model
         if client is None or model is None:
             return None
         try:
-            batch = client.evaluate(state, [question], model=model, allow_remote=True,
-                                    purpose=purpose, data_classification=data_classification)
+            evaluate: Callable[..., DecisionBatch] = client.evaluate
+            signature = inspect.signature(evaluate)
+            options: Dict[str, object] = {
+                "model": model, "allow_remote": True, "purpose": purpose,
+                "data_classification": data_classification,
+            }
+            try:
+                signature.bind(state, [question], **options)
+            except TypeError:
+                # Preserve the original injected-client contract. Never retry a
+                # provider invocation: a TypeError can follow a completed request.
+                signature.bind(state, [question], model=model)
+                options = {"model": model}
+            batch = evaluate(state, [question], **options)
             return batch if batch.is_fallback is False else None
         except Exception:
             # Provider exceptions may contain request text or credentials. Do not log them.

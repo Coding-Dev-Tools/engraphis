@@ -458,7 +458,6 @@ def main(argv=None) -> int:
                         "JEV_API_KEY": json.dumps(resolved_jev_key),
                         "ENGRAPHIS_DECISION_BACKEND": "byok",
                     },
-                    env_file,
                 )
             except OSError as exc:
                 _fail("trusted configuration", str(exc))

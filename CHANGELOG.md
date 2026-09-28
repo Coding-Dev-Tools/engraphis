@@ -10,7 +10,10 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - Bounded Jev key input and serialized configuration before publication, preserving
   existing setup on rejection. Invalid decision kinds now defer without a fabricated
   selection in direct, Classic, and Smart calls.
-- Refreshed the public offline fixtures and source bindings in immutable v98 evidence.
+- Preserved owner-only configuration checks when updating an existing Jev key, and
+  restored support for legacy injected decision clients while retaining per-call consent
+  and a single provider invocation.
+- Refreshed the public offline fixtures and source bindings in immutable v99 evidence.
 
 - Added saved project-to-workspace routing and connection instructions so agents can use the
   user's selected workspace. Routine MCP calls inherit an omitted workspace from an authorized
