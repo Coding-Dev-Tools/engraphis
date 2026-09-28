@@ -1,7 +1,7 @@
 # Engraphis MCP tools: reference
 
-The Classic server registers 35 direct tools and the Smart gateway registers nine; two names
-overlap, for 42 distinct public tool names. Parameters are `name (type, default)`: no default
+The Classic server registers 36 direct tools and the Smart gateway registers nine; two names
+overlap, for 43 distinct public tool names. Parameters are `name (type, default)`: no default
 means required. Every tool returns a JSON string; on failure it returns `"Error: <reason>"`
 instead of raising.
 Governance tools (`retire`/`pin`/`correct`/`link`) verify the memory actually belongs to the
@@ -632,6 +632,23 @@ default GitHub source is overridable via
 - `force (bool, false)`: bypass the 24-hour cache and re-check the release source now.
 
 Returns `{enabled, current, latest, update_available, url, notice}`.
+
+### `engraphis_decide`
+Fast sub-300ms System 1 decision gating for autonomous agents. Dispatches to TypeSafe Jev (BYOK),
+Engraphis Cloud Pro/Team, or deterministic local heuristics. Used for command safety guarding,
+fact contradiction screening, grounded support verification, turn completion checks, or custom micro-decisions.
+
+- `kind (str, "guard_command")`: one of `'guard_command'`, `'classify_contradiction'`, `'verify_support'`, `'verify_completion'`, or `'custom'`.
+- `state (str, "")`: input shell command, candidate fact, or evidence text to evaluate.
+- `query (str, "")`: query string for support verification.
+- `existing_content (str, "")`: existing memory content for contradiction checks.
+- `goal (str, "")`: task goal description for completion verification.
+- `recent_actions (str, "")`: summary of recent actions for completion verification.
+- `question (str, "")`: custom question for `'custom'` decisions.
+- `options (list[str], None)`: discrete choice alternatives.
+- `offline_mode (bool, false)`: when true, forces deterministic local heuristics without external API calls.
+
+Returns `{allowed, decision, confidence, reason, backend, latency_ms}`.
 
 ---
 

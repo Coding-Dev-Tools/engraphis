@@ -1,6 +1,6 @@
 {
   "schema": "engraphis-mcp-contract/v1",
-  "sha256": "3199e565fee3f7bde60979ceb11ad436b7f905870e2d4c6f68dd5c53e9ec8ba8",
+  "sha256": "eb10e4abaf5f236608db9082e8b2ea7e139281dadfd7fb1060baf74def40ff6e",
   "surfaces": {
     "classic": [
       {
@@ -686,6 +686,95 @@
           "type": "object"
         },
         "name": "engraphis_correct"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "System 1 decision gating (Jev / TypeSafe AI)"
+        },
+        "description": "Execute a fast (sub-300ms) System 1 micro-decision powered by Jev / TypeSafe AI.\n\nEvaluates command safety guardrails, fact contradiction screening, grounded evidence\nsupport verification, or turn completion without frontier LLM token waste.",
+        "inputSchema": {
+          "properties": {
+            "existing_content": {
+              "default": "",
+              "description": "Existing memory content (used for 'classify_contradiction').",
+              "maxLength": 16000,
+              "title": "Existing Content",
+              "type": "string"
+            },
+            "goal": {
+              "default": "",
+              "description": "Task goal description (used for 'verify_completion').",
+              "maxLength": 4096,
+              "title": "Goal",
+              "type": "string"
+            },
+            "kind": {
+              "default": "guard_command",
+              "description": "Decision kind: 'guard_command' (shell safety check), 'classify_contradiction' (candidate fact vs existing memory), 'verify_support' (evidence vs query support), 'verify_completion' (turn completion check), or 'custom' (generic micro-decision).",
+              "maxLength": 64,
+              "minLength": 1,
+              "title": "Kind",
+              "type": "string"
+            },
+            "offline_mode": {
+              "default": false,
+              "description": "Force deterministic local heuristics without remote calls.",
+              "title": "Offline Mode",
+              "type": "boolean"
+            },
+            "options": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional discrete alternatives for choice questions.",
+              "title": "Options"
+            },
+            "query": {
+              "default": "",
+              "description": "Query string (used for 'verify_support').",
+              "maxLength": 4096,
+              "title": "Query",
+              "type": "string"
+            },
+            "question": {
+              "default": "",
+              "description": "Custom prompt or question to answer (used for 'custom').",
+              "maxLength": 4096,
+              "title": "Question",
+              "type": "string"
+            },
+            "recent_actions": {
+              "default": "",
+              "description": "Summary of recent agent actions (used for 'verify_completion').",
+              "maxLength": 8192,
+              "title": "Recent Actions",
+              "type": "string"
+            },
+            "state": {
+              "default": "",
+              "description": "Input state, shell command, or evidence text to evaluate.",
+              "maxLength": 16000,
+              "title": "State",
+              "type": "string"
+            }
+          },
+          "title": "engraphis_decideArguments",
+          "type": "object"
+        },
+        "name": "engraphis_decide"
       },
       {
         "annotations": {

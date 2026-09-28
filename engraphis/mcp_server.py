@@ -421,6 +421,7 @@ _READ_ONLY_TOOLS = frozenset({
     "engraphis_export_receipts",
     "engraphis_stats",
     "engraphis_check_update",
+    "engraphis_decide",
 })
 _ADMIN_TOOLS = frozenset({
     "engraphis_consolidate",
@@ -2173,6 +2174,325 @@ def engraphis_consolidate(
         return _err(exc)
 
 
+_DESTRUCTIVE_PATTERNS = (
+    re.compile(r"\brm\s+-rf\s+[/~]", re.I),
+    re.compile(r"\b(format|mkfs|fdisk|dd\s+if=)\b", re.I),
+    re.compile(r"\b(drop\s+database|truncate\s+table)\b", re.I),
+    re.compile(r"\bgit\s+push\s+.*(--force|-f)\b", re.I),
+)
+_SAFE_PATTERNS = (
+    re.compile(r"(?:^|\n|COMMAND:\s*)git\s+(status|diff|log|show|branch|rev-parse|stash\s+list)\b", re.I),
+    re.compile(r"(?:^|\n|COMMAND:\s*)(ls|dir|cat|type|head|tail|grep|findstr|echo|pwd|where|which)\b", re.I),
+    re.compile(r"(?:^|\n|COMMAND:\s*)(pytest|python\s+-m\s+pytest|npm\s+test|cargo\s+check|ruff\s+check)\b", re.I),
+)
+
+
+def _heuristic_decision(
+    kind: str,
+    state: str,
+    query: str,
+    existing_content: str,
+    goal: str,
+    recent_actions: str,
+) -> dict[str, Any]:
+    """Deterministic local fallback when remote Jev is unavailable or unconfigured."""
+    if kind == "guard_command":
+        cmd = state.strip()
+        is_destr = any(p.search(cmd) for p in _DESTRUCTIVE_PATTERNS)
+        is_safe = any(p.search(cmd) for p in _SAFE_PATTERNS)
+        prob = 0.05 if is_destr else (0.95 if is_safe else 0.50)
+        cat = "destructive_or_leak" if is_destr else ("read_only" if is_safe else "state_change")
+        return {
+            "kind": kind,
+            "allow_auto": prob >= 0.90,
+            "escalate_to_user": prob < 0.90,
+            "safety_probability": prob,
+            "category": cat,
+            "confidence": 0.85,
+            "is_fallback": True,
+            "backend": "local_heuristic",
+        }
+    if kind == "classify_contradiction":
+        cand_tokens = set(re.findall(r"\w+", state.lower()))
+        exist_tokens = set(re.findall(r"\w+", existing_content.lower()))
+        overlap = cand_tokens & exist_tokens
+        if overlap and ("not" in cand_tokens or "no" in cand_tokens or "instead" in cand_tokens):
+            verdict = "contradicts_and_supersedes"
+        elif len(overlap) >= 3:
+            verdict = "reinforces"
+        else:
+            verdict = "orthogonal"
+        return {
+            "kind": kind,
+            "verdict": verdict,
+            "confidence": 0.70,
+            "is_fallback": True,
+            "backend": "local_heuristic",
+        }
+    if kind == "verify_support":
+        q_tokens = set(re.findall(r"\w+", query.lower()))
+        ev_tokens = set(re.findall(r"\w+", state.lower()))
+        matched = len(q_tokens & ev_tokens)
+        prob = min(1.0, matched / max(1, len(q_tokens))) if q_tokens else 0.0
+        return {
+            "kind": kind,
+            "supported": prob >= 0.25,
+            "probability": round(prob, 2),
+            "confidence": 0.75,
+            "is_fallback": True,
+            "backend": "local_heuristic",
+        }
+    if kind == "verify_completion":
+        output_lower = state.lower()
+        has_fail = any(w in output_lower for w in ("error", "failed", "failure", "assertionerror", "exception"))
+        has_ok = any(w in output_lower for w in ("passed", "success", "100%", "completed", "ok"))
+        complete = has_ok and not has_fail
+        return {
+            "kind": kind,
+            "is_complete": complete,
+            "completion_probability": 0.90 if complete else (0.10 if has_fail else 0.50),
+            "confidence": 0.80,
+            "is_fallback": True,
+            "backend": "local_heuristic",
+        }
+    return {
+        "kind": kind,
+        "selected": "default",
+        "confidence": 0.50,
+        "is_fallback": True,
+        "backend": "local_heuristic",
+    }
+
+
+@mcp.tool(
+    name="engraphis_decide",
+    annotations={
+        "title": "System 1 decision gating (Jev / TypeSafe AI)",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+)
+def engraphis_decide(
+    kind: Annotated[
+        str,
+        Field(
+            description=(
+                "Decision kind: 'guard_command' (shell safety check), "
+                "'classify_contradiction' (candidate fact vs existing memory), "
+                "'verify_support' (evidence vs query support), "
+                "'verify_completion' (turn completion check), "
+                "or 'custom' (generic micro-decision)."
+            ),
+            min_length=1,
+            max_length=64,
+        ),
+    ] = "guard_command",
+    state: Annotated[
+        str,
+        Field(
+            default="",
+            description="Input state, shell command, or evidence text to evaluate.",
+            max_length=16_000,
+        ),
+    ] = "",
+    query: Annotated[
+        str,
+        Field(
+            default="",
+            description="Query string (used for 'verify_support').",
+            max_length=4096,
+        ),
+    ] = "",
+    existing_content: Annotated[
+        str,
+        Field(
+            default="",
+            description="Existing memory content (used for 'classify_contradiction').",
+            max_length=16_000,
+        ),
+    ] = "",
+    goal: Annotated[
+        str,
+        Field(
+            default="",
+            description="Task goal description (used for 'verify_completion').",
+            max_length=4096,
+        ),
+    ] = "",
+    recent_actions: Annotated[
+        str,
+        Field(
+            default="",
+            description="Summary of recent agent actions (used for 'verify_completion').",
+            max_length=8192,
+        ),
+    ] = "",
+    question: Annotated[
+        str,
+        Field(
+            default="",
+            description="Custom prompt or question to answer (used for 'custom').",
+            max_length=4096,
+        ),
+    ] = "",
+    options: Annotated[
+        Optional[List[str]],
+        Field(
+            default=None,
+            description="Optional discrete alternatives for choice questions.",
+        ),
+    ] = None,
+    offline_mode: Annotated[
+        bool,
+        Field(
+            default=False,
+            description="Force deterministic local heuristics without remote calls.",
+        ),
+    ] = False,
+) -> str:
+    """Execute a fast (sub-300ms) System 1 micro-decision powered by Jev / TypeSafe AI.
+
+    Evaluates command safety guardrails, fact contradiction screening, grounded evidence
+    support verification, or turn completion without frontier LLM token waste.
+    """
+    try:
+        if not offline_mode:
+            from engraphis.backends.jev_decision import (
+                DecisionQuestion,
+                JevDecisionBackend,
+                create_cloud_decision_client,
+                create_typesafe_decision_client,
+            )
+            from engraphis.core.interfaces import MemoryRecord, MemoryType, Scope
+
+            client = None
+            backend_name = "none"
+            if os.environ.get("TYPESAFE_API_KEY") or os.environ.get("JEV_API_KEY"):
+                client = create_typesafe_decision_client()
+                backend_name = "typesafe_byok"
+            elif os.environ.get("ENGRAPHIS_CLOUD_ACCESS_TOKEN"):
+                client = create_cloud_decision_client()
+                backend_name = "engraphis_cloud"
+
+            model = os.environ.get("ENGRAPHIS_DECISION_MODEL", "jev-1.13.0")
+            backend = JevDecisionBackend(client=client, model=model) if client else None
+
+            if backend is not None and backend.is_available:
+                if kind == "guard_command":
+                    q_safe = DecisionQuestion(
+                        "is_safe",
+                        "Is this shell command safe to execute in automated agent mode without destructive data loss or secret leakage?",
+                        "noul",
+                    )
+                    q_cat = DecisionQuestion(
+                        "category",
+                        "Categorize this operation",
+                        "choice",
+                        ("read_only", "state_change", "destructive_or_leak"),
+                    )
+                    batch = client.evaluate(state, [q_safe, q_cat], model=model)
+                    if batch and not batch.is_fallback:
+                        safe_noul = batch.get_noul("is_safe")
+                        cat_choice = batch.get_choice("category")
+                        prob = safe_noul.probability if safe_noul else 0.5
+                        cat = cat_choice.selected if cat_choice else "state_change"
+                        allow = prob >= 0.90 and cat != "destructive_or_leak"
+                        return _ok({
+                            "kind": kind,
+                            "allow_auto": allow,
+                            "escalate_to_user": not allow,
+                            "safety_probability": prob,
+                            "category": cat,
+                            "confidence": safe_noul.confidence if safe_noul else 1.0,
+                            "is_fallback": False,
+                            "backend": backend_name,
+                        })
+
+                elif kind == "classify_contradiction":
+                    mem = MemoryRecord(
+                        id="mem_target",
+                        scope=Scope.WORKSPACE,
+                        workspace_id="ws_1",
+                        mtype=MemoryType.SEMANTIC,
+                        title="Existing memory",
+                        content=existing_content,
+                    )
+                    verdict, conf = backend.classify_contradiction(state, mem, allow_remote=True)
+                    return _ok({
+                        "kind": kind,
+                        "verdict": verdict,
+                        "confidence": conf,
+                        "is_fallback": False,
+                        "backend": backend_name,
+                    })
+
+                elif kind == "verify_support":
+                    supported, prob = backend.verify_grounded_support(query, state, allow_remote=True)
+                    return _ok({
+                        "kind": kind,
+                        "supported": supported,
+                        "probability": prob,
+                        "confidence": 1.0,
+                        "is_fallback": False,
+                        "backend": backend_name,
+                    })
+
+                elif kind == "verify_completion":
+                    full_state = f"GOAL: {goal}\nACTIONS: {recent_actions}\nOUTPUT: {state}"
+                    q_comp = DecisionQuestion(
+                        "is_complete",
+                        "Has the task goal been verified and completely achieved?",
+                        "noul",
+                    )
+                    batch = client.evaluate(full_state, [q_comp], model=model)
+                    if batch and not batch.is_fallback:
+                        comp_noul = batch.get_noul("is_complete")
+                        prob = comp_noul.probability if comp_noul else 0.5
+                        return _ok({
+                            "kind": kind,
+                            "is_complete": prob >= 0.85,
+                            "completion_probability": prob,
+                            "confidence": comp_noul.confidence if comp_noul else 1.0,
+                            "is_fallback": False,
+                            "backend": backend_name,
+                        })
+
+                elif kind == "custom":
+                    q = DecisionQuestion(
+                        "custom",
+                        question or "Evaluate state",
+                        "choice" if options else "noul",
+                        tuple(options) if options else (),
+                    )
+                    batch = client.evaluate(state, [q], model=model)
+                    if batch and not batch.is_fallback:
+                        if options:
+                            c = batch.get_choice("custom")
+                            return _ok({
+                                "kind": kind,
+                                "selected": c.selected if c else "",
+                                "confidence": c.confidence if c else 1.0,
+                                "is_fallback": False,
+                                "backend": backend_name,
+                            })
+                        else:
+                            n = batch.get_noul("custom")
+                            return _ok({
+                                "kind": kind,
+                                "probability": n.probability if n else 0.5,
+                                "confidence": n.confidence if n else 1.0,
+                                "is_fallback": False,
+                                "backend": backend_name,
+                            })
+
+        # Fallback to local heuristic
+        return _ok(_heuristic_decision(kind, state, query, existing_content, goal, recent_actions))
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
 @dataclass(frozen=True)
 class ActionSpec:
     """One classic MCP action that Smart MCP may describe and dispatch.
@@ -2340,6 +2660,9 @@ _ACTION_SYNONYMS = {
     "delete": {"erase", "retire"},
     "erase": {"erase"},
     "audit": {"receipt", "audit", "verify", "export"},
+    "decision": {"decide"},
+    "guard": {"decide"},
+    "safety": {"decide"},
 }
 
 _ACTION_PREFERENCES = {
@@ -2360,6 +2683,10 @@ _ACTION_PREFERENCES = {
     "search": {"recall"},
     "verify": {"verify_receipts"},
     "receipts": {"receipts"},
+    "decide": {"decide"},
+    "decision": {"decide"},
+    "guard": {"decide"},
+    "safety": {"decide"},
 }
 
 # A small set of unambiguous multi-word intents avoids an accidental match on broad
@@ -2374,6 +2701,9 @@ _ACTION_PHRASE_PREFERENCES = {
     frozenset({"grounded", "answer"}): {"recall_grounded"},
     frozenset({"list", "audit", "receipts"}): {"receipts"},
     frozenset({"verify", "receipt"}): {"verify_receipts"},
+    frozenset({"guard", "command"}): {"decide"},
+    frozenset({"check", "safety"}): {"decide"},
+    frozenset({"classify", "contradiction"}): {"decide"},
 }
 
 _CATEGORY_ACTIONS = {
@@ -2381,7 +2711,8 @@ _CATEGORY_ACTIONS = {
     "governance": {"retire", "secure_erase", "pin", "correct", "promote"},
     "code": {"index_repo", "search_code", "code_path", "code_impact", "export_code_graph"},
     "audit": {"receipts", "context_savings", "verify_receipts", "export_receipts"},
-    "ops": {"stats", "check_update", "consolidate"},
+    "ops": {"stats", "check_update", "consolidate", "decide"},
+    "decision": {"decide"},
 }
 
 

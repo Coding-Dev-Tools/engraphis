@@ -42,7 +42,7 @@ additional summary or promise extra token savings. Source IDs remain in `sources
 
 No user profile choice or tool switching is required. The dashboard `/mcp` endpoint and
 `engraphis-mcp-http` use this Smart surface by default. `engraphis-mcp-classic` (or
-`engraphis-mcp-http --classic`) preserves the 35 direct tools below for integrations that pin
+`engraphis-mcp-http --classic`) preserves the 36 direct tools below for integrations that pin
 their historical names and response shapes.
 
 Hosts which already own chat history should use `POST /api/adaptive-context`, not an MCP action.
@@ -155,6 +155,7 @@ an omitted mode means it was not recorded, and is not inferred from current defa
 | Session | `engraphis_end_session` | Closes a work session with a summary and open threads. |
 | Operations | `engraphis_stats` | Returns memory counts for health checks. |
 | Operations | `engraphis_check_update` | Refreshes the release cache and reports whether a newer version is available. Update checks are OFF unless `ENGRAPHIS_UPDATE_CHECK` is set to an affirmative value; `=0` keeps them off. |
+| Decision | `engraphis_decide` | Fast sub-300ms System 1 decision gating (command safety, contradiction classification, grounded support verification, completion checks) via TypeSafe Jev or local heuristics. |
 
 The classic recall, grounded, and answer tools (`engraphis_recall`,
 `engraphis_recall_grounded`, and the `engraphis_answer` alias) accept `planning="off"|"auto"`,
