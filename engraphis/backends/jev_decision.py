@@ -11,6 +11,7 @@ from __future__ import annotations
 import math
 import os
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Dict, Optional, Protocol, Sequence, Tuple
 
@@ -91,12 +92,12 @@ def _remaining_time(deadline: float) -> float:
     return remaining
 
 
-def _read_response(response, deadline: float) -> bytes:
-    """Bound total body-read time, including a peer that continuously drips bytes."""
+@contextmanager
+def _socket_deadline(sock, deadline: float):
+    """Interrupt a blocking HTTP parser even when every receive makes progress."""
     import socket
     import threading
 
-    sock = getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None)
     timer = None
     if isinstance(sock, socket.socket):
         # Even read1() can consume several reads while parsing chunk framing.
@@ -112,10 +113,54 @@ def _read_response(response, deadline: float) -> bytes:
         timer.daemon = True
         timer.start()
     try:
-        return _read_response_chunks(response, deadline)
+        yield
     finally:
         if timer is not None:
             timer.cancel()
+
+
+def _deadline_handlers(deadline: float):
+    import http.client
+    import urllib.request
+    from engraphis.hosted_client import PinnedHTTPSConnection, PinnedHTTPSHandler
+
+    class DeadlineResponse(http.client.HTTPResponse):
+        def __init__(self, sock, *args, **kwargs):
+            self._deadline_socket = sock
+            super().__init__(sock, *args, **kwargs)
+
+        def begin(self):
+            # getresponse() parses status and headers before urllib.open()
+            # returns. Protect that phase before a response body is available.
+            with _socket_deadline(self._deadline_socket, deadline):
+                super().begin()
+                _remaining_time(deadline)
+
+    class DeadlineHTTPConnection(http.client.HTTPConnection):
+        response_class = DeadlineResponse
+
+    class DeadlineHTTPSConnection(PinnedHTTPSConnection):
+        response_class = DeadlineResponse
+
+    class DeadlineHTTPHandler(urllib.request.HTTPHandler):
+        def http_open(self, req):
+            return self.do_open(DeadlineHTTPConnection, req)
+
+    class DeadlineHTTPSHandler(PinnedHTTPSHandler):
+        # Run before the shared opener's ordinary pinned HTTPS handler.
+        handler_order = 499
+
+        def do_open(self, http_class, req, **kwargs):
+            return super().do_open(DeadlineHTTPSConnection, req, **kwargs)
+
+    return DeadlineHTTPHandler(), DeadlineHTTPSHandler()
+
+
+def _read_response(response, deadline: float) -> bytes:
+    """Bound total body-read time, including a peer that continuously drips bytes."""
+    sock = getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None)
+    with _socket_deadline(sock, deadline):
+        return _read_response_chunks(response, deadline)
 
 
 def _read_response_chunks(response, deadline: float) -> bytes:
@@ -182,7 +227,7 @@ class EngraphisCloudDecisionClient:
 
     Construction never performs network I/O. Calling evaluate authorizes a remote
     request; use JevDecisionBackend for offline and per-call consent checks.
-    The timeout bounds socket operations and total response-body time. System
+    The timeout bounds socket operations and total HTTP response time. System
     DNS resolution itself cannot be interrupted by urllib.
     """
 
@@ -243,7 +288,7 @@ class EngraphisCloudDecisionClient:
             "User-Agent": "engraphis-cloud-decision/1.0",
         }
         req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-        with build_pinned_https_opener(NoRedirect()).open(
+        with build_pinned_https_opener(NoRedirect(), *_deadline_handlers(deadline)).open(
             req, timeout=_remaining_time(deadline),
         ) as resp:
             raw = _read_response(resp, deadline)
