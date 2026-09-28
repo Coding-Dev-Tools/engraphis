@@ -418,3 +418,174 @@ def test_cloud_deadline_interrupts_status_and_headers(monkeypatch, header_prefix
         writer.close()
         producer.join(timeout=2)
     assert not producer.is_alive()
+
+
+def deadline_connection(monkeypatch, deadline, transport="https"):
+    import urllib.request
+    from engraphis.backends.jev_decision import _deadline_handlers
+
+    selected = []
+    monkeypatch.setattr(urllib.request.AbstractHTTPHandler, "do_open",
+                        lambda self, connection_class, req, **kwargs: selected.append(connection_class))
+    http_handler, https_handler = _deadline_handlers(deadline)
+    if transport == "http":
+        http_handler.http_open(None)
+    else:
+        https_handler.https_open(None)
+    return selected[0]("localhost" if transport == "http" else "cloud.example", timeout=0.05)
+
+
+@pytest.mark.parametrize("transport", ["http", "https", "https_proxy"])
+def test_cloud_dial_retries_and_tls_share_short_budget(monkeypatch, transport):
+    import socket
+    import engraphis.backends.jev_decision as module
+
+    clock = [10.0]
+    connection = deadline_connection(monkeypatch, 10.05, transport)
+    monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])
+    addresses = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (host, 443))
+                 for host in ["93.184.216.34", "93.184.216.35"]]
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *args: addresses)
+    monkeypatch.setattr("engraphis.hosted_client._validated_addresses", lambda host: ["93.184.216.34"])
+    sockets = []
+
+    class DialSocket:
+        def __init__(self, *args):
+            self.timeouts = []
+            self.closed = False
+            sockets.append(self)
+
+        def settimeout(self, value):
+            self.timeouts.append(value)
+
+        def setsockopt(self, *args):
+            pass
+
+        def connect(self, address):
+            clock[0] += 0.03 if len(sockets) == 1 else 0.01
+            if len(sockets) == 1:
+                raise OSError("first address unavailable")
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(socket, "socket", DialSocket)
+    if transport != "http":
+        assert connection._attempt_timeout(99) == pytest.approx(0.05)
+        assert connection._connect_deadline() == 10.05
+
+        if transport == "https_proxy":
+            connection._tunnel_host = "93.184.216.34"
+            connection._tunnel_port = 443
+
+            def tunnel():
+                clock[0] += 0.005
+                connection.sock.settimeout(module._remaining_time(10.05))
+
+            connection._tunnel = tunnel
+
+        def tls(sock, server_hostname):
+            assert server_hostname == "cloud.example"
+            assert sock.timeouts[-1] == pytest.approx(0.005 if transport == "https_proxy" else 0.01)
+            clock[0] += 0.02
+            return sock
+
+        connection._context = SimpleNamespace(wrap_socket=tls)
+        with pytest.raises(TimeoutError):
+            connection.send(b"must not send after TLS consumes the budget")
+    else:
+        connection.connect()
+    assert len(sockets) == 2
+    assert sockets[0].closed
+    assert sockets[0].timeouts[0] == pytest.approx(0.05)
+    expected = [0.02, 0.01, 0.005] if transport == "https_proxy" else [0.02, 0.01]
+    assert sockets[1].timeouts == pytest.approx(expected)
+    connection.close()
+    assert sockets[1].closed
+
+
+@pytest.mark.parametrize("expire_during", ["dns", "connect"])
+def test_cloud_expired_resolution_or_dial_cannot_proceed(monkeypatch, expire_during):
+    import socket
+    import engraphis.backends.jev_decision as module
+
+    clock = [10.0]
+    connection = deadline_connection(monkeypatch, 10.05)
+    monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])
+
+    def resolve(*args):
+        if expire_during == "dns":
+            clock[0] += 0.1
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
+    sockets = []
+
+    class DialSocket:
+        def __init__(self, *args):
+            self.closed = False
+            sockets.append(self)
+
+        def settimeout(self, value):
+            pass
+
+        def connect(self, address):
+            clock[0] += 0.1
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(socket, "socket", DialSocket)
+    with pytest.raises(TimeoutError):
+        connection._create_connection(("proxy.example", 443), 0.5)
+    assert len(sockets) == (0 if expire_during == "dns" else 1)
+    assert all(sock.closed for sock in sockets)
+
+
+def test_cloud_dial_skips_unsupported_address_family(monkeypatch):
+    import socket
+    import time
+
+    connection = deadline_connection(monkeypatch, time.monotonic() + 2)
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *args: [
+        (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("::1", 443, 0, 0)),
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443)),
+    ])
+    families = []
+    connected = []
+    usable = SimpleNamespace(settimeout=lambda value: None, connect=connected.append)
+
+    def create(family, kind, protocol):
+        families.append(family)
+        if family == socket.AF_INET6:
+            raise OSError("IPv6 disabled")
+        return usable
+
+    monkeypatch.setattr(socket, "socket", create)
+    assert connection._create_connection(("localhost", 443)) is usable
+    assert families == [socket.AF_INET6, socket.AF_INET]
+    assert connected == [("127.0.0.1", 443)]
+
+
+@pytest.mark.parametrize("transport", ["http", "https"])
+def test_cloud_deadline_interrupts_blocked_request_send(monkeypatch, transport):
+    import http.client
+    import itertools
+    import socket
+    import time
+
+    started = time.monotonic()
+    connection = deadline_connection(monkeypatch, started + 0.1, transport)
+    connection.auto_open = False
+    with pytest.raises(http.client.NotConnected):
+        connection.send(b"disabled")
+    reader, writer = socket.socketpair()
+    writer.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+    connection.sock = writer
+    try:
+        with pytest.raises((TimeoutError, OSError)):
+            connection.send(itertools.repeat(b"x" * 65536))
+        assert time.monotonic() - started < 1.5
+    finally:
+        connection.close()
+        reader.close()
