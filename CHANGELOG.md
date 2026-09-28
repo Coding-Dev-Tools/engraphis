@@ -5,6 +5,8 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+- Updated the Pi test host to 0.87.1 to include the patched WebSocket client, and
+  extended the Pi dependency audit to cover its development dependencies.
 - Updated the Pi extension's locked `ip-address` dependency to 10.5.1, fixing
   IPv6 link-local and NAT64 classification advisories without changing its dependency ranges.
 - Hardened the experimental Cloud decision client with validated destinations,

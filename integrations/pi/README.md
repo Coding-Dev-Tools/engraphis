@@ -40,7 +40,7 @@ When published, install the Pi package:
 pi install npm:@engraphis/pi
 ```
 
-The extension is tested with Pi 0.83.x, Node 22.19 or later, and Engraphis
+The extension is tested with Pi 0.87.1, Node 22.19 or later, and Engraphis
 1.5.x. Pi supplies its own Pi and TypeBox runtime modules, following Pi's package
 contract; the extension checks the required Smart MCP tool names when it opens
 the local server and reports an actionable compatibility error if they are absent.
