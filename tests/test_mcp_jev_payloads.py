@@ -268,3 +268,26 @@ def test_other_kind_mappings_reach_real_client_validation(
     actual = ({item["id"] for item in questions} if wire_client["backend"] == "managed"
               else set(questions))
     assert actual == expected_questions
+
+
+@pytest.mark.parametrize("kind,field", [
+    ("guard_command", "state"),
+    ("classify_contradiction", "existing_content"),
+    ("verify_support", "query"),
+    ("verify_completion", "goal"),
+    ("verify_completion", "recent_actions"),
+    ("custom", "question"),
+    ("custom", "options"),
+])
+def test_sensitive_raw_mcp_fields_never_refresh_or_send(
+    wire_client, dispatch, caplog, kind, field,
+):
+    private = json.dumps({"DB_PASSWORD": 'synthetic" phrase'})
+    arguments = {"kind": kind, "state": "Synthetic evidence", "allow_remote": True,
+                 field: ["safe", private] if field == "options" else private}
+    result = dispatch(arguments)
+    assert result["is_fallback"] is True
+    assert result["fallback_reason"] == "sensitive_content"
+    assert wire_client["http"] == wire_client["refresh"] == []
+    assert "DB_PASSWORD" not in json.dumps(result) + caplog.text
+    assert "synthetic" not in json.dumps(result) + caplog.text
