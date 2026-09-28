@@ -401,6 +401,7 @@ def test_gateway_context_usage_counts_authoritative_receipt_once(monkeypatch):
     ("engraphis_discover_actions", "viewer"),
     ("engraphis_execute_read", "viewer"),
     ("engraphis_execute_action", "admin"),
+    ("engraphis_decide", "member"),
     ("engraphis_remember", "member"),
     ("engraphis_consolidate", "admin"),
 ])

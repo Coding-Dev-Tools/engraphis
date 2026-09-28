@@ -1,4 +1,5 @@
 """MCP decisions preserve consent, uncertainty, fallback, and private error boundaries."""
+import asyncio
 import json
 from types import SimpleNamespace
 
@@ -20,6 +21,105 @@ def test_unapproved_or_offline_mcp_never_discovers_credentials(monkeypatch, kwar
     assert result["confidence"] is None
     assert result["selected"] is None
     assert result["advisory_only"] is True
+
+
+def test_smart_read_refuses_remote_decision_before_backend_lookup(monkeypatch):
+    def forbidden(*args, **kwargs):
+        pytest.fail("a Smart read must not inspect credentials or consume decision allowance")
+
+    monkeypatch.setattr(transport, "select_decision_client", forbidden)
+    action = server._action_payload(server.ACTION_SPECS["decide"])
+    rejected = server.engraphis_execute_read(
+        capability_id=action["capability_id"], schema_digest=action["schema_digest"],
+        arguments={"kind": "custom", "state": "Synthetic", "allow_remote": True},
+    )
+    assert rejected.isError is True
+    assert "action_requires_execute_action" in rejected.content[0].text
+
+
+def test_classic_dispatch_retains_local_owner_access_and_requires_call_consent(monkeypatch):
+    batch = transport.CloudDecisionBatch(False, {}, {
+        "custom": transport.SimpleSupportDecision(probability=0.9, confidence=0.8),
+    })
+    calls = _client(monkeypatch, batch)
+    arguments = {"kind": "custom", "state": "Synthetic", "data_classification": "public"}
+    # The same registered dispatch serves stdio. Its local owner has no hosted
+    # viewer/member identity, and default consent must still suppress remote work.
+    local = asyncio.run(server.classic_mcp.call_tool("engraphis_decide", arguments))
+    local_content = local[0] if isinstance(local, tuple) else local
+    assert json.loads(local_content[0].text)["fallback_reason"] == "remote_not_authorized"
+    assert calls == []
+    approved = asyncio.run(server.classic_mcp.call_tool(
+        "engraphis_decide", {**arguments, "allow_remote": True},
+    ))
+    approved_content = approved[0] if isinstance(approved, tuple) else approved
+    assert json.loads(approved_content[0].text)["is_fallback"] is False
+    assert len(calls) == 1
+
+
+def test_local_http_smart_dispatch_auth_and_consent_precede_remote_work(monkeypatch, tmp_path):
+    """Exercise the real single-principal HTTP mount, without inventing Team roles."""
+    pytest.importorskip("fastapi")
+    pytest.importorskip("httpx")
+    from fastapi.testclient import TestClient
+    from engraphis.config import settings
+    from engraphis.dashboard_app import create_app
+
+    monkeypatch.setattr(settings, "db_path", str(tmp_path / "local-mcp.db"))
+    monkeypatch.setattr(settings, "embed_model", "")
+    monkeypatch.setattr(settings, "api_token", "synthetic-local-deployment-token")
+    monkeypatch.setattr(server, "_service", None)
+    monkeypatch.setattr(server.mcp.settings, "json_response", True)
+    batch = transport.CloudDecisionBatch(False, {}, {
+        "custom": transport.SimpleSupportDecision(probability=0.9, confidence=0.8),
+    })
+    calls = _client(monkeypatch, batch)
+    select_client = transport.select_decision_client
+    lookups = []
+
+    def inspected():
+        lookups.append(True)
+        return select_client()
+
+    monkeypatch.setattr(transport, "select_decision_client", inspected)
+    headers = {"Authorization": "Bearer synthetic-local-deployment-token",
+               "Accept": "application/json, text/event-stream"}
+    with TestClient(create_app(), base_url="http://127.0.0.1:8700",
+                    client=("127.0.0.1", 50000)) as client:
+        def rpc(name, arguments, *, authenticated=True):
+            return client.post("/mcp/", json={
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": name, "arguments": arguments},
+            }, headers=headers if authenticated else {"Accept": headers["Accept"]})
+
+        discovered = rpc("engraphis_discover_actions", {"task": "guard command safety"})
+        assert discovered.status_code == 200
+        payload = json.loads(discovered.json()["result"]["content"][0]["text"])
+        action = next(item for item in payload["actions"] if item["canonical_action"] == "decide")
+        arguments = {"capability_id": action["capability_id"],
+                     "schema_digest": action["schema_digest"],
+                     "arguments": {"kind": "custom", "state": "Synthetic",
+                                   "allow_remote": True, "data_classification": "public"}}
+
+        unauthenticated = rpc("engraphis_execute_action", arguments, authenticated=False)
+        assert unauthenticated.status_code == 401
+        read = rpc("engraphis_execute_read", arguments)
+        assert read.status_code == 200 and read.json()["result"]["isError"] is True
+        assert "action_requires_execute_action" in read.text
+        assert lookups == calls == []
+
+        local_arguments = {**arguments, "arguments": dict(arguments["arguments"])}
+        local_arguments["arguments"].pop("allow_remote")
+        local = rpc("engraphis_execute_action", local_arguments)
+        assert local.status_code == 200
+        assert "remote_not_authorized" in local.text
+        assert lookups == calls == []
+
+        approved = rpc("engraphis_execute_action", arguments)
+        assert approved.status_code == 200 and not approved.json()["result"].get("isError")
+        result = json.loads(approved.json()["result"]["content"][0]["text"])
+        assert result["result"]["is_fallback"] is False
+        assert lookups == [True] and len(calls) == 1
 
 
 def _client(monkeypatch, batch=None, error=None):

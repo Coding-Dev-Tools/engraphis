@@ -426,7 +426,6 @@ _READ_ONLY_TOOLS = frozenset({
     "engraphis_export_receipts",
     "engraphis_stats",
     "engraphis_check_update",
-    "engraphis_decide",
 })
 _ADMIN_TOOLS = frozenset({
     "engraphis_consolidate",
@@ -449,7 +448,8 @@ def minimum_role(tool_name: str) -> str:
     dynamic role, discovered reads stay viewer-accessible while the generic stateful
     executor fails closed to admin.  Local stdio has no role boundary and retains the
     owner's full capability; routine remote member writes remain available through the
-    dedicated session and remember tools.
+    dedicated session and remember tools. Optional remote decisions may consume account
+    allowance, so their direct tool uses the default member requirement too.
     """
     if tool_name in _SMART_GATEWAY_ROLES:
         return _SMART_GATEWAY_ROLES[tool_name]
