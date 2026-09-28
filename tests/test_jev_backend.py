@@ -280,7 +280,7 @@ def test_cloud_loopback_bypasses_ambient_proxies(monkeypatch, url):
     monkeypatch.setattr(urllib.request.AbstractHTTPHandler, "do_open", capture_route)
     client = create_cloud_decision_client(control_url=url, token="local-test-token")
     assert backend(client).verify_grounded_support("database?", "Postgres", allow_remote=True) == (True, 0.9)
-    expected = ("recording-proxy.example:8080", "api.engraphis.com") if url.endswith("engraphis.com") else (
+    expected = ("recording-proxy.example:8080", "api.engraphis.com") if urlsplit(url).hostname == "api.engraphis.com" else (
         urlsplit(url).netloc, None,
     )
     assert routes == [(*expected, "Bearer local-test-token")]
