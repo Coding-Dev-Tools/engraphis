@@ -6,8 +6,10 @@ those operations and never begin a later network phase with an exhausted budget.
 """
 from __future__ import annotations
 
+import threading
 import time
 from contextlib import contextmanager
+from typing import Optional
 
 
 def remaining_time(deadline: float) -> float:
@@ -21,14 +23,15 @@ def remaining_time(deadline: float) -> float:
 def socket_deadline(sock, deadline: float):
     """Interrupt a blocking HTTP parser even when every receive makes progress."""
     import socket
-    import threading
 
+    interrupted = threading.Event()
     timer = None
     if isinstance(sock, socket.socket):
         # Even read1() can consume several reads while parsing chunk framing.
         # Interrupt the socket at the deadline so slow chunk headers cannot keep
         # a single read1() alive. Shutdown does not acquire the reader's lock.
         def expire():
+            interrupted.set()
             try:
                 sock.shutdown(socket.SHUT_RDWR)
             except OSError:
@@ -38,7 +41,7 @@ def socket_deadline(sock, deadline: float):
         timer.daemon = True
         timer.start()
     try:
-        yield
+        yield interrupted
     finally:
         if timer is not None:
             timer.cancel()
@@ -155,14 +158,18 @@ def deadline_handlers(deadline: float, *, loopback_only: bool = False):
     return DeadlineHTTPHandler(), DeadlineHTTPSHandler()
 
 
-def read_response(response, deadline: float, *, max_bytes: int) -> bytes:
-    """Bound total body-read time, including a peer that continuously drips bytes."""
+def read_response(response, deadline: float, *, max_bytes: int,
+                  preserve_complete: bool = False) -> bytes:
+    """Bound body reads; optionally retain a complete body for credential rotation."""
     sock = getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None)
-    with socket_deadline(sock, deadline):
-        return read_response_chunks(response, deadline, max_bytes=max_bytes)
+    with socket_deadline(sock, deadline) as interrupted:
+        return read_response_chunks(response, deadline, max_bytes=max_bytes,
+                                    preserve_complete=preserve_complete, interrupted=interrupted)
 
 
-def read_response_chunks(response, deadline: float, *, max_bytes: int) -> bytes:
+def read_response_chunks(response, deadline: float, *, max_bytes: int,
+                         preserve_complete: bool = False,
+                         interrupted: Optional[threading.Event] = None) -> bytes:
     data = bytearray()
     while len(data) <= max_bytes:
         remaining = remaining_time(deadline)
@@ -175,8 +182,25 @@ def read_response_chunks(response, deadline: float, *, max_bytes: int) -> bytes:
         # read() tries to fill its entire buffer; read1() returns after a single
         # buffered/socket read, letting the absolute deadline run between chunks.
         chunk = response.read1(min(4096, max_bytes + 1 - len(data)))
+        data.extend(chunk)
+        if preserve_complete:
+            if len(data) > max_bytes:
+                break  # The caller rejects oversized bodies before parsing.
+            # A final length-delimited chunk needs no additional EOF read. Let
+            # refresh callers persist its rotation before reporting the timeout.
+            if not getattr(response, "chunked", False) and getattr(response, "length", None) == 0:
+                break
+            if not chunk:
+                # Shutdown can manufacture EOF, including inside chunk trailers;
+                # only a natural EOF establishes a complete unframed body.
+                if interrupted is not None and interrupted.is_set():
+                    raise TimeoutError("HTTP request deadline exceeded")
+                outstanding = getattr(response, "length", None)
+                if outstanding is not None and outstanding > 0:
+                    from http.client import IncompleteRead
+                    raise IncompleteRead(bytes(data), outstanding)
+                break
         remaining_time(deadline)
         if not chunk:
             break
-        data.extend(chunk)
     return bytes(data)

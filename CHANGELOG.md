@@ -13,7 +13,9 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - Preserved owner-only configuration checks when updating an existing Jev key, and
   restored support for legacy injected decision clients while retaining per-call consent
   and a single provider invocation.
-- Refreshed the public offline fixtures and source bindings in immutable v99 evidence.
+- Save fully received Cloud credential rotations before reporting an expired request
+  deadline, while rejecting truncated bodies and watchdog-interrupted responses.
+- Refreshed the public offline fixtures and source bindings in immutable v100 evidence.
 
 - Added saved project-to-workspace routing and connection instructions so agents can use the
   user's selected workspace. Routine MCP calls inherit an omitted workspace from an authorized
