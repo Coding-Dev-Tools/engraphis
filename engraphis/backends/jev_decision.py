@@ -142,6 +142,13 @@ def _deadline_handlers(deadline: float):
     class DeadlineHTTPSConnection(PinnedHTTPSConnection):
         response_class = DeadlineResponse
 
+        def _tunnel(self):
+            # CONNECT parses its response directly, bypassing response.begin().
+            with _socket_deadline(self.sock, deadline):
+                # typeshed omits this private standard-library method.
+                getattr(super(), "_tunnel")()
+                _remaining_time(deadline)
+
     class DeadlineHTTPHandler(urllib.request.HTTPHandler):
         def http_open(self, req):
             return self.do_open(DeadlineHTTPConnection, req)

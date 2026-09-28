@@ -358,7 +358,7 @@ def test_cloud_deadline_interrupts_slow_chunk_framing():
 
 
 @pytest.mark.parametrize("header_prefix", [b"HTTP/1.1 ", b"HTTP/1.1 200 OK\r\nX-Slow: "])
-@pytest.mark.parametrize("transport", ["http", "https"])
+@pytest.mark.parametrize("transport", ["http", "https", "https_proxy"])
 def test_cloud_deadline_interrupts_status_and_headers(monkeypatch, header_prefix, transport):
     import http.client
     import socket
@@ -397,9 +397,17 @@ def test_cloud_deadline_interrupts_status_and_headers(monkeypatch, header_prefix
             http_handler.http_open(None)
         else:
             https_handler.https_open(None)
-        response = selected[0].response_class(reader)
-        with pytest.raises((TimeoutError, OSError, http.client.HTTPException)):
-            response.begin()
+        if transport == "https_proxy":
+            connection = selected[0]("proxy.example")
+            connection.sock = reader
+            connection._tunnel_host = "target.example"
+            connection._tunnel_port = 443
+            with pytest.raises((TimeoutError, OSError, http.client.HTTPException)):
+                connection._tunnel()
+        else:
+            response = selected[0].response_class(reader)
+            with pytest.raises((TimeoutError, OSError, http.client.HTTPException)):
+                response.begin()
         assert time.monotonic() - started < 1.5
         assert https_handler.handler_order < 500
     finally:
