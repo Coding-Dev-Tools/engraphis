@@ -634,9 +634,12 @@ default GitHub source is overridable via
 Returns `{enabled, current, latest, update_available, url, notice}`.
 
 ### `engraphis_decide`
-Fast sub-300ms System 1 decision gating for autonomous agents. Dispatches to TypeSafe Jev (BYOK),
-Engraphis Cloud Pro/Team, or deterministic local heuristics. Used for command safety guarding,
-fact contradiction screening, grounded support verification, turn completion checks, or custom micro-decisions.
+Advisory command, contradiction, support, completion, or custom checks. The default backend
+is local. Selecting `managed` uses the saved Engraphis Cloud session when configured;
+`auto` selects only managed access, and `byok` explicitly selects a personal TypeSafe key.
+Managed availability and allowance require service verification. No latency, accuracy, or
+savings guarantee follows from configuration. Smart discovery uses `engraphis_execute_action`
+because a remote request may consume allowance.
 
 - `kind (str, "guard_command")`: one of `'guard_command'`, `'classify_contradiction'`, `'verify_support'`, `'verify_completion'`, or `'custom'`.
 - `state (str, "")`: input shell command, candidate fact, or evidence text to evaluate.
@@ -647,8 +650,19 @@ fact contradiction screening, grounded support verification, turn completion che
 - `question (str, "")`: custom question for `'custom'` decisions.
 - `options (list[str], None)`: discrete choice alternatives.
 - `offline_mode (bool, false)`: when true, forces deterministic local heuristics without external API calls.
+- `allow_remote (bool, false)`: explicitly permits this call's supplied text to leave the device;
+  backend selection alone never authorizes a request.
+- `data_classification (str, "internal")`: remote input must be `public` or `internal`;
+  secret classification and known secret patterns are rejected before credential refresh.
 
-Returns `{allowed, decision, confidence, reason, backend, latency_ms}`.
+Every result includes `kind`, `backend`, `is_fallback`, `advisory_only`, `decision_status`,
+`confidence`, and `confidence_source`. Remote results also include the pinned `model`.
+The kind adds `allow_auto`/`escalate_to_user`/`safety_probability`/`category`, `verdict`,
+`supported`/`probability`, `is_complete`/`completion_probability`, or `selected`/`probability`.
+Uncertain support/completion stays null. Fallback results include `fallback_reason`, null
+confidence, and unmeasured heuristic labels; fallback command checks never allow automatic
+execution. Noul confidence is derived decisiveness, not measured calibration. Decisions do
+not replace executable verification, authorization, or user approval.
 
 ---
 

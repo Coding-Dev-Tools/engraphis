@@ -84,3 +84,21 @@ def test_remote_advice_cannot_override_local_destructive_veto(monkeypatch):
     ))
     assert result["allow_auto"] is False and result["escalate_to_user"] is True
     assert result["advisory_only"] is True
+
+
+@pytest.mark.parametrize("command", (
+    "git status",
+    "git branch -D feature",
+    "echo text > tracked-file.txt",
+    "git status; Remove-Item -Recurse project",
+))
+@pytest.mark.parametrize("remote", (False, True))
+def test_unmeasured_command_fallback_never_recommends_autoexecution(monkeypatch, command, remote):
+    _client(monkeypatch, error=transport.DecisionClientError("remote_timeout"))
+    result = json.loads(server.engraphis_decide(
+        kind="guard_command", state=command, allow_remote=remote,
+    ))
+    assert result["is_fallback"] is True
+    assert result["allow_auto"] is False
+    assert result["escalate_to_user"] is True
+    assert result["confidence"] is None

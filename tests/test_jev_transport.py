@@ -16,7 +16,7 @@ def _question(kind="noul"):
 
 
 def _normalized(probability=0.9):
-    return {"model": transport.MODEL, "decisions": {"q": {
+    return {"model": transport.MODEL, "is_fallback": False, "decisions": {"q": {
         "type": "noul", "probability": probability, "confidence": abs(2*probability-1),
         "confidence_source": "derived_decisiveness",
     }}}
@@ -88,6 +88,7 @@ def test_consent_and_classification_are_checked_before_refresh(managed, kwargs):
     ("Synthetic", [_question(), _question()], transport.MODEL),
     ("Synthetic", [DecisionQuestion("q", "secret=synthetic0123456789", "noul")], transport.MODEL),
     ("Synthetic", [DecisionQuestion("q", "Prompt", "score")], transport.MODEL),
+    ("Synthetic", [DecisionQuestion("ghp_" + "A" * 36, "Prompt", "noul")], transport.MODEL),
     ("Synthetic", [_question()], "jev-latest"),
 ))
 def test_invalid_or_sensitive_input_never_reaches_refresh(managed, state, questions, model):
@@ -132,6 +133,7 @@ def test_backend_modes_never_implicitly_choose_byok(monkeypatch):
     lambda body: body["decisions"]["q"].update(confidence_source="provider"),
     lambda body: body["decisions"].update(extra={"type": "noul"}),
     lambda body: body.update(is_fallback="false"),
+    lambda body: body.pop("is_fallback"),
 ))
 def test_normalized_parser_rejects_malformed_values_without_default_confidence(change):
     body = _normalized()
@@ -236,3 +238,53 @@ def test_configuration_presence_honors_explicit_backend_and_managed_precedence(m
     assert not Settings(decision_backend="auto", typesafe_api_key="synthetic-key").has_decision_backend
     assert Settings(decision_backend="byok", typesafe_api_key="synthetic-key").has_decision_backend
     assert not Settings(decision_backend="byok", typesafe_api_key="offline").has_decision_backend
+
+
+def test_https_loopback_managed_requests_disable_ambient_proxies(managed, monkeypatch):
+    import urllib.request
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.invalid:8080")
+    monkeypatch.setattr(cloud_session, "credential_bound_control_url", lambda: "https://localhost:8443")
+    transport.create_cloud_decision_client().evaluate(
+        "Synthetic", [_question()], model=transport.MODEL, allow_remote=True,
+    )
+    handlers = next(value[1] for value in managed if value[0] == "handlers")
+    assert any(isinstance(handler, urllib.request.ProxyHandler) and handler.proxies == {}
+               for handler in handlers)
+
+
+def test_url_validation_consumes_budget_before_network_open(monkeypatch):
+    clock = [10.0]
+    monkeypatch.setattr(transport.time, "monotonic", lambda: clock[0])
+    def validate(url):
+        clock[0] += 3.0
+        return url
+    def forbidden(*args, **kwargs):
+        pytest.fail("expired validation budget reached network transport")
+    monkeypatch.setattr(hosted_client, "validate_cloud_base_url", validate)
+    monkeypatch.setattr(hosted_client, "build_pinned_https_opener",
+                        lambda *handlers: SimpleNamespace(open=forbidden))
+    with pytest.raises(transport.DecisionClientError, match="remote_timeout"):
+        transport._post_json("https://synthetic.invalid/v1/jev/decide", "synthetic", {}, 2.0)
+
+
+def test_slow_response_progress_does_not_renew_whole_request_timeout(monkeypatch):
+    clock = [10.0]
+    timeouts = []
+    monkeypatch.setattr(transport.time, "monotonic", lambda: clock[0])
+    class SlowResponse(io.BytesIO):
+        status = 200
+        headers = {"Content-Type": "application/json"}
+        fp = SimpleNamespace(raw=SimpleNamespace(_sock=SimpleNamespace(
+            settimeout=lambda value: timeouts.append(value),
+        )))
+        def read1(self, size=-1):
+            clock[0] += 0.75
+            return b" "
+    response = SlowResponse()
+    monkeypatch.setattr(hosted_client, "validate_cloud_base_url", lambda value: value)
+    monkeypatch.setattr(hosted_client, "build_pinned_https_opener",
+                        lambda *handlers: SimpleNamespace(open=lambda *args, **kwargs: response))
+    with pytest.raises(transport.DecisionClientError, match="remote_timeout"):
+        transport._post_json("https://synthetic.invalid/v1/jev/decide", "synthetic", {}, 2.0)
+    assert timeouts == [2.0, 1.25, 0.5]
+    assert response.closed
