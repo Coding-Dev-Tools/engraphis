@@ -135,7 +135,7 @@ test("applies configured repo only inside its configured workspace", () => {
 			{ query: "decision" },
 			{ command: "engraphis-mcp", defaultRepo: "backend", environment: {} },
 		),
-		{ query: "decision" },
+		{ query: "decision", repo: "backend" },
 	);
 	assert.deepEqual(
 		applyScopeDefaults(
@@ -149,6 +149,15 @@ test("applies configured repo only inside its configured workspace", () => {
 		),
 		{ query: "decision", workspace: "other" },
 	);
+});
+
+test("session scope wins over configured defaults while explicit values remain intact", () => {
+	const config = { command: "engraphis-mcp", defaultRepo: "backend", defaultWorkspace: "acme", environment: {} };
+	assert.deepEqual(applyScopeDefaults({ session_id: "ses_other" }, config), { session_id: "ses_other" });
+	assert.deepEqual(applyScopeDefaults({ session_id: "ses_other", workspace: "default", repo: null }, config),
+		{ session_id: "ses_other", workspace: "default", repo: null });
+	assert.deepEqual(applyScopeDefaults({ repo: null }, { ...config, defaultWorkspace: undefined }), { repo: null });
+	assert.deepEqual(applyScopeDefaults({ workspace: "other" }, { ...config, defaultWorkspace: undefined }), { workspace: "other" });
 });
 
 test("publishes canonical Engraphis repository metadata", async () => {

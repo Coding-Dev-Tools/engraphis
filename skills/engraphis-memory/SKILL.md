@@ -75,9 +75,19 @@ Every memory carries a **scope** (visibility) and a **type** (kind). Getting the
 
 `workspace → repo → session → memory`. Choose:
 
-- **workspace**: the org or product (`acme`). Always required on writes.
+- **workspace**: the client, org, product, or area of work (`acme`). Every write belongs to one;
+  routine MCP calls can resolve an omitted value from a supplied session or saved repo mapping.
 - **repo**: the repository (`backend`). Omit only for genuinely workspace-wide facts.
 - **session**: one unit of work; pass its `session_id` so its memories group and resume.
+
+Honor an explicit user workspace choice. Otherwise use the project's saved mapping by supplying
+its stable `repo` name and omitting `workspace`; check the resolved workspace returned at session
+start. Keep using that `session_id` for recall and remember. Explicit `workspace="default"`
+overrides the mapping, so do not insert it as boilerplate. Without a session or mapping, new
+sessions and writes retain the `default` fallback. A supplied session must be authorized, and
+conflicting explicit workspace/repo arguments fail rather than silently reroute. Memory types
+do not choose workspaces. Discover the workspace-list or project-routing action when setup is
+needed; use its returned schema and executor.
 
 Pick the **narrowest supported scope that is still reusable**: usually `scope="repo"`, or
 `scope="workspace"` for deliberately shared cross-repo facts. `scope="user"` is reserved and

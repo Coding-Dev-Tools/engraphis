@@ -72,6 +72,11 @@ pip install engraphis-prime-agent
 
 ## Quick start
 
+To follow a project's saved workspace default, use `PrimeAgentFleet(repo="backend")`
+with no workspace override, or set only `ENGRAPHIS_REPO`. Each session keeps the server's
+resolved workspace; the next session can follow a changed project default. An explicit
+workspace, including `"default"`, still wins. See [workspace setup](../../docs/WORKSPACE_ORGANIZATION.md).
+
 ```python
 import asyncio
 from engraphis_prime_agent import PrimeAgentFleet
