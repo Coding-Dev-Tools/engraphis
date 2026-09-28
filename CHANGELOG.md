@@ -5,6 +5,8 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+- Updated the Pi extension's locked `ip-address` dependency to 10.5.1, fixing
+  IPv6 link-local and NAT64 classification advisories without changing its dependency ranges.
 - Added saved project-to-workspace routing and connection instructions so agents can use the
   user's selected workspace. Routine MCP calls inherit an omitted workspace from an authorized
   session or repo mapping, report the resolved destination, and reject session mismatches.
