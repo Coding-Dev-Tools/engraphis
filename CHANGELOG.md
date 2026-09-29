@@ -5,6 +5,10 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+- Kept selective-memory relocation policy independent of SQL through a domain storage
+  protocol, with bounded reads and caller-owned transaction rollback.
+- Reran the unchanged public fixtures into immutable v102 source-bound evidence.
+
 - Updated the Pi test host to 0.87.1 to include the patched WebSocket client, and
   extended the Pi dependency audit to cover its development dependencies.
 - Updated the Pi extension's locked `ip-address` dependency to 10.5.1, fixing

@@ -38,6 +38,10 @@ from engraphis.core.interfaces import (
     Edge,
     GraphLayer,
     MemoryRecord,
+    MovePlan,
+    RelocationDependencies,
+    RelocationHistory,
+    RelocationSessionHistory,
     MemoryType,
     Node,
     Scope,
@@ -4483,6 +4487,234 @@ class Store:
         d = dict(row)
         d["open_threads"] = _loads(d.get("open_threads"), [])
         return d
+
+    def _relocation_rows(self, sql: str, args: tuple, *, limit: int) -> list[dict]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("relocation limit must be a positive integer")
+        # The serialized connection materializes results at execute time. Bound
+        # the SQL itself, not just a later cursor.fetchmany() call.
+        rows = [dict(row) for row in self.conn.execute(
+            sql + " LIMIT ?", args + (limit + 1,),
+        ).fetchall()]
+        if len(rows) > limit:
+            raise ValueError("This move exceeds the review limit; organize a smaller workspace first.")
+        return rows
+
+    def _relocation_one(self, sql: str, args: tuple) -> Optional[dict]:
+        row = self.conn.fetchone(sql + " LIMIT 1", args)
+        return dict(row) if row is not None else None
+
+    def relocation_dependencies(self, workspace_id: str, *, limit: int
+                                ) -> RelocationDependencies:
+        """Read bounded source history without exposing SQL to the move planner."""
+        return RelocationDependencies(
+            memories=self._relocation_rows(
+                "SELECT id, repo_id, session_id, metadata, provenance FROM memories "
+                "WHERE workspace_id=? ORDER BY id", (workspace_id,), limit=limit,
+            ),
+            links=self._relocation_rows(
+                "SELECT l.* FROM mem_links l WHERE l.a IN "
+                "(SELECT id FROM memories WHERE workspace_id=?) OR l.b IN "
+                "(SELECT id FROM memories WHERE workspace_id=?) ORDER BY l.rowid",
+                (workspace_id, workspace_id), limit=limit,
+            ),
+            edges=self._relocation_rows(
+                "SELECT * FROM edges WHERE workspace_id=? ORDER BY id", (workspace_id,), limit=limit,
+            ),
+            supports=self._relocation_rows(
+                "SELECT s.* FROM edge_supports s WHERE s.edge_id IN "
+                "(SELECT id FROM edges WHERE workspace_id=?) OR s.memory_id IN "
+                "(SELECT id FROM memories WHERE workspace_id=?) ORDER BY s.id",
+                (workspace_id, workspace_id), limit=limit,
+            ),
+            command_links=self._relocation_rows(
+                "SELECT cmd.result_id, src.source_id FROM memory_commands cmd "
+                "JOIN memory_command_sources src ON src.workspace_id=cmd.workspace_id "
+                "AND src.operation_id=cmd.operation_id WHERE cmd.workspace_id=? "
+                "ORDER BY cmd.sequence, src.source_id", (workspace_id,), limit=limit,
+            ),
+        )
+
+    def relocation_history(self, memory_ids: list[str], *, limit: int) -> RelocationHistory:
+        marks = ",".join("?" for _ in memory_ids)
+        mids = tuple(memory_ids)
+        history = RelocationHistory()
+        history.commands = self._relocation_rows(
+            f"SELECT * FROM memory_commands WHERE result_id IN ({marks}) "
+            f"OR (workspace_id,operation_id) IN (SELECT workspace_id,operation_id "
+            f"FROM memory_command_sources WHERE source_id IN ({marks})) "
+            "ORDER BY sequence", mids + mids, limit=limit,
+        )
+        for command in history.commands:
+            identity = (command["workspace_id"], command["operation_id"])
+            history.command_sources[identity] = self._relocation_rows(
+                "SELECT * FROM memory_command_sources WHERE workspace_id=? "
+                "AND operation_id=? ORDER BY source_id", identity, limit=limit,
+            )
+        for table in ("memory_sync_exports", "memory_tombstones", "source_imports", "code_memory_links"):
+            history.attachments[table] = self._relocation_rows(
+                f"SELECT * FROM {table} WHERE memory_id IN ({marks})", mids, limit=limit,
+            )
+        history.incidences = self._relocation_rows(
+            f"SELECT * FROM memory_entities WHERE memory_id IN ({marks}) ORDER BY id", mids, limit=limit,
+        )
+        return history
+
+    def relocation_session_history(self, session_id: str, *, limit: int
+                                   ) -> RelocationSessionHistory:
+        return RelocationSessionHistory(
+            session=self._relocation_one("SELECT * FROM sessions WHERE id=?", (session_id,)),
+            jobs=self._relocation_rows(
+                "SELECT * FROM jobs WHERE session_id=? ORDER BY id", (session_id,), limit=limit,
+            ),
+            source_vaults=self._relocation_rows(
+                "SELECT * FROM source_vaults WHERE session_id=? ORDER BY id", (session_id,), limit=limit,
+            ),
+            events=self._relocation_rows(
+                "SELECT * FROM events WHERE session_id=? ORDER BY id", (session_id,), limit=limit,
+            ),
+        )
+
+    def relocation_workspace_events(self, workspace_id: str, *, limit: int) -> list[dict]:
+        return self._relocation_rows(
+            "SELECT * FROM events WHERE workspace_id=? ORDER BY id", (workspace_id,), limit=limit,
+        )
+
+    def relocation_entity(self, entity_id: str) -> Optional[dict]:
+        return self._relocation_one("SELECT * FROM entities WHERE id=?", (entity_id,))
+
+    def relocation_repo(self, repo_id: str) -> Optional[dict]:
+        return self._relocation_one("SELECT * FROM repos WHERE id=?", (repo_id,))
+
+    def relocation_repo_named(self, workspace_id: str, name: str) -> Optional[dict]:
+        return self._relocation_one(
+            "SELECT * FROM repos WHERE workspace_id=? AND name=?", (workspace_id, name),
+        )
+
+    def relocation_entity_named(self, workspace_id: str, repo_id: Optional[str],
+                                name: str, etype: Optional[str]) -> Optional[dict]:
+        return self._relocation_one(
+            "SELECT * FROM entities WHERE workspace_id=? AND repo_id IS ? "
+            "AND name=? AND etype IS ? ORDER BY id", (workspace_id, repo_id, name, etype),
+        )
+
+    def relocation_canonical_entity(self, workspace_id: str, repo_id: Optional[str],
+                                    normalized_name: str, etype: Optional[str]) -> Optional[dict]:
+        return self._relocation_one(
+            "SELECT * FROM entities WHERE workspace_id=? AND repo_id IS ? "
+            "AND normalized_name=? AND etype IS ? AND canonical_id=id",
+            (workspace_id, repo_id, normalized_name, etype),
+        )
+
+    def relocation_edge_conflict(self, workspace_id: str, repo_id: Optional[str],
+                                 src: str, dst: str, relation: str, layer: Optional[str]
+                                 ) -> Optional[dict]:
+        return self._relocation_one(
+            "SELECT * FROM edges WHERE workspace_id=? AND repo_id IS ? "
+            "AND src=? AND dst=? AND relation=? AND layer=? "
+            "AND valid_to IS NULL AND expired_at IS NULL",
+            (workspace_id, repo_id, src, dst, relation, layer),
+        )
+
+    def relocation_claim_conflict(self, workspace_id: str, repo_id: Optional[str],
+                                  record: MemoryRecord) -> Optional[dict]:
+        return self._relocation_one(
+            "SELECT id, metadata, provenance, modified_hlc FROM memories "
+            "WHERE workspace_id=? AND repo_id IS ? AND scope=? AND mtype=? "
+            "AND subject_key=? AND claim_kind=? AND valid_to IS NULL AND expired_at IS NULL",
+            (workspace_id, repo_id, record.scope.value, record.mtype.value,
+             record.subject_key, record.claim_kind),
+        )
+
+    def relocation_operation_exists(self, workspace_id: str, operation_id: str) -> bool:
+        return self._relocation_one(
+            "SELECT 1 FROM memory_commands WHERE workspace_id=? AND operation_id=?",
+            (workspace_id, operation_id),
+        ) is not None
+
+    def relocation_ownership(self, source_id: str, target_id: str, *, limit: int) -> list[dict]:
+        return self._relocation_rows(
+            "SELECT * FROM workspaces WHERE id IN (?,?) ORDER BY id", (source_id, target_id), limit=limit,
+        )
+
+    def apply_memory_move(self, plan: MovePlan, *, actor: str) -> None:
+        """Persist an authorized, revalidated move without settling its caller's transaction."""
+        from engraphis.core.mutations import memory_version
+
+        if plan.blockers:
+            raise ValueError("Resolve the preview blockers before moving memories.")
+        if not self.conn.transaction_owned_by_current_thread():
+            raise RuntimeError("memory relocation requires a caller-owned write transaction")
+        c = self.conn
+        now = time.time()
+        repo_map: dict[str, str] = {}
+        for repo in plan.repos:
+            if repo["target"]:
+                repo_map[repo["id"]] = repo["target"]["id"]
+            else:
+                rid = ids.new_id("repo")
+                repo_map[repo["id"]] = rid
+                # Host routing and indexed-code settings are not portable with a memory subset.
+                c.execute("INSERT INTO repos(id,workspace_id,name,created_at,settings) VALUES(?,?,?,?,?)",
+                          (rid, plan.target_id, repo["name"], now, "{}"))
+        for session in plan.sessions:
+            c.execute("UPDATE sessions SET workspace_id=?,repo_id=? WHERE id=?",
+                      (plan.target_id, repo_map.get(session["repo_id"]), session["id"]))
+        for event in plan.events:
+            c.execute("UPDATE events SET workspace_id=?,repo_id=? WHERE id=?",
+                      (plan.target_id, repo_map.get(event["repo_id"]), event["id"]))
+        entity_map = {entity["id"]: entity["target"]["id"] if entity["target"] else ids.new_id("entity")
+                      for entity in plan.entities}
+        for entity in plan.entities:
+            if entity["target"]:
+                continue
+            eid = entity_map[entity["id"]]
+            root = entity["root"]
+            canonical = entity_map[root[4:]] if root.startswith("new:") else root
+            c.execute("INSERT INTO entities(id,workspace_id,repo_id,name,etype,canonical_id,"
+                      "normalized_name,canonical_method,canonical_confidence,created_at) "
+                      "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                      (eid, plan.target_id, repo_map.get(entity["repo_id"]), entity["name"],
+                       entity["etype"], canonical,
+                       entity["normalized_name"], entity["canonical_method"],
+                       entity["canonical_confidence"], entity["created_at"]))
+        for edge in plan.edges:
+            start, end = entity_map[edge["src"]], entity_map[edge["dst"]]
+            if edge["relation"] in {"co_occurs", "related", "associated_with"} and end < start:
+                start, end = end, start
+            c.execute("UPDATE edges SET workspace_id=?,repo_id=?,src=?,dst=? WHERE id=?",
+                      (plan.target_id, repo_map.get(edge["repo_id"]), start, end, edge["id"]))
+        for incidence in plan.incidences:
+            c.execute("UPDATE memory_entities SET workspace_id=?,repo_id=?,entity_id=? WHERE id=?",
+                      (plan.target_id, repo_map.get(incidence["repo_id"]),
+                       entity_map[incidence["entity_id"]], incidence["id"]))
+        for record in plan.records:
+            c.execute("UPDATE memories SET workspace_id=?,repo_id=? WHERE id=?",
+                      (plan.target_id, repo_map.get(record.repo_id or ""), record.id))
+            self.advance_memory_modified_hlc(record.id, commit=False)
+            self.audit(actor, "workspace_move", record.id, json.dumps({
+                "operation": plan.preview_token, "source_workspace": plan.source_id,
+                "target_workspace": plan.target_id, "source_repo": record.repo_id,
+                "target_repo": repo_map.get(record.repo_id or ""),
+            }, sort_keys=True), commit=False)
+        # Keep operation identities and ordering with their history. Remove only
+        # child keys while updating the parent so immediate foreign keys remain valid.
+        for row in plan.command_sources:
+            c.execute("DELETE FROM memory_command_sources WHERE source_id=?", (row["source_id"],))
+        for command in plan.commands:
+            result = self.get_memory(command["result_id"])
+            if result is None:
+                raise ValueError("A correction result disappeared during the move.")
+            c.execute("UPDATE memory_commands SET workspace_id=?,result_version=? WHERE sequence=?",
+                      (plan.target_id, memory_version(result), command["sequence"]))
+        for row in plan.command_sources:
+            c.execute("INSERT INTO memory_command_sources(source_id,workspace_id,operation_id) VALUES(?,?,?)",
+                      (row["source_id"], plan.target_id, row["operation_id"]))
+        for wid in (plan.source_id, plan.target_id):
+            c.execute("INSERT INTO graph_index_state(workspace_id,generation,state,updated_at) "
+                      "VALUES(?,1,'ready',?) ON CONFLICT(workspace_id) DO UPDATE SET "
+                      "generation=graph_index_state.generation+1,updated_at=excluded.updated_at",
+                      (wid, now))
 
     def begin_session_write(self, session_id: str, *, workspace_id: str,
                             repo_id: Optional[str] = None) -> bool:
