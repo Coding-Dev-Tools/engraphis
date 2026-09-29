@@ -212,6 +212,8 @@ def test_cloud_decision_client_uses_saved_session_configuration(monkeypatch):
     from engraphis.backends.jev_decision import create_cloud_decision_client
     configured = []
     monkeypatch.setattr(cloud_session, "configured", lambda **kw: configured.append(kw) or True)
+    monkeypatch.setattr(cloud_session, "credential_bound_control_url",
+                        lambda: "https://control.example.invalid")
     client = create_cloud_decision_client()
     assert configured == []
     assert client.is_configured is True
