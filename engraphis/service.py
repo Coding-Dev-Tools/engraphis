@@ -9429,46 +9429,73 @@ class MemoryService:
         # unrelated relation in the workspace.
         touching_entity_cap = all_mode_entity_cap or MAX_GRAPH_ANALYSIS_ENTITIES
         touching_sql = (
-            "WITH candidate_edges AS ("
-            "SELECT id, src, dst FROM edges "
-            "WHERE workspace_id=? "
+            "WITH candidate_entities AS ("
+            "SELECT id FROM entities selected_entity "
+            "WHERE selected_entity.workspace_id=? "
         )
         touching_params: list[Any] = [wid]
+        if repo_id:
+            touching_sql += (
+                "AND (selected_entity.repo_id=? OR selected_entity.repo_id IS NULL) "
+            )
+            touching_params.append(repo_id)
+        touching_sql += (
+            "AND (selected_entity.created_at IS NULL OR selected_entity.created_at<=?) "
+        )
+        touching_params.append(known_t)
+        if clean_entity_types:
+            clean_types = sorted(set(clean_entity_types))
+            marks = ",".join("?" for _ in clean_types)
+            touching_sql += f"AND selected_entity.etype IN ({marks}) "
+            touching_params.extend(clean_types)
         # A live scene must classify entities from the same world/system-time edge
         # population used by the later edge query. Keep the historical joins intact
         # for time-travel scenes so closed relations can still identify ghost endpoints.
         if not include_history:
-            touching_sql += (
-                "AND (valid_from IS NULL "
-                "OR valid_from<=?) "
-                "AND (valid_to IS NULL "
-                "OR ?<valid_to "
-                "OR (valid_to_recorded_at IS NOT NULL "
-                "AND ?<valid_to_recorded_at)) "
-                "AND (ingested_at IS NULL "
-                "OR ingested_at<=?) "
-                "AND (expired_at IS NULL "
-                "OR ?<expired_at) "
+            touching_edge_time_sql = (
+                "AND (touching_edge.valid_from IS NULL "
+                "OR touching_edge.valid_from<=?) "
+                "AND (touching_edge.valid_to IS NULL "
+                "OR ?<touching_edge.valid_to "
+                "OR (touching_edge.valid_to_recorded_at IS NOT NULL "
+                "AND ?<touching_edge.valid_to_recorded_at)) "
+                "AND (touching_edge.ingested_at IS NULL "
+                "OR touching_edge.ingested_at<=?) "
+                "AND (touching_edge.expired_at IS NULL "
+                "OR ?<touching_edge.expired_at) "
             )
-            touching_params.extend((t, t, t, known_t, known_t))
+            touching_edge_time_params: tuple[float, ...] = (t, t, t, known_t, known_t)
         else:
-            touching_sql += (
-                "AND (valid_from IS NULL "
-                "OR valid_from<=?) "
-                "AND (ingested_at IS NULL "
-                "OR ingested_at<=?) "
-                "AND (expired_at IS NULL "
-                "OR ?<expired_at) "
+            touching_edge_time_sql = (
+                "AND (touching_edge.valid_from IS NULL "
+                "OR touching_edge.valid_from<=?) "
+                "AND (touching_edge.ingested_at IS NULL "
+                "OR touching_edge.ingested_at<=?) "
+                "AND (touching_edge.expired_at IS NULL "
+                "OR ?<touching_edge.expired_at) "
             )
-            touching_params.extend((t, known_t, known_t))
+            touching_edge_time_params = (t, known_t, known_t)
+        # Drive both indexed endpoint probes from the selected entities. A workspace-
+        # wide edge CTE would scan unrelated repositories before this scope is applied.
+        # CROSS JOIN preserves that loop order; the dst branch omits a self-loop's
+        # second incidence without deduplicating distinct relations or support rows.
+        touching_sql += "), candidate_edges AS ("
+        for endpoint in ("src", "dst"):
+            if endpoint == "dst":
+                touching_sql += "UNION ALL "
+            touching_sql += (
+                "SELECT selected_entity.id AS entity_id, touching_edge.id AS edge_id "
+                "FROM candidate_entities selected_entity CROSS JOIN edges touching_edge "
+                f"ON touching_edge.workspace_id=? AND touching_edge.{endpoint}=selected_entity.id "
+                + touching_edge_time_sql
+            )
+            touching_params.extend((wid, *touching_edge_time_params))
+            if endpoint == "dst":
+                touching_sql += "AND touching_edge.src!=touching_edge.dst "
         touching_sql += (
-            "), edge_endpoints AS ("
-            "SELECT src AS entity_id, id AS edge_id FROM candidate_edges "
-            "UNION ALL "
-            "SELECT dst AS entity_id, id AS edge_id FROM candidate_edges "
             "), endpoint_supports AS ("
             "SELECT ee.entity_id, ee.edge_id, s.memory_id "
-            "FROM edge_endpoints ee "
+            "FROM candidate_edges ee "
             "LEFT JOIN edge_supports s "
             "ON s.edge_id=ee.edge_id "
         )
@@ -9499,7 +9526,7 @@ class MemoryService:
         join_type = "LEFT JOIN" if include_history else "JOIN"
         touching_sql += (
             f") SELECT selected_entity.id, COUNT(es.edge_id) AS touching_count "
-            f"FROM entities selected_entity "
+            f"FROM candidate_entities selected_entity "
             f"{join_type} endpoint_supports es ON es.entity_id=selected_entity.id "
             "LEFT JOIN memories touching_memory "
             "ON touching_memory.id=es.memory_id "
@@ -9530,26 +9557,9 @@ class MemoryService:
                 "OR ?<touching_memory.expired_at) "
             )
             touching_params.extend((wid, t, known_t, known_t))
-        touching_sql += "WHERE selected_entity.workspace_id=? "
-        touching_params.append(wid)
-        if repo_id:
-            touching_sql += (
-                "AND (selected_entity.repo_id=? OR selected_entity.repo_id IS NULL) "
-            )
-            touching_params.append(repo_id)
-        touching_sql += (
-            "AND (selected_entity.created_at IS NULL OR selected_entity.created_at<=?) "
-        )
-        touching_params.append(known_t)
-        if clean_entity_types:
-            clean_types = sorted(set(clean_entity_types))
-            if clean_types:
-                marks = ",".join("?" for _ in clean_types)
-                touching_sql += f"AND selected_entity.etype IN ({marks}) "
-                touching_params.extend(clean_types)
         # Private-only relation histories must not consume the public candidate cap.
-        # Keep the workspace-wide scan for history views so a shared entity touched by
-        # an unrelated session-private edge remains hidden and ghost endpoints survive.
+        # Keep workspace-wide privacy classification so a shared entity touched by an
+        # unrelated session-private edge remains hidden and ghost endpoints survive.
         touching_sql += "GROUP BY selected_entity.id HAVING "
         if include_history:
             touching_sql += (
