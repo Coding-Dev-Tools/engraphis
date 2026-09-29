@@ -2,7 +2,7 @@
   "environment": {
     "embedding": "deterministic",
     "numpy": "2.4.6",
-    "platform": "linux",
+    "platform": "win32",
     "python": "3.11.15",
     "vector_backend": "numpy"
   },
@@ -103,10 +103,10 @@
   ],
   "schema": "engraphis-public-offline-fixtures/v1",
   "suite": {
-    "digest": "464d44d3686bd15726629b06e281c74505d6602f277d232a4825485c62489437",
+    "digest": "77b140068cd036330b421a0d7668847d196f1bbeaa36c965d68943457002e6eb",
     "digest_method": "sha256(canonical compact JSON mapping each sorted path to its file SHA-256)",
     "files": {
-      "engraphis/__init__.py": "7d7e5e18c96a9a4f5c0eef6d123e7506736231819d11276b21e598f045fa40dd",
+      "engraphis/__init__.py": "f24241e8da2ede9ccba54ce4bf7531a800b55c29b2469e5de93bd423cffbf0be",
       "engraphis/ai_context.py": "4dfd5d39eb95d05c591d1981e9e855eced73232f53efd9fe9966e0e08957d030",
       "engraphis/app.py": "44d68ad8c0ff46baed01978c9b04e40b8be5031609d5a69e205b7f05da3777fb",
       "engraphis/backends/__init__.py": "a9f22b9278362904166614081f1df78469d453601b298ce4e8afdba8a3722b25",
@@ -169,7 +169,7 @@
       "engraphis/core/schema.py": "ac273d3f0383995be815bbd866f2a36ea1398f30833aed57b8d4459afc87096b",
       "engraphis/core/scoring.py": "f5b6ac291edf0968b3de83cb1951a97d5bfd8a8d079199cb2ef95bba0884c89a",
       "engraphis/core/secrets.py": "a4835ba06e2616156528df6365ca1aba6cba0c97cdf834a709d2797a371099d2",
-      "engraphis/core/store.py": "0ba21d11b9a61b105f743aac3850f12638cc51b425ce76fb8d0c1eb27d540647",
+      "engraphis/core/store.py": "0ec7df8149af781be7fc1e769ad63d4e91c402b84f842c676ce8b91ddf7ae2d3",
       "engraphis/core/sync.py": "69f75b50fdb1ec9352f92460c89efeec8d72ca642bd10beb29474a8c62b4f58a",
       "engraphis/core/textutil.py": "acd65031729fa5d91d09527b8eb52518b83cfce77a55e6b7ae2d94686e35c1a6",
       "engraphis/core/user_model.py": "3147ec8ee7cfd855783f639874b63f331cdc822bd8bd9298cfb326dd18666026",
@@ -202,7 +202,7 @@
       "engraphis/mcp_classic_cli.py": "778122b121a1c654b8f85810fad05d9c8d7799cf13903d7dc274938b51008da0",
       "engraphis/mcp_cli.py": "ed2d997438d727180842dc5fb3f6776f5a5d97974f690ee7229264be1ff61957",
       "engraphis/mcp_http_cli.py": "5a04bcaae4531a6ea116a827bb65c5df3bd6d07ea336f65ff3ed45034972c396",
-      "engraphis/mcp_server.py": "99efc711a0da17bcc93aed305c52909806e515d8052ed8389321ff59e7179424",
+      "engraphis/mcp_server.py": "4e6ccc506f6ce49b43b18022b3f543a6cd419917a75ef7dddd5498417c87e32c",
       "engraphis/models.py": "6e76e97db0aca3805c6f582ea78cc6e1c0ccd2665e16fd8ab81eb91b94141b51",
       "engraphis/netutil.py": "2e0f8a9095f6f31dcb5b96d323f023b9214369d59e1c488125a7d443a55972ff",
       "engraphis/observability.py": "a3a6945bf33a0d8e216da56ca7efec0031b82dc64a66cff36f0b2161f5db4981",
@@ -230,7 +230,7 @@
       "eval/benchmark.py": "b71832affdf87d23bc1db7b522a669a7888571b3989b03a235c70f5da9952bd6",
       "eval/benchmark_analysis.py": "1200791425d029695fee0b7da1f188a8962f337aa31eb4217d50e4503641d2b3",
       "eval/benchmark_campaign.py": "033dbebfb47df5fcd3a6588b29ea4ab5fd44d4387ae45334379278ab30f3e57f",
-      "eval/campaign_adapters.py": "706f8c464c4fa1f793f07849fdd8e2f825e521c7727c15d8576aa587921779fc",
+      "eval/campaign_adapters.py": "2bdb51de0dcdfceb1be2a649d84541780ac4d1fc0f9b7585004d87490073213e",
       "eval/campaign_api.py": "323be4e1d9520e8047ab54c9cbb158013785402b06ee4e93e55227971c54bf95",
       "eval/campaign_candidate.py": "88541840d16c3b7368586ed0ee3566054214b1f594826b746b28d0e407cb812a",
       "eval/campaign_continuation.py": "7f77a20ac8f85cd96729bba0cf45872c98a3421af005bd735434b7b416dd7e1f",
