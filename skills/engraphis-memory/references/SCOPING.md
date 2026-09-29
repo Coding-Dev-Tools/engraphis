@@ -131,5 +131,7 @@ a session context sees that exact session plus its repo/workspace ancestors. Oth
 leak into repo/workspace recall. Historical `user` rows can still appear as workspace ancestors
 for compatibility; they are not owner-isolated. Routine MCP calls can resolve the workspace from
 their session or repo mapping as described above. If recall returns no results and a `note` says
-the workspace/repo is unknown, you simply have not written there yet. Unknown or unauthorized
-session IDs are errors.
+the workspace/repo is unknown, you simply have not written there yet. An unknown `session_id`
+is an error when `workspace` is omitted. With an explicit workspace, an unknown session returns
+no memories and a `note`, without broadening the search. Unauthorized sessions and conflicts
+between a known session and the supplied workspace or repo remain errors.
