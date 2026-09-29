@@ -10745,7 +10745,8 @@ class MemoryService:
         cache_key = (
             revision, clean_workspace, clean_level, clean_center_id or "",
             clean_system_id or "", tuple(clean_seeds), clean_repo or "",
-            tuple(clean_layers or ()), tuple(clean_relations), tuple(clean_entity_types),
+            None if clean_layers is None else tuple(clean_layers),
+            tuple(clean_relations), tuple(clean_entity_types),
             tuple(clean_memory_types), clean_as_of, clean_valid_at, clean_known_at,
             clean_time_from, clean_time_to,
             clean_depth, clean_min_support,
