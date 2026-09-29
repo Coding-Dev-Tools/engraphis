@@ -132,33 +132,47 @@
     const sizes = splitBackgroundLayers(style.backgroundSize);
     const positions = splitBackgroundLayers(style.backgroundPosition);
     const repeats = splitBackgroundLayers(style.backgroundRepeat);
-    const scaleX = ctx.canvas.width / width, scaleY = ctx.canvas.height / height;
+    // force-graph truncates fractional backing dimensions, not its drawing scale.
+    const scale = window.devicePixelRatio || 1;
     ctx.save();
-    ctx.scale(scaleX, scaleY);
+    ctx.scale(scale, scale);
     // CSS lists the top image first, while canvas paints from the bottom up.
     for (let i = images.length - 1; i >= 0; i--) {
       const size = sizes[i % sizes.length].split(/\s+/);
-      const tileWidth = size[0] === 'auto' ? width : backgroundLength(size[0], width);
-      const tileHeight = !size[1] || size[1] === 'auto' ? height : backgroundLength(size[1], height);
+      let tileWidth = size[0] === 'auto' ? width : backgroundLength(size[0], width);
+      let tileHeight = !size[1] || size[1] === 'auto' ? height : backgroundLength(size[1], height);
       if (!(tileWidth > 0 && tileHeight > 0)) continue;
-      const tile = document.createElement('canvas');
-      tile.width = Math.max(1, Math.round(tileWidth * scaleX));
-      tile.height = Math.max(1, Math.round(tileHeight * scaleY));
-      const layer = tile.getContext('2d');
-      if (!layer) continue;
-      layer.scale(tile.width / tileWidth, tile.height / tileHeight);
-      if (!paintBackgroundGradient(layer, images[i], tileWidth, tileHeight)) continue;
       const position = positions[i % positions.length].split(/\s+/);
       let x = backgroundLength(position[0], width - tileWidth);
       let y = backgroundLength(position[1] || '50%', height - tileHeight);
       const repeat = repeats[i % repeats.length].split(/\s+/);
-      const repeatX = repeat[0] === 'repeat' || repeat[0] === 'repeat-x';
-      const repeatY = (repeat[1] || repeat[0]) === 'repeat' || repeat[0] === 'repeat-y';
-      if (repeatX) x = ((x % tileWidth) + tileWidth) % tileWidth - tileWidth;
-      if (repeatY) y = ((y % tileHeight) + tileHeight) % tileHeight - tileHeight;
+      let repeatX = repeat[0] === 'repeat' || repeat[0] === 'repeat-x';
+      let repeatY = (repeat[1] || repeat[0]) === 'repeat' || repeat[0] === 'repeat-y';
+      const linear = /^linear-gradient\((?:(-?[\d.]+)deg,)?/.exec(images[i]);
+      if (linear) {
+        const angle = Number(linear[1] || 180) % 180;
+        // Axis-aligned gradients are constant along the other axis. Painting one
+        // strip avoids artificial seams when fractional-DPR tiles meet there.
+        if (repeatX && angle === 0) { tileWidth = width; x = 0; repeatX = false; }
+        if (repeatY && Math.abs(angle) === 90) { tileHeight = height; y = 0; repeatY = false; }
+      }
+      const tile = document.createElement('canvas');
+      // Transparent padding lets interpolation cross a half-pixel tile boundary;
+      // drawImage otherwise clips away the leading pixel before blending it.
+      tile.width = Math.ceil(tileWidth * scale) + 2;
+      tile.height = Math.ceil(tileHeight * scale) + 2;
+      const layer = tile.getContext('2d');
+      if (!layer) continue;
+      layer.translate(1, 1);
+      layer.scale(scale, scale);
+      if (!paintBackgroundGradient(layer, images[i], tileWidth, tileHeight)) continue;
+      if (repeatX) { x = ((x % tileWidth) + tileWidth) % tileWidth; if (x > 0) x -= tileWidth; }
+      if (repeatY) { y = ((y % tileHeight) + tileHeight) % tileHeight; if (y > 0) y -= tileHeight; }
       for (let top = y; top < height; top += repeatY ? tileHeight : height + tileHeight) {
         for (let left = x; left < width; left += repeatX ? tileWidth : width + tileWidth) {
-          ctx.drawImage(tile, left, top, tileWidth, tileHeight);
+          // Preserve the raster's pixel scale while placing tiles at CSS intervals.
+          // Stretching 38 backing pixels into 37.5 at DPR 1.25 blurs the 1 px grid.
+          ctx.drawImage(tile, left - 1 / scale, top - 1 / scale, tile.width / scale, tile.height / scale);
         }
       }
     }
