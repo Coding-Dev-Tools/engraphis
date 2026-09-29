@@ -74,7 +74,11 @@ def validate_llm_base_url(value: str) -> str:
     path = parts.path.rstrip("/")
     return urlunsplit((scheme, parts.netloc, path, "", ""))
 
-_CLAUDE_MODEL_RE = re.compile(r"claude-(opus|sonnet|haiku|fable|mythos)-(\d+)(?:-(\d{1,2})(?!\d))?")
+# Fable and Mythos ids may omit a numeric version (``claude-mythos-preview``); every
+# member of those families rejects sampling and thinks by default.
+_CLAUDE_MODEL_RE = re.compile(
+    r"claude-(?:(opus|sonnet|haiku)-(\d+)(?:-(\d{1,2})(?!\d))?|(fable|mythos)(?![a-z0-9]))"
+)
 
 # Newer Claude models think by default, so hidden reasoning tokens share ``max_tokens`` with
 # the visible reply. Keep enough headroom that a small caller cap cannot end the turn before
@@ -93,9 +97,9 @@ def _anthropic_model_traits(model: Optional[str]) -> tuple[bool, bool]:
     match = _CLAUDE_MODEL_RE.search((model or "").lower())
     if match is None:
         return True, False
-    family, major, minor = match.group(1), int(match.group(2)), int(match.group(3) or 0)
-    if family in ("fable", "mythos"):
+    if match.group(4):
         return False, True
+    family, major, minor = match.group(1), int(match.group(2)), int(match.group(3) or 0)
     if family == "opus":
         return (major, minor) < (4, 7), major >= 5
     if family == "sonnet":

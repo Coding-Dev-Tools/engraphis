@@ -2312,19 +2312,19 @@ _READ_ONLY_COMMANDS = (
 # are not outcomes.
 _ZERO_OUTCOMES = re.compile(
     r"\b(?:0|no|zero|none|nothing|without)\s+(?:(?:any|of\s+the)\s+)?(?:tests?\s+)?"
-    r"(?:errors?|failures?|failed|failing|exceptions?|issues?|problems?|passed|succeeded"
-    r"|completed)\b|\b(?:errors?|failures?|failed|passed|passing)\s*[:=]\s*0\b"
+    r"(?:errors?|failures?|failed|failing|exceptions?|issues?|problems?|passed|passing"
+    r"|succeeded|completed)\b|\b(?:errors?|failures?|failed|passed|passing)\s*[:=]\s*(?:0|none)\b"
     r"|\berror[- ]free\b")
 _FAILURE_WORDS = re.compile(
     r"\b(?:error(?:s|ed)?|fail(?:ed|ures?|s|ing)?|assertionerror|exceptions?|traceback"
     r"|fatal)\b")
 _SUCCESS_WORDS = re.compile(
-    r"\b(?:pass(?:ed|es)?|success(?:ful(?:ly)?)?|succeeded|completed|ok)\b|\b100%")
+    r"\b(?:pass(?:ed|es|ing)?|success(?:ful(?:ly)?)?|succeeded|completed|ok)\b|\b100%")
 # A negation, but not a contrast: "not only passed" and "did not just fail" affirm.
 _NEGATION_PREFIX = r"(?:\b(?:not|never|no\s+longer)|n't)\s+(?!(?:only|just|merely|simply)\b)"
 # "did not pass" or "didn't succeed" reports a failure, not a success word.
 _NEGATED_SUCCESS = re.compile(_NEGATION_PREFIX + r"(?:\w+\s+){0,2}?"
-                              r"(?:pass(?:ed|es)?|succe(?:ss|ed|eded)\w*|complete[ds]?|ok)\b")
+                              r"(?:pass(?:ed|es|ing)?|succe(?:ss|ed|eded)\w*|complete[ds]?|ok)\b")
 # "did not fail" or "never errored" is not a failure word.
 _NEGATED_FAILURE = re.compile(_NEGATION_PREFIX + r"(?:\w+\s+)?"
                               r"(?:fail(?:ed|s|ing)?|error(?:s|ed)?)\b")
@@ -2705,7 +2705,16 @@ def engraphis_decide(
                 result.update({"supported": probability > 0.5 if certain else None,
                                "probability": probability})
             elif kind == "verify_completion":
-                result.update({"is_complete": probability >= 0.85 if certain else None,
+                # Completion needs stronger evidence than certainty alone. A likely but
+                # sub-threshold probability (0.75-0.85) is neither success nor failure.
+                is_complete = None
+                if certain and probability >= 0.85:
+                    is_complete = True
+                elif certain and probability < 0.5:
+                    is_complete = False
+                else:
+                    result["decision_status"] = "uncertain"
+                result.update({"is_complete": is_complete,
                                "completion_probability": probability})
             else:
                 result["probability"] = probability

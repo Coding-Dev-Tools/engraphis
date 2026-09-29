@@ -33,7 +33,13 @@ All notable changes to Engraphis are documented here. Format loosely follows
   the API defaults, `.env.example`, and the provider guide with `claude-sonnet-5-5`.
 - Documented how to back the experimental Jev decision adapter with Claude: pin an exact model
   id, keep fallback disabled, and avoid sampling parameters and forced tool choice.
-- Refreshed the public offline fixtures and source bindings in immutable v124 evidence.
+- Recognized `claude-mythos-preview` and other unversioned Fable/Mythos ids, so they no longer
+  receive `temperature` (an HTTP 400) and get the thinking-model output headroom.
+- A remote `verify_completion` probability between the certainty bound and the 0.85 completion
+  bar is now `uncertain` with a null `is_complete`, instead of a decisive failure.
+- Local completion checks recognize `N passing` (Mocha/Jest style), `not passing`, `0 passing`
+  and `errors: none`.
+- Refreshed the public offline fixtures and source bindings in immutable v125 evidence.
 
 ## [1.7.9] - 2026-09-29
 
