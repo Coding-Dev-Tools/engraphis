@@ -2288,18 +2288,25 @@ _DESTRUCTIVE_PATTERNS = (
                re.I),
 )
 # Read-only labels apply only to one simple command: chaining, substitution, pipes and
-# redirection can write, delete or exfiltrate. Stream merges and discards write no file.
-_SHELL_CONTROL = re.compile(r"[;&|<>`\r\n]|\$\(")
+# redirection can write, delete or exfiltrate, and PowerShell runs any "(...)" or "@(...)"
+# argument as a command. Stream merges and discards write no file.
+_SHELL_CONTROL = re.compile(r"[;&|<>`(\r\n]")
+# Quotes and escapes cannot hide a write or exec option such as '--output=x' or --p"re".
+_QUOTING = re.compile(r"[\"'\\^]")
 _BENIGN_REDIRECTS = re.compile(r"(?<!\S)(?:[12&]?>>?\s*/dev/null|[12]?>&[12])(?!\S)")
 _READ_ONLY_COMMANDS = (
     re.compile(r"git\s+(?:status|diff|log|show|rev-parse|blame|describe|shortlog|ls-files"
                r"|stash\s+list)(?!\S)(?!.*\s--output\b).*", re.I),
     re.compile(r"git\s+branch(?:\s+(?:-a|-r|-v|-vv|--all|--remotes|--list|--show-current"
                r"|--verbose))*", re.I),
-    re.compile(r"(?:ls|dir|cat|type|head|tail|grep|rg|findstr|echo|pwd|where|which|wc)(?!\S).*",
-               re.I),
+    # ripgrep's --pre runs a program on every file it searches.
+    re.compile(r"(?:ls|dir|cat|type|head|tail|grep|rg|findstr|echo|pwd|where|which|wc)(?!\S)"
+               r"(?!.*\s--pre(?:[=\s]|$)).*", re.I),
+    # Options that fix, annotate or write files are not read-only, and pytest deletes an
+    # existing --basetemp directory.
     re.compile(r"(?:pytest|python[\d.]*\s+-m\s+pytest|npm\s+test|cargo\s+(?:check|test)"
-               r"|ruff\s+check)(?!\S)(?!.*\s--fix\b).*", re.I),
+               r"|ruff\s+check)(?!\S)(?!.*\s(?:--fix(?:-only)?|--add-noqa|--output-file|-o"
+               r"|--basetemp|--junit-?xml|--report-log|--result-?log)(?:[=\s]|$)).*", re.I),
 )
 # Outcome words; zero counts ("0 failed", "nothing failed", "without errors", "errors: 0")
 # are not outcomes.
@@ -2379,13 +2386,17 @@ def _guard_category(command: str) -> str:
     screen completely may still be destructive, so it is never labeled read-only.
     """
     screened = command[:_GUARD_SCAN_CHARS]
-    if any(pattern.search(screened) for pattern in _DESTRUCTIVE_PATTERNS):
+    # Quotes and escapes cannot hide a destructive command either: git "push" -f, r\m -rf.
+    unquoted = _QUOTING.sub("", screened)
+    if any(pattern.search(screened) or pattern.search(unquoted)
+           for pattern in _DESTRUCTIVE_PATTERNS):
         return "destructive_or_leak"
     if len(command) > _GUARD_SCAN_CHARS:
         return "state_change"
     simple = _BENIGN_REDIRECTS.sub(" ", re.sub(r"^COMMAND:\s*", "", command, flags=re.I)).strip()
+    literal = _QUOTING.sub("", simple)
     if (simple and not _SHELL_CONTROL.search(simple)
-            and any(pattern.fullmatch(simple) for pattern in _READ_ONLY_COMMANDS)):
+            and any(pattern.fullmatch(literal) for pattern in _READ_ONLY_COMMANDS)):
         return "read_only"
     return "state_change"
 

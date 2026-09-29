@@ -6,7 +6,8 @@ All notable changes to Engraphis are documented here. Format loosely follows
 ## [Unreleased]
 
 - Classify local `engraphis_decide` command advice conservatively. Chained, piped,
-  substituted or redirected commands are never labeled read-only. Recursive deletes in any
+  substituted or redirected commands, and options that run programs or write files
+  (`rg --pre`, `pytest --basetemp`), are never labeled read-only. Recursive deletes in any
   flag order, raw device writes, history-rewriting or work-discarding Git operations, SQL
   and infrastructure teardown, downloaded-script execution, exfiltrating pipes and uploads,
   and well-known credential files are labeled destructive or leaking. Screening is bounded
