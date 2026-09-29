@@ -32,6 +32,12 @@ particular deployment has enabled Jev; the service checks current entitlement an
 Usage and availability are reported by the account portal. No latency, accuracy, or cost-saving
 guarantee is established by client configuration or a successful health check.
 
+The managed transport and MCP decision route require client **1.7.9 or newer**.
+The published 1.7.8 client has an experimental adapter but does not provide this route.
+After 1.7.9 is published, upgrade the Python environment that launches your MCP host
+and restart that host. See the [1.7.9 upgrade and release checklist](RELEASE_1_7_9.md).
+Installing a new client does not enable a deployment whose managed service is disabled.
+
 Set `ENGRAPHIS_DECISION_BACKEND=managed` and connect the installation through the ordinary
 Cloud account flow. The client refreshes its saved session and sends only to that session's
 bound control origin. `auto` chooses this managed route when configured; it never silently

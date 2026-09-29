@@ -5,6 +5,15 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [1.7.9] - 2026-09-29
+
+- Added the saved-session managed Jev transport and Classic/Smart MCP decision route
+  for Pro and Team, with explicit consent and current hosted entitlement checks.
+  Cloud activation remains a separate rollout requirement; see the upgrade and
+  qualification instructions in `docs/RELEASE_1_7_9.md`.
+- Retire consumed refresh credentials when a successful response has an invalid
+  token subject, and keep empty graph-layer selections separate from all-layer cache entries.
+
 - Provide a valid offline decision example in Smart MCP action discovery.
 - Reject coerced numeric/string remote consent before Classic MCP can select a Jev backend.
 - Retain global entities referenced by workspace edges during secure erasure,
@@ -36,7 +45,7 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - Rebuild FastMCP settings eagerly to avoid a forward-reference warning on newer SDKs.
 - Preserve CSS gradient tiles, screen blending and reduced-motion opacity in graph PNGs,
   including fractional display scaling; synchronize graph cache metadata across threads.
-- Refreshed the public offline fixtures and source bindings in immutable v111 evidence.
+- Refreshed public offline fixtures and source bindings in immutable v116 evidence for 1.7.9.
 
 - Added saved project-to-workspace routing and connection instructions so agents can use the
   user's selected workspace. Routine MCP calls inherit an omitted workspace from an authorized
