@@ -23,6 +23,15 @@ All notable changes to Engraphis are documented here. Format loosely follows
   options and clustered short flags no longer bypass destructive-command checks, and
   path-specific or pathspec-file checkouts, worktree restores and force-created branch resets
   count as discarding work. Credential paths match either path separator.
+- Fixed Anthropic connections for current Claude models. Opus 4.7 and later, Sonnet 5 and
+  later, and Fable no longer receive `temperature`, which they reject. Replies are read from
+  text blocks, so a leading thinking block no longer fails with "Unexpected Anthropic response
+  format". Models that think by default get `ENGRAPHIS_LLM_EFFORT` (default `medium`) and at
+  least 4096 output tokens so reasoning cannot crowd out the reply.
+- Replaced the retired `claude-3-5-sonnet-20241022` Anthropic default in the dashboard picker,
+  the API defaults, `.env.example`, and the provider guide with `claude-sonnet-5-5`.
+- Documented how to back the experimental Jev decision adapter with Claude: pin an exact model
+  id, keep fallback disabled, and avoid sampling parameters and forced tool choice.
 - Refreshed the public offline fixtures and source bindings in immutable v123 evidence.
 
 ## [1.7.9] - 2026-09-29

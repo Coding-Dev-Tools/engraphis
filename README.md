@@ -850,6 +850,7 @@ file. It never searches the working directory for `.env`, and explicit process v
 | `ENGRAPHIS_LLM_MODEL` | `gpt-4o-mini` | Model name (provider-specific) |
 | `ENGRAPHIS_LLM_API_KEY` | Not set | API key for chat/synthesis, `llm` / `llm_structured` extraction, and structured consolidation |
 | `ENGRAPHIS_LLM_BASE_URL` | Not set | Base URL for openrouter / custom OpenAI-compatible endpoints |
+| `ENGRAPHIS_LLM_EFFORT` | `medium` | Reasoning effort (`low \| medium \| high \| xhigh \| max`) for Claude models that think by default (Opus 5+, Sonnet 5+, Fable); ignored by other providers and models |
 | `ENGRAPHIS_DECISION_BACKEND` | `none` | `none` or `local` keeps advisory decisions local; `managed` uses the saved Cloud session and included allowance; `auto` selects managed when configured and never switches to BYOK; explicit `byok` uses a personal TypeSafe key. Legacy `typesafe`, `jev`, and `system1` mean BYOK. Remote calls also require per-call consent. |
 | `ENGRAPHIS_DECISION_MODEL` | `jev-1.13.0` | Pinned model accepted by the Jev transport; other model identifiers are rejected. |
 | `TYPESAFE_API_KEY` | Not set | Personal credential for explicit BYOK decisions; `JEV_API_KEY` is a fallback alias. Managed decisions use the saved Cloud session instead. |

@@ -70,6 +70,16 @@ def test_factory_requires_an_explicit_client_and_model(monkeypatch):
     assert result is not None and result.identity == "engraphis.backend.jev.v1"
 
 
+@pytest.mark.parametrize("model,expected", [
+    ("claude-sonnet-5-5", True), ("claude-opus-5-5", True), ("claude-haiku-4-5", True),
+    ("claude-sonnet-latest", False), ("claude-opus-5-5-latest", False), (" claude-opus-5-5", False),
+    ("", False),
+])
+def test_claude_models_must_be_pinned_to_an_exact_id(model, expected):
+    result = get_decision_backend("jev", client=FakeClient(), model=model)
+    assert (result is not None) is expected
+
+
 def test_offline_and_unapproved_requests_never_call_client():
     client = FakeClient()
     for adapter, approved in ((backend(client), False), (backend(client, offline_mode=True), True)):

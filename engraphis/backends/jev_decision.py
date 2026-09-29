@@ -5,6 +5,14 @@ imports an optional SDK nor discovers credentials or sibling repositories. No
 request is made without explicit per-call authorization. Offline, unavailable,
 fallback, uncertain and malformed responses defer to deterministic core behavior.
 The adapter is intentionally not wired into the write or grounded-recall paths.
+
+Backing a ``DecisionClient`` with Claude: pin an exact model id such as
+``claude-sonnet-5-5`` (bounded classification questions rarely justify
+``claude-opus-5-5``; measure before paying for it), never an alias ending in ``latest``.
+Keep ``allow_fallback`` false so a silent model switch cannot change the pinned identity.
+Newer Claude models reject ``temperature`` and forced ``tool_choice``, so ask the
+``choice`` and ``noul`` questions through structured output or a plain JSON reply, and
+let ``LLMClient`` (``engraphis.llm.client``) drop sampling parameters for those models.
 """
 from __future__ import annotations
 
