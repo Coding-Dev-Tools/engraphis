@@ -100,7 +100,21 @@ def deadline_handlers(deadline: float, *, loopback_only: bool = False):
     class DeadlineResponse(http.client.HTTPResponse):
         def __init__(self, sock, *args, **kwargs):
             self._deadline_socket = sock
+            self._deadline_chunk_complete = False
             super().__init__(sock, *args, **kwargs)
+
+        def _read_and_discard_trailer(self):
+            # HTTPResponse accepts EOF without a trailer terminator. That cannot
+            # prove completion when our watchdog may have shut down the socket.
+            while True:
+                line = self.fp.readline(http.client._MAXLINE + 1)
+                if len(line) > http.client._MAXLINE:
+                    raise http.client.LineTooLong("trailer line")
+                if line in (b"\r\n", b"\n"):
+                    self._deadline_chunk_complete = True
+                    return
+                if not line:
+                    raise http.client.IncompleteRead(b"")
 
         def begin(self):
             # getresponse() parses status and headers before urllib.open()
@@ -191,6 +205,11 @@ def read_response_chunks(response, deadline: float, *, max_bytes: int,
             if not getattr(response, "chunked", False) and getattr(response, "length", None) == 0:
                 break
             if not chunk:
+                # A parsed terminal chunk and explicit trailer terminator prove
+                # completion even if the watchdog fires after read1() returns.
+                if (getattr(response, "chunked", False)
+                        and getattr(response, "_deadline_chunk_complete", False)):
+                    break
                 # Shutdown can manufacture EOF, including inside chunk trailers;
                 # only a natural EOF establishes a complete unframed body.
                 if interrupted is not None and interrupted.is_set():

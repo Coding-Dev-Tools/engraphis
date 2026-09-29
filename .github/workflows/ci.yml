@@ -241,7 +241,7 @@ jobs:
           npm ci --ignore-scripts
           npm run verify
           npm run test:integration
-          npm audit --omit=dev
+          npm audit
 
   browser-accessibility:
     name: browser accessibility smoke
