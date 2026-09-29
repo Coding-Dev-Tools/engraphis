@@ -67,7 +67,7 @@ from engraphis.config import settings
 from engraphis.core.context import RegexTokenCounter
 from engraphis.core.poisoning import prompt_eligible
 from engraphis.core.mutations import MemoryConflict
-from engraphis.core.textutil import jaccard, tokenize
+from engraphis.core.textutil import tokenize
 from engraphis.service import MemoryService, ValidationError, _authenticated_principal
 
 logger = logging.getLogger("engraphis.mcp")
@@ -2257,17 +2257,22 @@ _DESTRUCTIVE_PATTERNS = (
     re.compile(_GIT_COMMAND + r"(?:reset\b[^\n;&|]*?\s--hard\b|stash\s+(?:drop|clear)\b"
                r"|clean\b[^\n;&|]*?\s(?:-(?=[a-zA-Z]*f)[a-zA-Z]+|--force)(?=\s|$)"
                r"|branch\b[^\n;&|]*?\s-(?=[a-zA-Z]*D)[a-zA-Z]+(?=\s|$)|filter-branch\b|filter-repo\b"
-               r"|reflog\s+expire\b|update-ref\b[^\n;&|]*?\s-d(?=\s|$))"),
+               r"|reflog\s+expire\b|update-ref\b[^\n;&|]*?\s-d(?=\s|$)"
+               r"|branch\b(?=[^\n;&|]*\s(?:--delete|-d)(?=\s|$))(?=[^\n;&|]*\s(?:--force|-f)(?=\s|$)))"),
     # Checkout paths after "--" or ".", worktree restores and forced switches discard work.
     re.compile(_GIT_COMMAND + r"(?:checkout\b[^\n;&|]*?\s(?:--|\.)(?=\s|$)"
-               r"|restore\b(?![^\n;&|]*\s--staged\b)(?=[^\n;&|]*\s[^\s-])"
-               r"|(?:checkout|switch)\b[^\n;&|]*?\s(?:-(?=[a-zA-Z]*f)[a-zA-Z]+|--force"
+               r"|restore\b(?=[^\n;&|]*\s(?:--worktree|-(?=[a-zA-Z]*W)[a-zA-Z]+)(?=\s|$))"
+               r"|restore\b(?![^\n;&|]*\s(?:--staged|-(?=[a-zA-Z]*S)[a-zA-Z]+)(?=\s|$))"
+               r"(?=[^\n;&|]*\s[^\s-])"
+               r"|checkout\b[^\n;&|]*?\s(?:-(?=[a-zA-Z]*[fB])[a-zA-Z]+|--force)(?=\s|$)"
+               r"|switch\b[^\n;&|]*?\s(?:-(?=[a-zA-Z]*[fC])[a-zA-Z]+|--force|--force-create"
                r"|--discard-changes)(?=\s|$))"),
     # Data and infrastructure teardown.
     re.compile(r"\b(?:drop\s+(?:database|schema|table)|truncate\s+table)\b"
                r"|\balter\s+table\b[^\n;]*?\bdrop\s+column\b", re.I),
     re.compile(r"\bdelete\s+from\s+[\w.\"`\[\]]+\s*(?:;|$)", re.I),
-    re.compile(r"\b(?:terraform\s+destroy|kubectl\s+delete|helm\s+(?:uninstall|delete)"
+    re.compile(r"\b(?:terraform\s+(?:destroy|apply\b[^\n;&|]*?\s-destroy)|kubectl\s+delete"
+               r"|helm\s+(?:uninstall|delete)"
                r"|aws\s+s3\s+(?:rm|rb)|docker\s+(?:system|volume)\s+prune)\b", re.I),
     # Piping into a shell or network tool, file uploads, and well-known credential files.
     re.compile(r"\|\s*(?:sudo\s+)?(?:curl|wget|nc|ncat|netcat|socat|ssh|(?:ba|z|da|k|fi)?sh"
@@ -2312,18 +2317,43 @@ _NEGATED_SUCCESS = re.compile(
 _SUPERSESSION_CUES = re.compile(
     r"\b(?:not|no|never|instead|switched|replaced|replaces|deprecated|migrated)\b|n't\b")
 _NEGATIONS = frozenset({"not", "no", "never", "n't"})
-# The term a fact rules out: "not pnpm", "instead of npm", "rather than yarn".
-_NEGATED_TERM = re.compile(r"(?:(?:\b(?:not|no|never)|n't)\s+|\b(?:instead\s+of|rather\s+than)\s+)(\w+)")
+# The term a fact rules out: "not pnpm", "instead of the npm client", "rather than yarn".
+_NEGATED_TERM = re.compile(r"(?:(?:\b(?:not|no|never)|n't)\s+|\b(?:instead\s+of|rather\s+than)\s+)"
+                           r"(?:(?:the|a|an)\s+)?(\w+)")
+_IRREGULAR_CONTRACTIONS = {"can't": "can not", "won't": "will not", "shan't": "shall not"}
+_AUXILIARIES = frozenset({"does", "had", "been", "can", "could", "would", "should", "shall",
+                          "must", "may", "might"})
+
+
+def _plain(text: str) -> str:
+    return text.lower().replace("\u2019", "'")
+
+
+def _fact_token(token: str) -> str:
+    """Fold negation forms and a plural -s so equivalent facts compare equal."""
+    if token in ("no", "never"):
+        return "not"
+    if len(token) > 3 and token.endswith("s") and not token.endswith("ss"):
+        return token[:-1]
+    return token
+
+
+def _fact_tokens(text: str) -> set[str]:
+    """Content words for comparing facts, with contractions and auxiliaries normalized."""
+    text = re.sub(r"\b(?:can|won|shan)'t\b", lambda match: _IRREGULAR_CONTRACTIONS[match.group(0)],
+                  _plain(text))
+    text = re.sub(r"n't\b", " not", text)
+    return {_fact_token(token) for token in tokenize(text) if token not in _AUXILIARIES}
 
 
 def _supersession_cues(text: str) -> set[str]:
     """Return supersession cues; every negation form counts as the same cue."""
-    return {"not" if cue in _NEGATIONS else cue for cue in _SUPERSESSION_CUES.findall(text.lower())}
+    return {"not" if cue in _NEGATIONS else cue for cue in _SUPERSESSION_CUES.findall(_plain(text))}
 
 
 def _negated_terms(text: str) -> set[str]:
     """Return content words a fact explicitly rules out."""
-    return {term for term in _NEGATED_TERM.findall(text.lower()) if tokenize(term)}
+    return {_fact_token(term) for term in _NEGATED_TERM.findall(_plain(text)) if tokenize(term)}
 
 
 def _guard_category(command: str) -> str:
@@ -2367,8 +2397,8 @@ def _heuristic_decision(
             "backend": "local_heuristic",
         }
     if kind == "classify_contradiction":
-        # Compare content words only; shared stopwords do not make facts related.
-        cand_tokens, exist_tokens = tokenize(state), tokenize(existing_content)
+        # Compare normalized content words; shared stopwords do not make facts related.
+        cand_tokens, exist_tokens = _fact_tokens(state), _fact_tokens(existing_content)
         overlap = cand_tokens & exist_tokens
         # Supersession needs a cue the existing fact lacks and a shared subject, not one
         # incidental shared word; a cue without that subject defers rather than reinforces.
@@ -2379,9 +2409,12 @@ def _heuristic_decision(
                        or (exist_ruled_out - cand_ruled_out) & cand_tokens)
         shared_subject = (len(overlap) >= 2 and
                           2 * len(overlap) >= min(len(cand_tokens), len(exist_tokens)))
+        # Reinforcement restates or extends one fact. Words unique to both sides may be
+        # conflicting values ("database is Postgres" vs "database is SQLite"), so defer.
+        contained = cand_tokens <= exist_tokens or exist_tokens <= cand_tokens
         if new_cues or flipped:
             verdict = "contradicts_and_supersedes" if shared_subject else "orthogonal"
-        elif len(overlap) >= 3 or jaccard(cand_tokens, exist_tokens) >= 0.5:
+        elif overlap and contained and (len(overlap) >= 2 or cand_tokens == exist_tokens):
             verdict = "reinforces"
         else:
             verdict = "orthogonal"
