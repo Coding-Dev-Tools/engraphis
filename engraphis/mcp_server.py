@@ -2413,7 +2413,7 @@ def engraphis_decide(
         bool, Field(description="Use local heuristics; no remote calls."),
     ] = False,
     allow_remote: Annotated[
-        bool, Field(description="Explicitly permit this call's supplied text to leave this device."),
+        StrictBool, Field(description="Explicitly permit this call's supplied text to leave this device."),
     ] = False,
     data_classification: Annotated[
         str, Field(description="Remote text must be public or internal; secrets are rejected."),

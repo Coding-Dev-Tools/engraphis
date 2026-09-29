@@ -5,6 +5,7 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+- Reject coerced numeric/string remote consent before Classic MCP can select a Jev backend.
 - Require the credential-bound control origin before selecting managed Jev.
 - Bound chunked response trailers while retaining strict deadline completion checks.
 - Keep relocation policy behind domain storage operations and 500-memory moves
@@ -26,7 +27,7 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - Recognize complete chunked refresh responses at the watchdog boundary without
   accepting a missing or truncated trailer terminator.
 - Rebuild FastMCP settings eagerly to avoid a forward-reference warning on newer SDKs.
-- Refreshed the public offline fixtures and source bindings in immutable v106 evidence.
+- Refreshed the public offline fixtures and source bindings in immutable v108 evidence.
 
 - Added saved project-to-workspace routing and connection instructions so agents can use the
   user's selected workspace. Routine MCP calls inherit an omitted workspace from an authorized
