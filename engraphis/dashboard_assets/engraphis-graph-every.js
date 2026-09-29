@@ -161,7 +161,7 @@
       neighbors: null, incidentEdges: null, connectionHighlights: null, ready: false, visibleCount: 0,
       frame: 0, labelFrame: 0, flowPaintAt: 0, overlayPaintAt: 0, layoutPending: false, lastLabelKey: '', labelLayout: [],
       underlayKey: '', drag: null, pickGrid: null, pickDirty: true,
-      destroyed: false, paused: false, unsupported: !gl, error: null,
+      destroyed: false, paused: false, contextLost: false, unsupported: !gl, error: null,
       labelMetrics: new Map(),
     };
 
@@ -324,7 +324,7 @@
     /* Hover dimming overlays the filter visibility: flag 1 stays bright (the hovered node
        plus its neighbours), flag 2 is a visible node pushed into the background. */
     function applyHoverToFlags() {
-      if (!state.ready || !gl || !nodeProgram) return;
+      if (!state.ready || state.contextLost || !gl || !nodeProgram) return;
       /* The hovered node AND the last highlighted node anchor the lit neighbourhood, so a
          clicked selection keeps its paths visible after the pointer moves on. */
       const anchors = [];
@@ -350,12 +350,12 @@
       gl.bufferData(gl.ARRAY_BUFFER, state.nodeFlags, gl.DYNAMIC_DRAW);
     }
     function uploadNodePositions() {
-      if (!gl || !nodeProgram) return;
+      if (state.contextLost || !gl || !nodeProgram) return;
       gl.bindBuffer(gl.ARRAY_BUFFER, nodeBuffers.position);
       gl.bufferData(gl.ARRAY_BUFFER, state.positions, gl.DYNAMIC_DRAW);
     }
     function uploadNodeMeta() {
-      if (!gl || !nodeProgram) return;
+      if (state.contextLost || !gl || !nodeProgram) return;
       const count = state.ids.length;
       if (state.nodeColors.length !== count * 3) state.nodeColors = new Float32Array(count * 3);
       if (state.nodeSizes.length !== count) state.nodeSizes = new Float32Array(count);
@@ -377,7 +377,7 @@
       applyHoverToFlags();
     }
     function uploadEdges() {
-      if (!gl || !edgeProgram) return;
+      if (state.contextLost || !gl || !edgeProgram) return;
       const links = state.totalLinks;
       const positions = new Float32Array(links * 4);
       const factors = new Float32Array(links * 2);
@@ -424,7 +424,7 @@
       state.edgeVertexCount = links * 2;
     }
     function uploadEdgePositions() {
-      if (!gl || !edgeProgram || !state.totalLinks || !state.edgeSources) return;
+      if (state.contextLost || !gl || !edgeProgram || !state.totalLinks || !state.edgeSources) return;
       const links = state.totalLinks;
       if (!state.edgePositions || state.edgePositions.length !== links * 4) {
         state.edgePositions = new Float32Array(links * 4);
@@ -592,7 +592,7 @@
     function labelText(index) { return state.labels[index] || state.ids[index]; }
     function drawOverlay(now, force = false) {
       state.labelFrame = 0;
-      if (!labelContext || state.destroyed || state.paused) return;
+      if (!labelContext || state.destroyed || state.paused || state.contextLost) return;
       const stamp = typeof now === 'number' && now > 0
         ? now
         : (typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now());
@@ -619,7 +619,7 @@
     }
     function runOverlayFrame(now) { drawOverlay(now); }
     function scheduleLabels(immediate = false) {
-      if (state.destroyed || state.paused || !labelContext) return;
+      if (state.destroyed || state.paused || state.contextLost || !labelContext) return;
       if (state.labelFrame) {
         if (!immediate) return;
         caf(state.labelFrame);
@@ -876,7 +876,7 @@
     }
     function draw(now = 0) {
       state.frame = 0;
-      if (state.destroyed || state.paused || !state.ready || !nodeProgram) return;
+      if (state.destroyed || state.paused || state.contextLost || !state.ready || !nodeProgram) return;
       if (flowAnimating() && state.flowPaintAt && now - state.flowPaintAt < FLOW_FRAME_MS) {
         schedule();
         return;
@@ -962,7 +962,7 @@
       gl.vertexAttribPointer(edgeBuffers.attrs.visible, 1, gl.FLOAT, false, 0, 0);
     }
     function schedule() {
-      if (!state.destroyed && !state.paused && !state.frame) state.frame = raf(draw);
+      if (!state.destroyed && !state.paused && !state.contextLost && !state.frame) state.frame = raf(draw);
     }
 
     /* ── Camera & sizing ────────────────────────────────────────────────────────── */
@@ -1311,18 +1311,23 @@
 
     const handleContextLost = event => {
       event.preventDefault();
-      state.paused = true;
+      // Context recovery must not replace the caller's lifecycle pause/resume intent.
+      state.contextLost = true;
       if (state.frame) { caf(state.frame); state.frame = 0; }
+      if (state.labelFrame) { caf(state.labelFrame); state.labelFrame = 0; }
     };
     const handleContextRestored = () => {
+      if (state.destroyed) return;
       initWebgl();
-      state.paused = false;
+      if (!nodeProgram || !edgeProgram) return;
+      state.contextLost = false;
       if (state.ready) {
         uploadNodePositions();
         uploadNodeMeta();
         uploadEdges();
         uploadEdgePositions();
         schedule();
+        scheduleLabels(true);
       }
     };
     canvas.addEventListener('webglcontextlost', handleContextLost);
@@ -1343,7 +1348,7 @@
     resize();
 
     function exportImageCanvas() {
-      if (state.destroyed || !state.ready || !nodeProgram) return null;
+      if (state.destroyed || state.contextLost || !state.ready || !nodeProgram) return null;
       if (state.frame) { caf(state.frame); state.frame = 0; }
       if (state.labelFrame) { caf(state.labelFrame); state.labelFrame = 0; }
       /* Paint both layers synchronously: draw() alone would leave the overlay on a rAF

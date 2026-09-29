@@ -2538,6 +2538,30 @@ def test_graph_scene_cache_is_warm_and_invalidates_on_store_write():
     assert refreshed["meta"]["index_generation"] > first["meta"]["index_generation"]
 
 
+@pytest.mark.parametrize("level", ["overview", "complete"])
+@pytest.mark.parametrize("mutate_cache_hit", [False, True])
+def test_quality_scene_cache_isolated_from_nested_response_mutation(level, mutate_cache_hit):
+    service, _alpha, _beta, _gamma = _seed_service()
+    kwargs = {"workspace": "acme", "level": level, "presentation": "quality"}
+    response = service.graph_scene(**kwargs)
+    if mutate_cache_hit:
+        response = service.graph_scene(**kwargs)
+    assert response["meta"]["cache_hit"] is mutate_cache_hit
+    expected_nodes = copy.deepcopy(response["nodes"])
+    expected_edges = copy.deepcopy(response["edges"])
+    scene_hash = response["meta"]["scene_hash"]
+
+    response["nodes"][0]["label"] = "Caller-local label"
+    response["nodes"][0]["repo_names"].append("caller-local-repo")
+    response["edges"].clear()
+
+    following = service.graph_scene(**kwargs)
+    assert following["meta"]["cache_hit"] is True
+    assert following["nodes"] == expected_nodes
+    assert following["edges"] == expected_edges
+    assert following["meta"]["scene_hash"] == scene_hash
+
+
 def test_all_presentation_cache_isolated_from_response_metadata_mutation():
     service, _alpha, _beta, _gamma = _seed_service()
 

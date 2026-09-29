@@ -11411,14 +11411,10 @@
       output.height = graphCanvas.height;
       const ctx = output.getContext('2d');
       if (!ctx) return null;
-      const styleAttr = el.getAttribute('data-graph-style') || (state.settings && state.settings.style) || 'cyber';
-      const bgColors = {
-        cyber: '#080c14',
-        galaxy: '#070a12',
-        solar: '#120d09',
-        classic: '#0e1014',
-      };
-      ctx.fillStyle = bgColors[styleAttr] || '#0e1014';
+      const paneStyle = typeof window.getComputedStyle === 'function'
+        ? window.getComputedStyle(el) : null;
+      ctx.fillStyle = paneStyle && paneStyle.backgroundColor
+        || state.themeColors.canvas || '#0e1014';
       ctx.fillRect(0, 0, output.width, output.height);
       if (spacetimeCanvas && spacetimeCanvas.width > 0 && spacetimeCanvas.height > 0) {
         ctx.drawImage(spacetimeCanvas, 0, 0, output.width, output.height);
