@@ -2301,19 +2301,26 @@ _READ_ONLY_COMMANDS = (
     re.compile(r"(?:pytest|python[\d.]*\s+-m\s+pytest|npm\s+test|cargo\s+(?:check|test)"
                r"|ruff\s+check)(?!\S)(?!.*\s--fix\b).*", re.I),
 )
-# Outcome words; zero counts ("0 failed", "no errors", "errors: 0") are not outcomes.
+# Outcome words; zero counts ("0 failed", "nothing failed", "without errors", "errors: 0")
+# are not outcomes.
 _ZERO_OUTCOMES = re.compile(
-    r"\b(?:0|no|zero|none)\s+(?:tests?\s+)?(?:errors?|failures?|failed|exceptions?|issues?"
-    r"|problems?|passed|succeeded|completed)\b"
-    r"|\b(?:errors?|failures?|failed|passed|passing)\s*[:=]\s*0\b")
+    r"\b(?:0|no|zero|none|nothing|without)\s+(?:(?:any|of\s+the)\s+)?(?:tests?\s+)?"
+    r"(?:errors?|failures?|failed|failing|exceptions?|issues?|problems?|passed|succeeded"
+    r"|completed)\b|\b(?:errors?|failures?|failed|passed|passing)\s*[:=]\s*0\b"
+    r"|\berror[- ]free\b")
 _FAILURE_WORDS = re.compile(
-    r"\b(?:errors?|fail(?:ed|ures?|s)?|assertionerror|exceptions?|traceback|fatal)\b")
+    r"\b(?:error(?:s|ed)?|fail(?:ed|ures?|s|ing)?|assertionerror|exceptions?|traceback"
+    r"|fatal)\b")
 _SUCCESS_WORDS = re.compile(
     r"\b(?:pass(?:ed|es)?|success(?:ful(?:ly)?)?|succeeded|completed|ok)\b|\b100%")
+# A negation, but not a contrast: "not only passed" and "did not just fail" affirm.
+_NEGATION_PREFIX = r"(?:\b(?:not|never)|n't)\s+(?!(?:only|just|merely|simply)\b)"
 # "did not pass" or "didn't succeed" reports a failure, not a success word.
-_NEGATED_SUCCESS = re.compile(
-    r"(?:\b(?:not|never)|n't)\s+(?:\w+\s+){0,2}?"
-    r"(?:pass(?:ed|es)?|succe(?:ss|ed|eded)\w*|complete[ds]?|ok)\b")
+_NEGATED_SUCCESS = re.compile(_NEGATION_PREFIX + r"(?:\w+\s+){0,2}?"
+                              r"(?:pass(?:ed|es)?|succe(?:ss|ed|eded)\w*|complete[ds]?|ok)\b")
+# "did not fail" or "never errored" is not a failure word.
+_NEGATED_FAILURE = re.compile(_NEGATION_PREFIX + r"(?:\w+\s+)?"
+                              r"(?:fail(?:ed|s|ing)?|error(?:s|ed)?)\b")
 _SUPERSESSION_CUES = re.compile(
     r"\b(?:not|no|never|instead|switched|replaced|replaces|deprecated|migrated)\b|n't\b")
 _NEGATIONS = frozenset({"not", "no", "never", "n't"})
@@ -2344,6 +2351,14 @@ def _fact_tokens(text: str) -> set[str]:
                   _plain(text))
     text = re.sub(r"n't\b", " not", text)
     return {_fact_token(token) for token in tokenize(text) if token not in _AUXILIARIES}
+
+
+def _support_tokens(text: str) -> set[str]:
+    """Content words for support checks, keeping standalone one-character terms such as C."""
+    # A contraction or possessive ending is not a term: "it's" leaves no stray "s".
+    text = re.sub(r"(?<=\w)['\u2019](?:s|t|d|m|ll|re|ve)\b", " ", text.lower())
+    words = "".join(char if char.isalnum() else " " for char in text).split()
+    return tokenize(text) | {word for word in words if len(word) == 1 and word not in {"a", "i"}}
 
 
 def _supersession_cues(text: str) -> set[str]:
@@ -2412,11 +2427,15 @@ def _heuristic_decision(
                            and not exist_ruled & cand_ruled))
         shared_subject = (len(overlap) >= 2 and
                           2 * len(overlap) >= min(len(cand_tokens), len(exist_tokens)))
+        # Terse facts such as "No SQLite" and "Use SQLite" share just one word; a negation
+        # that rules it out is still a direct contradiction.
+        terse = len(overlap - {"not"}) == 1 and max(len(cand_tokens), len(exist_tokens)) <= 2
         # Reinforcement restates or extends one fact. Words unique to both sides may be
         # conflicting values ("database is Postgres" vs "database is SQLite"), so defer.
         contained = cand_tokens <= exist_tokens or exist_tokens <= cand_tokens
         if (cand_cues - exist_cues - {"not"}) or flipped:
-            verdict = "contradicts_and_supersedes" if shared_subject else "orthogonal"
+            verdict = ("contradicts_and_supersedes" if shared_subject or (flipped and terse)
+                       else "orthogonal")
         elif (cand_cues == exist_cues and overlap and contained
               and (len(overlap) >= 2 or cand_tokens == exist_tokens)):
             verdict = "reinforces"
@@ -2430,7 +2449,7 @@ def _heuristic_decision(
             "backend": "local_heuristic",
         }
     if kind == "verify_support":
-        q_tokens, ev_tokens = tokenize(query), tokenize(state)
+        q_tokens, ev_tokens = _support_tokens(query), _support_tokens(state)
         matched = len(q_tokens & ev_tokens)
         prob = min(1.0, matched / max(1, len(q_tokens))) if q_tokens else 0.0
         return {
@@ -2442,8 +2461,9 @@ def _heuristic_decision(
             "backend": "local_heuristic",
         }
     if kind == "verify_completion":
-        # Whole words only: "ok" must not match "broken" and "0 errors" is not a failure.
-        output = _ZERO_OUTCOMES.sub(" ", state.lower())
+        # Whole words only: "ok" must not match "broken", and neither "0 errors" nor "did not
+        # fail" is a failure.
+        output = _NEGATED_FAILURE.sub(" ", _ZERO_OUTCOMES.sub(" ", _plain(state)))
         has_fail = bool(_FAILURE_WORDS.search(output) or _NEGATED_SUCCESS.search(output))
         complete = bool(_SUCCESS_WORDS.search(output)) and not has_fail
         return {
