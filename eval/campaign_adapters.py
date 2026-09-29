@@ -23,6 +23,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Optional, Protocol, Sequence
 
+from engraphis import __version__ as engraphis_version
+
 
 PINS_PATH = Path(__file__).resolve().parent / "configs" / "competitor-pins.json"
 
@@ -1275,7 +1277,7 @@ class _PeerAdapter(_BaseAdapter):
 class EngraphisAdapter(_BaseAdapter):
     capabilities = AdapterCapabilities(
         adapter="engraphis",
-        version="1.7.8",
+        version=engraphis_version,
         source="https://github.com/Coding-Dev-Tools/engraphis",
         source_revision=_UNKNOWN_SOURCE_REVISION,
         scopes=("workspace", "repo", "session"),
