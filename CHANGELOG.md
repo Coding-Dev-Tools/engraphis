@@ -5,6 +5,9 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+- Reject coerced numeric/string remote consent before Classic MCP can select a Jev backend.
+- Retain global entities referenced by workspace edges during secure erasure,
+  while preserving exact-workspace incidence checks for workspace-owned entities.
 - Preserve graph cache isolation, pause intent through WebGL context loss, and
   theme-correct exported backgrounds.
 - Scope graph incidence queries to candidate entities and retain shared legacy
@@ -32,7 +35,7 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - Rebuild FastMCP settings eagerly to avoid a forward-reference warning on newer SDKs.
 - Preserve CSS gradient tiles, screen blending and reduced-motion opacity in graph PNGs,
   including fractional display scaling; synchronize graph cache metadata across threads.
-- Refreshed the public offline fixtures and source bindings in immutable v107 evidence.
+- Refreshed the public offline fixtures and source bindings in immutable v109 evidence.
 
 - Added saved project-to-workspace routing and connection instructions so agents can use the
   user's selected workspace. Routine MCP calls inherit an omitted workspace from an authorized

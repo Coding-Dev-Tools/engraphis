@@ -2796,35 +2796,57 @@ def test_secure_erase_classifies_content_free_tombstone_export(
     }
 
 
-@pytest.mark.parametrize("incidence_scope", ["same", "legacy", "foreign"])
-@pytest.mark.parametrize("endpoint", ["src", "dst"])
-def test_secure_erase_preserves_only_same_scope_shared_entity_incidence(
-        store, incidence_scope, endpoint):
+@pytest.mark.parametrize(
+    ("entity_scope", "edge_scope", "retained"),
+    [
+        pytest.param("owned", "same", True, id="same-workspace"),
+        pytest.param("global", "global", True, id="legacy-global"),
+        pytest.param("owned", "foreign", False, id="foreign-edge-cannot-retain-owned"),
+        pytest.param("owned", "global", False, id="unscoped-edge-cannot-retain-owned"),
+        pytest.param("global", "same", True, id="global-with-owned-edge"),
+        pytest.param("global", "foreign", True, id="global-with-other-workspace-edge"),
+        pytest.param("global", "absent", False, id="global-orphan"),
+        pytest.param("owned", "absent", False, id="owned-orphan"),
+    ],
+)
+@pytest.mark.parametrize("endpoint", ["src", "dst", "self-loop"])
+def test_secure_erase_preserves_scope_compatible_shared_entity_incidence(
+        store, entity_scope, edge_scope, retained, endpoint):
     workspace_id = store.get_or_create_workspace("erase-incidence")
     other_workspace = store.get_or_create_workspace("foreign-incidence")
     memory_id = store.add_memory(MemoryRecord(
         id="mem_incidence", content="synthetic source", workspace_id=workspace_id,
     ))
-    entity_workspace = None if incidence_scope == "legacy" else workspace_id
+    entity_workspace = None if entity_scope == "global" else workspace_id
     entity_id = store.upsert_entity(Node(
         id="ent_incidence", name="Shared synthetic entity", workspace_id=entity_workspace,
     ))
     store.link_memory_entity(
         memory_id=memory_id, entity_id=entity_id, workspace_id=workspace_id, repo_id=None,
     )
-    edge_workspace = other_workspace if incidence_scope == "foreign" else entity_workspace
-    store.upsert_edge(Edge(
-        id="edg_incidence", src=entity_id if endpoint == "src" else "other",
-        dst=entity_id if endpoint == "dst" else "other", relation="related",
-        workspace_id=edge_workspace,
-    ))
+    if edge_scope != "absent":
+        edge_workspace = {
+            "same": workspace_id, "foreign": other_workspace, "global": None,
+        }[edge_scope]
+        other_entity = store.upsert_entity(Node(
+            id="ent_other", name="Other retained entity", workspace_id=edge_workspace,
+        ))
+        store.upsert_edge(Edge(
+            id="edg_incidence", src=other_entity if endpoint == "dst" else entity_id,
+            dst=other_entity if endpoint == "src" else entity_id, relation="related",
+            workspace_id=edge_workspace,
+        ))
 
     store.secure_erase_memory(memory_id)
 
     assert store.get_memory(memory_id) is None
-    assert store.conn.execute("SELECT 1 FROM edges WHERE id='edg_incidence'").fetchone()
+    edge = store.conn.execute("SELECT 1 FROM edges WHERE id='edg_incidence'").fetchone()
+    assert (edge is not None) == (edge_scope != "absent")
     entity = store.conn.execute("SELECT 1 FROM entities WHERE id=?", (entity_id,)).fetchone()
-    assert (entity is not None) == (incidence_scope != "foreign")
+    assert (entity is not None) == retained
+    assert store.conn.execute(
+        "SELECT 1 FROM memory_entities WHERE memory_id=?", (memory_id,),
+    ).fetchone() is None
 
 
 def test_secure_erase_defers_maintenance_for_caller_owned_transaction(store):
