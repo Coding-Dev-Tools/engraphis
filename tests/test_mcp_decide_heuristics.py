@@ -195,6 +195,15 @@ def test_local_guard_cost_stays_bounded_on_adversarial_input():
     ("not ok", False, 0.1),
     ("All tests passed, none failed", True, 0.9),
     ("passed: 0, failed: 0", False, 0.5),
+    ("The tests not only passed but completed faster", True, 0.9),
+    ("The suite did not just pass, it succeeded", True, 0.9),
+    ("The build did not fail and all tests passed", True, 0.9),
+    ("All tests passed and nothing failed", True, 0.9),
+    ("Build completed without errors", True, 0.9),
+    ("5 passed, 2 errored", False, 0.1),
+    ("The tests didn\u2019t pass", False, 0.1),
+    ("The job never failed before, but 2 tests failed now", False, 0.1),
+    ("The tests did not only fail, they crashed", False, 0.1),
 ))
 def test_local_completion_uses_whole_words_and_ignores_zero_counts(output, complete, probability):
     result = _decide(kind="verify_completion", state=output, goal="Run the test suite")
@@ -209,6 +218,17 @@ def test_local_support_ignores_stopword_overlap():
     related = _decide(kind="verify_support", query="database SQLite",
                       state="Engraphis stores all local memories in SQLite")
     assert related["supported"] is True
+
+
+def test_local_support_keeps_one_character_terms():
+    language = _decide(kind="verify_support", query="C", state="Written in C")
+    assert language["supported"] is True and language["probability"] == 1.0
+    other = _decide(kind="verify_support", query="C", state="Written in Rust")
+    assert other["supported"] is False
+    # Contraction and possessive endings are not one-character terms.
+    contraction = _decide(kind="verify_support", query="What's the user's plan?",
+                          state="It's done")
+    assert contraction["supported"] is False
 
 
 @pytest.mark.parametrize(("candidate", "existing", "verdict"), (
@@ -238,6 +258,10 @@ def test_local_support_ignores_stopword_overlap():
     ("The API cannot use port 80", "The API uses port 80", "contradicts_and_supersedes"),
     ("Primary production database is Postgres", "Primary production database is SQLite",
      "orthogonal"),
+    ("No SQLite", "Use SQLite", "contradicts_and_supersedes"),
+    ("Never npm", "Use npm", "contradicts_and_supersedes"),
+    ("Use SQLite", "No SQLite", "contradicts_and_supersedes"),
+    ("The API is not public", "The public website uses Next.js", "orthogonal"),
 ))
 def test_local_contradiction_compares_content_words(candidate, existing, verdict):
     result = _decide(kind="classify_contradiction", state=candidate, existing_content=existing)
