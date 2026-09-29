@@ -2260,10 +2260,10 @@ _DESTRUCTIVE_PATTERNS = (
                r"|reflog\s+expire\b|update-ref\b[^\n;&|]*?\s-d(?=\s|$)"
                r"|branch\b(?=[^\n;&|]*\s(?:--delete|-d)(?=\s|$))(?=[^\n;&|]*\s(?:--force|-f)(?=\s|$)))"),
     # Checkout paths after "--" or ".", worktree restores and forced switches discard work.
-    re.compile(_GIT_COMMAND + r"(?:checkout\b[^\n;&|]*?\s(?:--|\.)(?=\s|$)"
+    re.compile(_GIT_COMMAND + r"(?:checkout\b[^\n;&|]*?\s(?:(?:--|\.)(?=\s|$)|--pathspec-from-file\b)"
                r"|restore\b(?=[^\n;&|]*\s(?:--worktree|-(?=[a-zA-Z]*W)[a-zA-Z]+)(?=\s|$))"
                r"|restore\b(?![^\n;&|]*\s(?:--staged|-(?=[a-zA-Z]*S)[a-zA-Z]+)(?=\s|$))"
-               r"(?=[^\n;&|]*\s[^\s-])"
+               r"(?=[^\n;&|]*\s(?:[^\s-]|--pathspec-from-file\b))"
                r"|checkout\b[^\n;&|]*?\s(?:-(?=[a-zA-Z]*[fB])[a-zA-Z]+|--force)(?=\s|$)"
                r"|switch\b[^\n;&|]*?\s(?:-(?=[a-zA-Z]*[fC])[a-zA-Z]+|--force|--force-create"
                r"|--discard-changes)(?=\s|$))"),
@@ -2279,11 +2279,11 @@ _DESTRUCTIVE_PATTERNS = (
                r"|iex|invoke-expression)\b|\b(?:ba|z|da|k|fi)?sh\b[^\n;&|]*?(?:<\(|\$\()\s*(?:curl|wget)\b"
                r"|\b(?:iex|invoke-expression)\s*[($]", re.I),
     re.compile(r"\bcurl\b[^\n;&|]*?\s(?:(?:-d|--data(?:-binary|-raw|-urlencode)?)\s*['\"]?@"
-               r"|(?:-F|--form)\s*['\"]?[^\s'\"]*=@|(?:-T|--upload-file)\s)"
+               r"|(?:-F|--form)\s*['\"]?[^\s'\"]*=@|-[a-zA-Z]*?T\s*\S|--upload-file[\s=])"
                r"|\bwget\b[^\n;&|]*?\s--post-file\b"),
-    re.compile(r"\.ssh/id_[\w-]+|\bid_(?:rsa|dsa|ecdsa|ed25519)\b|\.aws/credentials|\.kube/config\b"
-               r"|\.docker/config\.json\b|\.git-credentials|[._]netrc\b|\.pgpass\b|\.npmrc\b|\.pypirc\b"
-               r"|/etc/shadow\b|\.engraphis/config\.env"
+    re.compile(r"\.ssh[/\\]id_[\w-]+|\bid_(?:rsa|dsa|ecdsa|ed25519)\b|\.aws[/\\]credentials"
+               r"|\.kube[/\\]config\b|\.docker[/\\]config\.json\b|\.git-credentials|[._]netrc\b"
+               r"|\.pgpass\b|\.npmrc\b|\.pypirc\b|/etc/shadow\b|\.engraphis[/\\]config\.env"
                r"|(?<![\w.-])\.env(?!\.(?:example|sample|template|dist)(?![\w-]))(?:\.[\w-]+)*(?![\w-])",
                re.I),
 )
@@ -2317,9 +2317,9 @@ _NEGATED_SUCCESS = re.compile(
 _SUPERSESSION_CUES = re.compile(
     r"\b(?:not|no|never|instead|switched|replaced|replaces|deprecated|migrated)\b|n't\b")
 _NEGATIONS = frozenset({"not", "no", "never", "n't"})
-# The term a fact rules out: "not pnpm", "instead of the npm client", "rather than yarn".
-_NEGATED_TERM = re.compile(r"(?:(?:\b(?:not|no|never)|n't)\s+|\b(?:instead\s+of|rather\s+than)\s+)"
-                           r"(?:(?:the|a|an)\s+)?(\w+)")
+# The clause a fact rules out: "not pnpm", "no longer uses port 80", "instead of npm".
+_RULED_OUT = re.compile(r"(?:\bno\s+longer|\b(?:not|no|never)|n't|\b(?:instead\s+of|rather\s+than))"
+                        r"\s+([^,.;:!?\n]+)")
 _IRREGULAR_CONTRACTIONS = {"can't": "can not", "won't": "will not", "shan't": "shall not"}
 _AUXILIARIES = frozenset({"does", "had", "been", "can", "could", "would", "should", "shall",
                           "must", "may", "might"})
@@ -2351,9 +2351,10 @@ def _supersession_cues(text: str) -> set[str]:
     return {"not" if cue in _NEGATIONS else cue for cue in _SUPERSESSION_CUES.findall(_plain(text))}
 
 
-def _negated_terms(text: str) -> set[str]:
-    """Return content words a fact explicitly rules out."""
-    return {_fact_token(term) for term in _NEGATED_TERM.findall(_plain(text)) if tokenize(term)}
+def _ruled_out(text: str) -> set[str]:
+    """Return the normalized content words of every clause a fact rules out."""
+    return {token for clause in _RULED_OUT.findall(_plain(text))
+            for token in _fact_tokens(clause)} - {"not"}
 
 
 def _guard_category(command: str) -> str:
@@ -2402,19 +2403,22 @@ def _heuristic_decision(
         overlap = cand_tokens & exist_tokens
         # Supersession needs a cue the existing fact lacks and a shared subject, not one
         # incidental shared word; a cue without that subject defers rather than reinforces.
-        new_cues = _supersession_cues(state) - _supersession_cues(existing_content)
-        # Matching cue sets can still flip targets: "npm, not pnpm" vs "pnpm, not npm".
-        cand_ruled_out, exist_ruled_out = _negated_terms(state), _negated_terms(existing_content)
-        flipped = bool((cand_ruled_out - exist_ruled_out) & exist_tokens
-                       or (exist_ruled_out - cand_ruled_out) & cand_tokens)
+        cand_cues, exist_cues = _supersession_cues(state), _supersession_cues(existing_content)
+        # A negation opposes only what it rules out: "does not use port 80" opposes "uses
+        # port 80" but not "uses port 443", and "npm, not pnpm" opposes "pnpm, not npm".
+        cand_ruled, exist_ruled = _ruled_out(state), _ruled_out(existing_content)
+        flipped = bool((cand_ruled and cand_ruled <= exist_tokens and not cand_ruled & exist_ruled)
+                       or (exist_ruled and exist_ruled <= cand_tokens
+                           and not exist_ruled & cand_ruled))
         shared_subject = (len(overlap) >= 2 and
                           2 * len(overlap) >= min(len(cand_tokens), len(exist_tokens)))
         # Reinforcement restates or extends one fact. Words unique to both sides may be
         # conflicting values ("database is Postgres" vs "database is SQLite"), so defer.
         contained = cand_tokens <= exist_tokens or exist_tokens <= cand_tokens
-        if new_cues or flipped:
+        if (cand_cues - exist_cues - {"not"}) or flipped:
             verdict = "contradicts_and_supersedes" if shared_subject else "orthogonal"
-        elif overlap and contained and (len(overlap) >= 2 or cand_tokens == exist_tokens):
+        elif (cand_cues == exist_cues and overlap and contained
+              and (len(overlap) >= 2 or cand_tokens == exist_tokens)):
             verdict = "reinforces"
         else:
             verdict = "orthogonal"
