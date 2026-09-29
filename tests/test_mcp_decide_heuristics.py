@@ -39,6 +39,10 @@ DESTRUCTIVE_OR_LEAK = (
     "git stash drop",
     "git checkout -- .",
     "git restore .",
+    "git checkout -- README.md",
+    "git checkout main -- app.py",
+    "git restore README.md",
+    "git restore --source=HEAD~1 app.py",
     "git checkout -f main",
     "git switch --discard-changes main",
     "git -C /tmp/repo push -f origin main",
@@ -105,6 +109,8 @@ STATE_CHANGE = (
     "git switch -c feature",
     "git -C /tmp/repo push origin main",
     "git restore --staged .",
+    "git restore --staged app.py",
+    "git checkout --track origin/feature",
     "delete from users where id = 1",
     "cp .env.example settings.env",
     "rm notes.txt",
@@ -197,6 +203,9 @@ def test_local_support_ignores_stopword_overlap():
     ("Use pnpm, not npm", "Use pnpm, not npm", "reinforces"),
     ("The API doesn't use port 80", "The API does not use port 80", "reinforces"),
     ("The API never uses port 80", "The API does not use port 80", "reinforces"),
+    ("Use npm, not pnpm", "Use pnpm, not npm", "contradicts_and_supersedes"),
+    ("Use npm instead of pnpm", "Use pnpm instead of npm", "contradicts_and_supersedes"),
+    ("Use pnpm rather than npm", "Use npm rather than pnpm", "contradicts_and_supersedes"),
 ))
 def test_local_contradiction_compares_content_words(candidate, existing, verdict):
     result = _decide(kind="classify_contradiction", state=candidate, existing_content=existing)

@@ -13,9 +13,10 @@ All notable changes to Engraphis are documented here. Format loosely follows
   so adversarial input stays cheap.
 - Match whole words, ignore zero counts and treat negated success as failure in local
   completion checks. Local support and contradiction checks compare content words rather
-  than shared stopwords, and supersession requires a shared subject plus a cue the existing
-  fact lacks, with every negation form counted as one cue. Git global options no longer
-  bypass destructive-command checks.
+  than shared stopwords. Supersession requires a shared subject plus a cue the existing fact
+  lacks or a flipped negation target ("npm, not pnpm" versus "pnpm, not npm"), with every
+  negation form counted as one cue. Git global options no longer bypass destructive-command
+  checks, and path-specific checkouts and worktree restores count as discarding work.
 - Provide a valid offline decision example in Smart MCP action discovery.
 - Reject coerced numeric/string remote consent before Classic MCP can select a Jev backend.
 - Retain global entities referenced by workspace edges during secure erasure,
