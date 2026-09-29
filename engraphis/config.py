@@ -738,6 +738,23 @@ def _parse_llm_provider(value: str) -> str:
     return (value or "").strip().lower() or "openai"
 
 
+#: Accepted ``ENGRAPHIS_LLM_EFFORT`` levels (Anthropic ``output_config.effort``).
+LLM_EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+
+
+def _parse_llm_effort(value: str) -> str:
+    """Normalize the reasoning-effort level; blank or unknown values use ``medium``."""
+    normalized = (value or "").strip().lower()
+    if not normalized:
+        return "medium"
+    if normalized not in LLM_EFFORT_LEVELS:
+        _logger.warning(
+            "ENGRAPHIS_LLM_EFFORT is not one of %s; using 'medium'", ", ".join(LLM_EFFORT_LEVELS)
+        )
+        return "medium"
+    return normalized
+
+
 def _validate_service_mode(value: str) -> str:
     """Validate service mode against allowed values.
 
@@ -970,6 +987,13 @@ class Settings:
     llm_base_url: str = field(default_factory=lambda: _env("ENGRAPHIS_LLM_BASE_URL", ""))
     llm_extra_headers: dict = field(
         default_factory=lambda: _parse_headers(_env("ENGRAPHIS_LLM_EXTRA_HEADERS", ""))
+    )
+    # Reasoning effort for Claude models that think by default (Opus 5+, Sonnet 5+, Fable).
+    # Extraction, consolidation and grounded synthesis are bounded tasks, so ``medium``
+    # balances quality against latency and cost; raise it only when an eval shows headroom.
+    # Ignored by every other provider and model.
+    llm_effort: str = field(
+        default_factory=lambda: _parse_llm_effort(_env("ENGRAPHIS_LLM_EFFORT", ""))
     )
     # OFF by default (opt-in): a successful dashboard connection test enables
     # schema-validated extraction ONLY while the user has turned extraction on (the
