@@ -2562,6 +2562,106 @@ def test_quality_scene_cache_isolated_from_nested_response_mutation(level, mutat
     assert following["meta"]["scene_hash"] == scene_hash
 
 
+@pytest.mark.parametrize("level", ["overview", "complete"])
+@pytest.mark.parametrize("eviction", ["clear", "pop"])
+def test_warm_graph_cache_tolerates_eviction_during_copy(monkeypatch, level, eviction):
+    service, _alpha, _beta, _gamma = _seed_service()
+    kwargs = {"workspace": "acme", "level": level}
+    first = service.graph_scene(**kwargs)
+    cache_key, cached = next(iter(service._graph_scene_cache.items()))
+    copied = threading.Event()
+    evicted = threading.Event()
+    real_deepcopy = copy.deepcopy
+
+    def copy_before_eviction(value, memo=None):
+        result = real_deepcopy(value, memo)
+        if value is cached[1]:
+            copied.set()
+            assert evicted.wait(5), "cache eviction did not finish while the copy was in flight"
+        return result
+
+    def evict():
+        if copied.wait(5):
+            if eviction == "clear":
+                service._graph_scene_cache.clear()
+            else:
+                service._graph_scene_cache.pop(cache_key, None)
+            evicted.set()
+
+    monkeypatch.setattr(service_module.copy, "deepcopy", copy_before_eviction)
+    worker = threading.Thread(target=evict)
+    worker.start()
+    try:
+        response = service.graph_scene(**kwargs)
+        assert response["meta"]["cache_hit"] is True
+        assert response["nodes"] == first["nodes"]
+        assert response["edges"] == first["edges"]
+        assert not service._graph_scene_cache  # Promotion must not restore the old snapshot.
+    finally:
+        copied.set()
+        worker.join(5)
+        service.store.close()
+    assert not worker.is_alive()
+
+
+def test_concurrent_complete_scene_publication_preserves_cache_budgets(monkeypatch):
+    service, _alpha, _beta, _gamma = _seed_service()
+    for limit in range(1, 16):
+        service.graph_scene(workspace="acme", node_limit=limit)
+    copies_ready = threading.Barrier(2)
+    real_deepcopy = copy.deepcopy
+    results = []
+    failures = []
+
+    def synchronize_publication(value, memo=None):
+        result = real_deepcopy(value, memo)
+        if isinstance(value, dict) and value.get("meta", {}).get("cache_hit") is False:
+            copies_ready.wait(5)
+        return result
+
+    def read_complete(confidence):
+        try:
+            results.append(service.graph_scene(
+                workspace="acme", level="complete", include_memory_nodes=False,
+                min_confidence=confidence,
+            ))
+        except BaseException as exc:
+            failures.append(exc)
+
+    monkeypatch.setattr(service_module.copy, "deepcopy", synchronize_publication)
+    workers = [threading.Thread(target=read_complete, args=(confidence,))
+               for confidence in (0.0, 0.1)]
+    for worker in workers:
+        worker.start()
+    try:
+        for worker in workers:
+            worker.join(10)
+        assert not any(worker.is_alive() for worker in workers)
+        assert not failures
+        assert len(results) == 2
+        assert all(scene["meta"]["cache_hit"] is False for scene in results)
+        assert len(service._graph_scene_cache) == 16
+        assert sum(key[2] == "complete" for key in service._graph_scene_cache) == 1
+    finally:
+        copies_ready.abort()
+        for worker in workers:
+            worker.join(5)
+        service.store.close()
+
+
+def test_warm_scene_promotion_preserves_least_recently_used_eviction():
+    service, _alpha, _beta, _gamma = _seed_service()
+    try:
+        for limit in range(1, 17):
+            service.graph_scene(workspace="acme", node_limit=limit)
+        assert service.graph_scene(workspace="acme", node_limit=1)["meta"]["cache_hit"] is True
+        service.graph_scene(workspace="acme", node_limit=17)
+        assert service.graph_scene(workspace="acme", node_limit=1)["meta"]["cache_hit"] is True
+        assert service.graph_scene(workspace="acme", node_limit=2)["meta"]["cache_hit"] is False
+    finally:
+        service.store.close()
+
+
 def test_all_presentation_cache_isolated_from_response_metadata_mutation():
     service, _alpha, _beta, _gamma = _seed_service()
 
