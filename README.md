@@ -667,6 +667,7 @@ when you are ready to evaluate the service boundary and billing options.
 | Memory engine + Smart MCP (Classic 39-tool compatibility) | ✓ | ✓ | ✓ |
 | Version-chain diffs, offline knowledge graph | ✓ | ✓ | ✓ |
 | Manual local consolidation (dry-run by default) | ✓ | ✓ | ✓ |
+| Advisory Jev decisions | Local heuristics; optional BYOK | Included managed allowance when enabled | Included pooled allowance when enabled |
 | Local workspace export (portable v2 JSON: memories, source manifests, graph/code evidence, sessions, audit, and receipts) | ✓ | ✓ | ✓ |
 | Hosted Cloud Sync | | ✓ | ✓ |
 | Hosted Analytics | | ✓ | ✓ |
@@ -686,6 +687,20 @@ Engraphis exposes a zero-configuration Smart MCP gateway plus a 39-tool Classic 
 server across memory, recall, code graphs, governance, sessions, and privacy-safe audit receipts.
 The focused [MCP tool reference](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/MCP_TOOLS.md) is the source for
 the full inventory and parameters.
+
+`engraphis_decide` provides advisory typed decisions in Classic MCP; Smart MCP exposes the
+same decision action through discovery and `engraphis_execute_action`. Decisions stay local
+by default. To use the included Pro or Team allowance when the Cloud service enables it,
+connect your installation through the ordinary Cloud account flow and set
+`ENGRAPHIS_DECISION_BACKEND=managed`. The account portal reports availability and usage.
+For a personal TypeSafe key, explicitly select `byok` and supply `TYPESAFE_API_KEY` through
+the trusted configuration below; direct provider charges may apply.
+
+Every remote call also requires literal boolean `allow_remote=true` and
+`data_classification="public"` or `"internal"` for the supplied text. `offline_mode=true`
+prevents remote requests. Results remain advisory, including local fallbacks; they do not
+authorize command execution or memory changes. See
+[the Jev plan and consent details](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/HOSTED_PLANS.md#included-system-1-decision-engine-jev).
 
 ---
 
@@ -833,6 +848,10 @@ file. It never searches the working directory for `.env`, and explicit process v
 | `ENGRAPHIS_LLM_MODEL` | `gpt-4o-mini` | Model name (provider-specific) |
 | `ENGRAPHIS_LLM_API_KEY` | Not set | API key for chat/synthesis, `llm` / `llm_structured` extraction, and structured consolidation |
 | `ENGRAPHIS_LLM_BASE_URL` | Not set | Base URL for openrouter / custom OpenAI-compatible endpoints |
+| `ENGRAPHIS_DECISION_BACKEND` | `none` | `none` or `local` keeps advisory decisions local; `managed` uses the saved Cloud session and included allowance; `auto` selects managed when configured and never switches to BYOK; explicit `byok` uses a personal TypeSafe key. Legacy `typesafe`, `jev`, and `system1` mean BYOK. Remote calls also require per-call consent. |
+| `ENGRAPHIS_DECISION_MODEL` | `jev-1.13.0` | Pinned model accepted by the Jev transport; other model identifiers are rejected. |
+| `TYPESAFE_API_KEY` | Not set | Personal credential for explicit BYOK decisions; `JEV_API_KEY` is a fallback alias. Managed decisions use the saved Cloud session instead. |
+| `TYPESAFE_BASE_URL` | `https://api.typesafe.ai` | Direct BYOK provider origin; does not change the managed session's bound Cloud control origin. |
 | `ENGRAPHIS_LLM_AUTO_EXTRACT` | `0` | Opt in to switching the running engine to `llm_structured` after a successful live connection test; the dashboard's extraction Off button persists `0`, and its On button restores `1` |
 | `ENGRAPHIS_FORWARDED_ALLOW_IPS` | *(none)* | Proxies trusted for forwarded client/TLS headers (`*` only when the service is reachable exclusively through that proxy) |
 | `ENGRAPHIS_LOCAL_TRUSTED_PEERS` | *(none)* | Exact peers/CIDRs treated as local without forwarding headers; use only for trusted Docker/LAN peers, never public deployments |
