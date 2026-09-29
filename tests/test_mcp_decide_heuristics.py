@@ -39,6 +39,8 @@ DESTRUCTIVE_OR_LEAK = (
     "git stash drop",
     "git checkout -- .",
     "git restore .",
+    "git checkout -f main",
+    "git switch --discard-changes main",
     "Remove-Item -Force ./notes.txt",
     "git push origin main --force",
     "git push -f",
@@ -87,6 +89,7 @@ STATE_CHANGE = (
     "git diff --output=patch.diff",
     "git push origin main",
     "git checkout main",
+    "git switch -c feature",
     "git restore --staged .",
     "delete from users where id = 1",
     "cp .env.example settings.env",
@@ -169,6 +172,9 @@ def test_local_support_ignores_stopword_overlap():
     ("We switched the primary database from SQLite", "Primary database is SQLite",
      "contradicts_and_supersedes"),
     ("The build is in the repo", "The cat is in the box", "orthogonal"),
+    ("The API no longer uses port 80", "The API uses port 80", "contradicts_and_supersedes"),
+    ("We switched logging to JSON", "We use JSON for API responses", "orthogonal"),
+    ("Use pnpm, not npm", "Use pnpm, not npm", "reinforces"),
 ))
 def test_local_contradiction_compares_content_words(candidate, existing, verdict):
     result = _decide(kind="classify_contradiction", state=candidate, existing_content=existing)
