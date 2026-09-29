@@ -14,12 +14,13 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - Match whole words, ignore zero counts and treat negated success as failure in local
   completion checks. Local support and contradiction checks compare content words rather
   than shared stopwords. Supersession requires a shared subject plus a replacement cue the
-  existing fact lacks, or a negation whose ruled-out clause the other fact asserts ("does not
-  use port 80" opposes "uses port 80", not "uses port 443"); reinforcement requires matching
-  cues and one fact containing the other's content words, so conflicting values defer. Git
-  global options no longer bypass destructive-command checks, and path-specific or
-  pathspec-file checkouts, worktree restores and force-created branch resets count as
-  discarding work. Credential paths match either path separator.
+  existing fact lacks, or a negation (including "cannot") whose ruled-out clause the other
+  fact asserts ("does not use port 80" opposes "uses port 80", not "uses port 443");
+  reinforcement requires matching cues and one fact containing the other's content words, so
+  conflicting values defer. Any number of Git global options and clustered short flags no
+  longer bypass destructive-command checks, and path-specific or pathspec-file checkouts,
+  worktree restores and force-created branch resets count as discarding work. Credential
+  paths match either path separator.
 - Provide a valid offline decision example in Smart MCP action discovery.
 - Reject coerced numeric/string remote consent before Classic MCP can select a Jev backend.
 - Retain global entities referenced by workspace edges during secure erasure,

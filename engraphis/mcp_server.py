@@ -2237,10 +2237,10 @@ def engraphis_consolidate(
 # Destructive and leak patterns scan every chained segment of the screened prefix.
 # Flag clusters use a lookahead so a long cluster cannot backtrack quadratically.
 _GUARD_SCAN_CHARS = 4096
-# Git accepts global options before its subcommand, e.g. `git -C repo push -f`. The
-# bound keeps each candidate constant-cost when "git" repeats in adversarial input.
-_GIT_COMMAND = (r"\bgit(?:\s+(?:-[Cc]\s+(?:\"[^\"\n]*\"|'[^'\n]*'|\S+)"
-                r"|--?[A-Za-z][\w-]*(?:=\S+)?)){0,8}\s+")
+# Git accepts any number of global options before its subcommand (`git -C repo push -f`).
+# An option argument never starts a nested bare "git", so candidates scan disjoint spans.
+_GIT_COMMAND = (r"\bgit(?:\s+(?:-[Cc]\s+(?![\"']?git\s)(?:\"[^\"\n]*\"|'[^'\n]*'|\S+)"
+                r"|--?[A-Za-z][\w-]*(?:=\S+)?))*\s+")
 _DESTRUCTIVE_PATTERNS = (
     # Recursive or forced deletes, with flags in any position or order.
     re.compile(r"\brm\b[^\n;&|]*?\s(?:-(?=[a-zA-Z]*[rRf])[a-zA-Z]+|--recursive|--force)(?=\s|$)"),
@@ -2252,8 +2252,8 @@ _DESTRUCTIVE_PATTERNS = (
     re.compile(r"(?<![\w-])format(?:\.com)?\s+[a-z]:(?!\w)", re.I),
     re.compile(r"\bdd\b[^\n;&|]*?\bof=|>\s*/dev/(?:sd|hd|vd|xvd|nvme|disk|mmcblk)"),
     # Git operations that rewrite shared history or discard work.
-    re.compile(_GIT_COMMAND + r"push\b[^\n;&|]*?\s(?:--force(?:-with-lease|-if-includes)?|-f"
-               r"|--delete|-d|--mirror|\+\S+|:\S+)(?=[\s=]|$)"),
+    re.compile(_GIT_COMMAND + r"push\b[^\n;&|]*?\s(?:--force(?:-with-lease|-if-includes)?"
+               r"|--delete|--mirror|-(?=[a-zA-Z]*[fd])[a-zA-Z]+|\+\S+|:\S+)(?=[\s=]|$)"),
     re.compile(_GIT_COMMAND + r"(?:reset\b[^\n;&|]*?\s--hard\b|stash\s+(?:drop|clear)\b"
                r"|clean\b[^\n;&|]*?\s(?:-(?=[a-zA-Z]*f)[a-zA-Z]+|--force)(?=\s|$)"
                r"|branch\b[^\n;&|]*?\s-(?=[a-zA-Z]*D)[a-zA-Z]+(?=\s|$)|filter-branch\b|filter-repo\b"
@@ -2326,7 +2326,7 @@ _AUXILIARIES = frozenset({"does", "had", "been", "can", "could", "would", "shoul
 
 
 def _plain(text: str) -> str:
-    return text.lower().replace("\u2019", "'")
+    return re.sub(r"\bcannot\b", "can not", text.lower().replace("\u2019", "'"))
 
 
 def _fact_token(token: str) -> str:
