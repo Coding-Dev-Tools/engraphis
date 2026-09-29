@@ -107,7 +107,7 @@ def test_core_backend_imports_stay_behind_outer_composition_root() -> None:
 
 def test_benchmark_text_alternatives_match_registered_fixture_boundary() -> None:
     """The current image and its alt text expose only current registered boundaries."""
-    registry_path = ROOT / "docs/benchmark-evidence/offline-fixtures-v90.json"
+    registry_path = ROOT / "docs/benchmark-evidence/offline-fixtures-v102.json"
     registry_bytes = registry_path.read_bytes()
     registry = json.loads(registry_bytes)
     measurements = {run["id"]: run["result"] for run in registry["runs"]}
