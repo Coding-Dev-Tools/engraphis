@@ -8086,10 +8086,8 @@ class Store:
             layer_marks = ",".join("?" for _ in layers)
             sql += f" AND layer IN ({layer_marks})"
             params.extend(_enum(layer) for layer in layers)
-        if flt and flt.workspace_id:
-            # Workspace filter is distributed directly into the index-accelerated
-            # src/dst branches above so SQLite can use MULTI-INDEX OR.
-            pass
+        # A workspace filter is already distributed into the indexed src/dst branches
+        # above so SQLite can use MULTI-INDEX OR; repeating it here would add nothing.
         if flt and flt.repo_id:
             if flt.include_ancestors:
                 sql += " AND (repo_id=? OR repo_id IS NULL)"
