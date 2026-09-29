@@ -213,6 +213,120 @@ def _client(monkeypatch, batch=None, error=None):
     return calls
 
 
+@pytest.fixture(params=["direct", "classic", "smart"])
+def dispatch_decision(request):
+    def call(arguments):
+        if request.param == "direct":
+            return json.loads(server.engraphis_decide(**arguments))
+        target = server.classic_mcp
+        name = "engraphis_decide"
+        if request.param == "smart":
+            target = server.smart_mcp
+            name = "engraphis_execute_action"
+            action = server._action_payload(server.ACTION_SPECS["decide"])
+            arguments = {"capability_id": action["capability_id"],
+                         "schema_digest": action["schema_digest"], "arguments": arguments}
+        response = asyncio.run(target.call_tool(name, arguments))
+        content = response[0] if isinstance(response, tuple) else response
+        result = json.loads(content[0].text)
+        return result["result"] if request.param == "smart" else result
+
+    return call
+
+
+@pytest.mark.parametrize("kind,required,missing", [
+    ("classify_contradiction", {"state": "Use SQLite", "existing_content": "Use CSV"}, "state"),
+    ("classify_contradiction", {"state": "Use SQLite", "existing_content": "Use CSV"}, "existing_content"),
+    ("verify_support", {"state": "SQLite is used", "query": "Which database?"}, "state"),
+    ("verify_support", {"state": "SQLite is used", "query": "Which database?"}, "query"),
+    ("verify_completion", {"state": "Tests passed", "goal": "Run the tests"}, "state"),
+    ("verify_completion", {"state": "Tests passed", "goal": "Run the tests"}, "goal"),
+])
+@pytest.mark.parametrize("blank", [None, "", " \n\t"], ids=["omitted", "empty", "whitespace"])
+def test_missing_required_input_is_unknown_before_backend_selection(
+    monkeypatch, dispatch_decision, kind, required, missing, blank,
+):
+    def forbidden(*args, **kwargs):
+        pytest.fail("incomplete decisions must not inspect credentials or consume allowance")
+
+    monkeypatch.setattr(transport, "select_decision_client", forbidden)
+    # Unrelated context, including optional action history, cannot replace a fact,
+    # a query, a goal, or the output evidence required for this decision kind.
+    arguments = dict.fromkeys(
+        ("query", "existing_content", "goal", "recent_actions", "question"), "Other context",
+    )
+    arguments.update(kind=kind, allow_remote=True, **required)
+    arguments.pop(missing)
+    if blank is not None:
+        arguments[missing] = blank
+    result = dispatch_decision(arguments)
+    assert result["is_fallback"] is True
+    assert result["fallback_reason"] == "invalid_request"
+    assert result["advisory_only"] is True and result["confidence"] is None
+    for field in ("supported", "probability", "is_complete", "completion_probability", "verdict", "selected"):
+        if field in result:
+            assert result[field] is None
+
+
+@pytest.mark.parametrize("kind,field", [
+    ("classify_contradiction", "verdict"), ("verify_support", "supported"),
+    ("verify_completion", "is_complete"),
+])
+def test_client_rejected_input_cannot_fall_back_to_a_definitive_conclusion(
+    monkeypatch, dispatch_decision, kind, field,
+):
+    calls = _client(monkeypatch, error=transport.DecisionClientError("invalid_request"))
+    result = dispatch_decision({
+        "kind": kind, "state": "Tests passed successfully", "query": "Tests passed",
+        "existing_content": "Tests passed successfully", "goal": "Run tests", "allow_remote": True,
+    })
+    assert len(calls) == 1
+    assert result["fallback_reason"] == "invalid_request"
+    assert result[field] is None
+    assert result["confidence"] is None and result["advisory_only"] is True
+    for probability in ("probability", "completion_probability"):
+        if probability in result:
+            assert result[probability] is None
+
+
+@pytest.mark.parametrize("kind", ["classify_contradiction", "verify_support", "verify_completion"])
+@pytest.mark.parametrize("consent", [{}, {"allow_remote": True, "offline_mode": True}])
+def test_incomplete_local_input_is_unknown_without_backend_selection(
+    monkeypatch, dispatch_decision, kind, consent,
+):
+    def forbidden(*args, **kwargs):
+        pytest.fail("local advice must not inspect credentials")
+
+    monkeypatch.setattr(transport, "select_decision_client", forbidden)
+    result = dispatch_decision({"kind": kind, "state": "Tests passed", **consent})
+    assert result["fallback_reason"] == "invalid_request"
+    assert result["is_fallback"] is True and result["advisory_only"] is True
+    assert result["confidence"] is None
+    for field in ("verdict", "supported", "probability", "is_complete", "completion_probability"):
+        if field in result:
+            assert result[field] is None
+
+
+@pytest.mark.parametrize("kind", ["classify_contradiction", "verify_support", "verify_completion"])
+@pytest.mark.parametrize("consent,reason", [
+    ({}, "remote_not_authorized"), ({"allow_remote": True, "offline_mode": True}, "offline"),
+])
+def test_valid_local_input_preserves_offline_and_consent_boundary(
+    monkeypatch, dispatch_decision, kind, consent, reason,
+):
+    def forbidden(*args, **kwargs):
+        pytest.fail("valid local advice must not inspect credentials")
+
+    monkeypatch.setattr(transport, "select_decision_client", forbidden)
+    result = dispatch_decision({
+        "kind": kind, "state": "Tests passed", "query": "Tests passed?",
+        "existing_content": "Tests pending", "goal": "Run the tests", **consent,
+    })
+    assert result["fallback_reason"] == reason
+    assert result["is_fallback"] is True and result["advisory_only"] is True
+    assert result["confidence"] is None
+
+
 @pytest.mark.parametrize("kind,key,result_key", (
     ("verify_support", "has_support", "supported"),
     ("verify_completion", "is_complete", "is_complete"),
@@ -223,7 +337,8 @@ def test_uncertain_remote_result_is_neither_success_nor_failure(monkeypatch, kin
     })
     calls = _client(monkeypatch, batch)
     result = json.loads(server.engraphis_decide(
-        kind=kind, state="Synthetic evidence", allow_remote=True, data_classification="public",
+        kind=kind, state="Synthetic evidence", query="Synthetic query", goal="Check the fixture",
+        allow_remote=True, data_classification="public",
     ))
     assert calls[0][2] == {"model": transport.MODEL, "allow_remote": True,
                             "purpose": kind, "data_classification": "public"}
@@ -252,16 +367,58 @@ def test_remote_failures_cannot_look_like_verified_success(monkeypatch, batch, e
     assert "private request" not in raw and "synthetic credential" not in raw
 
 
-def test_remote_advice_cannot_override_local_destructive_veto(monkeypatch):
+_REMOVAL_COMMANDS = (
+    "rm -rf / --no-preserve-root",
+    "rm -rf .",
+    "rm -rf *",
+    "rm -fr ./build",
+    "rm -rf build",
+    "rm -r -f ./build",
+    "rm -f -r build",
+    "rm -Rf ./build",
+    "rm --recursive --force ./build",
+    "rm --force --recursive build",
+    "rm -r --force ./build",
+    "rm --recursive -f ./build",
+)
+
+
+@pytest.mark.parametrize("command", _REMOVAL_COMMANDS + (
+    "git status; rm -rf .",
+    "git status && rm -rf ./build",
+    "echo $(rm -fr ./build)",
+    "sh -c 'rm -rf *'",
+    'cmd /c "del /s /q build"',
+    "Remove-Item -Recurse -Force ./build",
+    "git status",
+    "echo 'rm -rf . is an example, not a command to run'",
+))
+def test_remote_guard_advice_never_authorizes_commands(monkeypatch, dispatch_decision, command):
     batch = transport.CloudDecisionBatch(False, {
         "category": transport.SimpleChoiceDecision("read_only", 0.99),
     }, {"is_safe": transport.SimpleSupportDecision(0.99, 0.98)})
-    _client(monkeypatch, batch)
-    result = json.loads(server.engraphis_decide(
-        kind="guard_command", state="rm -rf / --no-preserve-root", allow_remote=True,
-    ))
+    calls = _client(monkeypatch, batch)
+    # These are inert strings: neither this test nor the guard executes a command.
+    result = dispatch_decision({"kind": "guard_command", "state": command, "allow_remote": True})
+    assert len(calls) == 1
+    assert result["is_fallback"] is False and result["decision_status"] == "decision"
     assert result["allow_auto"] is False and result["escalate_to_user"] is True
     assert result["advisory_only"] is True
+    # Preserve the provider's advice without elevating it to shell authority.
+    assert result["category"] == "read_only" and result["category_confidence"] == 0.99
+    assert result["safety_probability"] == 0.99 and result["confidence"] == 0.98
+
+
+@pytest.mark.parametrize("command", _REMOVAL_COMMANDS)
+def test_local_removal_advice_recognizes_relative_targets_and_flag_order(monkeypatch, command):
+    def forbidden(*args, **kwargs):
+        pytest.fail("local command advice must not inspect credentials")
+
+    monkeypatch.setattr(transport, "select_decision_client", forbidden)
+    result = json.loads(server.engraphis_decide(kind="guard_command", state=command))
+    assert result["category"] == "destructive_or_leak"
+    assert result["allow_auto"] is False and result["escalate_to_user"] is True
+    assert result["is_fallback"] is True and result["confidence"] is None
 
 
 @pytest.mark.parametrize("command", (

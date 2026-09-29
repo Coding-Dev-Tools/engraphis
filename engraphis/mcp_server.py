@@ -2233,7 +2233,7 @@ def engraphis_consolidate(
 
 
 _DESTRUCTIVE_PATTERNS = (
-    re.compile(r"\brm\s+-rf\s+[/~]", re.I),
+    re.compile(r"\brm\s+(?:-[rf]+|--(?:recursive|force))(?=\s|$)", re.I),
     re.compile(r"\b(format|mkfs|fdisk|dd\s+if=)\b", re.I),
     re.compile(r"\b(drop\s+database|truncate\s+table)\b", re.I),
     re.compile(r"\bgit\s+push\s+.*(--force|-f)\b", re.I),
@@ -2262,8 +2262,8 @@ def _heuristic_decision(
         cat = "destructive_or_leak" if is_destr else ("read_only" if is_safe else "state_change")
         return {
             "kind": kind,
-            "allow_auto": prob >= 0.90,
-            "escalate_to_user": prob < 0.90,
+            "allow_auto": False,
+            "escalate_to_user": True,
             "safety_probability": prob,
             "category": cat,
             "confidence": 0.85,
@@ -2352,7 +2352,8 @@ def engraphis_decide(
         Field(
             default="",
             description=(
-                "Input state, shell command, or evidence text to evaluate. For remote "
+                "Input state, shell command, or evidence text to evaluate. Required for "
+                "every kind except 'custom', which may use question instead. For remote "
                 "processing, the combined state, labels, and kind-specific context "
                 "must fit within 16,000 characters."
             ),
@@ -2363,7 +2364,7 @@ def engraphis_decide(
         str,
         Field(
             default="",
-            description="Query string (used for 'verify_support').",
+            description="Query string (required with state for 'verify_support').",
             max_length=4096,
         ),
     ] = "",
@@ -2371,7 +2372,7 @@ def engraphis_decide(
         str,
         Field(
             default="",
-            description="Existing memory content (used for 'classify_contradiction').",
+            description="Existing memory content (required with state for 'classify_contradiction').",
             max_length=16_000,
         ),
     ] = "",
@@ -2379,7 +2380,7 @@ def engraphis_decide(
         str,
         Field(
             default="",
-            description="Task goal description (used for 'verify_completion').",
+            description="Task goal description (required with state for 'verify_completion').",
             max_length=4096,
         ),
     ] = "",
@@ -2387,7 +2388,7 @@ def engraphis_decide(
         str,
         Field(
             default="",
-            description="Summary of recent agent actions (used for 'verify_completion').",
+            description="Optional summary of recent agent actions for 'verify_completion'.",
             max_length=8192,
         ),
     ] = "",
@@ -2434,27 +2435,34 @@ def engraphis_decide(
         result.update({"decision_status": "local_fallback", "fallback_reason": reason,
                        "advisory_only": True, "confidence": None,
                        "confidence_source": "unmeasured_heuristic",
-                       "probability_source": "heuristic"})
+                       "probability_source": "unavailable" if reason == "invalid_request" else "heuristic"})
         if kind == "guard_command":
             # Prefix heuristics do not parse shell syntax and cannot authorize it.
             result.update({"allow_auto": False, "escalate_to_user": True})
         elif kind == "custom" or reason == "invalid_request":
             result["selected"] = None
+        if reason == "invalid_request":
+            # Missing or malformed evidence cannot support even a local verdict.
+            for key in ("safety_probability", "category", "verdict", "supported",
+                        "probability", "is_complete", "completion_probability"):
+                if key in result:
+                    result[key] = None
         return _ok(result)
 
     if kind not in {"guard_command", "classify_contradiction", "verify_support", "verify_completion", "custom"}:
         return fallback("invalid_request")
-    if offline_mode or allow_remote is not True:
-        return fallback("offline" if offline_mode else "remote_not_authorized")
-    relevant_inputs = {
+    required_inputs = {
         "guard_command": (state,),
         "classify_contradiction": (state, existing_content),
         "verify_support": (state, query),
-        "verify_completion": (state, goal, recent_actions),
-        "custom": (state, question),
+        "verify_completion": (state, goal),
     }
-    if not any(value.strip() for value in relevant_inputs[kind]):
+    has_required_input = (bool(state.strip() or question.strip()) if kind == "custom"
+                          else all(value.strip() for value in required_inputs[kind]))
+    if not has_required_input:
         return fallback("invalid_request")
+    if offline_mode or allow_remote is not True:
+        return fallback("offline" if offline_mode else "remote_not_authorized")
     try:
         client, backend_name = select_decision_client()
         if client is None:
@@ -2516,10 +2524,9 @@ def engraphis_decide(
                     raise DecisionClientError("malformed_response")
                 if category.confidence <= 0.5:
                     result["decision_status"] = "uncertain"
-                allow = (certain and probability >= 0.90 and category.confidence > 0.5
-                         and category.selected == "read_only"
-                         and not any(pattern.search(state) for pattern in _DESTRUCTIVE_PATTERNS))
-                result.update({"allow_auto": allow, "escalate_to_user": not allow,
+                # Neither model confidence nor an incomplete command heuristic
+                # can authorize shell execution. Preserve the answer as advice.
+                result.update({"allow_auto": False, "escalate_to_user": True,
                                "safety_probability": probability, "category": category.selected,
                                "category_confidence": category.confidence})
             elif kind == "verify_support":

@@ -1,6 +1,6 @@
 {
   "schema": "engraphis-mcp-contract/v1",
-  "sha256": "a8788edc08967e96c789348445018423cd12f1deecddbd2dafbc5389c5a18791",
+  "sha256": "7e36e055ca003f17fa67194e1c22cc0af0e3c98172228b60989f1206dd1a28d2",
   "surfaces": {
     "classic": [
       {
@@ -712,14 +712,14 @@
             },
             "existing_content": {
               "default": "",
-              "description": "Existing memory content (used for 'classify_contradiction').",
+              "description": "Existing memory content (required with state for 'classify_contradiction').",
               "maxLength": 16000,
               "title": "Existing Content",
               "type": "string"
             },
             "goal": {
               "default": "",
-              "description": "Task goal description (used for 'verify_completion').",
+              "description": "Task goal description (required with state for 'verify_completion').",
               "maxLength": 4096,
               "title": "Goal",
               "type": "string"
@@ -756,7 +756,7 @@
             },
             "query": {
               "default": "",
-              "description": "Query string (used for 'verify_support').",
+              "description": "Query string (required with state for 'verify_support').",
               "maxLength": 4096,
               "title": "Query",
               "type": "string"
@@ -770,14 +770,14 @@
             },
             "recent_actions": {
               "default": "",
-              "description": "Summary of recent agent actions (used for 'verify_completion').",
+              "description": "Optional summary of recent agent actions for 'verify_completion'.",
               "maxLength": 8192,
               "title": "Recent Actions",
               "type": "string"
             },
             "state": {
               "default": "",
-              "description": "Input state, shell command, or evidence text to evaluate. For remote processing, the combined state, labels, and kind-specific context must fit within 16,000 characters.",
+              "description": "Input state, shell command, or evidence text to evaluate. Required for every kind except 'custom', which may use question instead. For remote processing, the combined state, labels, and kind-specific context must fit within 16,000 characters.",
               "maxLength": 16000,
               "title": "State",
               "type": "string"
