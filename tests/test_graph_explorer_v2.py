@@ -4273,6 +4273,141 @@ def test_visibility_cap_scopes_touching_edges_to_requested_repo(monkeypatch):
     assert "edg_noisy" not in {edge["id"] for edge in scene["edges"]}
 
 
+@pytest.mark.parametrize("include_history", [False, True])
+def test_touching_classification_work_is_bounded_by_selected_entities(include_history):
+    """Unrelated repository edges must not turn a small view into a workspace scan."""
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    try:
+        workspace_id = service.store.get_or_create_workspace("scoped-work")
+        selected_repo = service.store.get_or_create_repo(workspace_id, "selected")
+        noisy_repo = service.store.get_or_create_repo(workspace_id, "noisy")
+        conn = service.store.conn
+        for entity_id, repo_id in (
+            ("selected-a", selected_repo), ("selected-b", selected_repo),
+            ("noisy-a", noisy_repo), ("noisy-b", noisy_repo),
+        ):
+            conn.execute(
+                "INSERT INTO entities(id, workspace_id, repo_id, name, etype, created_at) "
+                "VALUES (?, ?, ?, ?, 'concept', 0)",
+                (entity_id, workspace_id, repo_id, entity_id),
+            )
+        edge_insert = (
+            "INSERT INTO edges(id, workspace_id, repo_id, src, dst, relation, layer) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'entity')"
+        )
+        conn.executemany(edge_insert, [
+            ("edg_selected", workspace_id, selected_repo,
+             "selected-a", "selected-b", "related"),
+            ("edg_loop", workspace_id, selected_repo,
+             "selected-a", "selected-a", "related"),
+        ])
+        conn.commit()
+        statements = []
+        conn.set_trace_callback(statements.append)
+        try:
+            service.graph_scene(
+                workspace="scoped-work", repo="selected", level="complete",
+                include_memory_nodes=False, include_history=include_history,
+                valid_at=100, known_at=100,
+            )
+        finally:
+            conn.set_trace_callback(None)
+        query = next(statement for statement in statements if "AS touching_count" in statement)
+
+        def measured_classification():
+            ticks = []
+            conn.set_progress_handler(lambda: ticks.append(None) or 0, 100)
+            try:
+                rows = [tuple(row) for row in conn.execute(query).fetchall()]
+            finally:
+                conn.set_progress_handler(None, 0)
+            return rows, len(ticks) * 100
+
+        baseline_rows, baseline_work = measured_classification()
+        conn.executemany(edge_insert, [
+            (f"edg_noisy_{index}", workspace_id, noisy_repo,
+             "noisy-a", "noisy-b", f"relation_{index}")
+            for index in range(3_000)
+        ])
+        conn.commit()
+        noisy_rows, noisy_work = measured_classification()
+
+        assert noisy_rows == baseline_rows
+        # Count SQLite VM instructions, not wall time. Leave room for planner/version
+        # overhead while rejecting a linear scan over the 3,000 unrelated relations.
+        assert noisy_work <= baseline_work + 2_000
+        assert noisy_rows == [("selected-a", 2), ("selected-b", 1)]
+    finally:
+        service.store.close()
+
+
+@pytest.mark.parametrize("include_history", [False, True])
+def test_self_loop_visibility_prunes_private_and_unavailable_support_before_cap(
+        monkeypatch, include_history):
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    try:
+        workspace_id = service.store.get_or_create_workspace("loop-privacy")
+        other_workspace = service.store.get_or_create_workspace("foreign-evidence")
+        selected_repo = service.store.get_or_create_repo(workspace_id, "selected")
+        other_repo = service.store.get_or_create_repo(workspace_id, "other")
+        conn = service.store.conn
+        for memory_id, scope, memory_workspace, ingested_at in (
+            ("mem_public", "workspace", workspace_id, 0),
+            ("mem_private", "session", workspace_id, 0),
+            ("mem_foreign", "workspace", other_workspace, 0),
+            ("mem_future", "workspace", workspace_id, 200),
+        ):
+            service.store.add_memory(MemoryRecord(
+                id=memory_id, content="synthetic evidence", workspace_id=memory_workspace,
+                scope=Scope(scope), valid_from=0, ingested_at=ingested_at,
+            ))
+        cases = [(f"a-private-{index:03d}", ["mem_private"]) for index in range(505)]
+        cases.extend([
+            ("b-foreign", ["mem_foreign"]), ("b-missing", ["mem_missing"]),
+            ("b-future", ["mem_future"]), ("z-supportless", []),
+            ("z-public", ["mem_private", "mem_public"]),
+        ])
+        for entity_id, memory_ids in cases:
+            conn.execute(
+                "INSERT INTO entities(id, workspace_id, name, etype, created_at) "
+                "VALUES (?, ?, ?, 'concept', 0)",
+                (entity_id, workspace_id, entity_id),
+            )
+            # Workspace-wide privacy must still see a shared entity's private edge
+            # in another repository even though that edge is outside the visible view.
+            edge_repo = selected_repo if entity_id.startswith("z-") else other_repo
+            conn.execute(
+                "INSERT INTO edges(id, workspace_id, repo_id, src, dst, relation, layer) "
+                "VALUES (?, ?, ?, ?, ?, 'related', 'entity')",
+                (entity_id, workspace_id, edge_repo, entity_id, entity_id),
+            )
+            for memory_id in memory_ids:
+                conn.execute(
+                    "INSERT INTO edge_supports(edge_id, memory_id, source_kind, "
+                    "valid_from, ingested_at) VALUES (?, ?, 'manual', 0, 0)",
+                    (entity_id, memory_id),
+                )
+        conn.commit()
+        monkeypatch.setattr(service_module, "MAX_GRAPH_ANALYSIS_ENTITIES", 2)
+        monkeypatch.setattr(service_module, "MAX_GRAPH_ANALYSIS_EDGES", 2)
+
+        scene = service.graph_scene(
+            workspace="loop-privacy", repo="selected", level="complete",
+            include_memory_nodes=False, include_history=include_history,
+            valid_at=100, known_at=100,
+        )
+
+        assert {node["id"] for node in scene["nodes"]} == {"z-supportless", "z-public"}
+        assert {(edge["source"], edge["target"]) for edge in scene["edges"]} == {
+            ("z-supportless", "z-supportless"), ("z-public", "z-public"),
+        }
+        public_edge = next(edge for edge in scene["edges"] if edge["id"] == "z-public")
+        assert public_edge["support_memory_ids"] == ["mem_public"]
+        assert public_edge["support_count"] == 1
+    finally:
+        service.store.close()
+
+
 def test_history_support_cap_counts_unique_evidence_keys(monkeypatch):
     service, _alpha, _beta, gamma = _seed_service()
     monkeypatch.setattr(service_module, "MAX_GRAPH_ANALYSIS_SUPPORTS", 3)
