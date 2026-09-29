@@ -4538,12 +4538,16 @@ class Store:
     def relocation_history(self, memory_ids: list[str], *, limit: int) -> RelocationHistory:
         marks = ",".join("?" for _ in memory_ids)
         mids = tuple(memory_ids)
+        # Reuse one bound selection for both command endpoints. Binding all 500
+        # IDs twice plus the result LIMIT exceeds SQLite's legacy 999-variable cap.
+        selected = "VALUES " + ",".join("(?)" for _ in mids) if mids else "SELECT NULL WHERE 0"
         history = RelocationHistory()
         history.commands = self._relocation_rows(
-            f"SELECT * FROM memory_commands WHERE result_id IN ({marks}) "
-            f"OR (workspace_id,operation_id) IN (SELECT workspace_id,operation_id "
-            f"FROM memory_command_sources WHERE source_id IN ({marks})) "
-            "ORDER BY sequence", mids + mids, limit=limit,
+            f"WITH selected(memory_id) AS ({selected}) "
+            "SELECT * FROM memory_commands WHERE result_id IN (SELECT memory_id FROM selected) "
+            "OR (workspace_id,operation_id) IN (SELECT workspace_id,operation_id "
+            "FROM memory_command_sources WHERE source_id IN (SELECT memory_id FROM selected)) "
+            "ORDER BY sequence", mids, limit=limit,
         )
         for command in history.commands:
             identity = (command["workspace_id"], command["operation_id"])

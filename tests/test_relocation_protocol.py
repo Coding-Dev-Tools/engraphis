@@ -3,6 +3,7 @@ import ast
 import copy
 import inspect
 import json
+import sqlite3
 
 import pytest
 
@@ -171,7 +172,7 @@ def test_portable_blockers_refuse_before_the_writer(blocker):
 def test_relocation_module_keeps_storage_api_and_sql_out_of_policy():
     tree = ast.parse(inspect.getsource(relocation))
     assert relocation.RelocationStore is RelocationStore
-    assert "conn" not in RelocationStore.__annotations__
+    assert "conn" not in getattr(RelocationStore, "__annotations__", {})
     assert not [node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)
                 and node.attr in {"conn", "execute", "executemany", "fetchone", "fetchall", "fetchmany"}]
     assert not [node.value for node in ast.walk(tree) if isinstance(node, ast.Constant)
@@ -232,3 +233,96 @@ def test_canonical_writer_also_refuses_blocked_plans(sqlite_store):
     plan.block("external_history", "The related history is incomplete.")
     with store.write_transaction(), pytest.raises(ValueError, match="preview blockers"):
         store.apply_memory_move(plan, actor="reviewer")
+
+
+@pytest.fixture(params=["native", "compatibility"])
+def legacy_variable_limit(sqlite_store, request, monkeypatch):
+    """Exercise SQLite's real limit and the guard used by Python without setlimit."""
+    store, _, _ = sqlite_store
+    if request.param == "native":
+        setlimit = getattr(store.conn, "setlimit", None)
+        category = getattr(sqlite3, "SQLITE_LIMIT_VARIABLE_NUMBER", None)
+        if setlimit is None or category is None:
+            pytest.skip("this Python lacks SQLite's connection limit API")
+        previous = setlimit(category, 999)
+        try:
+            yield sqlite_store
+        finally:
+            setlimit(category, previous)
+        return
+
+    # Python 3.9/3.10 cannot lower SQLite's native limit. Enforce the legacy
+    # parameter budget before each real query; the database still executes it.
+    for method in ("execute", "fetchone", "fetchall"):
+        original = getattr(type(store.conn), method)
+
+        def limited(connection, statement, parameters=(), *, _original=original):
+            if connection is store.conn and len(parameters) > 999:
+                raise sqlite3.OperationalError("too many SQL variables")
+            return _original(connection, statement, parameters)
+
+        monkeypatch.setattr(type(store.conn), method, limited)
+    yield sqlite_store
+
+
+def seed_move_command(store, workspace_id, operation_id, result_id, source_id):
+    store.conn.execute(
+        "INSERT INTO memory_commands(workspace_id,operation_id,operation,request_hash,"
+        "result_id,result_version,created_at) VALUES(?,?,'correct','request',?,'version',1)",
+        (workspace_id, operation_id, result_id),
+    )
+    store.conn.execute(
+        "INSERT INTO memory_command_sources(source_id,workspace_id,operation_id) VALUES(?,?,?)",
+        (source_id, workspace_id, operation_id),
+    )
+
+
+def test_history_at_move_cap_preserves_both_command_endpoints_and_result_limit(legacy_variable_limit):
+    store, source, target = legacy_variable_limit
+    selected = [f"mem_selected_{index}" for index in range(relocation.MAX_MOVE_MEMORIES)]
+    with pytest.raises(sqlite3.OperationalError, match="too many SQL variables"):
+        store.conn.execute("SELECT " + ",".join("?" for _ in range(1000)), (0,) * 1000)
+    seed_move_command(store, source, "result_match", selected[0], "mem_external_source")
+    seed_move_command(store, source, "source_match", "mem_external_result", selected[-1])
+    seed_move_command(store, source, "both_match", selected[1], selected[2])
+    seed_move_command(store, source, "unrelated", "mem_other_result", "mem_other_source")
+    # Matching an operation ID must not pull another workspace's command into
+    # the history merely because the selected source belongs to the first one.
+    seed_move_command(store, target, "source_match", "mem_foreign_result", "mem_foreign_source")
+    store.conn.commit()
+
+    history = store.relocation_history(selected, limit=3)
+    assert [row["operation_id"] for row in history.commands] == [
+        "result_match", "source_match", "both_match",
+    ]
+    assert {row["workspace_id"] for row in history.commands} == {source}
+    assert [row["source_id"] for row in history.command_sources[(source, "source_match")]] == [selected[-1]]
+    with pytest.raises(ValueError, match="review limit"):
+        store.relocation_history(selected, limit=2)
+    assert store.relocation_history([], limit=3).commands == []
+
+
+def test_full_500_memory_move_fits_legacy_sqlite_variable_limit(legacy_variable_limit):
+    store, source, target = legacy_variable_limit
+    selected = []
+    for index in range(relocation.MAX_MOVE_MEMORIES):
+        selected.append(store.add_memory(MemoryRecord(
+            id=f"mem_move_{index}", content=f"Preserved rule {index}",
+            workspace_id=source, scope=Scope.WORKSPACE,
+        )))
+    seed_move_command(store, source, "correction", selected[1], selected[0])
+    store.conn.commit()
+    with store.read_snapshot():
+        plan = relocation.prepare_move(store, source, target, selected)
+    assert not plan.blockers and len(plan.records) == 500
+    assert len(plan.commands) == 1 and len(plan.command_sources) == 1
+    with store.write_transaction():
+        refreshed = relocation.prepare_move(store, source, target, selected)
+        assert refreshed.preview_token == plan.preview_token
+        relocation.apply_move(store, refreshed, actor="reviewer")
+    assert store.conn.execute("SELECT COUNT(*) FROM memories WHERE workspace_id=?", (target,)).fetchone()[0] == 500
+    assert store.conn.execute("SELECT 1 FROM memories WHERE workspace_id=?", (source,)).fetchone() is None
+    history = store.relocation_history(selected, limit=10)
+    assert history.commands[0]["workspace_id"] == target
+    assert history.command_sources[(target, "correction")][0]["source_id"] == selected[0]
+    assert store.conn.execute("PRAGMA foreign_key_check").fetchall() == []
