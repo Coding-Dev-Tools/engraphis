@@ -511,6 +511,19 @@ def test_peer_requires_budgeted_client_for_real_constructor():
         GraphitiAdapter(client_factory=lambda **_: object())
 
 
+def test_engraphis_capability_version_matches_loaded_runtime():
+    from engraphis import __version__
+
+    adapter = EngraphisAdapter()
+    try:
+        assert adapter.capabilities.version == __version__
+        prepared = adapter.prepare(workspace_id="version-check")
+        assert prepared["capabilities"]["version"] == __version__
+        assert adapter.metrics()["capabilities"]["version"] == __version__
+    finally:
+        adapter.close()
+
+
 def test_engraphis_source_revision_is_unknown_until_explicitly_bound():
     direct = EngraphisAdapter()
     try:

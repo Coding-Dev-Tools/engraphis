@@ -2,7 +2,7 @@
   "environment": {
     "embedding": "deterministic",
     "numpy": "2.4.6",
-    "platform": "linux",
+    "platform": "win32",
     "python": "3.11.15",
     "vector_backend": "numpy"
   },
@@ -103,10 +103,10 @@
   ],
   "schema": "engraphis-public-offline-fixtures/v1",
   "suite": {
-    "digest": "87ac94ec45e26bc2e6890c83545ef8b50f8dbbae9f72d86e7b52a9afe5f74263",
+    "digest": "a0a17148da691957e7489de42158768eb0ee591197d9b0760729eda10b706f59",
     "digest_method": "sha256(canonical compact JSON mapping each sorted path to its file SHA-256)",
     "files": {
-      "engraphis/__init__.py": "7d7e5e18c96a9a4f5c0eef6d123e7506736231819d11276b21e598f045fa40dd",
+      "engraphis/__init__.py": "f24241e8da2ede9ccba54ce4bf7531a800b55c29b2469e5de93bd423cffbf0be",
       "engraphis/ai_context.py": "4dfd5d39eb95d05c591d1981e9e855eced73232f53efd9fe9966e0e08957d030",
       "engraphis/app.py": "44d68ad8c0ff46baed01978c9b04e40b8be5031609d5a69e205b7f05da3777fb",
       "engraphis/backends/__init__.py": "a9f22b9278362904166614081f1df78469d453601b298ce4e8afdba8a3722b25",
@@ -169,7 +169,7 @@
       "engraphis/core/schema.py": "ac273d3f0383995be815bbd866f2a36ea1398f30833aed57b8d4459afc87096b",
       "engraphis/core/scoring.py": "f5b6ac291edf0968b3de83cb1951a97d5bfd8a8d079199cb2ef95bba0884c89a",
       "engraphis/core/secrets.py": "a4835ba06e2616156528df6365ca1aba6cba0c97cdf834a709d2797a371099d2",
-      "engraphis/core/store.py": "0ba21d11b9a61b105f743aac3850f12638cc51b425ce76fb8d0c1eb27d540647",
+      "engraphis/core/store.py": "0ec7df8149af781be7fc1e769ad63d4e91c402b84f842c676ce8b91ddf7ae2d3",
       "engraphis/core/sync.py": "69f75b50fdb1ec9352f92460c89efeec8d72ca642bd10beb29474a8c62b4f58a",
       "engraphis/core/textutil.py": "acd65031729fa5d91d09527b8eb52518b83cfce77a55e6b7ae2d94686e35c1a6",
       "engraphis/core/user_model.py": "3147ec8ee7cfd855783f639874b63f331cdc822bd8bd9298cfb326dd18666026",
@@ -202,7 +202,7 @@
       "engraphis/mcp_classic_cli.py": "778122b121a1c654b8f85810fad05d9c8d7799cf13903d7dc274938b51008da0",
       "engraphis/mcp_cli.py": "ed2d997438d727180842dc5fb3f6776f5a5d97974f690ee7229264be1ff61957",
       "engraphis/mcp_http_cli.py": "5a04bcaae4531a6ea116a827bb65c5df3bd6d07ea336f65ff3ed45034972c396",
-      "engraphis/mcp_server.py": "f22fb8b6d7e88df4c21cdad35500c51e79c6f589ca12cbfdba338140ccb821d4",
+      "engraphis/mcp_server.py": "4e6ccc506f6ce49b43b18022b3f543a6cd419917a75ef7dddd5498417c87e32c",
       "engraphis/models.py": "6e76e97db0aca3805c6f582ea78cc6e1c0ccd2665e16fd8ab81eb91b94141b51",
       "engraphis/netutil.py": "2e0f8a9095f6f31dcb5b96d323f023b9214369d59e1c488125a7d443a55972ff",
       "engraphis/observability.py": "a3a6945bf33a0d8e216da56ca7efec0031b82dc64a66cff36f0b2161f5db4981",
