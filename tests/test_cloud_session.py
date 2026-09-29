@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import http.client
 from io import BytesIO
+import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 import urllib.error
 
 import pytest
@@ -993,3 +995,141 @@ def test_control_character_rotation_retires_predecessor_without_replay(
     with pytest.raises(cloud_session.CloudSessionError, match="cannot be reused"):
         cloud_session.access_for_workspace("ws", require_compute=False)
     assert len(calls) == 1
+
+
+def _subject_refresh_http(monkeypatch, bound_subject, subject_fields, source="saved"):
+    """Keep the actual refresh parser, locks, and private-state writer; replace HTTP only."""
+
+    monkeypatch.setattr(cloud_session, "_UNUSABLE_REFRESHES", set())
+    monkeypatch.setattr(cloud_session, "validate_cloud_base_url", lambda value: value)
+    state = {
+        "control_url": "https://control.example.test",
+        "organization_id": "org_subject",
+        "refresh_credential": "synthetic-original-refresh",
+        "token_subject": bound_subject,
+    }
+    if source == "saved":
+        cloud_session._save(state)
+    else:
+        monkeypatch.setenv("ENGRAPHIS_CLOUD_CONTROL_URL", state["control_url"])
+        monkeypatch.setenv("ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL", state["refresh_credential"])
+        monkeypatch.setenv("ENGRAPHIS_CLOUD_TOKEN_SUBJECT", bound_subject)
+    requests, responses = [], []
+
+    def open_refresh(request, timeout):
+        assert request.full_url == "https://control.example.test/v1/tokens/refresh"
+        assert request.get_method() == "POST"
+        requests.append(json.loads(request.data))
+        body = {
+            "access_token": "synthetic-access-%d" % len(requests),
+            "organization_id": "org_subject",
+            "refresh_credential": "synthetic-rotated-%d" % len(requests),
+            **subject_fields,
+        }
+        response = BytesIO(json.dumps(body).encode("utf-8"))
+        responses.append(response)
+        return response
+
+    monkeypatch.setattr(cloud_session, "build_pinned_https_opener",
+                        lambda *handlers: SimpleNamespace(open=open_refresh))
+    return requests, responses
+
+
+@pytest.mark.parametrize("source", ["saved", "environment"])
+@pytest.mark.parametrize("bound_subject,response_subject", [
+    ("member", "unexpected"), ("device", "unexpected"),
+    ("member", "device"), ("device", "member"),
+    ("member", None), ("device", None), ("member", ""), ("member", " \t"),
+    ("member", False), ("member", 0), ("member", ["member"]),
+    ("member", {"subject": "member"}), ("member", "MEMBER"), ("member", " member "),
+])
+def test_successful_refresh_retires_invalid_or_changed_subject_without_replay(
+    monkeypatch, caplog, source, bound_subject, response_subject,
+):
+    requests, responses = _subject_refresh_http(
+        monkeypatch, bound_subject, {"token_subject": response_subject}, source,
+    )
+    original = cloud_session._load()
+    errors = []
+    returned_access = 0
+    for _ in range(2):
+        try:
+            cloud_session.access_for_workspace("ws_subject", require_compute=False)
+        except cloud_session.CloudSessionError as exc:
+            errors.append(exc)
+        else:
+            returned_access += 1
+        # The persisted retirement must survive a fresh process, including an
+        # environment that still carries the consumed bootstrap credential.
+        cloud_session._UNUSABLE_REFRESHES.clear()
+
+    assert returned_access == 0, "untrusted refresh metadata yielded access credentials"
+    assert len(requests) == 1, "the consumed refresh was submitted again"
+    assert requests[0]["token_subject"] == bound_subject
+    assert responses[0].closed
+    assert len(errors) == 2 and errors[0].status == 409
+    assert errors[0].refresh_unusable is True
+    assert str(errors[0]) == (
+        "Engraphis Cloud returned an invalid session subject, so the rotated "
+        "credential could not be saved. Connect this installation again."
+    )
+    saved = cloud_session._load()
+    assert saved["refresh_unusable"] is True
+    assert saved["refresh_unusable_digest"] == cloud_session._refresh_digest("synthetic-original-refresh")
+    expected = {key: value for key, value in original.items() if key != "refresh_credential"}
+    assert {key: value for key, value in saved.items() if not key.startswith("refresh_unusable")} == expected
+    assert not any(token in str(errors[0]) + caplog.text for token in (
+        "unexpected", "synthetic-original-refresh", "synthetic-rotated", "synthetic-access",
+    ))
+
+
+@pytest.mark.parametrize("source", ["saved", "environment"])
+@pytest.mark.parametrize("bound_subject", ["member", "device"])
+@pytest.mark.parametrize("include_subject", [False, True], ids=["omitted", "explicit"])
+def test_successful_refresh_preserves_bound_subject_and_rotation_compatibility(
+    monkeypatch, source, bound_subject, include_subject,
+):
+    requests, responses = _subject_refresh_http(
+        monkeypatch, bound_subject, {"token_subject": bound_subject} if include_subject else {}, source,
+    )
+    for count in (1, 2):
+        assert cloud_session.access_for_workspace("ws_subject", require_compute=False) == (
+            "synthetic-access-%d" % count, "org_subject", "",
+        )
+        saved = cloud_session._load()
+        assert saved["token_subject"] == bound_subject
+        assert saved["refresh_credential"] == "synthetic-rotated-%d" % count
+        assert "access_token" not in saved and "refresh_unusable" not in saved
+    assert [request["refresh_credential"] for request in requests] == [
+        "synthetic-original-refresh", "synthetic-rotated-1",
+    ]
+    assert all(request["token_subject"] == bound_subject for request in requests)
+    assert all(response.closed for response in responses)
+
+
+@pytest.mark.parametrize("response_subject", ["unexpected", "device"])
+@pytest.mark.parametrize("failure", [OSError, cloud_session.CloudSessionError])
+def test_invalid_refresh_subject_stays_retired_when_persistence_fails(
+    monkeypatch, caplog, response_subject, failure,
+):
+    requests, responses = _subject_refresh_http(monkeypatch, "member", {"token_subject": response_subject})
+    original = cloud_session._load()
+    writes = []
+
+    def fail_save(value):
+        writes.append(value)
+        raise failure("synthetic-private-storage-error")
+
+    monkeypatch.setattr(cloud_session, "_save", fail_save)
+    with pytest.raises(cloud_session.CloudSessionError) as first:
+        cloud_session.access_for_workspace("ws_subject", require_compute=False)
+    with pytest.raises(cloud_session.CloudSessionError, match="cannot be reused"):
+        cloud_session.access_for_workspace("ws_subject", require_compute=False)
+    assert first.value.status == 409 and first.value.refresh_unusable is True
+    assert "invalid session subject" in str(first.value)
+    assert len(requests) == 1 and responses[0].closed
+    assert cloud_session._load() == original
+    assert cloud_session._refresh_is_unusable(original, "synthetic-original-refresh")
+    assert len(writes) == 1 and writes[0]["refresh_unusable"] is True
+    assert "refresh_credential" not in writes[0] and "access_token" not in writes[0]
+    assert "synthetic-private-storage-error" not in str(first.value) + caplog.text
