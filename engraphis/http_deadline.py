@@ -106,15 +106,22 @@ def deadline_handlers(deadline: float, *, loopback_only: bool = False):
         def _read_and_discard_trailer(self):
             # HTTPResponse accepts EOF without a trailer terminator. That cannot
             # prove completion when our watchdog may have shut down the socket.
+            max_line = getattr(http.client, "_MAXLINE")
+            max_trailers = getattr(http.client, "_MAXHEADERS")
+            trailers_read = 0
             while True:
-                line = self.fp.readline(http.client._MAXLINE + 1)
-                if len(line) > http.client._MAXLINE:
+                line = self.fp.readline(max_line + 1)
+                if len(line) > max_line:
                     raise http.client.LineTooLong("trailer line")
                 if line in (b"\r\n", b"\n"):
                     self._deadline_chunk_complete = True
                     return
                 if not line:
                     raise http.client.IncompleteRead(b"")
+                trailers_read += 1
+                if trailers_read > max_trailers:
+                    raise http.client.HTTPException(
+                        f"got more than {max_trailers} trailers")
 
         def begin(self):
             # getresponse() parses status and headers before urllib.open()

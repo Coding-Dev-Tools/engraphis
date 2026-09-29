@@ -114,6 +114,8 @@ def test_credential_origin_change_fails_without_using_token(managed, monkeypatch
 def test_backend_modes_never_implicitly_choose_byok(monkeypatch):
     monkeypatch.setenv("TYPESAFE_API_KEY", "synthetic-personal-key")
     monkeypatch.setattr(cloud_session, "configured", lambda **kw: True)
+    monkeypatch.setattr(cloud_session, "credential_bound_control_url",
+                        lambda: "https://control.example.invalid")
     for mode in ("none", "local"):
         assert transport.select_decision_client(mode) == (None, "local_heuristic")
     for mode in ("managed", "auto"):
@@ -232,6 +234,8 @@ def test_choice_must_match_reported_probability_distribution():
 def test_configuration_presence_honors_explicit_backend_and_managed_precedence(monkeypatch):
     from engraphis.config import Settings
     monkeypatch.setattr(cloud_session, "configured", lambda **kw: True)
+    monkeypatch.setattr(cloud_session, "credential_bound_control_url",
+                        lambda: "https://control.example.invalid")
     for mode in ("none", "local"):
         assert not Settings(decision_backend=mode, typesafe_api_key="synthetic-key").has_decision_backend
     for mode in ("managed", "auto"):

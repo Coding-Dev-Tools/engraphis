@@ -307,7 +307,8 @@ class EngraphisCloudDecisionClient:
     def is_configured(self) -> bool:
         from engraphis import cloud_session
         try:
-            return cloud_session.configured(require_compute=False)
+            return bool(cloud_session.configured(require_compute=False)
+                        and cloud_session.credential_bound_control_url())
         except Exception:
             return False
 
