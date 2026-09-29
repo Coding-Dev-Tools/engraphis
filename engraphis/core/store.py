@@ -5922,7 +5922,8 @@ class Store:
                                "WHERE me.entity_id=entities.id)")
             if "edges" in tables:
                 clauses.append("NOT EXISTS (SELECT 1 FROM edges e "
-                               "WHERE e.src=entities.id OR e.dst=entities.id)")
+                               "WHERE ((e.workspace_id=entities.workspace_id AND e.src=entities.id) "
+                               "OR (e.workspace_id=entities.workspace_id AND e.dst=entities.id)))")
             if clauses:
                 conn.execute(
                     f"DELETE FROM entities WHERE id IN ({marks}) AND " + " AND ".join(clauses),
@@ -7795,19 +7796,36 @@ class Store:
             return []
         valid_at, known_at = _temporal_anchors(flt, valid_at=at)
         marks = ",".join("?" for _ in node_ids)
-        sql = (
-            f"SELECT * FROM edges WHERE (src IN ({marks}) OR dst IN ({marks})) "
-            f"AND (valid_from IS NULL OR valid_from<=?) "
-            f"AND (valid_to IS NULL OR ?<valid_to "
-            f"OR (valid_to_recorded_at IS NOT NULL "
-            f"AND ?<valid_to_recorded_at)) "
-            f"AND (ingested_at IS NULL OR ingested_at<=?) "
-            f"AND (expired_at IS NULL OR ?<expired_at)"
-        )
-        params: list[Any] = [
-            *node_ids, *node_ids,
-            valid_at, valid_at, known_at, known_at, known_at,
-        ]
+        if flt and flt.workspace_id:
+            sql = (
+                f"SELECT * FROM edges WHERE ((workspace_id=? AND src IN ({marks})) "
+                f"OR (workspace_id=? AND dst IN ({marks}))) "
+                f"AND (valid_from IS NULL OR valid_from<=?) "
+                f"AND (valid_to IS NULL OR ?<valid_to "
+                f"OR (valid_to_recorded_at IS NOT NULL "
+                f"AND ?<valid_to_recorded_at)) "
+                f"AND (ingested_at IS NULL OR ingested_at<=?) "
+                f"AND (expired_at IS NULL OR ?<expired_at)"
+            )
+            params: list[Any] = [
+                flt.workspace_id, *node_ids,
+                flt.workspace_id, *node_ids,
+                valid_at, valid_at, known_at, known_at, known_at,
+            ]
+        else:
+            sql = (
+                f"SELECT * FROM edges WHERE (src IN ({marks}) OR dst IN ({marks})) "
+                f"AND (valid_from IS NULL OR valid_from<=?) "
+                f"AND (valid_to IS NULL OR ?<valid_to "
+                f"OR (valid_to_recorded_at IS NOT NULL "
+                f"AND ?<valid_to_recorded_at)) "
+                f"AND (ingested_at IS NULL OR ingested_at<=?) "
+                f"AND (expired_at IS NULL OR ?<expired_at)"
+            )
+            params = [
+                *node_ids, *node_ids,
+                valid_at, valid_at, known_at, known_at, known_at,
+            ]
         support_visibility, support_params = _temporal_visibility_sql(
             "s", flt, valid_at=valid_at
         )
@@ -7825,8 +7843,9 @@ class Store:
             sql += f" AND layer IN ({layer_marks})"
             params.extend(_enum(layer) for layer in layers)
         if flt and flt.workspace_id:
-            sql += " AND workspace_id=?"
-            params.append(flt.workspace_id)
+            # Workspace filter is distributed directly into the index-accelerated
+            # src/dst branches above so SQLite can use MULTI-INDEX OR.
+            pass
         if flt and flt.repo_id:
             if flt.include_ancestors:
                 sql += " AND (repo_id=? OR repo_id IS NULL)"
