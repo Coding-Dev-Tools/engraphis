@@ -84,9 +84,9 @@ neither is an end-to-end question-answer score. Coding outcomes, external datase
 operational capacity remain separate pending evaluation tracks until their artifacts are selected.
 
 These values are evidence IDs `offline-chunking` and `offline-performance` in
-[`offline-fixtures-v111.json`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/benchmark-evidence/offline-fixtures-v111.json),
+[`offline-fixtures-v113.json`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/benchmark-evidence/offline-fixtures-v113.json),
 SHA-256
-`35c3f6fcfddf5d22b2fcff8836ab20556bbe63b32d490cb6d45cadbffb4a2793`.
+`7c36af2ac3a0e1338987eddf27160879012cd9d2c834fd348268f420d14a7761`.
 [`BENCHMARKS.md`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/BENCHMARKS.md#public-numeric-evidence-registry)
 records the matching suite digest, exact commands, and per-command config digests. The offline
 fixture registry intentionally excludes external, model-dependent, consolidation, productivity,
@@ -698,8 +698,8 @@ the trusted configuration below; direct provider charges may apply.
 
 Every remote call also requires literal boolean `allow_remote=true` and
 `data_classification="public"` or `"internal"` for the supplied text. `offline_mode=true`
-prevents remote requests. Results remain advisory, including local fallbacks; they do not
-authorize command execution or memory changes. See
+prevents remote requests. Command checks always return `allow_auto=false`, including remote
+results. Decisions remain advisory and do not authorize execution or memory changes. See
 [the Jev plan and consent details](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/HOSTED_PLANS.md#included-system-1-decision-engine-jev).
 
 ---

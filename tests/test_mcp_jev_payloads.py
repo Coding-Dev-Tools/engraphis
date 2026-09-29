@@ -249,12 +249,8 @@ def test_combined_context_limit_rejects_without_truncation_or_network(wire_clien
     ({"kind": "verify_completion", "state": "Completed", "goal": "Run the fixture",
       "recent_actions": "Fixture passed"},
      "GOAL: Run the fixture\nACTIONS: Fixture passed\nOUTPUT: Completed", {"is_complete"}),
-    ({"kind": "classify_contradiction", "existing_content": "Use SQLite"},
-     "EXISTING FACT: Use SQLite\nNEW CANDIDATE FACT: ", {"verdict"}),
-    ({"kind": "verify_support", "query": "Which database?"},
-     "QUERY: Which database?\nEVIDENCE: ", {"has_support"}),
-    ({"kind": "verify_completion", "goal": "Run the fixture"},
-     "GOAL: Run the fixture\nACTIONS: \nOUTPUT: ", {"is_complete"}),
+    ({"kind": "verify_completion", "state": "Fixture passed", "goal": "Run the fixture"},
+     "GOAL: Run the fixture\nACTIONS: \nOUTPUT: Fixture passed", {"is_complete"}),
 ])
 def test_other_kind_mappings_reach_real_client_validation(
     wire_client, dispatch, arguments, expected_state, expected_questions,
@@ -268,6 +264,22 @@ def test_other_kind_mappings_reach_real_client_validation(
     actual = ({item["id"] for item in questions} if wire_client["backend"] == "managed"
               else set(questions))
     assert actual == expected_questions
+    if arguments["kind"] == "guard_command":
+        assert result["category"] == "read_only" and result["safety_probability"] == 0.9
+        assert result["allow_auto"] is False and result["escalate_to_user"] is True
+        assert result["advisory_only"] is True
+
+
+@pytest.mark.parametrize("arguments,result_key", [
+    ({"kind": "classify_contradiction", "existing_content": "Use SQLite"}, "verdict"),
+    ({"kind": "verify_support", "query": "Which database?"}, "supported"),
+    ({"kind": "verify_completion", "goal": "Run the fixture"}, "is_complete"),
+])
+def test_partial_kind_inputs_cannot_refresh_or_send(wire_client, dispatch, arguments, result_key):
+    result = dispatch({"allow_remote": True, **arguments})
+    assert result["is_fallback"] is True and result["fallback_reason"] == "invalid_request"
+    assert result[result_key] is None
+    assert wire_client["http"] == wire_client["refresh"] == []
 
 
 @pytest.mark.parametrize("kind,field", [
@@ -283,7 +295,8 @@ def test_sensitive_raw_mcp_fields_never_refresh_or_send(
     wire_client, dispatch, caplog, kind, field,
 ):
     private = json.dumps({"DB_PASSWORD": 'synthetic" phrase'})
-    arguments = {"kind": kind, "state": "Synthetic evidence", "allow_remote": True,
+    arguments = {"kind": kind, "state": "Synthetic evidence", "goal": "Check the fixture",
+                 "allow_remote": True,
                  field: ["safe", private] if field == "options" else private}
     result = dispatch(arguments)
     assert result["is_fallback"] is True

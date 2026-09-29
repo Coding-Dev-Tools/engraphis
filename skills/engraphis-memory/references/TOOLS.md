@@ -683,11 +683,11 @@ savings guarantee follows from configuration. Smart discovery uses `engraphis_ex
 because a remote request may consume allowance.
 
 - `kind (str, "guard_command")`: one of `'guard_command'`, `'classify_contradiction'`, `'verify_support'`, `'verify_completion'`, or `'custom'`.
-- `state (str, "")`: input shell command, candidate fact, or evidence text to evaluate.
-- `query (str, "")`: query string for support verification.
-- `existing_content (str, "")`: existing memory content for contradiction checks.
-- `goal (str, "")`: task goal description for completion verification.
-- `recent_actions (str, "")`: summary of recent actions for completion verification.
+- `state (str, "")`: nonblank shell command, candidate fact, or evidence text; required except when `custom` supplies `question`.
+- `query (str, "")`: nonblank query required for support verification.
+- `existing_content (str, "")`: nonblank existing memory required for contradiction checks.
+- `goal (str, "")`: nonblank task goal required for completion verification.
+- `recent_actions (str, "")`: optional summary of recent actions for completion verification.
 - `question (str, "")`: custom question for `'custom'` decisions.
 - `options (list[str], None)`: discrete choice alternatives.
 - `offline_mode (bool, false)`: when true, forces deterministic local heuristics without external API calls.
@@ -700,9 +700,11 @@ Every result includes `kind`, `backend`, `is_fallback`, `advisory_only`, `decisi
 `confidence`, and `confidence_source`. Remote results also include the pinned `model`.
 The kind adds `allow_auto`/`escalate_to_user`/`safety_probability`/`category`, `verdict`,
 `supported`/`probability`, `is_complete`/`completion_probability`, or `selected`/`probability`.
-Uncertain support/completion stays null. Fallback results include `fallback_reason`, null
-confidence, and unmeasured heuristic labels; fallback command checks never allow automatic
-execution. Noul confidence is derived decisiveness, not measured calibration. Decisions do
+Missing required inputs return `invalid_request` before backend lookup with unknown/null
+conclusions. `custom` accepts `state` or `question`; other kinds need `state` and their
+required context above. Uncertain support/completion stays null. Fallback results include
+`fallback_reason`, null confidence, and unmeasured heuristic labels. All command checks,
+including successful remote answers, return `allow_auto=false` and `escalate_to_user=true`. Noul confidence is derived decisiveness, not measured calibration. Decisions do
 not replace executable verification, authorization, or user approval.
 
 ---
