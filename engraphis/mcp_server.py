@@ -67,6 +67,7 @@ from engraphis.config import settings
 from engraphis.core.context import RegexTokenCounter
 from engraphis.core.poisoning import prompt_eligible
 from engraphis.core.mutations import MemoryConflict
+from engraphis.core.textutil import jaccard, tokenize
 from engraphis.service import MemoryService, ValidationError, _authenticated_principal
 
 logger = logging.getLogger("engraphis.mcp")
@@ -2232,17 +2233,85 @@ def engraphis_consolidate(
         return _err(exc)
 
 
+# Local command advice is a coarse screen, never authority: allow_auto stays False.
+# Destructive and leak patterns scan every chained segment of the screened prefix.
+# Flag clusters use a lookahead so a long cluster cannot backtrack quadratically.
+_GUARD_SCAN_CHARS = 4096
 _DESTRUCTIVE_PATTERNS = (
-    re.compile(r"\brm\s+(?:-[rf]+|--(?:recursive|force))(?=\s|$)", re.I),
-    re.compile(r"\b(format|mkfs|fdisk|dd\s+if=)\b", re.I),
-    re.compile(r"\b(drop\s+database|truncate\s+table)\b", re.I),
-    re.compile(r"\bgit\s+push\s+.*(--force|-f)\b", re.I),
+    # Recursive or forced deletes, with flags in any position or order.
+    re.compile(r"\brm\b[^\n;&|]*?\s(?:-(?=[a-zA-Z]*[rRf])[a-zA-Z]+|--recursive|--force)(?=\s|$)"),
+    re.compile(r"\b(?:del|erase)\b[^\n;&|]*?\s/[sq]\b|\b(?:rd|rmdir)\b[^\n;&|]*?\s/s\b", re.I),
+    re.compile(r"\bremove-item\b[^\n;&|]*?\s-(?:recurse|r|force)\b", re.I),
+    re.compile(r"\bfind\b[^\n;&|]*?\s(?:-delete\b|-exec(?:dir)?\s+rm\b)"),
+    # Raw device and filesystem writers; Windows format only as a drive command.
+    re.compile(r"\b(?:mkfs(?:\.\w+)?|fdisk|sfdisk|parted|wipefs|shred|format-volume)\b", re.I),
+    re.compile(r"(?<![\w-])format(?:\.com)?\s+[a-z]:(?!\w)", re.I),
+    re.compile(r"\bdd\b[^\n;&|]*?\bof=|>\s*/dev/(?:sd|hd|vd|xvd|nvme|disk|mmcblk)"),
+    # Git operations that rewrite shared history or discard work.
+    re.compile(r"\bgit\s+push\b[^\n;&|]*?\s(?:--force(?:-with-lease|-if-includes)?|-f|--delete|-d"
+               r"|--mirror|\+\S+|:\S+)(?=[\s=]|$)"),
+    re.compile(r"\bgit\s+(?:reset\b[^\n;&|]*?\s--hard\b|stash\s+(?:drop|clear)\b"
+               r"|clean\b[^\n;&|]*?\s(?:-(?=[a-zA-Z]*f)[a-zA-Z]+|--force)(?=\s|$)"
+               r"|branch\b[^\n;&|]*?\s-(?=[a-zA-Z]*D)[a-zA-Z]+(?=\s|$))"),
+    re.compile(r"\bgit\s+(?:checkout|restore)\b(?![^\n;&|]*\s--staged\b)[^\n;&|]*?\s(?:--\s+)?\.(?=\s|$)"),
+    # Data and infrastructure teardown.
+    re.compile(r"\b(?:drop\s+(?:database|schema|table)|truncate\s+table)\b", re.I),
+    re.compile(r"\bdelete\s+from\s+[\w.\"`\[\]]+\s*(?:;|$)", re.I),
+    re.compile(r"\b(?:terraform\s+destroy|kubectl\s+delete|helm\s+(?:uninstall|delete)"
+               r"|aws\s+s3\s+(?:rm|rb)|docker\s+(?:system|volume)\s+prune)\b", re.I),
+    # Piping into a shell or network tool, file uploads, and well-known credential files.
+    re.compile(r"\|\s*(?:sudo\s+)?(?:curl|wget|nc|ncat|netcat|socat|ssh|(?:ba|z|da|k|fi)?sh"
+               r"|iex|invoke-expression)\b", re.I),
+    re.compile(r"\bcurl\b[^\n;&|]*?\s(?:(?:-d|--data(?:-binary|-raw|-urlencode)?)\s*['\"]?@"
+               r"|(?:-F|--form)\s*['\"]?[^\s'\"]*=@|(?:-T|--upload-file)\s)"
+               r"|\bwget\b[^\n;&|]*?\s--post-file\b"),
+    re.compile(r"\.ssh/id_[\w-]+|\.aws/credentials|\.git-credentials|[._]netrc\b|\.pgpass\b"
+               r"|/etc/shadow\b|\.engraphis/config\.env"
+               r"|(?<![\w.-])\.env(?!\.(?:example|sample|template|dist)(?![\w-]))(?:\.[\w-]+)*(?![\w-])",
+               re.I),
 )
-_SAFE_PATTERNS = (
-    re.compile(r"(?:^|\n|COMMAND:\s*)git\s+(status|diff|log|show|branch|rev-parse|stash\s+list)\b", re.I),
-    re.compile(r"(?:^|\n|COMMAND:\s*)(ls|dir|cat|type|head|tail|grep|findstr|echo|pwd|where|which)\b", re.I),
-    re.compile(r"(?:^|\n|COMMAND:\s*)(pytest|python\s+-m\s+pytest|npm\s+test|cargo\s+check|ruff\s+check)\b", re.I),
+# Read-only labels apply only to one simple command: chaining, substitution, pipes and
+# redirection can write, delete or exfiltrate. Stream merges and discards write no file.
+_SHELL_CONTROL = re.compile(r"[;&|<>`\r\n]|\$\(")
+_BENIGN_REDIRECTS = re.compile(r"(?<!\S)(?:[12&]?>>?\s*/dev/null|[12]?>&[12])(?!\S)")
+_READ_ONLY_COMMANDS = (
+    re.compile(r"git\s+(?:status|diff|log|show|rev-parse|blame|describe|shortlog|ls-files"
+               r"|stash\s+list)(?!\S)(?!.*\s--output\b).*", re.I),
+    re.compile(r"git\s+branch(?:\s+(?:-a|-r|-v|-vv|--all|--remotes|--list|--show-current"
+               r"|--verbose))*", re.I),
+    re.compile(r"(?:ls|dir|cat|type|head|tail|grep|rg|findstr|echo|pwd|where|which|wc)(?!\S).*",
+               re.I),
+    re.compile(r"(?:pytest|python[\d.]*\s+-m\s+pytest|npm\s+test|cargo\s+(?:check|test)"
+               r"|ruff\s+check)(?!\S)(?!.*\s--fix\b).*", re.I),
 )
+# Outcome words; zero counts ("0 failed", "no errors", "errors: 0") are not outcomes.
+_ZERO_OUTCOMES = re.compile(
+    r"\b(?:0|no|zero)\s+(?:tests?\s+)?(?:errors?|failures?|failed|exceptions?|issues?"
+    r"|problems?|passed|succeeded|completed)\b|\b(?:errors?|failures?|failed)\s*[:=]\s*0\b")
+_FAILURE_WORDS = re.compile(
+    r"\b(?:errors?|fail(?:ed|ures?|s)?|assertionerror|exceptions?|traceback|fatal)\b")
+_SUCCESS_WORDS = re.compile(
+    r"\b(?:pass(?:ed|es)?|success(?:ful(?:ly)?)?|succeeded|completed|ok)\b|\b100%")
+_SUPERSESSION_CUES = re.compile(
+    r"\b(?:not|no|never|instead|switched|replaced|replaces|deprecated|migrated)\b|n't\b")
+
+
+def _guard_category(command: str) -> str:
+    """Classify a command coarsely; unrecognized commands are state changes.
+
+    Screening a bounded prefix keeps adversarial input cheap. A command too long to
+    screen completely may still be destructive, so it is never labeled read-only.
+    """
+    screened = command[:_GUARD_SCAN_CHARS]
+    if any(pattern.search(screened) for pattern in _DESTRUCTIVE_PATTERNS):
+        return "destructive_or_leak"
+    if len(command) > _GUARD_SCAN_CHARS:
+        return "state_change"
+    simple = _BENIGN_REDIRECTS.sub(" ", re.sub(r"^COMMAND:\s*", "", command, flags=re.I)).strip()
+    if (simple and not _SHELL_CONTROL.search(simple)
+            and any(pattern.fullmatch(simple) for pattern in _READ_ONLY_COMMANDS)):
+        return "read_only"
+    return "state_change"
 
 
 def _heuristic_decision(
@@ -2255,11 +2324,8 @@ def _heuristic_decision(
 ) -> dict[str, Any]:
     """Deterministic local fallback when remote Jev is unavailable or unconfigured."""
     if kind == "guard_command":
-        cmd = state.strip()
-        is_destr = any(p.search(cmd) for p in _DESTRUCTIVE_PATTERNS)
-        is_safe = any(p.search(cmd) for p in _SAFE_PATTERNS)
-        prob = 0.05 if is_destr else (0.95 if is_safe else 0.50)
-        cat = "destructive_or_leak" if is_destr else ("read_only" if is_safe else "state_change")
+        cat = _guard_category(state.strip())
+        prob = {"destructive_or_leak": 0.05, "read_only": 0.95}.get(cat, 0.50)
         return {
             "kind": kind,
             "allow_auto": False,
@@ -2271,12 +2337,12 @@ def _heuristic_decision(
             "backend": "local_heuristic",
         }
     if kind == "classify_contradiction":
-        cand_tokens = set(re.findall(r"\w+", state.lower()))
-        exist_tokens = set(re.findall(r"\w+", existing_content.lower()))
+        # Compare content words only; shared stopwords do not make facts related.
+        cand_tokens, exist_tokens = tokenize(state), tokenize(existing_content)
         overlap = cand_tokens & exist_tokens
-        if overlap and ("not" in cand_tokens or "no" in cand_tokens or "instead" in cand_tokens):
+        if overlap and _SUPERSESSION_CUES.search(state.lower()):
             verdict = "contradicts_and_supersedes"
-        elif len(overlap) >= 3:
+        elif len(overlap) >= 3 or jaccard(cand_tokens, exist_tokens) >= 0.5:
             verdict = "reinforces"
         else:
             verdict = "orthogonal"
@@ -2288,8 +2354,7 @@ def _heuristic_decision(
             "backend": "local_heuristic",
         }
     if kind == "verify_support":
-        q_tokens = set(re.findall(r"\w+", query.lower()))
-        ev_tokens = set(re.findall(r"\w+", state.lower()))
+        q_tokens, ev_tokens = tokenize(query), tokenize(state)
         matched = len(q_tokens & ev_tokens)
         prob = min(1.0, matched / max(1, len(q_tokens))) if q_tokens else 0.0
         return {
@@ -2301,10 +2366,10 @@ def _heuristic_decision(
             "backend": "local_heuristic",
         }
     if kind == "verify_completion":
-        output_lower = state.lower()
-        has_fail = any(w in output_lower for w in ("error", "failed", "failure", "assertionerror", "exception"))
-        has_ok = any(w in output_lower for w in ("passed", "success", "100%", "completed", "ok"))
-        complete = has_ok and not has_fail
+        # Whole words only: "ok" must not match "broken" and "0 errors" is not a failure.
+        output = _ZERO_OUTCOMES.sub(" ", state.lower())
+        has_fail = bool(_FAILURE_WORDS.search(output))
+        complete = bool(_SUCCESS_WORDS.search(output)) and not has_fail
         return {
             "kind": kind,
             "is_complete": complete,
