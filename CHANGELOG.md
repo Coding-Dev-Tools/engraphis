@@ -19,7 +19,9 @@ All notable changes to Engraphis are documented here. Format loosely follows
   and a single provider invocation.
 - Save fully received Cloud credential rotations before reporting an expired request
   deadline, while rejecting truncated bodies and watchdog-interrupted responses.
-- Refreshed the public offline fixtures and source bindings in immutable v100 evidence.
+- Recognize complete chunked refresh responses at the watchdog boundary without
+  accepting a missing or truncated trailer terminator.
+- Refreshed the public offline fixtures and source bindings in immutable v101 evidence.
 
 - Added saved project-to-workspace routing and connection instructions so agents can use the
   user's selected workspace. Routine MCP calls inherit an omitted workspace from an authorized
