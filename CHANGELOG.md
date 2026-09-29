@@ -5,6 +5,10 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+- Preserve graph cache isolation, pause intent through WebGL context loss, and
+  theme-correct exported backgrounds.
+- Scope graph incidence queries to candidate entities and retain shared legacy
+  entities during secure erasure.
 - Require the credential-bound control origin before selecting managed Jev.
 - Bound chunked response trailers while retaining strict deadline completion checks.
 - Keep relocation policy behind domain storage operations and 500-memory moves
@@ -25,7 +29,7 @@ All notable changes to Engraphis are documented here. Format loosely follows
   deadline, while rejecting truncated bodies and watchdog-interrupted responses.
 - Recognize complete chunked refresh responses at the watchdog boundary without
   accepting a missing or truncated trailer terminator.
-- Refreshed the public offline fixtures and source bindings in immutable v104 evidence.
+- Refreshed the public offline fixtures and source bindings in immutable v105 evidence.
 
 - Added saved project-to-workspace routing and connection instructions so agents can use the
   user's selected workspace. Routine MCP calls inherit an omitted workspace from an authorized
