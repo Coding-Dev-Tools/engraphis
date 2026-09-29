@@ -204,6 +204,8 @@ def test_local_guard_cost_stays_bounded_on_adversarial_input():
     ("The tests didn\u2019t pass", False, 0.1),
     ("The job never failed before, but 2 tests failed now", False, 0.1),
     ("The tests did not only fail, they crashed", False, 0.1),
+    ("The flaky test no longer passes", False, 0.1),
+    ("The flaky test no longer fails and all checks passed", True, 0.9),
 ))
 def test_local_completion_uses_whole_words_and_ignores_zero_counts(output, complete, probability):
     result = _decide(kind="verify_completion", state=output, goal="Run the test suite")

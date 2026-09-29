@@ -2314,7 +2314,7 @@ _FAILURE_WORDS = re.compile(
 _SUCCESS_WORDS = re.compile(
     r"\b(?:pass(?:ed|es)?|success(?:ful(?:ly)?)?|succeeded|completed|ok)\b|\b100%")
 # A negation, but not a contrast: "not only passed" and "did not just fail" affirm.
-_NEGATION_PREFIX = r"(?:\b(?:not|never)|n't)\s+(?!(?:only|just|merely|simply)\b)"
+_NEGATION_PREFIX = r"(?:\b(?:not|never|no\s+longer)|n't)\s+(?!(?:only|just|merely|simply)\b)"
 # "did not pass" or "didn't succeed" reports a failure, not a success word.
 _NEGATED_SUCCESS = re.compile(_NEGATION_PREFIX + r"(?:\w+\s+){0,2}?"
                               r"(?:pass(?:ed|es)?|succe(?:ss|ed|eded)\w*|complete[ds]?|ok)\b")
