@@ -442,6 +442,8 @@ open on timeout and is installed via `python scripts/install_cc_hook.py`.
 The hook sends the nearest Git root's name as `repo` and lets the server apply a saved workspace
 mapping. Set `ENGRAPHIS_HOOK_WORKSPACE` only for an explicit override; a previous `default`
 override must be cleared to use the mapping. Its context header shows the resolved workspace.
+Earlier versions defaulted to a workspace named after the project folder; save that mapping to
+keep recalling those memories at session start.
 
 ### prime-agent fleet
 

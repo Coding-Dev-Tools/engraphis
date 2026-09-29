@@ -50,7 +50,8 @@ All notable changes to Engraphis are documented here. Format loosely follows
   session or repo mapping, report the resolved destination, and reject session mismatches.
 - Command Code's SessionStart hook now uses the nearest Git root's repo name, honors saved
   workspace mappings unless explicitly overridden, and labels recalled context with the
-  server's resolved workspace.
+  server's resolved workspace. Save a mapping to keep recalling memories stored under the
+  earlier folder-named workspace default.
 - Added a previewed selective move workflow for organizing mixed workspaces while retaining
   source history and enforcing move eligibility and workspace access.
 - Hardened the experimental Cloud decision client with validated destinations,
