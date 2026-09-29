@@ -33,7 +33,7 @@ All notable changes to Engraphis are documented here. Format loosely follows
   the API defaults, `.env.example`, and the provider guide with `claude-sonnet-5-5`.
 - Documented how to back the experimental Jev decision adapter with Claude: pin an exact model
   id, keep fallback disabled, and avoid sampling parameters and forced tool choice.
-- Refreshed the public offline fixtures and source bindings in immutable v123 evidence.
+- Refreshed the public offline fixtures and source bindings in immutable v124 evidence.
 
 ## [1.7.9] - 2026-09-29
 
