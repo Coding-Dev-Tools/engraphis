@@ -2538,6 +2538,32 @@ def test_graph_scene_cache_is_warm_and_invalidates_on_store_write():
     assert refreshed["meta"]["index_generation"] > first["meta"]["index_generation"]
 
 
+@pytest.mark.parametrize("layer_order", [(None, []), ([], None)],
+                         ids=["all-then-none", "none-then-all"])
+def test_graph_scene_cache_distinguishes_all_layers_from_no_layers(monkeypatch, layer_order):
+    service, _alpha, _beta, _gamma = _seed_service()
+    try:
+        cold_scenes = []
+        for layers in layer_order:
+            scene = service.graph_scene(workspace="acme", layers=layers)
+            assert len(scene["edges"]) == (2 if layers is None else 0)
+            assert scene["meta"]["cache_hit"] is False
+            cold_scenes.append(scene)
+
+        def fail_if_rebuilt(**_kwargs):
+            pytest.fail("repeating either layer selection must use its own warm scene")
+
+        monkeypatch.setattr(service, "_graph_scene_rows", fail_if_rebuilt)
+        for layers, cold in zip(layer_order, cold_scenes):
+            warm = service.graph_scene(workspace="acme", layers=layers)
+            assert warm["meta"]["cache_hit"] is True
+            assert warm["nodes"] == cold["nodes"]
+            assert warm["edges"] == cold["edges"]
+            assert warm["meta"]["scene_hash"] == cold["meta"]["scene_hash"]
+    finally:
+        service.store.close()
+
+
 @pytest.mark.parametrize("level", ["overview", "complete"])
 @pytest.mark.parametrize("mutate_cache_hit", [False, True])
 def test_quality_scene_cache_isolated_from_nested_response_mutation(level, mutate_cache_hit):
