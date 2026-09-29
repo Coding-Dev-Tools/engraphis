@@ -279,6 +279,24 @@ def test_chunked_trailer_keeps_standard_line_limit(monkeypatch):
         http_deadline.read_response(response, 105.0, max_bytes=4096, preserve_complete=True)
 
 
+@pytest.mark.parametrize("count", [100, 101])
+def test_chunked_trailer_count_is_bounded_before_marking_completion(monkeypatch, count):
+    response, _reads, raw, _clock = _http_body_at_deadline(
+        monkeypatch, "chunked", trailer=b"X-Test: complete\r\n" * count + b"\r\n",
+    )
+    assert response._deadline_chunk_complete is False
+    with response:
+        if count == 100:
+            assert http_deadline.read_response(
+                response, 105.0, max_bytes=4096, preserve_complete=True,
+            ) == raw
+            assert response._deadline_chunk_complete is True
+        else:
+            with pytest.raises(http.client.HTTPException, match="^got more than 100 trailers$"):
+                http_deadline.read_response(response, 105.0, max_bytes=4096, preserve_complete=True)
+            assert response._deadline_chunk_complete is False
+
+
 @pytest.mark.parametrize("framing", ["length", "close", "chunked"])
 def test_completed_http_rotation_is_saved_at_body_deadline(monkeypatch, saved_session, framing):
     response, reads, raw, _clock = _http_body_at_deadline(monkeypatch, framing)
