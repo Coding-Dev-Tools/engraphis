@@ -48,6 +48,9 @@ _TEXT = {"content": [{"type": "text", "text": "ok"}]}
     ("claude-fable-5-1", False, True),
     ("claude-fable-5", False, True),
     ("claude-mythos-5-1", False, True),
+    ("claude-mythos-preview", False, True),
+    ("anthropic.claude-mythos-preview", False, True),
+    ("claude-fabled-1", True, False),
     ("claude-opus-4-8", False, False),
     ("claude-opus-4-7", False, False),
     ("claude-opus-4-6", True, False),
@@ -64,7 +67,8 @@ def test_model_traits_follow_the_documented_generations(model, accepts_sampling,
     assert _anthropic_model_traits(model) == (accepts_sampling, thinks)
 
 
-@pytest.mark.parametrize("model", ["claude-opus-5-5", "claude-sonnet-5-5", "claude-opus-4-7"])
+@pytest.mark.parametrize("model", ["claude-opus-5-5", "claude-sonnet-5-5", "claude-opus-4-7",
+                                   "claude-mythos-preview"])
 def test_sampling_parameters_are_omitted_for_models_that_reject_them(model):
     client = _client(model, _TEXT)
     assert client.chat([{"role": "user", "content": "hi"}], temperature=0.0) == "ok"

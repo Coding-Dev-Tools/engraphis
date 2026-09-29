@@ -109,9 +109,9 @@ Choosing a model:
 - Retired ids such as `claude-3-5-sonnet-20241022` and `claude-3-5-haiku-20241022` are rejected by
   the API; the connection test reports them as an HTTP 404.
 
-Opus 4.7 and later, Sonnet 5 and later, and Fable reject `temperature` and similar sampling
-parameters, so Engraphis omits them for those models. Opus 5 and later, Sonnet 5 and later, and
-Fable also think before answering by default. Engraphis sends `ENGRAPHIS_LLM_EFFORT` (`low`,
+Opus 4.7 and later, Sonnet 5 and later, Fable and Mythos (including `claude-mythos-preview`)
+reject `temperature` and similar sampling parameters, so Engraphis omits them for those models.
+Opus 5 and later, Sonnet 5 and later, Fable and Mythos also think before answering by default. Engraphis sends `ENGRAPHIS_LLM_EFFORT` (`low`,
 `medium`, `high`, `xhigh`, or `max`; default `medium`) for those models and keeps at least 4096
 output tokens available so hidden reasoning cannot crowd out the reply. Other providers and older
 Claude models ignore the setting.

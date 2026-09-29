@@ -349,6 +349,27 @@ def test_uncertain_remote_result_is_neither_success_nor_failure(monkeypatch, kin
     assert result[result_key] is None
 
 
+@pytest.mark.parametrize("probability,status,complete", (
+    (0.95, "decision", True),
+    (0.85, "decision", True),
+    (0.8, "uncertain", None),
+    (0.6, "uncertain", None),
+    (0.2, "decision", False),
+))
+def test_remote_completion_requires_the_completion_bar(monkeypatch, probability, status, complete):
+    decision = transport.SimpleSupportDecision(probability=probability,
+                                               confidence=abs(2 * probability - 1))
+    _client(monkeypatch, transport.CloudDecisionBatch(False, {}, {"is_complete": decision}))
+    result = json.loads(server.engraphis_decide(
+        kind="verify_completion", state="Synthetic evidence", goal="Check the fixture",
+        allow_remote=True, data_classification="public",
+    ))
+    assert result["is_fallback"] is False
+    assert result["decision_status"] == status
+    assert result["is_complete"] is complete
+    assert result["completion_probability"] == probability
+
+
 @pytest.mark.parametrize("batch,error,reason", (
     (transport.CloudDecisionBatch(True, {}, {}), None, "provider_fallback"),
     (transport.CloudDecisionBatch(False, {}, {}), None, "malformed_response"),
