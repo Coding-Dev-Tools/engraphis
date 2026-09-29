@@ -333,124 +333,137 @@ for (const pauseTiming of ['before-loss', 'during-loss', 'active']) {
   });
 }
 
-for (const deviceScaleFactor of [1, 2]) {
+for (const deviceScaleFactor of [1, 1.25, 2]) {
   test.describe(`Classic PNG at DPR ${deviceScaleFactor}`, () => {
     test.use({ deviceScaleFactor });
 
-for (const reducedMotion of ['no-preference', 'reduce']) {
-test(`Paper export preserves screen blending and ${reducedMotion} opacity`, async ({ page }) => {
-  await page.emulateMedia({ reducedMotion });
-  const session = await fixture(page);
-  await openGraph(page);
-  await page.locator('#sidebar-theme-select').selectOption('paper');
-  await expect(page.locator('body')).toHaveAttribute('data-theme', 'paper');
-  await page.locator('#graph-advanced > summary').click();
-  await page.locator('[data-graph-style-choice="classic"]').click();
-  const image = await page.evaluate(() => {
-    const { api, host } = window.__lifecycleEngines.at(-1);
-    api.pause();
-    const graph = host.querySelector('.force-graph-container canvas');
-    const overlay = host.querySelector('.graph-spacetime-overlay');
-    // Known pixels isolate export composition from changing physics and label positions.
-    for (const canvas of [graph, overlay]) {
-      const ctx = canvas.getContext('2d');
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-      ctx.globalAlpha = 1;
-      ctx.globalCompositeOperation = 'source-over';
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
+    for (const reducedMotion of deviceScaleFactor === 1.25 ? [] : ['no-preference', 'reduce']) {
+      test(`Paper export preserves screen blending and ${reducedMotion} opacity`, async ({ page }) => {
+        await page.emulateMedia({ reducedMotion });
+        const session = await fixture(page);
+        await openGraph(page);
+        await page.locator('#sidebar-theme-select').selectOption('paper');
+        await expect(page.locator('body')).toHaveAttribute('data-theme', 'paper');
+        await page.locator('#graph-advanced > summary').click();
+        await page.locator('[data-graph-style-choice="classic"]').click();
+        const image = await page.evaluate(() => {
+          const { api, host } = window.__lifecycleEngines.at(-1);
+          api.pause();
+          const graph = host.querySelector('.force-graph-container canvas');
+          const overlay = host.querySelector('.graph-spacetime-overlay');
+          // Known pixels isolate export composition from changing physics and label positions.
+          for (const canvas of [graph, overlay]) {
+            const ctx = canvas.getContext('2d');
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            ctx.globalAlpha = 1;
+            ctx.globalCompositeOperation = 'source-over';
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+          }
+          const foreground = graph.getContext('2d');
+          foreground.fillStyle = '#ff0000';
+          foreground.fillRect(10, 10, 10, 10);
+          const background = overlay.getContext('2d');
+          background.fillStyle = '#0000ff';
+          background.fillRect(10 * overlay.width / graph.width, 10 * overlay.height / graph.height,
+            30 * overlay.width / graph.width, 30 * overlay.height / graph.height);
+          const output = api.exportImageCanvas();
+          const ctx = output.getContext('2d');
+          const pixel = (x, y) => Array.from(ctx.getImageData(x, y, 1, 1).data);
+          return {
+            paneBackground: getComputedStyle(host).backgroundColor,
+            overlayBlend: getComputedStyle(overlay).mixBlendMode,
+            overlayOpacity: getComputedStyle(overlay).opacity,
+            background: pixel(0, 0), foreground: pixel(15, 15), overlay: pixel(30, 30),
+            size: [output.width, output.height], graphSize: [graph.width, graph.height],
+          };
+        });
+        expect(image.paneBackground).toBe('rgb(240, 238, 232)');
+        expect(image.background).toEqual([240, 238, 232, 255]);
+        expect(image.foreground).toEqual([255, 0, 0, 255]);
+        expect(image.overlayBlend).toBe('screen');
+        expect(image.overlayOpacity).toBe(reducedMotion === 'reduce' ? '0.42' : '1');
+        expect(image.overlay).toEqual([240, 238, reducedMotion === 'reduce' ? 242 : 255, 255]);
+        expect(image.size).toEqual(image.graphSize);
+        expect(session.errors).toEqual([]);
+      });
     }
-    const foreground = graph.getContext('2d');
-    foreground.fillStyle = '#ff0000';
-    foreground.fillRect(10, 10, 10, 10);
-    const background = overlay.getContext('2d');
-    background.fillStyle = '#0000ff';
-    background.fillRect(10 * overlay.width / graph.width, 10 * overlay.height / graph.height,
-      30 * overlay.width / graph.width, 30 * overlay.height / graph.height);
-    const output = api.exportImageCanvas();
-    const ctx = output.getContext('2d');
-    const pixel = (x, y) => Array.from(ctx.getImageData(x, y, 1, 1).data);
-    return {
-      paneBackground: getComputedStyle(host).backgroundColor,
-      overlayBlend: getComputedStyle(overlay).mixBlendMode,
-      overlayOpacity: getComputedStyle(overlay).opacity,
-      background: pixel(0, 0), foreground: pixel(15, 15), overlay: pixel(30, 30),
-      size: [output.width, output.height], graphSize: [graph.width, graph.height],
-    };
-  });
-  expect(image.paneBackground).toBe('rgb(240, 238, 232)');
-  expect(image.background).toEqual([240, 238, 232, 255]);
-  expect(image.foreground).toEqual([255, 0, 0, 255]);
-  expect(image.overlayBlend).toBe('screen');
-  expect(image.overlayOpacity).toBe(reducedMotion === 'reduce' ? '0.42' : '1');
-  expect(image.overlay).toEqual([240, 238, reducedMotion === 'reduce' ? 242 : 255, 255]);
-  expect(image.size).toEqual(image.graphSize);
-  expect(session.errors).toEqual([]);
-});
-}
 
-for (const style of ['galaxy', 'solar', 'cyber']) {
-test(`${style} export matches browser CSS gradient and grid pixels`, async ({ page }) => {
-  const session = await fixture(page);
-  await openGraph(page);
-  await page.locator('#graph-advanced > summary').click();
-  await page.locator(`[data-graph-style-choice="${style}"]`).click();
-  await expect(page.locator('#graph-canvas')).toHaveAttribute('data-graph-style', style);
-  await page.evaluate(() => window.__lifecycleEngines.at(-1).api.pause());
-  await frames(page);
-  const exported = await page.evaluate(() => {
-    const { api, host } = window.__lifecycleEngines.at(-1);
-    for (const canvas of host.querySelectorAll('canvas')) {
-      const ctx = canvas.getContext('2d');
-      if (!ctx) continue;
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
+    for (const style of deviceScaleFactor === 1.25 ? ['cyber'] : ['galaxy', 'solar', 'cyber']) {
+      test(`${style} export matches browser CSS gradient and grid pixels`, async ({ page }) => {
+        const session = await fixture(page);
+        await openGraph(page);
+        await page.locator('#graph-advanced > summary').click();
+        await page.locator(`[data-graph-style-choice="${style}"]`).click();
+        await expect(page.locator('#graph-canvas')).toHaveAttribute('data-graph-style', style);
+        await page.evaluate(() => window.__lifecycleEngines.at(-1).api.pause());
+        await frames(page);
+        const exported = await page.evaluate(() => {
+          const { api, host } = window.__lifecycleEngines.at(-1);
+          for (const canvas of host.querySelectorAll('canvas')) {
+            const ctx = canvas.getContext('2d');
+            if (!ctx) continue;
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+          }
+          const output = api.exportImageCanvas();
+          const ctx = output.getContext('2d');
+          const width = host.clientWidth, height = host.clientHeight;
+          const points = [[width * .24, height * .22], [width * .82, height * .78],
+            [width * .62, height * .42], [width * .5, height * .5],
+            [60.25, 181.25], [60.75, 181.25], [61.25, 181.25],
+            [61.25, 180.25], [61.25, 180.75],
+            [90.25, 181.25], [90.75, 181.25], [91.25, 181.25]];
+          return {
+            size: [output.width, output.height], cssSize: [width, height], points,
+            background: getComputedStyle(host).backgroundColor.match(/\d+/g).map(Number),
+            samples: points.map(([x, y]) => Array.from(ctx.getImageData(
+              Math.floor(x * devicePixelRatio), Math.floor(y * devicePixelRatio), 1, 1,
+            ).data)),
+          };
+        });
+        // The browser's own CSS compositor is the oracle, not a duplicate gradient formula.
+        const screenshot = await page.locator('#graph-canvas').screenshot({ animations: 'disabled' });
+        const displayed = await page.evaluate(async ({ png, points }) => {
+          const bytes = Uint8Array.from(atob(png), character => character.charCodeAt(0));
+          const bitmap = await createImageBitmap(new Blob([bytes], { type: 'image/png' }));
+          const canvas = document.createElement('canvas');
+          canvas.width = bitmap.width; canvas.height = bitmap.height;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(bitmap, 0, 0);
+          const samples = points.map(([x, y]) => Array.from(ctx.getImageData(
+            Math.floor(x * devicePixelRatio), Math.floor(y * devicePixelRatio), 1, 1,
+          ).data));
+          bitmap.close();
+          return samples;
+        }, { png: screenshot.toString('base64'), points: exported.points });
+        expect(exported.size).toEqual(exported.cssSize.map(size => Math.floor(size * deviceScaleFactor)));
+        for (let sample = 0; sample < displayed.length; sample++) {
+          for (let channel = 0; channel < 4; channel++) {
+            expect(Math.abs(exported.samples[sample][channel] - displayed[sample][channel]),
+              `${style} sample ${sample}: exported ${exported.samples[sample]}, displayed ${displayed[sample]}`)
+              .toBeLessThanOrEqual(3);
+          }
+        }
+        expect(exported.samples.some(pixel => pixel.slice(0, 3).some(
+          (value, channel) => Math.abs(value - exported.background[channel]) > 3,
+        ))).toBe(true);
+        if (style === 'cyber') {
+          // Both halves of each 1 CSS px line survive at DPR 2, with a clear gap after it.
+          // Compare with adjacent gaps: the underlying radial gradient varies across tiles.
+          for (const line of [4, 5, 7, 8]) {
+            expect(exported.samples[line][1]).toBeGreaterThan(exported.samples[6][1] + 5);
+          }
+          // At fractional DPR this stripe straddles two physical pixels. Average
+          // their coverage for contrast; both still have individual CSS pixel checks.
+          const repeatedLineGreen = [exported.samples[9][1], exported.samples[10][1]];
+          const contrastSamples = Number.isInteger(deviceScaleFactor) ? repeatedLineGreen
+            : [(repeatedLineGreen[0] + repeatedLineGreen[1]) / 2];
+          for (const green of contrastSamples) {
+            expect(green).toBeGreaterThan(exported.samples[11][1] + 5);
+          }
+        }
+        expect(session.errors).toEqual([]);
+      });
     }
-    const output = api.exportImageCanvas();
-    const ctx = output.getContext('2d');
-    const width = host.clientWidth, height = host.clientHeight;
-    const points = [[width * .24, height * .22], [width * .82, height * .78],
-      [width * .62, height * .42], [width * .5, height * .5],
-      [60.25, 180.25], [61.25, 181.25], [90.25, 180.25]];
-    return {
-      size: [output.width, output.height], cssSize: [width, height], points,
-      background: getComputedStyle(host).backgroundColor.match(/\d+/g).map(Number),
-      samples: points.map(([x, y]) => Array.from(ctx.getImageData(
-        Math.floor(x * output.width / width), Math.floor(y * output.height / height), 1, 1,
-      ).data)),
-    };
-  });
-  // The browser's own CSS compositor is the oracle, not a duplicate gradient formula.
-  const screenshot = await page.locator('#graph-canvas').screenshot({ animations: 'disabled' });
-  const displayed = await page.evaluate(async ({ png, points, cssSize }) => {
-    const bytes = Uint8Array.from(atob(png), character => character.charCodeAt(0));
-    const bitmap = await createImageBitmap(new Blob([bytes], { type: 'image/png' }));
-    const canvas = document.createElement('canvas');
-    canvas.width = bitmap.width; canvas.height = bitmap.height;
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(bitmap, 0, 0);
-    const samples = points.map(([x, y]) => Array.from(ctx.getImageData(
-      Math.floor(x * canvas.width / cssSize[0]), Math.floor(y * canvas.height / cssSize[1]), 1, 1,
-    ).data));
-    bitmap.close();
-    return samples;
-  }, { png: screenshot.toString('base64'), points: exported.points, cssSize: exported.cssSize });
-  expect(exported.size).toEqual(exported.cssSize.map(size => size * deviceScaleFactor));
-  for (let sample = 0; sample < displayed.length; sample++) {
-    for (let channel = 0; channel < 4; channel++) {
-      expect(Math.abs(exported.samples[sample][channel] - displayed[sample][channel]),
-        `${style} sample ${sample}: exported ${exported.samples[sample]}, displayed ${displayed[sample]}`)
-        .toBeLessThanOrEqual(3);
-    }
-  }
-  expect(exported.samples.some(pixel => pixel.slice(0, 3).some(
-    (value, channel) => Math.abs(value - exported.background[channel]) > 3,
-  ))).toBe(true);
-  if (style === 'cyber') {
-    expect(exported.samples[4][1]).toBeGreaterThan(exported.samples[5][1] + 5);
-    expect(exported.samples[4]).toEqual(exported.samples[6]);
-  }
-  expect(session.errors).toEqual([]);
-});
-}
   });
 }
