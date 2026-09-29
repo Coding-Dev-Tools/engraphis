@@ -63,6 +63,8 @@ DESTRUCTIVE_OR_LEAK = (
     "Remove-Item -Force ./notes.txt",
     "git push origin main --force",
     "git push -f",
+    "git push -uf origin HEAD:main",
+    "git -p -p -p -p -p -p -p -p -p push -f origin main",
     "git push origin +main",
     "git push origin :feature",
     "git push origin --delete feature",
@@ -170,7 +172,8 @@ def test_local_guard_cost_stays_bounded_on_adversarial_input():
         "rm -" + "r" * limit, "git clean -" + "f" * limit, "git branch -" + "D" * limit,
         "rm " * limit, "git push " * limit, "curl -d " * limit, "del " * limit,
         ".env" + ".a" * limit, "| " * limit, "git checkout " * limit, "remove-item " * limit,
-        "git -C x " * limit, "git -c " * limit, "bash " * limit,
+        "git -C x " * limit, "git -c " * limit, "bash " * limit, "git --x=git " * limit,
+        'git -C "' * limit, "git " + "-p " * limit,
     )
     started = time.perf_counter()
     for text in adversarial:
@@ -231,6 +234,8 @@ def test_local_support_ignores_stopword_overlap():
     ("Use port 443", "Do not use port 80", "orthogonal"),
     ("The API uses port", "The API does not use port 80", "orthogonal"),
     ("Use npm", "Do not use npm", "contradicts_and_supersedes"),
+    ("The API cannot use port 80", "The API can't use port 80", "reinforces"),
+    ("The API cannot use port 80", "The API uses port 80", "contradicts_and_supersedes"),
     ("Primary production database is Postgres", "Primary production database is SQLite",
      "orthogonal"),
 ))
