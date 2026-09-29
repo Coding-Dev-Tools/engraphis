@@ -280,3 +280,97 @@ test('a graph requested before leaving Explore commits paused until the view ret
   expect(session.graphRequests).toHaveLength(1);
   expect(session.errors).toEqual([]);
 });
+
+for (const pauseTiming of ['before-loss', 'during-loss', 'active']) {
+  test(`Every node restores WebGL with caller lifecycle intent: ${pauseTiming}`, async ({ page }) => {
+    const session = await fixture(page);
+    await openGraph(page);
+    await page.locator('#graph-advanced > summary').click();
+    await page.locator('[data-graph-preset-choice="every"]').click();
+    await expect(page.locator('#graph-canvas')).toHaveAttribute('aria-busy', 'false');
+    await page.waitForFunction(() => window.__lifecycleEngines.at(-1).name === 'EngraphisEveryGraph'
+      && window.__lifecycleEngines.at(-1).api.state().nodeCount === 3);
+    if (pauseTiming === 'before-loss') {
+      await page.locator('.nav-item[data-view="library"]').click();
+    }
+    await page.evaluate(async () => {
+      const record = window.__lifecycleEngines.at(-1);
+      const canvas = record.host.querySelector('.engraphis-all-canvas');
+      const gl = canvas.getContext('webgl2');
+      const extension = gl.getExtension('WEBGL_lose_context');
+      if (!extension) throw new Error('The Chromium fixture requires WEBGL_lose_context');
+      record.contextCanvas = canvas;
+      record.contextExtension = extension;
+      record.drawCalls = 0;
+      const drawArrays = gl.drawArrays.bind(gl);
+      gl.drawArrays = (...args) => { record.drawCalls += 1; return drawArrays(...args); };
+      const lost = new Promise(resolve => canvas.addEventListener('webglcontextlost', resolve, { once: true }));
+      extension.loseContext();
+      await lost;
+    });
+    if (pauseTiming === 'during-loss') {
+      await page.locator('.nav-item[data-view="library"]').click();
+    }
+    expect(await page.evaluate(() => window.__lifecycleEngines.at(-1).api.exportImageCanvas())).toBeNull();
+    await page.evaluate(async () => {
+      const record = window.__lifecycleEngines.at(-1);
+      const restored = new Promise(resolve => record.contextCanvas.addEventListener('webglcontextrestored', resolve, { once: true }));
+      record.contextExtension.restoreContext();
+      await restored;
+    });
+    const paused = pauseTiming !== 'active';
+    expect(await page.evaluate(() => window.__lifecycleEngines.at(-1).api.state().paused)).toBe(paused);
+    if (paused) {
+      const before = await page.evaluate(() => window.__lifecycleEngines.at(-1).drawCalls);
+      await frames(page);
+      expect(await page.evaluate(() => window.__lifecycleEngines.at(-1).drawCalls)).toBe(before);
+      await openGraph(page);
+      expect(await page.evaluate(() => window.__lifecycleEngines.at(-1).api.state().paused)).toBe(false);
+    }
+    await expect.poll(() => page.evaluate(() => window.__lifecycleEngines.at(-1).drawCalls)).toBeGreaterThan(0);
+    expect(await page.evaluate(() => window.__lifecycleEngines.at(-1).api.state().nodeCount)).toBe(3);
+    expect(session.errors).toEqual([]);
+  });
+}
+
+test('Classic PNG export follows the Paper background and composites both canvases', async ({ page }) => {
+  const session = await fixture(page);
+  await openGraph(page);
+  await page.locator('#sidebar-theme-select').selectOption('paper');
+  await expect(page.locator('body')).toHaveAttribute('data-theme', 'paper');
+  await page.locator('#graph-advanced > summary').click();
+  await page.locator('[data-graph-style-choice="classic"]').click();
+  const image = await page.evaluate(() => {
+    const { api, host } = window.__lifecycleEngines.at(-1);
+    api.pause();
+    const graph = host.querySelector('.force-graph-container canvas');
+    const overlay = host.querySelector('.graph-spacetime-overlay');
+    // Known pixels isolate export composition from changing physics and label positions.
+    for (const canvas of [graph, overlay]) {
+      const ctx = canvas.getContext('2d');
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+    }
+    const foreground = graph.getContext('2d');
+    foreground.fillStyle = '#ff0000';
+    foreground.fillRect(10, 10, 10, 10);
+    const background = overlay.getContext('2d');
+    background.fillStyle = '#0000ff';
+    background.fillRect(10 * overlay.width / graph.width, 10 * overlay.height / graph.height,
+      30 * overlay.width / graph.width, 30 * overlay.height / graph.height);
+    const output = api.exportImageCanvas();
+    const ctx = output.getContext('2d');
+    const pixel = (x, y) => Array.from(ctx.getImageData(x, y, 1, 1).data);
+    return {
+      paneBackground: getComputedStyle(host).backgroundColor,
+      background: pixel(0, 0), foreground: pixel(15, 15), overlay: pixel(30, 30),
+      size: [output.width, output.height], graphSize: [graph.width, graph.height],
+    };
+  });
+  expect(image.paneBackground).toBe('rgb(240, 238, 232)');
+  expect(image.background).toEqual([240, 238, 232, 255]);
+  expect(image.foreground).toEqual([255, 0, 0, 255]);
+  expect(image.overlay).toEqual([0, 0, 255, 255]);
+  expect(image.size).toEqual(image.graphSize);
+  expect(session.errors).toEqual([]);
+});

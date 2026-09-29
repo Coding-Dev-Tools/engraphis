@@ -23,6 +23,7 @@ import hashlib
 import contextvars
 import logging
 import math
+import copy
 import sqlite3
 import time
 import threading
@@ -10743,9 +10744,12 @@ class MemoryService:
         )
         if cached is not None and (
                 both_anchored or time.time() < cached[0]):
-            cached_scene = cached[1]
-            scene = dict(cached_scene)
-            scene["meta"] = dict(cached_scene["meta"])
+            if clean_presentation == "all":
+                cached_scene = cached[1]
+                scene = dict(cached_scene)
+                scene["meta"] = dict(cached_scene["meta"])
+            else:
+                scene = copy.deepcopy(cached[1])
             scene["meta"]["cache_hit"] = True
             scene["meta"]["query_ms"] = round(
                 (time.perf_counter() - started) * 1000.0, 3
@@ -10879,10 +10883,11 @@ class MemoryService:
         if clean_level == "complete":
             for key in [key for key in self._graph_scene_cache if key[2] == "complete"]:
                 self._graph_scene_cache.pop(key, None)
-        cached_scene = dict(scene)
-        cached_scene["meta"] = dict(scene["meta"])
-        response_scene = dict(scene)
-        response_scene["meta"] = dict(scene["meta"])
+        cached_scene = scene if clean_presentation == "all" else copy.deepcopy(scene)
+        response_scene = scene
+        if clean_presentation == "all":
+            response_scene = dict(scene)
+            response_scene["meta"] = dict(scene["meta"])
         self._graph_scene_cache[cache_key] = (valid_until, cached_scene)
         self._graph_scene_cache.move_to_end(cache_key)
         while len(self._graph_scene_cache) > 16:
