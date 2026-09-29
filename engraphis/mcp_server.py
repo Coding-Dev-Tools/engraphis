@@ -2253,7 +2253,9 @@ _DESTRUCTIVE_PATTERNS = (
     re.compile(r"\bgit\s+(?:reset\b[^\n;&|]*?\s--hard\b|stash\s+(?:drop|clear)\b"
                r"|clean\b[^\n;&|]*?\s(?:-(?=[a-zA-Z]*f)[a-zA-Z]+|--force)(?=\s|$)"
                r"|branch\b[^\n;&|]*?\s-(?=[a-zA-Z]*D)[a-zA-Z]+(?=\s|$))"),
-    re.compile(r"\bgit\s+(?:checkout|restore)\b(?![^\n;&|]*\s--staged\b)[^\n;&|]*?\s(?:--\s+)?\.(?=\s|$)"),
+    re.compile(r"\bgit\s+(?:checkout|restore)\b(?![^\n;&|]*\s--staged\b)[^\n;&|]*?\s(?:--\s+)?\.(?=\s|$)"
+               r"|\bgit\s+(?:checkout|switch)\b[^\n;&|]*?\s(?:-(?=[a-zA-Z]*f)[a-zA-Z]+|--force"
+               r"|--discard-changes)(?=\s|$)"),
     # Data and infrastructure teardown.
     re.compile(r"\b(?:drop\s+(?:database|schema|table)|truncate\s+table)\b", re.I),
     re.compile(r"\bdelete\s+from\s+[\w.\"`\[\]]+\s*(?:;|$)", re.I),
@@ -2340,8 +2342,14 @@ def _heuristic_decision(
         # Compare content words only; shared stopwords do not make facts related.
         cand_tokens, exist_tokens = tokenize(state), tokenize(existing_content)
         overlap = cand_tokens & exist_tokens
-        if overlap and _SUPERSESSION_CUES.search(state.lower()):
-            verdict = "contradicts_and_supersedes"
+        # Supersession needs a cue the existing fact lacks and a shared subject, not one
+        # incidental shared word; a cue without that subject defers rather than reinforces.
+        new_cues = (set(_SUPERSESSION_CUES.findall(state.lower()))
+                    - set(_SUPERSESSION_CUES.findall(existing_content.lower())))
+        shared_subject = (len(overlap) >= 2 and
+                          2 * len(overlap) >= min(len(cand_tokens), len(exist_tokens)))
+        if new_cues:
+            verdict = "contradicts_and_supersedes" if shared_subject else "orthogonal"
         elif len(overlap) >= 3 or jaccard(cand_tokens, exist_tokens) >= 0.5:
             verdict = "reinforces"
         else:
