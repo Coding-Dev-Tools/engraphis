@@ -12,12 +12,13 @@ import socket
 import threading
 import time
 import urllib.error
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from types import SimpleNamespace
 
 import pytest
 
-from engraphis import cloud_session, hosted_client
+from engraphis import cloud_session, hosted_client, http_deadline
 from engraphis.backends import jev_transport
 from engraphis.backends.jev_decision import DecisionQuestion
 
@@ -170,14 +171,14 @@ def test_completed_rotation_is_saved_before_reporting_timeout(
     assert "refresh_unusable" not in saved
 
 
-def _http_body_at_deadline(monkeypatch, framing, *, incomplete=False):
+def _http_body_at_deadline(monkeypatch, framing, *, incomplete=False, trailer=b"\r\n"):
     raw = json.dumps(_rotation()).encode()
     if framing == "length":
         headers = b"Content-Length: " + str(len(raw) + int(incomplete)).encode() + b"\r\n"
         body = raw
     elif framing == "chunked":
         headers = b"Transfer-Encoding: chunked\r\n"
-        body = ("%x\r\n" % len(raw)).encode() + raw + b"\r\n0\r\n\r\n"
+        body = ("%x\r\n" % len(raw)).encode() + raw + b"\r\n0\r\n" + trailer
     else:
         headers = b"Connection: close\r\n"
         body = raw
@@ -186,10 +187,14 @@ def _http_body_at_deadline(monkeypatch, framing, *, incomplete=False):
         def makefile(self, *args, **kwargs):
             return io.BytesIO(b"HTTP/1.1 200 OK\r\n" + headers + b"\r\n" + body)
 
-    response = http.client.HTTPResponse(SyntheticSocket())
-    response.begin()
     clock = [100.0]
     monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    # Construct the production response parser without opening a real socket.
+    handler = http_deadline.deadline_handlers(105.0)[0]
+    monkeypatch.setattr(handler, "do_open",
+                        lambda connection, request: connection.response_class(SyntheticSocket()))
+    response = handler.http_open(urllib.request.Request("http://127.0.0.1/"))
+    response.begin()
     read = response.read1
     calls = []
 
@@ -202,6 +207,76 @@ def _http_body_at_deadline(monkeypatch, framing, *, incomplete=False):
 
     monkeypatch.setattr(response, "read1", read_chunk)
     return response, calls, raw, clock
+
+
+def _interrupt_after_eof(monkeypatch, response):
+    interrupted = threading.Event()
+    read = response.read1
+
+    def read_then_interrupt(size=-1):
+        chunk = read(size)
+        if not chunk:
+            interrupted.set()
+        return chunk
+
+    @contextmanager
+    def watchdog(sock, deadline):
+        yield interrupted
+
+    monkeypatch.setattr(response, "read1", read_then_interrupt)
+    monkeypatch.setattr(http_deadline, "socket_deadline", watchdog)
+
+
+@pytest.mark.parametrize("trailer", [b"\r\n", b"\n", b"X-Test: complete\r\n\r\n"])
+def test_completed_chunked_rotation_survives_watchdog_edge(monkeypatch, saved_session, trailer):
+    response, _reads, _raw, _clock = _http_body_at_deadline(
+        monkeypatch, "chunked", trailer=trailer,
+    )
+    _interrupt_after_eof(monkeypatch, response)
+    monkeypatch.setattr(cloud_session, "build_pinned_https_opener",
+                        lambda *handlers: SimpleNamespace(open=lambda *args, **kwargs: response))
+    monkeypatch.setattr(jev_transport, "_post_json", _no_network)
+
+    with pytest.raises(jev_transport.DecisionClientError, match="^remote_timeout$"):
+        _evaluate(5)
+
+    saved = cloud_session._load()
+    assert saved["refresh_credential"] == "synthetic-rotated"
+    assert "refresh_unusable" not in saved
+    assert response.closed
+
+
+@pytest.mark.parametrize("trailer", [b"", b"X-Test: partial", b"X-Test: complete\r\n"])
+def test_unterminated_chunked_rotation_is_not_saved(monkeypatch, saved_session, trailer):
+    response, _reads, _raw, _clock = _http_body_at_deadline(
+        monkeypatch, "chunked", trailer=trailer,
+    )
+    monkeypatch.setattr(cloud_session, "build_pinned_https_opener",
+                        lambda *handlers: SimpleNamespace(open=lambda *args, **kwargs: response))
+    monkeypatch.setattr(jev_transport, "_post_json", _no_network)
+
+    with pytest.raises(jev_transport.DecisionClientError, match="^remote_unavailable$"):
+        _evaluate(5)
+
+    saved = cloud_session._load()
+    assert saved.get("refresh_credential") != "synthetic-rotated"
+    assert cloud_session._refresh_is_unusable(saved, "synthetic-unspent")
+    assert response.closed
+
+
+def test_complete_chunked_watchdog_edge_keeps_ordinary_deadline(monkeypatch):
+    response, _reads, _raw, _clock = _http_body_at_deadline(monkeypatch, "chunked")
+    _interrupt_after_eof(monkeypatch, response)
+    with response, pytest.raises(TimeoutError):
+        jev_transport._read_response(response, 105.0)
+
+
+def test_chunked_trailer_keeps_standard_line_limit(monkeypatch):
+    response, _reads, _raw, _clock = _http_body_at_deadline(
+        monkeypatch, "chunked", trailer=b"X-Test: " + b"a" * 65536 + b"\r\n\r\n",
+    )
+    with response, pytest.raises(http.client.LineTooLong):
+        http_deadline.read_response(response, 105.0, max_bytes=4096, preserve_complete=True)
 
 
 @pytest.mark.parametrize("framing", ["length", "close", "chunked"])

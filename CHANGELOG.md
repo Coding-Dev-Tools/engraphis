@@ -5,6 +5,8 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+- Updated the Pi test host to 0.87.1 to include the patched WebSocket client, and
+  extended the Pi dependency audit to cover its development dependencies.
 - Updated the Pi extension's locked `ip-address` dependency to 10.5.1, fixing
   IPv6 link-local and NAT64 classification advisories without changing its dependency ranges.
 - Kept managed Jev available when an unrelated compute endpoint cannot resolve,
@@ -17,7 +19,9 @@ All notable changes to Engraphis are documented here. Format loosely follows
   and a single provider invocation.
 - Save fully received Cloud credential rotations before reporting an expired request
   deadline, while rejecting truncated bodies and watchdog-interrupted responses.
-- Refreshed the public offline fixtures and source bindings in immutable v100 evidence.
+- Recognize complete chunked refresh responses at the watchdog boundary without
+  accepting a missing or truncated trailer terminator.
+- Refreshed the public offline fixtures and source bindings in immutable v101 evidence.
 
 - Added saved project-to-workspace routing and connection instructions so agents can use the
   user's selected workspace. Routine MCP calls inherit an omitted workspace from an authorized
