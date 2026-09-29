@@ -12215,9 +12215,9 @@ def test_pane_backgrounds_are_owned_by_css_not_by_the_asset() -> None:
     for style in ("galaxy", "solar", "cyber"):
         assert f'#graph-net[data-graph-style="{style}"]' in css
     assert "data-graph-style" in source
-    # The gradients must exist in exactly one place, or the two copies drift.
-    assert "radial-gradient" not in source
-    assert "linear-gradient" not in source
+    # Authored gradients belong in CSS. Export may parse computed CSS, but must
+    # not duplicate its gradient definitions in JavaScript string literals.
+    assert re.search(r"""["'`]\s*(?:linear|radial)-gradient\s*\(""", source) is None
 
 
 def test_hover_cursor_class_the_asset_toggles_exists_in_css() -> None:
