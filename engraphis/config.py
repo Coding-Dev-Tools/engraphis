@@ -1086,11 +1086,8 @@ class Settings:
                 api_key=self.typesafe_api_key, base_url=self.typesafe_base_url,
             ).is_configured
         if self.decision_backend in {"managed", "auto"}:
-            from engraphis.cloud_session import configured
-            try:
-                return configured(require_compute=False)
-            except Exception:
-                return False
+            from engraphis.backends.jev_transport import EngraphisCloudDecisionClient
+            return EngraphisCloudDecisionClient().is_configured
         return False
 
     def __post_init__(self) -> None:
