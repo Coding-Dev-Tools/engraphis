@@ -25,7 +25,8 @@ All notable changes to Engraphis are documented here. Format loosely follows
   deadline, while rejecting truncated bodies and watchdog-interrupted responses.
 - Recognize complete chunked refresh responses at the watchdog boundary without
   accepting a missing or truncated trailer terminator.
-- Refreshed the public offline fixtures and source bindings in immutable v104 evidence.
+- Rebuild FastMCP settings eagerly to avoid a forward-reference warning on newer SDKs.
+- Refreshed the public offline fixtures and source bindings in immutable v106 evidence.
 
 - Added saved project-to-workspace routing and connection instructions so agents can use the
   user's selected workspace. Routine MCP calls inherit an omitted workspace from an authorized
