@@ -111,6 +111,11 @@ A nonblank `ENGRAPHIS_HOOK_WORKSPACE` is an explicit override. Clear a previous 
 override to use project mappings. The recalled-context header names the workspace returned by
 the server. The hook remains silent on errors or empty recall results.
 
+Earlier hook versions used a workspace named after the project folder when no override was set.
+Without a saved mapping, the hook now starts in `default` instead, so those memories stop
+appearing at session start. To keep using them, save the mapping once, for example
+`engraphis_set_workspace_routing(workspace="website", repo="website")`, or move the memories.
+
 ## Organize existing memories
 
 Routing changes future writes. Existing memories stay where they are until explicitly moved.
