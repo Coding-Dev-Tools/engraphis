@@ -2258,9 +2258,11 @@ _DESTRUCTIVE_PATTERNS = (
                r"|clean\b[^\n;&|]*?\s(?:-(?=[a-zA-Z]*f)[a-zA-Z]+|--force)(?=\s|$)"
                r"|branch\b[^\n;&|]*?\s-(?=[a-zA-Z]*D)[a-zA-Z]+(?=\s|$)|filter-branch\b|filter-repo\b"
                r"|reflog\s+expire\b|update-ref\b[^\n;&|]*?\s-d(?=\s|$))"),
-    re.compile(_GIT_COMMAND + r"(?:checkout|restore)\b(?![^\n;&|]*\s--staged\b)[^\n;&|]*?\s"
-               r"(?:--\s+)?\.(?=\s|$)|" + _GIT_COMMAND + r"(?:checkout|switch)\b[^\n;&|]*?\s"
-               r"(?:-(?=[a-zA-Z]*f)[a-zA-Z]+|--force|--discard-changes)(?=\s|$)"),
+    # Checkout paths after "--" or ".", worktree restores and forced switches discard work.
+    re.compile(_GIT_COMMAND + r"(?:checkout\b[^\n;&|]*?\s(?:--|\.)(?=\s|$)"
+               r"|restore\b(?![^\n;&|]*\s--staged\b)(?=[^\n;&|]*\s[^\s-])"
+               r"|(?:checkout|switch)\b[^\n;&|]*?\s(?:-(?=[a-zA-Z]*f)[a-zA-Z]+|--force"
+               r"|--discard-changes)(?=\s|$))"),
     # Data and infrastructure teardown.
     re.compile(r"\b(?:drop\s+(?:database|schema|table)|truncate\s+table)\b"
                r"|\balter\s+table\b[^\n;]*?\bdrop\s+column\b", re.I),
@@ -2310,11 +2312,18 @@ _NEGATED_SUCCESS = re.compile(
 _SUPERSESSION_CUES = re.compile(
     r"\b(?:not|no|never|instead|switched|replaced|replaces|deprecated|migrated)\b|n't\b")
 _NEGATIONS = frozenset({"not", "no", "never", "n't"})
+# The term a fact rules out: "not pnpm", "instead of npm", "rather than yarn".
+_NEGATED_TERM = re.compile(r"(?:(?:\b(?:not|no|never)|n't)\s+|\b(?:instead\s+of|rather\s+than)\s+)(\w+)")
 
 
 def _supersession_cues(text: str) -> set[str]:
     """Return supersession cues; every negation form counts as the same cue."""
     return {"not" if cue in _NEGATIONS else cue for cue in _SUPERSESSION_CUES.findall(text.lower())}
+
+
+def _negated_terms(text: str) -> set[str]:
+    """Return content words a fact explicitly rules out."""
+    return {term for term in _NEGATED_TERM.findall(text.lower()) if tokenize(term)}
 
 
 def _guard_category(command: str) -> str:
@@ -2364,9 +2373,13 @@ def _heuristic_decision(
         # Supersession needs a cue the existing fact lacks and a shared subject, not one
         # incidental shared word; a cue without that subject defers rather than reinforces.
         new_cues = _supersession_cues(state) - _supersession_cues(existing_content)
+        # Matching cue sets can still flip targets: "npm, not pnpm" vs "pnpm, not npm".
+        cand_ruled_out, exist_ruled_out = _negated_terms(state), _negated_terms(existing_content)
+        flipped = bool((cand_ruled_out - exist_ruled_out) & exist_tokens
+                       or (exist_ruled_out - cand_ruled_out) & cand_tokens)
         shared_subject = (len(overlap) >= 2 and
                           2 * len(overlap) >= min(len(cand_tokens), len(exist_tokens)))
-        if new_cues:
+        if new_cues or flipped:
             verdict = "contradicts_and_supersedes" if shared_subject else "orthogonal"
         elif len(overlap) >= 3 or jaccard(cand_tokens, exist_tokens) >= 0.5:
             verdict = "reinforces"
