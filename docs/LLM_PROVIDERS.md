@@ -54,6 +54,7 @@ Every LLM setup uses these variables:
 | `ENGRAPHIS_LLM_API_KEY` | Credential for the provider. It is never returned by the dashboard. |
 | `ENGRAPHIS_LLM_BASE_URL` | Needed only to override a default or configure a compatible endpoint. |
 | `ENGRAPHIS_LLM_EXTRA_HEADERS` | Optional JSON object of headers required by a compatible endpoint. |
+| `ENGRAPHIS_LLM_EFFORT` | Reasoning effort for Claude models that think by default: `low`, `medium` (default), `high`, `xhigh`, or `max`. Ignored elsewhere. |
 
 The sample names below are Engraphis runtime defaults, not provider recommendations. Replace them
 when your account or deployment uses a different model.
@@ -91,12 +92,29 @@ it as `custom`; the native mode applies Anthropic's required request shape and h
 
 ```dotenv
 ENGRAPHIS_LLM_PROVIDER=anthropic
-ENGRAPHIS_LLM_MODEL=claude-3-5-sonnet-20241022
+ENGRAPHIS_LLM_MODEL=claude-sonnet-5-5
 ENGRAPHIS_LLM_API_KEY=<anthropic-api-key>
 ```
 
 Leave `ENGRAPHIS_LLM_BASE_URL` unset for the public API. For model and credential details, see
 the [Anthropic API documentation](https://docs.anthropic.com/).
+
+Choosing a model:
+
+- `claude-sonnet-5-5` is the default. Extraction, consolidation summaries, and grounded synthesis
+  are bounded tasks, and it costs half as much per token as Opus.
+- `claude-opus-5-5` suits the hardest consolidation and conflict-review work. Compare it against
+  the Sonnet default on your own data before paying for it, because the two are close on everyday
+  tasks.
+- Retired ids such as `claude-3-5-sonnet-20241022` and `claude-3-5-haiku-20241022` are rejected by
+  the API; the connection test reports them as an HTTP 404.
+
+Opus 4.7 and later, Sonnet 5 and later, and Fable reject `temperature` and similar sampling
+parameters, so Engraphis omits them for those models. Opus 5 and later, Sonnet 5 and later, and
+Fable also think before answering by default. Engraphis sends `ENGRAPHIS_LLM_EFFORT` (`low`,
+`medium`, `high`, `xhigh`, or `max`; default `medium`) for those models and keeps at least 4096
+output tokens available so hidden reasoning cannot crowd out the reply. Other providers and older
+Claude models ignore the setting.
 
 ## Google Gemini
 

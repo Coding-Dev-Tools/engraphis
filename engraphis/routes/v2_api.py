@@ -665,7 +665,7 @@ def workspaces():
 # working model name without the user needing to know the provider's catalogue.
 _LLM_DEFAULT_MODELS = {
     "openai": "gpt-4o-mini",
-    "anthropic": "claude-3-5-sonnet-20241022",
+    "anthropic": "claude-sonnet-5-5",
     "google": "gemini-1.5-flash",
     "openrouter": "openai/gpt-4o-mini",
 }
