@@ -45,7 +45,8 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - Rebuild FastMCP settings eagerly to avoid a forward-reference warning on newer SDKs.
 - Preserve CSS gradient tiles, screen blending and reduced-motion opacity in graph PNGs,
   including fractional display scaling; synchronize graph cache metadata across threads.
-- Refreshed public offline fixtures and source bindings in immutable v116 evidence for 1.7.9.
+- Refreshed public offline fixtures and source bindings in immutable v117 evidence for 1.7.9.
+- Campaign adapter capabilities and metrics now report the loaded Engraphis runtime version.
 
 - Added saved project-to-workspace routing and connection instructions so agents can use the
   user's selected workspace. Routine MCP calls inherit an omitted workspace from an authorized
