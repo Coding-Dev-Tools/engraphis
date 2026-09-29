@@ -190,6 +190,10 @@ and `query`; `verify_completion` needs `state` and `goal`, with optional `recent
 before backend lookup, with unknown/null conclusions and no remote allowance consumed.
 Command decisions always return `allow_auto=false` and `escalate_to_user=true`, including
 successful remote answers. Provider probability and category are advice, not shell authorization.
+Local command labels are coarse: only one simple inspection command, without chaining, pipes,
+substitution or file redirection, is `read_only`. Recognized destructive, history-rewriting,
+exfiltrating or credential-file commands are `destructive_or_leak`; anything else, including a
+command too long to screen completely, is `state_change`.
 
 The classic recall, grounded, and answer tools (`engraphis_recall`,
 `engraphis_recall_grounded`, and the `engraphis_answer` alias) accept `planning="off"|"auto"`,

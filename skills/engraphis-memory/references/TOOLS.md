@@ -705,7 +705,10 @@ conclusions. `custom` accepts `state` or `question`; other kinds need `state` an
 required context above. Uncertain support/completion stays null. Fallback results include
 `fallback_reason`, null confidence, and unmeasured heuristic labels. All command checks,
 including successful remote answers, return `allow_auto=false` and `escalate_to_user=true`. Noul confidence is derived decisiveness, not measured calibration. Decisions do
-not replace executable verification, authorization, or user approval.
+not replace executable verification, authorization, or user approval. Local command labels are
+coarse: only one simple inspection command, without chaining, pipes, substitution or file
+redirection, is `read_only`; recognized destructive, history-rewriting, exfiltrating or
+credential-file commands are `destructive_or_leak`; anything else is `state_change`.
 
 ---
 
