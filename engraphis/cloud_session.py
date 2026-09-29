@@ -1150,9 +1150,22 @@ def access_for_workspace(
                 status=409,
                 refresh_unusable=True,
             )
-        response_subject = _validated_token_subject(
-            body.get("token_subject") or token_subject
-        )
+        # Older control planes omit this field. A supplied value, however, must
+        # exactly preserve the already validated subject of the consumed family.
+        response_subject = body.get("token_subject", token_subject)
+        if response_subject != token_subject:
+            try:
+                _mark_refresh_unusable(saved, refresh)
+            except (OSError, RuntimeError):
+                # Retirement fences the credential in-process before attempting
+                # persistence; a write fault cannot make this a replayable outage.
+                pass
+            raise CloudSessionError(
+                "Engraphis Cloud returned an invalid session subject, so the rotated "
+                "credential could not be saved. Connect this installation again.",
+                status=409,
+                refresh_unusable=True,
+            )
         updated = dict(saved)
         updated.update({
             "schema": "engraphis-cloud-session/v1",
