@@ -2858,6 +2858,8 @@ def _issue_capability(spec: ActionSpec) -> str:
 
 def _example_for(spec: ActionSpec) -> dict[str, Any]:
     """Produce a minimal non-sensitive example from the real input schema."""
+    if spec.canonical_id == "decide":
+        return {"kind": "guard_command", "state": "git status --short", "offline_mode": True}
     examples = {
         "content": "A durable project convention.",
         "query": "What project background is relevant?",
