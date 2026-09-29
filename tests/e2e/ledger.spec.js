@@ -74,7 +74,7 @@ async function mockApi(page, options = {}) {
     retention_supervisor: 'none',
     default_models: {
       openai: 'gpt-4o-mini',
-      anthropic: 'claude-3-5-sonnet-20241022',
+      anthropic: 'claude-sonnet-5-5',
       google: 'gemini-1.5-flash',
       openrouter: 'openai/gpt-4o-mini',
     },
@@ -2450,7 +2450,7 @@ test('Ledger exposes local LLM setup and extraction controls', async ({ page }) 
   await expect(page.locator('#llm-connection').getByRole('button', { name: 'Turn off' })).toBeDisabled();
 
   await provider.selectOption('anthropic');
-  await expect(model).toHaveValue('claude-3-5-sonnet-20241022');
+  await expect(model).toHaveValue('claude-sonnet-5-5');
   await expect(page.getByLabel('Local .env setup')).toHaveValue(/ENGRAPHIS_LLM_PROVIDER=anthropic/);
   await page.getByRole('button', { name: 'Test connection' }).click();
   await expect(page.locator('#llm-test-result')).toContainText('No API key configured');
