@@ -183,6 +183,14 @@ an omitted mode means it was not recorded, and is not inferred from current defa
 | Operations | `engraphis_check_update` | Refreshes the release cache and reports whether a newer version is available. Update checks are OFF unless `ENGRAPHIS_UPDATE_CHECK` is set to an affirmative value; `=0` keeps them off. |
 | Decision | `engraphis_decide` | Advisory typed decisions with local fallback. Remote Jev requires an explicit backend and per-call `allow_remote=true`; missing, malformed, and uncertain answers stay visible. Smart discovery routes it through `engraphis_execute_action` because a remote call may consume allowance. |
 
+Decision inputs must be nonblank for the selected kind: `guard_command` needs `state`;
+`classify_contradiction` needs `state` and `existing_content`; `verify_support` needs `state`
+and `query`; `verify_completion` needs `state` and `goal`, with optional `recent_actions`.
+`custom` accepts either `state` or `question`. Missing required input returns `invalid_request`
+before backend lookup, with unknown/null conclusions and no remote allowance consumed.
+Command decisions always return `allow_auto=false` and `escalate_to_user=true`, including
+successful remote answers. Provider probability and category are advice, not shell authorization.
+
 The classic recall, grounded, and answer tools (`engraphis_recall`,
 `engraphis_recall_grounded`, and the `engraphis_answer` alias) accept `planning="off"|"auto"`,
 optional `mtype_limits` such as `{"working": 1, "semantic": 3}`, and optional
