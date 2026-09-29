@@ -56,6 +56,32 @@ def test_unapproved_or_offline_mcp_never_discovers_credentials(monkeypatch, kwar
     assert result["advisory_only"] is True
 
 
+@pytest.mark.parametrize("dispatch", ["direct", "classic", "smart"])
+@pytest.mark.parametrize("consent", [1, 0, 1.0, "true", "yes", "false", None])
+def test_remote_consent_requires_a_literal_boolean(monkeypatch, dispatch, consent):
+    from mcp.server.fastmcp.exceptions import ToolError
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("malformed consent must not inspect credentials or call a backend")
+
+    monkeypatch.setattr(transport, "select_decision_client", forbidden)
+    arguments = {"kind": "custom", "state": "Synthetic", "allow_remote": consent}
+    if dispatch == "direct":
+        result = json.loads(server.engraphis_decide(**arguments))
+        assert result["fallback_reason"] == "remote_not_authorized"
+    elif dispatch == "classic":
+        with pytest.raises(ToolError, match="valid boolean"):
+            asyncio.run(server.classic_mcp.call_tool("engraphis_decide", arguments))
+    else:
+        action = server._action_payload(server.ACTION_SPECS["decide"])
+        response = server.engraphis_execute_action(
+            capability_id=action["capability_id"], schema_digest=action["schema_digest"],
+            arguments=arguments,
+        )
+        assert response.isError is True
+        assert "E_VALIDATION" in response.content[0].text
+
+
 def test_smart_read_refuses_remote_decision_before_backend_lookup(monkeypatch):
     def forbidden(*args, **kwargs):
         pytest.fail("a Smart read must not inspect credentials or consume decision allowance")

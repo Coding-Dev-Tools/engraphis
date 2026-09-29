@@ -6157,10 +6157,17 @@ class Store:
                 clauses.append("NOT EXISTS (SELECT 1 FROM memory_entities me "
                                "WHERE me.entity_id=entities.id)")
             if "edges" in tables:
-                # Legacy entities and edges may both have an unscoped NULL workspace.
-                clauses.append("NOT EXISTS (SELECT 1 FROM edges e "
-                               "WHERE ((e.workspace_id IS entities.workspace_id AND e.src=entities.id) "
-                               "OR (e.workspace_id IS entities.workspace_id AND e.dst=entities.id)))")
+                # Global entities can be referenced by any workspace. Keep their
+                # lookup separate so owned entities retain indexed, exact-scope
+                # endpoint probes and foreign edges cannot prevent their erasure.
+                clauses.append(
+                    "CASE WHEN entities.workspace_id IS NULL THEN "
+                    "NOT EXISTS (SELECT 1 FROM edges e "
+                    "WHERE e.src=entities.id OR e.dst=entities.id) ELSE "
+                    "NOT EXISTS (SELECT 1 FROM edges e "
+                    "WHERE ((e.workspace_id IS entities.workspace_id AND e.src=entities.id) "
+                    "OR (e.workspace_id IS entities.workspace_id AND e.dst=entities.id))) END"
+                )
             if clauses:
                 conn.execute(
                     f"DELETE FROM entities WHERE id IN ({marks}) AND " + " AND ".join(clauses),
