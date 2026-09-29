@@ -96,6 +96,25 @@ def test_smart_read_refuses_remote_decision_before_backend_lookup(monkeypatch):
     assert "action_requires_execute_action" in rejected.content[0].text
 
 
+def test_discovered_decision_example_executes_as_offline_advice(monkeypatch):
+    def forbidden(*args, **kwargs):
+        pytest.fail("the advertised example must not inspect remote credentials")
+
+    monkeypatch.setattr(transport, "select_decision_client", forbidden)
+    discovered = json.loads(server.engraphis_discover_actions(task="guard command safety"))
+    action = next(item for item in discovered["actions"] if item["canonical_action"] == "decide")
+    response = server.engraphis_execute_action(
+        capability_id=action["capability_id"], schema_digest=action["schema_digest"],
+        arguments=action["example"],
+    )
+    raw = response if isinstance(response, str) else response.content[0].text
+    result = json.loads(raw)["result"]
+    assert result["decision_status"] == "local_fallback"
+    assert result["fallback_reason"] == "offline"
+    assert result["advisory_only"] is True
+    assert result["allow_auto"] is False
+
+
 def test_classic_dispatch_retains_local_owner_access_and_requires_call_consent(monkeypatch):
     batch = transport.CloudDecisionBatch(False, {}, {
         "custom": transport.SimpleSupportDecision(probability=0.9, confidence=0.8),
