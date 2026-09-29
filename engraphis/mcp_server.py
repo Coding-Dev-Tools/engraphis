@@ -2237,6 +2237,10 @@ def engraphis_consolidate(
 # Destructive and leak patterns scan every chained segment of the screened prefix.
 # Flag clusters use a lookahead so a long cluster cannot backtrack quadratically.
 _GUARD_SCAN_CHARS = 4096
+# Git accepts global options before its subcommand, e.g. `git -C repo push -f`. The
+# bound keeps each candidate constant-cost when "git" repeats in adversarial input.
+_GIT_COMMAND = (r"\bgit(?:\s+(?:-[Cc]\s+(?:\"[^\"\n]*\"|'[^'\n]*'|\S+)"
+                r"|--?[A-Za-z][\w-]*(?:=\S+)?)){0,8}\s+")
 _DESTRUCTIVE_PATTERNS = (
     # Recursive or forced deletes, with flags in any position or order.
     re.compile(r"\brm\b[^\n;&|]*?\s(?:-(?=[a-zA-Z]*[rRf])[a-zA-Z]+|--recursive|--force)(?=\s|$)"),
@@ -2248,26 +2252,30 @@ _DESTRUCTIVE_PATTERNS = (
     re.compile(r"(?<![\w-])format(?:\.com)?\s+[a-z]:(?!\w)", re.I),
     re.compile(r"\bdd\b[^\n;&|]*?\bof=|>\s*/dev/(?:sd|hd|vd|xvd|nvme|disk|mmcblk)"),
     # Git operations that rewrite shared history or discard work.
-    re.compile(r"\bgit\s+push\b[^\n;&|]*?\s(?:--force(?:-with-lease|-if-includes)?|-f|--delete|-d"
-               r"|--mirror|\+\S+|:\S+)(?=[\s=]|$)"),
-    re.compile(r"\bgit\s+(?:reset\b[^\n;&|]*?\s--hard\b|stash\s+(?:drop|clear)\b"
+    re.compile(_GIT_COMMAND + r"push\b[^\n;&|]*?\s(?:--force(?:-with-lease|-if-includes)?|-f"
+               r"|--delete|-d|--mirror|\+\S+|:\S+)(?=[\s=]|$)"),
+    re.compile(_GIT_COMMAND + r"(?:reset\b[^\n;&|]*?\s--hard\b|stash\s+(?:drop|clear)\b"
                r"|clean\b[^\n;&|]*?\s(?:-(?=[a-zA-Z]*f)[a-zA-Z]+|--force)(?=\s|$)"
-               r"|branch\b[^\n;&|]*?\s-(?=[a-zA-Z]*D)[a-zA-Z]+(?=\s|$))"),
-    re.compile(r"\bgit\s+(?:checkout|restore)\b(?![^\n;&|]*\s--staged\b)[^\n;&|]*?\s(?:--\s+)?\.(?=\s|$)"
-               r"|\bgit\s+(?:checkout|switch)\b[^\n;&|]*?\s(?:-(?=[a-zA-Z]*f)[a-zA-Z]+|--force"
-               r"|--discard-changes)(?=\s|$)"),
+               r"|branch\b[^\n;&|]*?\s-(?=[a-zA-Z]*D)[a-zA-Z]+(?=\s|$)|filter-branch\b|filter-repo\b"
+               r"|reflog\s+expire\b|update-ref\b[^\n;&|]*?\s-d(?=\s|$))"),
+    re.compile(_GIT_COMMAND + r"(?:checkout|restore)\b(?![^\n;&|]*\s--staged\b)[^\n;&|]*?\s"
+               r"(?:--\s+)?\.(?=\s|$)|" + _GIT_COMMAND + r"(?:checkout|switch)\b[^\n;&|]*?\s"
+               r"(?:-(?=[a-zA-Z]*f)[a-zA-Z]+|--force|--discard-changes)(?=\s|$)"),
     # Data and infrastructure teardown.
-    re.compile(r"\b(?:drop\s+(?:database|schema|table)|truncate\s+table)\b", re.I),
+    re.compile(r"\b(?:drop\s+(?:database|schema|table)|truncate\s+table)\b"
+               r"|\balter\s+table\b[^\n;]*?\bdrop\s+column\b", re.I),
     re.compile(r"\bdelete\s+from\s+[\w.\"`\[\]]+\s*(?:;|$)", re.I),
     re.compile(r"\b(?:terraform\s+destroy|kubectl\s+delete|helm\s+(?:uninstall|delete)"
                r"|aws\s+s3\s+(?:rm|rb)|docker\s+(?:system|volume)\s+prune)\b", re.I),
     # Piping into a shell or network tool, file uploads, and well-known credential files.
     re.compile(r"\|\s*(?:sudo\s+)?(?:curl|wget|nc|ncat|netcat|socat|ssh|(?:ba|z|da|k|fi)?sh"
-               r"|iex|invoke-expression)\b", re.I),
+               r"|iex|invoke-expression)\b|\b(?:ba|z|da|k|fi)?sh\b[^\n;&|]*?(?:<\(|\$\()\s*(?:curl|wget)\b"
+               r"|\b(?:iex|invoke-expression)\s*[($]", re.I),
     re.compile(r"\bcurl\b[^\n;&|]*?\s(?:(?:-d|--data(?:-binary|-raw|-urlencode)?)\s*['\"]?@"
                r"|(?:-F|--form)\s*['\"]?[^\s'\"]*=@|(?:-T|--upload-file)\s)"
                r"|\bwget\b[^\n;&|]*?\s--post-file\b"),
-    re.compile(r"\.ssh/id_[\w-]+|\.aws/credentials|\.git-credentials|[._]netrc\b|\.pgpass\b"
+    re.compile(r"\.ssh/id_[\w-]+|\bid_(?:rsa|dsa|ecdsa|ed25519)\b|\.aws/credentials|\.kube/config\b"
+               r"|\.docker/config\.json\b|\.git-credentials|[._]netrc\b|\.pgpass\b|\.npmrc\b|\.pypirc\b"
                r"|/etc/shadow\b|\.engraphis/config\.env"
                r"|(?<![\w.-])\.env(?!\.(?:example|sample|template|dist)(?![\w-]))(?:\.[\w-]+)*(?![\w-])",
                re.I),
@@ -2288,14 +2296,25 @@ _READ_ONLY_COMMANDS = (
 )
 # Outcome words; zero counts ("0 failed", "no errors", "errors: 0") are not outcomes.
 _ZERO_OUTCOMES = re.compile(
-    r"\b(?:0|no|zero)\s+(?:tests?\s+)?(?:errors?|failures?|failed|exceptions?|issues?"
-    r"|problems?|passed|succeeded|completed)\b|\b(?:errors?|failures?|failed)\s*[:=]\s*0\b")
+    r"\b(?:0|no|zero|none)\s+(?:tests?\s+)?(?:errors?|failures?|failed|exceptions?|issues?"
+    r"|problems?|passed|succeeded|completed)\b"
+    r"|\b(?:errors?|failures?|failed|passed|passing)\s*[:=]\s*0\b")
 _FAILURE_WORDS = re.compile(
     r"\b(?:errors?|fail(?:ed|ures?|s)?|assertionerror|exceptions?|traceback|fatal)\b")
 _SUCCESS_WORDS = re.compile(
     r"\b(?:pass(?:ed|es)?|success(?:ful(?:ly)?)?|succeeded|completed|ok)\b|\b100%")
+# "did not pass" or "didn't succeed" reports a failure, not a success word.
+_NEGATED_SUCCESS = re.compile(
+    r"(?:\b(?:not|never)|n't)\s+(?:\w+\s+){0,2}?"
+    r"(?:pass(?:ed|es)?|succe(?:ss|ed|eded)\w*|complete[ds]?|ok)\b")
 _SUPERSESSION_CUES = re.compile(
     r"\b(?:not|no|never|instead|switched|replaced|replaces|deprecated|migrated)\b|n't\b")
+_NEGATIONS = frozenset({"not", "no", "never", "n't"})
+
+
+def _supersession_cues(text: str) -> set[str]:
+    """Return supersession cues; every negation form counts as the same cue."""
+    return {"not" if cue in _NEGATIONS else cue for cue in _SUPERSESSION_CUES.findall(text.lower())}
 
 
 def _guard_category(command: str) -> str:
@@ -2344,8 +2363,7 @@ def _heuristic_decision(
         overlap = cand_tokens & exist_tokens
         # Supersession needs a cue the existing fact lacks and a shared subject, not one
         # incidental shared word; a cue without that subject defers rather than reinforces.
-        new_cues = (set(_SUPERSESSION_CUES.findall(state.lower()))
-                    - set(_SUPERSESSION_CUES.findall(existing_content.lower())))
+        new_cues = _supersession_cues(state) - _supersession_cues(existing_content)
         shared_subject = (len(overlap) >= 2 and
                           2 * len(overlap) >= min(len(cand_tokens), len(exist_tokens)))
         if new_cues:
@@ -2376,7 +2394,7 @@ def _heuristic_decision(
     if kind == "verify_completion":
         # Whole words only: "ok" must not match "broken" and "0 errors" is not a failure.
         output = _ZERO_OUTCOMES.sub(" ", state.lower())
-        has_fail = bool(_FAILURE_WORDS.search(output))
+        has_fail = bool(_FAILURE_WORDS.search(output) or _NEGATED_SUCCESS.search(output))
         complete = bool(_SUCCESS_WORDS.search(output)) and not has_fail
         return {
             "kind": kind,

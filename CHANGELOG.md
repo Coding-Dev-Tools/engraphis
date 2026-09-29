@@ -8,12 +8,14 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - Classify local `engraphis_decide` command advice conservatively. Chained, piped,
   substituted or redirected commands are never labeled read-only. Recursive deletes in any
   flag order, raw device writes, history-rewriting or work-discarding Git operations, SQL
-  and infrastructure teardown, exfiltrating pipes and uploads, and well-known credential
-  files are labeled destructive or leaking. Screening is bounded so adversarial input stays
-  cheap.
-- Match whole words and ignore zero counts in local completion checks. Local support and
-  contradiction checks compare content words rather than shared stopwords, and supersession
-  requires a cue absent from the existing fact plus a shared subject.
+  and infrastructure teardown, downloaded-script execution, exfiltrating pipes and uploads,
+  and well-known credential files are labeled destructive or leaking. Screening is bounded
+  so adversarial input stays cheap.
+- Match whole words, ignore zero counts and treat negated success as failure in local
+  completion checks. Local support and contradiction checks compare content words rather
+  than shared stopwords, and supersession requires a shared subject plus a cue the existing
+  fact lacks, with every negation form counted as one cue. Git global options no longer
+  bypass destructive-command checks.
 - Provide a valid offline decision example in Smart MCP action discovery.
 - Reject coerced numeric/string remote consent before Classic MCP can select a Jev backend.
 - Retain global entities referenced by workspace edges during secure erasure,
