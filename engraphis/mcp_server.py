@@ -51,6 +51,11 @@ except ImportError:  # pragma: no cover - core-floor (numpy-only) installs
 try:
     from mcp.server.fastmcp import FastMCP
     from mcp.types import CallToolResult, TextContent
+    try:
+        from mcp.server.fastmcp.server import Settings as _FastMCPSettings
+        _FastMCPSettings.model_rebuild()
+    except Exception:
+        pass
 except ImportError:  # pragma: no cover - exercised only without the optional dep
     raise SystemExit(
         "The 'mcp' package is required to run the Engraphis MCP server.\n"
