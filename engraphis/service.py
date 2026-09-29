@@ -1284,6 +1284,7 @@ class MemoryService:
         # bi-temporal validity boundary: time passing can change a current-time scene even
         # when no connection writes, so such an entry expires exactly at that boundary.
         self._graph_scene_cache: "OrderedDict[tuple, tuple[float, dict]]" = OrderedDict()
+        self._graph_scene_cache_lock = threading.Lock()
         self._graph_job_lock = threading.RLock()
         self._graph_job_threads: dict[str, threading.Thread] = {}
         self._obsidian_job_threads: dict[str, threading.Thread] = {}
@@ -9148,7 +9149,8 @@ class MemoryService:
                         (finished, error_code, wid, job_id, wid),
                     )
                 self.store.conn.commit()
-                self._graph_scene_cache.clear()
+                with self._graph_scene_cache_lock:
+                    self._graph_scene_cache.clear()
                 with self._graph_job_lock:
                     self._graph_job_threads.pop(job_id, None)
 
@@ -10753,7 +10755,6 @@ class MemoryService:
             clean_presentation,
             GRAPH_SCENE_ALGORITHM_VERSION,
         )
-        cached = self._graph_scene_cache.get(cache_key)
         # Cache hit only when both temporal axes are anchored (making the scene
         # a fixed historical query) or before the computed expiry deadline.
         # When known_at floats (defaults to system time), ghost state evolves as
@@ -10761,8 +10762,12 @@ class MemoryService:
         both_anchored = (
             clean_valid_at is not None and clean_known_at is not None
         )
-        if cached is not None and (
-                both_anchored or time.time() < cached[0]):
+        with self._graph_scene_cache_lock:
+            cached = self._graph_scene_cache.get(cache_key)
+            if cached is not None and not (both_anchored or time.time() < cached[0]):
+                self._graph_scene_cache.pop(cache_key, None)
+                cached = None
+        if cached is not None:
             if clean_presentation == "all":
                 cached_scene = cached[1]
                 scene = dict(cached_scene)
@@ -10773,10 +10778,12 @@ class MemoryService:
             scene["meta"]["query_ms"] = round(
                 (time.perf_counter() - started) * 1000.0, 3
             )
-            self._graph_scene_cache.move_to_end(cache_key)
+            # Copy outside the metadata lock; a worker may invalidate this entry in
+            # the meantime. Promote only the same surviving entry, never reinsert it.
+            with self._graph_scene_cache_lock:
+                if self._graph_scene_cache.get(cache_key) is cached:
+                    self._graph_scene_cache.move_to_end(cache_key)
             return scene
-        if cached is not None:
-            del self._graph_scene_cache[cache_key]
         present = time.time()
         query_at = clean_valid_at if clean_valid_at is not None else present
         query_known_at = clean_known_at if clean_known_at is not None else present
@@ -10897,20 +10904,21 @@ class MemoryService:
                 system_time_floating=clean_known_at is None,
             )
         )
-        # One complete scene can be many megabytes.  Keep at most one in the shared
-        # LRU while retaining the normal 16-entry budget for compact analytical views.
-        if clean_level == "complete":
-            for key in [key for key in self._graph_scene_cache if key[2] == "complete"]:
-                self._graph_scene_cache.pop(key, None)
         cached_scene = scene if clean_presentation == "all" else copy.deepcopy(scene)
         response_scene = scene
         if clean_presentation == "all":
             response_scene = dict(scene)
             response_scene["meta"] = dict(scene["meta"])
-        self._graph_scene_cache[cache_key] = (valid_until, cached_scene)
-        self._graph_scene_cache.move_to_end(cache_key)
-        while len(self._graph_scene_cache) > 16:
-            self._graph_scene_cache.popitem(last=False)
+        # Publish and enforce both budgets atomically after the expensive copy. One
+        # complete scene can be many megabytes; compact views share a 16-entry LRU.
+        with self._graph_scene_cache_lock:
+            if clean_level == "complete":
+                for key in [key for key in self._graph_scene_cache if key[2] == "complete"]:
+                    self._graph_scene_cache.pop(key, None)
+            self._graph_scene_cache[cache_key] = (valid_until, cached_scene)
+            self._graph_scene_cache.move_to_end(cache_key)
+            while len(self._graph_scene_cache) > 16:
+                self._graph_scene_cache.popitem(last=False)
         return response_scene
 
     def graph_suggest(self, query: str, *, workspace: str, limit: int = 8,
