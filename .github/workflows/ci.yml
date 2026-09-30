@@ -235,13 +235,36 @@ jobs:
           python -m pip install -e ".[test]"
       - name: Install and verify the Pi package
         working-directory: integrations/pi
+        # Windows defaults to pwsh, which reports only the last command's exit code.
+        shell: bash
         env:
           ENGRAPHIS_PI_TEST_COMMAND: engraphis-mcp
         run: |
           npm ci --ignore-scripts
           npm run verify
           npm run test:integration
-          npm audit
+          npm audit --omit=dev
+          # Development advisories fail too, except inside the Pi test host: it ships its own
+          # npm-shrinkwrap.json, which npm overrides cannot change. Those stay visible as
+          # warnings until a host release with a fixed lockfile is adopted.
+          npm audit --json > "$RUNNER_TEMP/pi-audit.json" || true
+          python - "$RUNNER_TEMP/pi-audit.json" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as handle:
+              report = json.load(handle)
+          host = "node_modules/@earendil-works/pi-coding-agent"
+          blocking = []
+          for name, vulnerability in sorted(report.get("vulnerabilities", {}).items()):
+              nodes = vulnerability.get("nodes") or []
+              if nodes and all(node == host or node.startswith(host + "/") for node in nodes):
+                  print(f"::warning::{name} ({vulnerability.get('severity')}) is pinned by the Pi test host")
+              else:
+                  blocking.append(f"{name} ({vulnerability.get('severity')})")
+          if blocking or "vulnerabilities" not in report:
+              sys.exit("npm audit found development advisories: " + (", ".join(blocking) or "no report"))
+          PY
 
   browser-accessibility:
     name: browser accessibility smoke
