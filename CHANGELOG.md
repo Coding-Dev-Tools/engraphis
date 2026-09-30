@@ -39,6 +39,10 @@ All notable changes to Engraphis are documented here. Format loosely follows
   bar is now `uncertain` with a null `is_complete`, instead of a decisive failure.
 - Local completion checks recognize `N passing` (Mocha/Jest style), `not passing`, `0 passing`
   and `errors: none`.
+- Updated the Pi extension's locked `fast-uri` to 3.1.8 and `ip-address` to 10.7.2 for newly
+  published advisories. CI runs the Pi checks under bash on Windows too, so a failed install,
+  build or test is no longer hidden behind the final audit, and development advisories fail
+  except those pinned inside the Pi test host's own lockfile, which stay visible as warnings.
 - Refreshed the public offline fixtures and source bindings in immutable v125 evidence.
 
 ## [1.7.9] - 2026-09-29
