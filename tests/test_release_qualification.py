@@ -182,8 +182,11 @@ def test_publication_writes_require_qualification_except_scoped_release_waivers(
     root = Path(__file__).resolve().parents[1]
     workflow = yaml.safe_load((root / ".github/workflows/release.yml").read_text(encoding="utf-8"))
     dispatch = workflow.get("on", workflow.get(True, {})).get("workflow_dispatch", {})
-    waiver_condition = "inputs.waive_v176_qualification || inputs.waive_v178_qualification"
-    for input_name in ("waive_v176_qualification", "waive_v178_qualification"):
+    waiver_condition = (
+        "inputs.waive_v176_qualification || inputs.waive_v178_qualification"
+        " || inputs.waive_v179_qualification"
+    )
+    for input_name in ("waive_v176_qualification", "waive_v178_qualification", "waive_v179_qualification"):
         waiver_input = dispatch.get("inputs", {}).get(input_name, {})
         assert waiver_input.get("type") == "boolean"
         assert waiver_input.get("default") is False
@@ -200,15 +203,18 @@ def test_publication_writes_require_qualification_except_scoped_release_waivers(
                 assert step.get("if") == waiver_condition
                 assert "verified-dist/*" not in step["run"]
                 assert "release-evidence/*" not in step["run"]
-                assert "true:false:v1.7.6:6a441a75c8dd159607fa3933da83f600864b9146" in step["run"]
-                assert "false:true:v1.7.8:dce68e1602e580cd51b71e26db2ab04238df7df4" in step["run"]
+                assert "true:false:false:v1.7.6:6a441a75c8dd159607fa3933da83f600864b9146" in step["run"]
+                assert "false:true:false:v1.7.8:dce68e1602e580cd51b71e26db2ab04238df7df4" in step["run"]
+                assert "false:false:true:v1.7.9:c6871b9bf506eec6cebe96beee1ac252429a7b99" in step["run"]
                 assert step["env"]["WAIVE_V176"] == "${{ inputs.waive_v176_qualification }}"
                 assert step["env"]["WAIVE_V178"] == "${{ inputs.waive_v178_qualification }}"
+                assert step["env"]["WAIVE_V179"] == "${{ inputs.waive_v179_qualification }}"
                 continue
             if "scripts.verify_release_qualification" in step.get("run", ""):
                 if name == "github-release-repair":
                     assert step.get("if") == (
-                        "${{ !inputs.waive_v176_qualification && !inputs.waive_v178_qualification }}"
+                        "${{ !inputs.waive_v176_qualification && !inputs.waive_v178_qualification"
+                        " && !inputs.waive_v179_qualification }}"
                     )
                 else:
                     assert "if" not in step
@@ -238,9 +244,10 @@ def test_publication_writes_require_qualification_except_scoped_release_waivers(
     waiver_guard = next(step for step in repair_steps
                         if step.get("name") == "Enforce and record the release-specific qualification waiver")
     assert waiver_guard.get("if") == waiver_condition
-    assert "true:false:v1.7.6|false:true:v1.7.8" in waiver_guard["run"]
+    assert "true:false:false:v1.7.6|false:true:false:v1.7.8|false:false:true:v1.7.9" in waiver_guard["run"]
     assert waiver_guard["env"]["WAIVE_V176"] == "${{ inputs.waive_v176_qualification }}"
     assert waiver_guard["env"]["WAIVE_V178"] == "${{ inputs.waive_v178_qualification }}"
+    assert waiver_guard["env"]["WAIVE_V179"] == "${{ inputs.waive_v179_qualification }}"
     disclosure = next(step for step in repair_steps
                       if step.get("name") == "Disclose the qualification waiver before PyPI repair")
     publication = next(step for step in repair_steps
@@ -258,7 +265,7 @@ def test_publication_writes_require_qualification_except_scoped_release_waivers(
 
 @pytest.mark.skipif(os.name == "nt", reason="release workflow executes in Linux bash")
 @pytest.mark.parametrize("existing,edit_fails", [(False, False), (True, False), (True, True)])
-@pytest.mark.parametrize("tag", ["v1.7.6", "v1.7.8"])
+@pytest.mark.parametrize("tag", ["v1.7.6", "v1.7.8", "v1.7.9"])
 def test_waiver_disclosure_cannot_follow_github_publication(tmp_path, existing, edit_fails, tag):
     yaml = pytest.importorskip("yaml")
     bash = shutil.which("bash")
@@ -412,6 +419,7 @@ fi
 @pytest.mark.parametrize("tag,commit", [
     ("v1.7.6", "6a441a75c8dd159607fa3933da83f600864b9146"),
     ("v1.7.8", "dce68e1602e580cd51b71e26db2ab04238df7df4"),
+    ("v1.7.9", "c6871b9bf506eec6cebe96beee1ac252429a7b99"),
 ])
 def test_public_waiver_notice_precedes_pypi_even_if_later_repair_fails(
     tmp_path, existing, edit_fails, draft, tag, commit,
@@ -454,6 +462,7 @@ esac
                    "ENGRAPHIS_REPAIR_COMMIT": commit,
                    "WAIVE_V176": str(tag == "v1.7.6").lower(),
                    "WAIVE_V178": str(tag == "v1.7.8").lower(),
+                   "WAIVE_V179": str(tag == "v1.7.9").lower(),
                    "GH_RUN_URL": "https://example.test/run/1", "GH_CALLS": str(calls_path),
                    "EXISTING": str(existing).lower(), "EDIT_FAILS": str(edit_fails).lower(),
                    "DRAFT": str(draft).lower()}
@@ -475,18 +484,26 @@ esac
 
 
 @pytest.mark.skipif(os.name == "nt", reason="release workflow executes in Linux bash")
-@pytest.mark.parametrize("tag,commit,v176,v178", [
-    ("v1.7.7", "6a441a75c8dd159607fa3933da83f600864b9146", "true", "false"),
-    ("v1.7.6", "a" * 40, "true", "false"),
-    ("v1.7.6", "", "true", "false"),
-    ("v1.7.8", "a" * 40, "false", "true"),
-    ("v1.7.8", "", "false", "true"),
-    ("v1.7.8", "dce68e1602e580cd51b71e26db2ab04238df7df4", "true", "false"),
-    ("v1.7.6", "6a441a75c8dd159607fa3933da83f600864b9146", "false", "true"),
-    ("v1.7.8", "dce68e1602e580cd51b71e26db2ab04238df7df4", "true", "true"),
-    ("v1.7.8", "dce68e1602e580cd51b71e26db2ab04238df7df4", "false", "false"),
+@pytest.mark.parametrize("tag,commit,v176,v178,v179", [
+    ("v1.7.7", "6a441a75c8dd159607fa3933da83f600864b9146", "true", "false", "false"),
+    ("v1.7.6", "a" * 40, "true", "false", "false"),
+    ("v1.7.6", "", "true", "false", "false"),
+    ("v1.7.8", "a" * 40, "false", "true", "false"),
+    ("v1.7.8", "", "false", "true", "false"),
+    ("v1.7.8", "dce68e1602e580cd51b71e26db2ab04238df7df4", "true", "false", "false"),
+    ("v1.7.6", "6a441a75c8dd159607fa3933da83f600864b9146", "false", "true", "false"),
+    ("v1.7.8", "dce68e1602e580cd51b71e26db2ab04238df7df4", "true", "true", "false"),
+    ("v1.7.8", "dce68e1602e580cd51b71e26db2ab04238df7df4", "false", "false", "false"),
+    ("v1.7.9", "a" * 40, "false", "false", "true"),
+    ("v1.7.9", "", "false", "false", "true"),
+    ("v1.7.8", "dce68e1602e580cd51b71e26db2ab04238df7df4", "false", "false", "true"),
+    ("v1.7.9", "c6871b9bf506eec6cebe96beee1ac252429a7b99", "false", "true", "true"),
+    ("v1.7.9", "c6871b9bf506eec6cebe96beee1ac252429a7b99", "true", "false", "true"),
+    ("v1.7.9", "c6871b9bf506eec6cebe96beee1ac252429a7b99", "false", "false", "false"),
 ])
-def test_waiver_rejects_a_different_retained_candidate_before_any_public_write(tmp_path, tag, commit, v176, v178):
+def test_waiver_rejects_a_different_retained_candidate_before_any_public_write(
+    tmp_path, tag, commit, v176, v178, v179,
+):
     yaml = pytest.importorskip("yaml")
     bash = shutil.which("bash")
     if bash is None:
@@ -507,23 +524,30 @@ def test_waiver_rejects_a_different_retained_candidate_before_any_public_write(t
                                              "RUNNER_TEMP": str(tmp_path), "RELEASE_TAG": tag,
                                              "ENGRAPHIS_REPAIR_COMMIT": commit, "GH_REPO": "test/repo",
                                              "WAIVE_V176": v176, "WAIVE_V178": v178,
+                                             "WAIVE_V179": v179,
                                              "GH_CALLS": str(calls_path)})
     assert result.returncode != 0
     assert not calls_path.exists()
 
 
 @pytest.mark.skipif(os.name == "nt", reason="release workflow executes in Linux bash")
-@pytest.mark.parametrize("tag,v176,v178,allowed", [
-    ("v1.7.6", "true", "false", True),
-    ("v1.7.8", "false", "true", True),
-    ("v1.7.6", "true", "true", False),
-    ("v1.7.8", "true", "true", False),
-    ("v1.7.8", "true", "false", False),
-    ("v1.7.6", "false", "true", False),
-    ("v1.7.9", "false", "true", False),
-    ("v1.7.8", "false", "false", False),
+@pytest.mark.parametrize("tag,v176,v178,v179,allowed", [
+    ("v1.7.6", "true", "false", "false", True),
+    ("v1.7.8", "false", "true", "false", True),
+    ("v1.7.9", "false", "false", "true", True),
+    ("v1.7.6", "true", "true", "false", False),
+    ("v1.7.8", "true", "true", "false", False),
+    ("v1.7.8", "true", "false", "false", False),
+    ("v1.7.6", "false", "true", "false", False),
+    ("v1.7.9", "false", "true", "false", False),
+    ("v1.7.8", "false", "false", "false", False),
+    ("v1.7.9", "false", "false", "false", False),
+    ("v1.7.9", "true", "false", "true", False),
+    ("v1.7.9", "false", "true", "true", False),
+    ("v1.7.9", "true", "true", "true", False),
+    ("v1.7.8", "false", "false", "true", False),
 ])
-def test_waiver_input_guard_rejects_ambiguous_or_unapproved_requests(tmp_path, tag, v176, v178, allowed):
+def test_waiver_input_guard_rejects_ambiguous_or_unapproved_requests(tmp_path, tag, v176, v178, v179, allowed):
     yaml = pytest.importorskip("yaml")
     bash = shutil.which("bash")
     if bash is None:
@@ -538,6 +562,7 @@ def test_waiver_input_guard_rejects_ambiguous_or_unapproved_requests(tmp_path, t
     result = subprocess.run([bash, str(script)], cwd=tmp_path, capture_output=True, text=True,
                             timeout=20, env={**os.environ, "RELEASE_TAG": tag,
                                              "WAIVE_V176": v176, "WAIVE_V178": v178,
+                                             "WAIVE_V179": v179,
                                              "GH_ACTOR": "test-actor", "GH_RUN_URL": "https://example.test/run/1",
                                              "GITHUB_STEP_SUMMARY": str(summary)})
     assert (result.returncode == 0) is allowed, result.stderr
