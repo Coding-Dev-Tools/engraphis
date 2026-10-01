@@ -20,6 +20,14 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 3
+    # The shipped force-graph bundle has local CSP patches and locked provenance.
+    # Version upgrades follow docs/DASHBOARD_VENDOR_ASSETS.md; security updates remain enabled.
+    ignore:
+      - dependency-name: "force-graph"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
+          - "version-update:semver-patch"
     labels:
       - "dependencies"
   - package-ecosystem: "docker"
