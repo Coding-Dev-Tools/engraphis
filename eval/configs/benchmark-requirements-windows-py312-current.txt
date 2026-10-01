@@ -1,3 +1,5 @@
+# Dependencies for new Windows Python 3.12 campaigns; capture a fresh observed inventory.
+# Retained campaigns keep benchmark-requirements-windows-py312.txt unchanged.
 annotated-doc==0.0.5
 annotated-types==0.8.0
 anyio==4.15.1
@@ -66,7 +68,7 @@ pydantic==2.13.5
 pydantic-settings==2.15.0
 pydantic_core==2.46.5
 pygments==2.21.0
-pyjwt==2.14.0
+pyjwt==2.15.1
 pypdf==6.18.1
 pyright==1.1.413
 pytesseract==0.3.13

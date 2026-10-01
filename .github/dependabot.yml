@@ -5,6 +5,10 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
+    # This file reproduces retained campaigns and must match their observed inventory.
+    # New campaigns use benchmark-requirements-windows-py312-current.txt instead.
+    exclude-paths:
+      - "eval/configs/benchmark-requirements-windows-py312.txt"
     # MCP 2 changes the server API; migrate and qualify it separately.
     ignore:
       - dependency-name: "mcp"
