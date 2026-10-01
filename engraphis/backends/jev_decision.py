@@ -5,13 +5,22 @@ imports an optional SDK nor discovers credentials or sibling repositories. No
 request is made without explicit per-call authorization. Offline, unavailable,
 fallback, uncertain and malformed responses defer to deterministic core behavior.
 The adapter is intentionally not wired into the write or grounded-recall paths.
+
+Backing a ``DecisionClient`` with Claude: pin an exact model id such as
+``claude-sonnet-5-5`` (bounded classification questions rarely justify
+``claude-opus-5-5``; measure before paying for it), never an alias ending in ``latest``.
+Keep ``allow_fallback`` false so a silent model switch cannot change the pinned identity.
+Newer Claude models reject ``temperature`` and forced ``tool_choice``, so ask the
+``choice`` and ``noul`` questions through structured output or a plain JSON reply, and
+let ``LLMClient`` (``engraphis.llm.client``) drop sampling parameters for those models.
 """
 from __future__ import annotations
 
+import inspect
 import math
 import os
 from dataclasses import dataclass
-from typing import Dict, Optional, Protocol, Sequence, Tuple
+from typing import Callable, Dict, Optional, Protocol, Sequence, Tuple
 
 from engraphis.core.interfaces import MemoryRecord
 
@@ -58,6 +67,8 @@ class DecisionClient(Protocol):
 
     Caller owns immutable model identity, endpoint, deadlines, data filtering and
     credentials. Passing an arbitrary SDK object is not a verified integration.
+    Clients may additionally accept per-call consent and classification keywords;
+    the adapter binds the supported signature before making a single invocation.
     """
 
     @property
@@ -81,11 +92,24 @@ def get_decision_backend(
     model: Optional[str] = None, offline_mode: bool = False,
 ) -> Optional[JevDecisionBackend]:
     selected = (name or os.environ.get("ENGRAPHIS_DECISION_BACKEND", "none")).strip().lower()
-    if selected in ("jev", "typesafe", "system1", "auto"):
+    if selected in ("jev", "typesafe", "system1", "byok", "managed", "auto"):
         backend = JevDecisionBackend(client=client, model=model, offline_mode=offline_mode)
         if backend.is_available:
             return backend
     return None
+
+
+# Public compatibility imports; transports are kept separate from the advisory adapter.
+from engraphis.backends.jev_transport import (  # noqa: E402,F401
+    CloudDecisionBatch,
+    EngraphisCloudDecisionClient,
+    SimpleChoiceDecision,
+    SimpleSupportDecision,
+    TypeSafeDecisionClient,
+    create_cloud_decision_client,
+    create_typesafe_decision_client,
+    select_decision_client,
+)
 
 
 class JevDecisionBackend:
@@ -115,14 +139,30 @@ class JevDecisionBackend:
 
     def _evaluate(
         self, state: str, question: DecisionQuestion, allow_remote: bool,
+        purpose: str, data_classification: str,
     ) -> Optional[DecisionBatch]:
-        if allow_remote is not True or len(state) > MAX_STATE_CHARS or not self.is_available:
+        if (allow_remote is not True or not isinstance(data_classification, str)
+                or data_classification not in {"public", "internal"}
+                or len(state) > MAX_STATE_CHARS or not self.is_available):
             return None
         client, model = self.client, self.model
         if client is None or model is None:
             return None
         try:
-            batch = client.evaluate(state, [question], model=model)
+            evaluate: Callable[..., DecisionBatch] = client.evaluate
+            signature = inspect.signature(evaluate)
+            options: Dict[str, object] = {
+                "model": model, "allow_remote": True, "purpose": purpose,
+                "data_classification": data_classification,
+            }
+            try:
+                signature.bind(state, [question], **options)
+            except TypeError:
+                # Preserve the original injected-client contract. Never retry a
+                # provider invocation: a TypeError can follow a completed request.
+                signature.bind(state, [question], model=model)
+                options = {"model": model}
+            batch = evaluate(state, [question], **options)
             return batch if batch.is_fallback is False else None
         except Exception:
             # Provider exceptions may contain request text or credentials. Do not log them.
@@ -130,6 +170,7 @@ class JevDecisionBackend:
 
     def classify_contradiction(
         self, candidate_text: str, existing_memory: MemoryRecord, *, allow_remote: bool = False,
+        data_classification: str = "internal",
     ) -> Tuple[str, float]:
         """Return an advisory relationship, or ('orthogonal', 0.0) to defer.
 
@@ -144,7 +185,8 @@ class JevDecisionBackend:
             "verdict", "Classify the relationship between the candidate and existing fact.",
             "choice", ("contradicts_and_supersedes", "reinforces", "orthogonal"),
         )
-        batch = self._evaluate(state, question, allow_remote)
+        batch = self._evaluate(state, question, allow_remote, "classify_contradiction",
+                               data_classification)
         try:
             decision = batch.get_choice("verdict") if batch is not None else None
             if (decision is not None and decision.selected in _VERDICTS
@@ -156,6 +198,7 @@ class JevDecisionBackend:
 
     def verify_grounded_support(
         self, query: str, evidence_text: str, *, allow_remote: bool = False,
+        data_classification: str = "internal",
     ) -> Tuple[bool, float]:
         """Return advisory support; absent or uncertain evidence never certifies it."""
         if not query.strip() or not evidence_text.strip():
@@ -164,7 +207,8 @@ class JevDecisionBackend:
         question = DecisionQuestion(
             "has_support", "Does the evidence directly support answering the query?", "noul",
         )
-        batch = self._evaluate(state, question, allow_remote)
+        batch = self._evaluate(state, question, allow_remote, "verify_support",
+                               data_classification)
         try:
             decision = batch.get_noul("has_support") if batch is not None else None
             if (decision is not None and _probability(decision.probability)

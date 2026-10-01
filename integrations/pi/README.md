@@ -40,7 +40,7 @@ When published, install the Pi package:
 pi install npm:@engraphis/pi
 ```
 
-The extension is tested with Pi 0.83.x, Node 22.19 or later, and Engraphis
+The extension is tested with Pi 0.87.1, Node 22.19 or later, and Engraphis
 1.5.x. Pi supplies its own Pi and TypeBox runtime modules, following Pi's package
 contract; the extension checks the required Smart MCP tool names when it opens
 the local server and reports an actionable compatibility error if they are absent.
@@ -85,6 +85,9 @@ project MCP configuration files or embed database paths and credentials in sourc
 
 Set `ENGRAPHIS_WORKSPACE` and (optionally) `ENGRAPHIS_REPO` to provide default scopes
 for routine Smart tools. Model-supplied values always take precedence.
+To follow a saved project default, set only `ENGRAPHIS_REPO` and leave
+`ENGRAPHIS_WORKSPACE` unset. A supplied session inherits its own workspace and repo.
+See [workspace setup](../../docs/WORKSPACE_ORGANIZATION.md).
 
 ## Trust model
 
@@ -109,9 +112,19 @@ in normal recall. This behavior is intentional and unchanged by the Pi extension
 ## Development
 
 ```bash
-npm install --ignore-scripts
+npm install --global --ignore-scripts npm@11.12.1
+npm ci --ignore-scripts
+npm install --prefix node_modules/@earendil-works/pi-coding-agent --ignore-scripts --no-save --omit=dev brace-expansion@5.0.12
 npm run verify
+npm audit
+npm audit --no-package-lock --include=dev
 ```
+
+The pinned Pi test host includes its own shrinkwrap, which reinstalls an older
+`brace-expansion` despite this package's fixed nested pin. The scoped install repairs
+that exact dependency while retaining the host's other locked dependencies. Its
+`--omit=dev` excludes the host's own authoring tools; the extension's development
+dependencies remain installed and audited. CI also verifies the installed version.
 
 `npm run verify` type-checks the package, runs its configuration tests, and previews
 the publish tarball. The package pins the MCP SDK; update it only with a compatibility

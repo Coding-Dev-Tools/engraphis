@@ -35,6 +35,12 @@ _CONFIG_ENV_ASSIGNMENT = re.compile(
 )
 
 
+def _validate_trusted_env_size(content: str) -> None:
+    """Never publish configuration that the bounded reader cannot load."""
+    if len(content.encode("utf-8")) > _MAX_CONFIG_ENV_BYTES:
+        raise UnsafeStateFile("trusted config file exceeds the 1 MiB size limit")
+
+
 def _resolve_config_env_path(
     *,
     environ: Optional[dict] = None,
@@ -738,6 +744,23 @@ def _parse_llm_provider(value: str) -> str:
     return (value or "").strip().lower() or "openai"
 
 
+#: Accepted ``ENGRAPHIS_LLM_EFFORT`` levels (Anthropic ``output_config.effort``).
+LLM_EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+
+
+def _parse_llm_effort(value: str) -> str:
+    """Normalize the reasoning-effort level; blank or unknown values use ``medium``."""
+    normalized = (value or "").strip().lower()
+    if not normalized:
+        return "medium"
+    if normalized not in LLM_EFFORT_LEVELS:
+        _logger.warning(
+            "ENGRAPHIS_LLM_EFFORT is not one of %s; using 'medium'", ", ".join(LLM_EFFORT_LEVELS)
+        )
+        return "medium"
+    return normalized
+
+
 def _validate_service_mode(value: str) -> str:
     """Validate service mode against allowed values.
 
@@ -809,7 +832,7 @@ def _env_bool(key: str, default: bool) -> bool:
 
 
 def persist_project_env(values: dict[str, str], path: Optional[Path] = None) -> Path:
-    """Upsert non-secret runtime settings in the trusted config file atomically.
+    """Upsert runtime settings in the trusted config file atomically.
 
     With no explicit *path*, dashboard controls persist beside other owner-private
     Engraphis state. The process-fixed ``ENGRAPHIS_ENV_FILE`` override is selected
@@ -866,11 +889,13 @@ def persist_project_env(values: dict[str, str], path: Optional[Path] = None) -> 
         if key not in found:
             rendered.append(f"{key}={value}")
 
+    content = "\n".join(rendered).rstrip() + "\n"
+    _validate_trusted_env_size(content)
     if trusted_target:
         ensure_owner_private_dir(target.parent)
     atomic_private_text(
         target,
-        "\n".join(rendered).rstrip() + "\n",
+        content,
         mode=mode,
         expected_stat=source_stat,
     )
@@ -971,12 +996,34 @@ class Settings:
     llm_extra_headers: dict = field(
         default_factory=lambda: _parse_headers(_env("ENGRAPHIS_LLM_EXTRA_HEADERS", ""))
     )
+    # Reasoning effort for Claude models that think by default (Opus 5+, Sonnet 5+, Fable).
+    # Extraction, consolidation and grounded synthesis are bounded tasks, so ``medium``
+    # balances quality against latency and cost; raise it only when an eval shows headroom.
+    # Ignored by every other provider and model.
+    llm_effort: str = field(
+        default_factory=lambda: _parse_llm_effort(_env("ENGRAPHIS_LLM_EFFORT", ""))
+    )
     # OFF by default (opt-in): a successful dashboard connection test enables
     # schema-validated extraction ONLY while the user has turned extraction on (the
     # Settings On/Off control, or ENGRAPHIS_LLM_AUTO_EXTRACT=1) — so a mere connection
     # test never silently starts provider egress of ingested content.
     llm_auto_extract: bool = field(
         default_factory=lambda: _env_bool("ENGRAPHIS_LLM_AUTO_EXTRACT", False)
+    )
+
+    # Advisory Jev decisions: "none" (default), "local", "managed", "auto" (managed
+    # when configured), or explicit "byok". Every remote call also needs permission.
+    decision_backend: str = field(
+        default_factory=lambda: _env("ENGRAPHIS_DECISION_BACKEND", "none").strip().lower()
+    )
+    decision_model: str = field(
+        default_factory=lambda: _env("ENGRAPHIS_DECISION_MODEL", "jev-1.13.0").strip()
+    )
+    typesafe_api_key: str = field(
+        default_factory=lambda: _env("TYPESAFE_API_KEY", "") or _env("JEV_API_KEY", "")
+    )
+    typesafe_base_url: str = field(
+        default_factory=lambda: _env("TYPESAFE_BASE_URL", "https://api.typesafe.ai").strip()
     )
 
     # Optional cross-encoder reranker model. Empty (default) -> IdentityReranker (offline).
@@ -1053,6 +1100,19 @@ class Settings:
     def vector_backend_identity(self) -> dict:
         """Return the configured vs resolved vector backend identities for health."""
         return {"configured": self.vector_backend, "resolved": self.resolved_vector_backend}
+
+    @property
+    def has_decision_backend(self) -> bool:
+        """Configuration presence, not provider health or permission to send a request."""
+        if self.decision_backend in {"byok", "typesafe", "jev", "system1"}:
+            from engraphis.backends.jev_transport import TypeSafeDecisionClient
+            return TypeSafeDecisionClient(
+                api_key=self.typesafe_api_key, base_url=self.typesafe_base_url,
+            ).is_configured
+        if self.decision_backend in {"managed", "auto"}:
+            from engraphis.backends.jev_transport import EngraphisCloudDecisionClient
+            return EngraphisCloudDecisionClient().is_configured
+        return False
 
     def __post_init__(self) -> None:
         """Validate critical settings and fail fast on configuration errors."""

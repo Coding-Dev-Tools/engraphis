@@ -1128,6 +1128,62 @@ def test_graph_neighbors_apply_workspace_and_repo_scope(store):
     assert [(edge.src, edge.dst) for edge in rows] == [("shared", "visible")]
 
 
+@pytest.mark.parametrize("prompt_only", [False, True])
+@pytest.mark.parametrize("include_ancestors", [False, True])
+def test_scoped_neighbors_preserve_both_endpoints_self_loops_and_paged_limits(
+        store, prompt_only, include_ancestors):
+    workspace_id = store.get_or_create_workspace("selected-neighbors")
+    other_workspace = store.get_or_create_workspace("foreign-neighbors")
+    repo_id = store.get_or_create_repo(workspace_id, "selected")
+    other_repo = store.get_or_create_repo(workspace_id, "other")
+    for suffix, src, dst, edge_workspace, edge_repo, provenance in (
+        ("00_pending_src", "seed", "pending-src", workspace_id, repo_id,
+         {"trusted": True, "review_state": "pending"}),
+        ("01_pending_dst", "pending-dst", "seed", workspace_id, repo_id,
+         {"trusted": True, "review_state": "pending"}),
+        ("10_public_src", "seed", "public-src", workspace_id, repo_id, {}),
+        ("11_public_dst", "public-dst", "seed", workspace_id, repo_id, {}),
+        ("12_loop", "seed", "seed", workspace_id, repo_id, {}),
+        ("13_ancestor", "seed", "ancestor", workspace_id, None, {}),
+        ("foreign_src", "seed", "foreign-src", other_workspace, None, {}),
+        ("foreign_dst", "foreign-dst", "seed", other_workspace, None, {}),
+        ("other_repo_src", "seed", "other-src", workspace_id, other_repo, {}),
+        ("other_repo_dst", "other-dst", "seed", workspace_id, other_repo, {}),
+    ):
+        store.upsert_edge(Edge(
+            id=f"edg_{suffix}", src=src, dst=dst, relation="related",
+            workspace_id=edge_workspace, repo_id=edge_repo, layer=GraphLayer.ENTITY,
+            valid_from=0, ingested_at=0, provenance=provenance,
+        ))
+    for suffix, src, dst, temporal in (
+        ("closed", "seed", "closed", {"valid_to": 50}),
+        ("unknown", "unknown", "seed", {"ingested_at": 200}),
+        ("future", "seed", "future", {"valid_from": 200}),
+        ("expired", "expired", "seed", {"expired_at": 50}),
+    ):
+        store.upsert_edge(Edge(
+            id=f"edg_{suffix}", src=src, dst=dst, relation="related",
+            workspace_id=workspace_id, repo_id=repo_id, layer=GraphLayer.ENTITY,
+            **{"valid_from": 0, "ingested_at": 0, **temporal},
+        ))
+    expected = ["edg_10_public_src", "edg_11_public_dst", "edg_12_loop"]
+    if not prompt_only:
+        expected[:0] = ["edg_00_pending_src", "edg_01_pending_dst"]
+    if include_ancestors:
+        expected.append("edg_13_ancestor")
+    flt = SearchFilter(
+        workspace_id=workspace_id, repo_id=repo_id, include_ancestors=include_ancestors,
+        valid_at=100, known_at=100,
+    )
+
+    for limit in (None, 1, 3):
+        rows = store.neighbors(
+            ["seed", "public-src"], flt=flt, layers=[GraphLayer.ENTITY],
+            prompt_only=prompt_only, limit=limit,
+        )
+        assert [edge.id for edge in rows] == expected[:limit]
+
+
 def test_memory_links_honor_known_at_empty_layers_and_large_id_sets(
         store, monkeypatch):
     from engraphis.core import store as store_mod
@@ -2738,6 +2794,59 @@ def test_secure_erase_classifies_content_free_tombstone_export(
         "id", "deleted_at", "device", "workspace_id", "repo_id",
         "export_class",
     }
+
+
+@pytest.mark.parametrize(
+    ("entity_scope", "edge_scope", "retained"),
+    [
+        pytest.param("owned", "same", True, id="same-workspace"),
+        pytest.param("global", "global", True, id="legacy-global"),
+        pytest.param("owned", "foreign", False, id="foreign-edge-cannot-retain-owned"),
+        pytest.param("owned", "global", False, id="unscoped-edge-cannot-retain-owned"),
+        pytest.param("global", "same", True, id="global-with-owned-edge"),
+        pytest.param("global", "foreign", True, id="global-with-other-workspace-edge"),
+        pytest.param("global", "absent", False, id="global-orphan"),
+        pytest.param("owned", "absent", False, id="owned-orphan"),
+    ],
+)
+@pytest.mark.parametrize("endpoint", ["src", "dst", "self-loop"])
+def test_secure_erase_preserves_scope_compatible_shared_entity_incidence(
+        store, entity_scope, edge_scope, retained, endpoint):
+    workspace_id = store.get_or_create_workspace("erase-incidence")
+    other_workspace = store.get_or_create_workspace("foreign-incidence")
+    memory_id = store.add_memory(MemoryRecord(
+        id="mem_incidence", content="synthetic source", workspace_id=workspace_id,
+    ))
+    entity_workspace = None if entity_scope == "global" else workspace_id
+    entity_id = store.upsert_entity(Node(
+        id="ent_incidence", name="Shared synthetic entity", workspace_id=entity_workspace,
+    ))
+    store.link_memory_entity(
+        memory_id=memory_id, entity_id=entity_id, workspace_id=workspace_id, repo_id=None,
+    )
+    if edge_scope != "absent":
+        edge_workspace = {
+            "same": workspace_id, "foreign": other_workspace, "global": None,
+        }[edge_scope]
+        other_entity = store.upsert_entity(Node(
+            id="ent_other", name="Other retained entity", workspace_id=edge_workspace,
+        ))
+        store.upsert_edge(Edge(
+            id="edg_incidence", src=other_entity if endpoint == "dst" else entity_id,
+            dst=other_entity if endpoint == "src" else entity_id, relation="related",
+            workspace_id=edge_workspace,
+        ))
+
+    store.secure_erase_memory(memory_id)
+
+    assert store.get_memory(memory_id) is None
+    edge = store.conn.execute("SELECT 1 FROM edges WHERE id='edg_incidence'").fetchone()
+    assert (edge is not None) == (edge_scope != "absent")
+    entity = store.conn.execute("SELECT 1 FROM entities WHERE id=?", (entity_id,)).fetchone()
+    assert (entity is not None) == retained
+    assert store.conn.execute(
+        "SELECT 1 FROM memory_entities WHERE memory_id=?", (memory_id,),
+    ).fetchone() is None
 
 
 def test_secure_erase_defers_maintenance_for_caller_owned_transaction(store):

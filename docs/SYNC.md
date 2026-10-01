@@ -30,7 +30,7 @@ for pricing and included services.
 
 ## Trial and grace
 
-The no-card Pro or Team trial begins after email confirmation and lasts **3 active days for Pro or 10 active days for Team**.
+The no-card Pro or Team trial begins after email confirmation and lasts **7 active days for Pro or 14 active days for Team**.
 
 `workspace_write_grace` is separate and private-service enforced. It may preserve bounded
 hosted-account continuity operations for at most **24 hours** following an authoritative

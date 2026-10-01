@@ -17,8 +17,8 @@ from typing import Optional
 from urllib.parse import urlsplit, urlunsplit
 
 
-TRIAL_DAYS = 3
-TRIAL_SECONDS = 3 * 24 * 60 * 60
+TRIAL_DAYS = 7
+TRIAL_SECONDS = 7 * 24 * 60 * 60
 MAX_HOSTED_ACCOUNT_GRACE_SECONDS = 24 * 60 * 60
 # Compatibility alias for clients released before the public/private boundary was made
 # explicit. The public local core is never paywalled; this duration belongs to private

@@ -32,6 +32,8 @@ SMART_TOOL_NAMES = {
 # This is deliberately an exact snapshot, rather than a count-only check: a
 # legacy client may depend on either deprecated alias retaining its behavior.
 CLASSIC_TOOL_NAMES = {
+    "engraphis_list_workspaces", "engraphis_get_workspace_routing",
+    "engraphis_set_workspace_routing",
     "engraphis_remember", "engraphis_remember_many",
     "engraphis_recall", "engraphis_recall_context",
     "engraphis_why", "engraphis_timeline", "engraphis_recall_proactive",
@@ -44,6 +46,7 @@ CLASSIC_TOOL_NAMES = {
     "engraphis_ingest", "engraphis_consolidate", "engraphis_ingest_postgres_schema",
     "engraphis_receipts", "engraphis_context_savings", "engraphis_verify_receipts",
     "engraphis_export_receipts", "engraphis_check_update", "engraphis_link_symbol",
+    "engraphis_decide",
 }
 
 
@@ -139,12 +142,12 @@ def test_smart_remember_rejects_invalid_exact_values(monkeypatch, content, value
     assert server._service.store.conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == 0
 
 
-def test_classic_mcp_retains_the_34_named_tool_compatibility_surface(monkeypatch):
+def test_classic_mcp_retains_the_named_tool_compatibility_surface(monkeypatch):
     server = _memory_server(monkeypatch)
 
     classic = _tools(server, "classic_mcp")
     assert set(classic) == CLASSIC_TOOL_NAMES
-    assert len(classic) == 35
+    assert len(classic) == 39
     # These aliases carry distinct historical defaults and must not disappear.
     assert {"engraphis_answer", "engraphis_forget"} <= set(classic)
 
@@ -398,6 +401,7 @@ def test_gateway_context_usage_counts_authoritative_receipt_once(monkeypatch):
     ("engraphis_discover_actions", "viewer"),
     ("engraphis_execute_read", "viewer"),
     ("engraphis_execute_action", "admin"),
+    ("engraphis_decide", "member"),
     ("engraphis_remember", "member"),
     ("engraphis_consolidate", "admin"),
 ])

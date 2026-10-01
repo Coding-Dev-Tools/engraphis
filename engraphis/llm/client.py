@@ -11,6 +11,7 @@ import json
 import logging
 import math
 import os
+import re
 import threading
 from typing import Any, Optional
 from urllib.parse import urlsplit, urlunsplit
@@ -73,6 +74,39 @@ def validate_llm_base_url(value: str) -> str:
     path = parts.path.rstrip("/")
     return urlunsplit((scheme, parts.netloc, path, "", ""))
 
+# Fable and Mythos ids may omit a numeric version (``claude-mythos-preview``); every
+# member of those families rejects sampling and thinks by default.
+_CLAUDE_MODEL_RE = re.compile(
+    r"claude-(?:(opus|sonnet|haiku)-(\d+)(?:-(\d{1,2})(?!\d))?|(fable|mythos)(?![a-z0-9]))"
+)
+
+# Newer Claude models think by default, so hidden reasoning tokens share ``max_tokens`` with
+# the visible reply. Keep enough headroom that a small caller cap cannot end the turn before
+# any text is produced.
+_ANTHROPIC_THINKING_MIN_TOKENS = 4096
+
+
+def _anthropic_model_traits(model: Optional[str]) -> tuple[bool, bool]:
+    """Return ``(accepts_sampling, thinks_by_default)`` for a Claude model id.
+
+    Opus 4.7+, Sonnet 5+, Fable and Mythos reject ``temperature``/``top_p``/``top_k``
+    with HTTP 400, and Opus 5+, Sonnet 5+, Fable and Mythos run adaptive thinking unless
+    told otherwise. Older or unrecognized ids keep the classic contract (sampling accepted,
+    no default thinking), so legacy models and proxies behave exactly as before.
+    """
+    match = _CLAUDE_MODEL_RE.search((model or "").lower())
+    if match is None:
+        return True, False
+    if match.group(4):
+        return False, True
+    family, major, minor = match.group(1), int(match.group(2)), int(match.group(3) or 0)
+    if family == "opus":
+        return (major, minor) < (4, 7), major >= 5
+    if family == "sonnet":
+        return major < 5, major >= 5
+    return major < 5, False
+
+
 _THOUGHT_SYSTEM_PROMPT = (
     "You are a memory consolidation engine. You receive recalled memory context "
     "and must produce a concise latent-state update as JSON only (no markdown, no "
@@ -125,9 +159,11 @@ class LLMClient:
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         extra_headers: Optional[dict] = None,
+        effort: Optional[str] = None,
     ) -> None:
         self.provider = (provider or settings.llm_provider).lower()
         self.model = model or settings.llm_model
+        self.effort = effort or settings.llm_effort
         self.api_key = api_key or settings.llm_api_key
         configured_base_url = (
             base_url or settings.llm_base_url or _PROVIDER_BASE_URLS.get(self.provider, "")
@@ -304,6 +340,7 @@ class LLMClient:
         self, messages, system, temperature, max_tokens, timeout=None
     ) -> str:
         """Anthropic Messages API."""
+        accepts_sampling, thinks_by_default = _anthropic_model_traits(self.model)
         body: dict[str, Any] = {
             "model": self.model,
             "messages": [_anthropic_msg(m) for m in messages],
@@ -311,8 +348,11 @@ class LLMClient:
         }
         if system:
             body["system"] = system
-        if temperature is not None:
+        if temperature is not None and accepts_sampling:
             body["temperature"] = temperature
+        if thinks_by_default:
+            body["max_tokens"] = max(body["max_tokens"], _ANTHROPIC_THINKING_MIN_TOKENS)
+            body["output_config"] = {"effort": self.effort}
 
         headers = {
             "x-api-key": self.api_key,
@@ -324,10 +364,18 @@ class LLMClient:
         url = f"{self.base_url}/messages"
         logger.debug("LLM provider request started")
         data = self._post_json(url, body, headers, timeout=timeout)
+        # Thinking models lead with a ``thinking`` block that has no ``text`` key, so read
+        # the text blocks by type instead of assuming ``content[0]`` is the reply.
         try:
-            return data["content"][0]["text"]
-        except (KeyError, IndexError, TypeError):
+            text = "".join(
+                block["text"] for block in data["content"]
+                if isinstance(block, dict) and block.get("type") == "text"
+            )
+        except (KeyError, TypeError):
             raise ValueError("Unexpected Anthropic response format") from None
+        if not text:
+            raise ValueError("Unexpected Anthropic response format")
+        return text
 
     def _chat_google(
         self, messages, system, temperature, max_tokens, timeout=None

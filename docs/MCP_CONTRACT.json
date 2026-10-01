@@ -1,6 +1,6 @@
 {
   "schema": "engraphis-mcp-contract/v1",
-  "sha256": "3199e565fee3f7bde60979ceb11ad436b7f905870e2d4c6f68dd5c53e9ec8ba8",
+  "sha256": "7e36e055ca003f17fa67194e1c22cc0af0e3c98172228b60989f1206dd1a28d2",
   "surfaces": {
     "classic": [
       {
@@ -690,6 +690,107 @@
       {
         "annotations": {
           "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": true,
+          "readOnlyHint": false,
+          "title": "System 1 decision gating (Jev / TypeSafe AI)"
+        },
+        "description": "Request advisory typed decisions, with deterministic local fallback.\n\nBackend selection and per-call permission are both required for remote processing.\nDecisions do not authorize shell execution, memory mutation, or task completion.",
+        "inputSchema": {
+          "properties": {
+            "allow_remote": {
+              "default": false,
+              "description": "Explicitly permit this call's supplied text to leave this device.",
+              "title": "Allow Remote",
+              "type": "boolean"
+            },
+            "data_classification": {
+              "default": "internal",
+              "description": "Remote text must be public or internal; secrets are rejected.",
+              "title": "Data Classification",
+              "type": "string"
+            },
+            "existing_content": {
+              "default": "",
+              "description": "Existing memory content (required with state for 'classify_contradiction').",
+              "maxLength": 16000,
+              "title": "Existing Content",
+              "type": "string"
+            },
+            "goal": {
+              "default": "",
+              "description": "Task goal description (required with state for 'verify_completion').",
+              "maxLength": 4096,
+              "title": "Goal",
+              "type": "string"
+            },
+            "kind": {
+              "default": "guard_command",
+              "description": "Decision kind: 'guard_command' (shell safety check), 'classify_contradiction' (candidate fact vs existing memory), 'verify_support' (evidence vs query support), 'verify_completion' (turn completion check), or 'custom' (generic micro-decision).",
+              "maxLength": 64,
+              "minLength": 1,
+              "title": "Kind",
+              "type": "string"
+            },
+            "offline_mode": {
+              "default": false,
+              "description": "Use local heuristics; no remote calls.",
+              "title": "Offline Mode",
+              "type": "boolean"
+            },
+            "options": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional discrete alternatives for choice questions.",
+              "title": "Options"
+            },
+            "query": {
+              "default": "",
+              "description": "Query string (required with state for 'verify_support').",
+              "maxLength": 4096,
+              "title": "Query",
+              "type": "string"
+            },
+            "question": {
+              "default": "",
+              "description": "Custom prompt or question to answer (used for 'custom'). Also supplies state when state is blank.",
+              "maxLength": 1024,
+              "title": "Question",
+              "type": "string"
+            },
+            "recent_actions": {
+              "default": "",
+              "description": "Optional summary of recent agent actions for 'verify_completion'.",
+              "maxLength": 8192,
+              "title": "Recent Actions",
+              "type": "string"
+            },
+            "state": {
+              "default": "",
+              "description": "Input state, shell command, or evidence text to evaluate. Required for every kind except 'custom', which may use question instead. For remote processing, the combined state, labels, and kind-specific context must fit within 16,000 characters.",
+              "maxLength": 16000,
+              "title": "State",
+              "type": "string"
+            }
+          },
+          "title": "engraphis_decideArguments",
+          "type": "object"
+        },
+        "name": "engraphis_decide"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
           "idempotentHint": true,
           "openWorldHint": false,
           "readOnlyHint": false,
@@ -906,6 +1007,33 @@
           "type": "object"
         },
         "name": "engraphis_forget"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "Read a project's workspace choice"
+        },
+        "description": "Read your saved project workspace routing without changing memories or sessions.",
+        "inputSchema": {
+          "properties": {
+            "repo": {
+              "description": "Exact repository name.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Repo",
+              "type": "string"
+            }
+          },
+          "required": [
+            "repo"
+          ],
+          "title": "engraphis_get_workspace_routingArguments",
+          "type": "object"
+        },
+        "name": "engraphis_get_workspace_routing"
       },
       {
         "annotations": {
@@ -1268,6 +1396,22 @@
           "type": "object"
         },
         "name": "engraphis_link_symbol"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "List available memory workspaces"
+        },
+        "description": "List authorized workspaces and repositories to choose a memory destination.",
+        "inputSchema": {
+          "properties": {},
+          "title": "engraphis_list_workspacesArguments",
+          "type": "object"
+        },
+        "name": "engraphis_list_workspaces"
       },
       {
         "annotations": {
@@ -2506,12 +2650,19 @@
               "title": "Valid From"
             },
             "workspace": {
-              "default": "default",
-              "description": "Top-level scope, e.g. an org or product name ('acme'). Defaults to 'default' if omitted.",
-              "maxLength": 200,
-              "minLength": 1,
-              "title": "Workspace",
-              "type": "string"
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Workspace name. Omit to inherit the supplied session or saved project choice, then 'default'.",
+              "title": "Workspace"
             }
           },
           "required": [
@@ -2830,6 +2981,47 @@
       {
         "annotations": {
           "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false,
+          "title": "Save a project's workspace choice"
+        },
+        "description": "Save your project workspace routing for future omitted-workspace calls across clients.",
+        "inputSchema": {
+          "properties": {
+            "enabled": {
+              "default": true,
+              "description": "Save this choice, or remove it when false.",
+              "title": "Enabled",
+              "type": "boolean"
+            },
+            "repo": {
+              "description": "Exact repository name.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Repo",
+              "type": "string"
+            },
+            "workspace": {
+              "description": "Existing workspace to select.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Workspace",
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace",
+            "repo"
+          ],
+          "title": "engraphis_set_workspace_routingArguments",
+          "type": "object"
+        },
+        "name": "engraphis_set_workspace_routing"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
           "idempotentHint": false,
           "openWorldHint": false,
           "readOnlyHint": false,
@@ -2873,12 +3065,19 @@
               "title": "Repo"
             },
             "workspace": {
-              "default": "default",
-              "description": "Workspace the session belongs to. Defaults to 'default' if omitted (cron jobs often omit it).",
-              "maxLength": 200,
-              "minLength": 1,
-              "title": "Workspace",
-              "type": "string"
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Workspace the session belongs to. Omit to use the saved project choice, then 'default'.",
+              "title": "Workspace"
             }
           },
           "title": "engraphis_start_sessionArguments",
@@ -3524,11 +3723,19 @@
               "type": "string"
             },
             "workspace": {
-              "default": "default",
-              "description": "Memory workspace.",
-              "maxLength": 200,
-              "title": "Workspace",
-              "type": "string"
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Chosen workspace; omit for session or project routing.",
+              "title": "Workspace"
             }
           },
           "required": [
@@ -3636,11 +3843,19 @@
               "type": "integer"
             },
             "workspace": {
-              "default": "default",
-              "description": "Workspace.",
-              "maxLength": 200,
-              "title": "Workspace",
-              "type": "string"
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Chosen workspace; omit for saved project routing.",
+              "title": "Workspace"
             }
           },
           "title": "engraphis_sessionArguments",

@@ -195,7 +195,13 @@ def create_read_only_app(service: Optional[MemoryService] = None, *,
 
         request._receive = limited_receive
         try:
-            return await call_next(request)
+            response = await call_next(request)
+            # Some FastAPI/Starlette versions consume receive errors while
+            # parsing JSON and turn them into a generic 400. The byte count is
+            # authoritative even when BodyTooLarge does not escape call_next.
+            if received > MAX_READ_ONLY_BODY_BYTES:
+                return JSONResponse({"detail": "request body too large"}, status_code=413)
+            return response
         except BodyTooLarge:
             return JSONResponse({"detail": "request body too large"}, status_code=413)
         except ValueError as exc:

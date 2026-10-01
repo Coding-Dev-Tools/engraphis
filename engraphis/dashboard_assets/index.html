@@ -7,7 +7,7 @@
   <meta name="description" content="Engraphis Ledger — local-first, grounded memory operations.">
   <title>Engraphis Ledger</title>
   <link rel="icon" type="image/png" sizes="32x32" href="/v2-assets/favicon-32.png">
-  <link rel="stylesheet" href="/v2-assets/ledger.css?v=20260903-rotation-balance-1">
+  <link rel="stylesheet" href="/v2-assets/ledger.css?v=20260928-workspace-routing-1">
   <link rel="stylesheet" href="/v2-assets/memory-workflow.css?v=20260906-lifecycle-1">
 </head>
 <body data-theme="slate">
@@ -190,6 +190,22 @@
             <p>This checklist stays on this browser, separately for each workspace and project. Local memory needs no account.</p>
           </header>
           <p id="connection-progress" class="connection-progress" role="status"></p>
+          <section class="connection-routing" aria-labelledby="connection-routing-title">
+            <h2 id="connection-routing-title">Use this workspace in your agent</h2>
+            <p>Choose a workspace and project above, save its default, then copy the instructions into your agent’s project instructions. You only need to do this once per project.</p>
+            <h3>Default workspace for this project</h3>
+            <p>Save a default on this Engraphis server for agents that supply this project’s repository name and omit a workspace. An explicit workspace or a supplied session takes priority. Memory type does not choose a workspace.</p>
+            <p id="connection-routing-status" role="status" aria-live="polite">Select a project to configure its default workspace.</p>
+            <div class="header-actions">
+              <button id="connection-routing-save" class="secondary-button" type="button" disabled>Save project routing</button>
+              <button id="connection-routing-remove" class="text-button" type="button" disabled>Remove project routing</button>
+            </div>
+            <h3>Copy agent instructions</h3>
+            <p>Project instructions follow your saved default, so you can change it here later. With no project selected, the instructions use this workspace directly.</p>
+            <pre class="connection-command"><code id="connection-workspace-instructions"></code></pre>
+            <button id="connection-workspace-copy" class="secondary-button" type="button" disabled>Copy workspace instructions</button>
+            <p id="connection-workspace-copy-status" role="status"></p>
+          </section>
           <ol class="connection-steps">
             <li>
               <h2>Connect your agent</h2>
@@ -287,6 +303,12 @@
             <button id="library-refresh" class="text-button" type="button">Refresh results</button>
             <button id="library-previous" class="secondary-button" type="button" disabled>Previous page</button>
             <button id="library-next" class="secondary-button" type="button" disabled>Next page</button>
+          </div>
+
+          <div class="library-selection-toolbar" role="group" aria-label="Move memories between workspaces">
+            <button id="library-selection-toggle" class="secondary-button" type="button" aria-pressed="false">Select memories</button>
+            <span id="library-selection-status" class="project-help" role="status" aria-live="polite">Select memories on this page to move them to another workspace.</span>
+            <button id="library-move" class="primary-button" type="button" disabled>Move selected</button>
           </div>
 
           <div class="library-layout">
@@ -749,6 +771,25 @@
     </form>
   </dialog>
 
+  <dialog id="memory-move-dialog" class="graph-connections-dialog" aria-labelledby="memory-move-title" aria-describedby="memory-move-description">
+    <form id="memory-move-form" class="graph-connections-panel" novalidate>
+      <header class="graph-connections-header">
+        <div><p class="eyebrow">Organize memory</p><h2 id="memory-move-title">Move selected memories</h2></div>
+      </header>
+      <p id="memory-move-description">Preview the destination and preserved history before moving. Moving changes who can access these memories to the destination workspace’s access rules.</p>
+      <p id="memory-move-source" class="memory-context"></p>
+      <label for="memory-move-target">Destination workspace</label>
+      <select id="memory-move-target" required></select>
+      <div id="memory-move-preview" class="memory-move-preview" role="status" aria-live="polite"><p>Choose a destination, then preview the move.</p></div>
+      <p id="memory-move-error" class="form-error" role="alert" hidden></p>
+      <div class="form-actions">
+        <button id="memory-move-cancel" class="secondary-button" type="button">Cancel</button>
+        <button id="memory-move-preview-button" class="secondary-button" type="button">Preview move</button>
+        <button id="memory-move-apply" class="primary-button" type="submit" disabled>Move memories</button>
+      </div>
+    </form>
+  </dialog>
+
   <dialog id="graph-connections-dialog" class="graph-connections-dialog" aria-labelledby="graph-connections-title">
     <div class="graph-connections-panel">
       <header class="graph-connections-header">
@@ -801,11 +842,11 @@
   </dialog>
 
   <script src="/v2-assets/managed-processing.js?v=20260905-policy-1"></script>
-  <script src="/v2-assets/workflow-context.js?v=20260906-ask-home-1"></script>
+  <script src="/v2-assets/workflow-context.js?v=20260928-workspace-routing-1"></script>
   <script src="/v2-assets/memory-revision.js?v=20260906-workflow-1"></script>
   <script src="/v2-assets/memory-history.js?v=20260906-workflow-1"></script>
   <script src="/v2-assets/ask-requests.js?v=20260906-ask-home-1"></script>
   <script src="/v2-assets/graph-lifecycle.js?v=20260906-lifecycle-1"></script>
-  <script src="/v2-assets/ledger.js?v=20260927-unmerged-readiness-3"></script>
+  <script src="/v2-assets/ledger.js?v=20260928-workspace-routing-1"></script>
 </body>
 </html>

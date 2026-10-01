@@ -19,7 +19,7 @@ is covered in [CONVENTIONS.md](CONVENTIONS.md); this file is about scope.
 ## The hierarchy
 
 ```
-workspace            org or product        ("acme")          : always required on a write
+workspace            org or product        ("acme")          : every write belongs to one
   └─ repo            a repository          ("backend")       : omit only for workspace-wide facts
        └─ session    one unit of work      (session_id)      : from engraphis_session(action="start")
             └─ memory                                         : the fact itself
@@ -28,6 +28,31 @@ workspace            org or product        ("acme")          : always required o
 Names are **stable identifiers**, not prose. Reuse the exact same `workspace`/`repo` strings every
 time: recall filters match on them literally. Pick the repository's canonical name for `repo`
 (what you'd `git clone`), and a durable org/product name for `workspace`.
+
+## Choose the workspace for this work
+
+Use an explicit user or project workspace choice when one is provided. Session starts can omit
+`workspace` to use the saved mapping for their `repo`, with `default` as the fallback. Routine
+remember and recall calls first resolve an omitted workspace from an authorized supplied
+`session_id`, then the saved repo mapping. Without either, writes use `default`; recall with a
+repo but no mapping also uses `default`. Local recall with no workspace, repo, or session retains
+its broad search behavior.
+
+Explicit workspace values, including `"default"`, win over saved mappings. A workspace or repo
+that conflicts with a supplied session is rejected. Invalid or unauthorized sessions never
+fall back. Starting a session does not create a server-global current workspace: retain the
+returned `session_id` and pass it on later calls. The session response names the destination.
+
+Use the dashboard's connection setup to save a repo-to-workspace mapping and copy project
+instructions, or discover the corresponding project-routing capability. Authenticated callers
+have separate saved mappings; standalone local clients share the local mapping. The dashboard
+workspace selector alone does not change an agent's arguments. A changed mapping affects future
+calls that use it, while existing sessions keep their original destination.
+
+Use stable workspace names by client, product, or area of work. The four memory types describe
+the memory, not its routing: changing `mtype` never moves it to another workspace. Reorganize
+existing records through an explicit, previewed move rather than changing routing and assuming
+past memories moved too. See the repo's `docs/WORKSPACE_ORGANIZATION.md` for the full workflow.
 
 ## What each scope means
 
@@ -104,6 +129,9 @@ never label shared workspace storage as a private personal scope.
 `engraphis_recall` is hierarchy-aware. A repo context sees that repo plus its workspace ancestors;
 a session context sees that exact session plus its repo/workspace ancestors. Other sessions never
 leak into repo/workspace recall. Historical `user` rows can still appear as workspace ancestors
-for compatibility; they are not owner-isolated. A `repo` or `session_id` filter requires a
-`workspace`. If recall returns no results and a `note` says the workspace/repo/session is unknown,
-you simply have not written there yet.
+for compatibility; they are not owner-isolated. Routine MCP calls can resolve the workspace from
+their session or repo mapping as described above. If recall returns no results and a `note` says
+the workspace/repo is unknown, you simply have not written there yet. An unknown `session_id`
+is an error when `workspace` is omitted. With an explicit workspace, an unknown session returns
+no memories and a `note`, without broadening the search. Unauthorized sessions and conflicts
+between a known session and the supplied workspace or repo remain errors.

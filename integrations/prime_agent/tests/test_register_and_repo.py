@@ -57,6 +57,54 @@ def test_agent_repo_falls_back_to_name_when_no_default() -> None:
     assert agent.repo == "researcher"
 
 
+@pytest.mark.asyncio
+async def test_project_routing_follows_new_sessions_and_preserves_explicit_choices(fake_mcp_server):
+    from engraphis.service import MemoryService
+    from engraphis_prime_agent.agent import EngraphisPrimeAgent
+
+    service = MemoryService.create(":memory:")
+    for name in ("one", "two"):
+        service.create_workspace(name)
+    service.set_workspace_routing("one", repo="api")
+
+    async def handler(name, args):
+        if name == "engraphis_session" and args.get("action") == "end":
+            result = service.end_session(args["session_id"], summary=args.get("summary", ""))
+        elif name == "engraphis_session":
+            result = service.start_session(workspace=args.get("workspace"), repo=args.get("repo"),
+                                           agent=args.get("agent", ""), goal=args.get("goal", ""))
+        else:
+            assert name == "engraphis_remember"
+            result = service.remember(**args)
+        return {"content": [{"type": "text", "text": json.dumps(result)}]}
+
+    fake_mcp_server.tool_handler = handler
+    config = EngraphisRuntimeConfig(command="ignored", default_repo="api", environment={})
+    client = EngraphisMcpClient(config)
+    await client.connect()
+    try:
+        agent = EngraphisPrimeAgent("researcher", client, config)
+        await agent.start_session()
+        assert agent.workspace == "one"
+        assert "workspace" not in fake_mcp_server.call_log[-1][1]
+        await agent.call("engraphis_remember", {"content": "Keep the project convention."})
+        assert service.store.conn.execute("SELECT workspace_id FROM memories").fetchone()[0] == service._lookup_workspace("one")
+        await agent.end_session()
+        service.set_workspace_routing("two", repo="api")
+        await agent.start_session()
+        assert agent.workspace == "two"
+        other = service.start_session("one", repo="other")["session_id"]
+        await agent.call("engraphis_remember", {"content": "A caller-selected session.", "session_id": other})
+        assert "workspace" not in fake_mcp_server.call_log[-1][1]
+        assert "repo" not in fake_mcp_server.call_log[-1][1]
+        pinned = EngraphisPrimeAgent("pinned", client, config, workspace="default")
+        await pinned.start_session()
+        assert pinned.workspace == "default"
+    finally:
+        await client.close()
+        service.close()
+
+
 # ---- Fix 2: register() wrappers lazily start the session ------------------
 
 

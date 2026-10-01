@@ -156,9 +156,12 @@ them back as `expected_head` / `expected_count` when independent evidence is req
   and tombstone checkpoints. Previously observed rollback is rejected, but first contact remains
   unanchored/incomplete until the hosted service supplies an authenticated workspace manifest:
   a local client cannot prove that an untrusted relay did not withhold an unseen device.
-- **Trial and grace are separate:** an email-confirmed trial lasts exactly 3 active days. A
-  separately bounded, maximum-24-hour local workspace-write grace never extends the trial,
-  subscription, Cloud Sync, managed compute, Team access, seats, or credentials.
+- **Trial and grace are separate:** new email-confirmed trials last 7 active days for Pro
+  and 14 active days for Team. Existing grants retain their recorded deadlines until explicitly
+  extended. Only eligible, currently active trials can be extended, with the total duration
+  measured from the original verified start; expired trials are never restarted. A separately
+  bounded, maximum-24-hour local workspace-write grace never extends the trial, subscription,
+  Cloud Sync, managed compute, Team access, seats, or credentials.
 - **Remote URL validation:** hosted endpoints require HTTPS except explicit loopback use,
   reject embedded credentials and redirects, require globally routable resolved addresses,
   and pin credential-bearing TLS connections to a vetted address while verifying the

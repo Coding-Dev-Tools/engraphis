@@ -1,7 +1,7 @@
 # Engraphis MCP tools: reference
 
-The Classic server registers 35 direct tools and the Smart gateway registers nine; two names
-overlap, for 42 distinct public tool names. Parameters are `name (type, default)`: no default
+The Classic server registers 39 direct tools and the Smart gateway registers nine; two names
+overlap, for 46 distinct public tool names. Parameters are `name (type, default)`: no default
 means required. Every tool returns a JSON string; on failure it returns `"Error: <reason>"`
 instead of raising.
 Governance tools (`retire`/`pin`/`correct`/`link`) verify the memory actually belongs to the
@@ -19,7 +19,9 @@ Group index: [Write](#write) · [Recall and read](#recall-and-read) · [History]
 Store a memory so it can be recalled later, across turns, sessions, and repos.
 
 - `content (str)`: the fact/decision/convention/procedure.
-- `workspace (str, "default")`: top-level scope (org/product), e.g. `"acme"`.
+- `workspace (str, None)`: top-level scope (org/product), e.g. `"acme"`. Omitted inherits an
+  authorized supplied session, then a saved repo mapping, then `"default"`. Explicit values
+  override mappings; a workspace/repo mismatch with a supplied session is rejected.
 - `repo (str, None)`: repository scope; omit for workspace-wide facts.
 - `session_id (str, None)`: from `engraphis_start_session`, if this belongs to a session.
 - `mtype (str, "semantic")`: `semantic` | `episodic` | `procedural` | `working`. See CONVENTIONS.
@@ -53,7 +55,8 @@ Store a memory so it can be recalled later, across turns, sessions, and repos.
   `date` | `enum` | `json`. Ambiguous repeated values require a source span through the
   Python/service API.
 
-Returns `{id, workspace, repo, scope, mtype, stored:true, op}` where `op` is `add` | `noop` |
+Returns `{id, workspace, workspace_source, repo, scope, mtype, stored:true, op}` where
+`workspace_source` is `explicit` | `session` | `project` | `default`, and `op` is `add` | `noop` |
 `invalidate` (with `superseded:[old_id,…]`) | `relate` (with `related_to`; both claims remain) |
 `quarantined` (retained for governance review but excluded from normal recall, with content-free
 `policy` and `reasons` codes).
@@ -135,15 +138,21 @@ retrieval_profile, response_mode, receipt}`. `usage` always names `budget_tokens
 `context_tokens`, `source_tokens`, `saved_tokens`, `savings_ratio`, `packed_count`,
 `omitted_count`, and `token_counter`.
 
+With no explicit workspace, a supplied authorized session provides its workspace/repo; otherwise
+the supplied repo uses its saved mapping or `"default"`. Explicit mismatches with a session are
+errors. Local calls without any workspace, repo, or session retain broad recall.
+
 ### `engraphis_recall`
 Retrieve the memories most relevant to a query (hybrid vector + lexical + graph, fused + reranked).
 It is the full-response compatibility surface; prefer `engraphis_recall_context` for a prompt.
 
 - `query (str)`: natural language, e.g. `"how do we handle auth?"`.
 - `workspace (str, None)`: restrict to this workspace.
-- `repo (str, None)`: restrict to this repo (requires `workspace`).
-- `session_id (str, None)`: exact session context (requires `workspace`); inherits repo/workspace
-  ancestors while excluding every other session.
+- `repo (str, None)`: restrict to this repo; an omitted workspace uses its saved mapping or
+  `"default"` when unmapped.
+- `session_id (str, None)`: exact authorized session context; an omitted workspace/repo inherits
+  from it. Includes repo/workspace ancestors while excluding every other session. Explicit
+  mismatches and invalid/unauthorized sessions are errors, never fallback requests.
 - `mtypes (list[str], None)`: restrict to these memory types.
 - `k (int, 8)`: max results, `1..50`.
 - `token_budget (int, None)`: hard packed-context budget; omitted uses the engine default.
@@ -429,8 +438,11 @@ Returns `{link_id, symbol_id, memory_id, relation, workspace, repo}`.
 ### `engraphis_start_session`
 Open a session to group this work's memories and enable cross-session resume.
 
-- `workspace (str)`, `repo (str, None)`, `agent (str, "")` (e.g. `"claude-code"`),
+- `workspace (str, None)`, `repo (str, None)`, `agent (str, "")` (e.g. `"claude-code"`),
   `goal (str, "")`, `force_new (bool, false)`.
+
+An explicit workspace wins; otherwise the saved mapping for `repo` is used, then `"default"`.
+The result reports `workspace_source` as `explicit`, `project`, or `default`.
 
 By default this is idempotent per exact `(workspace, repo, authenticated user, agent, goal)` task
 identity. Different users, agents, or goals automatically open distinct sessions. An exact retry
@@ -515,13 +527,16 @@ controls are discoverable rather than routine.
 Start or resume a session, or end it with a next-session handoff.
 
 - `action (str, "start")`: `start` or `end`.
-- `workspace (str, "default")`, `repo (str, None)`, `agent (str, "")`, `goal (str, "")`.
+- `workspace (str, None)`, `repo (str, None)`, `agent (str, "")`, `goal (str, "")`.
 - `session_id (str, "")`: required when `action="end"`.
 - `summary (str, "")`, `outcome (str, "")`, `open_threads (list[str], None)`: end-session handoff.
 - `force_new (bool, false)`: start a new session instead of reusing an exact active task.
 - `token_budget (int, 512)`: bounded goal context, `0..32768`.
 
-Returns a bounded session/bootstrap or end-session handoff response.
+Returns a bounded session/bootstrap or end-session handoff response. Starts use an explicit
+workspace, then the saved repo mapping, then `"default"`, and report `workspace_source` with
+the resolved `workspace` and `repo`. Keep using the returned `session_id` on remember and recall
+calls; there is no server-global current session.
 
 ### `engraphis_discover_actions`
 Return the exact schemas needed for a small set of matching advanced capabilities.
@@ -578,6 +593,32 @@ Returns scoped review records without exposing pending/quarantined bodies to an 
 
 ## Ops
 
+### `engraphis_list_workspaces`
+List workspaces visible to the current caller so an agent can select a destination.
+
+No parameters. Returns `{workspaces:[...]}` using the normal workspace-list records. This is
+read-only and available through Smart discovery's read executor.
+
+### `engraphis_get_workspace_routing`
+Read the current caller's saved workspace destination for an exact repo name.
+
+- `repo (str)`: stable project identifier supplied on the agent's MCP calls.
+
+Returns `{repo, workspace, configured, source}`. A saved mapping returns `configured:true` and
+`source:"project"`; an unmapped repo returns `workspace:null`, `configured:false`, and
+`source:"default"`. This is read-only; it does not create the fallback workspace.
+
+### `engraphis_set_workspace_routing`
+Save or remove the current caller's repo-to-workspace association.
+
+- `workspace (str)`, `repo (str)`, `enabled (bool, true)`.
+
+Returns the same routing shape as `engraphis_get_workspace_routing`. Use `enabled:false` to
+remove the association for that destination. The destination must be accessible. Mappings live
+in the shared database and are scoped to the authenticated caller or standalone local context.
+Explicit workspace arguments and supplied sessions retain precedence over the saved mapping.
+Use Smart discovery and the action executor to change routing; this is not a read action.
+
 ### `engraphis_receipts`
 List content-free, SHA-256-chained operation receipts for a workspace.
 
@@ -632,6 +673,42 @@ default GitHub source is overridable via
 - `force (bool, false)`: bypass the 24-hour cache and re-check the release source now.
 
 Returns `{enabled, current, latest, update_available, url, notice}`.
+
+### `engraphis_decide`
+Advisory command, contradiction, support, completion, or custom checks. The default backend
+is local. Selecting `managed` uses the saved Engraphis Cloud session when configured;
+`auto` selects only managed access, and `byok` explicitly selects a personal TypeSafe key.
+Managed availability and allowance require service verification. No latency, accuracy, or
+savings guarantee follows from configuration. Smart discovery uses `engraphis_execute_action`
+because a remote request may consume allowance.
+
+- `kind (str, "guard_command")`: one of `'guard_command'`, `'classify_contradiction'`, `'verify_support'`, `'verify_completion'`, or `'custom'`.
+- `state (str, "")`: nonblank shell command, candidate fact, or evidence text; required except when `custom` supplies `question`.
+- `query (str, "")`: nonblank query required for support verification.
+- `existing_content (str, "")`: nonblank existing memory required for contradiction checks.
+- `goal (str, "")`: nonblank task goal required for completion verification.
+- `recent_actions (str, "")`: optional summary of recent actions for completion verification.
+- `question (str, "")`: custom question for `'custom'` decisions.
+- `options (list[str], None)`: discrete choice alternatives.
+- `offline_mode (bool, false)`: when true, forces deterministic local heuristics without external API calls.
+- `allow_remote (bool, false)`: explicitly permits this call's supplied text to leave the device;
+  backend selection alone never authorizes a request.
+- `data_classification (str, "internal")`: remote input must be `public` or `internal`;
+  secret classification and known secret patterns are rejected before credential refresh.
+
+Every result includes `kind`, `backend`, `is_fallback`, `advisory_only`, `decision_status`,
+`confidence`, and `confidence_source`. Remote results also include the pinned `model`.
+The kind adds `allow_auto`/`escalate_to_user`/`safety_probability`/`category`, `verdict`,
+`supported`/`probability`, `is_complete`/`completion_probability`, or `selected`/`probability`.
+Missing required inputs return `invalid_request` before backend lookup with unknown/null
+conclusions. `custom` accepts `state` or `question`; other kinds need `state` and their
+required context above. Uncertain support/completion stays null. Fallback results include
+`fallback_reason`, null confidence, and unmeasured heuristic labels. All command checks,
+including successful remote answers, return `allow_auto=false` and `escalate_to_user=true`. Noul confidence is derived decisiveness, not measured calibration. Decisions do
+not replace executable verification, authorization, or user approval. Local command labels are
+coarse: only one simple inspection command, without chaining, pipes, substitution or file
+redirection, is `read_only`; recognized destructive, history-rewriting, exfiltrating or
+credential-file commands are `destructive_or_leak`; anything else is `state_change`.
 
 ---
 

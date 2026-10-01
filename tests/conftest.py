@@ -49,6 +49,8 @@ def _deployment_settings_isolation(monkeypatch, tmp_path):
     monkeypatch.delenv("ENGRAPHIS_CLOUD_ACCESS_TOKEN", raising=False)
     monkeypatch.delenv("ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL", raising=False)
     monkeypatch.delenv("ENGRAPHIS_SYNC_TOKEN", raising=False)
+    monkeypatch.setenv("ENGRAPHIS_API_TOKEN", "")
+    monkeypatch.setattr(settings, "api_token", "")
     monkeypatch.setattr(settings, "allowed_workspaces", [])
     monkeypatch.setattr(settings, "service_mode", "customer")
     monkeypatch.setattr(settings, "db_path", str(database))

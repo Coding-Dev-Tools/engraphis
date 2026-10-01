@@ -17,14 +17,16 @@ class FakeClient:
 
     def __init__(self, *, fallback=False, confidence=0.9, probability=0.9, verdict="reinforces"):
         self.calls = []
+        self.contexts = []
         self.batch = SimpleNamespace(
             is_fallback=fallback,
             get_choice=lambda _: SimpleNamespace(selected=verdict, confidence=confidence),
             get_noul=lambda _: SimpleNamespace(probability=probability, confidence=confidence),
         )
 
-    def evaluate(self, state, questions, *, model):
+    def evaluate(self, state, questions, *, model, allow_remote=False, purpose="custom", data_classification="internal"):
         self.calls.append((state, [question.to_dict() for question in questions], model))
+        self.contexts.append((allow_remote, purpose, data_classification))
         return self.batch
 
 
@@ -68,6 +70,16 @@ def test_factory_requires_an_explicit_client_and_model(monkeypatch):
     assert result is not None and result.identity == "engraphis.backend.jev.v1"
 
 
+@pytest.mark.parametrize("model,expected", [
+    ("claude-sonnet-5-5", True), ("claude-opus-5-5", True), ("claude-haiku-4-5", True),
+    ("claude-sonnet-latest", False), ("claude-opus-5-5-latest", False), (" claude-opus-5-5", False),
+    ("", False),
+])
+def test_claude_models_must_be_pinned_to_an_exact_id(model, expected):
+    result = get_decision_backend("jev", client=FakeClient(), model=model)
+    assert (result is not None) is expected
+
+
 def test_offline_and_unapproved_requests_never_call_client():
     client = FakeClient()
     for adapter, approved in ((backend(client), False), (backend(client, offline_mode=True), True)):
@@ -83,6 +95,81 @@ def test_explicitly_authorized_valid_response_is_advisory():
     assert adapter.classify_contradiction("Use Postgres", memory(), allow_remote=True) == ("reinforces", 0.9)
     assert all(call[2] == "test-model-1.0" for call in client.calls)
     assert client.calls[1][1][0]["options"] == ["contradicts_and_supersedes", "reinforces", "orthogonal"]
+
+
+class LegacyClient(FakeClient):
+    def evaluate(self, state, questions, *, model):
+        self.calls.append((state, [question.to_dict() for question in questions], model))
+        return self.batch
+
+
+def test_original_injected_client_contract_still_produces_advisory_results():
+    client = LegacyClient()
+    adapter = backend(client)
+    assert adapter.verify_grounded_support("database?", "Postgres", allow_remote=True) == (True, 0.9)
+    assert adapter.classify_contradiction("Use Postgres", memory(), allow_remote=True) == ("reinforces", 0.9)
+    assert [call[2] for call in client.calls] == ["test-model-1.0", "test-model-1.0"]
+
+
+@pytest.mark.parametrize("variadic", [False, True])
+def test_context_aware_clients_receive_the_authorized_request_context(variadic):
+    class VariadicClient(FakeClient):
+        def evaluate(self, state, questions, **options):
+            return super().evaluate(state, questions, **options)
+
+    client = VariadicClient() if variadic else FakeClient()
+    adapter = backend(client)
+    assert adapter.verify_grounded_support(
+        "database?", "Postgres", allow_remote=True, data_classification="public",
+    ) == (True, 0.9)
+    assert adapter.classify_contradiction("Use Postgres", memory(), allow_remote=True) == ("reinforces", 0.9)
+    assert client.contexts == [(True, "verify_support", "public"), (True, "classify_contradiction", "internal")]
+
+
+@pytest.mark.parametrize("approved,offline,classification", [
+    (False, False, "internal"), (1, False, "internal"), (True, True, "internal"),
+    (True, False, "confidential"), (True, False, None), (True, False, []),
+])
+def test_denied_advisory_requests_do_not_inspect_client_credentials(approved, offline, classification):
+    class PrivateClient(LegacyClient):
+        @property
+        def is_configured(self):
+            pytest.fail("denied requests must not inspect client credentials")
+
+    client = PrivateClient()
+    adapter = backend(client, offline_mode=offline)
+    assert adapter.verify_grounded_support(
+        "database?", "Postgres", allow_remote=approved, data_classification=classification,
+    ) == (False, 0.0)
+    assert client.calls == []
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_provider_typeerror_never_retries_an_invocation(legacy, caplog):
+    class ModernFailure(FakeClient):
+        def evaluate(self, state, questions, **options):
+            super().evaluate(state, questions, **options)
+            raise TypeError("synthetic-private-provider-error")
+
+    class LegacyFailure(LegacyClient):
+        def evaluate(self, state, questions, *, model):
+            super().evaluate(state, questions, model=model)
+            raise TypeError("synthetic-private-provider-error")
+
+    client = LegacyFailure() if legacy else ModernFailure()
+    assert backend(client).verify_grounded_support("database?", "Postgres", allow_remote=True) == (False, 0.0)
+    assert len(client.calls) == 1
+    assert "synthetic-private-provider-error" not in caplog.text
+
+
+def test_unsupported_client_signature_defers_without_invocation():
+    class UnsupportedClient(FakeClient):
+        def evaluate(self, state, questions, *, model, required_context):
+            pytest.fail("unsupported signatures must not invoke the client")
+
+    assert backend(UnsupportedClient()).verify_grounded_support(
+        "database?", "Postgres", allow_remote=True,
+    ) == (False, 0.0)
 
 
 @pytest.mark.parametrize("field,value", [
@@ -128,3 +215,26 @@ def test_empty_and_oversized_inputs_do_not_leave_the_process(query, evidence):
     client = FakeClient()
     assert backend(client).verify_grounded_support(query, evidence, allow_remote=True) == (False, 0.0)
     assert client.calls == []
+
+
+def test_cloud_decision_client_uses_saved_session_configuration(monkeypatch):
+    from engraphis import cloud_session
+    from engraphis.backends.jev_decision import create_cloud_decision_client
+    configured = []
+    monkeypatch.setattr(cloud_session, "configured", lambda **kw: configured.append(kw) or True)
+    monkeypatch.setattr(cloud_session, "credential_bound_control_url",
+                        lambda: "https://control.example.invalid")
+    client = create_cloud_decision_client()
+    assert configured == []
+    assert client.is_configured is True
+    assert configured == [{"require_compute": False}]
+    assert client.allow_fallback is False
+
+
+def test_typesafe_key_presence_is_not_an_implicit_backend_selection(monkeypatch):
+    from engraphis.backends.jev_transport import select_decision_client
+    monkeypatch.setenv("TYPESAFE_API_KEY", "synthetic-key")
+    monkeypatch.setenv("ENGRAPHIS_DECISION_BACKEND", "none")
+    assert select_decision_client() == (None, "local_heuristic")
+    client, name = select_decision_client("byok")
+    assert client.is_configured and name == "typesafe_byok"

@@ -235,13 +235,23 @@ jobs:
           python -m pip install -e ".[test]"
       - name: Install and verify the Pi package
         working-directory: integrations/pi
+        # Windows defaults to pwsh, which reports only the last command's exit code.
+        shell: bash
         env:
           ENGRAPHIS_PI_TEST_COMMAND: engraphis-mcp
         run: |
+          # npm 10 crashes while repairing a nested published shrinkwrap.
+          npm install --global --ignore-scripts npm@11.12.1
           npm ci --ignore-scripts
+          # The test host's published shrinkwrap overrides this package's nested pin.
+          # Repair that exact leaf in the installed host, preserving its other locked deps.
+          # --omit=dev excludes the host's own authoring tools, not this package's test tools.
+          npm install --prefix node_modules/@earendil-works/pi-coding-agent --ignore-scripts --no-save --omit=dev brace-expansion@5.0.12
+          node -e "require('node:assert/strict').equal(require('./node_modules/@earendil-works/pi-coding-agent/node_modules/brace-expansion/package.json').version, '5.0.12')"
           npm run verify
           npm run test:integration
-          npm audit --omit=dev
+          npm audit
+          npm audit --no-package-lock --include=dev
 
   browser-accessibility:
     name: browser accessibility smoke
@@ -441,7 +451,9 @@ jobs:
           wheels = list(Path("dist").glob("*.whl"))
           assert len(wheels) == 1
           profile = os.environ["ENGRAPHIS_SMOKE_PROFILE"]
+          # Large server wheels can pause longer than pip's default socket timeout.
           subprocess.run([str(executable), "-m", "pip", "install",
+                          "--timeout", "120", "--retries", "5",
                           str(wheels[0].resolve()) + f"[{profile}]"], check=True)
           subprocess.run([str(executable), "-m", "pip", "check"], check=True)
           (root / "environment.lock").write_text(subprocess.check_output(

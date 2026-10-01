@@ -388,8 +388,8 @@ def _graph_entity_visibility_sql(entity_alias: str, *, at: Optional[float] = Non
     """
     del at
     touching = (
-        f"visibility_edge.workspace_id={entity_alias}.workspace_id AND "
-        f"(visibility_edge.src={entity_alias}.id OR visibility_edge.dst={entity_alias}.id)"
+        f"((visibility_edge.workspace_id={entity_alias}.workspace_id AND visibility_edge.src={entity_alias}.id) OR "
+        f"(visibility_edge.workspace_id={entity_alias}.workspace_id AND visibility_edge.dst={entity_alias}.id))"
     )
     return (
         "(NOT EXISTS (SELECT 1 FROM edges visibility_edge WHERE " + touching + ") "
@@ -1284,6 +1284,7 @@ class MemoryService:
         # bi-temporal validity boundary: time passing can change a current-time scene even
         # when no connection writes, so such an entry expires exactly at that boundary.
         self._graph_scene_cache: "OrderedDict[tuple, tuple[float, dict]]" = OrderedDict()
+        self._graph_scene_cache_lock = threading.Lock()
         self._graph_job_lock = threading.RLock()
         self._graph_job_threads: dict[str, threading.Thread] = {}
         self._obsidian_job_threads: dict[str, threading.Thread] = {}
@@ -1715,6 +1716,150 @@ class MemoryService:
         can never be skipped at an individual call site."""
         return self._authorize_workspace(_clean_name(workspace, field="workspace"))
 
+    def _routing_owner(self) -> str:
+        principal = _authenticated_principal()
+        return "user:" + principal["id"] if principal is not None else "local"
+
+    def _project_routing_rows(self, repo: str) -> list[dict]:
+        """Read this caller's selections without treating inaccessible targets as absent."""
+        owner = self._routing_owner()
+        rows = self.store.conn.execute(
+            "SELECT r.id, r.settings, w.name AS workspace FROM repos r "
+            "JOIN workspaces w ON w.id=r.workspace_id WHERE r.name=? ORDER BY w.name",
+            (repo,),
+        ).fetchall()
+        selected = []
+        for row in rows:
+            try:
+                settings = json.loads(row["settings"] or "{}")
+            except (TypeError, ValueError, RecursionError) as exc:
+                raise ValidationError("project routing settings are invalid") from exc
+            if not isinstance(settings, dict):
+                raise ValidationError("project routing settings are invalid")
+            routing = settings.get("workspace_routing", {})
+            if not isinstance(routing, dict):
+                raise ValidationError("project routing settings are invalid")
+            if owner not in routing:
+                continue
+            if routing[owner] is not True:
+                raise ValidationError("project routing settings are invalid")
+            self._clean_ws(row["workspace"])
+            selected.append({**dict(row), "settings": settings})
+        return selected
+
+    def get_workspace_routing(self, repo: str) -> dict:
+        """Return the caller's saved workspace for one exact repository name."""
+        rp = _clean_name(repo, field="repo")
+        selected = self._project_routing_rows(rp)
+        if len(selected) > 1:
+            raise ValidationError("project has ambiguous workspace routing; select a workspace again")
+        workspace = selected[0]["workspace"] if selected else None
+        return {"repo": rp, "workspace": workspace, "configured": bool(selected),
+                "source": "project" if selected else "default"}
+
+    def set_workspace_routing(self, workspace: str, *, repo: str,
+                              enabled: bool = True) -> dict:
+        """Save or remove only this caller's project choice, preserving other settings."""
+        ws = self._clean_ws(workspace)
+        rp = _clean_name(repo, field="repo")
+        enabled = _strict_bool(enabled, field="enabled")
+        owner = self._routing_owner()
+        with self.store.write_transaction():
+            # Authorize all old and new destinations before creating even a repo row.
+            wid, _ = self._require_scope(ws, None)
+            selected = self._project_routing_rows(rp)
+            if ((enabled and len(selected) == 1 and selected[0]["workspace"] == ws)
+                    or (not enabled and not any(row["workspace"] == ws for row in selected))):
+                return self.get_workspace_routing(rp)
+            target_row = self.store.conn.execute(
+                "SELECT id FROM repos WHERE workspace_id=? AND name=?", (wid, rp),
+            ).fetchone()
+            target_id = target_row["id"] if target_row else None
+            target_settings = {}
+            if target_id:
+                row = self.store.conn.execute(
+                    "SELECT settings FROM repos WHERE id=?", (target_id,),
+                ).fetchone()
+                try:
+                    target_settings = json.loads(row["settings"] or "{}")
+                except (TypeError, ValueError, RecursionError) as exc:
+                    raise ValidationError("project routing settings are invalid") from exc
+                if (not isinstance(target_settings, dict)
+                        or not isinstance(target_settings.get("workspace_routing", {}), dict)):
+                    raise ValidationError("project routing settings are invalid")
+            for row in selected:
+                if not enabled and row["workspace"] != ws:
+                    continue
+                settings = row["settings"]
+                settings["workspace_routing"].pop(owner)
+                if not settings["workspace_routing"]:
+                    settings.pop("workspace_routing")
+                self.store.conn.execute(
+                    "UPDATE repos SET settings=? WHERE id=?",
+                    (json.dumps(settings), row["id"]),
+                )
+                if row["id"] == target_id:
+                    target_settings = settings
+            if enabled:
+                target_id = target_id or self.store.get_or_create_repo(wid, rp)
+                target_settings.setdefault("workspace_routing", {})[owner] = True
+                self.store.conn.execute(
+                    "UPDATE repos SET settings=? WHERE id=?",
+                    (json.dumps(target_settings), target_id),
+                )
+            self.store.audit(
+                owner, "workspace_routing", wid,
+                "project destination saved" if enabled else "project destination removed",
+                commit=False,
+            )
+            return self.get_workspace_routing(rp)
+
+    def resolve_workspace(self, workspace: Optional[str] = None, *,
+                          repo: Optional[str] = None, session_id: Optional[str] = None,
+                          for_write: bool = False) -> dict:
+        """Resolve explicit selection, owned session, saved project, then legacy fallback.
+
+        Routing is read-only. Validate supplied sessions before any write can create a
+        workspace/repo. Only an entirely context-free local read remains unscoped.
+        """
+        ws = self._clean_ws(workspace) if workspace is not None else None
+        rp = _clean_name(repo, field="repo") if repo else None
+        if session_id:
+            sid = _clean_text(session_id, field="session_id", max_chars=MAX_NAME_CHARS)
+            session = self.store.get_session(sid)
+            if session is None:
+                if for_write or ws is None:
+                    raise ValidationError(f"no session with id '{sid}'")
+            else:
+                self._authorize_session(session)
+                row = self.store.conn.execute(
+                    "SELECT name FROM workspaces WHERE id=?", (session["workspace_id"],),
+                ).fetchone()
+                session_workspace = row["name"]
+                if (ws is not None and ws != session_workspace) or (
+                        rp is not None and (not session.get("repo_id")
+                        or self._lookup_repo(session["workspace_id"], rp)
+                        != session.get("repo_id"))):
+                    raise ValidationError("session_id does not belong to that workspace/repo")
+                if for_write and session.get("status") != "active":
+                    raise ValidationError("session_id is not active")
+                if session.get("repo_id"):
+                    row = self.store.conn.execute(
+                        "SELECT name FROM repos WHERE id=?", (session["repo_id"],),
+                    ).fetchone()
+                    rp = row["name"] if row else None
+                return {"workspace": ws or session_workspace, "repo": rp,
+                        "source": "explicit" if ws is not None else "session"}
+        if ws is not None:
+            return {"workspace": ws, "repo": rp, "source": "explicit"}
+        if rp is not None:
+            mapping = self.get_workspace_routing(rp)
+            if mapping["configured"]:
+                return {"workspace": mapping["workspace"], "repo": rp, "source": "project"}
+        if for_write or rp is not None:
+            return {"workspace": self._clean_ws("default"), "repo": rp, "source": "default"}
+        return {"workspace": None, "repo": None, "source": "unscoped"}
+
     def _check_owns(self, memory_id: str, wid: str, rid: Optional[str]) -> None:
         """Governance tools (forget/pin/correct/link) act on a bare memory_id; require the
         caller to also name the workspace (and optionally repo) it believes owns the memory,
@@ -1795,7 +1940,7 @@ class MemoryService:
         return session
 
     # ── write ──────────────────────────────────────────────────────────────────
-    def remember(self, content: str, *, workspace: str, repo: Optional[str] = None,
+    def remember(self, content: str, *, workspace: Optional[str] = None, repo: Optional[str] = None,
                  session_id: Optional[str] = None, mtype: str = "semantic",
                  scope: Optional[str] = None, title: str = "", importance: float = 0.0,
                  keywords: Optional[list] = None, metadata: Optional[dict] = None,
@@ -1839,8 +1984,8 @@ class MemoryService:
                 source, trusted, raw_ingest=False, ingress=_ingress
             )
         )
-        ws = self._clean_ws(workspace)
-        rp = _clean_name(repo, field="repo") if repo else None
+        route = self.resolve_workspace(workspace, repo=repo, session_id=session_id, for_write=True)
+        ws, rp = route["workspace"], route["repo"]
         mt = _enum(mtype, MemoryType, "mtype")
         scope_was_omitted = scope is None
         sc = _write_scope(scope, repo=rp, session_id=session_id)
@@ -1924,6 +2069,7 @@ class MemoryService:
             raise
         out = {
             "id": result["id"], "workspace": ws, "repo": rp,
+            "workspace_source": route["source"],
             "scope": sc.value, "mtype": mt.value, "stored": True, "op": result["op"],
         }
         if result["op"] in ("noop", "invalidate", "relate"):
@@ -2317,8 +2463,9 @@ class MemoryService:
     # Intent-native agent protocol. These wrappers intentionally stay transport-agnostic:
     # REST and MCP can expose the same remember/link/recall vocabulary without leaking
     # SQLite operations into agent prompts.
-    def intent_remember(self, text: str, *, workspace: str,
-                        repo: Optional[str] = None, title: str = "",
+    def intent_remember(self, text: str, *, workspace: Optional[str] = None,
+                        repo: Optional[str] = None, session_id: Optional[str] = None,
+                        title: str = "",
                         mtype: str = "semantic", scope: Optional[str] = None,
                         importance: float = 0.0,
                         metadata: Optional[dict] = None,
@@ -2329,7 +2476,7 @@ class MemoryService:
                          _local_agent_operator: bool = False,
                          _ingress: str = "intent_api") -> dict:
         out = self.remember(
-            text, workspace=workspace, repo=repo, title=title, mtype=mtype,
+            text, workspace=workspace, repo=repo, session_id=session_id, title=title, mtype=mtype,
             scope=scope, importance=importance, metadata=metadata,
             retention_class=retention_class, retention_reason=retention_reason,
             # Dashboard intent is a local agent-protocol write.  It may create a
@@ -2351,6 +2498,7 @@ class MemoryService:
 
     def intent_recall(self, query: str, *, intent: str = "recall",
                       workspace: Optional[str] = None, repo: Optional[str] = None,
+                      session_id: Optional[str] = None,
                       mtypes: Optional[list] = None, k: int = 8,
                       as_of: Optional[float] = None,
                       valid_at: Optional[float] = None,
@@ -2368,6 +2516,8 @@ class MemoryService:
             intent, field="intent", max_chars=80, required=False
         ) or "recall"
         normalized = intent_clean.lower().replace("-", "_").replace(" ", "_")
+        route = self.resolve_workspace(workspace, repo=repo, session_id=session_id)
+        workspace, repo = route["workspace"], route["repo"]
         layers = {
             "explain": ["causal", "entity", "semantic"],
             "why": ["causal", "entity", "semantic"],
@@ -2379,7 +2529,7 @@ class MemoryService:
             "code": ["entity", "semantic"],
         }.get(normalized)
         out = self.recall(
-            query, workspace=workspace, repo=repo, mtypes=mtypes, k=k,
+            query, workspace=workspace, repo=repo, session_id=session_id, mtypes=mtypes, k=k,
             as_of=as_of, valid_at=valid_at, known_at=known_at,
             token_budget=token_budget, retrieval_profile=retrieval_profile,
             candidate_depth=candidate_depth,
@@ -2388,7 +2538,8 @@ class MemoryService:
             intent=intent_clean, graph_layers=layers,
             reinforce=reinforce, record_receipt=record_receipt,
         )
-        response = {"operation": "recall", "intent": intent_clean, **out}
+        response = {"operation": "recall", "intent": intent_clean, **out,
+                    "workspace": workspace, "repo": repo, "workspace_source": route["source"]}
         if normalized in {"locate_code", "code"} and workspace and repo:
             response["code"] = self.search_code(
                 query, workspace=workspace, repo=repo, limit=k,
@@ -4004,6 +4155,8 @@ class MemoryService:
 
         # A configured workspace binding or a bound dashboard user must never do a
         # workspace-less (global) recall — either case represents a tenant boundary.
+        route = self.resolve_workspace(workspace, repo=repo, session_id=session_id)
+        workspace, repo = route["workspace"], route["repo"]
         if not workspace and (
                 self.allowed_workspaces is not None
                 or _authenticated_principal() is not None):
@@ -4474,6 +4627,8 @@ class MemoryService:
             min_support = max(0.0, min(1.0, min_support))
         mts = [_enum(m, MemoryType, "mtype") for m in mtypes] if mtypes else None
 
+        route = self.resolve_workspace(workspace, repo=repo, session_id=session_id)
+        workspace, repo = route["workspace"], route["repo"]
         if not workspace and (
                 self.allowed_workspaces is not None
                 or _authenticated_principal() is not None):
@@ -4573,7 +4728,7 @@ class MemoryService:
         return out
 
     # ── session lifecycle ───────────────────────────────────────────────────────
-    def start_session(self, workspace: str, *, repo: Optional[str] = None,
+    def start_session(self, workspace: Optional[str] = None, *, repo: Optional[str] = None,
                       agent: str = "", goal: str = "", force_new: bool = False) -> dict:
         """Open a session. If this repo has a prior *ended* session, its summary and
         unresolved ``open_threads`` come back as ``bootstrap`` — the concrete fix for
@@ -4584,8 +4739,8 @@ class MemoryService:
         ``force_new=True`` deliberately branches even when every identity field matches.
         The lookup/create decision is one storage transaction, so concurrent retries cannot
         both insert a session."""
-        ws = self._clean_ws(workspace)
-        rp = _clean_name(repo, field="repo") if repo else None
+        route = self.resolve_workspace(workspace, repo=repo, for_write=True)
+        ws, rp = route["workspace"], route["repo"]
         agent = _clean_text(agent, field="agent", max_chars=MAX_NAME_CHARS, required=False)
         goal = _clean_text(goal, field="goal", max_chars=MAX_TITLE_CHARS, required=False)
         wid = self._get_or_create_workspace(ws)
@@ -4598,6 +4753,7 @@ class MemoryService:
         )
         if reused:
             return {"session_id": sid, "workspace": ws, "repo": rp,
+                    "workspace_source": route["source"],
                     "goal": goal, "status": "active", "reused": True,
                     "bootstrap": {}}
         bootstrap: dict = {}
@@ -4612,6 +4768,7 @@ class MemoryService:
                     "outcome": last.get("outcome") or "",
                 }
         return {"session_id": sid, "workspace": ws, "repo": rp, "goal": goal,
+               "workspace_source": route["source"],
                "status": "active", "reused": False, "bootstrap": bootstrap}
 
     def end_session(self, session_id: str, *, summary: str = "", outcome: str = "",
@@ -5775,7 +5932,7 @@ class MemoryService:
         #    drop the duplicate), else just relabel.
         repo_remap: dict = {}
         src_repos = [dict(x) for x in c.execute(
-            "SELECT id, name FROM repos WHERE workspace_id=?", (wid_src,))]
+            "SELECT id, name, settings FROM repos WHERE workspace_id=?", (wid_src,))]
 
         def _remap_file_links(loser_repo: str, winner_repo: str, file: str) -> None:
             """Re-point memory↔code links from a losing file snapshot's symbols to
@@ -5804,10 +5961,29 @@ class MemoryService:
 
         for r in src_repos:
             existing = c.execute(
-                "SELECT id FROM repos WHERE workspace_id=? AND name=?", (wid_dst, r["name"])
+                "SELECT id, settings FROM repos WHERE workspace_id=? AND name=?", (wid_dst, r["name"])
             ).fetchone()
             if existing:
                 repo_remap[r["id"]] = existing["id"]
+                # Workspace merge intentionally moves the project destination. Keep
+                # every caller's selection when identical repo names collapse, while
+                # retaining the existing target policy for all unrelated settings.
+                try:
+                    source_settings = json.loads(r["settings"] or "{}")
+                    target_settings = json.loads(existing["settings"] or "{}")
+                except (TypeError, ValueError, RecursionError) as exc:
+                    raise ValidationError("project routing settings are invalid") from exc
+                if not isinstance(source_settings, dict) or not isinstance(target_settings, dict):
+                    raise ValidationError("project routing settings are invalid")
+                incoming = source_settings.get("workspace_routing", {})
+                current = target_settings.get("workspace_routing", {})
+                if (not isinstance(incoming, dict) or not isinstance(current, dict)
+                        or any(value is not True for value in [*incoming.values(), *current.values()])):
+                    raise ValidationError("project routing settings are invalid")
+                if incoming:
+                    target_settings["workspace_routing"] = {**incoming, **current}
+                    c.execute("UPDATE repos SET settings=? WHERE id=?",
+                              (json.dumps(target_settings), existing["id"]))
                 # ``code_files`` is keyed by (repo_id, file), so fold overlapping file
                 # snapshots deterministically before the duplicate repo disappears.
                 for code_file in [dict(x) for x in c.execute(
@@ -6330,11 +6506,20 @@ class MemoryService:
                 "SELECT * FROM repos WHERE workspace_id=?", (wid_src,))]:
             nrid = ids.new_id("repo")
             repo_remap[r["id"]] = nrid
+            # Personal routing choices belong to the original project destination;
+            # duplicating them would create an ambiguous second selection.
+            try:
+                copied_settings = json.loads(r["settings"] or "{}")
+            except (TypeError, ValueError, RecursionError) as exc:
+                raise ValidationError("project settings are invalid") from exc
+            if not isinstance(copied_settings, dict):
+                raise ValidationError("project settings are invalid")
+            copied_settings.pop("workspace_routing", None)
             c.execute(
                 "INSERT INTO repos(id, workspace_id, name, root_path, vcs_remote, primary_lang, "
                 "created_at, indexed_at, settings) VALUES (?,?,?,?,?,?,?,?,?)",
                 (nrid, wid_dst, r["name"], r["root_path"], r["vcs_remote"], r["primary_lang"],
-                 ts, r["indexed_at"], r["settings"]))
+                 ts, r["indexed_at"], json.dumps(copied_settings)))
             for code_file in [dict(x) for x in c.execute(
                     "SELECT * FROM code_files WHERE repo_id=?", (r["id"],))]:
                 c.execute(
@@ -7001,6 +7186,73 @@ class MemoryService:
         self.store.audit(actor, "memory_reorder", wid, f"{len(clean_ids)} memories")
         c.commit()
         return {"workspace": workspace, "reordered": len(clean_ids)}
+
+    def _prepare_memory_move(self, workspace: str, target_workspace: str,
+                             memory_ids: list):
+        from engraphis.core.relocation import MAX_MOVE_MEMORIES, prepare_move
+
+        source = self._clean_ws(workspace)
+        target = self._clean_ws(target_workspace)
+        self._authorize_workspace_control(source)
+        self._authorize_workspace_control(target)
+        if source == target:
+            raise ValidationError("Choose a different destination workspace.")
+        source_id = self._lookup_workspace(source)
+        target_id = self._lookup_workspace(target)
+        if source_id is None or target_id is None:
+            raise ValidationError("Create both workspaces before moving memories.")
+        if not isinstance(memory_ids, list) or not 1 <= len(memory_ids) <= MAX_MOVE_MEMORIES:
+            raise ValidationError(f"Select between 1 and {MAX_MOVE_MEMORIES} memories.")
+        selected = [_clean_text(mid, field="memory_id", max_chars=MAX_NAME_CHARS)
+                    for mid in memory_ids]
+        if len(set(selected)) != len(selected):
+            raise ValidationError("Select each memory only once.")
+        for mid in selected:
+            self._check_owns(mid, source_id, None)
+        self._assert_no_active_graph_job(source_id, target_id)
+        try:
+            plan = prepare_move(self.store, source_id, target_id, sorted(selected))
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from exc
+        # Related historical/session records are subject to the same authorization
+        # as the explicit selection. Never disclose another user's hidden history.
+        for record in plan.records:
+            self._check_owns(record.id, source_id, None)
+        for session in plan.sessions:
+            self._authorize_session(session)
+        return source, target, plan
+
+    def preview_memory_move(self, *, workspace: str, target_workspace: str,
+                            memory_ids: list) -> dict:
+        """Preview related records and blockers without creating or updating data."""
+        with self.store.read_snapshot():
+            source, target, plan = self._prepare_memory_move(
+                workspace, target_workspace, memory_ids,
+            )
+            return {**plan.public(source, target),
+                    "source_visibility": self._workspace_visibility(source)[0],
+                    "target_visibility": self._workspace_visibility(target)[0]}
+
+    def move_memories(self, *, workspace: str, target_workspace: str, memory_ids: list,
+                      preview_token: str, confirmed: bool = False,
+                      actor: str = "user") -> dict:
+        """Apply the exact reviewed component atomically; preserve record identities."""
+        from engraphis.core.relocation import apply_move
+
+        if confirmed is not True or not isinstance(preview_token, str) or not preview_token:
+            raise ValidationError("Preview and confirm this selection before moving it.")
+        actor = _clean_text(actor, field="actor", max_chars=MAX_NAME_CHARS,
+                            required=False) or "user"
+        with self.store.write_transaction():
+            source, target, plan = self._prepare_memory_move(workspace, target_workspace, memory_ids)
+            if preview_token != plan.preview_token:
+                raise MemoryConflict("The move preview is stale. Preview this selection again.",
+                                     code="memory_move_conflict")
+            if plan.blockers:
+                raise ValidationError("Resolve the move preview blockers before continuing.")
+            apply_move(self.store, plan, actor=actor)
+            return {"source": source, "workspace": target,
+                    "moved": [record.id for record in plan.records], "count": len(plan.records)}
 
     def memory_history(self, memory_id: str, *, workspace: str,
                        repo: Optional[str] = None, limit: int = 50, cursor: str = "",
@@ -8042,6 +8294,20 @@ class MemoryService:
                 repo["vcs_remote"] = None
         for repo in repos:
             repo["settings"] = scrub_json(repo.get("settings"), {})
+            # Routing is local caller configuration, not portable workspace data.
+            # Exclude every principal's selection even from owner/admin exports.
+            try:
+                portable_settings = json.loads(repo["settings"] or "{}")
+            except (TypeError, ValueError, RecursionError) as exc:
+                raise ValidationError("project settings are invalid") from exc
+            if not isinstance(portable_settings, dict):
+                raise ValidationError("project settings are invalid")
+            if "workspace_routing" in portable_settings:
+                portable_settings.pop("workspace_routing")
+                repo["settings"] = json.dumps(
+                    portable_settings, sort_keys=canonical,
+                    separators=(",", ":") if canonical else None, ensure_ascii=False,
+                )
         for session in sessions:
             session["open_threads"] = scrub_json(session.get("open_threads"), [])
         for memory in memories:
@@ -8883,7 +9149,8 @@ class MemoryService:
                         (finished, error_code, wid, job_id, wid),
                     )
                 self.store.conn.commit()
-                self._graph_scene_cache.clear()
+                with self._graph_scene_cache_lock:
+                    self._graph_scene_cache.clear()
                 with self._graph_job_lock:
                     self._graph_job_threads.pop(job_id, None)
 
@@ -9164,18 +9431,30 @@ class MemoryService:
         # unrelated relation in the workspace.
         touching_entity_cap = all_mode_entity_cap or MAX_GRAPH_ANALYSIS_ENTITIES
         touching_sql = (
-            "SELECT selected_entity.id, COUNT(touching_edge.id) AS touching_count "
-            "FROM entities selected_entity "
-            "LEFT JOIN edges touching_edge "
-            "ON touching_edge.workspace_id=? "
-            "AND (touching_edge.src=selected_entity.id "
-            "OR touching_edge.dst=selected_entity.id) "
+            "WITH candidate_entities AS ("
+            "SELECT id FROM entities selected_entity "
+            "WHERE selected_entity.workspace_id=? "
         )
+        touching_params: list[Any] = [wid]
+        if repo_id:
+            touching_sql += (
+                "AND (selected_entity.repo_id=? OR selected_entity.repo_id IS NULL) "
+            )
+            touching_params.append(repo_id)
+        touching_sql += (
+            "AND (selected_entity.created_at IS NULL OR selected_entity.created_at<=?) "
+        )
+        touching_params.append(known_t)
+        if clean_entity_types:
+            clean_types = sorted(set(clean_entity_types))
+            marks = ",".join("?" for _ in clean_types)
+            touching_sql += f"AND selected_entity.etype IN ({marks}) "
+            touching_params.extend(clean_types)
         # A live scene must classify entities from the same world/system-time edge
         # population used by the later edge query. Keep the historical joins intact
         # for time-travel scenes so closed relations can still identify ghost endpoints.
         if not include_history:
-            touching_sql += (
+            touching_edge_time_sql = (
                 "AND (touching_edge.valid_from IS NULL "
                 "OR touching_edge.valid_from<=?) "
                 "AND (touching_edge.valid_to IS NULL "
@@ -9187,9 +9466,9 @@ class MemoryService:
                 "AND (touching_edge.expired_at IS NULL "
                 "OR ?<touching_edge.expired_at) "
             )
-            touching_params: list[Any] = [wid, t, t, t, known_t, known_t]
+            touching_edge_time_params: tuple[float, ...] = (t, t, t, known_t, known_t)
         else:
-            touching_sql += (
+            touching_edge_time_sql = (
                 "AND (touching_edge.valid_from IS NULL "
                 "OR touching_edge.valid_from<=?) "
                 "AND (touching_edge.ingested_at IS NULL "
@@ -9197,38 +9476,62 @@ class MemoryService:
                 "AND (touching_edge.expired_at IS NULL "
                 "OR ?<touching_edge.expired_at) "
             )
-            touching_params = [wid, t, known_t, known_t]
+            touching_edge_time_params = (t, known_t, known_t)
+        # Drive both indexed endpoint probes from the selected entities. A workspace-
+        # wide edge CTE would scan unrelated repositories before this scope is applied.
+        # CROSS JOIN preserves that loop order; the dst branch omits a self-loop's
+        # second incidence without deduplicating distinct relations or support rows.
+        touching_sql += "), candidate_edges AS ("
+        for endpoint in ("src", "dst"):
+            if endpoint == "dst":
+                touching_sql += "UNION ALL "
+            touching_sql += (
+                "SELECT selected_entity.id AS entity_id, touching_edge.id AS edge_id "
+                "FROM candidate_entities selected_entity CROSS JOIN edges touching_edge "
+                f"ON touching_edge.workspace_id=? AND touching_edge.{endpoint}=selected_entity.id "
+                + touching_edge_time_sql
+            )
+            touching_params.extend((wid, *touching_edge_time_params))
+            if endpoint == "dst":
+                touching_sql += "AND touching_edge.src!=touching_edge.dst "
         touching_sql += (
-            "LEFT JOIN edge_supports touching_support "
-            "ON touching_support.edge_id=touching_edge.id "
+            "), endpoint_supports AS ("
+            "SELECT ee.entity_id, ee.edge_id, s.memory_id "
+            "FROM candidate_edges ee "
+            "LEFT JOIN edge_supports s "
+            "ON s.edge_id=ee.edge_id "
         )
         if not include_history:
             touching_sql += (
-                "AND (touching_support.valid_from IS NULL "
-                "OR touching_support.valid_from<=?) "
-                "AND (touching_support.valid_to IS NULL "
-                "OR ?<touching_support.valid_to "
-                "OR (touching_support.valid_to_recorded_at IS NOT NULL "
-                "AND ?<touching_support.valid_to_recorded_at)) "
-                "AND (touching_support.ingested_at IS NULL "
-                "OR touching_support.ingested_at<=?) "
-                "AND (touching_support.expired_at IS NULL "
-                "OR ?<touching_support.expired_at) "
+                "AND (s.valid_from IS NULL "
+                "OR s.valid_from<=?) "
+                "AND (s.valid_to IS NULL "
+                "OR ?<s.valid_to "
+                "OR (s.valid_to_recorded_at IS NOT NULL "
+                "AND ?<s.valid_to_recorded_at)) "
+                "AND (s.ingested_at IS NULL "
+                "OR s.ingested_at<=?) "
+                "AND (s.expired_at IS NULL "
+                "OR ?<s.expired_at) "
             )
             touching_params.extend((t, t, t, known_t, known_t))
         else:
             touching_sql += (
-                "AND (touching_support.valid_from IS NULL "
-                "OR touching_support.valid_from<=?) "
-                "AND (touching_support.ingested_at IS NULL "
-                "OR touching_support.ingested_at<=?) "
-                "AND (touching_support.expired_at IS NULL "
-                "OR ?<touching_support.expired_at) "
+                "AND (s.valid_from IS NULL "
+                "OR s.valid_from<=?) "
+                "AND (s.ingested_at IS NULL "
+                "OR s.ingested_at<=?) "
+                "AND (s.expired_at IS NULL "
+                "OR ?<s.expired_at) "
             )
             touching_params.extend((t, known_t, known_t))
+        join_type = "LEFT JOIN" if include_history else "JOIN"
         touching_sql += (
+            f") SELECT selected_entity.id, COUNT(es.edge_id) AS touching_count "
+            f"FROM candidate_entities selected_entity "
+            f"{join_type} endpoint_supports es ON es.entity_id=selected_entity.id "
             "LEFT JOIN memories touching_memory "
-            "ON touching_memory.id=touching_support.memory_id "
+            "ON touching_memory.id=es.memory_id "
         )
         if not include_history:
             touching_sql += (
@@ -9256,32 +9559,15 @@ class MemoryService:
                 "OR ?<touching_memory.expired_at) "
             )
             touching_params.extend((wid, t, known_t, known_t))
-        touching_sql += "WHERE selected_entity.workspace_id=? "
-        touching_params.append(wid)
-        if repo_id:
-            touching_sql += (
-                "AND (selected_entity.repo_id=? OR selected_entity.repo_id IS NULL) "
-            )
-            touching_params.append(repo_id)
-        touching_sql += (
-            "AND (selected_entity.created_at IS NULL OR selected_entity.created_at<=?) "
-        )
-        touching_params.append(known_t)
-        if clean_entity_types:
-            clean_types = sorted(set(clean_entity_types))
-            if clean_types:
-                marks = ",".join("?" for _ in clean_types)
-                touching_sql += f"AND selected_entity.etype IN ({marks}) "
-                touching_params.extend(clean_types)
         # Private-only relation histories must not consume the public candidate cap.
-        # Keep the workspace-wide scan for history views so a shared entity touched by
-        # an unrelated session-private edge remains hidden and ghost endpoints survive.
+        # Keep workspace-wide privacy classification so a shared entity touched by an
+        # unrelated session-private edge remains hidden and ghost endpoints survive.
         touching_sql += "GROUP BY selected_entity.id HAVING "
         if include_history:
             touching_sql += (
-                "COUNT(touching_edge.id)=0 OR MAX(CASE "
+                "COUNT(es.edge_id)=0 OR MAX(CASE "
                 "WHEN NOT EXISTS (SELECT 1 FROM edge_supports touching_any_support "
-                "WHERE touching_any_support.edge_id=touching_edge.id) THEN 1 "
+                "WHERE touching_any_support.edge_id=es.edge_id) THEN 1 "
                 "WHEN touching_memory.id IS NOT NULL "
                 "AND touching_memory.workspace_id=? "
                 "AND COALESCE(touching_memory.scope, 'workspace')!='session' "
@@ -9289,10 +9575,10 @@ class MemoryService:
             )
         else:
             touching_sql += (
-                "COUNT(touching_edge.id)>0 AND MAX(CASE "
+                "COUNT(es.edge_id)>0 AND MAX(CASE "
                 "WHEN NOT EXISTS (SELECT 1 FROM edge_supports touching_any_support "
-                "WHERE touching_any_support.edge_id=touching_edge.id) THEN 1 "
-                "WHEN touching_support.edge_id IS NOT NULL "
+                "WHERE touching_any_support.edge_id=es.edge_id) THEN 1 "
+                "WHEN es.memory_id IS NOT NULL "
                 "AND touching_memory.id IS NOT NULL "
                 "AND touching_memory.workspace_id=? "
                 "AND COALESCE(touching_memory.scope, 'workspace')!='session' "
@@ -9372,16 +9658,16 @@ class MemoryService:
         # bounded candidate scan intentionally omits private rows from its result set.
         entity_sql += " AND (NOT EXISTS (SELECT 1 FROM edges hidden_edge "
         entity_sql += (
-            "WHERE hidden_edge.workspace_id=? "
-            "AND (hidden_edge.src=entity.id OR hidden_edge.dst=entity.id) "
+            "WHERE ((hidden_edge.workspace_id=? AND hidden_edge.src=entity.id) "
+            "OR (hidden_edge.workspace_id=? AND hidden_edge.dst=entity.id)) "
             "AND (hidden_edge.ingested_at IS NULL OR hidden_edge.ingested_at<=?)) "
             "OR EXISTS (SELECT 1 FROM edges public_edge "
         )
-        entity_params.extend((wid, known_t))
+        entity_params.extend((wid, wid, known_t))
         if not include_history:
             entity_sql += (
-                "WHERE public_edge.workspace_id=? "
-                "AND (public_edge.src=entity.id OR public_edge.dst=entity.id) "
+                "WHERE ((public_edge.workspace_id=? AND public_edge.src=entity.id) "
+                "OR (public_edge.workspace_id=? AND public_edge.dst=entity.id)) "
                 "AND (public_edge.valid_from IS NULL OR public_edge.valid_from<=?) "
                 "AND (public_edge.valid_to IS NULL OR ?<public_edge.valid_to "
                 "OR (public_edge.valid_to_recorded_at IS NOT NULL "
@@ -9417,14 +9703,14 @@ class MemoryService:
                 "AND COALESCE(public_memory.scope, 'workspace')!='session')))"
             )
             entity_params.extend((
-                wid, t, t, t, known_t, known_t,
+                wid, wid, t, t, t, known_t, known_t,
                 t, t, t, known_t, known_t,
                 wid, t, t, t, known_t, known_t,
             ))
         else:
             entity_sql += (
-                "WHERE public_edge.workspace_id=? "
-                "AND (public_edge.src=entity.id OR public_edge.dst=entity.id) "
+                "WHERE ((public_edge.workspace_id=? AND public_edge.src=entity.id) "
+                "OR (public_edge.workspace_id=? AND public_edge.dst=entity.id)) "
                 "AND (public_edge.valid_from IS NULL OR public_edge.valid_from<=?) "
                 "AND (public_edge.ingested_at IS NULL OR public_edge.ingested_at<=?) "
                 "AND (public_edge.expired_at IS NULL OR ?<public_edge.expired_at) "
@@ -9449,7 +9735,7 @@ class MemoryService:
                 "OR ?<public_memory.expired_at) "
                 "AND COALESCE(public_memory.scope, 'workspace')!='session')))"
             )
-            entity_params.extend((wid, t, known_t, known_t, t, known_t, known_t,
+            entity_params.extend((wid, wid, t, known_t, known_t, t, known_t, known_t,
                                   wid, t, known_t, known_t))
         entity_sql += ")"
         # Page until the cap is reached after session-scope pruning so private
@@ -10459,7 +10745,8 @@ class MemoryService:
         cache_key = (
             revision, clean_workspace, clean_level, clean_center_id or "",
             clean_system_id or "", tuple(clean_seeds), clean_repo or "",
-            tuple(clean_layers or ()), tuple(clean_relations), tuple(clean_entity_types),
+            None if clean_layers is None else tuple(clean_layers),
+            tuple(clean_relations), tuple(clean_entity_types),
             tuple(clean_memory_types), clean_as_of, clean_valid_at, clean_known_at,
             clean_time_from, clean_time_to,
             clean_depth, clean_min_support,
@@ -10469,7 +10756,6 @@ class MemoryService:
             clean_presentation,
             GRAPH_SCENE_ALGORITHM_VERSION,
         )
-        cached = self._graph_scene_cache.get(cache_key)
         # Cache hit only when both temporal axes are anchored (making the scene
         # a fixed historical query) or before the computed expiry deadline.
         # When known_at floats (defaults to system time), ghost state evolves as
@@ -10477,8 +10763,12 @@ class MemoryService:
         both_anchored = (
             clean_valid_at is not None and clean_known_at is not None
         )
-        if cached is not None and (
-                both_anchored or time.time() < cached[0]):
+        with self._graph_scene_cache_lock:
+            cached = self._graph_scene_cache.get(cache_key)
+            if cached is not None and not (both_anchored or time.time() < cached[0]):
+                self._graph_scene_cache.pop(cache_key, None)
+                cached = None
+        if cached is not None:
             if clean_presentation == "all":
                 cached_scene = cached[1]
                 scene = dict(cached_scene)
@@ -10489,9 +10779,12 @@ class MemoryService:
             scene["meta"]["query_ms"] = round(
                 (time.perf_counter() - started) * 1000.0, 3
             )
+            # Copy outside the metadata lock; a worker may invalidate this entry in
+            # the meantime. Promote only the same surviving entry, never reinsert it.
+            with self._graph_scene_cache_lock:
+                if self._graph_scene_cache.get(cache_key) is cached:
+                    self._graph_scene_cache.move_to_end(cache_key)
             return scene
-        if cached is not None:
-            del self._graph_scene_cache[cache_key]
         present = time.time()
         query_at = clean_valid_at if clean_valid_at is not None else present
         query_known_at = clean_known_at if clean_known_at is not None else present
@@ -10612,20 +10905,21 @@ class MemoryService:
                 system_time_floating=clean_known_at is None,
             )
         )
-        # One complete scene can be many megabytes.  Keep at most one in the shared
-        # LRU while retaining the normal 16-entry budget for compact analytical views.
-        if clean_level == "complete":
-            for key in [key for key in self._graph_scene_cache if key[2] == "complete"]:
-                self._graph_scene_cache.pop(key, None)
         cached_scene = scene if clean_presentation == "all" else copy.deepcopy(scene)
         response_scene = scene
         if clean_presentation == "all":
             response_scene = dict(scene)
             response_scene["meta"] = dict(scene["meta"])
-        self._graph_scene_cache[cache_key] = (valid_until, cached_scene)
-        self._graph_scene_cache.move_to_end(cache_key)
-        while len(self._graph_scene_cache) > 16:
-            self._graph_scene_cache.popitem(last=False)
+        # Publish and enforce both budgets atomically after the expensive copy. One
+        # complete scene can be many megabytes; compact views share a 16-entry LRU.
+        with self._graph_scene_cache_lock:
+            if clean_level == "complete":
+                for key in [key for key in self._graph_scene_cache if key[2] == "complete"]:
+                    self._graph_scene_cache.pop(key, None)
+            self._graph_scene_cache[cache_key] = (valid_until, cached_scene)
+            self._graph_scene_cache.move_to_end(cache_key)
+            while len(self._graph_scene_cache) > 16:
+                self._graph_scene_cache.popitem(last=False)
         return response_scene
 
     def graph_suggest(self, query: str, *, workspace: str, limit: int = 8,

@@ -10,7 +10,9 @@ import io
 import json
 import os
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -29,10 +31,9 @@ class WorkspaceResolution(unittest.TestCase):
     def setUp(self):
         self.hook = _load()
 
-    def test_default_falls_back_to_repo_basename(self):
-        self.assertEqual(
+    def test_default_leaves_workspace_to_server(self):
+        self.assertIsNone(
             self.hook.resolve_workspace("C:/work/engraphis", {}),
-            "engraphis",
         )
 
     def test_override_wins_over_basename(self):
@@ -42,12 +43,72 @@ class WorkspaceResolution(unittest.TestCase):
             "ops-prod",
         )
 
-    def test_blank_override_falls_back(self):
-        self.assertEqual(
+    def test_blank_override_leaves_workspace_to_server(self):
+        self.assertIsNone(
             self.hook.resolve_workspace(
                 "C:/work/engraphis", {"ENGRAPHIS_HOOK_WORKSPACE": "   "}),
-            "engraphis",
         )
+
+    def test_nested_directory_uses_git_root_name(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "project"
+            (root / ".git").mkdir(parents=True)
+            nested = root / "src" / "api"
+            nested.mkdir(parents=True)
+            self.assertEqual(self.hook.resolve_repo(nested), "project")
+
+    def test_nearest_git_file_is_a_worktree_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            outer = Path(directory) / "outer"
+            (outer / ".git").mkdir(parents=True)
+            root = outer / "project"
+            nested = root / "src"
+            nested.mkdir(parents=True)
+            (root / ".git").write_text("gitdir: /unused/worktree/admin", encoding="utf-8")
+            self.assertEqual(self.hook.resolve_repo(nested), "project")
+
+    def test_non_git_directory_uses_its_name(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory) / "research"
+            folder.mkdir()
+            self.assertEqual(self.hook.resolve_repo(folder), "research")
+
+
+class SessionRouting(unittest.TestCase):
+    def setUp(self):
+        self.hook = _load()
+
+    def _call(self, workspace):
+        result = {"content": [{"type": "text", "text": json.dumps({
+            "workspace": "client-acme", "context": "Use the agreed API contract."
+        })}]}
+        with mock.patch.object(
+            self.hook, "rpc", side_effect=[({}, "transport-session"), (result, "transport-session")]
+        ) as rpc:
+            with mock.patch.object(
+                self.hook, "notify_initialized", return_value="transport-session"
+            ):
+                context = self.hook.session_context("website", workspace, 100)
+        return context, rpc.call_args
+
+    def test_omitted_workspace_allows_saved_project_mapping(self):
+        context, call = self._call(None)
+        self.assertEqual(context, ("Use the agreed API contract.", "client-acme"))
+        self.assertNotIn("workspace", call.args[1]["arguments"])
+        self.assertEqual(call.args[1]["arguments"]["repo"], "website")
+        self.assertEqual(call.kwargs["session_id"], "transport-session")
+
+    def test_explicit_default_is_not_treated_as_omission(self):
+        _, call = self._call("default")
+        self.assertEqual(call.args[1]["arguments"]["workspace"], "default")
+
+    def test_legacy_plain_context_has_no_invented_workspace(self):
+        result = {"content": [{"type": "text", "text": "Known fact."}]}
+        self.assertEqual(self.hook.extract_session_result(result), ("Known fact.", None))
+
+    def test_tool_error_does_not_become_context(self):
+        result = {"isError": True, "content": [{"type": "text", "text": "Denied"}]}
+        self.assertEqual(self.hook.extract_session_result(result), ("", None))
 
 
 class ContextBuild(unittest.TestCase):
@@ -69,6 +130,11 @@ class ContextBuild(unittest.TestCase):
             self.hook.MAX_CONTEXT_CHARS = original
         # Header + footer + truncated body, never exceeds the budget.
         self.assertLessEqual(len(out), 50)
+
+    def test_unknown_destination_omits_workspace_label(self):
+        out = self.hook.build_additional_context("hello", None)
+        self.assertNotIn("workspace", out)
+        self.assertIn("hello", out)
 
 
 class EndToEndBehavior(unittest.TestCase):
@@ -99,7 +165,7 @@ class EndToEndBehavior(unittest.TestCase):
     def test_workspace_override_used_in_call(self):
         with mock.patch.object(self.hook, "MCP_URL", "http://127.0.0.1:9/mcp"):
             with mock.patch.object(self.hook, "session_context",
-                                   return_value="") as fake:
+                                   return_value=("", None)) as fake:
                 with mock.patch.dict(os.environ,
                                      {"ENGRAPHIS_HOOK_WORKSPACE": "ops"}):
                     with mock.patch.object(sys, "stdin", io.StringIO(json.dumps({
@@ -110,6 +176,26 @@ class EndToEndBehavior(unittest.TestCase):
                         with mock.patch.object(sys, "stdout", buf):
                             self.hook.main()
         self.assertEqual(fake.call_args.args[1], "ops")
+
+    def test_output_names_resolved_destination_for_nested_project(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "website"
+            (root / ".git").mkdir(parents=True)
+            nested = root / "src"
+            nested.mkdir()
+            payload = {"hook_event_name": "SessionStart", "cwd": str(nested)}
+            with mock.patch.dict(os.environ, {"ENGRAPHIS_HOOK_WORKSPACE": ""}):
+                with mock.patch.object(
+                    self.hook, "session_context", return_value=("Saved project fact.", "client-acme")
+                ) as fake:
+                    with mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))):
+                        buf = io.StringIO()
+                        with mock.patch.object(sys, "stdout", buf):
+                            self.assertEqual(self.hook.main(), 0)
+        self.assertEqual(fake.call_args.args[:2], ("website", None))
+        context = json.loads(buf.getvalue())["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("workspace client-acme", context)
+        self.assertNotIn("workspace src", context)
 
 
 class FailOpenBoundaryTests(unittest.TestCase):
@@ -130,7 +216,7 @@ class FailOpenBoundaryTests(unittest.TestCase):
             },
             clear=False,
         ):
-            with mock.patch.object(self.hook, "session_context", return_value="") as fake:
+            with mock.patch.object(self.hook, "session_context", return_value=("", None)) as fake:
                 with mock.patch.object(sys, "stdin", mock.MagicMock(read=lambda: "{}")):
                     with mock.patch.object(sys, "stdout", mock.MagicMock()):
                         rc = self.hook.main()
@@ -150,7 +236,7 @@ class FailOpenBoundaryTests(unittest.TestCase):
             },
             clear=False,
         ):
-            with mock.patch.object(self.hook, "session_context", return_value="ctx"):
+            with mock.patch.object(self.hook, "session_context", return_value=("ctx", "default")):
                 with mock.patch.object(sys, "stdin", mock.MagicMock(read=lambda: "{}")):
                     with mock.patch.object(sys, "stdout", mock.MagicMock()) as buf:
                         rc = self.hook.main()
@@ -247,7 +333,7 @@ class TerseCompressionTests(unittest.TestCase):
             clear=False,
         ):
             with mock.patch.object(self.hook, "session_context",
-                                   return_value="ctx"):
+                                   return_value=("ctx", "default")):
                 with mock.patch.object(sys, "stdin", mock.MagicMock(read=lambda: "{}")):
                     with mock.patch.object(sys, "stdout", mock.MagicMock()) as buf:
                         self.hook.main()
@@ -266,7 +352,7 @@ class TerseCompressionTests(unittest.TestCase):
             clear=False,
         ):
             with mock.patch.object(self.hook, "session_context",
-                                   return_value="ctx"):
+                                   return_value=("ctx", "default")):
                 with mock.patch.object(sys, "stdin", mock.MagicMock(read=lambda: "{}")):
                     with mock.patch.object(sys, "stdout", mock.MagicMock()) as buf:
                         self.hook.main()
