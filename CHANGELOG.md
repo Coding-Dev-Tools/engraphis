@@ -5,6 +5,8 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [1.7.9] - 2026-09-29
+
 - Classify local `engraphis_decide` command advice conservatively. Chained, piped,
   substituted or redirected commands, and options that run programs or write files
   (`rg --pre`, `pytest --basetemp`), are never labeled read-only. Recursive deletes in any
@@ -39,13 +41,10 @@ All notable changes to Engraphis are documented here. Format loosely follows
   bar is now `uncertain` with a null `is_complete`, instead of a decisive failure.
 - Local completion checks recognize `N passing` (Mocha/Jest style), `not passing`, `0 passing`
   and `errors: none`.
-- Updated the Pi extension's locked `fast-uri` to 3.1.8 and `ip-address` to 10.7.2 for newly
-  published advisories. CI runs the Pi checks under bash on Windows too, so a failed install,
-  build or test is no longer hidden behind the final audit, and development advisories fail
-  except those pinned inside the Pi test host's own lockfile, which stay visible as warnings.
-- Refreshed the public offline fixtures and source bindings in immutable v125 evidence.
-
-## [1.7.9] - 2026-09-29
+- Preserve individual negation targets in local contradiction advice, so a shared prohibition
+  cannot hide a separate conflict; different explicit subjects defer. Forced Git branch resets
+  and clustered deletion flags are destructive advice, and explicit Git diff/textconv or
+  ripgrep hostname helpers are never labeled read-only.
 
 - Added the saved-session managed Jev transport and Classic/Smart MCP decision route
   for Pro and Team, with explicit consent and current hosted entitlement checks.
@@ -90,7 +89,8 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - Rebuild FastMCP settings eagerly to avoid a forward-reference warning on newer SDKs.
 - Preserve CSS gradient tiles, screen blending and reduced-motion opacity in graph PNGs,
   including fractional display scaling; synchronize graph cache metadata across threads.
-- Refreshed public offline fixtures and source bindings in immutable v117 evidence for 1.7.9.
+- Refreshed public offline fixtures and source bindings in immutable v127 evidence for the
+  final 1.7.9 candidate; historical artifacts remain unchanged.
 - Campaign adapter capabilities and metrics now report the loaded Engraphis runtime version.
 
 - Added saved project-to-workspace routing and connection instructions so agents can use the

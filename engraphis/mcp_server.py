@@ -2256,9 +2256,8 @@ _DESTRUCTIVE_PATTERNS = (
                r"|--delete|--mirror|-(?=[a-zA-Z]*[fd])[a-zA-Z]+|\+\S+|:\S+)(?=[\s=]|$)"),
     re.compile(_GIT_COMMAND + r"(?:reset\b[^\n;&|]*?\s--hard\b|stash\s+(?:drop|clear)\b"
                r"|clean\b[^\n;&|]*?\s(?:-(?=[a-zA-Z]*f)[a-zA-Z]+|--force)(?=\s|$)"
-               r"|branch\b[^\n;&|]*?\s-(?=[a-zA-Z]*D)[a-zA-Z]+(?=\s|$)|filter-branch\b|filter-repo\b"
-               r"|reflog\s+expire\b|update-ref\b[^\n;&|]*?\s-d(?=\s|$)"
-               r"|branch\b(?=[^\n;&|]*\s(?:--delete|-d)(?=\s|$))(?=[^\n;&|]*\s(?:--force|-f)(?=\s|$)))"),
+               r"|branch\b[^\n;&|]*?\s(?:-(?=[a-zA-Z]*[Df])[a-zA-Z]+|--force)(?=\s|$)"
+               r"|filter-branch\b|filter-repo\b|reflog\s+expire\b|update-ref\b[^\n;&|]*?\s-d(?=\s|$))"),
     # Checkout paths after "--" or ".", worktree restores and forced switches discard work.
     re.compile(_GIT_COMMAND + r"(?:checkout\b[^\n;&|]*?\s(?:(?:--|\.)(?=\s|$)|--pathspec-from-file\b)"
                r"|restore\b(?=[^\n;&|]*\s(?:--worktree|-(?=[a-zA-Z]*W)[a-zA-Z]+)(?=\s|$))"
@@ -2296,12 +2295,12 @@ _QUOTING = re.compile(r"[\"'\\^]")
 _BENIGN_REDIRECTS = re.compile(r"(?<!\S)(?:[12&]?>>?\s*/dev/null|[12]?>&[12])(?!\S)")
 _READ_ONLY_COMMANDS = (
     re.compile(r"git\s+(?:status|diff|log|show|rev-parse|blame|describe|shortlog|ls-files"
-               r"|stash\s+list)(?!\S)(?!.*\s--output\b).*", re.I),
+               r"|stash\s+list)(?!\S)(?!.*\s--(?:output|ext-diff|textconv)\b).*", re.I),
     re.compile(r"git\s+branch(?:\s+(?:-a|-r|-v|-vv|--all|--remotes|--list|--show-current"
                r"|--verbose))*", re.I),
-    # ripgrep's --pre runs a program on every file it searches.
+    # ripgrep's preprocessing and hostname options run configured programs.
     re.compile(r"(?:ls|dir|cat|type|head|tail|grep|rg|findstr|echo|pwd|where|which|wc)(?!\S)"
-               r"(?!.*\s--pre(?:[=\s]|$)).*", re.I),
+               r"(?!.*\s--(?:pre|hostname-bin)(?:[=\s]|$)).*", re.I),
     # Options that fix, annotate or write files are not read-only, and pytest deletes an
     # existing --basetemp directory.
     re.compile(r"(?:pytest|python[\d.]*\s+-m\s+pytest|npm\s+test|cargo\s+(?:check|test)"
@@ -2333,7 +2332,7 @@ _SUPERSESSION_CUES = re.compile(
 _NEGATIONS = frozenset({"not", "no", "never", "n't"})
 # The clause a fact rules out: "not pnpm", "no longer uses port 80", "instead of npm".
 _RULED_OUT = re.compile(r"(?:\bno\s+longer|\b(?:not|no|never)|n't|\b(?:instead\s+of|rather\s+than))"
-                        r"\s+([^,.;:!?\n]+)")
+                        r"\s+([^,.;:!?\n]+?)(?=[,.;:!?\n]|\s+\b(?:and|but|or|yet)\b|$)")
 _IRREGULAR_CONTRACTIONS = {"can't": "can not", "won't": "will not", "shan't": "shall not"}
 _AUXILIARIES = frozenset({"does", "had", "been", "can", "could", "would", "should", "shall",
                           "must", "may", "might"})
@@ -2373,10 +2372,22 @@ def _supersession_cues(text: str) -> set[str]:
     return {"not" if cue in _NEGATIONS else cue for cue in _SUPERSESSION_CUES.findall(_plain(text))}
 
 
-def _ruled_out(text: str) -> set[str]:
-    """Return the normalized content words of every clause a fact rules out."""
-    return {token for clause in _RULED_OUT.findall(_plain(text))
-            for token in _fact_tokens(clause)} - {"not"}
+def _ruled_out(text: str) -> set[frozenset[str]]:
+    """Keep each negated clause distinct so an unrelated denial cannot hide a conflict."""
+    clauses = {frozenset(_fact_tokens(clause) - {"not"})
+               for clause in _RULED_OUT.findall(_plain(text))}
+    return clauses - {frozenset()}
+
+
+def _fact_subject(text: str) -> set[str]:
+    """Read an explicit subject before a use predicate; directives omit that subject."""
+    text = _plain(text)
+    predicate = re.search(r"\bus(?:e[sd]?|ing)\b", text)
+    if predicate is None:
+        return set()
+    # A preceding denial such as "No SQLite, use Postgres" is a separate clause.
+    prefix = re.split(r"[.!?;,\n]", text[:predicate.start()])[-1]
+    return _fact_tokens(prefix) - {"not", "longer"}
 
 
 def _guard_category(command: str) -> str:
@@ -2433,9 +2444,20 @@ def _heuristic_decision(
         # A negation opposes only what it rules out: "does not use port 80" opposes "uses
         # port 80" but not "uses port 443", and "npm, not pnpm" opposes "pnpm, not npm".
         cand_ruled, exist_ruled = _ruled_out(state), _ruled_out(existing_content)
-        flipped = bool((cand_ruled and cand_ruled <= exist_tokens and not cand_ruled & exist_ruled)
-                       or (exist_ruled and exist_ruled <= cand_tokens
-                           and not exist_ruled & cand_ruled))
+        flipped = any(
+            clause <= other_tokens and not any(
+                clause <= other_clause or other_clause <= clause for other_clause in other_ruled
+            )
+            for ruled, other_tokens, other_ruled in (
+                (cand_ruled, exist_tokens, exist_ruled), (exist_ruled, cand_tokens, cand_ruled)
+            )
+            for clause in ruled
+        )
+        # Matching a verb and value does not bind different named subjects. A bare
+        # directive can omit its subject; explicit subjects must share some context.
+        cand_subject, exist_subject = _fact_subject(state), _fact_subject(existing_content)
+        flipped = flipped and (not cand_subject or not exist_subject
+                               or bool(cand_subject & exist_subject))
         shared_subject = (len(overlap) >= 2 and
                           2 * len(overlap) >= min(len(cand_tokens), len(exist_tokens)))
         # Terse facts such as "No SQLite" and "Use SQLite" share just one word; a negation
