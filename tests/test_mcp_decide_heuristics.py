@@ -291,3 +291,29 @@ def test_local_support_keeps_one_character_terms():
 def test_local_contradiction_compares_content_words(candidate, existing, verdict):
     result = _decide(kind="classify_contradiction", state=candidate, existing_content=existing)
     assert result["verdict"] == verdict
+
+
+def test_git_option_guard_bounds_backtracking_without_capping_options():
+    # Isolate the actual patterns so a regression fails instead of hanging pytest.
+    # These strings are data; the child never executes a Git command.
+    import subprocess
+    import sys
+
+    options = ("-C " * 1000, "-c " * 1000, '-C "x" ' * 500,
+               "-C 'x' " * 500, '-C "x"suffix ' * 250)
+    commands = ["git " + flags + "status" for flags in options]
+    commands.extend("git " + '-C "my repo"suffix ' * 100 + operation for operation in (
+        "push --force origin main", "reset --hard HEAD~1", "clean -fd", "stash clear",
+    ))
+    payload = {"patterns": [(pattern.pattern, pattern.flags)
+                             for pattern in server._DESTRUCTIVE_PATTERNS],
+               "commands": commands}
+    child = subprocess.run(
+        [sys.executable, "-c",
+         "import json,re,sys; data=json.load(sys.stdin); "
+         "patterns=[re.compile(text,flags) for text,flags in data['patterns']]; "
+         "print(json.dumps([any(p.search(c) for p in patterns) for c in data['commands']]))"],
+        input=json.dumps(payload), text=True, capture_output=True, check=True,
+        timeout=5, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    assert json.loads(child.stdout) == [False] * len(options) + [True] * 4
