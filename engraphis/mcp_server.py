@@ -2239,8 +2239,13 @@ def engraphis_consolidate(
 _GUARD_SCAN_CHARS = 4096
 # Git accepts any number of global options before its subcommand (`git -C repo push -f`).
 # An option argument never starts a nested bare "git", so candidates scan disjoint spans.
-_GIT_COMMAND = (r"\bgit(?:\s+(?:-[Cc]\s+(?![\"']?git\s)(?:\"[^\"\n]*\"|'[^'\n]*'|\S+)"
-                r"|--?[A-Za-z][\w-]*(?:=\S+)?))*\s+")
+# Keep option and argument alternatives disjoint so nonmatching suffixes cannot
+# cause exponential backtracking across repeated flags or quoted arguments.
+_GIT_COMMAND = (
+    r"\bgit(?:\s+(?:-[Cc]\s+(?![\"']?git\s)"
+    r"(?:\"[^\"\n]*\"|'[^'\n]*'|[^\s\x22\x27])+"
+    r"|(?!-[Cc](?:\s|$))--?[A-Za-z][\w-]*(?:=\S+)?))*\s+"
+)
 _DESTRUCTIVE_PATTERNS = (
     # Recursive or forced deletes, with flags in any position or order.
     re.compile(r"\brm\b[^\n;&|]*?\s(?:-(?=[a-zA-Z]*[rRf])[a-zA-Z]+|--recursive|--force)(?=\s|$)"),
