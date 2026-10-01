@@ -90,7 +90,7 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - Rebuild FastMCP settings eagerly to avoid a forward-reference warning on newer SDKs.
 - Preserve CSS gradient tiles, screen blending and reduced-motion opacity in graph PNGs,
   including fractional display scaling; synchronize graph cache metadata across threads.
-- Refreshed public offline fixtures and source bindings in immutable v127 evidence for the
+- Refreshed public offline fixtures and source bindings in immutable v128 evidence for the
   final 1.7.9 candidate; historical artifacts remain unchanged.
 - Campaign adapter capabilities and metrics now report the loaded Engraphis runtime version.
 
