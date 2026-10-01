@@ -13,7 +13,8 @@ All notable changes to Engraphis are documented here. Format loosely follows
   flag order, raw device writes, history-rewriting or work-discarding Git operations, SQL
   and infrastructure teardown, downloaded-script execution, exfiltrating pipes and uploads,
   and well-known credential files are labeled destructive or leaking. Screening is bounded
-  so adversarial input stays cheap.
+  so adversarial input stays cheap. Repeated Git options and quoted arguments use disjoint
+  matching alternatives to prevent exponential backtracking when no destructive command follows.
 - Match whole words, ignore zero counts and treat negated success as failure in local
   completion checks; contrasts ("not only passed") and negated failures ("did not fail") are
   not failures. Local support and contradiction checks compare content words rather than

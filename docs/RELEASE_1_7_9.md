@@ -8,7 +8,7 @@ source does not publish it or enable the Cloud service. The existing 1.7.8
 release remains immutable.
 
 All planned changes are collected under the 1.7.9 candidate CHANGELOG section.
-The final source is bound by immutable `offline-fixtures-v127.json`; those local
+The final source is bound by immutable `offline-fixtures-v128.json`; those local
 fixtures establish their documented deterministic boundaries. They do not qualify
 the hosted provider or authorize publication.
 
