@@ -361,11 +361,19 @@ export const SMART_SCHEMAS = {
         "type": "string"
       },
       "workspace": {
-        "default": "default",
-        "description": "Memory workspace.",
-        "maxLength": 200,
-        "title": "Workspace",
-        "type": "string"
+        "anyOf": [
+          {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "description": "Chosen workspace; omit for session or project routing.",
+        "title": "Workspace"
       }
     },
     "required": [
@@ -462,11 +470,19 @@ export const SMART_SCHEMAS = {
         "type": "integer"
       },
       "workspace": {
-        "default": "default",
-        "description": "Workspace.",
-        "maxLength": 200,
-        "title": "Workspace",
-        "type": "string"
+        "anyOf": [
+          {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "description": "Chosen workspace; omit for saved project routing.",
+        "title": "Workspace"
       }
     },
     "title": "engraphis_sessionArguments",

@@ -531,6 +531,8 @@ def _recall_side_effect_snapshot(srv):
 
 
 _ALL_TOOLS = {
+    "engraphis_list_workspaces", "engraphis_get_workspace_routing",
+    "engraphis_set_workspace_routing",
     "engraphis_remember", "engraphis_remember_many",
     "engraphis_recall", "engraphis_recall_context",
     "engraphis_why", "engraphis_timeline",
@@ -544,7 +546,7 @@ _ALL_TOOLS = {
     "engraphis_ingest_postgres_schema",
     "engraphis_receipts", "engraphis_context_savings", "engraphis_verify_receipts",
     "engraphis_export_receipts", "engraphis_link_symbol",
-    "engraphis_check_update",
+    "engraphis_check_update", "engraphis_decide",
 }
 
 _SMART_TOOLS = {
@@ -575,11 +577,11 @@ def test_server_identity_and_tools_registered():
 
     classic = {t.name: t for t in asyncio.run(srv.classic_mcp.list_tools())}
     assert srv.classic_mcp.name == "engraphis_mcp"
-    assert len(_ALL_TOOLS) == 35
+    assert len(_ALL_TOOLS) == 39
     assert set(classic) == _ALL_TOOLS
     assert srv.minimum_role("engraphis_context_savings") == "viewer"
     kilo = (ROOT / "docs" / "KILO_CODE_INTEGRATION.md").read_text(encoding="utf-8")
-    full_surface = kilo.split("### Classic 35-tool inventory", 1)[1].split("\n---", 1)[0]
+    full_surface = kilo.split("### Classic 39-tool inventory", 1)[1].split("\n---", 1)[0]
     assert set(re.findall(r"`(engraphis_[a-z_]+)`", full_surface)) == _ALL_TOOLS
     # Flat schema (not a nested "params" object) so agents can call fields directly.
     props = classic["engraphis_remember"].inputSchema.get("properties", {})
@@ -1751,3 +1753,81 @@ def test_context_response_cap_omits_whole_evidence_and_updates_usage(monkeypatch
     assert usage["omitted_count"] == full["usage"]["packed_count"] + full["usage"]["omitted_count"]
     assert usage["saved_tokens"] == usage["estimated_saved_tokens"] == usage["source_tokens"]
     assert RegexTokenCounter()(json.dumps(bounded, ensure_ascii=False)) == usage["actual_response_tokens"] <= cap
+
+
+def test_mcp_decide_tool_registration_and_offline_guardrails(monkeypatch):
+    from engraphis.mcp_server import (
+        ACTION_SPECS,
+        classic_mcp,
+        engraphis_decide,
+        engraphis_discover_actions,
+        engraphis_execute_action,
+        engraphis_execute_read,
+        minimum_role,
+    )
+
+    # 1. Registration
+    assert "engraphis_decide" in classic_mcp._tool_manager._tools
+    assert minimum_role("engraphis_decide") == "member"
+    annotations = classic_mcp._tool_manager._tools["engraphis_decide"].annotations
+    assert annotations.readOnlyHint is False
+    assert annotations.idempotentHint is False
+    assert annotations.openWorldHint is True
+
+    # 2. Discovery
+    assert "decide" in ACTION_SPECS
+    # Remote Jev may consume allowance, so discovery uses the stateful executor.
+    assert ACTION_SPECS["decide"].side_effect == "write"
+    raw_disc = engraphis_discover_actions(task="guard command safety")
+    disc = json.loads(raw_disc)
+    action = next((a for a in disc.get("actions", []) if a["canonical_action"] == "decide"), None)
+    assert action is not None
+
+    # 3. Offline Guardrail Decisions
+    # Safe command
+    safe_out = json.loads(engraphis_decide(kind="guard_command", state="git status", offline_mode=True))
+    assert safe_out["allow_auto"] is False
+    assert safe_out["escalate_to_user"] is True
+    assert safe_out["safety_probability"] >= 0.90
+    assert safe_out["is_fallback"] is True
+    assert safe_out["backend"] == "local_heuristic"
+
+    # Destructive command
+    destr_out = json.loads(engraphis_decide(kind="guard_command", state="rm -rf / --no-preserve-root", offline_mode=True))
+    assert destr_out["allow_auto"] is False
+    assert destr_out["escalate_to_user"] is True
+    assert destr_out["safety_probability"] <= 0.10
+
+    # Contradiction screening
+    contra_out = json.loads(engraphis_decide(
+        kind="classify_contradiction",
+        state="We switched to PostgreSQL",
+        existing_content="Primary database is SQLite",
+        offline_mode=True,
+    ))
+    assert contra_out["verdict"] in ("contradicts_and_supersedes", "reinforces", "orthogonal")
+
+    # Support verification
+    supp_out = json.loads(engraphis_decide(
+        kind="verify_support",
+        query="database SQLite",
+        state="Engraphis stores all local memories in SQLite",
+        offline_mode=True,
+    ))
+    assert supp_out["supported"] is True
+
+    # 4. Smart MCP execution follows the discovered side-effect boundary.
+    read_raw = engraphis_execute_read(
+        capability_id=action["capability_id"],
+        schema_digest=action["schema_digest"],
+        arguments={"kind": "guard_command", "state": "git diff", "offline_mode": True},
+    )
+    assert read_raw.isError is True
+    assert "action_requires_execute_action" in read_raw.content[0].text
+    exec_raw = engraphis_execute_action(
+        capability_id=action["capability_id"],
+        schema_digest=action["schema_digest"],
+        arguments={"kind": "guard_command", "state": "git diff", "offline_mode": True},
+    )
+    exec_res = json.loads(exec_raw)
+    assert exec_res["result"]["allow_auto"] is False

@@ -13,7 +13,8 @@ import math
 import re
 from bisect import bisect_right
 from collections import Counter, defaultdict, deque
-from typing import Any, Iterable, Mapping, Optional, Sequence
+from collections.abc import Iterable, Mapping, Sequence
+from typing import Any, Optional
 
 
 ALGORITHM_VERSION = "galaxy-v13-responsive-compact-orbits"
@@ -106,7 +107,7 @@ def _hash_record(
     the public scene identity, including optional repository and temporal metadata.
     """
     def normalize(value: Any) -> Any:
-        if isinstance(value, Mapping):
+        if isinstance(value, (dict, Mapping)):
             return {
                 str(key): normalize(item)
                 for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))

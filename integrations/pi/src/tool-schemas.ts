@@ -21,14 +21,18 @@ export function applyScopeDefaults(
 	extra: Record<string, unknown> = {},
 ): Record<string, unknown> {
 	const result = { ...extra, ...params };
+	// A supplied session already owns its workspace and repo. Injecting runtime
+	// defaults would override that routing or create an unrelated scope conflict.
+	if (result.session_id) return result;
 	if (result.workspace === undefined && config.defaultWorkspace) {
 		result.workspace = config.defaultWorkspace;
 	}
 	if (
 		result.repo === undefined &&
 		config.defaultRepo &&
-		config.defaultWorkspace &&
-		result.workspace === config.defaultWorkspace
+		(config.defaultWorkspace
+			? result.workspace === config.defaultWorkspace
+			: result.workspace == null)
 	) {
 		result.repo = config.defaultRepo;
 	}

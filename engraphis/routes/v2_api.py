@@ -419,13 +419,15 @@ def _is_embedder_mismatch(exc) -> bool:
 
 def _keyword_search(ws, q, limit=20, *, as_of: Optional[float] = None,
                     valid_at: Optional[float] = None,
-                    known_at: Optional[float] = None):
+                    known_at: Optional[float] = None,
+                    repo: Optional[str] = None, session_id: Optional[str] = None):
     """Non-semantic fallback: match memories by keyword (title/content LIKE) so the
     Recall/Why/Timeline tabs still return results when the embedder is unavailable."""
     import json as _json
     import sqlite3 as _sql
     current_service = service()
-    ws = current_service._clean_ws(ws)
+    route = current_service.resolve_workspace(ws, repo=repo, session_id=session_id)
+    ws, repo = route["workspace"], route["repo"]
     # Read through the active store rather than opening a second raw SQLite connection.
     # This keeps dashboard reads on the same database/connection semantics as writes,
     # including :memory: databases, SQLCipher, and custom store connectors.
@@ -433,6 +435,11 @@ def _keyword_search(ws, q, limit=20, *, as_of: Optional[float] = None,
     try:
         row = conn.execute("SELECT id FROM workspaces WHERE name=?", (ws,)).fetchone()
         if row is None:
+            return []
+        rid = current_service._lookup_repo(row["id"], repo) if repo else None
+        if repo and rid is None:
+            return []
+        if session_id and current_service.store.get_session(session_id) is None:
             return []
         # Match the public Recall contract even if semantic retrieval cannot run.
         # A model-dimension mismatch must degrade retrieval quality, never silently
@@ -447,7 +454,6 @@ def _keyword_search(ws, q, limit=20, *, as_of: Optional[float] = None,
                "valid_from, valid_to, valid_to_recorded_at, ingested_at, expired_at, "
                "subject_key, claim_kind, provenance, metadata FROM memories "
                "WHERE workspace_id=? "
-               "AND COALESCE(scope, 'workspace')!='session' "
                "AND (valid_from IS NULL OR valid_from<=?) "
                "AND (valid_to IS NULL OR ?<valid_to "
                "OR (valid_to_recorded_at IS NOT NULL AND ?<valid_to_recorded_at)) "
@@ -457,6 +463,18 @@ def _keyword_search(ws, q, limit=20, *, as_of: Optional[float] = None,
             row["id"], world_anchor, world_anchor, system_anchor,
             system_anchor, system_anchor,
         ]
+        if session_id:
+            sql += " AND (scope IN ('workspace','user') OR (scope='session' AND session_id=?)"
+            args.append(session_id)
+            if rid:
+                sql += " OR (scope='repo' AND repo_id=?)"
+                args.append(rid)
+            sql += ")"
+        elif rid:
+            sql += " AND (scope IN ('workspace','user') OR (scope='repo' AND repo_id=?))"
+            args.append(rid)
+        else:
+            sql += " AND COALESCE(scope, 'workspace')!='session'"
         terms = [t for t in (q or "").split() if len(t) > 2][:6]
         if terms:
             sql += " AND (" + " OR ".join(["title LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\'" for _ in terms]) + ")"
@@ -659,13 +677,30 @@ def workspaces():
     return _run(service().list_workspaces)
 
 
+class _WorkspaceRoutingReq(BaseModel):
+    workspace: str = Field(min_length=1, max_length=200)
+    repo: str = Field(min_length=1, max_length=200)
+    enabled: StrictBool = True
+
+
+@router.get("/workspace-routing")
+def workspace_routing(repo: str = Query(..., min_length=1, max_length=200)):
+    return _run(service().get_workspace_routing, repo)
+
+
+@router.post("/workspace-routing")
+def workspace_routing_set(req: _WorkspaceRoutingReq):
+    return _run(service().set_workspace_routing, req.workspace, repo=req.repo,
+                enabled=req.enabled)
+
+
 # ── LLM connection status + test (dashboard "Connect your LLM" card) ───────────
 
 # Provider → sensible default model, so the dashboard's provider picker can prefill a
 # working model name without the user needing to know the provider's catalogue.
 _LLM_DEFAULT_MODELS = {
     "openai": "gpt-4o-mini",
-    "anthropic": "claude-3-5-sonnet-20241022",
+    "anthropic": "claude-sonnet-5-5",
     "google": "gemini-1.5-flash",
     "openrouter": "openai/gpt-4o-mini",
 }
@@ -1102,6 +1137,30 @@ def workspaces_merge(req: _MergeWsReq):
     return _run(service().merge_workspaces, req.source, req.target)
 
 
+class _MemoryMovePreviewReq(BaseModel):
+    workspace: str = Field(min_length=1, max_length=200)
+    target_workspace: str = Field(min_length=1, max_length=200)
+    memory_ids: list[str] = Field(min_length=1, max_length=500)
+
+
+class _MemoryMoveReq(_MemoryMovePreviewReq):
+    preview_token: str = Field(min_length=1, max_length=200)
+    confirmed: StrictBool = False
+
+
+@router.post("/memories/move-preview")
+def memories_move_preview(req: _MemoryMovePreviewReq):
+    return _run(service().preview_memory_move, workspace=req.workspace,
+                target_workspace=req.target_workspace, memory_ids=req.memory_ids)
+
+
+@router.post("/memories/move")
+def memories_move(req: _MemoryMoveReq):
+    return _run(service().move_memories, workspace=req.workspace,
+                target_workspace=req.target_workspace, memory_ids=req.memory_ids,
+                preview_token=req.preview_token, confirmed=req.confirmed)
+
+
 class _ImportFolderReq(BaseModel):
     workspace: str
     path: str = Field(max_length=1024)
@@ -1288,6 +1347,7 @@ def stats(workspace: Optional[str] = None):
 @router.get("/recall")
 def recall(q: str = Query(..., min_length=1, max_length=10_000),
            workspace: Optional[str] = None,
+           repo: Optional[str] = None, session_id: Optional[str] = None,
            k: int = Query(default=8, ge=1, le=50),
            mtype: Optional[str] = None, as_of: Optional[float] = None,
            valid_at: Optional[float] = None, known_at: Optional[float] = None,
@@ -1296,7 +1356,9 @@ def recall(q: str = Query(..., min_length=1, max_length=10_000),
            response_mode: str = "full",
            diagnostics: bool = False, planning: str = "off",
            mtype_limits: Optional[str] = None):
-    ws = workspace or _default_ws()
+    selected_workspace = workspace if workspace is not None or repo or session_id else _default_ws()
+    route = _run(service().resolve_workspace, selected_workspace, repo=repo, session_id=session_id)
+    ws, repo = route["workspace"], route["repo"]
     mtypes = [mtype] if mtype else None
     try:
         parsed_limits = json.loads(mtype_limits) if mtype_limits else None
@@ -1306,7 +1368,7 @@ def recall(q: str = Query(..., min_length=1, max_length=10_000),
         raise _invalid_request() from None
     try:
         out = service().recall(
-            q, workspace=ws, k=k, mtypes=mtypes, as_of=as_of,
+            q, workspace=ws, repo=repo, session_id=session_id, k=k, mtypes=mtypes, as_of=as_of,
             valid_at=valid_at, known_at=known_at, reinforce=False,
             token_budget=token_budget, retrieval_profile=retrieval_profile,
             candidate_depth=candidate_depth,
@@ -1325,6 +1387,7 @@ def recall(q: str = Query(..., min_length=1, max_length=10_000),
             raise HTTPException(status_code=500, detail={"error": "internal server error"})
         mems = _keyword_search(
             ws, q, -1, as_of=as_of, valid_at=valid_at, known_at=known_at,
+            repo=repo, session_id=session_id,
         )
         mems = _score_keyword_recall(q, mems)
         mems = _apply_keyword_mtype_limits(mems, parsed_limits, k=k)
@@ -1347,7 +1410,8 @@ def recall(q: str = Query(..., min_length=1, max_length=10_000),
         effective_budget = (
             token_budget if token_budget is not None else service().engine.recall_engine.token_budget
         )
-        return {"query": q, "workspace": ws, "count": len(mems), "context": "",
+        return {"query": q, "workspace": ws, "repo": repo,
+                "workspace_source": route["source"], "count": len(mems), "context": "",
                 "memories": mems, "mode": "keyword", "response_mode": response_mode,
                 "retrieval_profile": retrieval_profile,
                 "candidate_depth": candidate_depth,
@@ -1371,6 +1435,8 @@ def recall(q: str = Query(..., min_length=1, max_length=10_000),
     payload.update({
         "query": q,
         "workspace": ws,
+        "repo": repo,
+        "workspace_source": route["source"],
         "count": out.get("count", 0),
         "context": out.get("context", ""),
         "mode": "semantic",
@@ -1383,6 +1449,7 @@ class _AnswerReq(BaseModel):
     query: str = Field(min_length=1, max_length=10_000)
     workspace: Optional[str] = None
     repo: Optional[str] = None
+    session_id: Optional[str] = None
     k: int = Field(default=8, ge=1, le=50)
     max_citations: int = Field(default=5, ge=1, le=50)
     min_support: Optional[float] = Field(default=None, ge=0.0, le=1.0)
@@ -1407,12 +1474,13 @@ def answer(req: _AnswerReq):
     privacy-safe operation receipt; this adapter only applies the dashboard's bounded
     request model and stable error boundary.
     """
-    ws = req.workspace or _default_ws()
+    ws = req.workspace if req.workspace is not None or req.repo or req.session_id else _default_ws()
     out = _run(
         service().grounded_recall,
         req.query,
         workspace=ws,
         repo=req.repo,
+        session_id=req.session_id,
         k=req.k,
         as_of=req.as_of,
         valid_at=req.valid_at,
@@ -1907,8 +1975,9 @@ def merge(req: _MergeReq):
 # enforced by dashboard_app; hosted members, roles, seats, and remote agents live in Cloud.
 class _RememberReq(BaseModel):
     content: str
-    workspace: str = "default"
+    workspace: Optional[str] = None
     repo: Optional[str] = None
+    session_id: Optional[str] = None
     mtype: str = "semantic"
     scope: Optional[str] = None
     title: str = ""
@@ -1937,7 +2006,8 @@ def _request_is_loopback(request: Request) -> bool:
 @router.post("/remember")
 def remember(req: _RememberReq, request: Request):
     return _run(service().remember, req.content, workspace=req.workspace,
-                repo=req.repo, mtype=req.mtype, scope=req.scope, title=req.title,
+                repo=req.repo, session_id=req.session_id,
+                mtype=req.mtype, scope=req.scope, title=req.title,
                 importance=req.importance, keywords=req.keywords, metadata=req.metadata,
                 # This authenticated local API is the customer node's normal write
                 # surface. Callers can explicitly mark imported/external material
@@ -1958,8 +2028,9 @@ def remember(req: _RememberReq, request: Request):
 
 class _IntentRememberReq(BaseModel):
     text: str
-    workspace: str = "default"
+    workspace: Optional[str] = None
     repo: Optional[str] = None
+    session_id: Optional[str] = None
     title: str = ""
     mtype: str = "semantic"
     scope: Optional[str] = None
@@ -1978,6 +2049,7 @@ def intent_remember(req: _IntentRememberReq, request: Request):
     # separate server-side Team boundary and is not implemented in this package.
     return _run(
         service().intent_remember, req.text, workspace=req.workspace, repo=req.repo,
+        session_id=req.session_id,
         title=req.title, mtype=req.mtype, scope=req.scope, importance=req.importance,
         metadata=req.metadata, retention_class=req.retention_class,
         retention_reason=req.retention_reason,
@@ -2012,6 +2084,7 @@ class _IntentRecallReq(BaseModel):
     intent: str = "recall"
     workspace: Optional[str] = None
     repo: Optional[str] = None
+    session_id: Optional[str] = None
     mtypes: Optional[list] = None
     k: int = 8
     as_of: Optional[float] = None
@@ -2028,9 +2101,10 @@ class _IntentRecallReq(BaseModel):
 
 @router.post("/intent/recall")
 def intent_recall(req: _IntentRecallReq):
+    ws = req.workspace if req.workspace is not None or req.repo or req.session_id else _default_ws()
     return _run(
         service().intent_recall, req.query, intent=req.intent,
-        workspace=req.workspace or _default_ws(), repo=req.repo,
+        workspace=ws, repo=req.repo, session_id=req.session_id,
         mtypes=req.mtypes, k=req.k, as_of=req.as_of,
         valid_at=req.valid_at, known_at=req.known_at,
         token_budget=req.token_budget, retrieval_profile=req.retrieval_profile,

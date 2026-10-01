@@ -6,6 +6,7 @@ never writes it to project configuration or logs.
 """
 from __future__ import annotations
 
+import errno
 import hashlib
 import hmac
 import http.client
@@ -20,13 +21,16 @@ import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional, Tuple
+from urllib.parse import urlsplit
 
 from engraphis.hosted_client import (
     CloudUrlUnresolved,
+    _is_loopback_host,
     account_url,
     build_pinned_https_opener,
     validate_cloud_base_url,
 )
+from engraphis.http_deadline import deadline_handlers, read_response, remaining_time
 from engraphis.private_state import (
     UnsafeStateFile,
     atomic_private_text,
@@ -166,14 +170,62 @@ _LOCK_OPEN_FLAGS = os.O_RDWR | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOL
 
 
 @contextmanager
-def _refresh_lock():
+def _refresh_thread_lock(deadline: Optional[float]):
+    acquired = (
+        _REFRESH_THREAD_LOCK.acquire() if deadline is None
+        else _REFRESH_THREAD_LOCK.acquire(timeout=remaining_time(deadline))
+    )
+    if not acquired:
+        raise TimeoutError("cloud session refresh lock deadline exceeded")
+    try:
+        _check_deadline(deadline)
+        yield
+    finally:
+        _REFRESH_THREAD_LOCK.release()
+
+
+def _check_deadline(deadline: Optional[float]) -> None:
+    if deadline is not None:
+        remaining_time(deadline)
+
+
+def _acquire_refresh_file_lock(handle, deadline: Optional[float]) -> None:
+    if os.name == "nt":
+        import msvcrt
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+    while True:
+        _check_deadline(deadline)
+        try:
+            if os.name == "nt":
+                import msvcrt
+                mode = msvcrt.LK_LOCK if deadline is None else msvcrt.LK_NBLCK
+                msvcrt.locking(handle.fileno(), mode, 1)
+            else:
+                import fcntl
+                mode = fcntl.LOCK_EX | (0 if deadline is None else fcntl.LOCK_NB)
+                fcntl.flock(handle.fileno(), mode)
+            return
+        except OSError as exc:
+            # Only contention is retryable. Other permission/filesystem failures
+            # keep the existing safe-lock error, without spinning until timeout.
+            if deadline is None or exc.errno not in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                raise
+            time.sleep(min(0.01, remaining_time(deadline)))
+
+
+@contextmanager
+def _refresh_lock(*, deadline: Optional[float] = None):
     """Serialize spend-and-rotate of the single-use refresh credential.
 
     The thread lock covers one Python process; the one-byte advisory lock covers multiple
     workers sharing the same owner-only state directory.  The lock file remains in place
     so every process coordinates on one stable filesystem object.
     """
-    with _REFRESH_THREAD_LOCK:
+    with _refresh_thread_lock(deadline):
         lock_path = _refresh_lock_path()
         try:
             ensure_private_dir(lock_path.parent)
@@ -196,7 +248,8 @@ def _refresh_lock():
                     None if expected is None else (expected.st_dev, expected.st_ino)
                 )
                 if (
-                    not stat.S_ISREG(opened.st_mode)
+                    current is None
+                    or not stat.S_ISREG(opened.st_mode)
                     or getattr(opened, "st_nlink", 1) != 1
                     or (expected_identity is not None
                         and expected_identity != (opened.st_dev, opened.st_ino))
@@ -214,22 +267,16 @@ def _refresh_lock():
         handle = os.fdopen(descriptor, "r+b")
         locked = False
         try:
-            if os.name == "nt":
-                import msvcrt
-                handle.seek(0, os.SEEK_END)
-                if handle.tell() == 0:
-                    handle.write(b"\0")
-                    handle.flush()
-                handle.seek(0)
-                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
-            else:
-                import fcntl
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            _acquire_refresh_file_lock(handle, deadline)
             locked = True
             current = private_file_stat(lock_path)
             opened = os.fstat(handle.fileno())
-            if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+            if current is None or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
                 raise UnsafeStateFile("cloud session refresh lock changed while locking")
+            _check_deadline(deadline)
+        except TimeoutError:
+            handle.close()
+            raise
         except (OSError, UnsafeStateFile) as exc:
             handle.close()
             raise CloudSessionError(
@@ -814,7 +861,7 @@ _DRAIN_FAILURES = (OSError, ValueError, http.client.HTTPException)
 
 
 def _post_refresh(control_url: str, refresh: str, workspace_id: Optional[str],
-                  token_subject: str) -> dict:
+                  token_subject: str, *, deadline: Optional[float] = None) -> dict:
     # An org-scoped entitlement read asks for an unbound token, so it passes no workspace.
     # Serializing that as ``"workspace_id": null`` invites a 4xx from any control plane that
     # requires the field to be a string; omit the key instead of sending an empty value.
@@ -832,12 +879,24 @@ def _post_refresh(control_url: str, refresh: str, workspace_id: Optional[str],
         },
         method="POST",
     )
+    handlers: list[urllib.request.BaseHandler] = [_NoRedirect()]
+    if deadline is not None:
+        loopback_only = _is_loopback_host(urlsplit(control_url).hostname or "")
+        handlers.extend(deadline_handlers(deadline, loopback_only=loopback_only))
+        if loopback_only:
+            handlers.append(urllib.request.ProxyHandler({}))
+    opener = build_pinned_https_opener(*handlers) if deadline is not None else None
+    # Exhaustion before opening the request cannot have spent this credential.
+    # Keep this outside the uncertain, possibly-post-send exception handlers.
+    timeout = 10.0 if deadline is None else remaining_time(deadline)
     # Split for the same reason as ``device_connect.post_connect``, and with sharper
     # consequences here.  Once ``open`` returns, a success status line has been parsed, so
     # the control plane processed the refresh and the single-use credential it was given is
     # spent -- but the rotated replacement only reaches disk after the body parses, below.
     try:
-        response = build_pinned_https_opener(_NoRedirect()).open(request, timeout=10.0)
+        response = (
+            opener if opener is not None else build_pinned_https_opener(*handlers)
+        ).open(request, timeout=timeout)
     except urllib.error.HTTPError as exc:
         code = exc.code
         # Draining and closing the error body can itself time out or reset.  A sibling
@@ -850,7 +909,10 @@ def _post_refresh(control_url: str, refresh: str, workspace_id: Optional[str],
         # Exception, BaseException, object)`` -- neither an ``OSError`` nor a ``ValueError``,
         # so the pair alone let it through.
         try:
-            exc.read(_MAX_RESPONSE_BYTES + 1)
+            # A deadline-bound caller does not need the error body, so close it
+            # immediately rather than spend its remaining budget draining it.
+            if deadline is None:
+                exc.read(_MAX_RESPONSE_BYTES + 1)
         except _DRAIN_FAILURES:
             pass
         finally:
@@ -859,9 +921,18 @@ def _post_refresh(control_url: str, refresh: str, workspace_id: Optional[str],
             except _DRAIN_FAILURES:
                 pass
         raise _refresh_http_error(code)
-    # urllib wraps failures before or while sending the request in URLError.  That is the one
-    # distinguishable pre-send path, so the credential was not spent and retry remains safe.
+    # Preserve the ordinary refresh client's retry classification for URLError;
+    # a shared deadline adds a possibly interrupted-send case below.
     except urllib.error.URLError as exc:
+        if deadline is not None and time.monotonic() >= deadline:
+            # A deadline may interrupt a partially sent POST as well as a dial.
+            # Without a response we cannot prove the single-use token unspent.
+            raise CloudSessionError(
+                "Engraphis Cloud did not complete this refresh response, so the rotated "
+                "credential could not be saved. Connect this installation again.",
+                status=409,
+                refresh_unusable=True,
+            ) from exc
         raise CloudSessionError("Engraphis Cloud is temporarily unreachable.") from exc
     except (TimeoutError, http.client.RemoteDisconnected, OSError) as exc:
         # These escape directly from getresponse() after urllib wrote the POST.  The control
@@ -893,7 +964,11 @@ def _post_refresh(control_url: str, refresh: str, workspace_id: Optional[str],
 
     try:
         with response:
-            raw = response.read(_MAX_RESPONSE_BYTES + 1)
+            raw = (
+                response.read(_MAX_RESPONSE_BYTES + 1) if deadline is None
+                else read_response(response, deadline, max_bytes=_MAX_RESPONSE_BYTES,
+                                   preserve_complete=True)
+            )
     except (OSError, ValueError, http.client.HTTPException) as exc:
         # Post-response, and therefore NOT a transient outage. The server answered, so the
         # credential just submitted is spent, but the rotation it returned never reached
@@ -967,14 +1042,22 @@ def configured(*, require_compute: bool = True) -> bool:
 
 
 def access_for_workspace(
-    workspace_id: Optional[str], *, require_compute: bool = True
+    workspace_id: Optional[str], *, require_compute: bool = True,
+    deadline: Optional[float] = None,
 ) -> Tuple[str, str, str]:
     """Return ``(access_token, organization_id, compute_url)`` for a bound workspace.
 
     ``workspace_id`` may be ``None`` for an org-scoped read that deliberately wants an
     unbound token; the refresh body then omits the field rather than sending ``null``.
+    An optional monotonic ``deadline`` bounds both refresh locks and network phases.
+    Completed rotations are persisted even if time expires, before a timeout is raised.
+    OS filesystem/DNS calls cannot be preempted; their elapsed time is charged before
+    another phase starts. Callers omitting the deadline retain the existing behavior.
+    Control-only callers leave compute metadata unresolved; compute callers must use
+    ``require_compute=True`` to validate that destination before sending credentials.
     """
 
+    _check_deadline(deadline)
     raw_direct_token = os.environ.get("ENGRAPHIS_CLOUD_ACCESS_TOKEN", "")
     direct_token = credential_text(raw_direct_token)
     direct_org = os.environ.get("ENGRAPHIS_CLOUD_ORGANIZATION_ID", "").strip()
@@ -982,7 +1065,11 @@ def access_for_workspace(
     if raw_direct_token.strip() and not direct_token:
         raise CloudSessionError("The cloud access credential is invalid.", status=409)
     if direct_token and direct_org and (direct_compute or not require_compute):
-        compute_url = _reachable_cloud_base_url(direct_compute) if direct_compute else ""
+        compute_url = (
+            _reachable_cloud_base_url(direct_compute)
+            if require_compute and direct_compute else direct_compute
+        )
+        _check_deadline(deadline)
         return direct_token, direct_org, compute_url
 
     # Do not create the owner-only state directory merely to report an unconnected
@@ -993,6 +1080,7 @@ def access_for_workspace(
     # offer a trial even though retrying that credential would be a replay. The authoritative
     # session record is still loaded again under the lock below before any credential is used.
     preflight_saved = _load()
+    _check_deadline(deadline)
     if _selected_refresh_is_invalid(preflight_saved):
         raise CloudSessionError("The cloud refresh credential is invalid.", status=409)
     preflight_refresh = _selected_refresh(preflight_saved)
@@ -1007,11 +1095,13 @@ def access_for_workspace(
             "Connect this installation to Engraphis Cloud first.", status=401
         )
 
-    with _refresh_lock():
+    lock = _refresh_lock() if deadline is None else _refresh_lock(deadline=deadline)
+    with lock:
         # Load only after acquiring both locks. The saved rotation is the current
         # single-use credential; reading it before the lock lets two workers spend the
         # same value and causes one request to fail as a replay.
         saved = _load()
+        _check_deadline(deadline)
         if _selected_refresh_is_invalid(saved):
             raise CloudSessionError("The cloud refresh credential is invalid.", status=409)
         refresh = _selected_refresh(saved)
@@ -1027,10 +1117,18 @@ def access_for_workspace(
                 "Connect this installation to Engraphis Cloud first.", status=401
             )
         control = _reachable_cloud_base_url(control)
-        compute = _reachable_cloud_base_url(compute) if compute else ""
+        _check_deadline(deadline)
+        # A compute outage must not block control-only services such as Jev or sync.
+        # Preserve the binding so a later compute request still validates it normally.
+        if require_compute and compute:
+            compute = _reachable_cloud_base_url(compute)
+        _check_deadline(deadline)
         token_subject = _token_subject(saved)
         try:
-            body = _post_refresh(control, refresh, workspace_id, token_subject)
+            body = (
+                _post_refresh(control, refresh, workspace_id, token_subject) if deadline is None
+                else _post_refresh(control, refresh, workspace_id, token_subject, deadline=deadline)
+            )
         except CloudSessionError as exc:
             if exc.refresh_unusable:
                 _mark_refresh_unusable(saved, refresh)
@@ -1052,9 +1150,22 @@ def access_for_workspace(
                 status=409,
                 refresh_unusable=True,
             )
-        response_subject = _validated_token_subject(
-            body.get("token_subject") or token_subject
-        )
+        # Older control planes omit this field. A supplied value, however, must
+        # exactly preserve the already validated subject of the consumed family.
+        response_subject = body.get("token_subject", token_subject)
+        if response_subject != token_subject:
+            try:
+                _mark_refresh_unusable(saved, refresh)
+            except (OSError, RuntimeError):
+                # Retirement fences the credential in-process before attempting
+                # persistence; a write fault cannot make this a replayable outage.
+                pass
+            raise CloudSessionError(
+                "Engraphis Cloud returned an invalid session subject, so the rotated "
+                "credential could not be saved. Connect this installation again.",
+                status=409,
+                refresh_unusable=True,
+            )
         updated = dict(saved)
         updated.update({
             "schema": "engraphis-cloud-session/v1",
@@ -1109,4 +1220,5 @@ def access_for_workspace(
                 status=409,
                 refresh_unusable=True,
             ) from exc
+        _check_deadline(deadline)
         return access, organization_id, compute

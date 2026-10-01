@@ -38,7 +38,7 @@ middleware. Do not expose it through a LAN address or proxy. For a remote deploy
 `engraphis[all]`, set a strong `ENGRAPHIS_API_TOKEN`, terminate TLS, and use the dashboard's
 authenticated `/mcp` endpoint instead.
 
-Use `engraphis-mcp-http --classic` only for an existing integration that requires the 35 direct
+Use `engraphis-mcp-http --classic` only for an existing integration that requires the 36 direct
 tool names. New integrations should keep the nine-tool Smart default.
 
 Engraphis documents and tests generic MCP transports; it does not claim client-specific support
@@ -156,7 +156,7 @@ Environment secrets are for non-interactive deployments that cannot run the conn
 
 ## Trial and grace
 
-The no-card trial starts after email confirmation and lasts **3 active days for Pro or 10 active days for Team**.
+The no-card trial starts after email confirmation and lasts **7 active days for Pro or 14 active days for Team**.
 `workspace_write_grace` is a private-control-plane account-continuity state capped at **24
 hours**. It never extends the trial, hosted agent access, Team membership, seats, Cloud Sync, or
 managed compute, and it does not restrict the free local MCP server.

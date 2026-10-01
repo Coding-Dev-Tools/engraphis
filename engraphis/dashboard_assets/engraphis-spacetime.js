@@ -224,7 +224,9 @@
     const draw = (stamp, force = false) => {
       if (destroyed) return;
       frame = 0;
-      if (!force && lastPaint && stamp - lastPaint < SAMPLE_INTERVAL) {
+      // A pushed paused snapshot is the final frame; there is no future tick to
+      // replace a stale overlay if this paint is throttled away.
+      if (!force && !(latest && latest.paused) && lastPaint && stamp - lastPaint < SAMPLE_INTERVAL) {
         if (active && !document.hidden && !(latest && latest.paused)) frame = requestAnimationFrame(draw);
         return;
       }

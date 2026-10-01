@@ -10,8 +10,8 @@ from engraphis import hosted_client, licensing
 
 
 def test_hosted_lifecycle_constants_keep_trial_and_grace_separate():
-    assert hosted_client.TRIAL_DAYS == 3
-    assert hosted_client.TRIAL_SECONDS == 259_200
+    assert hosted_client.TRIAL_DAYS == 7
+    assert hosted_client.TRIAL_SECONDS == 604_800
     assert hosted_client.MAX_HOSTED_ACCOUNT_GRACE_SECONDS == 86_400
     assert hosted_client.MAX_LOCAL_WRITE_GRACE_SECONDS == 86_400
 
@@ -449,7 +449,7 @@ def test_pinned_https_handler_forwards_only_supported_connection_arguments(monke
 
 
 def test_licensing_facade_exposes_no_local_entitlement_engine():
-    assert licensing.TRIAL_DAYS == 3
+    assert licensing.TRIAL_DAYS == 7
     assert licensing.production_warnings() == []
     for removed in (
         "activate",

@@ -1,6 +1,6 @@
 {
   "schema": "engraphis-commercial/v2",
-  "version": "1.7.8",
+  "version": "1.7.9",
   "control_plane": "https://api.engraphis.com",
   "account_portal": "https://api.engraphis.com/account",
   "billing": {
@@ -12,15 +12,15 @@
     "provider_price_ids_public": false
   },
   "trial": {
-    "days": 3,
+    "days": 7,
     "card_required": false,
     "plans": [
       "pro",
       "team"
     ],
     "days_by_plan": {
-      "pro": 3,
-      "team": 10
+      "pro": 7,
+      "team": 14
     }
   },
   "entitlement_lifecycle": {
