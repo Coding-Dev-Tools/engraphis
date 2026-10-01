@@ -54,6 +54,11 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - Retire consumed refresh credentials when a successful response has an invalid
   token subject, and keep empty graph-layer selections separate from all-layer cache entries.
 
+- Updated the Pi extension's locked `fast-uri` to 3.1.8, `ip-address` to 10.7.2 and
+  `brace-expansion` to 5.0.12. CI repairs the Pi test host's embedded vulnerable leaf with
+  that exact pin, verifies the installed version, and audits both the full dependency lock
+  and installed tree. Pi checks use bash on Windows, so every install, build, test and audit
+  failure stops the job.
 - Provide a valid offline decision example in Smart MCP action discovery.
 - Reject coerced numeric/string remote consent before Classic MCP can select a Jev backend.
 - Retain global entities referenced by workspace edges during secure erasure,
