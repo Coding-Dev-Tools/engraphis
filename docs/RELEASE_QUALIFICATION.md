@@ -5,7 +5,7 @@ full-product qualification. Passing the public build jobs is necessary but does
 not replace the mandatory private readiness evidence. The workflow fails closed
 when qualification configuration is missing, malformed, expired or inconsistent
 with the selected source and distribution bytes. The owner-authorized repair
-waivers for the retained v1.7.6 and v1.7.8 candidates are documented below.
+waivers for the retained v1.7.6, v1.7.8 and v1.7.9 candidates are documented below.
 
 The public verifier is `scripts/verify_release_qualification.py`. It verifies
 Ed25519 signatures using `cryptography==50.0.0` in release jobs. It contains no
@@ -115,9 +115,9 @@ for these retained release candidates:
 | `waive_v176_qualification` | `v1.7.6` | `6a441a75c8dd159607fa3933da83f600864b9146` |
 | `waive_v178_qualification` | `v1.7.8` | `dce68e1602e580cd51b71e26db2ab04238df7df4` |
 
-Select exactly one waiver input together with its matching `release_tag`. Both
-inputs default to false. Combining them, selecting the wrong version, or reusing
-a tag for another commit fails before any public write. The v1.7.8 waiver follows
+Select exactly one waiver input together with its matching `release_tag`. All
+waiver inputs default to false. Combining them, selecting the wrong version, or
+reusing a tag for another commit fails before any public write. The v1.7.8 waiver follows
 the owner's explicit instruction to remove publication blockers after integrating
 and reviewing the beneficial local work. It reuses the distributions and evidence
 from the successful automated validations of that tagged source.
@@ -132,6 +132,28 @@ leaves the public disclosure in place. These waivers are not qualifications and
 do not mark any unverified gate as passing. All ordinary tag publications and
 repairs outside these exact candidates still require a valid owner-signed
 qualification.
+
+## Owner-authorized retained v1.7.9 repair
+
+On 2026-10-01, after reviewing the prepared exception and required public
+disclosure, the repository owner explicitly approved this retained-candidate
+repair and publication. This approval does not qualify the full product or
+authorize exceptions for future candidates.
+
+The `waive_v179_qualification` input defaults to false and is bound only
+to `v1.7.9` at `c6871b9bf506eec6cebe96beee1ac252429a7b99`. It cannot be combined
+with either earlier waiver or applied to a different tag or source commit.
+The retained tag run's automated validation jobs passed; its publisher failed
+because the signed full-product qualification receipt was absent. The repair
+reuses the exact retained wheel, source archive and public evidence from that run.
+
+This exception waives only the signed full-product qualification
+requirement for those retained bytes. Protected environment review, retained
+artifact verification and PyPI file identity checks remain required. Public
+GitHub release disclosure must succeed before the first PyPI write and must
+state that mandatory full-product acceptance gates remain unverified. Ordinary
+tag publication and repair outside the explicitly selected exception still
+require signed qualification.
 
 ## Public installed evidence
 
