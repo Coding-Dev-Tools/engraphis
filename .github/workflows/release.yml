@@ -892,6 +892,11 @@ jobs:
 
   github-release:
     name: Publish GitHub Release
+    # Share one publication lock with repairs, including runs on other refs.
+    concurrency:
+      group: engraphis-github-release-publication
+      cancel-in-progress: false
+      queue: max
     needs: publish
     environment: release-qualification
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
@@ -953,6 +958,11 @@ jobs:
 
   github-release-repair:
     name: Repair GitHub Release
+    # Hold the lock from the Latest lookup through all GitHub release writes.
+    concurrency:
+      group: engraphis-github-release-publication
+      cancel-in-progress: false
+      queue: max
     environment: release-qualification
     if: >-
       github.event_name == 'workflow_dispatch' &&
@@ -1231,7 +1241,27 @@ jobs:
         run: |
           set -euo pipefail
           notes_args=()
+          latest_args=(--latest)
+          promote_latest=true
           if [ "$WAIVE_QUALIFICATION" = "true" ]; then
+            # A retained older repair must not displace a newer public Latest.
+            # Both authorized candidates already have a public release history;
+            # failed lookups or unknown tag formats stop before any release write.
+            current_latest="$(gh release view --repo "$GH_REPO" --json tagName --jq .tagName)"
+            promote_latest="$(python - "$RELEASE_TAG" "$current_latest" <<'PY'
+          import re
+          import sys
+
+          def version(tag):
+              if re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", tag) is None:
+                  raise SystemExit("Latest release comparison requires stable version tags")
+              return tuple(map(int, tag[1:].split(".")))
+
+          print("true" if version(sys.argv[1]) >= version(sys.argv[2]) else "false")
+          PY
+          )"
+            latest_args=(--latest=false)
+            if [ "$promote_latest" = "true" ]; then latest_args=(--latest); fi
             {
               printf '## Release qualification\n\n'
               printf 'The owner waived full-product qualification for this release. Mandatory full-product gates are not represented as passed.\n\n'
@@ -1254,7 +1284,7 @@ jobs:
             gh release upload "$RELEASE_TAG" verified-dist/* release-evidence/* \
               --repo "$GH_REPO" \
               --clobber
-            if [ "$WAIVE_QUALIFICATION" = "true" ]; then
+            if [ "$WAIVE_QUALIFICATION" = "true" ] && [ "$promote_latest" = "true" ]; then
               gh release edit "$RELEASE_TAG" --repo "$GH_REPO" --latest
             fi
           else
@@ -1264,5 +1294,5 @@ jobs:
               --generate-notes \
               "${notes_args[@]}" \
               --title "Engraphis ${RELEASE_TAG#v}" \
-              --latest
+              "${latest_args[@]}"
           fi

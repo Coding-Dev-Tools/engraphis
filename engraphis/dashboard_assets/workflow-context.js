@@ -27,7 +27,7 @@
 
   window.EngraphisWorkflow = {
     title,
-    create({ onProjectChange, onNavigate, onNewMemory }) {
+    create({ api, onProjectChange, onNavigate, onNewMemory }) {
       const byId = id => document.getElementById(id);
       let workspace = '';
       let project = '';
@@ -37,8 +37,108 @@
       const journeyKey = () => 'engraphis-connection-journey-v1:'
         + encodeURIComponent(workspace) + ':' + encodeURIComponent(project);
       let journey = {};
+      let routingGeneration = 0;
+      let routingController = null;
+      let routingBusy = false;
+      let routingWorkspace = null;
       const checkIds = ['connection-configured', 'connection-recalled', 'connection-corrected'];
       const scopeLabel = () => project ? workspace + ' / ' + project : workspace + ' / all projects';
+
+      function renderWorkspaceInstructions() {
+        const lines = workspace && project ? [
+          'For this project, use Engraphis repo=' + JSON.stringify(project) + '.',
+          'Honor an explicit workspace choice for the current task. Otherwise omit workspace so the saved project default applies.',
+          'Start a session and check its returned workspace. Retain its session_id for recall and remember during this task.',
+          'Do not add a hardcoded workspace="default". Existing sessions keep their workspace when the project default changes.',
+        ] : workspace ? [
+          'Use Engraphis workspace=' + JSON.stringify(workspace) + '.',
+          project ? 'Use repo=' + JSON.stringify(project) + ' for this project.' : 'No project is selected. Omit repo for workspace-wide work.',
+          'Pass this workspace' + (project ? ' and repo' : '') + ' on every session start, recall, and remember call.',
+          'Use the returned session_id for this work context on tools that accept it.',
+          'When only session_id is supplied, inherit its workspace. Never combine a session with a different workspace or repo.',
+        ] : ['Choose a workspace to generate agent instructions.'];
+        byId('connection-workspace-instructions').textContent = lines.join('\n');
+        byId('connection-workspace-copy').disabled = !workspace || Boolean(project && (routingBusy || routingWorkspace !== workspace));
+      }
+
+      function renderRoutingControls() {
+        byId('connection-routing-save').disabled = !workspace || !project || routingBusy;
+        byId('connection-routing-remove').disabled = !workspace || !project || routingBusy
+          || routingWorkspace !== workspace;
+        byId('connection-routing-status').setAttribute('aria-busy', String(routingBusy));
+        renderWorkspaceInstructions();
+      }
+
+      function routingRequest() {
+        if (routingController) routingController.abort();
+        routingController = new AbortController();
+        const generation = ++routingGeneration;
+        const selectedWorkspace = workspace;
+        const selectedProject = project;
+        return {
+          workspace: selectedWorkspace,
+          project: selectedProject,
+          signal: routingController.signal,
+          current: () => generation === routingGeneration && selectedWorkspace === workspace && selectedProject === project,
+        };
+      }
+
+      function showRouting(result) {
+        routingWorkspace = result && result.configured === true && typeof result.workspace === 'string'
+          ? result.workspace : null;
+        byId('connection-routing-status').textContent = routingWorkspace
+          ? 'Default for ' + JSON.stringify(project) + ': ' + JSON.stringify(routingWorkspace)
+            + (routingWorkspace === workspace ? '.' : '. Saving will replace it with ' + JSON.stringify(workspace) + '.')
+          : 'No project default is saved. Save to route ' + JSON.stringify(project) + ' to ' + JSON.stringify(workspace) + '.';
+      }
+
+      async function loadRouting() {
+        const request = routingRequest();
+        routingWorkspace = null;
+        routingBusy = Boolean(workspace && project);
+        byId('connection-workspace-copy-status').textContent = '';
+        byId('connection-routing-status').textContent = routingBusy
+          ? 'Checking this project’s default workspace…' : 'Select a project to configure its default workspace.';
+        renderRoutingControls();
+        if (!routingBusy) return;
+        try {
+          const result = await api('/workspace-routing?repo=' + encodeURIComponent(request.project), { signal: request.signal });
+          if (request.current()) showRouting(result);
+        } catch (error) {
+          if (request.current()) byId('connection-routing-status').textContent = 'Could not load project routing: ' + error.message;
+        } finally {
+          if (request.current()) {
+            routingBusy = false;
+            renderRoutingControls();
+          }
+        }
+      }
+
+      async function saveRouting(enabled) {
+        if (!workspace || !project || routingBusy || (!enabled && routingWorkspace !== workspace)) return;
+        const request = routingRequest();
+        routingBusy = true;
+        renderRoutingControls();
+        byId('connection-routing-status').textContent = enabled ? 'Saving project routing…' : 'Removing project routing…';
+        try {
+          const result = await api('/workspace-routing', {
+            method: 'POST', signal: request.signal,
+            body: { workspace: request.workspace, repo: request.project, enabled },
+          });
+          if (request.current()) showRouting(result);
+        } catch (error) {
+          if (request.current()) {
+            routingWorkspace = null;
+            byId('connection-routing-status').textContent = 'Could not confirm the routing change: '
+              + error.message + ' Reselect this project to check its saved default.';
+          }
+        } finally {
+          if (request.current()) {
+            routingBusy = false;
+            renderRoutingControls();
+          }
+        }
+      }
 
       function renderJourney() {
         const host = Object.hasOwn(instructions, journey.host) ? journey.host : 'codex';
@@ -64,6 +164,7 @@
           + ' Agent connection and restart are not verified by this dashboard.';
         byId('connection-add-memory').disabled = !workspace;
         byId('connection-ask').disabled = !workspace;
+        renderWorkspaceInstructions();
       }
 
       function renderProjects() {
@@ -112,6 +213,22 @@
       }));
       byId('connection-add-memory').addEventListener('click', onNewMemory);
       byId('connection-ask').addEventListener('click', () => onNavigate('ask'));
+      byId('connection-routing-save').addEventListener('click', () => { void saveRouting(true); });
+      byId('connection-routing-remove').addEventListener('click', () => { void saveRouting(false); });
+      byId('connection-workspace-copy').addEventListener('click', async () => {
+        const selectedWorkspace = workspace;
+        const selectedProject = project;
+        try {
+          await navigator.clipboard.writeText(byId('connection-workspace-instructions').textContent);
+          if (workspace === selectedWorkspace && project === selectedProject) {
+            byId('connection-workspace-copy-status').textContent = 'Copied workspace instructions.';
+          }
+        } catch (_) {
+          if (workspace === selectedWorkspace && project === selectedProject) {
+            byId('connection-workspace-copy-status').textContent = 'Copy is unavailable. Select and copy the instructions above.';
+          }
+        }
+      });
       byId('connection-copy').addEventListener('click', async () => {
         try {
           await navigator.clipboard.writeText(byId('connection-command').textContent);
@@ -145,6 +262,7 @@
           byId('project-load-status').textContent = workspace ? 'Loading projects…' : '';
           renderProjects();
           renderJourney();
+          void loadRouting();
         },
         setProjects(values) {
           projectNames.clear();

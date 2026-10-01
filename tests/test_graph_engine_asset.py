@@ -2667,6 +2667,58 @@ def test_spacetime_lifecycle_clears_disabled_canvas_and_wakes_replacements(repla
 
 
 @requires_node
+@pytest.mark.parametrize("delivery", ["setSnapshot", "event"])
+def test_spacetime_paused_snapshot_paints_within_throttle_interval(delivery) -> None:
+    report = _run_spacetime_node(
+        """
+        const frames = new Map(), listeners = {};
+        let nextFrame = 0, clears = 0;
+        const ctx = new Proxy({}, {
+          get(_target, key) {
+            if (key === 'clearRect') return () => { clears++; };
+            return () => ({ addColorStop() {} });
+          }, set() { return true; },
+        });
+        globalThis.requestAnimationFrame = callback => {
+          const id = ++nextFrame; frames.set(id, callback); return id;
+        };
+        globalThis.cancelAnimationFrame = id => frames.delete(id);
+        globalThis.window = { devicePixelRatio: 1 };
+        globalThis.document = {
+          hidden: false, addEventListener() {}, removeEventListener() {},
+          createElement: () => ({ width: 0, height: 0, setAttribute() {}, remove() {},
+            getContext: () => ctx }),
+        };
+        const container = {
+          clientWidth: 900, clientHeight: 600, appendChild() {},
+          addEventListener(type, callback) { listeners[type] = callback; },
+          removeEventListener(type) { delete listeners[type]; },
+        };
+        const tick = stamp => {
+          const [id, callback] = frames.entries().next().value;
+          frames.delete(id); callback(stamp);
+        };
+        const initial = { paused: false, nodes: [], systemAnchors: [],
+          center: { x: 0, y: 0, radius: 11 }, viewport: { x: 450, y: 300, zoom: 1 } };
+        new Function('window', source)(window);
+        const overlay = window.EngraphisSpacetime.create(container, null);
+        overlay.setSnapshot(initial);
+        overlay.setEnabled(true);
+        tick(100);
+        const before = clears;
+        const final = { ...initial, paused: true, center: { x: 100, y: 50, radius: 11 } };
+        if ('DELIVERY' === 'setSnapshot') overlay.setSnapshot(final);
+        else listeners.engraphisgraphphysicschange({ detail: final });
+        tick(116);
+        emit({ before, after: clears, queued: frames.size });
+        overlay.destroy();
+        """.replace("DELIVERY", delivery)
+    )
+    assert report["after"] == report["before"] + 1
+    assert report["queued"] == 0
+
+
+@requires_node
 def test_advanced_spacetime_controls_pause_live_orbits_and_drag_release_is_bounded() -> None:
     """The public controls drive one observable physics state, including slingshot release."""
     report = _run_engine(
@@ -10682,7 +10734,7 @@ def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
         "'/v2-assets/engraphis-graph.js?v=20260927-unmerged-readiness-3'"
     )
     assert d3 < force_graph < renderer
-    assert '/v2-assets/ledger.js?v=20260927-unmerged-readiness-3' in markup
+    assert '/v2-assets/ledger.js?v=20260928-workspace-routing-1' in markup
     assert "if (graphAssetsPromise === attempt) releaseGraphAssetsAttempt(attempt)" in loader
     assert "graphAssetsRetry = Math.min(graphAssetsRetry + 1, 10)" in loader
     all_loader = source[source.index("function ensureGraphAllAsset()"):
@@ -12163,9 +12215,9 @@ def test_pane_backgrounds_are_owned_by_css_not_by_the_asset() -> None:
     for style in ("galaxy", "solar", "cyber"):
         assert f'#graph-net[data-graph-style="{style}"]' in css
     assert "data-graph-style" in source
-    # The gradients must exist in exactly one place, or the two copies drift.
-    assert "radial-gradient" not in source
-    assert "linear-gradient" not in source
+    # Authored gradients belong in CSS. Export may parse computed CSS, but must
+    # not duplicate its gradient definitions in JavaScript string literals.
+    assert re.search(r"""["'`]\s*(?:linear|radial)-gradient\s*\(""", source) is None
 
 
 def test_hover_cursor_class_the_asset_toggles_exists_in_css() -> None:

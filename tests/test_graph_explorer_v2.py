@@ -2538,6 +2538,156 @@ def test_graph_scene_cache_is_warm_and_invalidates_on_store_write():
     assert refreshed["meta"]["index_generation"] > first["meta"]["index_generation"]
 
 
+@pytest.mark.parametrize("layer_order", [(None, []), ([], None)],
+                         ids=["all-then-none", "none-then-all"])
+def test_graph_scene_cache_distinguishes_all_layers_from_no_layers(monkeypatch, layer_order):
+    service, _alpha, _beta, _gamma = _seed_service()
+    try:
+        cold_scenes = []
+        for layers in layer_order:
+            scene = service.graph_scene(workspace="acme", layers=layers)
+            assert len(scene["edges"]) == (2 if layers is None else 0)
+            assert scene["meta"]["cache_hit"] is False
+            cold_scenes.append(scene)
+
+        def fail_if_rebuilt(**_kwargs):
+            pytest.fail("repeating either layer selection must use its own warm scene")
+
+        monkeypatch.setattr(service, "_graph_scene_rows", fail_if_rebuilt)
+        for layers, cold in zip(layer_order, cold_scenes):
+            warm = service.graph_scene(workspace="acme", layers=layers)
+            assert warm["meta"]["cache_hit"] is True
+            assert warm["nodes"] == cold["nodes"]
+            assert warm["edges"] == cold["edges"]
+            assert warm["meta"]["scene_hash"] == cold["meta"]["scene_hash"]
+    finally:
+        service.store.close()
+
+
+@pytest.mark.parametrize("level", ["overview", "complete"])
+@pytest.mark.parametrize("mutate_cache_hit", [False, True])
+def test_quality_scene_cache_isolated_from_nested_response_mutation(level, mutate_cache_hit):
+    service, _alpha, _beta, _gamma = _seed_service()
+    kwargs = {"workspace": "acme", "level": level, "presentation": "quality"}
+    response = service.graph_scene(**kwargs)
+    if mutate_cache_hit:
+        response = service.graph_scene(**kwargs)
+    assert response["meta"]["cache_hit"] is mutate_cache_hit
+    expected_nodes = copy.deepcopy(response["nodes"])
+    expected_edges = copy.deepcopy(response["edges"])
+    scene_hash = response["meta"]["scene_hash"]
+
+    response["nodes"][0]["label"] = "Caller-local label"
+    response["nodes"][0]["repo_names"].append("caller-local-repo")
+    response["edges"].clear()
+
+    following = service.graph_scene(**kwargs)
+    assert following["meta"]["cache_hit"] is True
+    assert following["nodes"] == expected_nodes
+    assert following["edges"] == expected_edges
+    assert following["meta"]["scene_hash"] == scene_hash
+
+
+@pytest.mark.parametrize("level", ["overview", "complete"])
+@pytest.mark.parametrize("eviction", ["clear", "pop"])
+def test_warm_graph_cache_tolerates_eviction_during_copy(monkeypatch, level, eviction):
+    service, _alpha, _beta, _gamma = _seed_service()
+    kwargs = {"workspace": "acme", "level": level}
+    first = service.graph_scene(**kwargs)
+    cache_key, cached = next(iter(service._graph_scene_cache.items()))
+    copied = threading.Event()
+    evicted = threading.Event()
+    real_deepcopy = copy.deepcopy
+
+    def copy_before_eviction(value, memo=None):
+        result = real_deepcopy(value, memo)
+        if value is cached[1]:
+            copied.set()
+            assert evicted.wait(5), "cache eviction did not finish while the copy was in flight"
+        return result
+
+    def evict():
+        if copied.wait(5):
+            if eviction == "clear":
+                service._graph_scene_cache.clear()
+            else:
+                service._graph_scene_cache.pop(cache_key, None)
+            evicted.set()
+
+    monkeypatch.setattr(service_module.copy, "deepcopy", copy_before_eviction)
+    worker = threading.Thread(target=evict)
+    worker.start()
+    try:
+        response = service.graph_scene(**kwargs)
+        assert response["meta"]["cache_hit"] is True
+        assert response["nodes"] == first["nodes"]
+        assert response["edges"] == first["edges"]
+        assert not service._graph_scene_cache  # Promotion must not restore the old snapshot.
+    finally:
+        copied.set()
+        worker.join(5)
+        service.store.close()
+    assert not worker.is_alive()
+
+
+def test_concurrent_complete_scene_publication_preserves_cache_budgets(monkeypatch):
+    service, _alpha, _beta, _gamma = _seed_service()
+    for limit in range(1, 16):
+        service.graph_scene(workspace="acme", node_limit=limit)
+    copies_ready = threading.Barrier(2)
+    real_deepcopy = copy.deepcopy
+    results = []
+    failures = []
+
+    def synchronize_publication(value, memo=None):
+        result = real_deepcopy(value, memo)
+        if isinstance(value, dict) and value.get("meta", {}).get("cache_hit") is False:
+            copies_ready.wait(5)
+        return result
+
+    def read_complete(confidence):
+        try:
+            results.append(service.graph_scene(
+                workspace="acme", level="complete", include_memory_nodes=False,
+                min_confidence=confidence,
+            ))
+        except BaseException as exc:
+            failures.append(exc)
+
+    monkeypatch.setattr(service_module.copy, "deepcopy", synchronize_publication)
+    workers = [threading.Thread(target=read_complete, args=(confidence,))
+               for confidence in (0.0, 0.1)]
+    for worker in workers:
+        worker.start()
+    try:
+        for worker in workers:
+            worker.join(10)
+        assert not any(worker.is_alive() for worker in workers)
+        assert not failures
+        assert len(results) == 2
+        assert all(scene["meta"]["cache_hit"] is False for scene in results)
+        assert len(service._graph_scene_cache) == 16
+        assert sum(key[2] == "complete" for key in service._graph_scene_cache) == 1
+    finally:
+        copies_ready.abort()
+        for worker in workers:
+            worker.join(5)
+        service.store.close()
+
+
+def test_warm_scene_promotion_preserves_least_recently_used_eviction():
+    service, _alpha, _beta, _gamma = _seed_service()
+    try:
+        for limit in range(1, 17):
+            service.graph_scene(workspace="acme", node_limit=limit)
+        assert service.graph_scene(workspace="acme", node_limit=1)["meta"]["cache_hit"] is True
+        service.graph_scene(workspace="acme", node_limit=17)
+        assert service.graph_scene(workspace="acme", node_limit=1)["meta"]["cache_hit"] is True
+        assert service.graph_scene(workspace="acme", node_limit=2)["meta"]["cache_hit"] is False
+    finally:
+        service.store.close()
+
+
 def test_all_presentation_cache_isolated_from_response_metadata_mutation():
     service, _alpha, _beta, _gamma = _seed_service()
 
@@ -4247,6 +4397,141 @@ def test_visibility_cap_scopes_touching_edges_to_requested_repo(monkeypatch):
 
     assert noisy not in {node["id"] for node in scene["nodes"]}
     assert "edg_noisy" not in {edge["id"] for edge in scene["edges"]}
+
+
+@pytest.mark.parametrize("include_history", [False, True])
+def test_touching_classification_work_is_bounded_by_selected_entities(include_history):
+    """Unrelated repository edges must not turn a small view into a workspace scan."""
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    try:
+        workspace_id = service.store.get_or_create_workspace("scoped-work")
+        selected_repo = service.store.get_or_create_repo(workspace_id, "selected")
+        noisy_repo = service.store.get_or_create_repo(workspace_id, "noisy")
+        conn = service.store.conn
+        for entity_id, repo_id in (
+            ("selected-a", selected_repo), ("selected-b", selected_repo),
+            ("noisy-a", noisy_repo), ("noisy-b", noisy_repo),
+        ):
+            conn.execute(
+                "INSERT INTO entities(id, workspace_id, repo_id, name, etype, created_at) "
+                "VALUES (?, ?, ?, ?, 'concept', 0)",
+                (entity_id, workspace_id, repo_id, entity_id),
+            )
+        edge_insert = (
+            "INSERT INTO edges(id, workspace_id, repo_id, src, dst, relation, layer) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'entity')"
+        )
+        conn.executemany(edge_insert, [
+            ("edg_selected", workspace_id, selected_repo,
+             "selected-a", "selected-b", "related"),
+            ("edg_loop", workspace_id, selected_repo,
+             "selected-a", "selected-a", "related"),
+        ])
+        conn.commit()
+        statements = []
+        conn.set_trace_callback(statements.append)
+        try:
+            service.graph_scene(
+                workspace="scoped-work", repo="selected", level="complete",
+                include_memory_nodes=False, include_history=include_history,
+                valid_at=100, known_at=100,
+            )
+        finally:
+            conn.set_trace_callback(None)
+        query = next(statement for statement in statements if "AS touching_count" in statement)
+
+        def measured_classification():
+            ticks = []
+            conn.set_progress_handler(lambda: ticks.append(None) or 0, 100)
+            try:
+                rows = [tuple(row) for row in conn.execute(query).fetchall()]
+            finally:
+                conn.set_progress_handler(None, 0)
+            return rows, len(ticks) * 100
+
+        baseline_rows, baseline_work = measured_classification()
+        conn.executemany(edge_insert, [
+            (f"edg_noisy_{index}", workspace_id, noisy_repo,
+             "noisy-a", "noisy-b", f"relation_{index}")
+            for index in range(3_000)
+        ])
+        conn.commit()
+        noisy_rows, noisy_work = measured_classification()
+
+        assert noisy_rows == baseline_rows
+        # Count SQLite VM instructions, not wall time. Leave room for planner/version
+        # overhead while rejecting a linear scan over the 3,000 unrelated relations.
+        assert noisy_work <= baseline_work + 2_000
+        assert noisy_rows == [("selected-a", 2), ("selected-b", 1)]
+    finally:
+        service.store.close()
+
+
+@pytest.mark.parametrize("include_history", [False, True])
+def test_self_loop_visibility_prunes_private_and_unavailable_support_before_cap(
+        monkeypatch, include_history):
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    try:
+        workspace_id = service.store.get_or_create_workspace("loop-privacy")
+        other_workspace = service.store.get_or_create_workspace("foreign-evidence")
+        selected_repo = service.store.get_or_create_repo(workspace_id, "selected")
+        other_repo = service.store.get_or_create_repo(workspace_id, "other")
+        conn = service.store.conn
+        for memory_id, scope, memory_workspace, ingested_at in (
+            ("mem_public", "workspace", workspace_id, 0),
+            ("mem_private", "session", workspace_id, 0),
+            ("mem_foreign", "workspace", other_workspace, 0),
+            ("mem_future", "workspace", workspace_id, 200),
+        ):
+            service.store.add_memory(MemoryRecord(
+                id=memory_id, content="synthetic evidence", workspace_id=memory_workspace,
+                scope=Scope(scope), valid_from=0, ingested_at=ingested_at,
+            ))
+        cases = [(f"a-private-{index:03d}", ["mem_private"]) for index in range(505)]
+        cases.extend([
+            ("b-foreign", ["mem_foreign"]), ("b-missing", ["mem_missing"]),
+            ("b-future", ["mem_future"]), ("z-supportless", []),
+            ("z-public", ["mem_private", "mem_public"]),
+        ])
+        for entity_id, memory_ids in cases:
+            conn.execute(
+                "INSERT INTO entities(id, workspace_id, name, etype, created_at) "
+                "VALUES (?, ?, ?, 'concept', 0)",
+                (entity_id, workspace_id, entity_id),
+            )
+            # Workspace-wide privacy must still see a shared entity's private edge
+            # in another repository even though that edge is outside the visible view.
+            edge_repo = selected_repo if entity_id.startswith("z-") else other_repo
+            conn.execute(
+                "INSERT INTO edges(id, workspace_id, repo_id, src, dst, relation, layer) "
+                "VALUES (?, ?, ?, ?, ?, 'related', 'entity')",
+                (entity_id, workspace_id, edge_repo, entity_id, entity_id),
+            )
+            for memory_id in memory_ids:
+                conn.execute(
+                    "INSERT INTO edge_supports(edge_id, memory_id, source_kind, "
+                    "valid_from, ingested_at) VALUES (?, ?, 'manual', 0, 0)",
+                    (entity_id, memory_id),
+                )
+        conn.commit()
+        monkeypatch.setattr(service_module, "MAX_GRAPH_ANALYSIS_ENTITIES", 2)
+        monkeypatch.setattr(service_module, "MAX_GRAPH_ANALYSIS_EDGES", 2)
+
+        scene = service.graph_scene(
+            workspace="loop-privacy", repo="selected", level="complete",
+            include_memory_nodes=False, include_history=include_history,
+            valid_at=100, known_at=100,
+        )
+
+        assert {node["id"] for node in scene["nodes"]} == {"z-supportless", "z-public"}
+        assert {(edge["source"], edge["target"]) for edge in scene["edges"]} == {
+            ("z-supportless", "z-supportless"), ("z-public", "z-public"),
+        }
+        public_edge = next(edge for edge in scene["edges"] if edge["id"] == "z-public")
+        assert public_edge["support_memory_ids"] == ["mem_public"]
+        assert public_edge["support_count"] == 1
+    finally:
+        service.store.close()
 
 
 def test_history_support_cap_counts_unique_evidence_keys(monkeypatch):

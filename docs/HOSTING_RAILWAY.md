@@ -84,7 +84,7 @@ Before relying on the deployment, verify:
 - managed-service clients reject redirects and non-HTTPS remote endpoints; and
 - browser console output contains no CSP, accessibility, or network errors.
 
-The hosted trial lasts **3 active days for Pro or 10 active days for Team** after email
+The hosted trial lasts **7 active days for Pro or 14 active days for Team** after email
 confirmation. A separate `workspace_write_grace` allows only bounded hosted-account continuity
 operations for up to 24 hours; it never extends paid cloud access. Free local writes remain
 available without a hosted entitlement.

@@ -106,8 +106,8 @@ def _check_repository(manifest: dict, errors: list[str]) -> None:
         if monthly and not (10 * monthly <= annual <= 12 * monthly):
             _fail(errors, "%s annual price is not a sane multiple of monthly" % plan)
 
-    expected_trial = {"days": 3, "card_required": False, "plans": ["pro", "team"],
-                      "days_by_plan": {"pro": 3, "team": 10}}
+    expected_trial = {"days": 7, "card_required": False, "plans": ["pro", "team"],
+                      "days_by_plan": {"pro": 7, "team": 14}}
     trial = manifest.get("trial", {})
     for key, value in expected_trial.items():
         if trial.get(key) != value:

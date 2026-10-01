@@ -12,6 +12,7 @@ import re
 import sys
 import time
 import urllib.request
+from pathlib import Path
 
 MCP_URL_DEFAULT = "http://127.0.0.1:8711/mcp"
 BUDGET_SECONDS_DEFAULT = 4.0
@@ -164,21 +165,31 @@ def notify_initialized(deadline, session_id=None, url=None):
         return session_id
 
 
-def extract_context(result):
-    """Defensively pull the context text out of a tools/call result."""
+def extract_session_result(result):
+    """Read the context and actual destination from a tools/call result."""
+    if not isinstance(result, dict) or result.get("isError"):
+        return "", None
     content = result.get("content") if isinstance(result, dict) else None
     if not content or not isinstance(content[0], dict):
-        return ""
+        return "", None
     text = content[0].get("text")
     if not isinstance(text, str) or not text.strip():
-        return ""
+        return "", None
     try:
         parsed = json.loads(text)
     except ValueError:
-        return text.strip()
+        return text.strip(), None
     if isinstance(parsed, dict) and isinstance(parsed.get("context"), str):
-        return parsed["context"].strip()
-    return ""
+        workspace = parsed.get("workspace")
+        if not isinstance(workspace, str) or not workspace.strip():
+            workspace = None
+        return parsed["context"].strip(), workspace
+    return "", None
+
+
+def extract_context(result):
+    """Compatibility helper for callers that only need the context text."""
+    return extract_session_result(result)[0]
 
 
 def session_context(repo, workspace, deadline, mcp_url=None):
@@ -205,39 +216,51 @@ def session_context(repo, workspace, deadline, mcp_url=None):
     session_id = (
         notify_initialized(deadline, session_id=session_id, url=mcp_url) or session_id
     )
+    arguments = {
+        "action": "start",
+        "repo": repo,
+        # Context is only returned when a goal is supplied.
+        "goal": (
+            "Resume work on this repository: surface relevant durable "
+            "decisions, preferences, procedures, and open threads."
+        ),
+    }
+    if workspace is not None:
+        # An explicit override takes precedence over the saved project mapping.
+        # Omit the argument otherwise so the server can resolve that mapping.
+        arguments["workspace"] = workspace
     result, _ = rpc(
         "tools/call",
         {
             "name": "engraphis_session",
-            "arguments": {
-                "action": "start",
-                "workspace": workspace,
-                "repo": repo,
-                # Context is only returned when a goal is supplied.
-                "goal": (
-                    "Resume work on this repository: surface relevant durable "
-                    "decisions, preferences, procedures, and open threads."
-                ),
-            },
+            "arguments": arguments,
         },
         2,
         deadline,
         session_id=session_id,
         url=mcp_url,
     )
-    return extract_context(result)
+    return extract_session_result(result)
 
 
 def resolve_workspace(cwd, env):
-    """Honor ENGRAPHIS_HOOK_WORKSPACE; otherwise fall back to the repo basename.
-
-    Workspace names are bounded (``_clean_name`` in the service refuses empties and
-    overlong inputs), so we drop the override silently if it would be rejected.
-    """
+    """Return only an explicit override; the server resolves project mappings."""
     override = (env.get("ENGRAPHIS_HOOK_WORKSPACE") or "").strip()
-    if override:
-        return override
-    return os.path.basename(os.path.normpath(str(cwd)))
+    return override or None
+
+
+def resolve_repo(cwd):
+    """Use the nearest Git root name, including a worktree's .git file.
+
+    Starting Command Code in a source subdirectory must select the same saved
+    project mapping as starting at its repository root. Non-Git folders retain
+    their own name as the project identifier.
+    """
+    path = Path(str(cwd)).resolve()
+    for candidate in (path, *path.parents):
+        if (candidate / ".git").exists():
+            return candidate.name
+    return path.name
 
 
 def _compress_prose_to_terse(context: str, max_chars: int) -> str:
@@ -293,7 +316,11 @@ def _compress_prose_to_terse(context: str, max_chars: int) -> str:
 def build_additional_context(context, workspace, max_context_chars=None, format="prose"):
     if max_context_chars is None:
         max_context_chars = MAX_CONTEXT_CHARS
-    header = CONTEXT_HEADER.format(workspace=workspace)
+    header = (
+        CONTEXT_HEADER.format(workspace=workspace)
+        if workspace
+        else "Durable memory (engraphis) relevant to this repo:\n"
+    )
     footer = CONTEXT_FOOTER
     body_budget = max_context_chars - len(header) - len(footer)
     if body_budget <= 0:
@@ -335,10 +362,12 @@ def main():
     if name is not None and name != "SessionStart":
         return 0
     cwd = payload.get("cwd") or os.environ.get("COMMANDCODE_PROJECT_DIR") or os.getcwd()
-    repo = os.path.basename(os.path.normpath(str(cwd)))
-    workspace = resolve_workspace(cwd, os.environ)
     try:
-        context = session_context(repo, workspace, deadline, mcp_url=mcp_url)
+        repo = resolve_repo(cwd)
+        workspace = resolve_workspace(cwd, os.environ)
+        context, resolved_workspace = session_context(
+            repo, workspace, deadline, mcp_url=mcp_url
+        )
     except Exception:
         return 0
     if not context:
@@ -348,7 +377,7 @@ def main():
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
             "additionalContext": build_additional_context(
-                context, workspace, max_context_chars, format=fmt
+                context, resolved_workspace or workspace, max_context_chars, format=fmt
             ),
         },
     }

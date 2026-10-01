@@ -32,7 +32,8 @@ SERVER_HOSTED_ENTITLEMENTS = {
     "pro": {"analytics", "automation", "export", "sync"},
     "team": {"analytics", "automation", "export", "sync", "team"},
 }
-SERVER_TRIAL_DURATION_SECONDS = 259_200
+# The compatibility scalar is the Pro duration; Team uses the per-plan offer.
+SERVER_TRIAL_DURATION_SECONDS = 604_800
 SERVER_WORKSPACE_WRITE_GRACE_MAX_SECONDS = 86_400
 
 
