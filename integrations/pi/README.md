@@ -112,9 +112,18 @@ in normal recall. This behavior is intentional and unchanged by the Pi extension
 ## Development
 
 ```bash
-npm install --ignore-scripts
+npm ci --ignore-scripts
+npm install --prefix node_modules/@earendil-works/pi-coding-agent --ignore-scripts --no-save --omit=dev brace-expansion@5.0.12
 npm run verify
+npm audit
+npm audit --no-package-lock --include=dev
 ```
+
+The pinned Pi test host includes its own shrinkwrap, which reinstalls an older
+`brace-expansion` despite this package's fixed nested pin. The scoped install repairs
+that exact dependency while retaining the host's other locked dependencies. Its
+`--omit=dev` excludes the host's own authoring tools; the extension's development
+dependencies remain installed and audited. CI also verifies the installed version.
 
 `npm run verify` type-checks the package, runs its configuration tests, and previews
 the publish tarball. The package pins the MCP SDK; update it only with a compatibility

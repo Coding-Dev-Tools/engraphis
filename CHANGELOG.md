@@ -5,6 +5,11 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+- Updated the Pi extension's locked `fast-uri` to 3.1.8, `ip-address` to 10.7.2 and
+  `brace-expansion` to 5.0.12. CI repairs the Pi test host's embedded vulnerable leaf with
+  that exact pin, verifies the installed version, and audits both the full dependency lock
+  and installed tree. Pi checks use bash on Windows, so every install, build, test and audit
+  failure stops the job.
 - Kept selective-memory relocation policy independent of SQL through a domain storage
   protocol, with bounded reads and caller-owned transaction rollback.
 - Kept 500-memory moves within the legacy SQLite variable limit.
