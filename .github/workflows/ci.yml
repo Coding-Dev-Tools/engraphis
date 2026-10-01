@@ -240,6 +240,8 @@ jobs:
         env:
           ENGRAPHIS_PI_TEST_COMMAND: engraphis-mcp
         run: |
+          # npm 10 crashes while repairing a nested published shrinkwrap.
+          npm install --global --ignore-scripts npm@11.12.1
           npm ci --ignore-scripts
           # The test host's published shrinkwrap overrides this package's nested pin.
           # Repair that exact leaf in the installed host, preserving its other locked deps.
