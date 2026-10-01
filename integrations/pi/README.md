@@ -109,6 +109,7 @@ in normal recall. This behavior is intentional and unchanged by the Pi extension
 ## Development
 
 ```bash
+npm install --global --ignore-scripts npm@11.12.1
 npm ci --ignore-scripts
 npm install --prefix node_modules/@earendil-works/pi-coding-agent --ignore-scripts --no-save --omit=dev brace-expansion@5.0.12
 npm run verify
