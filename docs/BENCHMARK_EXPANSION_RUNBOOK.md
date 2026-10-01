@@ -15,20 +15,56 @@ are explicit unscored attempts, not fabricated failures or product quality concl
 
 ## Environment and freeze
 
-Use a separate Python 3.12 environment. The tested Windows package versions are in
+Use a separate Python 3.12 environment. Retained campaigns keep their tested Windows versions in
 [`benchmark-requirements-windows-py312.txt`](../eval/configs/benchmark-requirements-windows-py312.txt),
 with the observed distribution inventory in
 [`benchmark-environment-windows-py312.json`](../eval/configs/benchmark-environment-windows-py312.json).
-This is an exact version lock for this platform, not a cross-platform wheel-hash lock. Optional
-packages are confined to the evaluation environment; the NumPy-only core dependency contract is unchanged.
+Keep both files unchanged when reproducing those campaigns from their frozen source revision.
+They are historical evidence, not the dependency recommendation for new work.
+
+For a new campaign, install
+[`benchmark-requirements-windows-py312-current.txt`](../eval/configs/benchmark-requirements-windows-py312-current.txt)
+and capture the actual installed distributions into a new private inventory. The current file
+includes PyJWT 2.15.1; its package pins do not establish that a new campaign was run or qualified.
+These are version pins for Windows, not a cross-platform wheel-hash lock. Optional packages are
+confined to the evaluation environment; the NumPy-only core dependency contract is unchanged.
 
 ```powershell
-uv venv .private-eval/benchmark-20260915/venv --python 3.12 --seed
-$py = '.private-eval/benchmark-20260915/venv/Scripts/python.exe'
-uv pip install --python $py -r eval/configs/benchmark-requirements-windows-py312.txt
+uv venv .private-eval/benchmark-current/venv --python 3.12 --seed
+$py = '.private-eval/benchmark-current/venv/Scripts/python.exe'
+uv pip install --python $py -r eval/configs/benchmark-requirements-windows-py312-current.txt
 uv pip install --python $py --no-deps -e .
 & $py -m eval.coding_corpus --verify
+$dependencyLock = '.private-eval/benchmark-current/environment.json'
+$captureEnvironment = @'
+import importlib.metadata as metadata
+import json
+import platform
+import re
+import sys
+from pathlib import Path
+
+names = {re.sub(r"[-_.]+", "-", item.metadata["Name"]).lower()
+         for item in metadata.distributions() if item.metadata["Name"]}
+inventory = {
+    "schema": "engraphis-benchmark-environment/v1",
+    "python": platform.python_version(),
+    "platform": platform.platform(),
+    "distributions": {name: metadata.version(name) for name in sorted(names)},
+}
+target = Path(sys.argv[1])
+target.parent.mkdir(parents=True, exist_ok=True)
+with target.open("x", encoding="utf-8", newline="\n") as stream:
+    json.dump(inventory, stream, indent=2, sort_keys=True)
+    stream.write("\n")
+'@
+$captureEnvironment | & $py - $dependencyLock
 ```
+
+Choose a new directory for each campaign. Inventory capture refuses to overwrite an existing
+file. Pass that exact `$dependencyLock` to preparation and subsequent commands for this new
+campaign. Installing changed packages requires a fresh inventory and manifest; never edit the
+retained observed inventory to pretend that a different environment produced an old result.
 
 The 400 scenarios have 40 family labels and the frozen 80/80/240 split. They are generated from
 shared templates. Family counts therefore do not imply 40 independent real repositories.
@@ -67,9 +103,9 @@ Prepare into new paths after all relevant code and dependency changes are finish
 
 ```powershell
 & $py -m eval.benchmark_campaign --prepare `
-  --manifest .private-eval/benchmark-20260915/campaign.json `
-  --companion .private-eval/benchmark-20260915/comparisons.json `
-  --dependency-lock eval/configs/benchmark-environment-windows-py312.json
+  --manifest .private-eval/benchmark-current/campaign.json `
+  --companion .private-eval/benchmark-current/comparisons.json `
+  --dependency-lock $dependencyLock
 ```
 
 The original, retired API-route inputs are preserved at
@@ -229,7 +265,7 @@ companion cells remain explicitly counted. Freeze selection before held-out work
 
 ```powershell
 & $py -m eval.benchmark_campaign --manifest <campaign.json> --companion <comparisons.json> `
-  --dependency-lock eval/configs/benchmark-environment-windows-py312.json `
+  --dependency-lock <inventory-bound-by-campaign.json> `
   --results <private-results-directory> --freeze-selection --selection-receipt <new-receipt.json>
 ```
 
