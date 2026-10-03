@@ -15,8 +15,8 @@ than the session tool, because the data never lands at all.
 
 This test pins the (workspace defaults to 'default') contract for all three auto-fired
 write/session tools at two levels:
-  * signature level — asserts the ``workspace`` parameter still carries the ``"default"``
-    default (this is the *exact* thing that broke: a missing default), and
+  * signature level — asserts the ``workspace`` parameter remains optional; ``None``
+    now permits session/project routing before the legacy fallback, and
   * behavioral level — omitting ``workspace`` succeeds and lands the write in 'default'.
 
 NOTE: ``engraphis_recall`` is deliberately excluded. It is a stateful retrieval tool whose
@@ -54,8 +54,8 @@ def test_cron_write_tool_workspace_defaults_to_default(monkeypatch, tool_name):
     srv = _module_with_memory_db(monkeypatch)
     param = inspect.signature(getattr(srv, tool_name)).parameters.get("workspace")
     assert param is not None, f"{tool_name} lost its 'workspace' parameter"
-    assert param.default == "default", (
-        f"{tool_name}.workspace default is {param.default!r}, not 'default' — cron calls "
+    assert param.default in (None, "default"), (
+        f"{tool_name}.workspace default is {param.default!r}, not optional — cron calls "
         "that omit workspace will fail with 'workspace Field required' (fleet-wide "
         "memory-write outage)."
     )

@@ -24,7 +24,7 @@
 > and customer-side clients. Hosted sync, analytics, automation, and team services run on the
 > official hosted service; their server implementations are not distributed here.
 
-> **Support continued Engraphis development with Pro.** [Start a 3-day Pro trial](https://api.engraphis.com/account?plan=pro&interval=monthly&utm_source=engraphis&utm_medium=docs&utm_campaign=pro_conversion&utm_content=readme_intro&trial=pro#billing)
+> **Support continued Engraphis development with Pro.** [Start a 7-day Pro trial](https://api.engraphis.com/account?plan=pro&interval=monthly&utm_source=engraphis&utm_medium=docs&utm_campaign=pro_conversion&utm_content=readme_intro&trial=pro#billing)
 > or [subscribe to Pro](https://api.engraphis.com/account?plan=pro&interval=monthly&utm_source=engraphis&utm_medium=docs&utm_campaign=pro_conversion&utm_content=readme_intro#billing).
 
 ---
@@ -84,9 +84,9 @@ neither is an end-to-end question-answer score. Coding outcomes, external datase
 operational capacity remain separate pending evaluation tracks until their artifacts are selected.
 
 These values are evidence IDs `offline-chunking` and `offline-performance` in
-[`offline-fixtures-v88.json`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/benchmark-evidence/offline-fixtures-v88.json),
+[`offline-fixtures-v128.json`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/benchmark-evidence/offline-fixtures-v128.json),
 SHA-256
-`18af203925d9d53f77097b4459a30578b2d769a8bc9c7d224e7897f2a1b19199`.
+`73f2d1a8cd6e2db070577582a2266f6605efc052800da17db9938f7a274bf755`.
 [`BENCHMARKS.md`](https://github.com/Coding-Dev-Tools/engraphis/blob/main/BENCHMARKS.md#public-numeric-evidence-registry)
 records the matching suite digest, exact commands, and per-command config digests. The offline
 fixture registry intentionally excludes external, model-dependent, consolidation, productivity,
@@ -415,9 +415,19 @@ the indicated read or action executor; no profile selection is required. The gat
 the discovered capability again before it runs it, and clients remain responsible for their
 normal destructive-action approval boundary.
 
-Existing clients that pin the historical 35 named tools can use
+Existing clients that use named tools can use
 `engraphis-mcp-classic` (or `engraphis-mcp-http --classic`). The complete classic inventory,
 including `engraphis_check_update`, is in the [MCP tool reference](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/MCP_TOOLS.md).
+
+### Choose where agent memories belong
+
+Use the dashboard's agent connection setup to choose a workspace, save a repo-to-workspace
+mapping, and copy project-specific agent instructions. Routine MCP calls with an omitted
+workspace can inherit the supplied session or saved repo mapping. Explicit workspace values,
+including `"default"`, take precedence; update older instructions or hooks that hardcode them.
+Memory types describe the kind of memory, not its destination. See
+[workspace organization](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/WORKSPACE_ORGANIZATION.md)
+for setup, routing precedence, and previewing moves of existing memories.
 
 ### Pi extension
 
@@ -429,6 +439,11 @@ For installation, configuration, lifecycle commands, and the local trust boundar
 `integrations/commandcode/` ships a SessionStart hook that warms up a new
 session with bounded, recalled context from the local Engraphis gateway. Fails
 open on timeout and is installed via `python scripts/install_cc_hook.py`.
+The hook sends the nearest Git root's name as `repo` and lets the server apply a saved workspace
+mapping. Set `ENGRAPHIS_HOOK_WORKSPACE` only for an explicit override; a previous `default`
+override must be cleared to use the mapping. Its context header shows the resolved workspace.
+Earlier versions defaulted to a workspace named after the project folder; save that mapping to
+keep recalling those memories at session start.
 
 ### prime-agent fleet
 
@@ -651,9 +666,10 @@ when you are ready to evaluate the service boundary and billing options.
 | | Free (available now) | Pro: $10/mo or $100/yr | Team: $20/seat/mo or $200/seat/yr |
 |---|---|---|---|
 | Dashboard WebUI (with built-in inspector) | ✓ | ✓ | ✓ |
-| Memory engine + Smart MCP (Classic 35-tool compatibility) | ✓ | ✓ | ✓ |
+| Memory engine + Smart MCP (Classic 39-tool compatibility) | ✓ | ✓ | ✓ |
 | Version-chain diffs, offline knowledge graph | ✓ | ✓ | ✓ |
 | Manual local consolidation (dry-run by default) | ✓ | ✓ | ✓ |
+| Advisory Jev decisions | Local heuristics; optional BYOK | Included managed allowance when enabled | Included pooled allowance when enabled |
 | Local workspace export (portable v2 JSON: memories, source manifests, graph/code evidence, sessions, audit, and receipts) | ✓ | ✓ | ✓ |
 | Hosted Cloud Sync | | ✓ | ✓ |
 | Hosted Analytics | | ✓ | ✓ |
@@ -669,10 +685,24 @@ when you are ready to evaluate the service boundary and billing options.
 
 ## MCP tools
 
-Engraphis exposes a zero-configuration Smart MCP gateway plus a 35-tool Classic compatibility
+Engraphis exposes a zero-configuration Smart MCP gateway plus a 39-tool Classic compatibility
 server across memory, recall, code graphs, governance, sessions, and privacy-safe audit receipts.
 The focused [MCP tool reference](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/MCP_TOOLS.md) is the source for
 the full inventory and parameters.
+
+`engraphis_decide` provides advisory typed decisions in Classic MCP; Smart MCP exposes the
+same decision action through discovery and `engraphis_execute_action`. Decisions stay local
+by default. To use the included Pro or Team allowance when the Cloud service enables it,
+connect your installation through the ordinary Cloud account flow and set
+`ENGRAPHIS_DECISION_BACKEND=managed`. The account portal reports availability and usage.
+For a personal TypeSafe key, explicitly select `byok` and supply `TYPESAFE_API_KEY` through
+the trusted configuration below; direct provider charges may apply.
+
+Every remote call also requires literal boolean `allow_remote=true` and
+`data_classification="public"` or `"internal"` for the supplied text. `offline_mode=true`
+prevents remote requests. Command checks always return `allow_auto=false`, including remote
+results. Decisions remain advisory and do not authorize execution or memory changes. See
+[the Jev plan and consent details](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/HOSTED_PLANS.md#included-system-1-decision-engine-jev).
 
 ---
 
@@ -820,6 +850,11 @@ file. It never searches the working directory for `.env`, and explicit process v
 | `ENGRAPHIS_LLM_MODEL` | `gpt-4o-mini` | Model name (provider-specific) |
 | `ENGRAPHIS_LLM_API_KEY` | Not set | API key for chat/synthesis, `llm` / `llm_structured` extraction, and structured consolidation |
 | `ENGRAPHIS_LLM_BASE_URL` | Not set | Base URL for openrouter / custom OpenAI-compatible endpoints |
+| `ENGRAPHIS_LLM_EFFORT` | `medium` | Reasoning effort (`low \| medium \| high \| xhigh \| max`) for Claude models that think by default (Opus 5+, Sonnet 5+, Fable); ignored by other providers and models |
+| `ENGRAPHIS_DECISION_BACKEND` | `none` | `none` or `local` keeps advisory decisions local; `managed` uses the saved Cloud session and included allowance; `auto` selects managed when configured and never switches to BYOK; explicit `byok` uses a personal TypeSafe key. Legacy `typesafe`, `jev`, and `system1` mean BYOK. Remote calls also require per-call consent. |
+| `ENGRAPHIS_DECISION_MODEL` | `jev-1.13.0` | Pinned model accepted by the Jev transport; other model identifiers are rejected. |
+| `TYPESAFE_API_KEY` | Not set | Personal credential for explicit BYOK decisions; `JEV_API_KEY` is a fallback alias. Managed decisions use the saved Cloud session instead. |
+| `TYPESAFE_BASE_URL` | `https://api.typesafe.ai` | Direct BYOK provider origin; does not change the managed session's bound Cloud control origin. |
 | `ENGRAPHIS_LLM_AUTO_EXTRACT` | `0` | Opt in to switching the running engine to `llm_structured` after a successful live connection test; the dashboard's extraction Off button persists `0`, and its On button restores `1` |
 | `ENGRAPHIS_FORWARDED_ALLOW_IPS` | *(none)* | Proxies trusted for forwarded client/TLS headers (`*` only when the service is reachable exclusively through that proxy) |
 | `ENGRAPHIS_LOCAL_TRUSTED_PEERS` | *(none)* | Exact peers/CIDRs treated as local without forwarding headers; use only for trusted Docker/LAN peers, never public deployments |
@@ -859,7 +894,7 @@ engraphis/
 │   ├── backends/            # pluggable embedder / vector index / reranker / codegraph / sync transports / encryption
 │   ├── factory.py           # outer v2 composition root; selects and injects concrete backends
 │   ├── service.py           # validated MemoryService facade
-│   ├── mcp_server.py        # Smart MCP gateway + 35-tool Classic compatibility server
+│   ├── mcp_server.py        # Smart MCP gateway + 39-tool Classic compatibility server
 │   ├── dashboard_app.py     # dashboard WebUI (FastAPI)
 │   ├── dashboard_assets/    # primary Ledger interface + graph engine
 │   ├── classic_assets/      # selectable full operator dashboard backup

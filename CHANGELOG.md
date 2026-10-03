@@ -5,15 +5,104 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [1.7.9] - 2026-09-29
+
+- Classify local `engraphis_decide` command advice conservatively. Chained, piped,
+  substituted or redirected commands, and options that run programs or write files
+  (`rg --pre`, `pytest --basetemp`), are never labeled read-only. Recursive deletes in any
+  flag order, raw device writes, history-rewriting or work-discarding Git operations, SQL
+  and infrastructure teardown, downloaded-script execution, exfiltrating pipes and uploads,
+  and well-known credential files are labeled destructive or leaking. Screening is bounded
+  so adversarial input stays cheap. Repeated Git options and quoted arguments use disjoint
+  matching alternatives to prevent exponential backtracking when no destructive command follows.
+- Match whole words, ignore zero counts and treat negated success as failure in local
+  completion checks; contrasts ("not only passed") and negated failures ("did not fail") are
+  not failures. Local support and contradiction checks compare content words rather than
+  shared stopwords, and support keeps one-character terms such as "C". Supersession requires
+  a shared subject plus a replacement cue the existing fact lacks, or a negation (including
+  "cannot") whose ruled-out clause the other fact asserts ("does not use port 80" opposes
+  "uses port 80", not "uses port 443"); between terse facts one shared word is the subject,
+  so "No SQLite" opposes "Use SQLite". Reinforcement requires matching cues and one fact
+  containing the other's content words, so conflicting values defer. Any number of Git global
+  options and clustered short flags no longer bypass destructive-command checks, and
+  path-specific or pathspec-file checkouts, worktree restores and force-created branch resets
+  count as discarding work. Credential paths match either path separator.
+- Fixed Anthropic connections for current Claude models. Opus 4.7 and later, Sonnet 5 and
+  later, and Fable no longer receive `temperature`, which they reject. Replies are read from
+  text blocks, so a leading thinking block no longer fails with "Unexpected Anthropic response
+  format". Models that think by default get `ENGRAPHIS_LLM_EFFORT` (default `medium`) and at
+  least 4096 output tokens so reasoning cannot crowd out the reply.
+- Replaced the retired `claude-3-5-sonnet-20241022` Anthropic default in the dashboard picker,
+  the API defaults, `.env.example`, and the provider guide with `claude-sonnet-5-5`.
+- Documented how to back the experimental Jev decision adapter with Claude: pin an exact model
+  id, keep fallback disabled, and avoid sampling parameters and forced tool choice.
+- Recognized `claude-mythos-preview` and other unversioned Fable/Mythos ids, so they no longer
+  receive `temperature` (an HTTP 400) and get the thinking-model output headroom.
+- A remote `verify_completion` probability between the certainty bound and the 0.85 completion
+  bar is now `uncertain` with a null `is_complete`, instead of a decisive failure.
+- Local completion checks recognize `N passing` (Mocha/Jest style), `not passing`, `0 passing`
+  and `errors: none`.
+- Preserve individual negation targets in local contradiction advice, so a shared prohibition
+  cannot hide a separate conflict; different explicit subjects defer. Forced Git branch resets
+  and clustered deletion flags are destructive advice, and explicit Git diff/textconv or
+  ripgrep hostname helpers are never labeled read-only.
+
+- Added the saved-session managed Jev transport and Classic/Smart MCP decision route
+  for Pro and Team, with explicit consent and current hosted entitlement checks.
+  Cloud activation remains a separate rollout requirement; see the upgrade and
+  qualification instructions in `docs/RELEASE_1_7_9.md`.
+- Retire consumed refresh credentials when a successful response has an invalid
+  token subject, and keep empty graph-layer selections separate from all-layer cache entries.
+
 - Updated the Pi extension's locked `fast-uri` to 3.1.8, `ip-address` to 10.7.2 and
   `brace-expansion` to 5.0.12. CI repairs the Pi test host's embedded vulnerable leaf with
   that exact pin, verifies the installed version, and audits both the full dependency lock
   and installed tree. Pi checks use bash on Windows, so every install, build, test and audit
   failure stops the job.
+- Provide a valid offline decision example in Smart MCP action discovery.
+- Reject coerced numeric/string remote consent before Classic MCP can select a Jev backend.
+- Retain global entities referenced by workspace edges during secure erasure,
+  while preserving exact-workspace incidence checks for workspace-owned entities.
+- Preserve graph cache isolation, pause intent through WebGL context loss, and
+  theme-correct exported backgrounds.
+- Scope graph incidence queries to candidate entities and retain shared legacy
+  entities during secure erasure.
+- Require the credential-bound control origin before selecting managed Jev.
+- Bound chunked response trailers while retaining strict deadline completion checks.
+- Keep relocation policy behind domain storage operations and 500-memory moves
+  within the legacy SQLite variable limit.
 - Updated the Pi test host to 0.87.1 to include the patched WebSocket client, and
   extended the Pi dependency audit to cover its development dependencies.
 - Updated the Pi extension's locked `ip-address` dependency to 10.5.1, fixing
   IPv6 link-local and NAT64 classification advisories without changing its dependency ranges.
+- Kept managed Jev available when an unrelated compute endpoint cannot resolve,
+  while retaining destination validation for requests that use compute.
+- Bounded Jev key input and serialized configuration before publication, preserving
+  existing setup on rejection. Invalid decision kinds now defer without a fabricated
+  selection in direct, Classic, and Smart calls.
+- Preserved owner-only configuration checks when updating an existing Jev key, and
+  restored support for legacy injected decision clients while retaining per-call consent
+  and a single provider invocation.
+- Save fully received Cloud credential rotations before reporting an expired request
+  deadline, while rejecting truncated bodies and watchdog-interrupted responses.
+- Recognize complete chunked refresh responses at the watchdog boundary without
+  accepting a missing or truncated trailer terminator.
+- Rebuild FastMCP settings eagerly to avoid a forward-reference warning on newer SDKs.
+- Preserve CSS gradient tiles, screen blending and reduced-motion opacity in graph PNGs,
+  including fractional display scaling; synchronize graph cache metadata across threads.
+- Refreshed public offline fixtures and source bindings in immutable v128 evidence for the
+  final 1.7.9 candidate; historical artifacts remain unchanged.
+- Campaign adapter capabilities and metrics now report the loaded Engraphis runtime version.
+
+- Added saved project-to-workspace routing and connection instructions so agents can use the
+  user's selected workspace. Routine MCP calls inherit an omitted workspace from an authorized
+  session or repo mapping, report the resolved destination, and reject session mismatches.
+- Command Code's SessionStart hook now uses the nearest Git root's repo name, honors saved
+  workspace mappings unless explicitly overridden, and labels recalled context with the
+  server's resolved workspace. Save a mapping to keep recalling memories stored under the
+  earlier folder-named workspace default.
+- Added a previewed selective move workflow for organizing mixed workspaces while retaining
+  source history and enforcing move eligibility and workspace access.
 - Hardened the experimental Cloud decision client with validated destinations,
   redirect refusal, bounded responses, strict decision parsing, and read-only
   result interfaces. Loopback endpoints bypass proxies and reject external DNS

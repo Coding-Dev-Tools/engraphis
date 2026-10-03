@@ -5,6 +5,10 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
+    # This file reproduces retained campaigns and must match their observed inventory.
+    # New campaigns use benchmark-requirements-windows-py312-current.txt instead.
+    exclude-paths:
+      - "eval/configs/benchmark-requirements-windows-py312.txt"
     # MCP 2 changes the server API; migrate and qualify it separately.
     ignore:
       - dependency-name: "mcp"
@@ -16,6 +20,14 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 3
+    # The shipped force-graph bundle has local CSP patches and locked provenance.
+    # Version upgrades follow docs/DASHBOARD_VENDOR_ASSETS.md; security updates remain enabled.
+    ignore:
+      - dependency-name: "force-graph"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
+          - "version-update:semver-patch"
     labels:
       - "dependencies"
   - package-ecosystem: "docker"

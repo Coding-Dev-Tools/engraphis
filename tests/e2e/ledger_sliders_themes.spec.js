@@ -123,7 +123,7 @@ async function openDashboard(page, { graphScene = blackHoleGalaxyScene } = {}) {
 
     if (path === '/bootstrap') {
       return json({
-        license: { plan: 'local', features: [], known_features: {}, cloud_managed: false, trial: { used: false, trial_days: 3 } },
+        license: { plan: 'local', features: [], known_features: {}, cloud_managed: false, trial: { used: false, trial_days: 7 } },
         workspaces: [{ name: 'default', memories: 8 }],
         embedder: { semantic: true },
       });

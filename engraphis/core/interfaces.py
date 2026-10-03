@@ -464,7 +464,110 @@ class SchemaSnapshot:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class RelocationDependencies:
+    """Bounded canonical evidence used to discover a move's complete component."""
+    memories: list[dict] = field(default_factory=list)
+    links: list[dict] = field(default_factory=list)
+    edges: list[dict] = field(default_factory=list)
+    supports: list[dict] = field(default_factory=list)
+    command_links: list[dict] = field(default_factory=list)
+
+
+@dataclass
+class RelocationHistory:
+    """Selected memories' durable commands, attachments, and graph incidences."""
+    commands: list[dict] = field(default_factory=list)
+    command_sources: dict[tuple[str, str], list[dict]] = field(default_factory=dict)
+    attachments: dict[str, list[dict]] = field(default_factory=dict)
+    incidences: list[dict] = field(default_factory=list)
+
+
+@dataclass
+class RelocationSessionHistory:
+    session: Optional[dict] = None
+    jobs: list[dict] = field(default_factory=list)
+    source_vaults: list[dict] = field(default_factory=list)
+    events: list[dict] = field(default_factory=list)
+
+
+@dataclass
+class MovePlan:
+    """Detached reviewed component shared by relocation policy and persistence."""
+    source_id: str
+    target_id: str
+    requested_ids: list[str]
+    records: list[MemoryRecord] = field(default_factory=list)
+    blockers: list[dict] = field(default_factory=list)
+    repos: list[dict] = field(default_factory=list)
+    sessions: list[dict] = field(default_factory=list)
+    events: list[dict] = field(default_factory=list)
+    commands: list[dict] = field(default_factory=list)
+    command_sources: list[dict] = field(default_factory=list)
+    entities: list[dict] = field(default_factory=list)
+    edges: list[dict] = field(default_factory=list)
+    incidences: list[dict] = field(default_factory=list)
+    preview_token: str = ""
+
+    def block(self, code: str, message: str) -> None:
+        if not any(item["code"] == code for item in self.blockers):
+            self.blockers.append({"code": code, "message": message})
+
+    def public(self, source: str, target: str) -> dict:
+        return {
+            "source": source, "target": target,
+            "requested_ids": self.requested_ids,
+            "memory_ids": [record.id for record in self.records],
+            "count": len(self.records),
+            "related_count": len(self.records) - len(self.requested_ids),
+            "memories": [{"id": record.id, "title": record.title or record.content[:88],
+                          "related": record.id not in self.requested_ids}
+                         for record in self.records],
+            "sessions": len(self.sessions), "graph_edges": len(self.edges),
+            "repos": [row["name"] for row in self.repos],
+            "blockers": self.blockers, "can_move": not self.blockers,
+            "preview_token": self.preview_token if not self.blockers else "",
+        }
+
+
 # ── Protocols ────────────────────────────────────────────────────────────────
+
+@runtime_checkable
+class RelocationStore(Protocol):
+    """Domain operations for lossless relocation, with no database connection API.
+
+    Reads return detached canonical values in deterministic order, including closed
+    history. Each collection must refuse rather than truncate above ``limit``.
+    The caller owns a consistent snapshot for planning and a writer transaction
+    for revalidation/application. ``apply_memory_move`` must not commit either.
+    Authorization and preview-token validation remain the caller's responsibility.
+    """
+    def get_memory(self, memory_id: str) -> Optional[MemoryRecord]: ...
+    def relocation_dependencies(self, workspace_id: str, *, limit: int
+                                ) -> RelocationDependencies: ...
+    def relocation_history(self, memory_ids: list[str], *, limit: int
+                           ) -> RelocationHistory: ...
+    def relocation_session_history(self, session_id: str, *, limit: int
+                                   ) -> RelocationSessionHistory: ...
+    def relocation_workspace_events(self, workspace_id: str, *, limit: int) -> list[dict]: ...
+    def relocation_entity(self, entity_id: str) -> Optional[dict]: ...
+    def relocation_repo(self, repo_id: str) -> Optional[dict]: ...
+    def relocation_repo_named(self, workspace_id: str, name: str) -> Optional[dict]: ...
+    def relocation_entity_named(self, workspace_id: str, repo_id: Optional[str],
+                                name: str, etype: Optional[str]) -> Optional[dict]: ...
+    def relocation_canonical_entity(self, workspace_id: str, repo_id: Optional[str],
+                                    normalized_name: str, etype: Optional[str]
+                                    ) -> Optional[dict]: ...
+    def relocation_edge_conflict(self, workspace_id: str, repo_id: Optional[str],
+                                 src: str, dst: str, relation: str, layer: Optional[str]
+                                 ) -> Optional[dict]: ...
+    def relocation_claim_conflict(self, workspace_id: str, repo_id: Optional[str],
+                                  record: MemoryRecord) -> Optional[dict]: ...
+    def relocation_operation_exists(self, workspace_id: str, operation_id: str) -> bool: ...
+    def relocation_ownership(self, source_id: str, target_id: str, *, limit: int
+                             ) -> list[dict]: ...
+    def apply_memory_move(self, plan: MovePlan, *, actor: str) -> None: ...
+
 
 @runtime_checkable
 class Embedder(Protocol):

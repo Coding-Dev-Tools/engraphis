@@ -60,17 +60,17 @@ def test_trial_ctas_use_each_disclosed_plan_duration_without_guessing_team(tmp_p
         functions = ("licAccessState", "licPlanKey", "licTrialAvailable",
                      "licAccessLive", "licTrialDays", "hostedCta")
     cases = [
-        ({"trial_days": 3, "days_by_plan": {"pro": 3, "team": 10}},
-         ["Start 3-day Pro trial", "Start 10-day Team trial"]),
-        ({"trial_days": 3, "days_by_plan": {"pro": 5, "team": 17}},
+        ({"trial_days": 7, "days_by_plan": {"pro": 7, "team": 14}},
+         ["Start 7-day Pro trial", "Start 14-day Team trial"]),
+        ({"trial_days": 7, "days_by_plan": {"pro": 5, "team": 17}},
          ["Start 5-day Pro trial", "Start 17-day Team trial"]),
-        ({"trial_days": 3}, ["Start 3-day Pro trial", "Start Team trial"]),
-        ({"trial_days": 3, "days_by_plan": {"team": "10"}},
-         ["Start 3-day Pro trial", "Start Team trial"]),
-        ({"trial_days": 3, "days_by_plan": {"team": True}},
-         ["Start 3-day Pro trial", "Start Team trial"]),
-        ({"trial_days": 3, "days_by_plan": {"team": 0}},
-         ["Start 3-day Pro trial", "Start Team trial"]),
+        ({"trial_days": 7}, ["Start 7-day Pro trial", "Start Team trial"]),
+        ({"trial_days": 7, "days_by_plan": {"team": "10"}},
+         ["Start 7-day Pro trial", "Start Team trial"]),
+        ({"trial_days": 7, "days_by_plan": {"team": True}},
+         ["Start 7-day Pro trial", "Start Team trial"]),
+        ({"trial_days": 7, "days_by_plan": {"team": 0}},
+         ["Start 7-day Pro trial", "Start Team trial"]),
         ({}, ["Start Pro trial", "Start Team trial"]),
     ]
     # Isolate display semantics; real checkout routing is covered by the browser suite.

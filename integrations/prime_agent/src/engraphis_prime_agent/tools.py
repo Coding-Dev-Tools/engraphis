@@ -153,6 +153,9 @@ def apply_scope_defaults(
     """
     result: dict[str, Any] = dict(extra or {})
     result.update(params)
+    # Sessions carry their own scope, including explicit caller overrides.
+    if result.get("session_id"):
+        return result
     declared = set(_declared_property_names(schema)) if schema else None
     if (
         "workspace" not in result
@@ -163,8 +166,8 @@ def apply_scope_defaults(
     if (
         "repo" not in result
         and config.default_repo
-        and config.default_workspace
-        and result.get("workspace") == config.default_workspace
+        and (result.get("workspace") == config.default_workspace
+             if config.default_workspace else result.get("workspace") is None)
         and (declared is None or "repo" in declared)
     ):
         result["repo"] = config.default_repo
