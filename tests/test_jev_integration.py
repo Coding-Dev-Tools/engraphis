@@ -468,6 +468,7 @@ def test_dashboard_jev_review_requires_consent_and_does_not_write_memory(
     assert body["remote_blocked_reason"] is None
     assert body["data_classification"] == "public"
     assert body["support"]["status"] == "decision"
+    assert body["support"]["probability"] == 0.9
     assert body["contradiction"]["status"] == "decision"
     assert len(decision_client.calls) == 2
     assert all(call["allow_remote"] is True for call in decision_client.calls)
