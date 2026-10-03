@@ -33,8 +33,8 @@ from eval.performance import run as run_performance
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PUBLIC_OFFLINE_ARTIFACT = "offline-fixtures-v114.json"
-PUBLIC_OFFLINE_SHA = "40188db31e07680e1c886ecec8ed523c6237858f0d5c63ef3159251c63538970"
+PUBLIC_OFFLINE_ARTIFACT = "offline-fixtures-v115.json"
+PUBLIC_OFFLINE_SHA = "11bce701a0d5b5b34729b35fb991c1c0c9a8968209d8e56c03b7980809fea3ba"
 
 
 @pytest.fixture(scope="module")
@@ -126,41 +126,50 @@ def test_readme_distinguishes_every_registered_token_context_measurement():
     whole = chunking["whole"]
     chunked = chunking["chunked"]
     performance = committed["performance"]
+    grounded = committed["grounded"]
     context_full = performance["full_serialized_payload_tokens"]
     context_compact = performance["compact_serialized_payload_tokens"]
     payload_samples = performance["questions"]
     timed_recalls = performance["timed_recalls"]
 
     for evidence in (
-        "## Measured token and context savings",
-        "<summary>See benchmark details and reproduce the results</summary>",
-        "### Measurement details and reproducibility",
-        f"{whole['mean_context_tokens']:.1f}** tokens → structure-aware chunks: "
-        f"**{chunked['mean_context_tokens']:.1f}** tokens",
+        "## Benchmarks",
+        "three deterministic offline fixture runs",
+        f"{whole['mean_context_tokens']:.1f} → {chunked['mean_context_tokens']:.1f} tokens per question",
         f"{chunking['context_reduction_pct']:.1f}% lower",
-        f"{whole['mean_evidence_tokens']:.1f}** tokens → chunks: "
-        f"**{chunked['mean_evidence_tokens']:.1f}** tokens",
-        "73.9% lower",
-        f"{context_full:,}** `engraphis.regex.v1` tokens → "
-        f"compact proxy: **{context_compact:,}** tokens",
-        f"{performance['saved_serialized_payload_tokens']:,} proxy tokens avoided",
+        f"{context_full:,} → {context_compact:,} tokens",
         f"{100 * performance['serialized_payload_savings_ratio']:.2f}% lower",
-        f"{payload_samples} payload samples; {timed_recalls} timed recalls",
-        f"1,500** tokens; observed mean: **{performance['mean_context_tokens']:.2f}**; "
-        f"observed maximum: **{performance['max_context_tokens']}**",
-        "does **not** serialize the MCP envelope",
-        "not an MCP transport response",
-        "must not be added together",
-        "not a storage-reduction claim",
-        PUBLIC_OFFLINE_ARTIFACT,
-        "offline-chunking",
-        "offline-performance",
-        PUBLIC_OFFLINE_SHA,
-        "There is no universal memory-count",
-        "python -m eval.vector_scale",
-        'vector_backend="sqlite-vec"',
+        f"{payload_samples} samples; {timed_recalls} timed recalls",
+        f"{chunking['questions']} questions",
+        f"{performance['questions']} samples",
+        f"{grounded['grounded']}/{grounded['answerable']} answerable queries grounded",
+        f"{grounded['abstained']}/{grounded['off_topic']} abstention queries rejected",
+        "MCP transport and provider billing were not measured",
     ):
         assert evidence in readme
+
+    normalized_benchmarks = " ".join(
+        (ROOT / "BENCHMARKS.md").read_text(encoding="utf-8").split()
+    )
+    for evidence in (
+        PUBLIC_OFFLINE_ARTIFACT,
+        PUBLIC_OFFLINE_SHA,
+        "offline-chunking",
+        "offline-performance",
+        "offline-grounded",
+        f"mean retrieved top-5 content falls from {whole['mean_context_tokens']:.1f} to "
+        f"{chunked['mean_context_tokens']:.1f} tokens",
+        f"{whole['mean_evidence_tokens']:.1f} to {chunked['mean_evidence_tokens']:.1f}",
+        f"**{context_full:,}** full-proxy `engraphis.regex.v1` tokens versus "
+        f"**{context_compact:,}** compact-proxy tokens",
+        f"**{performance['saved_serialized_payload_tokens']:,}** proxy tokens",
+        f"**{100 * performance['serialized_payload_savings_ratio']:.2f}% lower**",
+        f"{payload_samples} payload samples",
+        f"{timed_recalls} recalls are timed",
+        "they are not serialized MCP envelopes or transport responses",
+        "the candidate-page and reader-admitted packed-context views each report Recall@5",
+    ):
+        assert evidence in normalized_benchmarks
 
     for unsupported in (
         "49,915,394",
@@ -189,9 +198,10 @@ def test_public_docs_scope_external_numbers_and_withhold_historical_claims():
     benchmarks_normalized = " ".join(benchmarks.split())
     additional_normalized = " ".join(additional.split())
 
-    assert "<summary>See benchmark details and reproduce the results</summary>" in readme
-    assert "offline fixture registry intentionally excludes external" in readme_normalized
-    assert "Completed retrieval-only diagnostics are published separately" in readme_normalized
+    assert "three deterministic offline fixture runs" in readme_normalized
+    assert "benchmark guide" in readme_normalized
+    assert "External, model-dependent, latency, consolidation, and productivity numbers are not included" in benchmarks_normalized
+    assert "Completed retrieval-only diagnostics are documented separately" in benchmarks_normalized
     assert "absence from this registry" in benchmarks_normalized
     assert "LoCoMo and LongMemEval retrieval diagnostics are retained as separate public-safe artifacts" in benchmarks_normalized
     assert "Mem2ActBench's declared small retrieval diagnostic is complete" in benchmarks_normalized
@@ -236,13 +246,15 @@ def test_readme_makes_agent_benefits_and_visual_evidence_scannable():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
     for evidence in (
-        "## What Engraphis gives an agent",
-        "Remember a project across sessions",
-        "Avoid confident guesses",
-        "Avoid dragging the whole project into every prompt",
+        "## What it provides",
+        "**Continuity:**",
+        "**Useful recall:**",
+        "**Grounded answers:**",
+        "**Operator control:**",
         "docs/images/knowledge-graph.png",
         "docs/images/context-efficiency.svg",
-        "Less repeated history means more room for the task, tools, and useful evidence",
+        "Configuration reference",
+        "Benchmark methodology",
     ):
         assert evidence in readme
 
@@ -316,7 +328,7 @@ def test_example_visual_uses_the_checked_in_offline_fixture_results(
 
 
 def test_context_savings_visual_uses_only_registered_measurements():
-    """The headline chart contains only registered values and explicit scope labels.
+    """The headline chart reflects all three registered fixture runs.
 
     Values are interpolated from the COMMITTED registry artifact — the publication
     source of truth — so chart text cannot drift from the evidence it cites.
@@ -329,35 +341,41 @@ def test_context_savings_visual_uses_only_registered_measurements():
     whole = chunking["whole"]
     chunked = chunking["chunked"]
     performance = committed["performance"]
+    grounded = committed["grounded"]
     context_full = performance["full_serialized_payload_tokens"]
     context_compact = performance["compact_serialized_payload_tokens"]
     payload_samples = performance["questions"]
     timed_recalls = performance["timed_recalls"]
 
     for evidence in (
-        "Measured context and retrieval boundaries",
-        "CONTEXT BOUNDARIES",
-        "QUALITY SCOPES",
-        "PENDING EVALUATION TRACKS",
-        "Whole documents",
-        f"{whole['mean_context_tokens']:.1f} tokens",
-        "Structure-aware chunks",
-        f"{chunked['mean_context_tokens']:.1f} tokens",
-        f"{chunking['context_reduction_pct']:.1f}% lower",
-        "Smallest evidence:",
+        "Offline benchmark results",
+        "3 REGISTERED OFFLINE FIXTURES",
+        "01  CONTEXT EFFICIENCY",
+        "02  RETRIEVAL QUALITY",
+        "03  GROUNDED CHECKS",
+        "offline-chunking",
+        f"{whole['mean_context_tokens']:.1f}",
+        "Whole",
+        f"{chunked['mean_context_tokens']:.1f}",
+        "Chunked",
+        f"{chunking['context_reduction_pct']:.1f}% fewer retrieved tokens per question",
         "Serialized JSON-shape payload proxy",
-        f"{payload_samples:,} payload samples / {timed_recalls:,} timed recalls",
-        "Full JSON-shape proxy",
-        f"{context_full:,} tokens",
-        "Compact JSON-shape proxy",
-        f"{context_compact:,} tokens",
-        f"{100 * performance['serialized_payload_savings_ratio']:.2f}% lower",
+        f"{payload_samples:,} payload samples",
+        f"{timed_recalls:,} timed recalls",
+        f"{context_full:,}",
+        f"{context_compact:,}",
+        f"{100 * performance['serialized_payload_savings_ratio']:.2f}% fewer proxy tokens",
         "Retrieved candidate quality",
-        "Packed context",
-        "Recall@5 1.000 / hit@5 1.000 / answer tokens 1.000",
+        "Packed context quality",
+        "Recall@5",
+        "Hit@5",
+        "Answer-token recall",
+        f"{grounded['grounded']} / {grounded['answerable']} grounded",
+        f"{grounded['abstained']} / {grounded['off_topic']} rejected",
+        f"{grounded['quarantine_hits']} / {grounded['quarantined']} abstained",
+        f"Decision accuracy {grounded['decision_accuracy']:.3f} ({grounded['grounded'] + grounded['abstained']} / {grounded['answerable'] + grounded['off_topic']})",
         "MCP transport not measured",
         "JSON proxy only",
-        "Pinned LoCoMo and LongMemEval artifacts with answer evaluators",
     ):
         assert evidence in visual
 
@@ -367,10 +385,11 @@ def test_context_savings_visual_uses_only_registered_measurements():
     assert not svg.findall(f".//{namespace}image")
     visible_text = {node.text for node in svg.iter(f"{namespace}text")}
     assert f"{context_compact:,} tokens" in visible_text
-    assert f"{100 * performance['serialized_payload_savings_ratio']:.2f}% lower" in visible_text
-    assert f"Mean {performance['mean_context_tokens']:.2f} / max {performance['max_context_tokens']:,} tokens" in visual
-    assert "Recall@5 1.000 / hit@5 1.000 / answer tokens 1.000" in visual
-    assert "MCP transport not measured" in visible_text
+    assert f"{100 * performance['serialized_payload_savings_ratio']:.2f}% fewer proxy tokens" in visible_text
+    assert any("MCP transport not measured" in label for label in visible_text)
+    assert "PENDING" not in visual
+    assert "PENDING EVALUATION TRACKS" not in visual
+    assert "LoCoMo" not in visual and "LongMemEval" not in visual
 
     for unsupported in (
         "Public evidence is checksum-bound",
@@ -394,7 +413,7 @@ def test_context_savings_visual_uses_only_registered_measurements():
         float(value)
         for value in re.findall(r'font-size="([^"]+)"', visual)
     }
-    assert {12.5, 13.2, 14.3, 17.4, 18.7, 20.0, 24.0, 33.0} <= text_sizes
+    assert {12.1, 12.2, 12.5, 13.0, 16.5, 17.0, 21.0, 24.0, 32.0} <= text_sizes
 
 
 def test_public_numeric_evidence_registry_is_complete_and_live(
@@ -495,13 +514,15 @@ def test_public_numeric_evidence_registry_is_complete_and_live(
     }
 
     surfaces = (
-        ROOT / "README.md",
         ROOT / "BENCHMARKS.md",
         ROOT / "docs" / "images" / "context-efficiency.svg",
         ROOT / "docs" / "images" / "evidence-backed-agent-examples.svg",
     )
     for surface in surfaces:
         assert expected_sha in surface.read_text(encoding="utf-8")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "artifact SHA-256 prefix" in readme
+    assert "full SHA-256 and reproduction steps" in readme
 
     claimed_ids = set(
         re.findall(

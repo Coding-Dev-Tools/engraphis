@@ -94,14 +94,14 @@ interpretation and do not count as additional benchmark-quality gains.
 ### Public numeric evidence registry
 
 Every exact public aggregate retained below comes from the checked-in, public-safe
-[`offline-fixtures-v114.json`](docs/benchmark-evidence/offline-fixtures-v114.json) artifact. Its
+[`offline-fixtures-v115.json`](docs/benchmark-evidence/offline-fixtures-v115.json) artifact. Its
 SHA-256 is
-`40188db31e07680e1c886ecec8ed523c6237858f0d5c63ef3159251c63538970`, also recorded in the
+`11bce701a0d5b5b34729b35fb991c1c0c9a8968209d8e56c03b7980809fea3ba`, also recorded in the
 adjacent `.sha256` file. The artifact contains no raw questions, answers, prompts, customer data,
 or per-record content fingerprints.
 
 The fixture-suite digest is
-`6347175b1e4b3760e23afe2dcb7722d48557f987c45c7fcbd4f115e1e7720b54`. The artifact defines
+`d9ca7058d14667ed9f65e4521d39e75461debb15cf0cdb5f6e0cd358e2e0ee90`. The artifact defines
 the digest algorithm and records the SHA-256 of every suite and dataset file. Each evidence ID
 also binds its exact command through `sha256(UTF-8 exact command)`:
 
@@ -118,15 +118,26 @@ Completed retrieval-only diagnostics are documented separately in the
 [benchmark expansion results](docs/BENCHMARK_EXPANSION_RESULTS.md); absence from this registry
 means no number is claimed in this offline registry.
 
-The context-efficiency chart is generated from the registry values and the selected report schema.
-Historical LoCoMo, graph, handoff, consolidation, and security figures remain preserved in their
-source artifacts but are omitted from the current chart until each has a matching immutable,
-public-safe artifact. The chart labels coding outcomes, external datasets, and operational
-capacity as pending evaluation tracks rather than implying scores. Regenerate it with
-`python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-v114.json --output docs/images/context-efficiency.svg` after selecting the report to publish.
+The context-efficiency chart is generated from all three registered offline fixture runs:
+`offline-chunking`, `offline-performance`, and `offline-grounded`. It separates retrieved-context
+and JSON-shape payload savings, candidate quality before packing, quality for reader-admitted
+context, and grounded/abstention checks. The payload figures are JSON-shape proxies; the chart
+does not measure MCP transport or provider billing. External and model-dependent benchmark
+diagnostics are documented separately and are not mixed into this fixture chart. Regenerate the
+matching SVG and PNG from the artifact with:
+
+```bash
+python scripts/render_benchmark_report.py \
+  --report docs/benchmark-evidence/offline-fixtures-v115.json \
+  --output docs/images/context-efficiency.svg \
+  --png-output docs/images/context-efficiency.png
+```
+
+The PNG export option requires CairoSVG (`pip install cairosvg`). The renderer validates and
+reads the artifact once, then derives both files from that same normalized snapshot.
 
 The companion examples are also generated from that artifact with
-`python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-v114.json --output docs/images/evidence-backed-agent-examples.svg`.
+`python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-v115.json --output docs/images/evidence-backed-agent-examples.svg`.
 The historical-to-executable mapping is in
 [`docs/BENCHMARK_CHANGE_COVERAGE.md`](docs/BENCHMARK_CHANGE_COVERAGE.md).
 
@@ -182,10 +193,10 @@ frontier-model QA score.
   registered CodeMem run, 26 payload samples total **24,590** full-proxy
   `engraphis.regex.v1` tokens versus **11,138** compact-proxy tokens, avoiding **13,452** proxy
   tokens (**54.71% lower**), while 260 recalls are timed. Packed context across the same 26
-  samples averages **85.38** tokens and reaches **108** under a 1,500-token cap; Recall@5,
-  hit@5, and answer-token recall remain 1.000 for the legacy candidate-page view. The registered
-  v9 artifact predates `packed_quality`, so no packed-quality aggregate is published from it.
-  These aggregates are evidence ID
+  samples averages **85.38** tokens and reaches **108** under a 1,500-token cap. In the current
+  registered v115 artifact, the candidate-page and reader-admitted packed-context views each
+  report Recall@5, hit@5, and answer-token recall of **1.000** over the same 26 questions; keep
+  those scopes distinct when comparing results. These aggregates are evidence ID
   `offline-performance` in the registry above. `--filler-memories`, `--candidate-k`, and
   `--retrieval-profile` make scaling and routing experiments executable, but their results need
   separate evidence before publication.

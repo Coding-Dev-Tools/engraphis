@@ -4092,7 +4092,9 @@ class MemoryService:
                mtype_limits: Optional[dict] = None,
                record_receipt: bool = True,
                _default_k: int = 8,
-               _default_token_budget: Optional[int] = None) -> dict:
+               _default_token_budget: Optional[int] = None,
+               jev_assisted: bool = False, allow_remote: bool = False,
+               data_classification: Optional[str] = None) -> dict:
         """Retrieve the most relevant memories for ``query`` within scope."""
         query = _clean_text(query, field="query", max_chars=MAX_CONTENT_CHARS)
         k_supplied = k is not None
@@ -4151,6 +4153,12 @@ class MemoryService:
             raise ValidationError("response_mode must be one of: compact, full")
         include_untrusted = _strict_bool(include_untrusted, field="include_untrusted")
         planning, mtype_limits = _planning_controls(planning, mtype_limits)
+        jev_assisted = _strict_bool(jev_assisted, field="jev_assisted")
+        allow_remote = _strict_bool(allow_remote, field="allow_remote")
+        if allow_remote and not jev_assisted:
+            raise ValidationError("remote Jev consent requires Jev-assisted planning")
+        if allow_remote and data_classification not in {"public", "internal"}:
+            raise ValidationError("remote Jev planning requires a public or internal classification")
 
         # A configured workspace binding or a bound dashboard user must never do a
         # workspace-less (global) recall — either case represents a tenant boundary.
@@ -4233,6 +4241,9 @@ class MemoryService:
             include_untrusted=include_untrusted,
             planning=planning,
             mtype_limits=mtype_limits,
+            jev_assisted=jev_assisted,
+            allow_remote=allow_remote,
+            data_classification=data_classification,
         )
         memories = []
         for chunk in result.chunks:
@@ -4323,6 +4334,7 @@ class MemoryService:
             "effective_k": result.effective_k,
             "context_revision": result.context_revision,
             "planning": result.planning_mode,
+            "planning_advisory": result.planning_advisory,
             "mtype_limits": dict(mtype_limits),
             "response_mode": response_mode,
             "include_untrusted": include_untrusted,
@@ -4571,7 +4583,9 @@ class MemoryService:
                         response_mode: str = "full",
                         diagnostics: bool = False,
                         planning: str = "off",
-                        mtype_limits: Optional[dict] = None) -> dict:
+                        mtype_limits: Optional[dict] = None,
+                        jev_assisted: bool = False, allow_remote: bool = False,
+                        data_classification: Optional[str] = None) -> dict:
         """Grounded recall: an answer built strictly from retrieved memories, with
         ``[n]`` citations and an explicit abstain when evidence is insufficient
         (``core.grounded``). This path is offline/deterministic (extractive answer) — no
@@ -4616,6 +4630,12 @@ class MemoryService:
         if response_mode not in RESPONSE_MODES:
             raise ValidationError("response_mode must be one of: compact, full")
         planning, mtype_limits = _planning_controls(planning, mtype_limits)
+        jev_assisted = _strict_bool(jev_assisted, field="jev_assisted")
+        allow_remote = _strict_bool(allow_remote, field="allow_remote")
+        if allow_remote and not jev_assisted:
+            raise ValidationError("remote Jev consent requires Jev-assisted planning")
+        if allow_remote and data_classification not in {"public", "internal"}:
+            raise ValidationError("remote Jev planning requires a public or internal classification")
         if min_support is not None:
             try:
                 min_support = float(min_support)
@@ -4690,6 +4710,9 @@ class MemoryService:
             diagnostics=bool(diagnostics),
             planning=planning,
             mtype_limits=mtype_limits,
+            jev_assisted=jev_assisted,
+            allow_remote=allow_remote,
+            data_classification=data_classification,
         )
         out = {"query": query, **ans.to_dict()}
         out["response_mode"] = response_mode

@@ -98,7 +98,7 @@ def test_core_backend_imports_stay_behind_outer_composition_root() -> None:
     assert "configure_engine_factory(_default_memory_engine_factory)" in package
     assert "create_memory_engine" in package
 
-    for document in (_read("AGENTS.md"), _read("CLAUDE.md"), _read("README.md")):
+    for document in (_read("AGENTS.md"), _read("CLAUDE.md")):
         normalized = " ".join(document.split())
         assert "engraphis/factory.py" in normalized
         assert "outer composition root" in normalized
@@ -107,7 +107,7 @@ def test_core_backend_imports_stay_behind_outer_composition_root() -> None:
 
 def test_benchmark_text_alternatives_match_registered_fixture_boundary() -> None:
     """The current image and its alt text expose only current registered boundaries."""
-    registry_path = ROOT / "docs/benchmark-evidence/offline-fixtures-v114.json"
+    registry_path = ROOT / "docs/benchmark-evidence/offline-fixtures-v115.json"
     registry_bytes = registry_path.read_bytes()
     registry = json.loads(registry_bytes)
     measurements = {run["id"]: run["result"] for run in registry["runs"]}
@@ -118,7 +118,10 @@ def test_benchmark_text_alternatives_match_registered_fixture_boundary() -> None
     namespace = {"svg": "http://www.w3.org/2000/svg"}
     visible_labels = {"".join(node.itertext()).strip()
                       for node in svg_root.findall(".//svg:text", namespace)}
-    assert hashlib.sha256(registry_bytes).hexdigest()[:12] in visible_labels
+    assert any(
+        hashlib.sha256(registry_bytes).hexdigest()[:12] in label
+        for label in visible_labels
+    )
     description_node = svg_root.find("svg:desc", namespace)
     assert description_node is not None
     description = " ".join("".join(description_node.itertext()).lower().split())
@@ -130,28 +133,28 @@ def test_benchmark_text_alternatives_match_registered_fixture_boundary() -> None
     assert image is not None
     alternative = " ".join(image.group(1).lower().split())
 
-    assert "registered deterministic fixtures" in alternative
-    assert "structure-aware chunks reduce retrieved context" in alternative
-    assert "retrieved-candidate quality is labeled separately" in alternative
-    assert "packed-context quality" in alternative
-    assert "both measured in the selected report" in alternative
-    assert "actual mcp transport and provider billing are not measured" in alternative
-    assert "740.3 to 214.3 tokens" in alternative
-    assert "162.2 to 42.4 tokens" in alternative
+    assert "three registered offline fixtures" in alternative
+    assert "structure-aware chunks reduced retrieved context" in alternative
+    assert "740.3 to 214.3 tokens per question" in alternative
     assert (
-        f"{payload['compact_serialized_payload_tokens']:,} rather than "
-        f"{payload['full_serialized_payload_tokens']:,} tokens"
+        f"{payload['full_serialized_payload_tokens']:,} to "
+        f"{payload['compact_serialized_payload_tokens']:,} tokens"
     ) in alternative
+    assert "candidate and packed retrieval quality are shown separately" in alternative
+    assert "5/5 answerable queries grounded" in alternative
+    assert "6/6 abstention queries rejected" in alternative
+    assert "1/1 quarantined-evidence check" in alternative
+    assert "mcp transport and provider billing were not measured" in alternative
 
     for evidence in (
-        "artifact-driven local deterministic benchmark report",
-        "structure-aware chunks report 740.3 to 214.3 retrieved tokens per question",
-        "retrieved-candidate quality and packed-context quality are separate views",
-        f"{payload['full_serialized_payload_tokens']:,} full-proxy versus "
-        f"{payload['compact_serialized_payload_tokens']:,} compact-proxy tokens",
-        "not an mcp transport measurement",
-        "does not measure provider billing",
-        "1,500-token cap",
+        "artifact-driven offline benchmark report with context efficiency, retrieval quality, and grounded behavior reported separately",
+        "structure-aware chunking reports 740.3 to 214.3 retrieved tokens per question",
+        "retrieved candidate quality is recall@5 1.000, hit@5 1.000, and answer-token recall 1.000 across 26 questions",
+        "packed context quality is recall@5 1.000, hit@5 1.000, and answer-token recall 1.000 across 26 questions",
+        "the json-shape payload proxy reports 24,590 full versus 11,138 compact tokens",
+        "mcp transport was not measured",
+        "provider billing was not measured",
+        "decision accuracy is 1.000 across 11 decisions",
     ):
         assert evidence in description
 
@@ -208,14 +211,13 @@ def test_official_longmemeval_runbook_tracks_attested_evidence_contract() -> Non
 
 
 def test_scope_and_event_guidance_match_fail_closed_runtime_contract() -> None:
-    readme = _read("README.md")
     skill = _read("skills/engraphis-memory/SKILL.md")
     scoping = _read("skills/engraphis-memory/references/SCOPING.md")
     conventions = _read("skills/engraphis-memory/references/CONVENTIONS.md")
     tools = _read("skills/engraphis-memory/references/TOOLS.md")
     kilo = _read("docs/KILO_CODE_INTEGRATION.md")
 
-    for document in (readme, skill, scoping, tools, kilo):
+    for document in (skill, scoping, tools, kilo):
         normalized = " ".join(document.split())
         assert "reserved and rejected" in normalized
         assert "owner identity" in normalized
@@ -232,17 +234,20 @@ def test_scope_and_event_guidance_match_fail_closed_runtime_contract() -> None:
 
 def test_configuration_and_recovery_guidance_matches_public_contracts() -> None:
     readme = _read("README.md")
+    configuration = _read("docs/CONFIGURATION.md")
     security = _read("SECURITY.md")
     connect = _read("docs/AGENT_CONNECT.md")
     providers = _read("docs/LLM_PROVIDERS.md")
     recovery = _read("docs/RECALL_RECOVERY.md")
     sync = _read("docs/SYNC.md")
 
-    for document in (readme, security, connect, providers, sync):
+    for document in (configuration, security, connect, providers, sync):
         normalized = " ".join(document.split())
         assert "~/.engraphis/config.env" in normalized
         assert "ENGRAPHIS_ENV_FILE" in normalized
         assert re.search(r"(?:never|does not) search(?:es)? the working directory", normalized)
+
+    assert "docs/CONFIGURATION.md" in readme
 
     assert "repaired_fields" in recovery
     assert "v1_memory_id" in recovery
@@ -258,7 +263,6 @@ def test_configuration_and_recovery_guidance_matches_public_contracts() -> None:
 
 def test_schema_and_erasure_docs_match_live_export_policy() -> None:
     agents = _read("AGENTS.md")
-    readme = _read("README.md")
     changelog = _read("CHANGELOG.md")
     sync = _read("docs/SYNC.md")
     erasure = _read("docs/SECURE_ERASURE.md")
@@ -266,10 +270,9 @@ def test_schema_and_erasure_docs_match_live_export_policy() -> None:
 
     assert f"SCHEMA_VERSION = {SCHEMA_VERSION}" in schema
     assert agents.count(f"`SCHEMA_VERSION = {SCHEMA_VERSION}`") == 2
-    assert f"schema {SCHEMA_VERSION}" in readme
     assert f"schema {SCHEMA_VERSION}" in changelog
 
-    for document in (agents, readme, changelog, sync, erasure):
+    for document in (agents, changelog, sync, erasure):
         normalized = " ".join(document.split())
         assert "never_export" in normalized
         assert "remote_erasure" in normalized
@@ -287,7 +290,8 @@ def test_document_import_docs_describe_the_source_neutral_contract() -> None:
     guide = _read("docs/DOCUMENT_IMPORT.md")
     obsidian = _read("docs/OBSIDIAN_IMPORT.md")
 
-    for document in (readme, guide):
+    assert "docs/DOCUMENT_IMPORT.md" in readme
+    for document in (guide,):
         assert "engraphis import documents" in document
         assert "--dry-run" in document
         assert "--yes" in document
@@ -313,6 +317,5 @@ def test_consolidation_docs_expose_only_live_public_options() -> None:
         assert "supersede_sources" not in document
         assert "supersede-sources" not in document
 
-    assert "source episodes remain live" in readme
     normalized_tools = " ".join(tools.split())
     assert "`profiles (bool, false)`; `structured (bool, false)`." in normalized_tools
