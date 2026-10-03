@@ -1463,6 +1463,9 @@ class _AnswerReq(BaseModel):
     diagnostics: bool = False
     planning: str = "off"
     mtype_limits: Optional[dict[str, StrictInt]] = None
+    jev_assisted: StrictBool = False
+    allow_remote: StrictBool = False
+    data_classification: Optional[str] = Field(default=None, max_length=16)
 
 
 @router.post("/answer")
@@ -1492,11 +1495,130 @@ def answer(req: _AnswerReq):
         diagnostics=req.diagnostics,
         planning=req.planning,
         mtype_limits=req.mtype_limits,
+        jev_assisted=req.jev_assisted,
+        allow_remote=req.allow_remote,
+        data_classification=req.data_classification,
         max_citations=req.max_citations,
         min_support=req.min_support,
     )
     out["sources"] = list(out.get("citations") or [])
     return out
+
+
+class _JevReviewReq(BaseModel):
+    workspace: Optional[str] = None
+    repo: Optional[str] = None
+    memory_ids: list[str] = Field(default_factory=list)
+    claim: str = Field(min_length=1, max_length=1_200)
+    allow_remote: StrictBool = False
+    data_classification: str = Field(min_length=1, max_length=16)
+
+
+def _dashboard_jev_backend():
+    """Resolve an injected/lazy Jev client without initiating provider traffic."""
+    from engraphis.backends.jev_decision import JevDecisionBackend, select_decision_client
+    from engraphis.backends.jev_transport import EngraphisCloudDecisionClient
+
+    current_service = service()
+    planner = getattr(current_service.engine.recall_engine, "query_planner", None)
+    backend = getattr(planner, "decision_backend", None)
+    if isinstance(backend, JevDecisionBackend):
+        return backend
+    selected = settings.decision_backend.strip().lower()
+    if selected in {"managed", "auto"}:
+        client = EngraphisCloudDecisionClient()
+    else:
+        client, _provider = select_decision_client(selected)
+    return JevDecisionBackend(client=client, model=settings.decision_model)
+
+
+def _jev_review_projection(memory: dict) -> str:
+    """Return a small title/content-only excerpt suitable for an advisory check."""
+    title = " ".join(str(memory.get("title") or "").split())[:200]
+    content = " ".join(str(memory.get("content") or memory.get("summary") or "").split())
+    content = content[:3_500]
+    return "\n".join(part for part in (title, content) if part)
+
+
+def _advisory_payload(result) -> dict:
+    payload = {"status": result.status, "confidence": result.confidence}
+    if result.status == "decision":
+        payload["value"] = result.value
+    if result.status == "fallback":
+        payload["fallback_reason"] = result.fallback_reason or "unavailable"
+    if result.status == "uncertain":
+        payload["reason"] = "uncertain_result"
+    return payload
+
+
+@router.post("/jev/review")
+def jev_review(req: _JevReviewReq):
+    """Run read-only Jev evidence and pairwise contradiction checks."""
+    if not 1 <= len(req.memory_ids) <= 2 or len(set(req.memory_ids)) != len(req.memory_ids):
+        raise HTTPException(status_code=422, detail={
+            "error": "select one or two distinct memories",
+        })
+    if not req.claim.strip():
+        raise HTTPException(status_code=422, detail={"error": "claim is required"})
+    if req.data_classification not in {"public", "internal"}:
+        raise HTTPException(status_code=422, detail={
+            "error": "data classification must be public or internal",
+        })
+    ws = req.workspace or _default_ws()
+    if not ws:
+        raise HTTPException(status_code=400, detail={"error": "workspace is required"})
+    current_service = service()
+    inspected = []
+    records = []
+    for memory_id in req.memory_ids:
+        detail = _run(current_service.inspect, memory_id, workspace=ws, repo=req.repo)
+        memory = detail.get("memory") or {}
+        record = current_service.store.get_memory(memory_id)
+        if not memory or record is None:
+            raise HTTPException(status_code=404, detail={"error": "memory not found"})
+        inspected.append(memory)
+        records.append(record)
+
+    backend = _dashboard_jev_backend()
+    blocked_secret = any(str(getattr(record, "sensitivity", "normal")) == "secret"
+                         for record in records)
+    allow_remote = req.allow_remote is True and not blocked_secret
+    evidence = "\n\n".join(
+        f"SELECTED MEMORY {index + 1}:\n{_jev_review_projection(memory)}"
+        for index, memory in enumerate(inspected)
+    )[:7_800]
+    support = backend.verify_grounded_support_result(
+        req.claim[:1_200], evidence, allow_remote=allow_remote,
+        data_classification=req.data_classification,
+    )
+    if blocked_secret:
+        support = type(support)("fallback", fallback_reason="sensitive_memory")
+
+    contradiction = None
+    if len(records) == 2:
+        first, second = inspected
+        candidate = _jev_review_projection(first)[:3_700]
+        existing = records[1]
+        contradiction = backend.classify_contradiction_result(
+            candidate, existing, allow_remote=allow_remote,
+            data_classification=req.data_classification,
+        )
+        if blocked_secret:
+            contradiction = type(contradiction)("fallback", fallback_reason="sensitive_memory")
+
+    return {
+        "advisory_only": True,
+        "read_only": True,
+        "remote_consent_granted": req.allow_remote,
+        "remote_blocked_reason": "sensitive_memory" if blocked_secret and req.allow_remote else None,
+        "data_classification": req.data_classification,
+        "memory_ids": list(req.memory_ids),
+        "support": _advisory_payload(support),
+        "contradiction": (
+            _advisory_payload(contradiction) if contradiction is not None
+            else {"status": "not_requested", "reason": "select_two_memories"}
+        ),
+    }
 
 
 @router.get("/memories")

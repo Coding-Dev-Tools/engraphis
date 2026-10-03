@@ -50,6 +50,15 @@ _SECRETS = (
 )
 
 
+def contains_sensitive_content(value: str) -> bool:
+    """Best-effort local check for conventional secrets before an advisory call.
+
+    This is a transport safeguard, not a general privacy classifier. Callers must
+    still obtain per-call consent and an explicit public/internal classification.
+    """
+    return isinstance(value, str) and any(pattern.search(value) for pattern in _SECRETS)
+
+
 class DecisionClientError(RuntimeError):
     def __init__(self, code: str) -> None:
         self.code = code
@@ -198,7 +207,7 @@ def _request_payload(
                for option in q.options) or len(set(q.options)) != len(q.options):
             raise DecisionClientError("invalid_request")
         texts.extend((q.id, q.prompt, *q.options))
-    if any(pattern.search(value) for value in texts for pattern in _SECRETS):
+    if any(contains_sensitive_content(value) for value in texts):
         raise DecisionClientError("sensitive_content")
     payload = {"model": model, "state": state, "questions": [q.to_dict() for q in questions],
                "allow_remote": True, "purpose": purpose, "data_classification": data_classification}
@@ -318,8 +327,10 @@ class EngraphisCloudDecisionClient:
 
     def evaluate(self, state: str, questions: Sequence[DecisionQuestion], *, model: str,
                  allow_remote: bool = False, purpose: str = "custom",
-                 data_classification: str = "internal") -> CloudDecisionBatch:
-        deadline = time.monotonic() + self.timeout_s
+                 data_classification: str = "internal",
+                 timeout_s: Optional[float] = None) -> CloudDecisionBatch:
+        effective_timeout = min(self.timeout_s, _timeout(timeout_s)) if timeout_s is not None else self.timeout_s
+        deadline = time.monotonic() + effective_timeout
         payload = _request_payload(state, questions, model, allow_remote=allow_remote,
                                    purpose=purpose, data_classification=data_classification)
         from engraphis import cloud_session
@@ -342,7 +353,7 @@ class EngraphisCloudDecisionClient:
             if not before or control != before:
                 raise DecisionClientError("session_changed")
             body = _post_json(control.rstrip("/") + "/v1/jev/decide", token, payload,
-                              self.timeout_s, deadline=deadline)
+                              effective_timeout, deadline=deadline)
             result = parse_decision_batch(body, questions, normalized=True)
             _remaining_time(deadline)
             return result
@@ -378,7 +389,8 @@ class TypeSafeDecisionClient:
 
     def evaluate(self, state: str, questions: Sequence[DecisionQuestion], *, model: str,
                  allow_remote: bool = False, purpose: str = "custom",
-                 data_classification: str = "internal") -> CloudDecisionBatch:
+                 data_classification: str = "internal",
+                 timeout_s: Optional[float] = None) -> CloudDecisionBatch:
         _request_payload(state, questions, model, allow_remote=allow_remote,
                          purpose=purpose, data_classification=data_classification)
         if not self.is_configured:
@@ -390,8 +402,9 @@ class TypeSafeDecisionClient:
                 wire[q.id]["criteria"] = {label: label for label in q.options}
             elif q.kind == "score":
                 wire[q.id]["criteria"] = list(q.options)
+        effective_timeout = min(self.timeout_s, _timeout(timeout_s)) if timeout_s is not None else self.timeout_s
         body = _post_json(self.base_url + "/v1/systemone", self.api_key,
-                          {"model": model, "state": state, "questions": wire}, self.timeout_s)
+                          {"model": model, "state": state, "questions": wire}, effective_timeout)
         return parse_decision_batch(body, questions, normalized=False)
 
 

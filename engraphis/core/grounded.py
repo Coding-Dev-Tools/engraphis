@@ -87,6 +87,7 @@ class GroundedAnswer:
     context_revision: str = ""
     planning_mode: str = "off"
     planning_details: Optional[dict] = None
+    planning_advisory: Optional[dict] = None
     graph_traversal_details: Optional[list[dict]] = None
     degraded_mode: bool = False
     semantic_support: bool = True
@@ -131,6 +132,8 @@ class GroundedAnswer:
             payload["diagnostics"] = self.diagnostics_v1
         if self.planning_details is not None:
             payload["planning_details"] = self.planning_details
+        if self.planning_advisory is not None:
+            payload["planning_advisory"] = self.planning_advisory
         if self.graph_traversal_details is not None:
             payload["graph_traversal_details"] = self.graph_traversal_details
         return payload
@@ -437,6 +440,7 @@ def build_grounded_answer(query: str, result: RecallResult, embedder, *,
         "context_revision": result.context_revision,
         "planning_mode": result.planning_mode,
         "planning_details": result.planning_details,
+        "planning_advisory": result.planning_advisory,
         "graph_traversal_details": result.graph_traversal_details,
         "diagnostics_v1": result.diagnostics_v1,
             "degraded_mode": result.degraded_mode,

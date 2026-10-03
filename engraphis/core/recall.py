@@ -149,6 +149,7 @@ class RecallResult:
     context_revision: str = ""
     planning_mode: str = "off"
     planning_details: Optional[dict[str, Any]] = None
+    planning_advisory: Optional[dict[str, Any]] = None
     graph_traversal_details: Optional[list[dict[str, Any]]] = None
     token_counter: Optional[Callable[[str], int]] = field(default=None, repr=False)
     # Safety metadata is kept off the public chunk projection.  Consumers which make
@@ -246,7 +247,9 @@ class RecallEngine:
                arm_config: Optional[ProfileConfig] = None,
                k_supplied: Optional[bool] = None,
                token_budget_supplied: Optional[bool] = None,
-               default_token_budget: Optional[int] = None) -> RecallResult:
+               default_token_budget: Optional[int] = None,
+               jev_assisted: bool = False, allow_remote: bool = False,
+               data_classification: Optional[str] = None) -> RecallResult:
         started = time.perf_counter()
         phase_started = started
         phase_ms: dict[str, float] = {}
@@ -362,6 +365,10 @@ class RecallEngine:
         if planning_mode not in PLANNING_MODES:
             choices = ", ".join(sorted(PLANNING_MODES))
             raise ValueError(f"planning must be one of: {choices}")
+        if type(jev_assisted) is not bool or type(allow_remote) is not bool:
+            raise ValueError("Jev planning controls must be booleans")
+        if allow_remote and data_classification not in {"public", "internal"}:
+            raise ValueError("remote Jev planning requires public or internal classification")
         caller_limits = _normalize_mtype_limits(mtype_limits)
         mark_phase("preparation")
         plan, planner_fallback = self._plan_queries(
@@ -369,6 +376,12 @@ class RecallEngine:
             flt,
             selected_profile=selected_profile,
             planning_mode=planning_mode,
+            jev_assisted=jev_assisted,
+            allow_remote=allow_remote,
+            data_classification=data_classification,
+        )
+        planning_advisory = _planning_advisory(
+            plan, planner_fallback, jev_assisted=jev_assisted,
         )
         mark_phase("planning")
         effective_limits = dict(plan.mtype_limits)
@@ -670,6 +683,7 @@ class RecallEngine:
                 retrieval_trace=[] if diagnostics else None,
                 context_revision=_context_revision(usage, packed, context),
                 planning_mode=planning_mode,
+                planning_advisory=planning_advisory,
                 planning_details=(
                     _planning_details(
                         plan,
@@ -1001,6 +1015,7 @@ class RecallEngine:
             retrieval_trace=trace,
             context_revision=_context_revision(usage, packed_chunks, context),
             planning_mode=planning_mode,
+            planning_advisory=planning_advisory,
             planning_details=(
                 _planning_details(
                     plan,
@@ -1047,10 +1062,13 @@ class RecallEngine:
         *,
         selected_profile: str,
         planning_mode: str,
+        jev_assisted: bool = False,
+        allow_remote: bool = False,
+        data_classification: Optional[str] = None,
     ) -> tuple[RetrievalPlan, str]:
         identity = RetrievalPlan((PlannedQuery(query, 1, selected_profile),))
         if planning_mode == "off":
-            return identity, ""
+            return identity, "jev_planning_disabled" if jev_assisted else ""
         try:
             # Query planning is not a policy boundary. SearchFilter is mutable for
             # legacy compatibility, so never expose the live retrieval filter to an
@@ -1064,12 +1082,18 @@ class RecallEngine:
                     list(flt.graph_layers) if flt.graph_layers is not None else None
                 ),
             )
-            proposed = self._run_planner(query, planner_filter)
+            proposed = self._run_planner(
+                query, planner_filter, jev_assisted=jev_assisted,
+                allow_remote=allow_remote, data_classification=data_classification,
+            )
             return _sanitize_plan(proposed, query, selected_profile), ""
         except Exception as exc:
             return identity, _planner_fallback_reason(exc)
 
-    def _run_planner(self, query: str, planner_filter: SearchFilter) -> RetrievalPlan:
+    def _run_planner(
+        self, query: str, planner_filter: SearchFilter, *, jev_assisted: bool = False,
+        allow_remote: bool = False, data_classification: Optional[str] = None,
+    ) -> RetrievalPlan:
         """Enforce the planner deadline even for a non-cooperative injected backend.
 
         Python cannot safely kill an arbitrary running function. A single daemon
@@ -1079,15 +1103,28 @@ class RecallEngine:
         """
         if self.planner_timeout_s <= 0 or not self._planner_slot.acquire(blocking=False):
             raise TimeoutError("planner deadline unavailable")
+        deadline = time.monotonic() + self.planner_timeout_s
+        planner_method = (
+            getattr(self.query_planner, "plan_with_jev", None)
+            if jev_assisted else self.query_planner.plan
+        )
+        if not callable(planner_method):
+            self._planner_slot.release()
+            raise RuntimeError("Jev-assisted planner is unavailable")
         outcome: queue.Queue[tuple[bool, Any]] = queue.Queue(maxsize=1)
 
         def invoke() -> None:
             try:
-                outcome.put((True, self.query_planner.plan(
-                    query,
-                    filter=planner_filter,
-                    timeout_s=self.planner_timeout_s,
-                )))
+                remaining = max(0.0, deadline - time.monotonic())
+                options = {"filter": planner_filter, "timeout_s": remaining}
+                if jev_assisted:
+                    if remaining <= 0:
+                        raise TimeoutError("planner deadline exhausted")
+                    options.update({
+                        "allow_remote": allow_remote,
+                        "data_classification": data_classification or "internal",
+                    })
+                outcome.put((True, planner_method(query, **options)))
             except Exception as exc:
                 outcome.put((False, exc))
             finally:
@@ -1099,7 +1136,7 @@ class RecallEngine:
             daemon=True,
         )
         worker.start()
-        worker.join(self.planner_timeout_s)
+        worker.join(max(0.0, deadline - time.monotonic()))
         if worker.is_alive():
             raise TimeoutError("planner deadline exceeded")
         try:
@@ -1985,6 +2022,42 @@ def _planner_fallback_reason(exc: Exception) -> str:
     if isinstance(exc, (TypeError, ValueError)):
         return "invalid_planner_output"
     return "planner_unavailable"
+
+
+def _planning_advisory(
+    plan: RetrievalPlan, fallback: str, *, jev_assisted: bool,
+) -> Optional[dict[str, Any]]:
+    """Expose only fixed Jev status labels, never provider text or query content."""
+    if not jev_assisted:
+        return None
+    if fallback:
+        return {"status": "fallback", "reason": fallback}
+    codes = set(plan.reason_codes)
+    if "jev_route_selected" in codes:
+        return {"status": "decision", "reason": "route_selected"}
+    if "jev_uncertain" in codes:
+        return {"status": "uncertain", "reason": "jev_uncertain"}
+    fixed_reasons = {
+        "jev_planning_disabled": "planning_disabled",
+        "jev_no_alternatives": "no_alternate_routes",
+        "jev_remote_consent_required": "remote_consent_required",
+        "jev_invalid_classification": "invalid_data_classification",
+        "jev_invalid_input": "invalid_input",
+        "jev_input_too_large": "input_too_large",
+        "jev_deadline_exhausted": "deadline_exhausted",
+        "jev_client_deadline_unsupported": "client_deadline_unsupported",
+        "jev_sensitive_content": "sensitive_content",
+        "jev_backend_unavailable": "backend_unavailable",
+        "jev_client_contract_invalid": "client_contract_invalid",
+        "jev_provider_fallback": "provider_fallback",
+        "jev_remote_unavailable": "remote_unavailable",
+        "jev_malformed_response": "malformed_response",
+        "jev_fallback": "unavailable_or_uncertain",
+    }
+    for code in plan.reason_codes:
+        if code in fixed_reasons:
+            return {"status": "fallback", "reason": fixed_reasons[code]}
+    return {"status": "fallback", "reason": "advisory_status_unavailable"}
 
 
 def _normalize_mtype_limits(values: Optional[dict]) -> dict[MemoryType, int]:

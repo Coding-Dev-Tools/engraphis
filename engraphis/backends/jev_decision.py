@@ -11,6 +11,7 @@ from __future__ import annotations
 import inspect
 import math
 import os
+import time
 from dataclasses import dataclass
 from typing import Callable, Dict, Optional, Protocol, Sequence, Tuple
 
@@ -34,6 +35,16 @@ class DecisionQuestion:
         if self.options:
             result["options"] = list(self.options)
         return result
+
+
+@dataclass(frozen=True)
+class AdvisoryDecisionResult:
+    """Visible state for an advisory result; unresolved values never authorize work."""
+
+    status: str
+    value: Optional[object] = None
+    confidence: Optional[float] = None
+    fallback_reason: Optional[str] = None
 
 
 class ChoiceDecision(Protocol):
@@ -132,14 +143,31 @@ class JevDecisionBackend:
     def _evaluate(
         self, state: str, question: DecisionQuestion, allow_remote: bool,
         purpose: str, data_classification: str,
-    ) -> Optional[DecisionBatch]:
-        if (allow_remote is not True or not isinstance(data_classification, str)
-                or data_classification not in {"public", "internal"}
-                or len(state) > MAX_STATE_CHARS or not self.is_available):
-            return None
+        timeout_s: Optional[float] = None,
+    ) -> tuple[Optional[DecisionBatch], str, Optional[str]]:
+        from engraphis.backends.jev_transport import contains_sensitive_content
+
+        if allow_remote is not True:
+            return None, "fallback", "remote_not_authorized"
+        if not isinstance(data_classification, str) or data_classification not in {"public", "internal"}:
+            return None, "fallback", "invalid_data_classification"
+        if not isinstance(state, str) or not state.strip():
+            return None, "fallback", "invalid_input"
+        if len(state) > MAX_STATE_CHARS:
+            return None, "fallback", "input_too_large"
+        if contains_sensitive_content(state):
+            return None, "fallback", "sensitive_content"
+        if timeout_s is not None and (
+            type(timeout_s) not in (int, float) or not math.isfinite(timeout_s)
+            or timeout_s <= 0 or timeout_s > 15
+        ):
+            return None, "fallback", "deadline_exhausted"
+        call_deadline = time.monotonic() + float(timeout_s) if timeout_s is not None else None
+        if not self.is_available:
+            return None, "fallback", "backend_unavailable"
         client, model = self.client, self.model
         if client is None or model is None:
-            return None
+            return None, "fallback", "backend_unavailable"
         try:
             evaluate: Callable[..., DecisionBatch] = client.evaluate
             signature = inspect.signature(evaluate)
@@ -147,18 +175,128 @@ class JevDecisionBackend:
                 "model": model, "allow_remote": True, "purpose": purpose,
                 "data_classification": data_classification,
             }
+            if timeout_s is not None:
+                options["timeout_s"] = float(timeout_s)
             try:
                 signature.bind(state, [question], **options)
             except TypeError:
+                if timeout_s is not None:
+                    return None, "fallback", "client_deadline_unsupported"
                 # Preserve the original injected-client contract. Never retry a
                 # provider invocation: a TypeError can follow a completed request.
-                signature.bind(state, [question], model=model)
+                try:
+                    signature.bind(state, [question], model=model)
+                except TypeError:
+                    return None, "fallback", "client_contract_invalid"
                 options = {"model": model}
+            if call_deadline is not None:
+                remaining = min(float(timeout_s), call_deadline - time.monotonic())
+                if remaining <= 0:
+                    return None, "fallback", "deadline_exhausted"
+                options["timeout_s"] = remaining
             batch = evaluate(state, [question], **options)
-            return batch if batch.is_fallback is False else None
+            if batch is None or batch.is_fallback is not False:
+                return None, "fallback", "provider_fallback"
+            return batch, "decision", None
         except Exception:
             # Provider exceptions may contain request text or credentials. Do not log them.
-            return None
+            return None, "fallback", "remote_unavailable"
+
+    def choose_option(
+        self, state: str, *, question_id: str, prompt: str,
+        options: Sequence[str], allow_remote: bool = False,
+        purpose: str = "custom", data_classification: str = "internal",
+        timeout_s: Optional[float] = None,
+    ) -> AdvisoryDecisionResult:
+        """Choose among caller-supplied bounded options, or report uncertainty."""
+        if (not isinstance(question_id, str) or not question_id
+                or not isinstance(prompt, str) or not prompt.strip()
+                or not isinstance(options, (list, tuple))
+                or not 2 <= len(options) <= 10
+                or any(not isinstance(option, str) or not option.strip() for option in options)
+                or len(set(options)) != len(options)):
+            return AdvisoryDecisionResult("fallback", fallback_reason="invalid_input")
+        question = DecisionQuestion(question_id, prompt, "choice", tuple(options))
+        batch, status, reason = self._evaluate(
+            state, question, allow_remote, purpose, data_classification, timeout_s,
+        )
+        if batch is None:
+            return AdvisoryDecisionResult(status, fallback_reason=reason)
+        try:
+            decision = batch.get_choice(question_id)
+            if (decision is None or decision.selected not in options
+                    or not _probability(decision.confidence)):
+                return AdvisoryDecisionResult("fallback", fallback_reason="malformed_response")
+            if decision.confidence <= 0.5:
+                return AdvisoryDecisionResult("uncertain", confidence=float(decision.confidence))
+            return AdvisoryDecisionResult(
+                "decision", value=decision.selected, confidence=float(decision.confidence),
+            )
+        except Exception:
+            return AdvisoryDecisionResult("fallback", fallback_reason="malformed_response")
+
+    def classify_contradiction_result(
+        self, candidate_text: str, existing_memory: MemoryRecord, *,
+        allow_remote: bool = False, data_classification: str = "internal",
+    ) -> AdvisoryDecisionResult:
+        """Return a visible contradiction classification without write authority."""
+        if (not isinstance(candidate_text, str) or not candidate_text.strip()
+                or not existing_memory.content.strip()):
+            return AdvisoryDecisionResult("fallback", fallback_reason="invalid_input")
+        state = (f"EXISTING FACT: {existing_memory.title}\n{existing_memory.content}\n\n"
+                 f"NEW CANDIDATE FACT:\n{candidate_text}")
+        question = DecisionQuestion(
+            "verdict", "Classify the relationship between the candidate and existing fact.",
+            "choice", ("contradicts_and_supersedes", "reinforces", "orthogonal"),
+        )
+        batch, status, reason = self._evaluate(
+            state, question, allow_remote, "classify_contradiction", data_classification,
+        )
+        if batch is None:
+            return AdvisoryDecisionResult(status, fallback_reason=reason)
+        try:
+            decision = batch.get_choice("verdict")
+            if (decision is None or decision.selected not in _VERDICTS
+                    or not _probability(decision.confidence)):
+                return AdvisoryDecisionResult("fallback", fallback_reason="malformed_response")
+            if decision.confidence <= 0.5:
+                return AdvisoryDecisionResult("uncertain", confidence=float(decision.confidence))
+            return AdvisoryDecisionResult(
+                "decision", value=decision.selected, confidence=float(decision.confidence),
+            )
+        except Exception:
+            return AdvisoryDecisionResult("fallback", fallback_reason="malformed_response")
+
+    def verify_grounded_support_result(
+        self, query: str, evidence_text: str, *, allow_remote: bool = False,
+        data_classification: str = "internal",
+    ) -> AdvisoryDecisionResult:
+        """Return visible support status; this never participates in grounded recall."""
+        if (not isinstance(query, str) or not query.strip()
+                or not isinstance(evidence_text, str) or not evidence_text.strip()):
+            return AdvisoryDecisionResult("fallback", fallback_reason="invalid_input")
+        state = f"QUERY: {query}\n\nEVIDENCE:\n{evidence_text}"
+        question = DecisionQuestion(
+            "has_support", "Does the evidence directly support answering the query?", "noul",
+        )
+        batch, status, reason = self._evaluate(
+            state, question, allow_remote, "verify_support", data_classification,
+        )
+        if batch is None:
+            return AdvisoryDecisionResult(status, fallback_reason=reason)
+        try:
+            decision = batch.get_noul("has_support")
+            if (decision is None or not _probability(decision.probability)
+                    or not _probability(decision.confidence)):
+                return AdvisoryDecisionResult("fallback", fallback_reason="malformed_response")
+            if decision.confidence <= 0.5 or decision.probability == 0.5:
+                return AdvisoryDecisionResult("uncertain", confidence=float(decision.confidence))
+            return AdvisoryDecisionResult(
+                "decision", value=decision.probability > 0.5,
+                confidence=float(decision.confidence),
+            )
+        except Exception:
+            return AdvisoryDecisionResult("fallback", fallback_reason="malformed_response")
 
     def classify_contradiction(
         self, candidate_text: str, existing_memory: MemoryRecord, *, allow_remote: bool = False,
@@ -169,23 +307,16 @@ class JevDecisionBackend:
         Even a confident provider response must never authorize invalidation;
         deterministic resolution and scope/temporal checks remain authoritative.
         """
-        if not candidate_text.strip() or not existing_memory.content.strip():
+        if (not isinstance(candidate_text, str) or not candidate_text.strip()
+                or not isinstance(existing_memory.content, str)
+                or not existing_memory.content.strip()):
             return "orthogonal", 0.0
-        state = (f"EXISTING FACT: {existing_memory.title}\n{existing_memory.content}\n\n"
-                 f"NEW CANDIDATE FACT:\n{candidate_text}")
-        question = DecisionQuestion(
-            "verdict", "Classify the relationship between the candidate and existing fact.",
-            "choice", ("contradicts_and_supersedes", "reinforces", "orthogonal"),
+        result = self.classify_contradiction_result(
+            candidate_text, existing_memory, allow_remote=allow_remote,
+            data_classification=data_classification,
         )
-        batch = self._evaluate(state, question, allow_remote, "classify_contradiction",
-                               data_classification)
-        try:
-            decision = batch.get_choice("verdict") if batch is not None else None
-            if (decision is not None and decision.selected in _VERDICTS
-                    and _probability(decision.confidence) and decision.confidence > 0.5):
-                return decision.selected, float(decision.confidence)
-        except Exception:
-            pass
+        if result.status == "decision" and isinstance(result.value, str):
+            return result.value, float(result.confidence or 0.0)
         return "orthogonal", 0.0
 
     def verify_grounded_support(
@@ -193,20 +324,14 @@ class JevDecisionBackend:
         data_classification: str = "internal",
     ) -> Tuple[bool, float]:
         """Return advisory support; absent or uncertain evidence never certifies it."""
-        if not query.strip() or not evidence_text.strip():
+        if (not isinstance(query, str) or not query.strip()
+                or not isinstance(evidence_text, str) or not evidence_text.strip()):
             return False, 0.0
-        state = f"QUERY: {query}\n\nEVIDENCE:\n{evidence_text}"
-        question = DecisionQuestion(
-            "has_support", "Does the evidence directly support answering the query?", "noul",
+        result = self.verify_grounded_support_result(
+            query, evidence_text, allow_remote=allow_remote,
+            data_classification=data_classification,
         )
-        batch = self._evaluate(state, question, allow_remote, "verify_support",
-                               data_classification)
-        try:
-            decision = batch.get_noul("has_support") if batch is not None else None
-            if (decision is not None and _probability(decision.probability)
-                    and _probability(decision.confidence) and decision.confidence > 0.5
-                    and decision.probability != 0.5):
-                return decision.probability > 0.5, float(decision.probability)
-        except Exception:
-            pass
+        if result.status == "decision":
+            # Preserve this legacy API's probability-valued return contract.
+            return bool(result.value), float(result.confidence or 0.0)
         return False, 0.0

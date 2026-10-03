@@ -254,6 +254,16 @@
             </div>
           </form>
 
+          <details class="jev-recall-options">
+            <summary>Experimental Jev retrieval planning</summary>
+            <p class="project-help">Jev can prioritize one route already produced locally. The original query and retrieval filters stay fixed. This option has no validated retrieval quality benefit yet.</p>
+            <label class="check-row"><input id="ask-jev-assisted" type="checkbox"> Ask Jev to prioritize a deterministic route for this question</label>
+            <label class="check-row"><input id="ask-jev-remote" type="checkbox" disabled> Allow this request to send the question and bounded route text to Jev</label>
+            <label class="compact-field">Data classification
+              <select id="ask-jev-classification" disabled><option value="internal" selected>Internal</option><option value="public">Public</option></select>
+            </label>
+          </details>
+
           <p id="ask-result-query" class="project-help ask-result-query"></p>
           <p id="ask-status" class="project-help" role="status"></p>
           <div class="form-actions ask-retry-actions">
