@@ -101,17 +101,13 @@ def test_public_pro_ctas_use_documentation_attribution():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     hosted_plans = (ROOT / "docs" / "HOSTED_PLANS.md").read_text(encoding="utf-8")
 
-    assert readme.count("pro_conversion") >= 2
-    assert "utm_medium=docs" in readme
-    assert "utm_content=readme_intro" in readme
-    assert "utm_content=readme_pricing" in readme
+    assert (
+        "[Hosted plans and licensing](https://github.com/Coding-Dev-Tools/engraphis/blob/b227d258c3109447b33df98bf372d44659f72722/"
+        "docs/HOSTED_PLANS.md)" in readme
+    )
     assert "utm_medium=docs" in hosted_plans
     assert "utm_content=hosted_plans_pricing" in hosted_plans
-    for document in (readme, hosted_plans):
-        assert all(parameter in document for parameter in CTA_PARAMS)
+    assert all(parameter in hosted_plans for parameter in CTA_PARAMS)
 
-    for heading in (
-        "## What Engraphis gives an agent",
-        "## Free forever vs. hosted plans",
-    ):
-        assert heading in readme
+    assert "## Optional Jev assistance" in readme
+    assert "## Guides" in readme

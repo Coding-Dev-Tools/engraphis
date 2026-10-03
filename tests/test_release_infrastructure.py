@@ -95,8 +95,8 @@ def test_all_public_launchers_converge_on_the_v2_service():
     assert '"url": "http://<host-LAN-IP>:8700/mcp/"' in docker_docs
     assert '".[server,mcp,documents,cloud-sync]"' in dockerfile
     assert (
-        "[Docker deployment guide]"
-        "(https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/DOCKER.md)"
+            "[Docker deployment](https://github.com/Coding-Dev-Tools/engraphis/blob/b227d258c3109447b33df98bf372d44659f72722/"
+            "docs/DOCKER.md)"
         in readme
     )
     assert "The Docker image includes the streamable HTTP MCP endpoint" in docker_docs
@@ -107,7 +107,7 @@ def test_all_public_launchers_converge_on_the_v2_service():
     assert "ENGRAPHIS_COMPOSE_PORT" in docker_docs
     assert "start_dashboard.main(args)" in launcher
     assert "engraphis.app" not in launcher
-    assert "same v2 service" in readme
+    assert "engraphis-dashboard" in readme
 
 
 def test_native_vector_backend_compatibility_stays_in_architecture_docs():
@@ -125,9 +125,8 @@ def test_advanced_query_planning_stays_in_architecture_docs():
     guidance = "`planning=\"auto\"` keeps the original query"
 
     assert (
-        "[architecture guide]"
-        "(https://github.com/Coding-Dev-Tools/engraphis/blob/main/"
-        "docs/ARCHITECTURE_V3.md#query-planning)"
+            "[Architecture and query planning](https://github.com/Coding-Dev-Tools/engraphis/blob/b227d258c3109447b33df98bf372d44659f72722/"
+            "docs/ARCHITECTURE_V3.md#query-planning)"
         in readme
     )
     assert guidance not in readme
@@ -141,9 +140,8 @@ def test_pi_and_public_write_review_details_stay_in_supporting_docs():
     review_guide = _text("docs/WRITE_REVIEW.md")
 
     assert (
-        "[Pi extension guide]"
-        "(https://github.com/Coding-Dev-Tools/engraphis/blob/main/"
-        "integrations/pi/README.md)"
+            "[Pi extension](https://github.com/Coding-Dev-Tools/engraphis/blob/b227d258c3109447b33df98bf372d44659f72722/"
+            "integrations/pi/README.md)"
         in readme
     )
     assert "pi install npm:@engraphis/pi" not in readme
@@ -174,8 +172,8 @@ def test_compose_keeps_container_safety_defaults_and_has_an_explicit_port_overri
     assert '"0.0.0.0:${ENGRAPHIS_COMPOSE_PORT:-8700}:${ENGRAPHIS_COMPOSE_PORT:-8700}"' in lan_compose
     assert "ENGRAPHIS_API_TOKEN: ${ENGRAPHIS_API_TOKEN:?Set a strong ENGRAPHIS_API_TOKEN for LAN use}" in lan_compose
     assert (
-        "[Docker deployment guide]"
-        "(https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/DOCKER.md)"
+            "[Docker deployment](https://github.com/Coding-Dev-Tools/engraphis/blob/b227d258c3109447b33df98bf372d44659f72722/"
+            "docs/DOCKER.md)"
         in readme
     )
     assert "ENGRAPHIS_COMPOSE_PORT=8787" in docker_docs
@@ -543,6 +541,7 @@ def test_public_capability_and_support_docs_match_the_shipped_tree():
     assert len(tools) == len(set(tools)) == 39
 
     readme = _text("README.md")
+    licensing = _text("docs/LICENSING.md")
     architecture = _text("docs/ARCHITECTURE_V3.md")
     skill = _text("skills/engraphis-memory/SKILL.md")
     skill_tools = _text("skills/engraphis-memory/references/TOOLS.md")
@@ -558,7 +557,12 @@ def test_public_capability_and_support_docs_match_the_shipped_tree():
     assert "engraphis-mcp-classic" in skill
     assert "recall_context (compact)" in architecture
     assert "engraphis_recall_context" in readme
-    assert "`engraphis_check_update`" in readme
+    mcp_reference = _text("docs/MCP_TOOLS.md")
+    assert (
+        "[MCP tool reference](https://github.com/Coding-Dev-Tools/engraphis/blob/b227d258c3109447b33df98bf372d44659f72722/"
+        "docs/MCP_TOOLS.md)" in readme
+    )
+    assert "`engraphis_check_update`" in mcp_reference
     for content in (skill, skill_tools, skill_scoping):
         assert "force_new" in content
         assert "reused" in content
@@ -608,14 +612,13 @@ def test_public_capability_and_support_docs_match_the_shipped_tree():
 
     security = _text("SECURITY.md")
     normalized_security = re.sub(r"\s+", " ", security)
-    normalized_readme = re.sub(r"\s+", " ", readme)
     assert "Private hosted service boundary" in security
     assert "latest published stable release is the supported line" in security
     assert "0.9.x) releases are no longer maintained" not in security
     assert "signing keys" in normalized_security
     assert "whole-database encryption" not in readme
     assert "Pro and Team are GA in v1.0.0" not in readme
-    assert "Pro and Team are services" in readme
+    assert "The hosted control plane and managed services are private services" in readme
     assert "img.shields.io/badge/version-1.0.0" not in readme
     assert (
         "[![PyPI version](https://img.shields.io/pypi/v/engraphis.svg)]"
@@ -623,18 +626,16 @@ def test_public_capability_and_support_docs_match_the_shipped_tree():
         in readme
     )
     assert (
-        "https://raw.githubusercontent.com/Coding-Dev-Tools/engraphis/main/"
-        "docs/images/knowledge-graph.png"
-        in readme
+        'src="https://raw.githubusercontent.com/Coding-Dev-Tools/engraphis/b227d258c3109447b33df98bf372d44659f72722/'
+        'docs/images/knowledge-graph.png"' in readme
     )
     assert (
-        "https://raw.githubusercontent.com/Coding-Dev-Tools/engraphis/main/"
-        "docs/images/context-efficiency.svg"
-        in readme
+        'src="https://raw.githubusercontent.com/Coding-Dev-Tools/engraphis/b227d258c3109447b33df98bf372d44659f72722/'
+        'docs/images/context-efficiency.svg"' in readme
     )
-    assert "official hosted service" in readme
+    assert "official hosted service" in licensing
     assert "are generally available" not in readme
-    assert "private repository" in normalized_readme
+    assert "private repository" in licensing
     assert not (ROOT / "docs" / "COMMERCIAL_OPERATIONS.md").exists()
     assert not (ROOT / ".github" / "workflows" / "commercial-backup.yml").exists()
 

@@ -2489,7 +2489,9 @@ class MemoryEngine:
                prompt_only: bool = False,
                planning: str = "off",
                mtype_limits: Optional[dict] = None,
-               reinforce: bool = False) -> RecallResult:
+               reinforce: bool = False, jev_assisted: bool = False,
+               allow_remote: bool = False,
+               data_classification: Optional[str] = None) -> RecallResult:
         flt = self._recall_filter(
             workspace_id=workspace_id, repo_id=repo_id, session_id=session_id,
             scopes=scopes, mtypes=mtypes, as_of=as_of, valid_at=valid_at,
@@ -2511,6 +2513,9 @@ class MemoryEngine:
             prompt_only=bool(prompt_only),
             planning=planning,
             mtype_limits=mtype_limits,
+            jev_assisted=jev_assisted,
+            allow_remote=allow_remote,
+            data_classification=data_classification,
         )
 
         return result
@@ -2744,7 +2749,9 @@ class MemoryEngine:
                         diagnostics: bool = False,
                         planning: str = "off",
                         mtype_limits: Optional[dict] = None,
-                        max_citations: int = 5, reinforce: bool = True):
+                        max_citations: int = 5, reinforce: bool = True,
+                        jev_assisted: bool = False, allow_remote: bool = False,
+                        data_classification: Optional[str] = None):
         """Recall, then answer *strictly from* what was recalled — with citations and an
         explicit abstain when the evidence is too weak (``core.grounded``). Offline and
         deterministic (extractive answer) unless an ``LLM`` is injected to synthesise
@@ -2770,6 +2777,9 @@ class MemoryEngine:
             prompt_only=True,
             planning=planning,
             mtype_limits=mtype_limits,
+            jev_assisted=jev_assisted,
+            allow_remote=allow_remote,
+            data_classification=data_classification,
         )
         floor = _grounded.GROUNDED_SUPPORT_FLOOR if min_support is None else min_support
         answer = _grounded.build_grounded_answer(query, result, self.embedder, llm=llm,

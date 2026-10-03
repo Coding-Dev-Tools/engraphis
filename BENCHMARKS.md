@@ -94,14 +94,14 @@ interpretation and do not count as additional benchmark-quality gains.
 ### Public numeric evidence registry
 
 Every exact public aggregate retained below comes from the checked-in, public-safe
-[`offline-fixtures-v128.json`](docs/benchmark-evidence/offline-fixtures-v128.json) artifact. Its
+[`offline-fixtures-v132.json`](docs/benchmark-evidence/offline-fixtures-v132.json) artifact. Its
 SHA-256 is
-`73f2d1a8cd6e2db070577582a2266f6605efc052800da17db9938f7a274bf755`, also recorded in the
+`0ab9183336eb91be2fd921a517231bc44cb245868391066b72e564c3f4571039`, also recorded in the
 adjacent `.sha256` file. The artifact contains no raw questions, answers, prompts, customer data,
 or per-record content fingerprints.
 
 The fixture-suite digest is
-`6e1be135db67964cfb48a2125ac846a9a420662b69ed4d7f61c21d1c87d971b2`. The artifact defines
+`6cfc127f842d045c5fe5c024a09688cf07a6f646a9191c168d317c77002d978c`. The artifact defines
 the digest algorithm and records the SHA-256 of every suite and dataset file. Each evidence ID
 also binds its exact command through `sha256(UTF-8 exact command)`:
 
@@ -121,12 +121,19 @@ means no number is claimed in this offline registry.
 The context-efficiency chart is generated from the registry values and the selected report schema.
 Historical LoCoMo, graph, handoff, consolidation, and security figures remain preserved in their
 source artifacts but are omitted from the current chart until each has a matching immutable,
-public-safe artifact. The chart labels coding outcomes, external datasets, and operational
-capacity as pending evaluation tracks rather than implying scores. Regenerate it with
-`python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-v128.json --output docs/images/context-efficiency.svg` after selecting the report to publish.
+public-safe artifact. The chart reports context size, candidate and packed retrieval quality, and
+grounded checks in separate panels; provider billing and MCP transport are not measured. Regenerate
+the SVG and matching PNG with:
 
-The companion examples are also generated from that artifact with
-`python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-v128.json --output docs/images/evidence-backed-agent-examples.svg`.
+```bash
+python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-v132.json --output docs/images/context-efficiency.svg --png-output docs/images/context-efficiency.png
+```
+
+The companion examples are also generated from that artifact with:
+
+```bash
+python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-v132.json --output docs/images/evidence-backed-agent-examples.svg --png-output docs/images/evidence-backed-agent-examples.png
+```
 The historical-to-executable mapping is in
 [`docs/BENCHMARK_CHANGE_COVERAGE.md`](docs/BENCHMARK_CHANGE_COVERAGE.md).
 
@@ -289,6 +296,27 @@ LoCoMo and LongMemEval retrieval diagnostics are retained as separate public-saf
 [benchmark expansion report](docs/BENCHMARK_EXPANSION_RESULTS.md), with source, model, configuration
 and checksum boundaries. Those values remain evidence-retrieval metrics, not end-to-end QA accuracy
 or an official LoCoMo leaderboard score.
+
+## Jev-assisted route-selection probe (provider-backed, exploratory)
+
+On 2026-10-03, the configured BYOK client ran `eval/jev_recall_quality.py` against 40 generated
+public synthetic tasks (10 each for lexical identifiers, graph relationships, temporal changes,
+and procedural context). Each call sent only the task query and at most two locally generated
+routes; no recalled memory bodies or stored user data were sent. Jev selected a route on all 40
+calls, but the baseline and Jev-assisted means were identical: nDCG@5 **0.740773**, Recall@5
+**0.75**, and answer-token coverage **0.75**. Every paired 95% interval was zero, so the
+improvement/non-inferiority gate did not pass. This synthetic probe does not establish a benefit
+on held-out user workloads, and no retrieval-quality improvement is claimed.
+
+The harness caps a run at 40 provider requests, makes at most one request per task, and requires
+explicit `--allow-remote` consent. Repeating it can consume BYOK provider usage:
+
+```bash
+python -m eval.jev_recall_quality --allow-remote --max-requests 40 --timeout 8
+```
+
+This exploratory provider run is separate from the registered offline artifact and the benchmark
+graphic below; it is not a general benchmark or customer-workload evaluation.
 
 ## What we do NOT yet claim
 

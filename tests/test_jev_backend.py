@@ -97,6 +97,22 @@ def test_explicitly_authorized_valid_response_is_advisory():
     assert client.calls[1][1][0]["options"] == ["contradicts_and_supersedes", "reinforces", "orthogonal"]
 
 
+def test_legacy_support_tuple_preserves_probability_separately_from_confidence():
+    client = FakeClient(confidence=0.6, probability=0.8)
+    adapter = backend(client)
+
+    result = adapter.verify_grounded_support_result(
+        "database?", "Postgres", allow_remote=True,
+    )
+    assert result.status == "decision"
+    assert result.value is True
+    assert result.confidence == 0.6
+    assert result.support_probability == 0.8
+    assert adapter.verify_grounded_support(
+        "database?", "Postgres", allow_remote=True,
+    ) == (True, 0.8)
+
+
 class LegacyClient(FakeClient):
     def evaluate(self, state, questions, *, model):
         self.calls.append((state, [question.to_dict() for question in questions], model))

@@ -1746,6 +1746,7 @@
         actions.append(button('Approve for prompt…', 'primary-button', () => approveForPrompt(memory)));
       }
       actions.append(
+        button('Review with Jev', 'secondary-button', () => openJevReview(memory)),
         button(memory.can_revise === false ? 'Review saved versions' : 'Edit', 'secondary-button', () => openEditor(memory)),
         button(memory.pinned ? 'Unpin' : 'Pin', 'secondary-button', () => togglePin(memory)),
         button('Search topic timeline', 'secondary-button', () => openMemoryTimeline(memory)),
@@ -1765,6 +1766,126 @@
         target.replaceChildren(empty(`Could not inspect memory: ${error.message}`));
       }
     }
+  }
+
+  function openJevReview(memory) {
+    const target = byId('memory-detail');
+    const prior = byId('jev-review-panel');
+    if (prior) { prior.remove(); return; }
+    const panel = node('section', 'jev-review-panel');
+    panel.id = 'jev-review-panel';
+    panel.setAttribute('aria-labelledby', 'jev-review-title');
+    panel.append(
+      node('h3', '', 'Review selected evidence with Jev'),
+      node('p', 'project-help', 'This advisory checks whether the selected memory supports your claim and, if you choose a second memory, whether the two conflict. It never changes stored memories.'),
+    );
+    panel.querySelector('h3').id = 'jev-review-title';
+    const form = node('form');
+    const claimLabel = node('label');
+    claimLabel.append(node('span', '', 'Question or claim to check'));
+    const claim = node('textarea');
+    claim.rows = 3;
+    claim.maxLength = 1200;
+    claim.required = true;
+    claim.value = memory.title || '';
+    claim.placeholder = 'What should this memory support?';
+    claimLabel.append(claim);
+    const peerLabel = node('label');
+    peerLabel.append(node('span', '', 'Compare with another memory (optional)'));
+    const peer = node('select');
+    peer.append(option('', 'No contradiction comparison'));
+    state.memories.filter(item => item && item.id && item.id !== memory.id).forEach(item => {
+      peer.append(option(item.id, memoryTitle(item)));
+    });
+    peerLabel.append(peer);
+    const remoteLabel = node('label', 'check-row');
+    const remote = node('input');
+    remote.type = 'checkbox';
+    remoteLabel.append(remote, document.createTextNode(' Allow this action to send the claim and selected excerpts to Jev'));
+    const classificationLabel = node('label');
+    classificationLabel.append(node('span', '', 'Data classification for this action'));
+    const classification = node('select');
+    classification.append(option('internal', 'Internal', true), option('public', 'Public'));
+    classificationLabel.append(classification);
+    const status = node('p', 'project-help');
+    status.setAttribute('role', 'status');
+    status.setAttribute('aria-live', 'polite');
+    const result = node('div', 'jev-review-result');
+    const submit = node('button', 'primary-button', 'Run read-only review');
+    submit.type = 'submit';
+    form.append(claimLabel, peerLabel, remoteLabel, classificationLabel, submit);
+    form.addEventListener('submit', event => { event.preventDefault(); void runJevReview(); });
+    panel.append(form, status, result);
+    target.append(panel);
+
+    async function runJevReview() {
+      const claimText = claim.value.trim();
+      if (!claimText) {
+        status.textContent = 'Enter a question or claim before reviewing.';
+        claim.focus();
+        return;
+      }
+      if (!state.workspace || state.selectedMemory !== memory.id) return;
+      const request = beginScopedRequest('jev-review');
+      const memoryIds = [memory.id, ...(peer.value ? [peer.value] : [])];
+      submit.disabled = true;
+      status.textContent = 'Running a read-only advisory review…';
+      result.replaceChildren();
+      try {
+        const response = await api('/jev/review', {
+          method: 'POST', signal: request.signal,
+          body: {
+            workspace: request.workspace,
+            ...(request.project ? { repo: request.project } : {}),
+            memory_ids: memoryIds,
+            claim: claimText,
+            allow_remote: remote.checked,
+            data_classification: classification.value,
+          },
+        });
+        if (!isCurrentScopedRequest(request) || state.selectedMemory !== memory.id) return;
+        renderJevReviewResult(result, response);
+        status.textContent = response.remote_blocked_reason
+          ? `Remote consent was granted, but sending was blocked (${response.remote_blocked_reason.replaceAll('_', ' ')}). See the fallback result.`
+          : response.remote_consent_granted
+            ? 'Remote consent was granted for this action only. This does not confirm a provider request; check each result for fallback or uncertainty.'
+            : 'Remote consent was not granted for this action. Check each result for fallback or uncertainty.';
+      } catch (error) {
+        if (isCurrentScopedRequest(request) && state.selectedMemory === memory.id) {
+          status.textContent = `Review unavailable: ${error.message}`;
+        }
+      } finally {
+        submit.disabled = false;
+      }
+    }
+  }
+
+  function renderJevReviewResult(target, response) {
+    const labelStatus = item => item.status === 'decision' ? 'Advisory decision'
+      : item.status === 'uncertain' ? 'Uncertain; no conclusion'
+      : item.status === 'not_requested' ? 'Not checked'
+      : 'Fallback; review manually';
+    const describe = (name, item) => {
+      const card = node('article');
+      card.append(node('strong', '', `${name} · ${labelStatus(item)}`));
+      if (item.status === 'decision') {
+        const value = item.value === true ? 'Evidence supports the claim.'
+          : item.value === false ? 'Evidence does not support the claim.'
+          : item.value === 'contradicts_and_supersedes' ? 'The memories may contradict.'
+          : item.value === 'reinforces' ? 'The memories appear consistent.'
+          : item.value === 'orthogonal' ? 'No direct relationship was found.'
+          : 'Jev returned an advisory result.';
+        card.append(node('p', '', value));
+      } else if (item.reason) card.append(node('p', '', item.reason.replaceAll('_', ' ')));
+      if (item.fallback_reason) card.append(node('p', '', `Reason: ${item.fallback_reason.replaceAll('_', ' ')}.`));
+      if (Number.isFinite(item.probability)) card.append(node('p', '', `Support probability: ${item.probability.toFixed(2)} · advisory only`));
+      if (Number.isFinite(item.confidence)) card.append(node('p', '', `Confidence: ${item.confidence.toFixed(2)} · advisory only`));
+      target.append(card);
+    };
+    target.replaceChildren();
+    describe('Evidence support', response.support || {});
+    describe('Contradiction check', response.contradiction || {});
+    target.append(node('p', 'project-help', 'Jev cannot authorize a memory change, grounded answer, or command. Review the sources yourself.'));
   }
 
   function openMemory(memory) {
@@ -2484,6 +2605,25 @@
       node('span', 'support-pill', `${(result.citations || []).length} ${(result.citations || []).length === 1 ? 'citation' : 'citations'}`),
     );
     target.append(meta);
+    const advisory = result.planning_advisory;
+    if (advisory && typeof advisory === 'object') {
+      const reasonLabels = {
+        route_selected: 'Jev prioritized a locally generated alternate route. A 40-task synthetic check found no retrieval-metric change; user-workload benefit is unproven.',
+        jev_uncertain: 'Jev was uncertain, so the deterministic route order was used.',
+        remote_consent_required: 'Remote consent was not granted, so deterministic route order was used.',
+        planning_disabled: 'Query planning is disabled, so the original query route was used.',
+        backend_unavailable: 'Jev is unavailable, so deterministic route order was used.',
+        planner_timeout: 'Route planning reached its deadline, so deterministic route order was used.',
+        remote_unavailable: 'The Jev request failed, so deterministic route order was used.',
+        malformed_response: 'Jev returned an invalid response, so deterministic route order was used.',
+        sensitive_content: 'The route text was not sent because it matched a sensitive-data filter; deterministic route order was used.',
+      };
+      const message = reasonLabels[advisory.reason]
+        || (advisory.status === 'decision'
+          ? 'Jev prioritized a locally generated route. A 40-task synthetic check found no retrieval-metric change; user-workload benefit is unproven.'
+          : 'The Jev advisory did not select a route; deterministic route order was used.');
+      target.append(node('p', 'project-help jev-recall-status', message));
+    }
     const coverage = ['unknown', 'partial', 'complete'].includes(result.answer_coverage) ? result.answer_coverage : 'unknown';
     const coverageNote = {
       unknown: 'This answer has not been checked against every part of your question.',
@@ -2524,8 +2664,8 @@
   async function askMemory(event) {
     event.preventDefault();
     const input = byId('ask-input');
-    const question = input.value.trim();
-    if (!question) {
+    const question = input.value;
+    if (!question.trim()) {
       showNotice('Enter a question before requesting a grounded answer.');
       input.focus();
       return;
@@ -2538,13 +2678,25 @@
     const workspace = request.workspace;
     showNotice('');
     const k = number(byId('ask-k').value) || 5;
+    const jevAssisted = byId('ask-jev-assisted').checked;
+    const allowRemote = jevAssisted && byId('ask-jev-remote').checked;
     await askRequests.start({
       question,
       scopeLabel: workspace + (request.project ? ' / ' + request.project : ' / all projects'),
       isCurrent: () => isCurrentScopedRequest(request),
       answer: signal => api('/answer', {
         method: 'POST', signal,
-        body: { query: question, workspace, ...(request.project ? { repo: request.project } : {}), k: Math.max(8, k), max_citations: k },
+        body: {
+          query: question,
+          workspace,
+          ...(request.project ? { repo: request.project } : {}),
+          k: Math.max(8, k),
+          max_citations: k,
+          planning: jevAssisted ? 'auto' : 'off',
+          jev_assisted: jevAssisted,
+          allow_remote: allowRemote,
+          ...(jevAssisted ? { data_classification: byId('ask-jev-classification').value } : {}),
+        },
       }),
       // /recall is read-only (reinforce=False): uncited candidates add no second
       // reinforcement of memories cited by the grounded answer.
@@ -5488,6 +5640,14 @@
 
   byId('workspace-select').addEventListener('change', event => selectWorkspace(event.target.value));
   byId('ask-form').addEventListener('submit', askMemory);
+  const updateJevRecallControls = () => {
+    const enabled = byId('ask-jev-assisted').checked;
+    byId('ask-jev-remote').disabled = !enabled;
+    byId('ask-jev-classification').disabled = !enabled;
+    if (!enabled) byId('ask-jev-remote').checked = false;
+  };
+  byId('ask-jev-assisted').addEventListener('change', updateJevRecallControls);
+  updateJevRecallControls();
   byId('review-refresh').addEventListener('click', () => { void loadReviewInbox(); });
   byId('library-filter').addEventListener('input', () => {
     resetMoveSelection();
