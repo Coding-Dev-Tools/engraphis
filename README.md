@@ -1,14 +1,14 @@
 # Engraphis
 
 [![PyPI version](https://img.shields.io/pypi/v/engraphis.svg)](https://pypi.org/project/engraphis/)
-[![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](https://github.com/Coding-Dev-Tools/engraphis/blob/codex/jev-pro-team-pr-20261003-final/LICENSE)
+[![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](https://github.com/Coding-Dev-Tools/engraphis/blob/b227d258c3109447b33df98bf372d44659f72722/LICENSE)
 
 **Persistent, local-first memory for AI agents.** Engraphis stores scoped project knowledge, retrieves relevant evidence across vector, lexical, graph, and code search, and returns bounded context with sources an agent can inspect.
 
 The local engine uses SQLite and works offline. It keeps changes over time instead of silently replacing facts, and grounded recall cites retrieved memories or abstains when evidence is weak.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Coding-Dev-Tools/engraphis/codex/jev-pro-team-pr-20261003-final/docs/images/knowledge-graph.png" alt="Engraphis local knowledge graph showing relationships between remembered entities" width="100%">
+  <img src="https://raw.githubusercontent.com/Coding-Dev-Tools/engraphis/b227d258c3109447b33df98bf372d44659f72722/docs/images/knowledge-graph.png" alt="Engraphis local knowledge graph showing relationships between remembered entities" width="100%">
   <br>
   <sup>Explore memories and their relationships in the local dashboard.</sup>
 </p>
@@ -35,7 +35,7 @@ hit = memory.recall("Why did we change auth?", workspace="acme", repo="api")
 print(hit["context"])
 ```
 
-Connect a coding agent over MCP with the [agent setup guide](https://github.com/Coding-Dev-Tools/engraphis/blob/codex/jev-pro-team-pr-20261003-final/docs/AGENT_CONNECT.md).
+Connect a coding agent over MCP with the [agent setup guide](https://github.com/Coding-Dev-Tools/engraphis/blob/b227d258c3109447b33df98bf372d44659f72722/docs/AGENT_CONNECT.md).
 
 ## What it provides
 
@@ -49,7 +49,7 @@ Connect a coding agent over MCP with the [agent setup guide](https://github.com/
 The current registered artifact contains three deterministic offline fixture runs. It separates context size, retrieval quality, and grounded decision checks; these small fixtures do not establish general task performance.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Coding-Dev-Tools/engraphis/codex/jev-pro-team-pr-20261003-final/docs/images/context-efficiency.svg" alt="Three registered offline fixtures: structure-aware chunking reduced mean retrieved context from 740.3 to 214.3 tokens per question (71.1%, 18 questions); the serialized JSON-shape proxy fell from 24,590 to 11,138 tokens across 26 payload samples and 260 recalls. Candidate and packed retrieval quality (Recall@5, Hit@5, and answer-token recall) are shown separately (each 1.000). Grounded checks show 5/5 answerable queries grounded and 6/6 abstention queries rejected, including a 1/1 quarantined-evidence probe; 11/11 decisions were correct. MCP transport and provider billing were not measured. Artifact SHA-256 prefix 0ab9183336eb; see the benchmark guide for the full checksum." width="100%">
+  <img src="https://raw.githubusercontent.com/Coding-Dev-Tools/engraphis/b227d258c3109447b33df98bf372d44659f72722/docs/images/context-efficiency.svg" alt="Three registered offline fixtures: structure-aware chunking reduced mean retrieved context from 740.3 to 214.3 tokens per question (71.1%, 18 questions); the serialized JSON-shape proxy fell from 24,590 to 11,138 tokens across 26 payload samples and 260 recalls. Candidate and packed retrieval quality (Recall@5, Hit@5, and answer-token recall) are shown separately (each 1.000). Grounded checks show 5/5 answerable queries grounded and 6/6 abstention queries rejected, including a 1/1 quarantined-evidence probe; 11/11 decisions were correct. MCP transport and provider billing were not measured. Artifact SHA-256 prefix 0ab9183336eb; see the benchmark guide for the full checksum." width="100%">
   <br>
   <sup>Three offline fixtures separate context reduction, candidate and packed retrieval quality, and grounded behavior. The chart shows the artifact checksum prefix; see the benchmark guide for the full checksum and reproduction steps.</sup>
 </p>
@@ -60,7 +60,7 @@ The current registered artifact contains three deterministic offline fixture run
 | Recall payload proxy | JSON-shape proxy: 24,590 → 11,138 tokens (54.71% lower, 26 samples; 260 timed recalls) | Candidate and packed Recall@5, Hit@5, and answer-token recall are each 1.000 |
 | Grounded decisions | 5/5 answerable queries grounded; 6/6 abstention queries rejected, including 1/1 quarantined-evidence check | 11/11 decisions correct |
 
-The payload figure is a serialized JSON-shape estimate, not an MCP transport measurement or provider billing total. See the [Benchmark methodology](https://github.com/Coding-Dev-Tools/engraphis/blob/codex/jev-pro-team-pr-20261003-final/BENCHMARKS.md) for artifact identity, counting methods, reproduction commands, external-evaluation boundaries, and limitations.
+The payload figure is a serialized JSON-shape estimate, not an MCP transport measurement or provider billing total. See the [Benchmark methodology](https://github.com/Coding-Dev-Tools/engraphis/blob/b227d258c3109447b33df98bf372d44659f72722/BENCHMARKS.md) for artifact identity, counting methods, reproduction commands, external-evaluation boundaries, and limitations.
 
 ## Optional Jev assistance
 
@@ -68,22 +68,22 @@ In the local dashboard, choose **Review with Jev** on a memory to check an evide
 
 Jev-assisted recall planning is experimental. In an exploratory comparison using 40 public synthetic tasks, Jev selected a route on all 40 calls but did not change nDCG@5, Recall@5, or answer-token coverage. This fixture does not establish a benefit on held-out user workloads, so no retrieval-quality improvement is claimed.
 
-Managed Jev is currently `not_yet_available` pending release acceptance. When released and enabled, Pro and Team will include Jev use at no additional charge within a finite allowance; Team usage is pooled. No fixed public quota is advertised. Once available, the account portal will show the current allowance, usage, and availability. See [hosted plans and Jev details](https://github.com/Coding-Dev-Tools/engraphis/blob/codex/jev-pro-team-pr-20261003-final/docs/HOSTED_PLANS.md#included-system-1-decision-engine-jev).
+Managed Jev is currently `not_yet_available` pending release acceptance. When released and enabled, Pro and Team will include Jev use at no additional charge within a finite allowance; Team usage is pooled. No fixed public quota is advertised. Once available, the account portal will show the current allowance, usage, and availability. See [hosted plans and Jev details](https://github.com/Coding-Dev-Tools/engraphis/blob/b227d258c3109447b33df98bf372d44659f72722/docs/HOSTED_PLANS.md#included-system-1-decision-engine-jev).
 
 ## Guides
 
-- [Configuration reference](https://github.com/Coding-Dev-Tools/engraphis/blob/codex/jev-pro-team-pr-20261003-final/docs/CONFIGURATION.md)
-- [MCP tool reference](https://github.com/Coding-Dev-Tools/engraphis/blob/codex/jev-pro-team-pr-20261003-final/docs/MCP_TOOLS.md)
-- [Agent and LLM provider setup](https://github.com/Coding-Dev-Tools/engraphis/blob/codex/jev-pro-team-pr-20261003-final/docs/LLM_PROVIDERS.md)
-- [Architecture and query planning](https://github.com/Coding-Dev-Tools/engraphis/blob/codex/jev-pro-team-pr-20261003-final/docs/ARCHITECTURE_V3.md#query-planning)
-- [Docker deployment](https://github.com/Coding-Dev-Tools/engraphis/blob/codex/jev-pro-team-pr-20261003-final/docs/DOCKER.md)
-- [Document import](https://github.com/Coding-Dev-Tools/engraphis/blob/codex/jev-pro-team-pr-20261003-final/docs/DOCUMENT_IMPORT.md)
-- [Cloud Sync](https://github.com/Coding-Dev-Tools/engraphis/blob/codex/jev-pro-team-pr-20261003-final/docs/SYNC.md)
-- [Pi extension](https://github.com/Coding-Dev-Tools/engraphis/blob/codex/jev-pro-team-pr-20261003-final/integrations/pi/README.md)
-- [Memory write review](https://github.com/Coding-Dev-Tools/engraphis/blob/codex/jev-pro-team-pr-20261003-final/docs/WRITE_REVIEW.md)
-- [Security policy](https://github.com/Coding-Dev-Tools/engraphis/blob/codex/jev-pro-team-pr-20261003-final/SECURITY.md)
-- [Hosted plans and licensing](https://github.com/Coding-Dev-Tools/engraphis/blob/codex/jev-pro-team-pr-20261003-final/docs/HOSTED_PLANS.md)
+- [Configuration reference](https://github.com/Coding-Dev-Tools/engraphis/blob/b227d258c3109447b33df98bf372d44659f72722/docs/CONFIGURATION.md)
+- [MCP tool reference](https://github.com/Coding-Dev-Tools/engraphis/blob/b227d258c3109447b33df98bf372d44659f72722/docs/MCP_TOOLS.md)
+- [Agent and LLM provider setup](https://github.com/Coding-Dev-Tools/engraphis/blob/b227d258c3109447b33df98bf372d44659f72722/docs/LLM_PROVIDERS.md)
+- [Architecture and query planning](https://github.com/Coding-Dev-Tools/engraphis/blob/b227d258c3109447b33df98bf372d44659f72722/docs/ARCHITECTURE_V3.md#query-planning)
+- [Docker deployment](https://github.com/Coding-Dev-Tools/engraphis/blob/b227d258c3109447b33df98bf372d44659f72722/docs/DOCKER.md)
+- [Document import](https://github.com/Coding-Dev-Tools/engraphis/blob/b227d258c3109447b33df98bf372d44659f72722/docs/DOCUMENT_IMPORT.md)
+- [Cloud Sync](https://github.com/Coding-Dev-Tools/engraphis/blob/b227d258c3109447b33df98bf372d44659f72722/docs/SYNC.md)
+- [Pi extension](https://github.com/Coding-Dev-Tools/engraphis/blob/b227d258c3109447b33df98bf372d44659f72722/integrations/pi/README.md)
+- [Memory write review](https://github.com/Coding-Dev-Tools/engraphis/blob/b227d258c3109447b33df98bf372d44659f72722/docs/WRITE_REVIEW.md)
+- [Security policy](https://github.com/Coding-Dev-Tools/engraphis/blob/b227d258c3109447b33df98bf372d44659f72722/SECURITY.md)
+- [Hosted plans and licensing](https://github.com/Coding-Dev-Tools/engraphis/blob/b227d258c3109447b33df98bf372d44659f72722/docs/HOSTED_PLANS.md)
 
 ## License
 
-Engraphis is licensed under Apache-2.0. The license does not grant trademark rights. See [LICENSE](https://github.com/Coding-Dev-Tools/engraphis/blob/codex/jev-pro-team-pr-20261003-final/LICENSE), [NOTICE](https://github.com/Coding-Dev-Tools/engraphis/blob/codex/jev-pro-team-pr-20261003-final/NOTICE), and the [licensing guide](https://github.com/Coding-Dev-Tools/engraphis/blob/codex/jev-pro-team-pr-20261003-final/docs/LICENSING.md). The hosted control plane and managed services are private services.
+Engraphis is licensed under Apache-2.0. The license does not grant trademark rights. See [LICENSE](https://github.com/Coding-Dev-Tools/engraphis/blob/b227d258c3109447b33df98bf372d44659f72722/LICENSE), [NOTICE](https://github.com/Coding-Dev-Tools/engraphis/blob/b227d258c3109447b33df98bf372d44659f72722/NOTICE), and the [licensing guide](https://github.com/Coding-Dev-Tools/engraphis/blob/b227d258c3109447b33df98bf372d44659f72722/docs/LICENSING.md). The hosted control plane and managed services are private services.
