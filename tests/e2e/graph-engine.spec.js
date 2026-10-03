@@ -428,7 +428,7 @@ async function openDashboard(page, {
 
     if (path === '/bootstrap') {
       return json({
-        license: { plan: 'local', features: [], known_features: {}, cloud_managed: false, trial: { used: false, trial_days: 3 } },
+        license: { plan: 'local', features: [], known_features: {}, cloud_managed: false, trial: { used: false, trial_days: 7 } },
         workspaces: [{ name: workspace, memories: 12 }],
         embedder: { semantic: true },
       });

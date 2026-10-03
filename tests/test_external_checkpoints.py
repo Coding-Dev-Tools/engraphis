@@ -372,7 +372,18 @@ run_resumable(cases, directory=Path(sys.argv[1]), binding={"dataset_sha256": "a"
         process.kill()
         process.wait(timeout=10)
         marker = tmp_path / ".runner.lock"
-        assert marker.read_bytes() == external_checkpoints.RUNNER_LOCK_MARKER
+        # Windows can report termination before its mandatory byte-range lock is
+        # released. Wait briefly for the OS cleanup, without relaxing ownership.
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                marker_bytes = marker.read_bytes()
+                break
+            except PermissionError:
+                if sys.platform != "win32" or time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.01)
+        assert marker_bytes == external_checkpoints.RUNNER_LOCK_MARKER
         assert "case-00000.started" in retained
         with pytest.raises(ValueError, match="explicit restart"):
             execute(tmp_path)

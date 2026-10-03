@@ -25,8 +25,10 @@ def _write_private(path: Path, content: str) -> None:
 
 @pytest.fixture(autouse=True)
 def _select_trusted_config(tmp_path, monkeypatch):
+    from engraphis import config
+
     path = _config_env(tmp_path)
-    monkeypatch.setattr(init_script, "_trusted_env_file", lambda: path)
+    monkeypatch.setattr(config, "_CONFIG_ENV_PATH", path)
     # Fresh Settings instances must keep the offline test configuration.
     monkeypatch.setenv("ENGRAPHIS_EMBED_MODEL", "")
     return path
@@ -68,6 +70,51 @@ def test_init_rejects_an_insecure_existing_trusted_env(tmp_path, monkeypatch, ca
 
     assert env_file.read_text() == "ENGRAPHIS_DB_PATH=/keep/me.db\n"
     assert "owner-only permissions are required" in capsys.readouterr().out
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits do not apply on Windows")
+def test_jev_update_rejects_permissions_changed_after_initial_read(tmp_path, monkeypatch, capsys):
+    env_file = _config_env(tmp_path)
+    _write_private(env_file, "ENGRAPHIS_DB_PATH=/keep/database.db\n")
+    original = env_file.read_bytes()
+    read = init_script._read_existing_env
+
+    def changed_permissions(path):
+        content = read(path)
+        path.chmod(0o644)
+        return content
+
+    monkeypatch.setattr(init_script, "_read_existing_env", changed_permissions)
+    assert main(["--jev-key", "synthetic-private-key", "--no-encryption"]) == 1
+    assert env_file.read_bytes() == original
+    captured = capsys.readouterr()
+    assert "owner-only permissions are required" in captured.out
+    assert "synthetic-private-key" not in captured.out + captured.err
+
+
+def test_jev_update_keeps_the_original_trusted_override(tmp_path, monkeypatch, capsys):
+    from engraphis import config
+
+    selected = tmp_path / "selected" / "config.env"
+    later = tmp_path / "later" / "config.env"
+    _write_private(selected, "ENGRAPHIS_DB_PATH=/keep/database.db\n")
+    _write_private(later, "ENGRAPHIS_DB_PATH=/other/database.db\n")
+    other_bytes = later.read_bytes()
+    monkeypatch.setattr(config, "_CONFIG_ENV_PATH", selected)
+    monkeypatch.setenv("ENGRAPHIS_ENV_FILE", str(selected))
+    read = init_script._read_existing_env
+
+    def changed_override(path):
+        assert path == selected
+        content = read(path)
+        monkeypatch.setenv("ENGRAPHIS_ENV_FILE", str(later))
+        return content
+
+    monkeypatch.setattr(init_script, "_read_existing_env", changed_override)
+    assert main(["--jev-key", "synthetic-private-key", "--no-encryption"]) == 0
+    assert config._parse_trusted_env(selected.read_text())["JEV_API_KEY"] == "synthetic-private-key"
+    assert later.read_bytes() == other_bytes
+    assert "synthetic-private-key" not in capsys.readouterr().out
 
 
 def test_init_reports_trusted_config_selection_failure(monkeypatch, capsys):
@@ -235,7 +282,7 @@ def test_doctor_reports_connected_cloud_install(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("ENGRAPHIS_CLOUD_ORGANIZATION_ID", "org_test")
     assert main(["--check"]) == 0
     out = capsys.readouterr().out
-    assert "Engraphis Cloud - installation connected" in out
+    assert "Engraphis Cloud - configuration present; connection not verified" in out
 
 
 def test_doctor_reports_functional_embedder(tmp_path, monkeypatch, capsys):
@@ -364,3 +411,176 @@ def test_init_rejects_invalid_extras_before_writing_config(tmp_path, monkeypatch
         main(["--extras", "server;owned"])
     assert exc.value.code == 2
     assert not _config_env(tmp_path).exists()
+
+
+def test_init_configures_jev_key_on_fresh_setup(tmp_path, monkeypatch, capsys):
+    from engraphis.config import _parse_trusted_env
+
+    monkeypatch.chdir(tmp_path)
+    assert main(["--jev-key", "test-typesafe-key-123", "--no-encryption"]) == 0
+    values = _parse_trusted_env(_config_env(tmp_path).read_text())
+    assert values["TYPESAFE_API_KEY"] == "test-typesafe-key-123"
+    assert values["JEV_API_KEY"] == "test-typesafe-key-123"
+    assert values["ENGRAPHIS_DECISION_BACKEND"] == "byok"
+    out = capsys.readouterr().out
+    assert "jev api key -> configured in trusted config" in out
+    assert "test-typesafe-key-123" not in out
+
+
+def test_init_updates_jev_key_on_existing_setup(tmp_path, monkeypatch, capsys):
+    from engraphis.config import _parse_trusted_env
+
+    monkeypatch.chdir(tmp_path)
+    env_file = _config_env(tmp_path)
+    _write_private(env_file, "ENGRAPHIS_DB_PATH=/keep/database.db\n")
+    assert main(["--jev-key", "updated-key-456"]) == 0
+    values = _parse_trusted_env(env_file.read_text())
+    assert values["ENGRAPHIS_DB_PATH"] == "/keep/database.db"
+    assert values["TYPESAFE_API_KEY"] == "updated-key-456"
+    assert values["JEV_API_KEY"] == "updated-key-456"
+    assert values["ENGRAPHIS_DECISION_BACKEND"] == "byok"
+    out = capsys.readouterr().out
+    assert "jev api key -> updated in trusted config" in out
+    assert "updated-key-456" not in out
+
+
+def test_init_reads_jev_key_from_stdin(tmp_path, monkeypatch, capsys):
+    import io
+    from engraphis.config import _parse_trusted_env
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("stdin-key-789\n"))
+    assert main(["--jev-key", "-", "--no-encryption"]) == 0
+    values = _parse_trusted_env(_config_env(tmp_path).read_text())
+    assert values["TYPESAFE_API_KEY"] == "stdin-key-789"
+    assert values["JEV_API_KEY"] == "stdin-key-789"
+    out = capsys.readouterr().out
+    assert "jev api key -> configured in trusted config" in out
+    assert "stdin-key-789" not in out
+
+
+@pytest.mark.parametrize("existing", [False, True], ids=["fresh", "existing"])
+@pytest.mark.parametrize("key", [
+    '"synthetic-leading-double', "'synthetic-leading-single",
+    'synthetic"double\'single\\backslash#hash=$dollar', "synthetic-trailing-backslash\\",
+])
+def test_init_jev_key_roundtrips_trusted_parser(tmp_path, monkeypatch, capsys, existing, key):
+    from engraphis.config import _parse_trusted_env
+
+    monkeypatch.chdir(tmp_path)
+    env_file = _config_env(tmp_path)
+    if existing:
+        _write_private(env_file, "ENGRAPHIS_DB_PATH=/keep/database.db\n")
+    assert main(["--jev-key", key, "--no-encryption"]) == 0
+    values = _parse_trusted_env(env_file.read_text())
+    assert values["TYPESAFE_API_KEY"] == key
+    assert values["JEV_API_KEY"] == key
+    assert values["ENGRAPHIS_DECISION_BACKEND"] == "byok"
+    if existing:
+        assert values["ENGRAPHIS_DB_PATH"] == "/keep/database.db"
+    captured = capsys.readouterr()
+    assert key not in captured.out + captured.err
+
+
+@pytest.mark.parametrize("key", ["", "key with space", "synthetic\nsecret", "synthetic\x00secret",
+                                 "synthetic\tsecret", "synthetic\u00e9secret"])
+def test_init_rejects_malformed_jev_key(tmp_path, monkeypatch, capsys, key):
+    monkeypatch.chdir(tmp_path)
+    assert main(["--jev-key", key, "--no-encryption"]) == 1
+    assert not _config_env(tmp_path).exists()
+    captured = capsys.readouterr()
+    assert "key must be printable ASCII without whitespace" in captured.out
+    if key:
+        assert key not in captured.out + captured.err
+
+
+@pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.parametrize("source", ["argument", "stdin"])
+def test_init_rejects_oversized_jev_key_without_writing(tmp_path, monkeypatch, capsys, existing, source):
+    import io
+
+    monkeypatch.chdir(tmp_path)
+    env_file = _config_env(tmp_path)
+    original = b"ENGRAPHIS_DB_PATH=/keep/database.db\n"
+    if existing:
+        _write_private(env_file, original.decode())
+        original = env_file.read_bytes()
+    key = "synthetic-" + "x" * (600 * 1024)
+    stream = io.StringIO(key + "\n")
+    monkeypatch.setattr(sys, "stdin", stream)
+    assert main(["--jev-key", "-" if source == "stdin" else key, "--no-encryption"]) == 1
+    if source == "stdin":
+        assert stream.tell() == init_script._MAX_JEV_KEY_CHARS + 3
+    assert env_file.read_bytes() == original if existing else not env_file.exists()
+    captured = capsys.readouterr()
+    assert "at most 4096 characters" in captured.out
+    assert "synthetic-" not in captured.out + captured.err
+
+
+@pytest.mark.parametrize("source", ["argument", "stdin"])
+def test_init_maximum_jev_key_roundtrips_with_escaping(tmp_path, monkeypatch, capsys, source):
+    import io
+    from engraphis.config import _parse_trusted_env
+
+    monkeypatch.chdir(tmp_path)
+    key = '\\"' * (init_script._MAX_JEV_KEY_CHARS // 2)
+    assert len(key) == init_script._MAX_JEV_KEY_CHARS
+    monkeypatch.setattr(sys, "stdin", io.StringIO(key + "\r\n"))
+    assert main(["--jev-key", "-" if source == "stdin" else key, "--no-encryption"]) == 0
+    content = _config_env(tmp_path).read_text()
+    values = _parse_trusted_env(content)
+    assert values["TYPESAFE_API_KEY"] == values["JEV_API_KEY"] == key
+    assert len(content.encode()) <= 1024 * 1024
+    assert key not in capsys.readouterr().out
+
+
+def test_init_jev_update_preserves_a_near_limit_config(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    env_file = _config_env(tmp_path)
+    prefix = "ENGRAPHIS_DB_PATH=/keep/database.db\n#"
+    original = prefix + "x" * (1024 * 1024 - len(prefix) - 1) + "\n"
+    _write_private(env_file, original)
+    env_file.write_bytes(original.encode())
+    before = env_file.read_bytes()
+    assert len(before) == 1024 * 1024
+    mode = env_file.stat().st_mode
+    assert main(["--jev-key", "synthetic-small-key", "--no-encryption"]) == 1
+    assert env_file.read_bytes() == before
+    assert env_file.stat().st_mode == mode
+    captured = capsys.readouterr()
+    assert "1 MiB size limit" in captured.out
+    assert "synthetic-small-key" not in captured.out + captured.err
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_init_rejects_oversized_rendered_config_before_publication(tmp_path, monkeypatch, capsys, existing):
+    monkeypatch.chdir(tmp_path)
+    env_file = _config_env(tmp_path)
+    original = b"ENGRAPHIS_DB_PATH=/keep/database.db\n"
+    if existing:
+        _write_private(env_file, original.decode())
+        original = env_file.read_bytes()
+    monkeypatch.setattr(init_script, "_env_content", lambda *args, **kwargs: "\u00e9" * (512 * 1024 + 1))
+    assert main(["--force", "--no-encryption"]) == 1
+    assert env_file.read_bytes() == original if existing else not env_file.exists()
+    assert "1 MiB size limit" in capsys.readouterr().out
+
+
+def test_doctor_reports_jev_decision_status(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    monkeypatch.delenv("JEV_API_KEY", raising=False)
+
+    # Optional / not configured
+    assert main(["--check", "--json"]) == 0
+    report_unconf = json.loads(capsys.readouterr().out)
+    jev_check = next(c for c in report_unconf["checks"] if c["code"] == "jev_decision")
+    assert jev_check["status"] == "optional"
+
+    # Configured
+    monkeypatch.setenv("TYPESAFE_API_KEY", "apikey_test_123")
+    monkeypatch.setenv("ENGRAPHIS_DECISION_BACKEND", "byok")
+    assert main(["--check", "--json"]) == 0
+    report_conf = json.loads(capsys.readouterr().out)
+    jev_check_conf = next(c for c in report_conf["checks"] if c["code"] == "jev_decision")
+    assert jev_check_conf["status"] == "ok"
+    assert "configured (TypeSafe AI BYOK); not verified" in jev_check_conf["detail"]

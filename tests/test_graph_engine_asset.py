@@ -10734,7 +10734,7 @@ def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
         "'/v2-assets/engraphis-graph.js?v=20260927-unmerged-readiness-3'"
     )
     assert d3 < force_graph < renderer
-    assert '/v2-assets/ledger.js?v=20260927-unmerged-readiness-3' in markup
+    assert '/v2-assets/ledger.js?v=20260928-workspace-routing-1' in markup
     assert "if (graphAssetsPromise === attempt) releaseGraphAssetsAttempt(attempt)" in loader
     assert "graphAssetsRetry = Math.min(graphAssetsRetry + 1, 10)" in loader
     all_loader = source[source.index("function ensureGraphAllAsset()"):
@@ -12215,9 +12215,9 @@ def test_pane_backgrounds_are_owned_by_css_not_by_the_asset() -> None:
     for style in ("galaxy", "solar", "cyber"):
         assert f'#graph-net[data-graph-style="{style}"]' in css
     assert "data-graph-style" in source
-    # The gradients must exist in exactly one place, or the two copies drift.
-    assert "radial-gradient" not in source
-    assert "linear-gradient" not in source
+    # Authored gradients belong in CSS. Export may parse computed CSS, but must
+    # not duplicate its gradient definitions in JavaScript string literals.
+    assert re.search(r"""["'`]\s*(?:linear|radial)-gradient\s*\(""", source) is None
 
 
 def test_hover_cursor_class_the_asset_toggles_exists_in_css() -> None:

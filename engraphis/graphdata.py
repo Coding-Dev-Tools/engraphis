@@ -63,19 +63,21 @@ def build_graph_payload(workspace: str, entity_rows: Sequence[Mapping[str, Any]]
         src, dst, rel = e["src"], e["dst"], e["relation"]
         if not src or not dst:
             continue
-        layer = e.get("layer") if hasattr(e, "get") else None
+        e_get = getattr(e, "get", None)
+        layer = e_get("layer") if e_get is not None else None
         layer = layer or "semantic"
         deg[src] = deg.get(src, 0) + 1
         deg[dst] = deg.get(dst, 0) + 1
         layers[layer] = layers.get(layer, 0) + 1
-        reason = e.get("reason") if hasattr(e, "get") else None
+        reason = e_get("reason") if e_get is not None else None
         item = {"from": src, "to": dst, "label": rel or "", "layer": layer}
         if reason:
             item["reason"] = reason
-        for key in ("id", "valid_from", "valid_to"):
-            value = e.get(key) if hasattr(e, "get") else None
-            if value not in (None, ""):
-                item[key] = value
+        if e_get is not None:
+            for key in ("id", "valid_from", "valid_to"):
+                value = e_get(key)
+                if value not in (None, ""):
+                    item[key] = value
         edges.append(item)
 
     # every node referenced by an edge must exist so the network renders cleanly, even

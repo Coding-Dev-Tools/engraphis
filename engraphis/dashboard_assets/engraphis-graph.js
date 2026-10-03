@@ -33,6 +33,151 @@
      writing them onto the element, so dashboard.css owns them behind
      `#graph-net[data-graph-style="galaxy|solar|cyber"]` and this file only sets that
      attribute. Keeping a second copy of the gradients in JS would be dead drift. */
+  function splitBackgroundLayers(value) {
+    const parts = [];
+    let start = 0, depth = 0;
+    for (let i = 0; i < value.length; i++) {
+      if (value[i] === '(') depth++;
+      else if (value[i] === ')') depth--;
+      else if (value[i] === ',' && depth === 0) {
+        parts.push(value.slice(start, i).trim());
+        start = i + 1;
+      }
+    }
+    parts.push(value.slice(start).trim());
+    return parts;
+  }
+
+  function backgroundLength(value, extent) {
+    return parseFloat(value) * (value.endsWith('%') ? extent / 100 : 1);
+  }
+
+  /* Export stays synchronous. Paint the linear and explicitly sized elliptical gradients
+     authored in the graph CSS, using computed colors, geometry and per-layer tile sizes.
+     No second theme palette or network/image decoding is needed for these backgrounds. */
+  function paintBackgroundGradient(ctx, image, width, height) {
+    const match = /^(linear|radial)-gradient\((.*)\)$/.exec(image);
+    if (!match) return false;
+    const stops = splitBackgroundLayers(match[2]);
+    let gradient, stopLength, bounds = [0, 0, width, height];
+    ctx.save();
+    if (match[1] === 'radial') {
+      const geometry = /^(?:ellipse\s+)?([\d.]+(?:px|%))\s+([\d.]+(?:px|%))(?:\s+at\s+([-\d.]+(?:px|%))\s+([-\d.]+(?:px|%)))?$/.exec(stops.shift());
+      if (!geometry) { ctx.restore(); return false; }
+      const rx = backgroundLength(geometry[1], width);
+      const ry = backgroundLength(geometry[2], height);
+      if (!(rx > 0 && ry > 0)) { ctx.restore(); return false; }
+      const x = backgroundLength(geometry[3] || '50%', width);
+      const y = backgroundLength(geometry[4] || '50%', height);
+      ctx.translate(x, y);
+      ctx.scale(rx, ry);
+      gradient = ctx.createRadialGradient(0, 0, 0, 0, 0, 1);
+      stopLength = rx;
+      bounds = [-x / rx, -y / ry, width / rx, height / ry];
+    } else {
+      const angle = /^(-?[\d.]+)deg$/.exec(stops[0]);
+      if (angle) stops.shift();
+      const radians = (angle ? Number(angle[1]) : 180) * Math.PI / 180;
+      const dx = Math.sin(radians), dy = -Math.cos(radians);
+      stopLength = Math.abs(width * dx) + Math.abs(height * dy);
+      gradient = ctx.createLinearGradient(width / 2 - dx * stopLength / 2,
+        height / 2 - dy * stopLength / 2, width / 2 + dx * stopLength / 2,
+        height / 2 + dy * stopLength / 2);
+    }
+    const colors = stops.map(stop => {
+      const position = /\s+(-?[\d.]+)(%|px)$/.exec(stop);
+      return { color: position ? stop.slice(0, position.index) : stop,
+        offset: position ? Number(position[1]) / (position[2] === '%' ? 100 : stopLength) : null };
+    });
+    // CSS fades in premultiplied color, whereas CanvasGradient interpolates straight
+    // RGBA. Retain the source hue at the transparent end of our two-color fades.
+    if (colors.length === 2) {
+      const rgba = colors.map(stop => {
+        const color = /^rgba?\(([^)]+)\)$/.exec(stop.color);
+        return color ? color[1].split(',').map(Number) : null;
+      });
+      for (let i = 0; i < colors.length; i++) {
+        if (rgba[i] && rgba[i][3] === 0 && rgba[1 - i]) {
+          colors[i].color = `rgba(${rgba[1 - i].slice(0, 3).join(',')},0)`;
+        }
+      }
+    }
+    if (colors[0].offset === null) colors[0].offset = 0;
+    if (colors[colors.length - 1].offset === null) colors[colors.length - 1].offset = 1;
+    // CSS distributes omitted stops between their positioned neighbours.
+    for (let i = 0; i < colors.length; i++) {
+      if (colors[i].offset !== null) continue;
+      let end = i;
+      while (colors[end].offset === null) end++;
+      const start = colors[i - 1].offset;
+      for (let next = i; next < end; next++) {
+        colors[next].offset = start + (colors[end].offset - start) * (next - i + 1) / (end - i + 1);
+      }
+      i = end;
+    }
+    let previous = 0;
+    colors.forEach(stop => {
+      previous = Math.max(previous, Math.min(1, stop.offset));
+      gradient.addColorStop(previous, stop.color);
+    });
+    ctx.fillStyle = gradient;
+    ctx.fillRect(...bounds);
+    ctx.restore();
+    return true;
+  }
+
+  function paintPaneBackground(ctx, style, width, height) {
+    if (!style || !style.backgroundImage || style.backgroundImage === 'none') return;
+    const images = splitBackgroundLayers(style.backgroundImage);
+    const sizes = splitBackgroundLayers(style.backgroundSize);
+    const positions = splitBackgroundLayers(style.backgroundPosition);
+    const repeats = splitBackgroundLayers(style.backgroundRepeat);
+    // force-graph truncates fractional backing dimensions, not its drawing scale.
+    const scale = window.devicePixelRatio || 1;
+    ctx.save();
+    ctx.scale(scale, scale);
+    // CSS lists the top image first, while canvas paints from the bottom up.
+    for (let i = images.length - 1; i >= 0; i--) {
+      const size = sizes[i % sizes.length].split(/\s+/);
+      let tileWidth = size[0] === 'auto' ? width : backgroundLength(size[0], width);
+      let tileHeight = !size[1] || size[1] === 'auto' ? height : backgroundLength(size[1], height);
+      if (!(tileWidth > 0 && tileHeight > 0)) continue;
+      const position = positions[i % positions.length].split(/\s+/);
+      let x = backgroundLength(position[0], width - tileWidth);
+      let y = backgroundLength(position[1] || '50%', height - tileHeight);
+      const repeat = repeats[i % repeats.length].split(/\s+/);
+      let repeatX = repeat[0] === 'repeat' || repeat[0] === 'repeat-x';
+      let repeatY = (repeat[1] || repeat[0]) === 'repeat' || repeat[0] === 'repeat-y';
+      const linear = /^linear-gradient\((?:(-?[\d.]+)deg,)?/.exec(images[i]);
+      if (linear) {
+        const angle = Number(linear[1] || 180) % 180;
+        // Axis-aligned gradients are constant along the other axis. Painting one
+        // strip avoids artificial seams when fractional-DPR tiles meet there.
+        if (repeatX && angle === 0) { tileWidth = width; x = 0; repeatX = false; }
+        if (repeatY && Math.abs(angle) === 90) { tileHeight = height; y = 0; repeatY = false; }
+      }
+      const tile = document.createElement('canvas');
+      // Transparent padding lets interpolation cross a half-pixel tile boundary;
+      // drawImage otherwise clips away the leading pixel before blending it.
+      tile.width = Math.ceil(tileWidth * scale) + 2;
+      tile.height = Math.ceil(tileHeight * scale) + 2;
+      const layer = tile.getContext('2d');
+      if (!layer) continue;
+      layer.translate(1, 1);
+      layer.scale(scale, scale);
+      if (!paintBackgroundGradient(layer, images[i], tileWidth, tileHeight)) continue;
+      if (repeatX) { x = ((x % tileWidth) + tileWidth) % tileWidth; if (x > 0) x -= tileWidth; }
+      if (repeatY) { y = ((y % tileHeight) + tileHeight) % tileHeight; if (y > 0) y -= tileHeight; }
+      for (let top = y; top < height; top += repeatY ? tileHeight : height + tileHeight) {
+        for (let left = x; left < width; left += repeatX ? tileWidth : width + tileWidth) {
+          // Preserve the raster's pixel scale while placing tiles at CSS intervals.
+          // Stretching 38 backing pixels into 37.5 at DPR 1.25 blurs the 1 px grid.
+          ctx.drawImage(tile, left - 1 / scale, top - 1 / scale, tile.width / scale, tile.height / scale);
+        }
+      }
+    }
+    ctx.restore();
+  }
   const PALETTES = {
     theme: null,
     aurora: { person_or_concept: '#8b7cf6', mention: '#2dd4bf', hashtag: '#fbbf24', email: '#60a5fa', organization: '#f472b6', location: '#a3e635' },
@@ -11400,6 +11545,36 @@
           target: linkEndpoint(link, 'target'),
         })),
       };
+    };
+    api.exportImageCanvas = () => {
+      if (destroyed) return null;
+      const graphCanvas = el.querySelector('.force-graph-container canvas') || el.querySelector('canvas');
+      if (!graphCanvas) return null;
+      const spacetimeCanvas = el.querySelector('.graph-spacetime-overlay');
+      const output = document.createElement('canvas');
+      output.width = graphCanvas.width;
+      output.height = graphCanvas.height;
+      const ctx = output.getContext('2d');
+      if (!ctx) return null;
+      const paneStyle = typeof window.getComputedStyle === 'function'
+        ? window.getComputedStyle(el) : null;
+      ctx.fillStyle = paneStyle && paneStyle.backgroundColor
+        || state.themeColors.canvas || '#0e1014';
+      ctx.fillRect(0, 0, output.width, output.height);
+      paintPaneBackground(ctx, paneStyle, el.clientWidth || output.width, el.clientHeight || output.height);
+      if (spacetimeCanvas && spacetimeCanvas.width > 0 && spacetimeCanvas.height > 0) {
+        const overlayStyle = window.getComputedStyle(spacetimeCanvas);
+        if (overlayStyle.display !== 'none' && overlayStyle.visibility !== 'hidden') {
+          ctx.save();
+          ctx.globalAlpha = Number(overlayStyle.opacity);
+          ctx.globalCompositeOperation = overlayStyle.mixBlendMode === 'normal'
+            ? 'source-over' : overlayStyle.mixBlendMode;
+          ctx.drawImage(spacetimeCanvas, 0, 0, output.width, output.height);
+          ctx.restore();
+        }
+      }
+      ctx.drawImage(graphCanvas, 0, 0);
+      return output;
     };
     api.fit = () => { if (!destroyed) fg.zoomToFit(reduced() ? 0 : 500, 40); };
     api.physicsDiagnostics = () => physicsDiagnostics();

@@ -23,7 +23,7 @@ async function workflowFixture(page, { projectsUnavailable = false, delayProject
     const ok = payload => route.fulfill({ contentType: 'application/json', body: JSON.stringify(payload) });
     if (path === '/bootstrap') return ok({
       version: '1.7.7', workspaces: [{ name: 'work-one', memories: 2 }, { name: 'work-two', memories: 0 }],
-      license: { plan: 'local', features: [], known_features: {}, trial: { used: false, trial_days: 3 } },
+      license: { plan: 'local', features: [], known_features: {}, trial: { used: false, trial_days: 7 } },
       embedder: { semantic: true },
     });
     if (path === '/repos') {

@@ -21,6 +21,11 @@ on:
         required: false
         type: boolean
         default: false
+      waive_v179_qualification:
+        description: "Owner-approved waiver for the retained v1.7.9 candidate at c6871b9b only"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -980,18 +985,19 @@ jobs:
         with:
           python-version: "3.11"
       - name: Enforce and record the release-specific qualification waiver
-        if: inputs.waive_v176_qualification || inputs.waive_v178_qualification
+        if: inputs.waive_v176_qualification || inputs.waive_v178_qualification || inputs.waive_v179_qualification
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
           WAIVE_V176: ${{ inputs.waive_v176_qualification }}
           WAIVE_V178: ${{ inputs.waive_v178_qualification }}
+          WAIVE_V179: ${{ inputs.waive_v179_qualification }}
           GH_ACTOR: ${{ github.actor }}
           GH_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         shell: bash
         run: |
           set -euo pipefail
-          case "$WAIVE_V176:$WAIVE_V178:$RELEASE_TAG" in
-            true:false:v1.7.6|false:true:v1.7.8) ;;
+          case "$WAIVE_V176:$WAIVE_V178:${WAIVE_V179:-false}:$RELEASE_TAG" in
+            true:false:false:v1.7.6|false:true:false:v1.7.8|false:false:true:v1.7.9) ;;
             *) printf 'Waiver must select exactly one authorized release.\n' >&2; exit 1 ;;
           esac
           {
@@ -1145,7 +1151,7 @@ jobs:
           cp dist/*.whl dist/*.tar.gz verified-dist/
 
       - name: Require signed full-product qualification before PyPI repair
-        if: ${{ !inputs.waive_v176_qualification && !inputs.waive_v178_qualification }}
+        if: ${{ !inputs.waive_v176_qualification && !inputs.waive_v178_qualification && !inputs.waive_v179_qualification }}
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
           ENGRAPHIS_RELEASE_QUALIFICATION: ${{ secrets.ENGRAPHIS_RELEASE_QUALIFICATION }}
@@ -1160,10 +1166,11 @@ jobs:
             --commit "$ENGRAPHIS_REPAIR_COMMIT" --tag "$RELEASE_TAG"
 
       - name: Disclose the qualification waiver before PyPI repair
-        if: inputs.waive_v176_qualification || inputs.waive_v178_qualification
+        if: inputs.waive_v176_qualification || inputs.waive_v178_qualification || inputs.waive_v179_qualification
         env:
           WAIVE_V176: ${{ inputs.waive_v176_qualification }}
           WAIVE_V178: ${{ inputs.waive_v178_qualification }}
+          WAIVE_V179: ${{ inputs.waive_v179_qualification }}
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ inputs.release_tag }}
@@ -1172,9 +1179,10 @@ jobs:
         run: |
           set -euo pipefail
           # Each exception covers one retained candidate, not future reuse of its tag.
-          case "$WAIVE_V176:$WAIVE_V178:$RELEASE_TAG:$ENGRAPHIS_REPAIR_COMMIT" in
-            true:false:v1.7.6:6a441a75c8dd159607fa3933da83f600864b9146|\
-            false:true:v1.7.8:dce68e1602e580cd51b71e26db2ab04238df7df4) ;;
+          case "$WAIVE_V176:$WAIVE_V178:${WAIVE_V179:-false}:$RELEASE_TAG:$ENGRAPHIS_REPAIR_COMMIT" in
+            true:false:false:v1.7.6:6a441a75c8dd159607fa3933da83f600864b9146|\
+            false:true:false:v1.7.8:dce68e1602e580cd51b71e26db2ab04238df7df4|\
+            false:false:true:v1.7.9:c6871b9bf506eec6cebe96beee1ac252429a7b99) ;;
             *) printf 'Waiver does not match an authorized source candidate.\n' >&2; exit 1 ;;
           esac
           {
@@ -1217,7 +1225,7 @@ jobs:
           --version "${RELEASE_TAG#v}" --retries 18 --delay 10
 
       - name: Require signed full-product qualification before GitHub repair
-        if: ${{ !inputs.waive_v176_qualification && !inputs.waive_v178_qualification }}
+        if: ${{ !inputs.waive_v176_qualification && !inputs.waive_v178_qualification && !inputs.waive_v179_qualification }}
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
           ENGRAPHIS_RELEASE_QUALIFICATION: ${{ secrets.ENGRAPHIS_RELEASE_QUALIFICATION }}
@@ -1235,7 +1243,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ inputs.release_tag }}
-          WAIVE_QUALIFICATION: ${{ inputs.waive_v176_qualification || inputs.waive_v178_qualification }}
+          WAIVE_QUALIFICATION: ${{ inputs.waive_v176_qualification || inputs.waive_v178_qualification || inputs.waive_v179_qualification }}
           GH_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         shell: bash
         run: |
@@ -1245,7 +1253,7 @@ jobs:
           promote_latest=true
           if [ "$WAIVE_QUALIFICATION" = "true" ]; then
             # A retained older repair must not displace a newer public Latest.
-            # Both authorized candidates already have a public release history;
+            # The candidate comparison uses the existing public release history;
             # failed lookups or unknown tag formats stop before any release write.
             current_latest="$(gh release view --repo "$GH_REPO" --json tagName --jq .tagName)"
             promote_latest="$(python - "$RELEASE_TAG" "$current_latest" <<'PY'

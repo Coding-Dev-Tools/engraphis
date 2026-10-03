@@ -4,7 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    # Stacked PRs must receive the same security gate before reaching main.
+    branches: [main, "codex/**"]
   schedule:
     - cron: "23 4 * * 1"
 

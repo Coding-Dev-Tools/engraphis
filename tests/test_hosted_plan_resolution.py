@@ -103,7 +103,7 @@ def _entitlement_dto(plan: str, *, active: bool = True,
         "expires_at": None,
         "is_trial": is_trial,
         "trial_consumed": trial_consumed or is_trial,
-        "trial_duration_seconds": 259_200 if is_trial else None,
+        "trial_duration_seconds": {"pro": 604_800, "team": 1_209_600}.get(plan) if is_trial else None,
         "trial_ends_at": trial_ends_at if is_trial else None,
         "version": 3,
     }
@@ -1750,9 +1750,9 @@ def test_both_license_surfaces_report_the_same_plan(monkeypatch) -> None:
     assert v1["plan"] == v2["plan"] == "team"
     assert v1["features"] == v2["features"]
     assert "team" in v1["features"]
-    # The legacy envelope and its disclosure fields are unchanged.
+    # The legacy envelope retains the Pro duration; per-plan offers disclose Team.
     assert v1["cloud_managed"] is True
-    assert v1["trial_seconds"] == 259_200
+    assert v1["trial_seconds"] == 604_800
     assert v1["grace_seconds"] == 86_400
     assert v1["grace_extends_cloud_access"] is False
     assert v1["upgrade_url"]
@@ -1963,26 +1963,26 @@ def test_license_discloses_manifest_trial_days_by_plan_and_retains_legacy_days(m
     from engraphis import commercial
 
     payload = v2_api.get_license()
-    assert payload["trial"]["days_by_plan"] == {"pro": 3, "team": 10}
-    assert payload["trial"]["trial_days"] == 3
-    assert payload["trial_seconds"] == 3 * 24 * 60 * 60
+    assert payload["trial"]["days_by_plan"] == {"pro": 7, "team": 14}
+    assert payload["trial"]["trial_days"] == 7
+    assert payload["trial_seconds"] == 7 * 24 * 60 * 60
     monkeypatch.setattr(commercial, "manifest", lambda: {
         "trial": {"days_by_plan": {"pro": 5, "team": 17}},
     })
     assert v2_api.get_license()["trial"]["days_by_plan"] == {"pro": 5, "team": 17}
-    assert v2_api.get_license()["trial"]["trial_days"] == 3
+    assert v2_api.get_license()["trial"]["trial_days"] == 7
 
 
-@pytest.mark.parametrize("trial", [{}, None, {"days_by_plan": {"pro": 3, "team": "10"}},
-                                    {"days_by_plan": {"pro": 3, "team": True}},
-                                    {"days_by_plan": {"pro": 3, "team": 0}}])
+@pytest.mark.parametrize("trial", [{}, None, {"days_by_plan": {"pro": 7, "team": "10"}},
+                                    {"days_by_plan": {"pro": 7, "team": True}},
+                                    {"days_by_plan": {"pro": 7, "team": 0}}])
 def test_unknown_team_trial_duration_is_never_inferred_from_legacy_days(monkeypatch, trial) -> None:
     from engraphis import commercial
 
     monkeypatch.setattr(commercial, "manifest", lambda: {"trial": trial})
     payload = v2_api.get_license()
     assert "team" not in payload["trial"]["days_by_plan"]
-    assert payload["trial"]["trial_days"] == 3
+    assert payload["trial"]["trial_days"] == 7
 
 
 def test_a_connected_but_unanswered_installation_offers_no_trial(monkeypatch) -> None:
