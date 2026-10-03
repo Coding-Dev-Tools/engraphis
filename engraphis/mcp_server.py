@@ -700,7 +700,7 @@ def engraphis_remember_many(
     name="engraphis_recall",
     annotations={"title": "Recall relevant memories", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": False,
-                 "openWorldHint": False},
+                 "openWorldHint": True},
 )
 def engraphis_recall(
     query: Annotated[str, Field(description="What you want to remember, in natural language "
@@ -812,7 +812,7 @@ def engraphis_recall(
     name="engraphis_recall_context",
     annotations={"title": "Recall token-efficient context", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": False,
-                 "openWorldHint": False},
+                 "openWorldHint": True},
 )
 def engraphis_recall_context(
     query: Annotated[str, Field(description="What prior context is needed.",
@@ -3518,7 +3518,7 @@ def engraphis_session(
 @smart_mcp.tool(
     name="engraphis_recall_context",
     annotations={"title": "Recall compact project context", "readOnlyHint": False,
-                 "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+                 "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
     structured_output=False,
 )
 def smart_recall_context(

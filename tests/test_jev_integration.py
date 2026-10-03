@@ -415,6 +415,13 @@ def test_dashboard_jev_review_requires_consent_and_does_not_write_memory(
     client, service, first_id, second_id = dashboard
     from engraphis.routes import v2_api
 
+    hidden_tail = "UNBOUNDED-SECOND-MEMORY-END-MARKER"
+    service.store.conn.execute(
+        "UPDATE memories SET content=? WHERE id=?",
+        ("SQLite stores local test fixtures. " + ("x" * 8_000) + hidden_tail, second_id),
+    )
+    service.store.conn.commit()
+
     decision_client = _DecisionClient()
     monkeypatch.setattr(v2_api, "_dashboard_jev_backend", lambda: _review_backend(decision_client))
     before_count = service.store.conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
@@ -466,6 +473,8 @@ def test_dashboard_jev_review_requires_consent_and_does_not_write_memory(
     assert all(call["allow_remote"] is True for call in decision_client.calls)
     assert all(call["data_classification"] == "public" for call in decision_client.calls)
     assert all(len(call["state"]) < 8_000 for call in decision_client.calls)
+    assert all(hidden_tail not in call["state"] for call in decision_client.calls)
+    assert "SQLite stores local test fixtures." in decision_client.calls[1]["state"]
     assert "Primary database" in decision_client.calls[0]["state"]
     assert "Fixture database" in decision_client.calls[0]["state"]
     assert "provenance" not in decision_client.calls[0]["state"]
