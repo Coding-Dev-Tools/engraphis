@@ -39,12 +39,12 @@ def test_readme_targets_resolve_in_the_repository() -> None:
         parsed = urlparse(destination)
         if parsed.scheme in {"http", "https"}:
             if parsed.netloc == "github.com":
-                prefix = "/Coding-Dev-Tools/engraphis/blob/main/"
+                prefix = "/Coding-Dev-Tools/engraphis/blob/71c099dfd8521c01ca78b799b5c21f0bfac8c104/"
                 if parsed.path.startswith(prefix):
                     target = ROOT / unquote(parsed.path[len(prefix) :])
                     assert target.is_file(), f"README target does not exist: {destination}"
             elif parsed.netloc == "raw.githubusercontent.com":
-                prefix = "/Coding-Dev-Tools/engraphis/main/"
+                prefix = "/Coding-Dev-Tools/engraphis/71c099dfd8521c01ca78b799b5c21f0bfac8c104/"
                 if parsed.path.startswith(prefix):
                     target = ROOT / unquote(parsed.path[len(prefix) :])
                     assert target.is_file(), f"README target does not exist: {destination}"
@@ -112,7 +112,7 @@ def test_core_backend_imports_stay_behind_outer_composition_root() -> None:
     assert "from engraphis.service import MemoryService" in readme
     assert "Configuration reference" in readme
     assert (
-        "[Benchmark methodology](https://github.com/Coding-Dev-Tools/engraphis/blob/main/"
+        "[Benchmark methodology](https://github.com/Coding-Dev-Tools/engraphis/blob/71c099dfd8521c01ca78b799b5c21f0bfac8c104/"
         "BENCHMARKS.md)" in readme
     )
 
@@ -273,7 +273,7 @@ def test_configuration_and_recovery_guidance_matches_public_contracts() -> None:
     sync = _read("docs/SYNC.md")
 
     assert (
-        "[Configuration reference](https://github.com/Coding-Dev-Tools/engraphis/blob/main/"
+        "[Configuration reference](https://github.com/Coding-Dev-Tools/engraphis/blob/71c099dfd8521c01ca78b799b5c21f0bfac8c104/"
         "docs/CONFIGURATION.md)" in readme
     )
     for document in (configuration, security, connect, providers, sync):

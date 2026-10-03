@@ -41,11 +41,11 @@ def _readme_targets(readme: str) -> set[str]:
 def _repository_path(url: str) -> Path | None:
     parsed = urlparse(url)
     if parsed.netloc == "github.com":
-        prefix = f"/{REPOSITORY}/blob/main/"
+        prefix = f"/{REPOSITORY}/blob/71c099dfd8521c01ca78b799b5c21f0bfac8c104/"
         if parsed.path.startswith(prefix):
             return ROOT / unquote(parsed.path[len(prefix) :])
     if parsed.netloc == "raw.githubusercontent.com":
-        prefix = f"/{REPOSITORY}/main/"
+        prefix = f"/{REPOSITORY}/71c099dfd8521c01ca78b799b5c21f0bfac8c104/"
         if parsed.path.startswith(prefix):
             return ROOT / unquote(parsed.path[len(prefix) :])
     return None
@@ -73,11 +73,11 @@ def test_pypi_readme_has_only_absolute_repository_assets_and_links() -> None:
         assert local.exists(), f"{target} maps to missing repository path {local.relative_to(ROOT)}"
 
     assert (
-        f"https://raw.githubusercontent.com/{REPOSITORY}/main/"
+        f"https://raw.githubusercontent.com/{REPOSITORY}/71c099dfd8521c01ca78b799b5c21f0bfac8c104/"
         "docs/images/knowledge-graph.png"
     ) in targets
     assert (
-        f"https://raw.githubusercontent.com/{REPOSITORY}/main/"
+        f"https://raw.githubusercontent.com/{REPOSITORY}/71c099dfd8521c01ca78b799b5c21f0bfac8c104/"
         "docs/images/context-efficiency.svg"
     ) in targets
 
