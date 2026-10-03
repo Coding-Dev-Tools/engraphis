@@ -95,7 +95,9 @@ def test_cors_origins_use_engraphis_port_env(monkeypatch):
 
 def test_sample_operational_config_matches_runtime_contract(monkeypatch):
     example = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
-    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    config_reference = (REPO_ROOT / "docs" / "CONFIGURATION.md").read_text(
+        encoding="utf-8"
+    )
 
     monkeypatch.delenv("ENGRAPHIS_RATE_LIMIT", raising=False)
     assert Settings().rate_limit == 0
@@ -118,7 +120,7 @@ def test_sample_operational_config_matches_runtime_contract(monkeypatch):
     monkeypatch.delenv("ENGRAPHIS_LLM_AUTO_EXTRACT", raising=False)
     assert Settings().llm_auto_extract is False
     assert "ENGRAPHIS_LLM_AUTO_EXTRACT=0" in example
-    assert "| `ENGRAPHIS_LLM_AUTO_EXTRACT` | `0` |" in readme
+    assert "| `ENGRAPHIS_LLM_AUTO_EXTRACT` | `0` |" in config_reference
 
     for name in (
         "ENGRAPHIS_DECAY_HALFLIFE_DAYS",
@@ -187,11 +189,13 @@ def test_model_provenance_settings_read_environment_and_are_documented(monkeypat
     assert configured.embed_revision == "a" * 40
     assert configured.require_immutable_models is True
     assert "ENGRAPHIS_EMBED_REVISION" in (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
-    assert "ENGRAPHIS_REQUIRE_IMMUTABLE_MODELS" in (REPO_ROOT / "README.md").read_text(
-        encoding="utf-8"
-    )
+    assert "ENGRAPHIS_REQUIRE_IMMUTABLE_MODELS" in (
+        REPO_ROOT / "docs" / "CONFIGURATION.md"
+    ).read_text(encoding="utf-8")
     assert "ENGRAPHIS_RERANK_REVISION" in (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
-    assert "ENGRAPHIS_RERANK_REVISION" in (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    assert "ENGRAPHIS_RERANK_REVISION" in (
+        REPO_ROOT / "docs" / "CONFIGURATION.md"
+    ).read_text(encoding="utf-8")
 
 
 def test_exact_backend_mode_reads_environment_and_is_documented(monkeypatch):
@@ -203,9 +207,9 @@ def test_exact_backend_mode_reads_environment_and_is_documented(monkeypatch):
     assert "ENGRAPHIS_REQUIRE_EXACT_BACKENDS" in (REPO_ROOT / ".env.example").read_text(
         encoding="utf-8"
     )
-    assert "ENGRAPHIS_REQUIRE_EXACT_BACKENDS" in (REPO_ROOT / "README.md").read_text(
-        encoding="utf-8"
-    )
+    assert "ENGRAPHIS_REQUIRE_EXACT_BACKENDS" in (
+        REPO_ROOT / "docs" / "CONFIGURATION.md"
+    ).read_text(encoding="utf-8")
 
 
 def test_invalid_configuration_warnings_do_not_echo_values(monkeypatch, caplog):

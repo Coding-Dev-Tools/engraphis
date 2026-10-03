@@ -47,9 +47,14 @@ def test_portable_tool_reference_matches_registered_runtime_schemas() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     architecture = (ROOT / "docs" / "ARCHITECTURE_V3.md").read_text(encoding="utf-8")
     kilo = (ROOT / "docs" / "KILO_CODE_INTEGRATION.md").read_text(encoding="utf-8")
-    assert "former 35 direct tool names" in readme
-    assert "Classic 39-tool compatibility" in readme
-    assert "39-tool Classic compatibility server" in readme
+    mcp_reference = (ROOT / "docs" / "MCP_TOOLS.md").read_text(encoding="utf-8")
+    assert (
+        "[MCP tool reference](https://github.com/Coding-Dev-Tools/engraphis/blob/main/"
+        "docs/MCP_TOOLS.md)" in readme
+    )
+    assert "39 direct tools" in mcp_reference
+    assert "engraphis-mcp-classic" in mcp_reference
+    assert "former 35 direct tool names" not in readme
     assert "Smart MCP (9 tools) / Classic MCP (39 tools)" in architecture
     assert "Classic 39-tool inventory" in kilo
 
