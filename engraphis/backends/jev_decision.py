@@ -53,6 +53,7 @@ class AdvisoryDecisionResult:
     value: Optional[object] = None
     confidence: Optional[float] = None
     fallback_reason: Optional[str] = None
+    support_probability: Optional[float] = None
 
 
 class ChoiceDecision(Protocol):
@@ -306,10 +307,14 @@ class JevDecisionBackend:
                     or not _probability(decision.confidence)):
                 return AdvisoryDecisionResult("fallback", fallback_reason="malformed_response")
             if decision.confidence <= 0.5 or decision.probability == 0.5:
-                return AdvisoryDecisionResult("uncertain", confidence=float(decision.confidence))
+                return AdvisoryDecisionResult(
+                    "uncertain", confidence=float(decision.confidence),
+                    support_probability=float(decision.probability),
+                )
             return AdvisoryDecisionResult(
                 "decision", value=decision.probability > 0.5,
                 confidence=float(decision.confidence),
+                support_probability=float(decision.probability),
             )
         except Exception:
             return AdvisoryDecisionResult("fallback", fallback_reason="malformed_response")
@@ -349,5 +354,8 @@ class JevDecisionBackend:
         )
         if result.status == "decision":
             # Preserve this legacy API's probability-valued return contract.
+            probability = result.support_probability
+            if probability is not None:
+                return bool(result.value), float(probability)
             return bool(result.value), float(result.confidence or 0.0)
         return False, 0.0

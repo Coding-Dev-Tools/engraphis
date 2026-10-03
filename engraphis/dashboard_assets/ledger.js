@@ -1878,6 +1878,7 @@
         card.append(node('p', '', value));
       } else if (item.reason) card.append(node('p', '', item.reason.replaceAll('_', ' ')));
       if (item.fallback_reason) card.append(node('p', '', `Reason: ${item.fallback_reason.replaceAll('_', ' ')}.`));
+      if (Number.isFinite(item.probability)) card.append(node('p', '', `Support probability: ${item.probability.toFixed(2)} · advisory only`));
       if (Number.isFinite(item.confidence)) card.append(node('p', '', `Confidence: ${item.confidence.toFixed(2)} · advisory only`));
       target.append(card);
     };

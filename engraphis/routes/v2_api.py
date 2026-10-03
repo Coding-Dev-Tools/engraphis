@@ -1550,6 +1550,8 @@ def _advisory_payload(result) -> dict:
     payload = {"status": result.status, "confidence": result.confidence}
     if result.status == "decision":
         payload["value"] = result.value
+    if result.support_probability is not None:
+        payload["probability"] = result.support_probability
     if result.status == "fallback":
         payload["fallback_reason"] = result.fallback_reason or "unavailable"
     if result.status == "uncertain":
