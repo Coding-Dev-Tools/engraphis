@@ -1,6 +1,6 @@
 {
   "schema": "engraphis-mcp-contract/v1",
-  "sha256": "0f5a09ed2bb623b119d317b6119119e35c56d9f21c8cbb133f60e562037246e5",
+  "sha256": "a4071de44ae4709e5108ebd116c532579168f13a0d841b1619ccb4b5c7e2d18d",
   "surfaces": {
     "classic": [
       {
@@ -1625,7 +1625,7 @@
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": false,
-          "openWorldHint": false,
+          "openWorldHint": true,
           "readOnlyHint": false,
           "title": "Recall relevant memories"
         },
@@ -1877,7 +1877,7 @@
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": false,
-          "openWorldHint": false,
+          "openWorldHint": true,
           "readOnlyHint": false,
           "title": "Recall token-efficient context"
         },
@@ -3570,7 +3570,7 @@
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": false,
-          "openWorldHint": false,
+          "openWorldHint": true,
           "readOnlyHint": false,
           "title": "Recall compact project context"
         },

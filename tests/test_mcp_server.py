@@ -606,6 +606,12 @@ def test_server_identity_and_tools_registered():
         classic["engraphis_recall_context"].inputSchema.get("properties", {})
     )
     smart = {t.name: t for t in asyncio.run(srv.mcp.list_tools())}
+    classic_tools = srv.classic_mcp._tool_manager._tools
+    assert classic_tools["engraphis_recall"].annotations.openWorldHint is True
+    assert classic_tools["engraphis_recall_context"].annotations.openWorldHint is True
+    assert srv.smart_mcp._tool_manager._tools[
+        "engraphis_recall_context"
+    ].annotations.openWorldHint is True
     assert smart["engraphis_recall_context"].inputSchema["properties"][
         "k"
     ]["default"] == 50

@@ -20,6 +20,7 @@ import time
 import urllib.error
 import urllib.request
 import weakref
+from dataclasses import replace
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
@@ -1532,11 +1533,16 @@ def _dashboard_jev_backend():
     return JevDecisionBackend(client=client, model=settings.decision_model)
 
 
-def _jev_review_projection(memory: dict) -> str:
-    """Return a small title/content-only excerpt suitable for an advisory check."""
+def _jev_review_projection_parts(memory: dict) -> tuple[str, str]:
+    """Return bounded title and content excerpts suitable for an advisory check."""
     title = " ".join(str(memory.get("title") or "").split())[:200]
     content = " ".join(str(memory.get("content") or memory.get("summary") or "").split())
     content = content[:3_500]
+    return title, content
+
+
+def _jev_review_projection(memory: dict) -> str:
+    title, content = _jev_review_projection_parts(memory)
     return "\n".join(part for part in (title, content) if part)
 
 
@@ -1598,7 +1604,8 @@ def jev_review(req: _JevReviewReq):
     if len(records) == 2:
         first, second = inspected
         candidate = _jev_review_projection(first)[:3_700]
-        existing = records[1]
+        existing_title, existing_content = _jev_review_projection_parts(second)
+        existing = replace(records[1], title=existing_title, content=existing_content)
         contradiction = backend.classify_contradiction_result(
             candidate, existing, allow_remote=allow_remote,
             data_classification=req.data_classification,
