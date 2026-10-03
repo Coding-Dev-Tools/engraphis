@@ -33,11 +33,20 @@ namesakes; advanced controls are discoverable rather than routine:
 | Smart tool | Accepted parameters |
 |---|---|
 | `engraphis_remember` | `content`, `workspace`, `repo`, `session_id`, `mtype`, `importance`, `subject_key`, `claim_kind`, optional source-bound `exact_value`/`exact_value_type`; safe provenance is fixed internally |
-| `engraphis_recall_context` | `query`, `workspace`, `repo`, `session_id`, `k`, `token_budget`, `packing_mode`, `retrieval_recipe`, `format`; always compact, no `response_mode` |
+| `engraphis_recall_context` | `query`, `workspace`, `repo`, `session_id`, `k`, `token_budget`, `packing_mode`, `retrieval_recipe`, `format`, optional Jev controls `allow_remote`, `data_classification`; always compact, no `response_mode` |
 
 `format="gist"` is a compatibility option for the same budgeted, cited evidence as
 `full`. It preserves the same selected text and whitespace; it does not apply an
 additional summary or promise extra token savings. Source IDs remain in `sources`.
+
+Jev-assisted recall planning is opt-in. On the Smart context tool, set `allow_remote=true` and
+`data_classification="public"` or `"internal"`; that call both enables bounded route selection
+and gives per-call consent for remote processing. The default stays deterministic and local.
+Classic recall tools additionally require `planning="auto"` and `jev_assisted=true`.
+The provider receives the query and bounded local routes, not recalled memory bodies. Jev cannot
+change scope, time, type, or trust filters; uncertainty and failures retain deterministic route
+order and appear in `planning_advisory`. Leaving the Jev controls at their defaults keeps local
+deterministic behavior.
 
 
 No user profile choice or tool switching is required. The dashboard `/mcp` endpoint and
@@ -103,6 +112,10 @@ request. `vector_search_ready` is the authoritative vector-arm status. When
 recall remains lexical/graph/code based and grounded answers use lexical support only. A
 request-local index failure instead reports `vector_search_ready=false` while semantic support
 can remain available for exact support scoring from the configured embedder and stored vectors.
+
+Classic `engraphis_recall` and `engraphis_recall_context` also accept `jev_assisted` (default
+`false`), `allow_remote` (default `false`), and `data_classification` (optional). Use the same
+explicit remote-consent requirements described for the Smart context tool above.
 
 Trust boundary: normal local-agent memory creation is prompt-visible immediately after validation;
 it does not require owner approval. The default `agent` source covers `engraphis_remember`,

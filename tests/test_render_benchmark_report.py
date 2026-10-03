@@ -151,6 +151,48 @@ def test_renderer_reflects_a_report_that_measures_transport():
     assert "MCP transport not measured" not in svg
 
 
+def test_registered_fixture_chart_includes_grounded_run_and_all_three_bindings():
+    artifact = Path(__file__).resolve().parents[1] / "docs/benchmark-evidence/offline-fixtures-v115.json"
+
+    report = load_report(artifact)
+    svg = render_report(report)
+
+    assert report["registered_fixture_count"] == 3
+    assert report["grounded"] == {
+        "answerable": 5,
+        "grounded": 5,
+        "off_topic": 6,
+        "abstained": 6,
+        "quarantined": 1,
+        "quarantine_hits": 1,
+        "decision_accuracy": 1.0,
+        "decision_count": 11,
+    }
+    assert "3 REGISTERED OFFLINE FIXTURES" in svg
+    assert "5 / 5 grounded" in svg
+    assert "6 / 6 rejected" in svg
+    assert "1 / 1 abstained" in svg
+    assert "Decision accuracy 1.000 (11 / 11)" in svg
+    assert "PENDING" not in svg
+    assert "LoCoMo" not in svg and "LongMemEval" not in svg
+
+
+def test_grounded_chart_rejects_accuracy_that_disagrees_with_counts():
+    payload = _renderer_input()
+    payload["grounded"] = {
+        "answerable": 5,
+        "grounded": 5,
+        "off_topic": 6,
+        "abstained": 6,
+        "quarantined": 1,
+        "quarantine_hits": 1,
+        "decision_accuracy": 0.5,
+    }
+
+    with pytest.raises(ValueError, match="grounded.decision_accuracy contradicts"):
+        render_report(payload)
+
+
 @pytest.mark.parametrize("flag", ["false", "true", 0, 1, 0.0, 1.0, None, [], [False], {}, {"value": True}])
 @pytest.mark.parametrize("form", ["render", "nested", "flat"])
 def test_renderer_rejects_nonboolean_transport_flags(tmp_path, flag, form):
