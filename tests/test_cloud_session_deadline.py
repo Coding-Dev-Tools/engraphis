@@ -491,7 +491,7 @@ def test_real_loopback_refresh_shares_deadline_and_never_uses_proxy(
     try:
         started = time.monotonic()
         if phase == "complete":
-            assert _evaluate(2).get_noul("q").probability == 0.9
+            assert _evaluate(2).get_noul("has_support").probability == 0.9
             assert [entry[0] for entry in requests] == ["/v1/tokens/refresh", "/v1/jev/decide"]
             assert cloud_session._load()["refresh_credential"] == "synthetic-rotated"
         else:
