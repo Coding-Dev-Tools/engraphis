@@ -1,9 +1,9 @@
 {
   "environment": {
     "embedding": "deterministic",
-    "numpy": "2.5.3",
+    "numpy": "2.4.5",
     "platform": "win32",
-    "python": "3.12.14",
+    "python": "3.12.10",
     "vector_backend": "numpy"
   },
   "generated_on": "2026-10-04",
@@ -103,7 +103,7 @@
   ],
   "schema": "engraphis-public-offline-fixtures/v1",
   "suite": {
-    "digest": "ff60849dc9764f549083af860e8578bdcbdbd3d42f6c6bc3c600a70e016e8596",
+    "digest": "aa9592dc080db001674179e4e96cb4574b73c4da2acd87395c6527d7c09ba65a",
     "digest_method": "sha256(canonical compact JSON mapping each sorted path to its file SHA-256)",
     "files": {
       "engraphis/__init__.py": "f24241e8da2ede9ccba54ce4bf7531a800b55c29b2469e5de93bd423cffbf0be",
@@ -213,7 +213,7 @@
       "engraphis/redirector.py": "5ba964b81f09008c9369180cb49d247519000763274aabc5e046215b12fa641d",
       "engraphis/routes/__init__.py": "f0d59080212cfa0d9b50877bca28e5832d1ae917899500d52c68b1c8821231af",
       "engraphis/routes/memory.py": "9ca066e1762eeeaafd9790ed57d730efcaceb57742dbe0c830ad8764500ff9e5",
-      "engraphis/routes/v2_api.py": "6f2632df3f6e508f2b5a061b4fe6fbac1776ffad8066b56d0930bb5977c97800",
+      "engraphis/routes/v2_api.py": "19ac3cb402db05c37e9e0db88ec6c4f659b5800429b133073b99a05a29a91f80",
       "engraphis/routes/vault.py": "1a7eee7c1a7c7aa11091042756aa2739a3eb963647020f40584a6a38da1988af",
       "engraphis/service.py": "e4a4d3e8b3938b44e864d7e29fa8c9989b6305e8fb30c69fbbb968077a634d19",
       "engraphis/service_context.py": "3de9289f49a977cdc206285ac42a9953a104eb1d1b1bc8ea77febd75c7cd82ab",
