@@ -16,7 +16,7 @@ implementations are not part of this repository.
 | Local dashboard, memory engine, and MCP tools | Yes | Yes | Yes |
 | Local version history, graph, and manual consolidation | Yes | Yes | Yes |
 | Local workspace export | Yes | Yes | Yes |
-| Advisory Jev decisions | Local heuristics; optional BYOK | Included managed decisions after service acceptance | Included managed decisions per named seat after service acceptance |
+| Advisory Jev decisions | Local heuristics; optional BYOK | Included managed decisions after service acceptance | Included managed decisions with a finite pool shared across named seats after service acceptance |
 | Hosted Cloud Sync, Analytics, and managed automation | | Yes | Yes |
 | Private account and billing support | | Yes | Yes |
 | Hosted multi-user dashboard, roles, seats, and audit export | | | Yes |
@@ -26,9 +26,10 @@ Start or manage a hosted subscription in the [Engraphis account portal](https://
 
 ## Included System 1 Decision Engine (Jev)
 
-After release acceptance and service enablement, each Pro subscription owner and each named Team
-seat includes managed Jev decisions at no additional charge, within a finite rolling allowance.
-The account portal reports current availability and usage. Some admitted requests may count if
+After release acceptance and service enablement, each Pro subscription owner and each active
+Team named seat has managed Jev decisions at no additional charge, within a finite rolling
+allowance. Team usage is pooled across its active named seats. The account portal reports current
+availability and usage. Some admitted requests may count if
 they fail or are interrupted; no overage charge is applied. A service protection limit may pause
 requests before the included allowance is exhausted.
 
