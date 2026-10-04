@@ -447,6 +447,49 @@ def test_service_grounded_recall_shape():
     assert out["receipt"]["operation"] == "grounded_recall"
 
 
+def test_compact_grounded_retrieval_preview_uses_recall_candidate_allowlist():
+    svc = MemoryService.create(":memory:")
+    content = "Deployment identifier is ALPHA."
+    stored = svc.remember(
+        content,
+        workspace="acme",
+        repo="backend",
+        exact_value="ALPHA",
+        exact_value_type="identifier",
+    )
+    try:
+        full = svc.grounded_recall(
+            "Which deployment identifier is used?",
+            workspace="acme",
+            repo="backend",
+            include_retrieval_preview=True,
+        )
+        full_candidate = next(
+            row for row in full["retrieval_preview"] if row["id"] == stored["id"]
+        )
+        assert full_candidate["exact_value"]["value"] == "ALPHA"
+
+        compact = svc.grounded_recall(
+            "Which deployment identifier is used?",
+            workspace="acme",
+            repo="backend",
+            response_mode="compact",
+            include_retrieval_preview=True,
+        )
+        candidate = next(
+            row for row in compact["retrieval_preview"] if row["id"] == stored["id"]
+        )
+
+        assert set(candidate) == {
+            "id", "title", "scope", "mtype", "repo_id", "score",
+            "relative_score", "absolute_support", "arm", "provenance",
+        }
+        assert "ALPHA" not in repr(candidate)
+        assert svc.store.get_memory(stored["id"]).content == content
+    finally:
+        svc.close()
+
+
 def test_service_grounded_recall_unknown_workspace_is_soft():
     svc = MemoryService.create(":memory:")
     out = svc.grounded_recall("anything", workspace="ghost")
