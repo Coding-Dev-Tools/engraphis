@@ -20,7 +20,7 @@ from engraphis.core.interfaces import (
     SearchFilter,
 )
 from engraphis.core.query_planner import DeterministicQueryPlanner, MAX_PLANNED_QUERIES
-from engraphis.core.recall import RecallEngine
+from engraphis.core.recall import RecallEngine, RecallResult
 from engraphis.core.store import Store
 
 
@@ -368,6 +368,17 @@ def test_invalid_planner_priority_falls_back_to_identity(priority):
 
     assert len(result.planning_details["queries"]) == 1
     assert result.planning_details["fallback_reason"] == "invalid_planner_output"
+
+
+def test_planning_advisory_is_appended_after_existing_positional_fields():
+    fields = list(RecallResult.__dataclass_fields__)
+    graph_details = [{"query": "preserve-position"}]
+
+    assert fields.index("graph_traversal_details") == 21
+    assert fields[-1] == "planning_advisory"
+    result = RecallResult(*([None] * 21 + [graph_details]))
+    assert result.graph_traversal_details is graph_details
+    assert result.planning_advisory is None
 
 
 def test_sanitized_planner_priorities_remain_weighted_not_positional():

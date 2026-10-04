@@ -56,7 +56,7 @@ from engraphis.core.vector_repair import index_repair_identity
 from engraphis.core.ids import new_id as make_id
 from engraphis.core.savings import annotate_usage, normalize_release_version
 from engraphis.core.interfaces import (
-    Edge, FactSpec, GraphLayer, MemoryType, Node, Scope, SearchFilter,
+    Edge, FactSpec, GraphLayer, MemoryRecord, MemoryType, Node, Scope, SearchFilter,
     embedder_capabilities, embedding_space_fingerprint,
     vector_index_requires_sync,
     vector_index_shares_store_transaction,
@@ -7374,6 +7374,34 @@ class MemoryService:
                         "can_revise": self.engine.can_revise_memory(record.id)} for record in page],
                     "count": len(page), "total_count": total, "next_cursor": next_cursor,
                     "valid_at": anchors[0], "known_at": anchors[1]}
+
+    def read_memory_for_review(
+        self, memory_id: str, *, workspace: str, repo: Optional[str] = None,
+    ) -> MemoryRecord:
+        """Read one selected advisory record, including authorized project ancestors.
+
+        Match the browse view's current bi-temporal and ancestor visibility rather
+        than an inspector's historical bare-ID access. Without a session context,
+        session-private records are excluded. No links, audit, or lineage are read.
+        """
+        from engraphis.core.store import _row_to_record
+
+        mid = _clean_text(memory_id, field="memory_id", max_chars=MAX_NAME_CHARS)
+        wid, rid = self._require_scope(workspace, repo)
+        now = time.time()
+        where, params = self.store._where(SearchFilter(
+            workspace_id=wid, repo_id=rid, include_ancestors=True,
+            valid_at=now, known_at=now,
+        ), include_invalid=False)
+        row = self.store.conn.execute(
+            "SELECT * FROM memories WHERE id=? AND " + " AND ".join(where),
+            [mid, *params],
+        ).fetchone()
+        if row is None:
+            raise ValidationError(f"memory '{mid}' is not visible in that workspace/repo")
+        record = _row_to_record(row)
+        self._authorize_memory_session(record)
+        return record
 
     def inspect(self, memory_id: str, *, workspace: str, repo: Optional[str] = None) -> dict:
         """Everything the inspector shows for one memory: the record, its links, its

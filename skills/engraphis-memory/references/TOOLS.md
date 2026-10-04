@@ -697,23 +697,24 @@ Returns `{enabled, current, latest, update_available, url, notice}`.
 Advisory command, contradiction, support, completion, or custom checks. The default backend
 is local. Selecting `managed` uses the saved Engraphis Cloud session when configured;
 `auto` selects only managed access, and `byok` explicitly selects a personal TypeSafe key.
-Managed availability and allowance require service verification. No latency, accuracy, or
-savings guarantee follows from configuration. Smart discovery uses `engraphis_execute_action`
-because a remote request may consume allowance.
+Managed Jev remains `not_yet_available` until release acceptance and service-capacity qualification
+pass. After enablement, Pro usage is owner-scoped and Team questions share a finite organization
+pool sized by licensed seat count at no additional charge. The account portal reports current
+availability and usage; fixed quotas are not published and overage is not charged. Service
+protection may pause requests. No latency, accuracy, or savings guarantee follows from
+configuration. Smart discovery uses `engraphis_execute_action` because a remote request may
+consume allowance.
 
 Managed access admits only `guard_command`, `classify_contradiction`, `verify_support`, and
 `verify_completion`, with the concrete context below and fixed question schemas. A purpose label
 does not authorize arbitrary questions. Managed `custom` and `query_planning` fail closed before
 credential refresh or network requests; custom remote questions and experimental route selection
 require explicit BYOK. Neither managed nor `auto` silently switches to a personal provider key.
-Every paid Pro user and paid Team named seat, including viewers, and active legitimate trial/test
-entitlements receives 100 evaluated questions per rolling hour, 1,000 per rolling five hours,
-and 2,000 per rolling 24 hours. All three caps apply to the individual; there is no monthly or
-Team pool and no extra managed charge or personal provider key requirement. Command review
-evaluates two questions; the other three workflows evaluate one each. Admitted failures remain
-counted. The unchanged production fleet guard of 100 questions/day remains a launch conflict.
-Release acceptance, provider terms, and live quality evaluation remain gates; synthetic fixtures
-do not demonstrate model accuracy.
+Paid Pro users and paid Team named seats, including viewers, receive the included managed
+workflows after service enablement. Command review evaluates two questions; the other three
+workflows evaluate one each. Admitted failures remain counted. Release acceptance, service
+capacity, provider terms, and live quality evaluation remain gates; synthetic fixtures do not
+demonstrate model accuracy.
 
 Authorized viewers can use direct Classic advisory decisions without gaining memory writes or
 administration. The generic Smart stateful executor still requires admin, and the private hosted
