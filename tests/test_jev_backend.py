@@ -127,6 +127,31 @@ def test_original_injected_client_contract_still_produces_advisory_results():
     assert [call[2] for call in client.calls] == ["test-model-1.0", "test-model-1.0"]
 
 
+@pytest.mark.parametrize("field", ["question_id", "prompt", "option"])
+def test_sensitive_question_fields_are_screened_before_legacy_client_calls(field):
+    client = LegacyClient()
+    adapter = backend(client)
+    question_id = "jev_review"
+    prompt = "Choose the best bounded option."
+    options = ("local", "remote")
+    secret = "ghp_" + "A" * 20
+    if field == "question_id":
+        question_id = secret
+    elif field == "prompt":
+        prompt = f"Use this token: {secret}"
+    else:
+        options = ("local", secret)
+
+    result = adapter.choose_option(
+        "Synthetic public state", question_id=question_id, prompt=prompt,
+        options=options, allow_remote=True,
+    )
+
+    assert result.status == "fallback"
+    assert result.fallback_reason == "sensitive_content"
+    assert client.calls == []
+
+
 @pytest.mark.parametrize("variadic", [False, True])
 def test_context_aware_clients_receive_the_authorized_request_context(variadic):
     class VariadicClient(FakeClient):
