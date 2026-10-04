@@ -371,5 +371,10 @@ def test_consolidation_docs_expose_only_live_public_options() -> None:
     assert "Team usage is pooled across its active named seats" in hosted_plan
     assert "current availability and usage" in hosted_plan
     assert "currently `not_yet_available` pending release acceptance" in hosted_plan
+    assert "Managed Jev accepts only the fixed command-review, completion-review" in hosted_plan
+    assert "experimental BYOK planner can reorder bounded deterministic query routes" in hosted_plan
+    assert "no retrieval-quality improvement" in hosted_plan
+    assert "Experimental recall route selection is BYOK-only" in readme
+    assert "Managed Jev returns to deterministic planning" in readme
     normalized_tools = " ".join(tools.split())
     assert "`profiles (bool, false)`; `structured (bool, false)`." in normalized_tools

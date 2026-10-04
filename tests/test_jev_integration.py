@@ -586,6 +586,60 @@ def test_dashboard_jev_review_blocks_secret_memory_even_after_consent(dashboard,
     assert service.store.get_memory(first_id).sensitivity == "secret"
 
 
+def test_dashboard_jev_review_accepts_visible_workspace_ancestor_for_repo(
+    dashboard, monkeypatch,
+):
+    client, service, ancestor_id, _second_id = dashboard
+    from engraphis.routes import v2_api
+
+    workspace_id = service.store.get_or_create_workspace("demo")
+    repo_id = service.store.get_or_create_repo(workspace_id, "project")
+    repo_memory_id = service.engine.remember(
+        "The project uses a bounded local cache.",
+        workspace_id=workspace_id,
+        repo_id=repo_id,
+        scope=Scope.REPO,
+        title="Project cache",
+    )
+    other_repo_id = service.store.get_or_create_repo(workspace_id, "other-project")
+    other_memory_id = service.engine.remember(
+        "This memory belongs to a different repository.",
+        workspace_id=workspace_id,
+        repo_id=other_repo_id,
+        scope=Scope.REPO,
+        title="Other project",
+    )
+    decision_client = _DecisionClient()
+    monkeypatch.setattr(v2_api, "_dashboard_jev_backend", lambda: _review_backend(decision_client))
+
+    accepted = client.post("/api/jev/review", json={
+        "workspace": "demo",
+        "repo": "project",
+        "memory_ids": [ancestor_id, repo_memory_id],
+        "claim": "The project uses a local cache.",
+        "allow_remote": True,
+        "data_classification": "internal",
+    })
+
+    assert accepted.status_code == 200
+    assert accepted.json()["memory_ids"] == [ancestor_id, repo_memory_id]
+    assert len(decision_client.calls) == 2
+    assert all("Postgres 16" in call["state"] or "Project cache" in call["state"]
+               for call in decision_client.calls)
+
+    rejected = client.post("/api/jev/review", json={
+        "workspace": "demo",
+        "repo": "project",
+        "memory_ids": [ancestor_id, other_memory_id],
+        "claim": "The project uses a local cache.",
+        "allow_remote": True,
+        "data_classification": "internal",
+    })
+
+    assert rejected.status_code == 404
+    assert len(decision_client.calls) == 2
+
+
 def test_jev_review_projection_preserves_structural_whitespace():
     from engraphis.routes.v2_api import _jev_review_projection_parts
 
