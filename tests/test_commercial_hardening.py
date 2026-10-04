@@ -275,7 +275,7 @@ def test_the_published_prices_match_the_manifest_where_pricing_is_documented() -
         monthly = "$%d" % manifest["plans"][plan]["monthly_usd"]
         annual = "$%d" % manifest["plans"][plan]["annual_usd"]
         assert (
-            "[Hosted plans and licensing](https://github.com/Coding-Dev-Tools/engraphis/blob/12d2e405ed4bd78917a3e5eef2cf0d3a7f1561b2/"
+            "[Hosted plans and licensing](https://github.com/Coding-Dev-Tools/engraphis/blob/54eae9fc5105ab491a9aa9dc2bfeba6109baf63b/"
             "docs/HOSTED_PLANS.md)" in readme
         )
         assert monthly in hosted_plans and annual in hosted_plans, plan
