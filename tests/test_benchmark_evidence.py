@@ -33,8 +33,8 @@ from eval.performance import run as run_performance
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PUBLIC_OFFLINE_ARTIFACT = "offline-fixtures-v138.json"
-PUBLIC_OFFLINE_SHA = "a7dea13c36d52a471ca5675602f00130979d2040ce3f9c26e8ba738163c6a7be"
+PUBLIC_OFFLINE_ARTIFACT = "offline-fixtures-v140.json"
+PUBLIC_OFFLINE_SHA = "7a4c7a1a189368a3913ab8edad315d08e405daa39d1b0c3ec22253334b84809f"
 
 
 @pytest.fixture(scope="module")
@@ -264,6 +264,27 @@ def test_readme_visual_pngs_match_their_svg_canvas():
 
         assert png_header[:8] == b"\x89PNG\r\n\x1a\n"
         assert struct.unpack(">II", png_header[16:24]) == expected
+
+
+def test_benchmark_header_badge_fits_its_label():
+    svg = ElementTree.parse(
+        ROOT / "docs" / "images" / "context-efficiency.svg"
+    ).getroot()
+    namespace = "{http://www.w3.org/2000/svg}"
+    badge = next(
+        node for node in svg.findall(f"{namespace}rect")
+        if node.attrib.get("x") == "22" and node.attrib.get("y") == "20"
+    )
+    label = next(
+        node for node in svg.findall(f"{namespace}text")
+        if node.text == "REGISTERED OFFLINE EVIDENCE"
+    )
+    estimated_right = (
+        float(label.attrib["x"])
+        + len(label.text or "") * float(label.attrib["font-size"]) * 0.6
+    )
+
+    assert estimated_right <= float(badge.attrib["x"]) + float(badge.attrib["width"])
 
 
 def test_example_visual_uses_the_checked_in_offline_fixture_results(

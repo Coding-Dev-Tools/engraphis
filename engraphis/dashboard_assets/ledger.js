@@ -1861,6 +1861,14 @@
   }
 
   function renderJevReviewResult(target, response) {
+    const fallbackLabels = {
+      allowance_exhausted: 'The included Jev allowance is currently used up. Check account usage for the next available window.',
+      remote_timeout: 'Jev did not respond before the request deadline. You can retry later.',
+      session_changed: 'The Cloud session changed during the request. Sign in again before retrying.',
+      managed_operation_unsupported: 'This Jev operation is unavailable in the managed service.',
+      remote_unavailable: 'The Jev service is unavailable. You can retry later.',
+      malformed_response: 'Jev returned a response that could not be validated. Review the sources manually.',
+    };
     const labelStatus = item => item.status === 'decision' ? 'Advisory decision'
       : item.status === 'uncertain' ? 'Uncertain; no conclusion'
       : item.status === 'not_requested' ? 'Not checked'
@@ -1877,7 +1885,8 @@
           : 'Jev returned an advisory result.';
         card.append(node('p', '', value));
       } else if (item.reason) card.append(node('p', '', item.reason.replaceAll('_', ' ')));
-      if (item.fallback_reason) card.append(node('p', '', `Reason: ${item.fallback_reason.replaceAll('_', ' ')}.`));
+      if (item.fallback_reason) card.append(node('p', '', fallbackLabels[item.fallback_reason]
+        || 'Jev could not complete this check. Review the sources manually.'));
       if (Number.isFinite(item.probability)) card.append(node('p', '', `Support probability: ${item.probability.toFixed(2)} · advisory only`));
       if (Number.isFinite(item.confidence)) card.append(node('p', '', `Confidence: ${item.confidence.toFixed(2)} · advisory only`));
       target.append(card);
@@ -2613,6 +2622,10 @@
         remote_consent_required: 'Remote consent was not granted, so deterministic route order was used.',
         planning_disabled: 'Query planning is disabled, so the original query route was used.',
         backend_unavailable: 'Jev is unavailable, so deterministic route order was used.',
+        allowance_exhausted: 'The included Jev allowance is currently used up, so deterministic route order was used. Check account usage for the next available window.',
+        remote_timeout: 'Jev did not respond before the request deadline, so deterministic route order was used. You can retry later.',
+        session_changed: 'The Cloud session changed during the request, so deterministic route order was used. Sign in again before retrying.',
+        managed_operation_unsupported: 'This Jev operation is unavailable in the managed service, so deterministic route order was used.',
         planner_timeout: 'Route planning reached its deadline, so deterministic route order was used.',
         remote_unavailable: 'The Jev request failed, so deterministic route order was used.',
         malformed_response: 'Jev returned an invalid response, so deterministic route order was used.',

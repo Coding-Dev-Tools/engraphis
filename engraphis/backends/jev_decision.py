@@ -28,6 +28,14 @@ from engraphis.core.interfaces import MemoryRecord
 
 MAX_STATE_CHARS = 16_000
 _VERDICTS = frozenset(("contradicts_and_supersedes", "reinforces", "orthogonal"))
+_SAFE_CLIENT_ERROR_CODES = frozenset({
+    "allowance_exhausted",
+    "remote_timeout",
+    "remote_unavailable",
+    "malformed_response",
+    "session_changed",
+    "managed_operation_unsupported",
+})
 
 
 @dataclass(frozen=True)
@@ -157,7 +165,7 @@ class JevDecisionBackend:
         purpose: str, data_classification: str,
         timeout_s: Optional[float] = None,
     ) -> tuple[Optional[DecisionBatch], str, Optional[str]]:
-        from engraphis.backends.jev_transport import contains_sensitive_content
+        from engraphis.backends.jev_transport import DecisionClientError, contains_sensitive_content
 
         if allow_remote is not True:
             return None, "fallback", "remote_not_authorized"
@@ -231,6 +239,13 @@ class JevDecisionBackend:
                 return None, "fallback", "provider_fallback"
             batch = cast(DecisionBatch, response)
             return batch, "decision", None
+        except DecisionClientError as exc:
+            # Preserve only fixed transport states that help the caller recover.
+            # Injected clients can raise this type too, so never echo an unknown code.
+            code = exc.code
+            reason = (code if isinstance(code, str) and code in _SAFE_CLIENT_ERROR_CODES
+                      else "remote_unavailable")
+            return None, "fallback", reason
         except Exception:
             # Provider exceptions may contain request text or credentials. Do not log them.
             return None, "fallback", "remote_unavailable"

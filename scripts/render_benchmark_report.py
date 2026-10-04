@@ -628,7 +628,7 @@ def render_report(report: dict[str, Any]) -> str:
         '.heading{font-family:Segoe UI,sans-serif;font-weight:700;fill:#f2f5f9} '
         '.green{fill:#00c896}.muted{fill:#7589a7}</style>',
         f'<rect x="3" y="2" width="1094" height="664" fill="{BACKGROUND}" stroke="{GRID}"/>',
-        '<rect x="22" y="20" width="192" height="21" fill="#1c222b" stroke="#303a47"/>',
+        '<rect x="22" y="20" width="224" height="21" fill="#1c222b" stroke="#303a47"/>',
         _text(31, 35, "REGISTERED OFFLINE EVIDENCE", size=12.5),
         _text(23, 75, "Offline benchmark results", size=32, class_name="heading"),
         _text(1080, 36, fixture_label, size=13.1, class_name="muted", anchor="end"),

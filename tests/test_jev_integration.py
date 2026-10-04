@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from engraphis.backends.jev_decision import JevDecisionBackend  # noqa: E402
 from engraphis.backends.jev_query_planner import JevAssistedQueryPlanner  # noqa: E402
+from engraphis.backends.jev_transport import DecisionClientError  # noqa: E402
 from engraphis.config import settings  # noqa: E402
 from engraphis.core.interfaces import (  # noqa: E402
     GraphLayer,
@@ -47,11 +48,12 @@ class _DecisionClient:
     is_configured = True
     allow_fallback = False
 
-    def __init__(self, *, confidence=0.9, malformed=False, fail=False):
+    def __init__(self, *, confidence=0.9, malformed=False, fail=False, error_code=None):
         self.calls = []
         self.confidence = confidence
         self.malformed = malformed
         self.fail = fail
+        self.error_code = error_code
 
     def evaluate(
         self, state, questions, *, model, allow_remote=False, purpose="custom",
@@ -68,6 +70,8 @@ class _DecisionClient:
         })
         if self.fail:
             raise RuntimeError("private synthetic failure")
+        if self.error_code is not None:
+            raise DecisionClientError(self.error_code)
         return _Batch(confidence=self.confidence, malformed=self.malformed)
 
 
@@ -432,6 +436,50 @@ def test_smart_mcp_recall_exposes_opt_in_consent_and_falls_back_without_it(
     assert "SELECTED MEMORY" not in decision_client.calls[0]["state"]
 
 
+@pytest.mark.parametrize(("error_code", "expected_reason"), [
+    ("allowance_exhausted", "allowance_exhausted"),
+    ("remote_timeout", "remote_timeout"),
+    ("session_changed", "session_changed"),
+    ("private-provider-detail", "remote_unavailable"),
+])
+def test_recall_surfaces_safe_jev_transport_state_and_keeps_deterministic_routes(
+    dashboard, monkeypatch, error_code, expected_reason,
+):
+    _client, service, _first_id, _second_id = dashboard
+    from engraphis import mcp_server
+
+    monkeypatch.setattr(mcp_server, "_service", service)
+    decision_client = _DecisionClient(error_code=error_code)
+    deterministic = _FixedDeterministicPlanner()
+    planner = JevAssistedQueryPlanner(_backend(decision_client), deterministic)
+    service.engine.recall_engine.query_planner = planner
+    query = "Why does CACHE.get() fail after restart?"
+
+    expected = planner.plan(query)
+    fallback_plan = planner.plan_with_advisory(
+        query, allow_remote=True, data_classification="internal",
+    )
+    assert [route.text for route in fallback_plan.queries] == [
+        route.text for route in expected.queries
+    ]
+    assert fallback_plan.reason_codes[-1] == f"jev_{expected_reason}"
+    response = json.loads(mcp_server.smart_recall_context(
+        query=query,
+        workspace="demo",
+        allow_remote=True,
+        data_classification="internal",
+    ))
+
+    assert response["planning_advisory"] == {
+        "status": "fallback", "reason": expected_reason,
+    }
+    assert len(decision_client.calls) == 2
+    # The failed or unavailable advisory leaves local deterministic routes intact.
+    assert [route.text for route in expected.queries] == [
+        query, "CACHE.get()", "cache restart path",
+    ]
+
+
 def test_dashboard_jev_review_requires_consent_and_does_not_write_memory(
     dashboard, monkeypatch,
 ):
@@ -590,6 +638,8 @@ def test_dashboard_shows_jev_controls_and_never_claims_consent_proves_transmissi
     assert 'id="ask-jev-remote" type="checkbox" disabled' in page.text
     assert 'id="ask-jev-classification" disabled' in page.text
     assert "Data classification for this action" in script.text
+    assert "allowance_exhausted:" in script.text
+    assert "fallbackLabels[item.fallback_reason]" in script.text
     assert "Remote consent was granted for this action only" in script.text
     assert "Jev received only this action" not in script.text
     assert "jev_assisted: jevAssisted" in script.text
