@@ -14,6 +14,7 @@ from engraphis.core.schema import SCHEMA_VERSION
 
 ROOT = Path(__file__).resolve().parents[1]
 README_BENCHMARK_PIN = "27ab1b3baab791d9f6957171cd6d21b09f39eed7"
+README_HOSTED_PLANS_PIN = "a0d3e57c9077c19301246fa0799ac434f8148900"
 
 
 def _read(path: str) -> str:
@@ -43,6 +44,7 @@ def test_readme_targets_resolve_in_the_repository() -> None:
                 prefixes = (
                     "/Coding-Dev-Tools/engraphis/blob/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/",
                     f"/Coding-Dev-Tools/engraphis/blob/{README_BENCHMARK_PIN}/",
+                    f"/Coding-Dev-Tools/engraphis/blob/{README_HOSTED_PLANS_PIN}/",
                 )
             elif parsed.netloc == "raw.githubusercontent.com":
                 prefixes = (
@@ -360,5 +362,9 @@ def test_consolidation_docs_expose_only_live_public_options() -> None:
         assert "supersede-sources" not in document
 
     assert "docs/HOSTED_PLANS.md" in readme
+    hosted_plan = " ".join(_read("docs/HOSTED_PLANS.md").split())
+    assert "100 evaluated questions per rolling hour, 1,000 per rolling five hours, and 2,000 per rolling 24 hours" in hosted_plan
+    assert "Team usage is per seat, not pooled." in hosted_plan
+    assert "currently `not_yet_available` pending release acceptance" in hosted_plan
     normalized_tools = " ".join(tools.split())
     assert "`profiles (bool, false)`; `structured (bool, false)`." in normalized_tools
