@@ -33,7 +33,7 @@ from eval.performance import run as run_performance
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PUBLIC_OFFLINE_ARTIFACT = "offline-fixtures-v143.json"
+PUBLIC_OFFLINE_ARTIFACT = "offline-fixtures-v144.json"
 PUBLIC_OFFLINE_SHA = "cce67041fa5c6a5c4e6b0ed0ac1b7d8f4b6616fe3370fc2a846f4d99e14e49cd"
 
 
