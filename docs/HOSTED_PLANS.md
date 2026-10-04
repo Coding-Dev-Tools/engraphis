@@ -62,8 +62,12 @@ confidence is explicitly labelled derived decisiveness, not measured calibration
 malformed, unavailable and fallback results remain distinguishable. Local heuristic confidence
 is unmeasured. All decisions are advisory: deterministic authorization, memory governance,
 executable checks and the user's approval remain authoritative.
-The advisory adapter is not connected to core memory writes or grounded recall.
-Local command heuristics never recommend automatic execution.
+Managed Jev accepts only the fixed command-review, completion-review, evidence-support,
+and contradiction-check operations. It does not perform recall-route selection. The separate
+experimental BYOK planner can reorder bounded deterministic query routes before retrieval, but
+it cannot write memories or bypass grounded support and abstention checks; current synthetic
+fixtures show no retrieval-quality improvement. Local command heuristics never recommend
+automatic execution.
 
 The email-confirmed, no-card trial lasts seven active days for Pro and fourteen active days for Team. If hosted entitlement expires,
 `workspace_write_grace` can retain only approved hosted-account continuity operations for up to
