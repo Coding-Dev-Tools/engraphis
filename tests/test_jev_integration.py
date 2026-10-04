@@ -247,6 +247,29 @@ def test_route_transport_timeout_subtracts_local_planner_time():
     assert 0 < client.calls[0]["timeout_s"] < 0.48
 
 
+def test_local_planning_diagnostics_report_deterministic_planner():
+    client = _DecisionClient()
+    planner = JevAssistedQueryPlanner(_backend(client))
+    service = MemoryService.create(":memory:", embed_model="", embed_dim=16)
+    try:
+        engine = service.engine.recall_engine
+        engine.query_planner = planner
+
+        result = engine.recall(
+            "Why does CACHE.get() fail after restart?",
+            SearchFilter(),
+            planning="auto",
+            diagnostics=True,
+        )
+
+        assert result.planning_details is not None
+        assert result.planning_details["planner"] == planner.local_identity
+        assert result.planning_details["planner"] == "engraphis.query-planner.deterministic.v1"
+        assert client.calls == []
+    finally:
+        service.close()
+
+
 def test_core_planner_gets_cloned_scope_and_time_filters_without_trust_authority():
     client = _DecisionClient()
     deterministic = _FixedDeterministicPlanner()
