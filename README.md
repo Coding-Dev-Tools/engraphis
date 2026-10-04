@@ -68,7 +68,7 @@ In the local dashboard, choose **Review with Jev** on a memory to check an evide
 
 Jev-assisted recall planning is experimental. In an exploratory comparison using 40 public synthetic tasks, Jev selected a route on all 40 calls but did not change nDCG@5, Recall@5, or answer-token coverage. This fixture does not establish a benefit on held-out user workloads, so no retrieval-quality improvement is claimed.
 
-Managed Jev is currently `not_yet_available` pending release acceptance and capacity qualification. When enabled, Pro and Team include managed decisions at no additional charge within a finite allowance. Team usage is pooled across active named seats. The account portal will show current availability and usage. Some admitted requests may count even if they fail; no overage is charged, and service protection may pause requests. Subscribers do not need a provider key for managed use; direct BYOK is separate and may incur provider charges. See [hosted plans and Jev details](https://github.com/Coding-Dev-Tools/engraphis/blob/52f31d60d55c30ba0861721c439d3679988198d4/docs/HOSTED_PLANS.md#included-system-1-decision-engine-jev).
+Managed Jev is currently `not_yet_available` pending release acceptance and capacity qualification. When enabled, Pro and Team include managed decisions at no additional charge within a finite allowance. Team usage is pooled across active named seats. The account portal will show current availability and usage. Some admitted requests may count even if they fail; no overage is charged, and service protection may pause requests. Subscribers do not need a provider key for managed use; direct BYOK is separate and may incur provider charges. See [hosted plans and Jev details](https://github.com/Coding-Dev-Tools/engraphis/blob/7516f9c6292abfa24e6089b1eab81c5a64b8f2e9/docs/HOSTED_PLANS.md#included-system-1-decision-engine-jev).
 
 ## Guides
 
@@ -82,7 +82,7 @@ Managed Jev is currently `not_yet_available` pending release acceptance and capa
 - [Pi extension](https://github.com/Coding-Dev-Tools/engraphis/blob/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/integrations/pi/README.md)
 - [Memory write review](https://github.com/Coding-Dev-Tools/engraphis/blob/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/docs/WRITE_REVIEW.md)
 - [Security policy](https://github.com/Coding-Dev-Tools/engraphis/blob/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/SECURITY.md)
-- [Hosted plans and licensing](https://github.com/Coding-Dev-Tools/engraphis/blob/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/docs/HOSTED_PLANS.md)
+- [Hosted plans and licensing](https://github.com/Coding-Dev-Tools/engraphis/blob/7516f9c6292abfa24e6089b1eab81c5a64b8f2e9/docs/HOSTED_PLANS.md)
 
 ## License
 
