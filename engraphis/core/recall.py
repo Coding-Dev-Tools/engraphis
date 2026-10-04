@@ -150,7 +150,6 @@ class RecallResult:
     context_revision: str = ""
     planning_mode: str = "off"
     planning_details: Optional[dict[str, Any]] = None
-    planning_advisory: Optional[dict[str, Any]] = None
     graph_traversal_details: Optional[list[dict[str, Any]]] = None
     token_counter: Optional[Callable[[str], int]] = field(default=None, repr=False)
     # Safety metadata is kept off the public chunk projection.  Consumers which make
@@ -170,6 +169,9 @@ class RecallResult:
     # Effective output limit after applying retrieval_recipe. Appended for
     # compatibility with callers that construct RecallResult positionally.
     effective_k: int = 8
+    # Advisory metadata is appended so existing positional callers keep their
+    # graph, safety, and capability fields in the same positions.
+    planning_advisory: Optional[dict[str, Any]] = None
 
 
 class RecallEngine:

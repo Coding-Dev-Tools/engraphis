@@ -1540,8 +1540,7 @@ def _dashboard_jev_backend():
 def _jev_review_projection_parts(memory: dict) -> tuple[str, str]:
     """Return bounded title and content excerpts suitable for an advisory check."""
     title = " ".join(str(memory.get("title") or "").split())[:200]
-    content = " ".join(str(memory.get("content") or memory.get("summary") or "").split())
-    content = content[:3_500]
+    content = str(memory.get("content") or memory.get("summary") or "")[:3_500]
     return title, content
 
 
