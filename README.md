@@ -70,7 +70,24 @@ Recall route selection is experimental and BYOK-only. Smart MCP opts in through 
 
 Jev-assisted recall planning is experimental. In an exploratory comparison using 40 public synthetic tasks, Jev selected a route on all 40 calls but did not change nDCG@5, Recall@5, or answer-token coverage. This fixture does not establish a benefit on held-out user workloads, so no retrieval-quality improvement is claimed.
 
-Managed Jev is currently `not_yet_available` pending release acceptance and capacity qualification. After enablement, Pro and Team include fixed command, completion, evidence-support, and contradiction decisions at no additional charge within a finite allowance. Team usage shares one pool sized by licensed seat count. The account portal reports availability and usage; no overage is charged, and service protection may pause requests. Subscribers do not need a provider key for managed use. See [hosted plans and Jev details](https://github.com/Coding-Dev-Tools/engraphis/blob/e440bf6ba0ff600648fdac6eb53dd28d6d80df24/docs/HOSTED_PLANS.md#included-system-1-decision-engine-jev).
+Managed Jev is currently `not_yet_available` pending release acceptance and
+service-capacity qualification; client configuration does not enable it. After
+enablement, every legitimate Pro user and each eligible Team named seat, including paid
+viewers, with an active paid, trial, or test entitlement receives managed Jev at no
+additional customer charge and without a personal provider key.
+
+Each individual receives all three independent rolling limits: **100 evaluated questions per rolling hour, 1,000 per rolling five hours, and 2,000 per rolling 24 hours**. Usage is per
+person, not pooled across a Team and not monthly. Each evaluated question counts once;
+if a batch is evaluated, every question counts, and command review evaluates two
+questions. Admitted attempts that fail or are interrupted remain counted. No overage is
+charged. The account portal reports each member's remaining usage across all three
+windows; usage returns as earlier questions leave each rolling window.
+
+The existing production fleet guard remains 100 questions per day across the service.
+That limit conflicts with these per-person rolling caps and may pause or reject requests
+earlier. Resolve capacity and the fleet guard before launch. The supported decisions are
+advisory; current synthetic fixtures do not demonstrate Jev accuracy or cost savings.
+See [hosted plans and Jev details](docs/HOSTED_PLANS.md#included-system-1-decision-engine-jev).
 
 ## Guides
 
