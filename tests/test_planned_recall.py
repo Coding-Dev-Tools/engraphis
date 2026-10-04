@@ -11,6 +11,7 @@ from engraphis.backends.query_planner import LLMQueryPlanner
 from engraphis.backends.reranker import IdentityReranker
 from engraphis.core import grounded
 from engraphis.core.interfaces import (
+    AdvisoryQueryPlanner,
     MemoryRecord,
     MemoryType,
     PlannedQuery,
@@ -35,6 +36,29 @@ class _StaticPlanner:
         if isinstance(self.result, Exception):
             raise self.result
         return self.result
+
+
+class _ProtocolAdvisoryPlanner:
+    identity = "tests.protocol-advisory.v1"
+    local_identity = "tests.protocol-local.v1"
+    advisory_identity = "tests.protocol-advisory.v1"
+
+    def __init__(self):
+        self.advisory_calls = []
+
+    def plan(self, query, *, filter=None, timeout_s=None):
+        del filter, timeout_s
+        return RetrievalPlan((PlannedQuery(query, 1, "balanced"),))
+
+    def plan_with_advisory(
+        self, query, *, filter=None, timeout_s=None, allow_remote=False,
+        data_classification="internal",
+    ):
+        self.advisory_calls.append((filter, timeout_s, allow_remote, data_classification))
+        return RetrievalPlan((
+            PlannedQuery(query, 1, "balanced"),
+            PlannedQuery("advisory route", 2, "lexical"),
+        ))
 
 
 class _MappedEmbedder:
@@ -161,6 +185,54 @@ def test_deterministic_planner_keeps_original_and_bounds_additional_queries():
     assert plan.queries[1].profile == "lexical"
     assert "exact_term" in plan.reason_codes
     assert "relationship_intent" in plan.reason_codes
+
+
+def test_advisory_planner_extension_is_dispatched_through_its_protocol():
+    planner = _ProtocolAdvisoryPlanner()
+    assert isinstance(planner, AdvisoryQueryPlanner)
+    store, _embedder, engine, _workspace, _repo = _engine(planner)
+    try:
+        plan, fallback = engine._plan_queries(
+            "original query",
+            SearchFilter(),
+            selected_profile="balanced",
+            planning_mode="auto",
+            jev_assisted=True,
+            allow_remote=True,
+            data_classification="public",
+        )
+
+        assert fallback == ""
+        assert [route.text for route in plan.queries] == [
+            "original query", "advisory route",
+        ]
+        assert len(planner.advisory_calls) == 1
+        _, _, allow_remote, classification = planner.advisory_calls[0]
+        assert allow_remote is True
+        assert classification == "public"
+    finally:
+        store.close()
+
+
+def test_jev_assisted_request_falls_back_for_legacy_query_planner():
+    planner = _StaticPlanner(RetrievalPlan((PlannedQuery("unused", 1, "balanced"),)))
+    store, _embedder, engine, _workspace, _repo = _engine(planner)
+    try:
+        plan, fallback = engine._plan_queries(
+            "original query",
+            SearchFilter(),
+            selected_profile="balanced",
+            planning_mode="auto",
+            jev_assisted=True,
+            allow_remote=True,
+            data_classification="internal",
+        )
+
+        assert planner.calls == 0
+        assert fallback == "planner_unavailable"
+        assert [route.text for route in plan.queries] == ["original query"]
+    finally:
+        store.close()
 
 
 def test_planning_off_never_invokes_injected_planner_and_preserves_results():

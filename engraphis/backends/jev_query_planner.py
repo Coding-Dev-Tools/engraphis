@@ -20,6 +20,7 @@ class JevAssistedQueryPlanner:
     """
 
     identity = "engraphis.query-planner.jev-assisted.v1"
+    advisory_identity = identity
 
     def __init__(
         self, decision_backend: Optional[JevDecisionBackend] = None,
@@ -27,6 +28,9 @@ class JevAssistedQueryPlanner:
     ) -> None:
         self.decision_backend = decision_backend
         self.deterministic = deterministic or DeterministicQueryPlanner()
+        self.local_identity = str(
+            getattr(self.deterministic, "identity", type(self.deterministic).__name__)
+        )
 
     def plan(
         self, query: str, *, filter: Optional[SearchFilter] = None,
@@ -36,7 +40,7 @@ class JevAssistedQueryPlanner:
             query, filter=filter, timeout_s=timeout_s, mode="auto",
         )
 
-    def plan_with_jev(
+    def plan_with_advisory(
         self, query: str, *, filter: Optional[SearchFilter] = None,
         timeout_s: Optional[float] = None, allow_remote: bool = False,
         data_classification: str = "internal",
@@ -120,6 +124,20 @@ class JevAssistedQueryPlanner:
             queries=prioritized,
             mtype_limits=dict(baseline.mtype_limits),
             reason_codes=(*baseline.reason_codes[:7], "jev_route_selected"),
+        )
+
+    def plan_with_jev(
+        self, query: str, *, filter: Optional[SearchFilter] = None,
+        timeout_s: Optional[float] = None, allow_remote: bool = False,
+        data_classification: str = "internal",
+    ) -> RetrievalPlan:
+        """Backward-compatible alias for the advisory planner protocol."""
+        return self.plan_with_advisory(
+            query,
+            filter=filter,
+            timeout_s=timeout_s,
+            allow_remote=allow_remote,
+            data_classification=data_classification,
         )
 
     @staticmethod

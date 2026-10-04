@@ -36,6 +36,7 @@ from engraphis.core.evidence import exact_value_binding
 from engraphis.core.graph_policy import UniformGraphTraversalPolicy
 from engraphis.core.graphrank import personalized_pagerank
 from engraphis.core.interfaces import (
+    AdvisoryQueryPlanner,
     Candidate,
     ContextPacker,
     ContextUsage,
@@ -692,7 +693,9 @@ class RecallEngine:
                         effective_limits,
                         [],
                         planner_fallback,
-                        getattr(self.query_planner, "identity", type(self.query_planner).__name__),
+                        _planner_diagnostic_identity(
+                            self.query_planner, jev_assisted=jev_assisted,
+                        ),
                         rerank_pool_size=0,
                         available_candidates=0,
                         candidate_k_used=arm_candidate_k,
@@ -1024,7 +1027,9 @@ class RecallEngine:
                     effective_limits,
                     type_limit_drops,
                     planner_fallback,
-                    getattr(self.query_planner, "identity", type(self.query_planner).__name__),
+                    _planner_diagnostic_identity(
+                        self.query_planner, jev_assisted=jev_assisted,
+                    ),
                     rerank_pool_size=len(pool),
                     available_candidates=len(scored),
                     candidate_k_used=arm_candidate_k,
@@ -1104,13 +1109,13 @@ class RecallEngine:
         if self.planner_timeout_s <= 0 or not self._planner_slot.acquire(blocking=False):
             raise TimeoutError("planner deadline unavailable")
         deadline = time.monotonic() + self.planner_timeout_s
-        planner_method = (
-            getattr(self.query_planner, "plan_with_jev", None)
-            if jev_assisted else self.query_planner.plan
-        )
-        if not callable(planner_method):
-            self._planner_slot.release()
-            raise RuntimeError("Jev-assisted planner is unavailable")
+        if jev_assisted:
+            if not isinstance(self.query_planner, AdvisoryQueryPlanner):
+                self._planner_slot.release()
+                raise RuntimeError("advisory planner is unavailable")
+            planner_method = self.query_planner.plan_with_advisory
+        else:
+            planner_method = self.query_planner.plan
         outcome: queue.Queue[tuple[bool, Any]] = queue.Queue(maxsize=1)
 
         def invoke() -> None:
@@ -2013,6 +2018,17 @@ def _sanitize_plan(
         _normalize_mtype_limits(proposed.mtype_limits),
         tuple(reasons),
     )
+
+
+def _planner_diagnostic_identity(
+    planner: QueryPlanner, *, jev_assisted: bool,
+) -> str:
+    """Report the implementation that handled this mode of planning."""
+    if isinstance(planner, AdvisoryQueryPlanner):
+        identity = planner.advisory_identity if jev_assisted else planner.local_identity
+    else:
+        identity = getattr(planner, "identity", type(planner).__name__)
+    return str(identity)
 
 
 def _planner_fallback_reason(exc: Exception) -> str:
