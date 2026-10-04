@@ -586,6 +586,73 @@ def test_dashboard_jev_review_blocks_secret_memory_even_after_consent(dashboard,
     assert service.store.get_memory(first_id).sensitivity == "secret"
 
 
+@pytest.mark.parametrize(("sensitivity", "metadata_sensitivity"), [
+    ("normal", "secret"), ("normal", " SeCrEt "), ("normal", "unrecognized"),
+    ("normal", True), ("normal", False), ("normal", {"label": "normal"}),
+    ("secret", "normal"),
+])
+@pytest.mark.parametrize("secret_position", [0, 1])
+def test_review_secret_or_unknown_metadata_never_reaches_either_provider_check(
+    dashboard, monkeypatch, sensitivity, metadata_sensitivity, secret_position,
+):
+    from engraphis.routes import v2_api
+
+    client, service, first_id, second_id = dashboard
+    memory_ids = [first_id, second_id]
+    selected_id = memory_ids[secret_position]
+    service.store.conn.execute(
+        "UPDATE memories SET sensitivity=?, metadata=? WHERE id=?",
+        (sensitivity, json.dumps({"sensitivity": metadata_sensitivity}), selected_id),
+    )
+    service.store.conn.commit()
+    decision_client = _DecisionClient()
+    backend_resolutions = []
+
+    def resolve_backend():
+        backend_resolutions.append(True)
+        return _review_backend(decision_client)
+
+    monkeypatch.setattr(v2_api, "_dashboard_jev_backend", resolve_backend)
+    before = list(service.store.conn.iterdump())
+    response = client.post("/api/jev/review", json={
+        "workspace": "demo", "memory_ids": memory_ids, "claim": "Which database is primary?",
+        "allow_remote": True, "data_classification": "internal",
+    })
+    assert response.status_code == 200
+    body = response.json()
+    assert body["remote_consent_granted"] is True
+    assert body["remote_blocked_reason"] == "sensitive_memory"
+    assert body["support"]["fallback_reason"] == "sensitive_memory"
+    assert body["contradiction"]["fallback_reason"] == "sensitive_memory"
+    assert decision_client.calls == []
+    assert backend_resolutions == []
+    assert list(service.store.conn.iterdump()) == before
+
+
+@pytest.mark.parametrize("metadata_sensitivity", ["normal", " Sensitive ", None])
+def test_review_recognized_nonsecret_metadata_retains_consented_advisory(
+    dashboard, monkeypatch, metadata_sensitivity,
+):
+    import json
+    from engraphis.routes import v2_api
+
+    client, service, first_id, second_id = dashboard
+    service.store.conn.execute("UPDATE memories SET metadata=? WHERE id=?", (
+        json.dumps({"sensitivity": metadata_sensitivity}), first_id,
+    ))
+    service.store.conn.commit()
+    decision_client = _DecisionClient()
+    monkeypatch.setattr(v2_api, "_dashboard_jev_backend", lambda: _review_backend(decision_client))
+    response = client.post("/api/jev/review", json={
+        "workspace": "demo", "memory_ids": [first_id, second_id],
+        "claim": "Which database is primary?", "allow_remote": True,
+        "data_classification": "internal",
+    })
+    assert response.status_code == 200
+    assert response.json()["remote_blocked_reason"] is None
+    assert len(decision_client.calls) == 2
+
+
 @pytest.mark.parametrize(("scope", "stored_repo"), [
     (Scope.REPO, "selected"),
     (Scope.WORKSPACE, None),
