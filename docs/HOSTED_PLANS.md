@@ -26,6 +26,9 @@ Start or manage a hosted subscription in the [Engraphis account portal](https://
 
 ## Included System 1 Decision Engine (Jev)
 
+This is the canonical allowance contract approved on 2026-10-04 and supersedes the
+earlier pooled Team allowance proposal.
+
 After release acceptance and service enablement, every legitimate paid Pro user and every
 paid Team named seat, including a viewer seat, includes managed Jev at no additional charge
 and without a personal provider API key. Active legitimate trial/test entitlements receive

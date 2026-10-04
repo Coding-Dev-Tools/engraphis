@@ -13,8 +13,8 @@ from engraphis.core.schema import SCHEMA_VERSION
 
 
 ROOT = Path(__file__).resolve().parents[1]
-README_BENCHMARK_PIN = "54eae9fc5105ab491a9aa9dc2bfeba6109baf63b"
-README_HOSTED_PLANS_PIN = "54eae9fc5105ab491a9aa9dc2bfeba6109baf63b"
+README_BENCHMARK_PIN = "0bd6a8e8f5804a664d9850c57b159d73012ce59b"
+README_HOSTED_PLANS_PIN = "e440bf6ba0ff600648fdac6eb53dd28d6d80df24"
 
 
 def _read(path: str) -> str:
@@ -42,13 +42,13 @@ def test_readme_targets_resolve_in_the_repository() -> None:
         if parsed.scheme in {"http", "https"}:
             if parsed.netloc == "github.com":
                 prefixes = (
-                    "/Coding-Dev-Tools/engraphis/blob/54eae9fc5105ab491a9aa9dc2bfeba6109baf63b/",
+                    "/Coding-Dev-Tools/engraphis/blob/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/",
                     f"/Coding-Dev-Tools/engraphis/blob/{README_BENCHMARK_PIN}/",
                     f"/Coding-Dev-Tools/engraphis/blob/{README_HOSTED_PLANS_PIN}/",
                 )
             elif parsed.netloc == "raw.githubusercontent.com":
                 prefixes = (
-                    "/Coding-Dev-Tools/engraphis/54eae9fc5105ab491a9aa9dc2bfeba6109baf63b/",
+                    "/Coding-Dev-Tools/engraphis/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/",
                     f"/Coding-Dev-Tools/engraphis/{README_BENCHMARK_PIN}/",
                 )
             else:
@@ -283,7 +283,7 @@ def test_configuration_and_recovery_guidance_matches_public_contracts() -> None:
     sync = _read("docs/SYNC.md")
 
     assert (
-        "[Configuration reference](https://github.com/Coding-Dev-Tools/engraphis/blob/54eae9fc5105ab491a9aa9dc2bfeba6109baf63b/"
+        "[Configuration reference](https://github.com/Coding-Dev-Tools/engraphis/blob/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/"
         "docs/CONFIGURATION.md)" in readme
     )
     for document in (configuration, security, connect, providers, sync):
@@ -363,8 +363,22 @@ def test_consolidation_docs_expose_only_live_public_options() -> None:
 
     assert "docs/HOSTED_PLANS.md" in readme
     hosted_plan = " ".join(_read("docs/HOSTED_PLANS.md").split())
-    assert "100 evaluated questions per rolling hour, 1,000 per rolling five hours, and 2,000 per rolling 24 hours" in hosted_plan
-    assert "Team usage is per seat, not pooled." in hosted_plan
+    assert "100 questions per rolling hour" in readme
+    assert "100 evaluated questions per rolling hour" in hosted_plan
+    for public_copy in (readme, hosted_plan):
+        assert "1,000 per rolling five hours" in public_copy
+        assert "2,000 per rolling 24 hours" in public_copy
+    assert "Team use is not pooled" in readme
+    assert "Team usage is per seat, not pooled" in hosted_plan
+    assert "signed-in member's individual window usage" in hosted_plan
     assert "currently `not_yet_available` pending release acceptance" in hosted_plan
+    assert "100 questions/day" in hosted_plan
+    assert "Deterministic fixtures validate integration and fallback behavior, not model" in hosted_plan
+    assert "Managed access is limited to the following concrete Engraphis workflows" in hosted_plan
+    assert "Experimental recall route planning and custom remote questions require explicit BYOK" in hosted_plan
+    assert "no latency, accuracy, or cost-saving guarantee" in hosted_plan
+    assert "Recall route selection is experimental and BYOK-only" in readme
+    assert "no retrieval-quality improvement is claimed" in readme
+    assert "Managed Jev remains `not_yet_available`" in readme
     normalized_tools = " ".join(tools.split())
     assert "`profiles (bool, false)`; `structured (bool, false)`." in normalized_tools
