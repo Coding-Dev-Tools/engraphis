@@ -2068,6 +2068,10 @@ def _planning_advisory(
         "jev_client_contract_invalid": "client_contract_invalid",
         "jev_provider_fallback": "provider_fallback",
         "jev_remote_unavailable": "remote_unavailable",
+        "jev_allowance_exhausted": "allowance_exhausted",
+        "jev_remote_timeout": "remote_timeout",
+        "jev_session_changed": "session_changed",
+        "jev_managed_operation_unsupported": "managed_operation_unsupported",
         "jev_malformed_response": "malformed_response",
         "jev_fallback": "unavailable_or_uncertain",
     }

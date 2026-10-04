@@ -162,7 +162,10 @@ def _fallback_code(reason: Optional[str]) -> str:
         "client_contract_invalid": "jev_client_contract_invalid",
         "provider_fallback": "jev_provider_fallback",
         "remote_unavailable": "jev_remote_unavailable",
-        "malformed_response": "jev_malformed_response",
+        "allowance_exhausted": "jev_allowance_exhausted",
+        "remote_timeout": "jev_remote_timeout",
+        "session_changed": "jev_session_changed",
         "managed_operation_unsupported": "jev_managed_operation_unsupported",
+        "malformed_response": "jev_malformed_response",
     }
     return allowed.get(reason or "", "jev_fallback")
