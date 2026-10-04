@@ -8,6 +8,11 @@ from urllib.parse import unquote, urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY = "Coding-Dev-Tools/engraphis"
+README_BENCHMARK_PIN = "d7058a8e8de9a92c2c25d9dbd8b76971ca3fd3e5"
+README_LINK_PINS = (
+    "fee9d0c150c250632d8e0c0ee86c1325c9e1ee78",
+    README_BENCHMARK_PIN,
+)
 
 
 def _project_version() -> str:
@@ -41,13 +46,15 @@ def _readme_targets(readme: str) -> set[str]:
 def _repository_path(url: str) -> Path | None:
     parsed = urlparse(url)
     if parsed.netloc == "github.com":
-        prefix = f"/{REPOSITORY}/blob/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/"
-        if parsed.path.startswith(prefix):
-            return ROOT / unquote(parsed.path[len(prefix) :])
+        prefixes = tuple(f"/{REPOSITORY}/blob/{pin}/" for pin in README_LINK_PINS)
+        for prefix in prefixes:
+            if parsed.path.startswith(prefix):
+                return ROOT / unquote(parsed.path[len(prefix) :])
     if parsed.netloc == "raw.githubusercontent.com":
-        prefix = f"/{REPOSITORY}/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/"
-        if parsed.path.startswith(prefix):
-            return ROOT / unquote(parsed.path[len(prefix) :])
+        prefixes = tuple(f"/{REPOSITORY}/{pin}/" for pin in README_LINK_PINS)
+        for prefix in prefixes:
+            if parsed.path.startswith(prefix):
+                return ROOT / unquote(parsed.path[len(prefix) :])
     return None
 
 
@@ -77,7 +84,7 @@ def test_pypi_readme_has_only_absolute_repository_assets_and_links() -> None:
         "docs/images/knowledge-graph.png"
     ) in targets
     assert (
-        f"https://raw.githubusercontent.com/{REPOSITORY}/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/"
+        f"https://raw.githubusercontent.com/{REPOSITORY}/{README_BENCHMARK_PIN}/"
         "docs/images/context-efficiency.svg"
     ) in targets
 
