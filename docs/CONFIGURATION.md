@@ -44,7 +44,7 @@ control-plane, relay, compute, and worker implementations are private services.
 | `ENGRAPHIS_LLM_MODEL` | `gpt-4o-mini` | Model name (provider-specific) |
 | `ENGRAPHIS_LLM_API_KEY` | Not set | API key for chat/synthesis, `llm` / `llm_structured` extraction, and structured consolidation |
 | `ENGRAPHIS_LLM_BASE_URL` | Not set | Base URL for openrouter / custom OpenAI-compatible endpoints |
-| `ENGRAPHIS_DECISION_BACKEND` | `none` | `none` or `local` keeps advisory decisions local; `managed` uses the saved Cloud session and included finite allowance for four concrete workflows after service acceptance; Team usage is pooled by licensed seat count. `auto` selects managed when configured and never switches to BYOK; explicit `byok` uses a personal TypeSafe key and may incur provider charges. Managed custom questions and query planning are unsupported. Legacy `typesafe`, `jev`, and `system1` mean BYOK. Remote calls also require per-call consent. |
+| `ENGRAPHIS_DECISION_BACKEND` | `none` | `none` or `local` keeps advisory decisions local; `managed` uses the saved Cloud session and an included per-person rolling allowance after service acceptance; `auto` selects managed when configured and never switches to BYOK; explicit `byok` uses a personal TypeSafe key and may incur provider charges. Managed custom questions and query planning are unsupported. Legacy `typesafe`, `jev`, and `system1` mean BYOK. Remote calls also require per-call consent. |
 | `ENGRAPHIS_DECISION_MODEL` | `jev-1.13.0` | Pinned model accepted by the Jev transport; other model identifiers are rejected. |
 | `TYPESAFE_API_KEY` | Not set | Personal credential for explicit BYOK decisions; `JEV_API_KEY` is a fallback alias. Managed decisions use the saved Cloud session instead. |
 | `TYPESAFE_BASE_URL` | `https://api.typesafe.ai` | Direct BYOK provider origin; does not change the managed session's bound Cloud control origin. |
@@ -62,29 +62,41 @@ control-plane, relay, compute, and worker implementations are private services.
 | `ENGRAPHIS_CLOUD_ACCESS_TOKEN` | Not set | Optional short-lived access token for ephemeral jobs |
 | `ENGRAPHIS_MANAGED_COMPUTE_CONSENT` | *(unset)* | Deny-only operator override: `0` pauses readable managed processing. A truthy value cannot grant approval. Each workspace requires explicit confirmation in Manage → Settings; encrypted sync is separate |
 
-Managed Jev is currently `not_yet_available` pending release acceptance and service-capacity
-qualification. After enablement, paid Pro users and paid Team named seats (including viewers) can
-use four fixed advisory workflows at no additional charge within a finite allowance. Pro usage is
-owner-scoped; Team questions share one organization pool sized by licensed seat count. The account
-portal reports current availability and usage. No fixed quota is published, overage is not charged,
-and service-protection limits may pause requests. A command review evaluates two questions; each
-of the other three workflows evaluates one. Subscribers do not need a provider key for managed
-use. These rules are service-enforced, not client configuration overrides. Setting a backend does
-not enable the service or satisfy provider terms, release acceptance, capacity, or quality gates.
-See [hosted plans](HOSTED_PLANS.md#included-system-1-decision-engine-jev).
+Managed Jev is currently `not_yet_available` pending release acceptance and
+service-capacity qualification; client configuration does not enable it. After
+enablement, every legitimate Pro user and each eligible Team named seat, including paid
+viewers, with an active paid, trial, or test entitlement receives managed Jev at no
+additional customer charge and without a personal provider key.
 
-The four managed workflows require a command, a pair of facts, query/evidence, or goal/output
-context and their fixed question schemas. Arbitrary `custom` and `query_planning` payloads are
-rejected before credential refresh or network requests. Experimental recall route planning
-requires explicit BYOK; managed failure never silently selects a personal key. Remote consent
-and `public` or `internal` classification remain mandatory, and `offline_mode=true` prevents
-remote requests. Viewers can use direct Classic advisory decisions; generic Smart stateful
-execution still requires admin and the private Team tool catalog is unchanged.
+Each individual receives all three independent rolling limits: **100 evaluated questions per rolling hour, 1,000 per rolling five hours, and 2,000 per rolling 24 hours**. Usage is per
+person, not pooled across a Team and not monthly. Each evaluated question counts once;
+if a batch is evaluated, every question counts. A `guard_command` review evaluates two
+questions, and each other supported workflow evaluates one. Admitted attempts that fail
+or are interrupted remain counted. No overage is charged. The account portal reports
+that member's remaining usage across all three windows; usage returns as earlier
+questions leave each rolling window.
 
-Managed transport callers can supply `request_key` for explicit retry deduplication. A duplicate
-admitted key returns 409 without an additional provider call or usage increment; there is no
-stored answer replay or automatic retry. Admitted errors remain counted. This parameter is not
-an environment setting or an MCP/dashboard field.
+The existing production fleet guard remains 100 questions per day across the service. It
+conflicts with the per-person rolling caps and may pause or reject requests earlier, so
+resolve capacity and the fleet guard before launch. No latency, accuracy, or cost-saving
+guarantee is established by configuration or a successful health check. These rules are
+service-enforced, not client configuration overrides. Selecting a backend does not
+enable the service or satisfy release, provider-terms, capacity, or quality gates. See
+[hosted plans](HOSTED_PLANS.md#included-system-1-decision-engine-jev).
+
+The four managed workflows require a command, a pair of facts, query/evidence, or
+goal/output context and their fixed question schemas. Arbitrary `custom` and
+`query_planning` payloads are rejected before credential refresh or network requests.
+Experimental recall route planning requires explicit BYOK; managed failure never
+silently selects a personal key. Remote consent and `public` or `internal`
+classification remain mandatory, and `offline_mode=true` prevents remote requests.
+Viewers can use direct Classic advisory decisions; generic Smart stateful execution
+still requires admin and the private Team tool catalog is unchanged.
+
+Managed transport callers can supply `request_key` for explicit retry deduplication. A
+duplicate admitted key returns 409 without an additional provider call or usage
+increment; there is no stored answer replay or automatic retry. Admitted errors remain
+counted. This parameter is not an environment setting or an MCP/dashboard field.
 
 The optional cross-encoder reranker is model- and hardware-dependent. Treat its quality and
 latency as deployment-specific until a versioned model identity, exact configuration, and
