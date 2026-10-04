@@ -13,7 +13,7 @@ from engraphis.core.schema import SCHEMA_VERSION
 
 
 ROOT = Path(__file__).resolve().parents[1]
-README_BENCHMARK_PIN = "27ab1b3baab791d9f6957171cd6d21b09f39eed7"
+README_BENCHMARK_PIN = "66920e48eb12444876d6e08e937c7a12e02ad4c5"
 
 
 def _read(path: str) -> str:
@@ -41,12 +41,12 @@ def test_readme_targets_resolve_in_the_repository() -> None:
         if parsed.scheme in {"http", "https"}:
             if parsed.netloc == "github.com":
                 prefixes = (
-                    "/Coding-Dev-Tools/engraphis/blob/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/",
+                    "/Coding-Dev-Tools/engraphis/blob/66920e48eb12444876d6e08e937c7a12e02ad4c5/",
                     f"/Coding-Dev-Tools/engraphis/blob/{README_BENCHMARK_PIN}/",
                 )
             elif parsed.netloc == "raw.githubusercontent.com":
                 prefixes = (
-                    "/Coding-Dev-Tools/engraphis/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/",
+                    "/Coding-Dev-Tools/engraphis/66920e48eb12444876d6e08e937c7a12e02ad4c5/",
                     f"/Coding-Dev-Tools/engraphis/{README_BENCHMARK_PIN}/",
                 )
             else:
@@ -281,7 +281,7 @@ def test_configuration_and_recovery_guidance_matches_public_contracts() -> None:
     sync = _read("docs/SYNC.md")
 
     assert (
-        "[Configuration reference](https://github.com/Coding-Dev-Tools/engraphis/blob/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/"
+        "[Configuration reference](https://github.com/Coding-Dev-Tools/engraphis/blob/66920e48eb12444876d6e08e937c7a12e02ad4c5/"
         "docs/CONFIGURATION.md)" in readme
     )
     for document in (configuration, security, connect, providers, sync):
