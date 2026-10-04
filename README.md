@@ -87,7 +87,7 @@ The existing production fleet guard remains 100 questions per day across the ser
 That limit conflicts with these per-person rolling caps and may pause or reject requests
 earlier. Resolve capacity and the fleet guard before launch. The supported decisions are
 advisory; current synthetic fixtures do not demonstrate Jev accuracy or cost savings.
-See [hosted plans and Jev details](docs/HOSTED_PLANS.md#included-system-1-decision-engine-jev).
+See [hosted plans and Jev details](https://github.com/Coding-Dev-Tools/engraphis/blob/94b8d244bfef890493ac7858faf03203f64547f1/docs/HOSTED_PLANS.md#included-system-1-decision-engine-jev).
 
 ## Guides
 

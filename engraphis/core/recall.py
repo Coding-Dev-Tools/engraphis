@@ -1089,11 +1089,16 @@ class RecallEngine:
                     list(flt.graph_layers) if flt.graph_layers is not None else None
                 ),
             )
+            advisory_available = isinstance(self.query_planner, AdvisoryQueryPlanner)
             proposed = self._run_planner(
-                query, planner_filter, jev_assisted=jev_assisted,
+                query, planner_filter,
+                jev_assisted=jev_assisted and advisory_available,
                 allow_remote=allow_remote, data_classification=data_classification,
             )
-            return _sanitize_plan(proposed, query, selected_profile), ""
+            plan = _sanitize_plan(proposed, query, selected_profile)
+            if jev_assisted and not advisory_available:
+                return plan, "jev_advisory_unavailable"
+            return plan, ""
         except Exception as exc:
             return identity, _planner_fallback_reason(exc)
 
@@ -2050,6 +2055,7 @@ def _planning_advisory(
         return None
     fixed_reasons = {
         "jev_planning_disabled": "planning_disabled",
+        "jev_advisory_unavailable": "advisory_unavailable",
         "jev_no_alternatives": "no_alternate_routes",
         "jev_no_route_choice": "no_route_choice",
         "jev_remote_consent_required": "remote_consent_required",
