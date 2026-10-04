@@ -49,6 +49,8 @@ class SyntheticTask:
     task_id: str
     category: str
     query: str
+    service_id: str
+    cache_id: str
     answer_tokens: frozenset[str]
     answer_phrase: str
     target_memory_id: str = ""
@@ -97,6 +99,8 @@ def synthetic_tasks() -> list[SyntheticTask]:
                 task_id=f"task-{index:02d}",
                 category=category,
                 query=query,
+                service_id=service,
+                cache_id=cache,
                 answer_tokens=frozenset(tokenize(answer_phrase)),
                 answer_phrase=answer_phrase,
             ))
@@ -112,8 +116,8 @@ def _seed(service: MemoryService, tasks: list[SyntheticTask]) -> list[SyntheticT
         service.engine.remember(
             (
                 f"Synthetic fixture {index}: {task.answer_phrase}. This verified fact links "
-                f"{task.category.replace('_', ' ')} evidence for {task.query.split()[2]} "
-                f"and {task.query.split()[4]}."
+                f"{task.category.replace('_', ' ')} evidence for {task.service_id} "
+                f"and {task.cache_id}."
             ),
             workspace_id=workspace_id,
             repo_id=repo_id,
@@ -127,8 +131,8 @@ def _seed(service: MemoryService, tasks: list[SyntheticTask]) -> list[SyntheticT
             service.engine.remember(
                 (
                     f"Synthetic decoy {index}-{distractor}: routine "
-                    f"{task.category.replace('_', ' ')} status for {task.query.split()[2]} "
-                    f"and {task.query.split()[4]}; no verified outcome is recorded."
+                    f"{task.category.replace('_', ' ')} status for {task.service_id} "
+                    f"and {task.cache_id}; no verified outcome is recorded."
                 ),
                 workspace_id=workspace_id,
                 repo_id=repo_id,
@@ -147,6 +151,8 @@ def _seed(service: MemoryService, tasks: list[SyntheticTask]) -> list[SyntheticT
             task_id=task.task_id,
             category=task.category,
             query=task.query,
+            service_id=task.service_id,
+            cache_id=task.cache_id,
             answer_tokens=task.answer_tokens,
             answer_phrase=task.answer_phrase,
             target_memory_id=str(target[0]),
@@ -273,7 +279,7 @@ def run_evaluation(
             raise RuntimeError("evaluation exceeded its configured remote-request cap")
         return {
             "schema": "engraphis-jev-recall-evaluation/v1",
-            "fixture": "synthetic-independent-tasks/v1",
+            "fixture": "synthetic-independent-tasks/v2",
             "tasks": len(tasks),
             "categories": dict(Counter(task.category for task in tasks)),
             "model": MODEL,
@@ -320,7 +326,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.check_only:
         tasks = synthetic_tasks()[:args.max_requests]
         print(json.dumps({
-            "fixture": "synthetic-independent-tasks/v1",
+            "fixture": "synthetic-independent-tasks/v2",
             "tasks": len(tasks),
             "categories": dict(Counter(task.category for task in tasks)),
             "eligible_tasks": sum(
