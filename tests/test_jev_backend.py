@@ -135,6 +135,7 @@ def _serialized_request_sizes(state, question, model=MODEL, purpose="custom"):
     managed = {
         "model": model, "state": state, "questions": [question.to_dict()],
         "allow_remote": True, "purpose": purpose, "data_classification": "internal",
+        "request_key": "0" * 32,
     }
     provider_question = {"type": question.kind, "instructions": question.prompt}
     if question.kind == "choice":

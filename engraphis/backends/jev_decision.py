@@ -215,6 +215,8 @@ class JevDecisionBackend:
         managed_payload = {
             "model": model, "state": state, "questions": [question.to_dict()],
             "allow_remote": True, "purpose": purpose, "data_classification": data_classification,
+            # Managed Cloud transport appends its default uuid4().hex key.
+            "request_key": "0" * 32,
         }
         provider_question: Dict[str, object] = {
             "type": question.kind, "instructions": question.prompt,
