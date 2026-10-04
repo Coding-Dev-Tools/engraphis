@@ -16,7 +16,7 @@ implementations are not part of this repository.
 | Local dashboard, memory engine, and MCP tools | Yes | Yes | Yes |
 | Local version history, graph, and manual consolidation | Yes | Yes | Yes |
 | Local workspace export | Yes | Yes | Yes |
-| Advisory Jev decisions | Local heuristics; optional BYOK | Included managed allowance after service acceptance | Included pooled allowance after service acceptance |
+| Advisory Jev decisions | Local heuristics; optional BYOK | Included managed decisions after service acceptance | Included managed decisions per named seat after service acceptance |
 | Hosted Cloud Sync, Analytics, and managed automation | | Yes | Yes |
 | Private account and billing support | | Yes | Yes |
 | Hosted multi-user dashboard, roles, seats, and audit export | | | Yes |
@@ -26,15 +26,20 @@ Start or manage a hosted subscription in the [Engraphis account portal](https://
 
 ## Included System 1 Decision Engine (Jev)
 
-After release acceptance and service enablement, Pro and Team include managed Jev decisions at
-no additional charge within a finite allowance. Team usage is pooled across the organization.
-There is no fixed public quota. After acceptance, the account portal reports current allowance,
-usage, reset time, pooling, and availability. Requests that may have reached the provider remain
-counted, including failed or interrupted requests, and no overage charge is applied. A shared
-daily provider-protection limit can pause service before a plan allowance is exhausted. The
-service is currently `not_yet_available` pending release acceptance; client configuration does
-not enable it. No latency, accuracy, or cost-saving guarantee is established by configuration or
-a successful health check.
+After release acceptance and service enablement, each Pro subscription owner and each named Team
+seat includes managed Jev decisions at no additional charge. Every individual has 100 evaluated
+questions per rolling hour, 1,000 per rolling five hours, and 2,000 per rolling 24 hours. Team
+usage is per seat, not pooled. Each evaluated question counts once; command review consumes two.
+The account portal reports the signed-in member's rolling windows and next release times. An
+admitted request that may have reached the provider remains counted if it fails or is interrupted;
+no overage charge is applied. A service protection limit may pause requests before an individual's
+allowance is exhausted.
+
+Managed Jev is currently `not_yet_available` pending release acceptance and service capacity
+qualification; client configuration does not enable it. Subscribers do not need a personal
+provider key for managed decisions. Direct BYOK is separate and may incur provider charges. No
+latency, accuracy, or cost-saving guarantee is established by configuration or a successful
+health check.
 
 The managed transport and MCP decision route require client **1.7.9 or newer**.
 The published 1.7.8 client has an experimental adapter but does not provide this route.
