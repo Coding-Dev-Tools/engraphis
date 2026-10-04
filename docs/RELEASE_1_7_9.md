@@ -36,8 +36,9 @@ does not ship the managed transport or the registered MCP decision tool.
    `offline_mode=true` prevents remote execution. Pattern filtering cannot detect
    every secret in arbitrary prose.
 
-The service enforces current membership, entitlement, monthly allowance and a
-separate fleet cap. A local success, fallback, health response or configured
+The service enforces current membership, entitlement, and individual rolling limits
+of 100 questions per hour, 1,000 per five hours, and 2,000 per 24 hours. The separate
+100-question/day fleet cap remains a launch conflict. A local success, fallback, health response or configured
 backend does not establish a successful managed provider request. The account
 portal reports availability and usage. Jev advice does not authorize actions or
 replace deterministic checks.

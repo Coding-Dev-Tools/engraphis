@@ -105,7 +105,7 @@ def test_direct_control_routes_exact_origin_and_token_without_saved_state_or_ref
         requests.append(request)
         assert 0 < timeout <= client.timeout_s
         response = io.BytesIO(json.dumps({
-            "model": transport.MODEL, "is_fallback": False, "decisions": {"q": {
+            "model": transport.MODEL, "is_fallback": False, "decisions": {"has_support": {
                 "type": "noul", "probability": 0.9, "confidence": 0.8,
                 "confidence_source": "derived_decisiveness",
             }},
@@ -117,13 +117,15 @@ def test_direct_control_routes_exact_origin_and_token_without_saved_state_or_ref
     monkeypatch.setattr(socket, "getaddrinfo", resolve)
     monkeypatch.setattr(hosted_client, "build_pinned_https_opener",
                         lambda *handlers: SimpleNamespace(open=open_request))
-    batch = client.evaluate("Synthetic evidence", [DecisionQuestion("q", "Assess", "noul")],
-                            model=transport.MODEL, allow_remote=True)
-    assert batch.get_noul("q").probability == 0.9
+    state = "QUERY: Which evidence supports this fact?\nEVIDENCE: Synthetic evidence"
+    batch = client.evaluate(state, [DecisionQuestion(
+        "has_support", "Does this evidence directly support answering the query?", "noul",
+    )], model=transport.MODEL, allow_remote=True, purpose="verify_support")
+    assert batch.get_noul("has_support").probability == 0.9
     assert len(requests) == 1 and resolutions
     assert requests[0].full_url == control + "/v1/jev/decide"
     assert requests[0].get_header("Authorization") == "Bearer synthetic-direct-access"
-    assert json.loads(requests[0].data)["state"] == "Synthetic evidence"
+    assert json.loads(requests[0].data)["state"] == state
     assert direct_credentials == []
 
 

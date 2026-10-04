@@ -163,5 +163,6 @@ def _fallback_code(reason: Optional[str]) -> str:
         "provider_fallback": "jev_provider_fallback",
         "remote_unavailable": "jev_remote_unavailable",
         "malformed_response": "jev_malformed_response",
+        "managed_operation_unsupported": "jev_managed_operation_unsupported",
     }
     return allowed.get(reason or "", "jev_fallback")
