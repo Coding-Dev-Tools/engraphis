@@ -1582,12 +1582,12 @@ def jev_review(req: _JevReviewReq):
     inspected = []
     records = []
     for memory_id in req.memory_ids:
-        detail = _run(current_service.inspect, memory_id, workspace=ws, repo=req.repo)
-        memory = detail.get("memory") or {}
-        record = current_service.store.get_memory(memory_id)
-        if not memory or record is None:
-            raise HTTPException(status_code=404, detail={"error": "memory not found"})
-        inspected.append(memory)
+        record = _run(
+            current_service.read_memory_for_review, memory_id, workspace=ws, repo=req.repo,
+        )
+        inspected.append({
+            "title": record.title, "content": record.content, "summary": record.summary,
+        })
         records.append(record)
 
     backend = _dashboard_jev_backend()

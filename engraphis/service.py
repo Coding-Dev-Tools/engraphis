@@ -56,7 +56,7 @@ from engraphis.core.vector_repair import index_repair_identity
 from engraphis.core.ids import new_id as make_id
 from engraphis.core.savings import annotate_usage, normalize_release_version
 from engraphis.core.interfaces import (
-    Edge, FactSpec, GraphLayer, MemoryType, Node, Scope, SearchFilter,
+    Edge, FactSpec, GraphLayer, MemoryRecord, MemoryType, Node, Scope, SearchFilter,
     embedder_capabilities, embedding_space_fingerprint,
     vector_index_requires_sync,
     vector_index_shares_store_transaction,
@@ -7374,6 +7374,28 @@ class MemoryService:
                         "can_revise": self.engine.can_revise_memory(record.id)} for record in page],
                     "count": len(page), "total_count": total, "next_cursor": next_cursor,
                     "valid_at": anchors[0], "known_at": anchors[1]}
+
+    def read_memory_for_review(
+        self, memory_id: str, *, workspace: str, repo: Optional[str] = None,
+    ) -> MemoryRecord:
+        """Read one selected advisory record, including authorized project ancestors.
+
+        Unlike governance and inspection, a project review can use workspace/user
+        memories visible in its browse view. Session-private records still require
+        their existing owner authorization. No links, audit, or lineage are read.
+        """
+        mid = _clean_text(memory_id, field="memory_id", max_chars=MAX_NAME_CHARS)
+        wid, rid = self._require_scope(workspace, repo)
+        record = self.store.get_memory(mid)
+        if record is None:
+            raise ValidationError(f"no memory with id '{mid}'")
+        if record.workspace_id != wid or (
+            rid is not None and record.repo_id != rid
+            and record.scope not in (Scope.WORKSPACE, Scope.USER)
+        ):
+            raise ValidationError(f"memory '{mid}' does not belong to that workspace/repo")
+        self._authorize_memory_session(record)
+        return record
 
     def inspect(self, memory_id: str, *, workspace: str, repo: Optional[str] = None) -> dict:
         """Everything the inspector shows for one memory: the record, its links, its

@@ -5,11 +5,15 @@ citation filter (cite only sources that individually clear the floor), the optio
 synthesis path (used, abstained, and failure→fallback), the memory-poisoning fencing of
 the synthesis prompt, and the service-layer validation/JSON shape.
 """
+from dataclasses import fields
+
 import pytest
 
 from engraphis.backends.embedder_deterministic import DeterministicEmbedder
 from engraphis.core.engine import MemoryEngine
-from engraphis.core.grounded import ABSTAIN_SENTINEL, GROUNDED_SUPPORT_FLOOR, support_scores
+from engraphis.core.grounded import (
+    ABSTAIN_SENTINEL, GROUNDED_SUPPORT_FLOOR, GroundedAnswer, support_scores,
+)
 from engraphis.service import MemoryService, ValidationError
 
 FACTS = [
@@ -26,6 +30,48 @@ def _engine_with_facts():
     for text, title in FACTS:
         eng.remember(text, workspace_id=wid, repo_id=rid, title=title)
     return eng, wid, rid
+
+
+def test_grounded_answer_preserves_legacy_positional_fields_and_appends_advisory():
+    graph_details = [{"source": "memory-1", "depth": 2}]
+    diagnostics = {"context": "bounded"}
+    preview = [{"id": "memory-1", "content": "PASETO tokens"}]
+    legacy_arguments = (
+        "PASETO tokens [1]", True, False, "supported", 0.87654, False,
+        [{"n": 1, "id": "memory-1"}], {"input_tokens": 12}, [{"id": "memory-1"}],
+        100.0, 200.0, True, "balanced", "fixed", 50, 25, "bounded depth",
+        [{"arm": "lexical"}], "revision-1", "deterministic", {"queries": ["auth"]},
+        graph_details, True, False, "lexical", "offline backend", False,
+        "complete", diagnostics, preview,
+    )
+
+    answer = GroundedAnswer(*legacy_arguments)
+    assert answer.graph_traversal_details is graph_details
+    assert fields(GroundedAnswer)[21].name == "graph_traversal_details"
+    assert fields(GroundedAnswer)[-1].name == "planning_advisory"
+    assert answer.degraded_mode is True
+    assert answer.semantic_support is False
+    assert answer.embedding_mode == "lexical"
+    assert answer.degraded_reason == "offline backend"
+    assert answer.vector_search_ready is False
+    assert answer.answer_coverage == "complete"
+    assert answer.diagnostics_v1 is diagnostics
+    assert answer.retrieval_preview is preview
+    assert answer.planning_advisory is None
+    payload = answer.to_dict()
+    assert payload["graph_traversal_details"] == graph_details
+    assert payload["diagnostics"] == diagnostics
+    assert payload["retrieval_preview"] == preview
+    assert payload["planning_details"] == {"queries": ["auth"]}
+    assert payload["planning"] == "deterministic"
+    assert payload["support"] == 0.8765
+    assert "planning_advisory" not in payload
+
+    advisory = {"status": "fallback", "reason": "remote_not_authorized"}
+    with_advisory = GroundedAnswer(*legacy_arguments, advisory)
+    assert with_advisory.graph_traversal_details is graph_details
+    assert with_advisory.planning_advisory is advisory
+    assert with_advisory.to_dict() == {**payload, "planning_advisory": advisory}
 
 
 # ── deterministic offline path ──────────────────────────────────────────────────
