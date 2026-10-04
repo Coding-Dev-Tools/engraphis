@@ -586,6 +586,118 @@ def test_dashboard_jev_review_blocks_secret_memory_even_after_consent(dashboard,
     assert service.store.get_memory(first_id).sensitivity == "secret"
 
 
+@pytest.mark.parametrize(("scope", "stored_repo"), [
+    (Scope.REPO, "selected"),
+    (Scope.WORKSPACE, None),
+    (Scope.USER, None),
+    (Scope.WORKSPACE, "sibling"),
+    (Scope.USER, "sibling"),
+])
+def test_project_jev_review_accepts_visible_ancestors_without_inspection_or_mutation(
+    dashboard, monkeypatch, scope, stored_repo,
+):
+    from engraphis.routes import v2_api
+    from engraphis.service import ValidationError
+    from engraphis.service_context import bind_service
+
+    client, service, _first_id, _second_id = dashboard
+    wid = service.store.get_or_create_workspace("demo")
+    selected_rid = service.store.get_or_create_repo(wid, "selected")
+    sibling_rid = service.store.get_or_create_repo(wid, "sibling")
+    first_id = service.engine.remember(
+        "The selected application uses Postgres.", workspace_id=wid,
+        repo_id=selected_rid, scope=Scope.REPO, title="Selected repository",
+    )
+    code = "def configure():\n    return {'database': 'Postgres'}\n"
+    peer_id = service.engine.remember(
+        code, workspace_id=wid, scope=Scope.REPO if scope == Scope.REPO else Scope.WORKSPACE,
+        repo_id=selected_rid if scope == Scope.REPO else None,
+        title="Selected review evidence",
+    )
+    if scope == Scope.USER or stored_repo == "sibling":
+        # Legacy/promoted rows can retain a repo id; new user-scope writes are unsupported.
+        service.store.conn.execute(
+            "UPDATE memories SET scope=?, repo_id=? WHERE id=?",
+            (scope.value, sibling_rid if stored_repo == "sibling" else None, peer_id),
+        )
+        service.store.conn.commit()
+    visible = service.list_memories(workspace="demo", repo="selected")["memories"]
+    assert {first_id, peer_id} <= {memory["id"] for memory in visible}
+    if scope in {Scope.WORKSPACE, Scope.USER}:
+        # Broader review visibility never broadens inspection/governance ownership.
+        with pytest.raises(ValidationError, match="does not belong"):
+            service.inspect(peer_id, workspace="demo", repo="selected")
+
+    def forbidden_inspection(*_args, **_kwargs):
+        pytest.fail("advisory review read inspector links, audit, or lineage")
+
+    monkeypatch.setattr(service, "inspect", forbidden_inspection)
+    decision_client = _DecisionClient()
+    monkeypatch.setattr(v2_api, "_dashboard_jev_backend", lambda: _review_backend(decision_client))
+    before = list(service.store.conn.iterdump())
+    with bind_service(service, principal={
+        "id": "usr_reviewer", "email": "reviewer@example.test", "role": "viewer",
+    }):
+        response = client.post("/api/jev/review", json={
+            "workspace": "demo", "repo": "selected", "memory_ids": [first_id, peer_id],
+            "claim": "Which database is configured?", "allow_remote": True,
+            "data_classification": "internal",
+        })
+
+    assert response.status_code == 200
+    assert response.json()["support"]["status"] == "decision"
+    assert response.json()["contradiction"]["status"] == "decision"
+    assert len(decision_client.calls) == 2
+    assert all(code in call["state"] for call in decision_client.calls)
+    assert list(service.store.conn.iterdump()) == before
+
+
+@pytest.mark.parametrize("denied_scope", ["foreign_workspace", "sibling_repo", "foreign_session"])
+def test_project_jev_review_denies_out_of_scope_records_before_provider_or_mutation(
+    dashboard, monkeypatch, denied_scope,
+):
+    from engraphis.routes import v2_api
+    from engraphis.service import ValidationError
+    from engraphis.service_context import bind_service
+
+    client, service, first_id, _second_id = dashboard
+    wid = service.store.get_or_create_workspace("demo")
+    selected_rid = service.store.get_or_create_repo(wid, "selected")
+    memory_wid, memory_rid, scope, session_id = wid, selected_rid, Scope.REPO, None
+    if denied_scope == "foreign_workspace":
+        memory_wid = service.store.get_or_create_workspace("foreign")
+        memory_rid, scope = None, Scope.WORKSPACE
+    elif denied_scope == "sibling_repo":
+        memory_rid = service.store.get_or_create_repo(wid, "sibling")
+    else:
+        session_id = service.store.start_session(wid, selected_rid, user_id="usr_other")
+        scope = Scope.SESSION
+    denied_id = service.engine.remember(
+        "PRIVATE-DENIED-REVIEW-EVIDENCE", workspace_id=memory_wid, repo_id=memory_rid,
+        scope=scope, session_id=session_id,
+    )
+    decision_client = _DecisionClient()
+    monkeypatch.setattr(v2_api, "_dashboard_jev_backend", lambda: _review_backend(decision_client))
+    before = list(service.store.conn.iterdump())
+    with bind_service(service, principal={
+        "id": "usr_reviewer", "email": "reviewer@example.test", "role": "viewer",
+    }):
+        expected = "another user" if denied_scope == "foreign_session" else "does not belong"
+        with pytest.raises(ValidationError, match=expected):
+            service.read_memory_for_review(denied_id, workspace="demo", repo="selected")
+        response = client.post("/api/jev/review", json={
+            "workspace": "demo", "repo": "selected", "memory_ids": [first_id, denied_id],
+            "claim": "Is there selected evidence?", "allow_remote": True,
+            "data_classification": "internal",
+        })
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["error"] == "invalid request"
+    assert decision_client.calls == []
+    assert "PRIVATE-DENIED-REVIEW-EVIDENCE" not in response.text
+    assert list(service.store.conn.iterdump()) == before
+
+
 def test_jev_review_projection_preserves_structural_whitespace():
     from engraphis.routes.v2_api import _jev_review_projection_parts
 
