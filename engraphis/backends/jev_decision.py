@@ -28,6 +28,14 @@ from engraphis.core.interfaces import MemoryRecord
 
 MAX_STATE_CHARS = 16_000
 _VERDICTS = frozenset(("contradicts_and_supersedes", "reinforces", "orthogonal"))
+_SAFE_CLIENT_ERROR_CODES = frozenset({
+    "allowance_exhausted",
+    "remote_timeout",
+    "remote_unavailable",
+    "malformed_response",
+    "session_changed",
+    "managed_operation_unsupported",
+})
 
 
 @dataclass(frozen=True)
@@ -232,8 +240,10 @@ class JevDecisionBackend:
             batch = cast(DecisionBatch, response)
             return batch, "decision", None
         except DecisionClientError as exc:
-            # Preserve the local eligibility denial without exposing provider details.
-            reason = ("managed_operation_unsupported" if exc.code == "managed_operation_unsupported"
+            # Preserve only fixed transport states that help the caller recover.
+            # Injected clients can raise this type too, so never echo an unknown code.
+            code = exc.code
+            reason = (code if isinstance(code, str) and code in _SAFE_CLIENT_ERROR_CODES
                       else "remote_unavailable")
             return None, "fallback", reason
         except Exception:

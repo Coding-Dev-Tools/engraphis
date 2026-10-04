@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from engraphis.backends.jev_decision import MAX_STATE_CHARS, JevDecisionBackend, get_decision_backend
+from engraphis.backends.jev_transport import DecisionClientError
 from engraphis.core.interfaces import MemoryRecord, MemoryType, Scope
 
 
@@ -150,6 +151,28 @@ def test_sensitive_question_fields_are_screened_before_legacy_client_calls(field
     assert result.status == "fallback"
     assert result.fallback_reason == "sensitive_content"
     assert client.calls == []
+
+
+@pytest.mark.parametrize(("code", "expected"), [
+    ("allowance_exhausted", "allowance_exhausted"),
+    ("remote_timeout", "remote_timeout"),
+    ("session_changed", "session_changed"),
+    ("private-provider-detail", "remote_unavailable"),
+    (["private-provider-detail"], "remote_unavailable"),
+])
+def test_safe_transport_error_codes_are_preserved_without_echoing_unknown_codes(code, expected):
+    class ErrorClient(FakeClient):
+        def evaluate(self, state, questions, **options):
+            del state, questions, options
+            raise DecisionClientError(code)
+
+    result = backend(ErrorClient()).choose_option(
+        "Synthetic public state", question_id="route", prompt="Choose a route.",
+        options=("route_1", "route_2"), allow_remote=True,
+    )
+
+    assert result.status == "fallback"
+    assert result.fallback_reason == expected
 
 
 @pytest.mark.parametrize("variadic", [False, True])

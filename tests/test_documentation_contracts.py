@@ -14,7 +14,7 @@ from engraphis.core.schema import SCHEMA_VERSION
 
 ROOT = Path(__file__).resolve().parents[1]
 README_BENCHMARK_PIN = "12d2e405ed4bd78917a3e5eef2cf0d3a7f1561b2"
-README_HOSTED_PLANS_PIN = README_BENCHMARK_PIN
+README_HOSTED_PLANS_PIN = "12d2e405ed4bd78917a3e5eef2cf0d3a7f1561b2"
 
 
 def _read(path: str) -> str:
