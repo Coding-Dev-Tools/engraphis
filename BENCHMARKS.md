@@ -94,14 +94,14 @@ interpretation and do not count as additional benchmark-quality gains.
 ### Public numeric evidence registry
 
 Every exact public aggregate retained below comes from the checked-in, public-safe
-[`offline-fixtures-v143.json`](docs/benchmark-evidence/offline-fixtures-v143.json) artifact. Its
+[`offline-fixtures-v144.json`](docs/benchmark-evidence/offline-fixtures-v144.json) artifact. Its
 SHA-256 is
-`6388815f422ea44c83754ed806eae08780a8e1ba1f1ef59aa1c737c5a76309c0`, also recorded in the
+`25b4663bba54935d7aa38ef39458155115b87714eff78964fe3c784e0344cd22`, also recorded in the
 adjacent `.sha256` file. The artifact contains no raw questions, answers, prompts, customer data,
 or per-record content fingerprints.
 
 The fixture-suite digest is
-`9b395a60e7ae85e1a8eff24f91fb8963528ff450d89dd80c5dfc119a21bfcda0`. The artifact defines
+`ff60849dc9764f549083af860e8578bdcbdbd3d42f6c6bc3c600a70e016e8596`. The artifact defines
 the digest algorithm and records the SHA-256 of every suite and dataset file. Each evidence ID
 also binds its exact command through `sha256(UTF-8 exact command)`:
 
@@ -126,13 +126,13 @@ grounded checks in separate panels; provider billing and MCP transport are not m
 the SVG and matching PNG with:
 
 ```bash
-python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-v143.json --output docs/images/context-efficiency.svg --png-output docs/images/context-efficiency.png
+python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-v144.json --output docs/images/context-efficiency.svg --png-output docs/images/context-efficiency.png
 ```
 
 The companion examples are also generated from that artifact with:
 
 ```bash
-python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-v143.json --output docs/images/evidence-backed-agent-examples.svg --png-output docs/images/evidence-backed-agent-examples.png
+python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-v144.json --output docs/images/evidence-backed-agent-examples.svg --png-output docs/images/evidence-backed-agent-examples.png
 ```
 The historical-to-executable mapping is in
 [`docs/BENCHMARK_CHANGE_COVERAGE.md`](docs/BENCHMARK_CHANGE_COVERAGE.md).
