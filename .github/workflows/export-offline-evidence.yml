@@ -1,5 +1,13 @@
 name: Temporary offline evidence export
 on:
+  push:
+    branches:
+      - codex/jev-individual-access-20261004
+    paths:
+      - ".github/workflows/export-offline-evidence.yml"
+      - "engraphis/**"
+      - "eval/**"
+      - "scripts/export_offline_evidence.py"
   pull_request:
     types: [opened, synchronize, reopened]
     paths:
