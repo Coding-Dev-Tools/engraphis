@@ -51,8 +51,10 @@ def saved_session(monkeypatch, tmp_path):
 
 def _evaluate(timeout=0.1):
     return jev_transport.create_cloud_decision_client(timeout_s=timeout).evaluate(
-        "Synthetic local evidence.", [DecisionQuestion("q", "Is this supported?", "noul")],
-        model=jev_transport.MODEL, allow_remote=True, data_classification="public",
+        "QUERY: Which port?\nEVIDENCE: The selected memory says port 443.",
+        [DecisionQuestion("has_support", "Does this evidence directly support answering the query?", "noul")],
+        model=jev_transport.MODEL, allow_remote=True, purpose="verify_support",
+        data_classification="public",
     )
 
 
@@ -66,7 +68,7 @@ def _rotation():
 
 
 def _decision():
-    return {"model": jev_transport.MODEL, "is_fallback": False, "decisions": {"q": {
+    return {"model": jev_transport.MODEL, "is_fallback": False, "decisions": {"has_support": {
         "type": "noul", "probability": 0.9, "confidence": 0.8,
         "confidence_source": "derived_decisiveness",
     }}}
@@ -137,7 +139,7 @@ def test_refresh_and_decision_receive_the_same_remaining_budget(monkeypatch, sav
     monkeypatch.setattr(hosted_client, "validate_cloud_base_url", lambda value: value)
     monkeypatch.setattr(hosted_client, "build_pinned_https_opener",
                         lambda *handlers: SimpleNamespace(open=open_request))
-    assert _evaluate(5).get_noul("q").probability == 0.9
+    assert _evaluate(5).get_noul("has_support").probability == 0.9
     assert calls == [("refresh", 105.0), ("decision", 2.0)]
     assert cloud_session._load()["refresh_credential"] == "synthetic-rotated"
 
