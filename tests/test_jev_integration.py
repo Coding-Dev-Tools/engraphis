@@ -274,6 +274,41 @@ def test_local_planning_diagnostics_report_deterministic_planner():
         service.close()
 
 
+@pytest.mark.parametrize("caller", ["engine", "service", "classic_mcp"])
+@pytest.mark.parametrize("planning", [None, "off"])
+def test_planning_off_exposes_public_advisory_reason_without_remote_work(
+    dashboard, monkeypatch, caller, planning,
+):
+    _client, service, _first_id, _second_id = dashboard
+    from engraphis import mcp_server
+
+    monkeypatch.setattr(mcp_server, "_service", service)
+    decision_client = _DecisionClient()
+    deterministic = _FixedDeterministicPlanner()
+    service.engine.recall_engine.query_planner = JevAssistedQueryPlanner(
+        _backend(decision_client), deterministic,
+    )
+    kwargs = {"jev_assisted": True, "allow_remote": True,
+              "data_classification": "internal"}
+    if planning is not None:
+        kwargs["planning"] = planning
+    query = "Which database is primary?"
+    if caller == "engine":
+        result = service.engine.recall_engine.recall(query, SearchFilter(), **kwargs)
+        advisory = result.planning_advisory
+    elif caller == "service":
+        advisory = service.recall(
+            query, workspace="demo", record_receipt=False, **kwargs,
+        )["planning_advisory"]
+    else:
+        advisory = json.loads(mcp_server.engraphis_recall_context(
+            query=query, workspace="demo", **kwargs,
+        ))["planning_advisory"]
+    assert advisory == {"status": "fallback", "reason": "planning_disabled"}
+    assert deterministic.filters == []
+    assert decision_client.calls == []
+
+
 def test_core_planner_gets_cloned_scope_and_time_filters_without_trust_authority():
     client = _DecisionClient()
     deterministic = _FixedDeterministicPlanner()
