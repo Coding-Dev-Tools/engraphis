@@ -19,6 +19,7 @@ from __future__ import annotations
 import inspect
 import math
 import os
+import re
 import time
 from dataclasses import dataclass
 from typing import Callable, Dict, Optional, Protocol, Sequence, Tuple, cast
@@ -166,7 +167,22 @@ class JevDecisionBackend:
             return None, "fallback", "invalid_input"
         if len(state) > MAX_STATE_CHARS:
             return None, "fallback", "input_too_large"
-        if contains_sensitive_content(state):
+        if (not isinstance(question, DecisionQuestion)
+                or not isinstance(question.options, tuple)
+                or not isinstance(question.id, str)
+                or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}", question.id)
+                or not isinstance(question.prompt, str) or not question.prompt.strip()
+                or len(question.prompt) > 1024
+                or not isinstance(question.kind, str)
+                or question.kind not in {"choice", "noul", "score"}
+                or (question.kind == "noul" and question.options)
+                or (question.kind != "noul" and not 2 <= len(question.options) <= 10)
+                or any(not isinstance(option, str) or not option.strip() or len(option) > 256
+                       for option in question.options)
+                or len(set(question.options)) != len(question.options)):
+            return None, "fallback", "invalid_input"
+        question_fields = (question.id, question.prompt, question.kind, *question.options)
+        if any(contains_sensitive_content(value) for value in (state, *question_fields)):
             return None, "fallback", "sensitive_content"
         call_timeout: Optional[float] = None
         if timeout_s is not None and (
@@ -227,10 +243,13 @@ class JevDecisionBackend:
     ) -> AdvisoryDecisionResult:
         """Choose among caller-supplied bounded options, or report uncertainty."""
         if (not isinstance(question_id, str) or not question_id
+                or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}", question_id)
                 or not isinstance(prompt, str) or not prompt.strip()
+                or len(prompt) > 1024
                 or not isinstance(options, (list, tuple))
                 or not 2 <= len(options) <= 10
-                or any(not isinstance(option, str) or not option.strip() for option in options)
+                or any(not isinstance(option, str) or not option.strip() or len(option) > 256
+                       for option in options)
                 or len(set(options)) != len(options)):
             return AdvisoryDecisionResult("fallback", fallback_reason="invalid_input")
         question = DecisionQuestion(question_id, prompt, "choice", tuple(options))
