@@ -13,7 +13,7 @@ from engraphis.core.schema import SCHEMA_VERSION
 
 
 ROOT = Path(__file__).resolve().parents[1]
-README_BENCHMARK_PIN = "cc4f894850fb2dd88bf7c404e5e9c698e3de1195"
+README_BENCHMARK_PIN = "1d2b32cd0ebe81928594df09e5be124928690573"
 README_HOSTED_PLANS_PIN = "e440bf6ba0ff600648fdac6eb53dd28d6d80df24"
 
 
@@ -374,7 +374,9 @@ def test_consolidation_docs_expose_only_live_public_options() -> None:
     assert "Managed Jev accepts only the fixed command-review, completion-review" in hosted_plan
     assert "experimental BYOK planner can reorder bounded deterministic query routes" in hosted_plan
     assert "no retrieval-quality improvement" in hosted_plan
-    assert "Experimental recall route selection is BYOK-only" in readme
-    assert "Managed Jev returns to deterministic planning" in readme
+    assert "Team usage shares one pool sized by licensed seat count" in readme
+    assert "Recall route selection is experimental and BYOK-only" in readme
+    assert "no retrieval-quality improvement is claimed" in readme
+    assert "Managed Jev is currently `not_yet_available`" in readme
     normalized_tools = " ".join(tools.split())
     assert "`profiles (bool, false)`; `structured (bool, false)`." in normalized_tools
