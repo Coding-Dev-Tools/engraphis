@@ -209,13 +209,30 @@ Managed access admits only the four concrete workflows above with their fixed qu
 required context. A purpose label cannot authorize arbitrary question schemas. Managed `custom`
 requests return `managed_operation_unsupported` without a credential refresh or network request;
 custom remote questions require explicit BYOK. Local custom fallback remains available.
-Managed Jev remains `not_yet_available` until release acceptance and service-capacity
-qualification. After enablement, Pro usage is owner-scoped and Team questions share one
-organization pool sized by licensed seat count, at no additional charge within a finite allowance.
-The account portal reports availability and usage; no fixed quota is published, no overage is
-charged, and service-protection limits may pause requests. `guard_command` counts as two evaluated
-questions; each other workflow counts as one. No personal provider key is required for managed
-use.
+Managed Jev is currently `not_yet_available` pending release acceptance and
+service-capacity qualification; client configuration does not enable it. After
+enablement, every legitimate Pro user and each eligible Team named seat, including paid
+viewers, with an active paid, trial, or test entitlement receives managed Jev at no
+additional customer charge and without a personal provider key.
+
+Each individual receives all three independent rolling limits: **100 evaluated questions per rolling hour, 1,000 per rolling five hours, and 2,000 per rolling 24 hours**. Usage is per
+person, not pooled across a Team and not monthly. Each evaluated question counts once;
+if a batch is evaluated, every question counts. A `guard_command` review evaluates two
+questions, and each other supported workflow evaluates one. Admitted attempts that fail
+or are interrupted remain counted. No overage is charged. The account portal reports
+that member's remaining usage across all three windows; usage returns as earlier
+questions leave each rolling window.
+
+The existing production fleet guard remains 100 questions per day across the service. It
+conflicts with the per-person rolling caps and may pause or reject requests earlier, so
+resolve capacity and the fleet guard before launch. No latency, accuracy, or cost-saving
+guarantee is established by configuration or a successful health check.
+
+Managed access admits only `guard_command`, `classify_contradiction`, `verify_support`,
+and `verify_completion`, with fixed question schemas and required context. Managed
+`custom` questions and `query_planning` fail closed before credential refresh or network
+requests; explicit BYOK and local custom heuristics remain separate choices.
+
 Admitted errors remain counted. Managed transport callers can preserve an explicit `request_key`
 for a retry; duplicate admitted keys return 409 without a second provider call or usage increment.
 No answer is stored for replay, and no automatic retry occurs. The MCP tool does not expose a

@@ -36,12 +36,27 @@ does not ship the managed transport or the registered MCP decision tool.
    `offline_mode=true` prevents remote execution. Pattern filtering cannot detect
    every secret in arbitrary prose.
 
-Managed Jev remains `not_yet_available` until release acceptance and service-capacity
-qualification pass. After enablement, Pro usage is owner-scoped and Team questions share a finite
-organization pool sized by licensed seat count. The account portal reports availability and usage;
-fixed quotas are not published and overage is not charged. A local success, fallback, health
-response, or configured backend does not establish a successful managed provider request. Jev
-advice does not authorize actions or replace deterministic checks.
+Managed Jev is currently `not_yet_available` pending release acceptance and
+service-capacity qualification; client configuration does not enable it. After
+enablement, every legitimate Pro user and each eligible Team named seat, including paid
+viewers, with an active paid, trial, or test entitlement receives managed Jev at no
+additional customer charge and without a personal provider key.
+
+Each individual receives all three independent rolling limits: **100 evaluated questions per rolling hour, 1,000 per rolling five hours, and 2,000 per rolling 24 hours**. Usage is per
+person, not pooled across a Team and not monthly. Each evaluated question counts once;
+if a batch is evaluated, every question counts. A `guard_command` review evaluates two
+questions, and each other supported workflow evaluates one. Admitted attempts that fail
+or are interrupted remain counted. No overage is charged. The account portal reports
+that member's remaining usage across all three windows; usage returns as earlier
+questions leave each rolling window.
+
+The existing production fleet guard remains 100 questions per day across the service. It
+conflicts with the per-person rolling caps and may pause or reject requests earlier, so
+resolve capacity and the fleet guard before launch. No latency, accuracy, or cost-saving
+guarantee is established by configuration or a successful health check. A successful
+local fallback, health response, or configured backend does not establish a successful
+managed provider request. Jev advice does not authorize actions or replace deterministic
+checks.
 
 ## Qualification and publication sequence
 

@@ -14,7 +14,6 @@ from engraphis.core.schema import SCHEMA_VERSION
 
 ROOT = Path(__file__).resolve().parents[1]
 README_BENCHMARK_PIN = "719e1712c3f59d3fd6836d10c2c67b18317cf1ce"
-README_HOSTED_PLANS_PIN = "719e1712c3f59d3fd6836d10c2c67b18317cf1ce"
 
 
 def _read(path: str) -> str:
@@ -44,7 +43,6 @@ def test_readme_targets_resolve_in_the_repository() -> None:
                 prefixes = (
                     "/Coding-Dev-Tools/engraphis/blob/719e1712c3f59d3fd6836d10c2c67b18317cf1ce/",
                     f"/Coding-Dev-Tools/engraphis/blob/{README_BENCHMARK_PIN}/",
-                    f"/Coding-Dev-Tools/engraphis/blob/{README_HOSTED_PLANS_PIN}/",
                 )
             elif parsed.netloc == "raw.githubusercontent.com":
                 prefixes = (
@@ -361,22 +359,55 @@ def test_consolidation_docs_expose_only_live_public_options() -> None:
         assert "supersede_sources" not in document
         assert "supersede-sources" not in document
 
-    assert "docs/HOSTED_PLANS.md" in readme
+    assert "docs/HOSTED_PLANS.md#included-system-1-decision-engine-jev" in readme
     hosted_plan = " ".join(_read("docs/HOSTED_PLANS.md").split())
-    for public_copy in (readme, hosted_plan):
-        assert "100 evaluated questions" not in public_copy
-        assert "1,000 per rolling" not in public_copy
-        assert "2,000 per rolling" not in public_copy
-    assert "finite rolling allowance" in hosted_plan
-    assert "Team usage shares one pool sized by its licensed seat count" in hosted_plan
-    assert "current availability and usage" in hosted_plan
-    assert "currently `not_yet_available` pending release acceptance" in hosted_plan
+    configuration = " ".join(_read("docs/CONFIGURATION.md").split())
+    mcp_tools = " ".join(_read("docs/MCP_TOOLS.md").split())
+    release = " ".join(_read("docs/RELEASE_1_7_9.md").split())
+    normalized_tools = " ".join(tools.split())
+    public_documents = (readme, hosted_plan, configuration, mcp_tools, release, normalized_tools)
+    public_copy = " ".join(" ".join(public_documents).split())
+    for document in public_documents:
+        normalized_document = " ".join(document.split()).lower()
+        for limit in (
+            "100 evaluated questions per rolling hour",
+            "1,000 per rolling five hours",
+            "2,000 per rolling 24 hours",
+        ):
+            assert limit in normalized_document
+        for invariant in (
+            "not pooled across a team",
+            "not monthly",
+            "if a batch is evaluated, every question counts",
+            "admitted attempts that fail or are interrupted remain counted",
+            "the existing production fleet guard remains 100 questions per day",
+            "may pause or reject requests earlier",
+        ):
+            assert invariant in normalized_document
+        for obsolete in (
+            "team usage shares one pool",
+            "team questions share one organization pool",
+            "fixed quotas are not published",
+            "no fixed quota is published",
+            "finite rolling allowance",
+            "monthly allowance",
+        ):
+            assert obsolete not in normalized_document
+    for entitlement in (
+        "every legitimate pro user",
+        "eligible team named seat",
+        "paid viewers",
+        "trial, or test entitlement",
+        "no additional customer charge",
+        "without a personal provider key",
+    ):
+        assert entitlement in public_copy.lower()
+    assert "managed jev is currently" in public_copy.lower()
+    assert "Recall route selection is experimental and BYOK-only" in readme
+    assert "no retrieval-quality improvement is claimed" in readme
     assert "Managed Jev accepts only the fixed command-review, completion-review" in hosted_plan
     assert "experimental BYOK planner can reorder bounded deterministic query routes" in hosted_plan
     assert "no retrieval-quality improvement" in hosted_plan
-    assert "Team usage shares one pool sized by licensed seat count" in readme
-    assert "Recall route selection is experimental and BYOK-only" in readme
-    assert "no retrieval-quality improvement is claimed" in readme
-    assert "Managed Jev is currently `not_yet_available`" in readme
-    normalized_tools = " ".join(tools.split())
+    assert "Managed `custom` questions" in mcp_tools
+    assert "query_planning" in normalized_tools
     assert "`profiles (bool, false)`; `structured (bool, false)`." in normalized_tools
