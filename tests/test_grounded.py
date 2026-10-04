@@ -405,6 +405,12 @@ def test_service_grounded_recall_unknown_workspace_is_soft():
     svc = MemoryService.create(":memory:")
     out = svc.grounded_recall("anything", workspace="ghost")
     assert out["grounded"] is False and "ghost" in out["reason"]
+    assert "retrieval_preview" not in out
+
+    with_preview = svc.grounded_recall(
+        "anything", workspace="ghost", include_retrieval_preview=True,
+    )
+    assert with_preview["retrieval_preview"] == []
 
 
 def test_service_grounded_recall_validates_query():

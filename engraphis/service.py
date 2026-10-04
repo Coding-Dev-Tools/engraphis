@@ -4586,7 +4586,8 @@ class MemoryService:
                         planning: str = "off",
                         mtype_limits: Optional[dict] = None,
                         jev_assisted: bool = False, allow_remote: bool = False,
-                        data_classification: Optional[str] = None) -> dict:
+                        data_classification: Optional[str] = None,
+                        include_retrieval_preview: bool = False) -> dict:
         """Grounded recall: an answer built strictly from retrieved memories, with
         ``[n]`` citations and an explicit abstain when evidence is insufficient
         (``core.grounded``). This path is offline/deterministic (extractive answer) — no
@@ -4633,6 +4634,9 @@ class MemoryService:
         planning, mtype_limits = _planning_controls(planning, mtype_limits)
         jev_assisted = _strict_bool(jev_assisted, field="jev_assisted")
         allow_remote = _strict_bool(allow_remote, field="allow_remote")
+        include_retrieval_preview = _strict_bool(
+            include_retrieval_preview, field="include_retrieval_preview",
+        )
         if allow_remote and not jev_assisted:
             raise ValidationError("remote Jev consent requires Jev-assisted planning")
         if allow_remote and data_classification not in {"public", "internal"}:
@@ -4647,6 +4651,19 @@ class MemoryService:
             min_support = max(0.0, min(1.0, min_support))
         mts = [_enum(m, MemoryType, "mtype") for m in mtypes] if mtypes else None
 
+        def empty_scope_response(reason: str) -> dict:
+            payload = _empty_grounded(
+                query, reason=reason, token_budget=token_budget,
+                response_mode=response_mode, retrieval_profile=retrieval_profile,
+                candidate_depth=candidate_depth, planning=planning,
+                mtype_limits=mtype_limits, valid_at=valid_at, known_at=known_at,
+            )
+            if include_retrieval_preview:
+                payload["retrieval_preview"] = []
+            return _with_retrieval_capabilities(
+                payload, self.engine.embedder, self.store,
+            )
+
         route = self.resolve_workspace(workspace, repo=repo, session_id=session_id)
         workspace, repo = route["workspace"], route["repo"]
         if not workspace and (
@@ -4659,41 +4676,21 @@ class MemoryService:
             ws = self._clean_ws(workspace)
             wid = self._lookup_workspace(ws)
             if wid is None:
-                return _with_retrieval_capabilities(_empty_grounded(
-                    query, reason=f"no workspace named '{ws}' yet",
-                    token_budget=token_budget, response_mode=response_mode,
-                    retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
-                    planning=planning, mtype_limits=mtype_limits,
-                    valid_at=valid_at,
-                    known_at=known_at,
-                ), self.engine.embedder, self.store)
+                return empty_scope_response(f"no workspace named '{ws}' yet")
             if repo:
                 rp = _clean_name(repo, field="repo")
                 rid = self._lookup_repo(wid, rp)
                 if rid is None:
-                    return _with_retrieval_capabilities(_empty_grounded(
-                        query,
-                        reason=f"no repo named '{rp}' in workspace '{ws}' yet",
-                        token_budget=token_budget, response_mode=response_mode,
-                        retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
-                        planning=planning, mtype_limits=mtype_limits,
-                        valid_at=valid_at,
-                        known_at=known_at,
-                    ), self.engine.embedder, self.store)
+                    return empty_scope_response(
+                        f"no repo named '{rp}' in workspace '{ws}' yet",
+                    )
             if session_id:
                 sid = _clean_text(
                     session_id, field="session_id", max_chars=MAX_NAME_CHARS
                 )
                 session = self.store.get_session(sid)
                 if session is None:
-                    return _with_retrieval_capabilities(_empty_grounded(
-                        query, reason=f"no session with id '{sid}'",
-                        token_budget=token_budget, response_mode=response_mode,
-                        retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
-                        planning=planning, mtype_limits=mtype_limits,
-                        valid_at=valid_at,
-                        known_at=known_at,
-                    ), self.engine.embedder, self.store)
+                    return empty_scope_response(f"no session with id '{sid}'")
                 if session["workspace_id"] != wid or (
                         rid is not None and session.get("repo_id") != rid):
                     raise ValidationError("session_id does not belong to that workspace/repo")
@@ -4714,8 +4711,11 @@ class MemoryService:
             jev_assisted=jev_assisted,
             allow_remote=allow_remote,
             data_classification=data_classification,
+            **({"include_retrieval_preview": True} if include_retrieval_preview else {}),
         )
         out = {"query": query, **ans.to_dict()}
+        if include_retrieval_preview and "retrieval_preview" not in out:
+            out["retrieval_preview"] = []
         out["response_mode"] = response_mode
         out["mtype_limits"] = dict(mtype_limits)
         out["usage"] = _annotate_context_usage(
@@ -4730,6 +4730,11 @@ class MemoryService:
                 item["provenance"] = _compact_provenance(item.get("provenance"))
                 compact_citations.append(item)
             out["citations"] = compact_citations
+            for candidate in out.get("retrieval_preview") or []:
+                candidate.pop("content", None)
+                candidate["provenance"] = _compact_provenance(
+                    candidate.get("provenance"),
+                )
         out["receipt"] = self._record_receipt(
             "grounded_recall", response=out, workspace_id=wid or "", repo_id=rid or "",
             actor="agent",

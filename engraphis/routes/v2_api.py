@@ -1467,6 +1467,7 @@ class _AnswerReq(BaseModel):
     jev_assisted: StrictBool = False
     allow_remote: StrictBool = False
     data_classification: Optional[str] = Field(default=None, max_length=16)
+    include_retrieval_preview: StrictBool = False
 
 
 @router.post("/answer")
@@ -1499,10 +1500,13 @@ def answer(req: _AnswerReq):
         jev_assisted=req.jev_assisted,
         allow_remote=req.allow_remote,
         data_classification=req.data_classification,
+        include_retrieval_preview=req.include_retrieval_preview,
         max_citations=req.max_citations,
         min_support=req.min_support,
     )
     out["sources"] = list(out.get("citations") or [])
+    if req.include_retrieval_preview:
+        out.setdefault("retrieval_preview", [])
     return out
 
 

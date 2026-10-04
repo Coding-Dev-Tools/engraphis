@@ -547,6 +547,15 @@ def test_jev_route_choice_cannot_bypass_grounded_abstention(dashboard, monkeypat
     service.engine.recall_engine.query_planner = JevAssistedQueryPlanner(
         _backend(decision_client), deterministic,
     )
+    retrieved = []
+    recall = service.engine.recall_engine.recall
+
+    def record_recall(*args, **kwargs):
+        result = recall(*args, **kwargs)
+        retrieved.append(result)
+        return result
+
+    monkeypatch.setattr(service.engine.recall_engine, "recall", record_recall)
 
     response = client.post("/api/answer", json={
         "workspace": "demo",
@@ -555,6 +564,7 @@ def test_jev_route_choice_cannot_bypass_grounded_abstention(dashboard, monkeypat
         "jev_assisted": True,
         "allow_remote": True,
         "data_classification": "internal",
+        "include_retrieval_preview": True,
     })
 
     assert response.status_code == 200
@@ -565,7 +575,9 @@ def test_jev_route_choice_cannot_bypass_grounded_abstention(dashboard, monkeypat
     assert body["grounded"] is False
     assert body["abstained"] is True
     assert body["citations"] == []
+    assert body["retrieval_preview"] == retrieved[0].chunks
     assert len(decision_client.calls) == 1
+    assert len(retrieved) == 1
     assert decision_client.calls[0]["questions"][0].id == "route"
 
 

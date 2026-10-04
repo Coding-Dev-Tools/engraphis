@@ -2751,7 +2751,8 @@ class MemoryEngine:
                         mtype_limits: Optional[dict] = None,
                         max_citations: int = 5, reinforce: bool = True,
                         jev_assisted: bool = False, allow_remote: bool = False,
-                        data_classification: Optional[str] = None):
+                        data_classification: Optional[str] = None,
+                        include_retrieval_preview: bool = False):
         """Recall, then answer *strictly from* what was recalled — with citations and an
         explicit abstain when the evidence is too weak (``core.grounded``). Offline and
         deterministic (extractive answer) unless an ``LLM`` is injected to synthesise
@@ -2784,6 +2785,10 @@ class MemoryEngine:
         floor = _grounded.GROUNDED_SUPPORT_FLOOR if min_support is None else min_support
         answer = _grounded.build_grounded_answer(query, result, self.embedder, llm=llm,
                                                  min_support=floor, max_citations=max_citations)
+        if include_retrieval_preview:
+            # Reuse this call's final candidates so dashboard inspection cannot
+            # silently run a second query with different Jev planning or filters.
+            answer.retrieval_preview = [dict(chunk) for chunk in result.chunks]
         if reinforce and not flt.historical and answer.grounded:
             for cite in answer.citations:
                 if cite.get("id"):

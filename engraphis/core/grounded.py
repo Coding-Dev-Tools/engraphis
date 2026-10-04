@@ -97,6 +97,7 @@ class GroundedAnswer:
     # Supported cited evidence does not establish coverage of every requested fact.
     answer_coverage: str = "unknown"
     diagnostics_v1: Optional[dict] = None
+    retrieval_preview: Optional[list[dict]] = None
 
     def to_dict(self) -> dict:
         payload = {
@@ -136,6 +137,8 @@ class GroundedAnswer:
             payload["planning_advisory"] = self.planning_advisory
         if self.graph_traversal_details is not None:
             payload["graph_traversal_details"] = self.graph_traversal_details
+        if self.retrieval_preview is not None:
+            payload["retrieval_preview"] = self.retrieval_preview
         return payload
 
 

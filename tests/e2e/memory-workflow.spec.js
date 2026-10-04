@@ -70,7 +70,7 @@ async function workflowFixture(page, { projectsUnavailable = false, delayProject
       records.push({ ...body, id, version: 'mv1:' + id, workspace_id: 'ws_one', repo_id: body.repo ? 'repo_' + body.repo : null, content: body.content, can_revise: true });
       return ok({ id });
     }
-    if (path === '/answer') return ok({ grounded: true, answer: 'Project answer.', support: 0.9, citations: [] });
+    if (path === '/answer') return ok({ grounded: true, answer: 'Project answer.', support: 0.9, citations: [], retrieval_preview: [] });
     if (path === '/recall') return ok({ memories: records.filter(record => record.repo === url.searchParams.get('repo')) });
     if (path === '/proactive') return ok({ memories: [] });
     if (path === '/review-inbox') return ok({ items: [], count: 0, has_more: false, truncated: false, count_semantics: 'returned_sample' });
@@ -101,8 +101,10 @@ test('memory navigation, readable titles, and project scope agree across Library
   await page.locator('#ask-input').fill('Which database?');
   await page.locator('#ask-form').getByRole('button', { name: 'Grounded answer' }).click();
   await expect(page.locator('#answer-panel')).toContainText('Project answer.');
-  expect(requests.find(request => request.path === '/answer').body.repo).toBe('alpha');
-  expect(requests.find(request => request.path === '/recall').query.repo).toBe('alpha');
+  const groundedRequest = requests.find(request => request.path === '/answer');
+  expect(groundedRequest.body.repo).toBe('alpha');
+  expect(groundedRequest.body.include_retrieval_preview).toBe(true);
+  expect(requests.filter(request => request.path === '/recall')).toHaveLength(0);
   await page.locator('#project-select').selectOption('');
   await expect(page.locator('#answer-panel')).not.toContainText('Project answer.');
   await page.locator('[data-view="library"]').click();
