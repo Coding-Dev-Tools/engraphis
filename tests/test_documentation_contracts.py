@@ -368,7 +368,7 @@ def test_consolidation_docs_expose_only_live_public_options() -> None:
         assert "1,000 per rolling" not in public_copy
         assert "2,000 per rolling" not in public_copy
     assert "finite rolling allowance" in hosted_plan
-    assert "Team usage is pooled across its active named seats" in hosted_plan
+    assert "Team usage shares one pool sized by its licensed seat count" in hosted_plan
     assert "current availability and usage" in hosted_plan
     assert "currently `not_yet_available` pending release acceptance" in hosted_plan
     assert "Managed Jev accepts only the fixed command-review, completion-review" in hosted_plan

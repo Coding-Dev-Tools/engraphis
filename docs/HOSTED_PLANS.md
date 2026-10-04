@@ -28,7 +28,7 @@ Start or manage a hosted subscription in the [Engraphis account portal](https://
 
 After release acceptance and service enablement, each Pro subscription owner and each active
 Team named seat has managed Jev decisions at no additional charge, within a finite rolling
-allowance. Team usage is pooled across its active named seats. The account portal reports current
+allowance. Team usage shares one pool sized by its licensed seat count. The account portal reports current
 availability and usage. Some admitted requests may count if
 they fail or are interrupted; no overage charge is applied. A service protection limit may pause
 requests before the included allowance is exhausted.

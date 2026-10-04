@@ -56,7 +56,7 @@ from engraphis.core.vector_repair import index_repair_identity
 from engraphis.core.ids import new_id as make_id
 from engraphis.core.savings import annotate_usage, normalize_release_version
 from engraphis.core.interfaces import (
-    Edge, FactSpec, GraphLayer, MemoryType, Node, Scope, SearchFilter,
+    Edge, FactSpec, GraphLayer, MemoryRecord, MemoryType, Node, Scope, SearchFilter,
     embedder_capabilities, embedding_space_fingerprint,
     vector_index_requires_sync,
     vector_index_shares_store_transaction,
@@ -7374,6 +7374,42 @@ class MemoryService:
                         "can_revise": self.engine.can_revise_memory(record.id)} for record in page],
                     "count": len(page), "total_count": total, "next_cursor": next_cursor,
                     "valid_at": anchors[0], "known_at": anchors[1]}
+
+    def read_memory_for_review(
+        self, memory_id: str, *, workspace: str, repo: Optional[str] = None,
+    ) -> MemoryRecord:
+        """Read one selected advisory record, including authorized project ancestors.
+
+        Unlike governance and inspection, a project review can use workspace/user
+        memories visible in its browse view. Session-private records still require
+        their existing owner authorization. No links, audit, or lineage are read.
+        """
+        mid = _clean_text(memory_id, field="memory_id", max_chars=MAX_NAME_CHARS)
+        wid, rid = self._require_scope(workspace, repo)
+        record = self.store.get_memory(mid)
+        if record is None:
+            raise ValidationError(f"no memory with id '{mid}'")
+        if record.workspace_id != wid:
+            raise ValidationError(f"memory '{mid}' does not belong to that workspace/repo")
+        self._authorize_memory_session(record)
+        from engraphis.core.interfaces import SearchFilter
+
+        visible_filter = SearchFilter(
+            workspace_id=wid, repo_id=rid, include_ancestors=True,
+        )
+        visible_where, visible_params = self.store._where(
+            visible_filter, include_invalid=False,
+        )
+        visible_clause = " AND ".join(visible_where) or "1"
+        visible = self.store.conn.execute(
+            "SELECT 1 FROM memories WHERE id=? AND " + visible_clause,
+            [mid, *visible_params],
+        ).fetchone()
+        if visible is None:
+            raise ValidationError(
+                f"memory '{mid}' is not visible in the current workspace/repo view"
+            )
+        return record
 
     def inspect(self, memory_id: str, *, workspace: str, repo: Optional[str] = None) -> dict:
         """Everything the inspector shows for one memory: the record, its links, its
