@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from eval import jev_recall_quality as evaluation
 from engraphis.core.query_planner import DeterministicQueryPlanner
 
@@ -46,3 +48,14 @@ def test_check_only_does_not_resolve_or_call_a_provider(monkeypatch, capsys):
     assert report["tasks"] == 40
     assert report["eligible_tasks"] == 40
     assert report["remote_calls"] == 0
+
+
+def test_direct_remote_evaluation_requires_consent_before_client_lookup(monkeypatch):
+    monkeypatch.setattr(
+        evaluation,
+        "select_decision_client",
+        lambda _backend: (_ for _ in ()).throw(AssertionError("provider lookup attempted")),
+    )
+
+    with pytest.raises(PermissionError, match="explicit allow_remote=True consent"):
+        evaluation.run_evaluation(timeout_s=8.0, max_requests=1)

@@ -198,7 +198,11 @@ def benefit_gate(deltas: dict[str, tuple[float, float, float]]) -> bool:
     )
 
 
-def run_evaluation(*, timeout_s: float, max_requests: int) -> dict[str, Any]:
+def run_evaluation(
+    *, timeout_s: float, max_requests: int, allow_remote: bool = False,
+) -> dict[str, Any]:
+    if allow_remote is not True:
+        raise PermissionError("remote evaluation requires explicit allow_remote=True consent")
     tasks = synthetic_tasks()[:max_requests]
     if not tasks or len(tasks) > MAX_REMOTE_REQUESTS:
         raise ValueError("evaluation request count exceeds the 40-call safety cap")
@@ -329,7 +333,11 @@ def main(argv: list[str] | None = None) -> int:
     if not args.allow_remote:
         parser.error("remote evaluation requires explicit --allow-remote consent")
     try:
-        report = run_evaluation(timeout_s=args.timeout, max_requests=args.max_requests)
+        report = run_evaluation(
+            timeout_s=args.timeout,
+            max_requests=args.max_requests,
+            allow_remote=args.allow_remote,
+        )
     except Exception:
         raise SystemExit(
             "Jev evaluation stopped safely; provider details, prompts, and credentials were not logged."
