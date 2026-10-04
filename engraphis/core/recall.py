@@ -2048,13 +2048,6 @@ def _planning_advisory(
     """Expose only fixed Jev status labels, never provider text or query content."""
     if not jev_assisted:
         return None
-    if fallback:
-        return {"status": "fallback", "reason": fallback}
-    codes = set(plan.reason_codes)
-    if "jev_route_selected" in codes:
-        return {"status": "decision", "reason": "route_selected"}
-    if "jev_uncertain" in codes:
-        return {"status": "uncertain", "reason": "jev_uncertain"}
     fixed_reasons = {
         "jev_planning_disabled": "planning_disabled",
         "jev_no_alternatives": "no_alternate_routes",
@@ -2077,6 +2070,13 @@ def _planning_advisory(
         "jev_malformed_response": "malformed_response",
         "jev_fallback": "unavailable_or_uncertain",
     }
+    if fallback:
+        return {"status": "fallback", "reason": fixed_reasons.get(fallback, fallback)}
+    codes = set(plan.reason_codes)
+    if "jev_route_selected" in codes:
+        return {"status": "decision", "reason": "route_selected"}
+    if "jev_uncertain" in codes:
+        return {"status": "uncertain", "reason": "jev_uncertain"}
     for code in plan.reason_codes:
         if code in fixed_reasons:
             return {"status": "fallback", "reason": fixed_reasons[code]}
