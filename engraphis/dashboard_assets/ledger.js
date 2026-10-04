@@ -2695,12 +2695,10 @@
           planning: jevAssisted ? 'auto' : 'off',
           jev_assisted: jevAssisted,
           allow_remote: allowRemote,
+          include_retrieval_preview: true,
           ...(jevAssisted ? { data_classification: byId('ask-jev-classification').value } : {}),
         },
       }),
-      // /recall is read-only (reinforce=False): uncited candidates add no second
-      // reinforcement of memories cited by the grounded answer.
-      preview: signal => api(`/recall?q=${encodeURIComponent(question)}&${memoryQuery(workspace, request.project)}&k=${Math.max(8, k)}`, { signal }),
     });
   }
 

@@ -4,10 +4,11 @@ const AxeBuilder = require('@axe-core/playwright').default;
 const answer = {
   grounded: true, answer: 'Postgres is the supported database. [1]', support: 0.99,
   citations: [{ id: 'mem_answer', n: 1, title: 'Database evidence', content: 'Postgres is the supported database.', support: 0.99 }],
+  retrieval_preview: [{ id: 'mem_preview', title: 'Raw evidence', content: 'Candidate Postgres memory.' }],
 };
 const emptyInbox = { items: [], count: 0, has_more: false, truncated: false, count_semantics: 'returned_sample' };
 
-async function fixture(page, { coverage, answerFailures = 0, previewFailures = 0, reviews = emptyInbox, statsUnavailable = false } = {}) {
+async function fixture(page, { coverage, answerFailures = 0, reviews = emptyInbox, statsUnavailable = false } = {}) {
   const requests = [];
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
@@ -31,7 +32,6 @@ async function fixture(page, { coverage, answerFailures = 0, previewFailures = 0
       return ok({ ...answer, ...(coverage === undefined ? {} : { answer_coverage: coverage }) });
     }
     if (path === '/recall') {
-      if (previewFailures-- > 0) return route.fulfill({ status: 503, json: { detail: 'Preview temporarily unavailable' } });
       return ok({ memories: [{ id: 'mem_preview', title: 'Raw evidence', content: 'Candidate Postgres memory.' }] });
     }
     return ok({});
@@ -63,59 +63,58 @@ test('answer retry retains the submitted question and never repeats a successful
   const { requests } = await fixture(page, { answerFailures: 1 });
   await ask(page, 'Original question');
   await expect(page.locator('#ask-answer-retry')).toBeVisible();
-  await expect(page.locator('#retrieval-list')).toContainText('Candidate Postgres memory.');
+  await expect(page.locator('#retrieval-list')).toContainText('grounded retrieval did not complete');
   await page.locator('#ask-input').fill('An edited but unsubmitted question');
   await page.locator('#ask-answer-retry').click();
   await expect(page.locator('#answer-panel')).toContainText(answer.answer);
+  await expect(page.locator('#retrieval-list')).toContainText('Candidate Postgres memory.');
   expect(requests.filter(item => item.path === '/answer').map(item => item.body.query)).toEqual(['Original question', 'Original question']);
-  expect(requests.filter(item => item.path === '/recall')).toHaveLength(1);
+  expect(requests.filter(item => item.path === '/answer').every(item => item.body.include_retrieval_preview === true)).toBe(true);
+  expect(requests.filter(item => item.path === '/recall')).toHaveLength(0);
   await expect(page.locator('#ask-result-query')).toContainText('Original question');
   await expect(page.locator('#ask-status')).toHaveText('Answer ready · Preview ready.');
 });
 
-test('preview retry preserves the answer and makes only the preview request', async ({ page }) => {
-  const { requests } = await fixture(page, { previewFailures: 1 });
+test('retrieval preview reuses the answer candidates without a second recall request', async ({ page }) => {
+  const { requests } = await fixture(page);
   await ask(page);
   await expect(page.locator('#answer-panel')).toContainText(answer.answer);
-  await expect(page.locator('#ask-preview-retry')).toBeVisible();
-  await page.locator('#ask-preview-retry').click();
+  await expect(page.locator('#retrieval-list')).toContainText('Candidate Postgres memory.');
   await expect(page.locator('#ask-status')).toHaveText('Answer ready · Preview ready.');
   expect(requests.filter(item => item.path === '/answer')).toHaveLength(1);
-  expect(requests.filter(item => item.path === '/recall')).toHaveLength(2);
+  expect(requests.filter(item => item.path === '/recall')).toHaveLength(0);
   await expect(page.locator('#answer-panel')).toContainText(answer.answer);
 });
 
-test('canceling a stalled preview preserves the ready answer and ignores its late response', async ({ page }) => {
+test('canceling the answer also cancels its matching retrieval preview', async ({ page }) => {
   await fixture(page);
   let release;
   const gate = new Promise(resolve => { release = resolve; });
-  let previews = 0;
-  await page.route('**/api/recall?*', async route => {
-    const call = ++previews;
-    if (call === 1) await gate;
-    await route.fulfill({ json: { memories: [{ id: 'mem_' + call, title: call === 1 ? 'Late canceled preview' : 'Fresh preview' }] } }).catch(() => {});
+  let answers = 0;
+  await page.route('**/api/answer', async route => {
+    answers += 1;
+    if (answers === 1) await gate;
+    await route.fulfill({ json: { ...answer, retrieval_preview: [{ id: 'mem_fresh', title: 'Fresh preview' }] } }).catch(() => {});
   });
   await ask(page);
-  await expect(page.locator('#answer-panel')).toContainText(answer.answer);
   await page.locator('#ask-cancel').click();
-  await expect(page.locator('#ask-status')).toHaveText('Answer ready · Preview canceled.');
+  await expect(page.locator('#ask-status')).toHaveText('Answer canceled · Preview canceled.');
   await expect(page.locator('#ask-cancel')).toBeHidden();
-  await expect(page.locator('#answer-panel')).toContainText(answer.answer);
-  await page.locator('#ask-preview-retry').click();
+  await expect(page.locator('#ask-answer-retry')).toBeVisible();
+  await page.locator('#ask-answer-retry').click();
   await expect(page.locator('#retrieval-list')).toContainText('Fresh preview');
   release();
-  await expect(page.locator('#retrieval-list')).not.toContainText('Late canceled preview');
+  await expect(page.locator('#retrieval-list')).not.toContainText('Candidate Postgres memory.');
 });
 
-test('canceling both pending requests exposes two independent retries', async ({ page }) => {
+test('canceling a pending grounded request exposes one retry for both panels', async ({ page }) => {
   await fixture(page);
   await page.route('**/api/answer', () => {});
-  await page.route('**/api/recall?*', () => {});
   await ask(page);
   await page.locator('#ask-cancel').click();
   await expect(page.locator('#ask-status')).toHaveText('Answer canceled · Preview canceled.');
   await expect(page.locator('#ask-answer-retry')).toBeVisible();
-  await expect(page.locator('#ask-preview-retry')).toBeVisible();
+  await expect(page.locator('#ask-preview-retry')).toHaveCount(0);
   await expect(page.locator('#answer-panel')).toHaveAttribute('aria-busy', 'false');
   await expect(page.locator('#retrieval-list')).toHaveAttribute('aria-busy', 'false');
 });
@@ -228,17 +227,16 @@ test('unavailable workspace counts are not presented as an empty first-use works
 });
 
 test('Ask controls and Home remain accessible at a narrow width', async ({ page }) => {
-  const { errors } = await fixture(page, { previewFailures: 1 });
+  const { errors } = await fixture(page);
   await ask(page);
-  await expect(page.locator('#ask-preview-retry')).toBeVisible();
+  await expect(page.locator('#retrieval-list')).toContainText('Candidate Postgres memory.');
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
   await page.route('**/api/answer', route => route.fulfill({ status: 503, json: { detail: 'Answer unavailable' } }));
   await ask(page, 'A question whose answer fails');
   await expect(page.locator('#ask-answer-retry')).toBeVisible();
-  await page.locator('.retrieval-details summary').click();
-  await expect(page.locator('#retrieval-list')).toContainText('Candidate Postgres memory.');
+  await expect(page.locator('#retrieval-list')).toContainText('grounded retrieval did not complete');
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
   await page.locator('[data-view="today"]').click();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
