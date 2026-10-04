@@ -13,6 +13,7 @@ from engraphis.core.schema import SCHEMA_VERSION
 
 
 ROOT = Path(__file__).resolve().parents[1]
+README_BENCHMARK_PIN = "d7058a8e8de9a92c2c25d9dbd8b76971ca3fd3e5"
 
 
 def _read(path: str) -> str:
@@ -39,15 +40,22 @@ def test_readme_targets_resolve_in_the_repository() -> None:
         parsed = urlparse(destination)
         if parsed.scheme in {"http", "https"}:
             if parsed.netloc == "github.com":
-                prefix = "/Coding-Dev-Tools/engraphis/blob/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/"
-                if parsed.path.startswith(prefix):
-                    target = ROOT / unquote(parsed.path[len(prefix) :])
-                    assert target.is_file(), f"README target does not exist: {destination}"
+                prefixes = (
+                    "/Coding-Dev-Tools/engraphis/blob/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/",
+                    f"/Coding-Dev-Tools/engraphis/blob/{README_BENCHMARK_PIN}/",
+                )
             elif parsed.netloc == "raw.githubusercontent.com":
-                prefix = "/Coding-Dev-Tools/engraphis/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/"
+                prefixes = (
+                    "/Coding-Dev-Tools/engraphis/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/",
+                    f"/Coding-Dev-Tools/engraphis/{README_BENCHMARK_PIN}/",
+                )
+            else:
+                prefixes = ()
+            for prefix in prefixes:
                 if parsed.path.startswith(prefix):
                     target = ROOT / unquote(parsed.path[len(prefix) :])
                     assert target.is_file(), f"README target does not exist: {destination}"
+                    break
             continue
         target = destination.split("#", 1)[0]
         assert (ROOT / target).is_file(), f"README target does not exist: {destination}"
@@ -112,7 +120,7 @@ def test_core_backend_imports_stay_behind_outer_composition_root() -> None:
     assert "from engraphis.service import MemoryService" in readme
     assert "Configuration reference" in readme
     assert (
-        "[Benchmark methodology](https://github.com/Coding-Dev-Tools/engraphis/blob/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/"
+        f"[Benchmark methodology](https://github.com/Coding-Dev-Tools/engraphis/blob/{README_BENCHMARK_PIN}/"
         "BENCHMARKS.md)" in readme
     )
 
