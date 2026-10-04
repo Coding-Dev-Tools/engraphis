@@ -13,8 +13,8 @@ from engraphis.core.schema import SCHEMA_VERSION
 
 
 ROOT = Path(__file__).resolve().parents[1]
-README_BENCHMARK_PIN = "12d2e405ed4bd78917a3e5eef2cf0d3a7f1561b2"
-README_HOSTED_PLANS_PIN = "12d2e405ed4bd78917a3e5eef2cf0d3a7f1561b2"
+README_BENCHMARK_PIN = "54eae9fc5105ab491a9aa9dc2bfeba6109baf63b"
+README_HOSTED_PLANS_PIN = "54eae9fc5105ab491a9aa9dc2bfeba6109baf63b"
 
 
 def _read(path: str) -> str:
@@ -42,13 +42,13 @@ def test_readme_targets_resolve_in_the_repository() -> None:
         if parsed.scheme in {"http", "https"}:
             if parsed.netloc == "github.com":
                 prefixes = (
-                    "/Coding-Dev-Tools/engraphis/blob/12d2e405ed4bd78917a3e5eef2cf0d3a7f1561b2/",
+                    "/Coding-Dev-Tools/engraphis/blob/54eae9fc5105ab491a9aa9dc2bfeba6109baf63b/",
                     f"/Coding-Dev-Tools/engraphis/blob/{README_BENCHMARK_PIN}/",
                     f"/Coding-Dev-Tools/engraphis/blob/{README_HOSTED_PLANS_PIN}/",
                 )
             elif parsed.netloc == "raw.githubusercontent.com":
                 prefixes = (
-                    "/Coding-Dev-Tools/engraphis/12d2e405ed4bd78917a3e5eef2cf0d3a7f1561b2/",
+                    "/Coding-Dev-Tools/engraphis/54eae9fc5105ab491a9aa9dc2bfeba6109baf63b/",
                     f"/Coding-Dev-Tools/engraphis/{README_BENCHMARK_PIN}/",
                 )
             else:
@@ -283,7 +283,7 @@ def test_configuration_and_recovery_guidance_matches_public_contracts() -> None:
     sync = _read("docs/SYNC.md")
 
     assert (
-        "[Configuration reference](https://github.com/Coding-Dev-Tools/engraphis/blob/12d2e405ed4bd78917a3e5eef2cf0d3a7f1561b2/"
+        "[Configuration reference](https://github.com/Coding-Dev-Tools/engraphis/blob/54eae9fc5105ab491a9aa9dc2bfeba6109baf63b/"
         "docs/CONFIGURATION.md)" in readme
     )
     for document in (configuration, security, connect, providers, sync):
