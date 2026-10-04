@@ -53,7 +53,7 @@ def bootstrap(monkeypatch, tmp_path):
             assert token == f"synthetic-access-{len(calls['refresh'])}"
             assert deadline > transport.time.monotonic()
             calls["decision"].append(url)
-            return {"model": transport.MODEL, "is_fallback": False, "decisions": {"q": {
+            return {"model": transport.MODEL, "is_fallback": False, "decisions": {"has_support": {
                 "type": "noul", "probability": 0.9, "confidence": 0.8,
                 "confidence_source": "derived_decisiveness",
             }}}
@@ -66,8 +66,9 @@ def bootstrap(monkeypatch, tmp_path):
 
 
 def _evaluate(client):
-    return client.evaluate("Synthetic evidence", [DecisionQuestion("q", "Assess", "noul")],
-                           model=transport.MODEL, allow_remote=True)
+    return client.evaluate("QUERY: Which evidence supports this fact?\nEVIDENCE: Synthetic evidence", [
+        DecisionQuestion("has_support", "Does this evidence directly support answering the query?", "noul"),
+    ], model=transport.MODEL, allow_remote=True, purpose="verify_support")
 
 
 @pytest.mark.parametrize("source", ["environment", "saved"])
@@ -93,7 +94,7 @@ def test_managed_decisions_survive_compute_dns_outage_and_preserve_binding(boots
     monkeypatch.setattr(socket, "getaddrinfo", dns)
     assert client.is_configured
     for _ in range(2):
-        assert _evaluate(client).get_noul("q").probability == 0.9
+        assert _evaluate(client).get_noul("has_support").probability == 0.9
     assert "unavailable-compute.example.test" not in resolved
     saved = cloud_session._load()
     assert saved["compute_url"] == compute
@@ -136,7 +137,7 @@ def test_first_managed_decision_uses_canonical_bootstrap_and_reuses_rotation(
 ):
     client, calls = bootstrap(raw, canonical, source=source)
     assert client.is_configured
-    assert _evaluate(client).get_noul("q").probability == 0.9
+    assert _evaluate(client).get_noul("has_support").probability == 0.9
     saved = cloud_session._load()
     assert saved["control_url"] == canonical
     assert saved["refresh_credential"] == "synthetic-rotated-1"
@@ -144,7 +145,7 @@ def test_first_managed_decision_uses_canonical_bootstrap_and_reuses_rotation(
 
     # Persisted family binding wins over an environment endpoint replacement.
     monkeypatch.setenv("ENGRAPHIS_CLOUD_CONTROL_URL", "https://unused.example.invalid")
-    assert _evaluate(client).get_noul("q").probability == 0.9
+    assert _evaluate(client).get_noul("has_support").probability == 0.9
     assert calls["refresh"] == [(canonical, "synthetic-bootstrap"),
                                 (canonical, "synthetic-rotated-1")]
     assert calls["decision"] == [canonical + "/v1/jev/decide"] * 2

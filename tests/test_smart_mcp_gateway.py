@@ -401,9 +401,20 @@ def test_gateway_context_usage_counts_authoritative_receipt_once(monkeypatch):
     ("engraphis_discover_actions", "viewer"),
     ("engraphis_execute_read", "viewer"),
     ("engraphis_execute_action", "admin"),
-    ("engraphis_decide", "member"),
+    ("engraphis_decide", "viewer"),
+    ("engraphis_stats", "viewer"),
     ("engraphis_remember", "member"),
+    ("engraphis_remember_many", "member"),
+    ("engraphis_correct", "member"),
+    ("engraphis_retire", "member"),
+    ("engraphis_secure_erase", "member"),
+    ("engraphis_session", "member"),
+    ("engraphis_update_memory", "member"),
+    ("engraphis_future_unknown_tool", "member"),
     ("engraphis_consolidate", "admin"),
+    ("engraphis_index_repo", "admin"),
+    ("engraphis_ingest_postgres_schema", "admin"),
+    ("engraphis_link_symbol", "admin"),
 ])
 def test_smart_gateway_roles_fail_closed_at_the_outer_auth_boundary(
     monkeypatch, tool_name, required_role,
@@ -411,6 +422,41 @@ def test_smart_gateway_roles_fail_closed_at_the_outer_auth_boundary(
     server = _memory_server(monkeypatch)
 
     assert server.minimum_role(tool_name) == required_role
+
+
+@pytest.mark.parametrize("offline_mode", [False, True])
+def test_viewer_decision_access_does_not_bypass_smart_read_boundary(monkeypatch, offline_mode):
+    server = _memory_server(monkeypatch)
+    action = _payload(server.engraphis_discover_actions(
+        task="guard command safety", intent="write",
+    ))["actions"][0]
+    assert action["canonical_action"] == "decide"
+    assert action["side_effect"] == "write"
+    assert server.minimum_role("engraphis_decide") == "viewer"
+    assert server.minimum_role("engraphis_execute_action") == "admin"
+    assert server.ACTION_SPECS["decide"].annotations["readOnlyHint"] is False
+    assert server.ACTION_SPECS["decide"].annotations["idempotentHint"] is False
+    before = server._service.store.conn.execute(
+        "SELECT COUNT(*) FROM operation_receipts"
+    ).fetchone()[0]
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("the read executor dispatched a quota-consuming decision")
+
+    monkeypatch.setattr(server, "_run_action", forbidden)
+    response = server.engraphis_execute_read(
+        capability_id=action["capability_id"], schema_digest=action["schema_digest"],
+        arguments={"kind": "guard_command", "state": "git status", "allow_remote": True,
+                   "offline_mode": offline_mode},
+    )
+    code, message, retryable = _error_envelope(response)
+    assert code == "E_VALIDATION"
+    assert "action_requires_execute_action" in message
+    assert retryable is False
+    after = server._service.store.conn.execute(
+        "SELECT COUNT(*) FROM operation_receipts"
+    ).fetchone()[0]
+    assert after == before
 
 
 @pytest.mark.parametrize(("task", "executor_name"), [

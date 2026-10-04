@@ -15,6 +15,13 @@ def _question(kind="noul"):
                             () if kind == "noul" else ("no", "yes"))
 
 
+def _support_question():
+    return DecisionQuestion("has_support", "Does this evidence directly support answering the query?", "noul")
+
+
+SUPPORT_STATE = "QUERY: Which evidence supports this fact?\nEVIDENCE: A synthetic statement"
+
+
 def _normalized(probability=0.9):
     return {"model": transport.MODEL, "is_fallback": False, "decisions": {"q": {
         "type": "noul", "probability": probability, "confidence": abs(2*probability-1),
@@ -41,7 +48,9 @@ def managed(monkeypatch):
 
         def open_request(request, timeout):
             calls.append(("request", request, timeout))
-            response = io.BytesIO(json.dumps(_normalized()).encode())
+            body = _normalized()
+            body["decisions"]["has_support"] = body["decisions"].pop("q")
+            response = io.BytesIO(json.dumps(body).encode())
             response.status = 200
             response.headers = {"Content-Type": "application/json"}
             return response
@@ -54,8 +63,9 @@ def managed(monkeypatch):
 def test_constructor_and_configuration_are_network_free_and_managed_refresh_is_bound(managed):
     client = transport.create_cloud_decision_client()
     assert client.is_configured and managed == []
-    batch = client.evaluate("A synthetic statement", [_question()], model=transport.MODEL,
-                            allow_remote=True, purpose="verify_support", data_classification="public")
+    batch = client.evaluate(SUPPORT_STATE, [_support_question()], model=transport.MODEL,
+                            allow_remote=True, purpose="verify_support", data_classification="public",
+                            request_key="constructor_key_0001")
     assert managed[0][:2] == ("refresh", None)
     assert managed[0][2]["require_compute"] is False
     assert 0 < managed[0][2]["deadline"] - transport.time.monotonic() <= client.timeout_s
@@ -64,11 +74,12 @@ def test_constructor_and_configuration_are_network_free_and_managed_refresh_is_b
     assert request.get_header("Authorization") == "Bearer synthetic-access-token"
     assert 0 < timeout <= 15
     assert json.loads(request.data) == {
-        "model": transport.MODEL, "state": "A synthetic statement", "questions": [_question().to_dict()],
+        "model": transport.MODEL, "state": SUPPORT_STATE, "questions": [_support_question().to_dict()],
         "allow_remote": True, "purpose": "verify_support", "data_classification": "public",
+        "request_key": "constructor_key_0001",
     }
-    assert batch.get_noul("q").probability == 0.9
-    assert batch.get_noul("q").confidence_source == "derived_decisiveness"
+    assert batch.get_noul("has_support").probability == 0.9
+    assert batch.get_noul("has_support").confidence_source == "derived_decisiveness"
 
 
 @pytest.mark.parametrize("kwargs", (
@@ -106,7 +117,8 @@ def test_credential_origin_change_fails_without_using_token(managed, monkeypatch
     monkeypatch.setattr(cloud_session, "credential_bound_control_url", lambda: next(values))
     with pytest.raises(transport.DecisionClientError, match="session_changed"):
         transport.create_cloud_decision_client().evaluate(
-            "Synthetic", [_question()], model=transport.MODEL, allow_remote=True,
+            SUPPORT_STATE, [_support_question()], model=transport.MODEL,
+            allow_remote=True, purpose="verify_support",
         )
     assert len(managed) == 1 and managed[0][0] == "refresh"
 
@@ -251,7 +263,8 @@ def test_https_loopback_managed_requests_disable_ambient_proxies(managed, monkey
     monkeypatch.setenv("HTTPS_PROXY", "http://proxy.invalid:8080")
     monkeypatch.setattr(cloud_session, "credential_bound_control_url", lambda: "https://localhost:8443")
     transport.create_cloud_decision_client().evaluate(
-        "Synthetic", [_question()], model=transport.MODEL, allow_remote=True,
+        SUPPORT_STATE, [_support_question()], model=transport.MODEL,
+        allow_remote=True, purpose="verify_support",
     )
     handlers = next(value[1] for value in managed if value[0] == "handlers")
     assert any(isinstance(handler, urllib.request.ProxyHandler) and handler.proxies == {}
@@ -270,7 +283,9 @@ def test_http_loopback_managed_request_uses_saved_origin_without_proxy(monkeypat
             requests.append((self.path, self.headers["Authorization"], json.loads(
                 self.rfile.read(int(self.headers["Content-Length"])),
             )))
-            body = json.dumps(_normalized()).encode()
+            normalized = _normalized()
+            normalized["decisions"]["has_support"] = normalized["decisions"].pop("q")
+            body = json.dumps(normalized).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -312,14 +327,14 @@ def test_http_loopback_managed_request_uses_saved_origin_without_proxy(monkeypat
         monkeypatch.setenv("ENGRAPHIS_CLOUD_CONTROL_URL", "http://other.invalid")
         client = transport.create_cloud_decision_client(timeout_s=2)
         assert client.is_configured
-        batch = client.evaluate("Synthetic local evidence", [_question()], model=transport.MODEL,
-                                allow_remote=True, data_classification="public")
-        assert batch.get_noul("q").probability == 0.9
+        batch = client.evaluate(SUPPORT_STATE, [_support_question()], model=transport.MODEL,
+                                allow_remote=True, purpose="verify_support", data_classification="public")
+        assert batch.get_noul("has_support").probability == 0.9
         assert len(requests) == 1
         path, authorization, body = requests[0]
         assert path == "/v1/jev/decide"
         assert authorization == "Bearer synthetic-access"
-        assert body["state"] == "Synthetic local evidence"
+        assert body["state"] == SUPPORT_STATE
         assert cloud_session.credential_bound_control_url() == control
         assert cloud_session._load()["refresh_credential"] == "synthetic-rotated"
     finally:
@@ -376,3 +391,156 @@ def test_slow_response_progress_does_not_renew_whole_request_timeout(monkeypatch
         transport._post_json("https://synthetic.invalid/v1/jev/decide", "synthetic", {}, 2.0)
     assert timeouts == [2.0, 1.25, 0.5]
     assert response.closed
+
+
+def _managed_cases():
+    contradiction = DecisionQuestion(
+        "verdict", "Classify the relationship between the facts.", "choice",
+        ("contradicts_and_supersedes", "reinforces", "orthogonal"),
+    )
+    return (
+        ("guard_command", "git status", [
+            DecisionQuestion("is_safe", "Is this command free of destructive data loss or secret leakage?", "noul"),
+            DecisionQuestion("category", "Categorize this operation", "choice",
+                             ("read_only", "state_change", "destructive_or_leak")),
+        ]),
+        ("classify_contradiction", "EXISTING FACT: Port 8000\nNEW CANDIDATE FACT: Port 9000", [contradiction]),
+        ("classify_contradiction", "EXISTING FACT: Port 8000\n\nNEW CANDIDATE FACT:\nPort 9000", [
+            DecisionQuestion(contradiction.id,
+                             "Classify the relationship between the candidate and existing fact.",
+                             contradiction.kind, contradiction.options),
+        ]),
+        ("verify_support", SUPPORT_STATE, [_support_question()]),
+        ("verify_support", "QUERY: Which port?\n\nEVIDENCE:\nPort 8000", [
+            DecisionQuestion("has_support", "Does the evidence directly support answering the query?", "noul"),
+        ]),
+        ("verify_completion", "GOAL: Fix the port\nACTIONS: \nOUTPUT: Port is corrected", [
+            DecisionQuestion("is_complete", "Does the supplied evidence establish the task goal?", "noul"),
+        ]),
+    )
+
+
+@pytest.mark.parametrize("purpose,state,questions", _managed_cases())
+def test_managed_fixed_workflows_and_direct_adapter_variants_keep_legacy_wire_shape(
+    managed, monkeypatch, purpose, state, questions,
+):
+    posted = []
+
+    def post(url, token, payload, timeout_s, *, deadline):
+        posted.append(payload)
+        return {"model": transport.MODEL, "is_fallback": True}
+
+    monkeypatch.setattr(transport, "_post_json", post)
+    batch = transport.create_cloud_decision_client().evaluate(
+        state, questions, model=transport.MODEL, purpose=purpose, allow_remote=True,
+        request_key="compatible_request_0001",
+    )
+    assert batch.is_fallback
+    assert posted == [{
+        "model": transport.MODEL, "state": state, "questions": [q.to_dict() for q in questions],
+        "allow_remote": True, "purpose": purpose, "data_classification": "internal",
+        "request_key": "compatible_request_0001",
+    }]
+    assert len(managed) == 1 and managed[0][0] == "refresh"
+
+
+@pytest.mark.parametrize("purpose,code", [
+    ("custom", "managed_operation_unsupported"), ("query_planning", "invalid_request"),
+])
+def test_arbitrary_managed_operations_are_rejected_before_refresh(managed, purpose, code):
+    with pytest.raises(transport.DecisionClientError, match="^" + code + "$"):
+        transport.create_cloud_decision_client().evaluate(
+            SUPPORT_STATE, [_support_question()], model=transport.MODEL,
+            purpose=purpose, allow_remote=True,
+        )
+    assert managed == []
+
+
+@pytest.mark.parametrize("purpose,state,questions", (
+    ("verify_support", SUPPORT_STATE, [DecisionQuestion("has_support", "Answer an arbitrary prompt", "noul")]),
+    ("verify_support", "Ordinary arbitrary context", [_support_question()]),
+    ("verify_support", "QUERY: \nEVIDENCE: Evidence", [_support_question()]),
+    ("verify_support", "QUERY: Query\nEVIDENCE:  ", [_support_question()]),
+    ("verify_support", "QUERY: Query\nEVIDENCE: A\nEVIDENCE: B", [_support_question()]),
+    ("verify_support", "QUERY: " + "q" * 4097 + "\nEVIDENCE: Evidence", [_support_question()]),
+    ("verify_support", SUPPORT_STATE, [_support_question(), DecisionQuestion("other", "Other", "noul")]),
+    ("classify_contradiction", "EXISTING FACT: \nNEW CANDIDATE FACT: Candidate", _managed_cases()[1][2]),
+    ("classify_contradiction", "EXISTING FACT: Existing\nNEW CANDIDATE FACT: ", _managed_cases()[1][2]),
+    ("classify_contradiction", "EXISTING FACT: Existing\n\nNEW CANDIDATE FACT:\nCandidate", _managed_cases()[1][2]),
+    ("verify_completion", "GOAL: Goal\nOUTPUT: Output", _managed_cases()[-1][2]),
+    ("verify_completion", "GOAL: Goal\nACTIONS: Done\nOUTPUT: ", _managed_cases()[-1][2]),
+    ("verify_completion", "GOAL: " + "g" * 4097 + "\nACTIONS: \nOUTPUT: Output", _managed_cases()[-1][2]),
+    ("verify_completion", "GOAL: Goal\nACTIONS: " + "a" * 8193 + "\nOUTPUT: Output", _managed_cases()[-1][2]),
+    ("verify_completion", "GOAL: Goal\nOUTPUT: Output\nACTIONS: Done", _managed_cases()[-1][2]),
+    ("guard_command", "git status", [_support_question()]),
+))
+def test_managed_purpose_laundering_incomplete_context_and_batches_fail_preflight(
+    managed, purpose, state, questions,
+):
+    with pytest.raises(transport.DecisionClientError, match="^invalid_request$"):
+        transport.create_cloud_decision_client().evaluate(
+            state, questions, model=transport.MODEL, purpose=purpose, allow_remote=True,
+        )
+    assert managed == []
+
+
+@pytest.mark.parametrize("key", ["", "short", "a" * 65, "a" * 15, "a" * 16 + " ",
+                               "é" * 16, "path/request_key", True, 123])
+def test_invalid_request_key_fails_before_refresh(managed, key):
+    with pytest.raises(transport.DecisionClientError, match="^invalid_request$"):
+        transport.create_cloud_decision_client().evaluate(
+            SUPPORT_STATE, [_support_question()], model=transport.MODEL,
+            purpose="verify_support", allow_remote=True, request_key=key,
+        )
+    assert managed == []
+
+
+@pytest.mark.parametrize("key", ["a" * 16, "Z0_-" * 16])
+def test_request_key_length_boundaries_are_sent_verbatim(managed, key):
+    transport.create_cloud_decision_client().evaluate(
+        SUPPORT_STATE, [_support_question()], model=transport.MODEL,
+        purpose="verify_support", allow_remote=True, request_key=key,
+    )
+    assert json.loads(managed[-1][1].data)["request_key"] == key
+
+
+def test_omitted_request_key_creates_distinct_opaque_keys_for_distinct_calls(managed):
+    client = transport.create_cloud_decision_client()
+    for _ in range(2):
+        client.evaluate(SUPPORT_STATE, [_support_question()], model=transport.MODEL,
+                        purpose="verify_support", allow_remote=True)
+    keys = [json.loads(call[1].data)["request_key"] for call in managed if call[0] == "request"]
+    assert len(keys) == len(set(keys)) == 2
+    assert all(len(key) == 32 and set(key) <= set("0123456789abcdef") for key in keys)
+
+
+def test_lost_reply_has_no_automatic_retry_and_explicit_caller_retries_keep_key(managed, monkeypatch):
+    posted = []
+
+    def unavailable(url, token, payload, timeout_s, *, deadline):
+        posted.append((payload["request_key"], timeout_s))
+        raise transport.DecisionClientError("remote_timeout")
+
+    monkeypatch.setattr(transport, "_post_json", unavailable)
+    client = transport.create_cloud_decision_client(timeout_s=10)
+    for attempt in range(2):
+        with pytest.raises(transport.DecisionClientError, match="^remote_timeout$"):
+            client.evaluate(SUPPORT_STATE, [_support_question()], model=transport.MODEL,
+                            purpose="verify_support", allow_remote=True,
+                            request_key="lost_reply_retry_0001", timeout_s=2)
+        assert len(posted) == attempt + 1
+    assert posted == [("lost_reply_retry_0001", 2.0)] * 2
+    assert sum(call[0] == "refresh" for call in managed) == 2
+
+
+def test_request_key_bytes_are_included_in_preflight_size_bound(managed, monkeypatch):
+    payload = transport._request_payload(SUPPORT_STATE, [_support_question()], transport.MODEL,
+                                         allow_remote=True, purpose="verify_support",
+                                         data_classification="internal")
+    monkeypatch.setattr(transport, "MAX_REQUEST_BYTES", len(json.dumps(payload, ensure_ascii=False).encode()) + 1)
+    with pytest.raises(transport.DecisionClientError, match="^invalid_request$"):
+        transport.create_cloud_decision_client().evaluate(
+            SUPPORT_STATE, [_support_question()], model=transport.MODEL,
+            purpose="verify_support", allow_remote=True,
+        )
+    assert managed == []

@@ -156,7 +156,7 @@ class JevDecisionBackend:
         purpose: str, data_classification: str,
         timeout_s: Optional[float] = None,
     ) -> tuple[Optional[DecisionBatch], str, Optional[str]]:
-        from engraphis.backends.jev_transport import contains_sensitive_content
+        from engraphis.backends.jev_transport import DecisionClientError, contains_sensitive_content
 
         if allow_remote is not True:
             return None, "fallback", "remote_not_authorized"
@@ -215,6 +215,11 @@ class JevDecisionBackend:
                 return None, "fallback", "provider_fallback"
             batch = cast(DecisionBatch, response)
             return batch, "decision", None
+        except DecisionClientError as exc:
+            # Preserve the local eligibility denial without exposing provider details.
+            reason = ("managed_operation_unsupported" if exc.code == "managed_operation_unsupported"
+                      else "remote_unavailable")
+            return None, "fallback", reason
         except Exception:
             # Provider exceptions may contain request text or credentials. Do not log them.
             return None, "fallback", "remote_unavailable"

@@ -16,6 +16,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Dict, Optional, Sequence
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 from engraphis.http_deadline import (
     deadline_handlers as _deadline_handlers,
@@ -222,6 +223,72 @@ def _timeout(value: float) -> float:
     return float(value)
 
 
+def _validate_managed_context(
+    state: str, questions: Sequence[DecisionQuestion], purpose: str,
+) -> None:
+    """Match Cloud's fixed advisory questions and concrete context schemas.
+
+    Known MCP and direct-adapter wire forms remain compatible. A purpose label
+    cannot turn arbitrary questions into an included managed operation. These
+    checks do not establish the provenance or truth of supplied plaintext.
+    """
+    expected = {
+        "guard_command": (
+            ("is_safe", "Is this command free of destructive data loss or secret leakage?",
+             "noul", ()),
+            ("category", "Categorize this operation", "choice",
+             ("read_only", "state_change", "destructive_or_leak")),
+        ),
+        "classify_contradiction": (
+            ("verdict", "Classify the relationship between the facts.", "choice",
+             ("contradicts_and_supersedes", "reinforces", "orthogonal")),
+        ),
+        "verify_support": (
+            ("has_support", "Does this evidence directly support answering the query?",
+             "noul", ()),
+        ),
+        "verify_completion": (
+            ("is_complete", "Does the supplied evidence establish the task goal?", "noul", ()),
+        ),
+    }.get(purpose)
+    if expected is None:
+        raise DecisionClientError("managed_operation_unsupported")
+    actual = tuple((q.id, q.prompt, q.kind, tuple(q.options)) for q in questions)
+    fields = [(state, 16000)]
+    if purpose in {"classify_contradiction", "verify_support"}:
+        if purpose == "classify_contradiction":
+            prefix, delimiter = "EXISTING FACT: ", "\nNEW CANDIDATE FACT: "
+            direct_prompt = "Classify the relationship between the candidate and existing fact."
+            direct_delimiter = "\n\nNEW CANDIDATE FACT:\n"
+            first_limit = 16000
+        else:
+            prefix, delimiter = "QUERY: ", "\nEVIDENCE: "
+            direct_prompt = "Does the evidence directly support answering the query?"
+            direct_delimiter = "\n\nEVIDENCE:\n"
+            first_limit = 4096
+        first = expected[0]
+        direct = ((first[0], direct_prompt, first[2], first[3]),)
+        if actual == direct:
+            expected, delimiter = direct, direct_delimiter
+        if not state.startswith(prefix) or state.count(delimiter) != 1:
+            raise DecisionClientError("invalid_request")
+        before, after = state[len(prefix):].split(delimiter)
+        fields = [(before, first_limit), (after, 16000)]
+    elif purpose == "verify_completion":
+        if (not state.startswith("GOAL: ") or state.count("\nACTIONS: ") != 1
+                or state.count("\nOUTPUT: ") != 1):
+            raise DecisionClientError("invalid_request")
+        goal, remaining = state[len("GOAL: "):].split("\nACTIONS: ")
+        if "\nOUTPUT: " not in remaining:
+            raise DecisionClientError("invalid_request")
+        actions, output = remaining.split("\nOUTPUT: ")
+        if len(actions) > 8192:
+            raise DecisionClientError("invalid_request")
+        fields = [(goal, 4096), (output, 16000)]
+    if actual != expected or any(not value.strip() or len(value) > limit for value, limit in fields):
+        raise DecisionClientError("invalid_request")
+
+
 def _read_response(response, deadline: float) -> bytes:
     raw = _read_deadline_response(response, deadline, max_bytes=MAX_RESPONSE_BYTES)
     if len(raw) > MAX_RESPONSE_BYTES:
@@ -328,11 +395,26 @@ class EngraphisCloudDecisionClient:
     def evaluate(self, state: str, questions: Sequence[DecisionQuestion], *, model: str,
                  allow_remote: bool = False, purpose: str = "custom",
                  data_classification: str = "internal",
-                 timeout_s: Optional[float] = None) -> CloudDecisionBatch:
+                 timeout_s: Optional[float] = None,
+                 request_key: Optional[str] = None) -> CloudDecisionBatch:
+        """Evaluate once; callers can reuse an explicit key after a lost reply.
+
+        Cloud charges evaluated questions and rejects duplicate keys without a
+        second provider call. This client never retries automatically.
+        """
         effective_timeout = min(self.timeout_s, _timeout(timeout_s)) if timeout_s is not None else self.timeout_s
         deadline = time.monotonic() + effective_timeout
         payload = _request_payload(state, questions, model, allow_remote=allow_remote,
                                    purpose=purpose, data_classification=data_classification)
+        _validate_managed_context(state, questions, purpose)
+        if request_key is not None and (
+            not isinstance(request_key, str)
+            or not re.fullmatch(r"[A-Za-z0-9_-]{16,64}", request_key)
+        ):
+            raise DecisionClientError("invalid_request")
+        payload["request_key"] = request_key if request_key is not None else uuid4().hex
+        if len(json.dumps(payload, ensure_ascii=False).encode()) > MAX_REQUEST_BYTES:
+            raise DecisionClientError("invalid_request")
         from engraphis import cloud_session
         from engraphis.hosted_client import validate_cloud_base_url
         try:
