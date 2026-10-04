@@ -21,6 +21,13 @@ def test_generated_artifacts_match_registered_tools():
     classic = {item["name"] for item in contract["surfaces"]["classic"]}
     assert "engraphis_recall" in classic
     assert "engraphis_discover_actions" not in classic
+    remote_capable = {
+        "classic": {"engraphis_recall", "engraphis_recall_context"},
+        "smart": {"engraphis_recall_context"},
+    }
+    for surface, names in remote_capable.items():
+        tools = {item["name"]: item for item in contract["surfaces"][surface]}
+        assert all(tools[name]["annotations"]["openWorldHint"] is True for name in names)
 
 
 def test_contract_is_secret_free_public_metadata():
