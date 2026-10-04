@@ -281,6 +281,28 @@ def test_empty_and_oversized_inputs_do_not_leave_the_process(query, evidence):
     assert client.calls == []
 
 
+def test_multibyte_state_is_bounded_by_serialized_request_bytes_before_client_call():
+    client = FakeClient()
+    result = backend(client).verify_grounded_support_result(
+        "\U0001f600" * 7_000, "Postgres", allow_remote=True,
+    )
+
+    assert result.status == "fallback"
+    assert result.fallback_reason == "input_too_large"
+    assert client.calls == []
+
+
+def test_invalid_unicode_is_rejected_before_client_call():
+    client = FakeClient()
+    result = backend(client).verify_grounded_support_result(
+        "\ud800", "Postgres", allow_remote=True,
+    )
+
+    assert result.status == "fallback"
+    assert result.fallback_reason == "invalid_input"
+    assert client.calls == []
+
+
 def test_cloud_decision_client_uses_saved_session_configuration(monkeypatch):
     from engraphis import cloud_session
     from engraphis.backends.jev_decision import create_cloud_decision_client

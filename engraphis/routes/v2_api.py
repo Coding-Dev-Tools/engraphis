@@ -1544,6 +1544,16 @@ def _jev_review_projection_parts(memory: dict) -> tuple[str, str]:
     return title, content
 
 
+def _jev_record_is_secret(record) -> bool:
+    """Honor both canonical and legacy metadata sensitivity classifications."""
+    sensitivity = str(getattr(record, "sensitivity", "") or "").strip().casefold()
+    metadata = getattr(record, "metadata", {})
+    metadata_sensitivity = ""
+    if isinstance(metadata, dict):
+        metadata_sensitivity = str(metadata.get("sensitivity") or "").strip().casefold()
+    return "secret" in {sensitivity, metadata_sensitivity}
+
+
 def _jev_review_projection(memory: dict) -> str:
     title, content = _jev_review_projection_parts(memory)
     return "\n".join(part for part in (title, content) if part)
@@ -1579,39 +1589,19 @@ def jev_review(req: _JevReviewReq):
     if not ws:
         raise HTTPException(status_code=400, detail={"error": "workspace is required"})
     current_service = service()
-    from engraphis.core.interfaces import SearchFilter
-
-    workspace_id, repo_id = current_service._require_scope(ws, req.repo)
-    visible_filter = SearchFilter(
-        workspace_id=workspace_id,
-        repo_id=repo_id,
-        include_ancestors=True,
-    )
-    visible_where, visible_args = current_service.store._where(
-        visible_filter, include_invalid=False,
-    )
-    visible_clause = " AND ".join(visible_where) or "1"
     inspected = []
     records = []
     for memory_id in req.memory_ids:
-        # Inspect without an exact repo constraint so visible workspace/user ancestors
-        # can be reviewed in a project. The canonical browse predicate below retains
-        # the same repo, temporal, workspace, and non-session boundaries as the selector.
-        detail = _run(current_service.inspect, memory_id, workspace=ws)
-        memory = detail.get("memory") or {}
-        record = current_service.store.get_memory(memory_id)
-        visible = current_service.store.conn.execute(
-            "SELECT 1 FROM memories WHERE id=? AND " + visible_clause,
-            [memory_id, *visible_args],
-        ).fetchone()
-        if not memory or record is None or visible is None:
-            raise HTTPException(status_code=404, detail={"error": "memory not found"})
-        inspected.append(memory)
+        record = _run(
+            current_service.read_memory_for_review, memory_id, workspace=ws, repo=req.repo,
+        )
+        inspected.append({
+            "title": record.title, "content": record.content, "summary": record.summary,
+        })
         records.append(record)
 
     backend = _dashboard_jev_backend()
-    blocked_secret = any(str(getattr(record, "sensitivity", "normal")) == "secret"
-                         for record in records)
+    blocked_secret = any(_jev_record_is_secret(record) for record in records)
     allow_remote = req.allow_remote is True and not blocked_secret
     evidence = "\n\n".join(
         f"SELECTED MEMORY {index + 1}:\n{_jev_review_projection(memory)}"
