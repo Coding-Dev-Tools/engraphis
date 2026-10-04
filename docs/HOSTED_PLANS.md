@@ -27,13 +27,10 @@ Start or manage a hosted subscription in the [Engraphis account portal](https://
 ## Included System 1 Decision Engine (Jev)
 
 After release acceptance and service enablement, each Pro subscription owner and each named Team
-seat includes managed Jev decisions at no additional charge. Every individual has 100 evaluated
-questions per rolling hour, 1,000 per rolling five hours, and 2,000 per rolling 24 hours. Team
-usage is per seat, not pooled. Each evaluated question counts once; command review consumes two.
-The account portal reports the signed-in member's rolling windows and next release times. An
-admitted request that may have reached the provider remains counted if it fails or is interrupted;
-no overage charge is applied. A service protection limit may pause requests before an individual's
-allowance is exhausted.
+seat includes managed Jev decisions at no additional charge, within a finite rolling allowance.
+The account portal reports current availability and usage. Some admitted requests may count if
+they fail or are interrupted; no overage charge is applied. A service protection limit may pause
+requests before the included allowance is exhausted.
 
 Managed Jev is currently `not_yet_available` pending release acceptance and service capacity
 qualification; client configuration does not enable it. Subscribers do not need a personal

@@ -363,8 +363,12 @@ def test_consolidation_docs_expose_only_live_public_options() -> None:
 
     assert "docs/HOSTED_PLANS.md" in readme
     hosted_plan = " ".join(_read("docs/HOSTED_PLANS.md").split())
-    assert "100 evaluated questions per rolling hour, 1,000 per rolling five hours, and 2,000 per rolling 24 hours" in hosted_plan
-    assert "Team usage is per seat, not pooled." in hosted_plan
+    for public_copy in (readme, hosted_plan):
+        assert "100 evaluated questions" not in public_copy
+        assert "1,000 per rolling" not in public_copy
+        assert "2,000 per rolling" not in public_copy
+    assert "finite rolling allowance" in hosted_plan
+    assert "current availability and usage" in hosted_plan
     assert "currently `not_yet_available` pending release acceptance" in hosted_plan
     normalized_tools = " ".join(tools.split())
     assert "`profiles (bool, false)`; `structured (bool, false)`." in normalized_tools
