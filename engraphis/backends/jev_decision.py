@@ -17,6 +17,7 @@ let ``LLMClient`` (``engraphis.llm.client``) drop sampling parameters for those 
 from __future__ import annotations
 
 import inspect
+import json
 import math
 import os
 import re
@@ -165,7 +166,9 @@ class JevDecisionBackend:
         purpose: str, data_classification: str,
         timeout_s: Optional[float] = None,
     ) -> tuple[Optional[DecisionBatch], str, Optional[str]]:
-        from engraphis.backends.jev_transport import DecisionClientError, contains_sensitive_content
+        from engraphis.backends.jev_transport import (
+            MAX_REQUEST_BYTES, DecisionClientError, contains_sensitive_content,
+        )
 
         if allow_remote is not True:
             return None, "fallback", "remote_not_authorized"
@@ -206,6 +209,31 @@ class JevDecisionBackend:
         client, model = self.client, self.model
         if client is None or model is None:
             return None, "fallback", "backend_unavailable"
+        # Bound both supported transport envelopes before any injected-client call,
+        # including legacy signatures. TypeSafe choice criteria duplicate option text.
+        managed_payload = {
+            "model": model, "state": state, "questions": [question.to_dict()],
+            "allow_remote": True, "purpose": purpose, "data_classification": data_classification,
+        }
+        provider_question: Dict[str, object] = {
+            "type": question.kind, "instructions": question.prompt,
+        }
+        if question.kind == "choice":
+            provider_question["criteria"] = {label: label for label in question.options}
+        elif question.kind == "score":
+            provider_question["criteria"] = list(question.options)
+        provider_payload = {
+            "model": model, "state": state, "questions": {question.id: provider_question},
+        }
+        try:
+            if any(
+                len(json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8"))
+                > MAX_REQUEST_BYTES
+                for payload in (managed_payload, provider_payload)
+            ):
+                return None, "fallback", "input_too_large"
+        except (TypeError, ValueError, UnicodeEncodeError):
+            return None, "fallback", "invalid_input"
         try:
             evaluate: Callable[..., object] = client.evaluate
             signature = inspect.signature(evaluate)

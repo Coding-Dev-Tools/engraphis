@@ -652,7 +652,9 @@ def test_project_jev_review_accepts_visible_ancestors_without_inspection_or_muta
     assert list(service.store.conn.iterdump()) == before
 
 
-@pytest.mark.parametrize("denied_scope", ["foreign_workspace", "sibling_repo", "foreign_session"])
+@pytest.mark.parametrize("denied_scope", [
+    "foreign_workspace", "sibling_repo", "foreign_session", "own_session",
+])
 def test_project_jev_review_denies_out_of_scope_records_before_provider_or_mutation(
     dashboard, monkeypatch, denied_scope,
 ):
@@ -670,7 +672,8 @@ def test_project_jev_review_denies_out_of_scope_records_before_provider_or_mutat
     elif denied_scope == "sibling_repo":
         memory_rid = service.store.get_or_create_repo(wid, "sibling")
     else:
-        session_id = service.store.start_session(wid, selected_rid, user_id="usr_other")
+        session_owner = "usr_reviewer" if denied_scope == "own_session" else "usr_other"
+        session_id = service.store.start_session(wid, selected_rid, user_id=session_owner)
         scope = Scope.SESSION
     denied_id = service.engine.remember(
         "PRIVATE-DENIED-REVIEW-EVIDENCE", workspace_id=memory_wid, repo_id=memory_rid,
@@ -682,8 +685,7 @@ def test_project_jev_review_denies_out_of_scope_records_before_provider_or_mutat
     with bind_service(service, principal={
         "id": "usr_reviewer", "email": "reviewer@example.test", "role": "viewer",
     }):
-        expected = "another user" if denied_scope == "foreign_session" else "does not belong"
-        with pytest.raises(ValidationError, match=expected):
+        with pytest.raises(ValidationError, match="not visible"):
             service.read_memory_for_review(denied_id, workspace="demo", repo="selected")
         response = client.post("/api/jev/review", json={
             "workspace": "demo", "repo": "selected", "memory_ids": [first_id, denied_id],
@@ -695,6 +697,85 @@ def test_project_jev_review_denies_out_of_scope_records_before_provider_or_mutat
     assert response.json()["detail"]["error"] == "invalid request"
     assert decision_client.calls == []
     assert "PRIVATE-DENIED-REVIEW-EVIDENCE" not in response.text
+    assert list(service.store.conn.iterdump()) == before
+
+
+@pytest.mark.parametrize(("state", "visible"), [
+    ("current", True),
+    ("low_retention", True),
+    ("future_invalidation", True),
+    ("not_yet_known_invalidation", True),
+    ("valid_from_boundary", True),
+    ("known_from_boundary", True),
+    ("invalidated", False),
+    ("valid_to_boundary", False),
+    ("expired", False),
+    ("expired_boundary", False),
+    ("future_valid", False),
+    ("not_yet_known", False),
+    ("forgotten", False),
+    ("retired", False),
+])
+def test_jev_review_selected_record_matches_current_browse_visibility(
+    dashboard, monkeypatch, state, visible,
+):
+    from engraphis.routes import v2_api
+    from engraphis.service import ValidationError
+    from engraphis.service_context import bind_service
+
+    client, service, first_id, second_id = dashboard
+    now = time.time() + 1
+    monkeypatch.setattr(time, "time", lambda: now)
+    changes = {
+        "low_retention": {"stability": 0},
+        "future_invalidation": {"valid_to": now + 60, "valid_to_recorded_at": now},
+        "not_yet_known_invalidation": {
+            "valid_to": now - 60, "valid_to_recorded_at": now + 60,
+        },
+        "valid_from_boundary": {"valid_from": now},
+        "known_from_boundary": {"ingested_at": now},
+        "invalidated": {"valid_to": now - 60, "valid_to_recorded_at": now},
+        "valid_to_boundary": {"valid_to": now, "valid_to_recorded_at": now},
+        "expired": {"expired_at": now - 60},
+        "expired_boundary": {"expired_at": now},
+        "future_valid": {"valid_from": now + 60},
+        "not_yet_known": {"ingested_at": now + 60},
+    }.get(state, {})
+    if changes:
+        service.store.conn.execute(
+            "UPDATE memories SET " + ",".join(f"{field}=?" for field in changes) + " WHERE id=?",
+            [*changes.values(), second_id],
+        )
+        service.store.conn.commit()
+    elif state == "forgotten":
+        service.forget(second_id, workspace="demo")
+    elif state == "retired":
+        service.retire(second_id, workspace="demo")
+
+    decision_client = _DecisionClient()
+    monkeypatch.setattr(v2_api, "_dashboard_jev_backend", lambda: _review_backend(decision_client))
+    before = list(service.store.conn.iterdump())
+    with bind_service(service, principal={
+        "id": "usr_reviewer", "email": "reviewer@example.test", "role": "viewer",
+    }):
+        listing = service.list_memories(workspace="demo")["memories"]
+        assert (second_id in {memory["id"] for memory in listing}) is visible
+        if visible:
+            assert service.read_memory_for_review(second_id, workspace="demo").id == second_id
+        else:
+            with pytest.raises(ValidationError, match="not visible"):
+                service.read_memory_for_review(second_id, workspace="demo")
+        response = client.post("/api/jev/review", json={
+            "workspace": "demo", "memory_ids": [first_id, second_id],
+            "claim": "Which database is primary?", "allow_remote": True,
+            "data_classification": "internal",
+        })
+
+    assert response.status_code == (200 if visible else 400)
+    assert len(decision_client.calls) == (2 if visible else 0)
+    if not visible:
+        assert response.json()["detail"]["error"] == "invalid request"
+        assert "SQLite stores local test fixtures." not in response.text
     assert list(service.store.conn.iterdump()) == before
 
 
