@@ -49,7 +49,7 @@ Connect a coding agent over MCP with the [agent setup guide](https://github.com/
 The current registered artifact contains three deterministic offline fixture runs. It separates context size, retrieval quality, and grounded decision checks; these small fixtures do not establish general task performance.
 
 <p align="center">
-  <img src="docs/images/context-efficiency.svg" alt="Three registered offline fixtures: structure-aware chunking reduced mean retrieved context from 740.3 to 214.3 tokens per question (71.1%, 18 questions); the serialized JSON-shape proxy fell from 24,590 to 11,138 tokens across 26 payload samples and 260 recalls. Candidate and packed retrieval quality (Recall@5, Hit@5, and answer-token recall) are shown separately (each 1.000). Grounded checks show 5/5 answerable queries grounded and 6/6 abstention queries rejected, including a 1/1 quarantined-evidence probe; 11/11 decisions were correct. MCP transport and provider billing were not measured. Artifact SHA-256 prefix 170642b51e55; see the benchmark guide for the full checksum." width="100%">
+  <img src="https://raw.githubusercontent.com/Coding-Dev-Tools/engraphis/c5827974d2ba211f49ff442640baa373723cf112/docs/images/context-efficiency.svg" alt="Three registered offline fixtures: structure-aware chunking reduced mean retrieved context from 740.3 to 214.3 tokens per question (71.1%, 18 questions); the serialized JSON-shape proxy fell from 24,590 to 11,138 tokens across 26 payload samples and 260 recalls. Candidate and packed retrieval quality (Recall@5, Hit@5, and answer-token recall) are shown separately (each 1.000). Grounded checks show 5/5 answerable queries grounded and 6/6 abstention queries rejected, including a 1/1 quarantined-evidence probe; 11/11 decisions were correct. MCP transport and provider billing were not measured. Artifact SHA-256 prefix 170642b51e55; see the benchmark guide for the full checksum." width="100%">
   <br>
   <sup>Three offline fixtures separate context reduction, candidate and packed retrieval quality, and grounded behavior. The chart shows the artifact checksum prefix; see the benchmark guide for the full checksum and reproduction steps.</sup>
 </p>
@@ -60,7 +60,7 @@ The current registered artifact contains three deterministic offline fixture run
 | Recall payload proxy | JSON-shape proxy: 24,590 → 11,138 tokens (54.71% lower, 26 samples; 260 timed recalls) | Candidate and packed Recall@5, Hit@5, and answer-token recall are each 1.000 |
 | Grounded decisions | 5/5 answerable queries grounded; 6/6 abstention queries rejected, including 1/1 quarantined-evidence check | 11/11 decisions correct |
 
-The payload figure is a serialized JSON-shape estimate, not an MCP transport measurement or provider billing total. See the [Benchmark methodology](https://github.com/Coding-Dev-Tools/engraphis/blob/0bd6a8e8f5804a664d9850c57b159d73012ce59b/BENCHMARKS.md) for artifact identity, counting methods, reproduction commands, external-evaluation boundaries, and limitations.
+The payload figure is a serialized JSON-shape estimate, not an MCP transport measurement or provider billing total. See the [Benchmark methodology](https://github.com/Coding-Dev-Tools/engraphis/blob/c5827974d2ba211f49ff442640baa373723cf112/BENCHMARKS.md) for artifact identity, counting methods, reproduction commands, external-evaluation boundaries, and limitations.
 
 ## Optional Jev assistance
 
@@ -70,7 +70,7 @@ Recall route selection is experimental and BYOK-only. Smart MCP opts in through 
 
 Jev-assisted recall planning is experimental. In an exploratory comparison using 40 public synthetic tasks, Jev selected a route on all 40 calls but did not change nDCG@5, Recall@5, or answer-token coverage. This fixture does not establish a benefit on held-out user workloads, so no retrieval-quality improvement is claimed.
 
-Managed Jev remains `not_yet_available` pending release acceptance and capacity qualification. Under the user-approved 2026-10-04 allowance, each eligible Pro member and each eligible Team seat receives its own 100 questions per rolling hour, 1,000 per rolling five hours, and 2,000 per rolling 24 hours; Team use is not pooled. Each evaluated question uses one unit, so command review uses two. Paid viewers and eligible active trial/test entitlements receive the same limits, with no extra customer charge or customer provider key. The account portal reports each member's limits and usage. The unchanged 100-questions/day production fleet guard conflicts with the per-person allowance and remains a launch blocker. See [hosted plans and Jev details](docs/HOSTED_PLANS.md#included-system-1-decision-engine-jev).
+Managed Jev remains `not_yet_available` pending release acceptance and capacity qualification. Under the user-approved 2026-10-04 allowance, each eligible Pro member and each eligible Team seat receives its own 100 questions per rolling hour, 1,000 per rolling five hours, and 2,000 per rolling 24 hours; Team use is not pooled. Each evaluated question uses one unit, so command review uses two. Paid viewers and eligible active trial/test entitlements receive the same limits, with no extra customer charge or customer provider key. The account portal reports each member's limits and usage. The unchanged 100-questions/day production fleet guard conflicts with the per-person allowance and remains a launch blocker. See [hosted plans and Jev details](https://github.com/Coding-Dev-Tools/engraphis/blob/c5827974d2ba211f49ff442640baa373723cf112/docs/HOSTED_PLANS.md#included-system-1-decision-engine-jev).
 
 ## Guides
 
@@ -84,7 +84,7 @@ Managed Jev remains `not_yet_available` pending release acceptance and capacity 
 - [Pi extension](https://github.com/Coding-Dev-Tools/engraphis/blob/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/integrations/pi/README.md)
 - [Memory write review](https://github.com/Coding-Dev-Tools/engraphis/blob/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/docs/WRITE_REVIEW.md)
 - [Security policy](https://github.com/Coding-Dev-Tools/engraphis/blob/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/SECURITY.md)
-- [Hosted plans and licensing](https://github.com/Coding-Dev-Tools/engraphis/blob/e440bf6ba0ff600648fdac6eb53dd28d6d80df24/docs/HOSTED_PLANS.md)
+- [Hosted plans and licensing](https://github.com/Coding-Dev-Tools/engraphis/blob/c5827974d2ba211f49ff442640baa373723cf112/docs/HOSTED_PLANS.md)
 
 ## License
 
