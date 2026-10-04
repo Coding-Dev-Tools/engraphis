@@ -44,7 +44,7 @@ control-plane, relay, compute, and worker implementations are private services.
 | `ENGRAPHIS_LLM_MODEL` | `gpt-4o-mini` | Model name (provider-specific) |
 | `ENGRAPHIS_LLM_API_KEY` | Not set | API key for chat/synthesis, `llm` / `llm_structured` extraction, and structured consolidation |
 | `ENGRAPHIS_LLM_BASE_URL` | Not set | Base URL for openrouter / custom OpenAI-compatible endpoints |
-| `ENGRAPHIS_DECISION_BACKEND` | `none` | `none` or `local` keeps advisory decisions local; `managed` uses the saved Cloud session and included allowance; `auto` selects managed when configured and never switches to BYOK; explicit `byok` uses a personal TypeSafe key. Legacy `typesafe`, `jev`, and `system1` mean BYOK. Remote calls also require per-call consent. |
+| `ENGRAPHIS_DECISION_BACKEND` | `none` | `none` or `local` keeps advisory decisions local; `managed` uses the saved Cloud session and an included per-person rolling allowance after service acceptance; `auto` selects managed when configured and never switches to BYOK; explicit `byok` uses a personal TypeSafe key and may incur provider charges. Managed custom questions and query planning are unsupported. Legacy `typesafe`, `jev`, and `system1` mean BYOK. Remote calls also require per-call consent. |
 | `ENGRAPHIS_DECISION_MODEL` | `jev-1.13.0` | Pinned model accepted by the Jev transport; other model identifiers are rejected. |
 | `TYPESAFE_API_KEY` | Not set | Personal credential for explicit BYOK decisions; `JEV_API_KEY` is a fallback alias. Managed decisions use the saved Cloud session instead. |
 | `TYPESAFE_BASE_URL` | `https://api.typesafe.ai` | Direct BYOK provider origin; does not change the managed session's bound Cloud control origin. |
@@ -61,6 +61,28 @@ control-plane, relay, compute, and worker implementations are private services.
 | `ENGRAPHIS_CLOUD_TOKEN_SUBJECT` | `member` | Subject fixed during hosted bootstrap (`device` or `member`); set explicitly with an environment-only refresh credential |
 | `ENGRAPHIS_CLOUD_ACCESS_TOKEN` | Not set | Optional short-lived access token for ephemeral jobs |
 | `ENGRAPHIS_MANAGED_COMPUTE_CONSENT` | *(unset)* | Deny-only operator override: `0` pauses readable managed processing. A truthy value cannot grant approval. Each workspace requires explicit confirmation in Manage → Settings; encrypted sync is separate |
+
+Managed Jev is currently `not_yet_available` pending release acceptance and
+service-capacity qualification; client configuration does not enable it. After
+enablement, every legitimate Pro user and each eligible Team named seat, including paid
+viewers, with an active paid, trial, or test entitlement receives managed Jev at no
+additional customer charge and without a personal provider key.
+
+Each individual receives all three independent rolling limits: **100 evaluated questions per rolling hour, 1,000 per rolling five hours, and 2,000 per rolling 24 hours**. Usage is per
+person, not pooled across a Team and not monthly. Each evaluated question counts once;
+if a batch is evaluated, every question counts. A `guard_command` review evaluates two
+questions, and each other supported workflow evaluates one. Admitted attempts that fail
+or are interrupted remain counted. No overage is charged. The account portal reports
+that member's remaining usage across all three windows; usage returns as earlier
+questions leave each rolling window.
+
+The existing production fleet guard remains 100 questions per day across the service. It
+conflicts with the per-person rolling caps and may pause or reject requests earlier, so
+resolve capacity and the fleet guard before launch. No latency, accuracy, or cost-saving
+guarantee is established by configuration or a successful health check. These rules are
+service-enforced, not client configuration overrides. Selecting a backend does not
+enable the service or satisfy release, provider-terms, capacity, or quality gates. See
+[hosted plans](HOSTED_PLANS.md#included-system-1-decision-engine-jev).
 
 The optional cross-encoder reranker is model- and hardware-dependent. Treat its quality and
 latency as deployment-specific until a versioned model identity, exact configuration, and
