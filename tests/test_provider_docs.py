@@ -99,11 +99,11 @@ def test_readme_and_env_example_link_to_the_provider_guides():
     readme = _read("README.md")
     provider_guide = _read("docs/LLM_PROVIDERS.md")
     assert (
-        "[Agent and LLM provider setup](https://github.com/Coding-Dev-Tools/engraphis/blob/12d2e405ed4bd78917a3e5eef2cf0d3a7f1561b2/"
+        "[Agent and LLM provider setup](https://github.com/Coding-Dev-Tools/engraphis/blob/54eae9fc5105ab491a9aa9dc2bfeba6109baf63b/"
         "docs/LLM_PROVIDERS.md)" in readme
     )
     assert (
-        "[agent setup guide](https://github.com/Coding-Dev-Tools/engraphis/blob/12d2e405ed4bd78917a3e5eef2cf0d3a7f1561b2/"
+        "[agent setup guide](https://github.com/Coding-Dev-Tools/engraphis/blob/54eae9fc5105ab491a9aa9dc2bfeba6109baf63b/"
         "docs/AGENT_CONNECT.md)" in readme
     )
     assert "Ollama" in provider_guide
