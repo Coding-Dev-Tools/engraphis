@@ -13,7 +13,7 @@ from engraphis.core.schema import SCHEMA_VERSION
 
 
 ROOT = Path(__file__).resolve().parents[1]
-README_BENCHMARK_PIN = "d7058a8e8de9a92c2c25d9dbd8b76971ca3fd3e5"
+README_BENCHMARK_PIN = "27ab1b3baab791d9f6957171cd6d21b09f39eed7"
 
 
 def _read(path: str) -> str:

@@ -8,7 +8,7 @@ from urllib.parse import unquote, urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY = "Coding-Dev-Tools/engraphis"
-README_BENCHMARK_PIN = "d7058a8e8de9a92c2c25d9dbd8b76971ca3fd3e5"
+README_BENCHMARK_PIN = "27ab1b3baab791d9f6957171cd6d21b09f39eed7"
 README_LINK_PINS = (
     "fee9d0c150c250632d8e0c0ee86c1325c9e1ee78",
     README_BENCHMARK_PIN,
