@@ -87,7 +87,6 @@ class GroundedAnswer:
     context_revision: str = ""
     planning_mode: str = "off"
     planning_details: Optional[dict] = None
-    planning_advisory: Optional[dict] = None
     graph_traversal_details: Optional[list[dict]] = None
     degraded_mode: bool = False
     semantic_support: bool = True
@@ -98,6 +97,9 @@ class GroundedAnswer:
     answer_coverage: str = "unknown"
     diagnostics_v1: Optional[dict] = None
     retrieval_preview: Optional[list[dict]] = None
+    # Append advisory metadata so existing positional callers retain their graph,
+    # capability, diagnostics, and retrieval-preview argument positions.
+    planning_advisory: Optional[dict] = None
 
     def to_dict(self) -> dict:
         payload = {

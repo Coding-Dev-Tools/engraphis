@@ -1,9 +1,9 @@
 {
   "environment": {
     "embedding": "deterministic",
-    "numpy": "2.4.5",
+    "numpy": "2.5.3",
     "platform": "win32",
-    "python": "3.12.10",
+    "python": "3.12.14",
     "vector_backend": "numpy"
   },
   "generated_on": "2026-10-04",
@@ -103,7 +103,7 @@
   ],
   "schema": "engraphis-public-offline-fixtures/v1",
   "suite": {
-    "digest": "7c48f87316fcd4de53154356609d843371c7b6118c40edb3125012ec37fb7521",
+    "digest": "9b395a60e7ae85e1a8eff24f91fb8963528ff450d89dd80c5dfc119a21bfcda0",
     "digest_method": "sha256(canonical compact JSON mapping each sorted path to its file SHA-256)",
     "files": {
       "engraphis/__init__.py": "f24241e8da2ede9ccba54ce4bf7531a800b55c29b2469e5de93bd423cffbf0be",
@@ -153,7 +153,7 @@
       "engraphis/core/graph_policy.py": "ec5b373d01adb2de87df31d9f543130018e9a73faaaed239a184f14a32646615",
       "engraphis/core/graph_scene.py": "5bfb4dadd90aff6be89dad0384aabec533c04c9a5225d3e9d43a468152569d75",
       "engraphis/core/graphrank.py": "1279a58396104d3f906bfd5ec75b32efedfefe52201467bf19d80be3517017a5",
-      "engraphis/core/grounded.py": "1fdbd9522c541b7e9aef05b4af245fc741503f761c70dd1193b9d4e68b610c1b",
+      "engraphis/core/grounded.py": "0d6b60ef16f3cd65b7032bdb60ba853dac364d0df58a74c932ecf12aec98e4b7",
       "engraphis/core/ids.py": "e47eeadfaf560bc7638e1879fc491fa82d981cd42b9e4b05ef87033b2d7dfa60",
       "engraphis/core/interfaces.py": "05d65c1919f3c23592f48e5f2820bbe857923fb65f5146727636eba51941271c",
       "engraphis/core/mutations.py": "dbb46a97686994e1652b2698e50c3309ff428d7258d6e8e53cbad7bb55b459aa",
@@ -213,9 +213,9 @@
       "engraphis/redirector.py": "5ba964b81f09008c9369180cb49d247519000763274aabc5e046215b12fa641d",
       "engraphis/routes/__init__.py": "f0d59080212cfa0d9b50877bca28e5832d1ae917899500d52c68b1c8821231af",
       "engraphis/routes/memory.py": "9ca066e1762eeeaafd9790ed57d730efcaceb57742dbe0c830ad8764500ff9e5",
-      "engraphis/routes/v2_api.py": "2b21704be76196ee480d2aabdeadb80da0170f528bcdf0a769d60d23b76e0fdc",
+      "engraphis/routes/v2_api.py": "6f2632df3f6e508f2b5a061b4fe6fbac1776ffad8066b56d0930bb5977c97800",
       "engraphis/routes/vault.py": "1a7eee7c1a7c7aa11091042756aa2739a3eb963647020f40584a6a38da1988af",
-      "engraphis/service.py": "6df47bb264f4729a41cf84cd2778a483598c5da6dfd907792c6565a95acacb5f",
+      "engraphis/service.py": "90bbab496c95583f5d97e6767cf975020212622df6a48a653e92b84210e03e8e",
       "engraphis/service_context.py": "3de9289f49a977cdc206285ac42a9953a104eb1d1b1bc8ea77febd75c7cd82ab",
       "engraphis/static/__init__.py": "1fff4c4e2554e7f5fcf3eace269feba09827524917193a4dd65df95bae64ad1f",
       "engraphis/stores/__init__.py": "48ee4326c8f28eecf46f558b7aea21adb779226a7038299017ab90196d5d84be",

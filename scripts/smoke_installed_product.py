@@ -327,10 +327,27 @@ def run_journey(surface="all", *, timeout=30.0, installed=True):
               "installed_artifact": installed, "embedding": "deterministic/offline", "checks": {}}
     for name, journey in (("mcp", mcp_journey), ("server", server_journey)):
         if surface in (name, "all"):
-            with tempfile.TemporaryDirectory(prefix="engraphis-installed-journey-") as temporary:
-                root = Path(temporary).resolve()
+            temporary = tempfile.TemporaryDirectory(prefix="engraphis-installed-journey-")
+            root = Path(temporary.name).resolve()
+            # Cleanup is confined to this run's newly created temporary directory.
+            if root.parent != Path(tempfile.gettempdir()).resolve():
+                raise RuntimeError("smoke temporary directory escaped its root")
+            try:
                 env = isolated_environment(root, installed=installed)
                 report["checks"][name] = journey(root, env, timeout=timeout, installed=installed)
+            finally:
+                # Windows can retain SQLite mappings briefly after taskkill confirms
+                # the owned process tree exited. Retry cleanup for a bounded interval;
+                # a persistent lock still fails the smoke instead of being ignored.
+                cleanup_deadline = time.monotonic() + 2.0
+                while True:
+                    try:
+                        temporary.cleanup()
+                        break
+                    except PermissionError:
+                        if os.name != "nt" or time.monotonic() >= cleanup_deadline:
+                            raise
+                        time.sleep(0.05)
     return report
 
 

@@ -1540,14 +1540,32 @@ def _dashboard_jev_backend():
 def _jev_review_projection_parts(memory: dict) -> tuple[str, str]:
     """Return bounded title and content excerpts suitable for an advisory check."""
     title = " ".join(str(memory.get("title") or "").split())[:200]
-    content = " ".join(str(memory.get("content") or memory.get("summary") or "").split())
-    content = content[:3_500]
+    content = str(memory.get("content") or memory.get("summary") or "")[:3_500]
     return title, content
 
 
 def _jev_review_projection(memory: dict) -> str:
     title, content = _jev_review_projection_parts(memory)
     return "\n".join(part for part in (title, content) if part)
+
+
+def _jev_review_remote_sensitivity_allowed(record: object) -> bool:
+    """Honor both current and legacy classifications without allowing downgrades."""
+    sensitivity = getattr(record, "sensitivity", "normal")
+    if not isinstance(sensitivity, str) or sensitivity.strip().casefold() not in {
+        "normal", "sensitive",
+    }:
+        return False
+    metadata = getattr(record, "metadata", None)
+    if metadata is None:
+        return True
+    if not isinstance(metadata, dict):
+        return False
+    legacy_sensitivity = metadata.get("sensitivity")
+    if legacy_sensitivity is None:
+        return True
+    return (isinstance(legacy_sensitivity, str)
+            and legacy_sensitivity.strip().casefold() in {"", "normal", "sensitive"})
 
 
 def _advisory_payload(result) -> dict:
@@ -1583,41 +1601,43 @@ def jev_review(req: _JevReviewReq):
     inspected = []
     records = []
     for memory_id in req.memory_ids:
-        detail = _run(current_service.inspect, memory_id, workspace=ws, repo=req.repo)
-        memory = detail.get("memory") or {}
-        record = current_service.store.get_memory(memory_id)
-        if not memory or record is None:
-            raise HTTPException(status_code=404, detail={"error": "memory not found"})
-        inspected.append(memory)
+        record = _run(
+            current_service.read_memory_for_review, memory_id, workspace=ws, repo=req.repo,
+        )
+        inspected.append({
+            "title": record.title, "content": record.content, "summary": record.summary,
+        })
         records.append(record)
 
-    backend = _dashboard_jev_backend()
-    blocked_secret = any(str(getattr(record, "sensitivity", "normal")) == "secret"
+    blocked_secret = any(not _jev_review_remote_sensitivity_allowed(record)
                          for record in records)
-    allow_remote = req.allow_remote is True and not blocked_secret
-    evidence = "\n\n".join(
-        f"SELECTED MEMORY {index + 1}:\n{_jev_review_projection(memory)}"
-        for index, memory in enumerate(inspected)
-    )[:7_800]
-    support = backend.verify_grounded_support_result(
-        req.claim[:1_200], evidence, allow_remote=allow_remote,
-        data_classification=req.data_classification,
-    )
-    if blocked_secret:
-        support = type(support)("fallback", fallback_reason="sensitive_memory")
-
     contradiction = None
-    if len(records) == 2:
-        first, second = inspected
-        candidate = _jev_review_projection(first)[:3_700]
-        existing_title, existing_content = _jev_review_projection_parts(second)
-        existing = replace(records[1], title=existing_title, content=existing_content)
-        contradiction = backend.classify_contradiction_result(
-            candidate, existing, allow_remote=allow_remote,
+    if blocked_secret:
+        from engraphis.backends.jev_decision import AdvisoryDecisionResult
+
+        support = AdvisoryDecisionResult("fallback", fallback_reason="sensitive_memory")
+        if len(records) == 2:
+            contradiction = AdvisoryDecisionResult("fallback", fallback_reason="sensitive_memory")
+    else:
+        backend = _dashboard_jev_backend()
+        allow_remote = req.allow_remote is True
+        evidence = "\n\n".join(
+            f"SELECTED MEMORY {index + 1}:\n{_jev_review_projection(memory)}"
+            for index, memory in enumerate(inspected)
+        )[:7_800]
+        support = backend.verify_grounded_support_result(
+            req.claim[:1_200], evidence, allow_remote=allow_remote,
             data_classification=req.data_classification,
         )
-        if blocked_secret:
-            contradiction = type(contradiction)("fallback", fallback_reason="sensitive_memory")
+        if len(records) == 2:
+            first, second = inspected
+            candidate = _jev_review_projection(first)[:3_700]
+            existing_title, existing_content = _jev_review_projection_parts(second)
+            existing = replace(records[1], title=existing_title, content=existing_content)
+            contradiction = backend.classify_contradiction_result(
+                candidate, existing, allow_remote=allow_remote,
+                data_classification=req.data_classification,
+            )
 
     return {
         "advisory_only": True,

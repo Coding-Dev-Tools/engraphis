@@ -150,7 +150,6 @@ class RecallResult:
     context_revision: str = ""
     planning_mode: str = "off"
     planning_details: Optional[dict[str, Any]] = None
-    planning_advisory: Optional[dict[str, Any]] = None
     graph_traversal_details: Optional[list[dict[str, Any]]] = None
     token_counter: Optional[Callable[[str], int]] = field(default=None, repr=False)
     # Safety metadata is kept off the public chunk projection.  Consumers which make
@@ -170,6 +169,9 @@ class RecallResult:
     # Effective output limit after applying retrieval_recipe. Appended for
     # compatibility with callers that construct RecallResult positionally.
     effective_k: int = 8
+    # Advisory metadata is appended so existing positional callers keep their
+    # graph, safety, and capability fields in the same positions.
+    planning_advisory: Optional[dict[str, Any]] = None
 
 
 class RecallEngine:
@@ -2046,13 +2048,6 @@ def _planning_advisory(
     """Expose only fixed Jev status labels, never provider text or query content."""
     if not jev_assisted:
         return None
-    if fallback:
-        return {"status": "fallback", "reason": fallback}
-    codes = set(plan.reason_codes)
-    if "jev_route_selected" in codes:
-        return {"status": "decision", "reason": "route_selected"}
-    if "jev_uncertain" in codes:
-        return {"status": "uncertain", "reason": "jev_uncertain"}
     fixed_reasons = {
         "jev_planning_disabled": "planning_disabled",
         "jev_no_alternatives": "no_alternate_routes",
@@ -2075,6 +2070,13 @@ def _planning_advisory(
         "jev_malformed_response": "malformed_response",
         "jev_fallback": "unavailable_or_uncertain",
     }
+    if fallback:
+        return {"status": "fallback", "reason": fixed_reasons.get(fallback, fallback)}
+    codes = set(plan.reason_codes)
+    if "jev_route_selected" in codes:
+        return {"status": "decision", "reason": "route_selected"}
+    if "jev_uncertain" in codes:
+        return {"status": "uncertain", "reason": "jev_uncertain"}
     for code in plan.reason_codes:
         if code in fixed_reasons:
             return {"status": "fallback", "reason": fixed_reasons[code]}

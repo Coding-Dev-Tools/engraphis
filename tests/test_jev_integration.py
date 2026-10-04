@@ -274,6 +274,41 @@ def test_local_planning_diagnostics_report_deterministic_planner():
         service.close()
 
 
+@pytest.mark.parametrize("caller", ["engine", "service", "classic_mcp"])
+@pytest.mark.parametrize("planning", [None, "off"])
+def test_planning_off_exposes_public_advisory_reason_without_remote_work(
+    dashboard, monkeypatch, caller, planning,
+):
+    _client, service, _first_id, _second_id = dashboard
+    from engraphis import mcp_server
+
+    monkeypatch.setattr(mcp_server, "_service", service)
+    decision_client = _DecisionClient()
+    deterministic = _FixedDeterministicPlanner()
+    service.engine.recall_engine.query_planner = JevAssistedQueryPlanner(
+        _backend(decision_client), deterministic,
+    )
+    kwargs = {"jev_assisted": True, "allow_remote": True,
+              "data_classification": "internal"}
+    if planning is not None:
+        kwargs["planning"] = planning
+    query = "Which database is primary?"
+    if caller == "engine":
+        result = service.engine.recall_engine.recall(query, SearchFilter(), **kwargs)
+        advisory = result.planning_advisory
+    elif caller == "service":
+        advisory = service.recall(
+            query, workspace="demo", record_receipt=False, **kwargs,
+        )["planning_advisory"]
+    else:
+        advisory = json.loads(mcp_server.engraphis_recall_context(
+            query=query, workspace="demo", **kwargs,
+        ))["planning_advisory"]
+    assert advisory == {"status": "fallback", "reason": "planning_disabled"}
+    assert deterministic.filters == []
+    assert decision_client.calls == []
+
+
 def test_core_planner_gets_cloned_scope_and_time_filters_without_trust_authority():
     client = _DecisionClient()
     deterministic = _FixedDeterministicPlanner()
@@ -584,6 +619,279 @@ def test_dashboard_jev_review_blocks_secret_memory_even_after_consent(dashboard,
     assert body["support"]["fallback_reason"] == "sensitive_memory"
     assert decision_client.calls == []
     assert service.store.get_memory(first_id).sensitivity == "secret"
+
+
+@pytest.mark.parametrize(("sensitivity", "metadata_sensitivity"), [
+    ("normal", "secret"), ("normal", " SeCrEt "), ("normal", "unrecognized"),
+    ("normal", True), ("normal", False), ("normal", {"label": "normal"}),
+    ("secret", "normal"),
+])
+@pytest.mark.parametrize("secret_position", [0, 1])
+def test_review_secret_or_unknown_metadata_never_reaches_either_provider_check(
+    dashboard, monkeypatch, sensitivity, metadata_sensitivity, secret_position,
+):
+    from engraphis.routes import v2_api
+
+    client, service, first_id, second_id = dashboard
+    memory_ids = [first_id, second_id]
+    selected_id = memory_ids[secret_position]
+    service.store.conn.execute(
+        "UPDATE memories SET sensitivity=?, metadata=? WHERE id=?",
+        (sensitivity, json.dumps({"sensitivity": metadata_sensitivity}), selected_id),
+    )
+    service.store.conn.commit()
+    decision_client = _DecisionClient()
+    backend_resolutions = []
+
+    def resolve_backend():
+        backend_resolutions.append(True)
+        return _review_backend(decision_client)
+
+    monkeypatch.setattr(v2_api, "_dashboard_jev_backend", resolve_backend)
+    before = list(service.store.conn.iterdump())
+    response = client.post("/api/jev/review", json={
+        "workspace": "demo", "memory_ids": memory_ids, "claim": "Which database is primary?",
+        "allow_remote": True, "data_classification": "internal",
+    })
+    assert response.status_code == 200
+    body = response.json()
+    assert body["remote_consent_granted"] is True
+    assert body["remote_blocked_reason"] == "sensitive_memory"
+    assert body["support"]["fallback_reason"] == "sensitive_memory"
+    assert body["contradiction"]["fallback_reason"] == "sensitive_memory"
+    assert decision_client.calls == []
+    assert backend_resolutions == []
+    assert list(service.store.conn.iterdump()) == before
+
+
+@pytest.mark.parametrize("metadata_sensitivity", ["normal", " Sensitive ", None])
+def test_review_recognized_nonsecret_metadata_retains_consented_advisory(
+    dashboard, monkeypatch, metadata_sensitivity,
+):
+    import json
+    from engraphis.routes import v2_api
+
+    client, service, first_id, second_id = dashboard
+    service.store.conn.execute("UPDATE memories SET metadata=? WHERE id=?", (
+        json.dumps({"sensitivity": metadata_sensitivity}), first_id,
+    ))
+    service.store.conn.commit()
+    decision_client = _DecisionClient()
+    monkeypatch.setattr(v2_api, "_dashboard_jev_backend", lambda: _review_backend(decision_client))
+    response = client.post("/api/jev/review", json={
+        "workspace": "demo", "memory_ids": [first_id, second_id],
+        "claim": "Which database is primary?", "allow_remote": True,
+        "data_classification": "internal",
+    })
+    assert response.status_code == 200
+    assert response.json()["remote_blocked_reason"] is None
+    assert len(decision_client.calls) == 2
+
+
+@pytest.mark.parametrize(("scope", "stored_repo"), [
+    (Scope.REPO, "selected"),
+    (Scope.WORKSPACE, None),
+    (Scope.USER, None),
+    (Scope.WORKSPACE, "sibling"),
+    (Scope.USER, "sibling"),
+])
+def test_project_jev_review_accepts_visible_ancestors_without_inspection_or_mutation(
+    dashboard, monkeypatch, scope, stored_repo,
+):
+    from engraphis.routes import v2_api
+    from engraphis.service import ValidationError
+    from engraphis.service_context import bind_service
+
+    client, service, _first_id, _second_id = dashboard
+    wid = service.store.get_or_create_workspace("demo")
+    selected_rid = service.store.get_or_create_repo(wid, "selected")
+    sibling_rid = service.store.get_or_create_repo(wid, "sibling")
+    first_id = service.engine.remember(
+        "The selected application uses Postgres.", workspace_id=wid,
+        repo_id=selected_rid, scope=Scope.REPO, title="Selected repository",
+    )
+    code = "def configure():\n    return {'database': 'Postgres'}\n"
+    peer_id = service.engine.remember(
+        code, workspace_id=wid, scope=Scope.REPO if scope == Scope.REPO else Scope.WORKSPACE,
+        repo_id=selected_rid if scope == Scope.REPO else None,
+        title="Selected review evidence",
+    )
+    if scope == Scope.USER or stored_repo == "sibling":
+        # Legacy/promoted rows can retain a repo id; new user-scope writes are unsupported.
+        service.store.conn.execute(
+            "UPDATE memories SET scope=?, repo_id=? WHERE id=?",
+            (scope.value, sibling_rid if stored_repo == "sibling" else None, peer_id),
+        )
+        service.store.conn.commit()
+    visible = service.list_memories(workspace="demo", repo="selected")["memories"]
+    assert {first_id, peer_id} <= {memory["id"] for memory in visible}
+    if scope in {Scope.WORKSPACE, Scope.USER}:
+        # Broader review visibility never broadens inspection/governance ownership.
+        with pytest.raises(ValidationError, match="does not belong"):
+            service.inspect(peer_id, workspace="demo", repo="selected")
+
+    def forbidden_inspection(*_args, **_kwargs):
+        pytest.fail("advisory review read inspector links, audit, or lineage")
+
+    monkeypatch.setattr(service, "inspect", forbidden_inspection)
+    decision_client = _DecisionClient()
+    monkeypatch.setattr(v2_api, "_dashboard_jev_backend", lambda: _review_backend(decision_client))
+    before = list(service.store.conn.iterdump())
+    with bind_service(service, principal={
+        "id": "usr_reviewer", "email": "reviewer@example.test", "role": "viewer",
+    }):
+        response = client.post("/api/jev/review", json={
+            "workspace": "demo", "repo": "selected", "memory_ids": [first_id, peer_id],
+            "claim": "Which database is configured?", "allow_remote": True,
+            "data_classification": "internal",
+        })
+
+    assert response.status_code == 200
+    assert response.json()["support"]["status"] == "decision"
+    assert response.json()["contradiction"]["status"] == "decision"
+    assert len(decision_client.calls) == 2
+    assert all(code in call["state"] for call in decision_client.calls)
+    assert list(service.store.conn.iterdump()) == before
+
+
+@pytest.mark.parametrize("denied_scope", [
+    "foreign_workspace", "sibling_repo", "foreign_session", "own_session",
+])
+def test_project_jev_review_denies_out_of_scope_records_before_provider_or_mutation(
+    dashboard, monkeypatch, denied_scope,
+):
+    from engraphis.routes import v2_api
+    from engraphis.service import ValidationError
+    from engraphis.service_context import bind_service
+
+    client, service, first_id, _second_id = dashboard
+    wid = service.store.get_or_create_workspace("demo")
+    selected_rid = service.store.get_or_create_repo(wid, "selected")
+    memory_wid, memory_rid, scope, session_id = wid, selected_rid, Scope.REPO, None
+    if denied_scope == "foreign_workspace":
+        memory_wid = service.store.get_or_create_workspace("foreign")
+        memory_rid, scope = None, Scope.WORKSPACE
+    elif denied_scope == "sibling_repo":
+        memory_rid = service.store.get_or_create_repo(wid, "sibling")
+    else:
+        session_owner = "usr_reviewer" if denied_scope == "own_session" else "usr_other"
+        session_id = service.store.start_session(wid, selected_rid, user_id=session_owner)
+        scope = Scope.SESSION
+    denied_id = service.engine.remember(
+        "PRIVATE-DENIED-REVIEW-EVIDENCE", workspace_id=memory_wid, repo_id=memory_rid,
+        scope=scope, session_id=session_id,
+    )
+    decision_client = _DecisionClient()
+    monkeypatch.setattr(v2_api, "_dashboard_jev_backend", lambda: _review_backend(decision_client))
+    before = list(service.store.conn.iterdump())
+    with bind_service(service, principal={
+        "id": "usr_reviewer", "email": "reviewer@example.test", "role": "viewer",
+    }):
+        with pytest.raises(ValidationError, match="not visible"):
+            service.read_memory_for_review(denied_id, workspace="demo", repo="selected")
+        response = client.post("/api/jev/review", json={
+            "workspace": "demo", "repo": "selected", "memory_ids": [first_id, denied_id],
+            "claim": "Is there selected evidence?", "allow_remote": True,
+            "data_classification": "internal",
+        })
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["error"] == "invalid request"
+    assert decision_client.calls == []
+    assert "PRIVATE-DENIED-REVIEW-EVIDENCE" not in response.text
+    assert list(service.store.conn.iterdump()) == before
+
+
+@pytest.mark.parametrize(("state", "visible"), [
+    ("current", True),
+    ("low_retention", True),
+    ("future_invalidation", True),
+    ("not_yet_known_invalidation", True),
+    ("valid_from_boundary", True),
+    ("known_from_boundary", True),
+    ("invalidated", False),
+    ("valid_to_boundary", False),
+    ("expired", False),
+    ("expired_boundary", False),
+    ("future_valid", False),
+    ("not_yet_known", False),
+    ("forgotten", False),
+    ("retired", False),
+])
+def test_jev_review_selected_record_matches_current_browse_visibility(
+    dashboard, monkeypatch, state, visible,
+):
+    from engraphis.routes import v2_api
+    from engraphis.service import ValidationError
+    from engraphis.service_context import bind_service
+
+    client, service, first_id, second_id = dashboard
+    now = time.time() + 1
+    monkeypatch.setattr(time, "time", lambda: now)
+    changes = {
+        "low_retention": {"stability": 0},
+        "future_invalidation": {"valid_to": now + 60, "valid_to_recorded_at": now},
+        "not_yet_known_invalidation": {
+            "valid_to": now - 60, "valid_to_recorded_at": now + 60,
+        },
+        "valid_from_boundary": {"valid_from": now},
+        "known_from_boundary": {"ingested_at": now},
+        "invalidated": {"valid_to": now - 60, "valid_to_recorded_at": now},
+        "valid_to_boundary": {"valid_to": now, "valid_to_recorded_at": now},
+        "expired": {"expired_at": now - 60},
+        "expired_boundary": {"expired_at": now},
+        "future_valid": {"valid_from": now + 60},
+        "not_yet_known": {"ingested_at": now + 60},
+    }.get(state, {})
+    if changes:
+        service.store.conn.execute(
+            "UPDATE memories SET " + ",".join(f"{field}=?" for field in changes) + " WHERE id=?",
+            [*changes.values(), second_id],
+        )
+        service.store.conn.commit()
+    elif state == "forgotten":
+        service.forget(second_id, workspace="demo")
+    elif state == "retired":
+        service.retire(second_id, workspace="demo")
+
+    decision_client = _DecisionClient()
+    monkeypatch.setattr(v2_api, "_dashboard_jev_backend", lambda: _review_backend(decision_client))
+    before = list(service.store.conn.iterdump())
+    with bind_service(service, principal={
+        "id": "usr_reviewer", "email": "reviewer@example.test", "role": "viewer",
+    }):
+        listing = service.list_memories(workspace="demo")["memories"]
+        assert (second_id in {memory["id"] for memory in listing}) is visible
+        if visible:
+            assert service.read_memory_for_review(second_id, workspace="demo").id == second_id
+        else:
+            with pytest.raises(ValidationError, match="not visible"):
+                service.read_memory_for_review(second_id, workspace="demo")
+        response = client.post("/api/jev/review", json={
+            "workspace": "demo", "memory_ids": [first_id, second_id],
+            "claim": "Which database is primary?", "allow_remote": True,
+            "data_classification": "internal",
+        })
+
+    assert response.status_code == (200 if visible else 400)
+    assert len(decision_client.calls) == (2 if visible else 0)
+    if not visible:
+        assert response.json()["detail"]["error"] == "invalid request"
+        assert "SQLite stores local test fixtures." not in response.text
+    assert list(service.store.conn.iterdump()) == before
+
+
+def test_jev_review_projection_preserves_structural_whitespace():
+    from engraphis.routes.v2_api import _jev_review_projection_parts
+
+    source = "def configure():\n    settings = {\n        'port': 443,\n    }\n    return settings\n"
+    title, content = _jev_review_projection_parts({"title": "  Setup  ", "content": source})
+
+    assert title == "Setup"
+    assert content == source
+    assert _jev_review_projection_parts({"content": source + "x" * 4_000})[1] == (
+        source + "x" * 4_000
+    )[:3_500]
 
 
 def test_jev_route_choice_cannot_bypass_grounded_abstention(dashboard, monkeypatch):
