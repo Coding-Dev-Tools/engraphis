@@ -4250,14 +4250,7 @@ class MemoryService:
         for chunk in result.chunks:
             if response_mode == "compact":
                 # Candidate rows omit source text; admitted bindings live in packed_sources.
-                item = {
-                    key: chunk.get(key)
-                    for key in (
-                        "id", "title", "scope", "mtype", "repo_id", "score",
-                        "relative_score", "absolute_support", "arm"
-                    )
-                }
-                item["provenance"] = _compact_provenance(chunk.get("provenance"))
+                item = _compact_retrieval_candidate(chunk)
             else:
                 item = dict(chunk)
                 arm = item.get("arm") or "hybrid"
@@ -4730,11 +4723,10 @@ class MemoryService:
                 item["provenance"] = _compact_provenance(item.get("provenance"))
                 compact_citations.append(item)
             out["citations"] = compact_citations
-            for candidate in out.get("retrieval_preview") or []:
-                candidate.pop("content", None)
-                candidate["provenance"] = _compact_provenance(
-                    candidate.get("provenance"),
-                )
+            out["retrieval_preview"] = [
+                _compact_retrieval_candidate(candidate)
+                for candidate in out.get("retrieval_preview") or []
+            ]
         out["receipt"] = self._record_receipt(
             "grounded_recall", response=out, workspace_id=wid or "", repo_id=rid or "",
             actor="agent",
@@ -12677,6 +12669,21 @@ def _compact_provenance(value: Any) -> dict:
         return {}
     keys = ("source", "source_kind", "trusted", "kind", "origin")
     return {key: value[key] for key in keys if key in value}
+
+
+def _compact_retrieval_candidate(candidate: Any) -> dict:
+    """Apply the compact recall allowlist to every candidate projection."""
+    if not isinstance(candidate, dict):
+        return {}
+    item = {
+        key: candidate.get(key)
+        for key in (
+            "id", "title", "scope", "mtype", "repo_id", "score",
+            "relative_score", "absolute_support", "arm",
+        )
+    }
+    item["provenance"] = _compact_provenance(candidate.get("provenance"))
+    return item
 
 
 def _planning_controls(planning: str, mtype_limits: Optional[dict]) -> tuple[str, dict]:

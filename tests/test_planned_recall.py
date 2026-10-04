@@ -20,7 +20,7 @@ from engraphis.core.interfaces import (
     SearchFilter,
 )
 from engraphis.core.query_planner import DeterministicQueryPlanner, MAX_PLANNED_QUERIES
-from engraphis.core.recall import RecallEngine, RecallResult
+from engraphis.core.recall import RecallEngine, RecallResult, _planning_advisory
 from engraphis.core.store import Store
 
 
@@ -214,8 +214,11 @@ def test_advisory_planner_extension_is_dispatched_through_its_protocol():
         store.close()
 
 
-def test_jev_assisted_request_falls_back_for_legacy_query_planner():
-    planner = _StaticPlanner(RetrievalPlan((PlannedQuery("unused", 1, "balanced"),)))
+def test_jev_assisted_request_preserves_legacy_query_planner_routes():
+    planner = _StaticPlanner(RetrievalPlan((
+        PlannedQuery("deterministic route one", 3, "lexical"),
+        PlannedQuery("deterministic route two", 2, "balanced"),
+    )))
     store, _embedder, engine, _workspace, _repo = _engine(planner)
     try:
         plan, fallback = engine._plan_queries(
@@ -228,9 +231,14 @@ def test_jev_assisted_request_falls_back_for_legacy_query_planner():
             data_classification="internal",
         )
 
-        assert planner.calls == 0
-        assert fallback == "planner_unavailable"
-        assert [route.text for route in plan.queries] == ["original query"]
+        assert planner.calls == 1
+        assert fallback == "jev_advisory_unavailable"
+        assert [route.text for route in plan.queries] == [
+            "original query", "deterministic route two", "deterministic route one",
+        ]
+        assert _planning_advisory(plan, fallback, jev_assisted=True) == {
+            "status": "fallback", "reason": "advisory_unavailable",
+        }
     finally:
         store.close()
 
