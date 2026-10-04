@@ -586,6 +586,19 @@ def test_dashboard_jev_review_blocks_secret_memory_even_after_consent(dashboard,
     assert service.store.get_memory(first_id).sensitivity == "secret"
 
 
+def test_jev_review_projection_preserves_structural_whitespace():
+    from engraphis.routes.v2_api import _jev_review_projection_parts
+
+    source = "def configure():\n    settings = {\n        'port': 443,\n    }\n    return settings\n"
+    title, content = _jev_review_projection_parts({"title": "  Setup  ", "content": source})
+
+    assert title == "Setup"
+    assert content == source
+    assert _jev_review_projection_parts({"content": source + "x" * 4_000})[1] == (
+        source + "x" * 4_000
+    )[:3_500]
+
+
 def test_jev_route_choice_cannot_bypass_grounded_abstention(dashboard, monkeypatch):
     client, service, _first_id, _second_id = dashboard
     from engraphis.backends.jev_query_planner import JevAssistedQueryPlanner
