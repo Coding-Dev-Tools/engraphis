@@ -44,7 +44,7 @@ control-plane, relay, compute, and worker implementations are private services.
 | `ENGRAPHIS_LLM_MODEL` | `gpt-4o-mini` | Model name (provider-specific) |
 | `ENGRAPHIS_LLM_API_KEY` | Not set | API key for chat/synthesis, `llm` / `llm_structured` extraction, and structured consolidation |
 | `ENGRAPHIS_LLM_BASE_URL` | Not set | Base URL for openrouter / custom OpenAI-compatible endpoints |
-| `ENGRAPHIS_DECISION_BACKEND` | `none` | `none` or `local` keeps advisory decisions local; `managed` uses the saved Cloud session and included individual allowance for four concrete workflows; `auto` selects managed when configured and never switches to BYOK; explicit `byok` uses a personal TypeSafe key and may incur provider charges. Managed custom questions and query planning are unsupported. Legacy `typesafe`, `jev`, and `system1` mean BYOK. Remote calls also require per-call consent. |
+| `ENGRAPHIS_DECISION_BACKEND` | `none` | `none` or `local` keeps advisory decisions local; `managed` uses the saved Cloud session and included finite allowance for four concrete workflows after service acceptance; Team usage is pooled by licensed seat count. `auto` selects managed when configured and never switches to BYOK; explicit `byok` uses a personal TypeSafe key and may incur provider charges. Managed custom questions and query planning are unsupported. Legacy `typesafe`, `jev`, and `system1` mean BYOK. Remote calls also require per-call consent. |
 | `ENGRAPHIS_DECISION_MODEL` | `jev-1.13.0` | Pinned model accepted by the Jev transport; other model identifiers are rejected. |
 | `TYPESAFE_API_KEY` | Not set | Personal credential for explicit BYOK decisions; `JEV_API_KEY` is a fallback alias. Managed decisions use the saved Cloud session instead. |
 | `TYPESAFE_BASE_URL` | `https://api.typesafe.ai` | Direct BYOK provider origin; does not change the managed session's bound Cloud control origin. |
@@ -62,15 +62,16 @@ control-plane, relay, compute, and worker implementations are private services.
 | `ENGRAPHIS_CLOUD_ACCESS_TOKEN` | Not set | Optional short-lived access token for ephemeral jobs |
 | `ENGRAPHIS_MANAGED_COMPUTE_CONSENT` | *(unset)* | Deny-only operator override: `0` pauses readable managed processing. A truthy value cannot grant approval. Each workspace requires explicit confirmation in Manage → Settings; encrypted sync is separate |
 
-Managed Jev requires a current paid Pro user or paid Team named seat, including viewers, or an
-active legitimate trial/test entitlement. Each individual receives 100 evaluated questions per
-rolling hour, 1,000 per rolling five hours, and 2,000 per rolling 24 hours. All three caps apply;
-there is no monthly allowance or Team pool, no extra managed charge, and no personal provider
-key requirement. Each batch question is one use; a command review evaluates two questions.
-These are service-enforced limits, not client configuration overrides. The unchanged production
-fleet guard of 100 questions/day remains a launch conflict and can reject requests earlier.
-Configuration does not enable the service or satisfy provider terms, live acceptance, or quality
-gates. See [hosted plans](HOSTED_PLANS.md#included-system-1-decision-engine-jev).
+Managed Jev is currently `not_yet_available` pending release acceptance and service-capacity
+qualification. After enablement, paid Pro users and paid Team named seats (including viewers) can
+use four fixed advisory workflows at no additional charge within a finite allowance. Pro usage is
+owner-scoped; Team questions share one organization pool sized by licensed seat count. The account
+portal reports current availability and usage. No fixed quota is published, overage is not charged,
+and service-protection limits may pause requests. A command review evaluates two questions; each
+of the other three workflows evaluates one. Subscribers do not need a provider key for managed
+use. These rules are service-enforced, not client configuration overrides. Setting a backend does
+not enable the service or satisfy provider terms, release acceptance, capacity, or quality gates.
+See [hosted plans](HOSTED_PLANS.md#included-system-1-decision-engine-jev).
 
 The four managed workflows require a command, a pair of facts, query/evidence, or goal/output
 context and their fixed question schemas. Arbitrary `custom` and `query_planning` payloads are

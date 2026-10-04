@@ -1,6 +1,7 @@
 """Offline transport contracts: no keys, provider calls or credential discovery."""
 import io
 import json
+import urllib.error
 from types import SimpleNamespace
 
 import pytest
@@ -198,6 +199,44 @@ def test_http_reader_bounds_and_strict_json(raw, monkeypatch):
                         lambda *args: SimpleNamespace(open=lambda *a, **kw: response))
     with pytest.raises(transport.DecisionClientError, match="malformed_response"):
         transport._post_json("https://control.example.invalid/v1/jev/decide", "synthetic", {}, 1)
+
+
+@pytest.mark.parametrize(("body", "content_type", "path", "expected"), (
+    (b'{"detail":{"code":"jev_rolling_allowance_exhausted","is_fallback":false}}',
+     "application/json", "/v1/jev/decide", "allowance_exhausted"),
+    (b'{"detail":{"code":"jev_provider_protection_limit","is_fallback":false}}',
+     "application/json", "/v1/jev/decide", "provider_protection_limit"),
+    (b'{"detail":{"code":"private_provider_error","is_fallback":false}}',
+     "application/json", "/v1/jev/decide", "remote_unavailable"),
+    (b'{"detail":{"code":"jev_rolling_allowance_exhausted","is_fallback":false}}',
+     "application/json", "/v1/systemone", "remote_unavailable"),
+    (b'{"detail":{"code":"jev_rolling_allowance_exhausted","is_fallback":true}}',
+     "application/json", "/v1/jev/decide", "remote_unavailable"),
+    (b'{"detail":{"code":"jev_rolling_allowance_exhausted","code":"jev_provider_protection_limit","is_fallback":false}}',
+     "application/json", "/v1/jev/decide", "remote_unavailable"),
+    (b"private provider detail", "text/plain", "/v1/jev/decide", "remote_unavailable"),
+    (b"x" * (transport.MAX_ERROR_RESPONSE_BYTES + 1), "application/json",
+     "/v1/jev/decide", "remote_unavailable"),
+))
+def test_429_maps_only_bounded_allowlisted_cloud_reasons(
+    body, content_type, path, expected, monkeypatch,
+):
+    monkeypatch.setattr(hosted_client, "validate_cloud_base_url", lambda value: value)
+    url = f"https://control.example.invalid{path}"
+    error = urllib.error.HTTPError(
+        url, 429, "Too Many Requests",
+        {"Content-Type": content_type, "Content-Length": str(len(body))},
+        io.BytesIO(body),
+    )
+
+    def fail(*_args, **_kwargs):
+        raise error
+
+    monkeypatch.setattr(hosted_client, "build_pinned_https_opener",
+                        lambda *args: SimpleNamespace(open=fail))
+    with pytest.raises(transport.DecisionClientError) as raised:
+        transport._post_json(url, "synthetic", {}, 1)
+    assert str(raised.value) == expected
 
 
 def test_redirects_and_transport_exceptions_never_echo_private_values(monkeypatch):

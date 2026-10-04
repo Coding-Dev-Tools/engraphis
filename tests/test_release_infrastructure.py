@@ -95,7 +95,7 @@ def test_all_public_launchers_converge_on_the_v2_service():
     assert '"url": "http://<host-LAN-IP>:8700/mcp/"' in docker_docs
     assert '".[server,mcp,documents,cloud-sync]"' in dockerfile
     assert (
-            "[Docker deployment](https://github.com/Coding-Dev-Tools/engraphis/blob/54eae9fc5105ab491a9aa9dc2bfeba6109baf63b/"
+            "[Docker deployment](https://github.com/Coding-Dev-Tools/engraphis/blob/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/"
             "docs/DOCKER.md)"
         in readme
     )
@@ -125,7 +125,7 @@ def test_advanced_query_planning_stays_in_architecture_docs():
     guidance = "`planning=\"auto\"` keeps the original query"
 
     assert (
-            "[Architecture and query planning](https://github.com/Coding-Dev-Tools/engraphis/blob/54eae9fc5105ab491a9aa9dc2bfeba6109baf63b/"
+            "[Architecture and query planning](https://github.com/Coding-Dev-Tools/engraphis/blob/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/"
             "docs/ARCHITECTURE_V3.md#query-planning)"
         in readme
     )
@@ -140,7 +140,7 @@ def test_pi_and_public_write_review_details_stay_in_supporting_docs():
     review_guide = _text("docs/WRITE_REVIEW.md")
 
     assert (
-            "[Pi extension](https://github.com/Coding-Dev-Tools/engraphis/blob/54eae9fc5105ab491a9aa9dc2bfeba6109baf63b/"
+            "[Pi extension](https://github.com/Coding-Dev-Tools/engraphis/blob/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/"
             "integrations/pi/README.md)"
         in readme
     )
@@ -172,7 +172,7 @@ def test_compose_keeps_container_safety_defaults_and_has_an_explicit_port_overri
     assert '"0.0.0.0:${ENGRAPHIS_COMPOSE_PORT:-8700}:${ENGRAPHIS_COMPOSE_PORT:-8700}"' in lan_compose
     assert "ENGRAPHIS_API_TOKEN: ${ENGRAPHIS_API_TOKEN:?Set a strong ENGRAPHIS_API_TOKEN for LAN use}" in lan_compose
     assert (
-            "[Docker deployment](https://github.com/Coding-Dev-Tools/engraphis/blob/54eae9fc5105ab491a9aa9dc2bfeba6109baf63b/"
+            "[Docker deployment](https://github.com/Coding-Dev-Tools/engraphis/blob/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/"
             "docs/DOCKER.md)"
         in readme
     )
@@ -559,7 +559,7 @@ def test_public_capability_and_support_docs_match_the_shipped_tree():
     assert "engraphis_recall_context" in readme
     mcp_reference = _text("docs/MCP_TOOLS.md")
     assert (
-        "[MCP tool reference](https://github.com/Coding-Dev-Tools/engraphis/blob/54eae9fc5105ab491a9aa9dc2bfeba6109baf63b/"
+        "[MCP tool reference](https://github.com/Coding-Dev-Tools/engraphis/blob/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/"
         "docs/MCP_TOOLS.md)" in readme
     )
     assert "`engraphis_check_update`" in mcp_reference
@@ -626,7 +626,7 @@ def test_public_capability_and_support_docs_match_the_shipped_tree():
         in readme
     )
     assert (
-        'src="https://raw.githubusercontent.com/Coding-Dev-Tools/engraphis/54eae9fc5105ab491a9aa9dc2bfeba6109baf63b/'
+        'src="https://raw.githubusercontent.com/Coding-Dev-Tools/engraphis/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/'
         'docs/images/knowledge-graph.png"' in readme
     )
     assert re.search(

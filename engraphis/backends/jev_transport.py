@@ -30,7 +30,12 @@ if TYPE_CHECKING:
 MODEL = "jev-1.13.0"
 MAX_REQUEST_BYTES = 24 * 1024
 MAX_RESPONSE_BYTES = 256 * 1024
+MAX_ERROR_RESPONSE_BYTES = 4 * 1024
 _PURPOSES = {"guard_command", "classify_contradiction", "verify_support", "verify_completion", "custom"}
+_CLOUD_HTTP_ERROR_CODES = {
+    "jev_rolling_allowance_exhausted": "allowance_exhausted",
+    "jev_provider_protection_limit": "provider_protection_limit",
+}
 _SECRETS = (
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
     re.compile(r"\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|"
@@ -58,6 +63,45 @@ def contains_sensitive_content(value: str) -> bool:
     still obtain per-call consent and an explicit public/internal classification.
     """
     return isinstance(value, str) and any(pattern.search(value) for pattern in _SECRETS)
+
+
+def _http_error_fallback_code(url: str, error: urllib.error.HTTPError) -> str:
+    """Map only the two fixed Cloud 429 reasons; never expose provider text."""
+    try:
+        if error.code != 429 or urlsplit(url).path.rstrip("/") != "/v1/jev/decide":
+            return "remote_unavailable"
+        headers = error.headers or {}
+        if headers.get("Content-Type", "").partition(";")[0].strip() != "application/json":
+            return "remote_unavailable"
+        length = headers.get("Content-Length", "")
+        if length and (not length.isdigit() or int(length) > MAX_ERROR_RESPONSE_BYTES):
+            return "remote_unavailable"
+        raw = error.read(MAX_ERROR_RESPONSE_BYTES + 1)
+        if not isinstance(raw, bytes) or len(raw) > MAX_ERROR_RESPONSE_BYTES:
+            return "remote_unavailable"
+
+        def unique(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("duplicate JSON key")
+                result[key] = value
+            return result
+
+        def invalid(_value):
+            raise ValueError("non-finite JSON value")
+
+        payload = json.loads(raw.decode("utf-8"), object_pairs_hook=unique,
+                             parse_constant=invalid)
+        detail = payload.get("detail") if isinstance(payload, dict) else None
+        if not isinstance(detail, dict) or detail.get("is_fallback") is not False:
+            return "remote_unavailable"
+        code = detail.get("code")
+        if not isinstance(code, str):
+            return "remote_unavailable"
+        return _CLOUD_HTTP_ERROR_CODES.get(code, "remote_unavailable")
+    except Exception:
+        return "remote_unavailable"
 
 
 class DecisionClientError(RuntimeError):
@@ -363,8 +407,10 @@ def _post_json(
     except DecisionClientError:
         raise
     except urllib.error.HTTPError as exc:
-        code = "allowance_exhausted" if exc.code == 429 else "remote_unavailable"
-        exc.close()
+        try:
+            code = _http_error_fallback_code(url, exc)
+        finally:
+            exc.close()
         raise DecisionClientError(code) from None
     except TimeoutError:
         raise DecisionClientError("remote_timeout") from None

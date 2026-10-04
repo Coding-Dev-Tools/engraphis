@@ -3,12 +3,15 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import json
 from types import SimpleNamespace
 
 import pytest
 
-from engraphis.backends.jev_decision import MAX_STATE_CHARS, JevDecisionBackend, get_decision_backend
-from engraphis.backends.jev_transport import DecisionClientError
+from engraphis.backends.jev_decision import (
+    MAX_STATE_CHARS, DecisionQuestion, JevDecisionBackend, get_decision_backend,
+)
+from engraphis.backends.jev_transport import MAX_REQUEST_BYTES, MODEL, DecisionClientError
 from engraphis.core.interfaces import MemoryRecord, MemoryType, Scope
 
 
@@ -128,6 +131,152 @@ def test_original_injected_client_contract_still_produces_advisory_results():
     assert [call[2] for call in client.calls] == ["test-model-1.0", "test-model-1.0"]
 
 
+def _serialized_request_sizes(state, question, model=MODEL, purpose="custom"):
+    managed = {
+        "model": model, "state": state, "questions": [question.to_dict()],
+        "allow_remote": True, "purpose": purpose, "data_classification": "internal",
+    }
+    provider_question = {"type": question.kind, "instructions": question.prompt}
+    if question.kind == "choice":
+        provider_question["criteria"] = {label: label for label in question.options}
+    elif question.kind == "score":
+        provider_question["criteria"] = list(question.options)
+    provider = {"model": model, "state": state, "questions": {question.id: provider_question}}
+    return tuple(
+        len(json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8"))
+        for payload in (managed, provider)
+    )
+
+
+def _state_at_request_boundary(question, unit, target=MAX_REQUEST_BYTES):
+    overhead = max(_serialized_request_sizes("", question))
+    unit_bytes = len(json.dumps(unit, ensure_ascii=False).encode("utf-8")) - 2
+    repeats, remainder = divmod(target - overhead, unit_bytes)
+    state = unit * repeats + "x" * remainder
+    assert len(state) <= MAX_STATE_CHARS
+    assert max(_serialized_request_sizes(state, question)) == target
+    return state
+
+
+@pytest.mark.parametrize("client_type", [FakeClient, LegacyClient])
+@pytest.mark.parametrize("unit,prompt,options", [
+    ("界", "Choose a route.", ("reinforces", "orthogonal")),
+    ("🧠", "Choose a route.", ("reinforces", "orthogonal")),
+    ('"', "Choose a route.", ("reinforces", "orthogonal")),
+    ("\\", "Choose a route.", ("reinforces", "orthogonal")),
+    ("\x01", "Choose a route.", ("reinforces", "orthogonal")),
+    ("界", "评估这些选项。", ("选项" + "🧠" * 250, "另选" + "🧠" * 250)),
+])
+@pytest.mark.parametrize("extra_byte", [0, 1])
+def test_full_utf8_request_boundary_before_modern_and_legacy_clients(
+    client_type, unit, prompt, options, extra_byte,
+):
+    question = DecisionQuestion("route", prompt, "choice", options)
+    state = _state_at_request_boundary(question, unit, MAX_REQUEST_BYTES + extra_byte)
+    client = client_type(verdict=options[0])
+    adapter = JevDecisionBackend(client=client, model=MODEL)
+
+    result = adapter.choose_option(
+        state, question_id=question.id, prompt=question.prompt,
+        options=question.options, allow_remote=True,
+    )
+
+    if extra_byte:
+        assert result.status == "fallback"
+        assert result.fallback_reason == "input_too_large"
+        assert client.calls == []
+    else:
+        assert result.status == "decision"
+        assert result.value == options[0]
+        assert len(client.calls) == 1
+
+
+@pytest.mark.parametrize("client_type", [FakeClient, LegacyClient])
+@pytest.mark.parametrize("changed_field", ["model", "purpose", "question_id", "prompt", "option"])
+def test_request_byte_limit_includes_model_questions_options_and_metadata(client_type, changed_field):
+    question = DecisionQuestion("route", "Choose a route.", "choice", ("reinforces", "orthogonal"))
+    state = _state_at_request_boundary(question, "界")
+    model, purpose = MODEL, "custom"
+    if changed_field == "model":
+        model += "x"
+    elif changed_field == "purpose":
+        purpose += "x"
+    elif changed_field == "question_id":
+        question = DecisionQuestion(question.id + "x", question.prompt, question.kind, question.options)
+    elif changed_field == "prompt":
+        question = DecisionQuestion(question.id, question.prompt + "x", question.kind, question.options)
+    else:
+        question = DecisionQuestion(question.id, question.prompt, question.kind,
+                                    (question.options[0], question.options[1] + "x"))
+    assert max(_serialized_request_sizes(state, question, model, purpose)) > MAX_REQUEST_BYTES
+    client = client_type()
+
+    result = JevDecisionBackend(client=client, model=model).choose_option(
+        state, question_id=question.id, prompt=question.prompt, options=question.options,
+        purpose=purpose, allow_remote=True,
+    )
+
+    assert result.fallback_reason == "input_too_large"
+    assert client.calls == []
+
+
+@pytest.mark.parametrize("client_type", [FakeClient, LegacyClient])
+@pytest.mark.parametrize("kind", ["noul", "score"])
+def test_nonchoice_question_byte_bounds_preserve_valid_multibyte_input(client_type, kind):
+    options = () if kind == "noul" else ("低", "高")
+    question = DecisionQuestion("support", "评估证据。", kind, options)
+    state = _state_at_request_boundary(question, "🧠")
+    client = client_type()
+    adapter = JevDecisionBackend(client=client, model=MODEL)
+
+    _batch, status, reason = adapter._evaluate(state, question, True, "custom", "internal")
+    assert status == "decision" and reason is None
+    _batch, status, reason = adapter._evaluate(state + "x", question, True, "custom", "internal")
+    assert status == "fallback" and reason == "input_too_large"
+    assert len(client.calls) == 1
+
+
+def test_provider_choice_label_expansion_is_bounded_before_actual_transport(monkeypatch):
+    from engraphis.backends import jev_transport
+
+    options = ("选项" + "🧠" * 250, "另选" + "🧠" * 250)
+    question = DecisionQuestion("route", "评估这些选项。", "choice", options)
+    state = _state_at_request_boundary(question, "界")
+    managed_size, provider_size = _serialized_request_sizes(state, question)
+    assert managed_size < provider_size == MAX_REQUEST_BYTES
+    sent_bodies = []
+
+    def fake_post(_url, _token, payload, _timeout, **_kwargs):
+        sent_bodies.append(payload)
+        return {"model": MODEL, "answers": {"route": {
+            "type": "choice", "choice": options[0], "confidence": 0.9,
+            "probabilities": {options[0]: 1.0, options[1]: 0.0},
+        }}}
+
+    monkeypatch.setattr(jev_transport, "_post_json", fake_post)
+    client = jev_transport.TypeSafeDecisionClient(api_key="synthetic-test-credential")
+    adapter = JevDecisionBackend(client=client, model=MODEL)
+    result = adapter.choose_option(state, question_id="route", prompt=question.prompt,
+                                   options=options, allow_remote=True)
+    assert result.status == "decision"
+    assert len(json.dumps(sent_bodies[0], ensure_ascii=False).encode("utf-8")) == MAX_REQUEST_BYTES
+    result = adapter.choose_option(state + "x", question_id="route", prompt=question.prompt,
+                                   options=options, allow_remote=True)
+    assert result.fallback_reason == "input_too_large"
+    assert len(sent_bodies) == 1
+
+
+@pytest.mark.parametrize("client_type", [FakeClient, LegacyClient])
+def test_invalid_utf8_state_falls_back_without_invoking_client(client_type):
+    client = client_type()
+    result = backend(client).choose_option(
+        "invalid surrogate \ud800", question_id="route", prompt="Choose a route.",
+        options=("reinforces", "orthogonal"), allow_remote=True,
+    )
+    assert result.fallback_reason == "invalid_input"
+    assert client.calls == []
+
+
 @pytest.mark.parametrize("field", ["question_id", "prompt", "option"])
 def test_sensitive_question_fields_are_screened_before_legacy_client_calls(field):
     client = LegacyClient()
@@ -155,6 +304,7 @@ def test_sensitive_question_fields_are_screened_before_legacy_client_calls(field
 
 @pytest.mark.parametrize(("code", "expected"), [
     ("allowance_exhausted", "allowance_exhausted"),
+    ("provider_protection_limit", "provider_protection_limit"),
     ("remote_timeout", "remote_timeout"),
     ("session_changed", "session_changed"),
     ("private-provider-detail", "remote_unavailable"),
@@ -278,6 +428,28 @@ def test_missing_malformed_and_failed_responses_defer_without_logging_payloads(c
 def test_empty_and_oversized_inputs_do_not_leave_the_process(query, evidence):
     client = FakeClient()
     assert backend(client).verify_grounded_support(query, evidence, allow_remote=True) == (False, 0.0)
+    assert client.calls == []
+
+
+def test_multibyte_state_is_bounded_by_serialized_request_bytes_before_client_call():
+    client = FakeClient()
+    result = backend(client).verify_grounded_support_result(
+        "\U0001f600" * 7_000, "Postgres", allow_remote=True,
+    )
+
+    assert result.status == "fallback"
+    assert result.fallback_reason == "input_too_large"
+    assert client.calls == []
+
+
+def test_invalid_unicode_is_rejected_before_client_call():
+    client = FakeClient()
+    result = backend(client).verify_grounded_support_result(
+        "\ud800", "Postgres", allow_remote=True,
+    )
+
+    assert result.status == "fallback"
+    assert result.fallback_reason == "invalid_input"
     assert client.calls == []
 
 

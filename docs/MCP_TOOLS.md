@@ -209,11 +209,13 @@ Managed access admits only the four concrete workflows above with their fixed qu
 required context. A purpose label cannot authorize arbitrary question schemas. Managed `custom`
 requests return `managed_operation_unsupported` without a credential refresh or network request;
 custom remote questions require explicit BYOK. Local custom fallback remains available.
-For managed usage, `guard_command` counts as two evaluated questions and the other three
-workflows count as one each. Every paid Pro individual and paid Team named seat, including
-viewers, and active legitimate trial/test entitlements has independent rolling caps of
-100 questions/1 hour, 1,000/5 hours, and 2,000/24 hours. All three apply; usage is neither monthly
-nor pooled. No extra managed charge or personal provider key is required.
+Managed Jev remains `not_yet_available` until release acceptance and service-capacity
+qualification. After enablement, Pro usage is owner-scoped and Team questions share one
+organization pool sized by licensed seat count, at no additional charge within a finite allowance.
+The account portal reports availability and usage; no fixed quota is published, no overage is
+charged, and service-protection limits may pause requests. `guard_command` counts as two evaluated
+questions; each other workflow counts as one. No personal provider key is required for managed
+use.
 Admitted errors remain counted. Managed transport callers can preserve an explicit `request_key`
 for a retry; duplicate admitted keys return 409 without a second provider call or usage increment.
 No answer is stored for replay, and no automatic retry occurs. The MCP tool does not expose a
@@ -223,8 +225,7 @@ The direct Classic `engraphis_decide` tool permits authorized viewers and remain
 It does not grant memory writes or administration. Smart discovery still classifies the action
 as stateful because it can consume allowance, so `engraphis_execute_action` retains its admin
 requirement. The private hosted Team tool catalog is unchanged. Managed service release
-acceptance and live quality evaluation remain required; the unchanged production fleet guard of
-100 questions/day can block requests before the individual caps and remains a launch conflict.
+acceptance, service capacity, and live quality evaluation remain required.
 Command decisions always return `allow_auto=false` and `escalate_to_user=true`, including
 successful remote answers. Provider probability and category are advice, not shell authorization.
 Local command labels are coarse: only one simple inspection command, without chaining, pipes,

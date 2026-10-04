@@ -36,12 +36,12 @@ does not ship the managed transport or the registered MCP decision tool.
    `offline_mode=true` prevents remote execution. Pattern filtering cannot detect
    every secret in arbitrary prose.
 
-The service enforces current membership, entitlement, and individual rolling limits
-of 100 questions per hour, 1,000 per five hours, and 2,000 per 24 hours. The separate
-100-question/day fleet cap remains a launch conflict. A local success, fallback, health response or configured
-backend does not establish a successful managed provider request. The account
-portal reports availability and usage. Jev advice does not authorize actions or
-replace deterministic checks.
+Managed Jev remains `not_yet_available` until release acceptance and service-capacity
+qualification pass. After enablement, Pro usage is owner-scoped and Team questions share a finite
+organization pool sized by licensed seat count. The account portal reports availability and usage;
+fixed quotas are not published and overage is not charged. A local success, fallback, health
+response, or configured backend does not establish a successful managed provider request. Jev
+advice does not authorize actions or replace deterministic checks.
 
 ## Qualification and publication sequence
 
