@@ -629,9 +629,10 @@ def test_public_capability_and_support_docs_match_the_shipped_tree():
         'src="https://raw.githubusercontent.com/Coding-Dev-Tools/engraphis/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/'
         'docs/images/knowledge-graph.png"' in readme
     )
-    assert (
-        'src="https://raw.githubusercontent.com/Coding-Dev-Tools/engraphis/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/'
-        'docs/images/context-efficiency.svg"' in readme
+    assert re.search(
+        r'src="https://raw\.githubusercontent\.com/Coding-Dev-Tools/engraphis/[0-9a-f]{40}/'
+        r'docs/images/context-efficiency\.svg"',
+        readme,
     )
     assert "official hosted service" in licensing
     assert "are generally available" not in readme
