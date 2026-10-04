@@ -29,7 +29,7 @@ Start or manage a hosted subscription in the [Engraphis account portal](https://
 After release acceptance and service enablement, every legitimate paid Pro user and every
 paid Team named seat, including a viewer seat, includes managed Jev at no additional charge
 and without a personal provider API key. Active legitimate trial/test entitlements receive
-the same limits. Each individual has all three rolling caps:
+the same limits. Every individual has 100 evaluated questions per rolling hour, 1,000 per rolling five hours, and 2,000 per rolling 24 hours. Team usage is per seat, not pooled. Each individual has all three rolling caps:
 
 | Rolling window | Maximum evaluated questions per individual |
 |---|---|
@@ -43,7 +43,7 @@ evaluate one. All three caps are enforced, including the five-hour cap. Usage fo
 individual member rather than a device or seat allocation: reassigning a seat does not reset
 that member's recent usage. There is no monthly allowance, organization pool, or unlimited
 access. Revocation or expiry prevents further managed access. The account portal reports
-individual window usage and availability; capacity returns as admissions age out of each
+the signed-in member's individual window usage, next release times and availability; capacity returns as admissions age out of each
 window rather than at a calendar reset.
 
 Admission reserves question usage atomically before a provider request. Admitted failed,
@@ -51,7 +51,7 @@ interrupted, or subsequently revoked requests remain counted; requests rejected 
 admission do not consume an individual use. No overage charge is applied. The production fleet guard remains
 **100 questions/day** across the service. That guard is an unresolved launch conflict with
 the individual allowances and can pause service before a user's caps are reached.
-The service is currently `not_yet_available` pending release acceptance; client configuration
+The service is currently `not_yet_available` pending release acceptance and service capacity qualification; client configuration
 does not enable it. Launch also requires provider-terms review, live acceptance and quality
 evaluation. Deterministic fixtures validate integration and fallback behavior, not model
 accuracy; no latency, accuracy, or cost-saving guarantee follows from configuration or a
