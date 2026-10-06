@@ -124,7 +124,7 @@ export default function engraphisPiExtension(pi: ExtensionAPI) {
 		executionMode: "sequential",
 		parameters: SESSION_PARAMETERS,
 		execute: async (_toolCallId, params, signal) =>
-			call("engraphis_session", applyScopeDefaults(params, runtimeConfig, { agent: "pi" }), signal),
+			call("engraphis_session", applyScopeDefaults(params, runtimeConfig, { agent: "pi", action: "start" }), signal),
 	});
 
 	pi.registerTool({

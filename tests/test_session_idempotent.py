@@ -5,7 +5,6 @@ agents, or repos never inherit each other's work. Starts and ends are atomic, an
 handoff cannot be overwritten, and no write may target a closed session.
 """
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -262,7 +261,7 @@ def test_explicit_resume_preserves_no_age_expiry_and_reports_source_age():
     svc = _svc()
     source = svc.start_session("w", repo="r", agent="agent-a")
     svc.end_session(source["session_id"], summary="old but valid handoff")
-    old_start = time.time() - 730 * 24 * 60 * 60
+    old_start = 1704067200.0  # 2024-01-01 UTC; independent of the runner's year.
     old_end = old_start + 60
     svc.store.conn.execute(
         "UPDATE sessions SET started_at=?, ended_at=? WHERE id=?",

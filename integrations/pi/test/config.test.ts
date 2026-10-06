@@ -160,6 +160,22 @@ test("session scope wins over configured defaults while explicit values remain i
 	assert.deepEqual(applyScopeDefaults({ workspace: "other" }, { ...config, defaultWorkspace: undefined }), { workspace: "other" });
 });
 
+test("session starts keep target scope defaults and the explicit ended source", () => {
+	const config = { command: "engraphis-mcp", defaultRepo: "api", defaultWorkspace: "acme", environment: {} };
+	for (const action of ["start", "start_session"]) {
+		assert.deepEqual(applyScopeDefaults({ action, session_id: "ses_source" }, config),
+			{ action, session_id: "ses_source", workspace: "acme", repo: "api" });
+		assert.deepEqual(applyScopeDefaults({ action, session_id: "ses_source", workspace: "other", repo: null }, config),
+			{ action, session_id: "ses_source", workspace: "other", repo: null });
+	}
+	assert.deepEqual(applyScopeDefaults({ session_id: "ses_source" }, config, { agent: "pi", action: "start" }),
+		{ agent: "pi", action: "start", session_id: "ses_source", workspace: "acme", repo: "api" });
+	assert.deepEqual(applyScopeDefaults({ action: "start", session_id: "ses_source" },
+		{ command: "engraphis-mcp", environment: {} }), { action: "start", session_id: "ses_source" });
+	assert.deepEqual(applyScopeDefaults({ action: "end", session_id: "ses_active" }, config),
+		{ action: "end", session_id: "ses_active" });
+});
+
 test("publishes canonical Engraphis repository metadata", async () => {
 	const packageJson = JSON.parse(
 		await readFile(new URL("../package.json", import.meta.url), "utf8"),
