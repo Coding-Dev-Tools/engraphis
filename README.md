@@ -1,14 +1,14 @@
 # Engraphis
 
 [![PyPI version](https://img.shields.io/pypi/v/engraphis.svg)](https://pypi.org/project/engraphis/)
-[![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](https://github.com/Coding-Dev-Tools/engraphis/blob/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/LICENSE)
+[![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](https://github.com/Coding-Dev-Tools/engraphis/blob/54d97d66bdbd052ac4533394a066e2b81efc8c74/LICENSE)
 
 **Persistent, local-first memory for AI agents.** Engraphis stores scoped project knowledge, retrieves relevant evidence across vector, lexical, graph, and code search, and returns bounded context with sources an agent can inspect.
 
 The local engine uses SQLite and works offline. It keeps changes over time instead of silently replacing facts, and grounded recall cites retrieved memories or abstains when evidence is weak.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Coding-Dev-Tools/engraphis/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/docs/images/knowledge-graph.png" alt="Engraphis local knowledge graph showing relationships between remembered entities" width="100%">
+  <img src="https://raw.githubusercontent.com/Coding-Dev-Tools/engraphis/54d97d66bdbd052ac4533394a066e2b81efc8c74/docs/images/knowledge-graph.png" alt="Engraphis local knowledge graph showing relationships between remembered entities" width="100%">
   <br>
   <sup>Explore memories and their relationships in the local dashboard.</sup>
 </p>
@@ -35,7 +35,7 @@ hit = memory.recall("Why did we change auth?", workspace="acme", repo="api")
 print(hit["context"])
 ```
 
-Connect a coding agent over MCP with the [agent setup guide](https://github.com/Coding-Dev-Tools/engraphis/blob/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/docs/AGENT_CONNECT.md).
+Connect a coding agent over MCP with the [agent setup guide](https://github.com/Coding-Dev-Tools/engraphis/blob/54d97d66bdbd052ac4533394a066e2b81efc8c74/docs/AGENT_CONNECT.md).
 
 ## What it provides
 
@@ -87,22 +87,22 @@ The existing production fleet guard remains 100 questions per day across the ser
 That limit conflicts with these per-person rolling caps and may pause or reject requests
 earlier. Resolve capacity and the fleet guard before launch. The supported decisions are
 advisory; current synthetic fixtures do not demonstrate Jev accuracy or cost savings.
-See [hosted plans and Jev details](https://github.com/Coding-Dev-Tools/engraphis/blob/94b8d244bfef890493ac7858faf03203f64547f1/docs/HOSTED_PLANS.md#included-system-1-decision-engine-jev).
+See [hosted plans and Jev details](https://github.com/Coding-Dev-Tools/engraphis/blob/54d97d66bdbd052ac4533394a066e2b81efc8c74/docs/HOSTED_PLANS.md#included-system-1-decision-engine-jev).
 
 ## Guides
 
-- [Configuration reference](https://github.com/Coding-Dev-Tools/engraphis/blob/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/docs/CONFIGURATION.md)
-- [MCP tool reference](https://github.com/Coding-Dev-Tools/engraphis/blob/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/docs/MCP_TOOLS.md)
-- [Agent and LLM provider setup](https://github.com/Coding-Dev-Tools/engraphis/blob/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/docs/LLM_PROVIDERS.md)
-- [Architecture and query planning](https://github.com/Coding-Dev-Tools/engraphis/blob/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/docs/ARCHITECTURE_V3.md#query-planning)
-- [Docker deployment](https://github.com/Coding-Dev-Tools/engraphis/blob/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/docs/DOCKER.md)
-- [Document import](https://github.com/Coding-Dev-Tools/engraphis/blob/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/docs/DOCUMENT_IMPORT.md)
-- [Cloud Sync](https://github.com/Coding-Dev-Tools/engraphis/blob/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/docs/SYNC.md)
-- [Pi extension](https://github.com/Coding-Dev-Tools/engraphis/blob/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/integrations/pi/README.md)
-- [Memory write review](https://github.com/Coding-Dev-Tools/engraphis/blob/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/docs/WRITE_REVIEW.md)
-- [Security policy](https://github.com/Coding-Dev-Tools/engraphis/blob/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/SECURITY.md)
-- [Hosted plans and licensing](https://github.com/Coding-Dev-Tools/engraphis/blob/e440bf6ba0ff600648fdac6eb53dd28d6d80df24/docs/HOSTED_PLANS.md)
+- [Configuration reference](https://github.com/Coding-Dev-Tools/engraphis/blob/54d97d66bdbd052ac4533394a066e2b81efc8c74/docs/CONFIGURATION.md)
+- [MCP tool reference](https://github.com/Coding-Dev-Tools/engraphis/blob/54d97d66bdbd052ac4533394a066e2b81efc8c74/docs/MCP_TOOLS.md)
+- [Agent and LLM provider setup](https://github.com/Coding-Dev-Tools/engraphis/blob/54d97d66bdbd052ac4533394a066e2b81efc8c74/docs/LLM_PROVIDERS.md)
+- [Architecture and query planning](https://github.com/Coding-Dev-Tools/engraphis/blob/54d97d66bdbd052ac4533394a066e2b81efc8c74/docs/ARCHITECTURE_V3.md#query-planning)
+- [Docker deployment](https://github.com/Coding-Dev-Tools/engraphis/blob/54d97d66bdbd052ac4533394a066e2b81efc8c74/docs/DOCKER.md)
+- [Document import](https://github.com/Coding-Dev-Tools/engraphis/blob/54d97d66bdbd052ac4533394a066e2b81efc8c74/docs/DOCUMENT_IMPORT.md)
+- [Cloud Sync](https://github.com/Coding-Dev-Tools/engraphis/blob/54d97d66bdbd052ac4533394a066e2b81efc8c74/docs/SYNC.md)
+- [Pi extension](https://github.com/Coding-Dev-Tools/engraphis/blob/54d97d66bdbd052ac4533394a066e2b81efc8c74/integrations/pi/README.md)
+- [Memory write review](https://github.com/Coding-Dev-Tools/engraphis/blob/54d97d66bdbd052ac4533394a066e2b81efc8c74/docs/WRITE_REVIEW.md)
+- [Security policy](https://github.com/Coding-Dev-Tools/engraphis/blob/54d97d66bdbd052ac4533394a066e2b81efc8c74/SECURITY.md)
+- [Hosted plans and licensing](https://github.com/Coding-Dev-Tools/engraphis/blob/54d97d66bdbd052ac4533394a066e2b81efc8c74/docs/HOSTED_PLANS.md)
 
 ## License
 
-Engraphis is licensed under Apache-2.0. The license does not grant trademark rights. See [LICENSE](https://github.com/Coding-Dev-Tools/engraphis/blob/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/LICENSE), [NOTICE](https://github.com/Coding-Dev-Tools/engraphis/blob/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/NOTICE), and the [licensing guide](https://github.com/Coding-Dev-Tools/engraphis/blob/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/docs/LICENSING.md). The hosted control plane and managed services are private services.
+Engraphis is licensed under Apache-2.0. The license does not grant trademark rights. See [LICENSE](https://github.com/Coding-Dev-Tools/engraphis/blob/54d97d66bdbd052ac4533394a066e2b81efc8c74/LICENSE), [NOTICE](https://github.com/Coding-Dev-Tools/engraphis/blob/54d97d66bdbd052ac4533394a066e2b81efc8c74/NOTICE), and the [licensing guide](https://github.com/Coding-Dev-Tools/engraphis/blob/54d97d66bdbd052ac4533394a066e2b81efc8c74/docs/LICENSING.md). The hosted control plane and managed services are private services.
