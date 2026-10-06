@@ -46,7 +46,7 @@
     "prepublishOnly": "npm run verify"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.30.0"
+    "@modelcontextprotocol/sdk": "1.32.1"
   },
   "overrides": {
     "hono": "^4.13.5",
