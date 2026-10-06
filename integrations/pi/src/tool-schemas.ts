@@ -21,9 +21,10 @@ export function applyScopeDefaults(
 	extra: Record<string, unknown> = {},
 ): Record<string, unknown> {
 	const result = { ...extra, ...params };
-	// A supplied session already owns its workspace and repo. Injecting runtime
-	// defaults would override that routing or create an unrelated scope conflict.
-	if (result.session_id) return result;
+	// A start selects an ended handoff source; the target still needs its scope.
+	// Other calls inherit their active session's workspace and repo.
+	const startingSession = result.action === "start" || result.action === "start_session";
+	if (result.session_id && !startingSession) return result;
 	if (result.workspace === undefined && config.defaultWorkspace) {
 		result.workspace = config.defaultWorkspace;
 	}

@@ -90,6 +90,58 @@ async def test_start_session_returns_session_id_and_caches_it(fleet) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("action", [None, "start", "start_session"])
+async def test_explicit_resume_uses_selected_source_even_with_a_cached_session(action):
+    from engraphis.service import MemoryService, ValidationError
+
+    service = MemoryService.create(":memory:")
+    source = service.start_session("acme", repo="api", agent="source")
+    service.end_session(source["session_id"], summary="EXACT_SOURCE")
+    unrelated = service.start_session("acme", repo="api", agent="target")
+    service.end_session(unrelated["session_id"], summary="UNRELATED_LATEST")
+
+    class ServiceClient:
+        async def call_tool(self, name, args):
+            assert name == "engraphis_session"
+            try:
+                details = service.start_session(
+                    args.get("workspace", "default"), repo=args.get("repo"),
+                    agent=args.get("agent"), goal=args.get("goal"),
+                    force_new=args.get("force_new", False),
+                    resume_from_session_id=args.get("session_id"),
+                )
+            except ValidationError as exc:
+                raise EngraphisMcpToolError(str(exc)) from exc
+            return {"content": [{"text": json.dumps(details)}]}
+
+    config = EngraphisRuntimeConfig(
+        command="ignored", default_workspace="acme", default_repo="api",
+    )
+    agent = EngraphisPrimeAgent("target", ServiceClient(), config)
+    try:
+        cached = await agent.start_session()
+        request = {"session_id": source["session_id"]}
+        if action is not None:
+            request["action"] = action
+        response = await agent.call("engraphis_session", request)
+        details = json.loads(response["content"][0]["text"])
+        assert details["bootstrap"]["summary"] == "EXACT_SOURCE"
+        assert details["handoff_source"]["session_id"] == source["session_id"]
+        assert agent.session_id == details["session_id"]
+        assert cached  # A cached target must still refresh its selected handoff.
+
+        before = service.store.conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+        active = agent.session_id
+        with pytest.raises(EngraphisMcpToolError, match="unavailable"):
+            await agent.call("engraphis_session", {"action": "start", "session_id": "ses_missing"})
+        after = service.store.conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+        assert after == before
+        assert agent.session_id == active
+    finally:
+        service.close()
+
+
+@pytest.mark.asyncio
 async def test_force_new_starts_a_fresh_session(fleet) -> None:
     agent = fleet["researcher"]
     sid1 = await agent.start_session()
