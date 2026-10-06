@@ -219,6 +219,7 @@ class RecallEngine:
             max(1, int(resolved_cap)) if resolved_cap is not None else None
         )
         self._planner_slot = threading.BoundedSemaphore(1)
+        self._advisory_planner_slot = threading.BoundedSemaphore(1)
         # Latency knob: an operator may opt in to a narrower prompt-only first
         # arm for small-k callers (k <= 20) where the B2 P2 latency tier
         # widened the search by candidate_k + min(250, candidate_k*3).  Setting
@@ -1109,16 +1110,17 @@ class RecallEngine:
         """Enforce the planner deadline even for a non-cooperative injected backend.
 
         Python cannot safely kill an arbitrary running function. A single daemon
-        worker therefore owns the planner slot; recall returns the identity route
-        on deadline, and further calls fail open until the timed-out worker exits.
-        This bounds caller latency and prevents an accumulation of stuck threads.
+        worker owns each local/advisory slot; further calls in the same mode fail
+        open until a timed-out worker exits. An optional remote request cannot
+        occupy the local planner's slot. This bounds both modes independently.
         """
-        if self.planner_timeout_s <= 0 or not self._planner_slot.acquire(blocking=False):
+        planner_slot = self._advisory_planner_slot if jev_assisted else self._planner_slot
+        if self.planner_timeout_s <= 0 or not planner_slot.acquire(blocking=False):
             raise TimeoutError("planner deadline unavailable")
         deadline = time.monotonic() + self.planner_timeout_s
         if jev_assisted:
             if not isinstance(self.query_planner, AdvisoryQueryPlanner):
-                self._planner_slot.release()
+                planner_slot.release()
                 raise RuntimeError("advisory planner is unavailable")
             planner_method = self.query_planner.plan_with_advisory
         else:
@@ -1140,7 +1142,7 @@ class RecallEngine:
             except Exception as exc:
                 outcome.put((False, exc))
             finally:
-                self._planner_slot.release()
+                planner_slot.release()
 
         worker = threading.Thread(
             target=invoke,
