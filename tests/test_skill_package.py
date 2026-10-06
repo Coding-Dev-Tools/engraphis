@@ -49,7 +49,7 @@ def test_portable_tool_reference_matches_registered_runtime_schemas() -> None:
     kilo = (ROOT / "docs" / "KILO_CODE_INTEGRATION.md").read_text(encoding="utf-8")
     mcp_reference = (ROOT / "docs" / "MCP_TOOLS.md").read_text(encoding="utf-8")
     assert (
-        "[MCP tool reference](https://github.com/Coding-Dev-Tools/engraphis/blob/54d97d66bdbd052ac4533394a066e2b81efc8c74/"
+        "[MCP tool reference](https://github.com/Coding-Dev-Tools/engraphis/blob/ff1abc928b27dbde91cf408aa0613a7fd5457a67/"
         "docs/MCP_TOOLS.md)" in readme
     )
     assert "39 direct tools" in mcp_reference
