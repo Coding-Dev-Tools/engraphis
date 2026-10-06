@@ -65,10 +65,13 @@ def contains_sensitive_content(value: str) -> bool:
     return isinstance(value, str) and any(pattern.search(value) for pattern in _SECRETS)
 
 
-def _http_error_fallback_code(url: str, error: urllib.error.HTTPError) -> str:
+def _http_error_fallback_code(
+    url: str, error: urllib.error.HTTPError, *, deadline: float,
+) -> str:
     """Map only the two fixed Cloud 429 reasons; never expose provider text."""
     try:
-        if error.code != 429 or urlsplit(url).path.rstrip("/") != "/v1/jev/decide":
+        _remaining_time(deadline)
+        if error.code != 429 or not urlsplit(url).path.rstrip("/").endswith("/v1/jev/decide"):
             return "remote_unavailable"
         headers = error.headers or {}
         if headers.get("Content-Type", "").partition(";")[0].strip() != "application/json":
@@ -76,7 +79,9 @@ def _http_error_fallback_code(url: str, error: urllib.error.HTTPError) -> str:
         length = headers.get("Content-Length", "")
         if length and (not length.isdigit() or int(length) > MAX_ERROR_RESPONSE_BYTES):
             return "remote_unavailable"
-        raw = error.read(MAX_ERROR_RESPONSE_BYTES + 1)
+        # HTTPError wraps the HTTPResponse in fp. Read that response directly so
+        # the deadline reader reaches its socket and interrupts slow framing too.
+        raw = _read_deadline_response(error.fp, deadline, max_bytes=MAX_ERROR_RESPONSE_BYTES)
         if not isinstance(raw, bytes) or len(raw) > MAX_ERROR_RESPONSE_BYTES:
             return "remote_unavailable"
 
@@ -99,9 +104,12 @@ def _http_error_fallback_code(url: str, error: urllib.error.HTTPError) -> str:
         code = detail.get("code")
         if not isinstance(code, str):
             return "remote_unavailable"
+        _remaining_time(deadline)
         return _CLOUD_HTTP_ERROR_CODES.get(code, "remote_unavailable")
+    except TimeoutError:
+        return "remote_timeout"
     except Exception:
-        return "remote_unavailable"
+        return "remote_timeout" if time.monotonic() >= deadline else "remote_unavailable"
 
 
 class DecisionClientError(RuntimeError):
@@ -408,7 +416,7 @@ def _post_json(
         raise
     except urllib.error.HTTPError as exc:
         try:
-            code = _http_error_fallback_code(url, exc)
+            code = _http_error_fallback_code(url, exc, deadline=deadline)
         finally:
             exc.close()
         raise DecisionClientError(code) from None
