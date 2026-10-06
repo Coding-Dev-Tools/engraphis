@@ -153,10 +153,14 @@ def apply_scope_defaults(
     """
     result: dict[str, Any] = dict(extra or {})
     result.update(params)
-    # Sessions carry their own scope, including explicit caller overrides.
-    if result.get("session_id"):
-        return result
     declared = set(_declared_property_names(schema)) if schema else None
+    # A start's session_id selects an ended handoff source, while the new
+    # target session uses independently configured workspace/repo defaults.
+    starting_session = result.get("action") in ("start", "start_session") or (
+        "action" not in result and declared is not None and "action" in declared
+    )
+    if result.get("session_id") and not starting_session:
+        return result
     if (
         "workspace" not in result
         and config.default_workspace
@@ -415,7 +419,11 @@ def build_tool(
         # conflict review) do not declare session_id; passing it would
         # be rejected as an unexpected argument by FastMCP.
         declared = _declared_property_names(schema)
-        if session_id and "session_id" not in params and "session_id" in declared:
+        starting_session = name == "engraphis_session" and params.get(
+            "action", "start",
+        ) in ("start", "start_session")
+        if (session_id and "session_id" not in params and "session_id" in declared
+                and not starting_session):
             params["session_id"] = session_id
         return await client.call_tool(name, params)
 

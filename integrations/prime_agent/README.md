@@ -175,6 +175,13 @@ never the full environment:
 | `engraphis_update_memory` | Edit one memory's title/type/importance/audit actor. |
 | `engraphis_conflict_review` | List pending, quarantined, or conflicting memories for review. |
 
+To select an ended session's handoff explicitly, call
+`await agent.start_session(resume_from_session_id="ses_...")`, or invoke
+`engraphis_session` with `action="start"` and `session_id="ses_..."`.
+The new task uses the agent's configured workspace and repo; the selected source
+must belong to that exact scope and user. An unavailable source fails without
+substituting another handoff, even when the agent already has an active session.
+
 ## Concurrency model
 
 The fleet shares one `EngraphisMcpClient`, which owns one `engraphis-mcp`

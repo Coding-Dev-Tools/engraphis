@@ -100,6 +100,37 @@ async def test_remember_tool_passes_arguments(client) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("args", [{}, {"action": "start"}, {"action": "start_session"},
+                                   {"action": "start", "force_new": True}])
+async def test_bound_start_does_not_inject_active_session(client, fake_mcp_server, args):
+    fn, _ = build_tool("engraphis_session", client, client.config, session_id="ses_active")
+    await fn(args)
+    assert "session_id" not in fake_mcp_server.call_log[-1][1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", [None, "start", "start_session"])
+async def test_bound_resume_preserves_source_and_configured_scope(client, fake_mcp_server, action):
+    config = EngraphisRuntimeConfig(command="ignored", default_workspace="acme", default_repo="api")
+    fn, _ = build_tool("engraphis_session", client, config, session_id="ses_active")
+    args = {"session_id": "ses_ended_source"}
+    if action is not None:
+        args["action"] = action
+    await fn(args)
+    sent = fake_mcp_server.call_log[-1][1]
+    assert sent["session_id"] == "ses_ended_source"
+    assert sent["workspace"] == "acme"
+    assert sent["repo"] == "api"
+
+
+@pytest.mark.asyncio
+async def test_bound_end_still_injects_active_session(client, fake_mcp_server):
+    fn, _ = build_tool("engraphis_session", client, client.config, session_id="ses_active")
+    await fn({"action": "end"})
+    assert fake_mcp_server.call_log[-1][1]["session_id"] == "ses_active"
+
+
+@pytest.mark.asyncio
 async def test_session_id_is_injected_when_bound(client, fake_mcp_server) -> None:
     fn, _ = build_tool(
         "engraphis_recall_context", client, client.config, session_id="ses_test_1"
