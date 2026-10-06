@@ -121,6 +121,53 @@ def _backend(client):
     return JevDecisionBackend(client=client, model="test-model-1.0")
 
 
+def test_remote_planner_deadline_cannot_disable_local_routes():
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    started = threading.Event()
+    released = threading.Event()
+    finished = threading.Event()
+
+    class BlockedClient(_DecisionClient):
+        def evaluate(self, *args, **kwargs):
+            started.set()
+            try:
+                assert released.wait(5)
+                return super().evaluate(*args, **kwargs)
+            finally:
+                finished.set()
+
+    service = MemoryService.create(":memory:", embed_model="", embed_dim=16)
+    engine = service.engine.recall_engine
+    engine.query_planner = JevAssistedQueryPlanner(
+        _backend(BlockedClient()), _FixedDeterministicPlanner(),
+    )
+    engine.planner_timeout_s = 0.1
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            remote = pool.submit(
+                engine._run_planner, "why does the cache fail?", SearchFilter(),
+                jev_assisted=True, allow_remote=True, data_classification="public",
+            )
+            assert started.wait(2)
+            with pytest.raises(TimeoutError):
+                remote.result(timeout=2)
+            assert not finished.is_set()
+            with pytest.raises(TimeoutError, match="unavailable"):
+                engine._run_planner(
+                    "another remote question", SearchFilter(), jev_assisted=True,
+                    allow_remote=True, data_classification="public",
+                )
+            local = engine._run_planner("why does the cache fail?", SearchFilter())
+            assert len(local.queries) == 3
+            assert local.reason_codes == ("fixture_routes",)
+    finally:
+        released.set()
+        assert finished.wait(2)
+        service.close()
+
+
 def test_route_choice_is_limited_to_deterministic_routes_and_keeps_exact_query():
     original = '  Why does CACHE.get() fail after restart?  '
     client = _DecisionClient()
@@ -379,27 +426,34 @@ def test_core_planner_gets_cloned_scope_and_time_filters_without_trust_authority
         service.close()
 
 
-def test_managed_decision_client_is_resolved_lazily_after_login(monkeypatch):
+@pytest.mark.parametrize("mode", ["managed", "auto"])
+def test_managed_route_planning_stays_local_after_login(monkeypatch, mode):
     from engraphis import cloud_session
-    from engraphis.backends.jev_transport import EngraphisCloudDecisionClient
 
-    logged_in = [False]
-    monkeypatch.setattr(settings, "decision_backend", "managed")
+    monkeypatch.setattr(settings, "decision_backend", mode)
     monkeypatch.setattr(settings, "decision_model", "test-model-1.0")
-    monkeypatch.setattr(
-        cloud_session, "configured", lambda **_kwargs: logged_in[0],
-    )
-    monkeypatch.setattr(
-        cloud_session, "credential_bound_control_url",
-        lambda: "https://control.example.invalid" if logged_in[0] else "",
-    )
+    monkeypatch.setenv("TYPESAFE_API_KEY", "ambient-key-must-not-select-byok")
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("managed route planning must not inspect or refresh credentials")
+
+    monkeypatch.setattr(cloud_session, "configured", forbidden)
+    monkeypatch.setattr(cloud_session, "credential_bound_control_url", forbidden)
+    monkeypatch.setattr(cloud_session, "access_for_workspace", forbidden)
     service = MemoryService.create(":memory:", embed_model="", embed_dim=16)
     try:
-        backend = service.engine.recall_engine.query_planner.decision_backend
-        assert isinstance(backend.client, EngraphisCloudDecisionClient)
+        planner = service.engine.recall_engine.query_planner
+        backend = planner.decision_backend
+        assert backend.client is None
         assert backend.is_available is False
-        logged_in[0] = True
-        assert backend.is_available is True
+        planner.deterministic = _FixedDeterministicPlanner()
+        baseline = planner.plan("why is the cache related to the service?")
+        assisted = planner.plan_with_advisory(
+            "why is the cache related to the service?",
+            allow_remote=True, data_classification="public", timeout_s=1,
+        )
+        assert assisted.queries == baseline.queries
+        assert assisted.reason_codes[-1] == "jev_backend_unavailable"
     finally:
         service.close()
 
