@@ -333,6 +333,8 @@ class EngraphisCloudDecisionClient:
         deadline = time.monotonic() + effective_timeout
         payload = _request_payload(state, questions, model, allow_remote=allow_remote,
                                    purpose=purpose, data_classification=data_classification)
+        if purpose == "custom":
+            raise DecisionClientError("managed_operation_unsupported")
         from engraphis import cloud_session
         from engraphis.hosted_client import validate_cloud_base_url
         try:
