@@ -10,8 +10,8 @@ ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY = "Coding-Dev-Tools/engraphis"
 README_BENCHMARK_PIN = "54d97d66bdbd052ac4533394a066e2b81efc8c74"
 README_LINK_PINS = (
-    "fee9d0c150c250632d8e0c0ee86c1325c9e1ee78",
-    "e440bf6ba0ff600648fdac6eb53dd28d6d80df24",
+    "54d97d66bdbd052ac4533394a066e2b81efc8c74",
+    "54d97d66bdbd052ac4533394a066e2b81efc8c74",
     README_BENCHMARK_PIN,
 )
 
@@ -81,7 +81,7 @@ def test_pypi_readme_has_only_absolute_repository_assets_and_links() -> None:
         assert local.exists(), f"{target} maps to missing repository path {local.relative_to(ROOT)}"
 
     assert (
-        f"https://raw.githubusercontent.com/{REPOSITORY}/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/"
+        f"https://raw.githubusercontent.com/{REPOSITORY}/54d97d66bdbd052ac4533394a066e2b81efc8c74/"
         "docs/images/knowledge-graph.png"
     ) in targets
     assert (

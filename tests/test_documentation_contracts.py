@@ -14,7 +14,7 @@ from engraphis.core.schema import SCHEMA_VERSION
 
 ROOT = Path(__file__).resolve().parents[1]
 README_BENCHMARK_PIN = "54d97d66bdbd052ac4533394a066e2b81efc8c74"
-README_HOSTED_PLANS_PIN = "94b8d244bfef890493ac7858faf03203f64547f1"
+README_HOSTED_PLANS_PIN = "54d97d66bdbd052ac4533394a066e2b81efc8c74"
 
 
 def _read(path: str) -> str:
@@ -42,13 +42,13 @@ def test_readme_targets_resolve_in_the_repository() -> None:
         if parsed.scheme in {"http", "https"}:
             if parsed.netloc == "github.com":
                 prefixes = (
-                    "/Coding-Dev-Tools/engraphis/blob/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/",
+                    "/Coding-Dev-Tools/engraphis/blob/54d97d66bdbd052ac4533394a066e2b81efc8c74/",
                     f"/Coding-Dev-Tools/engraphis/blob/{README_BENCHMARK_PIN}/",
                     f"/Coding-Dev-Tools/engraphis/blob/{README_HOSTED_PLANS_PIN}/",
                 )
             elif parsed.netloc == "raw.githubusercontent.com":
                 prefixes = (
-                    "/Coding-Dev-Tools/engraphis/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/",
+                    "/Coding-Dev-Tools/engraphis/54d97d66bdbd052ac4533394a066e2b81efc8c74/",
                     f"/Coding-Dev-Tools/engraphis/{README_BENCHMARK_PIN}/",
                 )
             else:
@@ -283,7 +283,7 @@ def test_configuration_and_recovery_guidance_matches_public_contracts() -> None:
     sync = _read("docs/SYNC.md")
 
     assert (
-        "[Configuration reference](https://github.com/Coding-Dev-Tools/engraphis/blob/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/"
+        "[Configuration reference](https://github.com/Coding-Dev-Tools/engraphis/blob/54d97d66bdbd052ac4533394a066e2b81efc8c74/"
         "docs/CONFIGURATION.md)" in readme
     )
     for document in (configuration, security, connect, providers, sync):
@@ -362,7 +362,7 @@ def test_consolidation_docs_expose_only_live_public_options() -> None:
         assert "supersede-sources" not in document
 
     assert (
-        "https://github.com/Coding-Dev-Tools/engraphis/blob/94b8d244bfef890493ac7858faf03203f64547f1/"
+        "https://github.com/Coding-Dev-Tools/engraphis/blob/54d97d66bdbd052ac4533394a066e2b81efc8c74/"
         "docs/HOSTED_PLANS.md#included-system-1-decision-engine-jev"
     ) in readme
     hosted_plan = " ".join(_read("docs/HOSTED_PLANS.md").split())
