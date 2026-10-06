@@ -13,7 +13,7 @@ from engraphis.core.schema import SCHEMA_VERSION
 
 
 ROOT = Path(__file__).resolve().parents[1]
-README_BENCHMARK_PIN = "d01bcdb178c74d658c2bb7652968b239ea02e1f5"
+README_BENCHMARK_PIN = "12e7d4887e7e7eaf0c06dbe8ade1deee2a951dca"
 README_HOSTED_PLANS_PIN = "94b8d244bfef890493ac7858faf03203f64547f1"
 
 
