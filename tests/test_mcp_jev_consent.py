@@ -11,6 +11,50 @@ from engraphis.backends import jev_transport as transport
 
 
 @pytest.mark.parametrize("dispatch", ["direct", "classic", "smart"])
+@pytest.mark.parametrize("mode", ["managed", "auto", " MANAGED "])
+def test_managed_custom_is_rejected_before_client_or_credential_lookup(monkeypatch, dispatch, mode):
+    from engraphis import cloud_session
+    from engraphis.backends.jev_decision import select_decision_client
+
+    # Load re-exported selectors before patching the transport module; otherwise
+    # a later factory import would retain the temporary forbidden test function.
+    assert select_decision_client is transport.select_decision_client
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("unsupported managed custom calls must not inspect credentials or select a client")
+
+    monkeypatch.setenv("ENGRAPHIS_DECISION_BACKEND", mode)
+    monkeypatch.setenv("TYPESAFE_API_KEY", "ambient-key-must-not-select-byok")
+    monkeypatch.setattr(transport, "select_decision_client", forbidden)
+    monkeypatch.setattr(cloud_session, "configured", forbidden)
+    monkeypatch.setattr(cloud_session, "credential_bound_control_url", forbidden)
+    monkeypatch.setattr(cloud_session, "access_for_workspace", forbidden)
+    arguments = {"kind": "custom", "question": "Does the synthetic fixture contain evidence?",
+                 "allow_remote": True, "data_classification": "public"}
+    if dispatch == "direct":
+        raw = server.engraphis_decide(**arguments)
+    elif dispatch == "classic":
+        response = asyncio.run(server.classic_mcp.call_tool("engraphis_decide", arguments))
+        content = response[0] if isinstance(response, tuple) else response
+        raw = content[0].text
+    else:
+        action = server._action_payload(server.ACTION_SPECS["decide"])
+        response = server.engraphis_execute_action(
+            capability_id=action["capability_id"], schema_digest=action["schema_digest"],
+            arguments=arguments,
+        )
+        raw = response if isinstance(response, str) else response.content[0].text
+    result = json.loads(raw)
+    if dispatch == "smart":
+        result = result["result"]
+    assert result["fallback_reason"] == "managed_operation_unsupported"
+    assert result["is_fallback"] is True
+    assert result["selected"] is None
+    assert result["confidence"] is None
+    assert result["advisory_only"] is True
+
+
+@pytest.mark.parametrize("dispatch", ["direct", "classic", "smart"])
 @pytest.mark.parametrize("consent", [{}, {"offline_mode": True, "allow_remote": True},
                                      {"allow_remote": True}])
 def test_invalid_kind_never_fabricates_a_decision_or_inspects_credentials(

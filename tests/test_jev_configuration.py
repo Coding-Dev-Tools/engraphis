@@ -72,11 +72,12 @@ def test_mcp_missing_control_falls_back_without_using_personal_key(
         monkeypatch.setenv("ENGRAPHIS_CLOUD_CONTROL_URL", control)
     monkeypatch.setenv("ENGRAPHIS_DECISION_BACKEND", mode)
     result = json.loads(mcp_server.engraphis_decide(
-        kind="custom", state="Synthetic evidence", allow_remote=True,
+        kind="verify_support", state="Synthetic evidence", query="What does the fixture support?",
+        allow_remote=True,
     ))
     assert result["decision_status"] == "local_fallback"
     assert result["fallback_reason"] == "backend_not_configured"
-    assert result["selected"] is None and result["confidence"] is None
+    assert result["is_fallback"] is True and result["confidence"] is None
     assert direct_credentials == []
 
 
