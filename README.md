@@ -49,7 +49,7 @@ Connect a coding agent over MCP with the [agent setup guide](https://github.com/
 The current registered artifact contains three deterministic offline fixture runs. It separates context size, retrieval quality, and grounded decision checks; these small fixtures do not establish general task performance.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Coding-Dev-Tools/engraphis/d34c692020e0b7a50cb19affdc2d6ca820f69187/docs/images/context-efficiency.svg" alt="Three registered offline fixtures: structure-aware chunking reduced mean retrieved context from 740.3 to 214.3 tokens per question (71.1%, 18 questions); the serialized JSON-shape proxy fell from 24,590 to 11,138 tokens across 26 payload samples and 260 recalls. Candidate and packed retrieval quality (Recall@5, Hit@5, and answer-token recall) are shown separately (each 1.000). Grounded checks show 5/5 answerable queries grounded and 6/6 abstention queries rejected, including a 1/1 quarantined-evidence probe; 11/11 decisions were correct. MCP transport and provider billing were not measured. Artifact SHA-256 prefix 7eaeeb82778f; see the benchmark guide for the full checksum." width="100%">
+  <img src="https://raw.githubusercontent.com/Coding-Dev-Tools/engraphis/d01bcdb178c74d658c2bb7652968b239ea02e1f5/docs/images/context-efficiency.svg" alt="Three registered offline fixtures: structure-aware chunking reduced mean retrieved context from 740.3 to 214.3 tokens per question (71.1%, 18 questions); the serialized JSON-shape proxy fell from 24,590 to 11,138 tokens across 26 payload samples and 260 recalls. Candidate and packed retrieval quality (Recall@5, Hit@5, and answer-token recall) are shown separately (each 1.000). Grounded checks show 5/5 answerable queries grounded and 6/6 abstention queries rejected, including a 1/1 quarantined-evidence probe; 11/11 decisions were correct. MCP transport and provider billing were not measured. Artifact SHA-256 prefix 7eaeeb82778f; see the benchmark guide for the full checksum." width="100%">
   <br>
   <sup>Three offline fixtures separate context reduction, candidate and packed retrieval quality, and grounded behavior. The chart shows the artifact checksum prefix; see the benchmark guide for the full checksum and reproduction steps.</sup>
 </p>
@@ -60,7 +60,7 @@ The current registered artifact contains three deterministic offline fixture run
 | Recall payload proxy | JSON-shape proxy: 24,590 → 11,138 tokens (54.71% lower, 26 samples; 260 timed recalls) | Candidate and packed Recall@5, Hit@5, and answer-token recall are each 1.000 |
 | Grounded decisions | 5/5 answerable queries grounded; 6/6 abstention queries rejected, including 1/1 quarantined-evidence check | 11/11 decisions correct |
 
-The payload figure is a serialized JSON-shape estimate, not an MCP transport measurement or provider billing total. See the [Benchmark methodology](https://github.com/Coding-Dev-Tools/engraphis/blob/d34c692020e0b7a50cb19affdc2d6ca820f69187/BENCHMARKS.md) for artifact identity, counting methods, reproduction commands, external-evaluation boundaries, and limitations.
+The payload figure is a serialized JSON-shape estimate, not an MCP transport measurement or provider billing total. See the [Benchmark methodology](https://github.com/Coding-Dev-Tools/engraphis/blob/d01bcdb178c74d658c2bb7652968b239ea02e1f5/BENCHMARKS.md) for artifact identity, counting methods, reproduction commands, external-evaluation boundaries, and limitations.
 
 ## Optional Jev assistance
 
