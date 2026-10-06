@@ -2680,6 +2680,11 @@ def engraphis_decide(
         return fallback("invalid_request")
     if offline_mode or allow_remote is not True:
         return fallback("offline" if offline_mode else "remote_not_authorized")
+    selected_backend = os.environ.get("ENGRAPHIS_DECISION_BACKEND", "none").strip().lower()
+    if kind == "custom" and selected_backend in {"managed", "auto"}:
+        # Unsupported managed work must not inspect credentials or select a
+        # client, even if a saved Cloud session is already configured.
+        return fallback("managed_operation_unsupported")
     try:
         client, backend_name = select_decision_client()
         if client is None:
