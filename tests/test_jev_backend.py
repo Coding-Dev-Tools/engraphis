@@ -452,6 +452,23 @@ def test_invalid_unicode_is_rejected_before_client_call():
     assert client.calls == []
 
 
+@pytest.mark.parametrize(("query", "reason"), [
+    ("\U0001f600" * 7_000, "input_too_large"),
+    ("\ud800", "invalid_input"),
+], ids=["multibyte_limit", "invalid_unicode"])
+def test_serialized_input_preflight_does_not_inspect_client_credentials(query, reason):
+    class PrivateClient(FakeClient):
+        @property
+        def is_configured(self):
+            pytest.fail("rejected payloads must not inspect client credentials")
+
+    client = PrivateClient()
+    result = backend(client).verify_grounded_support_result(query, "Postgres", allow_remote=True)
+    assert result.status == "fallback"
+    assert result.fallback_reason == reason
+    assert client.calls == []
+
+
 def test_cloud_decision_client_uses_saved_session_configuration(monkeypatch):
     from engraphis import cloud_session
     from engraphis.backends.jev_decision import create_cloud_decision_client

@@ -15,6 +15,7 @@ from engraphis.service import (
     current_user,
     set_current_user,
 )
+from engraphis.core.context import RegexTokenCounter
 
 
 def _svc():
@@ -155,6 +156,188 @@ def test_ended_session_is_not_reused():
     assert b["session_id"] != a["session_id"]
     assert b["bootstrap"].get("outcome") == "shipped"
     assert "follow up on X" in b["bootstrap"].get("open_threads", [])
+
+
+def test_explicit_resume_selects_exact_cross_agent_handoff_and_is_retryable():
+    svc = _svc()
+    source = svc.start_session("w", repo="r", agent="agent-a", goal="first task")
+    svc.end_session(
+        source["session_id"], summary="the requested source", outcome="blocked",
+        open_threads=["continue the exact branch"],
+    )
+    newer = svc.start_session("w", repo="r", agent="agent-b", goal="unrelated")
+    svc.end_session(newer["session_id"], summary="newer but unrelated")
+
+    resumed = svc.start_session(
+        "w", repo="r", agent="agent-c", goal="continue",
+        resume_from_session_id=source["session_id"],
+    )
+    retried = svc.start_session(
+        "w", repo="r", agent="agent-c", goal="continue",
+        resume_from_session_id=source["session_id"],
+    )
+
+    assert resumed["bootstrap"] == {
+        "summary": "the requested source",
+        "outcome": "blocked",
+        "open_threads": ["continue the exact branch"],
+    }
+    assert resumed["handoff_source"]["session_id"] == source["session_id"]
+    assert resumed["handoff_source"]["started_at"].endswith("Z")
+    assert resumed["handoff_source"]["ended_at"].endswith("Z")
+    assert resumed["handoff_usage"]["token_counter"] == "engraphis.regex.v1"
+    assert resumed["handoff_usage"]["returned_content_tokens"] <= 512
+    assert retried["session_id"] == resumed["session_id"]
+    assert retried["reused"] is True
+    assert retried["bootstrap"] == resumed["bootstrap"]
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["missing", "deleted", "active", "wrong_workspace", "wrong_repo",
+     "omitted_repo", "empty", "missing_end_time"],
+)
+def test_explicit_resume_fails_closed_for_unavailable_or_mismatched_source(case):
+    svc = _svc()
+    source = None
+    if case == "missing":
+        # There is an eligible implicit handoff, but an explicit unknown ID must
+        # fail instead of silently substituting it.
+        fallback = svc.start_session("w", repo="r", agent="target")
+        svc.end_session(fallback["session_id"], summary="do not substitute")
+    else:
+        source = svc.start_session("w", repo="r", agent="source")
+        if case != "active":
+            svc.end_session(
+                source["session_id"],
+                summary="" if case == "empty" else "valid source",
+                outcome="" if case == "empty" else "done",
+            )
+        if case == "deleted":
+            svc.store.conn.execute("DELETE FROM sessions WHERE id=?", (source["session_id"],))
+        if case == "missing_end_time":
+            svc.store.conn.execute(
+                "UPDATE sessions SET ended_at=NULL WHERE id=?", (source["session_id"],)
+            )
+        if case == "wrong_workspace":
+            svc.start_session("elsewhere", repo="r", agent="seed")
+        if case == "wrong_repo":
+            svc.start_session("w", repo="other", agent="seed")
+
+    before = svc.store.conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+    sid = source["session_id"] if source else "ses_nonexistent"
+    workspace = "elsewhere" if case == "wrong_workspace" else "w"
+    repo = "other" if case == "wrong_repo" else (None if case == "omitted_repo" else "r")
+    with pytest.raises(ValidationError, match="resume_from_session_id is unavailable"):
+        svc.start_session(
+            workspace, repo=repo, agent="target", resume_from_session_id=sid,
+        )
+    after = svc.store.conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+    assert after == before
+
+
+def test_explicit_resume_requires_exact_stable_user_id_even_when_email_matches():
+    svc = _svc()
+    # Create a legacy shared workspace so the test isolates session ownership from
+    # personal-folder authorization.
+    svc.start_session("w", repo="r", agent="seed")
+    set_current_user({"id": "usr_alice", "email": "same@example.test", "role": "member"})
+    source = svc.start_session("w", repo="r", agent="agent-a")
+    svc.end_session(source["session_id"], summary="private handoff")
+    before = svc.store.conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+
+    set_current_user({"id": "usr_alice_recreated", "email": "same@example.test",
+                      "role": "member"})
+    with pytest.raises(ValidationError, match="resume_from_session_id is unavailable"):
+        svc.start_session(
+            "w", repo="r", agent="agent-b",
+            resume_from_session_id=source["session_id"],
+        )
+    after = svc.store.conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+    assert after == before
+
+
+def test_explicit_resume_preserves_no_age_expiry_and_reports_source_age():
+    svc = _svc()
+    source = svc.start_session("w", repo="r", agent="agent-a")
+    svc.end_session(source["session_id"], summary="old but valid handoff")
+    old_start = 1704067200.0  # 2024-01-01 UTC; independent of the runner's year.
+    old_end = old_start + 60
+    svc.store.conn.execute(
+        "UPDATE sessions SET started_at=?, ended_at=? WHERE id=?",
+        (old_start, old_end, source["session_id"]),
+    )
+
+    resumed = svc.start_session(
+        "w", repo="r", agent="agent-b",
+        resume_from_session_id=source["session_id"],
+    )
+
+    assert resumed["bootstrap"]["summary"] == "old but valid handoff"
+    assert resumed["handoff_source"]["started_at"].startswith("2024-")
+    assert "no automatic expiry" in resumed["handoff_usage"]["age_policy"]
+
+
+def test_explicit_resume_handoff_is_deterministically_bounded():
+    svc = _svc()
+    source = svc.start_session("w", repo="r", agent="agent-a")
+    svc.end_session(
+        source["session_id"], summary="context " * 9_000, outcome="outcome " * 100,
+        open_threads=[f"thread {index} " * 80 for index in range(64)],
+    )
+
+    resumed = svc.start_session(
+        "w", repo="r", agent="agent-b",
+        resume_from_session_id=source["session_id"],
+    )
+
+    bootstrap = resumed["bootstrap"]
+    usage = resumed["handoff_usage"]
+    counter = RegexTokenCounter()
+    returned_tokens = (
+        counter(bootstrap["summary"])
+        + counter(bootstrap["outcome"])
+        + sum(counter(item) for item in bootstrap["open_threads"])
+    )
+    assert set(bootstrap) == {"summary", "outcome", "open_threads"}
+    assert returned_tokens <= 512
+    assert usage["returned_content_tokens"] == returned_tokens
+    assert usage["truncated"] is True
+    assert usage["omitted_threads"] == 58
+    assert len(bootstrap["summary"]) <= 4_000
+    assert len(bootstrap["outcome"]) <= 512
+    assert len(bootstrap["open_threads"]) == 6
+    assert all(len(item) <= 512 for item in bootstrap["open_threads"])
+
+
+def test_concurrent_explicit_resume_retries_share_only_the_target_session(tmp_path):
+    db = str(tmp_path / "session-resume.db")
+    first = MemoryService.create(db)
+    source = first.start_session("w", repo="r", agent="source")
+    first.end_session(source["session_id"], summary="same source for every retry")
+    second = MemoryService.create(db)
+    barrier = threading.Barrier(2)
+
+    def resume(svc):
+        barrier.wait(timeout=10)
+        return svc.start_session(
+            "w", repo="r", agent="target", goal="same target",
+            resume_from_session_id=source["session_id"],
+        )
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(resume, (first, second)))
+        assert len({item["session_id"] for item in results}) == 1
+        assert sorted(item["reused"] for item in results) == [False, True]
+        assert all(
+            item["handoff_source"]["session_id"] == source["session_id"]
+            and item["bootstrap"]["summary"] == "same source for every retry"
+            for item in results
+        )
+    finally:
+        second.store.close()
+        first.store.close()
 
 
 def test_concurrent_exact_starts_reuse_one_session(tmp_path):

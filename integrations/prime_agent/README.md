@@ -41,7 +41,7 @@ local Engraphis gateway. Choose by host, not by feature set.
 | Integration | Host | Best for | Concurrency | Install |
 |---|---|---|---|---|
 | `integrations/prime_agent/` (this package) | [PrimeIntellect prime-agent](https://github.com/PrimeIntellect-ai/prime-agent) fleets of 1–8 named sub-agents | Multi-role pipelines (`researcher` → `coder` → `reviewer` → `tester`) that need per-role session isolation but one local gateway | Eight sub-agents share one stdio subprocess; tool calls serialize at the JSON-RPC frame layer | `pip install ./integrations/prime_agent` |
-| [Pi extension](https://github.com/Coding-Dev-Tools/engraphis/blob/main/integrations/pi/README.md) | The Pi coding agent | A single interactive coding loop with prompt-ready recall, durable notes, and governed governance actions | One agent, one stdio gateway | Pi extension marketplace / `pip install engraphis-pi` |
+| [Pi extension](https://github.com/Coding-Dev-Tools/engraphis/blob/main/integrations/pi/README.md) | The Pi coding agent | A single interactive coding loop with prompt-ready recall, durable notes, and governed governance actions | One agent, one stdio gateway | `pi install npm:@engraphis/pi` |
 | [Command Code SessionStart hook](https://github.com/Coding-Dev-Tools/engraphis/blob/main/integrations/commandcode/) | A Command Code session | Warming a brand-new session with bounded, cited context on `SessionStart`; fails open on timeout | One hook per session | `python scripts/install_cc_hook.py` |
 
 Pick the prime-agent integration when you already have or want a multi-role
@@ -174,6 +174,13 @@ never the full environment:
 | `engraphis_get_memory` | Read one governed memory record by id. |
 | `engraphis_update_memory` | Edit one memory's title/type/importance/audit actor. |
 | `engraphis_conflict_review` | List pending, quarantined, or conflicting memories for review. |
+
+To select an ended session's handoff explicitly, call
+`await agent.start_session(resume_from_session_id="ses_...")`, or invoke
+`engraphis_session` with `action="start"` and `session_id="ses_..."`.
+The new task uses the agent's configured workspace and repo; the selected source
+must belong to that exact scope and user. An unavailable source fails without
+substituting another handoff, even when the agent already has an active session.
 
 ## Concurrency model
 

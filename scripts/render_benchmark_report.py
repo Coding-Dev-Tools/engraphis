@@ -310,7 +310,7 @@ def _validate_normalized(report: dict[str, Any]) -> None:
     whole = _require_mapping(chunking.get("whole"), "report.chunking.whole")
     chunked = _require_mapping(chunking.get("chunked"), "report.chunking.chunked")
     context = _require_mapping(performance.get("context"), "report.performance.context")
-    _validate_counts(chunking, ("questions", "documents"), "report.chunking")
+    _validate_counts(chunking, ("k", "questions", "documents"), "report.chunking")
     _validate_counts(whole, ("memories", "max_stored_tokens"), "report.chunking.whole")
     _validate_counts(chunked, ("memories", "max_stored_tokens"), "report.chunking.chunked")
     _validate_numbers(
@@ -377,6 +377,7 @@ def _normalize_chunking(value: Optional[dict[str, Any]]) -> dict[str, Any]:
         "chunked": chunked if isinstance(chunked, dict) else {},
         "questions": value.get("questions"),
         "documents": value.get("documents"),
+        "k": value.get("k"),
         "context_reduction_pct": value.get("context_reduction_pct"),
     }
 
@@ -555,9 +556,15 @@ def render_report(report: dict[str, Any]) -> str:
     retrieved = _quality(performance, "quality")
     packed = _quality(performance, "packed_quality")
     packed_available = bool(packed) and packed.get("sample_count", 1) != 0
+    if not packed_available:
+        packed = {}
     grounded = _normalize_grounded(report.get("grounded"))
     corpus = performance.get("corpus") if isinstance(performance.get("corpus"), dict) else {}
     run = performance.get("run") if isinstance(performance.get("run"), dict) else {}
+    run_k = _integer(run.get("k"))
+    chunk_k = _integer(chunking.get("k"))
+    quality_rank = f"@{run_k}" if run_k is not None else "@k"
+    chunk_rank = f"@{chunk_k}" if chunk_k is not None else "@k"
     payload_boundary = performance.get("payload_boundary")
     if not isinstance(payload_boundary, dict):
         payload_boundary = {"transport_measured": False}
@@ -580,9 +587,9 @@ def render_report(report: dict[str, Any]) -> str:
     whole_recall = whole.get("recall_at_k")
     chunked_recall = chunked.get("recall_at_k")
     recall_label = (
-        f"Recall@5 {_decimal(whole_recall)} both modes"
+        f"Recall{chunk_rank} {_decimal(whole_recall)} both modes"
         if whole_recall is not None and whole_recall == chunked_recall
-        else f"Recall@5 whole/chunked {_decimal(whole_recall)}/{_decimal(chunked_recall)}"
+        else f"Recall{chunk_rank} whole/chunked {_decimal(whole_recall)}/{_decimal(chunked_recall)}"
     )
     chunk_population = (
         f"{_tokens(chunk_documents)} documents · " if chunk_documents is not None else ""
@@ -595,8 +602,8 @@ def render_report(report: dict[str, Any]) -> str:
         if fixture_count is not None else "SELECTED REPORT"
     )
     packed_quality_desc = (
-        f"Packed context quality is Recall@5 {_decimal(packed.get('recall_at_k'))}, "
-        f"Hit@5 {_decimal(packed.get('hit_at_k'))}, and answer-token recall "
+        f"Packed context quality is Recall{quality_rank} {_decimal(packed.get('recall_at_k'))}, "
+        f"Hit{quality_rank} {_decimal(packed.get('hit_at_k'))}, and answer-token recall "
         f"{_decimal(packed.get('answer_token_recall'))} across "
         f"{_tokens(packed.get('sample_count'))} questions."
         if packed_available else "Packed-context quality is not included in this report."
@@ -614,7 +621,7 @@ def render_report(report: dict[str, Any]) -> str:
         "Artifact-driven offline benchmark report with context efficiency, retrieval quality, and grounded behavior reported separately.",
         f"Structure-aware chunking reports {_decimal(whole_context, 1)} to {_decimal(chunked_context, 1)} retrieved tokens per question.",
         f"The JSON-shape payload proxy reports {_tokens(full_proxy)} full versus {_tokens(compact_proxy)} compact tokens; {transport_description}; provider billing was not measured.",
-        f"Retrieved candidate quality is Recall@5 {_decimal(retrieved.get('recall_at_k'))}, Hit@5 {_decimal(retrieved.get('hit_at_k'))}, and answer-token recall {_decimal(retrieved.get('answer_token_recall'))} across {_tokens(questions)} questions.",
+        f"Retrieved candidate quality is Recall{quality_rank} {_decimal(retrieved.get('recall_at_k'))}, Hit{quality_rank} {_decimal(retrieved.get('hit_at_k'))}, and answer-token recall {_decimal(retrieved.get('answer_token_recall'))} across {_tokens(questions)} questions.",
         packed_quality_desc,
         grounded_desc,
         f"Source artifact SHA-256 {source_hash}.",
@@ -665,16 +672,16 @@ def render_report(report: dict[str, Any]) -> str:
         '<rect x="550" y="343" width="1" height="136" fill="#252c36"/>',
         _text(22, 370, "Retrieved candidate quality", size=16.5, class_name="heading"),
         _text(22, 390, f"offline-performance · before packing · n={_tokens(questions)}", size=12.2, class_name="muted"),
-        _text(22, 416, "Recall@5", size=12.5),
-        _text(194, 416, "Hit@5", size=12.5),
+        _text(22, 416, f"Recall{quality_rank}", size=12.5),
+        _text(194, 416, f"Hit{quality_rank}", size=12.5),
         _text(363, 416, "Answer-token recall", size=12.5),
         _text(22, 451, _decimal(retrieved.get("recall_at_k")), size=24, class_name="heading"),
         _text(194, 451, _decimal(retrieved.get("hit_at_k")), size=24, class_name="heading"),
         _text(363, 451, _decimal(retrieved.get("answer_token_recall")), size=24, class_name="heading"),
         _text(571, 370, "Packed context quality", size=16.5, class_name="green"),
         _text(571, 390, f"reader-admitted context · n={_tokens(packed.get('sample_count'))}" if packed_available else "Not included in selected report", size=12.2, class_name="muted"),
-        _text(571, 416, "Recall@5", size=12.5),
-        _text(743, 416, "Hit@5", size=12.5),
+        _text(571, 416, f"Recall{quality_rank}", size=12.5),
+        _text(743, 416, f"Hit{quality_rank}", size=12.5),
         _text(912, 416, "Answer-token recall", size=12.5),
         _text(571, 451, _decimal(packed.get("recall_at_k")), size=24, class_name="green"),
         _text(743, 451, _decimal(packed.get("hit_at_k")), size=24, class_name="green"),

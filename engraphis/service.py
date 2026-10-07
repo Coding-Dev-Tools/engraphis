@@ -28,6 +28,7 @@ import sqlite3
 import time
 import threading
 import unicodedata
+from datetime import datetime, timezone
 import numpy as np
 from collections import Counter, OrderedDict
 from dataclasses import asdict
@@ -181,6 +182,12 @@ MAX_KEYWORD_CHARS = 128
 MAX_METADATA_BYTES = 16_384
 MAX_K = 50
 MAX_TOKEN_BUDGET = 32_768
+SESSION_HANDOFF_TOKEN_BUDGET = 512
+SESSION_HANDOFF_SUMMARY_TOKENS = 384
+SESSION_HANDOFF_FIELD_TOKENS = 32
+SESSION_HANDOFF_MAX_THREADS = 6
+SESSION_HANDOFF_SUMMARY_CHARS = 4_000
+SESSION_HANDOFF_FIELD_CHARS = 512
 RESPONSE_MODES = frozenset({"full", "compact"})
 # These are the transport-neutral producers used by the local agent protocol.  They
 # are allowed to create prompt-visible memories immediately; external source labels
@@ -443,6 +450,40 @@ class WorkspaceBindingError(ValidationError):
 
     def __init__(self) -> None:
         super().__init__("workspace is not permitted by this instance's configuration")
+
+
+def _bounded_session_handoff_text(
+    value: str,
+    *,
+    max_chars: int,
+    token_budget: int,
+    counter: RegexTokenCounter,
+) -> tuple[str, int, bool]:
+    """Truncate one untrusted handoff field by characters and exact regex tokens."""
+    text = value[:max_chars]
+    truncated = len(value) > max_chars
+    token_count = counter(text)
+    if token_count > token_budget:
+        if token_budget <= 0:
+            text = ""
+        else:
+            spans = list(re.finditer(r"\w+|[^\w\s]", text, re.UNICODE))
+            text = text[:spans[token_budget - 1].end()].rstrip()
+        token_count = counter(text)
+        truncated = True
+    return text, token_count, truncated
+
+
+def _session_handoff_timestamp(value: Any) -> str:
+    """Render a valid stored epoch timestamp as an explicit UTC instant."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("invalid session timestamp")
+    timestamp = float(value)
+    if not math.isfinite(timestamp) or timestamp <= 0:
+        raise ValueError("invalid session timestamp")
+    return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat().replace(
+        "+00:00", "Z"
+    )
 
 
 def _reject_secret_capture(fields) -> None:
@@ -4723,10 +4764,11 @@ class MemoryService:
                 item["provenance"] = _compact_provenance(item.get("provenance"))
                 compact_citations.append(item)
             out["citations"] = compact_citations
-            out["retrieval_preview"] = [
-                _compact_retrieval_candidate(candidate)
-                for candidate in out.get("retrieval_preview") or []
-            ]
+            if include_retrieval_preview:
+                out["retrieval_preview"] = [
+                    _compact_retrieval_candidate(candidate)
+                    for candidate in out.get("retrieval_preview") or []
+                ]
         out["receipt"] = self._record_receipt(
             "grounded_recall", response=out, workspace_id=wid or "", repo_id=rid or "",
             actor="agent",
@@ -4748,8 +4790,117 @@ class MemoryService:
         return out
 
     # ── session lifecycle ───────────────────────────────────────────────────────
+    def _explicit_session_handoff(
+        self,
+        session_id: str,
+        *,
+        workspace_id: str,
+        repo_id: Optional[str],
+        user_id: str,
+    ) -> tuple[dict, dict, dict]:
+        """Authorize and bound an explicitly selected, ended handoff.
+
+        This intentionally does not fall back to a recent session. The stable owner,
+        exact workspace/repository scope, and completed status are checked while the
+        caller holds the store's write reservation.
+        """
+        unavailable = "resume_from_session_id is unavailable"
+        source = self.store.get_session(session_id)
+        if source is None:
+            raise ValidationError(unavailable)
+        if (
+            source.get("workspace_id") != workspace_id
+            or source.get("repo_id") != repo_id
+            or str(source.get("user_id") or "") != user_id
+            or source.get("status") != "summarized"
+        ):
+            raise ValidationError(unavailable)
+        try:
+            self._authorize_session(source)
+            started_at = _session_handoff_timestamp(source.get("started_at"))
+            ended_at = _session_handoff_timestamp(source.get("ended_at"))
+            if float(source["ended_at"]) < float(source["started_at"]):
+                raise ValueError("invalid session timestamp order")
+        except (ValidationError, KeyError, TypeError, ValueError, OverflowError, OSError):
+            raise ValidationError(unavailable) from None
+
+        summary = source.get("summary")
+        outcome = source.get("outcome")
+        threads = source.get("open_threads")
+        if summary is None:
+            summary = ""
+        if outcome is None:
+            outcome = ""
+        if not isinstance(summary, str) or not isinstance(outcome, str):
+            raise ValidationError(unavailable)
+        if not isinstance(threads, list) or any(not isinstance(item, str) for item in threads):
+            raise ValidationError(unavailable)
+        if not (summary.strip() or outcome.strip() or any(item.strip() for item in threads)):
+            raise ValidationError(unavailable)
+
+        counter = RegexTokenCounter()
+        remaining = SESSION_HANDOFF_TOKEN_BUDGET
+        bounded_summary, summary_tokens, summary_truncated = _bounded_session_handoff_text(
+            summary,
+            max_chars=SESSION_HANDOFF_SUMMARY_CHARS,
+            token_budget=min(SESSION_HANDOFF_SUMMARY_TOKENS, remaining),
+            counter=counter,
+        )
+        remaining -= summary_tokens
+        bounded_outcome, outcome_tokens, outcome_truncated = _bounded_session_handoff_text(
+            outcome,
+            max_chars=SESSION_HANDOFF_FIELD_CHARS,
+            token_budget=min(SESSION_HANDOFF_FIELD_TOKENS, remaining),
+            counter=counter,
+        )
+        remaining -= outcome_tokens
+
+        bounded_threads: list[str] = []
+        thread_tokens = 0
+        threads_truncated = False
+        selected_threads = threads[:SESSION_HANDOFF_MAX_THREADS]
+        for index, thread in enumerate(selected_threads):
+            remaining_slots = len(selected_threads) - index
+            fair_share = remaining // remaining_slots if remaining_slots else 0
+            field_budget = min(SESSION_HANDOFF_FIELD_TOKENS, fair_share)
+            bounded, used, was_truncated = _bounded_session_handoff_text(
+                thread,
+                max_chars=SESSION_HANDOFF_FIELD_CHARS,
+                token_budget=field_budget,
+                counter=counter,
+            )
+            remaining -= used
+            thread_tokens += used
+            threads_truncated = threads_truncated or was_truncated
+            if bounded:
+                bounded_threads.append(bounded)
+        omitted_threads = max(0, len(threads) - len(bounded_threads))
+        truncated = bool(
+            summary_truncated or outcome_truncated or threads_truncated or omitted_threads
+        )
+        bootstrap = {
+            "summary": bounded_summary,
+            "outcome": bounded_outcome,
+            "open_threads": bounded_threads,
+        }
+        source_info = {
+            "session_id": source["id"],
+            "started_at": started_at,
+            "ended_at": ended_at,
+        }
+        usage = {
+            "token_counter": counter.identity,
+            "budget_tokens": SESSION_HANDOFF_TOKEN_BUDGET,
+            "returned_content_tokens": summary_tokens + outcome_tokens + thread_tokens,
+            "truncated": truncated,
+            "omitted_threads": omitted_threads,
+            "age_policy": "no automatic expiry; timestamps are source metadata, not a freshness guarantee",
+        }
+        return bootstrap, source_info, usage
+
     def start_session(self, workspace: Optional[str] = None, *, repo: Optional[str] = None,
-                      agent: str = "", goal: str = "", force_new: bool = False) -> dict:
+                      agent: str = "", goal: str = "", force_new: bool = False,
+                      resume_from_session_id: Optional[str] = None) -> dict:
         """Open a session. If this repo has a prior *ended* session, its summary and
         unresolved ``open_threads`` come back as ``bootstrap`` — the concrete fix for
         "the agent forgets everything between sessions".
@@ -4757,12 +4908,60 @@ class MemoryService:
         Idempotent by default for the exact ``(workspace, repo, user, agent, goal)`` task
         identity. A different user, agent, or goal opens a distinct session automatically;
         ``force_new=True`` deliberately branches even when every identity field matches.
+        ``resume_from_session_id`` selects one ended handoff across agents, but only for
+        the exact authenticated owner and resolved workspace/repo. It fails closed on an
+        unavailable source, returns at most 512 regex-counted handoff tokens, and does not
+        expire handoffs by age. Source timestamps show age without guaranteeing freshness.
         The lookup/create decision is one storage transaction, so concurrent retries cannot
         both insert a session."""
         route = self.resolve_workspace(workspace, repo=repo, for_write=True)
         ws, rp = route["workspace"], route["repo"]
         agent = _clean_text(agent, field="agent", max_chars=MAX_NAME_CHARS, required=False)
         goal = _clean_text(goal, field="goal", max_chars=MAX_TITLE_CHARS, required=False)
+        if resume_from_session_id is not None:
+            source_id = _clean_text(
+                resume_from_session_id,
+                field="resume_from_session_id",
+                max_chars=MAX_NAME_CHARS,
+            )
+            principal = _authenticated_principal()
+            user_id = principal["id"] if principal is not None else ""
+            with self.store.write_transaction():
+                workspace_id = self._lookup_workspace(ws)
+                repo_id = self._lookup_repo(workspace_id, rp) if workspace_id and rp else None
+                if not workspace_id or (rp and not repo_id):
+                    raise ValidationError("resume_from_session_id is unavailable")
+                self._authorize_workspace(ws)
+                bootstrap, handoff_source, handoff_usage = self._explicit_session_handoff(
+                    source_id,
+                    workspace_id=workspace_id,
+                    repo_id=repo_id,
+                    user_id=user_id,
+                )
+                actual_workspace_id = self._get_or_create_workspace(ws)
+                actual_repo_id = self.store.get_or_create_repo(actual_workspace_id, rp) if rp else None
+                if actual_workspace_id != workspace_id or actual_repo_id != repo_id:
+                    raise ValidationError("resume_from_session_id is unavailable")
+                sid, reused = self.store.get_or_start_session(
+                    workspace_id,
+                    repo_id,
+                    agent=agent,
+                    user_id=user_id,
+                    goal=goal,
+                    force_new=bool(force_new),
+                )
+            return {
+                "session_id": sid,
+                "workspace": ws,
+                "repo": rp,
+                "workspace_source": route["source"],
+                "goal": goal,
+                "status": "active",
+                "reused": reused,
+                "bootstrap": bootstrap,
+                "handoff_source": handoff_source,
+                "handoff_usage": handoff_usage,
+            }
         wid = self._get_or_create_workspace(ws)
         rid = self.store.get_or_create_repo(wid, rp) if rp else None
         principal = _authenticated_principal()
