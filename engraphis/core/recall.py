@@ -1077,12 +1077,13 @@ class RecallEngine:
         identity = RetrievalPlan((PlannedQuery(query, 1, selected_profile),))
         if planning_mode == "off":
             return identity, "jev_planning_disabled" if jev_assisted else ""
-        try:
+
+        def planner_filter() -> SearchFilter:
             # Query planning is not a policy boundary. SearchFilter is mutable for
             # legacy compatibility, so never expose the live retrieval filter to an
             # injected planner. Clone its collection fields as well to prevent an
             # in-place list mutation from widening the real query.
-            planner_filter = replace(
+            return replace(
                 flt,
                 scopes=list(flt.scopes) if flt.scopes is not None else None,
                 mtypes=list(flt.mtypes) if flt.mtypes is not None else None,
@@ -1090,22 +1091,35 @@ class RecallEngine:
                     list(flt.graph_layers) if flt.graph_layers is not None else None
                 ),
             )
-            advisory_available = isinstance(self.query_planner, AdvisoryQueryPlanner)
+
+        fallback_plan = identity
+        advisory_available = isinstance(self.query_planner, AdvisoryQueryPlanner)
+        deadline = time.monotonic() + self.planner_timeout_s
+        try:
+            if jev_assisted and advisory_available and allow_remote:
+                # Save local routes before remote work so even an uncooperative
+                # advisory cannot discard them. Both phases share one deadline,
+                # and each receives a fresh clone of the real search boundary.
+                fallback_plan = _sanitize_plan(self._run_planner(
+                    query, planner_filter(), timeout_s=max(0.0, deadline - time.monotonic()),
+                ), query, selected_profile)
             proposed = self._run_planner(
-                query, planner_filter,
+                query, planner_filter(),
                 jev_assisted=jev_assisted and advisory_available,
                 allow_remote=allow_remote, data_classification=data_classification,
+                timeout_s=max(0.0, deadline - time.monotonic()),
             )
             plan = _sanitize_plan(proposed, query, selected_profile)
             if jev_assisted and not advisory_available:
                 return plan, "jev_advisory_unavailable"
             return plan, ""
         except Exception as exc:
-            return identity, _planner_fallback_reason(exc)
+            return fallback_plan, _planner_fallback_reason(exc)
 
     def _run_planner(
         self, query: str, planner_filter: SearchFilter, *, jev_assisted: bool = False,
         allow_remote: bool = False, data_classification: Optional[str] = None,
+        timeout_s: Optional[float] = None,
     ) -> RetrievalPlan:
         """Enforce the planner deadline even for a non-cooperative injected backend.
 
@@ -1114,10 +1128,15 @@ class RecallEngine:
         open until a timed-out worker exits. An optional remote request cannot
         occupy the local planner's slot. This bounds both modes independently.
         """
-        planner_slot = self._advisory_planner_slot if jev_assisted else self._planner_slot
-        if self.planner_timeout_s <= 0 or not planner_slot.acquire(blocking=False):
+        planner_slot = (
+            self._advisory_planner_slot if jev_assisted and allow_remote else self._planner_slot
+        )
+        timeout = self.planner_timeout_s if timeout_s is None else min(
+            self.planner_timeout_s, max(0.0, timeout_s),
+        )
+        if timeout <= 0 or not planner_slot.acquire(blocking=False):
             raise TimeoutError("planner deadline unavailable")
-        deadline = time.monotonic() + self.planner_timeout_s
+        deadline = time.monotonic() + timeout
         if jev_assisted:
             if not isinstance(self.query_planner, AdvisoryQueryPlanner):
                 planner_slot.release()

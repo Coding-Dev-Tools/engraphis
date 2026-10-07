@@ -204,11 +204,7 @@ class JevDecisionBackend:
         if timeout_s is not None:
             call_timeout = float(timeout_s)
         call_deadline = time.monotonic() + call_timeout if call_timeout is not None else None
-        if not self.is_available:
-            return None, "fallback", "backend_unavailable"
         client, model = self.client, self.model
-        if client is None or model is None:
-            return None, "fallback", "backend_unavailable"
         # Bound both supported transport envelopes before any injected-client call,
         # including legacy signatures. TypeSafe choice criteria duplicate option text.
         managed_payload = {
@@ -234,6 +230,8 @@ class JevDecisionBackend:
                 return None, "fallback", "input_too_large"
         except (TypeError, ValueError, UnicodeEncodeError):
             return None, "fallback", "invalid_input"
+        if not self.is_available or client is None or model is None:
+            return None, "fallback", "backend_unavailable"
         try:
             evaluate: Callable[..., object] = client.evaluate
             signature = inspect.signature(evaluate)

@@ -168,6 +168,94 @@ def test_remote_planner_deadline_cannot_disable_local_routes():
         service.close()
 
 
+def test_timed_out_advisory_preserves_routes_for_busy_and_unconsented_requests():
+    import threading
+
+    started = threading.Event()
+    released = threading.Event()
+    finished = threading.Event()
+    attempts = []
+
+    class BlockedClient(_DecisionClient):
+        def evaluate(self, *args, **kwargs):
+            attempts.append(kwargs["timeout_s"])
+            started.set()
+            try:
+                assert released.wait(5)
+                return super().evaluate(*args, **kwargs)
+            finally:
+                finished.set()
+
+    service = MemoryService.create(":memory:", embed_model="", embed_dim=16)
+    engine = service.engine.recall_engine
+    deterministic = _FixedDeterministicPlanner()
+    deterministic.delay_s = 0.02
+    engine.query_planner = JevAssistedQueryPlanner(_backend(BlockedClient()), deterministic)
+    engine.planner_timeout_s = 0.15
+    query = "Why does CACHE.get() fail after restart?"
+    boundary = SearchFilter(repo_id="repo_demo", scopes=[Scope.REPO], known_at=102.0)
+
+    def plan(allow_remote):
+        return engine._plan_queries(
+            query, boundary, selected_profile="balanced", planning_mode="auto",
+            jev_assisted=True, allow_remote=allow_remote, data_classification="public",
+        )
+
+    try:
+        before = time.monotonic()
+        timed_out, reason = plan(True)
+        assert time.monotonic() - before < 0.5
+        assert started.is_set() and not finished.is_set()
+        assert reason == "planner_timeout"
+        assert [route.text for route in timed_out.queries] == [
+            query, "CACHE.get()", "cache restart path",
+        ]
+        busy, reason = plan(True)
+        assert busy.queries == timed_out.queries
+        assert reason == "planner_timeout"
+        local, reason = plan(False)
+        assert local.queries == timed_out.queries
+        assert reason == ""
+        assert local.reason_codes[-1] == "jev_remote_consent_required"
+        assert len(attempts) == 1
+        assert 0 < attempts[0] < 0.13
+        assert boundary.repo_id == "repo_demo"
+        assert boundary.scopes == [Scope.REPO]
+        assert boundary.known_at == 102.0
+        assert all(snapshot["repo_id"] == "repo_demo"
+                   for snapshot in deterministic.filter_snapshots)
+    finally:
+        released.set()
+        assert finished.wait(2)
+        service.close()
+
+
+@pytest.mark.parametrize("failure", [RuntimeError("private provider failure"), object()])
+def test_optional_advisory_failure_keeps_the_configured_local_plan(failure):
+    class BrokenAdvisory(_FixedDeterministicPlanner):
+        local_identity = "fixture.local"
+        advisory_identity = "fixture.advisory"
+
+        def plan_with_advisory(self, *args, **kwargs):
+            if isinstance(failure, Exception):
+                raise failure
+            return failure
+
+    service = MemoryService.create(":memory:", embed_model="", embed_dim=16)
+    try:
+        service.engine.recall_engine.query_planner = BrokenAdvisory()
+        plan, reason = service.engine.recall_engine._plan_queries(
+            "cache question", SearchFilter(), selected_profile="balanced",
+            planning_mode="auto", jev_assisted=True, allow_remote=True,
+            data_classification="internal",
+        )
+        assert len(plan.queries) == 3
+        assert plan.queries[0].text == "cache question"
+        assert reason in {"planner_unavailable", "invalid_planner_output"}
+    finally:
+        service.close()
+
+
 def test_route_choice_is_limited_to_deterministic_routes_and_keeps_exact_query():
     original = '  Why does CACHE.get() fail after restart?  '
     client = _DecisionClient()
@@ -489,6 +577,37 @@ def dashboard(monkeypatch, tmp_path):
 
 def _review_backend(client):
     return _backend(client)
+
+
+@pytest.mark.parametrize("mode", ["managed", "auto"])
+def test_dashboard_managed_review_resolves_client_separately_from_route_planning(
+    dashboard, monkeypatch, mode,
+):
+    client, service, first_id, _second_id = dashboard
+    from engraphis import cloud_session
+    from engraphis.backends import jev_transport
+
+    monkeypatch.setattr(settings, "decision_backend", mode)
+    monkeypatch.setenv("TYPESAFE_API_KEY", "ambient-key-must-not-select-byok")
+    monkeypatch.setattr(cloud_session, "configured", lambda **_kwargs: pytest.fail(
+        "resolving or denying a review must not inspect Cloud credentials",
+    ))
+    service.engine.recall_engine.query_planner = JevAssistedQueryPlanner(_backend(None))
+    decision_client = _DecisionClient()
+    monkeypatch.setattr(jev_transport, "EngraphisCloudDecisionClient", lambda: decision_client)
+    body = {"workspace": "demo", "memory_ids": [first_id],
+            "claim": "Which database is primary?", "data_classification": "public"}
+
+    denied = client.post("/api/jev/review", json={**body, "allow_remote": False})
+    assert denied.status_code == 200
+    assert denied.json()["support"]["fallback_reason"] == "remote_not_authorized"
+    assert decision_client.calls == []
+    authorized = client.post("/api/jev/review", json={**body, "allow_remote": True})
+    assert authorized.status_code == 200
+    assert authorized.json()["support"]["status"] == "decision"
+    assert len(decision_client.calls) == 1
+    assert decision_client.calls[0]["purpose"] == "verify_support"
+    assert service.engine.recall_engine.query_planner.decision_backend.client is None
 
 
 def test_smart_mcp_recall_exposes_opt_in_consent_and_falls_back_without_it(

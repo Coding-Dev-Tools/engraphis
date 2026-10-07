@@ -451,7 +451,8 @@ Returns `{link_id, symbol_id, memory_id, relation, workspace, repo}`.
 Open a session to group this work's memories and enable cross-session resume.
 
 - `workspace (str, None)`, `repo (str, None)`, `agent (str, "")` (e.g. `"claude-code"`),
-  `goal (str, "")`, `force_new (bool, false)`.
+  `goal (str, "")`, `force_new (bool, false)`,
+  `resume_from_session_id (str, None)` for an explicit cross-agent handoff.
 
 An explicit workspace wins; otherwise the saved mapping for `repo` is used, then `"default"`.
 The result reports `workspace_source` as `explicit`, `project`, or `default`.
@@ -464,6 +465,13 @@ session when every identity field matches. A new session returns `reused:false` 
 If a previous same-user/agent session in this repo ended with a summary/open threads, `bootstrap`
 carries them so you resume without crossing an identity boundary. Pass `session_id` to `remember`
 and `end_session`.
+
+`resume_from_session_id` selects one exact ended session. It must belong to the same authenticated
+user and exact resolved workspace/repo. Missing, active, deleted, or unauthorized sources fail
+closed; the tool never substitutes a different or recent session. The returned bootstrap is bounded
+to 512 regex-counted content tokens, at most six open threads, and per-field character limits.
+`handoff_source` includes source start/end times in UTC. Sessions have no automatic age expiry, and
+those timestamps do not guarantee freshness.
 
 Authenticated host adapters must provide a stable non-empty user `id` and ownership `email` when
 binding request context. Malformed non-`None` principals fail closed; only `None` selects trusted
@@ -542,12 +550,16 @@ Start or resume a session, or end it with a next-session handoff.
 
 - `action (str, "start")`: `start` or `end`.
 - `workspace (str, None)`, `repo (str, None)`, `agent (str, "")`, `goal (str, "")`.
-- `session_id (str, "")`: required when `action="end"`.
+- `session_id (str, "")`: required when `action="end"`; on `action="start"`, optionally selects
+  an exact ended cross-agent handoff from the same authenticated user and exact workspace/repo.
+  An unavailable or mismatched source fails closed without fallback.
 - `summary (str, "")`, `outcome (str, "")`, `open_threads (list[str], None)`: end-session handoff.
 - `force_new (bool, false)`: start a new session instead of reusing an exact active task.
 - `token_budget (int, 512)`: bounded goal context, `0..32768`.
 
-Returns a bounded session/bootstrap or end-session handoff response. Starts use an explicit
+Returns a bounded session/bootstrap or end-session handoff response. An explicit cross-agent
+resume returns the selected source ID and UTC timestamps, with no automatic age expiry or freshness
+guarantee. Starts use an explicit
 workspace, then the saved repo mapping, then `"default"`, and report `workspace_source` with
 the resolved `workspace` and `repo`. Keep using the returned `session_id` on remember and recall
 calls; there is no server-global current session.

@@ -447,6 +447,18 @@ def test_service_grounded_recall_shape():
     assert out["receipt"]["operation"] == "grounded_recall"
 
 
+@pytest.mark.parametrize("response_mode", ["full", "compact"])
+def test_grounded_retrieval_preview_is_omitted_without_opt_in(response_mode):
+    svc = MemoryService.create(":memory:")
+    try:
+        svc.remember("We use PASETO for auth.", workspace="acme")
+        out = svc.grounded_recall("Which auth scheme?", workspace="acme",
+                                  response_mode=response_mode)
+        assert "retrieval_preview" not in out
+    finally:
+        svc.close()
+
+
 def test_compact_grounded_retrieval_preview_uses_recall_candidate_allowlist():
     svc = MemoryService.create(":memory:")
     content = "Deployment identifier is ALPHA."
