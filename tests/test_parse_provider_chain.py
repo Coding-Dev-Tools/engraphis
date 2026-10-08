@@ -11,6 +11,16 @@ pytest.importorskip("httpx", reason="provider-chain tests require the optional H
 from engraphis.llm.client import LLMProviderChain, parse_provider_chain
 
 
+@pytest.fixture(autouse=True)
+def _synthetic_provider_clients():
+    """Parsing creates clients but must never initialize provider networking."""
+    with mock.patch("engraphis.llm.client.httpx.Client") as factory:
+        factory.return_value.post.side_effect = AssertionError(
+            "provider parsing must not send an HTTP request"
+        )
+        yield
+
+
 def _parse(env_value: str) -> LLMProviderChain:
     """Helper to parse a provider chain string without polluting real env."""
     with mock.patch.dict(os.environ, {"ENGRAPHIS_LLM_PROVIDERS": env_value}):

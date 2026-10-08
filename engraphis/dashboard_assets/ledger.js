@@ -1782,7 +1782,7 @@
     panel.querySelector('h3').id = 'jev-review-title';
     const form = node('form');
     const claimLabel = node('label');
-    claimLabel.append(node('span', '', 'Question or claim to check'));
+    claimLabel.append(node('span', '', 'Question for the selected evidence'));
     const claim = node('textarea');
     claim.rows = 3;
     claim.maxLength = 1200;
@@ -1801,7 +1801,7 @@
     const remoteLabel = node('label', 'check-row');
     const remote = node('input');
     remote.type = 'checkbox';
-    remoteLabel.append(remote, document.createTextNode(' Allow this action to send the claim and selected excerpts to Jev'));
+    remoteLabel.append(remote, document.createTextNode(' Allow this action to send the question and selected excerpts to Jev'));
     const classificationLabel = node('label');
     classificationLabel.append(node('span', '', 'Data classification for this action'));
     const classification = node('select');
@@ -1821,7 +1821,7 @@
     async function runJevReview() {
       const claimText = claim.value.trim();
       if (!claimText) {
-        status.textContent = 'Enter a question or claim before reviewing.';
+        status.textContent = 'Enter a question before reviewing.';
         claim.focus();
         return;
       }
@@ -1878,8 +1878,8 @@
       const card = node('article');
       card.append(node('strong', '', `${name} · ${labelStatus(item)}`));
       if (item.status === 'decision') {
-        const value = item.value === true ? 'Evidence supports the claim.'
-          : item.value === false ? 'Evidence does not support the claim.'
+        const value = item.value === true ? 'Evidence appears sufficient to answer the question.'
+          : item.value === false ? 'Evidence appears insufficient to answer the question.'
           : item.value === 'contradicts_and_supersedes' ? 'The memories may contradict.'
           : item.value === 'reinforces' ? 'The memories appear consistent.'
           : item.value === 'orthogonal' ? 'No direct relationship was found.'
@@ -2695,24 +2695,24 @@
     const k = number(byId('ask-k').value) || 5;
     const jevAssisted = byId('ask-jev-assisted').checked;
     const allowRemote = jevAssisted && byId('ask-jev-remote').checked;
+    const body = {
+      query: question,
+      workspace,
+      ...(request.project ? { repo: request.project } : {}),
+      k: Math.max(8, k),
+      max_citations: k,
+      planning: jevAssisted ? 'auto' : 'off',
+      jev_assisted: jevAssisted,
+      allow_remote: allowRemote,
+      include_retrieval_preview: true,
+      ...(jevAssisted ? { data_classification: byId('ask-jev-classification').value } : {}),
+    };
     await askRequests.start({
       question,
       scopeLabel: workspace + (request.project ? ' / ' + request.project : ' / all projects'),
       isCurrent: () => isCurrentScopedRequest(request),
       answer: signal => api('/answer', {
-        method: 'POST', signal,
-        body: {
-          query: question,
-          workspace,
-          ...(request.project ? { repo: request.project } : {}),
-          k: Math.max(8, k),
-          max_citations: k,
-          planning: jevAssisted ? 'auto' : 'off',
-          jev_assisted: jevAssisted,
-          allow_remote: allowRemote,
-          include_retrieval_preview: true,
-          ...(jevAssisted ? { data_classification: byId('ask-jev-classification').value } : {}),
-        },
+        method: 'POST', signal, body,
       }),
     });
   }
@@ -5659,7 +5659,16 @@
     byId('ask-jev-classification').disabled = !enabled;
     if (!enabled) byId('ask-jev-remote').checked = false;
   };
-  byId('ask-jev-assisted').addEventListener('change', updateJevRecallControls);
+  ['ask-jev-assisted', 'ask-jev-remote', 'ask-jev-classification'].forEach(id => {
+    byId(id).addEventListener('change', () => {
+      updateJevRecallControls();
+      beginScopedRequest('ask');
+      askRequests.reset();
+      byId('answer-panel').replaceChildren(empty('Submit the question with the current Jev settings.'));
+      byId('retrieval-list').replaceChildren(empty('The next answer will include its matching retrieval preview.'));
+      byId('ask-status').textContent = 'Jev settings changed. Submit the question to apply them.';
+    });
+  });
   updateJevRecallControls();
   byId('review-refresh').addEventListener('click', () => { void loadReviewInbox(); });
   byId('library-filter').addEventListener('input', () => {

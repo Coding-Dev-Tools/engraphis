@@ -1907,13 +1907,20 @@ def engraphis_start_session(
                          "identity. Default false: an exact retry returns the existing "
                          "active session (reused=true). Set true only to branch a second "
                          "session for the same task identity.")] = False,
+    resume_from_session_id: Annotated[Optional[str], Field(
+        description="Optional exact ended session to hand off from another agent. It must "
+                    "belong to this authenticated user and exact workspace/repo; it never "
+                    "falls back to a recent session.", max_length=200,
+    )] = None,
 ) -> str:
     """Open a session to group this work's memories and enable cross-session resume.
 
     Call this at the start of a task in a repo you've worked in before — if a previous
     session for the same authenticated user and agent was ended with a summary or open
     threads, they come back in ``bootstrap`` so you can resume without crossing another
-    user or agent's handoff boundary.
+    user or agent's handoff boundary. ``resume_from_session_id`` explicitly selects an
+    ended handoff from another agent; it requires the same authenticated user and exact
+    workspace/repo, and it fails closed instead of choosing a different session.
 
     Exact retries are reused by default for the same ``(workspace, repo, authenticated
     user, agent, goal)`` identity. Different users, agents, or goals start distinct
@@ -1924,11 +1931,14 @@ def engraphis_start_session(
     Returns:
         str: JSON ``{"session_id","workspace","repo","goal","status":"active","reused",
         "bootstrap":{"summary","open_threads","outcome"} or {} if there is no prior
-        session}``. Pass ``session_id`` to engraphis_remember and engraphis_end_session.
+        session}``. Explicit resumes also include source timestamps and bounded usage
+        metadata. Pass ``session_id`` to engraphis_remember and engraphis_end_session.
     """
     try:
-        return _ok(service().start_session(workspace, repo=repo, agent=agent, goal=goal,
-                                           force_new=force_new))
+        return _ok(service().start_session(
+            workspace, repo=repo, agent=agent, goal=goal, force_new=force_new,
+            resume_from_session_id=resume_from_session_id,
+        ))
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
 
@@ -3468,10 +3478,12 @@ def engraphis_session(
                                               min_length=1, max_length=200)] = None,
     repo: Annotated[Optional[str], Field(description="Optional repo.", max_length=200)] = None,
     agent: Annotated[str, Field(description="Optional agent.", max_length=200)] = "",
-    goal: Annotated[str, Field(description="Goal; start returns bounded context.",
+    goal: Annotated[str, Field(description="Optional goal.",
                                max_length=1_000)] = "",
-    session_id: Annotated[str, Field(description="Session id for end.",
-                                    max_length=200)] = "",
+    session_id: Annotated[str, Field(
+        description="End ID or exact ended resume source; same owner/scope, no fallback.",
+        max_length=200,
+    )] = "",
     summary: Annotated[str, Field(description="Final handoff.", max_length=100_000)] = "",
     outcome: Annotated[str, Field(description="Outcome label.", max_length=1_000)] = "",
     open_threads: Annotated[Optional[List[str]], Field(description="Unresolved follow-ups.")] = None,
@@ -3481,7 +3493,7 @@ def engraphis_session(
     token_budget: Annotated[int, Field(description="Start context token budget.", ge=0,
                                       le=32_768)] = 512,
 ) -> str:
-    """Start/resume a session or end it with its next-session handoff."""
+    """Manage sessions and explicit handoffs."""
     # Direct (non-protocol) callers bypass Pydantic's BeforeValidator, so
     # normalize the shorthand tool-name forms here too.
     if action == "start_session":
@@ -3501,6 +3513,7 @@ def engraphis_session(
         return _gateway_error("invalid_session_action")
     started = engraphis_start_session(
         workspace=workspace, repo=repo, agent=agent, goal=goal, force_new=force_new,
+        resume_from_session_id=session_id or None,
     )
     if started.startswith("Error:"):
         return _smart_error_from_string(started)

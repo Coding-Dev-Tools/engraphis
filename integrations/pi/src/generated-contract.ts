@@ -423,7 +423,7 @@ export const SMART_SCHEMAS = {
       },
       "goal": {
         "default": "",
-        "description": "Goal; start returns bounded context.",
+        "description": "Optional goal.",
         "maxLength": 1000,
         "title": "Goal",
         "type": "string"
@@ -467,7 +467,7 @@ export const SMART_SCHEMAS = {
       },
       "session_id": {
         "default": "",
-        "description": "Session id for end.",
+        "description": "End ID or exact ended resume source; same owner/scope, no fallback.",
         "maxLength": 200,
         "title": "Session Id",
         "type": "string"
