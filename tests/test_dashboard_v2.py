@@ -1258,6 +1258,35 @@ def test_dashboard_grounded_answer_route_cites_or_abstains(monkeypatch, tmp_path
         # ``candidate_k_used`` is the final page depth after prompt-safe
         # overfetch/widening, rather than the adaptive policy's starting depth.
         assert body["candidate_k_used"] >= body["candidate_k_requested"]
+        assert "retrieval_preview" not in body
+
+        preview = client.post(
+            "/api/answer",
+            json={
+                "query": "Which database is the main database?",
+                "workspace": "demo",
+                "k": 8,
+                "include_retrieval_preview": True,
+            },
+        )
+        assert preview.status_code == 200
+        preview_body = preview.json()
+        assert preview_body["retrieval_preview"]
+        assert any(item["id"] == body["citations"][0]["id"]
+                   for item in preview_body["retrieval_preview"])
+
+        compact_preview = client.post(
+            "/api/answer",
+            json={
+                "query": "Which database is the main database?",
+                "workspace": "demo",
+                "response_mode": "compact",
+                "include_retrieval_preview": True,
+            },
+        )
+        assert compact_preview.status_code == 200
+        assert all("content" not in item
+                   for item in compact_preview.json()["retrieval_preview"])
 
         abstained = client.post(
             "/api/answer",

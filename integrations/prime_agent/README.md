@@ -41,7 +41,7 @@ local Engraphis gateway. Choose by host, not by feature set.
 | Integration | Host | Best for | Concurrency | Install |
 |---|---|---|---|---|
 | `integrations/prime_agent/` (this package) | [PrimeIntellect prime-agent](https://github.com/PrimeIntellect-ai/prime-agent) fleets of 1–8 named sub-agents | Multi-role pipelines (`researcher` → `coder` → `reviewer` → `tester`) that need per-role session isolation but one local gateway | Eight sub-agents share one stdio subprocess; tool calls serialize at the JSON-RPC frame layer | `pip install ./integrations/prime_agent` |
-| [Pi extension](https://github.com/Coding-Dev-Tools/engraphis/blob/main/integrations/pi/README.md) | The Pi coding agent | A single interactive coding loop with prompt-ready recall, durable notes, and governed governance actions | One agent, one stdio gateway | Pi extension marketplace / `pip install engraphis-pi` |
+| [Pi extension](https://github.com/Coding-Dev-Tools/engraphis/blob/main/integrations/pi/README.md) | The Pi coding agent | A single interactive coding loop with prompt-ready recall, durable notes, and governed governance actions | One agent, one stdio gateway | `pi install npm:@engraphis/pi` |
 | [Command Code SessionStart hook](https://github.com/Coding-Dev-Tools/engraphis/blob/main/integrations/commandcode/) | A Command Code session | Warming a brand-new session with bounded, cited context on `SessionStart`; fails open on timeout | One hook per session | `python scripts/install_cc_hook.py` |
 
 Pick the prime-agent integration when you already have or want a multi-role

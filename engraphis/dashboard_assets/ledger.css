@@ -589,6 +589,13 @@ input::placeholder, textarea::placeholder { color: var(--c-dim); opacity: 1; }
 .detail-panel { min-height: 360px; padding: 20px; }
 .detail-panel > p:not(.eyebrow, .empty-state) { color: var(--c-mid); line-height: 1.65; white-space: pre-wrap; }
 .detail-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 18px; }
+.jev-review-panel,.jev-recall-options { margin-top: 16px; padding: 14px; border: 1px solid var(--c-line); border-radius: 12px; background: var(--c-raised); }
+.jev-review-panel { display: grid; gap: 10px; }
+.jev-review-panel textarea { width: 100%; }
+.jev-review-result { display: grid; gap: 8px; }
+.jev-review-result article { padding: 10px; border: 1px solid var(--c-line); border-radius: 8px; }
+.jev-recall-options summary { cursor: pointer; font-weight: 600; }
+.jev-recall-options > * + * { margin-top: 10px; }
 .definition-list { display: grid; gap: 7px; margin: 18px 0; }
 .definition-list div { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 10px; }
 .definition-list dt { color: var(--c-dim); }

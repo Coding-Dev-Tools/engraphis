@@ -96,6 +96,10 @@ class GroundedAnswer:
     # Supported cited evidence does not establish coverage of every requested fact.
     answer_coverage: str = "unknown"
     diagnostics_v1: Optional[dict] = None
+    retrieval_preview: Optional[list[dict]] = None
+    # Append advisory metadata so existing positional callers retain their graph,
+    # capability, diagnostics, and retrieval-preview argument positions.
+    planning_advisory: Optional[dict] = None
 
     def to_dict(self) -> dict:
         payload = {
@@ -131,8 +135,12 @@ class GroundedAnswer:
             payload["diagnostics"] = self.diagnostics_v1
         if self.planning_details is not None:
             payload["planning_details"] = self.planning_details
+        if self.planning_advisory is not None:
+            payload["planning_advisory"] = self.planning_advisory
         if self.graph_traversal_details is not None:
             payload["graph_traversal_details"] = self.graph_traversal_details
+        if self.retrieval_preview is not None:
+            payload["retrieval_preview"] = self.retrieval_preview
         return payload
 
 
@@ -437,6 +445,7 @@ def build_grounded_answer(query: str, result: RecallResult, embedder, *,
         "context_revision": result.context_revision,
         "planning_mode": result.planning_mode,
         "planning_details": result.planning_details,
+        "planning_advisory": result.planning_advisory,
         "graph_traversal_details": result.graph_traversal_details,
         "diagnostics_v1": result.diagnostics_v1,
             "degraded_mode": result.degraded_mode,

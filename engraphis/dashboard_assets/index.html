@@ -254,11 +254,20 @@
             </div>
           </form>
 
+          <details class="jev-recall-options">
+            <summary>Experimental Jev retrieval planning</summary>
+            <p class="project-help">Jev can prioritize one route already produced locally. The original query and retrieval filters stay fixed. A 40-task synthetic check found no retrieval-metric change; this option has no demonstrated user-workload benefit.</p>
+            <label class="check-row"><input id="ask-jev-assisted" type="checkbox"> Ask Jev to prioritize a deterministic route for this question</label>
+            <label class="check-row"><input id="ask-jev-remote" type="checkbox" disabled> Allow this request to send the question and bounded route text to Jev</label>
+            <label class="compact-field">Data classification
+              <select id="ask-jev-classification" disabled><option value="internal" selected>Internal</option><option value="public">Public</option></select>
+            </label>
+          </details>
+
           <p id="ask-result-query" class="project-help ask-result-query"></p>
           <p id="ask-status" class="project-help" role="status"></p>
           <div class="form-actions ask-retry-actions">
             <button id="ask-answer-retry" class="secondary-button" type="button" hidden>Retry answer</button>
-            <button id="ask-preview-retry" class="secondary-button" type="button" hidden>Retry preview</button>
           </div>
 
           <section id="answer-panel" class="answer-panel" aria-live="polite">
@@ -267,9 +276,9 @@
 
           <details class="retrieval-details">
             <summary>Inspect retrieval</summary>
-            <h2>Retrieved candidates</h2>
+            <h2>Retrieved candidates from this answer</h2>
             <div id="retrieval-list" class="memory-list">
-              <p class="empty-state">Candidate retrieval loads independently from the answer.</p>
+              <p class="empty-state">Candidates from the grounded answer will appear here.</p>
             </div>
           </details>
         </div>

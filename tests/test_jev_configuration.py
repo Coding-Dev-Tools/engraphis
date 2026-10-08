@@ -72,11 +72,12 @@ def test_mcp_missing_control_falls_back_without_using_personal_key(
         monkeypatch.setenv("ENGRAPHIS_CLOUD_CONTROL_URL", control)
     monkeypatch.setenv("ENGRAPHIS_DECISION_BACKEND", mode)
     result = json.loads(mcp_server.engraphis_decide(
-        kind="custom", state="Synthetic evidence", allow_remote=True,
+        kind="verify_support", state="Synthetic evidence", query="What does the fixture support?",
+        allow_remote=True,
     ))
     assert result["decision_status"] == "local_fallback"
     assert result["fallback_reason"] == "backend_not_configured"
-    assert result["selected"] is None and result["confidence"] is None
+    assert result["is_fallback"] is True and result["confidence"] is None
     assert direct_credentials == []
 
 
@@ -118,7 +119,7 @@ def test_direct_control_routes_exact_origin_and_token_without_saved_state_or_ref
     monkeypatch.setattr(hosted_client, "build_pinned_https_opener",
                         lambda *handlers: SimpleNamespace(open=open_request))
     batch = client.evaluate("Synthetic evidence", [DecisionQuestion("q", "Assess", "noul")],
-                            model=transport.MODEL, allow_remote=True)
+                            model=transport.MODEL, allow_remote=True, purpose="verify_support")
     assert batch.get_noul("q").probability == 0.9
     assert len(requests) == 1 and resolutions
     assert requests[0].full_url == control + "/v1/jev/decide"

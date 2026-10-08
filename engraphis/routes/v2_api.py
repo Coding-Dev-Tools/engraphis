@@ -20,6 +20,7 @@ import time
 import urllib.error
 import urllib.request
 import weakref
+from dataclasses import replace
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
@@ -1463,6 +1464,10 @@ class _AnswerReq(BaseModel):
     diagnostics: bool = False
     planning: str = "off"
     mtype_limits: Optional[dict[str, StrictInt]] = None
+    jev_assisted: StrictBool = False
+    allow_remote: StrictBool = False
+    data_classification: Optional[str] = Field(default=None, max_length=16)
+    include_retrieval_preview: StrictBool = False
 
 
 @router.post("/answer")
@@ -1492,11 +1497,163 @@ def answer(req: _AnswerReq):
         diagnostics=req.diagnostics,
         planning=req.planning,
         mtype_limits=req.mtype_limits,
+        jev_assisted=req.jev_assisted,
+        allow_remote=req.allow_remote,
+        data_classification=req.data_classification,
+        include_retrieval_preview=req.include_retrieval_preview,
         max_citations=req.max_citations,
         min_support=req.min_support,
     )
     out["sources"] = list(out.get("citations") or [])
+    if req.include_retrieval_preview:
+        out.setdefault("retrieval_preview", [])
     return out
+
+
+class _JevReviewReq(BaseModel):
+    workspace: Optional[str] = None
+    repo: Optional[str] = None
+    memory_ids: list[str] = Field(default_factory=list)
+    claim: str = Field(min_length=1, max_length=1_200)
+    allow_remote: StrictBool = False
+    data_classification: str = Field(min_length=1, max_length=16)
+
+
+def _dashboard_jev_backend():
+    """Resolve an injected/lazy Jev client without initiating provider traffic."""
+    from engraphis.backends.jev_decision import JevDecisionBackend, select_decision_client
+    from engraphis.backends.jev_transport import EngraphisCloudDecisionClient
+
+    current_service = service()
+    planner = getattr(current_service.engine.recall_engine, "query_planner", None)
+    backend = getattr(planner, "decision_backend", None)
+    if isinstance(backend, JevDecisionBackend) and (
+        backend.client is not None or backend.offline_mode
+    ):
+        return backend
+    selected = settings.decision_backend.strip().lower()
+    if selected in {"managed", "auto"}:
+        client = EngraphisCloudDecisionClient()
+    else:
+        client, _provider = select_decision_client(selected)
+    return JevDecisionBackend(client=client, model=settings.decision_model)
+
+
+def _jev_review_projection_parts(memory: dict) -> tuple[str, str]:
+    """Return bounded title and content excerpts suitable for an advisory check."""
+    title = " ".join(str(memory.get("title") or "").split())[:200]
+    content = str(memory.get("content") or memory.get("summary") or "")[:3_500]
+    return title, content
+
+
+def _jev_review_projection(memory: dict) -> str:
+    title, content = _jev_review_projection_parts(memory)
+    return "\n".join(part for part in (title, content) if part)
+
+
+def _jev_review_remote_sensitivity_allowed(record: object) -> bool:
+    """Honor both current and legacy classifications without allowing downgrades."""
+    sensitivity = getattr(record, "sensitivity", "normal")
+    if not isinstance(sensitivity, str) or sensitivity.strip().casefold() not in {
+        "normal", "sensitive",
+    }:
+        return False
+    metadata = getattr(record, "metadata", None)
+    if metadata is None:
+        return True
+    if not isinstance(metadata, dict):
+        return False
+    legacy_sensitivity = metadata.get("sensitivity")
+    if legacy_sensitivity is None:
+        return True
+    return (isinstance(legacy_sensitivity, str)
+            and legacy_sensitivity.strip().casefold() in {"", "normal", "sensitive"})
+
+
+def _advisory_payload(result) -> dict:
+    payload = {"status": result.status, "confidence": result.confidence}
+    if result.status == "decision":
+        payload["value"] = result.value
+    if result.support_probability is not None:
+        payload["probability"] = result.support_probability
+    if result.status == "fallback":
+        payload["fallback_reason"] = result.fallback_reason or "unavailable"
+    if result.status == "uncertain":
+        payload["reason"] = "uncertain_result"
+    return payload
+
+
+@router.post("/jev/review")
+def jev_review(req: _JevReviewReq):
+    """Run read-only Jev evidence and pairwise contradiction checks."""
+    if not 1 <= len(req.memory_ids) <= 2 or len(set(req.memory_ids)) != len(req.memory_ids):
+        raise HTTPException(status_code=422, detail={
+            "error": "select one or two distinct memories",
+        })
+    if not req.claim.strip():
+        raise HTTPException(status_code=422, detail={"error": "claim is required"})
+    if req.data_classification not in {"public", "internal"}:
+        raise HTTPException(status_code=422, detail={
+            "error": "data classification must be public or internal",
+        })
+    ws = req.workspace or _default_ws()
+    if not ws:
+        raise HTTPException(status_code=400, detail={"error": "workspace is required"})
+    current_service = service()
+    inspected = []
+    records = []
+    for memory_id in req.memory_ids:
+        record = _run(
+            current_service.read_memory_for_review, memory_id, workspace=ws, repo=req.repo,
+        )
+        inspected.append({
+            "title": record.title, "content": record.content, "summary": record.summary,
+        })
+        records.append(record)
+
+    blocked_secret = any(not _jev_review_remote_sensitivity_allowed(record)
+                         for record in records)
+    contradiction = None
+    if blocked_secret:
+        from engraphis.backends.jev_decision import AdvisoryDecisionResult
+
+        support = AdvisoryDecisionResult("fallback", fallback_reason="sensitive_memory")
+        if len(records) == 2:
+            contradiction = AdvisoryDecisionResult("fallback", fallback_reason="sensitive_memory")
+    else:
+        backend = _dashboard_jev_backend()
+        allow_remote = req.allow_remote is True
+        evidence = "\n\n".join(
+            f"SELECTED MEMORY {index + 1}:\n{_jev_review_projection(memory)}"
+            for index, memory in enumerate(inspected)
+        )[:7_800]
+        support = backend.verify_grounded_support_result(
+            req.claim[:1_200], evidence, allow_remote=allow_remote,
+            data_classification=req.data_classification,
+        )
+        if len(records) == 2:
+            first, second = inspected
+            candidate = _jev_review_projection(first)[:3_700]
+            existing_title, existing_content = _jev_review_projection_parts(second)
+            existing = replace(records[1], title=existing_title, content=existing_content)
+            contradiction = backend.classify_contradiction_result(
+                candidate, existing, allow_remote=allow_remote,
+                data_classification=req.data_classification,
+            )
+
+    return {
+        "advisory_only": True,
+        "read_only": True,
+        "remote_consent_granted": req.allow_remote,
+        "remote_blocked_reason": "sensitive_memory" if blocked_secret and req.allow_remote else None,
+        "data_classification": req.data_classification,
+        "memory_ids": list(req.memory_ids),
+        "support": _advisory_payload(support),
+        "contradiction": (
+            _advisory_payload(contradiction) if contradiction is not None
+            else {"status": "not_requested", "reason": "select_two_memories"}
+        ),
+    }
 
 
 @router.get("/memories")

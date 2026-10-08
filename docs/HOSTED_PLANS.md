@@ -16,7 +16,7 @@ implementations are not part of this repository.
 | Local dashboard, memory engine, and MCP tools | Yes | Yes | Yes |
 | Local version history, graph, and manual consolidation | Yes | Yes | Yes |
 | Local workspace export | Yes | Yes | Yes |
-| Advisory Jev decisions | Local heuristics; optional BYOK | Included managed allowance when enabled | Included pooled allowance when enabled |
+| Advisory Jev decisions | Local heuristics; optional BYOK | Included managed decisions per eligible individual after service acceptance | Included managed decisions per eligible named seat after service acceptance; no shared pool |
 | Hosted Cloud Sync, Analytics, and managed automation | | Yes | Yes |
 | Private account and billing support | | Yes | Yes |
 | Hosted multi-user dashboard, roles, seats, and audit export | | | Yes |
@@ -26,11 +26,26 @@ Start or manage a hosted subscription in the [Engraphis account portal](https://
 
 ## Included System 1 Decision Engine (Jev)
 
-Pro and Team include a managed allowance for advisory typed decisions through the private
-Cloud service (`POST /v1/jev/decide`). This client implementation does not establish that a
-particular deployment has enabled Jev; the service checks current entitlement and allowance.
-Usage and availability are reported by the account portal. No latency, accuracy, or cost-saving
-guarantee is established by client configuration or a successful health check.
+After release acceptance and service enablement, every legitimate Pro user and each
+eligible Team named seat, including paid viewers, with an active paid, trial, or test
+entitlement receives managed Jev at no additional customer charge and without a personal
+provider key.
+
+Each individual receives all three independent rolling limits: **100 evaluated questions per rolling hour, 1,000 per rolling five hours, and 2,000 per rolling 24 hours**. All three
+limits apply. Usage is per person, not pooled across a Team and not monthly. Each
+evaluated question counts once; if a batch is evaluated, every question counts. A
+`guard_command` review evaluates two questions, and each other supported workflow
+evaluates one. Admitted attempts that fail or are interrupted remain counted. No overage
+is charged. The account portal reports the authenticated member's remaining use across
+all three windows; usage returns as earlier questions leave each rolling window.
+
+Managed Jev is currently `not_yet_available` pending release acceptance and
+service-capacity qualification; client configuration does not enable it. The existing
+production fleet guard remains 100 questions per day across the service. It conflicts
+with these individual caps and may pause or reject requests earlier, so resolve capacity
+and the fleet guard before launch. Direct BYOK is separate and may incur provider
+charges. Configuration or a successful health check does not establish latency,
+accuracy, or cost savings.
 
 The managed transport and MCP decision route require client **1.7.9 or newer**.
 The published 1.7.8 client has an experimental adapter but does not provide this route.
@@ -55,22 +70,17 @@ confidence is explicitly labelled derived decisiveness, not measured calibration
 malformed, unavailable and fallback results remain distinguishable. Local heuristic confidence
 is unmeasured. All decisions are advisory: deterministic authorization, memory governance,
 executable checks and the user's approval remain authoritative.
-The advisory adapter is not connected to core memory writes or grounded recall.
-Local command heuristics never recommend automatic execution.
+Managed Jev accepts only the fixed command-review, completion-review, evidence-support,
+and contradiction-check operations. It does not perform recall-route selection. The separate
+experimental BYOK planner can reorder bounded deterministic query routes before retrieval, but
+it cannot write memories or bypass grounded support and abstention checks; current synthetic
+fixtures show no retrieval-quality improvement. Local command heuristics never recommend
+automatic execution.
 
 The email-confirmed, no-card trial lasts seven active days for Pro and fourteen active days for Team. If hosted entitlement expires,
 `workspace_write_grace` can retain only approved hosted-account continuity operations for up to
 24 hours. It does not extend a trial or subscription, grant cloud access, or affect the free
 local tools. `recovery_read_only` supports hosted account recovery and export after grace.
-
-## Experimental decision adapter
-
-The source includes an opt-in Jev advisory adapter and a client for the experimental
-`POST /v1/jev/decide` Cloud endpoint. It is not connected to core memory writes or
-grounded recall. Callers supply a client and pinned model and explicitly authorize
-each remote request; offline mode keeps these calls local by declining the request.
-Managed availability, plan entitlements, quotas, latency, and savings require separate
-service verification and are not established by this client implementation.
 
 See [Licensing and commercial service boundary](LICENSING.md) for the full source and service
 boundary, and [Cloud Sync](SYNC.md) for the sync security model.

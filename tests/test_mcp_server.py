@@ -589,7 +589,8 @@ def test_server_identity_and_tools_registered():
     assert {"valid_from", "subject_key", "claim_kind"} <= set(props)
     assert "as_of" in classic["engraphis_recall"].inputSchema.get("properties", {})
     assert {"valid_at", "known_at", "token_budget", "retrieval_profile", "candidate_depth",
-            "response_mode", "diagnostics", "planning", "mtype_limits"} <= set(
+            "response_mode", "diagnostics", "planning", "mtype_limits", "jev_assisted",
+            "allow_remote", "data_classification"} <= set(
         classic["engraphis_recall"].inputSchema.get("properties", {})
     )
     assert classic["engraphis_recall_context"].inputSchema["properties"][
@@ -600,13 +601,25 @@ def test_server_identity_and_tools_registered():
     assert classic["engraphis_recall_context"].inputSchema["properties"][
         "k"
     ]["default"] == 50
-    assert {"planning", "mtype_limits"} <= set(
+    assert {"planning", "mtype_limits", "jev_assisted", "allow_remote",
+            "data_classification"} <= set(
         classic["engraphis_recall_context"].inputSchema.get("properties", {})
     )
     smart = {t.name: t for t in asyncio.run(srv.mcp.list_tools())}
+    classic_tools = srv.classic_mcp._tool_manager._tools
+    assert classic_tools["engraphis_recall"].annotations.openWorldHint is True
+    assert classic_tools["engraphis_recall_context"].annotations.openWorldHint is True
+    assert srv.smart_mcp._tool_manager._tools[
+        "engraphis_recall_context"
+    ].annotations.openWorldHint is True
     assert smart["engraphis_recall_context"].inputSchema["properties"][
         "k"
     ]["default"] == 50
+    smart_recall_properties = smart["engraphis_recall_context"].inputSchema["properties"]
+    assert smart_recall_properties["allow_remote"]["default"] is False
+    assert {"data_classification", "allow_remote"} <= set(
+        smart_recall_properties
+    )
     assert "as_of" in classic["engraphis_recall_grounded"].inputSchema.get("properties", {})
     assert {"valid_at", "known_at", "token_budget", "retrieval_profile", "candidate_depth",
             "response_mode", "planning", "mtype_limits"} <= set(

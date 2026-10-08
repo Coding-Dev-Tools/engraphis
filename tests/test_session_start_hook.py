@@ -67,11 +67,32 @@ class WorkspaceResolution(unittest.TestCase):
             (root / ".git").write_text("gitdir: /unused/worktree/admin", encoding="utf-8")
             self.assertEqual(self.hook.resolve_repo(nested), "project")
 
+    def test_parent_git_marker_outside_private_fixture_is_detected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            host = Path(directory) / "host-project"
+            (host / ".git").mkdir(parents=True)
+            folder = host / "private-fixture" / "research"
+            folder.mkdir(parents=True)
+            self.assertEqual(self.hook.resolve_repo(folder), "host-project")
+
     def test_non_git_directory_uses_its_name(self):
         with tempfile.TemporaryDirectory() as directory:
             folder = Path(directory) / "research"
             folder.mkdir()
-            self.assertEqual(self.hook.resolve_repo(folder), "research")
+            real_exists = Path.exists
+
+            def fixture_exists(path):
+                # The fixture is non-Git even when its host's temporary root
+                # has an ancestor marker (for example, an isolated sandbox).
+                if path.name == ".git":
+                    try:
+                        path.relative_to(directory)
+                    except ValueError:
+                        return False
+                return real_exists(path)
+
+            with mock.patch.object(Path, "exists", fixture_exists):
+                self.assertEqual(self.hook.resolve_repo(folder), "research")
 
 
 class SessionRouting(unittest.TestCase):

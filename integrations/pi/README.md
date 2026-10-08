@@ -101,16 +101,16 @@ likewise point only to a trusted local executable.
 Every advanced state-changing action requires an explicit Pi confirmation dialog.
 The extension fails closed in non-interactive Pi modes that cannot present that
 dialog, and consumes each discovered action capability after one approval attempt.
-Routine session and pending-review memory writes remain available directly.
+Routine session and memory writes remain available directly.
 
 Pi supplies the Pi and TypeBox runtime modules. The package deliberately declares
 them as optional peers, so installing `@engraphis/pi` does not add a duplicate Pi
 runtime to your extension directory.
 
-Engraphis MCP writes enter the normal pending-review boundary. A successful
-`engraphis_remember` call does not make unreviewed text prompt-eligible; approve it
-through the Engraphis dashboard or interactive approval command before expecting it
-in normal recall. This behavior is intentional and unchanged by the Pi extension.
+Routine stdio MCP writes use the local-agent trust policy and are available to normal
+recall when accepted. External or suspicious inputs still enter the pending-review or
+quarantine boundary; inspect them through the dashboard or `engraphis_conflict_review`
+before approving them. The Pi extension does not change those governance rules.
 
 ## Development
 

@@ -107,25 +107,22 @@ def test_custom_question_only_uses_real_client_validation(
     if options is not None:
         arguments["options"] = options
     result = dispatch(arguments)
+    if wire_client["backend"] == "managed":
+        assert result["is_fallback"] is True
+        assert result["fallback_reason"] == "managed_operation_unsupported"
+        assert wire_client["http"] == wire_client["refresh"] == []
+        return
     assert result["is_fallback"] is False
     assert result["decision_status"] == "decision"
     assert len(wire_client["http"]) == 1
     payload = wire_client["http"][0]
     state = state_args.get("state", "")
     assert payload["state"] == (state if state.strip() else question)
-    if wire_client["backend"] == "managed":
-        assert len(wire_client["refresh"]) == 1
-        expected = {"id": "custom", "prompt": question, "type": "choice" if options else "noul"}
-        if options:
-            expected["options"] = options
-        assert payload["questions"] == [expected]
-        assert payload["purpose"] == "custom"
-    else:
-        assert wire_client["refresh"] == []
-        expected = {"type": "choice" if options else "noul", "instructions": question}
-        if options:
-            expected["criteria"] = {item: item for item in options}
-        assert payload["questions"] == {"custom": expected}
+    assert wire_client["refresh"] == []
+    expected = {"type": "choice" if options else "noul", "instructions": question}
+    if options:
+        expected["criteria"] = {item: item for item in options}
+    assert payload["questions"] == {"custom": expected}
     if options:
         assert result["selected"] == "yes"
     else:
@@ -160,6 +157,8 @@ def test_question_only_still_requires_consent_before_backend_selection(
 def test_invalid_or_sensitive_custom_input_cannot_refresh_or_send(
     wire_client, dispatch, arguments, reason,
 ):
+    if wire_client["backend"] == "managed" and reason == "sensitive_content":
+        reason = "managed_operation_unsupported"
     result = dispatch({"kind": "custom", "allow_remote": True, **arguments})
     assert result["is_fallback"] is True and result["fallback_reason"] == reason
     assert wire_client["http"] == wire_client["refresh"] == []
@@ -176,6 +175,11 @@ def test_blank_optional_question_uses_default_with_meaningful_state(
     if options:
         arguments["options"] = options
     result = dispatch(arguments)
+    if wire_client["backend"] == "managed":
+        assert result["is_fallback"] is True
+        assert result["fallback_reason"] == "managed_operation_unsupported"
+        assert wire_client["http"] == wire_client["refresh"] == []
+        return
     assert result["is_fallback"] is False
     assert len(wire_client["http"]) == 1
     payload = wire_client["http"][0]
@@ -213,6 +217,11 @@ def test_custom_question_schema_matches_real_client_limit(
     arguments = {"kind": "custom", "question": "q" * length, "allow_remote": True}
     if length == 1024:
         result = dispatch(arguments)
+        if wire_client["backend"] == "managed":
+            assert result["is_fallback"] is True
+            assert result["fallback_reason"] == "managed_operation_unsupported"
+            assert wire_client["http"] == wire_client["refresh"] == []
+            return
         assert result["is_fallback"] is False
         assert len(wire_client["http"]) == 1
         assert wire_client["http"][0]["state"] == arguments["question"]
@@ -300,7 +309,10 @@ def test_sensitive_raw_mcp_fields_never_refresh_or_send(
                  field: ["safe", private] if field == "options" else private}
     result = dispatch(arguments)
     assert result["is_fallback"] is True
-    assert result["fallback_reason"] == "sensitive_content"
+    expected_reason = ("managed_operation_unsupported"
+                       if kind == "custom" and wire_client["backend"] == "managed"
+                       else "sensitive_content")
+    assert result["fallback_reason"] == expected_reason
     assert wire_client["http"] == wire_client["refresh"] == []
     assert "DB_PASSWORD" not in json.dumps(result) + caplog.text
     assert "synthetic" not in json.dumps(result) + caplog.text

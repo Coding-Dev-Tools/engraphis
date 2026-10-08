@@ -8,8 +8,9 @@ only when the selected report contains the additive ``packed_quality`` section.
 Examples::
 
     python scripts/render_benchmark_report.py \
-        --report docs/benchmark-evidence/offline-fixtures-v9.json \
-        --output docs/images/context-efficiency.svg
+        --report docs/benchmark-evidence/offline-fixtures-v115.json \
+        --output docs/images/context-efficiency.svg \
+        --png-output docs/images/context-efficiency.png
 
     python scripts/render_benchmark_report.py \
         --report artifacts/performance-report.json \
@@ -28,9 +29,8 @@ from xml.sax.saxutils import escape
 
 
 WIDTH = 1103
-HEIGHT = 956
+HEIGHT = 670
 BACKGROUND = "#0e1114"
-PANEL = "#141920"
 GRID = "#252c36"
 BAR = "#445367"
 GREEN = "#00b889"
@@ -66,17 +66,17 @@ def _integer(value: Any, *, default: Optional[int] = None) -> Optional[int]:
 
 def _tokens(value: Any) -> str:
     number = _integer(value)
-    return f"{number:,}" if number is not None else "pending"
+    return f"{number:,}" if number is not None else "Not reported"
 
 
 def _decimal(value: Any, places: int = 3) -> str:
     number = _number(value)
-    return f"{number:.{places}f}" if number is not None else "pending"
+    return f"{number:.{places}f}" if number is not None else "Not reported"
 
 
 def _percent(value: Any, places: int = 2) -> str:
     number = _number(value)
-    return f"{number * 100:.{places}f}%" if number is not None else "pending"
+    return f"{number * 100:.{places}f}%" if number is not None else "Not reported"
 
 
 def _require_sha256(value: Any, label: str) -> str:
@@ -261,6 +261,40 @@ def _derive_payload_savings(context: dict[str, Any]) -> tuple[Optional[int], Opt
     return derived_saved, derived_ratio
 
 
+def _normalize_grounded(value: Optional[dict[str, Any]]) -> dict[str, Any]:
+    """Normalize the registered grounded-eval summary and verify its counts."""
+    if not value:
+        return {}
+    answerable = _integer(value.get("answerable", value.get("n_answerable")))
+    grounded = _integer(value.get("grounded", value.get("grounded_hits")))
+    off_topic = _integer(value.get("off_topic", value.get("n_unanswerable")))
+    abstained = _integer(value.get("abstained", value.get("abstain_hits")))
+    quarantined = _integer(value.get("quarantined", value.get("n_quarantine")))
+    quarantine_hits = _integer(value.get("quarantine_hits"))
+    supplied_accuracy = _validate_rate(value.get("decision_accuracy", value.get("accuracy")), "grounded.decision_accuracy")
+    required = (answerable, grounded, off_topic, abstained, quarantined, quarantine_hits)
+    if any(item is None for item in required):
+        raise ValueError("grounded fixture requires exact answerable, grounded, off_topic, abstained, quarantined, and quarantine_hits counts")
+    assert answerable is not None and grounded is not None and off_topic is not None
+    assert abstained is not None and quarantined is not None and quarantine_hits is not None
+    if grounded > answerable or abstained > off_topic or quarantined > off_topic or quarantine_hits > quarantined:
+        raise ValueError("grounded fixture result counts exceed their registered populations")
+    total = answerable + off_topic
+    accuracy = 0.0 if total == 0 else (grounded + abstained) / total
+    if supplied_accuracy is not None:
+        _assert_derived(supplied_accuracy, accuracy, "grounded.decision_accuracy", places=3)
+    return {
+        "answerable": answerable,
+        "grounded": grounded,
+        "off_topic": off_topic,
+        "abstained": abstained,
+        "quarantined": quarantined,
+        "quarantine_hits": quarantine_hits,
+        "decision_accuracy": accuracy,
+        "decision_count": total,
+    }
+
+
 def _validate_payload_boundary(performance: dict[str, Any]) -> None:
     if "payload_boundary" not in performance:
         return
@@ -276,7 +310,7 @@ def _validate_normalized(report: dict[str, Any]) -> None:
     whole = _require_mapping(chunking.get("whole"), "report.chunking.whole")
     chunked = _require_mapping(chunking.get("chunked"), "report.chunking.chunked")
     context = _require_mapping(performance.get("context"), "report.performance.context")
-    _validate_counts(chunking, ("questions", "documents"), "report.chunking")
+    _validate_counts(chunking, ("k", "questions", "documents"), "report.chunking")
     _validate_counts(whole, ("memories", "max_stored_tokens"), "report.chunking.whole")
     _validate_counts(chunked, ("memories", "max_stored_tokens"), "report.chunking.chunked")
     _validate_numbers(
@@ -327,6 +361,10 @@ def _validate_normalized(report: dict[str, Any]) -> None:
         if "sample_count" in quality:
             _integer(quality["sample_count"])
 
+    grounded = report.get("grounded")
+    if grounded is not None:
+        _normalize_grounded(_require_mapping(grounded, "report.grounded"))
+
 
 def _normalize_chunking(value: Optional[dict[str, Any]]) -> dict[str, Any]:
     if not value:
@@ -338,6 +376,8 @@ def _normalize_chunking(value: Optional[dict[str, Any]]) -> dict[str, Any]:
         "whole": whole if isinstance(whole, dict) else {},
         "chunked": chunked if isinstance(chunked, dict) else {},
         "questions": value.get("questions"),
+        "documents": value.get("documents"),
+        "k": value.get("k"),
         "context_reduction_pct": value.get("context_reduction_pct"),
     }
 
@@ -436,8 +476,12 @@ def load_report_snapshot(path: Union[str, Path]) -> tuple[dict[str, Any], dict[s
         normalized = {
             "schema": raw.get("schema"),
             "source": source,
+            "registered_fixture_count": len(raw["runs"]),
             "chunking": _normalize_chunking(chunking),
             "performance": _normalize_performance(performance),
+            "grounded": _normalize_grounded(
+                runs.get("offline-grounded") if isinstance(runs.get("offline-grounded"), dict) else None
+            ),
         }
         _validate_normalized(normalized)
         return normalized, raw
@@ -448,8 +492,10 @@ def load_report_snapshot(path: Union[str, Path]) -> tuple[dict[str, Any], dict[s
     normalized = {
         "schema": raw.get("schema"),
         "source": source,
+        "registered_fixture_count": None,
         "chunking": _normalize_chunking(chunking if isinstance(chunking, dict) else None),
         "performance": performance,
+        "grounded": {},
     }
     _validate_normalized(normalized)
     return normalized, raw
@@ -471,21 +517,22 @@ def _text(
     )
 
 
-def _panel(y: int, height: int) -> list[str]:
-    return [
-        f'<rect x="4" y="{y}" width="1092" height="{height}" fill="{BACKGROUND}" stroke="{GRID}"/>',
-        f'<rect x="368" y="{y}" width="1" height="{height}" fill="{GRID}"/>',
-        f'<rect x="823" y="{y}" width="1" height="{height}" fill="{GRID}"/>',
-    ]
-
-
-def _bar(value: Optional[float], maximum: Optional[float], *, x: int, y: int) -> str:
-    width = 0.0
+def _bar(
+    value: Optional[float],
+    maximum: Optional[float],
+    *,
+    x: int,
+    y: int,
+    width: int = 424,
+    color: str = GREEN,
+) -> str:
+    track_width = width
+    value_width = 0.0
     if value is not None and maximum is not None and maximum > 0:
-        width = max(0.0, min(424.0, 424.0 * value / maximum))
+        value_width = max(0.0, min(float(track_width), float(track_width) * value / maximum))
     return (
-        f'<rect x="{x}" y="{y}" width="424" height="8" fill="#1d2530"/>'
-        f'<rect x="{x}" y="{y}" width="{width:.2f}" height="8" fill="{GREEN}"/>'
+        f'<rect x="{x}" y="{y}" width="{track_width}" height="8" fill="#1d2530"/>'
+        f'<rect x="{x}" y="{y}" width="{value_width:.2f}" height="8" fill="{color}"/>'
     )
 
 
@@ -509,32 +556,22 @@ def render_report(report: dict[str, Any]) -> str:
     retrieved = _quality(performance, "quality")
     packed = _quality(performance, "packed_quality")
     packed_available = bool(packed) and packed.get("sample_count", 1) != 0
+    if not packed_available:
+        packed = {}
+    grounded = _normalize_grounded(report.get("grounded"))
     corpus = performance.get("corpus") if isinstance(performance.get("corpus"), dict) else {}
     run = performance.get("run") if isinstance(performance.get("run"), dict) else {}
+    run_k = _integer(run.get("k"))
+    chunk_k = _integer(chunking.get("k"))
+    quality_rank = f"@{run_k}" if run_k is not None else "@k"
+    chunk_rank = f"@{chunk_k}" if chunk_k is not None else "@k"
     payload_boundary = performance.get("payload_boundary")
     if not isinstance(payload_boundary, dict):
-        payload_boundary = {
-            "kind": "serialized_json_shape_proxy",
-            "transport_measured": False,
-            "mcp_envelope_serialized": False,
-        }
+        payload_boundary = {"transport_measured": False}
     transport_measured = payload_boundary.get("transport_measured", False) is True
-    transport_label = (
-        "MCP transport measured"
-        if transport_measured
-        else "MCP transport not measured"
-    )
-    payload_scope_label = (
-        "JSON proxy plus transport"
-        if transport_measured
-        else "JSON proxy only"
-    )
-    transport_description = (
-        "MCP transport is measured separately"
-        if transport_measured
-        else "the payload is not an MCP transport measurement"
-    )
-
+    transport_label = "MCP transport measured" if transport_measured else "MCP transport not measured"
+    payload_scope_label = "JSON proxy plus transport" if transport_measured else "JSON proxy only"
+    transport_description = "MCP transport was measured" if transport_measured else "MCP transport was not measured"
     whole_context = _number(whole.get("mean_context_tokens"))
     chunked_context = _number(chunked.get("mean_context_tokens"))
     maximum_context = max(value for value in (whole_context, chunked_context, 1.0) if value is not None)
@@ -543,175 +580,163 @@ def render_report(report: dict[str, Any]) -> str:
     maximum_proxy = max(value for value in (full_proxy, compact_proxy, 1.0) if value is not None)
     questions = _integer(corpus.get("questions"))
     timed_recalls = _integer(run.get("timed_recalls"))
-    budget = _integer(run.get("token_budget"))
-    mean_context = context.get("mean_tokens")
-    max_context = context.get("max_tokens")
     chunk_questions = _integer(chunking.get("questions"))
+    chunk_documents = _integer(chunking.get("documents"))
     chunk_reduction = _derive_chunk_reduction(chunking)
     _, payload_savings_ratio = _derive_payload_savings(context)
-
-    desc = (
-        "Artifact-driven local deterministic benchmark report. "
-        f"Structure-aware chunks report {_decimal(whole_context, 1)} to "
-        f"{_decimal(chunked_context, 1)} retrieved tokens per question. "
-        f"The performance run reports {_tokens(full_proxy)} full-proxy versus "
-        f"{_tokens(compact_proxy)} compact-proxy tokens. "
-        "Retrieved-candidate quality and packed-context quality are separate views; "
-        "packed quality is shown only when the selected report includes it. "
-        "Payload counts are a serialized JSON-shape proxy; "
-        f"{transport_description}. The report does not measure provider billing. "
-        f"Packed context reports {_decimal(mean_context, 2)} mean and "
-        f"{_tokens(max_context)} max under a {_tokens(budget)}-token cap. "
-        f"Source artifact SHA-256 {source_hash}."
+    whole_recall = whole.get("recall_at_k")
+    chunked_recall = chunked.get("recall_at_k")
+    recall_label = (
+        f"Recall{chunk_rank} {_decimal(whole_recall)} both modes"
+        if whole_recall is not None and whole_recall == chunked_recall
+        else f"Recall{chunk_rank} whole/chunked {_decimal(whole_recall)}/{_decimal(chunked_recall)}"
     )
+    chunk_population = (
+        f"{_tokens(chunk_documents)} documents · " if chunk_documents is not None else ""
+    )
+    fixture_count = report.get("registered_fixture_count")
+    if fixture_count is not None:
+        fixture_count = _integer(fixture_count)
+    fixture_label = (
+        f"{fixture_count} REGISTERED OFFLINE FIXTURES"
+        if fixture_count is not None else "SELECTED REPORT"
+    )
+    packed_quality_desc = (
+        f"Packed context quality is Recall{quality_rank} {_decimal(packed.get('recall_at_k'))}, "
+        f"Hit{quality_rank} {_decimal(packed.get('hit_at_k'))}, and answer-token recall "
+        f"{_decimal(packed.get('answer_token_recall'))} across "
+        f"{_tokens(packed.get('sample_count'))} questions."
+        if packed_available else "Packed-context quality is not included in this report."
+    )
+    grounded_desc = (
+        f"Grounded checks score {grounded['grounded']} of {grounded['answerable']} "
+        f"answerable queries grounded and {grounded['abstained']} of {grounded['off_topic']} "
+        f"abstention queries rejected, including {grounded['quarantine_hits']} of "
+        f"{grounded['quarantined']} quarantined-evidence checks. "
+        f"Decision accuracy is {_decimal(grounded['decision_accuracy'])} across "
+        f"{grounded['decision_count']} decisions."
+        if grounded else "Grounded checks are not included in this selected report."
+    )
+    desc = " ".join((
+        "Artifact-driven offline benchmark report with context efficiency, retrieval quality, and grounded behavior reported separately.",
+        f"Structure-aware chunking reports {_decimal(whole_context, 1)} to {_decimal(chunked_context, 1)} retrieved tokens per question.",
+        f"The JSON-shape payload proxy reports {_tokens(full_proxy)} full versus {_tokens(compact_proxy)} compact tokens; {transport_description}; provider billing was not measured.",
+        f"Retrieved candidate quality is Recall{quality_rank} {_decimal(retrieved.get('recall_at_k'))}, Hit{quality_rank} {_decimal(retrieved.get('hit_at_k'))}, and answer-token recall {_decimal(retrieved.get('answer_token_recall'))} across {_tokens(questions)} questions.",
+        packed_quality_desc,
+        grounded_desc,
+        f"Source artifact SHA-256 {source_hash}.",
+    ))
     lines = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{WIDTH}" height="{HEIGHT}" '
-        'viewBox="0 0 1103 956" role="img" aria-labelledby="title desc">',
-        '<title id="title">Measured context and retrieval boundaries</title>',
+        f'viewBox="0 0 {WIDTH} {HEIGHT}" role="img" aria-labelledby="title desc">',
+        '<title id="title">Offline context, retrieval, and grounded benchmark results</title>',
         f'<desc id="desc">{escape(desc)}</desc>',
         '<style>text{font-family:Consolas,monospace;fill:#b9c8dc} '
         '.heading{font-family:Segoe UI,sans-serif;font-weight:700;fill:#f2f5f9} '
         '.green{fill:#00c896}.muted{fill:#7589a7}</style>',
-        f'<rect x="3" y="2" width="1094" height="949" fill="{BACKGROUND}" stroke="{GRID}"/>',
-        '<rect x="23" y="27" width="176" height="20" fill="#1c222b" stroke="#303a47"/>',
-        _text(32, 41, "BENCHMARK FIXTURE REPORT", size=12.5),
-        _text(225, 48, "Measured context and retrieval boundaries", size=33, class_name="heading"),
-        _text(23, 75, "Registered local fixtures with explicit candidate, packed, and payload scopes.", size=13.2, class_name="muted"),
-        '<rect x="4" y="90" width="1092" height="28" fill="#141920" stroke="#252c36"/>',
-        _text(19, 109, "01 CONTEXT BOUNDARIES", size=12.5, class_name="green"),
-        _text(1080, 109, "2 REGISTERED FIXTURES", size=12.5, class_name="muted", anchor="end"),
+        f'<rect x="3" y="2" width="1094" height="664" fill="{BACKGROUND}" stroke="{GRID}"/>',
+        '<rect x="22" y="20" width="224" height="21" fill="#1c222b" stroke="#303a47"/>',
+        _text(31, 35, "REGISTERED OFFLINE EVIDENCE", size=12.5),
+        _text(23, 75, "Offline benchmark results", size=32, class_name="heading"),
+        _text(1080, 36, fixture_label, size=13.1, class_name="muted", anchor="end"),
+        _text(23, 99, "Context efficiency, retrieval quality, and grounded checks are reported separately.", size=13.2, class_name="muted"),
+        '<rect x="4" y="112" width="1092" height="27" fill="#141920" stroke="#252c36"/>',
+        _text(19, 131, "01  CONTEXT EFFICIENCY", size=12.5, class_name="green"),
+        _text(1080, 131, "CHUNKING + SERIALIZED JSON-SHAPE PROXY", size=12.5, class_name="muted", anchor="end"),
+        f'<rect x="4" y="139" width="1092" height="166" fill="{BACKGROUND}" stroke="{GRID}"/>',
+        '<rect x="550" y="139" width="1" height="166" fill="#252c36"/>',
     ]
-
-    lines.extend(_panel(118, 108))
-    lines.append(
-        f'<g aria-label="Structure-aware chunking; {_decimal(whole_context, 1)} to '
-        f'{_decimal(chunked_context, 1)} tokens">'
-    )
     lines.extend([
-        _text(19, 149, "Retrieved context per question", size=17.4, class_name="heading"),
-        _text(19, 170, f"{_tokens(chunk_questions)} questions / Recall@5 is fixture-bound", size=12.5, class_name="muted"),
-        _text(19, 187, f"Smallest evidence: {_decimal(whole.get('mean_evidence_tokens'), 1)} to {_decimal(chunked.get('mean_evidence_tokens'), 1)} tokens", size=12.5, class_name="muted"),
-        _text(19, 204, "Stored-memory content before context packing", size=12.5, class_name="muted"),
-        _text(384, 146, "Whole documents", size=14.3),
-        _text(808, 146, f"{_decimal(whole_context, 1)} tokens", size=14.3, anchor="end"),
-        _bar(whole_context, maximum_context, x=384, y=154),
-        _text(384, 182, "Structure-aware chunks", size=14.3, class_name="green"),
-        _text(808, 182, f"{_decimal(chunked_context, 1)} tokens", size=14.3, class_name="green", anchor="end"),
-        _bar(chunked_context, maximum_context, x=384, y=190),
-        _text(1080, 161, "OUTCOME DIFFERENTIAL", size=12.5, class_name="muted", anchor="end"),
-        _text(1080, 189, f"{_percent((chunk_reduction or 0) / 100, places=1)} lower" if chunk_reduction is not None else "pending", size=24, class_name="green", anchor="end"),
-        '</g>',
+        _text(19, 165, "Retrieved context after chunking", size=17, class_name="heading"),
+        _text(19, 186, f"offline-chunking · {chunk_population}{_tokens(chunk_questions)} questions · {recall_label}", size=12.2, class_name="muted"),
+        _text(19, 215, f"{_percent((chunk_reduction or 0) / 100, places=1)} fewer retrieved tokens per question" if chunk_reduction is not None else "Retrieved context per question", size=17, class_name="green"),
+        _text(20, 245, "Whole", size=12.5),
+        _bar(whole_context, maximum_context, x=85, y=237, width=330),
+        _text(525, 245, f"{_decimal(whole_context, 1)} tokens", size=12.5, anchor="end"),
+        _text(20, 278, "Chunked", size=12.5, class_name="green"),
+        _bar(chunked_context, maximum_context, x=85, y=270, width=330),
+        _text(525, 278, f"{_decimal(chunked_context, 1)} tokens", size=12.5, class_name="green", anchor="end"),
+        _text(568, 165, "Serialized JSON-shape payload proxy", size=17, class_name="heading"),
+        _text(568, 186, f"offline-performance · {_tokens(questions)} payload samples · {_tokens(timed_recalls)} timed recalls", size=12.2, class_name="muted"),
+        _text(568, 215, f"{_percent(payload_savings_ratio)} fewer proxy tokens", size=17, class_name="green"),
+        _text(570, 245, "Full", size=12.5),
+        _bar(full_proxy, maximum_proxy, x=625, y=237, width=335),
+        _text(1078, 245, f"{_tokens(full_proxy)} tokens", size=12.5, anchor="end"),
+        _text(570, 278, "Compact", size=12.5, class_name="green"),
+        _bar(compact_proxy, maximum_proxy, x=625, y=270, width=335),
+        _text(1078, 278, f"{_tokens(compact_proxy)} tokens", size=12.5, class_name="green", anchor="end"),
+        '<rect x="4" y="316" width="1092" height="27" fill="#141920" stroke="#252c36"/>',
+        _text(19, 335, "02  RETRIEVAL QUALITY", size=12.5, class_name="green"),
+        _text(1080, 335, "CANDIDATES BEFORE PACKING VS READER-ADMITTED CONTEXT", size=12.5, class_name="muted", anchor="end"),
+        f'<rect x="4" y="343" width="1092" height="136" fill="{BACKGROUND}" stroke="{GRID}"/>',
+        '<rect x="550" y="343" width="1" height="136" fill="#252c36"/>',
+        _text(22, 370, "Retrieved candidate quality", size=16.5, class_name="heading"),
+        _text(22, 390, f"offline-performance · before packing · n={_tokens(questions)}", size=12.2, class_name="muted"),
+        _text(22, 416, f"Recall{quality_rank}", size=12.5),
+        _text(194, 416, f"Hit{quality_rank}", size=12.5),
+        _text(363, 416, "Answer-token recall", size=12.5),
+        _text(22, 451, _decimal(retrieved.get("recall_at_k")), size=24, class_name="heading"),
+        _text(194, 451, _decimal(retrieved.get("hit_at_k")), size=24, class_name="heading"),
+        _text(363, 451, _decimal(retrieved.get("answer_token_recall")), size=24, class_name="heading"),
+        _text(571, 370, "Packed context quality", size=16.5, class_name="green"),
+        _text(571, 390, f"reader-admitted context · n={_tokens(packed.get('sample_count'))}" if packed_available else "Not included in selected report", size=12.2, class_name="muted"),
+        _text(571, 416, f"Recall{quality_rank}", size=12.5),
+        _text(743, 416, f"Hit{quality_rank}", size=12.5),
+        _text(912, 416, "Answer-token recall", size=12.5),
+        _text(571, 451, _decimal(packed.get("recall_at_k")), size=24, class_name="green"),
+        _text(743, 451, _decimal(packed.get("hit_at_k")), size=24, class_name="green"),
+        _text(912, 451, _decimal(packed.get("answer_token_recall")), size=24, class_name="green"),
     ])
 
-    lines.extend(_panel(226, 93))
-    lines.append(
-        f'<g aria-label="Serialized JSON-shape payload proxy; {_tokens(full_proxy)} full; '
-        f'{_tokens(compact_proxy)} compact">'
-    )
-    lines.extend([
-        _text(19, 257, "Serialized recall payload proxy", size=17.4, class_name="heading"),
-        _text(19, 278, f"{_tokens(questions)} payload samples / {_tokens(timed_recalls)} timed recalls", size=12.5, class_name="muted"),
-        _text(384, 254, "Full JSON-shape proxy", size=14.3),
-        _text(808, 254, f"{_tokens(full_proxy)} tokens", size=14.3, anchor="end"),
-        _bar(full_proxy, maximum_proxy, x=384, y=262),
-        _text(384, 290, "Compact JSON-shape proxy", size=14.3, class_name="green"),
-        _text(808, 290, f"{_tokens(compact_proxy)} tokens", size=14.3, class_name="green", anchor="end"),
-        _bar(compact_proxy, maximum_proxy, x=384, y=298),
-        _text(1080, 269, "PROXY DIFFERENTIAL", size=12.5, class_name="muted", anchor="end"),
-        _text(1080, 297, f"{_percent(payload_savings_ratio)} lower", size=24, class_name="green", anchor="end"),
-        '</g>',
-    ])
-
-    lines.extend([
-        '<rect x="4" y="319" width="1092" height="28" fill="#141920" stroke="#252c36"/>',
-        _text(19, 338, "02 QUALITY SCOPES", size=12.5, class_name="green"),
-        _text(1080, 338, "CANDIDATE VS PACKED", size=12.5, class_name="muted", anchor="end"),
-    ])
-    lines.extend(_panel(347, 94))
-    packed_label = (
-        f"Recall@5 {_decimal(packed.get('recall_at_k'))} / "
-        f"hit@5 {_decimal(packed.get('hit_at_k'))} / "
-        f"answer tokens {_decimal(packed.get('answer_token_recall'))}"
-        if packed_available else "Pending selected report with packed_quality"
-    )
-    lines.append(
-        '<g aria-label="Retrieved candidate quality and packed context quality">'
-    )
-    lines.extend([
-        _text(19, 378, "Retrieved candidate quality", size=17.4, class_name="heading"),
-        _text(19, 399, "Legacy fields score all candidate chunks before packing", size=12.5, class_name="muted"),
-        _text(384, 375, "Retrieved candidates", size=14.3),
-        _text(808, 375, f"Recall@5 {_decimal(retrieved.get('recall_at_k'))}", size=14.3, anchor="end"),
-        _text(384, 403, f"hit@5 {_decimal(retrieved.get('hit_at_k'))} / answer tokens {_decimal(retrieved.get('answer_token_recall'))}", size=14.3),
-        _text(384, 431, "Packed context", size=14.3, class_name="green"),
-        _text(808, 431, packed_label, size=12.5, class_name="green", anchor="end"),
-        '</g>',
-    ])
-
-    lines.extend(_panel(441, 94))
-    lines.extend([
-        _text(19, 472, "Packed prompt-context usage", size=17.4, class_name="heading"),
-        _text(19, 493, "Context usage is separate from payload serialization", size=12.5, class_name="muted"),
-        _text(19, 510, f"Mean {_decimal(mean_context, 2)} / max {_tokens(max_context)} tokens", size=12.5, class_name="muted"),
-        _text(384, 469, "Configured hard budget", size=14.3),
-        _text(808, 469, f"{_tokens(budget)} tokens", size=14.3, anchor="end"),
-        _bar(_number(max_context), _number(budget) or 1.0, x=384, y=477),
-        _text(384, 505, "Transport boundary", size=14.3, class_name="green"),
-        _text(808, 505, transport_label, size=14.3, class_name="green", anchor="end"),
-        _text(1080, 484, "SCOPE", size=12.5, class_name="muted", anchor="end"),
-        _text(1080, 512, payload_scope_label, size=24, class_name="green", anchor="end"),
-    ])
-
-    lines.extend([
-        '<rect x="4" y="535" width="1092" height="28" fill="#141920" stroke="#252c36"/>',
-        _text(19, 554, "03 PENDING EVALUATION TRACKS", size=12.5, class_name="green"),
-        _text(1080, 554, "NO UNREGISTERED SCORES", size=12.5, class_name="muted", anchor="end"),
-    ])
-    for y, title, detail in (
-        (566, "Coding outcomes", "Project-authored tasks, paired graders, and held-out corrections"),
-        (616, "External datasets", "Pinned LoCoMo and LongMemEval artifacts with answer evaluators"),
-        (666, "Operational capacity", "Frozen 1/4/16 process matrix at staged memory counts"),
-    ):
-        lines.extend(_panel(y, 50))
+    if grounded:
         lines.extend([
-            _text(19, y + 22, title, size=14.3, class_name="heading"),
-            _text(384, y + 22, detail, size=13.2),
-            _text(1080, y + 22, "PENDING", size=13.2, class_name="muted", anchor="end"),
+            '<rect x="4" y="489" width="1092" height="27" fill="#141920" stroke="#252c36"/>',
+            _text(19, 508, "03  GROUNDED CHECKS", size=12.5, class_name="green"),
+            _text(1080, 508, "OFFLINE DETERMINISTIC FIXTURE", size=12.5, class_name="muted", anchor="end"),
+            f'<rect x="4" y="516" width="1092" height="109" fill="{BACKGROUND}" stroke="{GRID}"/>',
+            '<rect x="367" y="516" width="1" height="77" fill="#252c36"/>',
+            '<rect x="732" y="516" width="1" height="77" fill="#252c36"/>',
+            _text(22, 541, "Answerable queries", size=13, class_name="heading"),
+            _text(22, 575, f"{grounded['grounded']} / {grounded['answerable']} grounded", size=21, class_name="green"),
+            _text(386, 541, "Abstention queries", size=13, class_name="heading"),
+            _text(386, 575, f"{grounded['abstained']} / {grounded['off_topic']} rejected", size=21, class_name="green"),
+            _text(750, 541, "Quarantined-evidence probe", size=13, class_name="heading"),
+            _text(750, 575, f"{grounded['quarantine_hits']} / {grounded['quarantined']} abstained", size=21, class_name="green"),
+            _text(22, 610, f"Decision accuracy {_decimal(grounded['decision_accuracy'])} ({grounded['grounded'] + grounded['abstained']} / {grounded['decision_count']}); the quarantine probe is included in the abstention total.", size=12.1, class_name="muted"),
         ])
-
     lines.extend([
-        '<rect x="23" y="864" width="263" height="82" fill="#0e1114" stroke="#252c36"/>',
-        _text(35, 885, "RETRIEVED QUALITY", size=12.5, class_name="muted"),
-        _text(35, 913, f"{_decimal(retrieved.get('recall_at_k'))} Recall@5", size=20, class_name="heading"),
-        _text(35, 935, "candidate page metric", size=12.5, class_name="muted"),
-        '<rect x="287" y="864" width="263" height="82" fill="#0e1114" stroke="#252c36"/>',
-        _text(299, 885, "PACKED QUALITY", size=12.5, class_name="muted"),
-        _text(299, 913, f"{_decimal(packed.get('recall_at_k'))} Recall@5" if packed_available else "PENDING", size=20, class_name="heading"),
-        _text(299, 935, "reader-admitted context", size=12.5, class_name="muted"),
-        '<rect x="550" y="864" width="263" height="82" fill="#0e1114" stroke="#252c36"/>',
-        _text(562, 885, "PAYLOAD BOUNDARY", size=12.5, class_name="muted"),
-        _text(562, 913, payload_scope_label, size=20, class_name="green"),
-        _text(562, 935, transport_label.lower(), size=12.5, class_name="muted"),
-        '<rect x="814" y="864" width="263" height="82" fill="#0e1114" stroke="#252c36"/>',
-        _text(826, 885, "SOURCE ARTIFACT", size=12.5, class_name="muted"),
-        _text(826, 913, source_hash[:12], size=20, class_name="heading"),
-        _text(826, 935, "SHA-256 prefix", size=12.5, class_name="muted"),
-        _text(1080, 70, "Artifact-driven local measurements", size=18.7, class_name="muted", anchor="end"),
+        _text(22, 651, f"SOURCE SHA-256  {source_hash[:12]}", size=12.2, class_name="muted"),
+        _text(1080, 651, f"{payload_scope_label}; {transport_label}; provider billing not measured.", size=12.2, class_name="muted", anchor="end"),
         "</svg>",
     ])
     return "\n".join(lines) + "\n"
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="Render an artifact-backed benchmark report as SVG.")
+    parser = argparse.ArgumentParser(description="Render an artifact-backed benchmark report as SVG and optional PNG.")
     parser.add_argument("--report", required=True, help="JSON artifact or selected performance report")
     parser.add_argument("--output", required=True, help="destination SVG path")
+    parser.add_argument("--png-output", help="optional PNG export path (requires CairoSVG)")
     args = parser.parse_args(argv)
     report = load_report(args.report)
+    svg = render_report(report)
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", encoding="utf-8", newline="\n") as handle:
-        handle.write(render_report(report))
+        handle.write(svg)
+    if args.png_output:
+        try:
+            import cairosvg
+        except ImportError as exc:
+            raise SystemExit("--png-output requires CairoSVG; install it with `pip install cairosvg`") from exc
+        png_output = Path(args.png_output)
+        png_output.parent.mkdir(parents=True, exist_ok=True)
+        cairosvg.svg2png(
+            bytestring=svg.encode("utf-8"),
+            write_to=str(png_output),
+            output_width=WIDTH,
+            output_height=HEIGHT,
+        )
     return 0
 
 
