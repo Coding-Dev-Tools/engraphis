@@ -52,7 +52,7 @@ def saved_session(monkeypatch, tmp_path):
 def _evaluate(timeout=0.1):
     return jev_transport.create_cloud_decision_client(timeout_s=timeout).evaluate(
         "Synthetic local evidence.", [DecisionQuestion("q", "Is this supported?", "noul")],
-        model=jev_transport.MODEL, allow_remote=True, data_classification="public",
+        model=jev_transport.MODEL, allow_remote=True, data_classification="public", purpose="verify_support",
     )
 
 

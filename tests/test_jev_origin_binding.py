@@ -67,7 +67,7 @@ def bootstrap(monkeypatch, tmp_path):
 
 def _evaluate(client):
     return client.evaluate("Synthetic evidence", [DecisionQuestion("q", "Assess", "noul")],
-                           model=transport.MODEL, allow_remote=True)
+                           model=transport.MODEL, allow_remote=True, purpose="verify_support")
 
 
 @pytest.mark.parametrize("source", ["environment", "saved"])

@@ -24,10 +24,15 @@ from engraphis.backends.graph_extractor import (
     feed as feed_graph,
     get_graph_extractor,
 )
+from engraphis.backends.jev_decision import (
+    JevDecisionBackend,
+    select_decision_client,
+)
+from engraphis.backends.jev_query_planner import JevAssistedQueryPlanner
 from engraphis.backends.reranker import get_reranker
 from engraphis.backends.retention import get_retention_supervisor
 from engraphis.backends.vector_sqlitevec import get_vector_index
-from engraphis.config import resolve_vector_backend
+from engraphis.config import resolve_vector_backend, settings
 from engraphis.core.interfaces import GraphTraversalPolicy, QueryPlanner
 from engraphis.core.store import Store
 
@@ -206,6 +211,22 @@ def create_memory_engine(
         )
         if supervisor is not None:
             owned.append(supervisor)
+
+        if query_planner is None:
+            selected_decision_backend = settings.decision_backend.strip().lower()
+            if selected_decision_backend in {"managed", "auto"}:
+                # Managed Jev supports fixed review workflows, not route selection.
+                # Do not inspect or refresh Cloud credentials for a planner call,
+                # and never switch an included managed request to paid BYOK.
+                jev_client = None
+            else:
+                jev_client, _jev_provider = select_decision_client(
+                    selected_decision_backend,
+                )
+            jev_backend = JevDecisionBackend(
+                client=jev_client, model=settings.decision_model,
+            )
+            query_planner = JevAssistedQueryPlanner(decision_backend=jev_backend)
 
         engine = engine_cls(
             store,

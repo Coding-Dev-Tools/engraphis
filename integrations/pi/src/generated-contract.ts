@@ -174,9 +174,27 @@ export const SMART_SCHEMAS = {
   },
   "engraphis_recall_context": {
     "properties": {
+      "allow_remote": {
+        "default": false,
+        "title": "Allow Remote",
+        "type": "boolean"
+      },
+      "data_classification": {
+        "anyOf": [
+          {
+            "maxLength": 16,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Data Classification"
+      },
       "format": {
         "default": "full",
-        "description": "Context format: full or gist.",
+        "description": "full or gist.",
         "title": "Format",
         "type": "string"
       },
@@ -192,7 +210,7 @@ export const SMART_SCHEMAS = {
           }
         ],
         "default": 50,
-        "description": "Max source memories.",
+        "description": "Count.",
         "title": "K"
       },
       "packing_mode": {
@@ -201,7 +219,7 @@ export const SMART_SCHEMAS = {
         "type": "string"
       },
       "query": {
-        "description": "Question/task needing context.",
+        "description": "Question.",
         "maxLength": 100000,
         "minLength": 1,
         "title": "Query",
@@ -251,7 +269,7 @@ export const SMART_SCHEMAS = {
           }
         ],
         "default": 1024,
-        "description": "Hard returned-context token budget.",
+        "description": "Token cap.",
         "title": "Token Budget"
       },
       "workspace": {

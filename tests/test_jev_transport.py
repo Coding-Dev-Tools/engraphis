@@ -51,6 +51,15 @@ def managed(monkeypatch):
     return calls
 
 
+def test_managed_custom_transport_is_rejected_before_refresh(managed):
+    with pytest.raises(transport.DecisionClientError, match="^managed_operation_unsupported$"):
+        transport.create_cloud_decision_client().evaluate(
+            "Synthetic evidence", [_question()], model=transport.MODEL,
+            allow_remote=True, purpose="custom", data_classification="public",
+        )
+    assert managed == []
+
+
 def test_constructor_and_configuration_are_network_free_and_managed_refresh_is_bound(managed):
     client = transport.create_cloud_decision_client()
     assert client.is_configured and managed == []
@@ -107,6 +116,7 @@ def test_credential_origin_change_fails_without_using_token(managed, monkeypatch
     with pytest.raises(transport.DecisionClientError, match="session_changed"):
         transport.create_cloud_decision_client().evaluate(
             "Synthetic", [_question()], model=transport.MODEL, allow_remote=True,
+            purpose="verify_support",
         )
     assert len(managed) == 1 and managed[0][0] == "refresh"
 
@@ -252,6 +262,7 @@ def test_https_loopback_managed_requests_disable_ambient_proxies(managed, monkey
     monkeypatch.setattr(cloud_session, "credential_bound_control_url", lambda: "https://localhost:8443")
     transport.create_cloud_decision_client().evaluate(
         "Synthetic", [_question()], model=transport.MODEL, allow_remote=True,
+        purpose="verify_support",
     )
     handlers = next(value[1] for value in managed if value[0] == "handlers")
     assert any(isinstance(handler, urllib.request.ProxyHandler) and handler.proxies == {}
@@ -313,7 +324,7 @@ def test_http_loopback_managed_request_uses_saved_origin_without_proxy(monkeypat
         client = transport.create_cloud_decision_client(timeout_s=2)
         assert client.is_configured
         batch = client.evaluate("Synthetic local evidence", [_question()], model=transport.MODEL,
-                                allow_remote=True, data_classification="public")
+                                allow_remote=True, data_classification="public", purpose="verify_support")
         assert batch.get_noul("q").probability == 0.9
         assert len(requests) == 1
         path, authorization, body = requests[0]

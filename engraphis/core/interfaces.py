@@ -836,6 +836,30 @@ class QueryPlanner(Protocol):
 
 
 @runtime_checkable
+class AdvisoryQueryPlanner(QueryPlanner, Protocol):
+    """Optionally prioritize bounded planner routes with an advisory decision.
+
+    This capability is separate from ``QueryPlanner`` so existing injected
+    planners remain source-compatible and local planning never requires Jev.
+    Implementations must preserve the original query and retrieval filters, and
+    treat remote consent and data classification as per-call inputs.
+    """
+
+    local_identity: str
+    advisory_identity: str
+
+    def plan_with_advisory(
+        self,
+        query: str,
+        *,
+        filter: Optional[SearchFilter] = None,
+        timeout_s: Optional[float] = None,
+        allow_remote: bool = False,
+        data_classification: str = "internal",
+    ) -> RetrievalPlan: ...
+
+
+@runtime_checkable
 class LLM(Protocol):
     """External or local model for synthesis and structured extraction (§8.2)."""
     def complete(self, messages: list[dict], **kw: Any) -> str: ...

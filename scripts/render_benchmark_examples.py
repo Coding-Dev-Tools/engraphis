@@ -34,8 +34,16 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--png-output", type=Path,
+                        help="optional PNG export path (requires CairoSVG)")
     args = parser.parse_args(argv)
     render(args.report, args.output)
+    if args.png_output:
+        try:
+            import cairosvg
+        except ImportError as exc:
+            raise SystemExit("--png-output requires CairoSVG; install it with `pip install cairosvg`") from exc
+        cairosvg.svg2png(url=str(args.output), write_to=str(args.png_output))
     return 0
 
 

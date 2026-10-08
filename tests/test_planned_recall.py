@@ -11,6 +11,7 @@ from engraphis.backends.query_planner import LLMQueryPlanner
 from engraphis.backends.reranker import IdentityReranker
 from engraphis.core import grounded
 from engraphis.core.interfaces import (
+    AdvisoryQueryPlanner,
     MemoryRecord,
     MemoryType,
     PlannedQuery,
@@ -19,7 +20,7 @@ from engraphis.core.interfaces import (
     SearchFilter,
 )
 from engraphis.core.query_planner import DeterministicQueryPlanner, MAX_PLANNED_QUERIES
-from engraphis.core.recall import RecallEngine
+from engraphis.core.recall import RecallEngine, RecallResult, _planning_advisory
 from engraphis.core.store import Store
 
 
@@ -35,6 +36,29 @@ class _StaticPlanner:
         if isinstance(self.result, Exception):
             raise self.result
         return self.result
+
+
+class _ProtocolAdvisoryPlanner:
+    identity = "tests.protocol-advisory.v1"
+    local_identity = "tests.protocol-local.v1"
+    advisory_identity = "tests.protocol-advisory.v1"
+
+    def __init__(self):
+        self.advisory_calls = []
+
+    def plan(self, query, *, filter=None, timeout_s=None):
+        del filter, timeout_s
+        return RetrievalPlan((PlannedQuery(query, 1, "balanced"),))
+
+    def plan_with_advisory(
+        self, query, *, filter=None, timeout_s=None, allow_remote=False,
+        data_classification="internal",
+    ):
+        self.advisory_calls.append((filter, timeout_s, allow_remote, data_classification))
+        return RetrievalPlan((
+            PlannedQuery(query, 1, "balanced"),
+            PlannedQuery("advisory route", 2, "lexical"),
+        ))
 
 
 class _MappedEmbedder:
@@ -161,6 +185,62 @@ def test_deterministic_planner_keeps_original_and_bounds_additional_queries():
     assert plan.queries[1].profile == "lexical"
     assert "exact_term" in plan.reason_codes
     assert "relationship_intent" in plan.reason_codes
+
+
+def test_advisory_planner_extension_is_dispatched_through_its_protocol():
+    planner = _ProtocolAdvisoryPlanner()
+    assert isinstance(planner, AdvisoryQueryPlanner)
+    store, _embedder, engine, _workspace, _repo = _engine(planner)
+    try:
+        plan, fallback = engine._plan_queries(
+            "original query",
+            SearchFilter(),
+            selected_profile="balanced",
+            planning_mode="auto",
+            jev_assisted=True,
+            allow_remote=True,
+            data_classification="public",
+        )
+
+        assert fallback == ""
+        assert [route.text for route in plan.queries] == [
+            "original query", "advisory route",
+        ]
+        assert len(planner.advisory_calls) == 1
+        _, _, allow_remote, classification = planner.advisory_calls[0]
+        assert allow_remote is True
+        assert classification == "public"
+    finally:
+        store.close()
+
+
+def test_jev_assisted_request_preserves_legacy_query_planner_routes():
+    planner = _StaticPlanner(RetrievalPlan((
+        PlannedQuery("deterministic route one", 3, "lexical"),
+        PlannedQuery("deterministic route two", 2, "balanced"),
+    )))
+    store, _embedder, engine, _workspace, _repo = _engine(planner)
+    try:
+        plan, fallback = engine._plan_queries(
+            "original query",
+            SearchFilter(),
+            selected_profile="balanced",
+            planning_mode="auto",
+            jev_assisted=True,
+            allow_remote=True,
+            data_classification="internal",
+        )
+
+        assert planner.calls == 1
+        assert fallback == "jev_advisory_unavailable"
+        assert [route.text for route in plan.queries] == [
+            "original query", "deterministic route two", "deterministic route one",
+        ]
+        assert _planning_advisory(plan, fallback, jev_assisted=True) == {
+            "status": "fallback", "reason": "advisory_unavailable",
+        }
+    finally:
+        store.close()
 
 
 def test_planning_off_never_invokes_injected_planner_and_preserves_results():
@@ -296,6 +376,17 @@ def test_invalid_planner_priority_falls_back_to_identity(priority):
 
     assert len(result.planning_details["queries"]) == 1
     assert result.planning_details["fallback_reason"] == "invalid_planner_output"
+
+
+def test_planning_advisory_is_appended_after_existing_positional_fields():
+    fields = list(RecallResult.__dataclass_fields__)
+    graph_details = [{"query": "preserve-position"}]
+
+    assert fields.index("graph_traversal_details") == 21
+    assert fields[-1] == "planning_advisory"
+    result = RecallResult(*([None] * 21 + [graph_details]))
+    assert result.graph_traversal_details is graph_details
+    assert result.planning_advisory is None
 
 
 def test_sanitized_planner_priorities_remain_weighted_not_positional():

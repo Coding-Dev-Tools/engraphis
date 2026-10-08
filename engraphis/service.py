@@ -57,7 +57,7 @@ from engraphis.core.vector_repair import index_repair_identity
 from engraphis.core.ids import new_id as make_id
 from engraphis.core.savings import annotate_usage, normalize_release_version
 from engraphis.core.interfaces import (
-    Edge, FactSpec, GraphLayer, MemoryType, Node, Scope, SearchFilter,
+    Edge, FactSpec, GraphLayer, MemoryRecord, MemoryType, Node, Scope, SearchFilter,
     embedder_capabilities, embedding_space_fingerprint,
     vector_index_requires_sync,
     vector_index_shares_store_transaction,
@@ -4134,7 +4134,9 @@ class MemoryService:
                mtype_limits: Optional[dict] = None,
                record_receipt: bool = True,
                _default_k: int = 8,
-               _default_token_budget: Optional[int] = None) -> dict:
+               _default_token_budget: Optional[int] = None,
+               jev_assisted: bool = False, allow_remote: bool = False,
+               data_classification: Optional[str] = None) -> dict:
         """Retrieve the most relevant memories for ``query`` within scope."""
         query = _clean_text(query, field="query", max_chars=MAX_CONTENT_CHARS)
         k_supplied = k is not None
@@ -4193,6 +4195,12 @@ class MemoryService:
             raise ValidationError("response_mode must be one of: compact, full")
         include_untrusted = _strict_bool(include_untrusted, field="include_untrusted")
         planning, mtype_limits = _planning_controls(planning, mtype_limits)
+        jev_assisted = _strict_bool(jev_assisted, field="jev_assisted")
+        allow_remote = _strict_bool(allow_remote, field="allow_remote")
+        if allow_remote and not jev_assisted:
+            raise ValidationError("remote Jev consent requires Jev-assisted planning")
+        if allow_remote and data_classification not in {"public", "internal"}:
+            raise ValidationError("remote Jev planning requires a public or internal classification")
 
         # A configured workspace binding or a bound dashboard user must never do a
         # workspace-less (global) recall — either case represents a tenant boundary.
@@ -4275,19 +4283,15 @@ class MemoryService:
             include_untrusted=include_untrusted,
             planning=planning,
             mtype_limits=mtype_limits,
+            jev_assisted=jev_assisted,
+            allow_remote=allow_remote,
+            data_classification=data_classification,
         )
         memories = []
         for chunk in result.chunks:
             if response_mode == "compact":
                 # Candidate rows omit source text; admitted bindings live in packed_sources.
-                item = {
-                    key: chunk.get(key)
-                    for key in (
-                        "id", "title", "scope", "mtype", "repo_id", "score",
-                        "relative_score", "absolute_support", "arm"
-                    )
-                }
-                item["provenance"] = _compact_provenance(chunk.get("provenance"))
+                item = _compact_retrieval_candidate(chunk)
             else:
                 item = dict(chunk)
                 arm = item.get("arm") or "hybrid"
@@ -4365,6 +4369,7 @@ class MemoryService:
             "effective_k": result.effective_k,
             "context_revision": result.context_revision,
             "planning": result.planning_mode,
+            "planning_advisory": result.planning_advisory,
             "mtype_limits": dict(mtype_limits),
             "response_mode": response_mode,
             "include_untrusted": include_untrusted,
@@ -4613,7 +4618,10 @@ class MemoryService:
                         response_mode: str = "full",
                         diagnostics: bool = False,
                         planning: str = "off",
-                        mtype_limits: Optional[dict] = None) -> dict:
+                        mtype_limits: Optional[dict] = None,
+                        jev_assisted: bool = False, allow_remote: bool = False,
+                        data_classification: Optional[str] = None,
+                        include_retrieval_preview: bool = False) -> dict:
         """Grounded recall: an answer built strictly from retrieved memories, with
         ``[n]`` citations and an explicit abstain when evidence is insufficient
         (``core.grounded``). This path is offline/deterministic (extractive answer) — no
@@ -4658,6 +4666,15 @@ class MemoryService:
         if response_mode not in RESPONSE_MODES:
             raise ValidationError("response_mode must be one of: compact, full")
         planning, mtype_limits = _planning_controls(planning, mtype_limits)
+        jev_assisted = _strict_bool(jev_assisted, field="jev_assisted")
+        allow_remote = _strict_bool(allow_remote, field="allow_remote")
+        include_retrieval_preview = _strict_bool(
+            include_retrieval_preview, field="include_retrieval_preview",
+        )
+        if allow_remote and not jev_assisted:
+            raise ValidationError("remote Jev consent requires Jev-assisted planning")
+        if allow_remote and data_classification not in {"public", "internal"}:
+            raise ValidationError("remote Jev planning requires a public or internal classification")
         if min_support is not None:
             try:
                 min_support = float(min_support)
@@ -4667,6 +4684,19 @@ class MemoryService:
                 raise ValidationError("min_support must be finite")
             min_support = max(0.0, min(1.0, min_support))
         mts = [_enum(m, MemoryType, "mtype") for m in mtypes] if mtypes else None
+
+        def empty_scope_response(reason: str) -> dict:
+            payload = _empty_grounded(
+                query, reason=reason, token_budget=token_budget,
+                response_mode=response_mode, retrieval_profile=retrieval_profile,
+                candidate_depth=candidate_depth, planning=planning,
+                mtype_limits=mtype_limits, valid_at=valid_at, known_at=known_at,
+            )
+            if include_retrieval_preview:
+                payload["retrieval_preview"] = []
+            return _with_retrieval_capabilities(
+                payload, self.engine.embedder, self.store,
+            )
 
         route = self.resolve_workspace(workspace, repo=repo, session_id=session_id)
         workspace, repo = route["workspace"], route["repo"]
@@ -4680,41 +4710,21 @@ class MemoryService:
             ws = self._clean_ws(workspace)
             wid = self._lookup_workspace(ws)
             if wid is None:
-                return _with_retrieval_capabilities(_empty_grounded(
-                    query, reason=f"no workspace named '{ws}' yet",
-                    token_budget=token_budget, response_mode=response_mode,
-                    retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
-                    planning=planning, mtype_limits=mtype_limits,
-                    valid_at=valid_at,
-                    known_at=known_at,
-                ), self.engine.embedder, self.store)
+                return empty_scope_response(f"no workspace named '{ws}' yet")
             if repo:
                 rp = _clean_name(repo, field="repo")
                 rid = self._lookup_repo(wid, rp)
                 if rid is None:
-                    return _with_retrieval_capabilities(_empty_grounded(
-                        query,
-                        reason=f"no repo named '{rp}' in workspace '{ws}' yet",
-                        token_budget=token_budget, response_mode=response_mode,
-                        retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
-                        planning=planning, mtype_limits=mtype_limits,
-                        valid_at=valid_at,
-                        known_at=known_at,
-                    ), self.engine.embedder, self.store)
+                    return empty_scope_response(
+                        f"no repo named '{rp}' in workspace '{ws}' yet",
+                    )
             if session_id:
                 sid = _clean_text(
                     session_id, field="session_id", max_chars=MAX_NAME_CHARS
                 )
                 session = self.store.get_session(sid)
                 if session is None:
-                    return _with_retrieval_capabilities(_empty_grounded(
-                        query, reason=f"no session with id '{sid}'",
-                        token_budget=token_budget, response_mode=response_mode,
-                        retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
-                        planning=planning, mtype_limits=mtype_limits,
-                        valid_at=valid_at,
-                        known_at=known_at,
-                    ), self.engine.embedder, self.store)
+                    return empty_scope_response(f"no session with id '{sid}'")
                 if session["workspace_id"] != wid or (
                         rid is not None and session.get("repo_id") != rid):
                     raise ValidationError("session_id does not belong to that workspace/repo")
@@ -4732,8 +4742,14 @@ class MemoryService:
             diagnostics=bool(diagnostics),
             planning=planning,
             mtype_limits=mtype_limits,
+            jev_assisted=jev_assisted,
+            allow_remote=allow_remote,
+            data_classification=data_classification,
+            **({"include_retrieval_preview": True} if include_retrieval_preview else {}),
         )
         out = {"query": query, **ans.to_dict()}
+        if include_retrieval_preview and "retrieval_preview" not in out:
+            out["retrieval_preview"] = []
         out["response_mode"] = response_mode
         out["mtype_limits"] = dict(mtype_limits)
         out["usage"] = _annotate_context_usage(
@@ -4748,6 +4764,11 @@ class MemoryService:
                 item["provenance"] = _compact_provenance(item.get("provenance"))
                 compact_citations.append(item)
             out["citations"] = compact_citations
+            if include_retrieval_preview:
+                out["retrieval_preview"] = [
+                    _compact_retrieval_candidate(candidate)
+                    for candidate in out.get("retrieval_preview") or []
+                ]
         out["receipt"] = self._record_receipt(
             "grounded_recall", response=out, workspace_id=wid or "", repo_id=rid or "",
             actor="agent",
@@ -7544,6 +7565,34 @@ class MemoryService:
                         "can_revise": self.engine.can_revise_memory(record.id)} for record in page],
                     "count": len(page), "total_count": total, "next_cursor": next_cursor,
                     "valid_at": anchors[0], "known_at": anchors[1]}
+
+    def read_memory_for_review(
+        self, memory_id: str, *, workspace: str, repo: Optional[str] = None,
+    ) -> MemoryRecord:
+        """Read one selected advisory record, including authorized project ancestors.
+
+        Match the browse view's current bi-temporal and ancestor visibility rather
+        than an inspector's historical bare-ID access. Without a session context,
+        session-private records are excluded. No links, audit, or lineage are read.
+        """
+        from engraphis.core.store import _row_to_record
+
+        mid = _clean_text(memory_id, field="memory_id", max_chars=MAX_NAME_CHARS)
+        wid, rid = self._require_scope(workspace, repo)
+        now = time.time()
+        where, params = self.store._where(SearchFilter(
+            workspace_id=wid, repo_id=rid, include_ancestors=True,
+            valid_at=now, known_at=now,
+        ), include_invalid=False)
+        row = self.store.conn.execute(
+            "SELECT * FROM memories WHERE id=? AND " + " AND ".join(where),
+            [mid, *params],
+        ).fetchone()
+        if row is None:
+            raise ValidationError(f"memory '{mid}' is not visible in that workspace/repo")
+        record = _row_to_record(row)
+        self._authorize_memory_session(record)
+        return record
 
     def inspect(self, memory_id: str, *, workspace: str, repo: Optional[str] = None) -> dict:
         """Everything the inspector shows for one memory: the record, its links, its
@@ -12819,6 +12868,21 @@ def _compact_provenance(value: Any) -> dict:
         return {}
     keys = ("source", "source_kind", "trusted", "kind", "origin")
     return {key: value[key] for key in keys if key in value}
+
+
+def _compact_retrieval_candidate(candidate: Any) -> dict:
+    """Apply the compact recall allowlist to every candidate projection."""
+    if not isinstance(candidate, dict):
+        return {}
+    item = {
+        key: candidate.get(key)
+        for key in (
+            "id", "title", "scope", "mtype", "repo_id", "score",
+            "relative_score", "absolute_support", "arm",
+        )
+    }
+    item["provenance"] = _compact_provenance(candidate.get("provenance"))
+    return item
 
 
 def _planning_controls(planning: str, mtype_limits: Optional[dict]) -> tuple[str, dict]:

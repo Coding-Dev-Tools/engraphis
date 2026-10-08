@@ -6,12 +6,15 @@ import json
 import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 
 from engraphis.core.schema import SCHEMA_VERSION
 
 
 ROOT = Path(__file__).resolve().parents[1]
+README_BENCHMARK_PIN = "f964429b35877986bd0626b690469f59f41061de"
+README_HOSTED_PLANS_PIN = "94b8d244bfef890493ac7858faf03203f64547f1"
 
 
 def _read(path: str) -> str:
@@ -19,33 +22,45 @@ def _read(path: str) -> str:
 
 
 
-def test_readme_long_description_uses_no_repository_relative_targets() -> None:
+def test_readme_targets_resolve_in_the_repository() -> None:
     readme = _read("README.md")
     destinations = re.findall(
         r"!?\[[^\]]*\]\(([^) ]+)|(?:href|src)=\"([^\"]+)\"",
         readme,
     )
     flattened = [markdown or html for markdown, html in destinations]
-    relative = [
-        destination
-        for destination in flattened
-        if not destination.startswith(("#", "https://", "http://"))
-    ]
-    assert not relative
-
     image_targets = [
         destination
         for destination in flattened
         if destination.endswith((".png", ".svg"))
     ]
     assert image_targets
-    assert all(
-        target.startswith(
-            "https://raw.githubusercontent.com/Coding-Dev-Tools/engraphis/main/"
-        )
-        or target.startswith("https://img.shields.io/")
-        for target in image_targets
-    )
+    for destination in flattened:
+        if destination.startswith(("#", "mailto:")):
+            continue
+        parsed = urlparse(destination)
+        if parsed.scheme in {"http", "https"}:
+            if parsed.netloc == "github.com":
+                prefixes = (
+                    "/Coding-Dev-Tools/engraphis/blob/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/",
+                    f"/Coding-Dev-Tools/engraphis/blob/{README_BENCHMARK_PIN}/",
+                    f"/Coding-Dev-Tools/engraphis/blob/{README_HOSTED_PLANS_PIN}/",
+                )
+            elif parsed.netloc == "raw.githubusercontent.com":
+                prefixes = (
+                    "/Coding-Dev-Tools/engraphis/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/",
+                    f"/Coding-Dev-Tools/engraphis/{README_BENCHMARK_PIN}/",
+                )
+            else:
+                prefixes = ()
+            for prefix in prefixes:
+                if parsed.path.startswith(prefix):
+                    target = ROOT / unquote(parsed.path[len(prefix) :])
+                    assert target.is_file(), f"README target does not exist: {destination}"
+                    break
+            continue
+        target = destination.split("#", 1)[0]
+        assert (ROOT / target).is_file(), f"README target does not exist: {destination}"
 
 def test_canonical_offline_gate_tracks_ci() -> None:
     agents = _read("AGENTS.md")
@@ -98,16 +113,25 @@ def test_core_backend_imports_stay_behind_outer_composition_root() -> None:
     assert "configure_engine_factory(_default_memory_engine_factory)" in package
     assert "create_memory_engine" in package
 
-    for document in (_read("AGENTS.md"), _read("CLAUDE.md"), _read("README.md")):
+    for document in (_read("AGENTS.md"), _read("CLAUDE.md")):
         normalized = " ".join(document.split())
         assert "engraphis/factory.py" in normalized
         assert "outer composition root" in normalized
         assert "core/engine.py" in normalized
+    readme = _read("README.md")
+    assert "from engraphis.service import MemoryService" in readme
+    assert "Configuration reference" in readme
+    assert (
+        f"[Benchmark methodology](https://github.com/Coding-Dev-Tools/engraphis/blob/{README_BENCHMARK_PIN}/"
+        "BENCHMARKS.md)" in readme
+    )
 
 
 def test_benchmark_text_alternatives_match_registered_fixture_boundary() -> None:
     """The current image and its alt text expose only current registered boundaries."""
-    registry_path = ROOT / "docs/benchmark-evidence/offline-fixtures-v129.json"
+    from tests.test_benchmark_evidence import PUBLIC_OFFLINE_ARTIFACT
+
+    registry_path = ROOT / "docs/benchmark-evidence" / PUBLIC_OFFLINE_ARTIFACT
     registry_bytes = registry_path.read_bytes()
     registry = json.loads(registry_bytes)
     measurements = {run["id"]: run["result"] for run in registry["runs"]}
@@ -118,7 +142,8 @@ def test_benchmark_text_alternatives_match_registered_fixture_boundary() -> None
     namespace = {"svg": "http://www.w3.org/2000/svg"}
     visible_labels = {"".join(node.itertext()).strip()
                       for node in svg_root.findall(".//svg:text", namespace)}
-    assert hashlib.sha256(registry_bytes).hexdigest()[:12] in visible_labels
+    prefix = hashlib.sha256(registry_bytes).hexdigest()[:12]
+    assert any(prefix in label for label in visible_labels)
     description_node = svg_root.find("svg:desc", namespace)
     assert description_node is not None
     description = " ".join("".join(description_node.itertext()).lower().split())
@@ -130,28 +155,47 @@ def test_benchmark_text_alternatives_match_registered_fixture_boundary() -> None
     assert image is not None
     alternative = " ".join(image.group(1).lower().split())
 
-    assert "registered deterministic fixtures" in alternative
-    assert "structure-aware chunks reduce retrieved context" in alternative
-    assert "retrieved-candidate quality is labeled separately" in alternative
-    assert "packed-context quality" in alternative
-    assert "both measured in the selected report" in alternative
-    assert "actual mcp transport and provider billing are not measured" in alternative
-    assert "740.3 to 214.3 tokens" in alternative
-    assert "162.2 to 42.4 tokens" in alternative
-    assert (
-        f"{payload['compact_serialized_payload_tokens']:,} rather than "
-        f"{payload['full_serialized_payload_tokens']:,} tokens"
-    ) in alternative
+    chunking = measurements["offline-chunking"]
+    grounded = measurements["offline-grounded"]
+    assert "three registered offline fixtures" in alternative
+    assert f"{chunking['whole']['mean_context_tokens']:.1f} to {chunking['chunked']['mean_context_tokens']:.1f} tokens" in alternative
+    assert f"{payload['full_serialized_payload_tokens']:,} to {payload['compact_serialized_payload_tokens']:,} tokens" in alternative
+    assert "candidate and packed retrieval quality" in alternative
+    assert f"{grounded['grounded']}/{grounded['answerable']} answerable queries grounded" in alternative
+    assert f"{grounded['abstained']}/{grounded['off_topic']} abstention queries rejected" in alternative
+    assert "mcp transport and provider billing were not measured" in alternative
+    assert hashlib.sha256(registry_bytes).hexdigest()[:12] in alternative
+
+    benchmark_image = re.search(
+        r'<img[^>]+context-efficiency\.svg[^>]*>', readme, flags=re.IGNORECASE,
+    )
+    assert benchmark_image is not None
+    benchmark_paragraph_end = readme.find("</p>", benchmark_image.end())
+    assert benchmark_paragraph_end >= 0
+    caption = re.search(
+        r"<sup>(.*?)</sup>", readme[benchmark_image.end():benchmark_paragraph_end],
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    assert caption is not None
+    normalized_caption = " ".join(caption.group(1).lower().split())
+    for evidence in (
+        "three offline fixtures",
+        "context reduction",
+        "candidate and packed retrieval quality",
+        "grounded behavior",
+        "artifact checksum",
+    ):
+        assert evidence in normalized_caption
 
     for evidence in (
-        "artifact-driven local deterministic benchmark report",
-        "structure-aware chunks report 740.3 to 214.3 retrieved tokens per question",
-        "retrieved-candidate quality and packed-context quality are separate views",
-        f"{payload['full_serialized_payload_tokens']:,} full-proxy versus "
-        f"{payload['compact_serialized_payload_tokens']:,} compact-proxy tokens",
-        "not an mcp transport measurement",
-        "does not measure provider billing",
-        "1,500-token cap",
+        "artifact-driven offline benchmark report",
+        "structure-aware chunking",
+        "retrieved candidate quality",
+        "packed context quality",
+        f"{payload['full_serialized_payload_tokens']:,} full",
+        f"{payload['compact_serialized_payload_tokens']:,} compact",
+        "mcp transport was not measured",
+        "provider billing was not measured",
     ):
         assert evidence in description
 
@@ -208,14 +252,13 @@ def test_official_longmemeval_runbook_tracks_attested_evidence_contract() -> Non
 
 
 def test_scope_and_event_guidance_match_fail_closed_runtime_contract() -> None:
-    readme = _read("README.md")
     skill = _read("skills/engraphis-memory/SKILL.md")
     scoping = _read("skills/engraphis-memory/references/SCOPING.md")
     conventions = _read("skills/engraphis-memory/references/CONVENTIONS.md")
     tools = _read("skills/engraphis-memory/references/TOOLS.md")
     kilo = _read("docs/KILO_CODE_INTEGRATION.md")
 
-    for document in (readme, skill, scoping, tools, kilo):
+    for document in (skill, scoping, tools, kilo):
         normalized = " ".join(document.split())
         assert "reserved and rejected" in normalized
         assert "owner identity" in normalized
@@ -232,13 +275,18 @@ def test_scope_and_event_guidance_match_fail_closed_runtime_contract() -> None:
 
 def test_configuration_and_recovery_guidance_matches_public_contracts() -> None:
     readme = _read("README.md")
+    configuration = _read("docs/CONFIGURATION.md")
     security = _read("SECURITY.md")
     connect = _read("docs/AGENT_CONNECT.md")
     providers = _read("docs/LLM_PROVIDERS.md")
     recovery = _read("docs/RECALL_RECOVERY.md")
     sync = _read("docs/SYNC.md")
 
-    for document in (readme, security, connect, providers, sync):
+    assert (
+        "[Configuration reference](https://github.com/Coding-Dev-Tools/engraphis/blob/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/"
+        "docs/CONFIGURATION.md)" in readme
+    )
+    for document in (configuration, security, connect, providers, sync):
         normalized = " ".join(document.split())
         assert "~/.engraphis/config.env" in normalized
         assert "ENGRAPHIS_ENV_FILE" in normalized
@@ -266,10 +314,11 @@ def test_schema_and_erasure_docs_match_live_export_policy() -> None:
 
     assert f"SCHEMA_VERSION = {SCHEMA_VERSION}" in schema
     assert agents.count(f"`SCHEMA_VERSION = {SCHEMA_VERSION}`") == 2
-    assert f"schema {SCHEMA_VERSION}" in readme
+    assert "Security policy" in readme
+    assert "Cloud Sync" in readme
     assert f"schema {SCHEMA_VERSION}" in changelog
 
-    for document in (agents, readme, changelog, sync, erasure):
+    for document in (agents, changelog, sync, erasure):
         normalized = " ".join(document.split())
         assert "never_export" in normalized
         assert "remote_erasure" in normalized
@@ -287,10 +336,9 @@ def test_document_import_docs_describe_the_source_neutral_contract() -> None:
     guide = _read("docs/DOCUMENT_IMPORT.md")
     obsidian = _read("docs/OBSIDIAN_IMPORT.md")
 
-    for document in (readme, guide):
-        assert "engraphis import documents" in document
-        assert "--dry-run" in document
-        assert "--yes" in document
+    assert "DOCUMENT_IMPORT.md" in readme
+    for term in ("engraphis import documents", "--dry-run", "--yes"):
+        assert term in guide
     for format_name in (
         "Markdown", "reStructuredText", "HTML", "JSON", "CSV", "DOCX", "ODT",
         "RTF", "XLSX", "ODS", "PPTX", "ODP", "EPUB", "Source code",
@@ -313,6 +361,58 @@ def test_consolidation_docs_expose_only_live_public_options() -> None:
         assert "supersede_sources" not in document
         assert "supersede-sources" not in document
 
-    assert "source episodes remain live" in readme
+    assert (
+        "https://github.com/Coding-Dev-Tools/engraphis/blob/94b8d244bfef890493ac7858faf03203f64547f1/"
+        "docs/HOSTED_PLANS.md#included-system-1-decision-engine-jev"
+    ) in readme
+    hosted_plan = " ".join(_read("docs/HOSTED_PLANS.md").split())
+    configuration = " ".join(_read("docs/CONFIGURATION.md").split())
+    mcp_tools = " ".join(_read("docs/MCP_TOOLS.md").split())
+    release = " ".join(_read("docs/RELEASE_1_7_9.md").split())
     normalized_tools = " ".join(tools.split())
+    public_documents = (readme, hosted_plan, configuration, mcp_tools, release, normalized_tools)
+    public_copy = " ".join(" ".join(public_documents).split())
+    for document in public_documents:
+        normalized_document = " ".join(document.split()).lower()
+        for limit in (
+            "100 evaluated questions per rolling hour",
+            "1,000 per rolling five hours",
+            "2,000 per rolling 24 hours",
+        ):
+            assert limit in normalized_document
+        for invariant in (
+            "not pooled across a team",
+            "not monthly",
+            "if a batch is evaluated, every question counts",
+            "admitted attempts that fail or are interrupted remain counted",
+            "the existing production fleet guard remains 100 questions per day",
+            "may pause or reject requests earlier",
+        ):
+            assert invariant in normalized_document
+        for obsolete in (
+            "team usage shares one pool",
+            "team questions share one organization pool",
+            "fixed quotas are not published",
+            "no fixed quota is published",
+            "finite rolling allowance",
+            "monthly allowance",
+        ):
+            assert obsolete not in normalized_document
+    for entitlement in (
+        "every legitimate pro user",
+        "eligible team named seat",
+        "paid viewers",
+        "trial, or test entitlement",
+        "no additional customer charge",
+        "without a personal provider key",
+    ):
+        assert entitlement in public_copy.lower()
+    assert "managed jev is currently" in public_copy.lower()
+    assert "Recall route selection is experimental and BYOK-only" in readme
+    assert "no retrieval-quality improvement is claimed" in readme
+    assert "Managed Jev accepts only the fixed command-review, completion-review" in hosted_plan
+    assert "experimental BYOK planner can reorder bounded deterministic query routes" in hosted_plan
+    assert "no retrieval-quality improvement" in hosted_plan
+    assert "Managed `custom` questions" in mcp_tools
+    assert 'planning (str, "off")' in normalized_tools
     assert "`profiles (bool, false)`; `structured (bool, false)`." in normalized_tools
