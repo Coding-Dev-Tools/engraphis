@@ -84,6 +84,20 @@ service-enforced, not client configuration overrides. Selecting a backend does n
 enable the service or satisfy release, provider-terms, capacity, or quality gates. See
 [hosted plans](HOSTED_PLANS.md#included-system-1-decision-engine-jev).
 
+The four managed workflows require a command, a pair of facts, query/evidence, or
+goal/output context and their fixed question schemas. Arbitrary `custom` and
+`query_planning` payloads are rejected before credential refresh or network requests.
+Experimental recall route planning requires explicit BYOK; managed failure never
+silently selects a personal key. Remote consent and `public` or `internal`
+classification remain mandatory, and `offline_mode=true` prevents remote requests.
+Viewers can use direct Classic advisory decisions; generic Smart stateful execution
+still requires admin and the private Team tool catalog is unchanged.
+
+Managed transport callers can supply `request_key` for explicit retry deduplication. A
+duplicate admitted key returns 409 without an additional provider call or usage
+increment; there is no stored answer replay or automatic retry. Admitted errors remain
+counted. This parameter is not an environment setting or an MCP/dashboard field.
+
 The optional cross-encoder reranker is model- and hardware-dependent. Treat its quality and
 latency as deployment-specific until a versioned model identity, exact configuration, and
 reproducible evaluation artifact are available for the comparison being reported.

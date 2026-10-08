@@ -2091,6 +2091,7 @@ def _planning_advisory(
         "jev_provider_fallback": "provider_fallback",
         "jev_remote_unavailable": "remote_unavailable",
         "jev_allowance_exhausted": "allowance_exhausted",
+        "jev_provider_protection_limit": "provider_protection_limit",
         "jev_remote_timeout": "remote_timeout",
         "jev_session_changed": "session_changed",
         "jev_managed_operation_unsupported": "managed_operation_unsupported",

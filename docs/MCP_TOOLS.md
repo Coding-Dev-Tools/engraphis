@@ -48,7 +48,8 @@ namesakes; advanced controls are discoverable rather than routine:
 `full`. It preserves the same selected text and whitespace; it does not apply an
 additional summary or promise extra token savings. Source IDs remain in `sources`.
 
-Jev-assisted recall planning is opt-in. On the Smart context tool, set `allow_remote=true` and
+Jev-assisted recall planning requires explicit BYOK and is opt-in. On the Smart context tool,
+set `allow_remote=true` and
 `data_classification="public"` or `"internal"`; that call both enables bounded route selection
 and gives per-call consent for remote processing. The default stays deterministic and local.
 Classic recall tools additionally require `planning="auto"` and `jev_assisted=true`.
@@ -56,6 +57,9 @@ The provider receives the query and bounded local routes, not recalled memory bo
 change scope, time, type, or trust filters; uncertainty and failures retain deterministic route
 order and appear in `planning_advisory`. Leaving the Jev controls at their defaults keeps local
 deterministic behavior.
+Managed access does not admit `query_planning`: it fails closed before credential refresh or
+network requests, retaining deterministic route order with a visible fallback. Neither `managed`
+nor `auto` silently switches to BYOK.
 
 
 No user profile choice or tool switching is required. The dashboard `/mcp` endpoint and
@@ -214,9 +218,10 @@ Decision inputs must be nonblank for the selected kind: `guard_command` needs `s
 and `query`; `verify_completion` needs `state` and `goal`, with optional `recent_actions`.
 `custom` accepts either `state` or `question`. Missing required input returns `invalid_request`
 before backend lookup, with unknown/null conclusions and no remote allowance consumed.
-Command decisions always return `allow_auto=false` and `escalate_to_user=true`, including
-successful remote answers. Provider probability and category are advice, not shell authorization.
-
+Managed access admits only the four concrete workflows above with their fixed questions and
+required context. A purpose label cannot authorize arbitrary question schemas. Managed `custom`
+requests return `managed_operation_unsupported` without a credential refresh or network request;
+custom remote questions require explicit BYOK. Local custom fallback remains available.
 Managed Jev is currently `not_yet_available` pending release acceptance and
 service-capacity qualification; client configuration does not enable it. After
 enablement, every legitimate Pro user and each eligible Team named seat, including paid
@@ -234,12 +239,25 @@ questions leave each rolling window.
 The existing production fleet guard remains 100 questions per day across the service. It
 conflicts with the per-person rolling caps and may pause or reject requests earlier, so
 resolve capacity and the fleet guard before launch. No latency, accuracy, or cost-saving
-guarantee is established by configuration or a successful health check. Managed access
-admits only `guard_command`, `classify_contradiction`, `verify_support`, and
-`verify_completion`, with fixed question schemas and required context. Managed `custom`
-questions and `query_planning` fail closed before credential refresh or network
+guarantee is established by configuration or a successful health check.
+
+Managed access admits only `guard_command`, `classify_contradiction`, `verify_support`,
+and `verify_completion`, with fixed question schemas and required context. Managed
+`custom` questions and `query_planning` fail closed before credential refresh or network
 requests; explicit BYOK and local custom heuristics remain separate choices.
 
+Admitted errors remain counted. Managed transport callers can preserve an explicit `request_key`
+for a retry; duplicate admitted keys return 409 without a second provider call or usage increment.
+No answer is stored for replay, and no automatic retry occurs. The MCP tool does not expose a
+`request_key` parameter.
+
+The direct Classic `engraphis_decide` tool permits authorized viewers and remains advisory.
+It does not grant memory writes or administration. Smart discovery still classifies the action
+as stateful because it can consume allowance, so `engraphis_execute_action` retains its admin
+requirement. The private hosted Team tool catalog is unchanged. Managed service release
+acceptance, service capacity, and live quality evaluation remain required.
+Command decisions always return `allow_auto=false` and `escalate_to_user=true`, including
+successful remote answers. Provider probability and category are advice, not shell authorization.
 Local command labels are coarse: only one simple inspection command, without chaining, pipes,
 substitution or file redirection, is `read_only`. Recognized destructive, history-rewriting,
 exfiltrating or credential-file commands are `destructive_or_leak`; anything else, including a

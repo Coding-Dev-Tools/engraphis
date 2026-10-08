@@ -62,6 +62,7 @@ def wire_client(request, monkeypatch):
     monkeypatch.setattr(cloud_session, "access_for_workspace", access)
     monkeypatch.setattr(jev_transport, "_post_json", post)
     service = MemoryService.create(":memory:")
+    calls["service"] = service
     monkeypatch.setattr(mcp_server, "_service", service)
     try:
         yield calls
@@ -110,6 +111,7 @@ def test_custom_question_only_uses_real_client_validation(
     if wire_client["backend"] == "managed":
         assert result["is_fallback"] is True
         assert result["fallback_reason"] == "managed_operation_unsupported"
+        assert result["advisory_only"] is True
         assert wire_client["http"] == wire_client["refresh"] == []
         return
     assert result["is_fallback"] is False
@@ -184,8 +186,7 @@ def test_blank_optional_question_uses_default_with_meaningful_state(
     assert len(wire_client["http"]) == 1
     payload = wire_client["http"][0]
     assert payload["state"] == arguments["state"]
-    prompt = (payload["questions"][0]["prompt"] if wire_client["backend"] == "managed"
-              else payload["questions"]["custom"]["instructions"])
+    prompt = payload["questions"]["custom"]["instructions"]
     assert prompt == "Evaluate state"
 
 
@@ -316,3 +317,130 @@ def test_sensitive_raw_mcp_fields_never_refresh_or_send(
     assert wire_client["http"] == wire_client["refresh"] == []
     assert "DB_PASSWORD" not in json.dumps(result) + caplog.text
     assert "synthetic" not in json.dumps(result) + caplog.text
+
+
+def _memory_snapshot(service):
+    """Capture contents, validity, reinforcement and graph state, excluding receipts."""
+    return {
+        table: tuple(tuple(row) for row in service.store.conn.execute(
+            f"SELECT * FROM {table} ORDER BY rowid",
+        ))
+        for table in ("memories", "edges", "mem_links")
+    }
+
+
+@pytest.mark.parametrize("kind,question_count", [
+    ("guard_command", 2),
+    ("classify_contradiction", 1),
+    ("verify_support", 1),
+    ("verify_completion", 1),
+])
+def test_scoped_memory_advisories_keep_offline_baseline_and_minimal_wire_calls(
+    wire_client, dispatch, kind, question_count,
+):
+    """Check useful integration behavior; synthetic replies do not measure model quality."""
+    from engraphis.core.interfaces import Scope
+
+    service = wire_client["service"]
+    workspace_id = service.store.get_or_create_workspace("jev-fixture")
+    memory_id = service.engine.remember(
+        "Application database is SQLite.", workspace_id=workspace_id,
+        scope=Scope.WORKSPACE, title="Application database",
+    )
+    service.engine.remember(
+        "UNSELECTED-MEMORY-FIXTURE: release owner is Morgan.",
+        workspace_id=workspace_id, scope=Scope.WORKSPACE, title="Release owner",
+    )
+    evidence = service.store.get_memory(memory_id).content
+    arguments = {
+        "guard_command": {"state": "git status"},
+        "classify_contradiction": {
+            "state": "Application database is now Postgres.", "existing_content": evidence,
+        },
+        "verify_support": {"state": evidence, "query": "Which application database?"},
+        "verify_completion": {
+            "state": "The fixture completed with zero failures.",
+            "goal": "Run the fixture", "recent_actions": "Fixture passed",
+        },
+    }[kind]
+    before = _memory_snapshot(service)
+
+    baseline = dispatch({"kind": kind, **arguments})
+    assert baseline["decision_status"] == "local_fallback"
+    assert baseline["fallback_reason"] == "remote_not_authorized"
+    assert baseline["confidence"] is None
+    assert baseline["confidence_source"] == "unmeasured_heuristic"
+    assert baseline["advisory_only"] is True
+    assert wire_client["refresh"] == wire_client["http"] == []
+    assert _memory_snapshot(service) == before
+
+    decision = dispatch({"kind": kind, **arguments, "allow_remote": True,
+                         "data_classification": "public"})
+    assert decision["decision_status"] == "decision"
+    assert decision["advisory_only"] is True
+    assert len(wire_client["http"]) == 1
+    assert len(wire_client["refresh"]) == (wire_client["backend"] == "managed")
+    payload = wire_client["http"][0]
+    assert len(payload["questions"]) == question_count
+    assert "UNSELECTED-MEMORY-FIXTURE" not in payload["state"]
+    assert _memory_snapshot(service) == before
+    if kind == "guard_command":
+        assert decision["allow_auto"] is False
+        assert decision["escalate_to_user"] is True
+
+
+def test_command_advice_never_executes_even_with_synthetic_positive_answer(
+    wire_client, dispatch, tmp_path, monkeypatch,
+):
+    import subprocess
+
+    marker = tmp_path / "command-must-not-execute.txt"
+    command = ('python -c "from pathlib import Path; '
+               f"Path({str(marker.as_posix())!r}).write_text('executed')\"")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("an advisory decision attempted shell execution")
+
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    result = dispatch({"kind": "guard_command", "state": command, "allow_remote": True})
+    assert result["is_fallback"] is False
+    assert result["safety_probability"] == 0.9
+    assert result["advisory_only"] is True
+    assert result["allow_auto"] is False and result["escalate_to_user"] is True
+    assert len(wire_client["http"]) == 1
+    assert not marker.exists()
+
+
+def test_managed_query_route_choice_preserves_deterministic_plan_without_network(wire_client):
+    from engraphis.backends.jev_decision import JevDecisionBackend
+    from engraphis.backends.jev_query_planner import JevAssistedQueryPlanner
+    from engraphis.core.interfaces import PlannedQuery, RetrievalPlan
+
+    class FixturePlanner:
+        def plan(self, query, **kwargs):
+            return RetrievalPlan((
+                PlannedQuery(query, 1, "balanced"),
+                PlannedQuery("CACHE.get()", 2, "lexical"),
+                PlannedQuery("cache restart path", 3, "graph"),
+            ))
+
+    client = (jev_transport.EngraphisCloudDecisionClient()
+              if wire_client["backend"] == "managed"
+              else jev_transport.TypeSafeDecisionClient())
+    planner = JevAssistedQueryPlanner(
+        JevDecisionBackend(client=client, model=jev_transport.MODEL), FixturePlanner(),
+    )
+    original = "  Why does CACHE.get() fail after restart?  "
+    baseline = planner.plan_with_jev(original, allow_remote=False)
+    assert baseline.reason_codes[-1] == "jev_remote_consent_required"
+    assert wire_client["refresh"] == wire_client["http"] == []
+    result = planner.plan_with_jev(original, allow_remote=True, data_classification="public")
+    assert result.queries[0].text == original
+    if wire_client["backend"] == "managed":
+        assert result.reason_codes[-1] == "jev_managed_operation_unsupported"
+        assert result.queries == baseline.queries
+        assert wire_client["refresh"] == wire_client["http"] == []
+    else:
+        assert result.reason_codes[-1] == "jev_route_selected"
+        assert len(wire_client["http"]) == 1
+        assert wire_client["refresh"] == []
