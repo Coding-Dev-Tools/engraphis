@@ -102,7 +102,7 @@ def test_public_pro_ctas_use_documentation_attribution():
     hosted_plans = (ROOT / "docs" / "HOSTED_PLANS.md").read_text(encoding="utf-8")
 
     assert (
-        "[Hosted plans and licensing](https://github.com/Coding-Dev-Tools/engraphis/blob/ff1abc928b27dbde91cf408aa0613a7fd5457a67/"
+        "[Hosted plans and licensing](https://github.com/Coding-Dev-Tools/engraphis/blob/522def372c45a26d46bc7a05829964ae0240f3a9/"
         "docs/HOSTED_PLANS.md)" in readme
     )
     assert "utm_medium=docs" in hosted_plans
