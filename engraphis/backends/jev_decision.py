@@ -259,6 +259,8 @@ class JevDecisionBackend:
                     return None, "fallback", "deadline_exhausted"
                 options["timeout_s"] = remaining
             response = evaluate(state, [question], **options)
+            if call_deadline is not None and time.monotonic() >= call_deadline:
+                return None, "fallback", "deadline_exhausted"
             if (response is None or getattr(response, "is_fallback", None) is not False
                     or not callable(getattr(response, "get_choice", None))
                     or not callable(getattr(response, "get_noul", None))):

@@ -1251,12 +1251,8 @@ jobs:
           notes_args=()
           latest_args=(--latest)
           promote_latest=true
-          if [ "$WAIVE_QUALIFICATION" = "true" ]; then
-            # A retained older repair must not displace a newer public Latest.
-            # The candidate comparison uses the existing public release history;
-            # failed lookups or unknown tag formats stop before any release write.
-            current_latest="$(gh release view --repo "$GH_REPO" --json tagName --jq .tagName)"
-            promote_latest="$(python - "$RELEASE_TAG" "$current_latest" <<'PY'
+          can_promote_latest() {
+            python - "$RELEASE_TAG" "$1" <<'PY'
           import re
           import sys
 
@@ -1267,7 +1263,13 @@ jobs:
 
           print("true" if version(sys.argv[1]) >= version(sys.argv[2]) else "false")
           PY
-          )"
+          }
+          if [ "$WAIVE_QUALIFICATION" = "true" ]; then
+            # A retained older repair must not displace a newer public Latest.
+            # The candidate comparison uses the existing public release history;
+            # failed lookups or unknown tag formats stop before any release write.
+            current_latest="$(gh release view --repo "$GH_REPO" --json tagName --jq .tagName)"
+            promote_latest="$(can_promote_latest "$current_latest")"
             latest_args=(--latest=false)
             if [ "$promote_latest" = "true" ]; then latest_args=(--latest); fi
             {
@@ -1293,7 +1295,14 @@ jobs:
               --repo "$GH_REPO" \
               --clobber
             if [ "$WAIVE_QUALIFICATION" = "true" ] && [ "$promote_latest" = "true" ]; then
-              gh release edit "$RELEASE_TAG" --repo "$GH_REPO" --latest
+              # Another publisher may have advanced Latest during asset upload.
+              # Recheck immediately before promotion; this narrows the race but
+              # does not provide an atomic lease across external publishers.
+              current_latest="$(gh release view --repo "$GH_REPO" --json tagName --jq .tagName)"
+              promote_latest="$(can_promote_latest "$current_latest")"
+              if [ "$promote_latest" = "true" ]; then
+                gh release edit "$RELEASE_TAG" --repo "$GH_REPO" --latest
+              fi
             fi
           else
             gh release create "$RELEASE_TAG" verified-dist/* release-evidence/* \

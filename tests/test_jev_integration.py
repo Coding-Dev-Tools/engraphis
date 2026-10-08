@@ -121,6 +121,61 @@ def _backend(client):
     return JevDecisionBackend(client=client, model="test-model-1.0")
 
 
+@pytest.mark.parametrize("late", [False, True])
+def test_direct_advisory_rejects_decisions_returned_after_its_deadline(monkeypatch, late):
+    clock = [10.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+
+    class ClockedClient(_DecisionClient):
+        def evaluate(self, *args, **kwargs):
+            clock[0] += 0.101 if late else 0.050
+            return super().evaluate(*args, **kwargs)
+
+    client = ClockedClient()
+    planner = JevAssistedQueryPlanner(_backend(client), _FixedDeterministicPlanner())
+    plan = planner.plan_with_advisory(
+        "query", timeout_s=0.1, allow_remote=True, data_classification="public",
+    )
+    alternatives = ["CACHE.get()", "cache restart path"]
+    if not late:
+        alternatives.reverse()
+    assert [route.text for route in plan.queries] == ["query", *alternatives]
+    assert plan.reason_codes[-1] == (
+        "jev_deadline_exhausted" if late else "jev_route_selected"
+    )
+    assert len(client.calls) == 1
+    assert client.calls[0]["timeout_s"] == pytest.approx(0.1)
+
+
+@pytest.mark.parametrize("selected", ["managed", "auto"])
+@pytest.mark.parametrize("injected_client", [False, True])
+def test_dashboard_preserves_injected_or_offline_backend(
+    monkeypatch, selected, injected_client,
+):
+    from engraphis.backends import jev_transport
+    from engraphis.routes import v2_api
+
+    class UninspectedClient(_DecisionClient):
+        @property
+        def is_configured(self):
+            pytest.fail("resolver must not inspect configuration before consent")
+
+    backend = JevDecisionBackend(
+        client=UninspectedClient() if injected_client else None,
+        model="test-model-1.0", offline_mode=not injected_client,
+    )
+    current_service = SimpleNamespace(engine=SimpleNamespace(
+        recall_engine=SimpleNamespace(query_planner=SimpleNamespace(decision_backend=backend)),
+    ))
+    monkeypatch.setattr(v2_api, "service", lambda: current_service)
+    monkeypatch.setattr(settings, "decision_backend", selected)
+    monkeypatch.setattr(
+        jev_transport, "EngraphisCloudDecisionClient",
+        lambda: pytest.fail("an explicit backend must be preserved"),
+    )
+    assert v2_api._dashboard_jev_backend() is backend
+
+
 def test_remote_planner_deadline_cannot_disable_local_routes():
     import threading
     from concurrent.futures import ThreadPoolExecutor

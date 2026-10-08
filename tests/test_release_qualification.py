@@ -413,6 +413,67 @@ fi
 
 
 @pytest.mark.skipif(os.name == "nt", reason="release workflow executes in Linux bash")
+@pytest.mark.parametrize("post_upload_latest,lookup_fails,expected", [
+    ("v1.8.0", False, False), ("v1.7.9", False, True),
+    ("unknown", False, None), ("v1.7.8", True, None),
+])
+def test_waiver_repair_rechecks_latest_after_upload(
+    tmp_path, post_upload_latest, lookup_fails, expected,
+):
+    yaml = pytest.importorskip("yaml")
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash is unavailable")
+    root = Path(__file__).resolve().parents[1]
+    workflow = yaml.safe_load((root / ".github/workflows/release.yml").read_text("utf-8"))
+    repair = next(step for step in workflow["jobs"]["github-release-repair"]["steps"]
+                  if step.get("name") == "Repair GitHub Release")
+    executable = tmp_path / "gh"
+    executable.write_text("""#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> "$GH_CALLS"
+if [ "$2" = view ]; then
+  if [ "$3" = --repo ]; then
+    if [ -e "$UPLOAD_MARKER" ]; then
+      if [ "$LOOKUP_FAILS" = true ]; then exit 7; fi
+      printf '%s\\n' "$POST_UPLOAD_LATEST"
+    else
+      printf 'v1.7.8\\n'
+    fi
+  else
+    printf 'Existing release notes\\n'
+  fi
+elif [ "$2" = upload ]; then
+  touch "$UPLOAD_MARKER"
+fi
+""", encoding="utf-8")
+    executable.chmod(0o700)
+    script = tmp_path / "repair.sh"
+    script.write_text(repair["run"], encoding="utf-8")
+    calls_path = tmp_path / "calls.txt"
+    result = subprocess.run([bash, str(script)], cwd=tmp_path, capture_output=True, text=True,
+                            timeout=20, env={**os.environ,
+                                "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
+                                "RUNNER_TEMP": str(tmp_path), "RELEASE_TAG": "v1.7.9",
+                                "WAIVE_QUALIFICATION": "true", "GH_REPO": "test/repo",
+                                "GH_RUN_URL": "https://example.test/run/1", "GH_CALLS": str(calls_path),
+                                "UPLOAD_MARKER": str(tmp_path / "uploaded"),
+                                "POST_UPLOAD_LATEST": post_upload_latest,
+                                "LOOKUP_FAILS": str(lookup_fails).lower()})
+    calls = calls_path.read_text("utf-8").splitlines()
+    assert any(call.startswith("release upload ") for call in calls)
+    latest_reads = [call for call in calls if call.startswith("release view --repo ")]
+    assert len(latest_reads) == 2
+    promoted = any(call.endswith(" --latest") for call in calls)
+    if expected is None:
+        assert result.returncode != 0
+        assert not promoted
+    else:
+        assert result.returncode == 0, result.stderr
+        assert promoted is expected
+
+
+@pytest.mark.skipif(os.name == "nt", reason="release workflow executes in Linux bash")
 @pytest.mark.parametrize("existing,edit_fails,draft", [
     (False, False, False), (True, False, False), (True, True, False), (True, False, True),
 ])
