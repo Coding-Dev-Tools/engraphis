@@ -454,11 +454,14 @@ def minimum_role(tool_name: str) -> str:
     dynamic role, discovered reads stay viewer-accessible while the generic stateful
     executor fails closed to admin.  Local stdio has no role boundary and retains the
     owner's full capability; routine remote member writes remain available through the
-    dedicated session and remember tools. Optional remote decisions may consume account
-    allowance, so their direct tool uses the default member requirement too.
+    dedicated session and remember tools. Direct advisory decisions are viewer-accessible
+    so an entitled viewer can use their individual allowance. They still consume quota
+    and remain stateful for Smart discovery and execution.
     """
     if tool_name in _SMART_GATEWAY_ROLES:
         return _SMART_GATEWAY_ROLES[tool_name]
+    if tool_name == "engraphis_decide":
+        return "viewer"
     if tool_name in _ADMIN_TOOLS:
         return "admin"
     if tool_name in _READ_ONLY_TOOLS:

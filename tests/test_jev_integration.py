@@ -701,6 +701,7 @@ def test_smart_mcp_recall_exposes_opt_in_consent_and_falls_back_without_it(
 
 @pytest.mark.parametrize(("error_code", "expected_reason"), [
     ("allowance_exhausted", "allowance_exhausted"),
+    ("provider_protection_limit", "provider_protection_limit"),
     ("remote_timeout", "remote_timeout"),
     ("session_changed", "session_changed"),
     ("private-provider-detail", "remote_unavailable"),
