@@ -5,11 +5,15 @@ citation filter (cite only sources that individually clear the floor), the optio
 synthesis path (used, abstained, and failure→fallback), the memory-poisoning fencing of
 the synthesis prompt, and the service-layer validation/JSON shape.
 """
+from dataclasses import fields
+
 import pytest
 
 from engraphis.backends.embedder_deterministic import DeterministicEmbedder
 from engraphis.core.engine import MemoryEngine
-from engraphis.core.grounded import ABSTAIN_SENTINEL, GROUNDED_SUPPORT_FLOOR, support_scores
+from engraphis.core.grounded import (
+    ABSTAIN_SENTINEL, GROUNDED_SUPPORT_FLOOR, GroundedAnswer, support_scores,
+)
 from engraphis.service import MemoryService, ValidationError
 
 FACTS = [
@@ -26,6 +30,48 @@ def _engine_with_facts():
     for text, title in FACTS:
         eng.remember(text, workspace_id=wid, repo_id=rid, title=title)
     return eng, wid, rid
+
+
+def test_grounded_answer_preserves_legacy_positional_fields_and_appends_advisory():
+    graph_details = [{"source": "memory-1", "depth": 2}]
+    diagnostics = {"context": "bounded"}
+    preview = [{"id": "memory-1", "content": "PASETO tokens"}]
+    legacy_arguments = (
+        "PASETO tokens [1]", True, False, "supported", 0.87654, False,
+        [{"n": 1, "id": "memory-1"}], {"input_tokens": 12}, [{"id": "memory-1"}],
+        100.0, 200.0, True, "balanced", "fixed", 50, 25, "bounded depth",
+        [{"arm": "lexical"}], "revision-1", "deterministic", {"queries": ["auth"]},
+        graph_details, True, False, "lexical", "offline backend", False,
+        "complete", diagnostics, preview,
+    )
+
+    answer = GroundedAnswer(*legacy_arguments)
+    assert answer.graph_traversal_details is graph_details
+    assert fields(GroundedAnswer)[21].name == "graph_traversal_details"
+    assert fields(GroundedAnswer)[-1].name == "planning_advisory"
+    assert answer.degraded_mode is True
+    assert answer.semantic_support is False
+    assert answer.embedding_mode == "lexical"
+    assert answer.degraded_reason == "offline backend"
+    assert answer.vector_search_ready is False
+    assert answer.answer_coverage == "complete"
+    assert answer.diagnostics_v1 is diagnostics
+    assert answer.retrieval_preview is preview
+    assert answer.planning_advisory is None
+    payload = answer.to_dict()
+    assert payload["graph_traversal_details"] == graph_details
+    assert payload["diagnostics"] == diagnostics
+    assert payload["retrieval_preview"] == preview
+    assert payload["planning_details"] == {"queries": ["auth"]}
+    assert payload["planning"] == "deterministic"
+    assert payload["support"] == 0.8765
+    assert "planning_advisory" not in payload
+
+    advisory = {"status": "fallback", "reason": "remote_not_authorized"}
+    with_advisory = GroundedAnswer(*legacy_arguments, advisory)
+    assert with_advisory.graph_traversal_details is graph_details
+    assert with_advisory.planning_advisory is advisory
+    assert with_advisory.to_dict() == {**payload, "planning_advisory": advisory}
 
 
 # ── deterministic offline path ──────────────────────────────────────────────────
@@ -401,10 +447,71 @@ def test_service_grounded_recall_shape():
     assert out["receipt"]["operation"] == "grounded_recall"
 
 
+@pytest.mark.parametrize("response_mode", ["full", "compact"])
+def test_grounded_retrieval_preview_is_omitted_without_opt_in(response_mode):
+    svc = MemoryService.create(":memory:")
+    try:
+        svc.remember("We use PASETO for auth.", workspace="acme")
+        out = svc.grounded_recall("Which auth scheme?", workspace="acme",
+                                  response_mode=response_mode)
+        assert "retrieval_preview" not in out
+    finally:
+        svc.close()
+
+
+def test_compact_grounded_retrieval_preview_uses_recall_candidate_allowlist():
+    svc = MemoryService.create(":memory:")
+    content = "Deployment identifier is ALPHA."
+    stored = svc.remember(
+        content,
+        workspace="acme",
+        repo="backend",
+        exact_value="ALPHA",
+        exact_value_type="identifier",
+    )
+    try:
+        full = svc.grounded_recall(
+            "Which deployment identifier is used?",
+            workspace="acme",
+            repo="backend",
+            include_retrieval_preview=True,
+        )
+        full_candidate = next(
+            row for row in full["retrieval_preview"] if row["id"] == stored["id"]
+        )
+        assert full_candidate["exact_value"]["value"] == "ALPHA"
+
+        compact = svc.grounded_recall(
+            "Which deployment identifier is used?",
+            workspace="acme",
+            repo="backend",
+            response_mode="compact",
+            include_retrieval_preview=True,
+        )
+        candidate = next(
+            row for row in compact["retrieval_preview"] if row["id"] == stored["id"]
+        )
+
+        assert set(candidate) == {
+            "id", "title", "scope", "mtype", "repo_id", "score",
+            "relative_score", "absolute_support", "arm", "provenance",
+        }
+        assert "ALPHA" not in repr(candidate)
+        assert svc.store.get_memory(stored["id"]).content == content
+    finally:
+        svc.close()
+
+
 def test_service_grounded_recall_unknown_workspace_is_soft():
     svc = MemoryService.create(":memory:")
     out = svc.grounded_recall("anything", workspace="ghost")
     assert out["grounded"] is False and "ghost" in out["reason"]
+    assert "retrieval_preview" not in out
+
+    with_preview = svc.grounded_recall(
+        "anything", workspace="ghost", include_retrieval_preview=True,
+    )
+    assert with_preview["retrieval_preview"] == []
 
 
 def test_service_grounded_recall_validates_query():

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from unittest import mock
 
 import pytest
 
@@ -31,10 +32,10 @@ class _Recorder:
 
 
 def _client(model, payload, **kwargs):
-    client = LLMClient(provider="anthropic", model=model, api_key="test-key", **kwargs)
-    client._http.close()
-    client._http = _Recorder(payload)
-    return client
+    # Install the synthetic transport before construction so request-shape
+    # coverage never depends on host proxy configuration or optional SOCKS extras.
+    with mock.patch.object(httpx, "Client", return_value=_Recorder(payload)):
+        return LLMClient(provider="anthropic", model=model, api_key="test-key", **kwargs)
 
 
 _TEXT = {"content": [{"type": "text", "text": "ok"}]}

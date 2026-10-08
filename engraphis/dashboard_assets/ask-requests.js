@@ -1,12 +1,13 @@
 (() => {
   'use strict';
 
-  // Each panel owns its retry and cancellation, while all attempts stay bound to
-  // the submitted question and its workspace/project snapshot.
+  // The grounded answer and retrieval preview share one server-side recall. This
+  // keeps Jev planning, scope, time anchors and trust filtering identical in both
+  // panels, and avoids a second remote planning decision.
   function create({ renderAnswer, renderPreview }) {
-    const byId = id => document.getElementById(id);
     const panels = { answer: 'answer-panel', preview: 'retrieval-list' };
     const names = { answer: 'Grounded Ask', preview: 'Raw retrieval' };
+    const byId = id => document.getElementById(id);
     let active = null;
     const valid = task => active === task && task.isCurrent();
     const message = (kind, value) => {
@@ -21,34 +22,41 @@
       const labels = { pending: 'loading', succeeded: 'ready', failed: 'failed', canceled: 'canceled' };
       byId('ask-status').textContent = 'Answer ' + labels[task.answer.status]
         + ' · Preview ' + labels[task.preview.status] + '.';
-      byId('ask-cancel').hidden = !['answer', 'preview'].some(kind => task[kind].status === 'pending');
+      byId('ask-cancel').hidden = task.answer.status !== 'pending';
+      byId('ask-answer-retry').hidden = !['failed', 'canceled'].includes(task.answer.status);
       ['answer', 'preview'].forEach(kind => {
-        byId('ask-' + kind + '-retry').hidden = !['failed', 'canceled'].includes(task[kind].status);
         byId(panels[kind]).setAttribute('aria-busy', String(task[kind].status === 'pending'));
       });
     }
 
-    async function run(task, kind) {
+    async function run(task) {
       if (!valid(task)) return;
-      const slot = task[kind];
-      const attempt = ++slot.attempt;
-      slot.controller = new AbortController();
-      slot.status = 'pending';
-      message(kind, kind === 'answer'
-        ? 'Searching, checking support and building citations…' : 'Retrieving candidate memories…');
+      const attempt = ++task.answer.attempt;
+      task.answer.controller = new AbortController();
+      task.answer.status = 'pending';
+      task.preview.status = 'pending';
+      message('answer', 'Searching, checking support and building citations…');
+      message('preview', 'Retrieving candidates from the grounded answer’s retrieval plan…');
       controls(task);
-      const current = () => valid(task) && slot.attempt === attempt && slot.status === 'pending';
+      const current = () => valid(task) && task.answer.attempt === attempt
+        && task.answer.status === 'pending';
       try {
-        const result = await slot.fetch(slot.controller.signal);
+        const result = await task.answer.fetch(task.answer.controller.signal);
         if (!current()) return;
         if (!result || typeof result !== 'object') throw new Error('No result was returned.');
-        if (kind === 'answer') renderAnswer(result);
-        else renderPreview(result);
-        slot.status = 'succeeded';
+        if (!Array.isArray(result.retrieval_preview)) {
+          throw new Error('The server omitted candidates from this retrieval plan.');
+        }
+        renderAnswer(result);
+        renderPreview({ memories: result.retrieval_preview });
+        task.answer.status = 'succeeded';
+        task.preview.status = 'succeeded';
       } catch (error) {
         if (!current()) return;
-        slot.status = 'failed';
-        message(kind, names[kind] + ' is unavailable: ' + error.message);
+        task.answer.status = 'failed';
+        task.preview.status = 'failed';
+        message('answer', names.answer + ' is unavailable: ' + error.message);
+        message('preview', names.preview + ' is unavailable because the grounded retrieval did not complete.');
       } finally {
         controls(task);
       }
@@ -57,10 +65,8 @@
     function reset() {
       const previous = active;
       active = null;
-      if (previous) ['answer', 'preview'].forEach(kind => {
-        if (previous[kind].controller) previous[kind].controller.abort();
-      });
-      ['ask-cancel', 'ask-answer-retry', 'ask-preview-retry'].forEach(id => { byId(id).hidden = true; });
+      if (previous && previous.answer.controller) previous.answer.controller.abort();
+      ['ask-cancel', 'ask-answer-retry'].forEach(id => { byId(id).hidden = true; });
       byId('ask-status').textContent = '';
       byId('ask-result-query').textContent = '';
       Object.values(panels).forEach(id => byId(id).setAttribute('aria-busy', 'false'));
@@ -68,36 +74,32 @@
 
     function cancel() {
       const task = active;
-      if (!task || !valid(task)) return;
-      ['answer', 'preview'].forEach(kind => {
-        const slot = task[kind];
-        if (slot.status !== 'pending') return;
-        slot.status = 'canceled';
-        ++slot.attempt;
-        slot.controller.abort();
-        message(kind, names[kind] + ' canceled in this browser. The server may still finish processing. Retry this panel when ready.');
-      });
+      if (!task || !valid(task) || task.answer.status !== 'pending') return;
+      task.answer.status = 'canceled';
+      task.preview.status = 'canceled';
+      ++task.answer.attempt;
+      task.answer.controller.abort();
+      message('answer', 'Grounded Ask canceled in this browser. The server may still finish processing. Retry this question when ready.');
+      message('preview', 'Retrieval preview canceled with the grounded answer.');
       controls(task);
     }
 
     byId('ask-cancel').addEventListener('click', cancel);
-    ['answer', 'preview'].forEach(kind => {
-      byId('ask-' + kind + '-retry').addEventListener('click', () => {
-        if (active && valid(active) && ['failed', 'canceled'].includes(active[kind].status)) void run(active, kind);
-      });
+    byId('ask-answer-retry').addEventListener('click', () => {
+      if (active && valid(active) && ['failed', 'canceled'].includes(active.answer.status)) void run(active);
     });
     return {
       reset,
-      start({ question, scopeLabel, isCurrent, answer, preview }) {
+      start({ question, scopeLabel, isCurrent, answer }) {
         reset();
         const task = {
           isCurrent,
-          answer: { fetch: answer, status: 'pending', attempt: 0 },
-          preview: { fetch: preview, status: 'pending', attempt: 0 },
+          answer: { fetch: answer, status: 'pending', attempt: 0, controller: null },
+          preview: { status: 'pending' },
         };
         active = task;
         byId('ask-result-query').textContent = 'Results for “' + question + '” in ' + scopeLabel + '.';
-        return Promise.allSettled([run(task, 'answer'), run(task, 'preview')]);
+        return run(task);
       },
     };
   }

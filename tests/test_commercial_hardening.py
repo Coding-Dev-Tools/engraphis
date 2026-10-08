@@ -261,8 +261,8 @@ def test_the_checkout_catalog_reads_a_broken_manifest_without_raising(monkeypatc
     assert ("team", "monthly") in targets
 
 
-def test_the_published_prices_match_the_manifest_everywhere_they_appear() -> None:
-    """README, hosted-plans, and upgrade panels restate manifest prices."""
+def test_the_published_prices_match_the_manifest_where_pricing_is_documented() -> None:
+    """The focused plan guide and upgrade panels restate manifest prices."""
 
     manifest = commercial.manifest()
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -274,7 +274,10 @@ def test_the_published_prices_match_the_manifest_everywhere_they_appear() -> Non
     for plan in ("pro", "team"):
         monthly = "$%d" % manifest["plans"][plan]["monthly_usd"]
         annual = "$%d" % manifest["plans"][plan]["annual_usd"]
-        assert monthly in readme and annual in readme, plan
+        assert (
+            "[Hosted plans and licensing](https://github.com/Coding-Dev-Tools/engraphis/blob/e440bf6ba0ff600648fdac6eb53dd28d6d80df24/"
+            "docs/HOSTED_PLANS.md)" in readme
+        )
         assert monthly in hosted_plans and annual in hosted_plans, plan
         assert monthly in dashboard and annual in dashboard, plan
         assert monthly in ledger and annual in ledger, plan

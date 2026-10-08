@@ -1,6 +1,6 @@
 {
   "schema": "engraphis-mcp-contract/v1",
-  "sha256": "09291ce708f7ea4123252cfb217fef8e41d7043093f68b777f86f4204ab3661a",
+  "sha256": "c45b4e1de83058b50b6da9def894fd5d5d8a5cc7c37466cd9dbef65c1fcf2b5d",
   "surfaces": {
     "classic": [
       {
@@ -1625,13 +1625,19 @@
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": false,
-          "openWorldHint": false,
+          "openWorldHint": true,
           "readOnlyHint": false,
           "title": "Recall relevant memories"
         },
         "description": "Retrieve the memories most relevant to a query (semantic vector + lexical + graph).\n\nCall this before answering or acting when prior context would help \u2014 to avoid re-asking\nthe user, to recover decisions/conventions, or to resume earlier work.\nSuccessful calls attempt to append a privacy-safe recall receipt but do not strengthen weak\nneighbors merely because they were returned. If the existing receipt chain is structurally\ninvalid, the recall result still completes with ``receipt: null`` and a ``receipt_warning``;\nthe Store remains fail-closed rather than guessing a chain predecessor. Grounded recall\nreinforces cited evidence; an explicit-use caller can opt into reinforcement through the\nPython API.\nBecause the receipt is stateful, this surface is neither read-only nor idempotent.\n\nReturns:\n    str: JSON with ``{\"query\",\"count\",\"context\",\"degraded_mode\",\"semantic_support\",\n    \"embedding_mode\",\"score_semantics\",\"memories\":[{\"id\",\n    \"title\",\"content\",\"scope\",\"mtype\",\"repo_id\",\"score\",\"relative_score\",\n    \"absolute_support\",\"arm\",\"retention\",\"provenance\"}]}``. ``score`` is a compatibility\n    alias for the query-relative rank; use ``absolute_support`` (0..1) for an evidence floor.\n    ``degraded_mode=true`` and ``semantic_support=false`` mean semantic vector retrieval\n    was disabled because the active embedder is not declared semantic.\n    Returns count 0 with a \"note\" if the workspace/repo isn't known yet.",
         "inputSchema": {
           "properties": {
+            "allow_remote": {
+              "default": false,
+              "description": "Per-call remote consent; requires a data classification.",
+              "title": "Allow Remote",
+              "type": "boolean"
+            },
             "as_of": {
               "anyOf": [
                 {
@@ -1651,10 +1657,30 @@
               "title": "Candidate Depth",
               "type": "string"
             },
+            "data_classification": {
+              "anyOf": [
+                {
+                  "maxLength": 16,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "public or internal; required for remote Jev.",
+              "title": "Data Classification"
+            },
             "diagnostics": {
               "default": false,
               "description": "Include per-arm raw/normalized/fusion/rerank diagnostics.",
               "title": "Diagnostics",
+              "type": "boolean"
+            },
+            "jev_assisted": {
+              "default": false,
+              "description": "Opt in to Jev route prioritization; deterministic order remains default.",
+              "title": "Jev Assisted",
               "type": "boolean"
             },
             "k": {
@@ -1851,13 +1877,19 @@
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": false,
-          "openWorldHint": false,
+          "openWorldHint": true,
           "readOnlyHint": false,
           "title": "Recall token-efficient context"
         },
         "description": "Return one hard-budget context plus compact source identities.\n\nThis is the recommended agent path: unlike legacy full recall, it does not\nrepeat every complete memory body alongside the already-packed context.  The\nresponse includes exact accounting for the declared counter, omitted/packed\ncounts, privacy-safe savings metadata, and the same ``degraded_mode`` /\n``semantic_support`` flags as ``engraphis_recall``.\n\n``format=\"gist\"`` remains an accepted compatibility option. It returns the same\nevidence-safe packed context, including complete conditions and code whitespace,\nwith a format marker. It does not apply another summary or claim extra savings.\nUse ``engraphis_get_memory`` for the full source behind a citation.",
         "inputSchema": {
           "properties": {
+            "allow_remote": {
+              "default": false,
+              "description": "Per-call remote consent; requires a data classification.",
+              "title": "Allow Remote",
+              "type": "boolean"
+            },
             "as_of": {
               "anyOf": [
                 {
@@ -1877,6 +1909,20 @@
               "title": "Candidate Depth",
               "type": "string"
             },
+            "data_classification": {
+              "anyOf": [
+                {
+                  "maxLength": 16,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "public or internal; required for remote Jev.",
+              "title": "Data Classification"
+            },
             "diagnostics": {
               "default": false,
               "description": "Include detailed retrieval scoring trace.",
@@ -1888,6 +1934,12 @@
               "description": "Context format: 'full' or compatibility alias 'gist'; both preserve budgeted, cited evidence.",
               "title": "Format",
               "type": "string"
+            },
+            "jev_assisted": {
+              "default": false,
+              "description": "Opt in to Jev route prioritization; deterministic order remains default.",
+              "title": "Jev Assisted",
+              "type": "boolean"
             },
             "k": {
               "anyOf": [
@@ -3532,16 +3584,34 @@
         "annotations": {
           "destructiveHint": false,
           "idempotentHint": false,
-          "openWorldHint": false,
+          "openWorldHint": true,
           "readOnlyHint": false,
           "title": "Recall compact project context"
         },
-        "description": "Return one compact, bounded context packet for routine agent work.",
+        "description": "Return bounded cited context; allow_remote opts this call into Jev planning.",
         "inputSchema": {
           "properties": {
+            "allow_remote": {
+              "default": false,
+              "title": "Allow Remote",
+              "type": "boolean"
+            },
+            "data_classification": {
+              "anyOf": [
+                {
+                  "maxLength": 16,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Data Classification"
+            },
             "format": {
               "default": "full",
-              "description": "Context format: full or gist.",
+              "description": "full or gist.",
               "title": "Format",
               "type": "string"
             },
@@ -3557,7 +3627,7 @@
                 }
               ],
               "default": 50,
-              "description": "Max source memories.",
+              "description": "Count.",
               "title": "K"
             },
             "packing_mode": {
@@ -3566,7 +3636,7 @@
               "type": "string"
             },
             "query": {
-              "description": "Question/task needing context.",
+              "description": "Question.",
               "maxLength": 100000,
               "minLength": 1,
               "title": "Query",
@@ -3616,7 +3686,7 @@
                 }
               ],
               "default": 1024,
-              "description": "Hard returned-context token budget.",
+              "description": "Token cap.",
               "title": "Token Budget"
             },
             "workspace": {

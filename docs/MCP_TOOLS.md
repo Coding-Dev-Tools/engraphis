@@ -42,11 +42,20 @@ namesakes; advanced controls are discoverable rather than routine:
 | Smart tool | Accepted parameters |
 |---|---|
 | `engraphis_remember` | `content`, `workspace`, `repo`, `session_id`, `mtype`, `importance`, `subject_key`, `claim_kind`, optional source-bound `exact_value`/`exact_value_type`; safe provenance is fixed internally |
-| `engraphis_recall_context` | `query`, `workspace`, `repo`, `session_id`, `k`, `token_budget`, `packing_mode`, `retrieval_recipe`, `format`; always compact, no `response_mode` |
+| `engraphis_recall_context` | `query`, `workspace`, `repo`, `session_id`, `k`, `token_budget`, `packing_mode`, `retrieval_recipe`, `format`, optional Jev controls `allow_remote`, `data_classification`; always compact, no `response_mode` |
 
 `format="gist"` is a compatibility option for the same budgeted, cited evidence as
 `full`. It preserves the same selected text and whitespace; it does not apply an
 additional summary or promise extra token savings. Source IDs remain in `sources`.
+
+Jev-assisted recall planning is opt-in. On the Smart context tool, set `allow_remote=true` and
+`data_classification="public"` or `"internal"`; that call both enables bounded route selection
+and gives per-call consent for remote processing. The default stays deterministic and local.
+Classic recall tools additionally require `planning="auto"` and `jev_assisted=true`.
+The provider receives the query and bounded local routes, not recalled memory bodies. Jev cannot
+change scope, time, type, or trust filters; uncertainty and failures retain deterministic route
+order and appear in `planning_advisory`. Leaving the Jev controls at their defaults keeps local
+deterministic behavior.
 
 
 No user profile choice or tool switching is required. The dashboard `/mcp` endpoint and
@@ -112,6 +121,10 @@ request. `vector_search_ready` is the authoritative vector-arm status. When
 recall remains lexical/graph/code based and grounded answers use lexical support only. A
 request-local index failure instead reports `vector_search_ready=false` while semantic support
 can remain available for exact support scoring from the configured embedder and stored vectors.
+
+Classic `engraphis_recall` and `engraphis_recall_context` also accept `jev_assisted` (default
+`false`), `allow_remote` (default `false`), and `data_classification` (optional). Use the same
+explicit remote-consent requirements described for the Smart context tool above.
 
 Trust boundary: normal local-agent memory creation is prompt-visible immediately after validation;
 it does not require owner approval. The default `agent` source covers `engraphis_remember`,
@@ -203,6 +216,30 @@ and `query`; `verify_completion` needs `state` and `goal`, with optional `recent
 before backend lookup, with unknown/null conclusions and no remote allowance consumed.
 Command decisions always return `allow_auto=false` and `escalate_to_user=true`, including
 successful remote answers. Provider probability and category are advice, not shell authorization.
+
+Managed Jev is currently `not_yet_available` pending release acceptance and
+service-capacity qualification; client configuration does not enable it. After
+enablement, every legitimate Pro user and each eligible Team named seat, including paid
+viewers, with an active paid, trial, or test entitlement receives managed Jev at no
+additional customer charge and without a personal provider key.
+
+Each individual receives all three independent rolling limits: **100 evaluated questions per rolling hour, 1,000 per rolling five hours, and 2,000 per rolling 24 hours**. Usage is per
+person, not pooled across a Team and not monthly. Each evaluated question counts once;
+if a batch is evaluated, every question counts. A `guard_command` review evaluates two
+questions, and each other supported workflow evaluates one. Admitted attempts that fail
+or are interrupted remain counted. No overage is charged. The account portal reports
+that member's remaining usage across all three windows; usage returns as earlier
+questions leave each rolling window.
+
+The existing production fleet guard remains 100 questions per day across the service. It
+conflicts with the per-person rolling caps and may pause or reject requests earlier, so
+resolve capacity and the fleet guard before launch. No latency, accuracy, or cost-saving
+guarantee is established by configuration or a successful health check. Managed access
+admits only `guard_command`, `classify_contradiction`, `verify_support`, and
+`verify_completion`, with fixed question schemas and required context. Managed `custom`
+questions and `query_planning` fail closed before credential refresh or network
+requests; explicit BYOK and local custom heuristics remain separate choices.
+
 Local command labels are coarse: only one simple inspection command, without chaining, pipes,
 substitution or file redirection, is `read_only`. Recognized destructive, history-rewriting,
 exfiltrating or credential-file commands are `destructive_or_leak`; anything else, including a

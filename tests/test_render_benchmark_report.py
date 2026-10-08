@@ -151,6 +151,82 @@ def test_renderer_reflects_a_report_that_measures_transport():
     assert "MCP transport not measured" not in svg
 
 
+@pytest.mark.parametrize("k", [2, None])
+def test_renderer_quality_labels_follow_selected_retrieval_depth(k):
+    payload = _renderer_input()
+    payload["chunking"]["k"] = 3
+    payload["chunking"]["whole"]["recall_at_k"] = 1.0
+    payload["chunking"]["chunked"]["recall_at_k"] = 1.0
+    if k is None:
+        payload["performance"]["run"].pop("k")
+    else:
+        payload["performance"]["run"]["k"] = k
+    svg = render_report(payload)
+    rank = str(k) if k is not None else "k"
+    assert f"Retrieved candidate quality is Recall@{rank}" in svg
+    assert f"Packed context quality is Recall@{rank}" in svg
+    assert f"Hit@{rank}" in svg
+    assert "Recall@3 1.000 both modes" in svg
+    assert "Recall@5" not in svg and "Hit@5" not in svg
+
+
+def test_renderer_omits_unscored_packed_values_when_no_samples_were_admitted():
+    from xml.etree import ElementTree
+
+    payload = _renderer_input()
+    payload["performance"]["packed_quality"]["sample_count"] = 0
+    svg = render_report(payload)
+    assert "Not included in selected report" in svg
+    assert "Packed-context quality is not included" in svg
+    root = ElementTree.fromstring(svg)
+    values = [text.text for text in root.findall("{http://www.w3.org/2000/svg}text")
+              if text.get("y") == "451" and float(text.get("x")) >= 571]
+    assert values == ["Not reported"] * 3
+
+
+def test_registered_fixture_chart_includes_grounded_run_and_all_three_bindings():
+    artifact = Path(__file__).resolve().parents[1] / "docs/benchmark-evidence/offline-fixtures-v115.json"
+
+    report = load_report(artifact)
+    svg = render_report(report)
+
+    assert report["registered_fixture_count"] == 3
+    assert report["grounded"] == {
+        "answerable": 5,
+        "grounded": 5,
+        "off_topic": 6,
+        "abstained": 6,
+        "quarantined": 1,
+        "quarantine_hits": 1,
+        "decision_accuracy": 1.0,
+        "decision_count": 11,
+    }
+    assert "3 REGISTERED OFFLINE FIXTURES" in svg
+    assert "Recall@5 1.000 both modes" in svg
+    assert "5 / 5 grounded" in svg
+    assert "6 / 6 rejected" in svg
+    assert "1 / 1 abstained" in svg
+    assert "Decision accuracy 1.000 (11 / 11)" in svg
+    assert "PENDING" not in svg
+    assert "LoCoMo" not in svg and "LongMemEval" not in svg
+
+
+def test_grounded_chart_rejects_accuracy_that_disagrees_with_counts():
+    payload = _renderer_input()
+    payload["grounded"] = {
+        "answerable": 5,
+        "grounded": 5,
+        "off_topic": 6,
+        "abstained": 6,
+        "quarantined": 1,
+        "quarantine_hits": 1,
+        "decision_accuracy": 0.5,
+    }
+
+    with pytest.raises(ValueError, match="grounded.decision_accuracy contradicts"):
+        render_report(payload)
+
+
 @pytest.mark.parametrize("flag", ["false", "true", 0, 1, 0.0, 1.0, None, [], [False], {}, {"value": True}])
 @pytest.mark.parametrize("form", ["render", "nested", "flat"])
 def test_renderer_rejects_nonboolean_transport_flags(tmp_path, flag, form):

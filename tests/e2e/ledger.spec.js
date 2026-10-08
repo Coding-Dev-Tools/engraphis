@@ -158,6 +158,7 @@ async function mockApi(page, options = {}) {
           content: memories[0].content,
           support: 0.92,
         }],
+        retrieval_preview: options.rawCandidates || memories,
       });
     }
     if (path === '/proactive') return ok({ workspace, memories });
@@ -676,37 +677,16 @@ test('Library restarts a stale page without dropping its search', async ({ page 
   await expect(page.locator('#library-previous')).toBeDisabled();
 });
 
-for (const failed of ['answer', 'recall']) {
-  test(`Ask preserves the successful panel when ${failed} fails`, async ({ page }) => {
-    await mockApi(page);
-    await page.route(`**/api/${failed}${failed === 'recall' ? '?**' : ''}`, route =>
-      route.fulfill({ status: 503, contentType: 'application/json', body: '{"detail":"Temporarily unavailable"}' }));
-    await page.goto('/?view=ask');
-    await page.locator('#ask-input').fill('Which database?');
-    await page.getByRole('button', { name: 'Grounded answer', exact: true }).click();
-    if (failed === 'recall') {
-      await expect(page.locator('#answer-panel')).toContainText('Postgres 16 is the main database. [1]');
-      await expect(page.locator('#retrieval-list')).toContainText('Raw retrieval is unavailable');
-    } else {
-      await expect(page.locator('#answer-panel')).toContainText('Grounded Ask is unavailable');
-      await expect(page.locator('#retrieval-list')).toContainText('Postgres 16 is the main database.');
-    }
-  });
-}
-
-test('Ask paints a completed answer while its preview stalls, then reports the deadline', async ({ page }) => {
-  await page.clock.install();
+test('Ask shows candidates from the grounded response without a second recall request', async ({ page }) => {
   await mockApi(page);
-  let previewRequested = false;
-  await page.route('**/api/recall?**', () => { previewRequested = true; });
   await page.goto('/?view=ask');
   await page.locator('#ask-input').fill('Which database?');
   await page.getByRole('button', { name: 'Grounded answer', exact: true }).click();
-  await expect.poll(() => previewRequested).toBe(true);
   await expect(page.locator('#answer-panel')).toContainText('Postgres 16 is the main database. [1]');
-  await page.clock.fastForward(31_000);
-  await expect(page.locator('#retrieval-list')).toContainText('The request timed out');
-  await expect(page.locator('#answer-panel')).toContainText('Postgres 16 is the main database. [1]');
+  await expect(page.locator('#retrieval-list')).toContainText('Postgres 16 is the main database.');
+  await expect(page.locator('#ask-status')).toHaveText('Answer ready · Preview ready.');
+  expect(await page.evaluate(() => performance.getEntriesByType('resource')
+    .filter(entry => new URL(entry.name).pathname.endsWith('/api/recall')).length)).toBe(0);
 });
 
 test('First-run guidance opens workspace creation and the first memory editor', async ({ page }) => {
@@ -1606,26 +1586,9 @@ test('late Ask, audit, and automation responses cannot cross workspace boundarie
           n: 1, id: `mem_${selected}`, title: `${selected} citation`,
           content: `${selected} evidence`, support: 0.9,
         }],
-      }),
-    });
-  });
-  await page.route('**/api/recall*', async route => {
-    const requestUrl = new URL(route.request().url());
-    const selected = requestUrl.searchParams.get('workspace');
-    if (selected === workspace) {
-      resolveAskStarted();
-      await askGate;
-      askCompleted += 1;
-    }
-    return route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify({
-        workspace: selected,
-        memories: [{
+        retrieval_preview: [{
           id: `raw_${selected}`, title: `${selected} raw result`,
           content: `${selected} raw evidence`, memory_type: 'semantic',
-          ingested_at: Date.now() / 1000,
         }],
       }),
     });
@@ -1719,7 +1682,7 @@ test('late Ask, audit, and automation responses cannot cross workspace boundarie
   await page.getByRole('button', { name: 'Grounded answer', exact: true }).click();
   await expect(page.locator('#answer-panel')).toContainText(`${otherWorkspace} grounded answer`);
   releaseAsk();
-  await expect.poll(() => askCompleted).toBe(2);
+  await expect.poll(() => askCompleted).toBe(1);
   await expect(page.locator('#answer-panel')).toContainText(`${otherWorkspace} grounded answer`);
   await expect(page.locator('#answer-panel')).not.toContainText(`${workspace} grounded answer`);
 
@@ -1908,7 +1871,7 @@ test('Ask keeps the raw retrieval preview alongside its single grounded answer',
     name: 'Uncited raw candidate',
   })).toBeVisible();
   expect(requests.filter(path => path === '/answer')).toHaveLength(1);
-  expect(requests.filter(path => path === '/recall')).toHaveLength(1);
+  expect(requests.filter(path => path === '/recall')).toHaveLength(0);
 });
 
 test('Explore uses the visual explorer controls and applies their state', async ({ page }) => {
