@@ -8,10 +8,10 @@ from urllib.parse import unquote, urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY = "Coding-Dev-Tools/engraphis"
-README_BENCHMARK_PIN = "f964429b35877986bd0626b690469f59f41061de"
+README_BENCHMARK_PIN = "522def372c45a26d46bc7a05829964ae0240f3a9"
 README_LINK_PINS = (
-    "fee9d0c150c250632d8e0c0ee86c1325c9e1ee78",
-    "e440bf6ba0ff600648fdac6eb53dd28d6d80df24",
+    "522def372c45a26d46bc7a05829964ae0240f3a9",
+    "522def372c45a26d46bc7a05829964ae0240f3a9",
     README_BENCHMARK_PIN,
 )
 
@@ -81,7 +81,7 @@ def test_pypi_readme_has_only_absolute_repository_assets_and_links() -> None:
         assert local.exists(), f"{target} maps to missing repository path {local.relative_to(ROOT)}"
 
     assert (
-        f"https://raw.githubusercontent.com/{REPOSITORY}/fee9d0c150c250632d8e0c0ee86c1325c9e1ee78/"
+        f"https://raw.githubusercontent.com/{REPOSITORY}/522def372c45a26d46bc7a05829964ae0240f3a9/"
         "docs/images/knowledge-graph.png"
     ) in targets
     assert (

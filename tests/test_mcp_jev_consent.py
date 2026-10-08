@@ -419,6 +419,7 @@ def test_remote_completion_requires_the_completion_bar(monkeypatch, probability,
     (transport.CloudDecisionBatch(False, {}, {}), None, "malformed_response"),
     (None, RuntimeError("private request and synthetic credential"), "remote_unavailable"),
     (None, transport.DecisionClientError("allowance_exhausted"), "allowance_exhausted"),
+    (None, transport.DecisionClientError("provider_protection_limit"), "provider_protection_limit"),
 ))
 def test_remote_failures_cannot_look_like_verified_success(monkeypatch, batch, error, reason):
     _client(monkeypatch, batch, error)

@@ -4,6 +4,63 @@ from types import SimpleNamespace
 import pytest
 
 
+@pytest.mark.parametrize("chunk_framing", [False, True])
+def test_cloud_http_error_body_shares_the_request_deadline(monkeypatch, chunk_framing):
+    import http.client
+    import json
+    import socket
+    import threading
+    import time
+    import urllib.error
+    from engraphis.backends import jev_transport as transport
+
+    reader, writer = socket.socketpair()
+    stopped = threading.Event()
+    body = json.dumps({"detail": {"code": "jev_rolling_allowance_exhausted", "is_fallback": False}}).encode()
+    body += b" " * 300
+    framing = (b"Transfer-Encoding: chunked\r\n" if chunk_framing else
+               f"Content-Length: {len(body)}\r\n".encode())
+    writer.sendall(b"HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\n"
+                   + framing + b"\r\n")
+    response = http.client.HTTPResponse(reader)
+    response.begin()
+    url = "http://127.0.0.1/control/v1/jev/decide"
+    error = urllib.error.HTTPError(url, 429, "synthetic rate limit", response.headers, response)
+
+    class Opener:
+        def open(self, *_args, **_kwargs):
+            raise error
+
+    monkeypatch.setattr("engraphis.hosted_client.build_pinned_https_opener",
+                        lambda *_args: Opener())
+
+    def drip_error():
+        try:
+            for byte in b"0" * 300 if chunk_framing else body:
+                if stopped.wait(0.01):
+                    return
+                writer.sendall(bytes([byte]))
+            writer.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
+
+    producer = threading.Thread(target=drip_error, daemon=True)
+    producer.start()
+    started = time.monotonic()
+    try:
+        with pytest.raises(transport.DecisionClientError, match="^remote_timeout$"):
+            transport._post_json(url, "synthetic-token", {}, 0.1)
+        assert time.monotonic() - started < 1.5
+        assert response.isclosed()
+    finally:
+        stopped.set()
+        error.close()
+        reader.close()
+        writer.close()
+        producer.join(timeout=2)
+    assert not producer.is_alive()
+
+
 def test_cloud_deadline_interrupts_slow_chunk_framing():
     import http.client
     import socket

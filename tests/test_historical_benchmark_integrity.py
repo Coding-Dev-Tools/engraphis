@@ -15,3 +15,17 @@ def test_retained_v149_bytes_match_the_advertised_checksum():
     assert artifact.with_suffix(".json.sha256").read_text("ascii") == (
         f"{expected}  {artifact.name}\n"
     )
+
+
+def test_retained_v142_client_checksum_resolves_the_original_payload():
+    """The renamed client snapshot must keep its original bytes and valid sidecar."""
+    root = Path(__file__).resolve().parents[1]
+    artifact = root / (
+        "docs/benchmark-evidence/offline-fixtures-v142-client-9449d94b7e80.json"
+    )
+    expected = "9449d94b7e8085ac6030102a4e00ba109dc81e90602a1b1acc832f6675d61754"
+    sidecar = artifact.with_suffix(".json.sha256")
+    digest, filename = sidecar.read_text("ascii").split()
+    assert filename == artifact.name
+    assert sidecar.parent / filename == artifact
+    assert digest == hashlib.sha256(artifact.read_bytes()).hexdigest() == expected

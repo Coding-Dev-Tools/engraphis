@@ -16,6 +16,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Dict, Optional, Sequence
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 from engraphis.http_deadline import (
     deadline_handlers as _deadline_handlers,
@@ -29,7 +30,12 @@ if TYPE_CHECKING:
 MODEL = "jev-1.13.0"
 MAX_REQUEST_BYTES = 24 * 1024
 MAX_RESPONSE_BYTES = 256 * 1024
+MAX_ERROR_RESPONSE_BYTES = 4 * 1024
 _PURPOSES = {"guard_command", "classify_contradiction", "verify_support", "verify_completion", "custom"}
+_CLOUD_HTTP_ERROR_CODES = {
+    "jev_rolling_allowance_exhausted": "allowance_exhausted",
+    "jev_provider_protection_limit": "provider_protection_limit",
+}
 _SECRETS = (
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
     re.compile(r"\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|"
@@ -57,6 +63,53 @@ def contains_sensitive_content(value: str) -> bool:
     still obtain per-call consent and an explicit public/internal classification.
     """
     return isinstance(value, str) and any(pattern.search(value) for pattern in _SECRETS)
+
+
+def _http_error_fallback_code(
+    url: str, error: urllib.error.HTTPError, *, deadline: float,
+) -> str:
+    """Map only the two fixed Cloud 429 reasons; never expose provider text."""
+    try:
+        _remaining_time(deadline)
+        if error.code != 429 or not urlsplit(url).path.rstrip("/").endswith("/v1/jev/decide"):
+            return "remote_unavailable"
+        headers = error.headers or {}
+        if headers.get("Content-Type", "").partition(";")[0].strip() != "application/json":
+            return "remote_unavailable"
+        length = headers.get("Content-Length", "")
+        if length and (not length.isdigit() or int(length) > MAX_ERROR_RESPONSE_BYTES):
+            return "remote_unavailable"
+        # HTTPError wraps the HTTPResponse in fp. Read that response directly so
+        # the deadline reader reaches its socket and interrupts slow framing too.
+        raw = _read_deadline_response(error.fp, deadline, max_bytes=MAX_ERROR_RESPONSE_BYTES)
+        if not isinstance(raw, bytes) or len(raw) > MAX_ERROR_RESPONSE_BYTES:
+            return "remote_unavailable"
+
+        def unique(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("duplicate JSON key")
+                result[key] = value
+            return result
+
+        def invalid(_value):
+            raise ValueError("non-finite JSON value")
+
+        payload = json.loads(raw.decode("utf-8"), object_pairs_hook=unique,
+                             parse_constant=invalid)
+        detail = payload.get("detail") if isinstance(payload, dict) else None
+        if not isinstance(detail, dict) or detail.get("is_fallback") is not False:
+            return "remote_unavailable"
+        code = detail.get("code")
+        if not isinstance(code, str):
+            return "remote_unavailable"
+        _remaining_time(deadline)
+        return _CLOUD_HTTP_ERROR_CODES.get(code, "remote_unavailable")
+    except TimeoutError:
+        return "remote_timeout"
+    except Exception:
+        return "remote_timeout" if time.monotonic() >= deadline else "remote_unavailable"
 
 
 class DecisionClientError(RuntimeError):
@@ -222,6 +275,72 @@ def _timeout(value: float) -> float:
     return float(value)
 
 
+def _validate_managed_context(
+    state: str, questions: Sequence[DecisionQuestion], purpose: str,
+) -> None:
+    """Match Cloud's fixed advisory questions and concrete context schemas.
+
+    Known MCP and direct-adapter wire forms remain compatible. A purpose label
+    cannot turn arbitrary questions into an included managed operation. These
+    checks do not establish the provenance or truth of supplied plaintext.
+    """
+    expected = {
+        "guard_command": (
+            ("is_safe", "Is this command free of destructive data loss or secret leakage?",
+             "noul", ()),
+            ("category", "Categorize this operation", "choice",
+             ("read_only", "state_change", "destructive_or_leak")),
+        ),
+        "classify_contradiction": (
+            ("verdict", "Classify the relationship between the facts.", "choice",
+             ("contradicts_and_supersedes", "reinforces", "orthogonal")),
+        ),
+        "verify_support": (
+            ("has_support", "Does this evidence directly support answering the query?",
+             "noul", ()),
+        ),
+        "verify_completion": (
+            ("is_complete", "Does the supplied evidence establish the task goal?", "noul", ()),
+        ),
+    }.get(purpose)
+    if expected is None:
+        raise DecisionClientError("managed_operation_unsupported")
+    actual = tuple((q.id, q.prompt, q.kind, tuple(q.options)) for q in questions)
+    fields = [(state, 16000)]
+    if purpose in {"classify_contradiction", "verify_support"}:
+        if purpose == "classify_contradiction":
+            prefix, delimiter = "EXISTING FACT: ", "\nNEW CANDIDATE FACT: "
+            direct_prompt = "Classify the relationship between the candidate and existing fact."
+            direct_delimiter = "\n\nNEW CANDIDATE FACT:\n"
+            first_limit = 16000
+        else:
+            prefix, delimiter = "QUERY: ", "\nEVIDENCE: "
+            direct_prompt = "Does the evidence directly support answering the query?"
+            direct_delimiter = "\n\nEVIDENCE:\n"
+            first_limit = 4096
+        first = expected[0]
+        direct = ((first[0], direct_prompt, first[2], first[3]),)
+        if actual == direct:
+            expected, delimiter = direct, direct_delimiter
+        if not state.startswith(prefix) or state.count(delimiter) != 1:
+            raise DecisionClientError("invalid_request")
+        before, after = state[len(prefix):].split(delimiter)
+        fields = [(before, first_limit), (after, 16000)]
+    elif purpose == "verify_completion":
+        if (not state.startswith("GOAL: ") or state.count("\nACTIONS: ") != 1
+                or state.count("\nOUTPUT: ") != 1):
+            raise DecisionClientError("invalid_request")
+        goal, remaining = state[len("GOAL: "):].split("\nACTIONS: ")
+        if "\nOUTPUT: " not in remaining:
+            raise DecisionClientError("invalid_request")
+        actions, output = remaining.split("\nOUTPUT: ")
+        if len(actions) > 8192:
+            raise DecisionClientError("invalid_request")
+        fields = [(goal, 4096), (output, 16000)]
+    if actual != expected or any(not value.strip() or len(value) > limit for value, limit in fields):
+        raise DecisionClientError("invalid_request")
+
+
 def _read_response(response, deadline: float) -> bytes:
     raw = _read_deadline_response(response, deadline, max_bytes=MAX_RESPONSE_BYTES)
     if len(raw) > MAX_RESPONSE_BYTES:
@@ -296,8 +415,10 @@ def _post_json(
     except DecisionClientError:
         raise
     except urllib.error.HTTPError as exc:
-        code = "allowance_exhausted" if exc.code == 429 else "remote_unavailable"
-        exc.close()
+        try:
+            code = _http_error_fallback_code(url, exc, deadline=deadline)
+        finally:
+            exc.close()
         raise DecisionClientError(code) from None
     except TimeoutError:
         raise DecisionClientError("remote_timeout") from None
@@ -328,13 +449,26 @@ class EngraphisCloudDecisionClient:
     def evaluate(self, state: str, questions: Sequence[DecisionQuestion], *, model: str,
                  allow_remote: bool = False, purpose: str = "custom",
                  data_classification: str = "internal",
-                 timeout_s: Optional[float] = None) -> CloudDecisionBatch:
+                 timeout_s: Optional[float] = None,
+                 request_key: Optional[str] = None) -> CloudDecisionBatch:
+        """Evaluate once; callers can reuse an explicit key after a lost reply.
+
+        Cloud charges evaluated questions and rejects duplicate keys without a
+        second provider call. This client never retries automatically.
+        """
         effective_timeout = min(self.timeout_s, _timeout(timeout_s)) if timeout_s is not None else self.timeout_s
         deadline = time.monotonic() + effective_timeout
         payload = _request_payload(state, questions, model, allow_remote=allow_remote,
                                    purpose=purpose, data_classification=data_classification)
-        if purpose == "custom":
-            raise DecisionClientError("managed_operation_unsupported")
+        _validate_managed_context(state, questions, purpose)
+        if request_key is not None and (
+            not isinstance(request_key, str)
+            or not re.fullmatch(r"[A-Za-z0-9_-]{16,64}", request_key)
+        ):
+            raise DecisionClientError("invalid_request")
+        payload["request_key"] = request_key if request_key is not None else uuid4().hex
+        if len(json.dumps(payload, ensure_ascii=False).encode()) > MAX_REQUEST_BYTES:
+            raise DecisionClientError("invalid_request")
         from engraphis import cloud_session
         from engraphis.hosted_client import validate_cloud_base_url
         try:

@@ -135,6 +135,7 @@ def _serialized_request_sizes(state, question, model=MODEL, purpose="custom"):
     managed = {
         "model": model, "state": state, "questions": [question.to_dict()],
         "allow_remote": True, "purpose": purpose, "data_classification": "internal",
+        "request_key": "0" * 32,
     }
     provider_question = {"type": question.kind, "instructions": question.prompt}
     if question.kind == "choice":
@@ -304,6 +305,7 @@ def test_sensitive_question_fields_are_screened_before_legacy_client_calls(field
 
 @pytest.mark.parametrize(("code", "expected"), [
     ("allowance_exhausted", "allowance_exhausted"),
+    ("provider_protection_limit", "provider_protection_limit"),
     ("remote_timeout", "remote_timeout"),
     ("session_changed", "session_changed"),
     ("private-provider-detail", "remote_unavailable"),

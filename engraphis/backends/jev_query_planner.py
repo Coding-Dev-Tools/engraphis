@@ -163,6 +163,7 @@ def _fallback_code(reason: Optional[str]) -> str:
         "provider_fallback": "jev_provider_fallback",
         "remote_unavailable": "jev_remote_unavailable",
         "allowance_exhausted": "jev_allowance_exhausted",
+        "provider_protection_limit": "jev_provider_protection_limit",
         "remote_timeout": "jev_remote_timeout",
         "session_changed": "jev_session_changed",
         "managed_operation_unsupported": "jev_managed_operation_unsupported",

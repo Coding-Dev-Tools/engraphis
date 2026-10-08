@@ -31,6 +31,7 @@ MAX_STATE_CHARS = 16_000
 _VERDICTS = frozenset(("contradicts_and_supersedes", "reinforces", "orthogonal"))
 _SAFE_CLIENT_ERROR_CODES = frozenset({
     "allowance_exhausted",
+    "provider_protection_limit",
     "remote_timeout",
     "remote_unavailable",
     "malformed_response",
@@ -210,6 +211,8 @@ class JevDecisionBackend:
         managed_payload = {
             "model": model, "state": state, "questions": [question.to_dict()],
             "allow_remote": True, "purpose": purpose, "data_classification": data_classification,
+            # Managed Cloud transport appends its default uuid4().hex key.
+            "request_key": "0" * 32,
         }
         provider_question: Dict[str, object] = {
             "type": question.kind, "instructions": question.prompt,
