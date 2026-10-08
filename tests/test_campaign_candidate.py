@@ -17,7 +17,9 @@ from eval.coding_corpus import load_corpus, run_oracle, scenario_workspace
 def _run(tmp_path, source):
     (tmp_path / "service.py").write_text(source, encoding="utf-8")
     process = subprocess.run(
-        [sys.executable, "-I", "-B", "-c", _RUNNER_SOURCE, "current_timeout", "[]", "{}"],
+        # This standalone runner uses only the stdlib; exclude test-host site
+        # initialization while retaining the same deadline and safety assertions.
+        [sys.executable, "-I", "-S", "-B", "-c", _RUNNER_SOURCE, "current_timeout", "[]", "{}"],
         cwd=tmp_path, capture_output=True, text=True, timeout=10, check=True,
     )
     return _operation_result(OracleSpec("current_timeout", (), {}, "eq", 41),

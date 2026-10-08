@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import logging
 from types import SimpleNamespace
+from unittest import mock
 import urllib.error
 
 import pytest
@@ -19,6 +20,12 @@ from engraphis.backends.sync_relay import RelayError, RelayTransport, RelayUnrea
 from engraphis.core.engine import MemoryEngine
 from engraphis.llm.client import LLMClient, validate_llm_base_url
 from engraphis.routes import v2_api
+
+
+def _llm_client(http_client, **kwargs):
+    # Synthetic response/error coverage must not initialize a real HTTP transport.
+    with mock.patch.object(httpx, "Client", return_value=http_client):
+        return LLMClient(**kwargs)
 
 
 class _LLMResponseClient:
@@ -94,14 +101,13 @@ def test_llm_http_error_hides_key_url_model_and_provider_body(caplog):
     model = "private-model-owner@example.com"
     endpoint_marker = "private-customer-endpoint"
     body_marker = "provider-body-bearer-secret"
-    client = LLMClient(
+    client = _llm_client(
+        _LLMResponseClient(status=401, body=body_marker),
         provider="google",
         model=model,
         api_key=api_key,
         base_url="https://provider.example/%s" % endpoint_marker,
     )
-    client._http.close()
-    client._http = _LLMResponseClient(status=401, body=body_marker)
 
     with caplog.at_level(logging.DEBUG, logger="engraphis.llm"):
         with pytest.raises(RuntimeError) as caught:
@@ -116,12 +122,11 @@ def test_llm_http_error_hides_key_url_model_and_provider_body(caplog):
 
 def test_llm_malformed_response_does_not_reflect_provider_payload():
     marker = "malformed-provider-payload-secret"
-    client = LLMClient(
+    client = _llm_client(
+        _LLMResponseClient(status=200, body='{"private":"%s"}' % marker),
         provider="openai", model="safe-model", api_key="safe-key",
         base_url="https://provider.example",
     )
-    client._http.close()
-    client._http = _LLMResponseClient(status=200, body='{"private":"%s"}' % marker)
 
     with pytest.raises(ValueError) as caught:
         client.chat([{"role": "user", "content": "hello"}])
@@ -132,13 +137,12 @@ def test_llm_malformed_response_does_not_reflect_provider_payload():
 
 
 def test_llm_deadline_is_forwarded_without_retry_or_provider_detail_leakage():
-    client = LLMClient(
+    timeout_client = _LLMTimeoutClient()
+    client = _llm_client(
+        timeout_client,
         provider="openai", model="safe-model", api_key="safe-key",
         base_url="https://provider.example",
     )
-    client._http.close()
-    timeout_client = _LLMTimeoutClient()
-    client._http = timeout_client
 
     with pytest.raises(TimeoutError, match="exceeded its deadline") as caught:
         client.chat([{"role": "user", "content": "hello"}], timeout=0.25)

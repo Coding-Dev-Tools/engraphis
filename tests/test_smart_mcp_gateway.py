@@ -577,6 +577,14 @@ def test_smart_session_start_and_end_preserve_handoff_contract(monkeypatch):
     assert ended["session_id"] == started["session_id"]
     assert ended["status"] == "summarized"
 
+    resumed = _payload(server.engraphis_session(
+        action="start", workspace="acme", repo="api", agent="another-agent",
+        goal="Continue deployment investigation.", session_id=ended["session_id"],
+    ))
+    assert resumed["session_id"] != ended["session_id"]
+    assert resumed["handoff_source"]["session_id"] == ended["session_id"]
+    assert resumed["bootstrap"]["summary"] == "Investigated failures."
+
 
 def test_smart_session_action_normalizes_full_tool_name(monkeypatch):
     """The Command Code harness passes action='start_session'/'end_session'

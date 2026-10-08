@@ -1527,7 +1527,9 @@ def _dashboard_jev_backend():
     current_service = service()
     planner = getattr(current_service.engine.recall_engine, "query_planner", None)
     backend = getattr(planner, "decision_backend", None)
-    if isinstance(backend, JevDecisionBackend):
+    if isinstance(backend, JevDecisionBackend) and (
+        backend.client is not None or backend.offline_mode
+    ):
         return backend
     selected = settings.decision_backend.strip().lower()
     if selected in {"managed", "auto"}:

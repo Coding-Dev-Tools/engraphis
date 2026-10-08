@@ -114,6 +114,7 @@ class EngraphisPrimeAgent:
         agent: str | None = None,
         goal: str | None = None,
         token_budget: int | None = None,
+        resume_from_session_id: str | None = None,
     ) -> str:
         # The two state mutations below happen under _session_lock so they
         # are atomic w.r.t. concurrent start_session / end_session callers
@@ -127,7 +128,7 @@ class EngraphisPrimeAgent:
             requested_budget = self.token_budget if token_budget is None else token_budget
             has_overrides = any(
                 value is not None
-                for value in (workspace, agent, goal, token_budget)
+                for value in (workspace, agent, goal, token_budget, resume_from_session_id)
             ) or not isinstance(repo, _UnsetRepo)
             request_force_new = force_new or (
                 self._session_id is not None
@@ -147,6 +148,8 @@ class EngraphisPrimeAgent:
                 args["workspace"] = requested_workspace
             if requested_repo is not None:
                 args["repo"] = requested_repo
+            if resume_from_session_id is not None:
+                args["session_id"] = resume_from_session_id
             response = await self.client.call_tool("engraphis_session", args)
             details = self._extract_session_details(response)
             session_id = details.get("session_id") or details.get("sessionId")
@@ -439,6 +442,8 @@ class EngraphisPrimeAgent:
         for key in ("workspace", "repo", "agent", "goal", "token_budget"):
             if key in args:
                 start_kwargs[key] = args[key]
+        if "session_id" in args:
+            start_kwargs["resume_from_session_id"] = args["session_id"]
         await self.start_session(**start_kwargs)
         # Rebuild tools with the new session id before returning so the
         # caller's next tool invocation does not see the stale binding.

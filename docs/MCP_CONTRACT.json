@@ -1,6 +1,6 @@
 {
   "schema": "engraphis-mcp-contract/v1",
-  "sha256": "a4071de44ae4709e5108ebd116c532579168f13a0d841b1619ccb4b5c7e2d18d",
+  "sha256": "c45b4e1de83058b50b6da9def894fd5d5d8a5cc7c37466cd9dbef65c1fcf2b5d",
   "surfaces": {
     "classic": [
       {
@@ -3079,7 +3079,7 @@
           "readOnlyHint": false,
           "title": "Start a memory session"
         },
-        "description": "Open a session to group this work's memories and enable cross-session resume.\n\nCall this at the start of a task in a repo you've worked in before \u2014 if a previous\nsession for the same authenticated user and agent was ended with a summary or open\nthreads, they come back in ``bootstrap`` so you can resume without crossing another\nuser or agent's handoff boundary.\n\nExact retries are reused by default for the same ``(workspace, repo, authenticated\nuser, agent, goal)`` identity. Different users, agents, or goals start distinct\nsessions automatically, and ``force_new=true`` always branches another session.\nBecause that valid option creates a new row on every call, the tool as a whole is\nconservatively annotated as non-idempotent.\n\nReturns:\n    str: JSON ``{\"session_id\",\"workspace\",\"repo\",\"goal\",\"status\":\"active\",\"reused\",\n    \"bootstrap\":{\"summary\",\"open_threads\",\"outcome\"} or {} if there is no prior\n    session}``. Pass ``session_id`` to engraphis_remember and engraphis_end_session.",
+        "description": "Open a session to group this work's memories and enable cross-session resume.\n\nCall this at the start of a task in a repo you've worked in before \u2014 if a previous\nsession for the same authenticated user and agent was ended with a summary or open\nthreads, they come back in ``bootstrap`` so you can resume without crossing another\nuser or agent's handoff boundary. ``resume_from_session_id`` explicitly selects an\nended handoff from another agent; it requires the same authenticated user and exact\nworkspace/repo, and it fails closed instead of choosing a different session.\n\nExact retries are reused by default for the same ``(workspace, repo, authenticated\nuser, agent, goal)`` identity. Different users, agents, or goals start distinct\nsessions automatically, and ``force_new=true`` always branches another session.\nBecause that valid option creates a new row on every call, the tool as a whole is\nconservatively annotated as non-idempotent.\n\nReturns:\n    str: JSON ``{\"session_id\",\"workspace\",\"repo\",\"goal\",\"status\":\"active\",\"reused\",\n    \"bootstrap\":{\"summary\",\"open_threads\",\"outcome\"} or {} if there is no prior\n    session}``. Explicit resumes also include source timestamps and bounded usage\n    metadata. Pass ``session_id`` to engraphis_remember and engraphis_end_session.",
         "inputSchema": {
           "properties": {
             "agent": {
@@ -3115,6 +3115,20 @@
               "default": null,
               "description": "Repo scope, if any.",
               "title": "Repo"
+            },
+            "resume_from_session_id": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional exact ended session to hand off from another agent. It must belong to this authenticated user and exact workspace/repo; it never falls back to a recent session.",
+              "title": "Resume From Session Id"
             },
             "workspace": {
               "anyOf": [
@@ -3824,7 +3838,7 @@
           "readOnlyHint": false,
           "title": "Start or end a memory session"
         },
-        "description": "Start/resume a session or end it with its next-session handoff.",
+        "description": "Manage sessions and explicit handoffs.",
         "inputSchema": {
           "properties": {
             "action": {
@@ -3848,7 +3862,7 @@
             },
             "goal": {
               "default": "",
-              "description": "Goal; start returns bounded context.",
+              "description": "Optional goal.",
               "maxLength": 1000,
               "title": "Goal",
               "type": "string"
@@ -3892,7 +3906,7 @@
             },
             "session_id": {
               "default": "",
-              "description": "Session id for end.",
+              "description": "End ID or exact ended resume source; same owner/scope, no fallback.",
               "maxLength": 200,
               "title": "Session Id",
               "type": "string"

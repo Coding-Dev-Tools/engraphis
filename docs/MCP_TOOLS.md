@@ -25,6 +25,15 @@ class, and execution revalidates availability, scope, authorization, and argumen
 The Smart gateway exposes these nine tools directly; advanced capabilities remain available through
 discovery and the validated executors.
 
+For a deliberate cross-agent handoff, pass the source ID as `session_id` when starting
+`engraphis_session`, or as `resume_from_session_id` to `engraphis_start_session`. The source must
+be an ended session owned by the same authenticated user in the exact resolved workspace and
+repository. Missing, active, deleted, or unauthorized sources fail closed; the tool never
+substitutes a recent handoff. The returned `bootstrap` is
+bounded to 512 regex-counted content tokens, at most six open threads, and per-field character
+limits. `handoff_source` labels the source start/end times in UTC. Sessions have no automatic
+age expiry; those timestamps show age but do not guarantee freshness.
+
 ### Smart routine schemas are reduced by design
 
 The two routine Smart tools deliberately accept smaller allow-lists than their Classic
@@ -199,6 +208,10 @@ an omitted mode means it was not recorded, and is not inferred from current defa
 | Operations | `engraphis_stats` | Returns memory counts for health checks. |
 | Operations | `engraphis_check_update` | Refreshes the release cache and reports whether a newer version is available. Update checks are OFF unless `ENGRAPHIS_UPDATE_CHECK` is set to an affirmative value; `=0` keeps them off. |
 | Decision | `engraphis_decide` | Advisory typed decisions with local fallback. Remote Jev requires an explicit backend and per-call `allow_remote=true`; missing, malformed, and uncertain answers stay visible. Smart discovery routes it through `engraphis_execute_action` because a remote call may consume allowance. |
+
+Classic `engraphis_start_session` accepts optional `resume_from_session_id` for the same explicit,
+same-owner, exact-workspace/repository handoff. Its `handoff_usage` reports the deterministic output
+limit; it is context accounting and does not measure provider billing or task-time savings.
 
 Decision inputs must be nonblank for the selected kind: `guard_command` needs `state`;
 `classify_contradiction` needs `state` and `existing_content`; `verify_support` needs `state`

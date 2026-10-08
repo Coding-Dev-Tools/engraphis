@@ -75,6 +75,58 @@ test('answer retry retains the submitted question and never repeats a successful
   await expect(page.locator('#ask-status')).toHaveText('Answer ready · Preview ready.');
 });
 
+for (const changedControl of ['assistance', 'consent', 'classification']) {
+  test('changing Jev ' + changedControl + ' invalidates an authorized retry', async ({ page }) => {
+    const { requests } = await fixture(page, { answerFailures: 1 });
+    await page.getByText('Experimental Jev retrieval planning', { exact: true }).click();
+    await page.locator('#ask-jev-assisted').check();
+    await page.locator('#ask-jev-remote').check();
+    await page.locator('#ask-jev-classification').selectOption('internal');
+    await ask(page, 'Original authorized question');
+    await expect(page.locator('#ask-answer-retry')).toBeVisible();
+    if (changedControl === 'assistance') await page.locator('#ask-jev-assisted').uncheck();
+    else if (changedControl === 'consent') await page.locator('#ask-jev-remote').uncheck();
+    else await page.locator('#ask-jev-classification').selectOption('public');
+    await expect(page.locator('#ask-answer-retry')).toBeHidden();
+    await expect(page.locator('#ask-status')).toContainText('Submit the question');
+    expect(requests.filter(item => item.path === '/answer')).toHaveLength(1);
+    await ask(page, 'New authorized question');
+    await expect(page.locator('#answer-panel')).toContainText(answer.answer);
+    const [first, next] = requests.filter(item => item.path === '/answer').map(item => item.body);
+    expect(first.allow_remote).toBe(true);
+    expect(first.data_classification).toBe('internal');
+    expect(next.allow_remote).toBe(changedControl === 'classification');
+    expect(next.jev_assisted).toBe(changedControl !== 'assistance');
+    expect(next.data_classification).toBe(changedControl === 'assistance' ? undefined
+      : changedControl === 'classification' ? 'public' : 'internal');
+  });
+}
+
+test('revoking Jev consent invalidates a pending answer and its late preview', async ({ page }) => {
+  const { requests } = await fixture(page);
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  await page.route('**/api/answer', async route => {
+    requests.push({ path: '/answer', body: route.request().postDataJSON() });
+    await gate;
+    await route.fulfill({ json: answer }).catch(() => {});
+  });
+  await page.getByText('Experimental Jev retrieval planning', { exact: true }).click();
+  await page.locator('#ask-jev-assisted').check();
+  await page.locator('#ask-jev-remote').check();
+  await ask(page);
+  await expect(page.locator('#ask-cancel')).toBeVisible();
+  await page.locator('#ask-jev-remote').uncheck();
+  release();
+  await expect(page.locator('#ask-answer-retry')).toBeHidden();
+  await expect(page.locator('#ask-cancel')).toBeHidden();
+  await expect(page.locator('#answer-panel')).not.toContainText(answer.answer);
+  await expect(page.locator('#answer-panel')).toContainText('Submit the question');
+  await expect(page.locator('#retrieval-list')).not.toContainText('Candidate Postgres memory.');
+  await expect(page.locator('#ask-status')).toContainText('Jev settings changed');
+  expect(requests.filter(item => item.path === '/answer')).toHaveLength(1);
+});
+
 test('retrieval preview reuses the answer candidates without a second recall request', async ({ page }) => {
   const { requests } = await fixture(page);
   await ask(page);
