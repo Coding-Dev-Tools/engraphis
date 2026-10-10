@@ -9,6 +9,7 @@
   <link rel="icon" type="image/png" sizes="32x32" href="/v2-assets/favicon-32.png">
   <link rel="stylesheet" href="/v2-assets/ledger.css?v=20260928-workspace-routing-1">
   <link rel="stylesheet" href="/v2-assets/memory-workflow.css?v=20260906-lifecycle-1">
+  <link rel="stylesheet" href="/v2-assets/spec-crawl.css">
 </head>
 <body data-theme="slate">
   <a class="skip-link" href="#main-content">Skip to main content</a>
@@ -55,6 +56,9 @@
       <nav class="manage-nav" aria-label="More tools">
         <button class="nav-item" type="button" data-view="relations">
           <span>Explore</span><small>connections and evidence</small>
+        </button>
+        <button class="nav-item" type="button" data-view="specstudio">
+          <span>Spec Studio</span><small>prompt crawler &amp; quality</small>
         </button>
         <button class="nav-item" type="button" data-view="provenance">
           <span>Activity</span><small>history, sources and receipts</small>
@@ -521,6 +525,179 @@
         </div>
       </section>
 
+      <section class="view specstudio-view" data-view-panel="specstudio" aria-labelledby="specstudio-title">
+        <div class="specstudio-layout">
+          <h1 id="specstudio-title">Spec Studio</h1>
+          <!-- Header HUD -->
+          <div class="spec-header-hud">
+            <div>
+              <span class="hud-brand">SWARM prompt-crawler</span> &middot;
+              <span class="hud-stat">LEGS <strong>16</strong></span> &middot;
+              <span class="hud-stat">WORDS READ <strong id="spec-hud-read">0/0</strong></span> &middot;
+              <span class="hud-stat">LINKS <strong id="spec-hud-links">0</strong></span> &middot;
+              <span class="hud-stat danger">FLAGS <strong id="spec-hud-flags">0</strong></span>
+            </div>
+            <div>
+              <span class="hud-stat">
+                <span class="spec-mode-toggle">
+                  <button id="spec-mode-prompt" class="spec-mode-btn active" aria-pressed="true" type="button">Prompt Spec</button>
+                  <button id="spec-mode-memories" class="spec-mode-btn" aria-pressed="false" type="button">Memory Nodes</button>
+                </span>
+              </span> &middot;
+              <span class="hud-stat"><span id="spec-hud-score-label">SPEC SCORE</span> <strong id="spec-score-num">0</strong></span> &middot;
+              <span class="hud-stat">TARGET <strong id="spec-hud-target">studio.prompt</strong></span>
+            </div>
+          </div>
+
+          <!-- Section Stepper -->
+          <div class="spec-stepper" id="spec-stepper" role="list" aria-label="Spec crawl sections"></div>
+
+          <!-- Canvas Stage -->
+          <div class="spec-stage-container">
+            <canvas id="spec-canvas" class="spec-canvas" role="img" aria-label="Spec crawl animation stage"></canvas>
+            <div class="spec-stage-overlay-controls">
+              <button id="spec-btn-play" type="button">Play</button>
+              <select id="spec-select-speed" aria-label="Playback speed">
+                <option value="1">1x</option>
+                <option value="2" selected>2x</option>
+                <option value="5">5x</option>
+                <option value="10">10x</option>
+              </select>
+              <button id="spec-btn-ship" type="button">Skip to Ship</button>
+              <button id="spec-btn-new" type="button">New Crawl</button>
+            </div>
+          </div>
+
+          <!-- Bottom Telemetry Grid -->
+          <div class="spec-telemetry-grid">
+            <!-- Panel 1: Crawl Log -->
+            <div class="spec-panel">
+              <div class="spec-panel-header">
+                <span>CRAWL LOG</span>
+                <span class="badge">replay</span>
+              </div>
+              <div class="spec-log-body" id="spec-log-body"></div>
+            </div>
+
+            <!-- Panel 2: Sections / Memory Nodes -->
+            <div class="spec-panel">
+              <div class="spec-panel-header">
+                <span id="spec-panel2-title">SECTIONS</span>
+                <span class="badge" id="spec-sections-count">0</span>
+              </div>
+              <div class="spec-sections-list" id="spec-sections-list"></div>
+            </div>
+
+            <!-- Panel 3: Coverage Radar -->
+            <div class="spec-panel">
+              <div class="spec-panel-header">
+                <span>COVERAGE RADAR</span>
+                <span class="badge">live</span>
+              </div>
+              <div class="spec-radar-container">
+                <svg id="spec-radar-svg" class="spec-radar-svg" viewBox="0 0 140 140"></svg>
+                <div class="spec-radar-bars">
+                  <div class="spec-radar-bar-row">
+                    <span>CLAIMS</span>
+                    <strong id="spec-count-claims">0</strong>
+                  </div>
+                  <div class="spec-radar-bar-row">
+                    <span>OWNERS</span>
+                    <strong id="spec-count-owners">0</strong>
+                  </div>
+                  <div class="spec-radar-bar-row">
+                    <span>APPROVALS</span>
+                    <strong id="spec-count-approvals">0</strong>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Panel 4: Word Heat / Remediation -->
+            <div class="spec-panel">
+              <div class="spec-panel-header">
+                <span id="spec-panel4-title">WORD HEAT</span>
+                <span class="badge" id="spec-panel4-badge">0</span>
+              </div>
+              <div id="spec-panel4-body">
+                <div class="spec-heat-grid" id="spec-heat-grid"></div>
+                <div class="spec-heat-meta" id="spec-heat-meta">
+                  <div>Enter a specification to begin.</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Panel 5: Spec Score / Cluster Health -->
+            <div class="spec-panel">
+              <div class="spec-panel-header">
+                <span id="spec-panel5-title">SPEC SCORE</span>
+                <span class="badge">live</span>
+              </div>
+              <div class="spec-score-container">
+                <div class="spec-score-circle">
+                  <svg viewBox="0 0 100 100" width="90" height="90">
+                    <circle cx="50" cy="50" r="40" fill="none" stroke="#1e293b" stroke-width="8"></circle>
+                    <circle id="spec-score-ring" cx="50" cy="50" r="40" fill="none" stroke="#00ffaa" stroke-width="8" stroke-dasharray="251" stroke-dashoffset="251" stroke-linecap="round"></circle>
+                  </svg>
+                  <div class="spec-score-number" id="spec-score-display">—</div>
+                </div>
+                <div class="spec-score-flags-ask" id="spec-flags-ask">flags to ask &middot; 0</div>
+                <div class="spec-score-motto" id="spec-score-motto">ask, don't guess</div>
+              </div>
+            </div>
+
+            <!-- Panel 6: Crawler.py -->
+            <div class="spec-panel">
+              <div class="spec-panel-header">
+                <span>CRAWLER.PY</span>
+                <span class="badge">illustration</span>
+              </div>
+              <div class="spec-code-body" tabindex="0" role="region" aria-label="Crawler illustration">
+                <div class="code-line code-comment"># crawler.py &middot; reads prompt spec</div>
+                <div class="code-line"><span class="code-fn">graph</span> = load(<span class="code-str">"studio.prompt"</span>)</div>
+                <div class="code-line"><span class="code-fn">spider</span> = Crawler(legs=16)</div>
+                <div class="code-line" id="code-line-walk"><span class="code-keyword">for</span> sec <span class="code-keyword">in</span> graph.sections:</div>
+                <div class="code-line">&nbsp;&nbsp;spider.walk_to(sec)</div>
+                <div class="code-line" id="code-line-classify">&nbsp;&nbsp;<span class="code-keyword">for</span> w <span class="code-keyword">in</span> sec.words:</div>
+                <div class="code-line">&nbsp;&nbsp;&nbsp;&nbsp;kind = classify(w)</div>
+                <div class="code-line" id="code-line-flag">&nbsp;&nbsp;&nbsp;&nbsp;<span class="code-keyword">if</span> kind == <span class="code-str">"vague"</span>:</div>
+                <div class="code-line">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;flags.append(w)</div>
+                <div class="code-line">&nbsp;&nbsp;&nbsp;&nbsp;<span class="code-keyword">else</span>:</div>
+                <div class="code-line">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;graph.link(w)</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Input Modal Backdrop -->
+        <div id="spec-modal-backdrop" class="spec-modal-backdrop" hidden>
+          <div class="spec-modal" role="dialog" aria-modal="true" aria-labelledby="spec-modal-title">
+            <h2 id="spec-modal-title">Crawl Spec or Prompt</h2>
+            <textarea id="spec-input-text" rows="10" maxlength="64000" aria-label="Specification text" placeholder="Paste your markdown prompt or spec here..."></textarea>
+            <div class="spec-modal-actions">
+              <button id="spec-modal-cancel" class="spec-btn-secondary" type="button">Cancel</button>
+              <button id="spec-modal-submit" class="spec-btn-primary" type="button">Run Spec Crawl</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Ask Modal Backdrop -->
+        <div id="spec-ask-modal-backdrop" class="spec-modal-backdrop" hidden>
+          <div class="spec-modal" role="dialog" aria-modal="true" aria-labelledby="spec-ask-title">
+            <h2 id="spec-ask-title">Ask, Don't Guess &middot; Clarification</h2>
+            <p id="spec-ask-question" class="spec-ask-question"></p>
+            <textarea id="spec-ask-input" rows="4" maxlength="10000" aria-label="Clarification answer" aria-describedby="spec-ask-question" placeholder="Enter precise rule or number to replace the vague wording..."></textarea>
+            <div class="spec-modal-actions">
+              <button id="spec-ask-cancel" class="spec-btn-secondary" type="button">Cancel</button>
+              <button id="spec-ask-submit" class="spec-btn-primary" type="button">Save Clarification &amp; Re-crawl</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Toast Notification -->
+        <div id="spec-toast" class="spec-toast" role="status" hidden></div>
+      </section>
+
       <section class="view" data-view-panel="provenance" aria-labelledby="provenance-title">
         <div class="page-wrap">
           <header class="view-header">
@@ -856,6 +1033,7 @@
   <script src="/v2-assets/memory-history.js?v=20260906-workflow-1"></script>
   <script src="/v2-assets/ask-requests.js?v=20260906-ask-home-1"></script>
   <script src="/v2-assets/graph-lifecycle.js?v=20260906-lifecycle-1"></script>
+  <script src="/v2-assets/spec-crawl.js"></script>
   <script src="/v2-assets/ledger.js?v=20260928-workspace-routing-1"></script>
 </body>
 </html>

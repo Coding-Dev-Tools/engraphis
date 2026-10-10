@@ -62,6 +62,12 @@ from engraphis.core.interfaces import (
     vector_index_requires_sync,
     vector_index_shares_store_transaction,
 )
+from engraphis.core.spec_crawl import (
+    SpecCrawlError,
+    apply_answer,
+    compose_memory_spec,
+    crawl_spec,
+)
 from engraphis.core.poisoning import (
     REVIEW_APPROVED,
     REVIEW_PENDING,
@@ -12833,6 +12839,322 @@ class MemoryService:
             },
             "computed_at": now,
         }
+
+    # ── spec / prompt crawl (studio.prompt style) ──────────────────────────────
+    def _spec_crawl_scope(
+        self, workspace: Optional[str], repo: Optional[str], session_id: Optional[str],
+        *, require_existing: bool = True,
+    ) -> tuple[str, Optional[str], Optional[SearchFilter]]:
+        route = self.resolve_workspace(workspace, repo=repo, session_id=session_id)
+        ws, rp = self._clean_ws(route["workspace"] or "default"), route["repo"]
+        wid = self._lookup_workspace(ws)
+        if wid is None:
+            if require_existing or rp or session_id:
+                raise ValidationError("spec crawl requires an existing workspace/repo")
+            return ws, rp, None
+        _, rid = self._require_scope(ws, rp)
+        sid = None
+        if session_id:
+            sid = _clean_text(session_id, field="session_id", max_chars=MAX_NAME_CHARS)
+            session = self.store.get_session(sid)
+            if session is None:
+                raise ValidationError("spec crawl session does not exist")
+            self._authorize_session(session)
+            if session["workspace_id"] != wid or (
+                    rid is not None and session.get("repo_id") != rid):
+                raise ValidationError("session_id does not belong to that workspace/repo")
+        return ws, rp, SearchFilter(
+            workspace_id=wid, repo_id=rid, session_id=sid, include_ancestors=True,
+        )
+
+    def spec_crawl(
+        self,
+        text: Optional[str] = None,
+        *,
+        workspace: Optional[str] = None,
+        repo: Optional[str] = None,
+        session_id: Optional[str] = None,
+        source_id: Optional[str] = None,
+        crawl_procedural: bool = False,
+        trace_claims: bool = True,
+        include_trace: bool = True,
+    ) -> dict:
+        """Crawl an agent specification, prompt, or procedural memories and report quality.
+
+        Calculates seven-axis radar coverage, classifies tokens into explainable kinds,
+        links concepts within and across sections, flags ambiguous wording ('ask, don't guess'),
+        and optionally verifies claims against grounded memory evidence.
+        """
+        crawl_procedural = _strict_bool(crawl_procedural, field="crawl_procedural")
+        trace_claims = _strict_bool(trace_claims, field="trace_claims")
+        include_trace = _strict_bool(include_trace, field="include_trace")
+        ws, repo, flt = self._spec_crawl_scope(
+            workspace, repo, session_id, require_existing=crawl_procedural,
+        )
+
+        content: str = ""
+        source_label: str = ""
+
+        if text is not None and str(text).strip():
+            content = _clean_text(text, field="text", max_chars=64_000)
+            source_label = "prompt:direct"
+        elif crawl_procedural:
+            assert flt is not None
+            flt.mtypes = [MemoryType.PROCEDURAL]
+            recs = self.store.list_memories(flt, limit=100, prompt_only=True)
+            content = compose_memory_spec([_mem_to_dict(r) for r in recs])
+            source_label = f"procedural:{ws}"
+            if not content.strip():
+                content = "# Procedural Rules\nNo procedural memories recorded yet.\n"
+        elif source_id:
+            if _authenticated_principal() is not None or self.allowed_workspaces is not None:
+                raise ValidationError("source_id file access requires the local operator; pass text instead")
+            from engraphis.core.engine import _approved_local_index_roots
+            clean_src = _clean_text(source_id, field="source_id", max_chars=500)
+            try:
+                path = Path(clean_src).expanduser().resolve(strict=True)
+                allowed = any(
+                    os.path.commonpath((os.path.normcase(str(path)), root)) == root
+                    for root in _approved_local_index_roots()
+                    if os.path.splitdrive(str(path))[0].casefold()
+                    == os.path.splitdrive(root)[0].casefold()
+                )
+                if not allowed or not path.is_file() or path.suffix.lower() not in {
+                    ".md", ".txt", ".rst", ".json", ".jsonl", ".yaml", ".yml", ".toml",
+                }:
+                    raise ValidationError("source_id must be a text specification under an approved local root")
+                with path.open("rb") as source:
+                    payload = source.read(128_001)
+                if len(payload) > 128_000:
+                    raise ValidationError("source file exceeds 128000 bytes")
+                content = _clean_text(payload.decode("utf-8"), field="text", max_chars=64_000)
+                _reject_secret_capture((("spec source", content),))
+                source_label = path.name
+            except (OSError, UnicodeError, ValueError) as exc:
+                if isinstance(exc, ValidationError):
+                    raise
+                raise ValidationError("source_id could not be read as an approved UTF-8 specification") from exc
+        else:
+            raise ValidationError("text, source_id, or crawl_procedural=True is required")
+
+        support_lookup = None
+        if trace_claims and flt is not None:
+            def _lookup(claim_sentence: str) -> Optional[dict]:
+                ans = self.engine.grounded_recall(
+                    claim_sentence,
+                    workspace_id=flt.workspace_id,
+                    repo_id=flt.repo_id,
+                    session_id=flt.session_id,
+                    k=4,
+                    min_support=0.25,
+                    max_citations=1,
+                    reinforce=False,
+                ).to_dict()
+                if ans.get("grounded") and ans.get("citations"):
+                    top = ans["citations"][0]
+                    return {"id": top["id"], "support": top.get("support", 0.0)}
+                return None
+            support_lookup = _lookup
+
+        try:
+            report = crawl_spec(
+                content,
+                support_lookup=support_lookup,
+                include_trace=include_trace,
+                source_label=source_label,
+            )
+        except SpecCrawlError as exc:
+            raise ValidationError(str(exc)) from exc
+
+        return report
+
+    def spec_crawl_answer(
+        self,
+        flag: dict,
+        answer: str,
+        *,
+        spec_text: str,
+        workspace: Optional[str] = None,
+        repo: Optional[str] = None,
+        session_id: Optional[str] = None,
+        save_as_memory: bool = True,
+    ) -> dict:
+        """Apply a human clarification to an ambiguous spec flag and optionally record it."""
+        save_as_memory = _strict_bool(save_as_memory, field="save_as_memory")
+        clean_answer = _clean_text(answer, field="answer", max_chars=10_000).strip()
+        if not clean_answer:
+            raise ValidationError("answer is empty")
+        if not isinstance(flag, dict) or "start" not in flag or "end" not in flag:
+            raise ValidationError("flag must be an object with start and end offsets")
+        spec_text = _clean_text(spec_text, field="spec_text", max_chars=64_000)
+        canonical_flags = crawl_spec(spec_text, include_trace=False)["flags"]
+        canonical = next((candidate for candidate in canonical_flags
+                          if candidate["kind"] == "vague" and all(
+                              candidate[key] == flag.get(key)
+                              for key in ("start", "end", "token"))), None)
+        if canonical is None:
+            raise ValidationError("flag does not match an ambiguous token in the current specification")
+        flag = canonical
+
+        try:
+            updated_text = apply_answer(spec_text, flag, clean_answer)
+        except SpecCrawlError as exc:
+            raise ValidationError(str(exc)) from exc
+
+        new_report = self.spec_crawl(
+            updated_text, workspace=workspace, repo=repo, session_id=session_id,
+            trace_claims=True, include_trace=True,
+        )
+
+        mem_id: Optional[str] = None
+        if save_as_memory:
+            token = flag.get("token", "rule")
+            sentence = flag.get("sentence", "").strip()
+            body = f"Clarification for '{token}': {clean_answer}"
+            if sentence:
+                body = f"{sentence}\n{body}"
+            rem_res = self.remember(
+                body,
+                title=f"Spec Clarification: {token}",
+                workspace=workspace,
+                repo=repo,
+                session_id=session_id,
+                mtype="procedural",
+                source="spec_crawl",
+                trusted=False,
+                metadata={"flag_id": flag.get("id")},
+            )
+            mem_id = rem_res.get("id") if isinstance(rem_res, dict) else str(rem_res)
+
+
+        return {
+            "updated_text": updated_text,
+            "new_report": new_report,
+            "memory_id": mem_id,
+        }
+
+    def spec_crawl_memories(
+        self,
+        *,
+        workspace: Optional[str] = None,
+        repo: Optional[str] = None,
+        session_id: Optional[str] = None,
+        memory_ids: Optional[list[str]] = None,
+        mtypes: Optional[list[str]] = None,
+        include_trace: bool = True,
+    ) -> dict[str, Any]:
+        """Analyze a cluster of live memory nodes for cross-node contradictions, orphans, policy gaps, and cluster health."""
+        include_trace = _strict_bool(include_trace, field="include_trace")
+        from engraphis.core.spec_crawl import analyze_memory_nodes
+        ws, rp, flt = self._spec_crawl_scope(workspace, repo, session_id)
+        assert flt is not None
+        if mtypes is not None:
+            flt.mtypes = [_enum(mt, MemoryType, "mtype") for mt in
+                          _clean_string_list(mtypes, field="mtypes", max_items=4, max_chars=32)]
+
+        recs = []
+        if memory_ids is not None:
+            clean_ids = _clean_string_list(
+                memory_ids, field="memory_ids", max_items=150, max_chars=MAX_NAME_CHARS,
+            )
+            with self.store.read_snapshot():
+                visible_ids = self.store.visible_memory_ids(clean_ids, flt)
+                rec_map = self.store.get_memories(sorted(visible_ids))
+                recs = [rec for rec in rec_map.values()
+                        if prompt_eligible(rec.provenance, rec.metadata)
+                        and self._memory_visible_to_caller(rec)]
+        else:
+            recs = self.store.list_memories(flt, limit=150, prompt_only=True)
+
+        # Gather declared links between these memories
+        mem_dicts = [_mem_to_dict(r) for r in recs]
+        mem_ids_set = {m["id"] for m in mem_dicts}
+        links = []
+        for mid in mem_ids_set:
+            node_links = self.store.get_links(mid)
+            for nl in node_links:
+                if nl.get("a") in mem_ids_set and nl.get("b") in mem_ids_set:
+                    links.append(nl)
+
+        report = analyze_memory_nodes(
+            mem_dicts,
+            links=links,
+            workspace=ws,
+            include_trace=include_trace,
+        )
+        report["workspace"] = ws
+        report["repo"] = rp
+        return report
+
+    def spec_crawl_resolve(
+        self,
+        *,
+        action: str,
+        node_a: str,
+        node_b: Optional[str] = None,
+        workspace: Optional[str] = None,
+        repo: Optional[str] = None,
+        confirmed: bool = False,
+    ) -> dict[str, Any]:
+        """Execute remediation on memory cluster audit: supersede older conflicting node or link orphan."""
+        confirmed = _strict_bool(confirmed, field="confirmed")
+        route = self.resolve_workspace(workspace, repo=repo)
+        ws = route["workspace"]
+        act = str(action or "").strip().lower()
+        if act not in {"supersede", "link"}:
+            raise ValidationError("unknown resolution action; expected 'supersede' or 'link'")
+        if act == "supersede" and confirmed is not True:
+            raise ValidationError("supersede requires explicit confirmation (confirmed=True)")
+        node_a_clean = _clean_text(node_a, field="node_a", max_chars=MAX_NAME_CHARS)
+        node_b_clean = _clean_text(node_b, field="node_b", max_chars=MAX_NAME_CHARS)
+        if node_a_clean == node_b_clean:
+            raise ValidationError("resolution requires two distinct memories")
+        wid, rid = self._require_scope(ws or "default", route["repo"])
+        with self.store.write_transaction():
+            for mid in (node_a_clean, node_b_clean):
+                self._check_owns(mid, wid, rid)
+                rec = self.store.get_memory(mid)
+                assert rec is not None
+                live = self.store.visible_memory_ids([mid], SearchFilter(
+                    workspace_id=wid, repo_id=rid, session_id=rec.session_id,
+                    include_ancestors=True,
+                ))
+                if mid not in live or not prompt_eligible(rec.provenance, rec.metadata):
+                    raise ValidationError("resolution requires live, approved memories")
+            self.link(
+                node_a_clean, node_b_clean, workspace=ws or "default", repo=route["repo"],
+                relation="supersedes" if act == "supersede" else "related_to",
+                reason="spec_crawl_resolve",
+            )
+            if act == "supersede":
+                self.retire(node_b_clean, workspace=ws or "default", repo=route["repo"],
+                            reason="spec_crawl_resolve", actor="spec_crawl")
+
+        if act == "supersede":
+            if not node_b_clean:
+                raise ValidationError("supersede requires both node_a (retained) and node_b (superseded)")
+            return {
+                "ok": True,
+                "action": "supersede",
+                "retained_node": node_a_clean,
+                "superseded_node": node_b_clean,
+                "message": f"Superseded node '{node_b_clean}' with retained node '{node_a_clean}'.",
+                "workspace": ws,
+            }
+        elif act == "link":
+            if not node_b_clean:
+                raise ValidationError("link requires both node_a and node_b")
+            return {
+                "ok": True,
+                "action": "link",
+                "from_node": node_a_clean,
+                "to_node": node_b_clean,
+                "message": f"Linked node '{node_a_clean}' to '{node_b_clean}'.",
+                "workspace": ws,
+            }
+        else:
+            raise ValidationError(f"unknown resolution action: {act}. Expected 'supersede' or 'link'.")
+
 
 
 def _filter(workspace_id, repo_id, mtypes, as_of, graph_layers=None, *, session_id=None,
