@@ -195,6 +195,10 @@ def test_api_spec_crawl_endpoints():
             # POST /api/spec/crawl
             rejected_source = client.post("/api/spec/crawl", json={"source_id": "AGENTS.md"})
             assert rejected_source.status_code == 422
+            rejected_with_text = client.post("/api/spec/crawl", json={
+                "source_id": "AGENTS.md", "text": "# Rules\nRun 15 tests.",
+            })
+            assert rejected_with_text.status_code == 422
             resp = client.post(
                 "/api/spec/crawl",
                 json={

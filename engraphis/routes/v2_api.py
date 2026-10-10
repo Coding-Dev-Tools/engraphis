@@ -2871,7 +2871,7 @@ class _SpecCrawlReq(BaseModel):
     workspace: Optional[str] = None
     repo: Optional[str] = None
     session_id: Optional[str] = None
-    source_id: Optional[str] = Field(default=None, max_length=500)
+    source_id: None = None
     crawl_procedural: StrictBool = False
     trace_claims: StrictBool = True
     include_trace: StrictBool = True
@@ -2880,8 +2880,6 @@ class _SpecCrawlReq(BaseModel):
 @router.post("/spec/crawl")
 def spec_crawl(req: _SpecCrawlReq):
     """Crawl a spec or prompt, returning radar coverage, word kinds, links, flags, and replay trace."""
-    if req.source_id is not None:
-        raise HTTPException(status_code=422, detail="HTTP spec crawl accepts text, not server file paths")
     ws = req.workspace if req.workspace is not None or req.repo or req.session_id else _default_ws()
     return _run(
         service().spec_crawl,
@@ -2889,7 +2887,6 @@ def spec_crawl(req: _SpecCrawlReq):
         workspace=ws,
         repo=req.repo,
         session_id=req.session_id,
-        source_id=req.source_id,
         crawl_procedural=req.crawl_procedural,
         trace_claims=req.trace_claims,
         include_trace=req.include_trace,
