@@ -150,6 +150,7 @@
       edgeGhosts: new Uint8Array(0), edgeRelations: [], edgeLayers: [], layers: null,
       totalLinks: 0, edgeVertexCount: 0,
       camera: { x: 0, y: 0, scale: 1 }, baseScale: 1, width: 1, height: 1, dpr: 1,
+      cameraOwned: false, viewportReady: false, pendingFit: null,
       styleName: opts.style || 'cyber', colorBy: 'community', typeColors: {}, themeColors: {}, palette: 'theme',
       settings: { labels: true, flow: false, flowSpeed: 45, frozen: false, mode: 'communities', repel: 48, link: 16, gravity: 48, font: 12, size: 3, linkw: 0.72,
         gravitationalConstant: 1, blackHoleMass: 1, localGravitationalConstant: 1,
@@ -968,10 +969,14 @@
     /* ── Camera & sizing ────────────────────────────────────────────────────────── */
     /* The camera touches uniforms only — the worker never hears about pan/zoom again. */
     function camera() { schedule(); scheduleLabels(); }
+    function claimCamera() { state.cameraOwned = true; state.pendingFit = null; }
     function resize() {
       const rect = element.getBoundingClientRect();
-      state.width = Math.max(1, rect.width || element.clientWidth || 1);
-      state.height = Math.max(1, rect.height || element.clientHeight || 1);
+      const width = rect.width || element.clientWidth, height = rect.height || element.clientHeight;
+      if (width <= 0 || height <= 0) return;
+      state.width = width;
+      state.height = height;
+      state.viewportReady = true;
       state.dpr = Math.min(2, window.devicePixelRatio || 1);
       [underlay, canvas, labels].forEach(target => {
         target.width = Math.max(1, Math.floor(state.width * state.dpr));
@@ -979,10 +984,19 @@
       });
       state.underlayKey = '';
       state.lastLabelKey = '';
+      if (state.pendingFit && !state.paused) fit(state.pendingFit === 'manual');
       if (state.ready) { schedule(); scheduleLabels(true); }
     }
-    function fit() {
-      if (!state.bounds) return;
+    function fit(manual = true) {
+      // Worker fits are advisory once the person has navigated this scene.
+      if (!manual && state.pendingFit === 'manual') manual = true;
+      if (!manual && state.cameraOwned) return;
+      if (manual) claimCamera();
+      if (!state.bounds || !state.viewportReady || state.paused) {
+        state.pendingFit = manual ? 'manual' : 'automatic';
+        return;
+      }
+      state.pendingFit = null;
       const bounds = state.bounds;
       state.camera.x = (bounds.minX + bounds.maxX) / 2;
       state.camera.y = (bounds.minY + bounds.maxY) / 2;
@@ -1007,7 +1021,7 @@
       if (state.edgeVertexCount) uploadEdgePositions(); else uploadEdges();
       state.pickDirty = true;
       state.lastLabelKey = '';
-      if (doFit) fit(); else camera();
+      if (doFit) fit(false); else camera();
       computeCommunityRegions();
       drawRegions();
     }
@@ -1094,7 +1108,7 @@
         refreshVisibility(false);
         uploadNodePositions();
         uploadEdges();
-        fit();
+        fit(false);
         if (message.type === 'preview') stats({ progressive: true, linksPending: true });
         else if (typeof opts.onMetrics === 'function') opts.onMetrics(api.metrics());
         schedule();
@@ -1137,6 +1151,7 @@
         worker.postMessage({ type: 'settings', settings: state.settings, relayout: false });
         return;
       }
+      if (fitLayout) { state.cameraOwned = false; state.pendingFit = null; }
       pendingLayoutFit = pendingLayoutFit || fitLayout;
       if (layoutFrame) return;
       layoutFrame = raf(() => {
@@ -1216,6 +1231,7 @@
     const activePointers = new Map();
     function applyPinch() {
       if (activePointers.size !== 2) return;
+      claimCamera();
       const [p1, p2] = [...activePointers.values()];
       const dist = Math.hypot(p2.x - p1.x, p2.y - p1.y) || 1;
       const rect = element.getBoundingClientRect();
@@ -1243,6 +1259,7 @@
       }
       if (state.drag) {
         const dx = event.clientX - state.drag.x, dy = event.clientY - state.drag.y;
+        if (dx || dy) claimCamera();
         if (Math.abs(dx) + Math.abs(dy) > 3) state.drag.moved = true;
         state.camera.x = state.drag.cameraX - dx / state.camera.scale;
         state.camera.y = state.drag.cameraY - dy / state.camera.scale;
@@ -1272,6 +1289,7 @@
       if (!state.drag && (!event.relatedTarget || event.relatedTarget !== canvas)) clearHover();
     });
     canvas.addEventListener('wheel', event => {
+      claimCamera();
       const rect = element.getBoundingClientRect();
       const before = world(event.clientX - rect.left, event.clientY - rect.top);
       state.camera.scale = clamp(state.camera.scale * Math.exp(-event.deltaY * 0.0012), 0.005, 7);
@@ -1300,7 +1318,10 @@
         case 'Escape': clearFocus(); clearHover(); break;
         default: handled = false;
       }
-      if (handled) { camera(); event.preventDefault(); }
+      if (handled) {
+        if (!['Escape', 'f', 'F'].includes(event.key)) claimCamera();
+        camera(); event.preventDefault();
+      }
     };
     element.tabIndex = 0;
     element.addEventListener('keydown', handleKeydown);
@@ -1417,12 +1438,17 @@
 
     const api = {
       exportImageCanvas,
-      apply(fn, shouldFit) { if (typeof fn === 'function') fn(api); if (shouldFit) fit(); return api; },
+      apply(fn, shouldFit) {
+        if (typeof fn === 'function') fn(api);
+        if (shouldFit) { state.cameraOwned = false; state.pendingFit = null; fit(false); }
+        return api;
+      },
       setData(data) {
         if (state.destroyed || !worker) return api;
         const nodes = Array.isArray(data && data.nodes) ? data.nodes : [];
         const links = Array.isArray(data && data.links) ? data.links : (data && data.edges) || [];
         state.ready = false; state.error = null; state.lastLabelKey = ''; state.layoutPending = true;
+        state.cameraOwned = false; state.pendingFit = null; state.bounds = null;
         state.hover = -1; state.focus = -1; state.hoverPoint = [0, 0]; state.focusPoint = [0, 0];
         state.neighbors = null; state.incidentEdges = null; state.connectionHighlights = null;
         state.edgeSources = new Uint32Array(0); state.edgeTargets = new Uint32Array(0);
@@ -1520,6 +1546,7 @@
       reveal(id) {
         const index = state.idIndex.get(String(id));
         if (index === undefined || !state.nodeFlags[index]) return false;
+        claimCamera();
         state.camera.x = state.positions[index * 2];
         state.camera.y = state.positions[index * 2 + 1];
         state.camera.scale = Math.max(1.2, state.camera.scale);
@@ -1551,7 +1578,7 @@
         if (state.labelFrame) { caf(state.labelFrame); state.labelFrame = 0; }
         return api;
       },
-      resume() { state.paused = false; schedule(); scheduleLabels(); return api; },
+      resume() { state.paused = false; resize(); schedule(); scheduleLabels(); return api; },
       state() {
         return {
           mode: 'all', presentation: 'all',

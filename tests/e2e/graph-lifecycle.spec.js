@@ -12,11 +12,11 @@ const scene = {
   meta: { algorithm_version: 'galaxy-v6', layout_seed: 7 },
 };
 
-async function fixture(page, { deferGraph } = {}) {
+async function fixture(page, { deferGraph, holdEveryWorker = false } = {}) {
   const errors = [];
   const graphRequests = [];
   page.on('pageerror', error => errors.push(error.message));
-  await page.addInitScript(() => {
+  await page.addInitScript(({ holdEveryWorker }) => {
     window.__lifecycleEngines = [];
     window.__lifecycleWorkers = [];
     const NativeWorker = window.Worker;
@@ -24,6 +24,22 @@ async function fixture(page, { deferGraph } = {}) {
       constructor(...args) {
         super(...args);
         const record = { url: String(args[0]), terminated: false };
+        if (holdEveryWorker && record.url.includes('engraphis-graph-every-worker.js')) {
+          let listener = null, released = false;
+          record.held = [];
+          Object.defineProperty(this, 'onmessage', {
+            get: () => listener,
+            set: value => { listener = value; },
+          });
+          this.addEventListener('message', event => {
+            if (released) { if (listener) listener.call(this, event); }
+            else record.held.push(event);
+          });
+          record.release = () => {
+            released = true;
+            record.held.splice(0).forEach(event => { if (listener) listener.call(this, event); });
+          };
+        }
         window.__lifecycleWorkers.push(record);
         const terminate = this.terminate.bind(this);
         this.terminate = () => { record.terminated = true; return terminate(); };
@@ -46,7 +62,7 @@ async function fixture(page, { deferGraph } = {}) {
         },
       });
     }
-  });
+  }, { holdEveryWorker });
   await page.route('**/api/**', async route => {
     const url = new URL(route.request().url());
     const path = url.pathname.slice(4);
@@ -162,6 +178,58 @@ test('Every node preserves keyboard pan and zoom across hiding and releases its 
   await page.keyboard.press('f');
   expect(session.errors).toEqual([]);
 });
+
+for (const gesture of ['keyboard', 'wheel', 'drag', 'small-drag', 'automatic']) {
+  test(`Every node handles deferred worker fits after ${gesture} navigation and hiding`, async ({ page }) => {
+    const session = await fixture(page, { holdEveryWorker: true });
+    await openGraph(page);
+    await page.locator('#graph-advanced > summary').click();
+    await page.locator('[data-graph-preset-choice="every"]').click();
+    await expect(page.locator('#graph-canvas')).toHaveAttribute('aria-busy', 'false');
+    await page.waitForFunction(() => window.__lifecycleEngines.length === 2
+      && window.__lifecycleWorkers.some(record => record.held
+        && record.held.some(event => event.data.type === 'layout' && event.data.fit === true)));
+    const camera = () => page.evaluate(() => {
+      const api = window.__lifecycleEngines[1].api;
+      return [api.graphToScreen(0, 0), api.graphToScreen(10, 10)];
+    });
+    const start = await camera();
+    const box = await page.locator('.engraphis-all-canvas').boundingBox();
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    if (gesture === 'keyboard') {
+      await page.locator('#graph-canvas').focus();
+      await page.keyboard.press('+');
+      await page.keyboard.press('ArrowRight');
+    } else if (gesture === 'wheel') {
+      await page.mouse.wheel(0, -200);
+    } else if (gesture === 'drag' || gesture === 'small-drag') {
+      await page.mouse.down();
+      await page.mouse.move(box.x + box.width / 2 + (gesture === 'small-drag' ? 1 : 70),
+        box.y + box.height / 2, { steps: 3 });
+      await page.mouse.up();
+    }
+    const before = await camera();
+    if (gesture !== 'automatic') expect(before).not.toEqual(start);
+    await page.locator('.nav-item[data-view="manage"]').click();
+    await frames(page);
+    expect(await camera()).toEqual(before);
+    await page.evaluate(() => window.__lifecycleWorkers.forEach(record => { if (record.release) record.release(); }));
+    expect(await camera()).toEqual(before);
+    await openGraph(page);
+    await frames(page);
+    const after = await camera();
+    if (gesture === 'automatic') {
+      expect(after).not.toEqual(before);
+      expect(after[1].x - after[0].x).toBeGreaterThan(0.05);
+    }
+    else expect(after).toEqual(before);
+    await page.locator('#graph-canvas').focus();
+    await page.keyboard.press('f');
+    const fitted = await camera();
+    expect(fitted[1].x - fitted[0].x).toBeGreaterThan(0.05);
+    expect(session.errors).toEqual([]);
+  });
+}
 
 test('Explore keeps essential controls first and reveals advanced controls with the keyboard', async ({ page }) => {
   await page.setViewportSize({ width: 640, height: 900 });
