@@ -247,8 +247,16 @@ def test_api_spec_crawl_memories_and_resolve():
 
         try:
             # Seed 2 conflicting memories and 1 orphan
-            m1 = svc.remember("Legacy service uses database port: 5432", title="Legacy DB Config", workspace="default")
-            m2 = svc.remember("Primary service uses database port: 5433", title="Primary DB Config", workspace="default")
+            m1 = svc.remember(
+                "Legacy service uses database port: 5432", title="Legacy DB Config",
+                workspace="default", subject_key="db.primary", claim_kind="port",
+                valid_from=1000.0, resolve_conflicts=False,
+            )
+            m2 = svc.remember(
+                "Primary service uses database port: 5433", title="Primary DB Config",
+                workspace="default", subject_key="db.primary", claim_kind="port",
+                valid_from=2000.0, resolve_conflicts=False,
+            )
             m3 = svc.remember("SOC2 compliance policy requires audit logging", title="Audit Policy", workspace="default")
 
             # 1. Audit cluster
@@ -303,3 +311,74 @@ def test_api_spec_crawl_memories_and_resolve():
         finally:
             v2_api._service = None
             svc.close()
+
+
+@pytest.mark.parametrize("failed", [True, False], ids=["backend_failure", "successful_abstention"])
+def test_claim_lookup_failures_remain_unchecked(crawl_service, monkeypatch, failed):
+    from engraphis.core.grounded import GroundedAnswer
+    from engraphis.core.spec_crawl import MAX_TRACED_CLAIMS
+
+    svc = crawl_service
+    svc.create_workspace("alpha")
+    text = "# Context\n" + "The server has port 123.\n" * 100
+    baseline = svc.spec_crawl(text, workspace="alpha", trace_claims=False)
+    before = svc.store.conn.total_changes
+    attempts = []
+
+    def lookup(query, **kwargs):
+        attempts.append(kwargs)
+        if failed:
+            raise RuntimeError("index unavailable")
+        return GroundedAnswer()
+
+    monkeypatch.setattr(svc.engine, "grounded_recall", lookup)
+    report = svc.spec_crawl(text, workspace="alpha", trace_claims=True)
+    assert len(attempts) == MAX_TRACED_CLAIMS
+    assert all(kwargs["reinforce"] is False for kwargs in attempts)
+    assert report["counts"]["claim_lookup_attempts"] == MAX_TRACED_CLAIMS
+    assert report["counts"]["claims_traced"] == 0
+    assert svc.store.conn.total_changes == before
+    if failed:
+        assert report["counts"]["claims_checked"] == 0
+        assert all(claim["status"] == "unchecked" for claim in report["claims"])
+        assert not any(flag["kind"] == "untraced" for flag in report["flags"])
+        assert report["score"] == baseline["score"]
+        assert report["score_breakdown"] == baseline["score_breakdown"]
+    else:
+        assert report["counts"]["claims_checked"] == MAX_TRACED_CLAIMS
+        assert sum(claim["status"] == "untraced" for claim in report["claims"]) == MAX_TRACED_CLAIMS
+        assert report["score"] < baseline["score"]
+
+
+def test_backfilled_recommendation_preserves_current_fact_and_history(crawl_service):
+    svc = crawl_service
+    current = svc.remember(
+        "port: 5433", workspace="alpha", trusted=True, subject_key="db.primary",
+        claim_kind="port", valid_from=2000.0, resolve_conflicts=False,
+    )["id"]
+    historical = svc.remember(
+        "port: 5432", workspace="alpha", trusted=True, subject_key="db.primary",
+        claim_kind="port", valid_from=1000.0, resolve_conflicts=False,
+    )["id"]
+    assert svc.store.get_memory(historical).ingested_at >= svc.store.get_memory(current).ingested_at
+    remedy = svc.spec_crawl_memories(workspace="alpha")["conflicts"][0]["remedy"]
+    assert remedy["action"] == "supersede"
+    assert remedy["ordering_basis"] == "valid_from"
+    assert remedy["keep_node"] == current
+    assert remedy["retire_node"] == historical
+    resolved = svc.spec_crawl_resolve(
+        action=remedy["action"], node_a=remedy["keep_node"], node_b=remedy["retire_node"],
+        workspace="alpha", confirmed=True,
+    )
+    assert resolved["retained_node"] == current
+    assert resolved["superseded_node"] == historical
+    assert svc.store.get_memory(current).valid_to is None
+    assert svc.store.get_memory(historical).valid_to is not None
+    assert svc.store.get_memory(historical).content == "port: 5432"
+    assert svc.store.get_memory(current).content == "port: 5433"
+    # Retired endpoints disappear from live get_links(), while the relationship remains in history.
+    historical_link = svc.store.conn.execute(
+        "SELECT a,b,valid_to FROM mem_links WHERE a=? AND b=? AND relation=?",
+        (current, historical, "supersedes"),
+    ).fetchone()
+    assert historical_link is not None

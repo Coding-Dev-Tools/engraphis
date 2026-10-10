@@ -87,7 +87,7 @@ The unified dashboard at `http://127.0.0.1:8700` includes a dedicated **Spec Stu
   - Displays links and highlights cross-node parameter / directive contradictions with pulsing red conflict lines.
   - Highlights isolated graph orphans with dashed orange suggestion links.
   - Spider walks between memory nodes, pulsing red on conflicts and orange on orphans.
-  - Remediation suggestions include **"Supersede Older"**, which requires confirmation before closing validity, and **"Auto-Link"**. Suggestions are advisory and use the selected workspace and project.
+  - Remediation suggestions include **"Supersede"**, which requires confirmation before closing validity, and **"Auto-Link"**. Suggestions are advisory and use the selected workspace and project.
 
 ---
 
@@ -95,9 +95,10 @@ The unified dashboard at `http://127.0.0.1:8700` includes a dedicated **Spec Stu
 
 Beyond inspecting isolated single-text prompt specifications, Spec Crawl provides cluster-level coherence auditing across multiple active memory records (`engraphis/core/spec_crawl.py::analyze_memory_nodes`):
 1. **Contradiction Detection**:
-   - Parameter collisions (e.g. `port: 5432` vs `port: 5433`, timeouts, database names, versions).
+   - Parameter collisions for positively matching, nonempty subject keys (e.g. `port: 5432` vs `port: 5433` for the same database).
    - Opposing modal directives (e.g. `must enforce <target>` vs `never allow / forbid <target>`).
    - Divergences for the same `(subject_key, claim_kind)` are review suggestions; different keyed subjects do not establish parameter conflicts.
+   - A keeper suggestion requires distinct, finite `valid_from` dates. Ingestion order never determines which fact is current. Missing, invalid, or equal effective dates require explicit clarification without a retirement target.
 2. **Graph Orphan Detection**:
    - Discovers nodes with 0 degrees of connectivity.
    - Compares token overlap to suggest related nodes for explicit linking.
@@ -181,3 +182,4 @@ python -m eval.spec_crawl
 ```
 
 Scores measure heuristic coverage and bounded ambiguity penalties. They do not prove execution safety or replace release tests. Partial specifications have low expected scores even when their wording is precise. Claim tracing makes at most 40 evidence lookups; reports return at most 200 flags while scores account for all detected flags.
+Failed evidence lookups remain `unchecked` and do not count as unsupported claims or lower the score. A successful lookup with no supporting evidence remains `untraced`.

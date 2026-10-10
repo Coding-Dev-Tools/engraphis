@@ -12940,22 +12940,19 @@ class MemoryService:
         support_lookup = None
         if trace_claims and flt is not None:
             def _lookup(claim_sentence: str) -> Optional[dict]:
-                try:
-                    ans = self.engine.grounded_recall(
-                        claim_sentence,
-                        workspace_id=flt.workspace_id,
-                        repo_id=flt.repo_id,
-                        session_id=flt.session_id,
-                        k=4,
-                        min_support=0.25,
-                        max_citations=1,
-                        reinforce=False,
-                    ).to_dict()
-                    if ans.get("grounded") and ans.get("citations"):
-                        top = ans["citations"][0]
-                        return {"id": top["id"], "support": top.get("support", 0.0)}
-                except Exception:
-                    pass
+                ans = self.engine.grounded_recall(
+                    claim_sentence,
+                    workspace_id=flt.workspace_id,
+                    repo_id=flt.repo_id,
+                    session_id=flt.session_id,
+                    k=4,
+                    min_support=0.25,
+                    max_citations=1,
+                    reinforce=False,
+                ).to_dict()
+                if ans.get("grounded") and ans.get("citations"):
+                    top = ans["citations"][0]
+                    return {"id": top["id"], "support": top.get("support", 0.0)}
                 return None
             support_lookup = _lookup
 
@@ -13141,7 +13138,7 @@ class MemoryService:
                 "action": "supersede",
                 "retained_node": node_a_clean,
                 "superseded_node": node_b_clean,
-                "message": f"Superseded older node '{node_b_clean}' with '{node_a_clean}'.",
+                "message": f"Superseded node '{node_b_clean}' with retained node '{node_a_clean}'.",
                 "workspace": ws,
             }
         elif act == "link":

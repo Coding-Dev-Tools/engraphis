@@ -1068,7 +1068,7 @@
       const resolveBtn = document.createElement('button');
       resolveBtn.className = 'spec-action-btn btn-resolve';
       resolveBtn.type = 'button';
-      resolveBtn.textContent = 'Supersede Older';
+      resolveBtn.textContent = 'Supersede';
       if (c.remedy && c.remedy.action === 'supersede') {
         resolveBtn.addEventListener('click', () => {
           resolveRemedy('supersede', c.remedy.keep_node, c.remedy.retire_node);
@@ -1082,6 +1082,22 @@
 
       card.appendChild(title);
       card.appendChild(reason);
+      if (c.remedy && c.remedy.action === 'clarify') {
+        const instructions = document.createElement('div');
+        instructions.className = 'spec-conflict-reason';
+        instructions.textContent = c.remedy.recommendation || c.remedy.detail || 'Choose the retained memory explicitly.';
+        card.appendChild(instructions);
+        [c.node_a, c.node_b].forEach(id => {
+          const node = (currentReport.nodes || []).find(item => item.id === id);
+          const candidate = document.createElement('div');
+          candidate.className = 'spec-conflict-reason';
+          const validFrom = node && node.valid_from;
+          const effectiveDate = new Date(typeof validFrom === 'number' ? validFrom * 1000 : NaN);
+          const date = Number.isFinite(effectiveDate.getTime()) ? effectiveDate.toISOString() : 'unknown';
+          candidate.textContent = `${node && node.title ? node.title : id} (${id}) — effective date: ${date}`;
+          card.appendChild(candidate);
+        });
+      }
       container.appendChild(card);
     });
 
@@ -1119,7 +1135,7 @@
 
   async function resolveRemedy(action, nodeA, nodeB) {
     if (mutationPending || reportScopeKey !== scopeKey() || currentMode !== 'memories') return;
-    const confirmed = action === 'supersede' && window.confirm('Retire this older memory from live recall? Its history remains available.');
+    const confirmed = action === 'supersede' && window.confirm(`Retire memory '${nodeB}' from live recall and retain '${nodeA}'? Its history remains available.`);
     if (action === 'supersede' && !confirmed) return;
     mutationPending = true;
     try {

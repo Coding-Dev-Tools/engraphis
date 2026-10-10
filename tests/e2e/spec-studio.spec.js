@@ -133,10 +133,10 @@ test('remediation uses the recommended keeper and requires confirmation', async 
   await page.locator('#spec-mode-memories').click();
   await expect(page.locator('#spec-panel4-body')).toContainText('Missing ownership policy.');
   page.once('dialog', dialog => dialog.dismiss());
-  await page.getByRole('button', { name: 'Supersede Older' }).click();
+  await page.getByRole('button', { name: 'Supersede', exact: true }).click();
   expect(requests.filter(item => item.path.endsWith('/resolve'))).toHaveLength(0);
   page.once('dialog', dialog => dialog.accept());
-  await page.getByRole('button', { name: 'Supersede Older' }).click();
+  await page.getByRole('button', { name: 'Supersede', exact: true }).click();
   await expect(page.locator('#spec-toast')).toContainText('Forbidden');
   expect(requests.find(item => item.path.endsWith('/resolve')).body).toMatchObject({
     node_a: 'new', node_b: 'old', workspace: 'alpha', repo: 'repoA', confirmed: true,
@@ -176,4 +176,25 @@ test('score ring tracks the report and empty traces do not keep requesting frame
     return count;
   });
   expect(frames).toBe(0);
+});
+
+test('ambiguous keeper instructions remain text and cannot trigger supersession', async ({ page }) => {
+  const { requests, errors } = await fixture(page);
+  await page.evaluate(report => SpecStudio.setMemoryReport(report), {
+    ...cluster,
+    nodes: [{ id: 'old', title: '<input id="unsafe-candidate">', valid_from: 2000 },
+      { id: 'new', title: 'Current configuration', valid_from: 2000 }],
+    conflicts: [{ ...cluster.conflicts[0], remedy: {
+      action: 'clarify', candidate_nodes: ['old', 'new'],
+      recommendation: 'Effective dates are equal. Choose the retained memory explicitly.',
+    } }],
+  });
+  const panel = page.locator('#spec-panel4-body');
+  await expect(panel).toContainText('Effective dates are equal. Choose the retained memory explicitly.');
+  await expect(panel).toContainText('<input id="unsafe-candidate"> (old)');
+  await expect(panel).toContainText('1970-01-01T00:33:20.000Z');
+  await expect(page.locator('#unsafe-candidate')).toHaveCount(0);
+  await expect(panel.locator('.btn-resolve')).toHaveCount(0);
+  expect(requests.filter(item => item.path.endsWith('/resolve'))).toEqual([]);
+  expect(errors).toEqual([]);
 });

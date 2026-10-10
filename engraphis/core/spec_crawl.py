@@ -16,6 +16,7 @@ instructions; instruction-like payloads are surfaced as ``injection`` flags.
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 import unicodedata
 from collections import Counter, defaultdict
@@ -766,6 +767,47 @@ def _extract_node_directives(text: str) -> dict[str, str]:
     return directives
 
 
+def _finite_timestamp(value: Any) -> Optional[float]:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        timestamp = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return timestamp if math.isfinite(timestamp) else None
+
+
+def _conflict_remedy(
+    node_a: Mapping[str, Any], node_b: Mapping[str, Any], *, shared_subject: bool,
+) -> dict[str, Any]:
+    if not shared_subject:
+        explanation = "Confirm that both policies concern the same subject before choosing a retained memory."
+    elif (node_a["valid_from"] is None or node_b["valid_from"] is None
+          or node_a["valid_from"] == node_b["valid_from"]):
+        explanation = "Effective dates are missing, invalid, or equal. Choose the retained memory explicitly."
+    else:
+        newer, older = ((node_a, node_b) if node_a["valid_from"] > node_b["valid_from"]
+                        else (node_b, node_a))
+        recommendation = (
+            f"Retain node '{newer['id']}' with the later effective date; confirm that it "
+            f"supersedes node '{older['id']}' before closing validity."
+        )
+        return {
+            "action": "supersede",
+            "keep_node": newer["id"],
+            "retire_node": older["id"],
+            "ordering_basis": "valid_from",
+            "recommendation": recommendation,
+            "detail": recommendation,
+        }
+    return {
+        "action": "clarify",
+        "candidate_nodes": [node_a["id"], node_b["id"]],
+        "recommendation": explanation,
+        "detail": explanation,
+    }
+
+
 def analyze_memory_nodes(
     memories: Sequence[Mapping[str, Any]],
     links: Optional[Sequence[Mapping[str, Any]]] = None,
@@ -823,7 +865,8 @@ def analyze_memory_nodes(
         scope = str(m.get("scope") or "workspace")
         subj_key = str(m.get("subject_key") or "").strip().lower()
         claim_kind = str(m.get("claim_kind") or "").strip().lower()
-        ingested_at = float(m.get("ingested_at") or m.get("valid_from") or 0.0)
+        ingested_at = _finite_timestamp(m.get("ingested_at"))
+        valid_from = _finite_timestamp(m.get("valid_from"))
 
         # Tokens & vague words
         sec = _Section(index=0, title="node", axis="context", heading_start=0,
@@ -867,6 +910,7 @@ def analyze_memory_nodes(
             "subject_key": subj_key,
             "claim_kind": claim_kind,
             "ingested_at": ingested_at,
+            "valid_from": valid_from,
             "axis": axis,
             "word_count": len(raw_toks),
             "token_kinds": dict(kinds_counter),
@@ -1001,8 +1045,6 @@ def analyze_memory_nodes(
                 )
                 if sim < 0.70 and _claim_kind and not proven_clash:
                     conflict_pairs.add(pair_key)
-                    newer = node_a if node_a["ingested_at"] >= node_b["ingested_at"] else node_b
-                    older = node_b if node_a["ingested_at"] >= node_b["ingested_at"] else node_a
                     conflicts.append({
                         "id": f"conflict_{len(conflicts) + 1}",
                         "node_a": node_a["id"],
@@ -1015,20 +1057,21 @@ def analyze_memory_nodes(
                         "detail": f"Divergent assertions for common subject '{subj}'.",
                         "remedy": {
                             "action": "clarify",
-                            "keep_node": newer["id"],
-                            "retire_node": older["id"],
+                            "candidate_nodes": [node_a["id"], node_b["id"]],
                             "recommendation": f"Verify whether these assertions for '{subj}' conflict before changing either memory.",
                             "detail": f"Verify whether these assertions for '{subj}' conflict before changing either memory.",
                         },
                     })
 
     # 3b. Parameter index
-    param_map: dict[str, dict[str, list[int]]] = defaultdict(lambda: defaultdict(list))
+    param_map: dict[tuple[str, str], dict[str, list[int]]] = defaultdict(lambda: defaultdict(list))
     for idx, node in enumerate(parsed_nodes):
+        if not node["subject_key"]:
+            continue
         for p_key, p_val in node["parameters"].items():
-            param_map[p_key][p_val].append(idx)
+            param_map[(node["subject_key"], p_key)][p_val].append(idx)
 
-    for p_key, val_dict in param_map.items():
+    for (_subject, p_key), val_dict in param_map.items():
         if len(val_dict) < 2:
             continue
         val_list = list(val_dict.items())
@@ -1036,13 +1079,10 @@ def analyze_memory_nodes(
             val_a, idxs_a = val_list[v1_idx]
             for v2_idx in range(v1_idx + 1, len(val_list)):
                 val_b, idxs_b = val_list[v2_idx]
-                for idx_a in idxs_a[-3:]:
+                for idx_a in idxs_a:
                     node_a = parsed_nodes[idx_a]
-                    for idx_b in idxs_b[-3:]:
+                    for idx_b in idxs_b:
                         node_b = parsed_nodes[idx_b]
-                        if (node_a["subject_key"] and node_b["subject_key"]
-                                and node_a["subject_key"] != node_b["subject_key"]):
-                            continue
                         if (node_a["claim_kind"] and node_b["claim_kind"]
                                 and node_a["claim_kind"] != node_b["claim_kind"]):
                             continue
@@ -1050,8 +1090,6 @@ def analyze_memory_nodes(
                         if pair_key in conflict_pairs or len(conflicts) >= 50:
                             continue
                         conflict_pairs.add(pair_key)
-                        newer = node_a if node_a["ingested_at"] >= node_b["ingested_at"] else node_b
-                        older = node_b if node_a["ingested_at"] >= node_b["ingested_at"] else node_a
                         conflicts.append({
                             "id": f"conflict_{len(conflicts) + 1}",
                             "node_a": node_a["id"],
@@ -1062,13 +1100,7 @@ def analyze_memory_nodes(
                             "severity": "high",
                             "reason": f"Contradictory parameter value for '{p_key}': '{val_a}' vs '{val_b}'.",
                             "detail": f"Contradictory parameter value for '{p_key}': '{val_a}' vs '{val_b}'.",
-                            "remedy": {
-                                "action": "supersede",
-                                "keep_node": newer["id"],
-                                "retire_node": older["id"],
-                                "recommendation": f"Supersede older node '{older['id']}' with newer '{newer['id']}'.",
-                                "detail": f"Supersede older node '{older['id']}' with newer '{newer['id']}'.",
-                            },
+                            "remedy": _conflict_remedy(node_a, node_b, shared_subject=True),
                         })
 
     # 3c. Directives index
@@ -1093,8 +1125,8 @@ def analyze_memory_nodes(
                     if pair_key in conflict_pairs or len(conflicts) >= 50:
                         continue
                     conflict_pairs.add(pair_key)
-                    newer = node_a if node_a["ingested_at"] >= node_b["ingested_at"] else node_b
-                    older = node_b if node_a["ingested_at"] >= node_b["ingested_at"] else node_a
+                    shared_subject = bool(node_a["subject_key"] and
+                                          node_a["subject_key"] == node_b["subject_key"])
                     conflicts.append({
                         "id": f"conflict_{len(conflicts) + 1}",
                         "node_a": node_a["id"],
@@ -1102,16 +1134,10 @@ def analyze_memory_nodes(
                         "title_a": node_a["title"],
                         "title_b": node_b["title"],
                         "subject": target,
-                        "severity": "high",
+                        "severity": "high" if shared_subject else "medium",
                         "reason": f"Opposing policy directives for '{target}': '{node_a['title']}' enforces while '{node_b['title']}' forbids.",
                         "detail": f"Opposing policy directives for '{target}': '{node_a['title']}' enforces while '{node_b['title']}' forbids.",
-                        "remedy": {
-                            "action": "supersede",
-                            "keep_node": newer["id"],
-                            "retire_node": older["id"],
-                            "recommendation": f"Supersede older node '{older['id']}' with newer '{newer['id']}'.",
-                            "detail": f"Supersede older node '{older['id']}' with newer '{newer['id']}'.",
-                        },
+                        "remedy": _conflict_remedy(node_a, node_b, shared_subject=shared_subject),
                     })
 
     # 3d. Redundancies pre-filtered by length ratio
@@ -1148,9 +1174,8 @@ def analyze_memory_nodes(
                     "similarity": round(sim, 2),
                     "remedy": {
                         "action": "consolidate",
-                        "keep_node": id_a,
-                        "redundant_node": id_b,
-                        "recommendation": f"Consolidate duplicate node '{id_b}' into '{id_a}'.",
+                        "candidate_nodes": [id_a, id_b],
+                        "recommendation": f"Review nodes '{id_a}' and '{id_b}' for consolidation; choose the retained fact explicitly.",
                     },
                 })
 
