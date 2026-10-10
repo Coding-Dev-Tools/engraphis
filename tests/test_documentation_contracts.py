@@ -121,10 +121,7 @@ def test_core_backend_imports_stay_behind_outer_composition_root() -> None:
     readme = _read("README.md")
     assert "from engraphis.service import MemoryService" in readme
     assert "Configuration reference" in readme
-    assert (
-        f"[Benchmark methodology](https://github.com/Coding-Dev-Tools/engraphis/blob/{README_BENCHMARK_PIN}/"
-        "BENCHMARKS.md)" in readme
-    )
+    assert "[Benchmark methodology](BENCHMARKS.md)" in readme
 
 
 def test_benchmark_text_alternatives_match_registered_fixture_boundary() -> None:
