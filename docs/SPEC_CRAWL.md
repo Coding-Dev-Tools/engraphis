@@ -17,7 +17,7 @@ Specification Text / Procedural Memories
   │
   ├─ Token Classification (functional kinds: owner, approval, spec, source, claim, action, vague)
   │
-  ├─ Concept Graph & Tentacles (intra-section and cross-section semantic connections)
+  ├─ Concept Graph & Tentacles (shared concepts within and across sections)
   │
   ├─ Seven-Axis Radar Coverage (role, objective, context, team, rules, review, start)
   │
@@ -70,7 +70,7 @@ When prompt specifications contain ambiguous or unquantified qualifiers (such as
 > *[VAGUE] "all" is unbounded in: "We must verify all unit tests before release." What exact scope, number, or condition do you mean?*
 
 Users or orchestrators can answer the clarification directly via:
-1. **Interactive Dashboard Modal**: clicking any flagged token opens a prompt asking for concrete bounds (e.g. *"all 15 core unit tests in tests/"*).
+1. **Interactive Dashboard Modal**: clicking **Clarify** beside an ambiguity opens a prompt asking for concrete bounds (e.g. *"all 15 core unit tests in tests/"*).
 2. **REST API**: calling `POST /api/spec/crawl/answer`.
 3. **Smart MCP**: discovering and executing `engraphis_spec_crawl_answer`.
 
@@ -100,7 +100,7 @@ Beyond inspecting isolated single-text prompt specifications, Spec Crawl provide
    - Divergences for the same `(subject_key, claim_kind)` are review suggestions; different keyed subjects do not establish parameter conflicts.
 2. **Graph Orphan Detection**:
    - Discovers nodes with 0 degrees of connectivity.
-   - Computes semantic similarity to suggest nearest-neighbor auto-linking targets.
+   - Compares token overlap to suggest related nodes for explicit linking.
 3. **Redundancy & Near-Duplicates**:
    - Detects duplicate memory claims ($\ge 0.75$ Jaccard similarity) and recommends consolidation.
 4. **7-Axis Memory Radar & Operational Gaps**:
@@ -132,7 +132,7 @@ python -m scripts.spec_crawl --workspace acme --min-score 75
 ## 8. REST API Endpoints
 
 ### `POST /api/spec/crawl`
-Performs an offline, read-only analysis of up to 64,000 characters. HTTP callers must send `text`; server filesystem paths are rejected. The local-operator MCP path accepts text files only under approved index roots.
+Performs an offline, read-only analysis of up to 64,000 characters. HTTP callers can send `text` or set `crawl_procedural: true` to analyze approved procedural memories in the selected scope. Server filesystem paths are rejected. The local-operator MCP path accepts text files only under approved index roots.
 
 ### `POST /api/spec/crawl/answer`
 Submits a clarification for a current flagged ambiguity, returns updated text and a new report, and optionally persists a pending procedural memory.
@@ -168,7 +168,7 @@ These four Classic MCP tools are also discoverable and callable through Smart MC
 - **`engraphis_spec_crawl`**: Read-only prompt spec crawler returning scores, radar coverage, classified tokens, connection tentacles, and flags.
 - **`engraphis_spec_crawl_answer`**: Clarification answer submission updating specifications and writing pending procedural memories.
 - **`engraphis_spec_crawl_memories`**: Audits active workspace memory nodes for contradictions, orphans, redundancies, and cluster health.
-- **`engraphis_spec_crawl_resolve`**: Executes remediation actions (superseding older conflicting nodes or auto-linking orphans).
+- **`engraphis_spec_crawl_resolve`**: Applies an explicitly requested link or confirmed supersession to selected memory nodes.
 
 ---
 
