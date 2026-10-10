@@ -13,7 +13,7 @@ from engraphis.core.schema import SCHEMA_VERSION
 
 
 ROOT = Path(__file__).resolve().parents[1]
-README_BENCHMARK_PIN = "522def372c45a26d46bc7a05829964ae0240f3a9"
+README_BENCHMARK_PIN = "f99fe73cece0f58ebd26ea7784e70ebb9a3926be"
 README_HOSTED_PLANS_PIN = "522def372c45a26d46bc7a05829964ae0240f3a9"
 
 
@@ -121,7 +121,10 @@ def test_core_backend_imports_stay_behind_outer_composition_root() -> None:
     readme = _read("README.md")
     assert "from engraphis.service import MemoryService" in readme
     assert "Configuration reference" in readme
-    assert "[Benchmark methodology](BENCHMARKS.md)" in readme
+    assert (
+        f"[Benchmark methodology](https://github.com/Coding-Dev-Tools/engraphis/blob/{README_BENCHMARK_PIN}/"
+        "BENCHMARKS.md)" in readme
+    )
 
 
 def test_benchmark_text_alternatives_match_registered_fixture_boundary() -> None:
