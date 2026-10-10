@@ -144,7 +144,7 @@ test('unknown project ownership never adopts the selected project and workspace-
 
 test('Library keeps task navigation before appearance controls at wide and narrow widths', async ({ page }, testInfo) => {
   const { errors } = await workflowFixture(page);
-  await expect(page.locator('.manage-nav [data-view] > span')).toHaveText(['Explore', 'Activity', 'Settings']);
+  await expect(page.locator('.manage-nav [data-view] > span')).toHaveText(['Explore', 'Spec Studio', 'Activity', 'Settings']);
   await expect(page.locator('#library-list')).toContainText('Alpha uses Postgres');
   const layout = [];
   for (const [name, width, height] of [['wide', 1280, 900], ['narrow', 390, 844]]) {
