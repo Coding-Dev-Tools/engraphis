@@ -538,7 +538,7 @@ def test_primary_github_release_targets_repository_without_checkout():
 def test_public_capability_and_support_docs_match_the_shipped_tree():
     server = _text("engraphis/mcp_server.py")
     tools = re.findall(r'@mcp\.tool\(\s*name="(engraphis_[^"]+)"', server)
-    assert len(tools) == len(set(tools)) == 39
+    assert len(tools) == len(set(tools)) == 43
 
     readme = _text("README.md")
     licensing = _text("docs/LICENSING.md")
@@ -551,7 +551,7 @@ def test_public_capability_and_support_docs_match_the_shipped_tree():
         assert "28-tool" not in content
         assert "(28 of them)" not in content
     assert "Smart MCP (9 tools)" in architecture
-    assert "Classic MCP (39 tools)" in architecture
+    assert "Classic MCP (43 tools)" in architecture
     assert "default Smart MCP surface has nine" in skill
     assert "Classic direct-tool guide" in skill
     assert "engraphis-mcp-classic" in skill
@@ -629,11 +629,7 @@ def test_public_capability_and_support_docs_match_the_shipped_tree():
         'src="https://raw.githubusercontent.com/Coding-Dev-Tools/engraphis/522def372c45a26d46bc7a05829964ae0240f3a9/'
         'docs/images/knowledge-graph.png"' in readme
     )
-    assert re.search(
-        r'src="https://raw\.githubusercontent\.com/Coding-Dev-Tools/engraphis/[0-9a-f]{40}/'
-        r'docs/images/context-efficiency\.svg"',
-        readme,
-    )
+    assert 'src="docs/images/context-efficiency.svg"' in readme
     assert "official hosted service" in licensing
     assert "are generally available" not in readme
     assert "private repository" in licensing
