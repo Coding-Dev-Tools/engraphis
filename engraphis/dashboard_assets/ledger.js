@@ -1373,6 +1373,7 @@
     renderFirstMemoryJourney();
     workflow.selectWorkspace(name);
     state.project = workflow.project();
+    if (window.SpecStudio) window.SpecStudio.setScope(name, state.project);
     void processingControls.selectWorkspace(name);
     state.graphWorkspace = '';
     state.graphData = null;
@@ -5466,7 +5467,7 @@
   }
 
   function switchView(view, { pushHistory = true } = {}) {
-    const validViews = ['today', 'ask', 'library', 'connections', 'relations', 'provenance', 'manage'];
+    const validViews = ['today', 'ask', 'library', 'connections', 'relations', 'specstudio', 'provenance', 'manage'];
     if (!validViews.includes(view)) view = 'today';
     if (pushHistory && state.view !== view) {
       const url = new URL(location.href);
@@ -5490,6 +5491,10 @@
     if (view === 'manage') {
       loadSavings(state.refreshEpoch);
       loadManageTab(state.manageTab);
+    }
+    if (view === 'specstudio' && window.SpecStudio && typeof window.SpecStudio.resizeCanvas === 'function') {
+      window.SpecStudio.setScope(state.workspace, state.project);
+      window.SpecStudio.resizeCanvas();
     }
     window.scrollTo({ top: 0, behavior: 'instant' });
     const heading = byId(`${view}-title`);
@@ -5583,10 +5588,10 @@
       let view = 'today';
       try {
         const saved = localStorage.getItem('engraphis-ledger-view');
-        if (['today', 'ask', 'library', 'connections', 'relations', 'provenance', 'manage'].includes(saved)) view = saved;
+        if (['today', 'ask', 'library', 'connections', 'relations', 'specstudio', 'provenance', 'manage'].includes(saved)) view = saved;
       } catch (_) {}
       const urlView = new URL(location.href).searchParams.get('view');
-      switchView(['today', 'ask', 'library', 'connections', 'relations', 'provenance', 'manage'].includes(urlView) ? urlView : view, { pushHistory: false });
+      switchView(['today', 'ask', 'library', 'connections', 'relations', 'specstudio', 'provenance', 'manage'].includes(urlView) ? urlView : view, { pushHistory: false });
       const requestedManageTab = entry.searchParams.get('tab');
       if (urlView === 'manage' && ['settings', 'sync', 'analytics'].includes(requestedManageTab)) {
         switchManageTab(requestedManageTab);
