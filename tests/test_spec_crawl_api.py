@@ -373,7 +373,19 @@ def test_backfilled_recommendation_preserves_current_fact_and_history(crawl_serv
     assert resolved["retained_node"] == current
     assert resolved["superseded_node"] == historical
     assert svc.store.get_memory(current).valid_to is None
-    assert svc.store.get_memory(historical).valid_to is not None
+    retired = svc.store.get_memory(historical)
+    assert retired.valid_to == 2000.0
+    from engraphis.core.interfaces import SearchFilter
+    wid = svc.store.get_memory(current).workspace_id
+    assert svc.store.visible_memory_ids([historical, current], SearchFilter(
+        workspace_id=wid, valid_at=1500.0,
+    )) == {historical}
+    assert svc.store.visible_memory_ids([historical, current], SearchFilter(
+        workspace_id=wid, valid_at=2500.0,
+    )) == {current}
+    assert svc.store.visible_memory_ids([historical, current], SearchFilter(
+        workspace_id=wid, valid_at=2500.0, known_at=retired.valid_to_recorded_at - 0.000001,
+    )) == {historical, current}
     assert svc.store.get_memory(historical).content == "port: 5432"
     assert svc.store.get_memory(current).content == "port: 5433"
     # Retired endpoints disappear from live get_links(), while the relationship remains in history.
@@ -382,3 +394,63 @@ def test_backfilled_recommendation_preserves_current_fact_and_history(crawl_serv
         (current, historical, "supersedes"),
     ).fetchone()
     assert historical_link is not None
+
+
+@pytest.mark.parametrize("action", ["supersede", "link"])
+@pytest.mark.parametrize("ancestor_is_retained", [True, False])
+def test_repo_resolution_accepts_visible_workspace_ancestors(crawl_service, action, ancestor_is_retained):
+    svc = crawl_service
+    ancestor = svc.remember("Workspace policy port: 5433", workspace="alpha", trusted=True,
+                            valid_from=2000 if ancestor_is_retained else 1000,
+                            resolve_conflicts=False)["id"]
+    local = svc.remember("Repository policy port: 5432", workspace="alpha", repo="one", trusted=True,
+                         valid_from=1000 if ancestor_is_retained else 2000,
+                         resolve_conflicts=False)["id"]
+    assert {node["id"] for node in svc.spec_crawl_memories(workspace="alpha", repo="one")["nodes"]} == {ancestor, local}
+    retained, retired = (ancestor, local) if ancestor_is_retained else (local, ancestor)
+    result = svc.spec_crawl_resolve(action=action, node_a=retained, node_b=retired,
+                                   workspace="alpha", repo="one", confirmed=True)
+    assert result["ok"] is True
+    if action == "supersede":
+        assert svc.store.get_memory(retired).valid_to == 2000
+    else:
+        assert any(link["a"] == retained and link["b"] == retired for link in svc.store.get_links(retained))
+
+
+@pytest.mark.parametrize("action", ["supersede", "link"])
+def test_repo_resolution_rejects_other_repositories_atomically(crawl_service, action):
+    svc = crawl_service
+    local = svc.remember("Local policy", workspace="alpha", repo="one", trusted=True)["id"]
+    other = svc.remember("Other policy", workspace="alpha", repo="two", trusted=True)["id"]
+    with pytest.raises(ValidationError):
+        svc.spec_crawl_resolve(action=action, node_a=local, node_b=other,
+                               workspace="alpha", repo="one", confirmed=True)
+    assert svc.store.get_memory(other).valid_to is None
+    assert not any(link["relation"] in {"supersedes", "related_to"} for link in svc.store.get_links(local))
+
+
+def test_reversed_effective_time_resolution_rolls_back_link_and_receipt(crawl_service):
+    svc = crawl_service
+    earlier = svc.remember("Earlier policy", workspace="alpha", trusted=True, valid_from=1000)["id"]
+    later = svc.remember("Later policy", workspace="alpha", trusted=True, valid_from=2000)["id"]
+    receipts = svc.store.conn.execute("SELECT COUNT(*) FROM operation_receipts").fetchone()[0]
+    with pytest.raises(ValidationError, match="predate"):
+        svc.spec_crawl_resolve(action="supersede", node_a=earlier, node_b=later,
+                               workspace="alpha", confirmed=True)
+    assert svc.store.get_memory(later).valid_to is None
+    assert not any(link["relation"] == "supersedes" for link in svc.store.get_links(earlier))
+    assert svc.store.conn.execute("SELECT COUNT(*) FROM operation_receipts").fetchone()[0] == receipts
+
+
+def test_cluster_audit_deduplicates_persisted_links_before_inference(crawl_service, monkeypatch):
+    svc = crawl_service
+    monkeypatch.setattr(svc.engine, "_evolve", lambda *args, **kwargs: None)
+    ids = [svc.remember(f"Deployment procedure for service {i}", workspace="alpha", trusted=True,
+                        resolve_conflicts=False)["id"] for i in range(4)]
+    svc.link(ids[0], ids[1], workspace="alpha", relation="related_to")
+    svc.link(ids[2], ids[3], workspace="alpha", relation="related_to")
+    report = svc.spec_crawl_memories(workspace="alpha", memory_ids=ids)
+    declared = [link for link in report["links"] if not link["inferred"]]
+    assert len(declared) == 2
+    assert len({(link["a"], link["b"], link["relation"]) for link in declared}) == 2
+    assert any(link["inferred"] for link in report["links"])

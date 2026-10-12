@@ -413,6 +413,8 @@ def _apply_response_budget(payload: dict, max_response_tokens: Optional[int]) ->
     return payload
 
 _READ_ONLY_TOOLS = frozenset({
+    "engraphis_spec_crawl",
+    "engraphis_spec_crawl_memories",
     "engraphis_list_workspaces",
     "engraphis_get_workspace_routing",
     "engraphis_recall",

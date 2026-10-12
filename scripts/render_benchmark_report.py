@@ -22,6 +22,8 @@ import argparse
 import hashlib
 import json
 import math
+import struct
+import zlib
 from pathlib import Path
 import re
 from typing import Any, Optional, Union
@@ -712,6 +714,29 @@ def render_report(report: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def render_png(svg: str, output: Path, artifact_sha256: str,
+               *, width: Optional[int] = None, height: Optional[int] = None) -> None:
+    """Rasterize this SVG and bind the export to its artifact and exact SVG bytes."""
+    try:
+        import cairosvg
+    except ImportError as exc:
+        raise SystemExit("--png-output requires CairoSVG; install it with `pip install cairosvg`") from exc
+    digest = _require_sha256(artifact_sha256, "PNG artifact SHA-256")
+    svg_bytes = svg.encode("utf-8")
+    png = cairosvg.svg2png(bytestring=svg_bytes, output_width=width, output_height=height)
+    metadata = b""
+    for key, value in (
+        ("engraphis_artifact_sha256", digest),
+        ("engraphis_svg_sha256", hashlib.sha256(svg_bytes).hexdigest()),
+    ):
+        data = b"tEXt" + key.encode("ascii") + b"\0" + value.encode("ascii")
+        metadata += struct.pack(">I", len(data) - 4) + data + struct.pack(">I", zlib.crc32(data))
+    # PNG requires IHDR first; put provenance before the image data.
+    header_end = 20 + struct.unpack(">I", png[8:12])[0]
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_bytes(png[:header_end] + metadata + png[header_end:])
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Render an artifact-backed benchmark report as SVG and optional PNG.")
     parser.add_argument("--report", required=True, help="JSON artifact or selected performance report")
@@ -725,18 +750,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     with output.open("w", encoding="utf-8", newline="\n") as handle:
         handle.write(svg)
     if args.png_output:
-        try:
-            import cairosvg
-        except ImportError as exc:
-            raise SystemExit("--png-output requires CairoSVG; install it with `pip install cairosvg`") from exc
-        png_output = Path(args.png_output)
-        png_output.parent.mkdir(parents=True, exist_ok=True)
-        cairosvg.svg2png(
-            bytestring=svg.encode("utf-8"),
-            write_to=str(png_output),
-            output_width=WIDTH,
-            output_height=HEIGHT,
-        )
+        render_png(svg, Path(args.png_output), report["source"]["artifact_sha256"],
+                   width=WIDTH, height=HEIGHT)
     return 0
 
 

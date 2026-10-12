@@ -2973,7 +2973,8 @@ class MemoryEngine:
         return {"memories": top, "last_session": last_session}
 
     # ── governance (audited; never a silent hard delete — AGENTS.md §3.2) ───────
-    def retire(self, memory_id: str, *, reason: str = "", actor: str = "user") -> dict:
+    def retire(self, memory_id: str, *, reason: str = "", actor: str = "user",
+               at: Optional[float] = None) -> dict:
         """Remove a memory from live recall while retaining temporal history.
 
         This is deliberately distinct from :meth:`secure_erase`: retirement is the
@@ -2982,7 +2983,8 @@ class MemoryEngine:
         """
         if self.store.get_memory(memory_id) is None:
             raise KeyError(f"no memory with id '{memory_id}'")
-        self.store.close_validity(memory_id, actor=actor, reason=reason or "retired by request")
+        self.store.close_validity(memory_id, at=at, actor=actor,
+                                  reason=reason or "retired by request")
         # Preserve the vector for explicit historical/as_of recall. Temporal filtering
         # keeps this retired row out of the current live view.
         return {"id": memory_id, "status": "retired", "reason": reason}
