@@ -6,6 +6,7 @@ import threading
 import urllib.error
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import time
 
 import pytest
 
@@ -66,6 +67,11 @@ def test_timeline_closed_only_filters_before_limit_and_preserves_zero(monkeypatc
                 id="", workspace_id=wid, scope=Scope.WORKSPACE, content="Database history",
                 ingested_at=2.0 + index, provenance={"trusted": True, "review_state": "approved"},
             ))
+        scheduled = svc.store.add_memory(MemoryRecord(
+            id="", workspace_id=wid, scope=Scope.WORKSPACE, content="Database history scheduled expiry",
+            valid_from=0.0, valid_to=time.time() + 3600, ingested_at=1.0,
+            provenance={"trusted": True, "review_state": "approved"},
+        ))
         if fallback:
             def mismatch(*args, **kwargs):
                 raise ValueError("shapes (256,) and (384,) not aligned")
@@ -77,6 +83,7 @@ def test_timeline_closed_only_filters_before_limit_and_preserves_zero(monkeypatc
         body = response.json()
         assert [record["id"] for record in body["history"]] == [old]
         assert body["history"][0]["valid_to"] == 0.0
+        assert scheduled not in [record["id"] for record in body["history"]]
         assert body["mode"] == ("keyword" if fallback else "semantic")
 
 
@@ -96,6 +103,11 @@ def test_keyword_timeline_sorts_world_time_instead_of_recent_access(monkeypatch,
             raise ValueError("shapes (256,) and (384,) not aligned")
 
         monkeypatch.setattr(svc, "timeline", mismatch)
+        before_expiry = v2_api._keyword_search(
+            "demo", "chronological history marker", valid_at=5.0, known_at=1000.0,
+            include_invalid=True, closed_only=True,
+        )
+        assert [record["id"] for record in before_expiry] == expected[:1]
         for closed_only in [False, True]:
             response = client.get("/api/timeline", params={
                 "workspace": "demo", "q": "chronological history marker", "closed_only": closed_only,

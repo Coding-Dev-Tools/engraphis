@@ -1127,6 +1127,24 @@ def test_closed_timeline_applies_review_and_system_time_before_candidate_cap():
     assert [record.id for record in history] == [approved]
 
 
+def test_closed_timeline_respects_world_time_separately_from_system_time():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    mid = eng.store.add_memory(MemoryRecord(
+        id="", content="History", workspace_id=wid, scope=Scope.WORKSPACE,
+        valid_from=0.0, valid_to=20.0, valid_to_recorded_at=2.0, ingested_at=1.0,
+        provenance={"trusted": True, "review_state": "approved"},
+    ))
+    assert eng.timeline("history", workspace_id=wid, valid_at=10.0, known_at=100.0,
+                        closed_only=True, prompt_only=True) == []
+    assert [record.id for record in eng.timeline(
+        "history", workspace_id=wid, valid_at=20.0, known_at=100.0,
+        closed_only=True, prompt_only=True,
+    )] == [mid]
+    assert eng.timeline("history", workspace_id=wid, valid_at=30.0, known_at=1.5,
+                        closed_only=True, prompt_only=True) == []
+
+
 def test_timeline_orders_zero_world_time_before_later_versions():
     eng = MemoryEngine.create(":memory:")
     wid = eng.store.get_or_create_workspace("w")

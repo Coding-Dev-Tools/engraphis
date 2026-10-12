@@ -2836,7 +2836,7 @@ class MemoryEngine:
         """
         flt = SearchFilter(
             workspace_id=workspace_id, repo_id=repo_id, include_ancestors=True,
-            valid_at=valid_at,
+            valid_at=now_ts() if closed_only and valid_at is None else valid_at,
             known_at=now_ts() if closed_only and known_at is None else known_at,
         )
         recs = [

@@ -5324,14 +5324,18 @@
   }
 
   /* Bi-temporal card: when the fact was true in the world, when Engraphis learned it, and
-     where it came from. A closed valid time marks a superseded or retired version. */
+     where it came from. An ended interval marks a superseded or retired version. */
   function temporalCard(memory) {
-    const current = memory.valid_to == null && memory.expired_at == null;
+    const now = Date.now() / 1000;
+    const past = (memory.valid_to != null && number(memory.valid_to) <= now)
+      || (memory.expired_at != null && number(memory.expired_at) <= now);
+    const future = !past && memory.valid_from != null && number(memory.valid_from) > now;
+    const current = !past && !future;
     const card = simpleMemoryCard(memory, 'timeline-card temporal-card');
     const heading = card.querySelector('h3');
     if (heading) {
       heading.append(document.createTextNode(' '),
-        node('span', `temporal-state${current ? ' current' : ''}`, current ? 'current' : 'past'));
+        node('span', `temporal-state${current ? ' current' : ''}`, current ? 'current' : future ? 'future' : 'past'));
     }
     const ended = memory.valid_to ?? memory.expired_at;
     const meta = node('dl', 'temporal-meta');
