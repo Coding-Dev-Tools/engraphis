@@ -7805,7 +7805,11 @@ class MemoryService:
         frontier = [rec]
         while frontier:
             cur = frontier.pop()
-            for pid in self._lineage_predecessors(cur.metadata):
+            lineage_ids = self._lineage_predecessors(cur.metadata)
+            for link in self.store.get_links(cur.id):
+                if link["relation"] == "supersedes":
+                    lineage_ids.append(link["b"] if link["a"] == cur.id else link["a"])
+            for pid in lineage_ids:
                 if pid in seen:
                     continue
                 seen.add(pid)
@@ -7825,7 +7829,7 @@ class MemoryService:
             return [rec]
         return sorted(members.values(), key=lambda r: (
             r.valid_to is None,
-            r.valid_from or r.ingested_at or 0,
+            r.valid_from if r.valid_from is not None else (r.ingested_at or 0),
             r.valid_to if r.valid_to is not None else float("inf"),
             r.id,
         ))
@@ -13043,7 +13047,7 @@ class MemoryService:
         mtypes: Optional[list[str]] = None,
         include_trace: bool = True,
     ) -> dict[str, Any]:
-        """Analyze a cluster of live memory nodes for cross-node contradictions, orphans, policy gaps, and cluster health."""
+        """Analyze a bounded sample of live memories and explicitly report truncation."""
         include_trace = _strict_bool(include_trace, field="include_trace")
         from engraphis.core.spec_crawl import analyze_memory_nodes
         ws, rp, flt = self._spec_crawl_scope(workspace, repo, session_id)
@@ -13053,6 +13057,7 @@ class MemoryService:
                           _clean_string_list(mtypes, field="mtypes", max_items=4, max_chars=32)]
 
         recs = []
+        truncated = False
         if memory_ids is not None:
             clean_ids = _clean_string_list(
                 memory_ids, field="memory_ids", max_items=150, max_chars=MAX_NAME_CHARS,
@@ -13064,7 +13069,9 @@ class MemoryService:
                         if prompt_eligible(rec.provenance, rec.metadata)
                         and self._memory_visible_to_caller(rec)]
         else:
-            recs = self.store.list_memories(flt, limit=150, prompt_only=True)
+            recs = self.store.list_memories(flt, limit=151, prompt_only=True)
+            truncated = len(recs) > 150
+            recs = recs[:150]
 
         # Gather declared links between these memories
         mem_dicts = [_mem_to_dict(r) for r in recs]
@@ -13089,6 +13096,9 @@ class MemoryService:
         )
         report["workspace"] = ws
         report["repo"] = rp
+        report["truncated"] = truncated
+        report["node_limit"] = 150
+        report["count_semantics"] = "requested_selection" if memory_ids is not None else "bounded_scope_sample"
         return report
 
     def spec_crawl_resolve(

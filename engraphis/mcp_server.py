@@ -2810,13 +2810,13 @@ def engraphis_spec_crawl(
         ),
     ] = None,
     workspace: Annotated[
-        str,
+        Optional[str],
         Field(
-            default="default",
+            default=None,
             description="Workspace for claim tracing.",
             max_length=200,
         ),
-    ] = "default",
+    ] = None,
     repo: Annotated[
         Optional[str],
         Field(
@@ -2912,13 +2912,13 @@ def engraphis_spec_crawl_answer(
         ),
     ],
     workspace: Annotated[
-        str,
+        Optional[str],
         Field(
-            default="default",
+            default=None,
             description="Workspace to store the procedural memory.",
             max_length=200,
         ),
-    ] = "default",
+    ] = None,
     repo: Annotated[
         Optional[str],
         Field(
@@ -2971,13 +2971,13 @@ def engraphis_spec_crawl_answer(
 )
 def engraphis_spec_crawl_memories(
     workspace: Annotated[
-        str,
+        Optional[str],
         Field(
-            default="default",
+            default=None,
             description="Workspace to audit memories.",
             max_length=200,
         ),
-    ] = "default",
+    ] = None,
     repo: Annotated[
         Optional[str],
         Field(

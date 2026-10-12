@@ -51,6 +51,16 @@ async function crawl(page, text = '# Rules\nVerify all tests.') {
   await expect(page.locator('#spec-score-display')).toHaveText(String(prompt.score));
 }
 
+test('bounded memory audits label health and node counts as a sample', async ({ page }) => {
+  await fixture(page);
+  await page.route('**/api/spec/crawl/memories', route => route.fulfill({ json: {
+    ...cluster, truncated: true, node_limit: 150, count_semantics: 'bounded_scope_sample',
+  } }));
+  await page.locator('#spec-mode-memories').click();
+  await expect(page.locator('#spec-score-motto')).toContainText('sample health');
+  await expect(page.locator('#spec-score-motto')).toContainText('more remain');
+});
+
 test('API failure clears scores and shows the real failure', async ({ page }) => {
   const { errors } = await fixture(page);
   await page.route('**/api/spec/crawl', route => route.fulfill({ status: 503, json: { detail: 'Offline analysis unavailable' } }));
