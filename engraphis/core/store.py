@@ -5212,7 +5212,7 @@ class Store:
 
     def list_memories(self, flt: Optional[SearchFilter] = None,
                       *, include_invalid: bool = False, limit: Optional[int] = None,
-                      prompt_only: bool = False) -> list[MemoryRecord]:
+                      prompt_only: bool = False, closed_only: bool = False) -> list[MemoryRecord]:
         """List scoped records, optionally capping only prompt-eligible rows.
 
         Public callers can opt into ``prompt_only`` when this bounded result will enter
@@ -5224,6 +5224,17 @@ class Store:
             return []
         sql = "SELECT * FROM memories"
         where, params = self._where(flt, include_invalid)
+        if closed_only:
+            # Select known closed world-time intervals before either result cap. Public
+            # history must still hide records outside the requested system-time snapshot.
+            known_at = flt.known_at if flt and flt.known_at is not None else now_ts()
+            where.extend([
+                "valid_to IS NOT NULL",
+                "(valid_to_recorded_at IS NULL OR valid_to_recorded_at<=?)",
+                "(ingested_at IS NULL OR ingested_at<=?)",
+                "(expired_at IS NULL OR ?<expired_at)",
+            ])
+            params.extend([known_at, known_at, known_at])
         if where:
             sql += " WHERE " + " AND ".join(where)
         sql += " ORDER BY ingested_at DESC"

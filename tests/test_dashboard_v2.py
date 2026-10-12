@@ -18,7 +18,7 @@ from fastapi import HTTPException  # noqa: E402
 from engraphis import __version__, cloud_features  # noqa: E402
 from engraphis.config import settings  # noqa: E402
 from engraphis.cloud_features import CloudFeatureError  # noqa: E402
-from engraphis.core.interfaces import MemoryType, Scope  # noqa: E402
+from engraphis.core.interfaces import MemoryRecord, MemoryType, Scope  # noqa: E402
 from engraphis.routes import v2_api  # noqa: E402
 from engraphis.core.schema import SCHEMA_VERSION  # noqa: E402
 from engraphis.service import MemoryService, ValidationError  # noqa: E402
@@ -49,6 +49,35 @@ def _client(monkeypatch, tmp_path):
     seeded.store.close()
     from engraphis.dashboard_app import create_app
     return TestClient(create_app(), client=("127.0.0.1", 50000))
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+def test_timeline_closed_only_filters_before_limit_and_preserves_zero(monkeypatch, tmp_path, fallback):
+    with _client(monkeypatch, tmp_path) as client:
+        svc = v2_api.service()
+        wid = svc.store.get_or_create_workspace("demo")
+        old = svc.store.add_memory(MemoryRecord(
+            id="", workspace_id=wid, scope=Scope.WORKSPACE, content="Database history from an older system.",
+            valid_from=-1.0, valid_to=0.0, ingested_at=1.0,
+            provenance={"trusted": True, "review_state": "approved"},
+        ))
+        for index in range(501):
+            svc.store.add_memory(MemoryRecord(
+                id="", workspace_id=wid, scope=Scope.WORKSPACE, content="Database history",
+                ingested_at=2.0 + index, provenance={"trusted": True, "review_state": "approved"},
+            ))
+        if fallback:
+            def mismatch(*args, **kwargs):
+                raise ValueError("shapes (256,) and (384,) not aligned")
+            monkeypatch.setattr(svc, "timeline", mismatch)
+        response = client.get("/api/timeline", params={
+            "workspace": "demo", "q": "database history", "limit": 50, "closed_only": True,
+        })
+        assert response.status_code == 200
+        body = response.json()
+        assert [record["id"] for record in body["history"]] == [old]
+        assert body["history"][0]["valid_to"] == 0.0
+        assert body["mode"] == ("keyword" if fallback else "semantic")
 
 
 def test_dashboard_serves_and_bootstraps_local_core(monkeypatch, tmp_path):

@@ -5317,17 +5317,17 @@
   /* Bi-temporal card: when the fact was true in the world, when Engraphis learned it, and
      where it came from. A closed valid time marks a superseded or retired version. */
   function temporalCard(memory) {
-    const current = !memory.valid_to && !memory.expired_at;
+    const current = memory.valid_to == null && memory.expired_at == null;
     const card = simpleMemoryCard(memory, 'timeline-card temporal-card');
     const heading = card.querySelector('h3');
     if (heading) {
       heading.append(document.createTextNode(' '),
         node('span', `temporal-state${current ? ' current' : ''}`, current ? 'current' : 'past'));
     }
-    const ended = memory.valid_to || memory.expired_at;
+    const ended = memory.valid_to ?? memory.expired_at;
     const meta = node('dl', 'temporal-meta');
     [
-      ['Valid time', `${temporalTime(memory.valid_from) || 'unrecorded'} — ${ended ? temporalTime(ended) || 'closed' : 'now'}`],
+      ['Valid time', `${temporalTime(memory.valid_from) || 'unrecorded'} — ${ended != null ? temporalTime(ended) || 'closed' : 'now'}`],
       ['Recorded', temporalTime(memory.ingested_at) || 'unrecorded'],
       ['Source', text((memory.provenance && (memory.provenance.source || memory.provenance.kind)) || 'unrecorded')],
     ].forEach(([term, value]) => {
@@ -5392,10 +5392,9 @@
     showNotice('');
     target.replaceChildren(empty('Loading temporal history…'));
     try {
-      const payload = await api(`/timeline?q=${encodeURIComponent(question)}&${query(request.workspace)}&limit=50`);
+      const payload = await api(`/timeline?q=${encodeURIComponent(question)}&${query(request.workspace)}&limit=50&closed_only=${closedOnly}`);
       if (!isCurrentScopedRequest(request)) return;
-      let history = payload.history || [];
-      if (closedOnly) history = history.filter(item => item.valid_to || item.expired_at);
+      const history = payload.history || [];
       target.replaceChildren();
       const note = searchModeNote(payload);
       if (note) target.append(note);

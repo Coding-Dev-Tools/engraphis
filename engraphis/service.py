@@ -5278,7 +5278,8 @@ class MemoryService:
 
     def timeline(self, query: str, *, workspace: str, repo: Optional[str] = None,
                 limit: int = 20, as_of: Optional[float] = None,
-                valid_at: Optional[float] = None, known_at: Optional[float] = None) -> dict:
+                valid_at: Optional[float] = None, known_at: Optional[float] = None,
+                closed_only: bool = False) -> dict:
         """Chronological, bi-temporal history of a fact: what we believed and when."""
         query = _clean_text(query, field="query", max_chars=MAX_CONTENT_CHARS)
         wid, rid = self._require_scope(workspace, repo)
@@ -5289,6 +5290,7 @@ class MemoryService:
         recs = self.engine.timeline(
             query, workspace_id=wid, repo_id=rid, limit=limit,
             valid_at=valid_at, known_at=known_at, prompt_only=True,
+            closed_only=closed_only,
         )
         return {"query": query, "history": [_mem_to_dict(r) for r in recs]}
 

@@ -1113,9 +1113,9 @@
       </header>
       <form id="code-index-form" class="sources-form" novalidate>
         <h3>Index a code repository</h3>
-        <p class="project-help">Parses source files on the machine running Engraphis into symbols and call edges, then links them to memories that mention them. Re-running reads only changed files.</p>
+        <p class="project-help">Parses source files on the machine running Engraphis into symbols and call edges, then links them to memories that mention them. Re-running reads only changed files. Use a path inside the allowed indexing folder, relative to that folder or absolute.</p>
         <label>Repository name<input id="code-index-repo" maxlength="200" autocomplete="off" required></label>
-        <label>Repository path<input id="code-index-root" maxlength="4096" autocomplete="off" spellcheck="false" placeholder="~/projects/my-repository" required></label>
+        <label>Repository path<input id="code-index-root" maxlength="4096" autocomplete="off" spellcheck="false" placeholder="projects/my-repository" required></label>
         <button class="primary-button" type="submit">Index repository</button>
         <p id="code-index-status" class="project-help" role="status" aria-live="polite"></p>
       </form>

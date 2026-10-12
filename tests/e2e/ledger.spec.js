@@ -3710,15 +3710,22 @@ test('A missing embedding model is explained and rechecked without resetting ope
 test('Timeline shows validity windows and narrows to superseded versions', async ({ page }) => {
   const errors = browserErrors(page);
   await mockApi(page);
-  const history = [
-    { ...memories[0], valid_from: 1_700_000_000, provenance: { source: 'human:ledger' } },
+  const history = Array.from({ length: 60 }, (_, index) => (
+    { ...memories[0], id: `mem_live_${index}`, valid_from: 1_700_000_000, provenance: { source: 'human:ledger' } }
+  )).concat([
     {
       id: 'mem_database_old', title: 'Database choice', content: 'MySQL 8 was the main database.',
-      memory_type: 'semantic', valid_from: 1_600_000_000, valid_to: 1_700_000_000,
-      ingested_at: 1_600_000_000,
+      memory_type: 'semantic', valid_from: -1, valid_to: 0, ingested_at: 1,
     },
-  ];
-  await page.route('**/api/timeline**', route => fulfillJson(route, { history }));
+  ]);
+  const queries = [];
+  await page.route('**/api/timeline**', route => {
+    const params = new URL(route.request().url()).searchParams;
+    const closed = params.get('closed_only') === 'true';
+    queries.push(closed);
+    const eligible = closed ? history.filter(item => item.valid_to != null) : history;
+    return fulfillJson(route, { history: eligible.slice(0, Number(params.get('limit'))) });
+  });
   await page.goto('/');
   await page.locator('.nav-item[data-view="provenance"]').click();
   await page.getByRole('tab', { name: 'Timeline' }).click();
@@ -3726,13 +3733,15 @@ test('Timeline shows validity windows and narrows to superseded versions', async
   await page.locator('#timeline-form button[type="submit"]').click();
 
   const cards = page.locator('#timeline-result .temporal-card');
-  await expect(cards).toHaveCount(2);
+  await expect(cards).toHaveCount(50);
   await expect(cards.first().locator('.temporal-state')).toHaveText('current');
-  await expect(cards.nth(1).locator('.temporal-state')).toHaveText('past');
   await expect(cards.first()).toContainText('human:ledger');
   await page.locator('#timeline-closed-only').check();
   await expect(cards).toHaveCount(1);
   await expect(cards.first()).toContainText('MySQL 8');
+  await expect(cards.first().locator('.temporal-state')).toHaveText('past');
+  await expect(cards.first().locator('.temporal-meta')).not.toContainText('— now');
+  expect(queries).toEqual([false, true]);
   expect(errors).toEqual([]);
 });
 
