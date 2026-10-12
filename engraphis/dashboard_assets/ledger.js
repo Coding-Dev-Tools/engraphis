@@ -5640,6 +5640,7 @@
   }
 
   async function renameWorkspace(name) {
+    if (name === state.workspace && !await confirmDiscardEditor()) return;
     const next = await dialogs.prompt({
       title: 'Rename workspace',
       message: `Choose a new name for “${name}”. Agents that name this workspace explicitly need the new name.`,

@@ -3032,6 +3032,44 @@ test('Activity verifies the receipt chain and says plainly when it cannot', asyn
   expect(errors).toEqual([]);
 });
 
+for (const discard of [false, true]) {
+  test(`Renaming an active workspace ${discard ? 'requires consent before discarding' : 'keeps'} a hidden draft`, async ({ page }) => {
+    const workspaces = [{ name: workspace, memories: 2 }];
+    await mockApi(page, { workspaces });
+    let renames = 0;
+    await page.route('**/api/workspaces/rename', async route => {
+      const body = route.request().postDataJSON();
+      renames++;
+      workspaces[0].name = body.new_name;
+      await fulfillJson(route, body);
+    });
+    await page.goto('/?view=library');
+    await page.locator('#new-memory-button').click();
+    await page.locator('#editor-memory-content').fill('Keep this draft unless I consent.');
+    await page.locator('.nav-item[data-view="manage"]').click();
+    await page.getByRole('button', { name: 'Rename', exact: true }).click();
+    const dialog = page.locator('#action-dialog');
+    await expect(page.locator('#action-dialog-title')).toContainText('Discard');
+    expect(renames).toBe(0);
+    await page.locator(discard ? '#action-dialog-submit' : '#action-dialog-cancel').click();
+    if (discard) {
+      await expect(page.locator('#action-dialog-title')).toHaveText('Rename workspace');
+      await answerActionDialog(page, { fields: { value: workspace + '-renamed' } });
+      await expect(page.locator('#workspace-select')).toHaveValue(workspace + '-renamed');
+      expect(renames).toBe(1);
+    } else {
+      await expect(dialog).toBeHidden();
+      expect(renames).toBe(0);
+    }
+    await page.locator('.nav-item[data-view="library"]').click();
+    if (discard) await expect(page.locator('#memory-editor')).toBeHidden();
+    else {
+      await expect(page.locator('#memory-editor')).toBeVisible();
+      await expect(page.locator('#editor-memory-content')).toHaveValue('Keep this draft unless I consent.');
+    }
+  });
+}
+
 test('Copying a workspace refreshes its list without clearing a hidden draft', async ({ page }) => {
   const workspaces = [{ name: workspace, memories: 2 }];
   await mockApi(page, { workspaces });

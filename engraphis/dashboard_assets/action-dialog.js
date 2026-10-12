@@ -136,7 +136,10 @@
         if (event) event.preventDefault();
         settle(null);
       };
-      const onClose = () => settle(null);
+      const onClose = () => {
+        // A previous close event can arrive after its continuation opens a new dialog.
+        if (!dialog.open) settle(null);
+      };
       form.addEventListener('submit', onSubmit);
       cancel.addEventListener('click', onCancel);
       dialog.addEventListener('cancel', onCancel);
