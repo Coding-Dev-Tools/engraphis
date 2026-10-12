@@ -976,8 +976,6 @@ def analyze_memory_nodes(
                 toks_j = node_tokens_map[id_j]
                 sim = jaccard(toks_i, toks_j)
                 if sim >= 0.35 or subj_match:
-                    edge_map[id_i].add(id_j)
-                    edge_map[id_j].add(id_i)
                     resolved_links.append({
                         "a": id_i,
                         "b": id_j,

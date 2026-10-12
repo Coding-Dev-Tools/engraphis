@@ -210,7 +210,7 @@ an omitted mode means it was not recorded, and is not inferred from current defa
 | Decision | `engraphis_decide` | Advisory typed decisions with local fallback. Remote Jev requires an explicit backend and per-call `allow_remote=true`; missing, malformed, and uncertain answers stay visible. Smart discovery routes it through `engraphis_execute_action` because a remote call may consume allowance. |
 | Quality | `engraphis_spec_crawl` | Offline deterministic prompt spec crawler; returns scores, radar coverage, classified tokens, connection tentacles, and flags. |
 | Quality | `engraphis_spec_crawl_answer` | Clarification answer submission updating specifications and writing pending procedural memories for review. |
-| Quality | `engraphis_spec_crawl_memories` | Analyzes an active cluster of workspace memory nodes for cross-node contradictions, graph orphans, 7-axis operational gaps, and cluster health. |
+| Quality | `engraphis_spec_crawl_memories` | Analyzes a bounded sample of active memory nodes for contradictions, stored-graph orphans, operational gaps, and health; explicitly reports truncation. |
 | Quality | `engraphis_spec_crawl_resolve` | Applies an explicitly requested link or confirmed supersession to selected memory nodes. |
 
 Classic `engraphis_start_session` accepts optional `resume_from_session_id` for the same explicit,

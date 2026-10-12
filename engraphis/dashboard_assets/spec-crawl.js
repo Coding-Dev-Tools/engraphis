@@ -961,7 +961,7 @@
     const list = document.getElementById('spec-sections-list');
     const badge = document.getElementById('spec-sections-count');
     if (!list || !currentReport || !currentReport.nodes) return;
-    if (badge) badge.textContent = currentReport.nodes.length;
+    if (badge) badge.textContent = `${currentReport.nodes.length}${currentReport.truncated ? '+' : ''}`;
     list.innerHTML = '';
 
     currentReport.nodes.forEach(node => {
@@ -1192,7 +1192,9 @@
     }
 
     const motto = document.getElementById('spec-score-motto');
-    if (motto) motto.textContent = 'cluster health';
+    if (motto) motto.textContent = currentReport && currentReport.truncated
+      ? `sample health · first ${currentReport.node_count} nodes · more remain`
+      : 'cluster health';
   }
 
   function updateKindCounts() {
