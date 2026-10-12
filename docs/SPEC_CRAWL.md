@@ -137,6 +137,8 @@ python -m scripts.spec_crawl --workspace acme --min-score 75
 ### `POST /api/spec/crawl`
 Performs an offline, read-only analysis of up to 64,000 characters. HTTP callers can send `text` or set `crawl_procedural: true` to analyze approved procedural memories in the selected scope. Procedural crawls return `procedural_total_eligible_memory_count`, `procedural_memory_count`, and `procedural_source_truncated`; the top-level `truncated` flag is also true when source memories or the analysis token limit omit content. Server filesystem paths are rejected. The local-operator MCP path accepts text files only under approved index roots.
 
+If the first approved procedural memory cannot fit the character budget, the crawl returns a validation error instead of an empty-scope audit. Pass a smaller specification or use a selected-memory audit to inspect that record.
+
 ### `POST /api/spec/crawl/answer`
 Submits a clarification for a current flagged ambiguity, returns updated text and a new report, and optionally persists a pending procedural memory.
 

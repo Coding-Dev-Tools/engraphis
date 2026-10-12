@@ -12933,6 +12933,11 @@ class MemoryService:
             )
             source_label = f"procedural:{ws}"
             if not content.strip():
+                if recs:
+                    raise ValidationError(
+                        "No procedural memory fits the 64000-character audit limit; "
+                        "pass a smaller specification or audit selected memories."
+                    )
                 content = "# Procedural Rules\nNo procedural memories recorded yet.\n"
         elif source_id:
             if _authenticated_principal() is not None or self.allowed_workspaces is not None:

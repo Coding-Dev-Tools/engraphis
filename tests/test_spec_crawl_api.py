@@ -80,6 +80,29 @@ def test_service_boolean_controls_do_not_coerce_strings(crawl_service):
     assert svc.store.conn.total_changes == before
 
 
+@pytest.mark.parametrize("include_smaller_memory", [False, True])
+def test_procedural_crawl_cannot_fabricate_empty_scope_when_source_exceeds_budget(
+    crawl_service, monkeypatch, include_smaller_memory,
+):
+    svc = crawl_service
+    records = []
+    oversized = svc.remember(
+        "Verify approved source evidence before release.\n" + "x" * 66_000,
+        workspace="alpha", title="Oversized rules", mtype="procedural", trusted=True,
+    )
+    records.append(svc.store.get_memory(oversized["id"]))
+    if include_smaller_memory:
+        smaller = svc.remember(
+            "Run Ruff before release.", workspace="alpha", title="Lint rule",
+            mtype="procedural", trusted=True,
+        )
+        records.append(svc.store.get_memory(smaller["id"]))
+    # A newest/first oversized record exhausts the whole-memory composition budget.
+    monkeypatch.setattr(svc.store, "list_memories", lambda *args, **kwargs: records)
+    with pytest.raises(ValidationError, match="64000-character audit limit"):
+        svc.spec_crawl(workspace="alpha", crawl_procedural=True, trace_claims=False)
+
+
 def test_memory_crawl_never_broadens_unknown_or_explicit_scopes(crawl_service):
     svc = crawl_service
     alpha = svc.remember("Alpha configuration port: 5432", workspace="alpha", repo="one", trusted=True)
