@@ -350,7 +350,7 @@ def test_claim_lookup_failures_remain_unchecked(crawl_service, monkeypatch, fail
         assert report["score"] < baseline["score"]
 
 
-def test_backfilled_recommendation_preserves_current_fact_and_history(crawl_service):
+def test_backfilled_recommendation_preserves_current_fact_and_history(crawl_service, monkeypatch):
     svc = crawl_service
     current = svc.remember(
         "port: 5433", workspace="alpha", trusted=True, subject_key="db.primary",
@@ -366,6 +366,8 @@ def test_backfilled_recommendation_preserves_current_fact_and_history(crawl_serv
     assert remedy["ordering_basis"] == "valid_from"
     assert remedy["keep_node"] == current
     assert remedy["retire_node"] == historical
+    recording_time = max(svc.store.get_memory(mid).ingested_at for mid in (current, historical)) + 2
+    monkeypatch.setattr("engraphis.core.store.now_ts", lambda: recording_time)
     resolved = svc.spec_crawl_resolve(
         action=remedy["action"], node_a=remedy["keep_node"], node_b=remedy["retire_node"],
         workspace="alpha", confirmed=True,
@@ -384,16 +386,83 @@ def test_backfilled_recommendation_preserves_current_fact_and_history(crawl_serv
         workspace_id=wid, valid_at=2500.0,
     )) == {current}
     assert svc.store.visible_memory_ids([historical, current], SearchFilter(
-        workspace_id=wid, valid_at=2500.0, known_at=retired.valid_to_recorded_at - 0.000001,
+        workspace_id=wid, valid_at=2500.0, known_at=recording_time - 1,
     )) == {historical, current}
     assert svc.store.get_memory(historical).content == "port: 5432"
     assert svc.store.get_memory(current).content == "port: 5433"
-    # Retired endpoints disappear from live get_links(), while the relationship remains in history.
+    # Supersession is lifecycle lineage and remains queryable after retiring its predecessor.
     historical_link = svc.store.conn.execute(
         "SELECT a,b,valid_to FROM mem_links WHERE a=? AND b=? AND relation=?",
         (current, historical, "supersedes"),
     ).fetchone()
     assert historical_link is not None
+    assert any(link["relation"] == "supersedes" and link["b"] == historical
+               for link in svc.store.get_links(current))
+    assert [entry["id"] for entry in svc.inspect(current, workspace="alpha")["chain"]] == [historical, current]
+
+
+def test_supersession_lineage_preserves_system_time_and_excludes_associative_links(crawl_service, monkeypatch):
+    from engraphis.core.interfaces import SearchFilter
+    svc = crawl_service
+    old = svc.remember("Historical policy", workspace="alpha", trusted=True, valid_from=1000)["id"]
+    current = svc.remember("Current policy", workspace="alpha", trusted=True, valid_from=2000)["id"]
+    unrelated = svc.remember("Other procedure", workspace="alpha", trusted=True)["id"]
+    stamp = max(svc.store.get_memory(mid).ingested_at for mid in (old, current, unrelated)) + 10
+    monkeypatch.setattr("engraphis.core.store.now_ts", lambda: stamp)
+    svc.link(current, unrelated, workspace="alpha", relation="related_to")
+    svc.spec_crawl_resolve(action="supersede", node_a=current, node_b=old, workspace="alpha", confirmed=True)
+    wid = svc.store.get_memory(current).workspace_id
+    before = svc.store.get_links(current, flt=SearchFilter(workspace_id=wid, valid_at=stamp, known_at=stamp - 1))
+    assert not any(link["relation"] == "supersedes" for link in before)
+    after = svc.store.get_links(current, flt=SearchFilter(workspace_id=wid, valid_at=stamp, known_at=stamp))
+    assert any(link["relation"] == "supersedes" for link in after)
+    assert {entry["id"] for entry in svc.inspect(current, workspace="alpha")["chain"]} == {old, current}
+    assert {entry["id"] for entry in svc.inspect(old, workspace="alpha")["chain"]} == {old, current}
+    svc.store.conn.execute("UPDATE memories SET expired_at=? WHERE id=?", (stamp - 1, old))
+    assert not any(link["relation"] == "supersedes" for link in svc.store.get_links(current))
+
+
+@pytest.mark.parametrize("eligible_count", [150, 151])
+def test_cluster_sample_reports_truncation_without_counting_pending_memories(crawl_service, monkeypatch, eligible_count):
+    svc = crawl_service
+    monkeypatch.setattr(svc.engine, "_evolve", lambda *args, **kwargs: None)
+    ids = [svc.remember(f"Procedure number {i}", workspace="alpha", trusted=True,
+                        resolve_conflicts=False)["id"] for i in range(eligible_count)]
+    svc.remember("Pending procedure", workspace="alpha", source="spec_crawl", resolve_conflicts=False)
+    report = svc.spec_crawl_memories(workspace="alpha", include_trace=False)
+    assert report["node_count"] == 150
+    assert report["truncated"] is (eligible_count > 150)
+    assert report["node_limit"] == 150
+    assert report["count_semantics"] == "bounded_scope_sample"
+    selected = svc.spec_crawl_memories(workspace="alpha", memory_ids=ids[:2])
+    assert selected["node_count"] == 2 and selected["truncated"] is False
+    assert selected["count_semantics"] == "requested_selection"
+    assert report["total_eligible_node_count"] == eligible_count
+    assert report["analysis_truncated"] is report["truncated"]
+
+
+def test_lineage_chain_preserves_zero_effective_dates_and_terminates_cycles(crawl_service):
+    svc = crawl_service
+    ids = [svc.remember(f"Policy at effective time {stamp}", workspace="alpha", trusted=True,
+                        valid_from=stamp, resolve_conflicts=False)["id"] for stamp in (0, 1000, 2000)]
+    for retained, retired in ((ids[1], ids[0]), (ids[2], ids[1])):
+        svc.spec_crawl_resolve(action="supersede", node_a=retained, node_b=retired,
+                               workspace="alpha", confirmed=True)
+    svc.link(ids[0], ids[2], workspace="alpha", relation="supersedes")
+    assert [entry["id"] for entry in svc.inspect(ids[2], workspace="alpha")["chain"]] == ids
+
+
+def test_remediation_requires_one_explicit_session_scope(crawl_service):
+    svc = crawl_service
+    first = svc.start_session("alpha", repo="app", agent="codex")["session_id"]
+    second = svc.start_session("alpha", repo="app", agent="codex", force_new=True)["session_id"]
+    ids = [svc.remember(f"Private procedure {i}", workspace="alpha", repo="app", session_id=sid,
+                        scope="session", trusted=True, resolve_conflicts=False)["id"]
+           for i, sid in enumerate((first, first, second))]
+    for scope in ({"workspace": "alpha", "repo": "app"}, {"session_id": first}):
+        with pytest.raises(ValidationError):
+            svc.spec_crawl_resolve(action="link", node_a=ids[0], node_b=ids[2], **scope)
+    assert svc.spec_crawl_resolve(action="link", node_a=ids[0], node_b=ids[1], session_id=first)["ok"]
 
 
 @pytest.mark.parametrize("action", ["supersede", "link"])

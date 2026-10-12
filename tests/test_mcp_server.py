@@ -1077,6 +1077,33 @@ def test_mcp_ingest_creates_prompt_visible_memory_without_owner_approval(monkeyp
     assert memory_id in {item["id"] for item in recalled["memories"]}
 
 
+def test_spec_crawl_wrappers_inherit_nondefault_session_scope(monkeypatch):
+    srv = _module_with_memory_db(monkeypatch)
+    svc = srv.service()
+    sid = svc.start_session("team", repo="alpha", agent="codex")["session_id"]
+    local = svc.remember("Alpha repository policy", workspace="team", repo="alpha",
+                         mtype="procedural", trusted=True)["id"]
+    ancestor = svc.remember("Workspace policy", workspace="team", mtype="procedural", trusted=True)["id"]
+    other = svc.remember("Beta repository policy", workspace="team", repo="beta",
+                         mtype="procedural", trusted=True)["id"]
+    cluster = json.loads(srv.engraphis_spec_crawl_memories(session_id=sid))
+    assert cluster["workspace"] == "team" and cluster["repo"] == "alpha"
+    assert {node["id"] for node in cluster["nodes"]} == {local, ancestor}
+    assert other not in {node["id"] for node in cluster["nodes"]}
+    assert json.loads(srv.engraphis_spec_crawl_resolve(
+        action="link", node_a=local, node_b=ancestor, session_id=sid,
+    ))["ok"] is True
+    assert "error" not in json.loads(srv.engraphis_spec_crawl(crawl_procedural=True, session_id=sid))
+    spec = "# Rules\nVerify all tests."
+    flag = svc.spec_crawl(spec, session_id=sid)["flags"][0]
+    clarified = json.loads(srv.engraphis_spec_crawl_answer(
+        flag=flag, answer="the 12 required tests", spec_text=spec,
+        session_id=sid, save_as_memory=False,
+    ))
+    assert "error" not in clarified and clarified["memory_id"] is None
+    assert srv.engraphis_spec_crawl_memories(workspace="default", session_id=sid).startswith("Error:")
+
+
 def test_remember_session_id_keeps_repo_default_scope(monkeypatch):
     srv = _module_with_memory_db(monkeypatch)
     session = json.loads(srv.engraphis_start_session(

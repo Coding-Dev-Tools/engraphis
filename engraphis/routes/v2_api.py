@@ -2954,13 +2954,14 @@ class _SpecCrawlResolveReq(BaseModel):
     node_b: Optional[str] = Field(default=None, max_length=256)
     workspace: Optional[str] = None
     repo: Optional[str] = None
+    session_id: Optional[str] = None
     confirmed: StrictBool = False
 
 
 @router.post("/spec/crawl/memories/resolve")
 def spec_crawl_resolve(req: _SpecCrawlResolveReq):
     """Execute remediation on memory cluster audit: supersede older conflicting node or link orphan."""
-    ws = req.workspace if req.workspace is not None or req.repo else _default_ws()
+    ws = req.workspace if req.workspace is not None or req.repo or req.session_id else _default_ws()
     return _run(
         service().spec_crawl_resolve,
         action=req.action,
@@ -2968,6 +2969,7 @@ def spec_crawl_resolve(req: _SpecCrawlResolveReq):
         node_b=req.node_b,
         workspace=ws,
         repo=req.repo,
+        session_id=req.session_id,
         confirmed=req.confirmed,
     )
 
