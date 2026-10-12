@@ -1404,6 +1404,7 @@ test('Ledger deadline includes stalled graph assets and Reload data starts a fre
     return route.fallback();
   });
   await page.goto('/');
+  await expect(page.locator('#connection-status')).toContainText('Local engine connected');
   await page.locator('.nav-item[data-view="relations"]').click();
   await revealAdvancedGraphControls(page);
   await expect(page.locator('#graph-empty')).toContainText('High-quality graph loading timed out');
@@ -3030,6 +3031,72 @@ test('Activity verifies the receipt chain and says plainly when it cannot', asyn
   await expect(status).toContainText('status is unavailable');
   expect(errors).toEqual([]);
 });
+
+test('Copying a workspace refreshes its list without clearing a hidden draft', async ({ page }) => {
+  const workspaces = [{ name: workspace, memories: 2 }];
+  await mockApi(page, { workspaces });
+  await page.route('**/api/workspaces/copy', async route => {
+    workspaces.push({ name: workspace + '-copy', memories: 2 });
+    await fulfillJson(route, { workspace: workspace + '-copy', memories_copied: 2 });
+  });
+  await page.goto('/?view=library');
+  await page.locator('#new-memory-button').click();
+  await page.locator('#editor-memory-content').fill('Preserve the original workspace draft.');
+  await page.locator('.nav-item[data-view="manage"]').click();
+  await page.getByRole('button', { name: 'Copy', exact: true }).click();
+  await expect(page.locator('#workspace-select option')).toHaveCount(2);
+  await expect(page.locator('#workspace-select')).toHaveValue(workspace);
+  await page.locator('.nav-item[data-view="library"]').click();
+  await expect(page.locator('#memory-editor')).toBeVisible();
+  await expect(page.locator('#editor-memory-content')).toHaveValue('Preserve the original workspace draft.');
+});
+
+for (const pendingSave of [false, true]) {
+  test(`Saving a workspace description preserves ${pendingSave ? 'a pending save' : 'an unsaved draft'} across navigation`, async ({ page }) => {
+    const errors = browserErrors(page);
+    const workspaces = [{ name: workspace, memories: 2, description: 'Original description' }];
+    await mockApi(page, { workspaces });
+    let releaseSave;
+    const savePending = new Promise(resolve => { releaseSave = resolve; });
+    let saveStarted = false;
+    await page.route('**/api/remember', async route => {
+      saveStarted = true;
+      await savePending;
+      await route.fulfill({ status: 503, json: { detail: 'Save unavailable' } });
+    });
+    await page.route('**/api/workspaces/describe', async route => {
+      const body = route.request().postDataJSON();
+      workspaces[0].description = body.description;
+      await fulfillJson(route, body);
+    });
+    try {
+      await page.goto('/?view=library');
+      await page.locator('#new-memory-button').click();
+      await page.locator('#editor-memory-title').fill('Keep my hidden draft');
+      await page.locator('#editor-memory-content').fill('Editing metadata must preserve this text.');
+      if (pendingSave) {
+        await page.locator('#memory-editor button[type="submit"]').click();
+        await expect.poll(() => saveStarted).toBe(true);
+      }
+      await page.locator('.nav-item[data-view="manage"]').click();
+      await page.getByRole('button', { name: 'Describe', exact: true }).click();
+      await answerActionDialog(page, { fields: { value: 'Updated description' } });
+      await expect(page.locator('.workspace-card')).toContainText('Updated description');
+      await page.locator('.nav-item[data-view="library"]').click();
+      await expect(page.locator('#memory-editor')).toBeVisible();
+      await expect(page.locator('#editor-memory-title')).toHaveValue('Keep my hidden draft');
+      await expect(page.locator('#editor-memory-content')).toHaveValue('Editing metadata must preserve this text.');
+      if (pendingSave) {
+        releaseSave();
+        await expect(page.locator('#editor-error')).toContainText('Your draft is retained');
+      }
+      expect(errors.filter(error => error !==
+        'Failed to load resource: the server responded with a status of 503 (Service Unavailable)')).toEqual([]);
+    } finally {
+      releaseSave();
+    }
+  });
+}
 
 test('Source completion preserves an editor while its save is pending and then fails', async ({ page }) => {
   const errors = browserErrors(page);
