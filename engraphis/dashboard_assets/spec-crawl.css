@@ -513,6 +513,16 @@
   font-size: 11px;
 }
 
+.spec-truncation-notice {
+  color: #fbbf24;
+  background: rgba(245, 158, 11, 0.08);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: 4px;
+  margin: 0 0 6px;
+  padding: 7px 8px;
+  font-size: 11px;
+}
+
 .spec-node-item.orphan {
   border-left: 3px solid #f97316;
 }
