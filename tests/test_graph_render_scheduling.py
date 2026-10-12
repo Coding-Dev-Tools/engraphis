@@ -105,3 +105,103 @@ console.log(JSON.stringify({ lanes: lanes.map(({ radius, members, dynamicRadius 
   ({ radius, members, dynamicRadius })) }));
 """)
     assert result["lanes"] == [{"radius": 30, "members": 3, "dynamicRadius": False}]
+
+
+@pytest.mark.parametrize("hz", [60, 120])
+def test_camera_invalidations_paint_each_frame_with_flow_without_redrawing_at_rest(hz):
+    result = run_node(r"""
+let draws = 0, scheduled = 0;
+const gl = new Proxy({ clear() { draws++; } }, { get(target, key) {
+  return target[key] || (() => {});
+}});
+const ctx = {
+  state: { destroyed: false, paused: false, contextLost: false, ready: true,
+    camera: { x: 0, y: 0, scale: 1 }, dpr: 1, ids: ['n'], settings: { flow: true },
+    edgeVertexCount: 0, hover: -1, focus: -1, hoverPoint: [0, 0], focusPoint: [0, 0] },
+  canvas: { width: 800, height: 600 }, gl, nodeProgram: {}, edgeProgram: {},
+  nodeBuffers: { attrs: {} }, edgeBuffers: { attrs: {} }, glowAmount: () => 0,
+  zoomRatio: () => 0, EDGE_START: 0.2, FLOW_FRAME_MS: 34,
+  clamp: (value, min, max) => Math.max(min, Math.min(max, value)),
+  flowAnimating: () => true, bindNodeGeometry() {}, bindEdgeGeometry() {},
+  drawRegions() {}, scheduleLabels() {}, schedule() { scheduled++; },
+};
+load(ctx, ['draw']);
+const hz = HZ;
+for (let frame = 1; frame <= hz; frame++) {
+  ctx.state.camera.x += 1;
+  ctx.draw(frame * 1000 / hz);
+}
+console.log(JSON.stringify({ draws, scheduled }));
+""".replace("HZ", str(hz)))
+    assert result == {"draws": hz, "scheduled": 0}
+
+
+def test_every_labels_obey_density_and_remeasure_font_changes():
+    result = run_node(r"""
+let measured = 0, paints = [];
+const context = { fillText(text) { paints.push(text); }, measureText(text) {
+  measured++; return { width: parseFloat(this.font) * text.length / 2 };
+}};
+const ctx = {
+  state: { ready: true, camera: { x: 0, y: 0, scale: 1 },
+    width: 1000, height: 600, settings: { labels: true, font: 12, labelDensity: 1 },
+    labelLayout: [], labelMetrics: new Map(), lastLabelKey: '',
+    nodeFlags: new Float32Array(30).fill(1), positions: new Float32Array(60),
+    topNodes: Array.from({ length: 30 }, (_, i) => i), hover: -1, focus: -1 },
+  labelContext: context, LABEL_MAX: 220, LABEL_CANDIDATE_MAX: 1800,
+  labelText: i => 'Name' + i,
+  screen: (_, __) => [0, 0],
+  clamp: (value, min, max) => Math.max(min, Math.min(max, value)),
+};
+for (let i = 0; i < 30; i++) {
+  ctx.state.positions[i * 2] = 50 + (i % 6) * 150;
+  ctx.state.positions[i * 2 + 1] = 50 + Math.floor(i / 6) * 100;
+}
+ctx.screen = (x, y) => [x, y];
+load(ctx, ['drawDeclutteredLabels']);
+ctx.drawDeclutteredLabels(); const low = paints.length;
+paints = []; ctx.state.settings.labelDensity = 24;
+ctx.drawDeclutteredLabels(); const normal = paints.length, before = measured;
+paints = []; ctx.state.settings.font = 24;
+ctx.drawDeclutteredLabels(); const remeasured = measured - before;
+console.log(JSON.stringify({ low, normal, remeasured, cache: [...ctx.state.labelMetrics.keys()] }));
+""")
+    assert result["low"] == 1
+    assert result["normal"] == 24
+    assert result["remeasured"] >= 24
+    assert any(key.startswith("24px ") for key in result["cache"])
+
+
+def test_zoomed_out_picking_respects_screen_hit_radius_and_visibility():
+    result = run_node(r"""
+const ctx = {
+  state: { ready: true, ids: ['near', 'hidden'], nodeFlags: [1, 0],
+    positions: [0, 0, 100, 0], pickDirty: true, camera: { scale: 0.02 } },
+  pointSize: () => 4,
+};
+load(ctx, ['buildPickGrid', 'pickAt']);
+const exact = ctx.pickAt(0, 0), twoPixels = ctx.pickAt(100, 0);
+const outside = ctx.pickAt(1000, 0);
+ctx.state.camera.scale = 4;
+const close = ctx.pickAt(2, 0), closeOutside = ctx.pickAt(3, 0);
+console.log(JSON.stringify({ exact, twoPixels, outside, close, closeOutside }));
+""")
+    assert result == {"exact": 0, "twoPixels": 0, "outside": -1, "close": 0, "closeOutside": -1}
+
+
+def test_hidden_refinement_defers_upload_until_resume():
+    result = run_node(r"""
+let applications = [];
+const ctx = {
+  state: { paused: true, contextLost: false, destroyed: false,
+    pendingLayout: { positions: [9, 12], bounds: { minX: 9 }, fit: true } },
+  applyLayout: (...args) => applications.push(args),
+};
+load(ctx, ['flushPendingLayout']);
+ctx.flushPendingLayout(); const hidden = applications.length;
+ctx.state.paused = false; ctx.flushPendingLayout(); ctx.flushPendingLayout();
+console.log(JSON.stringify({ hidden, applications, retained: ctx.state.pendingLayout }));
+""")
+    assert result == {
+        "hidden": 0, "applications": [[[9, 12], {"minX": 9}, True]], "retained": None,
+    }
