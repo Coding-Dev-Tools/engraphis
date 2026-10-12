@@ -421,7 +421,8 @@ def _is_embedder_mismatch(exc) -> bool:
 def _keyword_search(ws, q, limit=20, *, as_of: Optional[float] = None,
                     valid_at: Optional[float] = None,
                     known_at: Optional[float] = None,
-                    repo: Optional[str] = None, session_id: Optional[str] = None):
+                    repo: Optional[str] = None, session_id: Optional[str] = None,
+                    include_invalid: bool = False, closed_only: bool = False):
     """Non-semantic fallback: match memories by keyword (title/content LIKE) so the
     Recall/Why/Timeline tabs still return results when the embedder is unavailable."""
     import json as _json
@@ -454,16 +455,20 @@ def _keyword_search(ws, q, limit=20, *, as_of: Optional[float] = None,
         sql = ("SELECT id, scope, mtype, title, content, summary, pinned, importance, "
                "valid_from, valid_to, valid_to_recorded_at, ingested_at, expired_at, "
                "subject_key, claim_kind, provenance, metadata FROM memories "
-               "WHERE workspace_id=? "
-               "AND (valid_from IS NULL OR valid_from<=?) "
-               "AND (valid_to IS NULL OR ?<valid_to "
-               "OR (valid_to_recorded_at IS NOT NULL AND ?<valid_to_recorded_at)) "
-               "AND (ingested_at IS NULL OR ingested_at<=?) "
-               "AND (expired_at IS NULL OR ?<expired_at)")
-        args = [
-            row["id"], world_anchor, world_anchor, system_anchor,
-            system_anchor, system_anchor,
-        ]
+               "WHERE workspace_id=?")
+        args = [row["id"]]
+        if not include_invalid:
+            sql += (" AND (valid_from IS NULL OR valid_from<=?) "
+                    "AND (valid_to IS NULL OR ?<valid_to "
+                    "OR (valid_to_recorded_at IS NOT NULL AND ?<valid_to_recorded_at))")
+            args.extend([world_anchor, world_anchor, system_anchor])
+        sql += (" AND (ingested_at IS NULL OR ingested_at<=?) "
+                "AND (expired_at IS NULL OR ?<expired_at)")
+        args.extend([system_anchor, system_anchor])
+        if closed_only:
+            sql += (" AND valid_to IS NOT NULL "
+                    "AND (valid_to_recorded_at IS NULL OR valid_to_recorded_at<=?)")
+            args.append(system_anchor)
         if session_id:
             sql += " AND (scope IN ('workspace','user') OR (scope='session' AND session_id=?)"
             args.append(session_id)
@@ -1854,10 +1859,10 @@ def why(q: str = Query(..., min_length=1, max_length=10_000),
 @router.get("/timeline")
 def timeline(q: str = Query(..., min_length=1, max_length=10_000),
              workspace: Optional[str] = None,
-             limit: int = Query(default=20, ge=1, le=100)):
+             limit: int = Query(default=20, ge=1, le=100), closed_only: bool = False):
     ws = workspace or _default_ws()
     try:
-        out = service().timeline(q, workspace=ws, limit=limit)
+        out = service().timeline(q, workspace=ws, limit=limit, closed_only=closed_only)
     except WorkspaceBindingError:
         logger.info("dashboard timeline request rejected by workspace binding")
         raise HTTPException(status_code=403, detail={
@@ -1873,7 +1878,7 @@ def timeline(q: str = Query(..., min_length=1, max_length=10_000),
                 raise _invalid_request() from None
             logger.error("dashboard timeline failed (%s)", type(exc).__name__)
             raise HTTPException(status_code=500, detail={"error": "internal server error"})
-        mems = _keyword_search(ws, q, limit)
+        mems = _keyword_search(ws, q, limit, include_invalid=True, closed_only=closed_only)
         return {"query": q, "workspace": ws, "history": mems, "mode": "keyword",
                 "note": "Keyword match — install sentence-transformers for semantic search."}
     return {"query": q, "workspace": ws, "mode": "semantic",
