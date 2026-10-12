@@ -272,3 +272,24 @@ test('A save that fails after leaving the editor is still reported', async ({ pa
   await expect(page.locator('#notice-banner')).toContainText('Could not save “Draft in flight”');
   expect(errors).toEqual([]);
 });
+
+test('A refused address explains itself instead of reporting the server as down', async ({ page }) => {
+  const errors = pageErrors(page);
+  // What the zero-config API answers for a name DNS rebinding could forge.
+  await page.route('**/api/bootstrap', route => route.fulfill({
+    status: 403,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      error: 'this address is not a name Engraphis trusts without a token; open the dashboard '
+        + 'at localhost or 127.0.0.1, or add the name to ENGRAPHIS_ALLOWED_HOSTS',
+      auth: 'local-host-required',
+    }),
+  }));
+  await page.goto('/');
+  const banner = page.locator('#connection-banner');
+  await expect(banner).toBeVisible();
+  await expect(banner).toContainText('refused this page');
+  await expect(banner).toContainText('ENGRAPHIS_ALLOWED_HOSTS');
+  await expect(banner).not.toContainText('Check that Engraphis is still running');
+  expect(errors).toEqual([]);
+});

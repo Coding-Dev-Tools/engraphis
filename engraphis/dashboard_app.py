@@ -34,7 +34,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from engraphis import licensing
 from engraphis.config import settings
-from engraphis.netutil import is_local_request
+from engraphis.netutil import declared_host_names, is_local_request, is_rebinding_safe_host
 from engraphis.core.documents import supported_document_extensions
 from engraphis.http_security import wants_https
 from engraphis.local_auth import (
@@ -303,23 +303,22 @@ def _cross_site_browser_request(request: Request, trusted_origins: frozenset) ->
     """Whether a browser marked this request as started by a page on another site.
 
     The zero-config runtime trusts every loopback caller, and every website the user visits
-    can make that user's browser send "simple" requests to loopback without a CORS
-    preflight: form posts, multipart uploads, body-less POSTs, image GETs. Browsers label
-    them with ``Origin`` and ``Sec-Fetch-Site``; non-browser clients send neither. The
-    dashboard's session header and an ``Authorization`` header can only be sent cross-site
-    after a preflight that the CORS allow-list controls, so their presence is trusted.
+    can make that user's browser send requests to loopback. Browsers label them: every
+    CORS request and every non-GET request carries ``Origin``, and ``Sec-Fetch-Site`` says
+    where the rest came from. Non-browser clients send neither. A page may call the API
+    from its own origin or from an origin in the explicit CORS allow-list; no header can
+    vouch for any other page, because a wildcard allow-list would let it through the
+    preflight and zero-config access has no other credential.
     """
 
     headers = request.headers
-    if headers.get("x-engraphis-browser-session") == "1" or "authorization" in headers:
-        return False
     origin = headers.get("origin")
     if origin is not None:
-        origin = origin.strip().rstrip("/")
-        if not origin or origin.lower() == "null":
+        origin = origin.strip().rstrip("/").lower()
+        if not origin or origin == "null":
             return True
         try:
-            origin_host = urlsplit(origin).netloc.lower()
+            origin_host = urlsplit(origin).netloc
         except ValueError:
             return True
         if origin_host and origin_host == (headers.get("host") or "").strip().lower():
@@ -504,8 +503,20 @@ def create_app() -> FastAPI:
     # Origins the zero-config gate below accepts for simple (unpreflighted) requests. A
     # wildcard only relaxes preflighted CORS; it never vouches for an arbitrary page here.
     _trusted_origins = frozenset(
-        origin.rstrip("/") for origin in settings.cors_origins if origin != "*"
+        origin.strip().rstrip("/").lower() for origin in settings.cors_origins if origin != "*"
     )
+    # Names besides localhost and IP literals that may address the zero-config API: the
+    # bind name the launcher opens, the documented client URL and any extra names.
+    _dashboard_url = _os.environ.get("ENGRAPHIS_DASHBOARD_URL", "").strip()
+    _declared_hosts = declared_host_names(
+        _os.environ.get("ENGRAPHIS_HOST", ""), _dashboard_url,
+        _os.environ.get("ENGRAPHIS_ALLOWED_HOSTS", ""),
+    )
+    if _dashboard_url and not declared_host_names(_dashboard_url):
+        logger.warning(
+            "ENGRAPHIS_DASHBOARD_URL has no usable host name; without an API token the "
+            "dashboard answers only localhost, IP addresses and ENGRAPHIS_ALLOWED_HOSTS"
+        )
 
     @app.exception_handler(licensing.LicenseError)
     async def _license_error(request: Request, exc: licensing.LicenseError):
@@ -1336,14 +1347,11 @@ def create_app() -> FastAPI:
         path = request.url.path
         if request.method == "OPTIONS":
             return await call_next(request)
-        guarded = (
-            path.startswith("/api/")
-            or path == "/mcp"
-            or path.startswith("/mcp/")
-        )
+        mcp = path == "/mcp" or path.startswith("/mcp/")
+        guarded = path.startswith("/api/") or path.startswith("/dashboard/") or mcp
         if not guarded or path in _PUBLIC:
             return await call_next(request)
-        if (path == "/mcp" or path.startswith("/mcp/")) and not app.state.mcp_over_http:
+        if mcp and not app.state.mcp_over_http:
             return JSONResponse({"error": "MCP-over-HTTP is unavailable"}, status_code=404)
 
         # A configured token protects every non-public API and MCP request. This is a
@@ -1373,10 +1381,22 @@ def create_app() -> FastAPI:
                 },
                 status_code=403,
             )
-        # A loopback peer can still be another website acting through the user's browser.
-        # Refuse API requests a browser marked as cross-site unless they passed a preflight;
+        # A loopback peer can still be another website acting through the user's browser:
+        # through DNS rebinding under its own name, or with cross-site requests.
         # /mcp enforces its own Origin and Host allow-list.
-        if path.startswith("/api/") and _cross_site_browser_request(request, _trusted_origins):
+        if not mcp and not is_rebinding_safe_host(request, _declared_hosts):
+            return JSONResponse(
+                {
+                    "error": (
+                        "this address is not a name Engraphis trusts without a token; open "
+                        "the dashboard at localhost or 127.0.0.1, or add the name to "
+                        "ENGRAPHIS_ALLOWED_HOSTS"
+                    ),
+                    "auth": "local-host-required",
+                },
+                status_code=403,
+            )
+        if not mcp and _cross_site_browser_request(request, _trusted_origins):
             return JSONResponse(
                 {"error": "cross-site browser requests are refused; use the Engraphis dashboard"},
                 status_code=403,

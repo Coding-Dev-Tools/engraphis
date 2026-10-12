@@ -749,13 +749,17 @@ def test_open_mode_document_wizard_works_without_api_token(monkeypatch, tmp_path
         assert minted.status_code == 200
         csrf = minted.json()["review_csrf_token"]
         # Same-origin requests without the browser marker header fail closed (403);
-        # a non-loopback peer must not mint a nonce at all (401). Both checks run
+        # a non-loopback peer must not mint a nonce at all: the zero-config gate refuses
+        # it before the route, exactly as it refuses remote /api requests. Both checks run
         # against the same ASGI app with a different transport client address.
         assert client.get("/dashboard/review/csrf").status_code == 403
         remote = TestClient(client.app, client=("203.0.113.9", 51234))
-        assert remote.get(
+        refused = remote.get(
             "/dashboard/review/csrf", headers={"X-Engraphis-Browser-Session": "1"},
-        ).status_code == 401
+        )
+        assert refused.status_code == 403
+        assert refused.json()["auth"] == "local-token-required"
+        assert "review_csrf_token" not in refused.json()
 
         headers = {
             "X-Engraphis-Browser-Session": "1",
@@ -902,11 +906,20 @@ def test_zero_config_api_refuses_requests_another_website_starts(monkeypatch, tm
             headers={"Sec-Fetch-Site": "cross-site"},
         ).status_code == 403
 
-        # The dashboard's session header can only be sent cross-site after a preflight.
+        # No header vouches for another site's page: with ENGRAPHIS_CORS_ORIGINS=* any
+        # page could send the dashboard's header after passing the preflight.
+        borrowed = client.post(
+            "/api/workspaces/import-files", data={**form, "derive_facts": "false"},
+            files=upload("borrowed.md"),
+            headers={"Origin": "https://evil.example", "X-Engraphis-Browser-Session": "1",
+                     "Authorization": "Bearer anything"},
+        )
+        assert borrowed.status_code == 403
+        # The dashboard's own page sends its origin, or none at all on a GET.
         dashboard = client.post(
             "/api/workspaces/import-files", data={**form, "derive_facts": "false"},
             files=upload("dashboard.md"),
-            headers={"Origin": "https://evil.example", "X-Engraphis-Browser-Session": "1"},
+            headers={"Origin": "http://testserver", "X-Engraphis-Browser-Session": "1"},
         )
         assert dashboard.status_code == 200, dashboard.text
         # Same-origin pages, configured CORS origins, typed URLs and scripts all pass.
@@ -926,6 +939,81 @@ def test_zero_config_api_refuses_requests_another_website_starts(monkeypatch, tm
         )
         assert script.status_code == 200, script.text
         assert {"dashboard.md", "script.md"} <= titles(client)
+
+
+def test_zero_config_api_refuses_hosts_dns_rebinding_could_forge(monkeypatch, tmp_path):
+    """A website can point its own name at 127.0.0.1 (DNS rebinding). Its pages are then
+    same-origin with that name: they can send the dashboard's session header and pass every
+    Origin check from a loopback peer. Only ``Host`` still carries the website's name, so the
+    zero-config API accepts localhost, IP literals and the declared ENGRAPHIS_DASHBOARD_URL
+    name, and nothing else. A configured API token keeps every name working."""
+
+    for name in ("ENGRAPHIS_DASHBOARD_URL", "ENGRAPHIS_ALLOWED_HOSTS"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ENGRAPHIS_HOST", "127.0.0.1")
+    form = {"workspace": "demo", "memory_type": "semantic", "derive_facts": "false"}
+    upload = [("files", ("rebound.md", b"# Rebound\nUploaded.", "text/markdown"))]
+
+    def memories(client, host, **headers):
+        return client.get(
+            "/api/memories", params={"workspace": "demo"}, headers={"Host": host, **headers},
+        )
+
+    with _client(monkeypatch, tmp_path) as client:
+        for host in (
+            "attacker.test:8700", "127.0.0.1.attacker.test:8700", "evil.localhost:8700",
+            "localhost.attacker.test", "attacker.test@127.0.0.1:8700", "[::1",
+            # Some resolvers send ``localhost.`` to DNS, so only exact localhost counts.
+            "localhost.:8700", "localhost:attacker.test",
+        ):
+            rebound = {"Origin": f"http://{host}", "Sec-Fetch-Site": "same-origin",
+                       "X-Engraphis-Browser-Session": "1"}
+            refused = memories(client, host, **rebound)
+            assert refused.status_code == 403, host
+            assert refused.json()["auth"] == "local-host-required"
+            assert "ENGRAPHIS_ALLOWED_HOSTS" in refused.json()["error"]
+            imported = client.post(
+                "/api/workspaces/import-files", data=form, files=upload,
+                headers={"Host": host, **rebound},
+            )
+            assert imported.status_code == 403, host
+            # The review routes outside /api share the same gate.
+            csrf = client.get("/dashboard/review/csrf", headers={"Host": host, **rebound})
+            assert csrf.status_code == 403, host
+        listed = memories(client, "127.0.0.1:8700").json()["memories"]
+        assert "Rebound" not in {memory.get("title") for memory in listed}
+        # Health and readiness stay public under any name.
+        assert client.get("/api/health", headers={"Host": "attacker.test"}).status_code == 200
+
+        # The names a local browser really uses. An IP literal cannot be rebound.
+        for host in (
+            "localhost:8700", "LOCALHOST", "127.0.0.1:8700", "[::1]:8700",
+            "192.168.1.20:8700", "testserver",
+        ):
+            assert memories(client, host).status_code == 200, host
+        assert client.get(
+            "/dashboard/review/csrf",
+            headers={"Host": "localhost:8700", "X-Engraphis-Browser-Session": "1"},
+        ).status_code == 200
+
+        # With a token the bearer credential is the boundary, whatever the name.
+        monkeypatch.setattr(settings, "api_token", "rebinding-test-token")
+        hosted = memories(client, "engraphis.example.com",
+                          Authorization="Bearer rebinding-test-token")
+        assert hosted.status_code == 200, hosted.text
+
+    # Names the operator declared: the bind host the launcher opens, the documented
+    # client URL and the allowed-hosts list.
+    declared_dir = tmp_path / "declared"
+    declared_dir.mkdir()
+    monkeypatch.setenv("ENGRAPHIS_HOST", "desk-top")
+    monkeypatch.setenv("ENGRAPHIS_DASHBOARD_URL", "http://Engraphis.LAN:8700")
+    monkeypatch.setenv("ENGRAPHIS_ALLOWED_HOSTS", "engraphis, notes.internal:8700")
+    with _client(monkeypatch, declared_dir) as client:
+        for host in ("desk-top:8700", "engraphis.lan:8700", "engraphis:8700",
+                     "notes.internal"):
+            assert memories(client, host).status_code == 200, host
+        assert memories(client, "other.lan:8700").status_code == 403
 
 
 def test_dashboard_assets_revalidate_instead_of_pinning_old_visuals(monkeypatch, tmp_path):

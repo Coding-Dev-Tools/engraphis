@@ -889,6 +889,10 @@
     if (error && error.status === 401) {
       return 'This Engraphis deployment needs its API token before the dashboard can load. Choose Retry now to enter it.';
     }
+    if (error && error.status === 403) {
+      // The server explains a refused address or remote access; show its reason.
+      return `The dashboard server refused this page: ${error.message}`;
+    }
     if (error && error.status === 404) {
       return 'Dashboard APIs are unavailable at this address. If the legacy v1 reference server is running on this port, stop it and start engraphis-dashboard.';
     }
