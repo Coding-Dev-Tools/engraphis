@@ -3728,12 +3728,17 @@ test('Timeline shows validity windows and narrows to superseded versions', async
       memory_type: 'semantic', valid_from: -1, valid_to: 0, ingested_at: 1,
     },
   ]);
+  const now = Math.floor(Date.now() / 1000);
+  history.unshift(
+    { ...memories[0], id: 'mem_scheduled', valid_from: now - 100, valid_to: now + 86400, provenance: { source: 'human:ledger' } },
+    { ...memories[0], id: 'mem_planned', valid_from: now + 86400 },
+  );
   const queries = [];
   await page.route('**/api/timeline**', route => {
     const params = new URL(route.request().url()).searchParams;
     const closed = params.get('closed_only') === 'true';
     queries.push(closed);
-    const eligible = closed ? history.filter(item => item.valid_to != null) : history;
+    const eligible = closed ? history.filter(item => item.valid_to != null && item.valid_to <= now) : history;
     return fulfillJson(route, { history: eligible.slice(0, Number(params.get('limit'))) });
   });
   await page.goto('/');
@@ -3745,6 +3750,7 @@ test('Timeline shows validity windows and narrows to superseded versions', async
   const cards = page.locator('#timeline-result .temporal-card');
   await expect(cards).toHaveCount(50);
   await expect(cards.first().locator('.temporal-state')).toHaveText('current');
+  await expect(cards.nth(1).locator('.temporal-state')).toHaveText('future');
   await expect(cards.first()).toContainText('human:ledger');
   await page.locator('#timeline-closed-only').check();
   await expect(cards).toHaveCount(1);

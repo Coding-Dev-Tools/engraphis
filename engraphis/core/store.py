@@ -5228,13 +5228,14 @@ class Store:
             # Select known closed world-time intervals before either result cap. Public
             # history must still hide records outside the requested system-time snapshot.
             known_at = flt.known_at if flt and flt.known_at is not None else now_ts()
+            valid_at = flt.valid_at if flt and flt.valid_at is not None else now_ts()
             where.extend([
-                "valid_to IS NOT NULL",
+                "valid_to IS NOT NULL AND valid_to<=?",
                 "(valid_to_recorded_at IS NULL OR valid_to_recorded_at<=?)",
                 "(ingested_at IS NULL OR ingested_at<=?)",
                 "(expired_at IS NULL OR ?<expired_at)",
             ])
-            params.extend([known_at, known_at, known_at])
+            params.extend([valid_at, known_at, known_at, known_at])
         if where:
             sql += " WHERE " + " AND ".join(where)
         sql += " ORDER BY ingested_at DESC"

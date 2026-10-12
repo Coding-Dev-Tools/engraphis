@@ -466,9 +466,9 @@ def _keyword_search(ws, q, limit=20, *, as_of: Optional[float] = None,
                 "AND (expired_at IS NULL OR ?<expired_at)")
         args.extend([system_anchor, system_anchor])
         if closed_only:
-            sql += (" AND valid_to IS NOT NULL "
+            sql += (" AND valid_to IS NOT NULL AND valid_to<=? "
                     "AND (valid_to_recorded_at IS NULL OR valid_to_recorded_at<=?)")
-            args.append(system_anchor)
+            args.extend([world_anchor, system_anchor])
         if session_id:
             sql += " AND (scope IN ('workspace','user') OR (scope='session' AND session_id=?)"
             args.append(session_id)
