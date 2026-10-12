@@ -3551,10 +3551,13 @@
   }
 
   function graphConnectionEntries(item) {
-    const graph = state.graphEngine && state.graphEngine.exportData
-      ? state.graphEngine.exportData() : state.graphData;
+    const graph = state.graphEngine && state.graphEngine.visibleData
+      ? state.graphEngine.visibleData()
+      : state.graphEngine && state.graphEngine.exportData
+        ? state.graphEngine.exportData() : state.graphData;
     if (!graph) return [];
-    const nodes = new Map(graph.nodes.map(candidate => [candidate.id, candidate]));
+    const loaded = new Map(state.graphData.nodes.map(candidate => [candidate.id, candidate]));
+    const nodes = new Map(graph.nodes.map(candidate => [candidate.id, { ...loaded.get(candidate.id), ...candidate }]));
     const connections = new Map();
     graph.links.forEach(link => {
       const source = link.source;
@@ -4720,6 +4723,9 @@
 
   function graphStatsChanged(stats) {
     if (!stats) return;
+    if (state.graphEngine && state.graphEngine.visibleData) {
+      graphExplorer.setData(state.graphEngine.visibleData());
+    }
     const nodes = stats.nodes == null ? state.graphData.nodes.length : stats.nodes;
     const links = stats.links == null ? state.graphData.links.length : stats.links;
     byId('graph-count').textContent = graphCountText(
@@ -4737,6 +4743,9 @@
   }
 
   function graphMetricsChanged(metrics) {
+    if (state.graphEngine && state.graphEngine.visibleData) {
+      graphExplorer.setData(state.graphEngine.visibleData());
+    }
     state.graphMetrics = metrics || {};
     byId('graph-bridge-count').textContent = metrics && metrics.bridges != null
       ? `${metrics.bridges} bridge ${metrics.bridges === 1 ? 'edge' : 'edges'}`
@@ -5179,7 +5188,7 @@
         if (!data.nodes.length) byId('graph-empty').textContent = 'No entities exist in this workspace yet.';
         updateGraphModeControls();
         updateGraphFacts(data);
-        graphExplorer.setData(data);
+        graphExplorer.setData(candidateEngine.visibleData ? candidateEngine.visibleData() : data);
         renderGraphTypeColors();
         renderGraphLegend();
         // Candidate stats emitted before commit are retained, then published only after the
@@ -7376,8 +7385,11 @@
   document.querySelector('.graph-stage').addEventListener('keydown', event => {
     if (event.target.id !== 'graph-canvas' || event.defaultPrevented
       || event.altKey || event.ctrlKey || event.metaKey) return;
-    if (graphExplorer.handleKey(event)) event.preventDefault();
-  });
+    if (graphExplorer.handleKey(event)) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+  }, true);
   all('[data-graph-palette-choice]').forEach(control => control.addEventListener('click', () => {
     const palette = control.dataset.graphPaletteChoice;
     byId('graph-palette').value = palette;

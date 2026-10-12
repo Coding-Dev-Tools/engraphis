@@ -9405,6 +9405,42 @@ def test_explorer_exports_its_visible_data_and_reports_bridge_metrics() -> None:
 
 
 @requires_node
+def test_accessible_graph_scope_uses_entities_instead_of_lod_cluster_ids() -> None:
+    report = _run_engine(
+        """
+        const api = G.create(el, { reducedMotion: () => true });
+        api.setData({
+          nodes: [
+            { id: 'a', name: 'Alpha' }, { id: 'b', name: 'Beta' },
+            { id: 'c', name: 'Gamma' }, { id: 'free', name: 'Free' },
+          ],
+          links: [
+            { source: 'a', target: 'b', layer: 'semantic' },
+            { source: 'a', target: 'c', layer: 'entity' },
+          ],
+        });
+        api.setCollapse(true);
+        const collapsed = api.exportData().nodes.map(node => node.id);
+        const canonical = api.visibleData();
+        api.setSettings({ font: 14 });
+        const paintReusesSnapshot = canonical === api.visibleData();
+        api.setScope({ minDegree: 2, showUnlinked: false });
+        const filtered = api.visibleData();
+        api.setScope({ minDegree: 1 });
+        api.setLayers({ semantic: false });
+        const layered = api.visibleData();
+        emit({ collapsed, canonical, paintReusesSnapshot, filtered, layered });
+        """
+    )
+    assert all(node_id.startswith("cluster-") for node_id in report["collapsed"])
+    assert [node["id"] for node in report["canonical"]["nodes"]] == ["a", "b", "c", "free"]
+    assert report["paintReusesSnapshot"] is True
+    assert [node["id"] for node in report["filtered"]["nodes"]] == ["a"]
+    assert report["filtered"]["links"] == []
+    assert [(link["source"], link["target"]) for link in report["layered"]["links"]] == [("a", "c")]
+
+
+@requires_node
 def test_disconnected_entities_are_labelled_as_separate_communities() -> None:
     report = _run_node(
         """

@@ -8845,7 +8845,7 @@
       return { nodes: cnodes, links: clinks };
     }
 
-    function visible() {
+    function visible(collapseForLOD = true) {
       const keepLayer = l => {
         const layers = state.layers;
         return !layers || !hasOwn(layers, l.layer) || layers[l.layer] !== false;
@@ -8894,7 +8894,7 @@
           if (ids.has(source) && ids.has(target)) links = links.concat([Object.assign({}, s, { source, target, layer: 'semantic', suggested: true })]);
         });
       }
-      if (collapsed && state.renderMode !== 'full') return collapsedData(nodes, links.filter(l => !l.suggested));
+      if (collapseForLOD && collapsed && state.renderMode !== 'full') return collapsedData(nodes, links.filter(l => !l.suggested));
       return { nodes, links };
     }
 
@@ -11515,6 +11515,28 @@
       hoverSet = null;
       render(true, true);
     };
+    /* Accessible navigation uses canonical entities within the rendered scope. LOD cluster
+       bubbles are presentation objects, not entity ids that connections can open. Cache by
+       data and filters so paint/layout notifications do not rebuild a large entity list. */
+    let explorerRaw = null, explorerKey = '', explorerData = null;
+    api.visibleData = () => {
+      const key = JSON.stringify([state.minDegree, state.showUnlinked, state.repo,
+        state.asOf, state.ghost, state.focusId, state.depth, state.layers, state.suggestions]);
+      if (raw === explorerRaw && key === explorerKey) return explorerData;
+      const data = visible(false);
+      explorerRaw = raw;
+      explorerKey = key;
+      explorerData = {
+        nodes: data.nodes.map(node => ({
+          id: node.id, name: nodeName(node), etype: node.etype, degree: node.degree,
+        })),
+        links: data.links.map(link => ({
+          source: linkEndpoint(link, 'source'), target: linkEndpoint(link, 'target'),
+          label: link.label, layer: link.layer, ghost: link.ghost === true,
+        })),
+      };
+      return explorerData;
+    };
     /* Export the graph the person is actually looking at, not the unfiltered response
        retained for later scope changes. Strip force-graph's transient coordinates and turn
        endpoint objects back into stable ids so the resulting JSON is portable. */
@@ -11913,6 +11935,8 @@
         el.replaceChildren();
       } catch (e) { /* teardown is best-effort: never let it block a view change */ }
       raw = { nodes: [], links: [], suggestions: [], communities: [], community_bridges: [], meta: {} };
+      explorerRaw = null;
+      explorerData = null;
       galaxyServerPhase.clear();
       galaxySavedPhase.clear();
       galaxyPhaseRestorePending = false;
