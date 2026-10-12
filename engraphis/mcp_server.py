@@ -3073,6 +3073,14 @@ def engraphis_spec_crawl_resolve(
             max_length=200,
         ),
     ] = None,
+    session_id: Annotated[
+        Optional[str],
+        Field(
+            default=None,
+            description="Optional active session scope; both memories must be visible in this same session.",
+            max_length=200,
+        ),
+    ] = None,
     confirmed: Annotated[
         bool,
         Field(default=False, description="Explicit human approval to retire node_b; required for supersede."),
@@ -3086,6 +3094,7 @@ def engraphis_spec_crawl_resolve(
             node_b=node_b,
             workspace=workspace,
             repo=repo,
+            session_id=session_id,
             confirmed=confirmed,
         )
         return _ok(res)

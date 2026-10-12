@@ -133,7 +133,7 @@ python -m scripts.spec_crawl --workspace acme --min-score 75
 ## 8. REST API Endpoints
 
 ### `POST /api/spec/crawl`
-Performs an offline, read-only analysis of up to 64,000 characters. HTTP callers can send `text` or set `crawl_procedural: true` to analyze approved procedural memories in the selected scope. Server filesystem paths are rejected. The local-operator MCP path accepts text files only under approved index roots.
+Performs an offline, read-only analysis of up to 64,000 characters. HTTP callers can send `text` or set `crawl_procedural: true` to analyze approved procedural memories in the selected scope. Procedural crawls return `procedural_total_eligible_memory_count`, `procedural_memory_count`, and `procedural_source_truncated`; the top-level `truncated` flag is also true when source memories or the analysis token limit omit content. Server filesystem paths are rejected. The local-operator MCP path accepts text files only under approved index roots.
 
 ### `POST /api/spec/crawl/answer`
 Submits a clarification for a current flagged ambiguity, returns updated text and a new report, and optionally persists a pending procedural memory.
@@ -149,7 +149,7 @@ Audits an active cluster of workspace memories for contradictions, orphans, and 
 ```
 
 ### `POST /api/spec/crawl/memories/resolve`
-Executes an explicit remediation on two live, approved memories after checking scope and ownership, including workspace ancestors visible from the selected repository. `node_a` is retained; `node_b` is retired for `supersede` at the retained memory's `valid_from`, preserving world-time and recording-time history. A closure before the retired memory's effective date is rejected. Both the link and validity closure are atomic. Supersession requires `confirmed: true` following human approval.
+Executes an explicit remediation on two live, approved memories after checking scope and ownership, including workspace ancestors visible from the selected repository. Both memory IDs must be visible through the same workspace/repo/session filter. Omitting `session_id` excludes session-only memories; supplying it authorizes and restricts the action to that one session. `node_a` is retained; `node_b` is retired for `supersede` at the retained memory's `valid_from`, preserving world-time and recording-time history. A closure before the retired memory's effective date is rejected. Both the link and validity closure are atomic. Supersession requires `confirmed: true` following human approval.
 
 ```json
 {
@@ -157,6 +157,7 @@ Executes an explicit remediation on two live, approved memories after checking s
   "node_a": "mem_01...",
   "node_b": "mem_02...",
   "workspace": "default",
+  "session_id": "sess_...",
   "confirmed": true
 }
 ```
