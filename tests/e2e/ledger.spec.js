@@ -449,6 +449,42 @@ for (const mutation of ['pin', 'approval']) {
   }
 }
 
+test('release regression: same-workspace refresh replaces an aborted graph load', async ({ page }) => {
+  const errors = browserErrors(page);
+  await mockApi(page);
+  let releasePin, releaseGraph;
+  const pinPending = new Promise(resolve => { releasePin = resolve; });
+  const graphPending = new Promise(resolve => { releaseGraph = resolve; });
+  let pinStarted = false, graphRequests = 0;
+  await page.route('**/api/pin', async route => {
+    pinStarted = true;
+    await pinPending;
+    await route.fulfill({ json: { ok: true } });
+  });
+  await page.route('**/api/graph/scene**', async route => {
+    graphRequests++;
+    if (graphRequests === 1) await graphPending;
+    await route.fallback().catch(() => {});
+  });
+  try {
+    await page.goto('/?view=library');
+    await page.getByRole('option', { name: /^Database choice/ }).click();
+    await page.getByRole('button', { name: 'Pin', exact: true }).click();
+    await expect.poll(() => pinStarted).toBe(true);
+    await page.locator('.nav-item[data-view="relations"]').click();
+    await expect.poll(() => graphRequests).toBe(1);
+    releasePin();
+    await expect.poll(() => graphRequests).toBe(2);
+    await expect(page.locator('#graph-count')).toContainText('entities');
+    await expect(page.locator('#graph-canvas')).toHaveAttribute('aria-busy', 'false');
+    await expect(page.locator('#graph-empty')).not.toContainText('Graph unavailable');
+    expect(errors).toEqual([]);
+  } finally {
+    releasePin();
+    releaseGraph();
+  }
+});
+
 test('release regression: requested graph loads before slow hidden library and agenda', async ({ page }) => {
   await mockApi(page);
   let releaseHidden;
