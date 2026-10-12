@@ -71,6 +71,12 @@ capped tables and element count) so crafted content cannot freeze the page used 
   by another website unless they carry the dashboard's `X-Engraphis-Browser-Session` header or
   an `Authorization` header, which a cross-site page can only send after a CORS preflight.
   Non-browser clients send neither marker and are unaffected.
+- **Host names checked without a token:** the zero-config dashboard API (including its
+  `/dashboard/review` routes) and the token-free read-only graph server refuse requests
+  addressed to any name other than exactly `localhost`, an IP address, the bind host, the host
+  of `ENGRAPHIS_DASHBOARD_URL` or a name in `ENGRAPHIS_ALLOWED_HOSTS`, so a website that points
+  its own name at 127.0.0.1 (DNS rebinding) cannot use them. The `/mcp` endpoint keeps its own
+  Host allow-list. A configured API token is the boundary instead, under any name.
 - If exposed beyond localhost: put behind reverse proxy with **TLS + rate limiting**
 
 ### 3. Scope isolation

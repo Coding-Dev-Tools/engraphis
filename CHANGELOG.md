@@ -35,7 +35,11 @@ All notable changes to Engraphis are documented here. Format loosely follows
   marks as started by another website unless they carry the dashboard's session header or an
   `Authorization` header, both of which need a CORS preflight. Another website can no longer
   make a visitor's browser import files, start a sync or hosted upload, or change LLM settings
-  on a zero-config loopback install. The Markdown renderer is bounded (linear scans, an index
+  on a zero-config loopback install, even when `ENGRAPHIS_CORS_ORIGINS` is `*`. Without a
+  token the dashboard API, its `/dashboard/review` routes and the read-only graph server also
+  answer only exactly `localhost`, IP addresses, the bind host, the `ENGRAPHIS_DASHBOARD_URL`
+  host and the new `ENGRAPHIS_ALLOWED_HOSTS` names, so DNS rebinding (a website pointing its
+  own name at 127.0.0.1) cannot reach them either. The Markdown renderer is bounded (linear scans, an index
   of backtick runs, capped tables and element counts), so crafted memory content cannot freeze
   the page used to review it. Dialogs drop bidirectional control
   characters from untrusted names, and an invalid timestamp reads as unknown instead of
