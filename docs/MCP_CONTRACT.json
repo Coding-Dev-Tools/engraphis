@@ -1,6 +1,6 @@
 {
   "schema": "engraphis-mcp-contract/v1",
-  "sha256": "b8a1fe7dcfcf0d5b8209fbc0a3fbcc3957325fd6a7729d8a5ffb1758d79ebabf",
+  "sha256": "d818ec3cac2bb73546db93d78e728d3bc99029f48671315227bcdf78f60663db",
   "surfaces": {
     "classic": [
       {
@@ -3408,12 +3408,33 @@
               "description": "Optional repo scope.",
               "title": "Repo"
             },
+            "session_id": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional active session scope; both memories must be visible in this same session.",
+              "title": "Session Id"
+            },
             "workspace": {
-              "default": "default",
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
               "description": "Workspace scope.",
-              "maxLength": 200,
-              "title": "Workspace",
-              "type": "string"
+              "title": "Workspace"
             }
           },
           "required": [

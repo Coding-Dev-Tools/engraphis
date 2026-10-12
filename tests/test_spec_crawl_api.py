@@ -437,6 +437,8 @@ def test_cluster_sample_reports_truncation_without_counting_pending_memories(cra
     selected = svc.spec_crawl_memories(workspace="alpha", memory_ids=ids[:2])
     assert selected["node_count"] == 2 and selected["truncated"] is False
     assert selected["count_semantics"] == "requested_selection"
+    assert report["total_eligible_node_count"] == eligible_count
+    assert report["analysis_truncated"] is report["truncated"]
 
 
 def test_lineage_chain_preserves_zero_effective_dates_and_terminates_cycles(crawl_service):
@@ -448,6 +450,19 @@ def test_lineage_chain_preserves_zero_effective_dates_and_terminates_cycles(craw
                                workspace="alpha", confirmed=True)
     svc.link(ids[0], ids[2], workspace="alpha", relation="supersedes")
     assert [entry["id"] for entry in svc.inspect(ids[2], workspace="alpha")["chain"]] == ids
+
+
+def test_remediation_requires_one_explicit_session_scope(crawl_service):
+    svc = crawl_service
+    first = svc.start_session("alpha", repo="app", agent="codex")["session_id"]
+    second = svc.start_session("alpha", repo="app", agent="codex", force_new=True)["session_id"]
+    ids = [svc.remember(f"Private procedure {i}", workspace="alpha", repo="app", session_id=sid,
+                        scope="session", trusted=True, resolve_conflicts=False)["id"]
+           for i, sid in enumerate((first, first, second))]
+    for scope in ({"workspace": "alpha", "repo": "app"}, {"session_id": first}):
+        with pytest.raises(ValidationError):
+            svc.spec_crawl_resolve(action="link", node_a=ids[0], node_b=ids[2], **scope)
+    assert svc.spec_crawl_resolve(action="link", node_a=ids[0], node_b=ids[1], session_id=first)["ok"]
 
 
 @pytest.mark.parametrize("action", ["supersede", "link"])
