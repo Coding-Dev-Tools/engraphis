@@ -51,8 +51,12 @@ Memories may originate from web pages, tool output, or other untrusted sources.
 > detector bypass through ingest, and a mislabeled trusted case. Its metrics apply only to those
 > declared synthetic cases.
 
-**Dashboard XSS (fixed):** Memory content rendered as markdown is now sanitized via
-DOMPurify at all render sites. Verified against payloads with `onerror` handlers.
+**Dashboard XSS (fixed):** The dashboard renders memory content as Markdown with its own
+DOM-only renderer (`engraphis/dashboard_assets/markdown.js`): it builds elements with
+`textContent`, never parses HTML or assigns `innerHTML`, and links only absolute `http(s)` and
+`mailto` URLs. Raw HTML in a memory is shown as text. The renderer is bounded (linear scans,
+capped tables and element count) so crafted content cannot freeze the page used to review it;
+`tests/test_markdown_renderer.py` exercises hostile and oversized inputs.
 
 ### 2. Network exposure & authentication
 - **Loopback by default** (`ENGRAPHIS_HOST=127.0.0.1`)
@@ -62,6 +66,11 @@ DOMPurify at all render sites. Verified against payloads with `onerror` handlers
   invitations, roles, named seats, token rotation, and organization audit are hosted and are
   not mounted by this package.
 - **CORS allow-list** defaults to loopback only
+- **Cross-site browser requests refused without a token:** the zero-config API trusts loopback
+  callers, so it refuses requests that a browser marks (`Origin`, `Sec-Fetch-Site`) as started
+  by another website unless they carry the dashboard's `X-Engraphis-Browser-Session` header or
+  an `Authorization` header, which a cross-site page can only send after a CORS preflight.
+  Non-browser clients send neither marker and are unaffected.
 - If exposed beyond localhost: put behind reverse proxy with **TLS + rate limiting**
 
 ### 3. Scope isolation
@@ -105,6 +114,11 @@ installation, so do not share its bearer token.
 - The import UI's `derive_facts` option is a separate explicit opt-in. If an LLM/custom
   extractor is configured, selected file content may be sent to that provider; leave it off
   for a strictly local import. The default and chunk extractors remain fully local.
+- A multipart upload needs no CORS preflight, so `/api/workspaces/import-files` refuses
+  browser requests (those carrying `Origin` or `Sec-Fetch-Site`) unless they also carry the
+  dashboard's session header or an `Authorization` header. Another website therefore cannot
+  make a visitor's browser import files into a zero-config loopback install. Non-browser
+  clients are unaffected.
 - Audio/video transcription runs only when `ENGRAPHIS_WHISPER_MODEL` is configured. Depending on
   the faster-whisper model name, the underlying library may download a model; use an absolute
   local model path when strictly offline operation is required.

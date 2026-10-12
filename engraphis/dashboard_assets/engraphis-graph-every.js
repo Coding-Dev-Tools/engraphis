@@ -291,9 +291,11 @@
     /* ── Visibility & uploads (change-driven, never per-frame) ──────────────────── */
     function passesFilters(index) {
       if (!state.ghosts && state.nodeGhosts[index]) return false;
-      if (!state.scope.showUnlinked && !(state.degrees[index] > 0)) return false;
-      if (state.scope.minDegree > 0 && !(state.degrees[index] >= state.scope.minDegree)) return false;
-      return true;
+      /* Same contract as the main engine: "Unlinked nodes" decides degree-zero entities and
+         "Minimum links" applies only to linked ones, so the two controls never contradict. */
+      const degree = state.degrees[index] > 0 ? state.degrees[index] : 0;
+      if (degree === 0) return Boolean(state.scope.showUnlinked);
+      return !(state.scope.minDegree > 0) || degree >= state.scope.minDegree;
     }
     function edgePassesFilters(index) {
       const source = state.edgeSources[index], target = state.edgeTargets[index];
@@ -1535,6 +1537,33 @@
         const result = {};
         state.ids.forEach((id, index) => { result[id] = state.communities[index] ?? index; });
         return result;
+      },
+      /* Same contract as the quality engine's legend(): what node colour means right now. */
+      legend(limit) {
+        const max = Math.max(1, Math.min(24, Number(limit) || 10));
+        const byType = state.colorBy === 'type' || state.palette === 'custom';
+        if (state.colorBy === 'connections' && !byType) {
+          return { mode: 'connections', scale: activePalette().slice().reverse(),
+            first: 'Most connected', last: 'Least connected' };
+        }
+        const counts = new Map();
+        const sample = new Map();
+        for (let index = 0; index < state.ids.length; index += 1) {
+          const key = byType ? String(state.types[index] || 'person_or_concept')
+            : String(state.communities[index] ?? index);
+          counts.set(key, (counts.get(key) || 0) + 1);
+          if (!sample.has(key)) sample.set(key, index);
+        }
+        const items = [...counts.entries()]
+          .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+          .slice(0, max)
+          .map(([key, count], rank) => ({
+            key,
+            label: byType ? key.replace(/_/g, ' ') : `Cluster ${rank + 1}`,
+            color: nodeColor(sample.get(key)),
+            count,
+          }));
+        return { mode: byType ? 'type' : 'community', items, total: counts.size };
       },
       resize, fit,
       reheat() {

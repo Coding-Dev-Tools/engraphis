@@ -1,10 +1,13 @@
-"""Contract checks for the opt-in browser graph engine (``?graph-engine=next``).
+"""Contract checks for the dashboard's browser graph engines and Ledger's use of them.
 
 These tests intentionally stay dependency-light: the dashboard's offline CI floor does
 not need a browser or a JavaScript package manager just to validate a shipped static
 asset.  Where Node is available the asset is *executed* rather than pattern-matched, so
 the checks assert behaviour (escaping, bridge detection, stack safety, load-order
-independence) instead of the presence of source substrings.
+independence) instead of the presence of source substrings.  Ledger, the only dashboard,
+is exercised the same way: its lazy asset loader and its Explore view (``loadGraph``,
+``switchView``, ``applyTheme``, the graph lifecycle) run as verbatim slices of the shipped
+files against the real engine.
 
 The properties guarded here are the ones whose failure is silent in a browser:
 
@@ -14,7 +17,9 @@ The properties guarded here are the ones whose failure is silent in a browser:
   is an ``innerHTML`` sink and entity labels come from ingested memories;
 * the client-side graph analysis must not recurse per node or run unbounded work;
 * the per-style pane backgrounds must stay in CSS, since the production CSP sets
-  ``style-src-attr 'none'``.
+  ``style-src-attr 'none'``;
+* Ledger fetches the graph assets only when Explore opens, never pays for a renderer the
+  person cannot see, and tears a renderer down when it replaces it.
 """
 
 from __future__ import annotations
@@ -24,26 +29,22 @@ import math
 import re
 import shutil
 import subprocess
+from html.parser import HTMLParser
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-STATIC = ROOT / "engraphis" / "static"
-ASSET = ROOT / "engraphis" / "dashboard_assets" / "engraphis-graph.js"
-EVERY_ASSET = ROOT / "engraphis" / "dashboard_assets" / "engraphis-graph-every.js"
-EVERY_WORKER = ROOT / "engraphis" / "dashboard_assets" / "engraphis-graph-every-worker.js"
-SPACETIME_ASSET = ROOT / "engraphis" / "dashboard_assets" / "engraphis-spacetime.js"
-LEGACY_ADAPTER = STATIC / "engraphis-graph.js"
-INDEX = STATIC / "index.html"
-CSS = STATIC / "dashboard.css"
-DASHBOARD = STATIC / "dashboard.js"
-CLASSIC_DASHBOARD = ROOT / "engraphis" / "classic_assets" / "dashboard.js"
-VENDOR = STATIC / "vendor" / "force-graph.min.js"
-PRIMARY_LEDGER = ROOT / "engraphis" / "dashboard_assets" / "ledger.js"
-PRIMARY_INDEX = ROOT / "engraphis" / "dashboard_assets" / "index.html"
-PRIMARY_CSS = ROOT / "engraphis" / "dashboard_assets" / "ledger.css"
-PRIMARY_VENDOR = ROOT / "engraphis" / "dashboard_assets" / "vendor" / "force-graph.min.js"
+ASSETS = ROOT / "engraphis" / "dashboard_assets"
+ASSET = ASSETS / "engraphis-graph.js"
+EVERY_ASSET = ASSETS / "engraphis-graph-every.js"
+EVERY_WORKER = ASSETS / "engraphis-graph-every-worker.js"
+SPACETIME_ASSET = ASSETS / "engraphis-spacetime.js"
+GRAPH_LIFECYCLE = ASSETS / "graph-lifecycle.js"
+LEDGER = ASSETS / "ledger.js"
+LEDGER_INDEX = ASSETS / "index.html"
+LEDGER_CSS = ASSETS / "ledger.css"
+FORCE_GRAPH_VENDOR = ASSETS / "vendor" / "force-graph.min.js"
 
 NODE = shutil.which("node")
 requires_node = pytest.mark.skipif(NODE is None, reason="node is not installed")
@@ -190,22 +191,69 @@ const emit = value => console.log(JSON.stringify(value));
 # ── load order and failure isolation ────────────────────────────────────────────────
 
 
+@requires_node
 def test_graph_assets_are_never_loaded_on_a_plain_page_view() -> None:
-    """Neither graph script may sit in index.html.
+    """No graph script may sit in index.html, and only Explore may ask for one.
 
     force-graph applies inline styles at runtime, so under the production CSP
     (``style-src 'self'``) every page load that fetched it reported a violation per attempt —
-    including the pages that never open the graph.
+    including the pages that never open the graph.  The engines are large and only Explore
+    needs them, so the markup loads none of them and Ledger's navigation must not reach the lazy
+    loader from any other view.  Once Explore does ask, the renderer waits for the assets rather
+    than drawing something else, or nothing, in the meantime.
     """
-    html = INDEX.read_text(encoding="utf-8")
-    eager = re.findall(r'<script[^>]+src=["\'](/static/[^"\']+)["\']', html)
-    assert "/static/vendor/d3.min.js" in eager
-    assert any(
-        re.fullmatch(r"/static/dashboard\.js\?v=[A-Za-z0-9._-]+", item)
-        for item in eager
+    html = LEDGER_INDEX.read_text(encoding="utf-8")
+    eager = [
+        src.split("?", 1)[0]
+        for src in re.findall(r'<script[^>]+src=["\']([^"\']+)["\']', html, re.IGNORECASE)
+    ]
+    assert "/v2-assets/ledger.js" in eager
+    for deferred in (
+        "/v2-assets/vendor/d3.min.js", "/v2-assets/vendor/force-graph.min.js",
+        "/v2-assets/engraphis-graph.js", "/v2-assets/engraphis-graph-every.js",
+        "/v2-assets/engraphis-spacetime.js",
+    ):
+        assert deferred not in eager, f"{deferred} is fetched on every page view"
+
+    report = _run_ledger(
+        """
+        ledger.state.workspace = 'acme';
+        for (const view of ['today', 'ask', 'library', 'connections', 'provenance', 'manage']) {
+          ledger.switchView(view, { pushHistory: false });
+        }
+        const elsewhere = {
+          assets: assetLoads.length, scenes: requests.length, created: engines.length,
+        };
+        let releaseAssets;
+        assets = () => new Promise(resolve => { releaseAssets = resolve; });
+        ledger.switchView('relations', { pushHistory: false });
+        const loading = ledger.state.graphLoadPromise;
+        for (let turn = 0; turn < 3; turn += 1) await flush();
+        const waiting = {
+          assets: assetLoads.slice(), scenes: requests.length, created: engines.length,
+          message: $('graph-empty').hidden ? null : $('graph-empty').textContent,
+          busy: $('graph-canvas').getAttribute('aria-busy'),
+        };
+        releaseAssets();
+        await loading;
+        finish({
+          elsewhere, waiting, created: engines.length,
+          committed: engines.length === 1 && ledger.state.graphEngine === engines[0].engine,
+          busy: $('graph-canvas').getAttribute('aria-busy'),
+        });
+        """
     )
-    assert "/static/vendor/force-graph.min.js" not in eager
-    assert "/static/engraphis-graph.js" not in eager
+    assert report["elsewhere"] == {"assets": 0, "scenes": 0, "created": 0}
+    # Explore asks for the overview's assets once and fetches its scene alongside them...
+    assert report["waiting"]["assets"] == [False]
+    assert report["waiting"]["scenes"] == 1
+    # ...but renders nothing until the engine has actually arrived, and says it is loading.
+    assert report["waiting"]["created"] == 0
+    assert report["waiting"]["message"].startswith("Loading")
+    assert report["waiting"]["busy"] == "true"
+    assert report["created"] == 1
+    assert report["committed"] is True
+    assert report["busy"] == "false"
 
 
 def test_every_node_visibility_response_refreshes_webgl_node_buffers() -> None:
@@ -310,50 +358,9 @@ def test_every_node_underlay_cache_includes_backing_scale() -> None:
 
 
 def test_authored_galaxy_candidate_keeps_the_physics_snapshot_source_active() -> None:
-    source = PRIMARY_LEDGER.read_text(encoding="utf-8")
+    source = LEDGER.read_text(encoding="utf-8")
     assert "graph.setPreset(galaxyQuality && preset === 'every' ? 'galaxy' : preset);" in source
     assert "onPhysicsFrame: snapshot =>" in source
-
-
-def test_v1_graph_asset_is_only_a_compatibility_adapter() -> None:
-    """New renderer code stays on the v2 dashboard surface, not the legacy server."""
-    adapter = LEGACY_ADAPTER.read_text(encoding="utf-8")
-    assert "canonicalAsset: '/v2-assets/engraphis-graph.js'" in adapter
-    assert "window.EngraphisGraph =" not in adapter
-    assert "window.EngraphisGraph =" in ASSET.read_text(encoding="utf-8")
-
-
-def test_opt_in_graph_asset_is_lazily_loaded_after_its_dependencies() -> None:
-    """The load order the removed script tags used to guarantee now lives in graphRender().
-
-    ``graphRender`` returns early until ForceGraph is defined, so by the time the engine
-    branch runs its dependency is already in scope.
-    """
-    source = DASHBOARD.read_text(encoding="utf-8")
-    assert re.search(
-        r"script\.src='/static/vendor/force-graph\.min\.js\?v=[A-Za-z0-9._-]+'",
-        source,
-    )
-    assert re.search(
-        r"script\.src='/v2-assets/engraphis-graph\.js\?v=[A-Za-z0-9._-]+'",
-        source,
-    )
-    render = source[source.index("function graphRender("):]
-    render = render[: render.index("\nfunction ")]
-    force_graph_gate = render.index("typeof ForceGraph==='undefined'")
-    engine_gate = render.index("if(enginePending)")
-    classic = render.index("graphRenderEngine(data,fit,reheat)")
-    assert force_graph_gate < engine_gate < classic
-
-
-def test_classic_dashboard_copies_share_the_canonical_route_gate() -> None:
-    """Classic must use the canonical renderer, including mounted `/classic` routes."""
-    sources = [path.read_text(encoding="utf-8") for path in (DASHBOARD, CLASSIC_DASHBOARD)]
-    assert sources[0] == sources[1]
-    start = sources[0].index("function graphEngineEnabled()")
-    body = sources[0][start:sources[0].index("function graphEngineFallback", start)]
-    assert "/(^|\\/)classic\\/?$/.test(window.location.pathname)" in body
-    assert "GRAPH_ENGINE_FAILED" in body
 
 
 def test_engine_node_labels_honor_the_configured_font_at_normal_zoom() -> None:
@@ -362,88 +369,69 @@ def test_engine_node_labels_honor_the_configured_font_at_normal_zoom() -> None:
     assert "state.settings.font / scale" in source
 
 
-#: Executes dashboard.js's real graph-render *routing* decision against a stub DOM.
-#: ``graphEngineEnabled``, ``graphEngineFallback``, ``loadForceGraph``, ``loadGraphEngine`` and
-#: the routing half of ``graphRender`` are verbatim source slices — nothing is re-implemented.
-#: Only the classic renderer body below the routing decision is swapped for a ``CLASSIC()``
-#: marker, so the test can see which renderer a deep link actually reaches.
-ROUTING_HARNESS = """
+#: Executes Ledger's real lazy asset loader — ``loadScript``, ``ensureGraphAssets``,
+#: ``ensureGraphAllAsset`` and their retry bookkeeping, sliced verbatim from ``ledger.js`` —
+#: against a ``<head>`` that only records the ``<script>`` elements it is handed.  The scenario
+#: plays the browser: ``execute(name)`` runs a fetched script (registering its global, unless
+#: told the response was corrupt) and fires ``load``; ``fail(name)`` fires ``error``.  Nothing
+#: is re-implemented, so the order, flags, URLs and promise outcomes are the loader's own.
+LOADER_HARNESS = r"""
 const fs = require('fs');
-const src = fs.readFileSync(process.argv.slice(1).find(a => a.endsWith('dashboard.js')), 'utf8');
-const scenario = process.argv[process.argv.length - 1];
-const between = (from, to) => src.slice(src.indexOf(from), src.indexOf(to, src.indexOf(from)));
-let flags = between('let GRAPH_ENGINE_FAILED=false;', 'function graphEngineEmptyMessage');
-const loaders = between('let FORCE_GRAPH_LOADING=null,FORCE_GRAPH_RETRY=0;', 'function graphRender(');
-const CLASSIC_BOUNDARY = '/* Read AFTER the opt-in attempt:';
-const start = src.indexOf('function graphRender(');
-const routing = src.slice(start, src.indexOf(CLASSIC_BOUNDARY, start)) +
-  '\\n CLASSIC();\\n}';
-
-const log = { appended: [], warned: [], engine: 0, classic: 0 };
-let pending = null;
-const element = { clientWidth: 800, clientHeight: 600, classList: { toggle() {} },
-                  setAttribute() {}, set textContent(v) {} };
-globalThis.document = {
-  getElementById: () => element,
-  querySelectorAll: () => [],
-  createElement: () => (pending = {}),
-  head: { appendChild: s => log.appended.push(s.src) },
+const ledgerSource = fs.readFileSync(process.argv[1], 'utf8');
+const ledgerSlice = (from, to) => {
+  const start = ledgerSource.indexOf(from);
+  const end = start < 0 ? -1 : ledgerSource.indexOf(to, start + from.length);
+  if (end < 0) throw new Error('ledger.js landmark moved: ' + (start < 0 ? from : to));
+  return ledgerSource.slice(start, end);
 };
-const location = scenario === 'classic'
-  ? { search: '', pathname: '/classic' }
-  : { search: '?graph-engine=next', pathname: '/' };
-globalThis.window = { location, GSET: { mode: 'compact' },
-                      console: globalThis.console };
-globalThis.console = { warn: (...a) => log.warned.push(String(a[0])) };
-globalThis.showAs = () => {};
-globalThis.graphSetLayoutStatus = () => {};
-globalThis.graphData = () => ({ nodes: [], links: [] });
-/* Mirrors graphRenderEngine's real first line — `if(!element||typeof EngraphisGraph===
-   'undefined')return false` — because that bail is exactly what a naive lazy-load would turn
-   into a silent Classic fallback. Asserted against the real source below. */
-globalThis.graphRenderEngine = () => {
-  if (typeof EngraphisGraph === 'undefined') return false;
-  if (scenario === 'all-runtime-failed') return false;
-  log.engine += 1;
-  return true;
+const window = {};
+const appended = [];
+const loaderDocument = {
+  createElement: tag => ({
+    tag, src: '', async: true, dataset: {}, attached: false, onload: null, onerror: null,
+    remove() { this.attached = false; },
+  }),
+  head: { append(script) { script.attached = true; appended.push(script); } },
 };
-globalThis.CLASSIC = () => { log.classic += 1; };
-globalThis.GRAPH_PRESETS = { compact: {} };
-globalThis.GRAPH_ENGINE = globalThis.GACTIVE_DATA = globalThis.GCOMPONENT_LAYOUT = null;
-globalThis.GHILITE = globalThis.GHOVERSET = null;
-globalThis.GRAPH_FULL = scenario === 'all-loaded' || scenario === 'all-runtime-failed';
-if (globalThis.GRAPH_FULL) globalThis.EngraphisGraph = { create() {} };
-if (scenario === 'all-runtime-failed') globalThis.EngraphisEveryGraph = { create() {} };
-/* All mode intentionally has no vendor global: its renderer must remain self-contained. */
-if (!globalThis.GRAPH_FULL) globalThis.ForceGraph = function () {};
-
-new Function(flags + loaders + routing + '\\nreturn {graphRender};')().graphRender();
-const settled = { engine: log.engine, classic: log.classic };
-const finish = () => setTimeout(() => process.stdout.write(JSON.stringify({
-  beforeSettle: settled, engine: log.engine, classic: log.classic,
-  appended: log.appended, warned: log.warned,
-})), 0);
-if (scenario === 'all-runtime-failed') {
-  finish();
-} else if (scenario === 'all-loaded') {
-  /* loadGraphEngine(true) chains the already-ready core through one microtask before it
-     requests the optional all-node asset. */
-  Promise.resolve().then(() => {
-    globalThis.EngraphisEveryGraph = { create() {} }; pending.onload(); finish();
-  });
-} else {
-  if (scenario === 'loads' || scenario === 'classic') {
-    globalThis.EngraphisGraph = { create() {} }; pending.onload();
-  }
-  else { pending.onerror(); }
-  finish();
-}
+const all = selector => (selector === 'script[data-engraphis-graph-asset="true"]'
+  ? appended.filter(script => script.attached && script.dataset.engraphisGraphAsset === 'true')
+  : []);
+const loader = new Function('window', 'document', 'all',
+  ledgerSlice('let graphAssetsPromise = null;', 'function showNotice(')
+  + '\nreturn { ensureGraphAssets, ensureGraphAllAsset };')(window, loaderDocument, all);
+const GLOBALS = {
+  'd3.min.js': 'd3', 'force-graph.min.js': 'ForceGraph', 'engraphis-graph.js': 'EngraphisGraph',
+  'engraphis-spacetime.js': 'EngraphisSpacetime', 'engraphis-graph-every.js': 'EngraphisEveryGraph',
+};
+const CORE = ['d3.min.js', 'force-graph.min.js', 'engraphis-graph.js', 'engraphis-spacetime.js'];
+const fileOf = script => script.src.split('?')[0].split('/').pop();
+const scriptFor = name => appended.filter(script => fileOf(script) === name).pop();
+const execute = (name, { registers = true } = {}) => {
+  if (registers) window[GLOBALS[name]] = {};
+  scriptFor(name).onload();
+};
+const fail = name => scriptFor(name).onerror();
+const watch = promise => {
+  const outcome = { state: 'pending' };
+  promise.then(() => { outcome.state = 'resolved'; },
+    error => { outcome.state = 'rejected'; outcome.error = error.message; });
+  return outcome;
+};
+const flush = () => new Promise(resolve => setImmediate(resolve));
+const requested = () => appended.map(script => script.src);
+const attachedNow = () => appended.filter(script => script.attached).map(script => script.src);
+const emit = value => console.log(JSON.stringify(value));
 """
 
 
-def _run_routing(scenario: str) -> dict:
+def _run_loader(scenario: str) -> dict:
+    script = (
+        LOADER_HARNESS
+        + "(async () => {\n" + scenario + "\n})().catch(error => {\n"
+        + "  console.error(error && error.stack || error); process.exit(1);\n});"
+    )
     result = subprocess.run(
-        [NODE, "-e", ROUTING_HARNESS, str(DASHBOARD), scenario],
+        [NODE, "-e", script, str(LEDGER)],
         cwd=ROOT,
         capture_output=True,
         text=True,
@@ -454,104 +442,223 @@ def _run_routing(scenario: str) -> dict:
 
 
 @requires_node
-def test_graph_engine_deep_link_reaches_the_next_engine_after_a_lazy_load() -> None:
-    """``?graph-engine=next`` must not degrade just because its asset is not loaded yet.
+def test_graph_assets_load_lazily_in_parallel_and_settle_together() -> None:
+    """Opening the graph requests every graph asset at once and waits for all of them.
 
-    ``graphRenderEngine`` bails when ``EngraphisGraph`` is undefined, and that bail cannot tell
-    "not fetched yet" from "unavailable".  Deferring the script would turn every deep link into
-    that bail — the user asks for the new engine and silently gets Classic.  So graphRender
-    fetches the asset and waits, then renders.
+    The four scripts download in parallel and each runs as soon as it arrives (``async``
+    stays on): none needs another at load time (see
+    ``test_graph_assets_evaluate_without_each_other``), and the promise Ledger awaits
+    settles only once every one has registered its global. Ordered execution would let a
+    single stalled download hold back every later attempt, even after Reload removed it.
     """
-    # Keep the harness's stub honest: it only proves anything while the real function really
-    # does bail on an undefined global.
-    source = DASHBOARD.read_text(encoding="utf-8")
-    engine_path = source[source.index("function graphRenderEngine"):]
-    assert "typeof EngraphisGraph==='undefined')return false" in engine_path[:400]
-
-    report = _run_routing("loads")
-
-    assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260927-unmerged-readiness-3"
+    report = _run_loader(
+        """
+        const before = requested();
+        const core = watch(loader.ensureGraphAssets());
+        const order = requested();
+        const flags = appended.map(script => [script.async, script.dataset.engraphisGraphAsset]);
+        // Arrival order is the network's, not the insertion order.
+        ['engraphis-spacetime.js', 'engraphis-graph.js', 'force-graph.min.js']
+          .forEach(name => execute(name));
+        await flush();
+        const beforeLast = core.state;
+        execute('d3.min.js');
+        await flush();
+        const again = watch(loader.ensureGraphAssets());
+        await flush();
+        emit({ before, order, flags, beforeLast, settled: core.state, again: again.state,
+          requestedAgain: requested().length });
+        """
+    )
+    assert report["before"] == [], "graph assets were requested before anything asked for them"
+    assert [src.split("?", 1)[0] for src in report["order"]] == [
+        "/v2-assets/vendor/d3.min.js",
+        "/v2-assets/vendor/force-graph.min.js",
+        "/v2-assets/engraphis-graph.js",
+        "/v2-assets/engraphis-spacetime.js",
     ]
-    # It waits rather than rendering something wrong in the meantime.
-    assert report["beforeSettle"] == {"engine": 0, "classic": 0}
-    # And it lands on the next engine, never touching the classic renderer.
-    assert report["engine"] == 1
-    assert report["classic"] == 0
-    assert report["warned"] == []
+    # Every URL carries a cache key, so a release cannot run a stale engine from cache.
+    assert all(re.search(r"\?v=[A-Za-z0-9._-]+$", src) for src in report["order"])
+    assert report["flags"] == [[True, "true"]] * 4
+    assert report["beforeLast"] == "pending", "the loader resolved before every global existed"
+    assert report["settled"] == "resolved"
+    # Loaded assets are memoized: a later request neither waits nor fetches again.
+    assert report["again"] == "resolved"
+    assert report["requestedAgain"] == 4
 
 
 @requires_node
-def test_classic_route_reaches_the_canonical_engine_without_a_query_flag() -> None:
-    report = _run_routing("classic")
+def test_graph_assets_evaluate_without_each_other() -> None:
+    """Unordered execution is safe only while no graph asset needs another at load time.
 
-    assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260927-unmerged-readiness-3"
-    ]
-    assert report["beforeSettle"] == {"engine": 0, "classic": 0}
-    assert report["engine"] == 1
-    assert report["classic"] == 0
-    assert report["warned"] == []
-
-
-@requires_node
-def test_show_all_lazily_loads_its_renderer_after_the_main_engine_is_ready() -> None:
-    """The overview's memoized engine promise must not bypass the later all-node asset."""
-    report = _run_routing("all-loaded")
-
-    assert report["appended"] == [
-        "/v2-assets/engraphis-graph-every.js?v=20260927-unmerged-readiness-3"
-    ]
-    assert report["beforeSettle"] == {"engine": 0, "classic": 0}
-    assert report["engine"] == 1
-    assert report["classic"] == 0
-    assert report["warned"] == []
-
-
-@requires_node
-def test_show_all_never_reaches_legacy_force_graph_after_a_quality_failure() -> None:
-    """The complete scene is unsafe for the main-thread fallback, even after a failure latch."""
-    report = _run_routing("all-runtime-failed")
-
-    assert report["appended"] == []
-    assert report["engine"] == 0
-    assert report["classic"] == 0
-
-@requires_node
-def test_graph_engine_deep_link_degrades_loudly_when_the_asset_cannot_load() -> None:
-    """A genuine load failure is the only thing that reaches Classic, and it says so."""
-    report = _run_routing("fails")
-
-    assert report["engine"] == 0
-    assert report["classic"] == 1
-    assert report["warned"] == [
-        "graph-engine=next failed; falling back to the classic renderer"
-    ]
-
-
-def test_lazy_graph_engine_load_cannot_raise_an_unhandled_rejection() -> None:
-    """An unhandled rejection prints a console error — the exact thing this fix removes.
-
-    ``graphRender`` can start the engine fetch on a pass that returns at the ForceGraph gate,
-    before it attaches its own handler, so the memoized promise carries its own.
+    Each first-party engine is evaluated alone, with neither d3 nor force-graph defined, and
+    must still register its global (they look up ``d3``/``ForceGraph`` only when a renderer
+    is created, by which time the loader has waited for every asset).
     """
-    source = DASHBOARD.read_text(encoding="utf-8")
-    loader = source[source.index("function loadGraphEngine(loadAll=false)"):]
-    loader = loader[: loader.index("\nfunction ")]
-    assert "GRAPH_ENGINE_LOADING.catch(()=>{})" in loader
-    # A 200 that never registers the global is a corrupt asset, not a success.
-    assert "reject(new Error('Graph engine asset loaded without registering EngraphisGraph'))" in loader
-    assert "ALL_GRAPH_ENGINE_LOADING.catch(()=>{})" in source
-    assert "graphFull&&typeof EngraphisEveryGraph==='undefined'" in source
+    script = r"""
+    const vm = require('vm');
+    const fs = require('fs');
+    const out = {};
+    for (const file of process.argv.slice(1)) {
+      const sandbox = { console, setTimeout, clearTimeout };
+      sandbox.window = sandbox;
+      sandbox.self = sandbox;
+      sandbox.document = { createElement: () => ({ getContext: () => null }),
+        addEventListener() {}, removeEventListener() {} };
+      sandbox.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
+      sandbox.addEventListener = () => {};
+      sandbox.removeEventListener = () => {};
+      try {
+        vm.runInNewContext(fs.readFileSync(file, 'utf8'), sandbox, { filename: file });
+        out[file.split('/').pop()] = Object.keys(sandbox).filter(key => /^Engraphis/.test(key));
+      } catch (error) {
+        out[file.split('/').pop()] = 'threw: ' + error.message;
+      }
+    }
+    console.log(JSON.stringify(out));
+    """
+    files = [ASSETS / name for name in (
+        "engraphis-graph.js", "engraphis-spacetime.js", "engraphis-graph-every.js",
+    )]
+    result = subprocess.run(
+        [NODE, "-e", script, *map(str, files)],
+        cwd=ROOT, capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    registered = json.loads(result.stdout.strip().splitlines()[-1])
+    assert "EngraphisGraph" in registered["engraphis-graph.js"]
+    assert registered["engraphis-spacetime.js"] == ["EngraphisSpacetime"]
+    assert "EngraphisEveryGraph" in registered["engraphis-graph-every.js"]
 
 
-def test_force_graph_loader_rejects_a_success_without_the_vendor_global() -> None:
-    """A truncated 200 must not enter the render loop without ``ForceGraph``."""
-    source = DASHBOARD.read_text(encoding="utf-8")
-    loader = source[source.index("function loadForceGraph()"):]
-    loader = loader[: loader.index("\nlet GRAPH_ENGINE_LOADING")]
-    assert "typeof ForceGraph==='undefined'" in loader
-    assert "reject(new Error('Force graph asset loaded without registering ForceGraph'))" in loader
+@requires_node
+def test_a_failed_d3_load_is_retried_even_when_the_other_assets_registered() -> None:
+    """The engine only degrades without d3, so its absence must still trigger a reload.
+
+    With parallel downloads, d3 can fail while force-graph, the engine and the spacetime
+    overlay all register. The next Reload must fetch d3 again (with a fresh retry key) and
+    only d3, rather than treating the half-loaded set as ready.
+    """
+    report = _run_loader(
+        """
+        const first = watch(loader.ensureGraphAssets());
+        fail('d3.min.js');
+        ['force-graph.min.js', 'engraphis-graph.js', 'engraphis-spacetime.js']
+          .forEach(name => execute(name));
+        await flush();
+        const countAfterFirst = requested().length;
+        const second = watch(loader.ensureGraphAssets());
+        const retried = requested().slice(countAfterFirst);
+        execute('d3.min.js');
+        await flush();
+        emit({ first: first.state, retried, second: second.state });
+        """
+    )
+    assert report["first"] == "rejected"
+    assert [src.split("?", 1)[0] for src in report["retried"]] == ["/v2-assets/vendor/d3.min.js"]
+    assert report["retried"][0].endswith("&retry=1")
+    assert report["second"] == "resolved"
+
+
+@requires_node
+def test_every_node_asset_still_loads_after_the_core_assets_are_memoized() -> None:
+    """The overview's settled core promise must not short-circuit the later all-node asset."""
+    warm = _run_loader(
+        """
+        const core = watch(loader.ensureGraphAssets());
+        CORE.forEach(name => execute(name));
+        await flush();
+        const every = watch(loader.ensureGraphAssets(true));
+        const added = requested().slice(CORE.length);
+        await flush();
+        const waiting = every.state;
+        execute('engraphis-graph-every.js');
+        await flush();
+        emit({ core: core.state, added, waiting, every: every.state });
+        """
+    )
+    assert warm["core"] == "resolved"
+    assert [src.split("?", 1)[0] for src in warm["added"]] == [
+        "/v2-assets/engraphis-graph-every.js"
+    ]
+    assert warm["waiting"] == "pending"
+    assert warm["every"] == "resolved"
+
+    # Entering Every node straight away fetches both renderers in one go: an authored Galaxy
+    # scene still needs the quality engine even though the toolbar asked for every node.
+    cold = _run_loader(
+        """
+        const every = watch(loader.ensureGraphAssets(true));
+        const order = appended.map(fileOf);
+        [...CORE, 'engraphis-graph-every.js'].forEach(name => execute(name));
+        await flush();
+        emit({ order, every: every.state });
+        """
+    )
+    assert sorted(cold["order"]) == sorted([
+        "d3.min.js", "force-graph.min.js", "engraphis-graph.js", "engraphis-spacetime.js",
+        "engraphis-graph-every.js",
+    ])
+    assert cold["every"] == "resolved"
+
+
+@requires_node
+def test_lazy_graph_asset_failures_cannot_raise_an_unhandled_rejection() -> None:
+    """An unhandled rejection prints a console error per attempt.
+
+    A load can fail after the view that started it has gone, when nothing awaits the
+    promise any more, so the memoized attempts must carry their own handlers.
+    """
+    report = _run_loader(
+        """
+        const unhandled = [];
+        process.on('unhandledRejection', error => unhandled.push(String(error && error.message)));
+        loader.ensureGraphAssets();
+        loader.ensureGraphAllAsset();
+        fail('engraphis-graph.js');
+        fail('engraphis-graph-every.js');
+        for (let turn = 0; turn < 5; turn += 1) await flush();
+        emit({ unhandled });
+        """
+    )
+    assert report["unhandled"] == []
+
+
+@requires_node
+def test_a_graph_script_that_loads_without_registering_its_global_is_rejected() -> None:
+    """A truncated or stale 200 is a corrupt asset, not a success.
+
+    ``load`` only means the response arrived.  If the script did not register its global, the
+    renderer would bail on an undefined factory later, so the load must reject instead — and
+    must not become a permanent single-flight lock: the next request starts over with a fresh
+    URL, which a stalled or cached broken response cannot answer.
+    """
+    report = _run_loader(
+        """
+        const first = watch(loader.ensureGraphAssets());
+        execute('d3.min.js');
+        execute('force-graph.min.js', { registers: false });
+        for (let turn = 0; turn < 3; turn += 1) await flush();
+        const failed = { state: first.state, error: first.error, attached: attachedNow() };
+        const second = watch(loader.ensureGraphAssets());
+        const retried = requested().slice(CORE.length);
+        retried.map(src => src.split('?')[0].split('/').pop()).forEach(name => execute(name));
+        await flush();
+        emit({ failed, retried, second: second.state });
+        """
+    )
+    assert report["failed"]["state"] == "rejected"
+    assert report["failed"]["error"] == "ForceGraph did not register"
+    # The stale tags are withdrawn so a retry cannot join them.
+    assert report["failed"]["attached"] == []
+    # Only what is still missing is fetched again, each under a fresh retry URL.
+    assert [src.split("?", 1)[0] for src in report["retried"]] == [
+        "/v2-assets/vendor/force-graph.min.js",
+        "/v2-assets/engraphis-graph.js",
+        "/v2-assets/engraphis-spacetime.js",
+    ]
+    assert all(src.endswith("&retry=1") for src in report["retried"])
+    assert report["second"] == "resolved"
 
 
 @requires_node
@@ -596,8 +703,9 @@ def test_node_geometry_stays_compact_for_small_overviews_and_is_style_neutral() 
 
     A seven-node workspace is intentionally common in the Ledger overview.  Its normalized
     degree metric used to produce a dense-graph radius, and ``zoomToFit`` magnified that radius
-    until every node filled a large part of the canvas.  The radius helper now shares the
-    bounded scale used by Classic and does not know about visual style.
+    until every node filled a large part of the canvas.  The radius helper is bounded — a 0.25
+    floor keeps a low-evidence entity hit-testable, a normalized metric and a size-relative 1.1
+    cap stop a hub from blowing up — and it does not know about visual style.
     """
     report = _run_node(
         """
@@ -606,6 +714,9 @@ def test_node_geometry_stays_compact_for_small_overviews_and_is_style_neutral() 
           hub: I.graphNodeRadius({ degree: 6 }, 3, 1),
           cluster: I.graphNodeRadius({ cluster: true, members: 64 }, 3, 1),
           styles: ['classic', 'cyber', 'galaxy', 'solar'].map(() => I.graphNodeRadius({ degree: 6 }, 3, 1)),
+          floor: I.graphNodeRadius({ degree: 0 }, 0.1, 0),
+          caps: [1, 3, 12].map(size => [size, I.graphNodeRadius({ degree: 999 }, size, 1)]),
+          overflow: I.graphNodeRadius({ degree: 999 }, 3, 40),
         });
         """
     )
@@ -613,9 +724,11 @@ def test_node_geometry_stays_compact_for_small_overviews_and_is_style_neutral() 
     assert report["hub"] < 4
     assert report["cluster"] < 7
     assert len(set(report["styles"])) == 1
+    assert report["floor"] == 0.25
+    assert all(radius <= size * 1.1 for size, radius in report["caps"])
+    # A raw degree passed where a normalized metric belongs cannot inflate the disc.
+    assert report["overflow"] == report["hub"]
     assert "if (sun) r *= 1.7" not in ASSET.read_text(encoding="utf-8")
-    assert "if(sun)r*=1.7;" not in CLASSIC_DASHBOARD.read_text(encoding="utf-8")
-    assert "if(sun)r*=1.7;" not in DASHBOARD.read_text(encoding="utf-8")
 
 
 @requires_node
@@ -9102,17 +9215,6 @@ def test_auto_fit_cap_does_not_limit_manual_graph_inspection() -> None:
     assert "api.fit = () => { if (!destroyed) fg.zoomToFit" in source
 
 
-def test_dashboard_falls_back_to_the_classic_renderer_when_the_engine_throws() -> None:
-    source = DASHBOARD.read_text(encoding="utf-8")
-    # The opt-in flag must be latched off after a failure, and the render path must catch.
-    assert "GRAPH_ENGINE_FAILED" in source
-    assert "if(GRAPH_ENGINE_FAILED)return false" in source
-    assert "graphEngineFallback(error)" in source
-    engine_path = source[source.index("function graphRenderEngine"):]
-    engine_path = engine_path[: engine_path.index("\nfunction ")]
-    assert "try{" in engine_path and "}catch(error){" in engine_path
-
-
 # ── XSS: untrusted entity labels reaching force-graph ───────────────────────────────
 
 
@@ -9124,7 +9226,7 @@ def test_force_graph_tooltip_is_still_an_inner_html_sink() -> None:
     ingested memories, i.e. untrusted.  If a vendor bump ever changes this, revisit whether
     the explicit escaped accessors below are still the right shape.
     """
-    vendor = VENDOR.read_text(encoding="utf-8", errors="ignore")
+    vendor = FORCE_GRAPH_VENDOR.read_text(encoding="utf-8", errors="ignore")
     assert 'nodeLabel:{default:"name"' in vendor
     assert 'linkLabel:{default:"name"' in vendor
 
@@ -9134,10 +9236,10 @@ def test_engine_never_relies_on_the_default_label_accessor() -> None:
     assert ".nodeLabel(node => esc(nodeName(node)))" in source
     assert ".linkLabel(" in source
     assert "eval(" not in source
-    # The engine paints to canvas; the only markup sink it may use is clearing its own
-    # container on teardown.  Anything else would be a route for an unescaped entity label.
+    # The engine paints to canvas and clears its container with replaceChildren(), so it
+    # has no markup sink at all: any would be a route for an unescaped entity label.
     writes = re.findall(r"\w+\.(?:inner|outer)HTML\s*=\s*[^;]+", source)
-    assert writes == ["el.innerHTML = ''"], writes
+    assert writes == [], writes
     assert not re.search(r"insertAdjacentHTML|document\.write|createContextualFragment", source)
 
 
@@ -9354,10 +9456,9 @@ def test_graph_analysis_is_stack_safe_and_bounded_on_a_large_store() -> None:
 def test_influence_relations_do_not_merge_two_topics_into_one_community() -> None:
     """Community Islands must not fuse two topics over a single cross-topic relation.
 
-    ``influences`` edges routinely span otherwise separate bodies of work.  The classic
-    renderer keeps them drawn and traversable but builds its clustering adjacency without
-    them (``GCOMM_ADJ``); adding every link to one adjacency gives both topics the same
-    colour and the same force centre.
+    ``influences`` edges routinely span otherwise separate bodies of work.  They stay drawn
+    and traversable, but the clustering adjacency is built without them; adding every link to
+    one adjacency gives both topics the same colour and the same force centre.
     """
     report = _run_node(
         """
@@ -9389,12 +9490,11 @@ def test_influence_relations_do_not_merge_two_topics_into_one_community() -> Non
 def test_community_ids_are_ranked_by_size_so_the_legend_describes_the_right_nodes() -> None:
     """Legend labels and canvas swatches must agree about which cluster is "Cluster 1".
 
-    ``graphRenderLegend()`` sorts communities by size and calls the largest "Cluster 1", but
-    node colour indexes the palette by the community *id* (``commPal()[community % n]``).
-    Assigning ids in raw payload order therefore made the legend describe one component with
-    another's colour whenever a smaller component appeared first — which the payload order
-    alone decides.  The classic ``graphComputeCommunities()`` sorts before assigning; so must
-    this.
+    The legend (``api.legend()``) sorts communities by size and calls the largest "Cluster 1",
+    but node colour indexes the palette by the community *id* (``commPal()[community % n]``).
+    Assigning ids in raw payload order therefore made "Cluster 1" wear another component's
+    palette slot whenever a smaller component appeared first — which the payload order alone
+    decides.  Ids are assigned in size order instead.
     """
     report = _run_node(
         """
@@ -9458,9 +9558,8 @@ def test_flow_particles_are_capped_on_a_large_relation_set() -> None:
     """Three animated particles per relation does not survive a real ``/graph`` response.
 
     force-graph advances every particle on every frame, so a few thousand relations is tens
-    of thousands of animated objects and an unusable canvas.  The classic renderer refuses to
-    draw them past 800 links; the opt-in engine must use the same cutoff rather than trusting
-    that no store is big.
+    of thousands of animated objects and an unusable canvas.  The engine stops drawing them
+    past 800 links rather than trusting that no store is big.
     """
     report = _run_engine(
         """
@@ -9512,7 +9611,7 @@ def test_unfreezing_reapplies_enabled_relation_flow_after_a_frozen_render() -> N
 
 @requires_node
 def test_a_dashboard_sync_that_turns_freeze_off_reheats_the_renderer() -> None:
-    """Classic redraws send the full settings object, so ``frozen:false`` must be actionable."""
+    """Ledger re-applies the full settings object, Freeze included, so ``frozen:false`` acts."""
 
     report = _run_engine(
         """
@@ -9558,17 +9657,6 @@ def test_reduced_motion_keeps_auto_fit_instant_while_physics_stays_live() -> Non
     assert report["reduced"] is True
 
 
-def test_legacy_flow_particles_use_small_directional_arrows() -> None:
-    """Classic and its static compatibility copy must not regress to round flow dots."""
-    for path in (DASHBOARD, CLASSIC_DASHBOARD):
-        source = path.read_text(encoding="utf-8")
-        assert "linkDirectionalArrowLength(GPERF.dense?0:.625)" in source
-        assert (
-            "linkDirectionalParticleWidth(.85).linkDirectionalParticleCanvasObject"
-            "(graphPaintFlowArrow)" in source
-        )
-
-
 #: A canvas 2D stand-in that counts the fills the galaxy starfield performs.  The engine wraps
 #: ``onRenderFramePre`` in a try/catch, so a stub too thin to survive the real paint would read
 #: as "no stars drawn"; the small-graph leg of the test below is what proves it is thick enough.
@@ -9589,9 +9677,9 @@ def test_galaxy_stops_animating_once_the_graph_is_large() -> None:
 
     The starfield lives in ``onRenderFramePre``, which force-graph's change detection cannot
     see, so the engine holds ``autoPauseRedraw(false)`` for it — repainting every node and link
-    every frame, forever, even after particles and the simulation have stopped.  The classic
-    path simply drops the starfield past ``GPERF.large`` (``if(GPERF.large)return``); with the
-    stars gone there is nothing left that needs a frame the vendor would not schedule itself.
+    every frame, forever, even after particles and the simulation have stopped.  Past the
+    large-graph cutoff the starfield is dropped; with the stars gone there is nothing left that
+    needs a frame the vendor would not schedule itself.
     """
     report = _run_engine(
         CANVAS_STUB
@@ -9604,7 +9692,7 @@ def test_galaxy_stops_animating_once_the_graph_is_large() -> None:
         fills = 0; store.onRenderFramePre(ctx, 1);
         const smallStars = fills;
 
-        // 3001 entities / 3000 relations — past the classic renderer's 600-node signal.
+        // 3001 entities / 3000 relations — well past the 600-node large-graph signal.
         api.setData(chain(3000));
         const bigAutoPause = store.autoPauseRedraw;
         fills = 0; store.onRenderFramePre(ctx, 1);
@@ -9629,12 +9717,11 @@ def test_galaxy_stops_animating_once_the_graph_is_large() -> None:
 
 @requires_node
 def test_type_colours_follow_the_active_theme_not_a_hard_coded_dark_palette() -> None:
-    """``applyTheme()`` recolours the canvas, but the engine had no theme to recolour to.
+    """A theme's type colours must reach the canvas, below a style palette and an override.
 
-    The legend and controls read the ``--entity-*`` custom properties, so switching to Light,
-    Midnight, Solarized or Sepia moved them while the canvas kept the dark-theme constants —
-    an inconsistent palette and, on the light themes, poor contrast.  The engine cannot read
-    CSS variables from a canvas, so the dashboard supplies the resolved values.
+    The engine cannot read CSS custom properties from a canvas, so the page hands it resolved
+    theme colours through ``setThemeColors()``.  Without that tier a light theme would keep the
+    dark-theme constants — an inconsistent palette and poor contrast.
     """
     report = _run_engine(
         """
@@ -9656,7 +9743,7 @@ def test_type_colours_follow_the_active_theme_not_a_hard_coded_dark_palette() ->
         api.setThemeColors({ person_or_concept: '#112233' });
         const themed = colour();
 
-        // A style palette still outranks the theme, exactly as classic graphTypeColor() does.
+        // A style palette still outranks the theme.
         api.setStyle('cyber');
         const styled = colour();
 
@@ -9729,203 +9816,738 @@ def test_unlinked_entities_are_shown_by_default_and_can_be_hidden() -> None:
     assert report["restored"] == 3
 
 
-#: Executes the *real* ``graphRenderEngine`` source against stubs.  Only its collaborators are
-#: faked; the function itself is a verbatim slice, so what it forwards to the engine — and when
-#: it parks a freshly created renderer — is observed rather than asserted about the source text.
-RENDER_HARNESS = """
-const fs = require('fs');
-const src = fs.readFileSync(process.argv.slice(1).find(a => a.endsWith('dashboard.js')), 'utf8');
-const scenario = JSON.parse(process.argv[process.argv.length - 1]);
-const start = src.indexOf('function graphRenderEngine(');
-const slice = src.slice(start, src.indexOf('/* Nav away from the graph view', start));
-
-/* The theme-colour lookup is sliced verbatim too, not stubbed: the property under test is
-   that the dashboard resolves the *active* CSS custom properties and hands them over, so
-   faking the resolver would assert nothing. Only `getComputedStyle` below is synthetic. */
-const between = (from, to) => src.slice(src.indexOf(from), src.indexOf(to, src.indexOf(from)));
-const themeSrc = between('const ETYPE_TOKEN=', 'const GRAPH_PALETTES=')
-  + between('function cssvar(', 'function graphValidColor(')
-  + between('function graphThemeTypeColors(', 'function graphContrastColor(');
-
-/* A stand-in for a non-dark theme: every --entity-* token differs from the engine's
-   hard-coded THEME_ETYPE constants, so a renderer that ignored these would be visible. */
-const THEME_VARS = {
-  '--entity-concept': '#112233', '--entity-mention': '#223344', '--entity-hashtag': '#334455',
-  '--entity-email': '#445566', '--entity-organization': '#556677', '--entity-location': '#667788',
-  '--color-accent': '#778899', '--color-panel': '#9a7654', '--color-canvas': '#345678',
-  '--color-text-dim': '#123456',
+#: Runs Ledger's *real* Explore view against the real engine.  ``loadGraph`` (with its
+#: candidate-host transaction), ``switchView``, ``applyTheme``, the scope, tuning, theme and
+#: legend helpers, the Freeze and Unlinked-nodes handlers and the ``graph-lifecycle.js`` wiring
+#: are verbatim slices of the shipped files.  The stub DOM holds every element ``index.html``
+#: declares with an id, seeded with its shipped attributes, and ``getComputedStyle`` resolves
+#: ``ledger.css``'s own theme tokens.  Only the network, the lazy asset loader (exercised by
+#: ``LOADER_HARNESS``) and unrelated chrome are stubbed, so what Ledger hands the engine — and
+#: when it pauses, resumes or destroys it — is observed on the engine itself rather than
+#: asserted about source text.  A scenario runs inside an async function and reports through
+#: ``finish(value)``; ``$`` reads the stub DOM.
+LEDGER_HARNESS = ENGINE_PRELUDE + r"""
+/* The real vendor answers graphData() with an empty graph before the first data push, and
+   Ledger configures a renderer before it seeds one; the stand-in has to start the same way. */
+store.graphData = { nodes: [], links: [] };
+const [ledgerPath, lifecyclePath, cssPath, markupJson] = process.argv.slice(2);
+const ledgerSource = fs.readFileSync(ledgerPath, 'utf8');
+const ledgerSlice = (from, to) => {
+  const start = ledgerSource.indexOf(from);
+  const end = start < 0 ? -1 : ledgerSource.indexOf(to, start + from.length);
+  if (end < 0) throw new Error('ledger.js landmark moved: ' + (start < 0 ? from : to));
+  return ledgerSource.slice(start, end);
 };
-globalThis.getComputedStyle = () => ({ getPropertyValue: name => THEME_VARS[name] || '' });
 
-const log = { created: 0, paused: 0, seeded: 0, scope: null, themeColors: null, error: null };
-const checkbox = { checked: scenario.showUnlinked };
-const element = { classList: { toggle() {} }, setAttribute() {}, set textContent(value) {} };
-globalThis.document = {
-  getElementById: id => (id === 'graph-show-iso' ? checkbox : element),
+const css = fs.readFileSync(cssPath, 'utf8');
+const cssTokens = selector => {
+  const start = css.indexOf(selector + ' {');
+  if (start < 0) return {};
+  const block = css.slice(css.indexOf('{', start) + 1, css.indexOf('}', start));
+  return Object.fromEntries([...block.matchAll(/(--[\w-]+)\s*:\s*([^;]+);/g)]
+    .map(match => [match[1], match[2].trim()]));
+};
+
+const attached = new Set();
+const makeElement = (tag, attrs = {}, value = attrs.value) => {
+  const classes = new Set(String(attrs.class || '').split(/\s+/).filter(Boolean));
+  return {
+    tagName: String(tag).toUpperCase(), attrs: { ...attrs }, dataset: {}, children: [],
+    listeners: {}, parentNode: null, id: attrs.id || '', textContent: '', title: attrs.title || '',
+    value: value === undefined ? '' : String(value),
+    min: attrs.min === undefined ? '' : attrs.min, max: attrs.max === undefined ? '' : attrs.max,
+    checked: 'checked' in attrs, hidden: 'hidden' in attrs, disabled: 'disabled' in attrs,
+    tabIndex: 0, clientWidth: 800, clientHeight: 600,
+    classList: {
+      add: (...names) => names.forEach(name => classes.add(name)),
+      remove: (...names) => names.forEach(name => classes.delete(name)),
+      contains: name => classes.has(name),
+      toggle(name, force) {
+        const on = force === undefined ? !classes.has(name) : Boolean(force);
+        if (on) classes.add(name); else classes.delete(name);
+        return on;
+      },
+    },
+    get className() { return [...classes].join(' '); },
+    set className(next) {
+      classes.clear();
+      String(next).split(/\s+/).filter(Boolean).forEach(name => classes.add(name));
+    },
+    getAttribute(name) {
+      const present = Object.prototype.hasOwnProperty.call(this.attrs, name);
+      return present ? String(this.attrs[name]) : null;
+    },
+    setAttribute(name, next) { this.attrs[name] = String(next); },
+    removeAttribute(name) { delete this.attrs[name]; },
+    addEventListener(type, listener) {
+      (this.listeners[type] = this.listeners[type] || []).push(listener);
+    },
+    removeEventListener(type, listener) {
+      this.listeners[type] = (this.listeners[type] || []).filter(item => item !== listener);
+    },
+    click() {
+      const event = { currentTarget: this, target: this };
+      (this.listeners.click || []).forEach(listener => listener(event));
+    },
+    append(...items) {
+      items.forEach(item => { item.parentNode = this; this.children.push(item); });
+    },
+    replaceChildren(...items) { this.children = []; this.append(...items); },
+    querySelector: selector => (selector === 'canvas' ? canvas : null),
+    querySelectorAll: () => [],
+    cloneNode() { return makeElement(tag, { ...this.attrs, id: this.id, class: this.className }); },
+    insertAdjacentElement(_position, item) {
+      item.parentNode = this.parentNode;
+      attached.add(item);
+      return item;
+    },
+    replaceWith(item) {
+      item.parentNode = this.parentNode;
+      attached.delete(this);
+      attached.add(item);
+      this.parentNode = null;
+    },
+    remove() { attached.delete(this); this.parentNode = null; },
+    focus() {},
+  };
+};
+const body = makeElement('body');
+const ledgerDocument = {
+  hidden: false, body, head: makeElement('head'), listeners: {},
+  getElementById(id) {
+    for (const item of attached) if (item.id === id) return item;
+    return null;
+  },
+  querySelector: () => null,
   querySelectorAll: () => [],
-  body: {},
+  createElement: tag => makeElement(tag),
+  createElementNS: (_namespace, tag) => makeElement(tag),
+  addEventListener(type, listener) {
+    (this.listeners[type] = this.listeners[type] || []).push(listener);
+  },
+  removeEventListener(type, listener) {
+    this.listeners[type] = (this.listeners[type] || []).filter(item => item !== listener);
+  },
 };
-const engine = {
-  setSettings() {}, setStyle() {}, setColorBy() {}, setPalette() {}, setTypeColors() {},
-  setLayers() {}, setScope(patch) { log.scope = patch; },
-  setThemeColors(map) { log.themeColors = map; },
-  setData(data) { log.seeded = data.nodes.length; },
+JSON.parse(markupJson).forEach(({ tag, attrs, value }) => {
+  const item = makeElement(tag, attrs, value);
+  item.parentNode = body;
+  attached.add(item);
+});
+const $ = id => ledgerDocument.getElementById(id);
+const hideTab = hidden => {
+  ledgerDocument.hidden = hidden;
+  (ledgerDocument.listeners.visibilitychange || []).forEach(listener => listener());
 };
-const api = {
-  apply(fn, fit, reheat) { fn(engine); log.apply = { fit: !!fit, reheat: !!reheat }; }, communityMap: () => ({}),
-  freeze() {}, destroy() {}, resume() {}, pause() { log.paused += 1; },
-};
-globalThis.EngraphisGraph = { create() { log.created += 1; return api; } };
-globalThis.window = { GSET: { mode: 'compact', frozen: false } };
-globalThis.GRAPH = { nodes: [] };
-globalThis.GRAPH_ENGINE = null;
-globalThis.GACTIVE_DATA = null;
-globalThis.GCOLOR_OVERRIDES = {};
-/* The state the nav-away pause recorded while GRAPH_ENGINE was still null. */
-globalThis.GRAPH_ENGINE_PARKED = scenario.parked;
-globalThis.showAs = () => {};
-globalThis.prefersReducedMotion = () => !!scenario.reducedMotion;
-for (const name of ['graphSetLayoutStatus', 'graphSyncReadouts', 'graphUpdateEditedBadge',
-                    'graphUpdateHud', 'graphRenderLegend', 'graphSetHighlight',
-                    'graphSetSimulationStatus', 'syncGraphExplorerSelection', 'graphNodeClick',
-                    'graphEngineEmptyMessage']) globalThis[name] = () => {};
-globalThis.graphEngineFallback = error => {
-  log.error = String((error && error.message) || error);
-};
+const computedStyle = () => ({
+  getPropertyValue: name => ({
+    ...cssTokens(':root'), ...cssTokens(`body[data-theme="${body.dataset.theme}"]`),
+  })[name] || '',
+});
 
-const graphRenderEngine = new Function(themeSrc + slice + '\\nreturn graphRenderEngine;')();
-const rendered = graphRenderEngine({
-  nodes: [{ id: 'a' }, { id: 'b' }, { id: 'lonely' }],
-  links: [{ source: 'a', target: 'b' }],
-}, true, true);
-console.log(JSON.stringify(Object.assign({ rendered }, log)));
+/* Browser collaborators. Ledger's own timers are recorded rather than run, so a load deadline
+   can neither fire mid-scenario nor keep this process alive. */
+window.matchMedia = () => ({ matches: false });
+const timers = new Map();
+let timerId = 0;
+window.setTimeout = (callback, delay) => {
+  timers.set(++timerId, { callback, delay });
+  return timerId;
+};
+window.clearTimeout = id => { timers.delete(id); };
+window.history = { pushState() {} };
+window.scrollTo = () => {};
+window.ForceGraph = globalThis.ForceGraph;
+const overlays = [];
+window.EngraphisSpacetime = {
+  create() {
+    const overlay = {
+      enabled: null, destroyed: false, setSnapshot() {},
+      setEnabled(on) { this.enabled = on; }, destroy() { this.destroyed = true; },
+    };
+    overlays.push(overlay);
+    return overlay;
+  },
+};
+const engines = [];
+const createEngine = G.create;
+G.create = (host, opts) => {
+  const engine = createEngine(host, opts);
+  engines.push({ engine, host, opts });
+  return engine;
+};
+new Function('window', 'document', fs.readFileSync(lifecyclePath, 'utf8'))(window, ledgerDocument);
+
+/* The network. `scene` is what /graph/scene answers and `assets` what the lazy loader does; a
+   scenario may swap either for a pending promise to hold a load in flight. */
+const SCENE = {
+  nodes: [
+    { id: 'a', label: 'Ada', degree: 1, community_id: 0, etype: 'person_or_concept' },
+    { id: 'b', label: 'Grace', degree: 1, community_id: 0, etype: 'organization' },
+    { id: 'lonely', label: 'Lonely', degree: 0, community_id: 1, etype: 'person_or_concept' },
+  ],
+  edges: [{ source: 'a', target: 'b', layer: 'entity', label: 'mentions' }],
+};
+let scene = SCENE;
+let assets = () => Promise.resolve();
+const requests = [];
+const assetLoads = [];
+const collaborators = {
+  api: path => {
+    requests.push(path);
+    return Promise.resolve(typeof scene === 'function' ? scene() : scene);
+  },
+  ensureGraphAssets: loadAll => {
+    assetLoads.push(loadAll);
+    return assets(loadAll);
+  },
+  showNotice: () => {},
+};
+const ledger = new Function(
+  'window', 'document', 'location', 'localStorage', 'getComputedStyle', 'collaborators', `
+  const { api, ensureGraphAssets, showNotice } = collaborators;
+  const releaseGraphAssetsAttempt = () => {}, releaseGraphAllAssetsAttempt = () => {};
+  const graphAssetsPromise = null, graphAllAssetsPromise = null;
+  const validatedGraphRepository = () => '';
+  const graphExplorer = { select() {}, setData() {} };
+  const openGraphConnections = () => {}, graphStatsChanged = () => {};
+  const graphMetricsChanged = () => {}, customGraphColors = () => ({});
+  const graphLayerState = () => ({ ...GRAPH_DEFAULT_LAYERS });
+  const setGraphLayers = () => {}, clearGraphSavedView = () => {}, saveGraphPreferences = () => {};
+  const updateGraphModeControls = () => {}, updateGraphFacts = () => {};
+  const renderGraphTypeColors = () => {}, updateGraphLayerCounts = () => {};
+  const syncGraphChoices = () => {}, loadAudit = () => {}, loadSavings = () => {};
+  const loadManageTab = () => {};
+  ${ledgerSlice('const state = {', 'const memoryTitle =')}
+  ${ledgerSlice('const all = selector =>', 'const NOTICE_DURATION_MS')}
+  ${ledgerSlice('const node = (tag,', 'const button = (label,')}
+  ${ledgerSlice('const query = (name', 'const memoryQuery =')}
+  ${ledgerSlice('const GRAPH_INITIAL_NODE_LIMIT', 'const GRAPH_SAVED_VIEWS = {')}
+  ${ledgerSlice(
+    'const graphLifecycle = window.EngraphisGraphLifecycle.create({', 'const graphExplorer =')}
+  ${ledgerSlice('function graphCommunityIndex(value)', 'function revealGraphNode(')}
+  ${ledgerSlice('function graphIsGalaxy()', 'function updateGraphGalaxyControls()')}
+  ${ledgerSlice('function setGraphSwitch(', 'function graphScopeValue(')}
+  ${ledgerSlice('function graphScopeValue(', 'let graphPreferencesSaveScheduled')}
+  ${ledgerSlice('function graphPresetTuning(preset)', 'function graphLayerState()')}
+  ${ledgerSlice('const GRAPH_TYPE_LABELS = {', 'function customGraphColors()')}
+  ${ledgerSlice('const SVG_NS =', 'function graphLegendColor(')}
+  ${ledgerSlice('function graphThemeColors()', 'function setGraphTab(')}
+  ${ledgerSlice('function graphAsOfTimestamp()', 'function graphRepositoryNames()')}
+  ${ledgerSlice('function isCurrentGraphLoad(request)', 'function searchGraph(')}
+  ${ledgerSlice('function switchView(', 'async function refreshBootstrap(')}
+  ${ledgerSlice(
+    "byId('graph-freeze').addEventListener('click',", "byId('graph-flow').addEventListener(")}
+  ${ledgerSlice(
+    "byId('graph-show-unlinked').addEventListener('click',",
+    "byId('graph-depth').addEventListener(")}
+  return {
+    state, loadGraph, retryGraphLoad, switchView, applyTheme, setGraphShowUnlinked,
+    renderGraphLegend, graphLifecycle, graphPresetTuning, syncGraphTuning,
+    graphTuningEngineSettings, GRAPH_TUNING,
+  };`,
+)(window, ledgerDocument, { href: 'http://127.0.0.1:8700/', origin: 'http://127.0.0.1:8700' },
+  { getItem: () => null, setItem() {}, removeItem() {} }, computedStyle, collaborators);
+
+const flush = () => new Promise(resolve => setImmediate(resolve));
+/* Opens Explore the way the sidebar does and waits for that graph transaction to settle. */
+const openExplore = async () => {
+  ledger.state.workspace = 'acme';
+  ledger.switchView('relations', { pushHistory: false });
+  await ledger.state.graphLoadPromise;
+};
+const shownIds = () => (store.graphData.nodes || []).map(item => item.id).sort();
+const finish = value => process.stdout.write(JSON.stringify(value) + '\n', () => process.exit(0));
 """
 
 
-def _run_render(
-    *, show_unlinked: bool = False, parked: bool = False, reduced_motion: bool = False
-) -> dict:
-    source = DASHBOARD.read_text(encoding="utf-8")
-    # The harness slices real source; keep its landmarks honest.
-    assert "function graphRenderEngine(" in source
-    assert "/* Nav away from the graph view" in source
-    scenario = json.dumps({
-        "showUnlinked": show_unlinked,
-        "parked": parked,
-        "reducedMotion": reduced_motion,
-    })
+class _LedgerMarkup(HTMLParser):
+    """Every element ``index.html`` declares with an id, with its shipped attributes.
+
+    A ``<select>`` takes its first (or ``selected``) option's value, as it does in a browser.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.elements: list = []
+        self._select = None
+
+    def handle_starttag(self, tag, attrs) -> None:
+        values = {name: "" if value is None else value for name, value in attrs}
+        if tag == "option" and self._select is not None:
+            if "value" not in self._select or "selected" in values:
+                self._select["value"] = values.get("value", "")
+        elif "id" in values:
+            element = {"tag": tag, "attrs": values}
+            self.elements.append(element)
+            self._select = element if tag == "select" else self._select
+
+    def handle_endtag(self, tag) -> None:
+        if tag == "select":
+            self._select = None
+
+
+def _run_ledger(scenario: str) -> dict:
+    markup = _LedgerMarkup()
+    markup.feed(LEDGER_INDEX.read_text(encoding="utf-8"))
+    script = (
+        LEDGER_HARNESS
+        + "(async () => {\n" + scenario + "\n})().catch(error => {\n"
+        + "  console.error(error && error.stack || error); process.exit(1);\n});"
+    )
     result = subprocess.run(
-        [NODE, "-e", RENDER_HARNESS, str(DASHBOARD), scenario],
+        [
+            NODE, "-e", script, str(ASSET), str(LEDGER), str(GRAPH_LIFECYCLE), str(LEDGER_CSS),
+            json.dumps(markup.elements),
+        ],
         cwd=ROOT,
         capture_output=True,
         text=True,
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    report = json.loads(result.stdout.strip().splitlines()[-1])
-    assert report["error"] is None, report["error"]
-    assert report["rendered"] is True
-    return report
+    return json.loads(result.stdout.strip().splitlines()[-1])
 
 
-@requires_node
-@pytest.mark.parametrize("checked", [False, True])
-def test_dashboard_tells_the_engine_whether_to_show_unlinked_entities(checked: bool) -> None:
-    """"Show unlinked nodes" is filtered twice, and only one half was wired up.
+def _ledger_theme(theme: str) -> dict:
+    """The engine colours ``ledger.css`` defines for a theme (``slate`` is the ``:root`` set)."""
+    css = LEDGER_CSS.read_text(encoding="utf-8")
 
-    ``graphData()`` starts supplying degree-zero entities when the box is ticked, but the
-    engine re-filters on its own ``showUnlinked``/``minDegree`` state — which stays at the
-    defaults that drop exactly those entities — unless the dashboard says otherwise.
-    """
-    report = _run_render(show_unlinked=checked)
+    def tokens(selector: str) -> dict:
+        start = css.index(selector + " {")
+        block = css[start:css.index("}", start)]
+        pairs = re.findall(r"(--[\w-]+)\s*:\s*([^;]+);", block)
+        return {name: value.strip() for name, value in pairs}
 
-    assert report["scope"] is not None, "the engine never learns the checkbox state"
-    assert report["scope"]["showUnlinked"] is checked
-    # minDegree matters just as much: showUnlinked alone still loses to `degree >= 1`.
-    assert report["scope"]["minDegree"] == (0 if checked else 1)
-
-
-@requires_node
-def test_dashboard_hands_the_engine_the_active_themes_entity_colours() -> None:
-    """The other half of the theme fix: the engine can only use what it is given."""
-    report = _run_render()
-
-    assert report["themeColors"] is not None, "the engine never learns the active theme"
-    # Resolved from the stubbed --entity-* custom properties, not from any JS constant.
-    assert report["themeColors"]["person_or_concept"] == "#112233"
-    assert report["themeColors"]["organization"] == "#556677"
-    assert report["themeColors"]["accent"] == "#778899"
-    assert report["themeColors"]["surface"] == "#9a7654"
-    assert report["themeColors"]["canvas"] == "#345678"
-    assert report["themeColors"]["relation_label"] == "#123456"
-    assert report["themeColors"]["label"] == "#e7e9ee"
-    # Every type the legend can show must be covered, or the canvas falls back per type.
-    assert set(report["themeColors"]) == {
-        "person_or_concept", "mention", "hashtag", "email", "organization", "location",
-        "accent", "surface", "canvas", "relation_label", "label",
+    values = tokens(":root")
+    if theme != "slate":
+        values.update(tokens(f'body[data-theme="{theme}"]'))
+    colours = {
+        "accent": values["--c-acc"], "surface": values["--c-surface"], "canvas": values["--c-bg"],
+        "label": values["--c-fg"], "relation_label": values["--c-dim"],
     }
+    colours.update({etype: values[token] for etype, token in _ENTITY_COLOUR_TOKENS.items()})
+    return colours
 
 
-def test_a_theme_switch_repaints_the_opt_in_canvas() -> None:
+#: Entity types coloured by the theme when the graph is coloured by type with the Theme palette.
+_ENTITY_COLOUR_TOKENS = {
+    "person_or_concept": "--c-entity-concept", "mention": "--c-entity-mention",
+    "hashtag": "--c-entity-hashtag", "email": "--c-entity-email",
+    "organization": "--c-entity-organization", "location": "--c-entity-location",
+}
+
+
+def _contrast(first: str, second: str) -> float:
+    def luminance(colour: str) -> float:
+        channels = [int(colour.lstrip("#")[index:index + 2], 16) / 255 for index in (0, 2, 4)]
+        linear = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in channels]
+        return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+    high, low = sorted((luminance(first), luminance(second)), reverse=True)
+    return (high + 0.05) / (low + 0.05)
+
+
+@pytest.mark.parametrize("theme", ["slate", "midnight", "solarized", "paper", "sepia", "matrix"])
+def test_every_theme_gives_entity_types_legible_graph_colours(theme: str) -> None:
+    """Colour by entity type with the Theme palette paints these on the theme's own canvas.
+
+    Without per-theme values the engine fell back to its dark-theme colours, which measure
+    about 2:1 against the light themes' canvas — below the 3:1 WCAG floor for graphics.
+    """
+    colours = _ledger_theme(theme)
+    entity = [colours[etype] for etype in _ENTITY_COLOUR_TOKENS]
+    assert len(set(entity)) == len(entity), "two entity types share a colour"
+    for etype in _ENTITY_COLOUR_TOKENS:
+        ratio = _contrast(colours[etype], colours["canvas"])
+        assert ratio >= 3.0, f"{theme}: {etype} {colours[etype]} is {ratio:.2f}:1 on the canvas"
+
+
+@requires_node
+@pytest.mark.parametrize("pressed", [False, True])
+def test_dashboard_tells_the_engine_whether_to_show_unlinked_entities(pressed: bool) -> None:
+    """"Unlinked nodes" is filtered twice, and both halves must follow the toggle.
+
+    The scene request drops degree-zero entities server-side (``connected_only``) and the
+    engine re-filters on its own ``showUnlinked``/``minDegree`` scope, so if either half
+    ignores the toggle, unlinked entities never arrive or arrive and stay hidden.  The stub
+    server always sends the unlinked entity — the worst case for the engine half — so what the
+    canvas shows is decided by the scope Ledger hands over alone.
+    """
+    report = _run_ledger(
+        """
+        ledger.setGraphShowUnlinked(PRESSED, false);
+        await openExplore();
+        const view = () => {
+          const engine = ledger.state.graphEngine.state();
+          return {
+            pressed: $('graph-show-unlinked').getAttribute('aria-pressed'),
+            scope: { showUnlinked: engine.showUnlinked, minDegree: engine.minDegree },
+            shown: shownIds(),
+          };
+        };
+        const opened = { ...view(), request: requests[0] };
+        $('graph-show-unlinked').click();
+        const toggled = view();
+        await ledger.state.graphLoadPromise;
+        finish({ opened, toggled, reloaded: { ...view(), request: requests[1] } });
+        """.replace("PRESSED", "true" if pressed else "false")
+    )
+    with_unlinked, linked_only = ["a", "b", "lonely"], ["a", "b"]
+    opened, toggled, reloaded = report["opened"], report["toggled"], report["reloaded"]
+    assert opened["pressed"] == str(pressed).lower()
+    assert opened["scope"]["showUnlinked"] is pressed, "the engine never learns the toggle state"
+    # Ledger's own Minimum-links default is 1: showing unlinked entities must still win.
+    assert opened["scope"]["minDegree"] == 1
+    assert opened["shown"] == (with_unlinked if pressed else linked_only)
+    assert ("connected_only=true" in opened["request"]) is not pressed
+    # Clicking the toggle re-filters the committed canvas at once and refetches the scene.
+    assert toggled["pressed"] == str(not pressed).lower()
+    assert toggled["scope"]["showUnlinked"] is not pressed
+    assert toggled["shown"] == (linked_only if pressed else with_unlinked)
+    assert ("connected_only=true" in reloaded["request"]) is pressed
+    assert reloaded["shown"] == toggled["shown"]
+
+
+@requires_node
+def test_dashboard_hands_the_engine_the_active_themes_colours() -> None:
+    """The engine can only use the theme it is given; it cannot read CSS from a canvas.
+
+    Ledger resolves the active theme's custom properties and hands them to every renderer it
+    creates, so a light theme gets dark canvas labels from the very first frame.
+    """
+    report = _run_ledger(
+        """
+        ledger.applyTheme('paper');
+        await openExplore();
+        finish({ colours: ledger.state.graphEngine.state().themeColors });
+        """
+    )
+    paper = _ledger_theme("paper")
+    assert paper != _ledger_theme("slate"), "the scenario must really use a different theme"
+    for role, colour in paper.items():
+        assert report["colours"].get(role) == colour, f"the engine's {role} ignores the theme"
+
+
+@requires_node
+def test_a_theme_switch_repaints_the_graph_canvas_and_its_legend() -> None:
     """``applyTheme()`` is the only place a theme change is observable.
 
-    It already calls ``graphRecolor()``; that path has to reach the engine, or the canvas keeps
-    the previous theme until the next full graph render.
+    It has to reach the live renderer, or the canvas keeps the previous theme's labels until the
+    next graph load — and it must not pay for such a load either.  The legend is redrawn with it.
     """
-    source = DASHBOARD.read_text(encoding="utf-8")
-    assert "if(typeof graphRecolor==='function')graphRecolor()" in source
-    recolor = source[source.index("function graphRecolor()"):]
-    recolor = recolor[: recolor.index("\nfunction graphFit")]
-    assert "engine.setThemeColors(graphThemeTypeColors())" in recolor
+    report = _run_ledger(
+        """
+        await openExplore();
+        const engine = ledger.state.graphEngine;
+        const repaints = () => (calls.zoom || 0) + (calls.nodeCanvasObject || 0);
+        const before = { repaints: repaints(), rows: $('graph-legend-list').children };
+        ledger.applyTheme('sepia');
+        finish({
+          colours: engine.state().themeColors, repainted: repaints() - before.repaints,
+          legendRedrawn: $('graph-legend-list').children !== before.rows,
+          legendShown: !$('graph-legend').hidden, created: engines.length, scenes: requests.length,
+        });
+        """
+    )
+    for role, colour in _ledger_theme("sepia").items():
+        assert report["colours"].get(role) == colour, f"the canvas kept the old theme's {role}"
+    assert report["repainted"] > 0, "the recoloured canvas was never asked to repaint"
+    assert report["legendRedrawn"] is True
+    assert report["legendShown"] is True
+    assert report["created"] == 1 and report["scenes"] == 1, "a theme switch reloaded the graph"
+
+
+#: Explore is opened and its scene held in flight; ``LEAVE`` decides whether the person moves
+#: to another view before the scene (and so the renderer) arrives.  Then they come back.
+BORN_PAUSED = """
+let releaseScene;
+scene = () => new Promise(resolve => { releaseScene = () => resolve(SCENE); });
+ledger.state.workspace = 'acme';
+ledger.switchView('relations', { pushHistory: false });
+const loading = ledger.state.graphLoadPromise;
+await flush();
+if (LEAVE) ledger.switchView('library', { pushHistory: false });
+releaseScene();
+await loading;
+const snapshot = () => ({
+  created: engines.length, scenes: requests.length,
+  running: ledger.state.graphEngine.physicsDiagnostics().running,
+  pauses: invocations.pauseAnimation || 0, resumes: invocations.resumeAnimation || 0,
+  status: $('graph-lifecycle-status').dataset.lifecycle, overlay: overlays[0].enabled,
+});
+const settled = snapshot();
+ledger.switchView('relations', { pushHistory: false });
+await ledger.state.graphLoadPromise;
+finish({ settled, returned: snapshot() });
+"""
 
 
 @requires_node
 def test_a_renderer_created_after_leaving_the_graph_view_is_born_paused() -> None:
-    """The rAF leak this PR already fixed once, reached by a different route.
+    """The scene and the lazy scripts resolve asynchronously, so Explore can be left first.
 
-    ``/graph`` and both lazy scripts resolve asynchronously.  Leaving Graph before they do runs
-    the pause while ``GRAPH_ENGINE`` is still null, so the pending callback would create and
-    start a renderer against a hidden pane that nothing ever pauses again.
+    A renderer created after that must not start drawing into a hidden pane that nothing will
+    pause again; it is born paused, and resumes — without a reload — when Explore reopens.
     """
-    parked = _run_render(parked=True)
-    assert parked["created"] == 1
-    assert parked["paused"] == 1, "a renderer created off-view keeps repainting forever"
+    parked = _run_ledger(BORN_PAUSED.replace("LEAVE", "true"))
+    assert parked["settled"] == {
+        "created": 1, "scenes": 1, "running": False, "pauses": 1, "resumes": 0,
+        "status": "paused", "overlay": False,
+    }, "a renderer created off-view keeps repainting forever"
+    assert parked["returned"] == {
+        "created": 1, "scenes": 1, "running": True, "pauses": 1, "resumes": 1,
+        "status": "active", "overlay": True,
+    }
 
-    # On the view, the same path must not park a renderer the user is looking at.
-    live = _run_render(parked=False)
-    assert live["created"] == 1
-    assert live["paused"] == 0
+    # On the view, the same path must not park a renderer the person is looking at.
+    live = _run_ledger(BORN_PAUSED.replace("LEAVE", "false"))
+    assert live["settled"] == {
+        "created": 1, "scenes": 1, "running": True, "pauses": 0, "resumes": 0,
+        "status": "active", "overlay": True,
+    }
+    assert live["returned"] == live["settled"]
 
 
 @requires_node
-def test_classic_graph_starts_live_even_when_the_os_prefers_reduced_motion() -> None:
-    """Reduced visual motion cannot suppress the explicit physics default."""
+def test_leaving_the_graph_view_pauses_the_renderer_and_returning_resumes_it() -> None:
+    """force-graph keeps a rAF alive while resumed, so an unseen graph must stop drawing.
 
-    report = _run_render(reduced_motion=True)
-    assert report["apply"] == {"fit": True, "reheat": True}
+    Both ways of not being seen count — another view and a hidden browser tab — and the
+    spacetime overlay stops with the renderer.  Coming back resumes the same renderer, keeping
+    its camera and selection, instead of loading the graph again.
+    """
+    report = _run_ledger(
+        """
+        await openExplore();
+        const engine = ledger.state.graphEngine;
+        const snapshot = () => ({
+          running: engine.physicsDiagnostics().running,
+          status: $('graph-lifecycle-status').dataset.lifecycle, overlay: overlays[0].enabled,
+        });
+        const open = snapshot();
+        ledger.switchView('library', { pushHistory: false });
+        const away = snapshot();
+        ledger.switchView('relations', { pushHistory: false });
+        await ledger.state.graphLoadPromise;
+        const back = snapshot();
+        hideTab(true);
+        const hiddenTab = snapshot();
+        hideTab(false);
+        finish({
+          open, away, back, hiddenTab, shownTab: snapshot(),
+          created: engines.length, scenes: requests.length,
+        });
+        """
+    )
+    drawing = {"running": True, "status": "active", "overlay": True}
+    paused = {"running": False, "status": "paused", "overlay": False}
+    assert report["open"] == drawing
+    assert report["away"] == paused, "leaving Explore left the renderer drawing"
+    assert report["back"] == drawing
+    assert report["hiddenTab"] == paused, "a hidden tab left the renderer drawing"
+    assert report["shownTab"] == drawing
+    assert report["created"] == 1 and report["scenes"] == 1
 
-    source = CLASSIC_DASHBOARD.read_text(encoding="utf-8")
-    assert "window.GSET.frozen=false;" in source
-    engine = source[source.index("function graphRenderEngine("):]
-    engine = engine[:engine.index("/* Nav away from the graph view")]
-    assert "},fit,reheat);" in engine
-    assert "reheat&&!prefersReducedMotion()" not in engine
+
+@requires_node
+def test_the_graph_honours_reduced_motion_without_freezing_its_physics() -> None:
+    """The OS motion preference reaches the renderer; it does not switch the physics off.
+
+    Ledger leaves the preference to the engine, which reads it itself, so camera animation
+    stays suppressed.  Freeze, which the person can see and change, is what stops the layout:
+    an OS setting that silently froze every graph would make the force controls look broken.
+    """
+    report = _run_ledger(
+        """
+        window.matchMedia = query => ({ matches: query === '(prefers-reduced-motion: reduce)' });
+        await openExplore();
+        const engine = ledger.state.graphEngine;
+        const diagnostics = engine.physicsDiagnostics();
+        finish({
+          reduced: diagnostics.reducedMotion, frozen: diagnostics.frozen,
+          running: diagnostics.running, freeze: $('graph-freeze').getAttribute('aria-checked'),
+        });
+        """
+    )
+    assert report["reduced"] is True, "the renderer ignores the OS reduced-motion preference"
+    assert report["frozen"] is False, "reduced motion silently froze the graph"
+    assert report["running"] is True
+    assert report["freeze"] == "false"
 
 
-def test_classic_freeze_switch_keeps_the_status_readout_in_sync() -> None:
-    source = CLASSIC_DASHBOARD.read_text(encoding="utf-8")
-    start = source.index("function graphToggleFreeze(")
-    handler = source[start:source.index("\nfunction graphToggleLabels", start)]
-    assert "GRAPH_ENGINE.freeze(control.checked);graphSetSimulationStatus(control.checked?'Layout frozen':'Adaptive layout',false);return" in handler
+@requires_node
+def test_freeze_switch_keeps_its_state_and_the_renderer_in_sync() -> None:
+    """The Freeze switch is the status readout, so it must never disagree with the physics.
+
+    That includes a replacement renderer: reloading the graph must not quietly thaw (or
+    freeze) a layout behind a switch that still says otherwise.
+    """
+    report = _run_ledger(
+        """
+        await openExplore();
+        const freeze = $('graph-freeze');
+        const read = () => ({
+          checked: freeze.getAttribute('aria-checked'), on: freeze.classList.contains('on'),
+          frozen: ledger.state.graphFrozen,
+          engine: ledger.state.graphEngine.physicsDiagnostics().frozen,
+        });
+        const initial = read();
+        freeze.click();
+        const frozen = read();
+        await ledger.loadGraph({ force: true });
+        const replaced = { ...read(), created: engines.length };
+        freeze.click();
+        finish({ initial, frozen, replaced, thawed: read() });
+        """
+    )
+    live = {"checked": "false", "on": False, "frozen": False, "engine": False}
+    still = {"checked": "true", "on": True, "frozen": True, "engine": True}
+    assert report["initial"] == live
+    assert report["frozen"] == still
+    assert report["replaced"] == {**still, "created": 2}
+    assert report["thawed"] == live
 
 
-def test_leaving_the_graph_view_records_the_pause_as_well_as_applying_it() -> None:
-    source = DASHBOARD.read_text(encoding="utf-8")
-    assert "if(v==='graph')graphEngineResume();else graphEnginePause()" in source
-    pause = source[source.index("function graphEnginePause()"):]
-    pause = pause[: pause.index("\nfunction graphInvalidateData")]
-    assert "GRAPH_ENGINE_PARKED=true" in pause
-    assert "GRAPH_ENGINE_PARKED=false" in pause
+@requires_node
+def test_every_node_view_never_hands_the_complete_scene_to_the_main_thread_engine() -> None:
+    """The complete scene is up to 20k entities: only the all-node worker renderer may draw it.
+
+    If that renderer is unavailable the view must say so, not quietly fall back to the
+    main-thread quality engine and freeze the tab while it lays out every node.
+    """
+    report = _run_ledger(
+        """
+        ledger.state.graphMode = 'full';
+        await openExplore();
+        const unavailable = {
+          created: engines.length, assets: assetLoads.slice(), request: requests[0],
+          message: $('graph-empty').hidden ? null : $('graph-empty').textContent,
+          committed: ledger.state.graphEngine !== null,
+        };
+        const everyEngines = [];
+        window.EngraphisEveryGraph = {
+          create(host, opts) {
+            const engine = new Proxy({}, {
+              get: (_target, name) => {
+                if (name === 'then' || name === 'whenReady') return undefined;
+                if (name === 'apply') return configure => configure(engine);
+                return () => engine;
+              },
+            });
+            everyEngines.push({ host, opts });
+            return engine;
+          },
+        };
+        await ledger.loadGraph({ force: true });
+        finish({ unavailable, available: {
+          quality: engines.length, every: everyEngines.length,
+          renderMode: everyEngines.length ? everyEngines[0].opts.renderMode : null,
+          committed: $('graph-canvas') === (everyEngines[0] || {}).host,
+        } });
+        """
+    )
+    unavailable = report["unavailable"]
+    assert unavailable["assets"] == [True], "Every node never asked for its own renderer"
+    assert "presentation=all" in unavailable["request"]
+    assert unavailable["created"] == 0, "the complete scene reached the main-thread engine"
+    assert unavailable["committed"] is False
+    assert unavailable["message"] == (
+        "Graph unavailable: all-node graph engine asset is unavailable. "
+        "Choose Reload data to try again."
+    )
+    assert report["available"] == {
+        "quality": 0, "every": 1, "renderMode": "all", "committed": True,
+    }
+
+
+@requires_node
+def test_a_graph_asset_failure_is_reported_and_reload_recovers() -> None:
+    """A script that cannot load must leave a visible, actionable message — not a blank pane.
+
+    The failed attempt must not wedge the view either: Reload data starts a fresh load that
+    can succeed.
+    """
+    report = _run_ledger(
+        """
+        let broken = true;
+        assets = () => (broken
+          ? Promise.reject(new Error('could not load /v2-assets/engraphis-graph.js'))
+          : Promise.resolve());
+        await openExplore();
+        const failed = {
+          created: engines.length,
+          message: $('graph-empty').hidden ? null : $('graph-empty').textContent,
+          retry: $('graph-retry').textContent, retryDisabled: $('graph-retry').disabled,
+          busy: $('graph-canvas').getAttribute('aria-busy'),
+        };
+        broken = false;
+        ledger.retryGraphLoad();
+        await ledger.state.graphLoadPromise;
+        finish({ failed, recovered: {
+          created: engines.length, emptyHidden: $('graph-empty').hidden,
+          committed: ledger.state.graphEngine === engines[0].engine,
+          assets: assetLoads.slice(), scenes: requests.length,
+        } });
+        """
+    )
+    assert report["failed"] == {
+        "created": 0,
+        "message": "Graph unavailable: could not load /v2-assets/engraphis-graph.js. "
+                   "Choose Reload data to try again.",
+        "retry": "Reload data",
+        "retryDisabled": False,
+        "busy": "false",
+    }
+    assert report["recovered"] == {
+        "created": 1, "emptyHidden": True, "committed": True,
+        "assets": [False, False], "scenes": 2,
+    }
+
+
+@requires_node
+def test_tuning_sliders_represent_every_layout_preset_exactly() -> None:
+    """A preset's force values must survive the round trip through Ledger's sliders.
+
+    Choosing a layout writes the engine's preset values onto the Repel, Link, Gravity, Size,
+    Text, Line width and Label density sliders, and later loads read them back from there.  A
+    slider whose range cannot hold a preset value is clamped by the browser, so the visible
+    control — and the next renderer — silently runs a different layout than the one chosen.
+    A rescaled slider (the old ``data-graph-scale``) hands the engine a value in the wrong unit.
+    """
+    report = _run_ledger(
+        """
+        await openExplore();
+        const engine = ledger.state.graphEngine;
+        const sliders = () => Object.fromEntries(
+          ledger.GRAPH_TUNING.map(item => [item.key, Number($(item.id).value)]));
+        const results = {};
+        Object.keys(G.PRESETS)
+          .filter(name => Number.isFinite(Number(G.PRESETS[name].gravity)))
+          .forEach(preset => {
+            $('graph-preset').value = preset;
+            ledger.syncGraphTuning(engine.setPreset(preset));
+            const shown = sliders();
+            const sent = ledger.graphTuningEngineSettings();
+            ledger.syncGraphTuning(ledger.graphPresetTuning(preset));
+            results[preset] = { preset: G.PRESETS[preset], shown, sent, restored: sliders() };
+          });
+        finish(results);
+        """
+    )
+    layouts = {"galaxy", "original", "compact", "communities", "radial", "constellation"}
+    assert layouts <= set(report)
+    for preset, values in report.items():
+        assert set(values["shown"]) == {
+            "repel", "link", "gravity", "size", "font", "linkw", "labelDensity",
+        }
+        for key, shown in values["shown"].items():
+            expected = values["preset"][key]
+            assert shown == pytest.approx(expected), (
+                f"the {key} slider shows {shown} for {preset}, the engine runs {expected}"
+            )
+            assert values["sent"][key] == pytest.approx(expected)
+            assert values["restored"][key] == pytest.approx(expected)
 
 
 #: Force-graph resolves each link's ``source``/``target`` from an id to the node object once it
@@ -9962,13 +10584,12 @@ const paintLinks = (scale, links) => {
 
 @requires_node
 def test_relation_labels_are_painted_when_the_labels_box_is_ticked() -> None:
-    """**Labels** turns on two label layers on the classic path; the engine only had one.
+    """**Labels** turns on two label layers: entity names and relation names.
 
-    ``graphToggleLabels`` forwards the checkbox straight to ``setSettings({labels})``, and the
-    classic renderer answers it with *both* entity names and a ``linkCanvasObject`` that paints
-    each meaningful ``link.label``. Implicit ``co_occurs`` links are structural and deliberately
-    excluded. The opt-in engine configured no link painter at all, so relation names silently
-    disappeared under ``?graph-engine=next`` and could only be read by hovering one edge at a
+    Ledger's switch forwards straight to ``setSettings({labels})``, which must answer with
+    *both* entity names and a ``linkCanvasObject`` that paints each meaningful ``link.label``.
+    Implicit ``co_occurs`` links are structural and deliberately excluded.  Without the link
+    painter relation names silently disappear and can only be read by hovering one edge at a
     time.
     """
     report = _run_engine(
@@ -9997,16 +10618,6 @@ def test_relation_labels_are_painted_when_the_labels_box_is_ticked() -> None:
     assert report["ticked"] == ["mentions"], "the Labels checkbox never paints relation names"
     assert report["labelColor"] == "#123456", "relation labels ignore the active theme"
     assert report["zoomedOut"] == []
-
-
-def test_classic_graph_hides_implicit_co_occurrence_edge_labels() -> None:
-    """The Labels toggle keeps meaningful relation names but omits structural co-occurrences."""
-    static = DASHBOARD.read_text(encoding="utf-8")
-    classic = CLASSIC_DASHBOARD.read_text(encoding="utf-8")
-    assert static == classic, "the classic dashboard assets must remain synchronized"
-    label_guard = "function graphShowRelationLabel(label){return !!label&&String(label).toLowerCase()!=='co_occurs'}"
-    assert label_guard in static
-    assert "if(scale<2.4||!graphShowRelationLabel(link.label)||!link.source.x" in static
 
 
 @requires_node
@@ -10047,7 +10658,7 @@ def test_collapsed_cluster_labels_use_the_active_theme_text_colour() -> None:
 
 @requires_node
 def test_node_labels_use_the_active_theme_text_colour() -> None:
-    """Classic labels paint onto the canvas, so near-white is unreadable on light themes."""
+    """Labels paint onto the canvas, so near-white is unreadable on light themes."""
 
     report = _run_engine(
         LAY_OUT
@@ -10709,12 +11320,16 @@ def test_manual_drag_keeps_clock_live_and_nearby_bodies_follow_fixed_source() ->
 
 
 def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
-    """The primary Ledger must not pay for graph assets before Graph opens."""
+    """The primary Ledger must not pay for graph assets before Graph opens.
 
-    markup = PRIMARY_INDEX.read_text(encoding="utf-8")
-    source = PRIMARY_LEDGER.read_text(encoding="utf-8")
-    vendor = PRIMARY_VENDOR.read_text(encoding="utf-8")
-    styles = PRIMARY_CSS.read_text(encoding="utf-8")
+    The loader's order, flags and retry behaviour are executed by the ``LOADER_HARNESS`` tests;
+    this pins the markup, slider defaults and CSP-facing pieces they rely on.
+    """
+
+    markup = LEDGER_INDEX.read_text(encoding="utf-8")
+    source = LEDGER.read_text(encoding="utf-8")
+    vendor = FORCE_GRAPH_VENDOR.read_text(encoding="utf-8")
+    styles = LEDGER_CSS.read_text(encoding="utf-8")
     for asset in ("d3.min.js", "force-graph.min.js", "engraphis-graph.js"):
         assert asset not in markup
     assert 'id="graph-repel" type="range" min="0" max="400" value="100"' in markup
@@ -10728,13 +11343,8 @@ def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
     loader = source[
         loader_start:source.index("function showNotice", loader_start)
     ]
-    d3 = loader.index("'/v2-assets/vendor/d3.min.js?v=20260727-final'")
-    force_graph = loader.index("'/v2-assets/vendor/force-graph.min.js?v=20260727-final'")
-    renderer = loader.index(
-        "'/v2-assets/engraphis-graph.js?v=20260927-unmerged-readiness-3'"
-    )
-    assert d3 < force_graph < renderer
-    assert '/v2-assets/ledger.js?v=20260928-workspace-routing-1' in markup
+    # Cache keys change with every release, so only their presence is pinned here.
+    assert re.search(r'src="/v2-assets/ledger\.js\?v=[A-Za-z0-9._-]+"', markup)
     assert "if (graphAssetsPromise === attempt) releaseGraphAssetsAttempt(attempt)" in loader
     assert "graphAssetsRetry = Math.min(graphAssetsRetry + 1, 10)" in loader
     all_loader = source[source.index("function ensureGraphAllAsset()"):
@@ -10750,18 +11360,18 @@ def test_primary_graph_dependencies_are_lazy_retryable_and_csp_clean() -> None:
 def test_primary_graph_starts_unfrozen_so_the_force_controls_take_effect() -> None:
     """A fresh graph must settle, rather than make every tuning control look inert."""
 
-    assert "graphFrozen: false" in PRIMARY_LEDGER.read_text(encoding="utf-8")
-    assert "state.graphFrozen = false;" in PRIMARY_LEDGER.read_text(encoding="utf-8")
-    assert 'id="graph-freeze" class="graph-switch"' in PRIMARY_INDEX.read_text(encoding="utf-8")
-    freeze_control = PRIMARY_INDEX.read_text(encoding="utf-8").split('id="graph-freeze"', 1)[1]
+    assert "graphFrozen: false" in LEDGER.read_text(encoding="utf-8")
+    assert "state.graphFrozen = false;" in LEDGER.read_text(encoding="utf-8")
+    assert 'id="graph-freeze" class="graph-switch"' in LEDGER_INDEX.read_text(encoding="utf-8")
+    freeze_control = LEDGER_INDEX.read_text(encoding="utf-8").split('id="graph-freeze"', 1)[1]
     assert 'aria-checked="false"' in freeze_control
 
 
 def test_primary_dashboard_has_no_visible_notice_popup() -> None:
     """Action feedback must not cover the dashboard with a dismissible toast."""
 
-    markup = PRIMARY_INDEX.read_text(encoding="utf-8")
-    source = PRIMARY_LEDGER.read_text(encoding="utf-8")
+    markup = LEDGER_INDEX.read_text(encoding="utf-8")
+    source = LEDGER.read_text(encoding="utf-8")
     styles = (ROOT / "engraphis" / "dashboard_assets" / "ledger.css").read_text(encoding="utf-8")
     assert 'id="notice"' not in markup
     assert ">Dismiss<" not in markup
@@ -10774,7 +11384,7 @@ def test_primary_dashboard_has_no_visible_notice_popup() -> None:
 def test_primary_layout_choices_resume_a_frozen_graph_including_full_mode() -> None:
     """An explicit layout choice must visibly apply rather than merely change its selected chip."""
 
-    source = PRIMARY_LEDGER.read_text(encoding="utf-8")
+    source = LEDGER.read_text(encoding="utf-8")
     handler = source.split("all('[data-graph-preset-choice]')", 1)[1].split(
         "all('[data-graph-style-choice]')", 1
     )[0]
@@ -10916,7 +11526,7 @@ def test_appearance_only_changes_do_not_restart_the_layout() -> None:
     ``visible()`` allocates fresh arrays on every call, and force-graph treats any ``graphData``
     call as a data update: it re-copies the nodes and d3 resets the simulation alpha to 1.  So
     every appearance-only setter threw the settled layout away and made the whole graph move.
-    The classic renderer guards the same seed with ``if(dataChanged)FG.graphData(data)``.
+    The engine may only reseed force-graph when the visible set really changed.
     """
     report = _run_engine(
         """
@@ -10957,9 +11567,9 @@ def test_appearance_only_changes_do_not_restart_the_layout() -> None:
 def test_simulation_time_is_bounded_on_a_large_graph() -> None:
     """force-graph's default cooldown is 15 seconds; nothing here was overriding it.
 
-    The classic path caps a large graph at 1.1s / 80 ticks precisely because running the layout
-    — and therefore repainting every node and link — for the full default window is what makes a
-    big store feel broken on load and after every reheat.
+    A large graph is capped at 1.1s / 80 ticks because running the layout — and therefore
+    repainting every node and link — for the full default window is what makes a big store feel
+    broken on load and after every reheat.
     """
     report = _run_engine(
         """
@@ -10970,7 +11580,7 @@ def test_simulation_time_is_bounded_on_a_large_graph() -> None:
           time: store.cooldownTime, ticks: store.cooldownTicks, warmup: store.warmupTicks,
           alpha: store.d3AlphaDecay, velocity: store.d3VelocityDecay,
         };
-        // 3001 entities / 3000 relations — past the classic renderer's 600-node signal.
+        // 3001 entities / 3000 relations — well past the 600-node large-graph signal.
         api.setData(chain(3000));
         const big = {
           time: store.cooldownTime, ticks: store.cooldownTicks, warmup: store.warmupTicks,
@@ -10991,7 +11601,7 @@ def test_simulation_time_is_bounded_on_a_large_graph() -> None:
     assert report["big"]["time"] == 1100
     assert report["big"]["ticks"] == 80
     assert report["big"]["warmup"] == 18
-    # A large graph also settles harder, exactly as GPERF.large does on the classic path.
+    # A large graph also settles harder.
     assert report["big"]["alpha"] > report["small"]["alpha"]
     assert report["big"]["velocity"] > report["small"]["velocity"]
     # Freeze, not the OS visual-motion preference, is the explicit static-layout control.
@@ -11000,17 +11610,17 @@ def test_simulation_time_is_bounded_on_a_large_graph() -> None:
 
 
 @requires_node
-def test_physics_sliders_reheat_the_simulation_the_way_the_classic_renderer_does() -> None:
+def test_physics_sliders_reheat_the_simulation_but_paint_sliders_do_not() -> None:
     """Installing a new force on a settled graph moves nothing without a reheat.
 
-    ``graphSet`` (dashboard.js) routes Repel/Link/Gravity/Size/Font/Link-width/Label-density
-    through ``setSettings`` under ``?graph-engine=next``.  The classic branch of that same
-    function treats ``repel|link|gravity|size`` as *layout* changes: it re-applies the forces
-    and then reheats unless the user explicitly froze the graph.  The engine's ``applyForces()``
-    only swaps the charge/link/forceX-forceY/collide values into the running simulation — and a
-    settled graph sits at alpha~0 — so without the reheat those four sliders are inert until
-    the user finds the Reheat button.  The paint-only settings must *not* reheat: restarting
-    the layout because a label got bigger throws away the arrangement the user is reading.
+    Ledger's Repel/Link/Gravity/Size/Text/Line-width/Label-density sliders each forward their
+    value through ``setSettings``.  ``repel|link|gravity|size`` are *layout* changes: the forces
+    are re-applied and the simulation reheated unless the user explicitly froze the graph.  The
+    engine's ``applyForces()`` only swaps the charge/link/forceX-forceY/collide values into the
+    running simulation — and a settled graph sits at alpha~0 — so without the reheat those four
+    sliders are inert until the user finds the Reheat button.  The paint-only settings must
+    *not* reheat: restarting the layout because a label got bigger throws away the arrangement
+    the user is reading.
     """
     report = _run_engine(
         """
@@ -11042,7 +11652,7 @@ def test_physics_sliders_reheat_the_simulation_the_way_the_classic_renderer_does
         emit({ layout, paint, reducedMotion });
         """
     )
-    # The four sliders the classic renderer calls a layout change, plus the preset itself.
+    # The four sliders that change the layout, plus the preset itself.
     assert report["layout"] == {
         "repel": 1, "link": 1, "gravity": 1, "size": 1, "mode": 1
     }, "a physics slider installed new forces on a settled graph and nothing moved"
@@ -11470,11 +12080,11 @@ def test_full_graph_beyond_responsive_force_budget_is_centred_and_responds_to_gr
 
 @requires_node
 def test_curves_arrows_and_relation_labels_are_dropped_on_a_dense_graph() -> None:
-    """Three per-edge costs the classic path turns off past ``GPERF.dense`` (links > 1500).
+    """Three per-edge costs are turned off past the dense-graph cutoff (more than 1500 links).
 
     A curved link is a quadratic bezier instead of a straight line, an arrowhead is a filled
     triangle, and a relation label is a text layout — each per relation, each every frame.  At
-    this density they are unreadable anyway, so the classic renderer pays for none of them.
+    this density they are unreadable anyway, so the engine pays for none of them.
     """
     report = _run_engine(
         LAY_OUT
@@ -11500,7 +12110,7 @@ def test_curves_arrows_and_relation_labels_are_dropped_on_a_dense_graph() -> Non
         emit({ atLimit, overLimit, denseUnhighlighted, denseHighlighted });
         """
     )
-    # 1500 links is the classic threshold itself, so nothing is dropped yet.
+    # 1500 links is the threshold itself, so nothing is dropped yet.
     assert report["atLimit"]["curve"] == 0.12
     assert report["atLimit"]["arrow"] == 0.625
     assert report["overLimit"]["curve"] == 0
@@ -11527,13 +12137,6 @@ globalThis.d3 = {
 @requires_node
 def test_layout_presets_use_distinct_force_geometry() -> None:
     """Each layout button must install a visibly different arrangement strategy."""
-
-    for dashboard in (DASHBOARD, CLASSIC_DASHBOARD):
-        classic_forces = dashboard.read_text(encoding="utf-8")
-        forces = classic_forces[classic_forces.index("function graphApplyForces()") : classic_forces.index("function graphSetHighlight(")]
-        assert "if(mode==='communities')" in forces
-        assert "else if(mode==='radial'&&d3.forceRadial)" in forces
-        assert "else if(mode==='constellation')" in forces
 
     report = _run_engine(
         """
@@ -11592,14 +12195,13 @@ def test_layout_presets_use_distinct_force_geometry() -> None:
 
 
 @requires_node
-def test_collision_runs_one_pass_on_a_large_graph_like_the_classic_renderer() -> None:
+def test_collision_runs_one_pass_on_a_large_graph() -> None:
     """``forceCollide().iterations(2)`` is a second full quadtree traversal per node per tick.
 
-    ``graphApplyForces()`` on the classic path spends it only when it is affordable
-    (``.iterations(GPERF.large?1:2)``).  The opt-in engine computes the same ``large`` signal for
-    its cooldown and alpha-decay constants but was pinning two iterations regardless, so the one
-    case where the extra pass hurts most — the initial layout and every reheat of a big store —
-    was the case that paid for it twice over.
+    It is only worth spending while it is affordable.  The engine computes a ``large`` signal
+    for its cooldown and alpha-decay constants but was pinning two iterations regardless, so the
+    one case where the extra pass hurts most — the initial layout and every reheat of a big
+    store — was the case that paid for it twice over.
     """
     report = _run_engine(
         D3_STUB
@@ -11610,7 +12212,7 @@ def test_collision_runs_one_pass_on_a_large_graph_like_the_classic_renderer() ->
         api.setData(chain(40));
         const small = collide.iterations;
 
-        // 601 entities / 600 relations — one past the classic renderer's 600-node cutoff.
+        // 601 entities / 600 relations — one past the 600-node large-graph cutoff.
         api.setData(chain(600));
         const big = collide.iterations;
 
@@ -11658,10 +12260,10 @@ const paintNodes = () => {
 def test_per_node_glow_is_dropped_on_a_large_graph(style: str) -> None:
     """Every ``rich`` node was getting a bloom or a gradient on every frame, at any size.
 
-    The classic renderer gates all three of them on ``!GPERF.large`` — the galaxy halo, the solar
-    corona and its sphere shading. A radial gradient is a fresh object per node; at the >600-node
-    cutoff that is hundreds rebuilt per tick, on top of the layout, which is what made a dense
-    workspace crawl even after the other large-graph optimisations kicked in.
+    All three are gated on the large-graph signal — the galaxy halo, the solar corona and its
+    sphere shading. A radial gradient is a fresh object per node; at the >600-node cutoff that
+    is hundreds rebuilt per tick, on top of the layout, which is what made a dense workspace
+    crawl even after the other large-graph optimisations kicked in.
 
     ``fills`` is the control: the nodes are still being drawn, so a zero glow count means the
     effect was skipped, not that the paint never ran.
@@ -11915,206 +12517,9 @@ def test_all_metal_styles_keep_the_large_graph_canvas_path_cheap(style: str) -> 
     assert report["blurs"] == 0, f"{style} creates per-node blur in a large graph"
 
 
-def test_legacy_classic_canvas_uses_the_same_nonwhite_material_profiles_as_ledger() -> None:
-    """Classic's no-flag renderer is distinct from Ledger's engine and must not drift.
-
-    The user can switch between Ledger and `/classic`, while Classic also retains a direct
-    force-graph path for installations that do not opt into the newer engine. Both copies need
-    the material profile rather than Classic silently returning to white-centred flat discs.
-    """
-    def material_block(path: Path) -> str:
-        source = path.read_text(encoding="utf-8")
-        start = source.index("function graphRgb(")
-        return source[start:source.index("function graphApplyStyleChrome()", start)]
-
-    static = material_block(DASHBOARD)
-    classic = material_block(CLASSIC_DASHBOARD)
-    assert static == classic, "the classic dashboard material painter drifted from its fallback"
-    assert "function graphMaterialProfile(style,col)" in classic
-    assert "function graphPaintMaterialSurface(" in classic
-    assert "function graphMaterialTier(" in classic
-    assert "function graphMaterialSprite(" in classic
-    assert "graphMaterialProfile('cyber',col)" in classic
-    assert "graphMaterialProfile('galaxy',col)" in classic
-    assert "graphMaterialProfile('solar'" in classic
-    assert "graphMaterialProfile('classic',col)" in classic
-    assert "GRAPH_MATERIAL_CACHE_LIMIT=192" in classic
-    assert "ctx.drawImage(sprite.canvas" in classic
-    assert "#eafcff" not in classic
-    assert "rgba(255,255,255" not in classic
-    assert "graphIridescent(" not in classic
-    for marker in (
-        "family:'iridescent-pvd'",
-        "family:'anodized-alloy'",
-        "family:'brushed-copper'",
-        "family:'satin-gunmetal'",
-    ):
-        assert marker in classic
-        assert marker.replace(":'", ": '") in ASSET.read_text(encoding="utf-8")
-    # The fallback selects the gradient-free signature recipe before building/painting a
-    # sprite, so hundreds of nodes keep their material identity without per-node shaders.
-    paint = classic[
-        classic.index("function graphPaintMaterialSurface("):
-        classic.index("function graphStyleBackground(")
-    ]
-    assert "graphMaterialTier(screenRadius,large)" in paint
-    assert "paintDirect&&tier==='full'&&screenRadius>GRAPH_MATERIAL_RADIUS.full" in paint
-    assert "directMaterial=node.id===GHILITE||node.rank===0" in classic
-    full_classic = CLASSIC_DASHBOARD.read_text(encoding="utf-8")
-    style_node = full_classic[full_classic.index("function graphStyleNode("):full_classic.index("function graphApplyStyleChrome()")]
-    assert "graphPaintMaterialSurface(ctx,node.x,node.y,r,scale,profile,GPERF.large,directMaterial)" in style_node
-    assert "graphPaintMaterialSurface(ctx,node.x,node.y,r,scale,profile,GPERF.large)" not in style_node
-    assert classic.count("if(tier==='signature')") >= 4
-
-
-def test_legacy_node_geometry_is_bounded_like_ledger_for_all_styles() -> None:
-    """Classic must not resurrect the degree-squared visual blow-up behind the style switch.
-
-    The material painter is shared across four styles, so a geometry regression here affects
-    every theme even when the newer Ledger engine is correct.  Keep the two legacy copies in
-    lockstep and pin the compact radius contract: normalized degree emphasis, a 0.25 minimum
-    (a low-evidence entity must stay hit-testable instead of collapsing below a pixel), and a
-    size-slider-relative 1.1 maximum.
-    """
-    classic = CLASSIC_DASHBOARD.read_text(encoding="utf-8")
-    static = DASHBOARD.read_text(encoding="utf-8")
-    helper_start = classic.index("function graphNodeRadius(")
-    helper_end = classic.index("const ETYPE_TOKEN", helper_start)
-    assert static[static.index("function graphNodeRadius("):static.index("const ETYPE_TOKEN", static.index("function graphNodeRadius("))] == classic[helper_start:helper_end]
-    assert "const maxDegree=Math.max(1,...nodes.map(node=>node.degree||0));" in classic
-    assert "graphNodeRadius(node,window.GSET.size,(node.degree||0)/maxDegree)" in classic
-    assert "return Math.max(.25,Math.min(size*1.1,radius));" in classic
-    assert "Math.sqrt(node.val)" not in classic
-    assert "Math.sqrt(node.val)" not in static
-
-
-
-def test_classic_dashboard_uses_the_every_node_asset_not_the_removed_all_asset() -> None:
-    """Classic may opt into Every-node, but must not reference the removed asset."""
-    source = CLASSIC_DASHBOARD.read_text(encoding="utf-8")
-    assert "loadAllGraphEngine" in source
-    assert "ALL_GRAPH_ENGINE_LOADING" in source
-    assert "EngraphisEveryGraph" in source
-    assert "engraphis-graph-every.js" in source
-    assert "EngraphisAllGraph" not in source
-    assert "engraphis-graph-all.js" not in source
-
-
-def test_classic_graph_controls_have_no_freeze_or_orbit_pause_in_full_mode() -> None:
-    """Full-mode quality-only: Freeze and orbit-pause controls are hidden; Relation flow remains.
-
-    Classic never enters All mode, so this is a belt-and-braces guard: if the
-    All-mode concept ever leaks into Classic, the controls must not appear.
-    """
-    source = CLASSIC_DASHBOARD.read_text(encoding="utf-8")
-    # Relation flow toggle must remain available in Classic.
-    assert "graph-show-iso" in source or "Show unlinked" in source
-
-
-def test_classic_gravity_slider_max_covers_every_preset_value() -> None:
-    """The classic gravity slider's ``max`` must be at least the largest preset value.
-
-    The classic dashboard exposes a ``data-graph-setting="gravity"`` range input and a
-    ``GRAPH_PRESETS`` table; ``graphApplyPreset`` writes the preset value into both
-    ``window.GSET`` and the input's ``value``. If the slider's ``max`` is below a preset
-    value, the browser silently clamps the input while the engine receives the full
-    preset value, so the visible slider no longer represents the live state. The
-    ``communities`` preset (``gravity: 48``) was the first to be misrepresented when the
-    slider's ``max`` was 40.
-    """
-    preset_source = CLASSIC_DASHBOARD.read_text(encoding="utf-8")
-    preset_match = re.search(
-        r"const GRAPH_PRESETS\s*=\s*\{(?P<body>.*?)\n\};",
-        preset_source,
-        re.DOTALL,
-    )
-    assert preset_match, "classic GRAPH_PRESETS table not found"
-    preset_entries = re.findall(
-        r"(\w+):\{[^}]*?gravity:([0-9.]+)[^}]*?\}",
-        preset_match.group("body"),
-    )
-    gravity_by_preset = {name: float(value) for name, value in preset_entries}
-    assert gravity_by_preset, "no gravity values parsed from GRAPH_PRESETS"
-    max_preset_gravity = max(gravity_by_preset.values())
-
-    for label, path in (("classic", ROOT / "engraphis" / "classic_assets" / "index.html"),
-                        ("static", INDEX)):
-        markup = path.read_text(encoding="utf-8")
-        slider_match = re.search(
-            r'<input[^>]*data-graph-setting="gravity"[^>]*>',
-            markup,
-        )
-        assert slider_match, f"gravity slider not found in {label} index.html"
-        max_match = re.search(r'\bmax="([0-9.]+)"', slider_match.group(0))
-        assert max_match, (
-            f"{label} gravity slider has no max= attribute: {slider_match.group(0)!r}"
-        )
-        slider_max = float(max_match.group(1))
-        assert slider_max >= max_preset_gravity, (
-            f"{label} gravity slider max={slider_max} is below the highest "
-            f"preset gravity ({max_preset_gravity}); the browser would clamp "
-            "the input away from its preset value."
-        )
-
-
-def test_classic_linkw_slider_does_not_scale_the_engine_value() -> None:
-    """The classic Line-width slider must round-trip ``GRAPH_PRESETS.<name>.linkw`` directly.
-
-    The classic dashboard reads ``GRAPH_PRESETS[*].linkw`` (raw, e.g. ``0.7``) and writes
-    the slider's ``value`` to the engine. The earlier ``data-graph-scale="10"`` attribute
-    multiplied the slider's display range by 10 (``min="2" max="45"``) but the read-back
-    path kept the scaled value, so picking the ``communities`` preset put ``linkw=7.2`` into
-    the engine and rendered edges ten times thicker than the preset intended. The Ledger
-    uses the raw range (``min="0.1" max="2"``) and the classic dashboard now matches it:
-    the slider's ``max`` must be at least the largest preset value, with no
-    ``data-graph-scale`` attribute amplifying the engine value.
-    """
-    preset_source = CLASSIC_DASHBOARD.read_text(encoding="utf-8")
-    preset_match = re.search(
-        r"const GRAPH_PRESETS\s*=\s*\{(?P<body>.*?)\n\};",
-        preset_source,
-        re.DOTALL,
-    )
-    assert preset_match, "classic GRAPH_PRESETS table not found"
-    preset_entries = re.findall(
-        r"(\w+):\{[^}]*?linkw:([0-9.]+)[^}]*?\}",
-        preset_match.group("body"),
-    )
-    linkw_by_preset = {name: float(value) for name, value in preset_entries}
-    assert linkw_by_preset, "no linkw values parsed from GRAPH_PRESETS"
-    max_preset_linkw = max(linkw_by_preset.values())
-
-    for label, path in (("classic", ROOT / "engraphis" / "classic_assets" / "index.html"),
-                        ("static", INDEX)):
-        markup = path.read_text(encoding="utf-8")
-        slider_match = re.search(
-            r'<input[^>]*data-graph-setting="linkw"[^>]*>',
-            markup,
-        )
-        assert slider_match, f"linkw slider not found in {label} index.html"
-        slider_tag = slider_match.group(0)
-        max_match = re.search(r'\bmax="([0-9.]+)"', slider_tag)
-        assert max_match, f"{label} linkw slider has no max= attribute"
-        slider_max = float(max_match.group(1))
-        assert slider_max >= max_preset_linkw, (
-            f"{label} linkw slider max={slider_max} is below the highest "
-            f"preset linkw ({max_preset_linkw}); the browser would clamp "
-            "the input away from its preset value."
-        )
-        # ``data-graph-scale`` rewrites the displayed value into a different unit. The
-        # Ledger ships the raw range; mirror that — the slider's raw value must equal
-        # the engine's linkw, or the engine renders edges at the wrong thickness.
-        assert "data-graph-scale" not in slider_tag, (
-            f"{label} linkw slider still carries data-graph-scale, which causes "
-            "graphSet() to send a 10x-scaled value to the engine. Remove the "
-            "attribute and ship the raw value range so the engine gets the preset's "
-            "intended thickness."
-        )
-
-
 def test_ledger_recovery_copy_names_reload_data_and_real_filters_only() -> None:
     """Recovery UI must say 'Reload data' and name only real, actionable filters."""
-    source = PRIMARY_LEDGER.read_text(encoding="utf-8")
+    source = LEDGER.read_text(encoding="utf-8")
     assert "Reload data" in source
     assert "reload" in source.lower()
     # Recovery must not reference phantom filters or placeholder actions.
@@ -12128,7 +12533,7 @@ def test_ledger_renderer_transition_is_transactional_with_candidate_staging() ->
     Failure preserves the prior renderer and mode; success destroys the old one
     only after the candidate is live.
     """
-    source = PRIMARY_LEDGER.read_text(encoding="utf-8")
+    source = LEDGER.read_text(encoding="utf-8")
     assert "graph-canvas-candidate" in source
     assert "candidateEngine" in source
     assert "candidateHost" in source
@@ -12141,7 +12546,7 @@ def test_ledger_renderer_transition_is_transactional_with_candidate_staging() ->
 
 def test_ledger_toggle_labels_are_fixed_with_state_attributes() -> None:
     """Toggle buttons keep fixed visible labels; ARIA state carries their value."""
-    markup = PRIMARY_INDEX.read_text(encoding="utf-8")
+    markup = LEDGER_INDEX.read_text(encoding="utf-8")
     assert 'id="graph-freeze"' in markup
     freeze_section = markup.split('id="graph-freeze"', 1)[1][:500]
     assert 'role="switch"' in freeze_section
@@ -12155,7 +12560,7 @@ def test_force_graph_and_engine_loaders_support_retry_after_failure() -> None:
     stalled browser request. A successful second load after a first failure must
     reach the render loop.
     """
-    source = PRIMARY_LEDGER.read_text(encoding="utf-8")
+    source = LEDGER.read_text(encoding="utf-8")
     loader = source[source.index("function ensureGraphAssets"):
                     source.index("function showNotice",
                                  source.index("function ensureGraphAssets"))]
@@ -12167,81 +12572,197 @@ def test_force_graph_and_engine_loaders_support_retry_after_failure() -> None:
     assert "graphAssetSource" in loader or "retry=" in loader
 
 
-
-def _community_palettes(source: str) -> dict:
-    """Parse a ``COMMUNITY_PALS`` literal out of either renderer."""
-    # Anchor on the declaration: both files also name the table in prose comments.
-    match = re.search(r"COMMUNITY_PALS\s*=\s*\{", source)
-    assert match is not None, "COMMUNITY_PALS is not declared here"
-    block = source[match.end():source.index("};", match.end())]
-    return {
-        name: re.findall(r"#[0-9a-fA-F]{3,8}", body)
-        for name, body in re.findall(r"(\w+)\s*:\s*\[([^\]]*)\]", block)
-    }
-
-
+@requires_node
 def test_community_colours_match_the_dashboard_and_the_legend_swatches() -> None:
-    """The cluster legend is painted from CSS, so palette *order* is a contract, not a taste.
+    """The legend must describe the colours the canvas actually paints.
 
-    ``graphRenderLegend`` sorts communities by size and gives the largest a
-    ``.graph-cluster-0`` swatch, while the canvas colours that same community with palette slot
-    0.  The swatch colours live in ``dashboard.css`` and encode the Cyber palette — the default
-    style — so a renderer whose slot 0 is a different colour makes the legend describe cluster 1
-    with cluster 2's colour, on the default style, for every workspace.
+    A canvas cannot explain itself, so the cluster legend is how anyone matches a colour to a
+    group — and a legend whose swatch order or palette drifts from the renderer describes one
+    cluster with another's colour.  Ledger therefore draws its swatches from the engine's own
+    report of what each colour means: clusters largest first, "Cluster 1" for the largest, each
+    with the colour its nodes wear on the canvas.
     """
-    engine = _community_palettes(ASSET.read_text(encoding="utf-8"))
-    classic = _community_palettes(DASHBOARD.read_text(encoding="utf-8"))
-    assert engine, "COMMUNITY_PALS could not be parsed out of the engine"
-    assert engine == classic, "the opt-in renderer paints communities a different colour"
-
-    swatches = dict(
-        re.findall(r"\.graph-cluster-(\d+)\{background:(#[0-9a-fA-F]{3,8})\}",
-                   CSS.read_text(encoding="utf-8"))
+    report = _run_ledger(
+        """
+        // Three separate clusters of 3, 2 and 1 entities, with server ids in no useful order.
+        scene = {
+          nodes: [
+            { id: 'x1', degree: 1, community_id: 7 }, { id: 'x2', degree: 2, community_id: 7 },
+            { id: 'x3', degree: 1, community_id: 7 },
+            { id: 'y1', degree: 1, community_id: 'topic-b' },
+            { id: 'y2', degree: 1, community_id: 'topic-b' },
+            { id: 'z', degree: 0, community_id: 2 },
+          ],
+          edges: [
+            { source: 'x1', target: 'x2' }, { source: 'x2', target: 'x3' },
+            { source: 'y1', target: 'y2' },
+          ],
+        };
+        await openExplore();
+        const painted = {};
+        store.graphData.nodes.forEach(node => {
+          (painted[node.community] = painted[node.community] || []).push(node.color);
+        });
+        finish({
+          shown: !$('graph-legend').hidden, title: $('graph-legend-title').textContent,
+          rows: $('graph-legend-list').children.map(row => ({
+            fill: row.children[0].children[0].getAttribute('fill'),
+            label: row.children[1].textContent, count: Number(row.children[2].textContent),
+          })),
+          painted: Object.values(painted).map(colours => [colours.length, [...new Set(colours)]]),
+        });
+        """
     )
-    assert swatches, "the cluster legend swatches are missing from the stylesheet"
-    for index, colour in sorted(swatches.items()):
-        assert engine["cyber"][int(index)].lower() == colour.lower(), (
-            f"legend swatch {index} does not match the canvas colour for that cluster"
+    assert report["shown"] is True
+    assert report["title"] == "Clusters"
+    rows = report["rows"]
+    assert [row["label"] for row in rows] == ["Cluster 1", "Cluster 2", "Cluster 3"]
+    assert [row["count"] for row in rows] == [3, 2, 1]
+    painted = {size: colours for size, colours in report["painted"]}
+    for row in rows:
+        assert painted[row["count"]] == [row["fill"]], (
+            f"{row['label']}'s swatch does not match the canvas colour of its nodes"
         )
+    assert len({row["fill"] for row in rows}) == 3
 
 
 # ── CSP, styling and lifecycle ──────────────────────────────────────────────────────
 
 
+@requires_node
 def test_pane_backgrounds_are_owned_by_css_not_by_the_asset() -> None:
-    """``style-src-attr 'none'`` forbids writing these onto the element."""
-    css = CSS.read_text(encoding="utf-8")
+    """``style-src-attr 'none'`` forbids writing these onto the element.
+
+    The engine only names its style on the host (``data-graph-style``); ``ledger.css`` owns
+    every style's pane background.
+    """
+    css = LEDGER_CSS.read_text(encoding="utf-8")
     source = ASSET.read_text(encoding="utf-8")
-    for style in ("galaxy", "solar", "cyber"):
-        assert f'#graph-net[data-graph-style="{style}"]' in css
-    assert "data-graph-style" in source
+    host = re.search(r'<div id="graph-canvas"[^>]*>', LEDGER_INDEX.read_text(encoding="utf-8"))
+    assert host and 'class="graph-canvas"' in host.group(0)
+    report = _run_engine(
+        """
+        const api = G.create(el, { reducedMotion: () => true });
+        const named = Object.keys(G.STYLE_LAYERS).map(style => {
+          api.setStyle(style);
+          return [style, el.getAttribute('data-graph-style')];
+        });
+        emit({ named, inline: el.getAttribute('style') });
+        """
+    )
+    assert report["inline"] is None, "the engine wrote an inline style onto its host"
+    for style, attribute in report["named"]:
+        assert attribute == style
+        rule = re.search(r'\.graph-canvas\[data-graph-style="%s"\]\s*\{([^}]*)\}' % style, css)
+        assert rule and "background" in rule.group(1), f"no CSS-owned pane background for {style}"
+    # The all-node renderer names its style the same way, so the same rules apply to it.
+    assert "element.setAttribute('data-graph-style', state.styleName)" in (
+        EVERY_ASSET.read_text(encoding="utf-8")
+    )
     # Authored gradients belong in CSS. Export may parse computed CSS, but must
     # not duplicate its gradient definitions in JavaScript string literals.
     assert re.search(r"""["'`]\s*(?:linear|radial)-gradient\s*\(""", source) is None
 
 
+@requires_node
 def test_hover_cursor_class_the_asset_toggles_exists_in_css() -> None:
-    css = CSS.read_text(encoding="utf-8")
-    source = ASSET.read_text(encoding="utf-8")
-    assert "engraphis-graph-node-hover" in source
-    assert ".engraphis-graph-node-hover" in css
+    """Hovering a node toggles a class, and ``ledger.css`` must turn it into a pointer."""
+    report = _run_engine(
+        """
+        const toggled = [];
+        el.classList.toggle = (name, on) => toggled.push([name, on]);
+        const api = G.create(el, { reducedMotion: () => true });
+        api.setData(chain(1));
+        store.onNodeHover({ id: 'n0' });
+        store.onNodeHover(null);
+        emit({ toggled });
+        """
+    )
+    assert report["toggled"] == [
+        ["engraphis-graph-node-hover", True], ["engraphis-graph-node-hover", False],
+    ]
+    css = LEDGER_CSS.read_text(encoding="utf-8")
+    every = EVERY_ASSET.read_text(encoding="utf-8")
+    assert "classList.toggle('engraphis-all-node-hover'" in every
+    for name in ("engraphis-graph-node-hover", "engraphis-all-node-hover"):
+        assert re.search(r"\.graph-canvas\.%s\s*\{\s*cursor:\s*pointer;" % name, css), name
 
 
 def test_csp_gate_covers_the_graph_asset() -> None:
-    from scripts.externalize_dashboard_assets import EXTRA_SCRIPTS, check
+    """The graph scripts are inside the strict-CSP release gate, and stay lazily loaded."""
+    from scripts import externalize_dashboard_assets as gate
 
-    assert ASSET in EXTRA_SCRIPTS, "the graph engine must be inside the CSP drift gate"
-    check()
+    scanned = set(gate._first_party_scripts())
+    for script in (ASSET, EVERY_ASSET, EVERY_WORKER, SPACETIME_ASSET, GRAPH_LIFECYCLE, LEDGER):
+        assert script in scanned, f"{script.name} is outside the CSP drift gate"
+    for script in (ASSET, EVERY_ASSET, SPACETIME_ASSET, FORCE_GRAPH_VENDOR):
+        reference = "/v2-assets/" + script.relative_to(ASSETS).as_posix()
+        assert reference in gate.DEFERRED_SCRIPTS, f"{reference} may be loaded eagerly"
+    gate.check()
 
 
+@requires_node
 def test_engine_exposes_a_teardown_and_the_dashboard_drives_it() -> None:
-    source = ASSET.read_text(encoding="utf-8")
-    dashboard = DASHBOARD.read_text(encoding="utf-8")
-    for member in ("api.destroy", "api.pause", "api.resume", "api.resize"):
-        assert member in source
-    # force-graph keeps a rAF alive while resumed; leaving the view must park it.
-    assert "if(v==='graph')graphEngineResume();else graphEnginePause()" in dashboard
-    assert "GRAPH_ENGINE.destroy()" in dashboard
+    """Ledger owns every renderer's lifetime, so a replaced one must not keep running.
+
+    force-graph keeps a rAF alive and holds its canvas until it is destroyed.  Ledger stages a
+    replacement in a hidden candidate host, commits it, and only then destroys the renderer it
+    replaced, emptying the old host.  A replacement that throws is destroyed instead, and the
+    committed renderer survives — live and unfrozen — rather than leaving a blank pane.
+    """
+    report = _run_ledger(
+        """
+        await openExplore();
+        const first = ledger.state.graphEngine;
+        const firstHost = $('graph-canvas');
+        // What force-graph mounts into the host it is given.
+        firstHost.append(makeElement('div', { class: 'force-graph-container' }));
+        await ledger.loadGraph({ force: true });
+        const second = ledger.state.graphEngine;
+        const replaced = {
+          distinct: first !== second, firstDestroyed: first.destroyed(),
+          secondDestroyed: second.destroyed(), firstOverlayDestroyed: overlays[0].destroyed,
+          firstHostAttached: firstHost.parentNode !== null,
+          firstHostEmptied: firstHost.children.length === 0,
+          canvas: $('graph-canvas') === engines[1].host,
+        };
+        const createOverlay = window.EngraphisSpacetime.create;
+        window.EngraphisSpacetime.create = () => { throw new Error('renderer exploded'); };
+        await ledger.loadGraph({ force: true });
+        window.EngraphisSpacetime.create = createOverlay;
+        const candidate = engines[2];
+        const failed = {
+          kept: ledger.state.graphEngine === second, secondDestroyed: second.destroyed(),
+          candidateDestroyed: candidate.engine.destroyed(),
+          candidateAttached: candidate.host.parentNode !== null,
+          canvas: $('graph-canvas') === engines[1].host,
+          frozen: second.physicsDiagnostics().frozen, running: second.physicsDiagnostics().running,
+          message: $('graph-empty').hidden ? null : $('graph-empty').textContent,
+        };
+        ledger.graphLifecycle.clear();
+        finish({
+          replaced, failed, cleared: second.destroyed(),
+          api: ['destroy', 'pause', 'resume', 'resize'].map(name => typeof first[name]),
+        });
+        """
+    )
+    assert report["api"] == ["function"] * 4
+    assert report["replaced"] == {
+        "distinct": True, "firstDestroyed": True, "secondDestroyed": False,
+        "firstOverlayDestroyed": True, "firstHostAttached": False, "firstHostEmptied": True,
+        "canvas": True,
+    }
+    assert report["failed"] == {
+        "kept": True, "secondDestroyed": False, "candidateDestroyed": True,
+        "candidateAttached": False, "canvas": True, "frozen": False, "running": True,
+        "message": "Graph unavailable: renderer exploded. Choose Reload data to try again.",
+    }
+    # A workspace switch clears the lifecycle, which destroys whatever it still tracks.
+    assert report["cleared"] is True
+    source = LEDGER.read_text(encoding="utf-8")
+    start = source.index("async function selectWorkspace(")
+    end = re.compile(r"\n  (?:async )?function ").search(source, start + 1).start()
+    assert "graphLifecycle.clear();" in source[start:end]
 
 
 def test_manual_drag_controller_detaches_with_the_graph() -> None:
@@ -12278,8 +12799,7 @@ def test_manual_drag_controller_detaches_with_the_graph() -> None:
 def test_graph_physics_updates_are_bounded_and_coalesced() -> None:
     """Explicit slider changes coalesce while pointer placement has no wake mechanism."""
     source = ASSET.read_text(encoding="utf-8")
-    vendor = VENDOR.read_text(encoding="utf-8")
-    primary_vendor = PRIMARY_VENDOR.read_text(encoding="utf-8")
+    vendor = FORCE_GRAPH_VENDOR.read_text(encoding="utf-8")
     assert "const MIN_NODE_SPEED = 8;" in source
     assert "const MAX_NODE_SPEED = 48;" in source
     assert "function makeVelocityGuardForce()" in source
@@ -12299,15 +12819,6 @@ def test_graph_physics_updates_are_bounded_and_coalesced() -> None:
     assert "DRAG_ALPHA_TARGET" not in source
     assert "DRAG_SETTLE_DELAY_MS" not in source
     assert "d3AlphaTarget" in vendor and "resetCountdown" in vendor
-    assert "d3AlphaTarget" in primary_vendor and "resetCountdown" in primary_vendor
-
-
-def test_reduced_motion_is_honoured_by_the_opt_in_renderer() -> None:
-    source = ASSET.read_text(encoding="utf-8")
-    dashboard = DASHBOARD.read_text(encoding="utf-8")
-    assert "prefers-reduced-motion: reduce" in source
-    assert "opts.reducedMotion" in source
-    assert "reducedMotion:prefersReducedMotion" in dashboard
 
 
 def test_graph_engine_is_syntactically_valid_when_node_is_installed() -> None:

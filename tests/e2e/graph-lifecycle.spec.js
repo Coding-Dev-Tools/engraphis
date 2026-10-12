@@ -334,7 +334,7 @@ for (const pauseTiming of ['before-loss', 'during-loss', 'active']) {
 }
 
 for (const deviceScaleFactor of [1, 1.25, 2]) {
-  test.describe(`Classic PNG at DPR ${deviceScaleFactor}`, () => {
+  test.describe(`Steel style PNG at DPR ${deviceScaleFactor}`, () => {
     test.use({ deviceScaleFactor });
 
     for (const reducedMotion of deviceScaleFactor === 1.25 ? [] : ['no-preference', 'reduce']) {

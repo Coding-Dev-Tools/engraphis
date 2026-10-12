@@ -1,5 +1,6 @@
 const { test, expect } = require('@playwright/test');
 const AxeBuilder = require('@axe-core/playwright').default;
+const { answerActionDialog } = require('./action-dialog-helper');
 
 const answer = {
   grounded: true, answer: 'Postgres is the supported database. [1]', support: 0.99,
@@ -297,7 +298,6 @@ test('Ask controls and Home remain accessible at a narrow width', async ({ page 
 });
 
 test('a real pending source leaves the Home review inbox after governed approval', async ({ page }) => {
-  page.on('dialog', dialog => dialog.accept(dialog.type() === 'prompt' ? 'Reviewed this local browser fixture.' : undefined));
   await page.goto('/?view=manage#token=engraphis-playwright-local-only');
   await expect(page.locator('#connection-status')).toContainText('Local engine connected');
   await page.locator('#create-workspace-toggle').click();
@@ -313,6 +313,7 @@ test('a real pending source leaves the Home review inbox after governed approval
   await expect(page.locator('#home-setup-progress')).toHaveText('0 of 3 setup steps confirmed by you.');
   await page.locator('#decision-list [data-memory-id]').click();
   await page.locator('#memory-detail').getByRole('button', { name: 'Approve for prompt…' }).click();
+  await answerActionDialog(page, { fields: { reason: 'Reviewed this local browser fixture.' } });
   await expect(page.locator('#memory-detail')).toContainText('approved');
   await page.locator('[data-view="today"]').click();
   await expect(page.locator('#decision-list')).toContainText('No records currently need review in this context.');

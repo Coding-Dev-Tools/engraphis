@@ -44,7 +44,7 @@ semantic-vector support.
 
 ## Dashboard
 
-Open the dashboard and choose **Import local documents**. Select **Documents** mode, choose files
+Open **Library → Import → Import documents with preview…**. Select **Documents** mode, choose files
 or a folder, then set the source label, workspace, optional repository/session, scope, memory
 type, and conflict policy. **Preview import** performs zero writes and shows every candidate,
 format, warning, skip, rejection, update, rename, conflict, and missing source. Check the local

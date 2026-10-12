@@ -165,9 +165,9 @@ test.describe('Ledger Dashboard Sliders, Gravity Physics, Themes, and Options', 
     });
     await expect(page.locator('#graph-repel')).toBeVisible();
 
-    // 3. Test Themes: Slate, Midnight, Paper, Matrix
+    // 3. Test every theme
     const sidebarTheme = page.locator('#sidebar-theme-select');
-    const themes = ['slate', 'midnight', 'paper', 'matrix'];
+    const themes = ['slate', 'midnight', 'solarized', 'paper', 'sepia', 'matrix'];
     for (const theme of themes) {
       await sidebarTheme.selectOption(theme);
       await expect(page.locator('body')).toHaveAttribute('data-theme', theme);
@@ -205,7 +205,6 @@ test.describe('Ledger Dashboard Sliders, Gravity Physics, Themes, and Options', 
       { id: 'graph-text-size', value: '16', outputId: 'graph-text-size-output', expectedText: '16' },
       { id: 'graph-line-width', value: '1.25', outputId: 'graph-line-width-output', expectedText: '1.25' },
       { id: 'graph-label-density', value: '50', outputId: 'graph-label-density-output', expectedText: '50' },
-      { id: 'graph-tune-min-degree', value: '2', outputId: 'graph-tune-min-degree-output', expectedText: '2' },
       { id: 'graph-depth', value: '3', outputId: 'graph-depth-output', expectedText: '3' },
       { id: 'graph-gravitational-constant', value: '150', outputId: 'graph-gravitational-constant-output', expectedText: '150' },
       { id: 'graph-black-hole-mass', value: '240', outputId: 'graph-black-hole-mass-output', expectedText: '240' },
@@ -223,17 +222,16 @@ test.describe('Ledger Dashboard Sliders, Gravity Physics, Themes, and Options', 
       await expect(page.locator(`#${s.outputId}`)).toHaveText(s.expectedText);
     }
 
-    // Min degree bidirectional sync between analyse tab and tuning drawer
+    // Minimum links lives once, in Analyse → Scope
     const analyseTab = page.locator('#graph-analyse-tab');
     await analyseTab.click();
-    await expect(page.locator('#graph-min-degree-output')).toHaveText('2');
+    await expect(page.locator('#graph-tune-min-degree')).toHaveCount(0);
     await page.evaluate(() => {
       const el = document.getElementById('graph-min-degree');
       el.value = '3';
       el.dispatchEvent(new Event('input', { bubbles: true }));
     });
     await expect(page.locator('#graph-min-degree-output')).toHaveText('3');
-    await expect(page.locator('#graph-tune-min-degree-output')).toHaveText('3');
 
     // Restore min-degree to 0 so all nodes stay visible for physics tests
     await page.evaluate(() => {

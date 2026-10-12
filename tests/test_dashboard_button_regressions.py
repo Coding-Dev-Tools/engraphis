@@ -7,8 +7,6 @@ ROOT = Path(__file__).resolve().parents[1]
 LEDGER_HTML = ROOT / "engraphis" / "dashboard_assets" / "index.html"
 LEDGER_JS = ROOT / "engraphis" / "dashboard_assets" / "ledger.js"
 LEDGER_CSS = ROOT / "engraphis" / "dashboard_assets" / "ledger.css"
-CLASSIC_JS = ROOT / "engraphis" / "classic_assets" / "dashboard.js"
-STATIC_JS = ROOT / "engraphis" / "static" / "dashboard.js"
 
 
 def test_memory_editor_reports_empty_content_and_restores_trigger_focus():
@@ -31,7 +29,6 @@ def test_empty_dashboard_forms_reach_accessible_validation_handlers():
         "ask-form",
         "why-form",
         "timeline-form",
-        "supersession-form",
         "create-workspace-form",
     ):
         assert f'<form id="{form_id}"' in html
@@ -56,17 +53,22 @@ def test_successful_dashboard_actions_clear_stale_validation_notices():
         assert "showNotice('');" in section
 
 
-def test_classic_escape_closes_mobile_nav_and_returns_focus():
-    script = CLASSIC_JS.read_text(encoding="utf-8")
+def test_rechecks_never_reselect_the_workspace_under_open_work():
+    """Embedder recheck and connection retry must keep an open graph and unsaved edits.
 
-    assert "if(event.key!=='Escape')return;" in script
-    assert "closeMobileNav(true);return" in script
-
-
-def test_semantic_recheck_preserves_an_open_classic_graph():
-    for path in (CLASSIC_JS, STATIC_JS):
-        script = path.read_text(encoding="utf-8")
-        assert "if(CURRENT_VIEW!=='graph')graphResetEngineFailure();" in script
+    Re-running the whole bootstrap reselects the workspace, which tears down the graph
+    renderer and resets the memory editor.
+    """
+    script = LEDGER_JS.read_text(encoding="utf-8")
+    recheck = script[script.index("  async function recheckEmbedder()"):]
+    recheck = recheck[:recheck.index("\n  }\n")]
+    assert "refreshBootstrap(" not in recheck
+    assert "renderEmbedderBanner(bootstrap.embedder);" in recheck
+    retry = script[script.index("  async function retryConnection()"):]
+    retry = retry[:retry.index("\n  }\n")]
+    booted = retry[retry.index("if (!state.booted) await boot();"):]
+    assert "refreshBootstrap(" not in booted
+    assert "await api('/health'" in booted
 
 
 def test_validation_error_has_visible_error_styling():

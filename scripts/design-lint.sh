@@ -2,7 +2,7 @@
 # Design-slop linter for the Engraphis dashboard.
 #
 # Runs pbakaus/impeccable's deterministic detector (AI-slop + design-quality
-# rules, no LLM / no API key) against the static dashboard and prints a summary.
+# rules, no LLM / no API key) against the dashboard page and prints a summary.
 #
 # Manual use:
 #   bash scripts/design-lint.sh                       # warn-only, always exit 0

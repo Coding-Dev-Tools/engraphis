@@ -508,6 +508,42 @@ try {
     assert report["ok"], report.get("error")
 
 
+def test_renderer_scope_filters_match_the_main_engine() -> None:
+    """"Unlinked nodes" governs degree-zero entities; "Minimum links" only linked ones.
+
+    The main engine has always kept unlinked entities visible while the toggle is on, whatever
+    the Minimum links value. The Every-node renderer used to hide them as soon as Minimum links
+    reached 1, so the same two controls showed different graphs in the two layouts.
+    """
+    renderer = RENDERER.read_text(encoding="utf-8")
+    start = renderer.index("    function passesFilters(index) {")
+    end = renderer.index("    function edgePassesFilters(index) {")
+    script = (
+        "const state = { ghosts: true, nodeGhosts: [], degrees: [0, 1, 3], scope: {} };\n"
+        + renderer[start:end]
+        + """
+const out = [];
+for (const scope of [
+  { showUnlinked: true, minDegree: 0 }, { showUnlinked: true, minDegree: 2 },
+  { showUnlinked: false, minDegree: 0 }, { showUnlinked: false, minDegree: 2 },
+]) {
+  state.scope = scope;
+  out.push([0, 1, 2].map(passesFilters));
+}
+console.log(JSON.stringify(out));
+"""
+    )
+    result = subprocess.run(
+        ["node", "-e", script], cwd=ROOT, check=True, capture_output=True, text=True, timeout=60,
+    )
+    assert json.loads(result.stdout) == [
+        [True, True, True],
+        [True, False, True],
+        [False, True, True],
+        [False, False, True],
+    ]
+
+
 def test_renderer_keeps_labeled_gl_canvas_accessible() -> None:
     renderer = RENDERER.read_text(encoding="utf-8")
     assert "canvas.setAttribute('aria-hidden'" not in renderer

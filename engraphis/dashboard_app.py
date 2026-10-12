@@ -1,8 +1,8 @@
-"""The restored v1 dashboard — served on the *v2* engine.
+"""The Engraphis dashboard (Ledger), served on the *v2* engine.
 
-Same look-and-feel as the original dashboard (engraphis/static/index.html), but every
-route reads/writes the v2 MemoryService where the real data lives. This keeps the v1
-server (engraphis/app.py) untouched; run this with `python -m scripts.start_dashboard`.
+Every route reads/writes the v2 MemoryService where the real data lives, and the single
+browser interface is served from ``engraphis/dashboard_assets``. This keeps the v1 server
+(engraphis/app.py) untouched; run this with `python -m scripts.start_dashboard`.
 """
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from fastapi import (
     APIRouter, FastAPI, File, Form, HTTPException, Request, UploadFile,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.routing import APIRoute
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
@@ -55,8 +55,6 @@ from engraphis.service import (
 
 logger = logging.getLogger("engraphis")
 
-_STATIC = Path(__file__).resolve().parent / "static"
-_CLASSIC_ASSETS = Path(__file__).resolve().parent / "classic_assets"
 _V2_ASSETS = Path(__file__).resolve().parent / "dashboard_assets"
 _INDEX = _V2_ASSETS / "index.html"
 _DOCUMENT_SUFFIXES = frozenset(supported_document_extensions())
@@ -68,7 +66,7 @@ _DASHBOARD_UPLOAD_REQUEST_BYTES = (
 _DASHBOARD_REQUEST_BODY_LIMITS = {
     "/api/auth/session": 8 * 1024,
     "/api/workspaces/import-files": _DASHBOARD_UPLOAD_REQUEST_BYTES,
-    # Wizard multipart routes carry the same upload ceilings as the classic import:
+    # Wizard multipart routes carry the same upload ceilings as Quick import:
     # without these entries they fall back to the 8 MB JSON default and large vaults
     # are rejected by the body middleware before the bounded parser is ever reached.
     "/api/workspaces/import-documents/preview": _DASHBOARD_UPLOAD_REQUEST_BYTES,
@@ -196,7 +194,7 @@ class _BoundedUploadRoute(APIRoute):
         return bounded_route_handler
 
 
-# Document/Obsidian wizard multipart routes on this app. (The classic quick import
+# Document/Obsidian wizard multipart routes on this app. (Quick import's
 # /api/workspaces/import-files lives in routes/v2_api.py and already bounds its own
 # parser with request.form(max_files=...).)
 _BOUNDED_UPLOAD_PATHS = frozenset({
@@ -299,6 +297,35 @@ _PUBLIC = {
     "/api/auth/state",
     "/api/auth/session",
 }
+
+
+def _cross_site_browser_request(request: Request, trusted_origins: frozenset) -> bool:
+    """Whether a browser marked this request as started by a page on another site.
+
+    The zero-config runtime trusts every loopback caller, and every website the user visits
+    can make that user's browser send "simple" requests to loopback without a CORS
+    preflight: form posts, multipart uploads, body-less POSTs, image GETs. Browsers label
+    them with ``Origin`` and ``Sec-Fetch-Site``; non-browser clients send neither. The
+    dashboard's session header and an ``Authorization`` header can only be sent cross-site
+    after a preflight that the CORS allow-list controls, so their presence is trusted.
+    """
+
+    headers = request.headers
+    if headers.get("x-engraphis-browser-session") == "1" or "authorization" in headers:
+        return False
+    origin = headers.get("origin")
+    if origin is not None:
+        origin = origin.strip().rstrip("/")
+        if not origin or origin.lower() == "null":
+            return True
+        try:
+            origin_host = urlsplit(origin).netloc.lower()
+        except ValueError:
+            return True
+        if origin_host and origin_host == (headers.get("host") or "").strip().lower():
+            return False
+        return origin not in trusted_origins
+    return (headers.get("sec-fetch-site") or "").strip().lower() in {"cross-site", "same-site"}
 
 
 class _BrowserSessionReq(BaseModel):
@@ -473,6 +500,11 @@ def create_app() -> FastAPI:
         allow_credentials=not _cors_wildcard,
         allow_methods=["*"],
         allow_headers=["*"],
+    )
+    # Origins the zero-config gate below accepts for simple (unpreflighted) requests. A
+    # wildcard only relaxes preflighted CORS; it never vouches for an arbitrary page here.
+    _trusted_origins = frozenset(
+        origin.rstrip("/") for origin in settings.cors_origins if origin != "*"
     )
 
     @app.exception_handler(licensing.LicenseError)
@@ -1341,34 +1373,34 @@ def create_app() -> FastAPI:
                 },
                 status_code=403,
             )
+        # A loopback peer can still be another website acting through the user's browser.
+        # Refuse API requests a browser marked as cross-site unless they passed a preflight;
+        # /mcp enforces its own Origin and Host allow-list.
+        if path.startswith("/api/") and _cross_site_browser_request(request, _trusted_origins):
+            return JSONResponse(
+                {"error": "cross-site browser requests are refused; use the Engraphis dashboard"},
+                status_code=403,
+            )
         return await call_next(request)
 
-    # New dashboard capabilities belong to the v2 application surface.  The old ``static``
-    # directory remains mounted for the legacy shell and compatibility adapters only.
+    # The dashboard has one interface; its assets are served from ``dashboard_assets``.
     if _V2_ASSETS.is_dir():
         app.mount("/v2-assets", _FreshStaticFiles(directory=str(_V2_ASSETS)), name="v2-assets")
-    if _CLASSIC_ASSETS.is_dir():
-        app.mount(
-            "/classic-assets",
-            _FreshStaticFiles(directory=str(_CLASSIC_ASSETS)),
-            name="classic-assets",
-        )
-    if _STATIC.is_dir():
-        app.mount("/static", _FreshStaticFiles(directory=str(_STATIC)), name="static")
 
     @app.get("/", include_in_schema=False)
     def index():
-        """Serve Ledger as the production default; Classic remains at ``/classic``."""
+        """Serve the Ledger dashboard."""
         resp = FileResponse(_INDEX, media_type="text/html")
         resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         return resp
 
     @app.get("/classic", include_in_schema=False)
     def classic_index():
-        """The pre-Ledger dashboard, retained as a reversible local interface."""
-        resp = FileResponse(_CLASSIC_ASSETS / "index.html", media_type="text/html")
-        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-        return resp
+        """The Classic dashboard was retired and its features moved into Ledger.
+
+        Old bookmarks land on the single dashboard instead of a 404.
+        """
+        return RedirectResponse("/", status_code=307)
 
     for warning in licensing.production_warnings():
         import sys
