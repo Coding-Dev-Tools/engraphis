@@ -968,6 +968,18 @@
       : `${currentReport.nodes.length}${truncated ? '+' : ''}`;
     list.innerHTML = '';
 
+    if (truncated) {
+      const analyzed = currentReport.nodes.length;
+      const analyzedLabel = Number.isFinite(total)
+        ? `${analyzed} of ${total} eligible memories`
+        : `at least ${analyzed} eligible memories`;
+      const notice = document.createElement('p');
+      notice.className = 'spec-truncation-notice';
+      notice.setAttribute('role', 'status');
+      notice.textContent = `Partial audit: analyzed ${analyzedLabel}. Health score, conflicts, and policy gaps describe only this sample.`;
+      list.appendChild(notice);
+    }
+
     currentReport.nodes.forEach(node => {
       const item = document.createElement('div');
       item.className = 'spec-node-item';
