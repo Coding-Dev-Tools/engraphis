@@ -7569,8 +7569,8 @@ class Store:
         if include_invalid:
             return ordinary, params
 
-        # Promotion and merge links intentionally keep retired source history
-        # queryable from the live successor. They still require both endpoints
+        # Promotion, merge, and supersession links intentionally keep retired source
+        # history queryable from the live successor. They still require both endpoints
         # to satisfy every non-temporal scope/type predicate.
         historical_clauses: list[str] = []
         historical_params: list[Any] = []
@@ -7580,7 +7580,7 @@ class Store:
             )
             historical_clauses.extend(where)
             historical_params.extend(values)
-        lineage = "l.relation IN ('promotes','merges')"
+        lineage = "l.relation IN ('promotes','merges','supersedes')"
         if historical_clauses:
             lineage += " AND " + " AND ".join(historical_clauses)
         return f"(({ordinary}) OR ({lineage}))", params + historical_params

@@ -12863,6 +12863,16 @@ class MemoryService:
             if session["workspace_id"] != wid or (
                     rid is not None and session.get("repo_id") != rid):
                 raise ValidationError("session_id does not belong to that workspace/repo")
+            if rid is None and session.get("repo_id"):
+                # Preserve a repository-backed session's exact repository scope even
+                # when callers omit the redundant repo name.
+                rid = str(session["repo_id"])
+                repo_row = self.store.conn.execute(
+                    "SELECT name FROM repos WHERE id=? AND workspace_id=?",
+                    (rid, wid),
+                ).fetchone()
+                if repo_row is not None:
+                    rp = str(repo_row["name"])
         return ws, rp, SearchFilter(
             workspace_id=wid, repo_id=rid, session_id=sid, include_ancestors=True,
         )
@@ -13053,6 +13063,7 @@ class MemoryService:
                           _clean_string_list(mtypes, field="mtypes", max_items=4, max_chars=32)]
 
         recs = []
+        total_eligible_node_count = 0
         if memory_ids is not None:
             clean_ids = _clean_string_list(
                 memory_ids, field="memory_ids", max_items=150, max_chars=MAX_NAME_CHARS,
@@ -13063,8 +13074,14 @@ class MemoryService:
                 recs = [rec for rec in rec_map.values()
                         if prompt_eligible(rec.provenance, rec.metadata)
                         and self._memory_visible_to_caller(rec)]
+            total_eligible_node_count = len(recs)
         else:
-            recs = self.store.list_memories(flt, limit=150, prompt_only=True)
+            with self.store.read_snapshot():
+                total_eligible_node_count = self.store.prompt_eligibility_counts(
+                    flt,
+                )["prompt_eligible"]
+                recs = self.store.list_memories(flt, limit=150, prompt_only=True)
+                recs = [rec for rec in recs if self._memory_visible_to_caller(rec)]
 
         # Gather declared links between these memories
         mem_dicts = [_mem_to_dict(r) for r in recs]
@@ -13089,6 +13106,8 @@ class MemoryService:
         )
         report["workspace"] = ws
         report["repo"] = rp
+        report["total_eligible_node_count"] = total_eligible_node_count
+        report["analysis_truncated"] = total_eligible_node_count > len(mem_dicts)
         return report
 
     def spec_crawl_resolve(
