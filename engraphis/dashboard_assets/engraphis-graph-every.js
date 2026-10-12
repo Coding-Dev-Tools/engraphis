@@ -169,6 +169,7 @@
     let worker = null, nodeProgram = null, edgeProgram = null;
     let nodeBuffers = {}, edgeBuffers = {};
     let hitFrame = 0, pendingHit = null, layoutFrame = 0, pendingLayoutFit = false;
+    let explorerData = null;
 
     const reducedMotion = () => {
       if (typeof opts.reducedMotion === 'function') return opts.reducedMotion() === true;
@@ -306,6 +307,7 @@
       return !state.layers || state.layers[layer] !== false;
     }
     function refreshVisibility(repaint = true) {
+      explorerData = null;
       let visible = 0;
       for (let index = 0; index < state.ids.length; index += 1) {
         const pass = passesFilters(index);
@@ -1417,6 +1419,7 @@
     function destroyGraph() {
       if (state.destroyed) return;
       state.destroyed = true;
+      explorerData = null;
       state.paused = true;
       if (hitFrame) { caf(hitFrame); hitFrame = 0; }
       if (layoutFrame) { caf(layoutFrame); layoutFrame = 0; }
@@ -1463,6 +1466,29 @@
 
     const api = {
       exportImageCanvas,
+      /* Canonical scope-filtered entities/relations, independent of camera and hover
+         dimming. Worker position updates reuse this snapshot without sorting or DOM work. */
+      visibleData() {
+        if (explorerData) return explorerData;
+        const nodes = [], links = [];
+        if (state.ready && !state.destroyed) {
+          for (let index = 0; index < state.ids.length; index += 1) {
+            if (!passesFilters(index)) continue;
+            const item = nodeAt(index);
+            nodes.push({ id: item.id, name: item.label, etype: item.type, degree: state.degrees[index] || 0 });
+          }
+          for (let index = 0; index < state.edgeSources.length; index += 1) {
+            if (!edgePassesFilters(index)) continue;
+            links.push({
+              source: state.ids[state.edgeSources[index]], target: state.ids[state.edgeTargets[index]],
+              label: state.edgeRelations[index], layer: state.edgeLayers[index] || 'semantic',
+              ghost: Boolean(state.edgeGhosts[index]),
+            });
+          }
+        }
+        explorerData = { nodes, links };
+        return explorerData;
+      },
       apply(fn, shouldFit) {
         if (typeof fn === 'function') fn(api);
         if (shouldFit) { state.cameraOwned = false; state.pendingFit = null; fit(false); }
@@ -1473,6 +1499,7 @@
         const nodes = Array.isArray(data && data.nodes) ? data.nodes : [];
         const links = Array.isArray(data && data.links) ? data.links : (data && data.edges) || [];
         state.ready = false; state.error = null; state.lastLabelKey = ''; state.layoutPending = true;
+        explorerData = null;
         state.cameraOwned = false; state.pendingFit = null; state.bounds = null;
         state.pendingLayout = null;
         state.hover = -1; state.focus = -1; state.hoverPoint = [0, 0]; state.focusPoint = [0, 0];
@@ -1531,6 +1558,7 @@
       },
       setLayers(value) {
         state.layers = value && typeof value === 'object' ? { ...value } : null;
+        explorerData = null;
         uploadEdges();
         state.lastLabelKey = '';
         state.labelLayout = [];

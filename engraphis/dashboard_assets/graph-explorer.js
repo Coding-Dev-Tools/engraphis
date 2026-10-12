@@ -1,6 +1,6 @@
 /* Engraphis graph explorer: keyboard and screen-reader access to the Explore graph.
 
-   The canvas is a visual summary. This module lists the loaded entities (most connected
+   The canvas is a visual summary. This module lists the visible entities (most connected
    first) and relations as ordinary buttons with a shared filter, and drives the canvas
    keyboard cursor: with the canvas focused, arrow keys move between entities in the same
    order, Enter opens the selected entity's connections and Escape clears the selection.
@@ -20,6 +20,9 @@
     let filter = '';
     let cursor = -1;
     let timer = null;
+    let previousSource = null;
+    let previousSnapshot = '';
+    let loaded = false;
 
     const label = item => String((item && (item.name || item.label || item.id)) || 'entity');
     /* The renderer's force layout replaces link endpoints with node objects in place. */
@@ -112,8 +115,10 @@
       entityList.replaceChildren();
       relationList.replaceChildren();
       if (!nodes.length) {
-        entityList.append(element('p', 'empty-state', 'Open Explore to load the graph.'));
-        relationList.append(element('p', 'empty-state', 'Open Explore to load the graph.'));
+        entityList.append(element('p', 'empty-state', loaded
+          ? 'No entities are visible in the current graph scope.' : 'Open Explore to load the graph.'));
+        relationList.append(element('p', 'empty-state', loaded
+          ? 'No relations are visible in the current graph scope.' : 'Open Explore to load the graph.'));
         return;
       }
       if (!nodePage.length) entityList.append(element('p', 'empty-state', 'No entities match this filter.'));
@@ -148,26 +153,38 @@
 
     function setData(data) {
       const source = data || { nodes: [], links: [] };
+      if (source === previousSource) return;
       const known = new Set((source.nodes || [])
         .filter(item => item && item.id !== undefined && item.id !== null)
         .map(item => item.id));
-      links = (source.links || [])
+      const nextLinks = (source.links || [])
         .filter(Boolean)
         .map(link => ({ ...link, source: endpoint(link.source), target: endpoint(link.target) }))
-        .filter(link => known.has(link.source) || known.has(link.target));
+        .filter(link => known.has(link.source) && known.has(link.target));
+      const nextNodes = (source.nodes || []).filter(item => item && known.has(item.id));
+      const snapshot = JSON.stringify([
+        Boolean(data),
+        nextNodes.map(item => [item.id, label(item), item.etype, Number(item.degree) || 0]),
+        nextLinks.map(link => [link.source, link.target, link.label, link.layer]),
+      ]);
+      previousSource = source;
+      if (snapshot === previousSnapshot) return;
+      previousSnapshot = snapshot;
+      loaded = Boolean(data);
+      const selected = cursor >= 0 && nodes[cursor] ? nodes[cursor].id : null;
+      links = nextLinks;
       /* `degree` may be a weighted score; the count shown to people is real relations. */
       const relations = new Map();
       links.forEach(link => [link.source, link.target].forEach(id => {
         relations.set(id, (relations.get(id) || 0) + 1);
       }));
-      nodes = (source.nodes || [])
-        .filter(item => item && known.has(item.id))
+      nodes = nextNodes
         .map(item => ({ ...item, relations: relations.get(item.id) || 0 }))
         .sort((left, right) => (Number(right.degree) || 0) - (Number(left.degree) || 0)
           || right.relations - left.relations
           || label(left).localeCompare(label(right)));
       names = new Map(nodes.map(item => [item.id, item]));
-      cursor = -1;
+      cursor = nodes.findIndex(item => item.id === selected);
       render(true);
     }
 

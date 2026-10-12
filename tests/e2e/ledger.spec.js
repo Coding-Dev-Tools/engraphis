@@ -2988,6 +2988,9 @@ test('Explore explains its colours and lists every entity and relation for keybo
   await page.keyboard.press('ArrowDown');
   await expect(page.locator('#graph-keyboard-status')).toContainText('Engraphis, 1 relation, 1 of 3');
   await page.keyboard.press('End');
+  await expect(page.locator('#graph-keyboard-status')).toContainText('Postgres, 1 relation, 2 of 2');
+  await page.keyboard.press('Escape');
+  await page.keyboard.press('End');
   await expect(page.locator('#graph-keyboard-status')).toContainText('Unlinked Note, 0 relations, 3 of 3');
   await page.keyboard.press('Escape');
   await expect(page.locator('#graph-keyboard-status')).toHaveText('Selection cleared.');
@@ -3005,6 +3008,140 @@ test('Explore explains its colours and lists every entity and relation for keybo
   await expect(entities.first()).toContainText('Postgres');
   expect(errors).toEqual([]);
 });
+
+for (const every of [false, true]) {
+  test(`Explore keeps accessible navigation within the ${every ? 'Every-node' : 'overview'} scope`, async ({ page }) => {
+    const errors = browserErrors(page);
+    await page.addInitScript(() => {
+      for (const name of ['EngraphisGraph', 'EngraphisEveryGraph']) {
+        let factory;
+        Object.defineProperty(window, name, {
+          configurable: true,
+          get: () => factory,
+          set: value => {
+            factory = { ...value, create: (...args) => {
+              const engine = value.create(...args);
+              window.__scopeEngine = engine;
+              return engine;
+            } };
+          },
+        });
+      }
+      // Preview has no authoritative degrees. Ready must refresh the committed explorer,
+      // even when it arrives after the user can already see the progressive canvas.
+      const NativeWorker = window.Worker;
+      window.Worker = class extends NativeWorker {
+        set onmessage(callback) {
+          super.onmessage = callback && (event => {
+            if (event.data.type === 'ready') {
+              window.setTimeout(() => callback.call(this, event), 200);
+            } else callback.call(this, event);
+          });
+        }
+      };
+    });
+    await mockApi(page, { graphScene: {
+      nodes: [
+        { id: 'hub', label: 'Hub', type: 'artifact' },
+        { id: 'leaf-a', label: 'Leaf A', type: 'technology' },
+        { id: 'leaf-b', label: 'Leaf B', type: 'technology' },
+        { id: 'free', label: 'Free', type: 'concept' },
+      ],
+      edges: [
+        { source: 'hub', target: 'leaf-a', label: 'uses', layer: 'semantic' },
+        { source: 'hub', target: 'leaf-b', label: 'mentions', layer: 'entity' },
+      ],
+      meta: { total_nodes: 4, total_edges: 2 },
+    } });
+    await page.goto('/');
+    await expect(page.locator('#connection-status')).toContainText('Local engine connected');
+    await page.locator('.nav-item[data-view="relations"]').click();
+    await revealAdvancedGraphControls(page);
+    await expect(page.locator('#graph-canvas')).toHaveAttribute('aria-busy', 'false');
+    if (every) {
+      await page.locator('[data-graph-preset-choice="every"]').click();
+      await expect(page.locator('#graph-mode')).toContainText('All nodes');
+      await expect(page.locator('#graph-canvas')).toHaveAttribute('aria-busy', 'false');
+    }
+    await page.getByRole('tab', { name: 'Analyse' }).click();
+    const entities = page.locator('#graph-entity-list button.graph-explorer-item');
+    const relations = page.locator('#graph-relation-list .graph-relation-row');
+    await expect(entities).toHaveCount(4);
+    await expect(relations).toHaveCount(2);
+
+    await page.locator('#graph-min-degree').fill('2');
+    await expect(entities).toHaveCount(2);
+    expect(await entities.evaluateAll(items => items.map(item => item.dataset.entity).sort()))
+      .toEqual(['free', 'hub']);
+    await page.getByRole('tab', { name: 'Explore' }).click();
+    await page.locator('#graph-show-unlinked').click();
+    await expect(page.locator('#graph-canvas')).toHaveAttribute('aria-busy', 'false');
+    await expect(entities).toHaveCount(1);
+    await expect(entities).toHaveAttribute('data-entity', 'hub');
+    await expect(relations).toHaveCount(0);
+    await page.getByRole('tab', { name: 'Analyse' }).click();
+    await page.locator('#graph-min-degree').fill('3');
+    await expect(entities).toHaveCount(0);
+    await expect(page.locator('#graph-entity-list')).toContainText('No entities are visible in the current graph scope.');
+    await page.locator('#graph-min-degree').fill('2');
+    await expect(entities).toHaveCount(1);
+    await page.getByRole('tab', { name: 'Explore' }).click();
+    await page.locator('#graph-canvas').focus();
+    await page.keyboard.press('End');
+    await expect(page.locator('#graph-keyboard-status')).toContainText('Hub, 0 relations, 1 of 1');
+    await page.keyboard.press('Escape');
+    await page.getByRole('tab', { name: 'Analyse' }).click();
+    await page.locator('#graph-min-degree').fill('1');
+    await expect(entities).toHaveCount(3);
+    await expect(relations).toHaveCount(2);
+
+    await page.getByRole('tab', { name: 'Explore' }).click();
+    await page.locator('[data-graph-layer="semantic"]').click();
+    await expect(relations).toHaveCount(1);
+    await expect(relations).toContainText('mentions');
+    await page.locator('#graph-canvas').focus();
+    await page.keyboard.press('End');
+    await expect(page.locator('#graph-keyboard-status')).toContainText('Leaf A, 0 relations, 3 of 3');
+    await page.keyboard.press('Enter');
+    await expect(page.locator('#graph-connections-dialog')).toBeVisible();
+    await expect(page.locator('#graph-connections-meta')).toContainText('0 direct connections');
+    await page.keyboard.press('Escape');
+    await expect(page.locator('#graph-connections-dialog')).not.toBeVisible();
+    await page.locator('[data-graph-layer="semantic"]').click();
+    await expect(relations).toHaveCount(2);
+    // Restoring a layer changes relation counts/order but retains the selected entity.
+    await expect(page.locator('#graph-entity-list [aria-current="true"]')).toHaveAttribute('data-entity', 'leaf-a');
+    await page.locator('#graph-canvas').focus();
+    await page.keyboard.press('ArrowDown');
+    await expect(page.locator('#graph-keyboard-status')).toContainText('Leaf B, 1 relation, 3 of 3');
+
+    const stable = await page.evaluate(() => {
+      const engine = window.__scopeEngine;
+      const snapshot = engine.visibleData();
+      const control = document.querySelector('#graph-entity-list button');
+      engine.setSettings({ font: 14 });
+      return { snapshot: snapshot === engine.visibleData(), control: control === document.querySelector('#graph-entity-list button') };
+    });
+    expect(stable).toEqual({ snapshot: true, control: true });
+    if (!every) {
+      await page.evaluate(() => {
+        window.__scopeEngine.clearFocus();
+        window.__scopeEngine.setScope({ depth: 1 });
+        window.__scopeEngine.focus('leaf-a');
+      });
+      await expect(entities).toHaveCount(2);
+      expect(await entities.evaluateAll(items => items.map(item => item.dataset.entity).sort()))
+        .toEqual(['hub', 'leaf-a']);
+      await page.locator('#graph-canvas').focus();
+      await page.keyboard.press('Escape');
+      await expect(entities).toHaveCount(3);
+    }
+    await page.getByRole('tab', { name: 'Explore' }).click();
+    await page.locator('#graph-show-unlinked').click();
+    await expect(entities).toHaveCount(4);
+    expect(errors).toEqual([]);
+  });
+}
 
 test('Activity verifies the receipt chain and says plainly when it cannot', async ({ page }) => {
   const errors = browserErrors(page);
