@@ -1879,6 +1879,8 @@ def timeline(q: str = Query(..., min_length=1, max_length=10_000),
             logger.error("dashboard timeline failed (%s)", type(exc).__name__)
             raise HTTPException(status_code=500, detail={"error": "internal server error"})
         mems = _keyword_search(ws, q, limit, include_invalid=True, closed_only=closed_only)
+        mems.sort(key=lambda record: record["valid_from"] if record.get("valid_from") is not None
+                  else record.get("ingested_at") or 0.0)
         return {"query": q, "workspace": ws, "history": mems, "mode": "keyword",
                 "note": "Keyword match — install sentence-transformers for semantic search."}
     return {"query": q, "workspace": ws, "mode": "semantic",

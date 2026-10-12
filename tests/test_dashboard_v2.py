@@ -80,6 +80,30 @@ def test_timeline_closed_only_filters_before_limit_and_preserves_zero(monkeypatc
         assert body["mode"] == ("keyword" if fallback else "semantic")
 
 
+def test_keyword_timeline_sorts_world_time_instead_of_recent_access(monkeypatch, tmp_path):
+    with _client(monkeypatch, tmp_path) as client:
+        svc = v2_api.service()
+        wid = svc.store.get_or_create_workspace("demo")
+        expected = []
+        for world, ingested, accessed in [(0.0, 900.0, 1.0), (5.0, 2.0, 3.0), (10.0, 1.0, 900.0)]:
+            expected.append(svc.store.add_memory(MemoryRecord(
+                id="", workspace_id=wid, scope=Scope.WORKSPACE, content="Chronological history marker",
+                valid_from=world, valid_to=world + 1, ingested_at=ingested, last_access=accessed,
+                provenance={"trusted": True, "review_state": "approved"},
+            )))
+
+        def mismatch(*args, **kwargs):
+            raise ValueError("shapes (256,) and (384,) not aligned")
+
+        monkeypatch.setattr(svc, "timeline", mismatch)
+        for closed_only in [False, True]:
+            response = client.get("/api/timeline", params={
+                "workspace": "demo", "q": "chronological history marker", "closed_only": closed_only,
+            })
+            assert response.status_code == 200
+            assert [record["id"] for record in response.json()["history"]] == expected
+
+
 def test_dashboard_serves_and_bootstraps_local_core(monkeypatch, tmp_path):
     with _client(monkeypatch, tmp_path) as client:
         page = client.get("/")
@@ -968,6 +992,33 @@ def test_zero_config_api_refuses_requests_another_website_starts(monkeypatch, tm
         )
         assert script.status_code == 200, script.text
         assert {"dashboard.md", "script.md"} <= titles(client)
+
+
+@pytest.mark.parametrize("scheme", ["http", "https"])
+def test_zero_config_same_origin_checks_scheme_port_and_fetch_site(monkeypatch, tmp_path, scheme):
+    monkeypatch.setenv("ENGRAPHIS_HOST", "desk-top")
+    monkeypatch.setattr(settings, "cors_origins", [])
+    opposite = "https" if scheme == "http" else "http"
+    default_port = 80 if scheme == "http" else 443
+    with _client(monkeypatch, tmp_path) as client:
+        client.base_url = f"{scheme}://desk-top"
+        for marker in [
+            {"Origin": f"{opposite}://desk-top", "Sec-Fetch-Site": "same-site"},
+            {"Origin": f"{opposite}://desk-top"},
+            {"Origin": f"{scheme}://desk-top:{default_port + 1}", "Sec-Fetch-Site": "same-site"},
+            {"Origin": f"{scheme}://desk-top:0"},
+            {"Origin": f"{scheme}://desk-top", "Sec-Fetch-Site": "cross-site"},
+            {"Origin": f"{scheme}://user@desk-top"},
+            {"Origin": f"{scheme}://desk-top/path"},
+        ]:
+            response = client.post("/api/workspaces/create", json={"workspace": "forbidden-origin"}, headers=marker)
+            assert response.status_code == 403, marker
+        allowed = client.post("/api/workspaces/create", json={"workspace": "same-origin"}, headers={
+            "Origin": f"{scheme}://desk-top:{default_port}", "Sec-Fetch-Site": "same-origin",
+        })
+        assert allowed.status_code == 200, allowed.text
+        names = [item["name"] for item in client.get("/api/workspaces").json()["workspaces"]]
+        assert "same-origin" in names and "forbidden-origin" not in names
 
 
 def test_zero_config_api_refuses_hosts_dns_rebinding_could_forge(monkeypatch, tmp_path):
