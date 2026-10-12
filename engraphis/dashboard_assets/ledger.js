@@ -1376,7 +1376,12 @@
     invalidateConsolidationReview();
     const epoch = ++state.refreshEpoch;
     invalidateScopedRequests();
-    if (state.graphLoadController) state.graphLoadController.abort();
+    const previousGraphController = state.graphLoadController;
+    state.graphLoadRequest += 1;
+    state.graphLoadPromise = null;
+    state.graphLoadKey = '';
+    state.graphLoadController = null;
+    if (previousGraphController) previousGraphController.abort();
     askRequests.reset();
     window.clearTimeout(librarySearchTimer);
     state.libraryCursors = [null];
