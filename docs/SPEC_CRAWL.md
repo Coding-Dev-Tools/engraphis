@@ -109,6 +109,8 @@ Beyond inspecting isolated single-text prompt specifications, Spec Crawl provide
 5. **Cluster Health Score**:
    - 0–100 coherence score factoring in coverage, graph connectedness, clean node ratio, and deductions for contradictions and orphans.
 
+Memory bodies are used during analysis but are not returned in node summaries. The workspace audit analyzes at most 150 eligible memories per request and reports its eligible total and truncation state; Spec Studio warns when its health score and findings describe only a partial sample.
+
 ---
 
 ## 7. Command Line Interface (CLI)
