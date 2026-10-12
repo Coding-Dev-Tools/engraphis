@@ -816,8 +816,9 @@ Remediate a contradiction or link an orphaned memory node found during multi-nod
 - `node_a (str)`: retained memory node id (or source node to link from).
 - `node_b (str, None)`: older conflicting memory node id to supersede (or target node to link to).
 - `confirmed (bool, False)`: explicit human confirmation required for `supersede`; both records must be live and approved, and the update is atomic.
-- `workspace (str, "default")`: workspace scope.
+- `workspace (str, None)`: workspace scope.
 - `repo (str, None)`: optional repo scope.
+- `session_id (str, None)`: optional authorized session; both nodes must be visible through the same audit scope.
 
 ---
 

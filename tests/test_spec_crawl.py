@@ -26,6 +26,20 @@ def test_empty_and_invalid_input():
         crawl_spec("a" * (MAX_SPEC_CHARS + 1))
 
 
+def test_workspace_cli_emits_actionable_gap_recommendations_and_sample_notice(monkeypatch, capsys):
+    from scripts import spec_crawl as cli
+    report = {"node_count": 150, "analysis_truncated": True, "total_eligible_node_count": 151,
+              "policy_gaps": [{"axis": "review", "description": "Missing review guidance.",
+                               "remedy": {"recommendation": "Require test verification."}},
+                              {"axis": "team", "description": "Assign an owner."}]}
+    monkeypatch.setattr(cli, "_audit_workspace_memories", lambda **kwargs: report)
+    assert cli.main(["--workspace", "alpha", "--db", ":memory:"]) == 0
+    output = capsys.readouterr().out
+    assert "[GAP] REVIEW: Require test verification." in output
+    assert "[GAP] TEAM: Assign an owner." in output
+    assert "Partial audit: 150 of 151 eligible nodes" in output
+
+
 def test_basic_spec_crawl_determinism():
     spec = """# 01 ROLE
 who the studio works for. Staff owner: lead engineer.

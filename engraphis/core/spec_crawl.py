@@ -666,11 +666,18 @@ def compose_memory_spec(memories: Iterable[Mapping[str, Any]], *, limit: int = 2
     Titles become headings so section/axis mapping still applies; the memory id is kept
     in the heading suffix so flags can be traced back to the originating record.
     """
+    return compose_memory_spec_with_truncation(memories, limit=limit)[0]
+
+
+def compose_memory_spec_with_truncation(
+    memories: Iterable[Mapping[str, Any]], *, limit: int = 200,
+) -> tuple[str, bool]:
+    """Render procedural memories and report when count or character caps omit input."""
     parts: list[str] = []
     total = 0
     for i, memory in enumerate(memories):
         if i >= limit:
-            break
+            return "\n".join(parts), True
         title = " ".join(str(memory.get("title") or "").split())[:80] or f"memory {i + 1}"
         content = str(memory.get("content") or "").strip()
         if not content:
@@ -678,10 +685,10 @@ def compose_memory_spec(memories: Iterable[Mapping[str, Any]], *, limit: int = 2
         block = f"## {title}\n{content}\n"
         addition = len(block) + bool(parts)
         if total + addition > MAX_SPEC_CHARS:
-            break
+            return "\n".join(parts), True
         parts.append(block)
         total += addition
-    return "\n".join(parts)
+    return "\n".join(parts), False
 
 
 def apply_answer(text: str, flag: Mapping[str, Any], answer: str) -> str:
@@ -976,6 +983,8 @@ def analyze_memory_nodes(
                 toks_j = node_tokens_map[id_j]
                 sim = jaccard(toks_i, toks_j)
                 if sim >= 0.35 or subj_match:
+                    # Inferred overlaps are suggestions, not persisted connectivity.
+                    # Keep orphan degree and cluster health tied to declared links.
                     resolved_links.append({
                         "a": id_i,
                         "b": id_j,
@@ -1320,7 +1329,8 @@ def analyze_memory_nodes(
             "vague_penalty": -vague_penalty,
         },
         "node_count": len(parsed_nodes),
-        "nodes": parsed_nodes,
+        "nodes": [{key: value for key, value in node.items() if key != "content"}
+                  for node in parsed_nodes],
         "links": resolved_links,
         "conflicts": conflicts,
         "redundancies": redundancies,

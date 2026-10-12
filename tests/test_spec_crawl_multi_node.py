@@ -14,6 +14,14 @@ def test_analyze_empty_memory_nodes():
     assert len(res["conflicts"]) == 0
 
 
+def test_cluster_responses_omit_large_memory_bodies_without_losing_analysis():
+    import json
+    report = analyze_memory_nodes([{"id": "large", "content": "payload " * 12_500}])
+    assert "content" not in report["nodes"][0]
+    assert report["nodes"][0]["word_count"] > 0
+    assert len(json.dumps(report)) < 6_000
+
+
 def test_cross_node_parameter_conflict_detection():
     memories = [
         {

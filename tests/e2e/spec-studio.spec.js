@@ -54,11 +54,12 @@ async function crawl(page, text = '# Rules\nVerify all tests.') {
 test('bounded memory audits label health and node counts as a sample', async ({ page }) => {
   await fixture(page);
   await page.route('**/api/spec/crawl/memories', route => route.fulfill({ json: {
-    ...cluster, truncated: true, node_limit: 150, count_semantics: 'bounded_scope_sample',
+    ...cluster, analysis_truncated: true, total_eligible_node_count: 151,
   } }));
   await page.locator('#spec-mode-memories').click();
   await expect(page.locator('#spec-score-motto')).toContainText('sample health');
   await expect(page.locator('#spec-score-motto')).toContainText('more remain');
+  await expect(page.locator('#spec-sections-count')).toHaveText('2 / 151');
 });
 
 test('API failure clears scores and shows the real failure', async ({ page }) => {
