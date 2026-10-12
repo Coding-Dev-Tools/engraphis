@@ -318,10 +318,22 @@ def _cross_site_browser_request(request: Request, trusted_origins: frozenset) ->
         if not origin or origin == "null":
             return True
         try:
-            origin_host = urlsplit(origin).netloc
+            supplied = urlsplit(origin)
+            actual = urlsplit(str(request.url))
+            default_ports = {"http": 80, "https": 443}
+            supplied_port = supplied.port if supplied.port is not None else default_ports.get(supplied.scheme)
+            actual_port = actual.port if actual.port is not None else default_ports.get(actual.scheme)
+            same_origin = (
+                supplied.scheme in default_ports and supplied.hostname
+                and supplied.username is None and supplied.password is None
+                and not supplied.path and not supplied.query and not supplied.fragment
+                and (supplied.scheme, supplied.hostname, supplied_port)
+                == (actual.scheme, actual.hostname, actual_port)
+            )
         except ValueError:
             return True
-        if origin_host and origin_host == (headers.get("host") or "").strip().lower():
+        site = (headers.get("sec-fetch-site") or "").strip().lower()
+        if same_origin and site not in {"cross-site", "same-site"}:
             return False
         return origin not in trusted_origins
     return (headers.get("sec-fetch-site") or "").strip().lower() in {"cross-site", "same-site"}
