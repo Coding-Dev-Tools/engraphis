@@ -3730,7 +3730,7 @@ test('Timeline shows validity windows and narrows to superseded versions', async
   ]);
   const now = Math.floor(Date.now() / 1000);
   history.unshift(
-    { ...memories[0], id: 'mem_scheduled', valid_from: now - 100, valid_to: now + 86400, provenance: { source: 'human:ledger' } },
+    { ...memories[0], id: 'mem_scheduled', valid_from: 0, valid_to: now + 86400, provenance: { source: 'human:ledger' } },
     { ...memories[0], id: 'mem_planned', valid_from: now + 86400 },
   );
   const queries = [];
@@ -3752,11 +3752,15 @@ test('Timeline shows validity windows and narrows to superseded versions', async
   await expect(cards.first().locator('.temporal-state')).toHaveText('current');
   await expect(cards.nth(1).locator('.temporal-state')).toHaveText('future');
   await expect(cards.first()).toContainText('human:ledger');
+  const epoch = await page.evaluate(() => new Intl.DateTimeFormat(undefined,
+    { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(0)));
+  await expect(cards.first().locator('.temporal-meta')).toContainText(epoch);
   await page.locator('#timeline-closed-only').check();
   await expect(cards).toHaveCount(1);
   await expect(cards.first()).toContainText('MySQL 8');
   await expect(cards.first().locator('.temporal-state')).toHaveText('past');
   await expect(cards.first().locator('.temporal-meta')).not.toContainText('— now');
+  await expect(cards.first().locator('.temporal-meta')).toContainText(epoch);
   expect(queries).toEqual([false, true]);
   expect(errors).toEqual([]);
 });

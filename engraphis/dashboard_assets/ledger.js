@@ -259,14 +259,13 @@
   /* Server timestamps are seconds (sometimes milliseconds or ISO text). Any finite number
      passes validation and memory metadata is untrusted, so a value that is not a real date
      reads as unknown instead of throwing from Date/Intl formatting and breaking a panel. */
-  /* Server timestamps are epoch seconds or milliseconds, or ISO strings. Anything else
-     (zero, blank text, booleans, arrays) is "not recorded" rather than the 1970 epoch. */
+  /* Server timestamps are epoch seconds or milliseconds, or ISO strings. Zero is the
+     Unix epoch; blank text, booleans and nonscalar metadata are not recorded dates. */
   const validDate = value => {
     if (value == null || typeof value === 'boolean') return null;
     if (typeof value === 'object' && !(value instanceof Date)) return null;
     if (typeof value === 'string' && !value.trim()) return null;
     const numeric = Number(value);
-    if (numeric === 0) return null;
     const date = Number.isFinite(numeric)
       ? new Date(numeric < 1e12 ? numeric * 1000 : numeric)
       : new Date(value);
