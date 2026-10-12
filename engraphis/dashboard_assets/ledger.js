@@ -5672,9 +5672,13 @@
     });
     if (description === null) return;
     try {
-      await api('/workspaces/describe', { method: 'POST', body: { workspace: name, description } });
-      await refreshAfterWorkspaceChange(state.workspace,
-        description ? `Description saved for ${name}.` : `Description cleared for ${name}.`);
+      const saved = await api('/workspaces/describe', { method: 'POST', body: { workspace: name, description } });
+      const savedDescription = saved && typeof saved.description === 'string' ? saved.description : description;
+      state.workspaces = state.workspaces.map(entry => workspaceName(entry) === name
+        ? { ...(typeof entry === 'string' ? { name: entry } : entry), description: savedDescription }
+        : entry);
+      renderWorkspaceList();
+      showNotice(savedDescription ? `Description saved for ${name}.` : `Description cleared for ${name}.`);
     } catch (error) {
       showNotice(`Could not save the description: ${error.message}`);
     }
@@ -6915,6 +6919,13 @@
     const selected = names.includes(saved)
       ? saved
       : workspaceName([...state.workspaces].sort((a, b) => number(b.memories) - number(a.memories))[0]);
+    if (editorOpen() && names.includes(state.workspace)
+      && (selected === state.workspace || !await confirmDiscardEditor())) {
+      select.value = state.workspace;
+      renderWorkspaceNames();
+      renderWorkspaceList();
+      return;
+    }
     setConnection('Local engine connected');
     await selectWorkspace(selected);
   }
