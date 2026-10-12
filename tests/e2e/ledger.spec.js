@@ -3207,6 +3207,251 @@ for (const discard of [false, true]) {
   });
 }
 
+for (const operation of ['merge', 'delete', 'switch']) {
+  for (const discard of [false, true]) {
+    test(`${operation} from Settings ${discard ? 'requires consent before discarding' : 'keeps'} the active workspace draft`, async ({ page }) => {
+      const workspaces = [{ name: workspace, memories: 2 }, { name: 'other', memories: 1 }];
+      await mockApi(page, { workspaces });
+      let mutations = 0;
+      for (const endpoint of ['merge', 'delete']) {
+        await page.route(`**/api/workspaces/${endpoint}`, async route => {
+          mutations++;
+          workspaces.splice(0, 1);
+          await fulfillJson(route, { memories_moved: 2, memories_removed: 2 });
+        });
+      }
+      await page.goto('/?view=library');
+      await page.locator('#new-memory-button').click();
+      await page.locator('#editor-memory-content').fill('Preserve this draft until I consent.');
+      await page.locator('.nav-item[data-view="manage"]').click();
+      const card = page.locator('.workspace-card').filter({
+        has: page.getByRole('heading', { name: operation === 'switch' ? 'other' : `${workspace} active`, exact: true }),
+      });
+      const label = { merge: 'Merge into…', delete: 'Delete', switch: 'Switch to' }[operation];
+      await card.getByRole('button', { name: label, exact: true }).click();
+      await expect(page.locator('#action-dialog-title')).toContainText('Discard');
+      expect(mutations).toBe(0);
+      await page.locator(discard ? '#action-dialog-submit' : '#action-dialog-cancel').click();
+      if (discard) {
+        if (operation !== 'switch') {
+          await expect(page.locator('#action-dialog-title')).toContainText(operation === 'merge' ? 'Merge workspace' : 'Delete workspace');
+          await answerActionDialog(page);
+        }
+        await expect(page.locator('#workspace-select')).toHaveValue('other');
+        expect(mutations).toBe(operation === 'switch' ? 0 : 1);
+      } else {
+        await expect(page.locator('#action-dialog')).toBeHidden();
+        await expect(page.locator('#workspace-select')).toHaveValue(workspace);
+        expect(mutations).toBe(0);
+      }
+      await page.locator('.nav-item[data-view="library"]').click();
+      if (discard) await expect(page.locator('#memory-editor')).toBeHidden();
+      else await expect(page.locator('#editor-memory-content')).toHaveValue('Preserve this draft until I consent.');
+    });
+  }
+}
+
+test('Consolidation refresh preserves a hidden draft', async ({ page }) => {
+  await mockApi(page);
+  await page.route('**/api/consolidate', route => fulfillJson(route, { reinforced: 2 }));
+  await page.goto('/?view=library');
+  await page.locator('#new-memory-button').click();
+  await page.locator('#editor-memory-content').fill('Maintenance must keep this draft.');
+  await page.locator('.nav-item[data-view="manage"]').click();
+  await page.locator('#manage-consolidate-tab').click();
+  await page.locator('#consolidate-form button[type="submit"]').click();
+  await expect(page.locator('#consolidate-commit')).toBeEnabled();
+  await page.locator('#consolidate-commit').click();
+  await answerActionDialog(page);
+  await expect(page.locator('#consolidate-result')).toContainText('Consolidation committed');
+  await page.locator('.nav-item[data-view="library"]').click();
+  await expect(page.locator('#memory-editor')).toBeVisible();
+  await expect(page.locator('#editor-memory-content')).toHaveValue('Maintenance must keep this draft.');
+});
+
+for (const operation of ['rename', 'merge', 'delete']) {
+  test(`pending ${operation} locks its workspace and preserves a newer workspace draft`, async ({ page }) => {
+    const workspaces = [{ name: workspace, memories: 2 }, { name: 'other', memories: 1 }];
+    await mockApi(page, { workspaces });
+    let release, started = false;
+    const pending = new Promise(resolve => { release = resolve; });
+    const completed = page.waitForResponse(response => response.url().endsWith(`/api/workspaces/${operation}`));
+    await page.route(`**/api/workspaces/${operation}`, async route => {
+      started = true;
+      await pending;
+      if (operation === 'rename') workspaces[0].name = workspace + '-renamed';
+      else workspaces.splice(0, 1);
+      await fulfillJson(route, { memories_moved: 2, memories_removed: 2 });
+    });
+    try {
+      await page.goto('/?view=manage');
+      const card = page.locator('.workspace-card').filter({
+        has: page.getByRole('heading', { name: `${workspace} active`, exact: true }),
+      });
+      await card.getByRole('button', { name: { rename: 'Rename', merge: 'Merge into…', delete: 'Delete' }[operation], exact: true }).click();
+      await answerActionDialog(page, operation === 'rename' ? { fields: { value: workspace + '-renamed' } } : {});
+      await expect.poll(() => started).toBe(true);
+      await page.locator('.nav-item[data-view="library"]').click();
+      await expect(page.locator('#new-memory-button')).toBeDisabled();
+      await page.locator('#workspace-select').selectOption('other');
+      await expect(page.locator('#new-memory-button')).toBeEnabled();
+      await page.locator('#new-memory-button').click();
+      await page.locator('#editor-memory-content').fill('Keep the newer workspace draft.');
+      release();
+      await (await completed).finished();
+      await expect(page.locator('#workspace-select option[value="' + workspace + '"]')).toHaveCount(0);
+      await expect(page.locator('#workspace-select')).toHaveValue('other');
+      await expect(page.locator('#memory-editor')).toBeVisible();
+      await expect(page.locator('#editor-memory-content')).toHaveValue('Keep the newer workspace draft.');
+      await expect(page.locator('#new-memory-button')).toBeEnabled();
+    } finally { release(); }
+  });
+}
+
+for (const operation of ['rename', 'merge', 'delete']) {
+  test(`successful ${operation} retains the confirmed owner when bootstrap fails`, async ({ page }) => {
+    const workspaces = [{ name: workspace, memories: 2 }, { name: 'other', memories: 1 }];
+    await mockApi(page, { workspaces });
+    let failRefresh = false;
+    await page.route(`**/api/workspaces/${operation}`, async route => {
+      if (operation === 'rename') workspaces[0].name = workspace + '-renamed';
+      else workspaces.splice(0, 1);
+      failRefresh = true;
+      await fulfillJson(route, { memories_moved: 2, memories_removed: 2 });
+    });
+    await page.route('**/api/bootstrap*', async route => {
+      if (failRefresh) return route.fulfill({ status: 503, json: { detail: 'Workspace list unavailable' } });
+      await route.fallback();
+    });
+    await page.goto('/?view=manage');
+    await page.locator('.workspace-card').filter({
+      has: page.getByRole('heading', { name: `${workspace} active`, exact: true }),
+    }).getByRole('button', { name: { rename: 'Rename', merge: 'Merge into…', delete: 'Delete' }[operation], exact: true }).click();
+    await answerActionDialog(page, operation === 'rename' ? { fields: { value: workspace + '-renamed' } } : {});
+    await expect(page.locator('#notice-banner')).toContainText('workspace list could not be refreshed');
+    const owner = operation === 'rename' ? workspace + '-renamed' : 'other';
+    await expect(page.locator('#workspace-select')).toHaveValue(owner);
+    await expect(page.locator('#workspace-select option[value="' + workspace + '"]')).toHaveCount(0);
+    await page.locator('.nav-item[data-view="library"]').click();
+    await page.locator('#new-memory-button').click();
+    await expect(page.locator('#editor-scope-note')).toContainText('Workspace: ' + owner);
+  });
+}
+
+test('deleting the last workspace clears the approved editor and loaded records', async ({ page }) => {
+  const workspaces = [{ name: workspace, memories: 2 }];
+  await mockApi(page, { workspaces });
+  await page.route('**/api/workspaces/delete', async route => {
+    workspaces.length = 0;
+    await fulfillJson(route, { memories_removed: 2 });
+  });
+  await page.goto('/?view=library');
+  await expect(page.locator('#library-list [data-memory-id]')).toHaveCount(2);
+  await page.locator('#new-memory-button').click();
+  await page.locator('#editor-memory-content').fill('Discard only with my consent.');
+  await page.locator('.nav-item[data-view="manage"]').click();
+  await page.getByRole('button', { name: 'Delete', exact: true }).click();
+  await page.locator('#action-dialog-submit').click();
+  await expect(page.locator('#action-dialog-title')).toHaveText('Delete workspace permanently');
+  await answerActionDialog(page);
+  await expect(page.locator('#workspace-select')).toBeDisabled();
+  await page.locator('.nav-item[data-view="library"]').click();
+  await expect(page.locator('#memory-editor')).toBeHidden();
+  await expect(page.locator('#library-list [data-memory-id]')).toHaveCount(0);
+  await expect(page.locator('#new-memory-button')).toBeDisabled();
+});
+
+test('a delayed copy bootstrap respects newer workspace navigation', async ({ page }) => {
+  const workspaces = [{ name: workspace, memories: 2 }, { name: 'other', memories: 1 }];
+  await mockApi(page, { workspaces });
+  let release, hold = false, started = false;
+  const pending = new Promise(resolve => { release = resolve; });
+  await page.route('**/api/workspaces/copy', async route => {
+    workspaces.push({ name: workspace + '-copy', memories: 2 });
+    hold = true;
+    await fulfillJson(route, { workspace: workspace + '-copy', memories_copied: 2 });
+  });
+  await page.route('**/api/bootstrap*', async route => {
+    if (hold) { started = true; await pending; }
+    await route.fallback();
+  });
+  try {
+    await page.goto('/?view=manage');
+    await page.locator('.workspace-card').filter({
+      has: page.getByRole('heading', { name: `${workspace} active`, exact: true }),
+    }).getByRole('button', { name: 'Copy', exact: true }).click();
+    await expect.poll(() => started).toBe(true);
+    await page.locator('#workspace-select').selectOption('other');
+    release();
+    await expect(page.locator('#workspace-select option')).toHaveCount(3);
+    await expect(page.locator('#workspace-select')).toHaveValue('other');
+  } finally { release(); }
+});
+
+for (const failed of [false, true]) {
+  test(`a late ${failed ? 'failed' : 'successful'} consolidation preview cannot replace a newer review after a scope round trip`, async ({ page }) => {
+    await mockApi(page, { workspaces: [{ name: workspace, memories: 2 }, { name: 'other', memories: 1 }] });
+    let release, oldRequest, requests = 0;
+    const pending = new Promise(resolve => { release = resolve; });
+    const oldResponse = page.waitForResponse(response => response.request() === oldRequest);
+    await page.route('**/api/consolidate', async route => {
+      requests++;
+      if (requests === 1) {
+        oldRequest = route.request();
+        await pending;
+        if (failed) return route.fulfill({ status: 503, json: { detail: 'Old preview failed' } });
+        return fulfillJson(route, { fixture: 'stale preview' });
+      }
+      await fulfillJson(route, { fixture: 'current preview' });
+    });
+    try {
+      await page.goto('/?view=manage');
+      await page.locator('#manage-consolidate-tab').click();
+      await page.locator('#consolidate-form button[type="submit"]').click();
+      await expect.poll(() => requests).toBe(1);
+      await page.locator('#workspace-select').selectOption('other');
+      await page.locator('#workspace-select').selectOption(workspace);
+      await page.locator('#consolidate-form button[type="submit"]').click();
+      await expect(page.locator('#consolidate-result')).toContainText('current preview');
+      release();
+      await (await oldResponse).finished();
+      await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      await expect(page.locator('#consolidate-result')).toContainText('current preview');
+      await expect(page.locator('#consolidate-commit')).toBeEnabled();
+    } finally { release(); }
+  });
+}
+
+test('a late consolidation commit cannot refresh a newer workspace draft', async ({ page }) => {
+  await mockApi(page, { workspaces: [{ name: workspace, memories: 2 }, { name: 'other', memories: 1 }] });
+  let release, started = false;
+  const pending = new Promise(resolve => { release = resolve; });
+  const completed = page.waitForResponse(response => response.url().endsWith('/api/consolidate') && !response.request().postDataJSON().dry_run);
+  await page.route('**/api/consolidate', async route => {
+    if (!route.request().postDataJSON().dry_run) { started = true; await pending; }
+    await fulfillJson(route, { reinforced: 2 });
+  });
+  try {
+    await page.goto('/?view=manage');
+    await page.locator('#manage-consolidate-tab').click();
+    await page.locator('#consolidate-form button[type="submit"]').click();
+    await expect(page.locator('#consolidate-commit')).toBeEnabled();
+    await page.locator('#consolidate-commit').click();
+    await answerActionDialog(page);
+    await expect.poll(() => started).toBe(true);
+    await page.locator('#workspace-select').selectOption('other');
+    await page.locator('.nav-item[data-view="library"]').click();
+    await page.locator('#new-memory-button').click();
+    await page.locator('#editor-memory-content').fill('Do not refresh this newer workspace editor.');
+    release();
+    await (await completed).finished();
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    await expect(page.locator('#workspace-select')).toHaveValue('other');
+    await expect(page.locator('#editor-memory-content')).toHaveValue('Do not refresh this newer workspace editor.');
+    await expect(page.locator('#memory-editor')).toBeVisible();
+  } finally { release(); }
+});
+
 test('Copying a workspace refreshes its list without clearing a hidden draft', async ({ page }) => {
   const workspaces = [{ name: workspace, memories: 2 }];
   await mockApi(page, { workspaces });

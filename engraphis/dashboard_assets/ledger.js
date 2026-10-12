@@ -26,6 +26,8 @@
     savingsPreset: 'all',
     manageTab: 'workspaces',
     refreshEpoch: 0,
+    bootstrapRequest: 0,
+    workspaceMutations: new Set(),
     graphWorkspace: '',
     graphData: null,
     graphDataMode: 'overview',
@@ -1655,7 +1657,6 @@
   }
 
   async function selectWorkspace(name) {
-    if (!name) return;
     resetMoveSelection(true);
     invalidateConsolidationReview();
     const epoch = ++state.refreshEpoch;
@@ -1718,6 +1719,7 @@
       localStorage.setItem('engraphis-workspace', name);
     } catch (_) {}
     showNotice('');
+    if (!name) return;
     try {
       // Start the visible panel independently of hidden Library/Home requests.
       const visiblePanel = state.view === 'relations' ? loadGraph()
@@ -2100,6 +2102,8 @@
     const move = state.memoryMove;
     if (!move || move.loading || move.applying || !move.preview || move.preview.can_move !== true) return;
     const request = beginScopedRequest('memory-move');
+    if (!await confirmDiscardEditor() || state.memoryMove !== move
+      || !isCurrentScopedRequest(request)) return;
     const body = { ...memoryMoveBody(move), preview_token: move.preview.preview_token, confirmed: true };
     if (body.target_workspace !== move.preview.target || body.workspace !== move.preview.source) {
       invalidateMemoryMovePreview();
@@ -2468,6 +2472,10 @@
   }
 
   function openEditor(memory = null) {
+    if (state.workspaceMutations.has(state.workspace)) {
+      showNotice('Wait for the workspace update before editing memories.');
+      return;
+    }
     // A late detail response must not turn a new draft into an old revision.
     beginScopedRequest('memory-detail');
     resetEditorSession();
@@ -2536,6 +2544,10 @@
   }
 
   function setEditorBusy(busy) {
+    const updating = state.workspaceMutations.has(state.workspace);
+    byId('new-memory-button').disabled = updating || !state.workspace;
+    byId('first-memory-add').disabled = updating;
+    busy = busy || updating;
     const editor = byId('memory-editor');
     editor.setAttribute('aria-busy', String(busy));
     editor.querySelectorAll('input, select, textarea, button').forEach(control => { control.disabled = busy; });
@@ -2590,6 +2602,10 @@
 
   async function saveMemory(event) {
     event.preventDefault();
+    if (state.workspaceMutations.has(state.workspace)) {
+      showNotice('Wait for the workspace update before saving memories.');
+      return;
+    }
     const session = state.editorSession;
     if (!session || session.busy || session.conflicted) return;
     const current = state.editorMemory;
@@ -5562,7 +5578,9 @@
             : 'Local workspace'}`),
       );
       const actions = node('div', 'workspace-card-actions');
-      if (!active) actions.append(button('Switch to', 'secondary-button', () => selectWorkspace(name)));
+      if (!active) actions.append(button('Switch to', 'secondary-button', async () => {
+        if (await confirmDiscardEditor()) await selectWorkspace(name);
+      }));
       actions.append(
         button('Open library', 'secondary-button', () => openWorkspaceLibrary(name)),
         button('Rename', 'secondary-button', () => renameWorkspace(name)),
@@ -5577,6 +5595,9 @@
         actions.append(button('Make personal', 'secondary-button', () => changeWorkspaceVisibility(name, 'personal')));
       }
       actions.append(button('Delete', 'danger-button', () => deleteWorkspace(name)));
+      if (state.workspaceMutations.has(name)) {
+        actions.querySelectorAll('button').forEach(control => { control.disabled = true; });
+      }
       card.append(copy, actions);
       target.append(card);
     });
@@ -5599,6 +5620,44 @@
     } catch (error) {
       showNotice(`${message} The workspace list could not be refreshed: ${error.message}`);
     }
+  }
+
+  async function withWorkspaceMutation(name, operation) {
+    if (state.workspaceMutations.has(name)) throw new Error('This workspace is already being updated.');
+    state.workspaceMutations.add(name);
+    setEditorBusy(Boolean(state.editorSession && state.editorSession.busy));
+    renderWorkspaceList();
+    try {
+      await operation();
+    } finally {
+      state.workspaceMutations.delete(name);
+      setEditorBusy(Boolean(state.editorSession && state.editorSession.busy));
+      renderWorkspaceList();
+    }
+  }
+
+  async function refreshAfterWorkspaceMutation(name, message, renamed = '', destination = '') {
+    // The successful API response is authoritative even if the following list refresh is
+    // delayed, superseded, or fails. Remove the obsolete owner before allowing new drafts.
+    state.workspaces = renamed
+      ? state.workspaces.map(item => workspaceName(item) === name
+        ? (typeof item === 'string' ? renamed : { ...item, name: renamed }) : item)
+      : state.workspaces.filter(item => workspaceName(item) !== name);
+    const select = byId('workspace-select');
+    const previous = [...select.options].find(option => option.value === name);
+    if (previous) {
+      if (renamed) { previous.value = renamed; previous.textContent = renamed; }
+      else previous.remove();
+    }
+    select.disabled = !state.workspaces.length;
+    if (!state.workspaces.length) select.append(option('', 'No workspace'));
+    if (state.workspace === name) {
+      const next = renamed || destination || workspaceName(
+        [...state.workspaces].sort((a, b) => number(b.memories) - number(a.memories))[0] || '',
+      );
+      await selectWorkspace(next);
+    }
+    await refreshAfterWorkspaceChange(state.workspace, message);
   }
 
   async function createWorkspace(event) {
@@ -5660,9 +5719,10 @@
     });
     if (!next || next === name) return;
     try {
-      await api('/workspaces/rename', { method: 'POST', body: { workspace: name, new_name: next } });
-      await refreshAfterWorkspaceChange(name === state.workspace ? next : state.workspace,
-        `Workspace renamed to ${next}.`);
+      await withWorkspaceMutation(name, async () => {
+        await api('/workspaces/rename', { method: 'POST', body: { workspace: name, new_name: next } });
+        await refreshAfterWorkspaceMutation(name, `Workspace renamed to ${next}.`, next);
+      });
     } catch (error) {
       showNotice(`Could not rename workspace: ${error.message}`);
     }
@@ -5711,6 +5771,7 @@
       showNotice('Create another workspace before merging this one into it.');
       return;
     }
+    if (name === state.workspace && !await confirmDiscardEditor()) return;
     const item = state.workspaces.find(entry => workspaceName(entry) === name) || {};
     const count = number(item.memories);
     const result = await dialogs.open({
@@ -5728,10 +5789,12 @@
     });
     if (result === null || !result.target) return;
     try {
-      const merged = await api('/workspaces/merge', { method: 'POST', body: { source: name, target: result.target } });
-      const moved = number(merged && merged.memories_moved);
-      await refreshAfterWorkspaceChange(name === state.workspace ? result.target : state.workspace,
-        `Merged ${moved.toLocaleString()} ${moved === 1 ? 'memory' : 'memories'} into ${result.target}.`);
+      await withWorkspaceMutation(name, async () => {
+        const merged = await api('/workspaces/merge', { method: 'POST', body: { source: name, target: result.target } });
+        const moved = number(merged && merged.memories_moved);
+        await refreshAfterWorkspaceMutation(name,
+          `Merged ${moved.toLocaleString()} ${moved === 1 ? 'memory' : 'memories'} into ${result.target}.`, '', result.target);
+      });
     } catch (error) {
       showNotice(`Could not merge workspace: ${error.message}`);
     }
@@ -5756,6 +5819,7 @@
   }
 
   async function deleteWorkspace(name) {
+    if (name === state.workspace && !await confirmDiscardEditor()) return;
     const item = state.workspaces.find(entry => workspaceName(entry) === name) || {};
     const count = number(item.memories);
     const active = name === state.workspace;
@@ -5771,10 +5835,12 @@
     });
     if (!confirmed) return;
     try {
-      const result = await api('/workspaces/delete', { method: 'POST', body: { workspace: name } });
-      const removed = number(result && result.memories_removed);
-      await refreshAfterWorkspaceChange(active ? '' : state.workspace,
-        `Workspace ${name} deleted · ${removed.toLocaleString()} ${removed === 1 ? 'memory' : 'memories'} removed.`);
+      await withWorkspaceMutation(name, async () => {
+        const result = await api('/workspaces/delete', { method: 'POST', body: { workspace: name } });
+        const removed = number(result && result.memories_removed);
+        await refreshAfterWorkspaceMutation(name,
+          `Workspace ${name} deleted · ${removed.toLocaleString()} ${removed === 1 ? 'memory' : 'memories'} removed.`);
+      });
     } catch (error) {
       showNotice(`Could not delete workspace: ${error.message}`);
     }
@@ -5982,6 +6048,7 @@
   async function previewConsolidation(event) {
     event.preventDefault();
     const options = consolidationOptions();
+    const request = beginScopedRequest('consolidation');
     invalidateConsolidationReview();
     const target = byId('consolidate-result');
     target.replaceChildren(empty('Scanning local memory without writing changes…'));
@@ -5995,11 +6062,13 @@
       });
       // The preview is an approval only for the exact workspace and choices that
       // produced it; never let a late response authorize a changed form.
-      if (!sameConsolidationOptions(options, consolidationOptions())) return;
+      if (!isCurrentScopedRequest(request)
+        || !sameConsolidationOptions(options, consolidationOptions())) return;
       state.consolidationReview = options;
       byId('consolidate-commit').disabled = false;
       renderObject(target, result, 'Dry preview complete · nothing written');
     } catch (error) {
+      if (!isCurrentScopedRequest(request)) return;
       invalidateConsolidationReview();
       target.replaceChildren(empty(`Preview failed: ${error.message}`));
     }
@@ -6012,11 +6081,15 @@
       showNotice('Run a new dry preview after changing the workspace or consolidation options.');
       return;
     }
+    const request = beginScopedRequest('consolidation');
     if (!await dialogs.confirm({
       title: 'Commit consolidation',
       message: `Commit the reviewed consolidation result for ${state.workspace}? Original records remain in temporal history.`,
       confirmLabel: 'Commit result',
     })) return;
+    if (!isCurrentScopedRequest(request)
+      || !sameConsolidationOptions(state.consolidationReview, options)
+      || !sameConsolidationOptions(options, consolidationOptions())) return;
     const target = byId('consolidate-result');
     target.replaceChildren(empty('Committing the reviewed local consolidation…'));
     try {
@@ -6027,10 +6100,13 @@
           dry_run: false,
         },
       });
+      if (!isCurrentScopedRequest(request)) return;
       invalidateConsolidationReview();
       renderObject(target, result, 'Consolidation committed');
-      await selectWorkspace(state.workspace);
+      if (editorOpen()) await refreshLibrary();
+      else await selectWorkspace(request.workspace);
     } catch (error) {
+      if (!isCurrentScopedRequest(request)) return;
       target.replaceChildren(empty(`Commit failed: ${error.message}`));
     }
   }
@@ -6874,7 +6950,11 @@
   }
 
   async function refreshBootstrap(preferred = '') {
+    const request = ++state.bootstrapRequest;
+    const epoch = state.refreshEpoch;
+    const workspace = state.workspace;
     const bootstrap = (await api('/bootstrap?include_stats=false')) || {};
+    if (request !== state.bootstrapRequest) return;
     renderUpdateBanner(bootstrap.update);
     if (typeof bootstrap.version === 'string' && bootstrap.version.trim()) {
       state.releaseVersion = bootstrap.version.trim();
@@ -6895,10 +6975,7 @@
       select.append(option('', 'No workspace'));
       select.disabled = true;
       setConnection('Local engine connected · no workspace');
-      state.workspace = '';
-      state.project = '';
-      workflow.selectWorkspace('');
-      state.stats = {};
+      await selectWorkspace('');
       state.libraryTotal = 0;
       renderFirstMemoryJourney();
       renderWorkspaceNames();
@@ -6929,8 +7006,10 @@
     const selected = names.includes(saved)
       ? saved
       : workspaceName([...state.workspaces].sort((a, b) => number(b.memories) - number(a.memories))[0]);
-    if (editorOpen() && names.includes(state.workspace)
-      && (selected === state.workspace || !await confirmDiscardEditor())) {
+    const navigated = epoch !== state.refreshEpoch || workspace !== state.workspace;
+    if (names.includes(state.workspace)
+      && (navigated || (editorOpen()
+        && (selected === state.workspace || !await confirmDiscardEditor())))) {
       select.value = state.workspace;
       renderWorkspaceNames();
       renderWorkspaceList();
