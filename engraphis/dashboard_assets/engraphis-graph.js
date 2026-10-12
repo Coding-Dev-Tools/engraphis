@@ -11814,7 +11814,7 @@
       const counts = new Map();
       const topics = new Map();
       const community = state.colorBy === 'community';
-      raw.nodes.forEach(n => {
+      visible(false).nodes.forEach(n => {
         const key = community ? (n.community || 0) : String(n.etype || 'person_or_concept');
         counts.set(key, (counts.get(key) || 0) + 1);
         if (community && n.topic && !topics.has(key)) topics.set(key, String(n.topic));

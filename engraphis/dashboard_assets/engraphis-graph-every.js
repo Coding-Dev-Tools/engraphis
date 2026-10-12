@@ -1627,6 +1627,7 @@
         const counts = new Map();
         const sample = new Map();
         for (let index = 0; index < state.ids.length; index += 1) {
+          if (!state.ready || !passesFilters(index)) continue;
           const key = byType ? String(state.types[index] || 'person_or_concept')
             : String(state.communities[index] ?? index);
           counts.set(key, (counts.get(key) || 0) + 1);

@@ -3068,20 +3068,28 @@ for (const every of [false, true]) {
     const relations = page.locator('#graph-relation-list .graph-relation-row');
     await expect(entities).toHaveCount(4);
     await expect(relations).toHaveCount(2);
+    await page.getByRole('tab', { name: 'Explore' }).click();
+    await page.locator('[data-graph-color-choice="type"]').click();
+    await expect(page.locator('#graph-legend-list li')).toHaveCount(3);
+    await page.getByRole('tab', { name: 'Analyse' }).click();
 
     await page.locator('#graph-min-degree').fill('2');
     await expect(entities).toHaveCount(2);
     expect(await entities.evaluateAll(items => items.map(item => item.dataset.entity).sort()))
       .toEqual(['free', 'hub']);
+    await expect(page.locator('#graph-legend-list li')).toHaveCount(2);
+    await expect(page.locator('#graph-legend-list')).not.toContainText('technology');
     await page.getByRole('tab', { name: 'Explore' }).click();
     await page.locator('#graph-show-unlinked').click();
     await expect(page.locator('#graph-canvas')).toHaveAttribute('aria-busy', 'false');
     await expect(entities).toHaveCount(1);
     await expect(entities).toHaveAttribute('data-entity', 'hub');
+    await expect(page.locator('#graph-legend-list li')).toHaveCount(1);
     await expect(relations).toHaveCount(0);
     await page.getByRole('tab', { name: 'Analyse' }).click();
     await page.locator('#graph-min-degree').fill('3');
     await expect(entities).toHaveCount(0);
+    await expect(page.locator('#graph-legend')).toBeHidden();
     await expect(page.locator('#graph-entity-list')).toContainText('No entities are visible in the current graph scope.');
     await page.locator('#graph-min-degree').fill('2');
     await expect(entities).toHaveCount(1);
@@ -3093,6 +3101,7 @@ for (const every of [false, true]) {
     await page.getByRole('tab', { name: 'Analyse' }).click();
     await page.locator('#graph-min-degree').fill('1');
     await expect(entities).toHaveCount(3);
+    await expect(page.locator('#graph-legend-list li')).toHaveCount(2);
     await expect(relations).toHaveCount(2);
 
     await page.getByRole('tab', { name: 'Explore' }).click();
@@ -3139,6 +3148,7 @@ for (const every of [false, true]) {
     await page.getByRole('tab', { name: 'Explore' }).click();
     await page.locator('#graph-show-unlinked').click();
     await expect(entities).toHaveCount(4);
+    await expect(page.locator('#graph-legend-list li')).toHaveCount(3);
     expect(errors).toEqual([]);
   });
 }

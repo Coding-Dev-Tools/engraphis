@@ -9441,6 +9441,30 @@ def test_accessible_graph_scope_uses_entities_instead_of_lod_cluster_ids() -> No
 
 
 @requires_node
+def test_graph_legend_filters_before_selecting_its_largest_categories() -> None:
+    report = _run_engine(
+        """
+        const api = G.create(el, { reducedMotion: () => true });
+        const hidden = Array.from({ length: 90 }, (_, index) => ({
+          id: `hidden-${index}`, repo: 'hidden', etype: `hidden_type_${Math.floor(index / 10)}`,
+        }));
+        api.setData({ nodes: hidden.concat([{ id: 'visible', repo: 'visible', etype: 'visible_type' }]), links: [] });
+        api.setColorBy('type');
+        api.setScope({ showUnlinked: true });
+        api.setRepoFilter('visible');
+        const filtered = api.legend(8);
+        api.setRepoFilter('');
+        const restored = api.legend(8);
+        emit({ filtered, restored });
+        """
+    )
+    assert report["filtered"]["total"] == 1
+    assert [(item["key"], item["count"]) for item in report["filtered"]["items"]] == [("visible_type", 1)]
+    assert report["restored"]["total"] == 10
+    assert len(report["restored"]["items"]) == 8
+
+
+@requires_node
 def test_disconnected_entities_are_labelled_as_separate_communities() -> None:
     report = _run_node(
         """
