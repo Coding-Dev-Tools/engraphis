@@ -340,6 +340,187 @@ function browserErrors(page) {
   return errors;
 }
 
+test('release regression: a pending detail cannot change a new draft into a revision', async ({ page }) => {
+  await mockApi(page);
+  let releaseDetail;
+  const detailGate = new Promise(resolve => { releaseDetail = resolve; });
+  let detailStarted;
+  const started = new Promise(resolve => { detailStarted = resolve; });
+  await page.route('**/api/memory/mem_database**', async route => {
+    detailStarted();
+    await detailGate;
+    await route.fulfill({ json: { memory: memories[0], chain: [] } }).catch(() => {});
+  });
+  const saved = [];
+  await page.route('**/api/remember', async route => {
+    saved.push(route.request().postDataJSON());
+    await route.fulfill({ json: { id: 'mem_new' } });
+  });
+  await page.goto('/?view=library');
+  await page.getByRole('option', { name: /^Database choice/ }).click();
+  await started;
+  await page.getByRole('button', { name: 'New memory', exact: true }).click();
+  await page.locator('#editor-memory-title').fill('Independent draft');
+  await page.locator('#editor-memory-content').fill('A new fact survives a stale detail response.');
+  releaseDetail();
+  await expect(page.locator('#editor-title')).toHaveText('New memory');
+  await page.getByRole('button', { name: 'Save memory', exact: true }).click();
+  await expect.poll(() => saved.length).toBe(1);
+  expect(saved[0].content).toBe('A new fact survives a stale detail response.');
+  await expect(page.locator('#editor-error')).toBeHidden();
+});
+
+test('release regression: delayed pin completion preserves another workspace draft', async ({ page }) => {
+  await mockApi(page, { workspaces: [{ name: workspace, memories: 2 }, { name: 'other', memories: 0 }] });
+  let releasePin;
+  const pinGate = new Promise(resolve => { releasePin = resolve; });
+  let pinStarted;
+  const started = new Promise(resolve => { pinStarted = resolve; });
+  let completed;
+  const completion = new Promise(resolve => { completed = resolve; });
+  await page.route('**/api/pin', async route => {
+    pinStarted();
+    await pinGate;
+    await route.fulfill({ json: { ok: true } });
+    completed();
+  });
+  await page.goto('/?view=library');
+  await page.getByRole('option', { name: /^Database choice/ }).click();
+  await page.getByRole('button', { name: 'Pin', exact: true }).click();
+  await started;
+  await expect(page.getByRole('button', { name: 'Pin', exact: true })).toBeDisabled();
+  await page.getByLabel('Active workspace').selectOption('other');
+  await page.getByRole('button', { name: 'New memory', exact: true }).click();
+  await page.locator('#editor-memory-title').fill('Other workspace draft');
+  await page.locator('#editor-memory-content').fill('Keep this draft.');
+  releasePin();
+  await completion;
+  await expect(page.locator('#memory-editor')).toBeVisible();
+  await expect(page.locator('#editor-memory-content')).toHaveValue('Keep this draft.');
+  await expect(page.locator('#editor-scope-note')).toContainText('other');
+});
+
+for (const mutation of ['pin', 'approval']) {
+  for (const nextAction of ['draft', 'another record']) {
+    test(`release regression: ${mutation} refresh preserves a same-workspace ${nextAction}`, async ({ page }) => {
+      await mockApi(page);
+      await page.route('**/dashboard/review/csrf', route => route.fulfill({ json: { review_csrf_token: 'public-test-fixture' } }));
+      await page.route('**/dashboard/review/approve', route => route.fulfill({ json: { id: 'mem_approved' } }));
+      let holdRefresh = false, releaseRefresh, refreshStarted;
+      const gate = new Promise(resolve => { releaseRefresh = resolve; });
+      const started = new Promise(resolve => { refreshStarted = resolve; });
+      await page.route(/\/api\/proactive\?/, async route => {
+        if (holdRefresh) { refreshStarted(); await gate; }
+        await route.fallback();
+      });
+      try {
+        await page.goto('/?view=library');
+        await page.getByRole('option', { name: /^Database choice/ }).click();
+        await expect(page.getByRole('button', { name: 'Pin', exact: true })).toBeVisible();
+        holdRefresh = true;
+        await page.getByRole('button', { name: mutation === 'pin' ? 'Pin' : 'Approve for prompt…', exact: true }).click();
+        if (mutation === 'approval') {
+          await answerActionDialog(page, { fields: { reason: 'Reviewed this test fixture.' } });
+        }
+        await started;
+        if (nextAction === 'draft') {
+          await page.getByRole('button', { name: 'New memory', exact: true }).click();
+          await page.locator('#editor-memory-title').fill('Draft during refresh');
+          await page.locator('#editor-memory-content').fill('Keep this same-workspace draft.');
+        } else {
+          await page.getByRole('option', { name: /^Safe rendering/ }).click();
+          await expect(page.locator('#memory-detail')).toContainText('Safe rendering');
+        }
+        const refreshed = page.waitForResponse(response => /\/api\/proactive\?/.test(response.url()));
+        releaseRefresh();
+        await refreshed;
+        await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+        if (nextAction === 'draft') {
+          await expect(page.locator('#memory-editor')).toBeVisible();
+          await expect(page.locator('#editor-memory-content')).toHaveValue('Keep this same-workspace draft.');
+        } else {
+          await expect(page.locator('#memory-detail')).toContainText('Safe rendering');
+          await expect(page.locator('#memory-editor')).toBeHidden();
+        }
+      } finally {
+        releaseRefresh();
+      }
+    });
+  }
+}
+
+test('release regression: requested graph loads before slow hidden library and agenda', async ({ page }) => {
+  await mockApi(page);
+  let releaseHidden;
+  const hiddenGate = new Promise(resolve => { releaseHidden = resolve; });
+  await page.route(/\/api\/(memories|proactive)\?/, async route => {
+    await hiddenGate;
+    await route.fallback();
+  });
+  try {
+    await page.goto('/?view=relations');
+    await expect(page.locator('#graph-count')).toContainText('entities', { timeout: 5000 });
+    await expect(page.getByRole('region', { name: 'Explore project connections' })).toBeVisible();
+    await expect(page.locator('#connection-status')).toContainText('connected');
+  } finally {
+    releaseHidden();
+  }
+});
+
+test('release regression: import polling recovers the same job and reports stay paged', async ({ page }) => {
+  await mockApi(page);
+  await page.route('**/dashboard/review/csrf', route => route.fulfill({ json: { review_csrf_token: 'review-fixture' } }));
+  const files = Array.from({ length: 1500 }, (_, i) => ({
+    path: `note-${i}.md`, status: i % 2 ? 'skip' : 'import',
+  }));
+  let runs = 0, polls = 0;
+  await page.route('**/api/workspaces/import-documents/**', async route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith('/formats')) return route.fulfill({ json: { extensions: ['md'] } });
+    if (path.endsWith('/sources')) return route.fulfill({ json: { sources: [] } });
+    if (path.endsWith('/preview')) return route.fulfill({ json: { review_token: 'bound-preview', files, counts: { import: 750, skip: 750 } } });
+    if (path.endsWith('/run')) {
+      runs++;
+      return route.fulfill({ json: { job_id: 'job_review', state: 'running', files } });
+    }
+    if (path.endsWith('/jobs/job_review')) {
+      polls++;
+      if (polls === 1) return route.fulfill({ status: 503, json: { error: 'temporary progress failure' } });
+      return route.fulfill({ json: { job_id: 'job_review', state: 'complete', files } });
+    }
+    return route.fallback();
+  });
+  await page.goto('/?view=library');
+  await page.locator('#import-menu-button').click();
+  await page.locator('#obsidian-import-button').click();
+  await page.locator('#obsidian-vault-label').fill('Release fixture');
+  await page.locator('#obsidian-import-files').setInputFiles({
+    name: 'note.md', mimeType: 'text/markdown', buffer: Buffer.from('A local fixture fact.'),
+  });
+  await page.locator('#obsidian-scope').selectOption('session');
+  await page.getByRole('button', { name: 'Preview import', exact: true }).click();
+  await expect(page.locator('#obsidian-import-progress')).toHaveText('Session scope requires a session ID.');
+  await expect(page.locator('#obsidian-session')).toBeFocused();
+  await page.locator('#obsidian-scope').selectOption('workspace');
+  await page.getByRole('button', { name: 'Preview import', exact: true }).click();
+  await expect(page.locator('#obsidian-report-count')).toHaveText('1–100 of 1500 files');
+  await expect(page.locator('#obsidian-import-report li')).toHaveCount(100);
+  await page.getByRole('button', { name: 'Next report page' }).click();
+  await expect(page.locator('#obsidian-report-count')).toHaveText('101–200 of 1500 files');
+  await page.locator('#obsidian-report-filter').selectOption('skip');
+  await expect(page.locator('#obsidian-report-count')).toHaveText('1–100 of 750 files');
+  await page.locator('#obsidian-confirmed').check();
+  await page.getByRole('button', { name: 'Import documents', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Retry progress' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Import documents', exact: true })).toBeDisabled();
+  await page.getByRole('button', { name: 'Retry progress' }).click();
+  await expect(page.getByRole('button', { name: 'Preview import', exact: true })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Retry progress' })).toBeHidden();
+  expect(runs).toBe(1);
+  expect(polls).toBe(2);
+  await expect(page.locator('#obsidian-import-report li')).toHaveCount(100);
+});
+
 async function openProcessingSettings(page) {
   await page.goto('/?view=manage');
   await page.locator('#manage-settings-tab').click();
@@ -2408,13 +2589,13 @@ test('Ledger exposes local LLM setup and extraction controls', async ({ page }) 
   const model = page.getByRole('combobox', { name: 'Model' });
   await expect(provider).toHaveValue('openai');
   await expect(model).toHaveValue('gpt-4o-mini');
-  await expect(page.getByLabel('Local .env setup')).toHaveValue(/ENGRAPHIS_LLM_PROVIDER=openai/);
+  await expect(page.getByLabel('Owner-private config.env setup')).toHaveValue(/ENGRAPHIS_LLM_PROVIDER=openai/);
   await expect(page.locator('#llm-connection').getByRole('button', { name: 'Turn on' })).toBeDisabled();
   await expect(page.locator('#llm-connection').getByRole('button', { name: 'Turn off' })).toBeDisabled();
 
   await provider.selectOption('anthropic');
   await expect(model).toHaveValue('claude-sonnet-5-5');
-  await expect(page.getByLabel('Local .env setup')).toHaveValue(/ENGRAPHIS_LLM_PROVIDER=anthropic/);
+  await expect(page.getByLabel('Owner-private config.env setup')).toHaveValue(/ENGRAPHIS_LLM_PROVIDER=anthropic/);
   await page.getByRole('button', { name: 'Test connection' }).click();
   await expect(page.locator('#llm-test-result')).toContainText('No API key configured');
 });
@@ -2814,6 +2995,102 @@ test('Activity verifies the receipt chain and says plainly when it cannot', asyn
   expect(errors).toEqual([]);
 });
 
+test('Source completion preserves an editor while its save is pending and then fails', async ({ page }) => {
+  const errors = browserErrors(page);
+  const requests = await mockApi(page);
+  let releaseIndex, releaseSave;
+  const indexPending = new Promise(resolve => { releaseIndex = resolve; });
+  const savePending = new Promise(resolve => { releaseSave = resolve; });
+  let indexStarted = false, saveStarted = false;
+  await page.route('**/api/code/index', async route => {
+    indexStarted = true;
+    await indexPending;
+    await fulfillJson(route, { files_indexed: 1, symbols: 2 });
+  });
+  await page.route('**/api/remember', async route => {
+    saveStarted = true;
+    await savePending;
+    await route.fulfill({ status: 503, json: { detail: 'Save unavailable' } });
+  });
+  try {
+    await page.goto('/');
+    await page.locator('.nav-item[data-view="library"]').click();
+    await page.locator('#import-menu-button').click();
+    await page.locator('#import-sources-button').click();
+    await page.locator('#code-index-repo').fill('engraphis');
+    await page.locator('#code-index-root').fill('/srv/engraphis');
+    await page.locator('#code-index-form button[type="submit"]').click();
+    await expect.poll(() => indexStarted).toBe(true);
+    await page.locator('#sources-close').click();
+    await page.locator('#new-memory-button').click();
+    await page.locator('#editor-memory-title').fill('Keep the pending draft');
+    await page.locator('#editor-memory-content').fill('This draft must survive an import.');
+    await page.locator('#memory-editor button[type="submit"]').click();
+    await expect.poll(() => saveStarted).toBe(true);
+    const libraryLoads = requests.filter(path => path === '/memories').length;
+    releaseIndex();
+    await expect.poll(() => requests.filter(path => path === '/memories').length).toBeGreaterThan(libraryLoads);
+    await expect(page.locator('#memory-editor')).toBeVisible();
+    await expect(page.locator('#editor-memory-content')).toHaveValue('This draft must survive an import.');
+    releaseSave();
+    await expect(page.locator('#editor-error')).toContainText('Your draft is retained');
+    await expect(page.locator('#editor-memory-title')).toHaveValue('Keep the pending draft');
+    expect(errors.filter(error => error !==
+      'Failed to load resource: the server responded with a status of 503 (Service Unavailable)')).toEqual([]);
+  } finally {
+    releaseIndex();
+    releaseSave();
+  }
+});
+
+test('Fast library reorders are written in gesture order while the first write is pending', async ({ page }) => {
+  const errors = browserErrors(page);
+  const ordered = [...memories, { ...memories[0], id: 'mem_third', title: 'Third record' }];
+  await mockApi(page, { memoriesByWorkspace: { [workspace]: ordered } });
+  await page.addInitScript(() => {
+    const fetch = window.fetch.bind(window);
+    window.__reorderFetches = [];
+    window.fetch = (url, options) => {
+      if (String(url).includes('/api/memories/reorder')) {
+        window.__reorderFetches.push(JSON.parse(options.body).ids);
+      }
+      return fetch(url, options);
+    };
+  });
+  let releaseFirst;
+  const firstPending = new Promise(resolve => { releaseFirst = resolve; });
+  const writes = [], committed = [];
+  await page.route('**/api/memories/reorder', async route => {
+    const ids = route.request().postDataJSON().ids;
+    writes.push(ids);
+    if (writes.length === 1) await firstPending;
+    committed.push(ids);
+    await fulfillJson(route, { updated: ids.length });
+  });
+  try {
+    await page.goto('/');
+    await page.locator('.nav-item[data-view="library"]').click();
+    const cards = page.locator('#library-list [role="option"]');
+    await expect(cards).toHaveCount(3);
+    await cards.first().focus();
+    await page.keyboard.press('Alt+ArrowDown');
+    await expect.poll(() => writes.length).toBe(1);
+    await page.keyboard.press('Alt+ArrowDown');
+    await expect(cards.nth(2)).toContainText('Database choice');
+    expect(await page.evaluate(() => window.__reorderFetches.length)).toBe(1);
+    releaseFirst();
+    await expect.poll(() => committed.length).toBe(2);
+    expect(committed).toEqual([
+      ['mem_safety', 'mem_database', 'mem_third'],
+      ['mem_safety', 'mem_third', 'mem_database'],
+    ]);
+    await expect(page.locator('#library-reorder-status')).toContainText('position 3');
+    expect(errors).toEqual([]);
+  } finally {
+    releaseFirst();
+  }
+});
+
 test('Home shows memory health and the selected project’s last-session handoff', async ({ page }) => {
   const errors = browserErrors(page);
   await mockApi(page);
@@ -2882,7 +3159,7 @@ test('A missing embedding model is explained and rechecked without resetting ope
   const errors = browserErrors(page);
   const requests = await mockApi(page);
   let embedder = { semantic: false, model: 'all-MiniLM-L6-v2' };
-  await page.route('**/api/bootstrap', route => fulfillJson(route, {
+  await page.route('**/api/bootstrap*', route => fulfillJson(route, {
     license: license(),
     workspaces: [{ name: workspace, memories: memories.length }],
     stats: { memories: memories.length, total_rows: memories.length, workspaces: 1, sessions: 1 },

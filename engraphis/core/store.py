@@ -7569,7 +7569,7 @@ class Store:
         if include_invalid:
             return ordinary, params
 
-        # Promotion and merge links intentionally keep retired source history
+        # Lifecycle lineage links intentionally keep retired source history
         # queryable from the live successor. They still require both endpoints
         # to satisfy every non-temporal scope/type predicate.
         historical_clauses: list[str] = []
@@ -7580,7 +7580,14 @@ class Store:
             )
             historical_clauses.extend(where)
             historical_params.extend(values)
-        lineage = "l.relation IN ('promotes','merges')"
+        lineage = "l.relation IN ('promotes','merges','supersedes')"
+        _, known = _temporal_anchors(flt)
+        for alias in ("ma", "mb"):
+            historical_clauses.extend([
+                f"({alias}.ingested_at IS NULL OR {alias}.ingested_at<=?)",
+                f"({alias}.expired_at IS NULL OR ?<{alias}.expired_at)",
+            ])
+            historical_params.extend([known, known])
         if historical_clauses:
             lineage += " AND " + " AND ".join(historical_clauses)
         return f"(({ordinary}) OR ({lineage}))", params + historical_params

@@ -80,6 +80,8 @@
   };
 
   const byId = id => document.getElementById(id);
+  const runtimeApi = byId('ledger-runtime-api');
+  if (runtimeApi) runtimeApi.textContent = location.host;
   const memoryTitle = window.EngraphisWorkflow.title;
   const dialogs = window.EngraphisDialog;
   const markdown = window.EngraphisMarkdown;
@@ -112,6 +114,14 @@
     const control = node('button', className, label);
     control.type = 'button';
     control.addEventListener('click', action);
+    return control;
+  };
+  const memoryMutationButton = (label, className, action) => {
+    const control = button(label, className, async () => {
+      if (control.disabled) return;
+      control.disabled = true;
+      try { await action(); } finally { control.disabled = false; }
+    });
     return control;
   };
   const option = (value, label, selected = false) => {
@@ -416,6 +426,8 @@
 
   async function approveForPrompt(memory) {
     if (!memory || !memory.id) return;
+    const request = beginScopedRequest('memory-mutation');
+    const editorSession = state.editorSession;
     const provenance = memory.provenance || {};
     const reviewState = provenance.review_state || 'pending';
     const review = await dialogs.open({
@@ -428,6 +440,8 @@
       confirmLabel: 'Approve for prompt',
     });
     if (review === null) return;
+    if (!isCurrentScopedRequest(request) || state.editorSession !== editorSession
+      || state.selectedMemory !== memory.id) return;
     const reason = review.reason;
     if (!reason) {
       showNotice('A non-empty review reason is required.');
@@ -435,6 +449,8 @@
     }
     try {
       const csrf = await reviewCsrfToken();
+      if (!isCurrentScopedRequest(request) || state.editorSession !== editorSession
+        || state.selectedMemory !== memory.id) return;
       const response = await fetch(`${location.origin}/dashboard/review/approve`, {
         method: 'POST',
         headers: {
@@ -450,10 +466,16 @@
         error.status = response.status;
         throw error;
       }
+      if (!isCurrentScopedRequest(request) || state.editorSession !== editorSession
+        || state.selectedMemory !== memory.id) return;
       showNotice('Approved successor created. The reviewed source remains in the audit trail.');
-      await selectWorkspace(state.workspace);
-      if (payload.id) await selectMemory(payload.id);
+      await selectWorkspace(request.workspace);
+      if (payload.id && state.workspace === request.workspace
+        && state.refreshEpoch === request.epoch + 1
+        && !state.editorSession && !state.selectedMemory) await selectMemory(payload.id);
     } catch (error) {
+      if (!isCurrentScopedRequest(request) || state.editorSession !== editorSession
+        || state.selectedMemory !== memory.id) return;
       showNotice(`Could not approve this memory: ${error.message}`);
     }
   }
@@ -510,7 +532,7 @@
     if (!graphAllAssetsPromise) {
       const controller = new AbortController();
       const attempt = loadScript(
-        graphAssetSource('/v2-assets/engraphis-graph-every.js?v=20261009-ledger-only-1'),
+        graphAssetSource('/v2-assets/engraphis-graph-every.js?v=20261012-stacked-ledger-1'),
         'EngraphisEveryGraph', controller.signal,
       );
       graphAllAssetsPromise = attempt;
@@ -1349,8 +1371,9 @@
   }
 
   async function loadStats(workspace, epoch) {
+    const request = beginScopedRequest('stats');
     try {
-      const stats = await api(`/stats?${query(workspace)}`);
+      const stats = await api(`/stats?${query(workspace)}`, { signal: request.signal });
       if (epoch !== state.refreshEpoch) return;
       state.stats = stats;
       renderMetricValues(stats);
@@ -1426,7 +1449,7 @@
     byId('library-refresh').disabled = state.libraryLoading || !state.workspace;
     byId('library-list').setAttribute('aria-busy', String(state.libraryLoading));
     byId('library-list').querySelectorAll('.memory-card').forEach(card => {
-      card.disabled = state.librarySelecting && state.libraryLoading;
+      card.disabled = state.libraryLoading;
     });
     renderMoveSelection();
   }
@@ -1517,13 +1540,14 @@
   }
 
   async function loadToday(workspace, epoch) {
+    const request = beginScopedRequest('today');
     const project = state.project;
     const [proactiveResult, auditResult, healthResult, handoffResult] = await Promise.allSettled([
-      api(`/proactive?${query(workspace)}&k=8`),
-      api(`/audit?${query(workspace)}&limit=12`),
-      api(`/analytics/health?${query(workspace)}`),
+      api(`/proactive?${query(workspace)}&k=8`, { signal: request.signal }),
+      api(`/audit?${query(workspace)}&limit=12`, { signal: request.signal }),
+      api(`/analytics/health?${query(workspace)}`, { signal: request.signal }),
       project
-        ? api(`/proactive?${query(workspace)}&repo=${encodeURIComponent(project)}&k=1`)
+        ? api(`/proactive?${query(workspace)}&repo=${encodeURIComponent(project)}&k=1`, { signal: request.signal })
         : Promise.resolve(null),
     ]);
     if (epoch !== state.refreshEpoch) return;
@@ -1636,6 +1660,7 @@
     invalidateConsolidationReview();
     const epoch = ++state.refreshEpoch;
     invalidateScopedRequests();
+    if (state.graphLoadController) state.graphLoadController.abort();
     askRequests.reset();
     window.clearTimeout(librarySearchTimer);
     state.libraryCursors = [null];
@@ -1653,6 +1678,7 @@
     renderFirstMemoryJourney();
     workflow.selectWorkspace(name);
     state.project = workflow.project();
+    if (window.SpecStudio) window.SpecStudio.setScope(name, state.project);
     void processingControls.selectWorkspace(name);
     state.graphWorkspace = '';
     state.graphData = null;
@@ -1688,23 +1714,23 @@
     } catch (_) {}
     showNotice('');
     try {
+      // Start the visible panel independently of hidden Library/Home requests.
+      const visiblePanel = state.view === 'relations' ? loadGraph()
+        : state.view === 'provenance' && state.provenanceTab === 'audit' ? loadAudit()
+        : state.view === 'manage' ? Promise.all([loadSavings(epoch), loadManageTab(state.manageTab)])
+        : Promise.resolve();
       const results = await Promise.allSettled([
         loadStats(name, epoch),
         loadProjects(name, epoch),
         loadMemories(name, epoch),
         loadReviewInbox(),
         loadToday(name, epoch),
+        visiblePanel,
       ]);
       if (epoch !== state.refreshEpoch) return;
       const failed = results.find(result => result.status === 'rejected');
       if (failed) showNotice(`Some workspace panels could not refresh: ${failed.reason.message}`);
       renderWorkspaceList();
-      if (state.view === 'relations') await loadGraph();
-      if (state.view === 'provenance' && state.provenanceTab === 'audit') await loadAudit();
-      if (state.view === 'manage') {
-        await loadSavings(epoch);
-        await loadManageTab(state.manageTab);
-      }
     } catch (error) {
       if (epoch === state.refreshEpoch) showNotice(`Could not refresh ${name}: ${error.message}`);
     }
@@ -1718,21 +1744,29 @@
       && !byId('library-filter').value.trim() && !byId('library-type').value;
   }
 
+  let libraryOrderWrite = Promise.resolve();
+
   async function persistLibraryOrder(movedId, message) {
     const workspace = state.workspace;
     const epoch = state.refreshEpoch;
+    const ids = state.memories.map(memory => memory.id);
     renderLibrary();
     const moved = byId('library-list').querySelector(`[data-memory-id="${CSS.escape(movedId)}"]`);
     if (moved) {
       byId('library-list').querySelectorAll('[role="option"]').forEach(card => { card.tabIndex = card === moved ? 0 : -1; });
       moved.focus();
     }
+    // Preserve the order of accepted gestures even when the server is slow.
+    const write = libraryOrderWrite.catch(() => {}).then(() => api('/memories/reorder', {
+      method: 'POST', body: { workspace, ids },
+    }));
+    libraryOrderWrite = write;
     try {
-      await api('/memories/reorder', {
-        method: 'POST', body: { workspace, ids: state.memories.map(memory => memory.id) },
-      });
+      await write;
+      if (write !== libraryOrderWrite) return;
       if (workspace === state.workspace && epoch === state.refreshEpoch) byId('library-reorder-status').textContent = message;
     } catch (error) {
+      if (write !== libraryOrderWrite) return;
       if (workspace !== state.workspace || epoch !== state.refreshEpoch) return;
       showNotice(`Could not save the new order: ${error.message}`);
       refreshLibrary();
@@ -2171,15 +2205,15 @@
       const actions = node('div', 'detail-actions');
       const provenance = memory.provenance || {};
       if (provenance.review_state !== 'approved' || provenance.trusted !== true) {
-        actions.append(button('Approve for prompt…', 'primary-button', () => approveForPrompt(memory)));
+        actions.append(memoryMutationButton('Approve for prompt…', 'primary-button', () => approveForPrompt(memory)));
       }
       actions.append(
         button('Review with Jev', 'secondary-button', () => openJevReview(memory)),
         button(memory.can_revise === false ? 'Review saved versions' : 'Edit', 'secondary-button', () => openEditor(memory)),
-        button(memory.pinned ? 'Unpin' : 'Pin', 'secondary-button', () => togglePin(memory)),
+        memoryMutationButton(memory.pinned ? 'Unpin' : 'Pin', 'secondary-button', () => togglePin(memory)),
         button('Search topic timeline', 'secondary-button', () => openMemoryTimeline(memory)),
-        button('Retire', 'danger-button', () => retireMemory(memory)),
-        button('Secure erase leak', 'danger-button', () => secureEraseMemory(memory)),
+        memoryMutationButton('Retire', 'danger-button', () => retireMemory(memory)),
+        memoryMutationButton('Secure erase leak', 'danger-button', () => secureEraseMemory(memory)),
       );
       target.append(actions);
       const trail = auditTrail(payload.audit);
@@ -2429,6 +2463,8 @@
   }
 
   function openEditor(memory = null) {
+    // A late detail response must not turn a new draft into an old revision.
+    beginScopedRequest('memory-detail');
     resetEditorSession();
     state.editorSession = {
       revision: window.EngraphisMemoryRevision.create(memory), busy: false,
@@ -2631,7 +2667,8 @@
       if (workspace !== state.workspace || epoch !== state.refreshEpoch || state.editorSession !== session) return;
       closeEditor();
       await selectWorkspace(workspace);
-      if (savedId && workspace === state.workspace && state.refreshEpoch === epoch + 1) await selectMemory(savedId);
+      if (savedId && workspace === state.workspace && state.refreshEpoch === epoch + 1
+        && !state.editorSession && !state.selectedMemory) await selectMemory(savedId);
     } catch (error) {
       if (workspace === state.workspace && epoch === state.refreshEpoch && state.editorSession === session) {
         session.conflicted = Boolean(current && (error.status === 409 || !current.version));
@@ -2652,41 +2689,58 @@
   }
 
   async function togglePin(memory) {
+    const request = beginScopedRequest('memory-mutation');
+    const editorSession = state.editorSession;
     try {
       await api('/pin', {
         method: 'POST',
-        body: { id: memory.id, workspace: state.workspace, pinned: !memory.pinned },
+        body: { id: memory.id, workspace: request.workspace, pinned: !memory.pinned },
       });
+      if (!isCurrentScopedRequest(request) || state.editorSession !== editorSession
+        || state.selectedMemory !== memory.id) return;
       showNotice(memory.pinned ? 'Memory unpinned.' : 'Memory pinned against decay.');
-      await selectWorkspace(state.workspace);
-      selectMemory(memory.id);
+      await selectWorkspace(request.workspace);
+      if (state.workspace === request.workspace && state.refreshEpoch === request.epoch + 1
+        && !state.editorSession && !state.selectedMemory) await selectMemory(memory.id);
     } catch (error) {
+      if (!isCurrentScopedRequest(request) || state.editorSession !== editorSession
+        || state.selectedMemory !== memory.id) return;
       showNotice(`Could not change pin: ${error.message}`);
     }
   }
 
   async function retireMemory(memory) {
+    const request = beginScopedRequest('memory-mutation');
+    const editorSession = state.editorSession;
     if (!await dialogs.confirm({
       title: 'Retire memory',
       message: `Retire “${memory.title || memory.id}”? The record stays in temporal history but leaves live recall.`,
       confirmLabel: 'Retire memory',
       danger: true,
     })) return;
+    if (!isCurrentScopedRequest(request) || state.editorSession !== editorSession
+      || state.selectedMemory !== memory.id) return;
     try {
       await api('/retire', {
         method: 'POST',
-        body: { id: memory.id, workspace: state.workspace, reason: 'retired in Ledger' },
+        body: { id: memory.id, workspace: request.workspace, reason: 'retired in Ledger' },
       });
+      if (!isCurrentScopedRequest(request) || state.editorSession !== editorSession
+        || state.selectedMemory !== memory.id) return;
       state.selectedMemory = '';
       byId('memory-detail').replaceChildren(empty('Memory moved out of live recall. Its history is retained.'));
       showNotice('Memory retired without hard deletion.');
-      await selectWorkspace(state.workspace);
+      await selectWorkspace(request.workspace);
     } catch (error) {
+      if (!isCurrentScopedRequest(request) || state.editorSession !== editorSession
+        || state.selectedMemory !== memory.id) return;
       showNotice(`Could not retire memory: ${error.message}`);
     }
   }
 
   async function secureEraseMemory(memory) {
+    const request = beginScopedRequest('memory-mutation');
+    const editorSession = state.editorSession;
     const name = memory.title || memory.id;
     if (!await dialogs.confirm({
       title: 'Securely erase a leaked secret',
@@ -2697,18 +2751,27 @@
       confirmLabel: 'Securely erase',
       danger: true,
     })) return;
+    if (!isCurrentScopedRequest(request) || state.editorSession !== editorSession
+      || state.selectedMemory !== memory.id) return;
     try {
       /* The confirmation above is the operator attestation the service requires; it
          refuses an erase without `confirmed: true`. */
       const result = await api('/secure-erase', {
-        method: 'POST', body: { id: memory.id, workspace: state.workspace, confirmed: true },
+        method: 'POST', body: { id: memory.id, workspace: request.workspace, confirmed: true },
       });
+      if (!isCurrentScopedRequest(request) || state.editorSession !== editorSession
+        || state.selectedMemory !== memory.id) return;
       state.selectedMemory = '';
-      await selectWorkspace(state.workspace);
+      byId('memory-detail').replaceChildren(empty('Memory securely erased from this local store. Review the reported backup limitations and rotate the credential.'));
+      await selectWorkspace(request.workspace);
+      if (state.workspace !== request.workspace || state.refreshEpoch !== request.epoch + 1
+        || state.editorSession || state.selectedMemory) return;
       showNotice(result.vector_index_cleanup === 'deleted'
         ? 'Memory securely erased from this local store. Rotate the leaked credential too: exports, snapshots and remote peers keep their own copies.'
         : 'Memory removed locally, but the configured vector index needs separate remediation. Rotate the leaked credential too.');
     } catch (error) {
+      if (!isCurrentScopedRequest(request) || state.editorSession !== editorSession
+        || state.selectedMemory !== memory.id) return;
       showNotice(`Could not securely erase memory: ${error.message}`);
     }
   }
@@ -2722,7 +2785,8 @@
 
   const obsidianImport = {
     preview: null, job: null, poll: null, selection: null, sources: [],
-    jobWorkspace: '', running: false, reviewGeneration: 0,
+    jobWorkspace: '', jobId: '', running: false, reviewGeneration: 0,
+    polling: false, pollFailures: 0, reportPage: 0, reportKey: '',
   };
   let documentExtensions = null;
 
@@ -2853,19 +2917,31 @@
   function renderObsidianReport(result) {
     const target = byId('obsidian-import-report');
     const wanted = byId('obsidian-report-filter').value;
-    target.replaceChildren();
+    // Keep monitoring closed imports without rebuilding an invisible report.
+    if (!byId('obsidian-import-dialog').open) return;
     const rows = obsidianRows(result).filter(row => {
       const status = String(row.status || row.action || row.result || '').toLowerCase();
       if (wanted === 'all') return true;
       if (wanted === 'reject') return /reject|error|warn|conflict/.test(status) || Boolean(row.warning || row.error);
       return status.includes(wanted);
     });
+    const pageSize = 100;
+    obsidianImport.reportPage = Math.min(obsidianImport.reportPage, Math.max(0, Math.ceil(rows.length / pageSize) - 1));
+    const start = obsidianImport.reportPage * pageSize;
+    const page = rows.slice(start, start + pageSize);
+    const reportKey = JSON.stringify([wanted, start, rows.length, page]);
+    if (reportKey === obsidianImport.reportKey) return;
+    obsidianImport.reportKey = reportKey;
+    byId('obsidian-report-count').textContent = rows.length ? `${start + 1}–${start + page.length} of ${rows.length} files` : '0 files';
+    byId('obsidian-report-previous').disabled = start === 0;
+    byId('obsidian-report-next').disabled = start + page.length >= rows.length;
+    target.replaceChildren();
     if (!rows.length) {
       target.append(empty(wanted === 'all' ? 'No per-file details were returned.' : 'No files match this filter.'));
       return;
     }
     const list = node('ul');
-    rows.forEach(row => {
+    page.forEach(row => {
       const status = String(row.status || row.action || row.result || 'reported').toLowerCase();
       const action = row.action && String(row.action).toLowerCase() !== status
         ? ` · action: ${row.action}` : '';
@@ -2938,6 +3014,18 @@
     if (obsidianImport.running) return;
     if (!requireNewSourceLabel()) return;
     const selection = obsidianSelection();
+    const requiredScopeField = !selection.fields.workspace
+      ? ['obsidian-workspace', 'Enter a workspace before previewing this import.']
+      : selection.fields.scope === 'repo' && !selection.fields.repo
+        ? ['obsidian-repo', 'Repository scope requires a repository name.']
+        : selection.fields.scope === 'session' && !selection.fields.session_id
+          ? ['obsidian-session', 'Session scope requires a session ID.']
+          : null;
+    if (requiredScopeField) {
+      byId('obsidian-import-progress').textContent = requiredScopeField[1];
+      byId(requiredScopeField[0]).focus();
+      return;
+    }
     if (!selection.uploadFiles.length) {
       byId('obsidian-import-progress').textContent = selection.sourceMode === 'obsidian'
         ? 'Choose a folder containing Markdown notes.'
@@ -2977,9 +3065,16 @@
   }
 
   async function pollObsidianImport(jobId, workspace) {
+    if (obsidianImport.polling) return;
+    obsidianImport.polling = true;
+    obsidianImport.jobId = jobId;
+    obsidianImport.jobWorkspace = workspace;
+    obsidianImport.poll = null;
     try {
       const result = await obsidianApi(`/workspaces/import-documents/jobs/${encodeURIComponent(jobId)}?${query(workspace)}`);
       obsidianImport.job = result;
+      obsidianImport.pollFailures = 0;
+      byId('obsidian-retry-progress').hidden = true;
       renderObsidianReport(result);
       obsidianSummary(result, 'Import');
       if (!['complete', 'completed', 'partial', 'failed', 'cancelled'].includes(String(result.state || result.status || '').toLowerCase())) {
@@ -2995,10 +3090,16 @@
       byId('obsidian-run').disabled = true;
       byId('obsidian-preview').disabled = false;
       showNotice('Document import finished.');
-      await selectWorkspace(state.workspace);
+      if (workspace === state.workspace && !state.editorSession) await selectWorkspace(workspace);
     } catch (error) {
-      byId('obsidian-import-progress').textContent = `Could not read import progress: ${error.message}`;
+      obsidianImport.pollFailures += 1;
+      const retrying = obsidianImport.pollFailures <= 3;
+      byId('obsidian-import-progress').textContent = `Could not read import progress: ${error.message}. ${retrying ? 'Reconnecting to this job…' : 'Retry progress to reconnect to this job.'}`;
       byId('obsidian-run').disabled = true;
+      byId('obsidian-retry-progress').hidden = false;
+      if (retrying) obsidianImport.poll = window.setTimeout(() => pollObsidianImport(jobId, workspace), Math.min(6000, 750 * 2 ** obsidianImport.pollFailures));
+    } finally {
+      obsidianImport.polling = false;
     }
   }
 
@@ -3027,6 +3128,8 @@
     byId('obsidian-preview').disabled = true;
     byId('obsidian-import-progress').textContent = 'Starting local document import…';
     obsidianImport.running = true;
+    obsidianImport.pollFailures = 0;
+    byId('obsidian-retry-progress').hidden = true;
     obsidianImport.jobWorkspace = workspace;
     try {
       const result = await obsidianApi('/workspaces/import-documents/run', {
@@ -3051,7 +3154,7 @@
         byId('obsidian-run').disabled = true;
         byId('obsidian-preview').disabled = false;
         showNotice('Document import finished.');
-        await selectWorkspace(state.workspace);
+        if (workspace === state.workspace && !state.editorSession) await selectWorkspace(workspace);
       }
     } catch (error) {
       obsidianImport.running = false;
@@ -3092,6 +3195,9 @@
       obsidianImport.poll = null;
       obsidianImport.selection = null;
       obsidianImport.jobWorkspace = '';
+      obsidianImport.jobId = '';
+      obsidianImport.pollFailures = 0;
+      byId('obsidian-retry-progress').hidden = true;
       delete byId('obsidian-cancel').dataset.jobId;
       delete byId('obsidian-cancel').dataset.workspace;
     }
@@ -3106,12 +3212,14 @@
     byId('obsidian-run').disabled = true;
     byId('obsidian-preview').disabled = obsidianImport.running;
     byId('obsidian-cancel').hidden = !obsidianImport.running;
-    if (!obsidianImport.running) renderObsidianReport(null);
     await Promise.all([loadObsidianVaults(), loadDocumentFormats()]);
     byId('obsidian-vault-id').value = '';
     updateSourceLabelRequirement();
     updateDocumentImportMode();
     dialog.showModal();
+    obsidianImport.reportKey = '';
+    if (!obsidianImport.running) obsidianImport.reportPage = 0;
+    renderObsidianReport(obsidianImport.job || obsidianImport.preview);
     byId('obsidian-import-files').focus();
   }
 
@@ -3498,6 +3606,9 @@
       const evidence = detail.evidence || [];
       const total = number(detail.totals && detail.totals.evidence) || evidence.length;
       byId('graph-connection-memory-title').textContent = `${total} ${total === 1 ? 'memory' : 'memories'} for ${title}`;
+      if (detail.truncation && detail.truncation.evidence) {
+        byId('graph-connection-memory-title').textContent += ' · bounded evidence sample';
+      }
       renderGraphConnectionMemories(
         evidence.map(graphMemoryCard),
         'No active memories support this connected node.',
@@ -5325,10 +5436,10 @@
     byId('receipt-chain-status').textContent = 'Checking the receipt chain…';
     byId('receipt-chain-status').dataset.state = 'unknown';
     const [auditResult, receiptsResult, savingsResult, chainResult] = await Promise.allSettled([
-      api(`/audit?${query(request.workspace)}&limit=100`),
-      api(`/receipts?${query(request.workspace)}&limit=100`),
-      api(`/context-savings${savingsQuery(state.savingsPreset)}`),
-      api(`/receipts/verify?${query(request.workspace)}`),
+      api(`/audit?${query(request.workspace)}&limit=100`, { signal: request.signal }),
+      api(`/receipts?${query(request.workspace)}&limit=100`, { signal: request.signal }),
+      api(`/context-savings${savingsQuery(state.savingsPreset)}`, { signal: request.signal }),
+      api(`/receipts/verify?${query(request.workspace)}`, { signal: request.signal }),
     ]);
     if (!isCurrentScopedRequest(request)) return;
     renderReceiptChain(chainResult.status === 'fulfilled' ? chainResult.value : null,
@@ -6286,7 +6397,7 @@
     if (!target) return;
     target.replaceChildren(empty('Checking Cloud Sync connection…'));
     try {
-      const status = await api('/sync/status');
+      const status = await api('/sync/status', { signal: request.signal });
       if (!isCurrentScopedRequest(request)) return;
       renderSyncStatus(status);
     } catch (error) {
@@ -6569,8 +6680,8 @@
 
     const keyState = node('p', 'llm-key-state', status.key_set ? 'API key set' : 'No API key set');
     keyState.append(node('span', '', ` · extractor: ${status.extractor || 'none'}`));
-    const setupNote = node('p', 'llm-setup-note', 'Choose a provider and model for the copyable .env snippet. Update it locally, then restart Engraphis to apply the change.');
-    const snippetLabel = node('label', 'llm-snippet-label', 'Local .env setup');
+    const setupNote = node('p', 'llm-setup-note', 'Choose a provider and model for the copyable configuration snippet. Save it in your owner-private ~/.engraphis/config.env, then restart Engraphis to apply the change.');
+    const snippetLabel = node('label', 'llm-snippet-label', 'Owner-private config.env setup');
     const snippet = node('textarea', 'llm-env-snippet');
     snippet.id = 'llm-env-snippet';
     snippet.readOnly = true;
@@ -6688,7 +6799,7 @@
   }
 
   function switchView(view, { pushHistory = true } = {}) {
-    const validViews = ['today', 'ask', 'library', 'connections', 'relations', 'provenance', 'manage'];
+    const validViews = ['today', 'ask', 'library', 'connections', 'relations', 'specstudio', 'provenance', 'manage'];
     if (!validViews.includes(view)) view = 'today';
     if (pushHistory && state.view !== view) {
       const url = new URL(location.href);
@@ -6707,11 +6818,15 @@
       localStorage.setItem('engraphis-ledger-view', view);
     } catch (_) {}
     graphLifecycle.sync();
-    if (view === 'relations') loadGraph();
-    if (view === 'provenance' && state.provenanceTab === 'audit') loadAudit();
-    if (view === 'manage') {
+    if (state.workspace && view === 'relations') loadGraph();
+    if (state.workspace && view === 'provenance' && state.provenanceTab === 'audit') loadAudit();
+    if (state.workspace && view === 'manage') {
       loadSavings(state.refreshEpoch);
       loadManageTab(state.manageTab);
+    }
+    if (view === 'specstudio' && window.SpecStudio && typeof window.SpecStudio.resizeCanvas === 'function') {
+      window.SpecStudio.setScope(state.workspace, state.project);
+      window.SpecStudio.resizeCanvas();
     }
     window.scrollTo({ top: 0, behavior: 'instant' });
     const heading = byId(`${view}-title`);
@@ -6740,7 +6855,7 @@
   }
 
   async function refreshBootstrap(preferred = '') {
-    const bootstrap = (await api('/bootstrap')) || {};
+    const bootstrap = (await api('/bootstrap?include_stats=false')) || {};
     renderUpdateBanner(bootstrap.update);
     if (typeof bootstrap.version === 'string' && bootstrap.version.trim()) {
       state.releaseVersion = bootstrap.version.trim();
@@ -6795,8 +6910,8 @@
     const selected = names.includes(saved)
       ? saved
       : workspaceName([...state.workspaces].sort((a, b) => number(b.memories) - number(a.memories))[0]);
-    await selectWorkspace(selected);
     setConnection('Local engine connected');
+    await selectWorkspace(selected);
   }
 
   let bootPromise = null;
@@ -6818,17 +6933,17 @@
       const entry = new URL(location.href);
       // Links may name a workspace (for example from an approval prompt). Bootstrap
       // still validates the name against the authorized workspace list.
+      let view = 'today';
+      try {
+        const saved = localStorage.getItem('engraphis-ledger-view');
+        if (['today', 'ask', 'library', 'connections', 'relations', 'specstudio', 'provenance', 'manage'].includes(saved)) view = saved;
+      } catch (_) {}
+      const urlView = new URL(location.href).searchParams.get('view');
+      switchView(['today', 'ask', 'library', 'connections', 'relations', 'specstudio', 'provenance', 'manage'].includes(urlView) ? urlView : view, { pushHistory: false });
       await refreshBootstrap(entry.searchParams.get('workspace') || '');
       state.booted = true;
       state.bootFailure = '';
       clearConnectionProblem();
-      let view = 'today';
-      try {
-        const saved = localStorage.getItem('engraphis-ledger-view');
-        if (['today', 'ask', 'library', 'connections', 'relations', 'provenance', 'manage'].includes(saved)) view = saved;
-      } catch (_) {}
-      const urlView = new URL(location.href).searchParams.get('view');
-      switchView(['today', 'ask', 'library', 'connections', 'relations', 'provenance', 'manage'].includes(urlView) ? urlView : view, { pushHistory: false });
       const requestedManageTab = entry.searchParams.get('tab');
       if (urlView === 'manage' && ['settings', 'sync', 'analytics'].includes(requestedManageTab)) {
         switchManageTab(requestedManageTab);
@@ -7026,8 +7141,8 @@
     notify: showNotice,
     onImported: async workspace => {
       if (workspace !== state.workspace) return;
-      // Keep an unsaved editor draft: refresh the list instead of reloading the workspace.
-      if (editorDirty()) refreshLibrary();
+      // Keep open drafts, including pending saves whose failure must retain the draft.
+      if (editorOpen()) refreshLibrary();
       else await selectWorkspace(workspace);
     },
     confirmDerive: () => dialogs.confirm({
@@ -7070,7 +7185,22 @@
   ].forEach(([id, eventName]) => {
     byId(id).addEventListener(eventName, () => invalidateDocumentImportPreview());
   });
-  byId('obsidian-report-filter').addEventListener('change', () => renderObsidianReport(obsidianImport.job || obsidianImport.preview));
+  byId('obsidian-report-filter').addEventListener('change', () => {
+    obsidianImport.reportPage = 0;
+    renderObsidianReport(obsidianImport.job || obsidianImport.preview);
+  });
+  [['obsidian-report-previous', -1], ['obsidian-report-next', 1]].forEach(([id, delta]) => {
+    byId(id).addEventListener('click', () => {
+      obsidianImport.reportPage = Math.max(0, obsidianImport.reportPage + delta);
+      renderObsidianReport(obsidianImport.job || obsidianImport.preview);
+    });
+  });
+  byId('obsidian-retry-progress').addEventListener('click', () => {
+    if (!obsidianImport.running || !obsidianImport.jobId || obsidianImport.polling) return;
+    window.clearTimeout(obsidianImport.poll);
+    obsidianImport.pollFailures = 0;
+    void pollObsidianImport(obsidianImport.jobId, obsidianImport.jobWorkspace);
+  });
 
   all('[data-graph-tab]').forEach(control => control.addEventListener('click', () => setGraphTab(control.dataset.graphTab)));
   byId('graph-fit').addEventListener('click', () => state.graphEngine && state.graphEngine.fit());

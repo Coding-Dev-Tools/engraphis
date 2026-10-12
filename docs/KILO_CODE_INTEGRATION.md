@@ -226,7 +226,7 @@ class, and the appropriate executor revalidates all of it before running.
 preserves the named-tool compatibility surface below; new Kilo Code installations should keep the zero-config
 Smart command shown above.
 
-### Classic 39-tool inventory
+### Classic 43-tool inventory
 
 | Category | Tool | What it does |
 |---|---|---|
@@ -269,6 +269,10 @@ Smart command shown above.
 | Ops | `engraphis_check_update` | Check the release source and refresh the persistent update cache. |
 | Maintenance | `engraphis_consolidate` | Pure dry-run or live sweep; structured calls may process a large cluster across retries. |
 | Decision | `engraphis_decide` | Advisory command, contradiction, support, and completion checks. Remote processing requires backend selection and explicit permission for each call. |
+| Quality | `engraphis_spec_crawl` | Multi-dimensional prompt & spec crawler; radar scores, concept tentacles, clarify questions, simulated traces. |
+| Quality | `engraphis_spec_crawl_answer` | Answer a clarification question with user-provided answers, recalculating scores & simulation trace. |
+| Quality | `engraphis_spec_crawl_memories` | Analyze a cluster of memories for contradiction, divergence, and convergence. |
+| Quality | `engraphis_spec_crawl_resolve` | Reconcile divergent or contradicted memories with resolved state and supersede chain. |
 
 ---
 

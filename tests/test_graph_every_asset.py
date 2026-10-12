@@ -307,7 +307,8 @@ def test_renderer_uploads_change_driven_and_reports_honest_edge_counts() -> None
 
 def test_renderer_scales_picking_and_highlight_points_in_world_units() -> None:
     renderer = RENDERER.read_text(encoding="utf-8")
-    assert "(pointSize(best) + 7) / Math.max(0.005, state.camera.scale)" in renderer
+    assert "const scale = Math.max(0.005, state.camera.scale);" in renderer
+    assert "(pointSize(index) + 7) / scale" in renderer
     assert "state[key] = [state.positions[index * 2], state.positions[index * 2 + 1]];" in renderer
 
 
