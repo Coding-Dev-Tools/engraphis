@@ -11883,7 +11883,7 @@ class MemoryService:
                 SELECT id FROM entities WHERE workspace_id=? AND (id=? OR canonical_id=?)
             ), raw_supports AS (
                 SELECT * FROM (
-                    SELECT support.memory_id, support.confidence
+                    SELECT support.memory_id, support.confidence, 0 AS endpoint_kind
                     FROM target
                     JOIN edges relation ON relation.src=target.id
                     JOIN edge_supports support ON support.edge_id=relation.id
@@ -11893,7 +11893,7 @@ class MemoryService:
                 )
                 UNION ALL
                 SELECT * FROM (
-                    SELECT support.memory_id, support.confidence
+                    SELECT support.memory_id, support.confidence, 1 AS endpoint_kind
                     FROM target
                     JOIN edges relation ON relation.dst=target.id
                     JOIN edge_supports support ON support.edge_id=relation.id
@@ -11908,7 +11908,10 @@ class MemoryService:
             SELECT memory.id, memory.title, memory.content, memory.mtype,
                    memory.valid_from, memory.valid_to, memory.valid_to_recorded_at,
                    memory.ingested_at,
-                   memory.expired_at, memory.provenance, ranked.confidence
+                   memory.expired_at, memory.provenance, ranked.confidence,
+                   (SELECT MAX(candidate_count) FROM (
+                       SELECT COUNT(*) AS candidate_count FROM raw_supports GROUP BY endpoint_kind
+                   )) AS candidate_count
             FROM ranked JOIN memories memory ON memory.id=ranked.memory_id
             WHERE memory.workspace_id=?
             ORDER BY ranked.confidence DESC,
@@ -11921,11 +11924,13 @@ class MemoryService:
         )
         rows = self.store.conn.execute(
             sql,
-            (*target_params, *branch_params, GRAPH_ENTITY_EVIDENCE_CANDIDATE_LIMIT,
-             *branch_params, GRAPH_ENTITY_EVIDENCE_CANDIDATE_LIMIT, wid,
+            (*target_params, *branch_params, GRAPH_ENTITY_EVIDENCE_CANDIDATE_LIMIT + 1,
+             *branch_params, GRAPH_ENTITY_EVIDENCE_CANDIDATE_LIMIT + 1, wid,
              GRAPH_ENTITY_EVIDENCE_LIMIT + 1),
         ).fetchall()
-        truncated = len(rows) > GRAPH_ENTITY_EVIDENCE_LIMIT
+        truncated = len(rows) > GRAPH_ENTITY_EVIDENCE_LIMIT or any(
+            row["candidate_count"] > GRAPH_ENTITY_EVIDENCE_CANDIDATE_LIMIT for row in rows
+        )
         rows = rows[:GRAPH_ENTITY_EVIDENCE_LIMIT]
         evidence = []
         for row in rows:

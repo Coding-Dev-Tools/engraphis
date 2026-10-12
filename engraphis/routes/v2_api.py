@@ -593,7 +593,7 @@ def build():
 
 
 @router.get("/bootstrap")
-def bootstrap():
+def bootstrap(include_stats: bool = True):
     from engraphis import __version__
     lic = get_license()
     current_service = service()
@@ -607,7 +607,9 @@ def bootstrap():
             wss,
             key=lambda item: (int(item.get("memories") or 0), str(item.get("name") or "")),
         ).get("name")
-    if current_service.allowed_workspaces is not None and not wss:
+    if not include_stats:
+        bootstrap_stats = None
+    elif current_service.allowed_workspaces is not None and not wss:
         # A bound deployment must never fall back to a global aggregate when its
         # allow-list has no visible workspace.  ``stats()`` correctly rejects that
         # request for tenant isolation, but bootstrap is also the dashboard's empty
@@ -898,7 +900,7 @@ def llm_test():
         _record_llm_test({"ok": False})
         return _public_llm_test_result(
             {"ok": False},
-            error=("No API key configured. Set ENGRAPHIS_LLM_API_KEY in your .env "
+            error=("No API key configured. Set ENGRAPHIS_LLM_API_KEY in your owner-private ~/.engraphis/config.env "
                    "and restart."),
         )
     try:
@@ -2737,7 +2739,10 @@ def graph_scene(workspace: Optional[str] = None, level: str = "overview",
             )
             return without_code_overlay("code_overlay_failed")
 
-    return _run(run_scene)
+    # Scenes already contain JSON primitives. Avoid FastAPI's recursive generic
+    # encoder walking every node/edge before Starlette serializes them again.
+    from fastapi.responses import JSONResponse
+    return JSONResponse(_run(run_scene))
 
 
 @router.get("/graph/suggest")

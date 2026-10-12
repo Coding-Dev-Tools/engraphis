@@ -103,7 +103,7 @@
 
     <main class="main" id="main-content" tabindex="-1">
       <p id="notice-text" class="sr-only" role="status" aria-live="polite"></p>
-      <div id="notice-banner" class="notice-banner" role="status" aria-live="polite" hidden></div>
+      <div id="notice-banner" class="notice-banner" hidden></div>
       <section id="update-banner" class="update-banner" role="status" aria-live="polite" hidden></section>
 
       <section class="view active" data-view-panel="today" aria-labelledby="today-title">
@@ -929,7 +929,7 @@
               <section class="setting-card">
                 <p class="eyebrow">Engine</p>
                 <h2>Local runtime</h2>
-                <dl class="definition-list"><div><dt>API</dt><dd>127.0.0.1:8700</dd></div><div><dt>Engine</dt><dd>v2 · bi-temporal</dd></div><div><dt>Storage</dt><dd>local SQLite</dd></div></dl>
+                <dl class="definition-list"><div><dt>API</dt><dd id="ledger-runtime-api"></dd></div><div><dt>Engine</dt><dd>v2 · bi-temporal</dd></div><div><dt>Storage</dt><dd>local SQLite</dd></div></dl>
                 <a class="secondary-button" href="/classic">Open Classic tools</a>
               </section>
             </div>
@@ -1018,10 +1018,16 @@
       <label class="obsidian-confirm"><input id="obsidian-confirmed" type="checkbox"> I confirm these local documents may be imported into the selected Engraphis scope.</label>
       <div id="obsidian-import-progress" class="graph-connections-meta" role="status" aria-live="polite">Choose files or a folder to preview its import.</div>
       <label>Show report<select id="obsidian-report-filter"><option value="all">All files</option><option value="import">Will import</option><option value="update">Will update</option><option value="skip">Skipped</option><option value="reject">Rejected / warnings</option></select></label>
-      <div id="obsidian-import-report" class="obsidian-import-report" role="log" aria-live="polite"><p class="empty-state">No preview yet.</p></div>
+      <div id="obsidian-import-report" class="obsidian-import-report" role="region" aria-label="Document import report"><p class="empty-state">No preview yet.</p></div>
+      <div class="form-actions" aria-label="Document report pages">
+        <span id="obsidian-report-count"></span>
+        <button id="obsidian-report-previous" class="secondary-button" type="button" disabled>Previous report page</button>
+        <button id="obsidian-report-next" class="secondary-button" type="button" disabled>Next report page</button>
+      </div>
       <div class="form-actions">
         <button id="obsidian-preview" class="secondary-button" type="button">Preview import</button>
         <button id="obsidian-cancel" class="secondary-button" type="button" hidden>Cancel import</button>
+        <button id="obsidian-retry-progress" class="secondary-button" type="button" hidden>Retry progress</button>
         <button id="obsidian-run" class="primary-button" type="submit" disabled>Import documents</button>
       </div>
     </form>
@@ -1034,6 +1040,6 @@
   <script src="/v2-assets/ask-requests.js?v=20260906-ask-home-1"></script>
   <script src="/v2-assets/graph-lifecycle.js?v=20260906-lifecycle-1"></script>
   <script src="/v2-assets/spec-crawl.js"></script>
-  <script src="/v2-assets/ledger.js?v=20260928-workspace-routing-1"></script>
+  <script src="/v2-assets/ledger.js?v=20261010-ui-release-2"></script>
 </body>
 </html>
