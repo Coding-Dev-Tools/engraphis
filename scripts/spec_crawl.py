@@ -129,6 +129,10 @@ def main(argv: list[str] | None = None) -> int:
             n_nodes = report.get("node_count", 0)
             print(f"=== Spec Crawl Memory Cluster Audit: workspace='{args.workspace}' ===")
             print(f"Cluster Health: {health}/100 ({n_nodes} active memory nodes)")
+            if report.get("truncated") or report.get("analysis_truncated"):
+                total = report.get("total_eligible_node_count")
+                detail = f" of {total} eligible nodes" if total is not None else " nodes"
+                print(f"Partial audit: {n_nodes}{detail} analyzed; health and findings describe this sample.")
 
             print("\n--- 7-Axis Memory Radar ---")
             for axis, val in report.get("radar", {}).items():
@@ -139,7 +143,8 @@ def main(argv: list[str] | None = None) -> int:
             if policy_gaps:
                 print(f"\n--- Policy Gaps ({len(policy_gaps)}) ---")
                 for g in policy_gaps:
-                    rec = g.get("recommendation", "").replace("\u2014", "-").replace("\u2013", "-")
+                    rec = (g.get("remedy", {}).get("recommendation") or g.get("description")
+                           or g.get("recommendation", "")).replace("\u2014", "-").replace("\u2013", "-")
                     print(f"  [GAP] {g.get('axis', '').upper()}: {rec}")
 
             conflicts = report.get("conflicts", [])

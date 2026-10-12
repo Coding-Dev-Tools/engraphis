@@ -2810,13 +2810,13 @@ def engraphis_spec_crawl(
         ),
     ] = None,
     workspace: Annotated[
-        str,
+        Optional[str],
         Field(
-            default="default",
+            default=None,
             description="Workspace for claim tracing.",
             max_length=200,
         ),
-    ] = "default",
+    ] = None,
     repo: Annotated[
         Optional[str],
         Field(
@@ -2912,13 +2912,13 @@ def engraphis_spec_crawl_answer(
         ),
     ],
     workspace: Annotated[
-        str,
+        Optional[str],
         Field(
-            default="default",
+            default=None,
             description="Workspace to store the procedural memory.",
             max_length=200,
         ),
-    ] = "default",
+    ] = None,
     repo: Annotated[
         Optional[str],
         Field(
@@ -2971,13 +2971,13 @@ def engraphis_spec_crawl_answer(
 )
 def engraphis_spec_crawl_memories(
     workspace: Annotated[
-        str,
+        Optional[str],
         Field(
-            default="default",
+            default=None,
             description="Workspace to audit memories.",
             max_length=200,
         ),
-    ] = "default",
+    ] = None,
     repo: Annotated[
         Optional[str],
         Field(
@@ -3058,18 +3058,26 @@ def engraphis_spec_crawl_resolve(
         ),
     ] = None,
     workspace: Annotated[
-        str,
+        Optional[str],
         Field(
-            default="default",
+            default=None,
             description="Workspace scope.",
             max_length=200,
         ),
-    ] = "default",
+    ] = None,
     repo: Annotated[
         Optional[str],
         Field(
             default=None,
             description="Optional repo scope.",
+            max_length=200,
+        ),
+    ] = None,
+    session_id: Annotated[
+        Optional[str],
+        Field(
+            default=None,
+            description="Optional active session scope; both memories must be visible in this same session.",
             max_length=200,
         ),
     ] = None,
@@ -3086,6 +3094,7 @@ def engraphis_spec_crawl_resolve(
             node_b=node_b,
             workspace=workspace,
             repo=repo,
+            session_id=session_id,
             confirmed=confirmed,
         )
         return _ok(res)

@@ -14,6 +14,14 @@ def test_analyze_empty_memory_nodes():
     assert len(res["conflicts"]) == 0
 
 
+def test_cluster_responses_omit_large_memory_bodies_without_losing_analysis():
+    import json
+    report = analyze_memory_nodes([{"id": "large", "content": "payload " * 12_500}])
+    assert "content" not in report["nodes"][0]
+    assert report["nodes"][0]["word_count"] > 0
+    assert len(json.dumps(report)) < 6_000
+
+
 def test_cross_node_parameter_conflict_detection():
     memories = [
         {
@@ -101,6 +109,21 @@ def test_orphan_node_detection_and_link_suggestion():
 
     orphan_meta = next(o for o in report["orphans"] if o["node_id"] == "mem_pricing")
     assert orphan_meta["node_id"] == "mem_pricing"
+
+
+def test_similarity_suggestions_do_not_count_as_persisted_connectivity():
+    nodes = [{"id": "a", "content": "Verify token authentication for deployment."},
+             {"id": "b", "content": "Verify token authentication before deployment."}]
+    suggested = analyze_memory_nodes(nodes)
+    assert any(link["inferred"] for link in suggested["links"])
+    assert all(node["is_orphan"] and node["degree"] == 0 for node in suggested["nodes"])
+    assert {orphan["node_id"] for orphan in suggested["orphans"]} == {"a", "b"}
+    assert any(remedy["action"] == "link" for remedy in suggested["remediation_plan"])
+    assert suggested["score_breakdown"]["connected_points"] == 0
+    declared = analyze_memory_nodes(nodes, links=[{"a": "a", "b": "b", "relation": "related_to"}])
+    assert not declared["orphans"]
+    assert all(node["degree"] == 1 for node in declared["nodes"])
+    assert declared["score_breakdown"]["connected_points"] == 30
 
 
 def test_multi_node_radar_and_policy_gaps():

@@ -782,9 +782,9 @@ credential-file commands are `destructive_or_leak`; anything else is `state_chan
 Offline, deterministic crawler evaluating agent specifications, prompts, or procedural memories across 7 readiness axes, token classification, cross-section tentacles, and ambiguity detection.
 
 - `text (str, None)`: spec or prompt text (up to 64k chars).
-- `workspace (str, "default")`: workspace for claim tracing.
+- `workspace (str, None)`: workspace for claim tracing.
 - `repo (str, None)`: optional repo scope for claim tracing.
-- `session_id (str, None)`: optional active session id.
+- `session_id (str, None)`: optional active session id; omitting workspace inherits its workspace and repository.
 - `source_id (str, None)`: local-operator text file under an approved index root; authenticated callers must pass text instead.
 - `crawl_procedural (bool, False)`: crawl active procedural memories in the scope.
 - `trace_claims (bool, True)`: verify asserted claims against grounded memories.
@@ -795,17 +795,17 @@ Apply a human clarification to a current ambiguous spec flag and optionally reco
 - `flag (dict)`: flag object from `spec_crawl` report with start and end offsets.
 - `answer (str)`: human clarification or exact scope/number.
 - `spec_text (str)`: current full spec text to update.
-- `workspace (str, "default")`: workspace to store the procedural memory.
+- `workspace (str, None)`: workspace to store the procedural memory.
 - `repo (str, None)`: optional repo scope.
 - `session_id (str, None)`: optional session id.
 - `save_as_memory (bool, True)`: save clarification as a procedural memory in scope.
 
 ### `engraphis_spec_crawl_memories`
-Analyze multiple live memory nodes for contradictions, parameter clashes, orphans, and 7-axis coverage.
+Analyze multiple live memory nodes for contradictions, parameter clashes, orphans, and 7-axis coverage. Default scope reads are bounded to 150 eligible nodes and expose truncation; inferred links are suggestions, not stored connectivity.
 
-- `workspace (str, "default")`: workspace to audit memories.
+- `workspace (str, None)`: workspace to audit memories.
 - `repo (str, None)`: optional repo scope.
-- `session_id (str, None)`: optional active session id.
+- `session_id (str, None)`: optional active session id; omitting workspace inherits its workspace and repository.
 - `mtypes (list[str], None)`: optional filter by memory types: semantic, procedural, episodic, working.
 - `memory_ids (list[str], None)`: optional explicit list of memory IDs to analyze.
 
@@ -816,8 +816,9 @@ Remediate a contradiction or link an orphaned memory node found during multi-nod
 - `node_a (str)`: retained memory node id (or source node to link from).
 - `node_b (str, None)`: older conflicting memory node id to supersede (or target node to link to).
 - `confirmed (bool, False)`: explicit human confirmation required for `supersede`; both records must be live and approved, and the update is atomic.
-- `workspace (str, "default")`: workspace scope.
+- `workspace (str, None)`: workspace scope.
 - `repo (str, None)`: optional repo scope.
+- `session_id (str, None)`: optional authorized session; both nodes must be visible through the same audit scope.
 
 ---
 
