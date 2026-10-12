@@ -60,7 +60,7 @@ control-plane, relay, compute, and worker implementations are private services.
 | `ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL` | Not set | Bootstrap-only rotating hosted credential; after first use the owner-only cloud session replacement takes precedence |
 | `ENGRAPHIS_CLOUD_TOKEN_SUBJECT` | `member` | Subject fixed during hosted bootstrap (`device` or `member`); set explicitly with an environment-only refresh credential |
 | `ENGRAPHIS_CLOUD_ACCESS_TOKEN` | Not set | Optional short-lived access token for ephemeral jobs |
-| `ENGRAPHIS_MANAGED_COMPUTE_CONSENT` | *(unset)* | Deny-only operator override: `0` pauses readable managed processing. A truthy value cannot grant approval. Each workspace requires explicit confirmation in Manage → Settings; encrypted sync is separate |
+| `ENGRAPHIS_MANAGED_COMPUTE_CONSENT` | *(unset)* | Deny-only operator override: `0` pauses readable managed processing. A truthy value cannot grant approval. Each workspace requires explicit confirmation in Settings → Preferences; encrypted sync is separate |
 
 Managed Jev is currently `not_yet_available` pending release acceptance and
 service-capacity qualification; client configuration does not enable it. After

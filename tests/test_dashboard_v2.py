@@ -62,24 +62,16 @@ def test_dashboard_serves_and_bootstraps_local_core(monkeypatch, tmp_path):
         assert 'class="sidebar"' in page.text
         for area in ("Home", "Ask", "Library", "Connections", "Explore", "Activity", "Settings"):
             assert f">{area}<" in page.text
-        assert 'value="matrix">Matrix' in page.text
-        assert 'class="dashboard-switcher" aria-label="Dashboard interface"' in page.text
+        for theme in ("slate", "midnight", "solarized", "paper", "sepia", "matrix"):
+            assert f'<option value="{theme}">' in page.text, theme
         assert 'id="sidebar-theme-select" aria-label="Dashboard theme"' in page.text
-        assert 'value="classic">Classic<' in page.text
-        assert 'href="/classic">Classic<' in page.text
-        assert 'Ledger (primary)' not in page.text
-        assert 'Classic (alternate)' not in page.text
+        # One dashboard: no interface switcher and no route to a second one.
+        assert 'class="dashboard-switcher"' not in page.text
+        assert 'href="/classic"' not in page.text
+        assert '/classic-assets/' not in page.text
         assert '/v2-assets/vendor/d3.min.js' not in page.text
         assert '/v2-assets/vendor/force-graph.min.js' not in page.text
         assert '/v2-assets/engraphis-graph.js' not in page.text
-        classic = client.get("/classic")
-        assert classic.status_code == 200
-        assert '/classic-assets/dashboard.css' in classic.text
-        assert 'class="dashboard-switcher" aria-label="Dashboard interface"' in classic.text
-        assert 'href="/"' in classic.text
-        assert 'href="/classic" aria-current="page">Classic (alternate)<' in classic.text
-        assert 'value="classic" selected>Classic dashboard (alternate)<' in classic.text
-        assert 'id="graph-show-iso" data-onchange="h49" checked' in classic.text
         assert client.get("/v2-assets/ledger.css").status_code == 200
         ledger_js = client.get("/v2-assets/ledger.js")
         assert ledger_js.status_code == 200
@@ -90,17 +82,9 @@ def test_dashboard_serves_and_bootstraps_local_core(monkeypatch, tmp_path):
         )
         assert re.search(r"/v2-assets/ledger\.css\?v=[A-Za-z0-9._-]+", page.text)
         assert re.search(r"/v2-assets/ledger\.js\?v=[A-Za-z0-9._-]+", page.text)
-        classic_js = client.get("/classic-assets/dashboard.js")
-        assert classic_js.status_code == 200
-        assert "/static/vendor/force-graph.min.js?v=20260809-csp" in classic_js.text
-        assert re.search(
-            r"/v2-assets/engraphis-graph\.js\?v=[A-Za-z0-9._-]+", classic_js.text
-        )
-        assert "presentation=all" not in classic_js.text
-        assert "GRAPH_FULL" in classic_js.text
-        assert "EngraphisEveryGraph" in classic_js.text
-        assert "engraphis-graph-all.js" not in classic_js.text
-        assert "EngraphisAllGraph" not in classic_js.text
+        assert "EngraphisEveryGraph" in ledger_js.text
+        assert "engraphis-graph-all.js" not in ledger_js.text
+        assert "EngraphisAllGraph" not in ledger_js.text
         bootstrap = client.get("/api/bootstrap")
         assert bootstrap.status_code == 200
         assert bootstrap.json()["version"] == __version__
@@ -875,24 +859,138 @@ def test_open_mode_document_import_writes_memories_end_to_end(monkeypatch, tmp_p
         )
 
 
+def test_zero_config_api_refuses_requests_another_website_starts(monkeypatch, tmp_path):
+    """Any website can make its visitor's browser send "simple" requests to loopback
+    without a CORS preflight: multipart uploads (which could import files and request LLM
+    derivation without the consent dialog), body-less POSTs and image GETs. The
+    zero-config gate refuses what a browser marks as cross-site unless it carries a header
+    that only passes a preflight. Same-origin pages and non-browser clients are unaffected."""
+
+    refusal = "cross-site browser requests are refused; use the Engraphis dashboard"
+
+    def titles(client):
+        listed = client.get(
+            "/api/memories", params={"workspace": "demo"},
+            headers={"X-Engraphis-Browser-Session": "1"},
+        ).json()["memories"]
+        return {memory.get("title") for memory in listed}
+
+    def upload(name):
+        return [("files", (name, b"# " + name.encode() + b"\nUploaded.", "text/markdown"))]
+
+    form = {"workspace": "demo", "memory_type": "semantic", "derive_facts": "true"}
+    with _client(monkeypatch, tmp_path) as client:
+        for browser_marker in (
+            {"Origin": "https://evil.example"},
+            {"Origin": "null"},
+            {"Origin": "http://localhost:3000", "Sec-Fetch-Site": "same-site"},
+            {"Sec-Fetch-Site": "cross-site"},
+        ):
+            refused = client.post(
+                "/api/workspaces/import-files", data=form,
+                files=upload("cross-site.md"), headers=browser_marker,
+            )
+            assert refused.status_code == 403, browser_marker
+            assert refused.json()["error"] == refusal
+        assert "cross-site.md" not in titles(client)
+        # Body-less POSTs and image GETs are refused before any handler runs.
+        assert client.post(
+            "/api/sync/run", headers={"Origin": "https://evil.example"},
+        ).json() == {"error": refusal}
+        assert client.get(
+            "/api/memories", params={"workspace": "demo"},
+            headers={"Sec-Fetch-Site": "cross-site"},
+        ).status_code == 403
+
+        # The dashboard's session header can only be sent cross-site after a preflight.
+        dashboard = client.post(
+            "/api/workspaces/import-files", data={**form, "derive_facts": "false"},
+            files=upload("dashboard.md"),
+            headers={"Origin": "https://evil.example", "X-Engraphis-Browser-Session": "1"},
+        )
+        assert dashboard.status_code == 200, dashboard.text
+        # Same-origin pages, configured CORS origins, typed URLs and scripts all pass.
+        for allowed in (
+            {"Origin": "http://testserver", "Sec-Fetch-Site": "same-origin"},
+            {"Origin": settings.cors_origins[0], "Sec-Fetch-Site": "cross-site"},
+            {"Sec-Fetch-Site": "none"},
+            {},
+        ):
+            response = client.get(
+                "/api/memories", params={"workspace": "demo"}, headers=allowed,
+            )
+            assert response.status_code == 200, allowed
+        script = client.post(
+            "/api/workspaces/import-files", data={**form, "derive_facts": "false"},
+            files=upload("script.md"),
+        )
+        assert script.status_code == 200, script.text
+        assert {"dashboard.md", "script.md"} <= titles(client)
+
+
 def test_dashboard_assets_revalidate_instead_of_pinning_old_visuals(monkeypatch, tmp_path):
     with _client(monkeypatch, tmp_path) as client:
         for path in (
             "/v2-assets/engraphis-graph.js?v=20260809-pin-only-physics",
             "/v2-assets/ledger.js?v=20260728-connected-memories",
             "/v2-assets/ledger.css?v=20260728-connected-memories",
-            "/classic-assets/dashboard.js?v=20260809-pin-only-physics",
+            "/v2-assets/markdown.js?v=20260728-connected-memories",
         ):
             response = client.get(path)
             assert response.status_code == 200
             assert response.headers["cache-control"] == "no-cache, must-revalidate"
 
 
-def test_classic_dashboard_script_mirrors_the_static_compatibility_asset():
-    root = Path(__file__).parents[1] / "engraphis"
-    assert (root / "classic_assets" / "dashboard.js").read_bytes() == (
-        root / "static" / "dashboard.js"
-    ).read_bytes()
+def test_the_retired_classic_dashboard_redirects_to_ledger(monkeypatch, tmp_path):
+    """Old bookmarks land on the one dashboard; Classic's assets are no longer served."""
+
+    with _client(monkeypatch, tmp_path) as client:
+        for path in ("/classic", "/classic?workspace=demo"):
+            response = client.get(path, follow_redirects=False)
+            assert response.status_code == 307, path
+            assert response.headers["location"] == "/"
+        followed = client.get("/classic")
+        assert followed.status_code == 200
+        assert "<title>Engraphis Ledger</title>" in followed.text
+        for retired in (
+            "/classic-assets/dashboard.js",
+            "/classic-assets/index.html",
+            "/static/dashboard.js",
+            "/static/vendor/marked.min.js",
+            "/v2-assets/engraphis-graph-compat.js",
+        ):
+            assert client.get(retired).status_code == 404, retired
+
+    root = Path(__file__).parents[1]
+    for package in ("classic_assets", "static"):
+        assert not (root / "engraphis" / package).exists(), package
+    packaging = (root / "pyproject.toml").read_text(encoding="utf-8")
+    packaging += (root / "MANIFEST.in").read_text(encoding="utf-8")
+    assert "classic_assets" not in packaging
+    assert "engraphis/static" not in packaging and "engraphis.static" not in packaging
+
+
+def test_proactive_handoff_belongs_to_the_named_project(monkeypatch, tmp_path):
+    """Home shows a last-session handoff only for the project it was recorded in."""
+
+    with _client(monkeypatch, tmp_path) as client:
+        svc = client.app.state.service
+        session = svc.start_session("demo", repo="api", agent="pytest", goal="ship the API")
+        svc.end_session(session["session_id"], summary="Shipped the migration.",
+                        outcome="done", open_threads=["Rotate the staging keys"])
+
+        scoped = client.get("/api/proactive", params={"workspace": "demo", "repo": "api", "k": 1})
+        assert scoped.status_code == 200
+        handoff = scoped.json()["handoff"]
+        assert handoff["summary"] == "Shipped the migration."
+        assert handoff["open_threads"] == ["Rotate the staging keys"]
+
+        unscoped = client.get("/api/proactive", params={"workspace": "demo", "k": 1})
+        assert unscoped.status_code == 200
+        assert unscoped.json()["handoff"] is None
+
+        too_long = client.get("/api/proactive", params={"workspace": "demo", "repo": "x" * 201})
+        assert too_long.status_code == 422
 
 
 def test_dashboard_and_mcp_recall_share_the_v2_service(monkeypatch, tmp_path):
@@ -1019,9 +1117,11 @@ def test_dashboard_serves_the_graph_engine_from_its_v2_asset_surface(monkeypatch
         asset = client.get("/v2-assets/engraphis-graph.js")
         assert asset.status_code == 200
         assert "window.EngraphisGraph =" in asset.text
-        compat = client.get("/v2-assets/engraphis-graph-compat.js")
-        assert compat.status_code == 200
-        assert "window.EngraphisGraphCompat =" in compat.text
+        assert "legend(" in asset.text
+        every = client.get("/v2-assets/engraphis-graph-every.js")
+        assert every.status_code == 200
+        assert "window.EngraphisEveryGraph" in every.text
+        assert client.get("/v2-assets/engraphis-graph-compat.js").status_code == 404
         assert client.get("/v2-assets/vendor/d3.min.js").status_code == 200
         assert client.get("/v2-assets/vendor/force-graph.min.js").status_code == 200
 
@@ -1190,7 +1290,10 @@ def test_graph_facts_and_search_use_the_atomic_node_reveal(monkeypatch, tmp_path
         assert "revealGraphNode(item.id, item.name)" in ledger.text
         assert "function openGraphConnections(item)" in ledger.text
         assert "function showGraphConnectionMemories(item, includeHistory = false)" in ledger.text
-        assert "onNodeClick: item => openGraphConnections(item)" in ledger.text
+        click = ledger.text[ledger.text.index("onNodeClick: item => {"):]
+        click = click[:click.index("},")]
+        assert "graphExplorer.select(item && item.id);" in click
+        assert "openGraphConnections(item);" in click
         assert "api.reveal = id =>" in engine.text
         assert "function centerRenderedNode(id)" in engine.text
         assert "suppressNodeClickAfterDrag" in engine.text
@@ -1215,7 +1318,9 @@ def test_workspace_switcher_uses_the_active_ledger_theme_for_native_dropdowns(mo
         assert ".workspace-switcher select {" in css
         assert "background: var(--c-inset);" in css
         assert "color-scheme: dark;" in css
-        assert 'body[data-theme="paper"] .workspace-switcher select { color-scheme: light; }' in css
+        assert ('body[data-theme="paper"] .workspace-switcher select,\n'
+                'body[data-theme="sepia"] .workspace-switcher select { color-scheme: light; }'
+                ) in css
         assert ".workspace-switcher select option { background: var(--c-inset); color: var(--c-fg); }" in css
         assert ".workspace-switcher select option:checked { background: var(--c-acc); color: var(--c-bg); }" in css
 
@@ -1941,19 +2046,25 @@ def test_automation_workspace_query_unknown_is_not_replaced_by_legacy_default(
 
 
 def test_dashboard_automation_uses_active_workspace_and_discloses_upload_boundary():
-    source = Path(__file__).parents[1] / "engraphis" / "static" / "dashboard.js"
-    source = source.read_text(encoding="utf-8")
-    assert "/automation?workspace=" in source
-    assert "/maintenance/run?workspace=" in source
+    assets = Path(__file__).parents[1] / "engraphis" / "dashboard_assets"
+    source = (assets / "ledger.js").read_text(encoding="utf-8")
+    page = (assets / "index.html").read_text(encoding="utf-8")
+    assert "api(`/automation?${query(workspace)}`" in source
+    assert "api(`/maintenance/run?${query(workspace)}`" in source
     assert "Preview snapshot" not in source
-    assert "uploads the selected workspace’s normal and sensitive memory content" in source
+    assert "uploads this workspace’s normal and sensitive memory content" in source
+    assert "submits a bounded snapshot of this workspace’s normal and sensitive memory content" \
+        in source
     # Processing requires a separate workspace choice; never imply an account or plan
     # enables it, and do not expose the operator override as the user control.
-    assert "ENGRAPHIS_MANAGED_COMPUTE_CONSENT" not in source
-    assert "Readable processing requires your workspace approval." in source
-    assert "Approve workspace processing in Manage > Settings" in source
-    assert "Hosted work is automatic with Pro." not in source
-    assert "starts automatically with Pro" not in source
+    for asset in (source, page):
+        assert "ENGRAPHIS_MANAGED_COMPUTE_CONSENT" not in asset
+        assert "Hosted work is automatic with Pro." not in asset
+        assert "starts automatically with Pro" not in asset
+    assert "I approve readable managed processing for the selected workspace." in page
+    assert "approve this workspace in Settings → Preferences" in source
+    assert "button('Review workspace processing', 'primary-button', () => switchManageTab('settings'))" \
+        in source
 
 
 def test_portfolio_and_report_analytics_are_hosted_only(monkeypatch, tmp_path):

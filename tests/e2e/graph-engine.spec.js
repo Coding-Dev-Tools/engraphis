@@ -8,7 +8,7 @@ async function revealAdvancedGraphControls(page) {
 const { test, expect } = require('@playwright/test');
 
 /*
- * Real-browser coverage for the opt-in canvas graph engine (`?graph-engine=next`).
+ * Real-browser coverage for the canvas graph engine as the Ledger dashboard serves it.
  *
  * tests/test_graph_engine_asset.py drives the asset under Node against a recording
  * force-graph stand-in, which is the right tool for the logic but proves nothing about a
@@ -20,7 +20,7 @@ const { test, expect } = require('@playwright/test');
  */
 
 const workspace = 'graph-e2e';
-const stellarOrbitAssetVersion = '20260927-unmerged-readiness-3';
+const stellarOrbitAssetVersion = '20261009-ledger-only-1';
 
 // A small connected store: two clusters joined by one bridge, so communities, the legend and
 // the bridge detector all have something real to work on.
@@ -317,10 +317,10 @@ const servedCompleteGalaxyScene = completeGalaxyScene();
 /**
  * Stub the dashboard's API surface and start recording everything a browser can tell us that
  * a Node harness cannot: which scripts were fetched, which CSP rules fired, and what the page
- * logged.  Returns the recorders so each test can assert on them.
+ * logged, then load the dashboard.  Returns the recorders so each test can assert on them.
  */
 async function openDashboard(page, {
-  query = '', graphScene = graphScenePayload, capturePhysics = false,
+  graphScene = graphScenePayload, capturePhysics = false,
 } = {}) {
   const requested = [];
   const consoleErrors = [];
@@ -344,8 +344,8 @@ async function openDashboard(page, {
        node coordinates are written by d3 onto the objects that instance holds.  Rather than
        add API surface for a test, intercept the vendor global the lazy loader is about to
        define and keep a reference to the instance the product builds.  The property starts
-       out reporting `undefined`, which is what `typeof ForceGraph==='undefined'` in
-       graphRender() needs in order to still take the lazy-load branch. */
+       out reporting `undefined`, so the dashboard's lazy loader still fetches the vendor
+       bundle. */
     let real = null;
     Object.defineProperty(window, 'ForceGraph', {
       configurable: true,
@@ -359,9 +359,9 @@ async function openDashboard(page, {
       set(value) { real = value; },
     });
 
-    // Ledger constructs the canonical engine directly, so capture that instance too. The
-    // product API remains unchanged; this only gives browser tests the same node/velocity
-    // visibility that the classic adapter gets through ForceGraph.
+    // Capture the engine instance the dashboard constructs as well. The product API remains
+    // unchanged; this only gives browser tests the engine's own diagnostics next to the
+    // force-graph instance above.
     let engine = null;
     let engineProxy = null;
     Object.defineProperty(window, 'EngraphisGraph', {
@@ -443,23 +443,34 @@ async function openDashboard(page, {
     return json({});
   });
 
-  await page.goto(`/classic${query}`);
-  await page.waitForFunction(() => typeof window.selectView === 'function');
+  await page.goto('/');
+  // The stubbed bootstrap lists one workspace; Ledger selects it once boot completes.
+  await expect(page.locator('#workspace-select')).toHaveValue(workspace);
   const violations = () => page.evaluate(() => window.__cspViolations.slice());
   return { requested, consoleErrors, pageErrors, cspViolations, violations };
 }
 
 const fetched = (requested, name) => requested.filter(url => url.includes(name));
 
-/** Open the Graph view and wait for force-graph to put a sized canvas on the page. */
-async function openGraphView(page) {
-  await page.locator('.nav-item[data-view="graph"]').click();
-  const canvas = page.locator('#graph-net canvas, #graph-canvas canvas').first();
+/**
+ * Open Graph & Relationships and wait for the committed renderer to put a sized canvas on the
+ * page. `preset` chooses a layout through the product's own layout chips; without it the graph
+ * keeps Ledger's default (Galaxy gravity).
+ */
+async function openGraphView(page, { preset } = {}) {
+  await page.locator('.nav-item[data-view="relations"]').click();
+  const canvas = page.locator('#graph-canvas canvas').first();
   await expect(canvas).toBeAttached({ timeout: 20_000 });
   await page.waitForFunction(() => {
-    const c = document.querySelector('#graph-net canvas, #graph-canvas canvas');
+    const c = document.querySelector('#graph-canvas canvas');
     return c && c.width > 0 && c.height > 0;
   }, null, { timeout: 20_000 });
+  if (preset) {
+    await revealAdvancedGraphControls(page);
+    const choice = page.locator(`[data-graph-preset-choice="${preset}"]`);
+    await choice.click();
+    await expect(choice).toHaveAttribute('aria-pressed', 'true');
+  }
   return canvas;
 }
 
@@ -571,7 +582,7 @@ async function renderedSystemEnvelopeSnapshot(page) {
   return page.evaluate(() => {
     const graph = window.__fg;
     const nodes = graph.graphData().nodes.filter(node => !node.ghost);
-    const canvas = document.querySelector('#graph-canvas canvas, #graph-net canvas');
+    const canvas = document.querySelector('#graph-canvas canvas');
     const bounds = canvas && canvas.getBoundingClientRect();
     const membersForStar = star => {
       const members = [], pending = [String(star.id)], seen = new Set([String(star.id)]);
@@ -666,7 +677,7 @@ async function renderedStellarSnapshot(page, systemId = 'aurora') {
     const planetPoint = toScreen(planet || zeroVector);
     const starEdge = star ? toScreen({ x: Number(star.x) + Number(star.radius || 0), y: Number(star.y) }) : { ...zeroPoint };
     const planetEdge = planet ? toScreen({ x: Number(planet.x) + Number(planet.radius || 0), y: Number(planet.y) }) : { ...zeroPoint };
-    const canvas = document.querySelector('#graph-canvas canvas, #graph-net canvas');
+    const canvas = document.querySelector('#graph-canvas canvas');
     const bounds = canvas && typeof canvas.getBoundingClientRect === 'function'
       ? canvas.getBoundingClientRect()
       : null;
@@ -1073,7 +1084,6 @@ async function orbitalSeparationTrial(page, separation, stepCount = 8) {
 
 test('Ledger releases a dragged node without reheating the graph', async ({ page }) => {
   const session = await openDashboard(page);
-  await page.goto('/');
   await expect(page.locator('.nav-item[data-view="relations"]')).toBeVisible();
   await page.locator('.nav-item[data-view="relations"]').click();
   await revealAdvancedGraphControls(page);
@@ -1227,10 +1237,10 @@ test('Ledger releases a dragged node without reheating the graph', async ({ page
   expect(session.pageErrors).toEqual([]);
 });
 
-test('Classic releases a dragged node without reheating with reduced visual motion', async ({ page }) => {
+test('a dragged node follows the pointer and releases its pin with reduced visual motion', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' });
-  const session = await openDashboard(page, { query: '?graph-engine=next' });
-  await openGraphView(page);
+  const session = await openDashboard(page);
+  await openGraphView(page, { preset: 'communities' });
   await page.waitForFunction(() => window.__fg && window.__fg.graphData().nodes.length > 0);
   await page.waitForFunction(() => window.__fg.graphData().nodes
     .every(node => Number.isFinite(node.x) && Number.isFinite(node.y)));
@@ -1239,7 +1249,7 @@ test('Classic releases a dragged node without reheating with reduced visual moti
   const drag = await page.evaluate(() => {
     const graph = window.__fg;
     const node = graph.graphData().nodes[0];
-    const canvas = document.querySelector('#graph-net canvas');
+    const canvas = document.querySelector('#graph-canvas canvas');
     const box = canvas.getBoundingClientRect();
     const point = graph.graph2ScreenCoords(node.x, node.y);
     return {
@@ -1285,7 +1295,7 @@ test('a dashboard page that never opens the graph fetches neither graph script',
   // refuses inline styles via same-origin extracted CSS) is never exercised by graph
   // code on non-graph views.  This asserts the deferral in the only place it is real.
   const session = await openDashboard(page);
-  await page.click('.nav-item[data-view="memories"]');
+  await page.click('.nav-item[data-view="library"]');
   await page.waitForTimeout(500);
 
   expect(fetched(session.requested, 'force-graph.min.js')).toEqual([]);
@@ -1294,17 +1304,16 @@ test('a dashboard page that never opens the graph fetches neither graph script',
   expect(session.pageErrors).toEqual([]);
 });
 
-test('the opt-in engine renders a real canvas and registers under its flag', async ({ page }) => {
-  const session = await openDashboard(page, { query: '?graph-engine=next' });
+test('opening the graph loads the engine and renders a real canvas', async ({ page }) => {
+  const session = await openDashboard(page);
   const canvas = await openGraphView(page);
 
   // Both assets arrive, and only now.
   expect(fetched(session.requested, 'engraphis-graph.js').length).toBe(1);
   expect(fetched(session.requested, 'force-graph.min.js').length).toBe(1);
   expect(await page.evaluate(() => typeof (window.EngraphisGraph || {}).create)).toBe('function');
-  // GRAPH_ENGINE is only assigned when graphRenderEngine() actually took the render.  It is a
-  // top-level `let`, so it lives in the global lexical scope rather than on `window`.
-  expect(await page.evaluate(() => Boolean(GRAPH_ENGINE))).toBe(true);
+  // The harness records an engine only when the dashboard actually built one.
+  expect(await page.evaluate(() => Boolean(window.__engraphisGraph))).toBe(true);
   // The default scope includes degree-zero entities so the graph does not silently omit evidence.
   const painted = await page.evaluate(() => window.__fg.graphData().nodes.map(n => n.id).sort());
   expect(painted).toEqual(['ada', 'babbage', 'engine', 'fts', 'notes', 'orphan', 'sqlite', 'store']);
@@ -1312,7 +1321,7 @@ test('the opt-in engine renders a real canvas and registers under its flag', asy
   // The canvas has pixels on it.  A silent failure in the paint path leaves a correctly sized
   // but entirely uniform canvas, which is exactly what a screenshot-free assertion misses.
   const distinctColours = await page.evaluate(() => {
-    const c = document.querySelector('#graph-net canvas');
+    const c = document.querySelector('#graph-canvas canvas');
     const data = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
     const seen = new Set();
     for (let i = 0; i < data.length; i += 4) {
@@ -1327,31 +1336,19 @@ test('the opt-in engine renders a real canvas and registers under its flag', asy
   expect(session.pageErrors).toEqual([]);
 });
 
-test('Classic defaults to the canonical engine without a query flag', async ({ page }) => {
-  const session = await openDashboard(page);
-  const canvas = await openGraphView(page);
-
-  expect(fetched(session.requested, 'engraphis-graph.js').length).toBe(1);
-  expect(fetched(session.requested, 'force-graph.min.js').length).toBe(1);
-  expect(await page.evaluate(() => typeof (window.EngraphisGraph || {}).create)).toBe('function');
-  expect(await page.evaluate(() => Boolean(GRAPH_ENGINE))).toBe(true);
-  await expect(canvas).toBeVisible();
-  expect(session.pageErrors).toEqual([]);
-});
-
 test('the live graph paints materially different hub faces for every style', async ({ page }) => {
-  const session = await openDashboard(page, { query: '?graph-engine=next' });
-  await openGraphView(page);
+  const session = await openDashboard(page);
+  await openGraphView(page, { preset: 'communities' });
   await page.waitForFunction(() => {
     const nodes = window.__fg && window.__fg.graphData().nodes;
     return nodes && nodes.length && nodes.every(node => Number.isFinite(node.x) && Number.isFinite(node.y));
   });
 
   const sampleFace = async style => {
-    await page.evaluate(value => graphSetStyle(value), style);
+    await page.locator(`[data-graph-style-choice="${style}"]`).click();
     await page.waitForTimeout(100);
     return page.evaluate(() => {
-      const canvas = document.querySelector('#graph-net canvas');
+      const canvas = document.querySelector('#graph-canvas canvas');
       const pixels = canvas.getContext('2d').getImageData(
         0, 0, canvas.width, canvas.height,
       ).data;
@@ -1409,7 +1406,7 @@ test('the browser material gallery preserves distinct node families at both DPRs
      force graph: layout coordinates and antialiasing are not a material contract. The engine
      still does the real browser canvas work here, so this catches an OffscreenCanvas/gradient
      fallback that a Node recording context cannot see. */
-  const session = await openDashboard(page, { query: '?graph-engine=next' });
+  const session = await openDashboard(page);
   await openGraphView(page);
   const gallery = await page.evaluate(() => {
     const I = window.EngraphisGraph._internals;
@@ -1458,7 +1455,7 @@ test('the deterministic graph material gallery matches its visual golden', async
   // Keep the project name in the path, but do not fork one baseline per operating system.
   testInfo.snapshotSuffix = '';
   await page.emulateMedia({ reducedMotion: 'reduce' });
-  const session = await openDashboard(page, { query: '?graph-engine=next' });
+  const session = await openDashboard(page);
   await openGraphView(page);
   const violationsBeforeGallery = await session.violations();
   await page.evaluate(() => {
@@ -1513,13 +1510,14 @@ test('the deterministic graph material gallery matches its visual golden', async
   expect(session.pageErrors).toEqual([]);
 });
 
-test('a physics slider moves the layout under the opt-in engine', async ({ page }) => {
+test('a physics slider moves a settled layout', async ({ page }) => {
   // The regression this pins: setSettings() narrowed its reheat to `mode`, so Repel/Link/
   // Gravity/Size wrote a new force into a simulation already sitting at alpha~0.  Nothing
   // moved until the user found the Reheat button — invisible to a stand-in that records the
   // force object but never runs a solver.  Here d3 is really integrating.
-  await openDashboard(page, { query: '?graph-engine=next' });
-  await openGraphView(page);
+  await openDashboard(page);
+  // Galaxy never settles by design; Islands does, so it isolates the slider's effect.
+  await openGraphView(page, { preset: 'communities' });
 
   // Let the initial layout settle so any movement below is the slider's doing, not warmup.
   await page.waitForTimeout(3_000);
@@ -1529,8 +1527,8 @@ test('a physics slider moves the layout under the opt-in engine', async ({ page 
   const settled = await positions();
   expect(await positions()).toBe(settled);
 
-  await page.locator('input[data-graph-setting="repel"]').fill('420');
-  await page.dispatchEvent('input[data-graph-setting="repel"]', 'input');
+  await page.locator('#graph-repel').fill('400');
+  await page.dispatchEvent('#graph-repel', 'input');
   await page.waitForTimeout(1_500);
 
   expect(await positions()).not.toBe(settled);
@@ -1538,7 +1536,7 @@ test('a physics slider moves the layout under the opt-in engine', async ({ page 
 
 test('black-hole Galaxy remains bounded and differential beyond 450 custom steps', async ({ page }) => {
   test.setTimeout(45_000);
-  await openDashboard(page, { query: '?graph-engine=next' });
+  await openDashboard(page);
   await openGraphView(page);
   await page.evaluate(scene => {
     window.__engraphisGraph.setPreset('galaxy');
@@ -1669,7 +1667,7 @@ test('reduced-motion Galaxy preserves simultaneous local and black-hole orbits',
   // Reduced motion removes camera/paint animation only. The fixed Galaxy solver must still
   // seed physical angular momentum rather than letting every body fall radially inward.
   await page.emulateMedia({ reducedMotion: 'reduce' });
-  await openDashboard(page, { query: '?graph-engine=next' });
+  await openDashboard(page);
   await openGraphView(page);
   await page.evaluate(scene => {
     const api = window.__engraphisGraph;
@@ -1728,10 +1726,6 @@ for (const reducedMotion of [false, true]) {
       test.setTimeout(45_000);
       await page.emulateMedia({ reducedMotion: reducedMotion ? 'reduce' : 'no-preference' });
       const session = await openDashboard(page, { graphScene: servedLargeGalaxyScene });
-      // `openDashboard` installs the real lazy-asset capture on Classic without opening its
-      // graph. Navigate to the primary Ledger so its adapter, controls, and asset URL own this
-      // acceptance run.
-      await page.goto('/');
       await page.locator('.nav-item[data-view="relations"]').click();
       await revealAdvancedGraphControls(page);
       await expect(page.locator('#graph-canvas canvas').first()).toBeAttached({ timeout: 20_000 });
@@ -1917,7 +1911,6 @@ test('served Ledger wires normalized spacetime controls, overlay, and orbit paus
   async ({ page }) => {
     test.setTimeout(35_000);
     const session = await openDashboard(page, { graphScene: blackHoleGalaxyScene });
-    await page.goto('/');
     await page.locator('.nav-item[data-view="relations"]').click();
     await revealAdvancedGraphControls(page);
     await expect(page.locator('#graph-canvas canvas').first()).toBeAttached({ timeout: 20_000 });
@@ -1988,7 +1981,6 @@ test('served Ledger wires normalized spacetime controls, overlay, and orbit paus
         ['graph-text-size', 16],
         ['graph-line-width', 1],
         ['graph-label-density', 40],
-        ['graph-tune-min-degree', 2],
         ['graph-depth', 3],
         ['graph-min-degree', 2],
       ].forEach(([id, value]) => set(id, value));
@@ -2011,7 +2003,7 @@ test('served Ledger wires normalized spacetime controls, overlay, and orbit paus
     /* The fixture has no high-degree metadata; restore a visible scope before exercising
        pause/resume so the physics clock is tested with live bodies rather than an empty filter. */
     await page.evaluate(() => {
-      ['graph-tune-min-degree', 'graph-min-degree'].forEach(id => {
+      ['graph-min-degree'].forEach(id => {
         const control = document.getElementById(id);
         control.value = '0';
         control.dispatchEvent(new Event('input', { bubbles: true }));
@@ -2059,7 +2051,6 @@ test('served Galaxy paints complete independent solar envelopes with a visible c
     test.setTimeout(55_000);
     await page.emulateMedia({ reducedMotion: 'no-preference' });
     await openDashboard(page, { graphScene: servedLargeGalaxyScene });
-    await page.goto('/');
     await page.locator('.nav-item[data-view="relations"]').click();
     await revealAdvancedGraphControls(page);
     await expect(page.locator('#graph-canvas canvas').first()).toBeAttached({ timeout: 30_000 });
@@ -2295,7 +2286,6 @@ test('served 500-body Galaxy sustains separated carrier orbits and the black-hol
     };
 
     await openDashboard(page, { graphScene: servedLargeGalaxyWithCoreSatellites });
-    await page.goto('/');
     await page.locator('.nav-item[data-view="relations"]').click();
     await revealAdvancedGraphControls(page);
     await expect(page.locator('#graph-canvas canvas').first()).toBeAttached({ timeout: 20_000 });
@@ -2315,7 +2305,6 @@ test('served Complete Galaxy uses the lightweight all-body orbit path instead of
     test.setTimeout(90_000);
     await page.emulateMedia({ reducedMotion: 'no-preference' });
     await openDashboard(page, { graphScene: servedCompleteGalaxyScene });
-    await page.goto('/');
     await page.locator('.nav-item[data-view="relations"]').click();
     await revealAdvancedGraphControls(page);
     await expect(page.locator('#graph-canvas canvas').first()).toBeAttached({ timeout: 30_000 });
@@ -2538,7 +2527,6 @@ for (const reducedMotion of [false, true]) {
       test.setTimeout(90_000);
       await page.emulateMedia({ reducedMotion: reducedMotion ? 'reduce' : 'no-preference' });
       await openDashboard(page, { graphScene: servedLargeGalaxyScene });
-      await page.goto('/');
       await page.locator('.nav-item[data-view="relations"]').click();
       await revealAdvancedGraphControls(page);
       await expect(page.locator('#graph-canvas canvas').first()).toBeAttached({ timeout: 20_000 });
@@ -2617,7 +2605,6 @@ test('Galaxy slider changes keep every authored local orbit advancing', async ({
   test.setTimeout(60_000);
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   await openDashboard(page, { graphScene: servedCompleteGalaxyScene });
-  await page.goto('/');
   await page.locator('.nav-item[data-view="relations"]').click();
   await revealAdvancedGraphControls(page);
   await expect(page.locator('#graph-canvas canvas').first()).toBeAttached({ timeout: 20_000 });
@@ -2675,7 +2662,6 @@ test('served Galaxy keeps local members moving after live slider changes', async
   test.setTimeout(75_000);
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   await openDashboard(page, { graphScene: servedLargeGalaxyScene });
-  await page.goto('/');
   await page.locator('.nav-item[data-view="relations"]').click();
   await revealAdvancedGraphControls(page);
   await expect(page.locator('#graph-canvas canvas').first()).toBeAttached({ timeout: 20_000 });
@@ -2716,7 +2702,6 @@ for (const reducedMotion of [false, true]) {
       test.setTimeout(85_000);
       await page.emulateMedia({ reducedMotion: reducedMotion ? 'reduce' : 'no-preference' });
       await openDashboard(page, { graphScene: blackHoleGalaxyScene });
-      await page.goto('/');
       await page.locator('.nav-item[data-view="relations"]').click();
       await revealAdvancedGraphControls(page);
       await expect(page.locator('#graph-canvas canvas').first()).toBeAttached({ timeout: 20_000 });
@@ -2891,7 +2876,6 @@ test('served primary dashboard keeps local stellar orbits independent at Galaxy-
       meta: { ...blackHoleGalaxyScene.meta, total_nodes: 3 },
     };
     const session = await openDashboard(page, { graphScene: gravityZeroScene });
-    await page.goto('/');
     // Set the real dashboard control before lazy graph construction. This proves the adapter
     // passes zero into both the one-shot seed and every subsequent served-engine step.
     await page.locator('#graph-gravity').evaluate(control => {
@@ -2982,7 +2966,6 @@ test('served primary dashboard keeps local stellar orbits independent at Galaxy-
 
 test('served non-Galaxy spacetime controls keep their full normalized range', async ({ page }) => {
   const session = await openDashboard(page);
-  await page.goto('/');
   await page.locator('.nav-item[data-view="relations"]').click();
   await revealAdvancedGraphControls(page);
   await expect(page.locator('#graph-canvas canvas').first()).toBeAttached({ timeout: 20_000 });
@@ -3024,7 +3007,7 @@ test('served non-Galaxy spacetime controls keep their full normalized range', as
 });
 
 test('Galaxy motion is 50 percent faster while core perturbation stays bound', async ({ page }) => {
-  await openDashboard(page, { query: '?graph-engine=next' });
+  await openDashboard(page);
   await openGraphView(page);
   await page.waitForFunction(() => window.__engraphisGraph && window.EngraphisGraph);
 
@@ -3203,7 +3186,7 @@ test('Galaxy motion is 50 percent faster while core perturbation stays bound', a
 });
 
 test('Compact to Galaxy restores phase while live drag never wakes D3', async ({ page }) => {
-  await openDashboard(page, { query: '?graph-engine=next' });
+  await openDashboard(page);
   await openGraphView(page);
   await page.waitForFunction(() => window.__engraphisGraph && window.__fg);
   await page.evaluate(scene => {
@@ -3301,7 +3284,7 @@ test('Compact to Galaxy restores phase while live drag never wakes D3', async ({
   const drag = await page.evaluate(() => {
     const graph = window.__fg;
     const dragged = graph.graphData().nodes.find(node => node.id === 'aurora-star');
-    const canvas = document.querySelector('#graph-net canvas');
+    const canvas = document.querySelector('#graph-canvas canvas');
     const box = canvas.getBoundingClientRect();
     const point = graph.graph2ScreenCoords(dragged.x, dragged.y);
     return { x: box.left + point.x, y: box.top + point.y,
@@ -3370,7 +3353,7 @@ test('Compact to Galaxy restores phase while live drag never wakes D3', async ({
 });
 
 test('Galaxy drag attracts linked and unlinked nearby bodies without reheating', async ({ page }) => {
-  await openDashboard(page, { query: '?graph-engine=next' });
+  await openDashboard(page);
   await openGraphView(page);
   await page.waitForFunction(() => window.__engraphisGraph && window.__fg);
   await page.evaluate(scene => {
@@ -3384,7 +3367,7 @@ test('Galaxy drag attracts linked and unlinked nearby bodies without reheating',
 
   const start = await page.evaluate(() => {
     const graph = window.__fg;
-    const canvas = document.querySelector('#graph-net canvas');
+    const canvas = document.querySelector('#graph-canvas canvas');
     const anchor = graph.graphData().nodes.find(node => node.id === 'aurora-star');
     const follower = graph.graphData().nodes.find(node => node.id === 'aurora-planet');
     const point = graph.graph2ScreenCoords(anchor.x, anchor.y);
@@ -3516,9 +3499,16 @@ test('Galaxy sliders retain full ranges with orbital-speed and radius response',
   // Use normal motion for this tuning sweep; the dedicated reduced-motion regression proves
   // that the same fixed solver and hierarchical orbits remain live under that preference.
   await page.emulateMedia({ reducedMotion: 'no-preference' });
-  await openDashboard(page, { query: '?graph-engine=next', capturePhysics: true });
+  await openDashboard(page, { capturePhysics: true });
   await openGraphView(page);
   await page.waitForFunction(() => window.__engraphisGraph && window.__fg);
+  // This sweep is calibrated against the engine's own spacetime defaults (every multiplier
+  // 1). Ledger's sliders start Galaxy at twice the galactic and local gravity, so put the
+  // engine back on its defaults before measuring its slider response.
+  await page.evaluate(() => window.__engraphisGraph.setSettings({
+    gravitationalConstant: 1, localGravitationalConstant: 1, blackHoleMass: 1,
+    damping: 1, springStiffness: 1,
+  }));
   const baseline = await gravityTrial(page, 48);
   const strong = await gravityTrial(page, 200);
   await testInfo.attach('gravity-step-samples.json', {
@@ -3757,7 +3747,7 @@ test('Galaxy sliders retain full ranges with orbital-speed and radius response',
     window.__lastGraphNodeClick = null;
     const graph = window.__fg;
     const anchor = graph.graphData().nodes.find(node => node.anchor_role === 'global');
-    const canvas = document.querySelector('#graph-net canvas');
+    const canvas = document.querySelector('#graph-canvas canvas');
     const box = canvas.getBoundingClientRect();
     const point = graph.graph2ScreenCoords(anchor.x, anchor.y);
     return { x: box.left + point.x, y: box.top + point.y };
@@ -3769,7 +3759,6 @@ test('Galaxy sliders retain full ranges with orbital-speed and radius response',
 
 test('Ledger Gravity slider changes Galaxy density immediately', async ({ page }) => {
   const session = await openDashboard(page);
-  await page.goto('/');
   await page.locator('.nav-item[data-view="relations"]').click();
   await revealAdvancedGraphControls(page);
   await expect(page.locator('#graph-canvas canvas').first()).toBeAttached({ timeout: 20_000 });
@@ -3830,7 +3819,6 @@ test('Ledger Gravity slider changes Galaxy density immediately', async ({ page }
 
 test('Ledger Gravity slider is path-independent across burst sweeps', async ({ page }) => {
   const session = await openDashboard(page);
-  await page.goto('/');
   await page.locator('.nav-item[data-view="relations"]').click();
   await revealAdvancedGraphControls(page);
   await expect(page.locator('#graph-canvas canvas').first()).toBeAttached({ timeout: 20_000 });
@@ -3890,7 +3878,6 @@ test('Ledger Gravity slider has no dead zone across 0..400', async ({ page }, te
      that mapping reaches the painted surface. */
   test.setTimeout(45_000);
   const session = await openDashboard(page);
-  await page.goto('/');
   await page.locator('.nav-item[data-view="relations"]').click();
   await revealAdvancedGraphControls(page);
   await expect(page.locator('#graph-canvas canvas').first()).toBeAttached({ timeout: 20_000 });
@@ -3924,7 +3911,7 @@ test('Ledger Gravity slider has no dead zone across 0..400', async ({ page }, te
       const outputText = document.getElementById('graph-gravity-output').textContent;
       const settingsGravity = window.__engraphisGraph.state().settings.gravity;
       const diagnostics = window.__engraphisGraph.physicsDiagnostics();
-      const canvas = document.querySelector('#graph-canvas canvas, #graph-net canvas');
+      const canvas = document.querySelector('#graph-canvas canvas');
       /* Hash the full frame after the paint window. This avoids a coarse-grid collision when
          a small but real carrier shift lands inside the same sampled cell. */
       let hash = 0;
@@ -3963,7 +3950,7 @@ test('Ledger Gravity slider has no dead zone across 0..400', async ({ page }, te
     }, value);
     /* Give force-graph at least one paint cycle so the canvas reflects the new setting. */
     await page.waitForTimeout(120);
-    const canvas = page.locator('#graph-canvas canvas, #graph-net canvas').first();
+    const canvas = page.locator('#graph-canvas canvas').first();
     const screenshot = await canvas.screenshot();
     await testInfo.attach(`gravity-slider-dead-zone-${value}.png`, {
       body: screenshot, contentType: 'image/png',
@@ -4004,7 +3991,7 @@ test('Ledger Gravity slider has no dead zone across 0..400', async ({ page }, te
 });
 
 test('Reheat layout control never adds Galaxy bonus physics slices', async ({ page }) => {
-  await openDashboard(page, { query: '?graph-engine=next' });
+  await openDashboard(page);
   await openGraphView(page);
   await page.waitForFunction(() => window.__engraphisGraph && window.__fg);
   await page.evaluate(scene => {
@@ -4075,7 +4062,7 @@ test('Reheat layout control never adds Galaxy bonus physics slices', async ({ pa
 });
 
 test('the default graph starts live instead of frozen', async ({ page }) => {
-  await openDashboard(page, { query: '?graph-engine=next' });
+  await openDashboard(page);
   await openGraphView(page);
   await page.waitForFunction(() => window.__fg && window.__fg.graphData().nodes
     .every(node => Number.isFinite(node.x) && Number.isFinite(node.y)));
@@ -4101,15 +4088,15 @@ test('the default graph starts live instead of frozen', async ({ page }) => {
 });
 
 test('drag remains bounded and releases its temporary pin', async ({ page }) => {
-  await openDashboard(page, { query: '?graph-engine=next' });
-  await openGraphView(page);
+  await openDashboard(page);
+  await openGraphView(page, { preset: 'communities' });
   await page.waitForFunction(() => window.__fg && window.__fg.graphData().nodes
     .every(node => Number.isFinite(node.x) && Number.isFinite(node.y)));
   await page.waitForTimeout(2_000);
 
   const start = await page.evaluate(() => {
     const graph = window.__fg;
-    const canvas = document.querySelector('#graph-net canvas');
+    const canvas = document.querySelector('#graph-canvas canvas');
     const box = canvas.getBoundingClientRect();
     const node = graph.graphData().nodes[0];
     const point = graph.graph2ScreenCoords(node.x, node.y);
@@ -4131,7 +4118,7 @@ test('drag remains bounded and releases its temporary pin', async ({ page }) => 
     await page.mouse.move(start.x + index * 28, start.y + index * 18, { steps: 2 });
     await page.waitForTimeout(45);
     samples.push(await page.evaluate(() => {
-      const canvas = document.querySelector('#graph-net canvas');
+      const canvas = document.querySelector('#graph-canvas canvas');
       const nodes = window.__fg.graphData().nodes;
       return {
         maxSpeed: Math.max(...nodes.map(node => Math.hypot(node.vx || 0, node.vy || 0))),
@@ -4146,7 +4133,7 @@ test('drag remains bounded and releases its temporary pin', async ({ page }) => 
   await page.waitForTimeout(650);
 
   const after = await page.evaluate(() => {
-    const canvas = document.querySelector('#graph-net canvas');
+    const canvas = document.querySelector('#graph-canvas canvas');
     const nodes = window.__fg.graphData().nodes;
     return {
       maxSpeed: Math.max(...nodes.map(node => Math.hypot(node.vx || 0, node.vy || 0))),
@@ -4171,14 +4158,14 @@ test('drag remains bounded and releases its temporary pin', async ({ page }) => 
 });
 
 test('repel and gravity slider bursts never schedule bonus Galaxy slices', async ({ page }) => {
-  await openDashboard(page, { query: '?graph-engine=next' });
-  await openGraphView(page);
+  await openDashboard(page);
+  await openGraphView(page, { preset: 'communities' });
   await page.waitForFunction(() => window.__fg && window.__fg.graphData().nodes
     .every(node => Number.isFinite(node.x) && Number.isFinite(node.y)));
   await page.waitForTimeout(1_800);
 
   const before = await page.evaluate(() => {
-    const canvas = document.querySelector('#graph-net canvas');
+    const canvas = document.querySelector('#graph-canvas canvas');
     return { k: canvas.__zoom.k, x: canvas.__zoom.x, y: canvas.__zoom.y,
       diagnostics: window.__engraphisGraph.physicsDiagnostics() };
   });
@@ -4191,8 +4178,8 @@ test('repel and gravity slider bursts never schedule bonus Galaxy slices', async
       if (Number(value) > 0) window.__softKickCount += 1;
       return original(value, ...args);
     };
-    const repel = document.querySelector('input[data-graph-setting="repel"]');
-    const gravity = document.querySelector('input[data-graph-setting="gravity"]');
+    const repel = document.querySelector('#graph-repel');
+    const gravity = document.querySelector('#graph-gravity');
     [180, 260, 340, 420, 500].forEach(value => {
       repel.value = String(value);
       repel.dispatchEvent(new Event('input', { bubbles: true }));
@@ -4208,7 +4195,7 @@ test('repel and gravity slider bursts never schedule bonus Galaxy slices', async
   for (const delay of [100, 250, 600, 1_000]) {
     await page.waitForTimeout(delay);
     samples.push(await page.evaluate(() => {
-      const canvas = document.querySelector('#graph-net canvas');
+      const canvas = document.querySelector('#graph-canvas canvas');
       const nodes = window.__fg.graphData().nodes;
       return {
         maxSpeed: Math.max(...nodes.map(node => Math.hypot(node.vx || 0, node.vy || 0))),
@@ -4228,9 +4215,9 @@ test('repel and gravity slider bursts never schedule bonus Galaxy slices', async
     && sample.diagnostics.lastReheatSubsteps === 0)).toBe(true);
 });
 
-test('reduced visual motion does not start the opt-in graph frozen', async ({ page }) => {
+test('reduced visual motion does not start the graph frozen', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' });
-  await openDashboard(page, { query: '?graph-engine=next' });
+  await openDashboard(page);
   await openGraphView(page);
   await page.waitForFunction(() => window.__fg && window.__fg.graphData().nodes
     .every(node => Number.isFinite(node.x) && Number.isFinite(node.y)));
@@ -4247,12 +4234,12 @@ test('reduced visual motion does not start the opt-in graph frozen', async ({ pa
   expect(greatestMovement).toBeGreaterThan(0.5);
 });
 
-test('Classic graph view produces zero CSP violations', async ({ page }) => {
-  /* The Classic renderer extracts all styles to same-origin CSS files loaded via <link> tags,
-     so no inline <style> elements or style attributes are injected at runtime. Combined with
-     a strict CSP that includes `style-src 'self'` and `style-src-attr 'none'`, this ensures
-     the graph view is fully CSP-clean. Any violation would indicate a regression to inline
-     style injection. */
+test('the graph view produces zero CSP violations', async ({ page }) => {
+  /* The dashboard keeps every style in same-origin CSS files loaded via <link> tags, so no
+     inline <style> elements or style attributes are injected at runtime. Combined with a
+     strict CSP that includes `style-src 'self'` and `style-src-attr 'none'`, this keeps the
+     graph view CSP-clean. Any violation would indicate a regression to inline style
+     injection. */
   const session = await openDashboard(page);
   await openGraphView(page);
   await page.waitForTimeout(2_000);
@@ -4262,19 +4249,9 @@ test('Classic graph view produces zero CSP violations', async ({ page }) => {
   expect(session.pageErrors).toEqual([]);
 });
 
-test('Classic does not expose a complete graph control', async ({ page }) => {
-  const session = await openDashboard(page);
-  await openGraphView(page);
-
-  await expect(page.locator('#graph-show-all')).toHaveCount(0);
-  await expect(page.locator('#graph-show-iso')).toBeEnabled();
-  expect(await page.evaluate(() => typeof GRAPH_FULL)).toBe('undefined');
-  expect(session.pageErrors).toEqual([]);
-});
-
-test.describe('Opt-in canvas graph engine helper contracts', () => {
+test.describe('Canvas graph engine helper contracts', () => {
   test('renders a canvas without uncaught errors or application CSP violations', async ({ page }) => {
-    const session = await openDashboard(page, { query: '?graph-engine=next' });
+    const session = await openDashboard(page);
     const canvas = await openGraphView(page);
 
     await expect(canvas).toBeVisible();
@@ -4288,10 +4265,7 @@ test.describe('Opt-in canvas graph engine helper contracts', () => {
   });
 
   test('keeps galaxy systems finite and separated inside the rendered envelope', async ({ page }) => {
-    await openDashboard(page, {
-      query: '?graph-engine=next',
-      graphScene: blackHoleGalaxyScene,
-    });
+    await openDashboard(page, { graphScene: blackHoleGalaxyScene });
     await openGraphView(page);
     await page.evaluate(scene => {
       window.__engraphisGraph.setPreset('galaxy');
@@ -4314,10 +4288,7 @@ test.describe('Opt-in canvas graph engine helper contracts', () => {
   });
 
   test('observes orbital phase motion in the rendered stellar snapshot', async ({ page }) => {
-    await openDashboard(page, {
-      query: '?graph-engine=next',
-      graphScene: blackHoleGalaxyScene,
-    });
+    await openDashboard(page, { graphScene: blackHoleGalaxyScene });
     await openGraphView(page);
     await page.evaluate(scene => {
       window.__engraphisGraph.setPreset('galaxy');
@@ -4343,10 +4314,7 @@ test.describe('Opt-in canvas graph engine helper contracts', () => {
   });
 
   test('rejects a rendered stellar snapshot without its global anchor', async ({ page }) => {
-    await openDashboard(page, {
-      query: '?graph-engine=next',
-      graphScene: blackHoleGalaxyScene,
-    });
+    await openDashboard(page, { graphScene: blackHoleGalaxyScene });
     await openGraphView(page);
     await page.evaluate(scene => {
       const api = window.__engraphisGraph;
@@ -4376,7 +4344,6 @@ test.describe('Opt-in canvas graph engine helper contracts', () => {
 
 test('served Ledger exposes spacetime controls for non-Galaxy presets', async ({ page }) => {
   const session = await openDashboard(page);
-  await page.goto('/');
   await page.locator('.nav-item[data-view="relations"]').click();
   await revealAdvancedGraphControls(page);
   await expect(page.locator('#graph-canvas canvas').first()).toBeAttached({ timeout: 20_000 });

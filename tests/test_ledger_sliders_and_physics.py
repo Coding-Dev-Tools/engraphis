@@ -3,7 +3,7 @@ themes, buttons, and options in the Ledger dashboard (v1.1 release readiness).
 
 Exercises the real shipped assets (ledger.js, engraphis-graph.js, ledger.css, index.html)
 via the Node engine harness and HTML/CSS parsers to prove:
-  1. All 17 sliders have valid bounds, clean 1:1 monotone mapping, zero dead zones,
+  1. All 16 sliders have valid bounds, clean 1:1 monotone mapping, zero dead zones,
      and synchronized output elements.
   2. Galaxy gravity physics obeys hierarchical orbital mechanics, carrier response,
      zero-gravity stability (Galaxy-zero), and orbit-pausing.
@@ -93,7 +93,7 @@ SCENE = {
     "meta": {"algorithm_version": "galaxy-v6", "layout_seed": 91, "total_nodes": 8, "truncated": False},
 }
 
-ALL_17_SLIDERS = [
+ALL_SLIDERS = [
     {"id": "graph-flow-speed", "min": 0, "max": 100, "fallback": 45, "has_output": True},
     {"id": "graph-repel", "min": 0, "max": 400, "fallback": 100, "has_output": True},
     {"id": "graph-link", "min": 4, "max": 80, "fallback": 8, "has_output": True},
@@ -102,7 +102,6 @@ ALL_17_SLIDERS = [
     {"id": "graph-text-size", "min": 6, "max": 24, "fallback": 12, "has_output": True},
     {"id": "graph-line-width", "min": 0.1, "max": 2.0, "fallback": 0.72, "has_output": True},
     {"id": "graph-label-density", "min": 1, "max": 100, "fallback": 24, "has_output": True},
-    {"id": "graph-tune-min-degree", "min": 0, "max": 12, "fallback": 1, "has_output": True},
     {"id": "graph-depth", "min": 1, "max": 4, "fallback": 2, "has_output": True},
     {"id": "graph-gravitational-constant", "min": 0, "max": 200, "fallback": 60, "has_output": True},
     {"id": "graph-black-hole-mass", "min": 20, "max": 500, "fallback": 96, "has_output": True},
@@ -193,10 +192,10 @@ def _run_node(script: str) -> dict:
 
 # ── TEST SUITE ─────────────────────────────────────────────────────────────────
 
-def test_html_contains_all_17_sliders_with_valid_attributes() -> None:
+def test_html_contains_every_slider_with_valid_attributes() -> None:
     """Validate that every slider exists in index.html with correct min, max, and values."""
     html = LEDGER_HTML.read_text(encoding="utf-8")
-    for slider in ALL_17_SLIDERS:
+    for slider in ALL_SLIDERS:
         sid = slider["id"]
         pattern = rf'id="{sid}"[^>]*type="range"'
         assert re.search(pattern, html), f"Slider {sid} missing or not type='range' in index.html"
@@ -223,7 +222,7 @@ def test_css_unifies_range_sliders_with_theme_accent() -> None:
 
 @requires_node
 def test_all_sliders_monotone_no_dead_zones_and_boundary_integrity() -> None:
-    """Exercise all 17 sliders through the shipped ledger.js response mapping.
+    """Exercise all 16 sliders through the shipped ledger.js response mapping.
 
     Proves:
       1. Every raw step maps to an in-bounds effective value.
@@ -251,7 +250,7 @@ def test_all_sliders_monotone_no_dead_zones_and_boundary_integrity() -> None:
         }
         const rangeFn = ledgerSource.slice(vStart, vi + 1);
 
-        const sliders = """ + json.dumps(ALL_17_SLIDERS) + """;
+        const sliders = """ + json.dumps(ALL_SLIDERS) + """;
         const sliderMap = Object.fromEntries(sliders.map(s => [s.id, {
           id: s.id, min: String(s.min), max: String(s.max), value: String(s.fallback),
         }]));
@@ -278,7 +277,7 @@ def test_all_sliders_monotone_no_dead_zones_and_boundary_integrity() -> None:
         emit(results);
         """
     )
-    for s in ALL_17_SLIDERS:
+    for s in ALL_SLIDERS:
         sid = s["id"]
         data = report[sid]
         samples = data["samples"]

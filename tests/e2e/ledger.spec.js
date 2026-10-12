@@ -1,6 +1,7 @@
 const { test, expect } = require('@playwright/test');
 const fs = require('fs/promises');
 const AxeBuilder = require('@axe-core/playwright').default;
+const { answerActionDialog } = require('./action-dialog-helper');
 
 const workspace = 'ledger-e2e';
 const memories = [
@@ -404,7 +405,7 @@ test('Pending Analytics checks the same job and shows a completed result', async
 
   await result.getByRole('button', { name: 'Refresh result' }).click();
   await expect(result).toContainText('The Cloud job is running');
-  await page.getByRole('tab', { name: 'Settings' }).click();
+  await page.getByRole('tab', { name: 'Preferences' }).click();
   await page.getByRole('tab', { name: 'Analytics' }).click();
   await expect(result).toContainText('Live memories1');
   await expect(result).toContainText('Average retention82%');
@@ -474,7 +475,7 @@ test('An unconfirmed Analytics start requires an explicit new run', async ({ pag
   await expect(result).toContainText('Starting a fresh analysis creates another run');
   expect(starts).toBe(1);
 
-  await page.getByRole('tab', { name: 'Settings' }).click();
+  await page.getByRole('tab', { name: 'Preferences' }).click();
   await page.getByRole('tab', { name: 'Analytics' }).click();
   await expect(result).toContainText('Analytics request unconfirmed');
   expect(starts).toBe(1);
@@ -862,10 +863,15 @@ test('Ledger enters Every node from a loaded overview without losing its scope',
   await expect(page.locator('#graph-repel-output')).toHaveText('82');
   await expect(page.locator('#graph-link-output')).toHaveText('34');
   await expect(page.locator('#graph-gravity-output')).toHaveText('27');
-  await page.locator('#graph-tune-min-degree').fill('2');
-  await expect(page.locator('#graph-count')).toContainText('0 visible of 3 entities');
-  await page.locator('#graph-tune-min-degree').fill('1');
-  await expect(page.locator('#graph-count')).toContainText('2 visible of 3 entities');
+  await page.getByRole('tab', { name: 'Analyse' }).click();
+  // Minimum links applies to linked entities; the Unlinked nodes switch alone decides the
+  // isolated ones, in the Every-node view exactly as in the overview.
+  await page.locator('#graph-min-degree').fill('2');
+  await expect(page.locator('#graph-count')).toContainText('1 visible of 3 entities');
+  await page.locator('#graph-min-degree').fill('1');
+  await expect(page.locator('#graph-count')).not.toContainText('visible of');
+  await expect(page.locator('#graph-count')).toContainText('3 entities');
+  await page.getByRole('tab', { name: 'Explore' }).click();
   const persistedInAllMode = await page.evaluate(() => JSON.parse(
     localStorage.getItem('engraphis-ledger-graph-preferences-v1') || '{}',
   ));
@@ -1007,14 +1013,16 @@ test('Ledger cache-busts a graph renderer that fetched but did not register', as
   await expect(page.locator('#graph-empty')).toContainText('Graph unavailable');
   expect(rendererRequests).toHaveLength(1);
   const first = new URL(rendererRequests[0]);
-  expect(first.searchParams.get('v')).toBe('20260927-unmerged-readiness-3');
+  const version = first.searchParams.get('v');
+  expect(version).toBeTruthy();
   expect(first.searchParams.has('retry')).toBe(false);
 
   await page.getByRole('button', { name: 'Reload data' }).click();
   await expect(page.locator('#graph-count')).toContainText('3 entities · 1 relations');
   expect(rendererRequests).toHaveLength(2);
+  // The retry keeps the release's cache key and only adds a fresh retry marker.
   const second = new URL(rendererRequests[1]);
-  expect(second.searchParams.get('v')).toBe('20260927-unmerged-readiness-3');
+  expect(second.searchParams.get('v')).toBe(version);
   expect(second.searchParams.get('retry')).toBe('1');
 });
 
@@ -1380,16 +1388,14 @@ test('A personal Team workspace needs explicit consent before sharing for Cloud 
   const share = page.getByRole('button', { name: 'Share for Cloud Sync' });
   await expect(share).toHaveCount(1);
 
-  page.once('dialog', async dialog => {
-    expect(dialog.message()).toContain('signed-in Team members');
-    expect(dialog.message()).toContain('encrypted Cloud Sync');
-    await dialog.dismiss();
-  });
   await share.click();
+  await answerActionDialog(page, {
+    accept: false, expectText: ['signed-in Team members', 'encrypted Cloud Sync'],
+  });
   expect(requests.visibilityChanges).toEqual([]);
 
-  page.once('dialog', dialog => dialog.accept());
   await share.click();
+  await answerActionDialog(page);
   await expect(page.locator('#notice-text')).toContainText('shared and eligible for Cloud Sync');
   expect(requests.visibilityChanges).toEqual([
     { workspace, visibility: 'shared', confirmed: true },
@@ -1398,11 +1404,8 @@ test('A personal Team workspace needs explicit consent before sharing for Cloud 
 
   const unshare = page.getByRole('button', { name: 'Make personal' });
   await expect(unshare).toHaveCount(1);
-  page.once('dialog', async dialog => {
-    expect(dialog.message()).toContain('does not erase data already uploaded');
-    await dialog.accept();
-  });
   await unshare.click();
+  await answerActionDialog(page, { expectText: ['does not erase data already uploaded'] });
   await expect(page.locator('#notice-text')).toContainText('excluded from future Cloud Sync');
   expect(requests.visibilityChanges).toEqual([
     { workspace, visibility: 'shared', confirmed: true },
@@ -1411,7 +1414,6 @@ test('A personal Team workspace needs explicit consent before sharing for Cloud 
 });
 
 test('Ledger initializes hosted automation only after an explicit upload action', async ({ page }) => {
-  page.on('dialog', dialog => dialog.accept());
   const requests = await mockApi(page, {
     automationPolicy: {
       enabled: false,
@@ -1441,6 +1443,7 @@ test('Ledger initializes hosted automation only after an explicit upload action'
   await expect(result).toContainText('No upload occurs until you choose this action.');
   await expect(page.locator('#automation-enabled')).toHaveCount(0);
   await page.getByRole('button', { name: 'Initialize hosted automation' }).click();
+  await answerActionDialog(page, { expectText: ['upload one bounded snapshot'] });
   await expect(page.locator('#automation-enabled')).toBeChecked();
   expect(requests.automationBootstraps).toEqual([workspace]);
   expect(requests.automationPolicies).toEqual([]);
@@ -2336,7 +2339,7 @@ test('a saved code view reloads when only its repository changes', async ({ page
   await after;
 });
 
-test('themes persist and both visible interface selectors round-trip', async ({ page }) => {
+test('themes persist, stay accessible, and the retired Classic URL opens Ledger', async ({ page }) => {
   const errors = browserErrors(page);
   const isAxeStyleProbe = message => (
     message.startsWith('Applying inline style violates')
@@ -2359,40 +2362,37 @@ test('themes persist and both visible interface selectors round-trip', async ({ 
   };
   await mockApi(page);
   await page.goto('/');
-  await page.getByRole('button', { name: 'Settings' }).click();
-  await page.getByRole('tab', { name: 'Settings' }).click();
 
-  const theme = page.locator('#theme-select');
+  const theme = page.locator('#sidebar-theme-select');
+  await expect(page.locator('#theme-select')).toHaveCount(0);
+  await expect(page.locator('#dashboard-select')).toHaveCount(0);
   await theme.selectOption('matrix');
   await expect(page.locator('body')).toHaveAttribute('data-theme', 'matrix');
   await page.reload();
-  await page.getByRole('tab', { name: 'Settings' }).click();
   await expect(theme).toHaveValue('matrix');
+  await expect(page.locator('body')).toHaveAttribute('data-theme', 'matrix');
 
   await page.keyboard.press('Tab');
   const focused = page.locator(':focus');
   expect(await focused.evaluate(element => getComputedStyle(element).outlineStyle))
     .not.toBe('none');
 
-  for (const value of ['slate', 'midnight', 'paper', 'matrix']) {
+  for (const value of ['slate', 'midnight', 'solarized', 'paper', 'sepia', 'matrix']) {
     await theme.selectOption(value);
+    await expect(page.locator('body')).toHaveAttribute('data-theme', value);
     const accessibility = await analyzeUnderStrictCsp(new AxeBuilder({ page }));
     expect(accessibility.violations, `${value} theme accessibility`).toEqual([]);
   }
 
-  await page.getByRole('combobox', { name: 'Interface' }).selectOption('classic');
-  await expect(page).toHaveURL(/\/classic$/);
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
-  await expect(page.getByRole('combobox', { name: 'Dashboard interface' }))
-    .toHaveValue('classic');
-  await expect(page.getByRole('combobox', { name: 'theme select' }))
-    .toHaveValue('matrix');
-  const classicAccessibility = await analyzeUnderStrictCsp(new AxeBuilder({ page })
-    .include('#view-settings')
-    .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa']));
-  expect(classicAccessibility.violations).toEqual([]);
-  await page.getByRole('combobox', { name: 'Dashboard interface' }).selectOption('primary');
+  // A theme chosen in the retired Classic dashboard carries over once.
+  await page.evaluate(() => {
+    localStorage.removeItem('engraphis-ledger-theme');
+    localStorage.setItem('engraphis-theme', 'sepia');
+  });
+  await page.goto('/classic');
   await expect(page).toHaveURL(/\/$/);
+  await expect(page.locator('body')).toHaveAttribute('data-theme', 'sepia');
+  await expect(theme).toHaveValue('sepia');
   expect(errors.filter(message => !isAxeStyleProbe(message))).toEqual([]);
 });
 
@@ -2400,7 +2400,7 @@ test('Ledger exposes local LLM setup and extraction controls', async ({ page }) 
   await mockApi(page);
   await page.goto('/');
   await page.getByRole('button', { name: 'Settings' }).click();
-  await page.getByRole('tab', { name: 'Settings' }).click();
+  await page.getByRole('tab', { name: 'Preferences' }).click();
 
   await expect(page.getByRole('heading', { name: 'Connect an LLM' })).toBeVisible();
   await expect(page.getByText('not configured', { exact: true })).toBeVisible();
@@ -2432,18 +2432,16 @@ test('Ledger applies the configured LLM extraction toggle', async ({ page }) => 
   } });
   await page.goto('/');
   await page.getByRole('button', { name: 'Settings' }).click();
-  await page.getByRole('tab', { name: 'Settings' }).click();
+  await page.getByRole('tab', { name: 'Preferences' }).click();
 
   const turnOn = page.locator('#llm-connection').getByRole('button', { name: 'Turn on' });
   await expect(turnOn).toBeEnabled();
   await expect(page.getByText(/Retention supervision is ON/)).toBeVisible();
   await expect(page.getByText(/bounded excerpt/)).toBeVisible();
-  page.once('dialog', dialog => {
-    expect(dialog.message()).toContain('configured LLM provider');
-    expect(dialog.message()).toContain('provider must read that text');
-    return dialog.accept();
-  });
   await turnOn.click();
+  await answerActionDialog(page, {
+    expectText: ['configured LLM provider', 'provider must read that text'],
+  });
   await expect(page.getByText('ON', { exact: true })).toBeVisible();
   await expect(page.locator('#llm-connection').getByRole('button', { name: 'Turn off' })).toBeEnabled();
 
@@ -2490,7 +2488,7 @@ test('Ledger gives active Pro members direct Cloud access and saves hosted polic
   await expect(page.locator('#plan-badge')).toHaveText('PRO');
 
   await page.getByRole('button', { name: 'Settings' }).click();
-  await page.getByRole('tab', { name: 'Settings' }).click();
+  await page.getByRole('tab', { name: 'Preferences' }).click();
   const cloudSettings = page.locator('#cloud-account-settings');
   await expect(cloudSettings.getByRole('link', { name: 'Open Engraphis Cloud' })).toHaveAttribute(
     'href',
@@ -2500,19 +2498,16 @@ test('Ledger gives active Pro members direct Cloud access and saves hosted polic
   await page.getByRole('tab', { name: 'Automation' }).click();
   await expect(page.getByRole('checkbox', { name: 'Enable hosted maintenance' })).toBeChecked();
   await page.getByRole('spinbutton', { name: 'Run every (hours)' }).fill('12');
-  page.once('dialog', dialog => {
-    expect(dialog.message()).toContain(
-      'Cloud Sync encrypts eligible shared-workspace changes end-to-end',
-    );
-    expect(dialog.message()).toContain('Engraphis Cloud cannot read their contents');
-    expect(dialog.message()).toContain('Engraphis will submit a bounded snapshot');
-    expect(dialog.message()).toContain(
-      'normal and sensitive memory content to Cloud for managed compute',
-    );
-    expect(dialog.message()).not.toContain('Privacy, by design.');
-    return dialog.accept();
-  });
   await page.getByRole('button', { name: 'Save & send policy to Cloud' }).click();
+  await expect(page.locator('#action-dialog')).not.toContainText('Privacy, by design.');
+  await answerActionDialog(page, {
+    expectText: [
+      'Cloud Sync encrypts eligible shared-workspace changes end-to-end',
+      'Engraphis Cloud cannot read their contents',
+      'Engraphis will submit a bounded snapshot',
+      'normal and sensitive memory content to Cloud for managed compute',
+    ],
+  });
   await expect.poll(() => requests.automationPolicies.length).toBe(1);
   expect(requests.details.filter(({ path, method }) => (
     path === '/automation' && method === 'POST'
@@ -2735,4 +2730,281 @@ test('renderer construction failure removes its candidate host', async ({ page }
   await expect(page.locator('#graph-empty')).toContainText('renderer construction failed', { timeout: 10_000 });
   await expect(page.locator('.graph-canvas-candidate')).toHaveCount(0);
   await expect(page.locator('#graph-count')).toContainText('entities');
+});
+
+// ── Capabilities carried over from the retired Classic dashboard ────────────────────────
+
+const fulfillJson = (route, body) => route.fulfill({
+  status: 200, contentType: 'application/json', body: JSON.stringify(body),
+});
+
+test('Explore explains its colours and lists every entity and relation for keyboard users', async ({ page }) => {
+  const errors = browserErrors(page);
+  await mockApi(page);
+  await page.goto('/');
+  await page.locator('.nav-item[data-view="relations"]').click();
+  await expect(page.locator('#graph-canvas canvas').first()).toBeAttached({ timeout: 20_000 });
+
+  const legend = page.locator('#graph-legend');
+  const rows = page.locator('#graph-legend-list li');
+  await expect(legend).toBeVisible();
+  await expect(page.locator('#graph-legend-title')).toHaveText('Clusters');
+  await expect(rows.first().locator('svg circle')).toHaveAttribute('fill', /^#[0-9a-f]{6}$/i);
+
+  await revealAdvancedGraphControls(page);
+  await page.locator('[data-graph-color-choice="type"]').click();
+  await expect(page.locator('#graph-legend-title')).toHaveText('Entity types');
+  await expect(rows.first()).toContainText('Person or concept');
+  await page.getByLabel('Colour for Person or concept nodes').fill('#ff8800');
+  await expect(page.locator('[data-graph-palette-choice="custom"]')).toHaveAttribute('aria-pressed', 'true');
+  await expect(rows.first().locator('svg circle')).toHaveAttribute('fill', '#ff8800');
+  await page.locator('#graph-reset-colors').click();
+  await expect(page.locator('[data-graph-palette-choice="theme"]')).toHaveAttribute('aria-pressed', 'true');
+  await expect(rows.first().locator('svg circle')).not.toHaveAttribute('fill', '#ff8800');
+  await page.locator('[data-graph-color-choice="connections"]').click();
+  await expect(page.locator('#graph-legend-title')).toHaveText('Connections');
+  await expect(legend).toContainText('Most connected');
+
+  // The canvas steps through entities, most related first, and says where it is.
+  await page.locator('#graph-canvas').focus();
+  await page.keyboard.press('ArrowDown');
+  await expect(page.locator('#graph-keyboard-status')).toContainText('Engraphis, 1 relation, 1 of 3');
+  await page.keyboard.press('End');
+  await expect(page.locator('#graph-keyboard-status')).toContainText('Unlinked Note, 0 relations, 3 of 3');
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#graph-keyboard-status')).toHaveText('Selection cleared.');
+
+  // Analyse lists the same entities and relations as ordinary, filterable buttons.
+  await page.getByRole('tab', { name: 'Analyse' }).click();
+  const entities = page.locator('#graph-entity-list button.graph-explorer-item');
+  await expect(entities).toHaveCount(3);
+  const relation = page.locator('#graph-relation-list .graph-relation-row');
+  await expect(relation).toHaveCount(1);
+  await expect(relation.getByRole('button', { name: 'Engraphis' })).toBeEnabled();
+  await expect(relation.getByRole('button', { name: 'Postgres' })).toBeEnabled();
+  await page.locator('#graph-explorer-filter').fill('postgres');
+  await expect(entities).toHaveCount(1);
+  await expect(entities.first()).toContainText('Postgres');
+  expect(errors).toEqual([]);
+});
+
+test('Activity verifies the receipt chain and says plainly when it cannot', async ({ page }) => {
+  const errors = browserErrors(page);
+  await mockApi(page);
+  let verification = { valid: true, count: 3, head: 'rcpt_0123456789abcdefghijklmnop' };
+  await page.route('**/api/receipts/verify**', route => fulfillJson(route, verification));
+  await page.goto('/');
+  await page.locator('.nav-item[data-view="provenance"]').click();
+  await page.getByRole('tab', { name: 'Audit & receipts' }).click();
+
+  const status = page.locator('#receipt-chain-status');
+  await expect(status).toHaveAttribute('data-state', 'valid');
+  await expect(status).toContainText('Receipt chain verified · 3 receipts');
+  await expect(status.locator('code')).toContainText('rcpt_0123');
+  verification = { valid: false, count: 3, errors: [{ index: 1 }] };
+  await page.locator('#verify-receipts').click();
+  await expect(status).toHaveAttribute('data-state', 'invalid');
+  await expect(status).toContainText('Receipt chain broken · 3 receipts checked');
+  await expect(status).toContainText('first problem at receipt 2');
+  // An answer without a verdict is never presented as a verified chain.
+  verification = {};
+  await page.locator('#verify-receipts').click();
+  await expect(status).toHaveAttribute('data-state', 'unknown');
+  await expect(status).toContainText('status is unavailable');
+  expect(errors).toEqual([]);
+});
+
+test('Home shows memory health and the selected project’s last-session handoff', async ({ page }) => {
+  const errors = browserErrors(page);
+  await mockApi(page);
+  await page.route('**/api/analytics/health**', route => fulfillJson(route, {
+    workspace,
+    decay_distribution: [
+      { bucket: 'critical', label: '< 20%', count: 1 },
+      { bucket: 'strong', label: '> 80%', count: 4 },
+    ],
+    orphan_count: 2,
+    conflict_frequency: { total: 3, last_7d: 1 },
+  }));
+  await page.route('**/api/repos**', route => fulfillJson(route, { repos: [{ id: 'repo_api', name: 'api' }] }));
+  await page.route('**/api/proactive**', route => {
+    const scoped = new URL(route.request().url()).searchParams.get('repo') === 'api';
+    return fulfillJson(route, scoped
+      ? { workspace, memories: [], handoff: {
+        summary: 'Shipped the migration.', outcome: 'done', open_threads: ['Rotate the staging keys'],
+      } }
+      : { workspace, memories, handoff: null });
+  });
+  await page.goto('/');
+
+  const health = page.locator('#home-health');
+  await expect(health).toContainText('Without entity links');
+  await expect(health).toContainText('Conflicts · 7 days');
+  await expect(health.getByLabel('Retention > 80%: 4 memories')).toBeAttached();
+  // Handoffs belong to a project, so none is shown for "All projects".
+  await expect(page.locator('#home-handoff')).toBeHidden();
+  await page.locator('#project-select').selectOption('api');
+  const handoff = page.locator('#home-handoff');
+  await expect(handoff).toBeVisible();
+  await expect(page.locator('#home-handoff-project')).toHaveText('api');
+  await expect(handoff).toContainText('Shipped the migration.');
+  await expect(handoff).toContainText('Outcome: done');
+  await expect(handoff.getByRole('listitem')).toHaveText(['Rotate the staging keys']);
+  expect(errors).toEqual([]);
+});
+
+test('Ask shows each candidate’s rank, support and retention', async ({ page }) => {
+  const errors = browserErrors(page);
+  await mockApi(page, {
+    rawCandidates: [
+      { ...memories[0], relative_score: 0.9, absolute_support: 0.62, retention: 0.8, arm: 'lexical' },
+      { ...memories[1], relative_score: 0.45, absolute_support: 0.1, retention: 0.25, arm: 'vector' },
+    ],
+  });
+  await page.goto('/');
+  await page.locator('.nav-item[data-view="ask"]').click();
+  await page.locator('#ask-input').fill('Which database?');
+  await page.getByRole('button', { name: 'Grounded answer', exact: true }).click();
+  await expect(page.locator('#answer-panel')).toContainText('Postgres 16');
+  await page.locator('.retrieval-details summary').click();
+  const scores = page.locator('#retrieval-list .retrieval-scores');
+  await expect(scores).toHaveCount(2);
+  await expect(scores.first()).toContainText('Rank #1');
+  await expect(scores.first()).toContainText('0.90');
+  await expect(scores.first()).toContainText('0.62');
+  await expect(scores.first()).toContainText('80%');
+  await expect(scores.nth(1)).toContainText('25%');
+  await expect(page.locator('#retrieval-list')).toContainText('Found by lexical retrieval');
+  expect(errors).toEqual([]);
+});
+
+test('A missing embedding model is explained and rechecked without resetting open work', async ({ page }) => {
+  const errors = browserErrors(page);
+  const requests = await mockApi(page);
+  let embedder = { semantic: false, model: 'all-MiniLM-L6-v2' };
+  await page.route('**/api/bootstrap', route => fulfillJson(route, {
+    license: license(),
+    workspaces: [{ name: workspace, memories: memories.length }],
+    stats: { memories: memories.length, total_rows: memories.length, workspaces: 1, sessions: 1 },
+    embedder,
+  }));
+  await page.goto('/');
+  const banner = page.locator('#embedder-banner');
+  await expect(banner).toBeVisible();
+  await expect(banner).toContainText('The configured model all-MiniLM-L6-v2 is not loaded');
+
+  await page.locator('.nav-item[data-view="library"]').click();
+  await page.locator('#library-list [role="option"]').first().press('Enter');
+  await expect(page.locator('#memory-detail')).toContainText('Postgres 16');
+  const libraryLoads = requests.filter(path => path === '/memories').length;
+  embedder = { semantic: true, model: 'all-MiniLM-L6-v2' };
+  await page.locator('#embedder-recheck').click();
+  await expect(banner).toBeHidden();
+  await expect(page.locator('#notice-banner')).toContainText('Semantic search is on.');
+  // The open memory survives: a recheck never reselects the workspace.
+  await expect(page.locator('#memory-detail')).toContainText('Postgres 16');
+  expect(requests.filter(path => path === '/memories').length).toBe(libraryLoads);
+  expect(errors).toEqual([]);
+});
+
+test('Timeline shows validity windows and narrows to superseded versions', async ({ page }) => {
+  const errors = browserErrors(page);
+  await mockApi(page);
+  const history = [
+    { ...memories[0], valid_from: 1_700_000_000, provenance: { source: 'human:ledger' } },
+    {
+      id: 'mem_database_old', title: 'Database choice', content: 'MySQL 8 was the main database.',
+      memory_type: 'semantic', valid_from: 1_600_000_000, valid_to: 1_700_000_000,
+      ingested_at: 1_600_000_000,
+    },
+  ];
+  await page.route('**/api/timeline**', route => fulfillJson(route, { history }));
+  await page.goto('/');
+  await page.locator('.nav-item[data-view="provenance"]').click();
+  await page.getByRole('tab', { name: 'Timeline' }).click();
+  await page.locator('#timeline-input').fill('database');
+  await page.locator('#timeline-form button[type="submit"]').click();
+
+  const cards = page.locator('#timeline-result .temporal-card');
+  await expect(cards).toHaveCount(2);
+  await expect(cards.first().locator('.temporal-state')).toHaveText('current');
+  await expect(cards.nth(1).locator('.temporal-state')).toHaveText('past');
+  await expect(cards.first()).toContainText('human:ledger');
+  await page.locator('#timeline-closed-only').check();
+  await expect(cards).toHaveCount(1);
+  await expect(cards.first()).toContainText('MySQL 8');
+  expect(errors).toEqual([]);
+});
+
+test('Sources index a repository and send a database connection string only once', async ({ page }) => {
+  const errors = browserErrors(page);
+  await mockApi(page);
+  const posted = [];
+  let releasePostgres = null;
+  await page.route('**/api/code/index', route => {
+    posted.push(['code', JSON.parse(route.request().postData() || '{}')]);
+    return fulfillJson(route, { files_indexed: 3, files_unchanged: 1, symbols: 12, edges: 4, code_memory_links: 2 });
+  });
+  await page.route('**/api/resources/postgres', async route => {
+    posted.push(['postgres', JSON.parse(route.request().postData() || '{}')]);
+    await new Promise(resolve => { releasePostgres = resolve; });
+    return fulfillJson(route, { schema: { tables: 2 }, entities: 5, relations: 1 });
+  });
+  await page.goto('/');
+  await page.locator('.nav-item[data-view="library"]').click();
+  await page.locator('#import-menu-button').click();
+  await page.locator('#import-sources-button').click();
+  const dialog = page.locator('#sources-dialog');
+  await expect(dialog).toBeVisible();
+  await expect(page.locator('#code-index-repo')).toBeFocused();
+
+  await page.locator('#code-index-repo').fill('engraphis');
+  await page.locator('#code-index-root').fill('/srv/engraphis');
+  await page.locator('#code-index-form button[type="submit"]').click();
+  await expect(page.locator('#code-index-status')).toContainText(
+    'engraphis: 3 changed and 1 unchanged files · 12 symbols · 4 edges · 2 memory links.',
+  );
+
+  await page.locator('#postgres-dsn').fill('postgresql://reader:s3cret@db.internal/app');
+  await page.locator('#postgres-repo').fill('app-db');
+  await page.locator('#postgres-import-form button[type="submit"]').click();
+  // The secret leaves the page before the import has even answered.
+  await expect.poll(() => posted.length).toBe(2);
+  await expect(page.locator('#postgres-dsn')).toHaveValue('');
+  releasePostgres();
+  await expect(page.locator('#postgres-import-status')).toContainText(
+    'Imported 2 tables, 5 entities and 1 relation. The connection string was not stored.',
+  );
+  expect(posted).toEqual([
+    ['code', { workspace, repo: 'engraphis', root_path: '/srv/engraphis' }],
+    ['postgres', { workspace, repo: 'app-db', dsn: 'postgresql://reader:s3cret@db.internal/app' }],
+  ]);
+  await page.locator('#sources-close').click();
+  await expect(dialog).toBeHidden();
+  await expect(page.locator('#import-menu-button')).toBeFocused();
+  expect(errors).toEqual([]);
+});
+
+test('Action dialogs cannot be reordered by bidi controls hidden in untrusted names', async ({ page }) => {
+  const errors = browserErrors(page);
+  await mockApi(page);
+  await page.goto('/');
+  // U+202E reverses the text after it; U+2066..U+2069 isolate. A memory title or workspace
+  // name carrying them could make one action read as another inside the confirmation.
+  const answer = page.evaluate(() => window.EngraphisDialog.confirm({
+    title: 'Retire ‮tpmorp rof evorppA',
+    message: ['Retire ⁦“notes”⁩ now?', 'Name: ‭abc‬'],
+    confirmLabel: 'Retire',
+    danger: true,
+  }));
+  const dialog = page.locator('#action-dialog');
+  await expect(dialog).toBeVisible();
+  const shown = await dialog.evaluate(element => element.textContent);
+  expect(shown).not.toMatch(/[‪-‮⁦-⁩]/);
+  await expect(page.locator('#action-dialog-title')).toHaveText('Retire tpmorp rof evorppA');
+  // A destructive confirmation starts on Cancel, and cancelling resolves false.
+  await expect(page.locator('#action-dialog-cancel')).toBeFocused();
+  await page.keyboard.press('Escape');
+  expect(await answer).toBe(false);
+  expect(errors).toEqual([]);
 });

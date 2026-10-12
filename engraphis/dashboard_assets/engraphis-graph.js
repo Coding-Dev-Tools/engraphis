@@ -1,12 +1,12 @@
-/* Engraphis knowledge graph — the dashboard's opt-in force-graph engine.
-   Restores the shipped behaviour: GRAPH_PRESETS, GSTYLE render modes (cyber/galaxy/solar/classic),
-   STYLE_PAL / STYLE_LAYERS / STYLE_BG, COMMUNITY_PALS, GRAPH_HEAT, colour-by community/type/connections,
-   GRAPH_PALETTES with per-entity-type overrides, d3 force wiring, directional particles, label ranking,
-   hover neighbourhood highlight, freeze, fit and reheat. Values copied from dashboard.js.
+/* Engraphis knowledge graph — the dashboard's force-graph engine (window.EngraphisGraph).
+   Layout presets, render styles (cyber/galaxy/solar/classic), STYLE_PAL / STYLE_LAYERS,
+   COMMUNITY_PALS, GRAPH_HEAT, colour-by community/type/connections, palettes with
+   per-entity-type overrides, d3 force wiring, directional particles, label ranking, hover
+   neighbourhood highlight, freeze, fit and reheat. ledger.js lazy-loads it with Explore.
 
    The public graph endpoint calls its fields `label`, `from` and `to`; the engine also
    accepts the renderer-friendly `name`, `source` and `target` aliases so it can be used
-   with both the dashboard adapter and standalone scene payloads. */
+   with both the dashboard and standalone scene payloads. */
 (function () {
   const PRESETS = {
     galaxy: { label: 'Galaxy gravity', repel: 100, link: 8, gravity: 72, font: 12, size: 3, linkw: 0.72, labelDensity: 24, curve: 0.12, particles: 0 },
@@ -30,9 +30,9 @@
     cyber: { temporal: '#22e0ff', entity: '#b6ff3c', causal: '#ffe14d', semantic: '#ff3ea5' }
   };
   /* The per-style pane backgrounds are NOT defined here. `style-src-attr 'none'` forbids
-     writing them onto the element, so dashboard.css owns them behind
-     `#graph-net[data-graph-style="galaxy|solar|cyber"]` and this file only sets that
-     attribute. Keeping a second copy of the gradients in JS would be dead drift. */
+     writing them onto the element, so ledger.css owns them behind
+     `.graph-canvas[data-graph-style="classic|galaxy|solar|cyber"]` and this file only sets
+     that attribute. Keeping a second copy of the gradients in JS would be dead drift. */
   function splitBackgroundLayers(value) {
     const parts = [];
     let start = 0, depth = 0;
@@ -187,11 +187,10 @@
   };
   const THEME_ETYPE = { person_or_concept: '#8c83e8', mention: '#5aafb3', hashtag: '#d7a84b', email: '#6f9fd8', organization: '#58b882', location: '#df7478' };
   /* Community colour is the *palette slot*, not the node: `nodeColor` indexes this by the
-     community id, and communities are numbered by size (largest == 0). The legend beside the
-     canvas paints its swatches from `.graph-cluster-N` in dashboard.css, which encodes the
-     Cyber palette — the default style — slot for slot. These arrays must therefore stay
-     byte-identical to `COMMUNITY_PALS` in dashboard.js, or "Cluster 1" gets one colour in the
-     legend and another on the canvas. Ordering is load-bearing; this is not free-choice art. */
+     community id, and communities are numbered by size (largest == 0). The dashboard legend
+     reads its swatches back through `legend()`, so "Cluster 1" is the largest community and
+     palette slot 0 on the canvas and in the legend alike. Ordering is load-bearing; this is
+     not free-choice art. */
   const COMMUNITY_PALS = {
     classic: ['#8c83e8', '#5aafb3', '#d7a84b', '#6f9fd8', '#58b882', '#df7478', '#b07de0', '#4fb0a0', '#e0894a', '#7c9be0', '#e06a9a', '#9ac25a'],
     galaxy: ['#b789ff', '#7bb4ff', '#66e0d0', '#ffcf6b', '#ff7ea8', '#8aa2ff', '#c98bff', '#5ad0e0', '#ffa0d0', '#9d7bff', '#6ad0b0', '#ffb060'],
@@ -202,24 +201,20 @@
 
   /* Flow particles are per *relation*, and force-graph advances every one of them on every
      frame — three particles on a few thousand relations is tens of thousands of animated
-     objects and a canvas that stops responding. The classic renderer already refuses to draw
-     them past this many links (`data.links.length>800` in dashboard.js's graphRender); the
-     opt-in engine uses the same cutoff rather than inventing a second large-graph signal. */
+     objects and a canvas that stops responding. Past this many links the engine draws none. */
   const PARTICLE_LINK_LIMIT = 800;
 
-  /* The classic renderer's large-graph signal (`GPERF` in dashboard.js, set from the rendered
-     data as `nodes>600 || links>2400`). Past it the classic path drops the galaxy starfield
-     outright — `if(GPERF.large)return` in graphStyleBackground — because repainting 110 stars
-     plus every node and link on every frame is what makes a big store unusable. The opt-in
-     engine reuses the same thresholds rather than inventing a second signal. */
+  /* The large-graph signal, set from the *rendered* data as `nodes>600 || links>2400`. Past
+     it the galaxy starfield is dropped outright, because repainting 110 stars plus every node
+     and link on every frame is what makes a big store unusable. */
   const LARGE_NODE_LIMIT = 600;
   const LARGE_LINK_LIMIT = 2400;
 
   /* "Show all nodes" may return twenty thousand entities. A D3 simulation for even a
      few thousand of them monopolises the main thread long enough to make the Ledger feel
      hung, irrespective of its eventual tick/cooldown limit. Keep live centre gravity for
-     overview-sized full graphs only; anything beyond the same large-graph cut-off as the
-     classic renderer uses the centred deterministic layout below. That preserves every node,
+     overview-sized full graphs only; anything beyond the large-graph cut-off uses the
+     centred deterministic layout below. That preserves every node,
      makes the gravity control compact/expand the layout, and leaves the UI responsive. */
   const FULL_FORCE_NODE_LIMIT = LARGE_NODE_LIMIT;
   const FULL_FORCE_LINK_LIMIT = LARGE_LINK_LIMIT;
@@ -907,12 +902,11 @@
       : Math.min(GALAXY_LOCAL_RELATIVE_SPEED_LIMIT, angularCappedSpeed) * multiplier;
   }
 
-  /* The classic renderer's *dense* signal (`GPERF.dense`, `links>1500` in dashboard.js). Past
-     it the classic path turns off the two per-edge costs that scale with the link count and
-     buy nothing at that density: link curvature (a quadratic bezier per relation instead of a
-     straight line) and the directional arrowhead (a filled triangle per relation, recomputed
-     every frame). Relation labels get the same treatment unless one node is highlighted. Same
-     thresholds and same behaviour here — a second signal would only drift. */
+  /* The *dense* signal (`links>1500` in the rendered data). Past it the engine turns off the
+     two per-edge costs that scale with the link count and buy nothing at that density: link
+     curvature (a quadratic bezier per relation instead of a straight line) and the
+     directional arrowhead (a filled triangle per relation, recomputed every frame). Relation
+     labels get the same treatment unless one node is highlighted. */
   const DENSE_LINK_LIMIT = 1500;
 
   /* Relation labels are the noisiest layer on the canvas, so — exactly as the classic
@@ -7944,11 +7938,10 @@
   }
   const STARS = makeStars();
 
-  /* Relations that cross topics rather than describe one. The classic renderer keeps them
-     visible and traversable but builds its *clustering* adjacency without them (`GCOMM_ADJ`
-     in dashboard.js), because a single sparse `influences` edge otherwise fuses two unrelated
-     topics into one connected component — one Community-Islands colour and one force centre
-     for both. Same semantics here. */
+  /* Relations that cross topics rather than describe one. They stay visible and traversable,
+     but the *clustering* adjacency is built without them, because a single sparse
+     `influences` edge otherwise fuses two unrelated topics into one connected component — one
+     Community-Islands colour and one force centre for both. */
   const CLUSTER_EXCLUDED_LABELS = { influences: true };
   function clustersAcross(link) {
     return !!(link && hasOwn(CLUSTER_EXCLUDED_LABELS, link.label));
@@ -7992,9 +7985,8 @@
        size and labels the largest "Cluster 1", while node colour indexes the palette by the
        community ID itself (`nodeColor` -> `commPal()[community % n]`). Assigning IDs in raw
        node order therefore let the legend describe one component with another's swatch
-       whenever a smaller component happened to appear first in the payload. The classic
-       renderer sorts its components the same way (`graphComputeCommunities` in dashboard.js),
-       so largest == community 0 == palette slot 0 == "Cluster 1" on both paths. */
+       whenever a smaller component happened to appear first in the payload. Sorting first
+       keeps largest == community 0 == palette slot 0 == "Cluster 1". */
     groups.sort((a, b) => b.length - a.length);
     groups.forEach((group, index) => {
       group.forEach(id => { const node = nodesById.get(id); if (node) node.community = index; });
@@ -8376,13 +8368,13 @@
     let galaxyContactCorrectionDeferred = false;
     let adj = Object.create(null), liveAdj = Object.create(null), hilite = null, hoverSet = null, maxDeg = 1;
     let legacySizeBy = 'degree';
-    // The classic renderer treats label density as a hard ranked cap, not merely a looser
-    // degree threshold. Keeping chosen IDs outside the paint callback bounds fillText work.
+    // Label density is a hard ranked cap, not merely a looser degree threshold. Keeping
+    // chosen IDs outside the paint callback bounds fillText work.
     let labelIds = new Set();
     let pendingLabels = [];
     let zoom = 1, collapsed = false;
-    /* Recomputed from the *rendered* data on every render, exactly as the classic path
-       recomputes GPERF — filters and focus can take a huge store down to a small view. */
+    /* Recomputed from the *rendered* data on every render — filters and focus can take a
+       huge store down to a small view. */
     let large = false, dense = false, materialLow = false;
     let staticFullLayout = false, fullLayoutDirty = true;
     /* The node/link arrays last handed to force-graph. Seeding is not free: the vendor copies
@@ -8726,12 +8718,12 @@
       }
     }
 
-    /* Priority mirrors the classic renderer's graphTypeColor(): an explicit user override wins,
-       then a non-classic style's own palette, then the *active theme*. The theme tier is the
-       reason `themeColors` exists — it cannot be folded into `overrides`, which outrank
-       STYLE_PAL. The dashboard owns the CSS custom properties (`--entity-*`), so it supplies
-       the resolved values through setThemeColors() on every applyTheme()/graphRecolor();
-       THEME_ETYPE stays only as the standalone-embed fallback for a caller that never does. */
+    /* Priority: an explicit user override wins, then a non-classic style's own palette, then
+       the *active theme*. The theme tier is the reason `themeColors` exists — it cannot be
+       folded into `overrides`, which outrank STYLE_PAL. ledger.css owns the per-theme
+       `--c-entity-*` properties, and ledger.js supplies the resolved values through
+       setThemeColors() whenever the theme changes; THEME_ETYPE stays only as the
+       standalone-embed fallback for a caller that never does. */
     function etypeColor(type) {
       const override = hasOwn(state.overrides, type) ? state.overrides[type] : null;
       if (typeof override === 'string' && override) return override;
@@ -9098,10 +9090,9 @@
         fg.d3Force('x', d3.forceX(0).strength(centering));
         fg.d3Force('y', d3.forceY(0).strength(centering));
       }
-      /* One collision pass on a large graph, two otherwise — the classic path's
-         `.iterations(GPERF.large?1:2)`. The second pass costs another full quadtree traversal
-         per node on every tick, and a large store pays that on the initial layout and on every
-         reheat, which is exactly where it is least affordable. */
+      /* One collision pass on a large graph, two otherwise. The second pass costs another
+         full quadtree traversal per node on every tick, and a large store pays that on the
+         initial layout and on every reheat, which is exactly where it is least affordable. */
       if (d3.forceCollide) fg.d3Force('collide', d3.forceCollide(n => n.radius + 1.5).iterations(large ? 1 : 2));
       /* D3 applies forces in insertion order. Register the guard after every motion force so
          it is the final velocity boundary. A drag then removes it with every other global force. */
@@ -9208,7 +9199,7 @@
 
     function styleBackground(ctx, scale) {
       if (state.styleName === 'galaxy') {
-        /* Matches the classic path's `if(GPERF.large)return`. Paired with the `large` term in
+        /* Skip the starfield on a large graph. Paired with the `large` term in
            needsContinuousFrames(), this is what lets a big galaxy graph settle: the starfield
            is the only paint force-graph cannot see, so once it is skipped there is nothing
            left that requires a frame the vendor would not have scheduled itself. */
@@ -9401,12 +9392,11 @@
       invalidate();
     }
 
-    /* The dashboard's **Labels** checkbox turns on *both* label layers on the classic path:
-       entity names (painted by styleNode) and relation names (a `linkCanvasObject`, drawn
-       'after' the line so it sits on top of it). Without this second half the checkbox silently
-       did half its job under `?graph-engine=next` and a relation name could only be read by
-       hovering one edge at a time. Same gates as classic graphRender(): zoomed in past
-       LINK_LABEL_MIN_SCALE, the relation carries a meaningful label (implicit co-occurrences
+    /* The dashboard's **Entity labels** switch turns on *both* label layers: entity names
+       (painted by styleNode) and relation names (a `linkCanvasObject`, drawn 'after' the line
+       so it sits on top of it). Without this second half the switch silently did half its job
+       and a relation name could only be read by hovering one edge at a time. Gates: zoomed in
+       past LINK_LABEL_MIN_SCALE, the relation carries a meaningful label (implicit co-occurrences
        are graph structure, not canvas text), and — on a dense graph — only while something is
        highlighted, so thousands of overlapping strings are never
        painted at once. Canvas text is not an HTML sink, so the raw label is drawn here; the
@@ -9453,8 +9443,8 @@
       return true;
     }
 
-    /* Large graphs settle harder, exactly as the classic path does (`GPERF.large?.055:.035`).
-       Shared so reheat() and freeze() cannot drift back to the small-graph constant. */
+    /* Large graphs settle harder. Shared so reheat() and freeze() cannot drift back to the
+       small-graph constant. */
     function alphaDecay() { return large ? 0.055 : 0.035; }
     function pageHidden() {
       return !!(visibilityDocument && visibilityDocument.hidden === true);
@@ -10532,9 +10522,9 @@
       }
       applyForces();
       fg.autoPauseRedraw(!needsContinuousFrames());
-      /* Bound the simulation the way the classic path does. Without these force-graph keeps its
-         15-second default window, so every load and every reheat of a large store runs the
-         layout — and repaints every node and link — for more than ten seconds longer. */
+      /* Bound the simulation. Without these force-graph keeps its 15-second default window,
+         so every load and every reheat of a large store runs the layout — and repaints every
+         node and link — for more than ten seconds longer. */
       setSimulationBudget(galaxyMode ? false : motion, galaxyMode);
       /* D3 is only the renderer in Galaxy mode. Its alpha, velocity decay and countdown are
          intentionally untouched; the fixed-step clock owns all three physical concerns. */
@@ -11129,9 +11119,8 @@
       }
       render(true, true);
     };
-    /* Which of these settings changes the *layout* rather than just the paint, matching the
-       classic path's `key==='repel'||key==='link'||key==='gravity'||key==='size'` in
-       dashboard.js::graphSet — `size` counts because it feeds d3.forceCollide, and `mode`
+    /* Which of these settings changes the *layout* rather than just the paint: repel, link,
+       gravity and size — `size` counts because it feeds d3.forceCollide — and `mode`, which
        swaps the whole force arrangement. applyForces() only writes the new charge / link /
        forceX-forceY / collide values into the simulation force-graph is already running, and a
        settled graph sits at alpha~0, so without the reheat those sliders install a force that
@@ -11790,6 +11779,36 @@
       raw.nodes.forEach(n => { map[n.id] = n.community || 0; });
       return map;
     };
+    /* What node colour means right now, for the dashboard's legend. The canvas is opaque to
+       assistive technology and its colours come from this engine's own palette resolution
+       (overrides, style palette, theme), so the dashboard asks instead of re-deriving them.
+       Items are ordered largest first; `scale[0]` is the most connected heat colour. */
+    api.legend = limit => {
+      const max = Math.max(1, Math.min(24, Number(limit) || 10));
+      if (state.colorBy === 'connections') {
+        return { mode: 'connections', scale: (selectedPalette() || GRAPH_HEAT).slice(),
+          first: 'Most connected', last: 'Least connected' };
+      }
+      const counts = new Map();
+      const topics = new Map();
+      const community = state.colorBy === 'community';
+      raw.nodes.forEach(n => {
+        const key = community ? (n.community || 0) : String(n.etype || 'person_or_concept');
+        counts.set(key, (counts.get(key) || 0) + 1);
+        if (community && n.topic && !topics.has(key)) topics.set(key, String(n.topic));
+      });
+      const palette = community ? commPal() : null;
+      const items = [...counts.entries()]
+        .sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])))
+        .slice(0, max)
+        .map(([key, count], rank) => ({
+          key: String(key),
+          label: community ? (topics.get(key) || `Cluster ${rank + 1}`) : String(key).replace(/_/g, ' '),
+          color: community ? palette[(Number(key) || 0) % palette.length] : etypeColor(key),
+          count,
+        }));
+      return { mode: community ? 'community' : 'type', items, total: counts.size };
+    };
     api.setGhosts = on => {
       state.ghost = on === true;
       galaxyLaneTopology = null;
@@ -11891,7 +11910,7 @@
         if (fg._destructor) fg._destructor();
         el.removeAttribute('data-graph-style');
         el.classList.remove('engraphis-graph-node-hover');
-        el.innerHTML = '';
+        el.replaceChildren();
       } catch (e) { /* teardown is best-effort: never let it block a view change */ }
       raw = { nodes: [], links: [], suggestions: [], communities: [], community_bridges: [], meta: {} };
       galaxyServerPhase.clear();

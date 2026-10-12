@@ -1887,12 +1887,15 @@ def review_inbox(workspace: Optional[str] = None, repo: Optional[str] = None,
 
 @router.get("/proactive")
 def proactive(workspace: Optional[str] = None,
-              k: int = Query(default=10, ge=1, le=50)):
+              k: int = Query(default=10, ge=1, le=50),
+              repo: Optional[str] = Query(default=None, max_length=200)):
+    """Queryless agenda. The last-session handoff is recorded per repository, so it is
+    only populated when ``repo`` names one; otherwise ``handoff`` is ``null``."""
     ws = workspace or _default_ws()
-    out = _run(service().recall_proactive, workspace=ws, k=k)
+    out = _run(service().recall_proactive, workspace=ws, repo=repo or None, k=k)
     mems = out.get("memories") or out.get("results") or []
     return {"workspace": ws, "memories": [_mem(m) for m in mems],
-            "handoff": out.get("handoff") or out.get("last_session")}
+            "handoff": out.get("handoff") or out.get("last_session") or None}
 
 
 class _ProactiveContextReq(BaseModel):
