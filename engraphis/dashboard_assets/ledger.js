@@ -55,6 +55,7 @@
     graphConnectionsRequest: 0,
     graphConnectionsController: null,
     graphMetrics: {},
+    graphLegendData: null,
     graphFrozen: false,
     graphOrbitPaused: false,
     graphSpacetimeOverlay: null,
@@ -1711,6 +1712,7 @@
     graphLifecycle.clear();
     state.graphSpacetimeOverlay = null;
     state.graphEngine = null;
+    state.graphLegendData = null;
     byId('graph-legend').hidden = true;
     graphExplorer.setData(null);
     byId('workspace-select').value = name;
@@ -4737,11 +4739,20 @@
     return `${prefix} · ${entityText} · ${number(links).toLocaleString()} relations${hidden}`;
   }
 
+  function syncGraphExplorer() {
+    if (state.graphEngine && state.graphEngine.visibleData) {
+      const data = state.graphEngine.visibleData();
+      graphExplorer.setData(data);
+      if (data !== state.graphLegendData) {
+        state.graphLegendData = data;
+        renderGraphLegend();
+      }
+    }
+  }
+
   function graphStatsChanged(stats) {
     if (!stats) return;
-    if (state.graphEngine && state.graphEngine.visibleData) {
-      graphExplorer.setData(state.graphEngine.visibleData());
-    }
+    syncGraphExplorer();
     const nodes = stats.nodes == null ? state.graphData.nodes.length : stats.nodes;
     const links = stats.links == null ? state.graphData.links.length : stats.links;
     byId('graph-count').textContent = graphCountText(
@@ -4759,9 +4770,7 @@
   }
 
   function graphMetricsChanged(metrics) {
-    if (state.graphEngine && state.graphEngine.visibleData) {
-      graphExplorer.setData(state.graphEngine.visibleData());
-    }
+    syncGraphExplorer();
     state.graphMetrics = metrics || {};
     byId('graph-bridge-count').textContent = metrics && metrics.bridges != null
       ? `${metrics.bridges} bridge ${metrics.bridges === 1 ? 'edge' : 'edges'}`
