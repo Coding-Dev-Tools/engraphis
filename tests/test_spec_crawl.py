@@ -108,6 +108,25 @@ The reviewer approves the commit.
     assert len(vague_flags) == 0
 
 
+@pytest.mark.parametrize("tail", ["Check every result carefully.", "Never deploy all projects without approval."])
+def test_xml_closing_tags_preserve_unheaded_trailing_text(tail):
+    spec = "<role>\nRepository maintainer.\n</role>\n" + tail
+    report = crawl_spec(spec)
+    assert len(report["sections"]) == 2
+    assert report["sections"][1]["axis"] == "other"
+    assert any(flag["kind"] == "vague" and flag["start"] >= spec.index(tail)
+               for flag in report["flags"])
+    assert report["counts"]["read"] >= len(tail.split())
+
+
+def test_xml_continuations_between_sections_keep_source_offsets():
+    spec = "<role>\nMaintainer.\n</role>\nCheck every result.\n<rules>\nVerify tests.\n</rules>\nAsk all owners."
+    report = crawl_spec(spec)
+    assert [section["axis"] for section in report["sections"]] == ["role", "other", "rules", "other"]
+    assert {flag["token"] for flag in report["flags"] if flag["kind"] == "vague"} == {"every", "all"}
+    assert all(spec[flag["start"]:flag["end"]] == flag["token"] for flag in report["flags"])
+
+
 def test_vague_qualifier_window():
     # "every" without number is flagged
     r1 = crawl_spec("# Rules\nCheck every result carefully.")

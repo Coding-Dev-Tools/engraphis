@@ -5019,7 +5019,7 @@ class MemoryService:
 
     # ── governance: retire / secure erase / pin / correct / promote ───────────
     def retire(self, memory_id: str, *, workspace: str, repo: Optional[str] = None,
-               reason: str = "", actor: str = "user") -> dict:
+               reason: str = "", actor: str = "user", at: Optional[float] = None) -> dict:
         """Bi-temporally retire one memory. This preserves history and indexes."""
         mid = _clean_text(memory_id, field="memory_id", max_chars=MAX_NAME_CHARS)
         reason = _clean_text(reason, field="reason", max_chars=MAX_TITLE_CHARS, required=False)
@@ -5029,7 +5029,7 @@ class MemoryService:
         wid, rid = self._require_scope(workspace, repo)
         self._check_owns(mid, wid, rid)
         try:
-            return self.engine.retire(mid, reason=reason, actor=actor)
+            return self.engine.retire(mid, reason=reason, actor=actor, at=at)
         except (KeyError, ValueError) as exc:
             raise ValidationError(str(exc))
 
@@ -13070,10 +13070,15 @@ class MemoryService:
         mem_dicts = [_mem_to_dict(r) for r in recs]
         mem_ids_set = {m["id"] for m in mem_dicts}
         links = []
-        for mid in mem_ids_set:
+        seen_links: set[tuple[str, str, str]] = set()
+        for mid in sorted(mem_ids_set):
             node_links = self.store.get_links(mid)
             for nl in node_links:
                 if nl.get("a") in mem_ids_set and nl.get("b") in mem_ids_set:
+                    key = (str(nl["a"]), str(nl["b"]), str(nl.get("relation") or "related_to"))
+                    if key in seen_links:
+                        continue
+                    seen_links.add(key)
                     links.append(nl)
 
         report = analyze_memory_nodes(
@@ -13111,10 +13116,12 @@ class MemoryService:
             raise ValidationError("resolution requires two distinct memories")
         wid, rid = self._require_scope(ws or "default", route["repo"])
         with self.store.write_transaction():
+            records = {}
             for mid in (node_a_clean, node_b_clean):
-                self._check_owns(mid, wid, rid)
+                self._check_owns(mid, wid, None)
                 rec = self.store.get_memory(mid)
                 assert rec is not None
+                records[mid] = rec
                 live = self.store.visible_memory_ids([mid], SearchFilter(
                     workspace_id=wid, repo_id=rid, session_id=rec.session_id,
                     include_ancestors=True,
@@ -13122,13 +13129,14 @@ class MemoryService:
                 if mid not in live or not prompt_eligible(rec.provenance, rec.metadata):
                     raise ValidationError("resolution requires live, approved memories")
             self.link(
-                node_a_clean, node_b_clean, workspace=ws or "default", repo=route["repo"],
+                node_a_clean, node_b_clean, workspace=ws or "default",
                 relation="supersedes" if act == "supersede" else "related_to",
                 reason="spec_crawl_resolve",
             )
             if act == "supersede":
-                self.retire(node_b_clean, workspace=ws or "default", repo=route["repo"],
-                            reason="spec_crawl_resolve", actor="spec_crawl")
+                self.retire(node_b_clean, workspace=ws or "default",
+                            reason="spec_crawl_resolve", actor="spec_crawl",
+                            at=records[node_a_clean].valid_from)
 
         if act == "supersede":
             if not node_b_clean:

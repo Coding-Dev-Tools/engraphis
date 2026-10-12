@@ -318,7 +318,7 @@ def _parse_sections(text: str, template: SpecTemplate,
             if match:
                 title = match.group(match.lastindex or 1).strip()
             elif _XML_CLOSE.match(line):
-                title = ""  # closing tag: consumes the line, starts no section
+                title = ""  # closing tag: end the section, retain any following prose
         if title is not None:
             heads.append((offset, min(line_end + 1, len(text)), title))
         offset = line_end + 1
@@ -329,6 +329,9 @@ def _parse_sections(text: str, template: SpecTemplate,
     for i, (head_start, body_start, title) in enumerate(heads):
         end = heads[i + 1][0] if i + 1 < len(heads) else len(text)
         if not title:
+            if text[body_start:end].strip():
+                sections.append(_Section(len(sections), "continuation", "other",
+                                         head_start, body_start, end))
             continue
         clean = re.sub(r"^[\d.)\s]+", "", title).strip(" *_`") or title
         sections.append(_Section(len(sections), clean[:80], template.axis_for(clean),
@@ -747,22 +750,32 @@ _FORBID_VERBS = frozenset({"never", "forbid", "deprecated", "disable", "prohibit
 
 def _extract_node_directives(text: str) -> dict[str, str]:
     directives: dict[str, str] = {}
-    tokens = [w.lower() for w in re.findall(r"[a-zA-Z_]{2,20}", text)]
-    for i, tok in enumerate(tokens):
-        negated = (i + 1 < len(tokens) and tokens[i + 1] == "not") or (
-            i > 0 and tokens[i - 1] == "not")
-        if tok in _FORBID_VERBS or (
-            tok in _ENFORCE_VERBS | {"do", "does", "should", "may", "can"} and negated
-        ):
-            action = "forbid"
-        elif tok in _ENFORCE_VERBS:
-            action = "enforce"
-        else:
-            continue
-        for offset in (1, 2, 3):
-            if i + offset < len(tokens):
+    for clause in re.split(r"[.!?;,\n]", text):
+        tokens = [w.lower() for w in re.findall(r"[a-zA-Z_]{2,20}", clause)]
+        consumed: set[int] = set()
+        for i, tok in enumerate(tokens):
+            if i in consumed:
+                continue
+            negated = (i + 1 < len(tokens) and tokens[i + 1] == "not") or (
+                i > 0 and tokens[i - 1] == "not")
+            if tok in _FORBID_VERBS or (
+                tok in _ENFORCE_VERBS | {"do", "does", "should", "may", "can"} and negated
+            ):
+                action = "forbid"
+            elif tok in _ENFORCE_VERBS:
+                action = "enforce"
+            else:
+                continue
+            for offset in (1, 2, 3):
+                if i + offset >= len(tokens):
+                    break
                 target = tokens[i + offset]
-                if target not in _ENFORCE_VERBS | _FORBID_VERBS | _STOPWORDS:
+                if target in {"require", "enforce"}:
+                    # Nested verbs inherit the governing directive, including its negation.
+                    consumed.add(i + offset)
+                elif target in _ENFORCE_VERBS | _FORBID_VERBS:
+                    break
+                elif target not in _STOPWORDS:
                     directives[target] = action
     return directives
 

@@ -582,6 +582,10 @@ def test_server_identity_and_tools_registered():
     assert len(_ALL_TOOLS) == 43
     assert set(classic) == _ALL_TOOLS
     assert srv.minimum_role("engraphis_context_savings") == "viewer"
+    assert srv.minimum_role("engraphis_spec_crawl") == "viewer"
+    assert srv.minimum_role("engraphis_spec_crawl_memories") == "viewer"
+    assert srv.minimum_role("engraphis_spec_crawl_answer") == "member"
+    assert srv.minimum_role("engraphis_spec_crawl_resolve") == "member"
     kilo = (ROOT / "docs" / "KILO_CODE_INTEGRATION.md").read_text(encoding="utf-8")
     full_surface = kilo.split("### Classic 43-tool inventory", 1)[1].split("\n---", 1)[0]
     assert set(re.findall(r"`(engraphis_[a-z_]+)`", full_surface)) == _ALL_TOOLS

@@ -2,6 +2,7 @@ import hashlib
 import json
 import re
 import struct
+import zlib
 from copy import deepcopy
 from pathlib import Path
 from xml.etree import ElementTree
@@ -33,8 +34,8 @@ from eval.performance import run as run_performance
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PUBLIC_OFFLINE_ARTIFACT = "offline-fixtures-spec-crawl-review-fixes-20261010.json"
-PUBLIC_OFFLINE_SHA = "8494a04d05334145645f69f2372624ee45356ae79ad60aea5bba8e9cb948a8ee"
+PUBLIC_OFFLINE_ARTIFACT = "offline-fixtures-pr260-review-20261011.json"
+PUBLIC_OFFLINE_SHA = "41e2983ba385cca1e062405d4702dde2b72f13f6c66957e1cfd37bbecad64edb"
 
 
 @pytest.fixture(scope="module")
@@ -513,6 +514,24 @@ def test_public_numeric_evidence_registry_is_complete_and_live(
         )
     )
     assert claimed_ids == set(runs)
+
+
+@pytest.mark.parametrize("stem", ["context-efficiency", "evidence-backed-agent-examples"])
+def test_benchmark_png_provenance_matches_current_svg_and_artifact(stem):
+    png = (ROOT / "docs" / "images" / f"{stem}.png").read_bytes()
+    metadata = {}
+    offset = 8
+    while offset < len(png):
+        length = struct.unpack(">I", png[offset:offset + 4])[0]
+        chunk = png[offset + 4:offset + 8 + length]
+        assert zlib.crc32(chunk) == struct.unpack(">I", png[offset + 8 + length:offset + 12 + length])[0]
+        if chunk[:4] == b"tEXt":
+            key, value = chunk[4:].split(b"\0", 1)
+            metadata[key.decode("ascii")] = value.decode("ascii")
+        offset += 12 + length
+    assert metadata["engraphis_artifact_sha256"] == PUBLIC_OFFLINE_SHA
+    svg = (ROOT / "docs" / "images" / f"{stem}.svg").read_bytes()
+    assert metadata["engraphis_svg_sha256"] == hashlib.sha256(svg).hexdigest()
 
 
 def test_benchmark_guide_tracks_the_live_offline_evaluators():

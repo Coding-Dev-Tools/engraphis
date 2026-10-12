@@ -149,7 +149,7 @@ Audits an active cluster of workspace memories for contradictions, orphans, and 
 ```
 
 ### `POST /api/spec/crawl/memories/resolve`
-Executes an explicit remediation on two live, approved memories after checking scope and ownership. `node_a` is retained; `node_b` is retired for `supersede`. Both the link and validity closure are atomic. Supersession requires `confirmed: true` following human approval.
+Executes an explicit remediation on two live, approved memories after checking scope and ownership, including workspace ancestors visible from the selected repository. `node_a` is retained; `node_b` is retired for `supersede` at the retained memory's `valid_from`, preserving world-time and recording-time history. A closure before the retired memory's effective date is rejected. Both the link and validity closure are atomic. Supersession requires `confirmed: true` following human approval.
 
 ```json
 {
@@ -164,6 +164,8 @@ Executes an explicit remediation on two live, approved memories after checking s
 ---
 
 ## 9. Smart MCP Tools
+
+The two read-only crawls are available to hosted/team viewers; clarification and resolution require member access.
 
 These four Classic MCP tools are also discoverable and callable through Smart MCP actions:
 - **`engraphis_spec_crawl`**: Read-only prompt spec crawler returning scores, radar coverage, classified tokens, connection tentacles, and flags.

@@ -175,6 +175,29 @@ def test_equivalent_negated_directives_do_not_conflict():
                for conflict in positive["conflicts"])
 
 
+@pytest.mark.parametrize("verb", ["require", "enforce"])
+@pytest.mark.parametrize("negative", ["Never", "Must not", "Do not"])
+def test_nested_directives_preserve_governing_negation(verb, negative):
+    nodes = [{"id": "a", "content": f"{negative} {verb} token verification."},
+             {"id": "b", "content": f"Always {verb} token verification."}]
+    for order in (nodes, list(reversed(nodes))):
+        report = analyze_memory_nodes(order)
+        assert report["conflicts"]
+        assert all(conflict["remedy"]["action"] == "clarify" for conflict in report["conflicts"])
+    equivalent = analyze_memory_nodes([
+        nodes[0], {"id": "c", "content": "Never token verification."},
+    ])
+    assert not equivalent["conflicts"]
+
+
+@pytest.mark.parametrize("separator", [". ", "; ", ", ", "\n", " and always "])
+def test_independent_directives_do_not_inherit_prior_negation(separator):
+    from engraphis.core.spec_crawl import _extract_node_directives
+    directives = _extract_node_directives(f"Never deploy{separator}require authentication.")
+    assert directives["deploy"] == "forbid"
+    assert directives["authentication"] == "enforce"
+
+
 def test_complementary_claims_and_distinct_subjects_remain_live():
     for nodes in (
         [{"id": "a", "subject_key": "db", "claim_kind": "host", "content": "host: primary.example"},
