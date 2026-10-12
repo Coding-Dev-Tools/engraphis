@@ -276,7 +276,7 @@ test('A save that fails after leaving the editor is still reported', async ({ pa
 test('A refused address explains itself instead of reporting the server as down', async ({ page }) => {
   const errors = pageErrors(page);
   // What the zero-config API answers for a name DNS rebinding could forge.
-  await page.route('**/api/bootstrap', route => route.fulfill({
+  await page.route('**/api/bootstrap*', route => route.fulfill({
     status: 403,
     contentType: 'application/json',
     body: JSON.stringify({

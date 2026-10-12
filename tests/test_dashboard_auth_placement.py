@@ -297,7 +297,8 @@ def _run_commercial(tmp_path, cases):
     runner = tmp_path / "commercial.js"
     runner.write_text(bundle, encoding="utf-8")
     result = subprocess.run(
-        ["node", str(runner), json.dumps(cases)], capture_output=True, text=True, timeout=60,
+        ["node", str(runner), json.dumps(cases)], capture_output=True,
+        encoding="utf-8", timeout=60,
     )
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)

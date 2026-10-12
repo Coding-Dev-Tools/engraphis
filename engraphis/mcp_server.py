@@ -413,6 +413,8 @@ def _apply_response_budget(payload: dict, max_response_tokens: Optional[int]) ->
     return payload
 
 _READ_ONLY_TOOLS = frozenset({
+    "engraphis_spec_crawl",
+    "engraphis_spec_crawl_memories",
     "engraphis_list_workspaces",
     "engraphis_get_workspace_routing",
     "engraphis_recall",
@@ -2786,6 +2788,319 @@ def engraphis_decide(
         return fallback(exc.code)
     except Exception:  # noqa: BLE001 - remote exceptions may contain private input or credentials
         return fallback("remote_unavailable")
+
+
+@mcp.tool(
+    name="engraphis_spec_crawl",
+    annotations={
+        "title": "Crawl spec or prompt quality",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+)
+def engraphis_spec_crawl(
+    text: Annotated[
+        Optional[str],
+        Field(
+            default=None,
+            description="Spec or prompt text (up to 64k chars).",
+            max_length=64_000,
+        ),
+    ] = None,
+    workspace: Annotated[
+        Optional[str],
+        Field(
+            default=None,
+            description="Workspace for claim tracing.",
+            max_length=200,
+        ),
+    ] = None,
+    repo: Annotated[
+        Optional[str],
+        Field(
+            default=None,
+            description="Optional repo scope for claim tracing.",
+            max_length=200,
+        ),
+    ] = None,
+    session_id: Annotated[
+        Optional[str],
+        Field(
+            default=None,
+            description="Optional active session id.",
+            max_length=200,
+        ),
+    ] = None,
+    source_id: Annotated[
+        Optional[str],
+        Field(
+            default=None,
+            description="Local-operator text file under an approved index root; authenticated callers must pass text.",
+            max_length=500,
+        ),
+    ] = None,
+    crawl_procedural: Annotated[
+        bool,
+        Field(
+            default=False,
+            description="Crawl active procedural memories in the scope.",
+        ),
+    ] = False,
+    trace_claims: Annotated[
+        bool,
+        Field(
+            default=True,
+            description="Verify asserted claims against grounded memories.",
+        ),
+    ] = True,
+) -> str:
+    """Analyze an agent prompt, specification, or procedural memories.
+
+    Calculates seven-axis radar coverage, classifies tokens into explainable kinds,
+    links terms within and across sections, flags ambiguous wording ('ask, don't guess'),
+    and optionally traces claims to grounded memories.
+    """
+    try:
+        res = service().spec_crawl(
+            text,
+            workspace=workspace,
+            repo=repo,
+            session_id=session_id,
+            source_id=source_id,
+            crawl_procedural=crawl_procedural,
+            trace_claims=trace_claims,
+            include_trace=False,
+        )
+        return _ok(res)
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@mcp.tool(
+    name="engraphis_spec_crawl_answer",
+    annotations={
+        "title": "Answer ambiguous spec flag",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": False,
+    },
+)
+def engraphis_spec_crawl_answer(
+    flag: Annotated[
+        dict[str, Any],
+        Field(
+            description="Flag object from spec_crawl report with start and end offsets.",
+        ),
+    ],
+    answer: Annotated[
+        str,
+        Field(
+            description="Human clarification or exact scope/number.",
+            min_length=1,
+            max_length=10_000,
+        ),
+    ],
+    spec_text: Annotated[
+        str,
+        Field(
+            description="Current full spec text to update.",
+            min_length=1,
+            max_length=64_000,
+        ),
+    ],
+    workspace: Annotated[
+        Optional[str],
+        Field(
+            default=None,
+            description="Workspace to store the procedural memory.",
+            max_length=200,
+        ),
+    ] = None,
+    repo: Annotated[
+        Optional[str],
+        Field(
+            default=None,
+            description="Optional repo scope.",
+            max_length=200,
+        ),
+    ] = None,
+    session_id: Annotated[
+        Optional[str],
+        Field(
+            default=None,
+            description="Optional session id.",
+            max_length=200,
+        ),
+    ] = None,
+    save_as_memory: Annotated[
+        bool,
+        Field(
+            default=True,
+            description="Save clarification as a procedural memory in scope.",
+        ),
+    ] = True,
+) -> str:
+    """Apply a human clarification to an ambiguous spec flag and optionally record it as a procedural memory."""
+    try:
+        res = service().spec_crawl_answer(
+            flag,
+            answer,
+            spec_text=spec_text,
+            workspace=workspace,
+            repo=repo,
+            session_id=session_id,
+            save_as_memory=save_as_memory,
+        )
+        return _ok(res)
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@mcp.tool(
+    name="engraphis_spec_crawl_memories",
+    annotations={
+        "title": "Audit multiple memory nodes for contradictions and health",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+)
+def engraphis_spec_crawl_memories(
+    workspace: Annotated[
+        Optional[str],
+        Field(
+            default=None,
+            description="Workspace to audit memories.",
+            max_length=200,
+        ),
+    ] = None,
+    repo: Annotated[
+        Optional[str],
+        Field(
+            default=None,
+            description="Optional repo scope.",
+            max_length=200,
+        ),
+    ] = None,
+    session_id: Annotated[
+        Optional[str],
+        Field(
+            default=None,
+            description="Optional active session id.",
+            max_length=200,
+        ),
+    ] = None,
+    memory_ids: Annotated[
+        Optional[list[str]],
+        Field(
+            default=None,
+            description="Optional explicit list of memory IDs to analyze.",
+        ),
+    ] = None,
+    mtypes: Annotated[
+        Optional[list[str]],
+        Field(
+            default=None,
+            description="Optional filter by memory types: semantic, procedural, episodic, working.",
+        ),
+    ] = None,
+) -> str:
+    """Analyze multiple live memory nodes for contradictions, parameter clashes, orphans, and 7-axis coverage."""
+    try:
+        res = service().spec_crawl_memories(
+            workspace=workspace,
+            repo=repo,
+            session_id=session_id,
+            memory_ids=memory_ids,
+            mtypes=mtypes,
+            include_trace=False,
+        )
+        return _ok(res)
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@mcp.tool(
+    name="engraphis_spec_crawl_resolve",
+    annotations={
+        "title": "Resolve contradiction or auto-link orphan in memory cluster",
+        "readOnlyHint": False,
+        "destructiveHint": True,
+        "idempotentHint": False,
+        "openWorldHint": False,
+    },
+)
+def engraphis_spec_crawl_resolve(
+    action: Annotated[
+        str,
+        Field(
+            description="Remediation action: 'supersede' (retires older conflicting node) or 'link' (connects orphan).",
+            max_length=64,
+        ),
+    ],
+    node_a: Annotated[
+        str,
+        Field(
+            description="Retained memory node id (or source node to link from).",
+            max_length=256,
+        ),
+    ],
+    node_b: Annotated[
+        Optional[str],
+        Field(
+            default=None,
+            description="Older conflicting memory node id to supersede (or target node to link to).",
+            max_length=256,
+        ),
+    ] = None,
+    workspace: Annotated[
+        Optional[str],
+        Field(
+            default=None,
+            description="Workspace scope.",
+            max_length=200,
+        ),
+    ] = None,
+    repo: Annotated[
+        Optional[str],
+        Field(
+            default=None,
+            description="Optional repo scope.",
+            max_length=200,
+        ),
+    ] = None,
+    session_id: Annotated[
+        Optional[str],
+        Field(
+            default=None,
+            description="Optional active session scope; both memories must be visible in this same session.",
+            max_length=200,
+        ),
+    ] = None,
+    confirmed: Annotated[
+        bool,
+        Field(default=False, description="Explicit human approval to retire node_b; required for supersede."),
+    ] = False,
+) -> str:
+    """Remediate a contradiction or link an orphaned memory node found during multi-node audit."""
+    try:
+        res = service().spec_crawl_resolve(
+            action=action,
+            node_a=node_a,
+            node_b=node_b,
+            workspace=workspace,
+            repo=repo,
+            session_id=session_id,
+            confirmed=confirmed,
+        )
+        return _ok(res)
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
 
 
 @dataclass(frozen=True)

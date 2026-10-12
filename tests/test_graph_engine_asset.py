@@ -31,6 +31,7 @@ import shutil
 import subprocess
 from html.parser import HTMLParser
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import pytest
 
@@ -510,9 +511,9 @@ def test_graph_assets_evaluate_without_each_other() -> None:
       sandbox.removeEventListener = () => {};
       try {
         vm.runInNewContext(fs.readFileSync(file, 'utf8'), sandbox, { filename: file });
-        out[file.split('/').pop()] = Object.keys(sandbox).filter(key => /^Engraphis/.test(key));
+        out[require('path').basename(file)] = Object.keys(sandbox).filter(key => /^Engraphis/.test(key));
       } catch (error) {
-        out[file.split('/').pop()] = 'threw: ' + error.message;
+        out[require('path').basename(file)] = 'threw: ' + error.message;
       }
     }
     console.log(JSON.stringify(out));
@@ -9830,7 +9831,8 @@ LEDGER_HARNESS = ENGINE_PRELUDE + r"""
 /* The real vendor answers graphData() with an empty graph before the first data push, and
    Ledger configures a renderer before it seeds one; the stand-in has to start the same way. */
 store.graphData = { nodes: [], links: [] };
-const [ledgerPath, lifecyclePath, cssPath, markupJson] = process.argv.slice(2);
+const [ledgerPath, lifecyclePath, cssPath, markupPath] = process.argv.slice(2);
+const markupJson = fs.readFileSync(markupPath, 'utf8');
 const ledgerSource = fs.readFileSync(ledgerPath, 'utf8');
 const ledgerSlice = (from, to) => {
   const start = ledgerSource.indexOf(from);
@@ -10091,20 +10093,22 @@ def _run_ledger(scenario: str) -> dict:
     markup = _LedgerMarkup()
     markup.feed(LEDGER_INDEX.read_text(encoding="utf-8"))
     script = (
-        LEDGER_HARNESS
+        "process.argv.splice(1, 1);\n" + LEDGER_HARNESS
         + "(async () => {\n" + scenario + "\n})().catch(error => {\n"
         + "  console.error(error && error.stack || error); process.exit(1);\n});"
     )
-    result = subprocess.run(
-        [
-            NODE, "-e", script, str(ASSET), str(LEDGER), str(GRAPH_LIFECYCLE), str(LEDGER_CSS),
-            json.dumps(markup.elements),
-        ],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    # Large dashboard fixtures exceed Windows' command-line limit. Keep the harness
+    # and its parsed markup in temporary UTF-8 files on every platform.
+    with TemporaryDirectory(prefix="engraphis-ledger-test-") as directory:
+        script_path = Path(directory) / "ledger.js"
+        markup_path = Path(directory) / "markup.json"
+        script_path.write_text(script, encoding="utf-8")
+        markup_path.write_text(json.dumps(markup.elements), encoding="utf-8")
+        result = subprocess.run(
+            [NODE, str(script_path), str(ASSET), str(LEDGER), str(GRAPH_LIFECYCLE),
+             str(LEDGER_CSS), str(markup_path)],
+            cwd=ROOT, capture_output=True, encoding="utf-8", check=False,
+        )
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout.strip().splitlines()[-1])
 
