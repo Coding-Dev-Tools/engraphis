@@ -2337,3 +2337,55 @@ def test_export_disclosure_manages_keyboard_focus_and_aria_expanded(monkeypatch,
         # Outside focusin/pointerdown collapses the menu.
         assert "document.addEventListener('focusin'" in script.text
         assert "document.addEventListener('pointerdown'" in script.text
+
+
+def test_spec_studio_in_ledger_dashboard(monkeypatch, tmp_path):
+    """Spec Studio view, assets, switchView support, and REST endpoints are integrated in Ledger."""
+    with _client(monkeypatch, tmp_path) as client:
+        page = client.get("/")
+        assert page.status_code == 200
+        assert 'data-view="specstudio"' in page.text
+        assert 'data-view-panel="specstudio"' in page.text
+        assert 'id="spec-canvas"' in page.text
+        assert '/v2-assets/spec-crawl.css' in page.text
+        assert '/v2-assets/spec-crawl.js' in page.text
+
+        css = client.get("/v2-assets/spec-crawl.css")
+        assert css.status_code == 200
+        assert ".specstudio-layout" in css.text
+        assert ".spec-canvas" in css.text
+
+        script = client.get("/v2-assets/spec-crawl.js")
+        assert script.status_code == 200
+        assert "window.SpecStudio" in script.text
+
+        ledger_js = client.get("/v2-assets/ledger.js")
+        assert ledger_js.status_code == 200
+        assert "'specstudio'" in ledger_js.text
+        assert "window.SpecStudio.resizeCanvas" in ledger_js.text
+
+        # Test POST /api/spec/crawl via dashboard client
+        crawl_resp = client.post("/api/spec/crawl", json={
+            "text": "# 01 ROLE\nLead engineer.\n# 02 RULES\nFollow all standards.\n",
+            "workspace": "demo",
+            "trace_claims": False,
+        })
+        assert crawl_resp.status_code == 200
+        data = crawl_resp.json()
+        assert data["score"] > 0
+        assert len(data["sections"]) == 2
+        assert len(data["flags"]) >= 1
+
+        flag = data["flags"][0]
+
+        # Test POST /api/spec/crawl/answer via dashboard client
+        ans_resp = client.post("/api/spec/crawl/answer", json={
+            "flag": flag,
+            "answer": "ISO 27001",
+            "spec_text": "# 01 ROLE\nLead engineer.\n# 02 RULES\nFollow all standards.\n",
+            "workspace": "demo",
+            "save_as_memory": False,
+        })
+        assert ans_resp.status_code == 200
+        ans_data = ans_resp.json()
+        assert "ISO 27001" in ans_data["updated_text"]

@@ -1,7 +1,7 @@
 # Engraphis MCP tools: reference
 
-The Classic server registers 39 direct tools and the Smart gateway registers nine; two names
-overlap, for 46 distinct public tool names. Parameters are `name (type, default)`: no default
+The Classic server registers 43 direct tools and the Smart gateway registers nine; two names
+overlap, for 50 distinct public tool names. Parameters are `name (type, default)`: no default
 means required. Every tool returns a JSON string; on failure it returns `"Error: <reason>"`
 instead of raising.
 Governance tools (`retire`/`pin`/`correct`/`link`) verify the memory actually belongs to the
@@ -9,7 +9,7 @@ Governance tools (`retire`/`pin`/`correct`/`link`) verify the memory actually be
 scope you were already given.
 
 Group index: [Write](#write) · [Recall and read](#recall-and-read) · [History](#history-bi-temporal) · [Governance](#governance) ·
-[Code](#code) · [Sessions](#sessions) · [Smart gateway](#smart-gateway) · [Ops](#ops).
+[Code](#code) · [Sessions](#sessions) · [Smart gateway](#smart-gateway) · [Ops](#ops) · [Quality](#quality).
 
 ---
 
@@ -773,6 +773,51 @@ not replace executable verification, authorization, or user approval. Local comm
 coarse: only one simple inspection command, without chaining, pipes, substitution or file
 redirection, is `read_only`; recognized destructive, history-rewriting, exfiltrating or
 credential-file commands are `destructive_or_leak`; anything else is `state_change`.
+
+---
+
+## Quality
+
+### `engraphis_spec_crawl`
+Offline, deterministic crawler evaluating agent specifications, prompts, or procedural memories across 7 readiness axes, token classification, cross-section tentacles, and ambiguity detection.
+
+- `text (str, None)`: spec or prompt text (up to 64k chars).
+- `workspace (str, "default")`: workspace for claim tracing.
+- `repo (str, None)`: optional repo scope for claim tracing.
+- `session_id (str, None)`: optional active session id.
+- `source_id (str, None)`: local-operator text file under an approved index root; authenticated callers must pass text instead.
+- `crawl_procedural (bool, False)`: crawl active procedural memories in the scope.
+- `trace_claims (bool, True)`: verify asserted claims against grounded memories.
+
+### `engraphis_spec_crawl_answer`
+Apply a human clarification to a current ambiguous spec flag and optionally record it as a pending procedural memory in scope. Review approval is required before prompt use.
+
+- `flag (dict)`: flag object from `spec_crawl` report with start and end offsets.
+- `answer (str)`: human clarification or exact scope/number.
+- `spec_text (str)`: current full spec text to update.
+- `workspace (str, "default")`: workspace to store the procedural memory.
+- `repo (str, None)`: optional repo scope.
+- `session_id (str, None)`: optional session id.
+- `save_as_memory (bool, True)`: save clarification as a procedural memory in scope.
+
+### `engraphis_spec_crawl_memories`
+Analyze multiple live memory nodes for contradictions, parameter clashes, orphans, and 7-axis coverage.
+
+- `workspace (str, "default")`: workspace to audit memories.
+- `repo (str, None)`: optional repo scope.
+- `session_id (str, None)`: optional active session id.
+- `mtypes (list[str], None)`: optional filter by memory types: semantic, procedural, episodic, working.
+- `memory_ids (list[str], None)`: optional explicit list of memory IDs to analyze.
+
+### `engraphis_spec_crawl_resolve`
+Remediate a contradiction or link an orphaned memory node found during multi-node audit.
+
+- `action (str)`: remediation action: `'supersede'` (retires older conflicting node) or `'link'` (connects orphan).
+- `node_a (str)`: retained memory node id (or source node to link from).
+- `node_b (str, None)`: older conflicting memory node id to supersede (or target node to link to).
+- `confirmed (bool, False)`: explicit human confirmation required for `supersede`; both records must be live and approved, and the update is atomic.
+- `workspace (str, "default")`: workspace scope.
+- `repo (str, None)`: optional repo scope.
 
 ---
 

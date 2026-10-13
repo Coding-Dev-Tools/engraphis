@@ -339,6 +339,137 @@ function browserErrors(page) {
   return errors;
 }
 
+test('release regression: a pending detail cannot change a new draft into a revision', async ({ page }) => {
+  await mockApi(page);
+  let releaseDetail;
+  const detailGate = new Promise(resolve => { releaseDetail = resolve; });
+  let detailStarted;
+  const started = new Promise(resolve => { detailStarted = resolve; });
+  await page.route('**/api/memory/mem_database**', async route => {
+    detailStarted();
+    await detailGate;
+    await route.fulfill({ json: { memory: memories[0], chain: [] } }).catch(() => {});
+  });
+  const saved = [];
+  await page.route('**/api/remember', async route => {
+    saved.push(route.request().postDataJSON());
+    await route.fulfill({ json: { id: 'mem_new' } });
+  });
+  await page.goto('/?view=library');
+  await page.getByRole('option', { name: /^Database choice/ }).click();
+  await started;
+  await page.getByRole('button', { name: 'New memory', exact: true }).click();
+  await page.locator('#editor-memory-title').fill('Independent draft');
+  await page.locator('#editor-memory-content').fill('A new fact survives a stale detail response.');
+  releaseDetail();
+  await expect(page.locator('#editor-title')).toHaveText('New memory');
+  await page.getByRole('button', { name: 'Save memory', exact: true }).click();
+  await expect.poll(() => saved.length).toBe(1);
+  expect(saved[0].content).toBe('A new fact survives a stale detail response.');
+  await expect(page.locator('#editor-error')).toBeHidden();
+});
+
+test('release regression: delayed pin completion preserves another workspace draft', async ({ page }) => {
+  await mockApi(page, { workspaces: [{ name: workspace, memories: 2 }, { name: 'other', memories: 0 }] });
+  let releasePin;
+  const pinGate = new Promise(resolve => { releasePin = resolve; });
+  let pinStarted;
+  const started = new Promise(resolve => { pinStarted = resolve; });
+  let completed;
+  const completion = new Promise(resolve => { completed = resolve; });
+  await page.route('**/api/pin', async route => {
+    pinStarted();
+    await pinGate;
+    await route.fulfill({ json: { ok: true } });
+    completed();
+  });
+  await page.goto('/?view=library');
+  await page.getByRole('option', { name: /^Database choice/ }).click();
+  await page.getByRole('button', { name: 'Pin', exact: true }).click();
+  await started;
+  await expect(page.getByRole('button', { name: 'Pin', exact: true })).toBeDisabled();
+  await page.getByLabel('Active workspace').selectOption('other');
+  await page.getByRole('button', { name: 'New memory', exact: true }).click();
+  await page.locator('#editor-memory-title').fill('Other workspace draft');
+  await page.locator('#editor-memory-content').fill('Keep this draft.');
+  releasePin();
+  await completion;
+  await expect(page.locator('#memory-editor')).toBeVisible();
+  await expect(page.locator('#editor-memory-content')).toHaveValue('Keep this draft.');
+  await expect(page.locator('#editor-scope-note')).toContainText('other');
+});
+
+test('release regression: requested graph loads before slow hidden library and agenda', async ({ page }) => {
+  await mockApi(page);
+  let releaseHidden;
+  const hiddenGate = new Promise(resolve => { releaseHidden = resolve; });
+  await page.route(/\/api\/(memories|proactive)\?/, async route => {
+    await hiddenGate;
+    await route.fallback();
+  });
+  try {
+    await page.goto('/?view=relations');
+    await expect(page.locator('#graph-count')).toContainText('entities', { timeout: 5000 });
+    await expect(page.getByRole('region', { name: 'Explore project connections' })).toBeVisible();
+    await expect(page.locator('#connection-status')).toContainText('connected');
+  } finally {
+    releaseHidden();
+  }
+});
+
+test('release regression: import polling recovers the same job and reports stay paged', async ({ page }) => {
+  await mockApi(page);
+  await page.route('**/dashboard/review/csrf', route => route.fulfill({ json: { review_csrf_token: 'review-fixture' } }));
+  const files = Array.from({ length: 1500 }, (_, i) => ({
+    path: `note-${i}.md`, status: i % 2 ? 'skip' : 'import',
+  }));
+  let runs = 0, polls = 0;
+  await page.route('**/api/workspaces/import-documents/**', async route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith('/formats')) return route.fulfill({ json: { extensions: ['md'] } });
+    if (path.endsWith('/sources')) return route.fulfill({ json: { sources: [] } });
+    if (path.endsWith('/preview')) return route.fulfill({ json: { review_token: 'bound-preview', files, counts: { import: 750, skip: 750 } } });
+    if (path.endsWith('/run')) {
+      runs++;
+      return route.fulfill({ json: { job_id: 'job_review', state: 'running', files } });
+    }
+    if (path.endsWith('/jobs/job_review')) {
+      polls++;
+      if (polls === 1) return route.fulfill({ status: 503, json: { error: 'temporary progress failure' } });
+      return route.fulfill({ json: { job_id: 'job_review', state: 'complete', files } });
+    }
+    return route.fallback();
+  });
+  await page.goto('/?view=library');
+  await page.getByRole('button', { name: 'Import local documents', exact: true }).click();
+  await page.locator('#obsidian-vault-label').fill('Release fixture');
+  await page.locator('#obsidian-import-files').setInputFiles({
+    name: 'note.md', mimeType: 'text/markdown', buffer: Buffer.from('A local fixture fact.'),
+  });
+  await page.locator('#obsidian-scope').selectOption('session');
+  await page.getByRole('button', { name: 'Preview import', exact: true }).click();
+  await expect(page.locator('#obsidian-import-progress')).toHaveText('Session scope requires a session ID.');
+  await expect(page.locator('#obsidian-session')).toBeFocused();
+  await page.locator('#obsidian-scope').selectOption('workspace');
+  await page.getByRole('button', { name: 'Preview import', exact: true }).click();
+  await expect(page.locator('#obsidian-report-count')).toHaveText('1–100 of 1500 files');
+  await expect(page.locator('#obsidian-import-report li')).toHaveCount(100);
+  await page.getByRole('button', { name: 'Next report page' }).click();
+  await expect(page.locator('#obsidian-report-count')).toHaveText('101–200 of 1500 files');
+  await page.locator('#obsidian-report-filter').selectOption('skip');
+  await expect(page.locator('#obsidian-report-count')).toHaveText('1–100 of 750 files');
+  await page.locator('#obsidian-confirmed').check();
+  await page.getByRole('button', { name: 'Import documents', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Retry progress' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Import documents', exact: true })).toBeDisabled();
+  await page.getByRole('button', { name: 'Retry progress' }).click();
+  await expect(page.getByRole('button', { name: 'Preview import', exact: true })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Retry progress' })).toBeHidden();
+  expect(runs).toBe(1);
+  expect(polls).toBe(2);
+  await expect(page.locator('#obsidian-import-report li')).toHaveCount(100);
+});
+
 async function openProcessingSettings(page) {
   await page.goto('/?view=manage');
   await page.locator('#manage-settings-tab').click();
@@ -2408,13 +2539,13 @@ test('Ledger exposes local LLM setup and extraction controls', async ({ page }) 
   const model = page.getByRole('combobox', { name: 'Model' });
   await expect(provider).toHaveValue('openai');
   await expect(model).toHaveValue('gpt-4o-mini');
-  await expect(page.getByLabel('Local .env setup')).toHaveValue(/ENGRAPHIS_LLM_PROVIDER=openai/);
+  await expect(page.getByLabel('Owner-private config.env setup')).toHaveValue(/ENGRAPHIS_LLM_PROVIDER=openai/);
   await expect(page.locator('#llm-connection').getByRole('button', { name: 'Turn on' })).toBeDisabled();
   await expect(page.locator('#llm-connection').getByRole('button', { name: 'Turn off' })).toBeDisabled();
 
   await provider.selectOption('anthropic');
   await expect(model).toHaveValue('claude-sonnet-5-5');
-  await expect(page.getByLabel('Local .env setup')).toHaveValue(/ENGRAPHIS_LLM_PROVIDER=anthropic/);
+  await expect(page.getByLabel('Owner-private config.env setup')).toHaveValue(/ENGRAPHIS_LLM_PROVIDER=anthropic/);
   await page.getByRole('button', { name: 'Test connection' }).click();
   await expect(page.locator('#llm-test-result')).toContainText('No API key configured');
 });
