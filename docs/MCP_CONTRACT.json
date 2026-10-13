@@ -1,6 +1,6 @@
 {
   "schema": "engraphis-mcp-contract/v1",
-  "sha256": "c45b4e1de83058b50b6da9def894fd5d5d8a5cc7c37466cd9dbef65c1fcf2b5d",
+  "sha256": "fd901b4cba128b971b17415d7739165c6421704320da9b178db6d0fa1f552bf8",
   "surfaces": {
     "classic": [
       {
@@ -3070,6 +3070,339 @@
           "type": "object"
         },
         "name": "engraphis_set_workspace_routing"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "Crawl spec or prompt quality"
+        },
+        "description": "Analyze an agent prompt, specification, or procedural memories.\n\nCalculates seven-axis radar coverage, classifies tokens into explainable kinds,\nlinks terms within and across sections, flags ambiguous wording ('ask, don't guess'),\nand optionally traces claims to grounded memories.",
+        "inputSchema": {
+          "properties": {
+            "crawl_procedural": {
+              "default": false,
+              "description": "Crawl active procedural memories in the scope.",
+              "title": "Crawl Procedural",
+              "type": "boolean"
+            },
+            "repo": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional repo scope for claim tracing.",
+              "title": "Repo"
+            },
+            "session_id": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional active session id.",
+              "title": "Session Id"
+            },
+            "source_id": {
+              "anyOf": [
+                {
+                  "maxLength": 500,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Local-operator text file under an approved index root; authenticated callers must pass text.",
+              "title": "Source Id"
+            },
+            "text": {
+              "anyOf": [
+                {
+                  "maxLength": 64000,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Spec or prompt text (up to 64k chars).",
+              "title": "Text"
+            },
+            "trace_claims": {
+              "default": true,
+              "description": "Verify asserted claims against grounded memories.",
+              "title": "Trace Claims",
+              "type": "boolean"
+            },
+            "workspace": {
+              "default": "default",
+              "description": "Workspace for claim tracing.",
+              "maxLength": 200,
+              "title": "Workspace",
+              "type": "string"
+            }
+          },
+          "title": "engraphis_spec_crawlArguments",
+          "type": "object"
+        },
+        "name": "engraphis_spec_crawl"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false,
+          "title": "Answer ambiguous spec flag"
+        },
+        "description": "Apply a human clarification to an ambiguous spec flag and optionally record it as a procedural memory.",
+        "inputSchema": {
+          "properties": {
+            "answer": {
+              "description": "Human clarification or exact scope/number.",
+              "maxLength": 10000,
+              "minLength": 1,
+              "title": "Answer",
+              "type": "string"
+            },
+            "flag": {
+              "additionalProperties": true,
+              "description": "Flag object from spec_crawl report with start and end offsets.",
+              "title": "Flag",
+              "type": "object"
+            },
+            "repo": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional repo scope.",
+              "title": "Repo"
+            },
+            "save_as_memory": {
+              "default": true,
+              "description": "Save clarification as a procedural memory in scope.",
+              "title": "Save As Memory",
+              "type": "boolean"
+            },
+            "session_id": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional session id.",
+              "title": "Session Id"
+            },
+            "spec_text": {
+              "description": "Current full spec text to update.",
+              "maxLength": 64000,
+              "minLength": 1,
+              "title": "Spec Text",
+              "type": "string"
+            },
+            "workspace": {
+              "default": "default",
+              "description": "Workspace to store the procedural memory.",
+              "maxLength": 200,
+              "title": "Workspace",
+              "type": "string"
+            }
+          },
+          "required": [
+            "flag",
+            "answer",
+            "spec_text"
+          ],
+          "title": "engraphis_spec_crawl_answerArguments",
+          "type": "object"
+        },
+        "name": "engraphis_spec_crawl_answer"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": "Audit multiple memory nodes for contradictions and health"
+        },
+        "description": "Analyze multiple live memory nodes for contradictions, parameter clashes, orphans, and 7-axis coverage.",
+        "inputSchema": {
+          "properties": {
+            "memory_ids": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional explicit list of memory IDs to analyze.",
+              "title": "Memory Ids"
+            },
+            "mtypes": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional filter by memory types: semantic, procedural, episodic, working.",
+              "title": "Mtypes"
+            },
+            "repo": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional repo scope.",
+              "title": "Repo"
+            },
+            "session_id": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional active session id.",
+              "title": "Session Id"
+            },
+            "workspace": {
+              "default": "default",
+              "description": "Workspace to audit memories.",
+              "maxLength": 200,
+              "title": "Workspace",
+              "type": "string"
+            }
+          },
+          "title": "engraphis_spec_crawl_memoriesArguments",
+          "type": "object"
+        },
+        "name": "engraphis_spec_crawl_memories"
+      },
+      {
+        "annotations": {
+          "destructiveHint": true,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false,
+          "title": "Resolve contradiction or auto-link orphan in memory cluster"
+        },
+        "description": "Remediate a contradiction or link an orphaned memory node found during multi-node audit.",
+        "inputSchema": {
+          "properties": {
+            "action": {
+              "description": "Remediation action: 'supersede' (retires older conflicting node) or 'link' (connects orphan).",
+              "maxLength": 64,
+              "title": "Action",
+              "type": "string"
+            },
+            "confirmed": {
+              "default": false,
+              "description": "Explicit human approval to retire node_b; required for supersede.",
+              "title": "Confirmed",
+              "type": "boolean"
+            },
+            "node_a": {
+              "description": "Retained memory node id (or source node to link from).",
+              "maxLength": 256,
+              "title": "Node A",
+              "type": "string"
+            },
+            "node_b": {
+              "anyOf": [
+                {
+                  "maxLength": 256,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Older conflicting memory node id to supersede (or target node to link to).",
+              "title": "Node B"
+            },
+            "repo": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional repo scope.",
+              "title": "Repo"
+            },
+            "workspace": {
+              "default": "default",
+              "description": "Workspace scope.",
+              "maxLength": 200,
+              "title": "Workspace",
+              "type": "string"
+            }
+          },
+          "required": [
+            "action",
+            "node_a"
+          ],
+          "title": "engraphis_spec_crawl_resolveArguments",
+          "type": "object"
+        },
+        "name": "engraphis_spec_crawl_resolve"
       },
       {
         "annotations": {

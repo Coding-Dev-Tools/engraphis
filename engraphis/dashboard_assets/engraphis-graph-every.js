@@ -159,7 +159,7 @@
       collapse: false, collapsed: false,
       focus: -1, hover: -1, hoverPoint: [0, 0], focusPoint: [0, 0],
       neighbors: null, incidentEdges: null, connectionHighlights: null, ready: false, visibleCount: 0,
-      frame: 0, labelFrame: 0, flowPaintAt: 0, overlayPaintAt: 0, layoutPending: false, lastLabelKey: '', labelLayout: [],
+      frame: 0, labelFrame: 0, overlayPaintAt: 0, layoutPending: false, pendingLayout: null, lastLabelKey: '', labelLayout: [],
       underlayKey: '', drag: null, pickGrid: null, pickDirty: true,
       destroyed: false, paused: false, contextLost: false, unsupported: !gl, error: null,
       labelMetrics: new Map(),
@@ -566,26 +566,31 @@
       if (state.pickDirty) buildPickGrid();
       const cell = state.pickCell;
       const gx = Math.floor(worldX / cell), gy = Math.floor(worldY / cell);
+      // pointSize is capped at 12 screen pixels. Search the entire hit radius,
+      // including at fit zoom; scanning occupied buckets bounds sparse far-out picks.
+      const scale = Math.max(0.005, state.camera.scale);
+      const radius = Math.ceil(19 / scale / cell);
       let best = -1, bestDist = Infinity;
-      for (let ox = -1; ox <= 1; ox += 1) {
-        for (let oy = -1; oy <= 1; oy += 1) {
-          const bucket = state.pickGrid.get((gx + ox + 32768) * 65536 + (gy + oy + 32768));
-          if (!bucket) continue;
-          for (let slot = 0; slot < bucket.length; slot += 1) {
-            const index = bucket[slot];
-            const dx = state.positions[index * 2] - worldX;
-            const dy = state.positions[index * 2 + 1] - worldY;
-            const dist = dx * dx + dy * dy;
-            if (dist < bestDist) { bestDist = dist; best = index; }
+      const consider = bucket => {
+        if (!bucket) return;
+        for (const index of bucket) {
+          const dx = state.positions[index * 2] - worldX;
+          const dy = state.positions[index * 2 + 1] - worldY;
+          const dist = dx * dx + dy * dy;
+          const reach = (pointSize(index) + 7) / scale;
+          if (dist <= reach * reach && dist < bestDist) { bestDist = dist; best = index; }
+        }
+      };
+      if ((radius * 2 + 1) ** 2 > state.pickGrid.size) {
+        for (const bucket of state.pickGrid.values()) consider(bucket);
+      } else {
+        for (let ox = -radius; ox <= radius; ox += 1) {
+          for (let oy = -radius; oy <= radius; oy += 1) {
+            consider(state.pickGrid.get((gx + ox + 32768) * 65536 + (gy + oy + 32768)));
           }
         }
       }
-      if (best < 0) return -1;
-      /* bestDist is measured in world units while pointSize and the extra touch slop are
-         screen pixels. Convert the hit radius back into world units so picking remains
-         usable at both fit-to-view and close-reading zoom levels. */
-      const reach = (pointSize(best) + 7) / Math.max(0.005, state.camera.scale);
-      return bestDist <= reach * reach ? best : -1;
+      return best;
     }
 
     /* ── Overlay: decluttered labels + capped relation flow ─────────────────────── */
@@ -807,7 +812,8 @@
       const key = `${Math.round(state.camera.x)}:${Math.round(state.camera.y)}:${Math.round(state.camera.scale * 24)}`;
       const fontPx = clamp(Number(state.settings.font || 12) + state.camera.scale * 1.5, 8, 24);
       const font = `${fontPx}px ui-sans-serif,system-ui,sans-serif`;
-      const cacheKey = `${font}|${key}`;
+      const labelCap = clamp(Math.round(Number(state.settings.labelDensity) || 24), 1, LABEL_MAX);
+      const cacheKey = `${font}|${labelCap}|${key}`;
       labelContext.font = font;
       labelContext.textBaseline = 'middle';
       const isLight = state.themeColors && state.themeColors.canvas && (
@@ -829,12 +835,13 @@
       const occupied = new Set();
       let drawn = 0;
       const consider = index => {
-        if (drawn >= LABEL_MAX || !state.nodeFlags[index] || state.nodeFlags[index] === 2) return;
+        if (drawn >= labelCap || !state.nodeFlags[index] || state.nodeFlags[index] === 2) return;
         const point = screen(state.positions[index * 2], state.positions[index * 2 + 1]);
         if (point[0] < -40 || point[0] > state.width + 40 || point[1] < -20 || point[1] > state.height + 20) return;
         const text = labelText(index);
-        let width = state.labelMetrics.get(text);
-        if (width === undefined) { width = labelContext.measureText(text).width; if (state.labelMetrics.size > 8000) state.labelMetrics.clear(); state.labelMetrics.set(text, width); }
+        const metricKey = `${font}|${text}`;
+        let width = state.labelMetrics.get(metricKey);
+        if (width === undefined) { width = labelContext.measureText(text).width; if (state.labelMetrics.size > 8000) state.labelMetrics.clear(); state.labelMetrics.set(metricKey, width); }
         const left = Math.floor((point[0] + 6) / cell), right = Math.ceil((point[0] + 6 + width) / cell);
         const top = Math.floor((point[1] - 6 - fontPx / 2) / cell), bottom = Math.ceil((point[1] - 6 + fontPx / 2) / cell);
         for (let gx = left; gx <= right; gx += 1) {
@@ -857,11 +864,11 @@
         consider(anchor);
         const neighborhoodLimit = Math.min(state.neighbors[anchor].length, LABEL_CANDIDATE_MAX);
         for (let slot = 0; slot < neighborhoodLimit; slot += 1) {
-          if (drawn >= LABEL_MAX) break;
+          if (drawn >= labelCap) break;
           consider(state.neighbors[anchor][slot]);
         }
       }
-      for (let rank = 0; rank < Math.min(state.topNodes.length, LABEL_CANDIDATE_MAX) && drawn < LABEL_MAX; rank += 1) {
+      for (let rank = 0; rank < Math.min(state.topNodes.length, LABEL_CANDIDATE_MAX) && drawn < labelCap; rank += 1) {
         if (!focusNeighborhood) consider(state.topNodes[rank]);
         else break;
       }
@@ -877,11 +884,6 @@
     function draw(now = 0) {
       state.frame = 0;
       if (state.destroyed || state.paused || state.contextLost || !state.ready || !nodeProgram) return;
-      if (flowAnimating() && state.flowPaintAt && now - state.flowPaintAt < FLOW_FRAME_MS) {
-        schedule();
-        return;
-      }
-      state.flowPaintAt = now;
       const glow = glowAmount();
       gl.clearColor(0, 0, 0, 0);
       gl.clear(gl.COLOR_BUFFER_BIT);
@@ -933,7 +935,8 @@
 
       drawRegions();
 
-      if (flowAnimating()) schedule();
+      // Relation flow owns its capped overlay clock; retained WebGL geometry
+      // only repaints for camera, data, or appearance changes.
       scheduleLabels();
     }
     function bindNodeGeometry() {
@@ -967,7 +970,7 @@
 
     /* ── Camera & sizing ────────────────────────────────────────────────────────── */
     /* The camera touches uniforms only — the worker never hears about pan/zoom again. */
-    function camera() { schedule(); scheduleLabels(); }
+    function camera() { schedule(); scheduleLabels(true); }
     function resize() {
       const rect = element.getBoundingClientRect();
       state.width = Math.max(1, rect.width || element.clientWidth || 1);
@@ -1010,6 +1013,12 @@
       if (doFit) fit(); else camera();
       computeCommunityRegions();
       drawRegions();
+    }
+    function flushPendingLayout() {
+      if (!state.pendingLayout || state.paused || state.contextLost || state.destroyed) return;
+      const pending = state.pendingLayout;
+      state.pendingLayout = null;
+      applyLayout(pending.positions, pending.bounds, pending.fit);
     }
 
     /* ── Worker messages ────────────────────────────────────────────────────────── */
@@ -1113,6 +1122,15 @@
         state.layoutPending = Number.isFinite(pass) && Number.isFinite(total)
           ? pass < total : message.fit !== true;
         if (!state.ready) return;
+        if (state.paused || state.contextLost) {
+          // Retain only the newest refinement while hidden. Buffer uploads and
+          // region construction belong to the visible renderer's next resume.
+          state.pendingLayout = {
+            positions: message.positions, bounds: message.bounds,
+            fit: message.fit === true || Boolean(state.pendingLayout && state.pendingLayout.fit),
+          };
+          return;
+        }
         applyLayout(message.positions, message.bounds, message.fit === true);
         stats({ layoutPending: state.layoutPending });
         return;
@@ -1255,7 +1273,10 @@
       const drag = state.drag;
       state.drag = null;
       if (!drag || drag.moved) return;
-      if (state.hover >= 0 && typeof opts.onNodeClick === 'function') opts.onNodeClick(nodeAt(state.hover));
+      const rect = element.getBoundingClientRect();
+      const point = world(event.clientX - rect.left, event.clientY - rect.top);
+      const hit = pickAt(point[0], point[1]);
+      if (hit >= 0 && typeof opts.onNodeClick === 'function') opts.onNodeClick(nodeAt(hit));
       else if (typeof opts.onBackgroundClick === 'function') opts.onBackgroundClick();
     });
     canvas.addEventListener('pointerleave', () => {
@@ -1326,6 +1347,7 @@
         uploadNodeMeta();
         uploadEdges();
         uploadEdgePositions();
+        flushPendingLayout();
         schedule();
         scheduleLabels(true);
       }
@@ -1409,6 +1431,7 @@
       state.edgeWeights = new Float32Array(0); state.edgeRelations = []; state.edgeLayers = [];
       state.neighbors = null; state.incidentEdges = null; state.connectionHighlights = null;
       state.positions = new Float32Array(0);
+      state.pendingLayout = null;
       state.nodeFlags = state.nodeGhosts = new Uint8Array(0);
       state.nodeColors = state.nodeSizes = new Float32Array(0);
       element.removeAttribute('data-graph-style');
@@ -1423,6 +1446,7 @@
         const nodes = Array.isArray(data && data.nodes) ? data.nodes : [];
         const links = Array.isArray(data && data.links) ? data.links : (data && data.edges) || [];
         state.ready = false; state.error = null; state.lastLabelKey = ''; state.layoutPending = true;
+        state.pendingLayout = null;
         state.hover = -1; state.focus = -1; state.hoverPoint = [0, 0]; state.focusPoint = [0, 0];
         state.neighbors = null; state.incidentEdges = null; state.connectionHighlights = null;
         state.edgeSources = new Uint32Array(0); state.edgeTargets = new Uint32Array(0);
@@ -1456,7 +1480,6 @@
       setSettings(value) {
         const patch = value || {};
         state.settings = { ...state.settings, ...patch };
-        state.flowPaintAt = 0;
         const relayout = Object.keys(patch).some(key => [
           'mode', 'repel', 'link', 'gravity', 'gravitationalConstant', 'blackHoleMass',
           'localGravitationalConstant', 'damping', 'springStiffness',
@@ -1551,7 +1574,7 @@
         if (state.labelFrame) { caf(state.labelFrame); state.labelFrame = 0; }
         return api;
       },
-      resume() { state.paused = false; schedule(); scheduleLabels(); return api; },
+      resume() { state.paused = false; flushPendingLayout(); schedule(); scheduleLabels(); return api; },
       state() {
         return {
           mode: 'all', presentation: 'all',
