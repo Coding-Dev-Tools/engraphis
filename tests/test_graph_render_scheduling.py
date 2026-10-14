@@ -107,6 +107,49 @@ console.log(JSON.stringify({ lanes: lanes.map(({ radius, members, dynamicRadius 
     assert result["lanes"] == [{"radius": 30, "members": 3, "dynamicRadius": False}]
 
 
+def test_hover_selection_and_clear_invalidate_settled_geometry():
+    result = run_node(r"""
+let scheduled = 0;
+const uploads = [];
+const ctx = {
+  state: { ready: true, contextLost: false, hover: 0, focus: -1,
+    neighbors: [[1], [0], []], nodeFlags: new Uint8Array([1, 1, 1]) },
+  gl: { bindBuffer() {}, bufferData(_, flags) { uploads.push(Array.from(flags)); } },
+  nodeProgram: {}, nodeBuffers: { flag: {} }, schedule() { scheduled++; },
+};
+load(ctx, ['applyHoverToFlags']);
+ctx.applyHoverToFlags();
+ctx.state.hover = -1; ctx.state.focus = 2; ctx.applyHoverToFlags();
+ctx.state.focus = -1; ctx.applyHoverToFlags();
+console.log(JSON.stringify({ scheduled, uploads }));
+""")
+    assert result == {"scheduled": 3, "uploads": [[1, 1, 2], [2, 2, 1], [1, 1, 1]]}
+
+
+def test_worker_refinement_repaints_without_overriding_owned_camera():
+    result = run_node(r"""
+let scheduled = 0, overlays = 0, uploads = 0;
+const ctx = {
+  state: { positions: new Float32Array([1, 2]), bounds: null, hover: 0, focus: -1,
+    camera: { x: 73, y: 29, scale: 2 }, cameraOwned: true, pendingFit: null,
+    edgeVertexCount: 0, lastLabelKey: 'old' },
+  uploadNodePositions() { uploads++; }, uploadEdges() {}, uploadEdgePositions() {},
+  computeCommunityRegions() {}, drawRegions() {}, schedule() { scheduled++; },
+  scheduleLabels() { overlays++; },
+};
+load(ctx, ['camera', 'fit', 'applyLayout']);
+ctx.applyLayout(new Float32Array([5, 8]), { minX: 0, maxX: 10, minY: 0, maxY: 10 }, true);
+console.log(JSON.stringify({ scheduled, overlays, uploads, camera: ctx.state.camera,
+  cameraOwned: ctx.state.cameraOwned, hoverPoint: ctx.state.hoverPoint,
+  pickDirty: ctx.state.pickDirty, lastLabelKey: ctx.state.lastLabelKey }));
+""")
+    assert result == {
+        "scheduled": 1, "overlays": 1, "uploads": 1,
+        "camera": {"x": 73, "y": 29, "scale": 2}, "cameraOwned": True,
+        "hoverPoint": [5, 8], "pickDirty": True, "lastLabelKey": "",
+    }
+
+
 @pytest.mark.parametrize("hz", [60, 120])
 def test_camera_invalidations_paint_each_frame_with_flow_without_redrawing_at_rest(hz):
     result = run_node(r"""
