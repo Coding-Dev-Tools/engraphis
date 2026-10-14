@@ -2938,10 +2938,10 @@ def engraphis_spec_crawl_answer(
     save_as_memory: Annotated[
         bool,
         Field(
-            default=True,
-            description="Save clarification as a procedural memory in scope.",
+            default=False,
+            description="Opt in to saving clarification as a pending procedural memory in the requested scope.",
         ),
-    ] = True,
+    ] = False,
 ) -> str:
     """Apply a human clarification to an ambiguous spec flag and optionally record it as a procedural memory."""
     try:
@@ -2999,6 +2999,7 @@ def engraphis_spec_crawl_memories(
         Field(
             default=None,
             description="Optional explicit list of memory IDs to analyze.",
+            max_length=150,
         ),
     ] = None,
     mtypes: Annotated[
@@ -3006,6 +3007,7 @@ def engraphis_spec_crawl_memories(
         Field(
             default=None,
             description="Optional filter by memory types: semantic, procedural, episodic, working.",
+            max_length=4,
         ),
     ] = None,
 ) -> str:
@@ -3050,13 +3052,13 @@ def engraphis_spec_crawl_resolve(
         ),
     ],
     node_b: Annotated[
-        Optional[str],
+        str,
         Field(
-            default=None,
             description="Older conflicting memory node id to supersede (or target node to link to).",
+            min_length=1,
             max_length=256,
         ),
-    ] = None,
+    ],
     workspace: Annotated[
         Optional[str],
         Field(
