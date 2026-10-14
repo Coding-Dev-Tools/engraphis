@@ -1,6 +1,6 @@
 {
   "schema": "engraphis-mcp-contract/v1",
-  "sha256": "d818ec3cac2bb73546db93d78e728d3bc99029f48671315227bcdf78f60663db",
+  "sha256": "0a7b5eac2e3b80134e3f088228de101715b6c610fba0d0d4f8099ac7da6c90b2",
   "surfaces": {
     "classic": [
       {
@@ -3209,8 +3209,8 @@
               "title": "Repo"
             },
             "save_as_memory": {
-              "default": true,
-              "description": "Save clarification as a procedural memory in scope.",
+              "default": false,
+              "description": "Opt in to saving clarification as a pending procedural memory in the requested scope.",
               "title": "Save As Memory",
               "type": "boolean"
             },
@@ -3277,6 +3277,7 @@
                   "items": {
                     "type": "string"
                   },
+                  "maxItems": 150,
                   "type": "array"
                 },
                 {
@@ -3293,6 +3294,7 @@
                   "items": {
                     "type": "string"
                   },
+                  "maxItems": 4,
                   "type": "array"
                 },
                 {
@@ -3381,18 +3383,11 @@
               "type": "string"
             },
             "node_b": {
-              "anyOf": [
-                {
-                  "maxLength": 256,
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
               "description": "Older conflicting memory node id to supersede (or target node to link to).",
-              "title": "Node B"
+              "maxLength": 256,
+              "minLength": 1,
+              "title": "Node B",
+              "type": "string"
             },
             "repo": {
               "anyOf": [
@@ -3439,7 +3434,8 @@
           },
           "required": [
             "action",
-            "node_a"
+            "node_a",
+            "node_b"
           ],
           "title": "engraphis_spec_crawl_resolveArguments",
           "type": "object"

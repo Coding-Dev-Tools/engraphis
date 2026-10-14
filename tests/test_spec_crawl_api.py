@@ -80,6 +80,42 @@ def test_service_boolean_controls_do_not_coerce_strings(crawl_service):
     assert svc.store.conn.total_changes == before
 
 
+def test_clarification_persistence_is_opt_in_and_keeps_requested_session(crawl_service):
+    svc = crawl_service
+    session_id = svc.start_session("alpha", repo="app", agent="codex")["session_id"]
+    text = "# Rules\nVerify all tests."
+    flag = svc.spec_crawl(text, workspace="alpha")["flags"][0]
+    before = svc.store.conn.total_changes
+    result = svc.spec_crawl_answer(flag, "12", spec_text=text, workspace="alpha",
+                                   repo="app", session_id=session_id)
+    assert result["memory_id"] is None
+    assert svc.store.conn.total_changes == before
+    saved = svc.spec_crawl_answer(flag, "12", spec_text=text, workspace="alpha",
+                                 repo="app", session_id=session_id, save_as_memory=True)
+    record = svc.store.get_memory(saved["memory_id"])
+    assert record.scope.value == "session"
+    assert record.session_id == session_id
+    from engraphis.core.poisoning import prompt_eligible
+    assert not prompt_eligible(record.provenance, record.metadata)
+
+
+def test_http_spec_schemas_reject_incomplete_or_oversized_inputs_before_writing(crawl_service):
+    svc = crawl_service
+    v2_api.set_service(svc)
+    app = FastAPI()
+    app.include_router(v2_api.router)
+    before = svc.store.conn.total_changes
+    with TestClient(app) as client:
+        for node_b in ({}, {"node_b": None}, {"node_b": ""}):
+            result = client.post("/api/spec/crawl/memories/resolve", json={
+                "action": "link", "node_a": "first", **node_b,
+            })
+            assert result.status_code == 422
+        for values in ({"memory_ids": ["mem"] * 151}, {"mtypes": ["procedural"] * 5}):
+            assert client.post("/api/spec/crawl/memories", json=values).status_code == 422
+    assert svc.store.conn.total_changes == before
+
+
 @pytest.mark.parametrize("include_smaller_memory", [False, True])
 def test_procedural_crawl_cannot_fabricate_empty_scope_when_source_exceeds_budget(
     crawl_service, monkeypatch, include_smaller_memory,

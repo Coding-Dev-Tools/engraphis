@@ -798,7 +798,7 @@ Apply a human clarification to a current ambiguous spec flag and optionally reco
 - `workspace (str, None)`: workspace to store the procedural memory.
 - `repo (str, None)`: optional repo scope.
 - `session_id (str, None)`: optional session id.
-- `save_as_memory (bool, True)`: save clarification as a procedural memory in scope.
+- `save_as_memory (bool, False)`: opt in to saving clarification as a pending procedural memory in the supplied session or selected repo/workspace scope.
 
 ### `engraphis_spec_crawl_memories`
 Analyze multiple live memory nodes for contradictions, parameter clashes, orphans, and 7-axis coverage. Default scope reads are bounded to 150 eligible nodes and expose truncation; inferred links are suggestions, not stored connectivity.
@@ -814,7 +814,7 @@ Remediate a contradiction or link an orphaned memory node found during multi-nod
 
 - `action (str)`: remediation action: `'supersede'` (retires older conflicting node) or `'link'` (connects orphan).
 - `node_a (str)`: retained memory node id (or source node to link from).
-- `node_b (str, None)`: older conflicting memory node id to supersede (or target node to link to).
+- `node_b (str, required)`: older conflicting memory node id to supersede (or target node to link to).
 - `confirmed (bool, False)`: explicit human confirmation required for `supersede`; both records must be live and approved, and the update is atomic.
 - `workspace (str, None)`: workspace scope.
 - `repo (str, None)`: optional repo scope.

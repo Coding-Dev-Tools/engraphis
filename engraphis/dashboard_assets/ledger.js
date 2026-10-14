@@ -3089,6 +3089,7 @@
   async function pollObsidianImport(jobId, workspace) {
     if (obsidianImport.polling) return;
     obsidianImport.polling = true;
+    let refreshWorkspace = false;
     obsidianImport.jobId = jobId;
     obsidianImport.jobWorkspace = workspace;
     obsidianImport.poll = null;
@@ -3112,7 +3113,7 @@
       byId('obsidian-run').disabled = true;
       byId('obsidian-preview').disabled = false;
       showNotice('Document import finished.');
-      if (workspace === state.workspace && !state.editorSession) await selectWorkspace(workspace);
+      refreshWorkspace = true;
     } catch (error) {
       obsidianImport.pollFailures += 1;
       const retrying = obsidianImport.pollFailures <= 3;
@@ -3122,6 +3123,14 @@
       if (retrying) obsidianImport.poll = window.setTimeout(() => pollObsidianImport(jobId, workspace), Math.min(6000, 750 * 2 ** obsidianImport.pollFailures));
     } finally {
       obsidianImport.polling = false;
+    }
+    // Release status-request ownership before the refresh can expose a new import.
+    if (refreshWorkspace && workspace === state.workspace && !state.editorSession) {
+      try {
+        await selectWorkspace(workspace);
+      } catch (error) {
+        showNotice(`Document import finished, but the workspace could not refresh: ${error.message}`);
+      }
     }
   }
 

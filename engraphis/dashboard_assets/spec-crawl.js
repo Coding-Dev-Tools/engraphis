@@ -1299,6 +1299,7 @@
     document.getElementById('spec-ask-question').textContent = flag.question;
     input.dataset.flagId = flag.id;
     input.value = '';
+    document.getElementById('spec-ask-save-memory').checked = false;
     modalReturnFocus = document.activeElement;
     modal.removeAttribute('hidden');
     input.focus();
@@ -1319,11 +1320,12 @@
     const flag = currentReport && (currentReport.flags || []).find(f => f.id === input.dataset.flagId);
     if (!answer || !flag || reportScopeKey !== scopeKey() || mutationPending) return;
     const specText = currentSpecText;
+    const saveAsMemory = document.getElementById('spec-ask-save-memory').checked;
     closeModals();
     mutationPending = true;
     try {
       const data = await postSpec('/api/spec/crawl/answer', {
-        flag, answer, spec_text: specText, save_as_memory: true
+        flag, answer, spec_text: specText, save_as_memory: saveAsMemory
       }, 'prompt');
       if (data) {
         currentSpecText = data.updated_text;
