@@ -12672,8 +12672,8 @@ def test_community_colours_match_the_dashboard_and_the_legend_swatches() -> None
     A canvas cannot explain itself, so the cluster legend is how anyone matches a colour to a
     group — and a legend whose swatch order or palette drifts from the renderer describes one
     cluster with another's colour.  Ledger therefore draws its swatches from the engine's own
-    report of what each colour means: clusters largest first, "Cluster 1" for the largest, each
-    with the colour its nodes wear on the canvas.
+    report of what each colour means: clusters largest first, stable names from their
+    canvas community identities, and the colour their nodes wear on the canvas.
     """
     report = _run_ledger(
         """
@@ -12703,13 +12703,15 @@ def test_community_colours_match_the_dashboard_and_the_legend_swatches() -> None
             label: row.children[1].textContent, count: Number(row.children[2].textContent),
           })),
           painted: Object.values(painted).map(colours => [colours.length, [...new Set(colours)]]),
+          communities: Object.entries(painted).map(([key, colours]) => ({ key, count: colours.length })),
         });
         """
     )
     assert report["shown"] is True
     assert report["title"] == "Clusters"
     rows = report["rows"]
-    assert [row["label"] for row in rows] == ["Cluster 1", "Cluster 2", "Cluster 3"]
+    communities = sorted(report["communities"], key=lambda item: -item["count"])
+    assert [row["label"] for row in rows] == [f"Cluster {int(item['key']) + 1}" for item in communities]
     assert [row["count"] for row in rows] == [3, 2, 1]
     painted = {size: colours for size, colours in report["painted"]}
     for row in rows:
