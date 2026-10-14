@@ -99,6 +99,15 @@ hardcoded excludes.
 Anyone who can reach an authenticated local mutation route has the authority of that local
 installation, so do not share its bearer token.
 
+### 5a. Coding-agent file writes
+
+Memory governance is not a filesystem sandbox. For hosts that mediate tool calls, Engraphis ships
+a fail-closed protected-path evaluator and an optional Command Code `PreToolUse` hook. Its policy
+lives outside the repository, direct file tools are checked before execution, and general shell
+access is denied by default because command inspection cannot guarantee non-mutation. See
+[`docs/FILE_PROTECTION.md`](docs/FILE_PROTECTION.md) for setup, host integration, and limitations.
+Use OS ACLs or read-only mounts when the agent can invoke tools outside that hook.
+
 ### 6. Local resource and database ingestion
 - Uploaded and folder-imported files are size/count bounded, marked `trusted:false`, and parsed
   as data. Missing optional PDF/OCR/transcription tools fail explicitly.

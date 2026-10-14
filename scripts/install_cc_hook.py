@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
-"""Install the Engraphis Command Code SessionStart hook into the user-scope settings file.
+"""Install Engraphis Command Code hooks into the user-scope settings file.
 
 Idempotent: running twice updates the existing entry rather than duplicating it.
 Backup is written to ``<settings>.bak-engraphis-<UTC-date>`` on first write only.
 
 Usage:
     python scripts/install_cc_hook.py
+    python scripts/install_cc_hook.py --file-guard
     python scripts/install_cc_hook.py --uninstall
 """
 from __future__ import annotations
@@ -21,6 +22,11 @@ SETTINGS_PATH = Path(os.environ.get("COMMANDCODE_SETTINGS_PATH")
                      or Path.home() / ".commandcode" / "settings.json")
 HOOK_PATH = Path(__file__).resolve().parent.parent / "integrations" / "commandcode" / "session_start_hook.py"
 HOOK_KEY = "cc-engraphis-session-start"
+FILE_GUARD_PATH = (
+    Path(__file__).resolve().parent.parent
+    / "integrations" / "commandcode" / "file_guard_hook.py"
+)
+FILE_GUARD_KEY = "cc-engraphis-file-guard"
 
 
 def _utc_stamp() -> str:
@@ -69,6 +75,15 @@ def _entry_command() -> str:
     return _hook_entry()["command"]
 
 
+def _file_guard_entry() -> dict:
+    return {
+        "type": "command",
+        "command": f"python \"{FILE_GUARD_PATH}\"",
+        "name": FILE_GUARD_KEY,
+        "timeout": 5,
+    }
+
+
 def _is_our_entry(entry: dict) -> bool:
     """Match by stable ``name`` (HOOK_KEY) first, then fall back to command string.
 
@@ -76,9 +91,11 @@ def _is_our_entry(entry: dict) -> bool:
     primary key; the command match stays as a backstop for legacy entries written
     by older versions of this script.
     """
-    if entry.get("name") == HOOK_KEY:
+    if entry.get("name") in {HOOK_KEY, FILE_GUARD_KEY}:
         return True
-    return entry.get("command", "") == _entry_command()
+    return entry.get("command", "") in {
+        _entry_command(), _file_guard_entry()["command"],
+    }
 
 
 def _session_start_has_our_entry(hooks: list) -> bool:
@@ -131,7 +148,7 @@ def _refresh_existing_wrappers(hooks: list) -> bool:
     return refreshed
 
 
-def install() -> None:
+def install(*, enable_file_guard: bool = False) -> None:
     settings = _read_settings(SETTINGS_PATH)
     hooks = settings.setdefault("hooks", {}).setdefault("SessionStart", [])
     # Idempotency: refresh our entry in-place inside any wrapper that already
@@ -140,6 +157,21 @@ def install() -> None:
     # no prior wrapper mentions us.
     if not _refresh_existing_wrappers(hooks):
         hooks.append({"hooks": [_hook_entry()]})
+    if enable_file_guard:
+        guard_hooks = settings.setdefault("hooks", {}).setdefault("PreToolUse", [])
+        found = False
+        for wrapper in guard_hooks:
+            entries = wrapper.get("hooks", []) or []
+            if any(entry.get("name") == FILE_GUARD_KEY for entry in entries):
+                wrapper["hooks"] = [
+                    entry for entry in entries if entry.get("name") != FILE_GUARD_KEY
+                ] + [_file_guard_entry()]
+                found = True
+        if not found:
+            guard_hooks.append({
+                "matcher": "Write|Edit|MultiEdit|NotebookEdit|Bash",
+                "hooks": [_file_guard_entry()],
+            })
     _backup(SETTINGS_PATH)
     _write_settings(SETTINGS_PATH, settings)
     print(f"installed SessionStart hook into {SETTINGS_PATH}")
@@ -147,21 +179,20 @@ def install() -> None:
 
 def uninstall() -> None:
     settings = _read_settings(SETTINGS_PATH)
-    if "hooks" not in settings or "SessionStart" not in settings["hooks"]:
-        print(f"no SessionStart hook entry in {SETTINGS_PATH}")
+    if "hooks" not in settings:
+        print(f"no Engraphis hook entry in {SETTINGS_PATH}")
         return
-    cleaned: list = []
-    for wrapper in settings["hooks"]["SessionStart"]:
-        stripped = _strip_our_entries(wrapper)
-        if stripped is not None:
-            cleaned.append(stripped)
-        elif wrapper is settings["hooks"]["SessionStart"][0]:
-            # No-op, but explicit: a wrapper that becomes empty after
-            # stripping is dropped (caller removed via ``cleaned.append``).
-            pass
-    settings["hooks"]["SessionStart"] = cleaned
-    if not settings["hooks"]["SessionStart"]:
-        del settings["hooks"]["SessionStart"]
+    for event in ("SessionStart", "PreToolUse"):
+        if event not in settings["hooks"]:
+            continue
+        cleaned = []
+        for wrapper in settings["hooks"][event]:
+            stripped = _strip_our_entries(wrapper)
+            if stripped is not None:
+                cleaned.append(stripped)
+        settings["hooks"][event] = cleaned
+        if not cleaned:
+            del settings["hooks"][event]
     if not settings["hooks"]:
         del settings["hooks"]
     _backup(SETTINGS_PATH)
@@ -170,17 +201,24 @@ def uninstall() -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n", 1)[0])
     parser.add_argument("--uninstall", action="store_true",
                         help="Remove the Engraphis SessionStart hook from the user settings.")
+    parser.add_argument(
+        "--file-guard", action="store_true",
+        help="Also install the fail-closed protected-file PreToolUse hook.",
+    )
     args = parser.parse_args()
     if not HOOK_PATH.exists():
         print(f"error: hook script not found at {HOOK_PATH}", file=sys.stderr)
         return 2
+    if args.file_guard and not FILE_GUARD_PATH.exists():
+        print(f"error: file guard hook not found at {FILE_GUARD_PATH}", file=sys.stderr)
+        return 2
     if args.uninstall:
         uninstall()
     else:
-        install()
+        install(enable_file_guard=args.file_guard)
     return 0
 
 
