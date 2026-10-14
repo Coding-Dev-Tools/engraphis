@@ -102,10 +102,29 @@ test('clarification binds current source and scope and reports pending review', 
   await expect(page.getByRole('button', { name: 'Clarify all' })).toBeFocused();
   await page.getByRole('button', { name: 'Clarify all' }).click();
   await page.locator('#spec-ask-input').fill('12');
+  await expect(page.locator('#spec-ask-save-memory')).not.toBeChecked();
+  await page.locator('#spec-ask-save-memory').check();
   await page.locator('#spec-ask-submit').click();
   await expect(page.locator('#spec-toast')).toContainText('saved for review');
   const answer = requests.find(item => item.path === '/spec/crawl/answer').body;
   expect(answer).toMatchObject({ workspace: 'alpha', repo: 'repoA', spec_text: '# Rules\nVerify all tests.', answer: '12', save_as_memory: true });
+  expect(errors).toEqual([]);
+});
+
+test('clarifications update the spec without saving a memory by default', async ({ page }) => {
+  const { requests, errors } = await fixture(page);
+  await page.route('**/api/spec/crawl/answer', async route => {
+    requests.push({ path: '/spec/crawl/answer', body: route.request().postDataJSON() });
+    await route.fulfill({ json: { updated_text: '# Rules\nVerify 12 tests.', memory_id: null,
+      new_report: { ...prompt, flags: [] } } });
+  });
+  await crawl(page);
+  await page.getByRole('button', { name: 'Clarify all' }).click();
+  await expect(page.locator('#spec-ask-save-memory')).not.toBeChecked();
+  await page.locator('#spec-ask-input').fill('12');
+  await page.locator('#spec-ask-submit').click();
+  await expect(page.locator('#spec-toast')).toContainText('Specification updated.');
+  expect(requests.find(item => item.path === '/spec/crawl/answer').body.save_as_memory).toBe(false);
   expect(errors).toEqual([]);
 });
 

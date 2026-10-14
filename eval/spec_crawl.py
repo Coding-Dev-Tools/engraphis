@@ -107,7 +107,7 @@ def main() -> None:
     print(f"  Determinism rate      : {res['determinism_rate'] * 100:.1f}%")
     print(f"  Axis classification   : {res['axes_accuracy'] * 100:.1f}%")
     print(f"  Flag recall           : {res['flag_recall'] * 100:.1f}%")
-    print(f"  Qualifier precision   : {res['qualifier_accuracy'] * 100:.1f}%")
+    print(f"  Qualified-token avoidance: {res['qualifier_accuracy'] * 100:.1f}%")
     print(f"  Section count        : {res['sections_accuracy'] * 100:.1f}%")
     print(f"  Score boundaries     : {res['scores_accuracy'] * 100:.1f}%")
     print(f"  Overall accuracy      : {res['overall_accuracy'] * 100:.1f}%")

@@ -6,6 +6,40 @@ import pytest
 from engraphis.core.spec_crawl import analyze_memory_nodes
 
 
+def test_unrelated_policies_do_not_hide_an_earlier_directive_conflict():
+    policies = [
+        {"id": "require", "subject_key": "prod", "content": "Always require authentication."},
+        {"id": "forbid", "subject_key": "prod", "content": "Never require authentication."},
+    ]
+    noise = [{"id": f"noise-{i}", "subject_key": f"noise.{i}",
+              "content": "Always require authentication."} for i in range(4)]
+    for order in (policies, policies + noise, list(reversed(policies + noise))):
+        conflicts = analyze_memory_nodes(order)["conflicts"]
+        assert len(conflicts) == 1
+        assert {conflicts[0]["node_a"], conflicts[0]["node_b"]} == {"require", "forbid"}
+
+
+@pytest.mark.parametrize("rule,conflicts", [
+    ("Never disable authentication.", False),
+    ("Must not disable authentication.", False),
+    ("Do not skip authentication.", False),
+    ("Never prohibit authentication.", False),
+    ("Always disable authentication.", True),
+    ("Never require authentication.", True),
+])
+def test_nested_policy_polarity_does_not_suggest_retiring_agreeing_rules(rule, conflicts):
+    nodes = [
+        {"id": "first", "subject_key": "prod", "content": rule, "valid_from": 1000},
+        {"id": "second", "subject_key": "prod", "content": "Always require authentication.",
+         "valid_from": 2000},
+    ]
+    for order in (nodes, list(reversed(nodes))):
+        report = analyze_memory_nodes(order)
+        assert bool(report["conflicts"]) == conflicts
+        if not conflicts:
+            assert all(remedy["action"] != "supersede" for remedy in report["remediation_plan"])
+
+
 def test_analyze_empty_memory_nodes():
     res = analyze_memory_nodes([])
     assert res["cluster_health_score"] == 0
