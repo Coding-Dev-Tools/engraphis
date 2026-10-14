@@ -185,6 +185,8 @@ These four Classic MCP tools are also discoverable and callable through Smart MC
 
 CI verifies determinism, axis classification, flag recall, qualified-token avoidance, section counts, and score boundaries in both the full stack and NumPy-only jobs. Qualified-token avoidance measures the explicitly labelled negative examples; it is not a general false-positive precision estimate:
 
+The same gate checks eight synthetic memory-audit contracts in both input orders: unrelated-subject noise, agreeing and opposing nested directives, subject and claim-kind separation, stored orphan connectivity, unknown effective dates, and effective-time ordering. It compares exact conflict pairs and retirement targets, requires compact node responses, and reports the fixture digest. These bounded regression fixtures do not establish general classifier quality.
+
 ```bash
 python -m eval.spec_crawl
 ```

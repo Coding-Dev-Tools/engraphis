@@ -5,14 +5,50 @@ Usage:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from pathlib import Path
 
-from engraphis.core.spec_crawl import crawl_spec
+from engraphis.core.spec_crawl import analyze_memory_nodes, crawl_spec
 
 ROOT = Path(__file__).resolve().parents[1]
 DATASET_PATH = ROOT / "eval" / "datasets" / "spec_crawl.jsonl"
+MEMORY_DATASET_PATH = ROOT / "eval" / "datasets" / "spec_crawl_memories.jsonl"
+
+
+def evaluate_memory_fixtures(path: Path = MEMORY_DATASET_PATH) -> dict:
+    """Check exact conflict pairs and lifecycle contracts in both input orders."""
+    payload = path.read_bytes()
+    cases = 0
+    failures: list[str] = []
+    for line in payload.decode("utf-8").splitlines():
+        if not line.strip():
+            continue
+        item = json.loads(line)
+        cases += 1
+        expected = {tuple(sorted(pair)) for pair in item["expected_conflicts"]}
+        passed = True
+        for nodes in (item["memories"], list(reversed(item["memories"]))):
+            report = analyze_memory_nodes(nodes, include_trace=False)
+            conflicts = report["conflicts"]
+            actual = {tuple(sorted((row["node_a"], row["node_b"]))) for row in conflicts}
+            passed = passed and actual == expected
+            passed = passed and all("content" not in node for node in report["nodes"])
+            if "expected_orphans" in item:
+                passed = passed and {row["node_id"] for row in report["orphans"]} == set(item["expected_orphans"])
+            if "expected_actions" in item:
+                passed = passed and {row["remedy"]["action"] for row in conflicts} == set(item["expected_actions"])
+            if "expected_retirements" in item:
+                retirements = {(row["remedy"]["keep_node"], row["remedy"]["retire_node"])
+                               for row in conflicts if row["remedy"]["action"] == "supersede"}
+                passed = passed and retirements == {tuple(pair) for pair in item["expected_retirements"]}
+        if not passed:
+            failures.append(item["id"])
+    passed_cases = cases - len(failures)
+    return {"cases": cases, "passed": passed_cases,
+            "accuracy": passed_cases / cases if cases else 0.0,
+            "failures": failures, "dataset_sha256": hashlib.sha256(payload).hexdigest()}
 
 
 def run() -> dict:
@@ -98,6 +134,7 @@ def run() -> dict:
         "scores_accuracy": scores_accuracy,
         "overall_accuracy": overall_accuracy,
         "agents_dogfood_ok": agents_ok,
+        "memory_audits": evaluate_memory_fixtures(),
     }
 
 
@@ -111,10 +148,14 @@ def main() -> None:
     print(f"  Section count        : {res['sections_accuracy'] * 100:.1f}%")
     print(f"  Score boundaries     : {res['scores_accuracy'] * 100:.1f}%")
     print(f"  Overall accuracy      : {res['overall_accuracy'] * 100:.1f}%")
+    memory = res["memory_audits"]
+    print(f"  Memory audit contracts: {memory['passed']}/{memory['cases']} (both input orders)")
+    print(f"  Memory fixture SHA-256: {memory['dataset_sha256']}")
     print(f"  AGENTS.md dogfooding  : {'PASSED' if res['agents_dogfood_ok'] else 'FAILED'}\n")
 
-    if res["overall_accuracy"] < 0.90 or not res["agents_dogfood_ok"] or res["scores_accuracy"] < 1:
-        sys.stderr.write("FLOOR VIOLATION: Spec Crawl evaluation fell below required 90% threshold\n")
+    if (res["overall_accuracy"] < 0.90 or not res["agents_dogfood_ok"]
+            or res["scores_accuracy"] < 1 or memory["accuracy"] < 1):
+        sys.stderr.write("FLOOR VIOLATION: Spec Crawl document thresholds or memory audit contracts failed\n")
         sys.exit(1)
 
 
