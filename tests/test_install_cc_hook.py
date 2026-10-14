@@ -60,6 +60,24 @@ def test_install_is_idempotent_on_repeat_runs(fake_settings) -> None:
     assert entries[0]["hooks"][0]["command"] == module._hook_entry()["command"]
 
 
+def test_file_guard_install_is_explicit_idempotent_and_fail_closed(fake_settings) -> None:
+    module, settings_path = fake_settings
+    module.install(enable_file_guard=True)
+    module.install(enable_file_guard=True)
+    payload = json.loads(settings_path.read_text(encoding="utf-8"))
+    entries = payload["hooks"]["PreToolUse"]
+    assert len(entries) == 1
+    assert entries[0]["matcher"] == "Write|Edit|MultiEdit|NotebookEdit|Bash"
+    assert entries[0]["hooks"] == [module._file_guard_entry()]
+
+
+def test_default_install_does_not_enable_file_guard(fake_settings) -> None:
+    module, settings_path = fake_settings
+    module.install()
+    payload = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert "PreToolUse" not in payload["hooks"]
+
+
 def test_install_does_not_disturb_other_session_start_entries(fake_settings) -> None:
     module, settings_path = fake_settings
     settings_path.write_text(

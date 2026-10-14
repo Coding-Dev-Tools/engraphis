@@ -100,6 +100,7 @@ See [hosted plans and Jev details](https://github.com/Coding-Dev-Tools/engraphis
 - [Cloud Sync](https://github.com/Coding-Dev-Tools/engraphis/blob/522def372c45a26d46bc7a05829964ae0240f3a9/docs/SYNC.md)
 - [Pi extension](https://github.com/Coding-Dev-Tools/engraphis/blob/522def372c45a26d46bc7a05829964ae0240f3a9/integrations/pi/README.md)
 - [Memory write review](https://github.com/Coding-Dev-Tools/engraphis/blob/522def372c45a26d46bc7a05829964ae0240f3a9/docs/WRITE_REVIEW.md)
+- [Coding-agent file protection](docs/FILE_PROTECTION.md)
 - [Security policy](https://github.com/Coding-Dev-Tools/engraphis/blob/522def372c45a26d46bc7a05829964ae0240f3a9/SECURITY.md)
 - [Hosted plans and licensing](https://github.com/Coding-Dev-Tools/engraphis/blob/522def372c45a26d46bc7a05829964ae0240f3a9/docs/HOSTED_PLANS.md)
 
