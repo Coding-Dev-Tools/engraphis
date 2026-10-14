@@ -3009,6 +3009,29 @@ test('Explore explains its colours and lists every entity and relation for keybo
   expect(errors).toEqual([]);
 });
 
+test('relation pagination focuses the first newly revealed row', async ({ page }) => {
+  const nodes = Array.from({ length: 82 }, (_, i) => ({
+    id: `node-${i}`, label: `Node ${i}`, type: 'concept',
+  }));
+  const edges = nodes.slice(1).map(node => ({
+    source: nodes[0].id, target: node.id, label: 'related', layer: 'semantic',
+  }));
+  await mockApi(page, { graphScene: { nodes, edges, meta: { total_nodes: 82, total_edges: 81 } } });
+  await page.goto('/');
+  await expect(page.locator('#connection-status')).toContainText('Local engine connected');
+  await page.locator('.nav-item[data-view="relations"]').click();
+  await expect(page.locator('#graph-canvas')).toHaveAttribute('aria-busy', 'false');
+  await page.getByRole('tab', { name: 'Analyse' }).click();
+  const rows = page.locator('#graph-relation-list .graph-relation-row');
+  await expect(rows).toHaveCount(40);
+  await page.getByRole('button', { name: 'Show 40 more relations', exact: true }).click();
+  await expect(rows).toHaveCount(80);
+  await expect(rows.nth(40).locator('button').first()).toBeFocused();
+  await page.getByRole('button', { name: 'Show 1 more relations', exact: true }).click();
+  await expect(rows).toHaveCount(81);
+  await expect(rows.nth(80).locator('button').first()).toBeFocused();
+});
+
 for (const every of [false, true]) {
   test(`Explore keeps accessible navigation within the ${every ? 'Every-node' : 'overview'} scope`, async ({ page }) => {
     const errors = browserErrors(page);

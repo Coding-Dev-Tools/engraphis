@@ -9478,6 +9478,35 @@ def test_disconnected_entities_are_labelled_as_separate_communities() -> None:
 
 
 @requires_node
+def test_filtered_community_legend_keeps_its_original_name_and_color() -> None:
+    report = _run_engine(
+        """
+        const api = G.create(el, { reducedMotion: () => true });
+        api.setData({
+          nodes: ['h1', 'h2', 'h3', 'v1', 'v2'].map(id => ({
+            id, repo: id.startsWith('h') ? 'hidden' : 'visible',
+          })),
+          links: [{ source: 'h1', target: 'h2' }, { source: 'h2', target: 'h3' },
+            { source: 'v1', target: 'v2' }],
+        });
+        api.setColorBy('community'); api.setScope({ showUnlinked: true });
+        const before = api.legend(8);
+        api.setRepoFilter('visible'); const filtered = api.legend(8);
+        api.setRepoFilter(''); const restored = api.legend(8);
+        emit({ before, filtered, restored });
+        """
+    )
+    assert len(report["before"]["items"]) == 2
+    assert len(report["filtered"]["items"]) == 1
+    surviving = report["filtered"]["items"][0]
+    original = next(item for item in report["before"]["items"] if item["key"] == surviving["key"])
+    assert surviving["label"] == original["label"]
+    assert surviving["color"] == original["color"]
+    assert surviving["label"] == "Cluster 2"
+    assert report["restored"] == report["before"]
+
+
+@requires_node
 def test_graph_analysis_is_stack_safe_and_bounded_on_a_large_store() -> None:
     """A long chain of entities is the worst case for both analyses.
 

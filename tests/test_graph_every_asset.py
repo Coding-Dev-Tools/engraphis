@@ -509,6 +509,32 @@ try {
     assert report["ok"], report.get("error")
 
 
+def test_every_community_legend_keeps_names_and_colors_when_scope_changes():
+    script = r"""
+const fs = require('fs');
+const source = fs.readFileSync('engraphis/dashboard_assets/engraphis-graph-every.js', 'utf8');
+const start = source.indexOf('      legend(limit) {');
+const end = source.indexOf('\n      resize, fit,', start);
+if (start < 0 || end < 0) throw new Error('missing legend');
+const state = { colorBy: 'community', ready: true,
+  ids: ['h1', 'h2', 'h3', 'v1', 'v2'], communities: [0, 0, 0, 1, 1] };
+let filtered = false;
+const passesFilters = index => !filtered || index >= 3;
+const nodeColor = index => ['red', 'blue'][state.communities[index]];
+eval('function ' + source.slice(start, end).trim().replace(/,$/, ''));
+const before = legend(); filtered = true; const hidden = legend();
+filtered = false; const restored = legend();
+console.log(JSON.stringify({ before, hidden, restored }));
+"""
+    result = subprocess.run(
+        ["node", "-e", script], cwd=ROOT, check=True, capture_output=True, text=True, timeout=20,
+    )
+    report = json.loads(result.stdout)
+    assert report["hidden"]["items"] == [report["before"]["items"][1]]
+    assert report["hidden"]["items"][0]["label"] == "Cluster 2"
+    assert report["restored"] == report["before"]
+
+
 def test_renderer_scope_filters_match_the_main_engine() -> None:
     """"Unlinked nodes" governs degree-zero entities; "Minimum links" only linked ones.
 

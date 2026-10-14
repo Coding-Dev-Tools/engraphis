@@ -85,8 +85,9 @@
         limits[kind] += PAGE;
         render(false);
         const list = byId(kind === 'nodes' ? 'graph-entity-list' : 'graph-relation-list');
-        const items = list.querySelectorAll(kind === 'nodes' ? '.graph-explorer-item' : '.graph-relation-row button');
-        const next = items[limits[kind] - PAGE];
+        const items = list.querySelectorAll(kind === 'nodes' ? '.graph-explorer-item' : '.graph-relation-row');
+        const row = items[limits[kind] - PAGE];
+        const next = kind === 'nodes' ? row : row && row.querySelector('button:not(:disabled)');
         if (next) next.focus();
       });
       return control;

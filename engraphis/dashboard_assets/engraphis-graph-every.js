@@ -1636,9 +1636,9 @@
         const items = [...counts.entries()]
           .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
           .slice(0, max)
-          .map(([key, count], rank) => ({
+          .map(([key, count]) => ({
             key,
-            label: byType ? key.replace(/_/g, ' ') : `Cluster ${rank + 1}`,
+            label: byType ? key.replace(/_/g, ' ') : `Cluster ${Number(key) + 1}`,
             color: nodeColor(sample.get(key)),
             count,
           }));

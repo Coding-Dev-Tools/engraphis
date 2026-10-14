@@ -11823,9 +11823,9 @@
       const items = [...counts.entries()]
         .sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])))
         .slice(0, max)
-        .map(([key, count], rank) => ({
+        .map(([key, count]) => ({
           key: String(key),
-          label: community ? (topics.get(key) || `Cluster ${rank + 1}`) : String(key).replace(/_/g, ' '),
+          label: community ? (topics.get(key) || `Cluster ${Number(key) + 1}`) : String(key).replace(/_/g, ' '),
           color: community ? palette[(Number(key) || 0) % palette.length] : etypeColor(key),
           count,
         }));
