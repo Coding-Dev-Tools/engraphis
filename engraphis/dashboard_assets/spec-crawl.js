@@ -867,7 +867,7 @@
   function renderPromptStepper() {
     const stepper = document.getElementById('spec-stepper');
     if (!stepper || !currentReport || !currentReport.sections) return;
-    stepper.innerHTML = '';
+    stepper.replaceChildren();
     cachedStepperSteps = [];
 
     currentReport.sections.forEach(sec => {
@@ -894,7 +894,7 @@
   function renderMemoryStepper() {
     const stepper = document.getElementById('spec-stepper');
     if (!stepper || !currentReport || !currentReport.nodes) return;
-    stepper.innerHTML = '';
+    stepper.replaceChildren();
     cachedStepperSteps = [];
 
     currentReport.nodes.slice(0, 12).forEach((n, idx) => {
@@ -930,7 +930,7 @@
     const badge = document.getElementById('spec-sections-count');
     if (!list || !currentReport || !currentReport.sections) return;
     if (badge) badge.textContent = currentReport.sections.length;
-    list.innerHTML = '';
+    list.replaceChildren();
 
     currentReport.sections.forEach(sec => {
       const item = document.createElement('div');
@@ -946,9 +946,18 @@
 
       const track = document.createElement('div');
       track.className = 'sec-bar-track';
-      const fill = document.createElement('div');
-      fill.className = 'sec-bar-fill';
-      fill.style.width = `${Math.min(100, (sec.words / 40) * 100)}%`;
+      const fill = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      fill.setAttribute('class', 'sec-bar-fill');
+      fill.setAttribute('viewBox', '0 0 100 4');
+      fill.setAttribute('preserveAspectRatio', 'none');
+      fill.setAttribute('aria-hidden', 'true');
+      const bar = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+      const wordsInSection = Number(sec.words);
+      const width = Number.isFinite(wordsInSection)
+        ? Math.max(0, Math.min(100, (wordsInSection / 40) * 100)) : 0;
+      bar.setAttribute('width', String(width));
+      bar.setAttribute('height', '4');
+      fill.appendChild(bar);
 
       track.appendChild(fill);
       item.appendChild(label);
@@ -961,8 +970,24 @@
     const list = document.getElementById('spec-sections-list');
     const badge = document.getElementById('spec-sections-count');
     if (!list || !currentReport || !currentReport.nodes) return;
-    if (badge) badge.textContent = currentReport.nodes.length;
-    list.innerHTML = '';
+    const truncated = currentReport.truncated || currentReport.analysis_truncated;
+    const total = currentReport.total_eligible_node_count;
+    if (badge) badge.textContent = truncated && Number.isFinite(total)
+      ? `${currentReport.nodes.length} / ${total}`
+      : `${currentReport.nodes.length}${truncated ? '+' : ''}`;
+    list.replaceChildren();
+
+    if (truncated) {
+      const analyzed = currentReport.nodes.length;
+      const analyzedLabel = Number.isFinite(total)
+        ? `${analyzed} of ${total} eligible memories`
+        : `at least ${analyzed} eligible memories`;
+      const notice = document.createElement('p');
+      notice.className = 'spec-truncation-notice';
+      notice.setAttribute('role', 'status');
+      notice.textContent = `Partial audit: analyzed ${analyzedLabel}. Health score, conflicts, and policy gaps describe only this sample.`;
+      list.appendChild(notice);
+    }
 
     currentReport.nodes.forEach(node => {
       const item = document.createElement('div');
@@ -1003,10 +1028,19 @@
       points.push(`${x},${y}`);
     });
 
-    svg.innerHTML = `
-      <polygon points="${points.join(' ')}" fill="rgba(0, 255, 170, 0.2)" stroke="#00ffaa" stroke-width="1.5" />
-      <circle cx="${center}" cy="${center}" r="${radius}" fill="none" stroke="#1e293b" stroke-width="1" />
-    `;
+    const polygon = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+    polygon.setAttribute('points', points.join(' '));
+    polygon.setAttribute('fill', 'rgba(0, 255, 170, 0.2)');
+    polygon.setAttribute('stroke', '#00ffaa');
+    polygon.setAttribute('stroke-width', '1.5');
+    const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+    circle.setAttribute('cx', String(center));
+    circle.setAttribute('cy', String(center));
+    circle.setAttribute('r', String(radius));
+    circle.setAttribute('fill', 'none');
+    circle.setAttribute('stroke', '#1e293b');
+    circle.setAttribute('stroke-width', '1');
+    svg.replaceChildren(polygon, circle);
   }
 
   function renderHeatGrid() {
@@ -1051,9 +1085,13 @@
     container.className = 'spec-conflicts-list';
 
     if (conflicts.length === 0 && orphans.length === 0 && gaps.length === 0) {
-      container.innerHTML = '<div style="color:#10b981;padding:12px;font-size:11px;">Zero conflicts or gaps detected. Cluster is coherent!</div>';
-      panel4Body.innerHTML = '';
-      panel4Body.appendChild(container);
+      const empty = document.createElement('div');
+      empty.className = 'spec-clean-cluster';
+      empty.textContent = currentReport.truncated || currentReport.analysis_truncated
+        ? 'No conflicts or gaps detected in the analyzed sample.'
+        : 'No conflicts or gaps detected.';
+      container.appendChild(empty);
+      panel4Body.replaceChildren(container);
       return;
     }
 
@@ -1192,7 +1230,9 @@
     }
 
     const motto = document.getElementById('spec-score-motto');
-    if (motto) motto.textContent = 'cluster health';
+    if (motto) motto.textContent = currentReport && (currentReport.truncated || currentReport.analysis_truncated)
+      ? `sample health · first ${currentReport.node_count} nodes · more remain`
+      : 'cluster health';
   }
 
   function updateKindCounts() {
@@ -1259,6 +1299,7 @@
     document.getElementById('spec-ask-question').textContent = flag.question;
     input.dataset.flagId = flag.id;
     input.value = '';
+    document.getElementById('spec-ask-save-memory').checked = false;
     modalReturnFocus = document.activeElement;
     modal.removeAttribute('hidden');
     input.focus();
@@ -1279,11 +1320,12 @@
     const flag = currentReport && (currentReport.flags || []).find(f => f.id === input.dataset.flagId);
     if (!answer || !flag || reportScopeKey !== scopeKey() || mutationPending) return;
     const specText = currentSpecText;
+    const saveAsMemory = document.getElementById('spec-ask-save-memory').checked;
     closeModals();
     mutationPending = true;
     try {
       const data = await postSpec('/api/spec/crawl/answer', {
-        flag, answer, spec_text: specText, save_as_memory: true
+        flag, answer, spec_text: specText, save_as_memory: saveAsMemory
       }, 'prompt');
       if (data) {
         currentSpecText = data.updated_text;

@@ -150,6 +150,7 @@
       edgeGhosts: new Uint8Array(0), edgeRelations: [], edgeLayers: [], layers: null,
       totalLinks: 0, edgeVertexCount: 0,
       camera: { x: 0, y: 0, scale: 1 }, baseScale: 1, width: 1, height: 1, dpr: 1,
+      cameraOwned: false, viewportReady: false, pendingFit: null,
       styleName: opts.style || 'cyber', colorBy: 'community', typeColors: {}, themeColors: {}, palette: 'theme',
       settings: { labels: true, flow: false, flowSpeed: 45, frozen: false, mode: 'communities', repel: 48, link: 16, gravity: 48, font: 12, size: 3, linkw: 0.72,
         gravitationalConstant: 1, blackHoleMass: 1, localGravitationalConstant: 1,
@@ -168,6 +169,7 @@
     let worker = null, nodeProgram = null, edgeProgram = null;
     let nodeBuffers = {}, edgeBuffers = {};
     let hitFrame = 0, pendingHit = null, layoutFrame = 0, pendingLayoutFit = false;
+    let explorerData = null;
 
     const reducedMotion = () => {
       if (typeof opts.reducedMotion === 'function') return opts.reducedMotion() === true;
@@ -291,9 +293,11 @@
     /* ── Visibility & uploads (change-driven, never per-frame) ──────────────────── */
     function passesFilters(index) {
       if (!state.ghosts && state.nodeGhosts[index]) return false;
-      if (!state.scope.showUnlinked && !(state.degrees[index] > 0)) return false;
-      if (state.scope.minDegree > 0 && !(state.degrees[index] >= state.scope.minDegree)) return false;
-      return true;
+      /* Same contract as the main engine: "Unlinked nodes" decides degree-zero entities and
+         "Minimum links" applies only to linked ones, so the two controls never contradict. */
+      const degree = state.degrees[index] > 0 ? state.degrees[index] : 0;
+      if (degree === 0) return Boolean(state.scope.showUnlinked);
+      return !(state.scope.minDegree > 0) || degree >= state.scope.minDegree;
     }
     function edgePassesFilters(index) {
       const source = state.edgeSources[index], target = state.edgeTargets[index];
@@ -303,6 +307,7 @@
       return !state.layers || state.layers[layer] !== false;
     }
     function refreshVisibility(repaint = true) {
+      explorerData = null;
       let visible = 0;
       for (let index = 0; index < state.ids.length; index += 1) {
         const pass = passesFilters(index);
@@ -348,6 +353,7 @@
       }
       gl.bindBuffer(gl.ARRAY_BUFFER, nodeBuffers.flag);
       gl.bufferData(gl.ARRAY_BUFFER, state.nodeFlags, gl.DYNAMIC_DRAW);
+      schedule();
     }
     function uploadNodePositions() {
       if (state.contextLost || !gl || !nodeProgram) return;
@@ -971,10 +977,14 @@
     /* ── Camera & sizing ────────────────────────────────────────────────────────── */
     /* The camera touches uniforms only — the worker never hears about pan/zoom again. */
     function camera() { schedule(); scheduleLabels(true); }
+    function claimCamera() { state.cameraOwned = true; state.pendingFit = null; }
     function resize() {
       const rect = element.getBoundingClientRect();
-      state.width = Math.max(1, rect.width || element.clientWidth || 1);
-      state.height = Math.max(1, rect.height || element.clientHeight || 1);
+      const width = rect.width || element.clientWidth, height = rect.height || element.clientHeight;
+      if (width <= 0 || height <= 0) return;
+      state.width = width;
+      state.height = height;
+      state.viewportReady = true;
       state.dpr = Math.min(2, window.devicePixelRatio || 1);
       [underlay, canvas, labels].forEach(target => {
         target.width = Math.max(1, Math.floor(state.width * state.dpr));
@@ -982,10 +992,19 @@
       });
       state.underlayKey = '';
       state.lastLabelKey = '';
+      if (state.pendingFit && !state.paused) fit(state.pendingFit === 'manual');
       if (state.ready) { schedule(); scheduleLabels(true); }
     }
-    function fit() {
-      if (!state.bounds) return;
+    function fit(manual = true) {
+      // Worker fits are advisory once the person has navigated this scene.
+      if (!manual && state.pendingFit === 'manual') manual = true;
+      if (!manual && state.cameraOwned) return;
+      if (manual) claimCamera();
+      if (!state.bounds || !state.viewportReady || state.paused) {
+        state.pendingFit = manual ? 'manual' : 'automatic';
+        return;
+      }
+      state.pendingFit = null;
       const bounds = state.bounds;
       state.camera.x = (bounds.minX + bounds.maxX) / 2;
       state.camera.y = (bounds.minY + bounds.maxY) / 2;
@@ -1010,7 +1029,9 @@
       if (state.edgeVertexCount) uploadEdgePositions(); else uploadEdges();
       state.pickDirty = true;
       state.lastLabelKey = '';
-      if (doFit) fit(); else camera();
+      if (doFit) fit(false);
+      // A worker fit may be declined after navigation; new geometry still needs paint.
+      camera();
       computeCommunityRegions();
       drawRegions();
     }
@@ -1103,7 +1124,7 @@
         refreshVisibility(false);
         uploadNodePositions();
         uploadEdges();
-        fit();
+        fit(false);
         if (message.type === 'preview') stats({ progressive: true, linksPending: true });
         else if (typeof opts.onMetrics === 'function') opts.onMetrics(api.metrics());
         schedule();
@@ -1155,6 +1176,7 @@
         worker.postMessage({ type: 'settings', settings: state.settings, relayout: false });
         return;
       }
+      if (fitLayout) { state.cameraOwned = false; state.pendingFit = null; }
       pendingLayoutFit = pendingLayoutFit || fitLayout;
       if (layoutFrame) return;
       layoutFrame = raf(() => {
@@ -1234,6 +1256,7 @@
     const activePointers = new Map();
     function applyPinch() {
       if (activePointers.size !== 2) return;
+      claimCamera();
       const [p1, p2] = [...activePointers.values()];
       const dist = Math.hypot(p2.x - p1.x, p2.y - p1.y) || 1;
       const rect = element.getBoundingClientRect();
@@ -1261,6 +1284,7 @@
       }
       if (state.drag) {
         const dx = event.clientX - state.drag.x, dy = event.clientY - state.drag.y;
+        if (dx || dy) claimCamera();
         if (Math.abs(dx) + Math.abs(dy) > 3) state.drag.moved = true;
         state.camera.x = state.drag.cameraX - dx / state.camera.scale;
         state.camera.y = state.drag.cameraY - dy / state.camera.scale;
@@ -1293,6 +1317,7 @@
       if (!state.drag && (!event.relatedTarget || event.relatedTarget !== canvas)) clearHover();
     });
     canvas.addEventListener('wheel', event => {
+      claimCamera();
       const rect = element.getBoundingClientRect();
       const before = world(event.clientX - rect.left, event.clientY - rect.top);
       state.camera.scale = clamp(state.camera.scale * Math.exp(-event.deltaY * 0.0012), 0.005, 7);
@@ -1321,7 +1346,10 @@
         case 'Escape': clearFocus(); clearHover(); break;
         default: handled = false;
       }
-      if (handled) { camera(); event.preventDefault(); }
+      if (handled) {
+        if (!['Escape', 'f', 'F'].includes(event.key)) claimCamera();
+        camera(); event.preventDefault();
+      }
     };
     element.tabIndex = 0;
     element.addEventListener('keydown', handleKeydown);
@@ -1394,6 +1422,7 @@
     function destroyGraph() {
       if (state.destroyed) return;
       state.destroyed = true;
+      explorerData = null;
       state.paused = true;
       if (hitFrame) { caf(hitFrame); hitFrame = 0; }
       if (layoutFrame) { caf(layoutFrame); layoutFrame = 0; }
@@ -1440,12 +1469,41 @@
 
     const api = {
       exportImageCanvas,
-      apply(fn, shouldFit) { if (typeof fn === 'function') fn(api); if (shouldFit) fit(); return api; },
+      /* Canonical scope-filtered entities/relations, independent of camera and hover
+         dimming. Worker position updates reuse this snapshot without sorting or DOM work. */
+      visibleData() {
+        if (explorerData) return explorerData;
+        const nodes = [], links = [];
+        if (state.ready && !state.destroyed) {
+          for (let index = 0; index < state.ids.length; index += 1) {
+            if (!passesFilters(index)) continue;
+            const item = nodeAt(index);
+            nodes.push({ id: item.id, name: item.label, etype: item.type, degree: state.degrees[index] || 0 });
+          }
+          for (let index = 0; index < state.edgeSources.length; index += 1) {
+            if (!edgePassesFilters(index)) continue;
+            links.push({
+              source: state.ids[state.edgeSources[index]], target: state.ids[state.edgeTargets[index]],
+              label: state.edgeRelations[index], layer: state.edgeLayers[index] || 'semantic',
+              ghost: Boolean(state.edgeGhosts[index]),
+            });
+          }
+        }
+        explorerData = { nodes, links };
+        return explorerData;
+      },
+      apply(fn, shouldFit) {
+        if (typeof fn === 'function') fn(api);
+        if (shouldFit) { state.cameraOwned = false; state.pendingFit = null; fit(false); }
+        return api;
+      },
       setData(data) {
         if (state.destroyed || !worker) return api;
         const nodes = Array.isArray(data && data.nodes) ? data.nodes : [];
         const links = Array.isArray(data && data.links) ? data.links : (data && data.edges) || [];
         state.ready = false; state.error = null; state.lastLabelKey = ''; state.layoutPending = true;
+        explorerData = null;
+        state.cameraOwned = false; state.pendingFit = null; state.bounds = null;
         state.pendingLayout = null;
         state.hover = -1; state.focus = -1; state.hoverPoint = [0, 0]; state.focusPoint = [0, 0];
         state.neighbors = null; state.incidentEdges = null; state.connectionHighlights = null;
@@ -1503,6 +1561,7 @@
       },
       setLayers(value) {
         state.layers = value && typeof value === 'object' ? { ...value } : null;
+        explorerData = null;
         uploadEdges();
         state.lastLabelKey = '';
         state.labelLayout = [];
@@ -1543,6 +1602,7 @@
       reveal(id) {
         const index = state.idIndex.get(String(id));
         if (index === undefined || !state.nodeFlags[index]) return false;
+        claimCamera();
         state.camera.x = state.positions[index * 2];
         state.camera.y = state.positions[index * 2 + 1];
         state.camera.scale = Math.max(1.2, state.camera.scale);
@@ -1559,6 +1619,34 @@
         state.ids.forEach((id, index) => { result[id] = state.communities[index] ?? index; });
         return result;
       },
+      /* Same contract as the quality engine's legend(): what node colour means right now. */
+      legend(limit) {
+        const max = Math.max(1, Math.min(24, Number(limit) || 10));
+        const byType = state.colorBy === 'type' || state.palette === 'custom';
+        if (state.colorBy === 'connections' && !byType) {
+          return { mode: 'connections', scale: activePalette().slice().reverse(),
+            first: 'Most connected', last: 'Least connected' };
+        }
+        const counts = new Map();
+        const sample = new Map();
+        for (let index = 0; index < state.ids.length; index += 1) {
+          if (!state.ready || !passesFilters(index)) continue;
+          const key = byType ? String(state.types[index] || 'person_or_concept')
+            : String(state.communities[index] ?? index);
+          counts.set(key, (counts.get(key) || 0) + 1);
+          if (!sample.has(key)) sample.set(key, index);
+        }
+        const items = [...counts.entries()]
+          .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+          .slice(0, max)
+          .map(([key, count]) => ({
+            key,
+            label: byType ? key.replace(/_/g, ' ') : `Cluster ${Number(key) + 1}`,
+            color: nodeColor(sample.get(key)),
+            count,
+          }));
+        return { mode: byType ? 'type' : 'community', items, total: counts.size };
+      },
       resize, fit,
       reheat() {
         if (state.settings.frozen || !worker) return api;
@@ -1574,7 +1662,7 @@
         if (state.labelFrame) { caf(state.labelFrame); state.labelFrame = 0; }
         return api;
       },
-      resume() { state.paused = false; flushPendingLayout(); schedule(); scheduleLabels(); return api; },
+      resume() { state.paused = false; resize(); flushPendingLayout(); schedule(); scheduleLabels(); return api; },
       state() {
         return {
           mode: 'all', presentation: 'all',

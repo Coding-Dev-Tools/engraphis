@@ -595,9 +595,11 @@ def test_public_capability_and_support_docs_match_the_shipped_tree():
             "engraphis/dashboard_assets/index.html",
             "engraphis/dashboard_assets/ledger.css",
             "engraphis/dashboard_assets/ledger.js",
-            "engraphis/classic_assets/index.html",
-            "engraphis/classic_assets/dashboard.js",
-            "engraphis/static/dashboard.js", "engraphis/static/index.html",
+            # First-party Ledger scripts split out of ledger.js.
+            "engraphis/dashboard_assets/action-dialog.js",
+            "engraphis/dashboard_assets/graph-explorer.js",
+            "engraphis/dashboard_assets/import-sources.js",
+            "engraphis/dashboard_assets/markdown.js",
         )
     ]
     public_paths.extend((ROOT / "docs").rglob("*.md"))

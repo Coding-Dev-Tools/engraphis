@@ -19,6 +19,7 @@ import hashlib
 import math
 import re
 import unicodedata
+from bisect import bisect_right
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -285,11 +286,18 @@ def _code_ranges(text: str) -> list[tuple[int, int]]:
         ranges.append((fence_start, len(text)))
     for match in re.finditer(r"`[^`\n]+`", text):
         ranges.append((match.start(), match.end()))
-    return sorted(ranges)
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(ranges):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
 
 
 def _in_ranges(pos: int, ranges: Sequence[tuple[int, int]]) -> bool:
-    return any(start <= pos < end for start, end in ranges)
+    index = bisect_right(ranges, (pos, float("inf"))) - 1
+    return index >= 0 and pos < ranges[index][1]
 
 
 def _parse_sections(text: str, template: SpecTemplate,
@@ -318,7 +326,7 @@ def _parse_sections(text: str, template: SpecTemplate,
             if match:
                 title = match.group(match.lastindex or 1).strip()
             elif _XML_CLOSE.match(line):
-                title = ""  # closing tag: consumes the line, starts no section
+                title = ""  # closing tag: end the section, retain any following prose
         if title is not None:
             heads.append((offset, min(line_end + 1, len(text)), title))
         offset = line_end + 1
@@ -329,6 +337,9 @@ def _parse_sections(text: str, template: SpecTemplate,
     for i, (head_start, body_start, title) in enumerate(heads):
         end = heads[i + 1][0] if i + 1 < len(heads) else len(text)
         if not title:
+            if text[body_start:end].strip():
+                sections.append(_Section(len(sections), "continuation", "other",
+                                         head_start, body_start, end))
             continue
         clean = re.sub(r"^[\d.)\s]+", "", title).strip(" *_`") or title
         sections.append(_Section(len(sections), clean[:80], template.axis_for(clean),
@@ -663,11 +674,18 @@ def compose_memory_spec(memories: Iterable[Mapping[str, Any]], *, limit: int = 2
     Titles become headings so section/axis mapping still applies; the memory id is kept
     in the heading suffix so flags can be traced back to the originating record.
     """
+    return compose_memory_spec_with_truncation(memories, limit=limit)[0]
+
+
+def compose_memory_spec_with_truncation(
+    memories: Iterable[Mapping[str, Any]], *, limit: int = 200,
+) -> tuple[str, bool]:
+    """Render procedural memories and report when count or character caps omit input."""
     parts: list[str] = []
     total = 0
     for i, memory in enumerate(memories):
         if i >= limit:
-            break
+            return "\n".join(parts), True
         title = " ".join(str(memory.get("title") or "").split())[:80] or f"memory {i + 1}"
         content = str(memory.get("content") or "").strip()
         if not content:
@@ -675,10 +693,10 @@ def compose_memory_spec(memories: Iterable[Mapping[str, Any]], *, limit: int = 2
         block = f"## {title}\n{content}\n"
         addition = len(block) + bool(parts)
         if total + addition > MAX_SPEC_CHARS:
-            break
+            return "\n".join(parts), True
         parts.append(block)
         total += addition
-    return "\n".join(parts)
+    return "\n".join(parts), False
 
 
 def apply_answer(text: str, flag: Mapping[str, Any], answer: str) -> str:
@@ -743,26 +761,40 @@ def _extract_node_parameters(text: str) -> dict[str, str]:
 
 _ENFORCE_VERBS = frozenset({"must", "always", "required", "enforce", "mandatory", "require"})
 _FORBID_VERBS = frozenset({"never", "forbid", "deprecated", "disable", "prohibit", "skip", "omit"})
+_NEGATIVE_ACTION_VERBS = frozenset({"forbid", "disable", "prohibit", "skip", "omit"})
 
 
 def _extract_node_directives(text: str) -> dict[str, str]:
     directives: dict[str, str] = {}
-    tokens = [w.lower() for w in re.findall(r"[a-zA-Z_]{2,20}", text)]
-    for i, tok in enumerate(tokens):
-        negated = (i + 1 < len(tokens) and tokens[i + 1] == "not") or (
-            i > 0 and tokens[i - 1] == "not")
-        if tok in _FORBID_VERBS or (
-            tok in _ENFORCE_VERBS | {"do", "does", "should", "may", "can"} and negated
-        ):
-            action = "forbid"
-        elif tok in _ENFORCE_VERBS:
-            action = "enforce"
-        else:
-            continue
-        for offset in (1, 2, 3):
-            if i + offset < len(tokens):
+    for clause in re.split(r"[.!?;,\n]", text):
+        tokens = [w.lower() for w in re.findall(r"[a-zA-Z_]{2,20}", clause)]
+        consumed: set[int] = set()
+        for i, tok in enumerate(tokens):
+            if i in consumed:
+                continue
+            negated = (i + 1 < len(tokens) and tokens[i + 1] == "not") or (
+                i > 0 and tokens[i - 1] == "not")
+            if tok in _FORBID_VERBS or (
+                tok in _ENFORCE_VERBS | {"do", "does", "should", "may", "can"} and negated
+            ):
+                action = "enforce" if tok in _NEGATIVE_ACTION_VERBS and negated else "forbid"
+            elif tok in _ENFORCE_VERBS:
+                action = "enforce"
+            else:
+                continue
+            for offset in (1, 2, 3):
+                if i + offset >= len(tokens):
+                    break
                 target = tokens[i + offset]
-                if target not in _ENFORCE_VERBS | _FORBID_VERBS | _STOPWORDS:
+                if target in {"require", "enforce"}:
+                    # Nested verbs inherit the governing directive, including its negation.
+                    consumed.add(i + offset)
+                elif target in _NEGATIVE_ACTION_VERBS:
+                    consumed.add(i + offset)
+                    action = "enforce" if action == "forbid" else "forbid"
+                elif target in _ENFORCE_VERBS | _FORBID_VERBS:
+                    break
+                elif target not in _STOPWORDS:
                     directives[target] = action
     return directives
 
@@ -963,8 +995,8 @@ def analyze_memory_nodes(
                 toks_j = node_tokens_map[id_j]
                 sim = jaccard(toks_i, toks_j)
                 if sim >= 0.35 or subj_match:
-                    edge_map[id_i].add(id_j)
-                    edge_map[id_j].add(id_i)
+                    # Inferred overlaps are suggestions, not persisted connectivity.
+                    # Keep orphan degree and cluster health tied to declared links.
                     resolved_links.append({
                         "a": id_i,
                         "b": id_j,
@@ -1111,9 +1143,9 @@ def analyze_memory_nodes(
 
     for target, action_dict in dir_map.items():
         if "enforce" in action_dict and "forbid" in action_dict:
-            for idx_a in action_dict["enforce"][-3:]:
+            for idx_a in action_dict["enforce"]:
                 node_a = parsed_nodes[idx_a]
-                for idx_b in action_dict["forbid"][-3:]:
+                for idx_b in action_dict["forbid"]:
                     node_b = parsed_nodes[idx_b]
                     if (node_a["subject_key"] and node_b["subject_key"]
                             and node_a["subject_key"] != node_b["subject_key"]):
@@ -1309,7 +1341,8 @@ def analyze_memory_nodes(
             "vague_penalty": -vague_penalty,
         },
         "node_count": len(parsed_nodes),
-        "nodes": parsed_nodes,
+        "nodes": [{key: value for key, value in node.items() if key != "content"}
+                  for node in parsed_nodes],
         "links": resolved_links,
         "conflicts": conflicts,
         "redundancies": redundancies,

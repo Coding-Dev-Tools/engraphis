@@ -74,7 +74,7 @@ Users or orchestrators can answer the clarification directly via:
 2. **REST API**: calling `POST /api/spec/crawl/answer`.
 3. **Smart MCP**: discovering and executing `engraphis_spec_crawl_answer`.
 
-The server verifies that the flag matches the current text before replacing its span. With `save_as_memory=True`, it saves a pending procedural memory (`mtype="procedural"`, `source="spec_crawl"`). Approve it in Library before it can enter model context or procedural-memory crawls. Direct-text crawls evaluate only the supplied text; a clarification does not guarantee a higher score.
+The server verifies that the flag matches the current text before replacing its span. Persistence is opt-in: `save_as_memory` defaults to `False`, and the dashboard offers an unchecked save option. With `save_as_memory=True`, it saves a pending procedural memory (`mtype="procedural"`, `source="spec_crawl"`) in the supplied session, or the selected repo/workspace when no session is supplied. Approve it in Library before it can enter model context or procedural-memory crawls. Direct-text crawls evaluate only the supplied text; a clarification does not guarantee a higher score.
 
 ---
 
@@ -109,6 +109,8 @@ Beyond inspecting isolated single-text prompt specifications, Spec Crawl provide
 5. **Cluster Health Score**:
    - 0–100 coherence score factoring in coverage, graph connectedness, clean node ratio, and deductions for contradictions and orphans.
 
+Memory bodies are used during analysis but are not returned in node summaries. The workspace audit analyzes at most 150 eligible memories per request and reports its eligible total and truncation state; Spec Studio warns when its health score and findings describe only a partial sample.
+
 ---
 
 ## 7. Command Line Interface (CLI)
@@ -133,7 +135,9 @@ python -m scripts.spec_crawl --workspace acme --min-score 75
 ## 8. REST API Endpoints
 
 ### `POST /api/spec/crawl`
-Performs an offline, read-only analysis of up to 64,000 characters. HTTP callers can send `text` or set `crawl_procedural: true` to analyze approved procedural memories in the selected scope. Server filesystem paths are rejected. The local-operator MCP path accepts text files only under approved index roots.
+Performs an offline, read-only analysis of up to 64,000 characters. HTTP callers can send `text` or set `crawl_procedural: true` to analyze approved procedural memories in the selected scope. Procedural crawls return `procedural_total_eligible_memory_count`, `procedural_memory_count`, and `procedural_source_truncated`; the top-level `truncated` flag is also true when source memories or the analysis token limit omit content. Server filesystem paths are rejected. The local-operator MCP path accepts text files only under approved index roots.
+
+If the first approved procedural memory cannot fit the character budget, the crawl returns a validation error instead of an empty-scope audit. Pass a smaller specification or use a selected-memory audit to inspect that record.
 
 ### `POST /api/spec/crawl/answer`
 Submits a clarification for a current flagged ambiguity, returns updated text and a new report, and optionally persists a pending procedural memory.
@@ -149,7 +153,7 @@ Audits an active cluster of workspace memories for contradictions, orphans, and 
 ```
 
 ### `POST /api/spec/crawl/memories/resolve`
-Executes an explicit remediation on two live, approved memories after checking scope and ownership. `node_a` is retained; `node_b` is retired for `supersede`. Both the link and validity closure are atomic. Supersession requires `confirmed: true` following human approval.
+Executes an explicit remediation on two live, approved memories after checking scope and ownership, including workspace ancestors visible from the selected repository. Both memory IDs must be visible through the same workspace/repo/session filter. Omitting `session_id` excludes session-only memories; supplying it authorizes and restricts the action to that one session. `node_a` is retained; `node_b` is retired for `supersede` at the retained memory's `valid_from`, preserving world-time and recording-time history. The lifecycle link remains visible for inspecting the supersession chain after retirement. A closure before the retired memory's effective date is rejected. Both the link and validity closure are atomic. Supersession requires `confirmed: true` following human approval.
 
 ```json
 {
@@ -157,6 +161,7 @@ Executes an explicit remediation on two live, approved memories after checking s
   "node_a": "mem_01...",
   "node_b": "mem_02...",
   "workspace": "default",
+  "session_id": "ses_...",
   "confirmed": true
 }
 ```
@@ -164,6 +169,9 @@ Executes an explicit remediation on two live, approved memories after checking s
 ---
 
 ## 9. Smart MCP Tools
+
+The two read-only crawls are available to hosted/team viewers; clarification and resolution require member access.
+Omit `workspace` when passing a `session_id` to inherit its workspace and repository; explicitly mismatched scope selections are rejected. Default cluster audits return at most 150 eligible nodes and report `truncated`, `node_limit`, and `count_semantics`; the dashboard labels truncated health scores as a sample. Inferred similarity links are suggestions and do not count as stored connectivity or remove orphan remedies.
 
 These four Classic MCP tools are also discoverable and callable through Smart MCP actions:
 - **`engraphis_spec_crawl`**: Read-only prompt spec crawler returning scores, radar coverage, classified tokens, connection tentacles, and flags.
@@ -175,7 +183,7 @@ These four Classic MCP tools are also discoverable and callable through Smart MC
 
 ## 10. Evaluation Gate
 
-CI verifies determinism, axis classification, flag recall, qualifier precision, section counts, and score boundaries in both the full stack and NumPy-only jobs:
+CI verifies determinism, axis classification, flag recall, qualified-token avoidance, section counts, and score boundaries in both the full stack and NumPy-only jobs. Qualified-token avoidance measures the explicitly labelled negative examples; it is not a general false-positive precision estimate:
 
 ```bash
 python -m eval.spec_crawl

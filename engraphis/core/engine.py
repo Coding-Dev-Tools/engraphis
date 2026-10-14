@@ -2828,25 +2828,30 @@ class MemoryEngine:
 
     def timeline(self, query: str, *, workspace_id: str, repo_id: Optional[str] = None,
                 limit: int = 20, valid_at: Optional[float] = None,
-                known_at: Optional[float] = None, prompt_only: bool = False) -> list[MemoryRecord]:
+                known_at: Optional[float] = None, prompt_only: bool = False,
+                closed_only: bool = False) -> list[MemoryRecord]:
         """Chronological, bi-temporal history of a fact: what we believed and when.
-        Includes invalidated versions; sorted by ``valid_from``.
+        Includes invalidated versions; sorted by ``valid_from``. ``closed_only`` selects
+        known closed intervals before candidate and result limits.
         """
         flt = SearchFilter(
             workspace_id=workspace_id, repo_id=repo_id, include_ancestors=True,
-            valid_at=valid_at, known_at=known_at,
+            valid_at=now_ts() if closed_only and valid_at is None else valid_at,
+            known_at=now_ts() if closed_only and known_at is None else known_at,
         )
         recs = [
             r for _, r in self._relatedness(
                 query, flt, include_invalid=True, prompt_only=prompt_only,
+                closed_only=closed_only,
             )[:limit]
         ]
-        recs.sort(key=lambda r: r.valid_from or r.ingested_at or 0.0)
+        recs.sort(key=lambda r: r.valid_from if r.valid_from is not None else r.ingested_at or 0.0)
         return recs
 
     def _relatedness(self, query: str, flt: SearchFilter, *,
                      include_invalid: bool,
-                     prompt_only: bool = False) -> list[tuple[float, MemoryRecord]]:
+                     prompt_only: bool = False,
+                     closed_only: bool = False) -> list[tuple[float, MemoryRecord]]:
         """Score every matching memory — optionally including invalidated ones — by the
         max of semantic similarity and lexical token overlap. ``why``/``timeline`` need to
         search *through* bi-temporal history, which the normal vector index ``search()``
@@ -2874,6 +2879,7 @@ class MemoryEngine:
         out: list[tuple[float, MemoryRecord]] = []
         records = self.store.list_memories(
             flt, include_invalid=include_invalid, limit=500, prompt_only=prompt_only,
+            closed_only=closed_only,
         )
         if include_invalid:
             # History must retain closed valid-time intervals, but cannot expose a
@@ -2973,7 +2979,8 @@ class MemoryEngine:
         return {"memories": top, "last_session": last_session}
 
     # ── governance (audited; never a silent hard delete — AGENTS.md §3.2) ───────
-    def retire(self, memory_id: str, *, reason: str = "", actor: str = "user") -> dict:
+    def retire(self, memory_id: str, *, reason: str = "", actor: str = "user",
+               at: Optional[float] = None) -> dict:
         """Remove a memory from live recall while retaining temporal history.
 
         This is deliberately distinct from :meth:`secure_erase`: retirement is the
@@ -2982,7 +2989,8 @@ class MemoryEngine:
         """
         if self.store.get_memory(memory_id) is None:
             raise KeyError(f"no memory with id '{memory_id}'")
-        self.store.close_validity(memory_id, actor=actor, reason=reason or "retired by request")
+        self.store.close_validity(memory_id, at=at, actor=actor,
+                                  reason=reason or "retired by request")
         # Preserve the vector for explicit historical/as_of recall. Temporal filtering
         # keeps this retired row out of the current live view.
         return {"id": memory_id, "status": "retired", "reason": reason}

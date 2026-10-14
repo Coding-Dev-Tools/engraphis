@@ -421,7 +421,8 @@ def _is_embedder_mismatch(exc) -> bool:
 def _keyword_search(ws, q, limit=20, *, as_of: Optional[float] = None,
                     valid_at: Optional[float] = None,
                     known_at: Optional[float] = None,
-                    repo: Optional[str] = None, session_id: Optional[str] = None):
+                    repo: Optional[str] = None, session_id: Optional[str] = None,
+                    include_invalid: bool = False, closed_only: bool = False):
     """Non-semantic fallback: match memories by keyword (title/content LIKE) so the
     Recall/Why/Timeline tabs still return results when the embedder is unavailable."""
     import json as _json
@@ -454,16 +455,20 @@ def _keyword_search(ws, q, limit=20, *, as_of: Optional[float] = None,
         sql = ("SELECT id, scope, mtype, title, content, summary, pinned, importance, "
                "valid_from, valid_to, valid_to_recorded_at, ingested_at, expired_at, "
                "subject_key, claim_kind, provenance, metadata FROM memories "
-               "WHERE workspace_id=? "
-               "AND (valid_from IS NULL OR valid_from<=?) "
-               "AND (valid_to IS NULL OR ?<valid_to "
-               "OR (valid_to_recorded_at IS NOT NULL AND ?<valid_to_recorded_at)) "
-               "AND (ingested_at IS NULL OR ingested_at<=?) "
-               "AND (expired_at IS NULL OR ?<expired_at)")
-        args = [
-            row["id"], world_anchor, world_anchor, system_anchor,
-            system_anchor, system_anchor,
-        ]
+               "WHERE workspace_id=?")
+        args = [row["id"]]
+        if not include_invalid:
+            sql += (" AND (valid_from IS NULL OR valid_from<=?) "
+                    "AND (valid_to IS NULL OR ?<valid_to "
+                    "OR (valid_to_recorded_at IS NOT NULL AND ?<valid_to_recorded_at))")
+            args.extend([world_anchor, world_anchor, system_anchor])
+        sql += (" AND (ingested_at IS NULL OR ingested_at<=?) "
+                "AND (expired_at IS NULL OR ?<expired_at)")
+        args.extend([system_anchor, system_anchor])
+        if closed_only:
+            sql += (" AND valid_to IS NOT NULL AND valid_to<=? "
+                    "AND (valid_to_recorded_at IS NULL OR valid_to_recorded_at<=?)")
+            args.extend([world_anchor, system_anchor])
         if session_id:
             sql += " AND (scope IN ('workspace','user') OR (scope='session' AND session_id=?)"
             args.append(session_id)
@@ -1854,10 +1859,10 @@ def why(q: str = Query(..., min_length=1, max_length=10_000),
 @router.get("/timeline")
 def timeline(q: str = Query(..., min_length=1, max_length=10_000),
              workspace: Optional[str] = None,
-             limit: int = Query(default=20, ge=1, le=100)):
+             limit: int = Query(default=20, ge=1, le=100), closed_only: bool = False):
     ws = workspace or _default_ws()
     try:
-        out = service().timeline(q, workspace=ws, limit=limit)
+        out = service().timeline(q, workspace=ws, limit=limit, closed_only=closed_only)
     except WorkspaceBindingError:
         logger.info("dashboard timeline request rejected by workspace binding")
         raise HTTPException(status_code=403, detail={
@@ -1873,7 +1878,9 @@ def timeline(q: str = Query(..., min_length=1, max_length=10_000),
                 raise _invalid_request() from None
             logger.error("dashboard timeline failed (%s)", type(exc).__name__)
             raise HTTPException(status_code=500, detail={"error": "internal server error"})
-        mems = _keyword_search(ws, q, limit)
+        mems = _keyword_search(ws, q, limit, include_invalid=True, closed_only=closed_only)
+        mems.sort(key=lambda record: record["valid_from"] if record.get("valid_from") is not None
+                  else record.get("ingested_at") or 0.0)
         return {"query": q, "workspace": ws, "history": mems, "mode": "keyword",
                 "note": "Keyword match — install sentence-transformers for semantic search."}
     return {"query": q, "workspace": ws, "mode": "semantic",
@@ -1889,12 +1896,15 @@ def review_inbox(workspace: Optional[str] = None, repo: Optional[str] = None,
 
 @router.get("/proactive")
 def proactive(workspace: Optional[str] = None,
-              k: int = Query(default=10, ge=1, le=50)):
+              k: int = Query(default=10, ge=1, le=50),
+              repo: Optional[str] = Query(default=None, max_length=200)):
+    """Queryless agenda. The last-session handoff is recorded per repository, so it is
+    only populated when ``repo`` names one; otherwise ``handoff`` is ``null``."""
     ws = workspace or _default_ws()
-    out = _run(service().recall_proactive, workspace=ws, k=k)
+    out = _run(service().recall_proactive, workspace=ws, repo=repo or None, k=k)
     mems = out.get("memories") or out.get("results") or []
     return {"workspace": ws, "memories": [_mem(m) for m in mems],
-            "handoff": out.get("handoff") or out.get("last_session")}
+            "handoff": out.get("handoff") or out.get("last_session") or None}
 
 
 class _ProactiveContextReq(BaseModel):
@@ -2905,7 +2915,7 @@ class _SpecCrawlAnswerReq(BaseModel):
     workspace: Optional[str] = None
     repo: Optional[str] = None
     session_id: Optional[str] = None
-    save_as_memory: StrictBool = True
+    save_as_memory: StrictBool = False
 
 
 @router.post("/spec/crawl/answer")
@@ -2928,8 +2938,8 @@ class _SpecCrawlMemoriesReq(BaseModel):
     workspace: Optional[str] = None
     repo: Optional[str] = None
     session_id: Optional[str] = None
-    memory_ids: Optional[list[str]] = None
-    mtypes: Optional[list[str]] = None
+    memory_ids: Optional[list[str]] = Field(default=None, max_length=150)
+    mtypes: Optional[list[str]] = Field(default=None, max_length=4)
     include_trace: StrictBool = True
 
 
@@ -2951,16 +2961,17 @@ def spec_crawl_memories(req: _SpecCrawlMemoriesReq):
 class _SpecCrawlResolveReq(BaseModel):
     action: str = Field(min_length=1, max_length=64)
     node_a: str = Field(min_length=1, max_length=256)
-    node_b: Optional[str] = Field(default=None, max_length=256)
+    node_b: str = Field(min_length=1, max_length=256)
     workspace: Optional[str] = None
     repo: Optional[str] = None
+    session_id: Optional[str] = None
     confirmed: StrictBool = False
 
 
 @router.post("/spec/crawl/memories/resolve")
 def spec_crawl_resolve(req: _SpecCrawlResolveReq):
     """Execute remediation on memory cluster audit: supersede older conflicting node or link orphan."""
-    ws = req.workspace if req.workspace is not None or req.repo else _default_ws()
+    ws = req.workspace if req.workspace is not None or req.repo or req.session_id else _default_ws()
     return _run(
         service().spec_crawl_resolve,
         action=req.action,
@@ -2968,6 +2979,7 @@ def spec_crawl_resolve(req: _SpecCrawlResolveReq):
         node_b=req.node_b,
         workspace=ws,
         repo=req.repo,
+        session_id=req.session_id,
         confirmed=req.confirmed,
     )
 

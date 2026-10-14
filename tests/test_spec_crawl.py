@@ -7,6 +7,8 @@ from engraphis.core.spec_crawl import (
     MAX_SPEC_CHARS,
     MAX_FLAGS,
     MAX_TRACED_CLAIMS,
+    _code_ranges,
+    _in_ranges,
     SpecCrawlError,
     apply_answer,
     compose_memory_spec,
@@ -24,6 +26,20 @@ def test_empty_and_invalid_input():
 
     with pytest.raises(SpecCrawlError, match="exceeds"):
         crawl_spec("a" * (MAX_SPEC_CHARS + 1))
+
+
+def test_workspace_cli_emits_actionable_gap_recommendations_and_sample_notice(monkeypatch, capsys):
+    from scripts import spec_crawl as cli
+    report = {"node_count": 150, "analysis_truncated": True, "total_eligible_node_count": 151,
+              "policy_gaps": [{"axis": "review", "description": "Missing review guidance.",
+                               "remedy": {"recommendation": "Require test verification."}},
+                              {"axis": "team", "description": "Assign an owner."}]}
+    monkeypatch.setattr(cli, "_audit_workspace_memories", lambda **kwargs: report)
+    assert cli.main(["--workspace", "alpha", "--db", ":memory:"]) == 0
+    output = capsys.readouterr().out
+    assert "[GAP] REVIEW: Require test verification." in output
+    assert "[GAP] TEAM: Assign an owner." in output
+    assert "Partial audit: 150 of 151 eligible nodes" in output
 
 
 def test_basic_spec_crawl_determinism():
@@ -106,6 +122,25 @@ The reviewer approves the commit.
     # The words inside the code fence should not be flagged as vague
     vague_flags = [f for f in r["flags"] if f["kind"] == "vague"]
     assert len(vague_flags) == 0
+
+
+@pytest.mark.parametrize("tail", ["Check every result carefully.", "Never deploy all projects without approval."])
+def test_xml_closing_tags_preserve_unheaded_trailing_text(tail):
+    spec = "<role>\nRepository maintainer.\n</role>\n" + tail
+    report = crawl_spec(spec)
+    assert len(report["sections"]) == 2
+    assert report["sections"][1]["axis"] == "other"
+    assert any(flag["kind"] == "vague" and flag["start"] >= spec.index(tail)
+               for flag in report["flags"])
+    assert report["counts"]["read"] >= len(tail.split())
+
+
+def test_xml_continuations_between_sections_keep_source_offsets():
+    spec = "<role>\nMaintainer.\n</role>\nCheck every result.\n<rules>\nVerify tests.\n</rules>\nAsk all owners."
+    report = crawl_spec(spec)
+    assert [section["axis"] for section in report["sections"]] == ["role", "other", "rules", "other"]
+    assert {flag["token"] for flag in report["flags"] if flag["kind"] == "vague"} == {"every", "all"}
+    assert all(spec[flag["start"]:flag["end"]] == flag["token"] for flag in report["flags"])
 
 
 def test_vague_qualifier_window():
@@ -256,3 +291,36 @@ def test_large_punctuation_input_and_path_tokens():
     assert report["word_count"] == 0
     paths = crawl_spec("# Context\nRead docs/spec.md and ../agent.md.")
     assert paths["counts"]["kinds"]["source"] >= 2
+
+
+def test_dense_inline_code_near_character_limit_is_bounded_and_unflagged():
+    text = "# Rules\n" + "`x`\n" * 15_998
+    assert len(text) == MAX_SPEC_CHARS
+    report = crawl_spec(text, include_trace=False)
+    assert report["truncated"] is True
+    assert report["flags"] == []
+    assert report["sections"][0]["axis"] == "rules"
+
+
+def test_overlapping_code_spans_merge_and_membership_does_not_rescan_them():
+    text = "```\n`all`\n```\nall"
+    ranges = _code_ranges(text)
+    assert ranges == [(0, text.index("\nall"))]
+    assert _in_ranges(text.index("`all`"), ranges)
+    assert not _in_ranges(text.rindex("all"), ranges)
+
+    class CountedRanges(list):
+        reads = 0
+
+        def __getitem__(self, index):
+            self.reads += 1
+            return super().__getitem__(index)
+
+        def __iter__(self):
+            for index in range(len(self)):
+                yield self[index]
+
+    dense = CountedRanges((i * 4, i * 4 + 3) for i in range(16_000))
+    assert _in_ranges(63_998, dense)
+    assert not _in_ranges(63_999, dense)
+    assert dense.reads <= 40

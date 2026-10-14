@@ -51,6 +51,17 @@ async function crawl(page, text = '# Rules\nVerify all tests.') {
   await expect(page.locator('#spec-score-display')).toHaveText(String(prompt.score));
 }
 
+test('bounded memory audits label health and node counts as a sample', async ({ page }) => {
+  await fixture(page);
+  await page.route('**/api/spec/crawl/memories', route => route.fulfill({ json: {
+    ...cluster, analysis_truncated: true, total_eligible_node_count: 151,
+  } }));
+  await page.locator('#spec-mode-memories').click();
+  await expect(page.locator('#spec-score-motto')).toContainText('sample health');
+  await expect(page.locator('#spec-score-motto')).toContainText('more remain');
+  await expect(page.locator('#spec-sections-count')).toHaveText('2 / 151');
+});
+
 test('API failure clears scores and shows the real failure', async ({ page }) => {
   const { errors } = await fixture(page);
   await page.route('**/api/spec/crawl', route => route.fulfill({ status: 503, json: { detail: 'Offline analysis unavailable' } }));
@@ -91,10 +102,29 @@ test('clarification binds current source and scope and reports pending review', 
   await expect(page.getByRole('button', { name: 'Clarify all' })).toBeFocused();
   await page.getByRole('button', { name: 'Clarify all' }).click();
   await page.locator('#spec-ask-input').fill('12');
+  await expect(page.locator('#spec-ask-save-memory')).not.toBeChecked();
+  await page.locator('#spec-ask-save-memory').check();
   await page.locator('#spec-ask-submit').click();
   await expect(page.locator('#spec-toast')).toContainText('saved for review');
   const answer = requests.find(item => item.path === '/spec/crawl/answer').body;
   expect(answer).toMatchObject({ workspace: 'alpha', repo: 'repoA', spec_text: '# Rules\nVerify all tests.', answer: '12', save_as_memory: true });
+  expect(errors).toEqual([]);
+});
+
+test('clarifications update the spec without saving a memory by default', async ({ page }) => {
+  const { requests, errors } = await fixture(page);
+  await page.route('**/api/spec/crawl/answer', async route => {
+    requests.push({ path: '/spec/crawl/answer', body: route.request().postDataJSON() });
+    await route.fulfill({ json: { updated_text: '# Rules\nVerify 12 tests.', memory_id: null,
+      new_report: { ...prompt, flags: [] } } });
+  });
+  await crawl(page);
+  await page.getByRole('button', { name: 'Clarify all' }).click();
+  await expect(page.locator('#spec-ask-save-memory')).not.toBeChecked();
+  await page.locator('#spec-ask-input').fill('12');
+  await page.locator('#spec-ask-submit').click();
+  await expect(page.locator('#spec-toast')).toContainText('Specification updated.');
+  expect(requests.find(item => item.path === '/spec/crawl/answer').body.save_as_memory).toBe(false);
   expect(errors).toEqual([]);
 });
 

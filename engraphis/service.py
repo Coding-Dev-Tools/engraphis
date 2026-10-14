@@ -65,7 +65,7 @@ from engraphis.core.interfaces import (
 from engraphis.core.spec_crawl import (
     SpecCrawlError,
     apply_answer,
-    compose_memory_spec,
+    compose_memory_spec_with_truncation,
     crawl_spec,
 )
 from engraphis.core.poisoning import (
@@ -5019,7 +5019,7 @@ class MemoryService:
 
     # ── governance: retire / secure erase / pin / correct / promote ───────────
     def retire(self, memory_id: str, *, workspace: str, repo: Optional[str] = None,
-               reason: str = "", actor: str = "user") -> dict:
+               reason: str = "", actor: str = "user", at: Optional[float] = None) -> dict:
         """Bi-temporally retire one memory. This preserves history and indexes."""
         mid = _clean_text(memory_id, field="memory_id", max_chars=MAX_NAME_CHARS)
         reason = _clean_text(reason, field="reason", max_chars=MAX_TITLE_CHARS, required=False)
@@ -5029,7 +5029,7 @@ class MemoryService:
         wid, rid = self._require_scope(workspace, repo)
         self._check_owns(mid, wid, rid)
         try:
-            return self.engine.retire(mid, reason=reason, actor=actor)
+            return self.engine.retire(mid, reason=reason, actor=actor, at=at)
         except (KeyError, ValueError) as exc:
             raise ValidationError(str(exc))
 
@@ -5278,7 +5278,8 @@ class MemoryService:
 
     def timeline(self, query: str, *, workspace: str, repo: Optional[str] = None,
                 limit: int = 20, as_of: Optional[float] = None,
-                valid_at: Optional[float] = None, known_at: Optional[float] = None) -> dict:
+                valid_at: Optional[float] = None, known_at: Optional[float] = None,
+                closed_only: bool = False) -> dict:
         """Chronological, bi-temporal history of a fact: what we believed and when."""
         query = _clean_text(query, field="query", max_chars=MAX_CONTENT_CHARS)
         wid, rid = self._require_scope(workspace, repo)
@@ -5289,6 +5290,7 @@ class MemoryService:
         recs = self.engine.timeline(
             query, workspace_id=wid, repo_id=rid, limit=limit,
             valid_at=valid_at, known_at=known_at, prompt_only=True,
+            closed_only=closed_only,
         )
         return {"query": query, "history": [_mem_to_dict(r) for r in recs]}
 
@@ -7805,7 +7807,11 @@ class MemoryService:
         frontier = [rec]
         while frontier:
             cur = frontier.pop()
-            for pid in self._lineage_predecessors(cur.metadata):
+            lineage_ids = self._lineage_predecessors(cur.metadata)
+            for link in self.store.get_links(cur.id):
+                if link["relation"] == "supersedes":
+                    lineage_ids.append(link["b"] if link["a"] == cur.id else link["a"])
+            for pid in lineage_ids:
                 if pid in seen:
                     continue
                 seen.add(pid)
@@ -7825,7 +7831,7 @@ class MemoryService:
             return [rec]
         return sorted(members.values(), key=lambda r: (
             r.valid_to is None,
-            r.valid_from or r.ingested_at or 0,
+            r.valid_from if r.valid_from is not None else (r.ingested_at or 0),
             r.valid_to if r.valid_to is not None else float("inf"),
             r.id,
         ))
@@ -12868,6 +12874,16 @@ class MemoryService:
             if session["workspace_id"] != wid or (
                     rid is not None and session.get("repo_id") != rid):
                 raise ValidationError("session_id does not belong to that workspace/repo")
+            if rid is None and session.get("repo_id"):
+                # Preserve a repository-backed session's exact repository scope even
+                # when callers omit the redundant repo name.
+                rid = str(session["repo_id"])
+                repo_row = self.store.conn.execute(
+                    "SELECT name FROM repos WHERE id=? AND workspace_id=?",
+                    (rid, wid),
+                ).fetchone()
+                if repo_row is not None:
+                    rp = str(repo_row["name"])
         return ws, rp, SearchFilter(
             workspace_id=wid, repo_id=rid, session_id=sid, include_ancestors=True,
         )
@@ -12899,17 +12915,36 @@ class MemoryService:
 
         content: str = ""
         source_label: str = ""
+        procedural_source_used = False
+        procedural_memory_count: Optional[int] = None
+        procedural_total_eligible: Optional[int] = None
+        procedural_source_truncated = False
 
         if text is not None and str(text).strip():
             content = _clean_text(text, field="text", max_chars=64_000)
             source_label = "prompt:direct"
         elif crawl_procedural:
+            procedural_source_used = True
             assert flt is not None
             flt.mtypes = [MemoryType.PROCEDURAL]
+            procedural_total_eligible = self.store.prompt_eligibility_counts(
+                flt,
+            )["prompt_eligible"]
             recs = self.store.list_memories(flt, limit=100, prompt_only=True)
-            content = compose_memory_spec([_mem_to_dict(r) for r in recs])
+            procedural_memory_count = len(recs)
+            content, content_truncated = compose_memory_spec_with_truncation(
+                [_mem_to_dict(r) for r in recs], limit=100,
+            )
+            procedural_source_truncated = (
+                procedural_total_eligible > procedural_memory_count or content_truncated
+            )
             source_label = f"procedural:{ws}"
             if not content.strip():
+                if recs:
+                    raise ValidationError(
+                        "No procedural memory fits the 64000-character audit limit; "
+                        "pass a smaller specification or audit selected memories."
+                    )
                 content = "# Procedural Rules\nNo procedural memories recorded yet.\n"
         elif source_id:
             if _authenticated_principal() is not None or self.allowed_workspaces is not None:
@@ -12971,6 +13006,12 @@ class MemoryService:
         except SpecCrawlError as exc:
             raise ValidationError(str(exc)) from exc
 
+        if procedural_source_used:
+            report["procedural_memory_count"] = procedural_memory_count
+            report["procedural_total_eligible_memory_count"] = procedural_total_eligible
+            report["procedural_source_truncated"] = procedural_source_truncated
+            report["truncated"] = bool(report.get("truncated") or procedural_source_truncated)
+
         return report
 
     def spec_crawl_answer(
@@ -12982,7 +13023,7 @@ class MemoryService:
         workspace: Optional[str] = None,
         repo: Optional[str] = None,
         session_id: Optional[str] = None,
-        save_as_memory: bool = True,
+        save_as_memory: bool = False,
     ) -> dict:
         """Apply a human clarification to an ambiguous spec flag and optionally record it."""
         save_as_memory = _strict_bool(save_as_memory, field="save_as_memory")
@@ -13024,6 +13065,7 @@ class MemoryService:
                 workspace=workspace,
                 repo=repo,
                 session_id=session_id,
+                scope="session" if session_id else None,
                 mtype="procedural",
                 source="spec_crawl",
                 trusted=False,
@@ -13048,7 +13090,7 @@ class MemoryService:
         mtypes: Optional[list[str]] = None,
         include_trace: bool = True,
     ) -> dict[str, Any]:
-        """Analyze a cluster of live memory nodes for cross-node contradictions, orphans, policy gaps, and cluster health."""
+        """Analyze a bounded sample of live memories and explicitly report truncation."""
         include_trace = _strict_bool(include_trace, field="include_trace")
         from engraphis.core.spec_crawl import analyze_memory_nodes
         ws, rp, flt = self._spec_crawl_scope(workspace, repo, session_id)
@@ -13058,6 +13100,8 @@ class MemoryService:
                           _clean_string_list(mtypes, field="mtypes", max_items=4, max_chars=32)]
 
         recs = []
+        truncated = False
+        total_eligible_node_count = 0
         if memory_ids is not None:
             clean_ids = _clean_string_list(
                 memory_ids, field="memory_ids", max_items=150, max_chars=MAX_NAME_CHARS,
@@ -13068,17 +13112,30 @@ class MemoryService:
                 recs = [rec for rec in rec_map.values()
                         if prompt_eligible(rec.provenance, rec.metadata)
                         and self._memory_visible_to_caller(rec)]
+            total_eligible_node_count = len(recs)
         else:
-            recs = self.store.list_memories(flt, limit=150, prompt_only=True)
+            with self.store.read_snapshot():
+                total_eligible_node_count = self.store.prompt_eligibility_counts(
+                    flt,
+                )["prompt_eligible"]
+                recs = self.store.list_memories(flt, limit=150, prompt_only=True)
+                recs = [rec for rec in recs if self._memory_visible_to_caller(rec)]
+
+        truncated = total_eligible_node_count > len(recs)
 
         # Gather declared links between these memories
         mem_dicts = [_mem_to_dict(r) for r in recs]
         mem_ids_set = {m["id"] for m in mem_dicts}
         links = []
-        for mid in mem_ids_set:
+        seen_links: set[tuple[str, str, str]] = set()
+        for mid in sorted(mem_ids_set):
             node_links = self.store.get_links(mid)
             for nl in node_links:
                 if nl.get("a") in mem_ids_set and nl.get("b") in mem_ids_set:
+                    key = (str(nl["a"]), str(nl["b"]), str(nl.get("relation") or "related_to"))
+                    if key in seen_links:
+                        continue
+                    seen_links.add(key)
                     links.append(nl)
 
         report = analyze_memory_nodes(
@@ -13089,6 +13146,11 @@ class MemoryService:
         )
         report["workspace"] = ws
         report["repo"] = rp
+        report["truncated"] = truncated
+        report["node_limit"] = 150
+        report["count_semantics"] = "requested_selection" if memory_ids is not None else "bounded_scope_sample"
+        report["total_eligible_node_count"] = total_eligible_node_count
+        report["analysis_truncated"] = truncated
         return report
 
     def spec_crawl_resolve(
@@ -13099,12 +13161,13 @@ class MemoryService:
         node_b: Optional[str] = None,
         workspace: Optional[str] = None,
         repo: Optional[str] = None,
+        session_id: Optional[str] = None,
         confirmed: bool = False,
     ) -> dict[str, Any]:
         """Execute remediation on memory cluster audit: supersede older conflicting node or link orphan."""
         confirmed = _strict_bool(confirmed, field="confirmed")
-        route = self.resolve_workspace(workspace, repo=repo)
-        ws = route["workspace"]
+        ws, rp, scope_filter = self._spec_crawl_scope(workspace, repo, session_id)
+        assert scope_filter is not None
         act = str(action or "").strip().lower()
         if act not in {"supersede", "link"}:
             raise ValidationError("unknown resolution action; expected 'supersede' or 'link'")
@@ -13114,26 +13177,28 @@ class MemoryService:
         node_b_clean = _clean_text(node_b, field="node_b", max_chars=MAX_NAME_CHARS)
         if node_a_clean == node_b_clean:
             raise ValidationError("resolution requires two distinct memories")
-        wid, rid = self._require_scope(ws or "default", route["repo"])
+        wid, _ = self._require_scope(ws or "default", rp)
         with self.store.write_transaction():
+            visible_ids = self.store.visible_memory_ids(
+                [node_a_clean, node_b_clean], scope_filter,
+            )
+            records = {}
             for mid in (node_a_clean, node_b_clean):
-                self._check_owns(mid, wid, rid)
+                self._check_owns(mid, wid, None)
                 rec = self.store.get_memory(mid)
                 assert rec is not None
-                live = self.store.visible_memory_ids([mid], SearchFilter(
-                    workspace_id=wid, repo_id=rid, session_id=rec.session_id,
-                    include_ancestors=True,
-                ))
-                if mid not in live or not prompt_eligible(rec.provenance, rec.metadata):
+                records[mid] = rec
+                if mid not in visible_ids or not prompt_eligible(rec.provenance, rec.metadata):
                     raise ValidationError("resolution requires live, approved memories")
             self.link(
-                node_a_clean, node_b_clean, workspace=ws or "default", repo=route["repo"],
+                node_a_clean, node_b_clean, workspace=ws or "default",
                 relation="supersedes" if act == "supersede" else "related_to",
                 reason="spec_crawl_resolve",
             )
             if act == "supersede":
-                self.retire(node_b_clean, workspace=ws or "default", repo=route["repo"],
-                            reason="spec_crawl_resolve", actor="spec_crawl")
+                self.retire(node_b_clean, workspace=ws or "default",
+                            reason="spec_crawl_resolve", actor="spec_crawl",
+                            at=records[node_a_clean].valid_from)
 
         if act == "supersede":
             if not node_b_clean:

@@ -6,12 +6,54 @@ import pytest
 from engraphis.core.spec_crawl import analyze_memory_nodes
 
 
+def test_unrelated_policies_do_not_hide_an_earlier_directive_conflict():
+    policies = [
+        {"id": "require", "subject_key": "prod", "content": "Always require authentication."},
+        {"id": "forbid", "subject_key": "prod", "content": "Never require authentication."},
+    ]
+    noise = [{"id": f"noise-{i}", "subject_key": f"noise.{i}",
+              "content": "Always require authentication."} for i in range(4)]
+    for order in (policies, policies + noise, list(reversed(policies + noise))):
+        conflicts = analyze_memory_nodes(order)["conflicts"]
+        assert len(conflicts) == 1
+        assert {conflicts[0]["node_a"], conflicts[0]["node_b"]} == {"require", "forbid"}
+
+
+@pytest.mark.parametrize("rule,conflicts", [
+    ("Never disable authentication.", False),
+    ("Must not disable authentication.", False),
+    ("Do not skip authentication.", False),
+    ("Never prohibit authentication.", False),
+    ("Always disable authentication.", True),
+    ("Never require authentication.", True),
+])
+def test_nested_policy_polarity_does_not_suggest_retiring_agreeing_rules(rule, conflicts):
+    nodes = [
+        {"id": "first", "subject_key": "prod", "content": rule, "valid_from": 1000},
+        {"id": "second", "subject_key": "prod", "content": "Always require authentication.",
+         "valid_from": 2000},
+    ]
+    for order in (nodes, list(reversed(nodes))):
+        report = analyze_memory_nodes(order)
+        assert bool(report["conflicts"]) == conflicts
+        if not conflicts:
+            assert all(remedy["action"] != "supersede" for remedy in report["remediation_plan"])
+
+
 def test_analyze_empty_memory_nodes():
     res = analyze_memory_nodes([])
     assert res["cluster_health_score"] == 0
     assert res["node_count"] == 0
     assert len(res["policy_gaps"]) == 7
     assert len(res["conflicts"]) == 0
+
+
+def test_cluster_responses_omit_large_memory_bodies_without_losing_analysis():
+    import json
+    report = analyze_memory_nodes([{"id": "large", "content": "payload " * 12_500}])
+    assert "content" not in report["nodes"][0]
+    assert report["nodes"][0]["word_count"] > 0
+    assert len(json.dumps(report)) < 6_000
 
 
 def test_cross_node_parameter_conflict_detection():
@@ -103,6 +145,21 @@ def test_orphan_node_detection_and_link_suggestion():
     assert orphan_meta["node_id"] == "mem_pricing"
 
 
+def test_similarity_suggestions_do_not_count_as_persisted_connectivity():
+    nodes = [{"id": "a", "content": "Verify token authentication for deployment."},
+             {"id": "b", "content": "Verify token authentication before deployment."}]
+    suggested = analyze_memory_nodes(nodes)
+    assert any(link["inferred"] for link in suggested["links"])
+    assert all(node["is_orphan"] and node["degree"] == 0 for node in suggested["nodes"])
+    assert {orphan["node_id"] for orphan in suggested["orphans"]} == {"a", "b"}
+    assert any(remedy["action"] == "link" for remedy in suggested["remediation_plan"])
+    assert suggested["score_breakdown"]["connected_points"] == 0
+    declared = analyze_memory_nodes(nodes, links=[{"a": "a", "b": "b", "relation": "related_to"}])
+    assert not declared["orphans"]
+    assert all(node["degree"] == 1 for node in declared["nodes"])
+    assert declared["score_breakdown"]["connected_points"] == 30
+
+
 def test_multi_node_radar_and_policy_gaps():
     memories = [
         {
@@ -173,6 +230,29 @@ def test_equivalent_negated_directives_do_not_conflict():
     assert all(conflict["remedy"]["action"] == "clarify" for conflict in positive["conflicts"])
     assert all("keep_node" not in conflict["remedy"] and "retire_node" not in conflict["remedy"]
                for conflict in positive["conflicts"])
+
+
+@pytest.mark.parametrize("verb", ["require", "enforce"])
+@pytest.mark.parametrize("negative", ["Never", "Must not", "Do not"])
+def test_nested_directives_preserve_governing_negation(verb, negative):
+    nodes = [{"id": "a", "content": f"{negative} {verb} token verification."},
+             {"id": "b", "content": f"Always {verb} token verification."}]
+    for order in (nodes, list(reversed(nodes))):
+        report = analyze_memory_nodes(order)
+        assert report["conflicts"]
+        assert all(conflict["remedy"]["action"] == "clarify" for conflict in report["conflicts"])
+    equivalent = analyze_memory_nodes([
+        nodes[0], {"id": "c", "content": "Never token verification."},
+    ])
+    assert not equivalent["conflicts"]
+
+
+@pytest.mark.parametrize("separator", [". ", "; ", ", ", "\n", " and always "])
+def test_independent_directives_do_not_inherit_prior_negation(separator):
+    from engraphis.core.spec_crawl import _extract_node_directives
+    directives = _extract_node_directives(f"Never deploy{separator}require authentication.")
+    assert directives["deploy"] == "forbid"
+    assert directives["authentication"] == "enforce"
 
 
 def test_complementary_claims_and_distinct_subjects_remain_live():
