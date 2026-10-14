@@ -7,6 +7,8 @@ from engraphis.core.spec_crawl import (
     MAX_SPEC_CHARS,
     MAX_FLAGS,
     MAX_TRACED_CLAIMS,
+    _code_ranges,
+    _in_ranges,
     SpecCrawlError,
     apply_answer,
     compose_memory_spec,
@@ -289,3 +291,36 @@ def test_large_punctuation_input_and_path_tokens():
     assert report["word_count"] == 0
     paths = crawl_spec("# Context\nRead docs/spec.md and ../agent.md.")
     assert paths["counts"]["kinds"]["source"] >= 2
+
+
+def test_dense_inline_code_near_character_limit_is_bounded_and_unflagged():
+    text = "# Rules\n" + "`x`\n" * 15_998
+    assert len(text) == MAX_SPEC_CHARS
+    report = crawl_spec(text, include_trace=False)
+    assert report["truncated"] is True
+    assert report["flags"] == []
+    assert report["sections"][0]["axis"] == "rules"
+
+
+def test_overlapping_code_spans_merge_and_membership_does_not_rescan_them():
+    text = "```\n`all`\n```\nall"
+    ranges = _code_ranges(text)
+    assert ranges == [(0, text.index("\nall"))]
+    assert _in_ranges(text.index("`all`"), ranges)
+    assert not _in_ranges(text.rindex("all"), ranges)
+
+    class CountedRanges(list):
+        reads = 0
+
+        def __getitem__(self, index):
+            self.reads += 1
+            return super().__getitem__(index)
+
+        def __iter__(self):
+            for index in range(len(self)):
+                yield self[index]
+
+    dense = CountedRanges((i * 4, i * 4 + 3) for i in range(16_000))
+    assert _in_ranges(63_998, dense)
+    assert not _in_ranges(63_999, dense)
+    assert dense.reads <= 40
