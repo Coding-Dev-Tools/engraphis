@@ -163,6 +163,36 @@ test('changing move destination ignores a late preview and filtering clears the 
   } finally { releasePreview(); }
 });
 
+for (const discard of [false, true]) {
+  test(`selective move ${discard ? 'requires consent before discarding' : 'keeps'} an existing draft`, async ({ page }) => {
+    const calls = await mockWorkspaceApi(page);
+    await page.goto('/?view=library');
+    await page.locator('#new-memory-button').click();
+    await page.locator('#editor-memory-content').fill('Keep the draft while choosing which records to move.');
+    await page.getByRole('button', { name: 'Select memories', exact: true }).click();
+    await page.locator('[data-memory-id="mem_current"]').click();
+    await page.getByRole('button', { name: 'Move selected', exact: true }).click();
+    await page.getByLabel('Destination workspace', { exact: true }).selectOption(destination);
+    await page.getByRole('button', { name: 'Preview move', exact: true }).click();
+    await expect(page.locator('#memory-move-apply')).toBeEnabled();
+    await page.locator('#memory-move-apply').click();
+    await expect(page.locator('#action-dialog-title')).toContainText('Discard');
+    expect(calls.moves).toEqual([]);
+    await page.locator(discard ? '#action-dialog-submit' : '#action-dialog-cancel').click();
+    if (discard) {
+      await expect(page.locator('#memory-move-dialog')).not.toBeVisible();
+      await expect(page.locator('#memory-editor')).not.toBeVisible();
+      expect(calls.moves).toHaveLength(1);
+    } else {
+      await expect(page.locator('#memory-move-dialog')).toBeVisible();
+      await page.locator('#memory-move-cancel').click();
+      await expect(page.locator('#memory-editor')).toBeVisible();
+      await expect(page.locator('#editor-memory-content')).toHaveValue('Keep the draft while choosing which records to move.');
+      expect(calls.moves).toEqual([]);
+    }
+  });
+}
+
 test('move blockers are visible and prevent submission', async ({ page }) => {
   const calls = await mockWorkspaceApi(page, { blockers: [{ code: 'source_import', message: 'Imported records must stay with their source collection.' }] });
   await selectForMove(page);

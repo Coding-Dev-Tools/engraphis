@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 from contextlib import asynccontextmanager
 import json
 import logging
-from typing import Optional
+from typing import Iterable, Optional
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
@@ -14,7 +15,7 @@ from pydantic import BaseModel, Field, StrictInt
 
 from engraphis.config import settings
 from engraphis.local_auth import bearer_ok
-from engraphis.netutil import is_local_request
+from engraphis.netutil import declared_host_names, is_local_request, is_rebinding_safe_host
 from engraphis.service import (
     DEFAULT_CODE_QUERY_CAPACITY,
     GraphIndexRebuilding,
@@ -89,7 +90,13 @@ class CodeImpactRequest(BaseModel):
 
 
 def create_read_only_app(service: Optional[MemoryService] = None, *,
-                         token: str = "") -> FastAPI:
+                         token: str = "", host_names: Iterable[str] = ()) -> FastAPI:
+    """Build the read-only graph API.
+
+    Without ``token`` it answers loopback peers only, and only under ``localhost``, an IP
+    address, ``ENGRAPHIS_ALLOWED_HOSTS`` or one of ``host_names`` (the launcher passes its
+    bind host), so a website using DNS rebinding cannot read workspace content.
+    """
     owns_service = service is None
     svc = service or MemoryService.create(
         settings.db_path,
@@ -114,6 +121,9 @@ def create_read_only_app(service: Optional[MemoryService] = None, *,
                 await asyncio.to_thread(svc.close)
 
     expected = str(token or "")
+    declared_hosts = declared_host_names(
+        os.environ.get("ENGRAPHIS_ALLOWED_HOSTS", ""), *host_names,
+    )
     app = FastAPI(
         title="Engraphis Read-Only Graph API", version="1",
         docs_url=None, redoc_url=None, lifespan=_owned_service_lifespan,
@@ -149,6 +159,15 @@ def create_read_only_app(service: Optional[MemoryService] = None, *,
             # from publishing workspace content merely by bypassing the launcher.
             return JSONResponse(
                 {"detail": "remote access requires a bearer token"}, status_code=403
+            )
+        elif not expected and not public and not is_rebinding_safe_host(
+            request, declared_hosts,
+        ):
+            # A loopback peer can be a website that pointed its own name at 127.0.0.1.
+            return JSONResponse(
+                {"detail": "use localhost or 127.0.0.1, or add this name to "
+                           "ENGRAPHIS_ALLOWED_HOSTS"},
+                status_code=403,
             )
         return await call_next(request)
 

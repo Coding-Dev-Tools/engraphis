@@ -239,10 +239,19 @@
 }
 
 .sec-bar-fill {
+  display: block;
   height: 100%;
-  background: #00f0ff;
-  width: 0%;
-  transition: width 0.2s ease;
+  width: 100%;
+}
+
+.sec-bar-fill rect {
+  fill: #00f0ff;
+}
+
+.spec-clean-cluster {
+  color: #10b981;
+  padding: 12px;
+  font-size: 11px;
 }
 
 /* Radar Panel */
@@ -510,6 +519,16 @@
   border: 1px solid #1e293b;
   border-radius: 4px;
   margin-bottom: 4px;
+  font-size: 11px;
+}
+
+.spec-truncation-notice {
+  color: #fbbf24;
+  background: rgba(245, 158, 11, 0.08);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: 4px;
+  margin: 0 0 6px;
+  padding: 7px 8px;
   font-size: 11px;
 }
 

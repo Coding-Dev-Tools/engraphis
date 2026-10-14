@@ -7,9 +7,9 @@
   <meta name="description" content="Engraphis Ledger — local-first, grounded memory operations.">
   <title>Engraphis Ledger</title>
   <link rel="icon" type="image/png" sizes="32x32" href="/v2-assets/favicon-32.png">
-  <link rel="stylesheet" href="/v2-assets/ledger.css?v=20260928-workspace-routing-1">
-  <link rel="stylesheet" href="/v2-assets/memory-workflow.css?v=20260906-lifecycle-1">
-  <link rel="stylesheet" href="/v2-assets/spec-crawl.css">
+  <link rel="stylesheet" href="/v2-assets/ledger.css?v=20261009-ledger-only-1">
+  <link rel="stylesheet" href="/v2-assets/memory-workflow.css?v=20261009-ledger-only-1">
+  <link rel="stylesheet" href="/v2-assets/spec-crawl.css?v=20261012-stacked-ledger-1">
 </head>
 <body data-theme="slate">
   <a class="skip-link" href="#main-content">Skip to main content</a>
@@ -70,18 +70,14 @@
 
       <details id="sidebar-options" class="sidebar-options" open>
         <summary>Display and account</summary>
-      <nav class="dashboard-switcher" aria-label="Dashboard interface">
-        <span>Dashboard</span>
-        <a class="dashboard-link active" href="/" aria-current="page">Ledger</a>
-        <a class="dashboard-link" href="/classic">Classic</a>
-      </nav>
-
       <label class="theme-switcher">
         <span>Theme</span>
         <select id="sidebar-theme-select" aria-label="Dashboard theme">
           <option value="slate">Slate (dark)</option>
           <option value="midnight">Midnight</option>
+          <option value="solarized">Solarized</option>
           <option value="paper">Paper (light)</option>
+          <option value="sepia">Sepia (light)</option>
           <option value="matrix">Matrix</option>
         </select>
       </label>
@@ -103,7 +99,21 @@
 
     <main class="main" id="main-content" tabindex="-1">
       <p id="notice-text" class="sr-only" role="status" aria-live="polite"></p>
-      <div id="notice-banner" class="notice-banner" hidden></div>
+      <div id="notice-banner" class="notice-banner" role="status" aria-live="polite" hidden></div>
+      <section id="connection-banner" class="system-banner connection-banner" role="alert" hidden>
+        <div class="system-banner-copy">
+          <strong id="connection-banner-title">Engraphis is not responding</strong>
+          <span id="connection-banner-detail">This page cannot reach the dashboard server. Check that Engraphis is still running, then retry.</span>
+        </div>
+        <button id="connection-retry" class="secondary-button" type="button">Retry now</button>
+      </section>
+      <section id="embedder-banner" class="system-banner embedder-banner" role="status" hidden>
+        <div class="system-banner-copy">
+          <strong>Semantic search is off</strong>
+          <span id="embedder-banner-detail">Recall is matching shared words rather than meaning.</span>
+        </div>
+        <button id="embedder-recheck" class="secondary-button" type="button">Recheck</button>
+      </section>
       <section id="update-banner" class="update-banner" role="status" aria-live="polite" hidden></section>
 
       <section class="view active" data-view-panel="today" aria-labelledby="today-title">
@@ -157,6 +167,11 @@
               <p id="home-setup-next" class="project-help">Your agent connection is separate from this dashboard.</p>
               <button class="primary-button" type="button" data-go="connections">Continue setup</button>
             </section>
+            <section id="home-handoff" class="rail-section" aria-labelledby="home-handoff-title" hidden>
+              <p class="eyebrow">Project · <span id="home-handoff-project"></span></p>
+              <h2 id="home-handoff-title">Last session handoff</h2>
+              <div id="home-handoff-body" class="handoff-body"></div>
+            </section>
             <section class="rail-section">
               <p class="eyebrow">Workspace context · all projects</p>
               <h2>Strongest memories</h2>
@@ -166,6 +181,11 @@
               <p class="eyebrow">Memory composition</p>
               <div id="type-bars" class="type-bars"><p class="empty-state">Loading types…</p></div>
             </section>
+            <section class="rail-section" aria-labelledby="home-health-title">
+              <p class="eyebrow">Memory health</p>
+              <h2 id="home-health-title">Retention, links and conflicts</h2>
+              <div id="home-health" class="health-summary" aria-live="polite"><p class="empty-state">Loading memory health…</p></div>
+            </section>
             <section id="first-memory-journey" class="rail-section rail-action" hidden aria-labelledby="first-memory-title">
               <p class="eyebrow">Your first memory</p>
               <h2 id="first-memory-title">Save one useful fact</h2>
@@ -174,12 +194,6 @@
               <button class="text-button" type="button" data-go="library">Or import local documents</button>
               <p>No account is needed for local memory.</p>
               <button class="text-button" type="button" data-go="connections">Connect your coding agent</button>
-            </section>
-            <section class="rail-section rail-action">
-              <p class="eyebrow">Local-first</p>
-              <h2>Ask before assuming</h2>
-              <p>Grounded Ask cites the records it uses and abstains when support is too weak.</p>
-              <button class="primary-button" type="button" data-go="ask">Ask your memory</button>
             </section>
           </aside>
         </div>
@@ -279,8 +293,9 @@
           </section>
 
           <details class="retrieval-details">
-            <summary>Inspect retrieval</summary>
+            <summary>Inspect retrieval and scores</summary>
             <h2>Retrieved candidates from this answer</h2>
+            <p class="project-help">Rank is relative to this answer only. Support is the absolute word and meaning overlap that grounding checks; retention is how strongly the record is currently held.</p>
             <div id="retrieval-list" class="memory-list">
               <p class="empty-state">Candidates from the grounded answer will appear here.</p>
             </div>
@@ -299,9 +314,14 @@
             </div>
             <div class="header-actions">
               <button id="new-memory-button" class="primary-button" type="button">New memory</button>
-              <button id="import-button" class="secondary-button" type="button">Import files</button>
-              <button id="obsidian-import-button" class="secondary-button" type="button">Import local documents</button>
-              <input id="import-files" type="file" accept=".md,.txt,.json,.csv,.py,.js,.ts" multiple hidden>
+              <div class="menu-wrap">
+                <button id="import-menu-button" class="secondary-button" type="button" aria-expanded="false" aria-controls="import-menu">Import ▾</button>
+                <div id="import-menu" class="action-menu" hidden>
+                  <button id="import-quick-button" type="button"><strong>Quick import files or a folder…</strong><small>Documents, code, PDFs and media into this workspace</small></button>
+                  <button id="obsidian-import-button" type="button"><strong>Import documents with preview…</strong><small>Review each file first; re-import a folder or Obsidian vault</small></button>
+                  <button id="import-sources-button" type="button"><strong>Index code or a database schema…</strong><small>Add symbols, tables and relations to the graph</small></button>
+                </div>
+              </div>
             </div>
           </header>
 
@@ -323,6 +343,8 @@
             <span id="library-selection-status" class="project-help" role="status" aria-live="polite">Select memories on this page to move them to another workspace.</span>
             <button id="library-move" class="primary-button" type="button" disabled>Move selected</button>
           </div>
+          <p id="library-reorder-hint" class="project-help library-reorder-hint" hidden>Drag a memory, or press Alt+↑ or Alt+↓ on it, to change the display order. Ordering is available for all projects without filters.</p>
+          <p id="library-reorder-status" class="sr-only" role="status" aria-live="polite"></p>
 
           <div class="library-layout">
             <div id="library-list" class="library-list" role="listbox" aria-label="Memories">
@@ -339,13 +361,25 @@
               <form id="memory-editor" class="detail-panel editor-panel" novalidate hidden>
                 <div class="section-heading">
                   <div><p class="eyebrow">Write</p><h2 id="editor-title">New memory</h2></div>
+                  <p id="editor-save-state" class="editor-save-state" role="status" aria-live="polite"></p>
                   <button id="editor-close" class="text-button" type="button">Close</button>
                 </div>
                 <label id="editor-scope-control">Save to<select id="editor-memory-scope"><option value="workspace">Shared across this workspace</option><option value="repo">Selected project only</option></select></label>
                 <p id="editor-scope-note" class="project-help"></p>
                 <label>Title<input id="editor-memory-title" maxlength="500" placeholder="Concise title (optional)"></label>
                 <label>Type<select id="editor-memory-type"><option>working</option><option>episodic</option><option selected>semantic</option><option>procedural</option></select></label>
-                <label>Content<textarea id="editor-memory-content" rows="12" maxlength="10000" required placeholder="A discrete, durable fact or procedure…"></textarea></label>
+                <div class="editor-content-field">
+                  <div class="editor-content-head">
+                    <label for="editor-memory-content">Content</label>
+                    <div class="editor-mode" role="group" aria-label="Content view">
+                      <button id="editor-write-mode" class="editor-mode-button active" type="button" aria-pressed="true">Write</button>
+                      <button id="editor-preview-mode" class="editor-mode-button" type="button" aria-pressed="false">Preview</button>
+                    </div>
+                  </div>
+                  <textarea id="editor-memory-content" rows="12" maxlength="10000" required placeholder="A discrete, durable fact or procedure…" aria-describedby="editor-content-help"></textarea>
+                  <div id="editor-preview" class="markdown-body editor-preview" tabindex="0" aria-label="Content preview" hidden></div>
+                  <p id="editor-content-help" class="project-help">Markdown works: headings, lists, links, tables and code. Ctrl+S or ⌘S saves.</p>
+                </div>
                 <p id="editor-error" class="form-error" role="alert" hidden></p>
                 <button id="editor-refresh" class="secondary-button" type="button" hidden>Refresh saved versions</button>
                 <div id="editor-history" hidden></div>
@@ -369,13 +403,19 @@
                 <h1 id="relations-title">Explore project connections</h1>
               </div>
             </header>
-            <div id="graph-canvas" class="graph-canvas" role="img" aria-label="Interactive knowledge graph" aria-describedby="graph-a11y-help graph-count graph-mode"></div>
+            <div id="graph-canvas" class="graph-canvas" role="application" aria-roledescription="interactive graph" tabindex="0" aria-label="Knowledge graph" aria-describedby="graph-a11y-help graph-count graph-mode"></div>
             <div id="graph-empty" class="graph-empty" role="status" aria-live="polite">Open Graph &amp; Relationships to load the graph.</div>
             <div class="graph-hud">
               <span id="graph-count">0 entities · 0 relations</span>
               <span id="graph-mode">Galaxy gravity</span>
             </div>
-            <p id="graph-a11y-help" class="sr-only">The graph is a visual summary. Open the Analyse tab to inspect entities and relations with keyboard controls.</p>
+            <section id="graph-legend" class="graph-legend" aria-labelledby="graph-legend-title" hidden>
+              <h2 id="graph-legend-title">Clusters</h2>
+              <ul id="graph-legend-list"></ul>
+              <p id="graph-legend-note" class="graph-legend-note"></p>
+            </section>
+            <p id="graph-a11y-help" class="sr-only">Arrow keys move between entities, most connected first. Enter opens the selected entity’s connections and Escape clears the selection. The Analyse tab lists entities and relations in the current graph scope.</p>
+            <p id="graph-keyboard-status" class="sr-only" role="status" aria-live="polite"></p>
           </div>
 
           <aside class="graph-rail" aria-label="Graph controls">
@@ -416,16 +456,35 @@
               <p id="graph-lifecycle-status" class="graph-note" role="status">The graph loads when you open Explore.</p>
               <p class="graph-note">Search by entity, then open its connected memories to inspect evidence.</p>
               <details id="graph-advanced" class="graph-advanced graph-drawer-section">
-                <summary>Advanced appearance and physics</summary>
+                <summary>Appearance, colour and physics</summary>
               <section class="graph-drawer-section" aria-labelledby="graph-rendering-title">
                 <h2 id="graph-rendering-title">Rendering</h2>
                 <div class="graph-choice-grid graph-rendering-grid" role="group" aria-label="Rendering style">
                   <button class="graph-choice graph-style-choice active" type="button" data-graph-style-choice="cyber" aria-pressed="true"><span class="render-preview cyber"><i></i><i></i><i></i></span><span>Cyber</span></button>
                   <button class="graph-choice graph-style-choice" type="button" data-graph-style-choice="galaxy" aria-pressed="false"><span class="render-preview galaxy"><i></i><i></i><i></i></span><span>Galaxy</span></button>
                   <button class="graph-choice graph-style-choice" type="button" data-graph-style-choice="solar" aria-pressed="false"><span class="render-preview solar"><i></i><i></i><i></i></span><span>Solar</span></button>
-                  <button class="graph-choice graph-style-choice" type="button" data-graph-style-choice="classic" aria-pressed="false"><span class="render-preview classic"><i></i><i></i><i></i></span><span>Classic</span></button>
+                  <button class="graph-choice graph-style-choice" type="button" data-graph-style-choice="classic" aria-pressed="false"><span class="render-preview classic"><i></i><i></i><i></i></span><span>Steel</span></button>
                 </div>
                 <p id="graph-style-note" class="graph-note">Iridescent PVD over graphite — cyan, violet, and magenta across each node.</p>
+              </section>
+
+              <section class="graph-drawer-section" aria-labelledby="graph-colour-title">
+                <h2 id="graph-colour-title">Colour</h2>
+                <div class="graph-segmented" role="group" aria-label="Colour nodes by">
+                  <button class="graph-segment active" type="button" data-graph-color-choice="community" aria-pressed="true">Clusters</button>
+                  <button class="graph-segment" type="button" data-graph-color-choice="type" aria-pressed="false">Entity type</button>
+                  <button class="graph-segment" type="button" data-graph-color-choice="connections" aria-pressed="false">Connections</button>
+                </div>
+                <div class="graph-palette-grid" role="group" aria-label="Colour palette">
+                  <button class="graph-palette-chip active" type="button" data-graph-palette-choice="theme" aria-pressed="true"><span class="palette-preview theme" aria-hidden="true"><i></i><i></i><i></i><i></i></span>Theme</button>
+                  <button class="graph-palette-chip" type="button" data-graph-palette-choice="aurora" aria-pressed="false"><span class="palette-preview aurora" aria-hidden="true"><i></i><i></i><i></i><i></i></span>Aurora</button>
+                  <button class="graph-palette-chip" type="button" data-graph-palette-choice="ocean" aria-pressed="false"><span class="palette-preview ocean" aria-hidden="true"><i></i><i></i><i></i><i></i></span>Ocean</button>
+                  <button class="graph-palette-chip" type="button" data-graph-palette-choice="ember" aria-pressed="false"><span class="palette-preview ember" aria-hidden="true"><i></i><i></i><i></i><i></i></span>Ember</button>
+                  <button class="graph-palette-chip" type="button" data-graph-palette-choice="contrast" aria-pressed="false"><span class="palette-preview contrast" aria-hidden="true"><i></i><i></i><i></i><i></i></span>High contrast</button>
+                  <button class="graph-palette-chip" type="button" data-graph-palette-choice="custom" aria-pressed="false"><span class="palette-preview custom" aria-hidden="true"><i></i><i></i><i></i><i></i></span>Custom</button>
+                </div>
+                <div id="graph-type-colors" class="graph-type-colors" role="group" aria-label="Entity type colours"></div>
+                <button id="graph-reset-colors" class="graph-action" type="button">Reset colours to theme</button>
               </section>
 
               <section class="graph-drawer-section" aria-labelledby="graph-layout-title">
@@ -462,7 +521,7 @@
               </section>
 
               <details class="graph-drawer-section graph-tuning" open>
-                <summary>Tune the simulation · forces, size, scope</summary>
+                <summary>Tune the simulation · forces, size, depth</summary>
                 <div class="graph-tuning-grid">
                   <label for="graph-repel"><span id="graph-repel-label">Orbital speed</span><input id="graph-repel" type="range" min="0" max="400" value="100" aria-labelledby="graph-repel-label"><output id="graph-repel-output">100</output></label>
                   <label for="graph-link"><span id="graph-link-label">Link distance · tight ↔ loose</span><input id="graph-link" type="range" min="4" max="80" value="8" aria-labelledby="graph-link-label"><output id="graph-link-output">8</output></label>
@@ -471,9 +530,9 @@
                   <label for="graph-text-size"><span id="graph-text-size-label">Text size</span><input id="graph-text-size" type="range" min="6" max="24" value="12" aria-labelledby="graph-text-size-label"><output id="graph-text-size-output">12</output></label>
                   <label for="graph-line-width"><span id="graph-line-width-label">Line width</span><input id="graph-line-width" type="range" min="0.1" max="2" step="0.01" value="0.72" aria-labelledby="graph-line-width-label"><output id="graph-line-width-output">0.72</output></label>
                   <label for="graph-label-density"><span id="graph-label-density-label">Label density</span><input id="graph-label-density" type="range" min="1" max="100" value="24" aria-labelledby="graph-label-density-label"><output id="graph-label-density-output">24</output></label>
-                  <label for="graph-tune-min-degree"><span id="graph-tune-min-degree-label">Min relations</span><input id="graph-tune-min-degree" type="range" min="0" max="12" value="1" aria-labelledby="graph-tune-min-degree-label"><output id="graph-tune-min-degree-output">1</output></label>
                   <label for="graph-depth"><span id="graph-depth-label">Neighbourhood</span><input id="graph-depth" type="range" min="1" max="4" value="2" aria-labelledby="graph-depth-label"><output id="graph-depth-output">2</output></label>
                 </div>
+                <p class="graph-note">The minimum number of links an entity needs is under Analyse → Scope.</p>
                 <div class="graph-layer-grid" role="group" aria-label="Graph relation layers">
                   <button class="graph-layer-chip active" type="button" data-graph-layer="temporal" aria-pressed="true"><i></i>Temporal <small id="graph-layer-temporal-count">0</small></button>
                   <button class="graph-layer-chip active" type="button" data-graph-layer="entity" aria-pressed="true"><i></i>Entity <small id="graph-layer-entity-count">0</small></button>
@@ -510,6 +569,15 @@
                 <div class="section-heading"><h2>Graph facts</h2><span id="graph-bridge-count"></span></div>
                 <div id="graph-stats" class="stat-grid"></div>
                 <div id="graph-top" class="compact-list"></div>
+              </section>
+              <section class="control-group graph-explorer" aria-labelledby="graph-explorer-title">
+                <h2 id="graph-explorer-title">Entities and relations</h2>
+                <label class="sr-only" for="graph-explorer-filter">Filter entities and relations</label>
+                <input id="graph-explorer-filter" class="graph-drawer-input" type="search" autocomplete="off" placeholder="Filter entities and relations…">
+                <div class="section-heading"><h3>Entities</h3><span id="graph-explorer-node-count" class="count-label"></span></div>
+                <div id="graph-entity-list" class="graph-explorer-list" role="list" aria-label="Entities, most connected first"><p class="empty-state">Open Explore to load the graph.</p></div>
+                <div class="section-heading"><h3>Relations</h3><span id="graph-explorer-edge-count" class="count-label"></span></div>
+                <div id="graph-relation-list" class="graph-explorer-list" role="list" aria-label="Relations"><p class="empty-state">Open Explore to load the graph.</p></div>
               </section>
             </section>
 
@@ -687,6 +755,7 @@
             <h2 id="spec-ask-title">Ask, Don't Guess &middot; Clarification</h2>
             <p id="spec-ask-question" class="spec-ask-question"></p>
             <textarea id="spec-ask-input" rows="4" maxlength="10000" aria-label="Clarification answer" aria-describedby="spec-ask-question" placeholder="Enter precise rule or number to replace the vague wording..."></textarea>
+            <label><input id="spec-ask-save-memory" type="checkbox"> Save this clarification as a pending memory</label>
             <div class="spec-modal-actions">
               <button id="spec-ask-cancel" class="spec-btn-secondary" type="button">Cancel</button>
               <button id="spec-ask-submit" class="spec-btn-primary" type="button">Save Clarification &amp; Re-crawl</button>
@@ -710,7 +779,6 @@
             <button id="provenance-belief-tab" class="tab active" type="button" role="tab" data-provenance-tab="belief" aria-selected="true" aria-controls="provenance-belief-panel">What we believe</button>
             <button id="provenance-timeline-tab" class="tab" type="button" role="tab" data-provenance-tab="timeline" aria-selected="false" aria-controls="provenance-timeline-panel">Timeline</button>
             <button id="provenance-audit-tab" class="tab" type="button" role="tab" data-provenance-tab="audit" aria-selected="false" aria-controls="provenance-audit-panel">Audit &amp; receipts</button>
-            <button id="provenance-supersessions-tab" class="tab" type="button" role="tab" data-provenance-tab="supersessions" aria-selected="false" aria-controls="provenance-supersessions-panel">Supersessions</button>
           </div>
 
           <section id="provenance-belief-panel" class="tab-panel active" data-provenance-panel="belief" role="tabpanel" aria-labelledby="provenance-belief-tab">
@@ -724,6 +792,7 @@
           <section id="provenance-timeline-panel" class="tab-panel" data-provenance-panel="timeline" role="tabpanel" aria-labelledby="provenance-timeline-tab">
             <form id="timeline-form" class="inline-form" novalidate>
               <label>Topic<input id="timeline-input" required placeholder="Database choice"></label>
+              <label class="check-row"><input id="timeline-closed-only" type="checkbox"> Only superseded versions</label>
               <button class="primary-button" type="submit">Show history</button>
             </form>
             <div id="timeline-result" class="timeline-list"><p class="empty-state">Search a topic to travel through its valid-time history.</p></div>
@@ -737,16 +806,9 @@
                 <button id="export-receipts" class="secondary-button" type="button">Export receipts</button>
               </div>
             </div>
+            <p id="receipt-chain-status" class="receipt-chain-status" role="status" aria-live="polite">Checking the receipt chain…</p>
             <div id="savings-detail" class="savings-detail" aria-live="polite"><p class="empty-state">Loading context savings…</p></div>
             <div id="audit-list" class="audit-list"><p class="empty-state">Loading audit records…</p></div>
-          </section>
-
-          <section id="provenance-supersessions-panel" class="tab-panel" data-provenance-panel="supersessions" role="tabpanel" aria-labelledby="provenance-supersessions-tab">
-            <form id="supersession-form" class="inline-form" novalidate>
-              <label>Topic<input id="supersession-input" required placeholder="What changed?"></label>
-              <button class="primary-button" type="submit">Find supersessions</button>
-            </form>
-            <div id="supersession-list" class="timeline-list"><p class="empty-state">Search a topic to compare closed and current records.</p></div>
           </section>
         </div>
       </section>
@@ -783,7 +845,7 @@
             <button id="manage-automation-tab" class="tab" type="button" role="tab" data-manage-tab="automation" aria-selected="false" aria-controls="manage-automation-panel">Automation</button>
             <button id="manage-team-tab" class="tab" type="button" role="tab" data-manage-tab="team" aria-selected="false" aria-controls="manage-team-panel">Team</button>
             <button id="manage-plans-tab" class="tab" type="button" role="tab" data-manage-tab="plans" aria-selected="false" aria-controls="manage-plans-panel">Plans &amp; billing</button>
-            <button id="manage-settings-tab" class="tab" type="button" role="tab" data-manage-tab="settings" aria-selected="false" aria-controls="manage-settings-panel">Settings</button>
+            <button id="manage-settings-tab" class="tab" type="button" role="tab" data-manage-tab="settings" aria-selected="false" aria-controls="manage-settings-panel">Preferences</button>
           </div>
 
           <section id="manage-workspaces-panel" class="tab-panel active" data-manage-panel="workspaces" role="tabpanel" aria-labelledby="manage-workspaces-tab">
@@ -827,7 +889,7 @@
             <div class="hosted-hero">
               <p class="eyebrow">Pro · hosted compute</p>
               <h2>Portfolio analytics without moving secret memory</h2>
-              <p>Aggregate health, growth and reinforcement trends are computed through the connected Engraphis Cloud account.</p>
+              <p>Aggregate health, growth and reinforcement trends are computed through the connected Engraphis Cloud account. Local memory health for this workspace is always on Home.</p>
               <div id="analytics-result" class="stat-grid"><p class="empty-state">Open this tab to check availability.</p></div>
               <a id="analytics-pro-cta" class="primary-button" data-pro-cta="analytics" href="#" target="_blank" rel="noopener">Subscribe to Pro</a>
             </div>
@@ -847,9 +909,12 @@
             <div class="hosted-hero">
               <p class="eyebrow">Team · hosted control plane</p>
               <h2>Shared workspaces, member roles and named seats</h2>
-              <p>The local dashboard stays single-user. Team authorization and remote-agent access live in the hosted service.</p>
+              <p>Organizations, invitations, roles, named seats, scoped device credentials and team audit run in Engraphis Cloud. This local dashboard stays single-user.</p>
               <div id="team-result" class="result-card"><p class="empty-state">Checking local connection state…</p></div>
-              <a id="team-cloud-cta" class="primary-button" data-pro-cta="team" href="#" target="_blank" rel="noopener">Compare Team</a>
+              <div class="header-actions">
+                <a id="team-cloud-cta" class="primary-button" data-pro-cta="team" href="#" target="_blank" rel="noopener">Compare Team</a>
+                <a class="secondary-button" href="https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/AGENT_CONNECT.md" target="_blank" rel="noopener">Agent Connect guide</a>
+              </div>
             </div>
           </section>
 
@@ -858,6 +923,10 @@
               <div><h2>Plans &amp; billing</h2><p>Free is local forever. Pay only for hosted services.</p></div>
               <label class="billing-toggle">Billing<select id="billing-select"><option value="monthly">Monthly</option><option value="annual">Annual · two months free</option></select></label>
             </div>
+            <section id="license-status" class="license-status" aria-labelledby="license-status-title">
+              <h3 id="license-status-title">This installation</h3>
+              <div id="license-status-body"><p class="empty-state">Checking plan status…</p></div>
+            </section>
             <div id="plan-cards" class="plan-cards"></div>
             <div class="comparison-table-wrap">
               <table class="comparison-table">
@@ -882,9 +951,9 @@
           <section id="manage-settings-panel" class="tab-panel" data-manage-panel="settings" role="tabpanel" aria-labelledby="manage-settings-tab">
             <div class="settings-intro">
               <div>
-                <p class="eyebrow">Settings · local preferences</p>
+                <p class="eyebrow">Preferences · this installation</p>
                 <h2>Make the workspace yours</h2>
-                <p>Choose how Engraphis looks and connects while keeping memory, recall, and storage local by default.</p>
+                <p>Choose how Engraphis connects while keeping memory, recall, and storage local by default. The theme is in the sidebar under Display and account.</p>
               </div>
               <div class="settings-intro-status"><span class="status-dot" aria-hidden="true"></span><span>Local-first runtime</span></div>
             </div>
@@ -900,23 +969,22 @@
               </form>
             </section>
             <div class="settings-grid">
-              <section class="setting-card">
-                <p class="eyebrow">Interface</p>
-                <h2>Dashboard</h2>
-                <p>Both interfaces read the same store. The choice changes presentation only.</p>
-                <label>Interface<select id="dashboard-select"><option value="ledger">Ledger</option><option value="classic">Classic</option></select></label>
-              </section>
-              <section class="setting-card">
-                <p class="eyebrow">Appearance</p>
-                <h2>Theme</h2>
-                <p>The preference stays on this device and is shared with Classic.</p>
-                <label>Theme<select id="theme-select"><option value="slate">Slate (dark)</option><option value="midnight">Midnight</option><option value="paper">Paper (light)</option><option value="matrix">Matrix</option></select></label>
-              </section>
-              <section class="setting-card">
+              <section class="setting-card cloud-setting-card">
                 <p class="eyebrow">Pro · hosted account</p>
                 <h2>Engraphis Cloud</h2>
                 <p>Manage your subscription, connected devices, and hosted account settings in Engraphis Cloud.</p>
                 <div id="cloud-account-settings" class="cloud-account-settings"><p class="empty-state">Checking hosted account access…</p></div>
+              </section>
+              <section class="setting-card runtime-setting-card" aria-labelledby="runtime-title">
+                <p class="eyebrow">Engine</p>
+                <h2 id="runtime-title">Local runtime</h2>
+                <dl class="definition-list">
+                  <div><dt>Version</dt><dd id="runtime-version">—</dd></div>
+                  <div><dt>Dashboard server</dt><dd id="runtime-host">—</dd></div>
+                  <div><dt>Engine</dt><dd>v2 · bi-temporal</dd></div>
+                  <div><dt>Storage</dt><dd>SQLite on the dashboard server</dd></div>
+                  <div><dt>Embedder</dt><dd id="runtime-embedder">—</dd></div>
+                </dl>
               </section>
               <section class="setting-card llm-setting-card">
                 <div>
@@ -930,7 +998,6 @@
                 <p class="eyebrow">Engine</p>
                 <h2>Local runtime</h2>
                 <dl class="definition-list"><div><dt>API</dt><dd id="ledger-runtime-api"></dd></div><div><dt>Engine</dt><dd>v2 · bi-temporal</dd></div><div><dt>Storage</dt><dd>local SQLite</dd></div></dl>
-                <a class="secondary-button" href="/classic">Open Classic tools</a>
               </section>
             </div>
           </section>
@@ -938,6 +1005,21 @@
       </section>
     </main>
   </div>
+
+  <dialog id="action-dialog" class="graph-connections-dialog action-dialog" aria-labelledby="action-dialog-title" aria-describedby="action-dialog-message">
+    <form id="action-dialog-form" class="graph-connections-panel" novalidate>
+      <header class="graph-connections-header">
+        <div><h2 id="action-dialog-title">Confirm</h2></div>
+      </header>
+      <div id="action-dialog-message" class="action-dialog-message"></div>
+      <div id="action-dialog-fields" class="action-dialog-fields"></div>
+      <p id="action-dialog-error" class="form-error" role="alert" hidden></p>
+      <div class="form-actions">
+        <button id="action-dialog-cancel" class="secondary-button" type="button">Cancel</button>
+        <button id="action-dialog-submit" class="primary-button" type="submit">Continue</button>
+      </div>
+    </form>
+  </dialog>
 
   <dialog id="browser-auth-dialog" class="graph-connections-dialog browser-auth-dialog" aria-labelledby="browser-auth-title" aria-describedby="browser-auth-description">
     <form id="browser-auth-form" class="graph-connections-panel browser-auth-form" novalidate>
@@ -995,6 +1077,60 @@
     </div>
   </dialog>
 
+  <dialog id="quick-import-dialog" class="graph-connections-dialog quick-import-dialog" aria-labelledby="quick-import-title" aria-describedby="quick-import-description">
+    <form id="quick-import-form" class="graph-connections-panel" novalidate>
+      <header class="graph-connections-header">
+        <div><p class="eyebrow">Quick import</p><h2 id="quick-import-title">Import into <span id="quick-import-workspace">this workspace</span></h2></div>
+        <button id="quick-import-close" class="text-button" type="button">Close</button>
+      </header>
+      <p id="quick-import-description" class="graph-connections-meta">Files are extracted on the machine running Engraphis: documents, code, PDFs, and images or audio when the matching extractor is installed. Each file becomes untrusted workspace memory that you can review before approving it for prompts. One import carries up to 1,500 files and 750 MB.</p>
+      <div id="quick-import-drop" class="drop-zone">
+        <p>Drag files or a folder here, or choose them.</p>
+        <div class="header-actions">
+          <button id="quick-import-choose-files" class="secondary-button" type="button">Choose files…</button>
+          <button id="quick-import-choose-folder" class="secondary-button" type="button">Choose a folder…</button>
+        </div>
+        <input id="quick-import-files" type="file" multiple hidden>
+        <input id="quick-import-folder" type="file" webkitdirectory directory multiple hidden>
+      </div>
+      <details id="quick-import-server" class="quick-import-server">
+        <summary>Import a folder by its path on the machine running Engraphis</summary>
+        <p class="project-help">Use this for large folders. The path must be inside that account’s home directory or a folder listed in ENGRAPHIS_IMPORT_ROOTS. Dependency and hidden folders are skipped.</p>
+        <label>Folder path<input id="quick-import-path" maxlength="4096" autocomplete="off" spellcheck="false" placeholder="~/notes"></label>
+        <label>File pattern<input id="quick-import-pattern" maxlength="200" value="*" autocomplete="off" spellcheck="false"></label>
+        <button id="quick-import-path-run" class="secondary-button" type="button">Import folder</button>
+      </details>
+      <label class="check-row"><input id="quick-import-derive" type="checkbox"> Also derive discrete facts with the configured extractor</label>
+      <p class="project-help">Deriving facts can send file text to your configured LLM provider. Leave it off to keep the import on this machine.</p>
+      <div id="quick-import-status" class="quick-import-status" role="status" aria-live="polite"></div>
+    </form>
+  </dialog>
+
+  <dialog id="sources-dialog" class="graph-connections-dialog sources-dialog" aria-labelledby="sources-title">
+    <div class="graph-connections-panel">
+      <header class="graph-connections-header">
+        <div><p class="eyebrow">Code and database sources</p><h2 id="sources-title">Add structure to the graph</h2></div>
+        <button id="sources-close" class="text-button" type="button">Close</button>
+      </header>
+      <form id="code-index-form" class="sources-form" novalidate>
+        <h3>Index a code repository</h3>
+        <p class="project-help">Parses source files on the machine running Engraphis into symbols and call edges, then links them to memories that mention them. Re-running reads only changed files. Use a path inside the allowed indexing folder, relative to that folder or absolute.</p>
+        <label>Repository name<input id="code-index-repo" maxlength="200" autocomplete="off" required></label>
+        <label>Repository path<input id="code-index-root" maxlength="4096" autocomplete="off" spellcheck="false" placeholder="projects/my-repository" required></label>
+        <button class="primary-button" type="submit">Index repository</button>
+        <p id="code-index-status" class="project-help" role="status" aria-live="polite"></p>
+      </form>
+      <form id="postgres-import-form" class="sources-form" novalidate>
+        <h3>Import a PostgreSQL schema</h3>
+        <p class="project-help">Reads table, column and key metadata from the catalog into entities and relations; row data is never read. The connection string is used once and is never stored.</p>
+        <label>Connection string<input id="postgres-dsn" type="password" autocomplete="off" spellcheck="false" placeholder="postgresql://user@host/database" required></label>
+        <label>Repository scope (optional)<input id="postgres-repo" maxlength="200" autocomplete="off"></label>
+        <button class="primary-button" type="submit">Import schema</button>
+        <p id="postgres-import-status" class="project-help" role="status" aria-live="polite"></p>
+      </form>
+    </div>
+  </dialog>
+
   <dialog id="obsidian-import-dialog" class="graph-connections-dialog obsidian-import-dialog" aria-labelledby="obsidian-import-title" aria-describedby="obsidian-import-description">
     <form id="obsidian-import-form" class="graph-connections-panel" novalidate>
       <header class="graph-connections-header">
@@ -1033,13 +1169,17 @@
     </form>
   </dialog>
 
+  <script src="/v2-assets/action-dialog.js?v=20261009-ledger-only-1"></script>
+  <script src="/v2-assets/markdown.js?v=20261009-ledger-only-1"></script>
   <script src="/v2-assets/managed-processing.js?v=20260905-policy-1"></script>
   <script src="/v2-assets/workflow-context.js?v=20260928-workspace-routing-1"></script>
   <script src="/v2-assets/memory-revision.js?v=20260906-workflow-1"></script>
-  <script src="/v2-assets/memory-history.js?v=20260906-workflow-1"></script>
+  <script src="/v2-assets/memory-history.js?v=20261009-ledger-only-1"></script>
   <script src="/v2-assets/ask-requests.js?v=20260906-ask-home-1"></script>
   <script src="/v2-assets/graph-lifecycle.js?v=20260906-lifecycle-1"></script>
-  <script src="/v2-assets/spec-crawl.js"></script>
-  <script src="/v2-assets/ledger.js?v=20261010-ui-release-2"></script>
+  <script src="/v2-assets/graph-explorer.js?v=20261009-ledger-only-1"></script>
+  <script src="/v2-assets/import-sources.js?v=20261009-ledger-only-1"></script>
+  <script src="/v2-assets/spec-crawl.js?v=20261012-stacked-ledger-1"></script>
+  <script src="/v2-assets/ledger.js?v=20261012-stacked-ledger-1"></script>
 </body>
 </html>

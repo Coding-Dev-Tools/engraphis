@@ -1,6 +1,6 @@
 {
   "schema": "engraphis-mcp-contract/v1",
-  "sha256": "fd901b4cba128b971b17415d7739165c6421704320da9b178db6d0fa1f552bf8",
+  "sha256": "0a7b5eac2e3b80134e3f088228de101715b6c610fba0d0d4f8099ac7da6c90b2",
   "surfaces": {
     "classic": [
       {
@@ -3151,11 +3151,18 @@
               "type": "boolean"
             },
             "workspace": {
-              "default": "default",
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
               "description": "Workspace for claim tracing.",
-              "maxLength": 200,
-              "title": "Workspace",
-              "type": "string"
+              "title": "Workspace"
             }
           },
           "title": "engraphis_spec_crawlArguments",
@@ -3202,8 +3209,8 @@
               "title": "Repo"
             },
             "save_as_memory": {
-              "default": true,
-              "description": "Save clarification as a procedural memory in scope.",
+              "default": false,
+              "description": "Opt in to saving clarification as a pending procedural memory in the requested scope.",
               "title": "Save As Memory",
               "type": "boolean"
             },
@@ -3229,11 +3236,18 @@
               "type": "string"
             },
             "workspace": {
-              "default": "default",
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
               "description": "Workspace to store the procedural memory.",
-              "maxLength": 200,
-              "title": "Workspace",
-              "type": "string"
+              "title": "Workspace"
             }
           },
           "required": [
@@ -3263,6 +3277,7 @@
                   "items": {
                     "type": "string"
                   },
+                  "maxItems": 150,
                   "type": "array"
                 },
                 {
@@ -3279,6 +3294,7 @@
                   "items": {
                     "type": "string"
                   },
+                  "maxItems": 4,
                   "type": "array"
                 },
                 {
@@ -3318,11 +3334,18 @@
               "title": "Session Id"
             },
             "workspace": {
-              "default": "default",
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
               "description": "Workspace to audit memories.",
-              "maxLength": 200,
-              "title": "Workspace",
-              "type": "string"
+              "title": "Workspace"
             }
           },
           "title": "engraphis_spec_crawl_memoriesArguments",
@@ -3360,18 +3383,11 @@
               "type": "string"
             },
             "node_b": {
-              "anyOf": [
-                {
-                  "maxLength": 256,
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
               "description": "Older conflicting memory node id to supersede (or target node to link to).",
-              "title": "Node B"
+              "maxLength": 256,
+              "minLength": 1,
+              "title": "Node B",
+              "type": "string"
             },
             "repo": {
               "anyOf": [
@@ -3387,17 +3403,39 @@
               "description": "Optional repo scope.",
               "title": "Repo"
             },
+            "session_id": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional active session scope; both memories must be visible in this same session.",
+              "title": "Session Id"
+            },
             "workspace": {
-              "default": "default",
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
               "description": "Workspace scope.",
-              "maxLength": 200,
-              "title": "Workspace",
-              "type": "string"
+              "title": "Workspace"
             }
           },
           "required": [
             "action",
-            "node_a"
+            "node_a",
+            "node_b"
           ],
           "title": "engraphis_spec_crawl_resolveArguments",
           "type": "object"

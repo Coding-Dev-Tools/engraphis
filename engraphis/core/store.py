@@ -5212,7 +5212,7 @@ class Store:
 
     def list_memories(self, flt: Optional[SearchFilter] = None,
                       *, include_invalid: bool = False, limit: Optional[int] = None,
-                      prompt_only: bool = False) -> list[MemoryRecord]:
+                      prompt_only: bool = False, closed_only: bool = False) -> list[MemoryRecord]:
         """List scoped records, optionally capping only prompt-eligible rows.
 
         Public callers can opt into ``prompt_only`` when this bounded result will enter
@@ -5224,6 +5224,18 @@ class Store:
             return []
         sql = "SELECT * FROM memories"
         where, params = self._where(flt, include_invalid)
+        if closed_only:
+            # Select known closed world-time intervals before either result cap. Public
+            # history must still hide records outside the requested system-time snapshot.
+            known_at = flt.known_at if flt and flt.known_at is not None else now_ts()
+            valid_at = flt.valid_at if flt and flt.valid_at is not None else now_ts()
+            where.extend([
+                "valid_to IS NOT NULL AND valid_to<=?",
+                "(valid_to_recorded_at IS NULL OR valid_to_recorded_at<=?)",
+                "(ingested_at IS NULL OR ingested_at<=?)",
+                "(expired_at IS NULL OR ?<expired_at)",
+            ])
+            params.extend([valid_at, known_at, known_at, known_at])
         if where:
             sql += " WHERE " + " AND ".join(where)
         sql += " ORDER BY ingested_at DESC"
@@ -7569,7 +7581,7 @@ class Store:
         if include_invalid:
             return ordinary, params
 
-        # Promotion and merge links intentionally keep retired source history
+        # Lifecycle lineage links intentionally keep retired source history
         # queryable from the live successor. They still require both endpoints
         # to satisfy every non-temporal scope/type predicate.
         historical_clauses: list[str] = []
@@ -7580,7 +7592,14 @@ class Store:
             )
             historical_clauses.extend(where)
             historical_params.extend(values)
-        lineage = "l.relation IN ('promotes','merges')"
+        lineage = "l.relation IN ('promotes','merges','supersedes')"
+        _, known = _temporal_anchors(flt)
+        for alias in ("ma", "mb"):
+            historical_clauses.extend([
+                f"({alias}.ingested_at IS NULL OR {alias}.ingested_at<=?)",
+                f"({alias}.expired_at IS NULL OR ?<{alias}.expired_at)",
+            ])
+            historical_params.extend([known, known])
         if historical_clauses:
             lineage += " AND " + " AND ".join(historical_clauses)
         return f"(({ordinary}) OR ({lineage}))", params + historical_params

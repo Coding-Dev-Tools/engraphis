@@ -28,7 +28,7 @@ most common mistake here.
 |---|---|---|
 | Status | Primary scoped, bi-temporal, interface-driven implementation. | Compatibility/reference implementation with flat namespaces. |
 | Model | Scoped + bi-temporal + typed; interface-driven. | Single flat `namespace` string per memory. |
-| Code | `engraphis/core/`, `engraphis/backends/`, `eval/`, `tests/`, `scripts/migrate_to_v2.py` | `engraphis/app.py`, `config.py`, `models.py`, `routes/`, `stores/`, `engines/`, `llm/`, `static/` |
+| Code | `engraphis/core/`, `engraphis/backends/`, `eval/`, `tests/`, `scripts/migrate_to_v2.py` | `engraphis/app.py`, `config.py`, `models.py`, `routes/`, `stores/`, `engines/`, `llm/` |
 | Data | new v2 schema (`SCHEMA_VERSION = 18`) | `engraphis_v1.db` |
 | Entry | `engraphis.MemoryEngine.create()` / `engraphis.create_memory_engine()` → `engraphis/factory.py` → `core/engine.py` | Internal reference only; never a public launcher |
 
