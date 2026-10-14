@@ -19,6 +19,7 @@ import hashlib
 import math
 import re
 import unicodedata
+from bisect import bisect_right
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -285,11 +286,18 @@ def _code_ranges(text: str) -> list[tuple[int, int]]:
         ranges.append((fence_start, len(text)))
     for match in re.finditer(r"`[^`\n]+`", text):
         ranges.append((match.start(), match.end()))
-    return sorted(ranges)
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(ranges):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
 
 
 def _in_ranges(pos: int, ranges: Sequence[tuple[int, int]]) -> bool:
-    return any(start <= pos < end for start, end in ranges)
+    index = bisect_right(ranges, (pos, float("inf"))) - 1
+    return index >= 0 and pos < ranges[index][1]
 
 
 def _parse_sections(text: str, template: SpecTemplate,
@@ -753,6 +761,7 @@ def _extract_node_parameters(text: str) -> dict[str, str]:
 
 _ENFORCE_VERBS = frozenset({"must", "always", "required", "enforce", "mandatory", "require"})
 _FORBID_VERBS = frozenset({"never", "forbid", "deprecated", "disable", "prohibit", "skip", "omit"})
+_NEGATIVE_ACTION_VERBS = frozenset({"forbid", "disable", "prohibit", "skip", "omit"})
 
 
 def _extract_node_directives(text: str) -> dict[str, str]:
@@ -768,7 +777,7 @@ def _extract_node_directives(text: str) -> dict[str, str]:
             if tok in _FORBID_VERBS or (
                 tok in _ENFORCE_VERBS | {"do", "does", "should", "may", "can"} and negated
             ):
-                action = "forbid"
+                action = "enforce" if tok in _NEGATIVE_ACTION_VERBS and negated else "forbid"
             elif tok in _ENFORCE_VERBS:
                 action = "enforce"
             else:
@@ -780,6 +789,9 @@ def _extract_node_directives(text: str) -> dict[str, str]:
                 if target in {"require", "enforce"}:
                     # Nested verbs inherit the governing directive, including its negation.
                     consumed.add(i + offset)
+                elif target in _NEGATIVE_ACTION_VERBS:
+                    consumed.add(i + offset)
+                    action = "enforce" if action == "forbid" else "forbid"
                 elif target in _ENFORCE_VERBS | _FORBID_VERBS:
                     break
                 elif target not in _STOPWORDS:
@@ -1131,9 +1143,9 @@ def analyze_memory_nodes(
 
     for target, action_dict in dir_map.items():
         if "enforce" in action_dict and "forbid" in action_dict:
-            for idx_a in action_dict["enforce"][-3:]:
+            for idx_a in action_dict["enforce"]:
                 node_a = parsed_nodes[idx_a]
-                for idx_b in action_dict["forbid"][-3:]:
+                for idx_b in action_dict["forbid"]:
                     node_b = parsed_nodes[idx_b]
                     if (node_a["subject_key"] and node_b["subject_key"]
                             and node_a["subject_key"] != node_b["subject_key"]):

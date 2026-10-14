@@ -2905,7 +2905,7 @@ class _SpecCrawlAnswerReq(BaseModel):
     workspace: Optional[str] = None
     repo: Optional[str] = None
     session_id: Optional[str] = None
-    save_as_memory: StrictBool = True
+    save_as_memory: StrictBool = False
 
 
 @router.post("/spec/crawl/answer")
@@ -2928,8 +2928,8 @@ class _SpecCrawlMemoriesReq(BaseModel):
     workspace: Optional[str] = None
     repo: Optional[str] = None
     session_id: Optional[str] = None
-    memory_ids: Optional[list[str]] = None
-    mtypes: Optional[list[str]] = None
+    memory_ids: Optional[list[str]] = Field(default=None, max_length=150)
+    mtypes: Optional[list[str]] = Field(default=None, max_length=4)
     include_trace: StrictBool = True
 
 
@@ -2951,7 +2951,7 @@ def spec_crawl_memories(req: _SpecCrawlMemoriesReq):
 class _SpecCrawlResolveReq(BaseModel):
     action: str = Field(min_length=1, max_length=64)
     node_a: str = Field(min_length=1, max_length=256)
-    node_b: Optional[str] = Field(default=None, max_length=256)
+    node_b: str = Field(min_length=1, max_length=256)
     workspace: Optional[str] = None
     repo: Optional[str] = None
     session_id: Optional[str] = None

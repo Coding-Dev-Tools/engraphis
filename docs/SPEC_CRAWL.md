@@ -74,7 +74,7 @@ Users or orchestrators can answer the clarification directly via:
 2. **REST API**: calling `POST /api/spec/crawl/answer`.
 3. **Smart MCP**: discovering and executing `engraphis_spec_crawl_answer`.
 
-The server verifies that the flag matches the current text before replacing its span. With `save_as_memory=True`, it saves a pending procedural memory (`mtype="procedural"`, `source="spec_crawl"`). Approve it in Library before it can enter model context or procedural-memory crawls. Direct-text crawls evaluate only the supplied text; a clarification does not guarantee a higher score.
+The server verifies that the flag matches the current text before replacing its span. Persistence is opt-in: `save_as_memory` defaults to `False`, and the dashboard offers an unchecked save option. With `save_as_memory=True`, it saves a pending procedural memory (`mtype="procedural"`, `source="spec_crawl"`) in the supplied session, or the selected repo/workspace when no session is supplied. Approve it in Library before it can enter model context or procedural-memory crawls. Direct-text crawls evaluate only the supplied text; a clarification does not guarantee a higher score.
 
 ---
 
@@ -183,7 +183,7 @@ These four Classic MCP tools are also discoverable and callable through Smart MC
 
 ## 10. Evaluation Gate
 
-CI verifies determinism, axis classification, flag recall, qualifier precision, section counts, and score boundaries in both the full stack and NumPy-only jobs:
+CI verifies determinism, axis classification, flag recall, qualified-token avoidance, section counts, and score boundaries in both the full stack and NumPy-only jobs. Qualified-token avoidance measures the explicitly labelled negative examples; it is not a general false-positive precision estimate:
 
 ```bash
 python -m eval.spec_crawl
