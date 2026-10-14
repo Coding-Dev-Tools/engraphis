@@ -349,6 +349,7 @@
       }
       gl.bindBuffer(gl.ARRAY_BUFFER, nodeBuffers.flag);
       gl.bufferData(gl.ARRAY_BUFFER, state.nodeFlags, gl.DYNAMIC_DRAW);
+      schedule();
     }
     function uploadNodePositions() {
       if (state.contextLost || !gl || !nodeProgram) return;
@@ -1024,7 +1025,9 @@
       if (state.edgeVertexCount) uploadEdgePositions(); else uploadEdges();
       state.pickDirty = true;
       state.lastLabelKey = '';
-      if (doFit) fit(false); else camera();
+      if (doFit) fit(false);
+      // A worker fit may be declined after navigation; new geometry still needs paint.
+      camera();
       computeCommunityRegions();
       drawRegions();
     }
