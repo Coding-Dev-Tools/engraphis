@@ -13021,7 +13021,7 @@ class MemoryService:
         workspace: Optional[str] = None,
         repo: Optional[str] = None,
         session_id: Optional[str] = None,
-        save_as_memory: bool = True,
+        save_as_memory: bool = False,
     ) -> dict:
         """Apply a human clarification to an ambiguous spec flag and optionally record it."""
         save_as_memory = _strict_bool(save_as_memory, field="save_as_memory")
@@ -13063,6 +13063,7 @@ class MemoryService:
                 workspace=workspace,
                 repo=repo,
                 session_id=session_id,
+                scope="session" if session_id else None,
                 mtype="procedural",
                 source="spec_crawl",
                 trusted=False,
