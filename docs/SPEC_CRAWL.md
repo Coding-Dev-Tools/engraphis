@@ -128,6 +128,8 @@ Inline code examples use matching backtick runs; runs of a different length insi
 Word classification reads at most `word_limit` (5,000) tokens per memory. Each node reports `word_analysis_truncated` and `word_count_is_lower_bound`; a truncated `word_count` is the number analyzed, not the full memory length. Reports include `word_analysis_truncated_node_count`, and partial nodes receive no clean-node quality credit. HTTP and MCP audits set `truncated` and `analysis_truncated` for either omitted memories or incomplete word analysis; `node_selection_truncated` identifies an omitted-memory sample separately.
 Spec Studio reports these limits separately: omitted memories produce a node-sample warning, while partial word analysis identifies the affected memory count and token limit without claiming that more memories remain.
 
+An empty memory selection returns the same cluster aliases, seven-axis radar, axis labels, score component fields, and policy-gap remedy fields as a populated audit. Health and coverage remain zero; the empty selection retains an empty trace and remediation plan.
+
 ---
 
 ## 7. Command Line Interface (CLI)
