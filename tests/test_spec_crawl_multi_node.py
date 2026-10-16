@@ -169,6 +169,41 @@ def test_cluster_responses_omit_large_memory_bodies_without_losing_analysis():
     assert len(json.dumps(report)) < 6_000
 
 
+def test_memory_word_truncation_is_disclosed_and_cannot_count_as_clean():
+    from engraphis.core.spec_crawl import MAX_SPEC_WORDS
+
+    report = analyze_memory_nodes([
+        {"id": "long", "content": "neutral " * MAX_SPEC_WORDS + "every result."},
+    ])
+    node = report["nodes"][0]
+    assert node["word_count"] == MAX_SPEC_WORDS
+    assert node["word_analysis_truncated"] is True
+    assert node["word_count_is_lower_bound"] is True
+    assert node["flag_count"] == 0
+    assert report["word_limit"] == MAX_SPEC_WORDS
+    assert report["word_analysis_truncated_node_count"] == 1
+    assert report["analysis_truncated"] is True
+    assert report["score_breakdown"]["quality_points"] == 0
+
+
+def test_exact_word_limit_is_complete_and_only_complete_clean_nodes_earn_quality():
+    from engraphis.core.spec_crawl import MAX_SPEC_WORDS
+
+    nodes = [{"id": "exact", "content": "neutral " * MAX_SPEC_WORDS},
+             {"id": "partial", "content": "neutral " * (MAX_SPEC_WORDS + 1)}]
+    report = analyze_memory_nodes(nodes)
+    complete, partial = report["nodes"]
+    assert complete["word_analysis_truncated"] is False
+    assert complete["word_count_is_lower_bound"] is False
+    assert partial["word_analysis_truncated"] is True
+    assert report["word_analysis_truncated_node_count"] == 1
+    assert report["score_breakdown"]["quality_points"] == 15
+    exact = analyze_memory_nodes(nodes[:1])
+    assert exact["analysis_truncated"] is False
+    assert exact["word_analysis_truncated_node_count"] == 0
+    assert exact["score_breakdown"]["quality_points"] == 30
+
+
 def test_cross_node_parameter_conflict_detection():
     memories = [
         {
@@ -200,6 +235,49 @@ def test_cross_node_parameter_conflict_detection():
     # Newer node should be retained, older should be retired
     assert conflict["remedy"]["keep_node"] == "mem_db_v2"
     assert conflict["remedy"]["retire_node"] == "mem_db_v1"
+
+
+@pytest.mark.parametrize("code_style", ["fenced", "inline"])
+def test_configuration_examples_do_not_create_supersession_remedies(code_style):
+    example = "auth: none. Never require authentication."
+    example = f"```text\n{example}\n```" if code_style == "fenced" else f"`{example}`"
+    report = analyze_memory_nodes([
+        {"id": "guidance", "subject_key": "app", "valid_from": 2,
+         "content": f"Use OAuth.\nObsolete example:\n{example}"},
+        {"id": "current", "subject_key": "app", "valid_from": 1,
+         "content": "auth: oauth. Always require authentication."},
+    ])
+    assert report["nodes"][0]["parameters"] == {}
+    assert report["nodes"][0]["directives"] == {}
+    assert not report["conflicts"]
+    assert all(remedy["action"] != "supersede" for remedy in report["remediation_plan"])
+
+
+@pytest.mark.parametrize("code_style", ["fenced", "inline"])
+def test_active_conflicts_survive_agreeing_code_examples(code_style):
+    example = "port: 9999. Never require authentication."
+    example = f"```text\n{example}\n```" if code_style == "fenced" else f"`{example}`"
+    report = analyze_memory_nodes([
+        {"id": "old", "subject_key": "app", "valid_from": 1,
+         "content": f"port: 5432. Always require authentication.\n{example}"},
+        {"id": "new", "subject_key": "app", "valid_from": 2,
+         "content": f"port: 5433. Never require authentication.\n{example}"},
+    ])
+    old, new = report["nodes"]
+    assert old["parameters"]["port"] == "5432"
+    assert new["parameters"]["port"] == "5433"
+    assert old["directives"]["authentication"] == "enforce"
+    assert new["directives"]["authentication"] == "forbid"
+    assert report["conflicts"][0]["remedy"]["keep_node"] == "new"
+    assert report["conflicts"][0]["remedy"]["retire_node"] == "old"
+
+
+def test_removed_inline_examples_cannot_join_parameter_or_directive_fragments():
+    report = analyze_memory_nodes([
+        {"id": "example", "content": "auth: `none`\nKeep OAuth enabled.\nAlways `require` authentication."},
+    ])
+    assert report["nodes"][0]["parameters"] == {}
+    assert report["nodes"][0]["directives"] == {}
 
 
 def test_cross_node_directive_conflict_detection():
