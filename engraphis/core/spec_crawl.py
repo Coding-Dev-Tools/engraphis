@@ -877,6 +877,11 @@ _DIRECTIVE_SCOPE_WORDS = frozenset({"to", "on", "for", "in", "across", "within",
 
 def _extract_node_directives(text: str) -> dict[str, str]:
     directives: dict[str, str] = {}
+    # Every governing token must also occur as a substring. Reject impossible
+    # text before full-word parsing; possible matches retain the exact parser.
+    lowered = text.lower()
+    if not any(verb in lowered for verb in _DIRECTIVE_VERBS):
+        return directives
     for clause in re.split(r"[.!?;,\n]", text):
         tokens = [w.lower() for w in re.findall(r"\b[a-zA-Z_][a-zA-Z_0-9-]*\b", clause)]
         if _DIRECTIVE_VERBS.isdisjoint(tokens):
