@@ -214,5 +214,7 @@ The same gate checks eight synthetic memory-audit contracts in both input orders
 python -m eval.spec_crawl
 ```
 
+The gate checks each metric separately: determinism, axis classification, flag recall, qualified-token avoidance, and section-count accuracy must each reach at least 90%. All score-boundary checks must pass (100%), and the mean of the six metrics must reach at least 90%. AGENTS.md dogfooding must also pass its existing checks: a score of at least 50 and at least eight parsed sections. This branch additionally requires every memory audit fixture contract to pass in both input orders.
+
 Scores measure heuristic coverage and bounded ambiguity penalties. They do not prove execution safety or replace release tests. Partial specifications have low expected scores even when their wording is precise. Claim tracing makes at most 40 evidence lookups; reports return at most 200 flags while scores account for all detected flags.
 Failed evidence lookups remain `unchecked` and do not count as unsupported claims or lower the score. A successful lookup with no supporting evidence remains `untraced`.
