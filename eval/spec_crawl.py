@@ -28,21 +28,27 @@ def evaluate_memory_fixtures(path: Path = MEMORY_DATASET_PATH) -> dict:
         item = json.loads(line)
         cases += 1
         expected = {tuple(sorted(pair)) for pair in item["expected_conflicts"]}
+        expected_nodes = {str(node["id"]) for node in item["memories"]}
+        expected_retirements = {tuple(pair) for pair in item.get("expected_retirements", [])}
+        expected_actions = {"supersede"} if expected_retirements else set()
+        if len(expected_retirements) < len(expected):
+            expected_actions.add("clarify")
+        expected_actions = set(item.get("expected_actions", expected_actions))
         passed = True
         for nodes in (item["memories"], list(reversed(item["memories"]))):
             report = analyze_memory_nodes(nodes, include_trace=False)
             conflicts = report["conflicts"]
             actual = {tuple(sorted((row["node_a"], row["node_b"]))) for row in conflicts}
-            passed = passed and actual == expected
+            passed = passed and actual == expected and len(conflicts) == len(expected)
+            passed = passed and {node["id"] for node in report["nodes"]} == expected_nodes
+            passed = passed and len(report["nodes"]) == len(expected_nodes)
             passed = passed and all("content" not in node for node in report["nodes"])
             if "expected_orphans" in item:
                 passed = passed and {row["node_id"] for row in report["orphans"]} == set(item["expected_orphans"])
-            if "expected_actions" in item:
-                passed = passed and {row["remedy"]["action"] for row in conflicts} == set(item["expected_actions"])
-            if "expected_retirements" in item:
-                retirements = {(row["remedy"]["keep_node"], row["remedy"]["retire_node"])
-                               for row in conflicts if row["remedy"]["action"] == "supersede"}
-                passed = passed and retirements == {tuple(pair) for pair in item["expected_retirements"]}
+            passed = passed and {row["remedy"]["action"] for row in conflicts} == expected_actions
+            retirements = {(row["remedy"]["keep_node"], row["remedy"]["retire_node"])
+                           for row in conflicts if row["remedy"]["action"] == "supersede"}
+            passed = passed and retirements == expected_retirements
         if not passed:
             failures.append(item["id"])
     passed_cases = cases - len(failures)
