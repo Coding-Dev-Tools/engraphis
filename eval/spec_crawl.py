@@ -14,6 +14,15 @@ from engraphis.core.spec_crawl import analyze_memory_nodes, crawl_spec
 
 ROOT = Path(__file__).resolve().parents[1]
 DATASET_PATH = ROOT / "eval" / "datasets" / "spec_crawl.jsonl"
+METRIC_FLOORS = {
+    "determinism_rate": 0.90,
+    "axes_accuracy": 0.90,
+    "flag_recall": 0.90,
+    "qualifier_accuracy": 0.90,
+    "sections_accuracy": 0.90,
+    "scores_accuracy": 1.0,
+    "overall_accuracy": 0.90,
+}
 MEMORY_DATASET_PATH = ROOT / "eval" / "datasets" / "spec_crawl_memories.jsonl"
 
 
@@ -159,9 +168,17 @@ def main() -> None:
     print(f"  Memory fixture SHA-256: {memory['dataset_sha256']}")
     print(f"  AGENTS.md dogfooding  : {'PASSED' if res['agents_dogfood_ok'] else 'FAILED'}\n")
 
-    if (res["overall_accuracy"] < 0.90 or not res["agents_dogfood_ok"]
-            or res["scores_accuracy"] < 1 or memory["accuracy"] < 1):
-        sys.stderr.write("FLOOR VIOLATION: Spec Crawl document thresholds or memory audit contracts failed\n")
+    violations = [
+        f"{metric} {res[metric]:.1%} < {floor:.1%}"
+        for metric, floor in METRIC_FLOORS.items()
+        if not res[metric] >= floor
+    ]
+    if not res["agents_dogfood_ok"]:
+        violations.append("AGENTS.md dogfooding failed")
+    if not memory["accuracy"] >= 1.0:
+        violations.append("memory audit contracts below 100%")
+    if violations:
+        sys.stderr.write("FLOOR VIOLATION: Spec Crawl evaluation: " + "; ".join(violations) + "\n")
         sys.exit(1)
 
 
