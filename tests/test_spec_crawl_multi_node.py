@@ -442,6 +442,27 @@ def test_multiple_clear_topics_in_one_memory_preserve_the_primary_axis_field():
     assert report["coverage"]["role"] == report["coverage"]["objective"] == 0.5
 
 
+@pytest.mark.parametrize("title", ["~~~", "Introduction\n~~~", "`port: 9001`"])
+def test_policy_mask_reuse_preserves_title_fences_and_inline_examples(title):
+    body = "port: 9002" if title.startswith("`") else "port: 9001\n~~~\nport: 9002"
+    report = analyze_memory_nodes([
+        {"id": "a", "subject_key": "service", "title": title, "content": body},
+        {"id": "b", "subject_key": "service", "content": "port: 9002"},
+    ])
+    assert not report["conflicts"]
+
+
+@pytest.mark.parametrize("title", ["~~~", "Introduction\n~~~", "`Never deploy changes.`"])
+def test_policy_mask_reuse_keeps_example_directives_out_of_conflicts(title):
+    body = "Always deploy changes." if title.startswith("`") else (
+        "Never deploy changes.\n~~~\nAlways deploy changes.")
+    report = analyze_memory_nodes([
+        {"id": "a", "subject_key": "service", "title": title, "content": body},
+        {"id": "b", "subject_key": "service", "content": "Always deploy changes."},
+    ])
+    assert not report["conflicts"]
+
+
 def test_simulation_trace_generation():
     memories = [
         {"id": "mem_1", "title": "Architecture", "content": "FastAPI with SQLite."},
