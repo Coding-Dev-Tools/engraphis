@@ -315,6 +315,7 @@ def _mask_code_ranges(text: str, ranges: Sequence[tuple[int, int]]) -> str:
 def _parse_sections(text: str, template: SpecTemplate,
                     code: Sequence[tuple[int, int]]) -> list[_Section]:
     heads: list[tuple[int, int, str]] = []  # (heading_start, body_start, title)
+    visible_text = _mask_code_ranges(text, code)
     offset = 0
     lines = text.split("\n")
     for n, line in enumerate(lines):
@@ -354,7 +355,8 @@ def _parse_sections(text: str, template: SpecTemplate,
                                          head_start, body_start, end))
             continue
         clean = re.sub(r"^[\d.)\s]+", "", title).strip(" *_`") or title
-        sections.append(_Section(len(sections), clean[:80], template.axis_for(clean),
+        axis = template.axis_for(visible_text[head_start:body_start])
+        sections.append(_Section(len(sections), clean[:80], axis,
                                  head_start, body_start, end))
     if not sections:
         sections.append(_Section(0, "spec", "other", 0, 0, len(text)))
@@ -536,6 +538,8 @@ def crawl_spec(text: str, *, template: SpecTemplate = DEFAULT_TEMPLATE,
                  end=sections[tok.section].start)
         counts = per_section[tok.section]
         counts["read"] += 1
+        if not tok.in_code:
+            counts["prose"] += 1
         counts[tok.kind] += 1
         sentence_span = spans[tok.sentence][:2]
         if tok.kind == "vague":
@@ -603,12 +607,14 @@ def crawl_spec(text: str, *, template: SpecTemplate = DEFAULT_TEMPLATE,
                      section, (start, end))
 
     # Coverage radar.
-    body_lower = text.casefold()
+    body_lower = ";\n".join(
+        injection_text[section.start:section.end] for section in sections
+    ).casefold()
     body_words = set(re.findall(r"\w+", body_lower))
     axes: dict[str, float] = {}
     for axis in template.axes:
         mapped = [s for s in sections if s.axis == axis]
-        words = sum(per_section[s.index]["read"] for s in mapped)
+        words = sum(per_section[s.index]["prose"] for s in mapped)
         section_score = min(1.0, words / 8.0) if mapped else 0.0
         signal_score = 0.5 if any(
             _contains_axis_term(sig, body_lower, body_words)
@@ -760,7 +766,7 @@ def _contains_axis_term(term: str, text: str, words: set[str]) -> bool:
     return re.search(r"\b" + re.escape(term) + r"\b", text) is not None
 
 
-def _classify_node_axis(title: str, content: str) -> str:
+def _node_axis_scores(title: str, content: str) -> Counter[str]:
     combined = f"{title} {content}".lower()
     title_words = {word.casefold() for word in _HEADING_WORD.findall(title)}
     combined_words = set(re.findall(r"\w+", combined))
@@ -775,9 +781,43 @@ def _classify_node_axis(title: str, content: str) -> str:
         for sig in signals:
             if _contains_axis_term(sig, combined, combined_words):
                 scores[axis] += 2
-    if scores:
-        return scores.most_common(1)[0][0]
-    return "context"
+    return scores
+
+
+def _classify_node_axis(title: str, content: str) -> str:
+    scores = _node_axis_scores(title, content)
+    return scores.most_common(1)[0][0] if scores else "context"
+
+
+def _covered_node_axes(title: str, content: str) -> list[str]:
+    """Keep primary labels separate from coverage supported by active policy prose."""
+    code = _code_ranges(content)
+    visible = _mask_code_ranges(content, code)
+    sections = _parse_sections(content, DEFAULT_TEMPLATE, code)
+    active_parts: list[str] = []
+    heading_axes: set[str] = set()
+    for section in sections:
+        body = visible[section.start:section.end]
+        if _TOKEN.search(body) is None:
+            continue
+        heading = visible[section.heading_start:section.start]
+        active_parts.extend((heading, body))
+        heading_words = {word.casefold() for word in _HEADING_WORD.findall(heading)}
+        heading_axes.update(axis for axis, aliases in _AXIS_ALIASES.items()
+                            if heading_words & aliases)
+    if not active_parts:
+        return []
+    prose = "\n".join(active_parts)
+    title = _mask_code_ranges(title, _code_ranges(title))
+    scores = _node_axis_scores(title, prose)
+    # Three points already represent a title alias or an alias backed by a
+    # body signal. A lone incidental secondary signal is not policy coverage.
+    covered = {axis for axis, score in scores.items() if score >= 3}
+    covered.add(scores.most_common(1)[0][0] if scores else "context")
+    covered.update(heading_axes)
+    if _extract_node_directives(prose):
+        covered.add("rules")
+    return [axis for axis in DEFAULT_AXES if axis in covered]
 
 
 def _extract_node_parameters(text: str) -> dict[str, str]:
@@ -960,7 +1000,8 @@ def analyze_memory_nodes(
 
         # Classify axis
         axis = _classify_node_axis(title, content)
-        axis_counts[axis] += 1
+        covered_axes = _covered_node_axes(title, content)
+        axis_counts.update(covered_axes)
 
         # Kinds summary
         kinds_counter: Counter[str] = Counter()
@@ -995,6 +1036,7 @@ def analyze_memory_nodes(
             "ingested_at": ingested_at,
             "valid_from": valid_from,
             "axis": axis,
+            "covered_axes": covered_axes,
             "word_count": len(raw_toks),
             "word_count_is_lower_bound": word_analysis_truncated,
             "word_analysis_truncated": word_analysis_truncated,
