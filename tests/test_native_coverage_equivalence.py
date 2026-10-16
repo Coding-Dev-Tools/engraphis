@@ -4,6 +4,9 @@ import pytest
 
 pytest.importorskip("sqlite_vec")
 
+# Run before ordinary tests can import SQLCipher's incompatible SQLite ABI.
+pytestmark = pytest.mark.native_sqlitevec
+
 from engraphis.backends.vector_sqlitevec import (  # noqa: E402
     SqliteVecVectorIndex, _native_mirror_covers_canonical,
 )
