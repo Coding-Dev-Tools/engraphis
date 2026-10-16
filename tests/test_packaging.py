@@ -492,10 +492,11 @@ def test_extras_stay_resolvable_on_the_lowest_supported_python():
 def test_dependency_floors_exclude_known_vulnerable_and_breaking_releases():
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
-    expected = '"mcp>=1.28.1,<2; python_version >= \'3.10\'"'
+    expected = '"mcp>=1.30.0,<2; python_version >= \'3.10\'"'
     assert pyproject.count(expected) == 3
     combined = pyproject + requirements
-    assert "mcp>=1.28.1,<2" in requirements
+    assert "mcp>=1.30.0,<2" in requirements
+    assert "mcp>=1.28.1" not in combined
     assert "mcp>=1.14.0" not in combined
     assert "python-multipart>=0.0.31" in combined
     assert "starlette>=1.3.1,<2" in combined
