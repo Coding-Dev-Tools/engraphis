@@ -80,6 +80,28 @@ def test_service_boolean_controls_do_not_coerce_strings(crawl_service):
     assert svc.store.conn.total_changes == before
 
 
+@pytest.mark.parametrize("explicit_selection", [False, True])
+def test_service_preserves_memory_word_truncation_status(crawl_service, explicit_selection):
+    from engraphis.core.spec_crawl import MAX_SPEC_WORDS
+
+    svc = crawl_service
+    memory_id = svc.remember(
+        "neutral " * MAX_SPEC_WORDS + "every result.", workspace="alpha",
+        resolve_conflicts=False,
+    )["id"]
+    before = svc.store.conn.total_changes
+    report = svc.spec_crawl_memories(
+        workspace="alpha", memory_ids=[memory_id] if explicit_selection else None,
+    )
+    assert svc.store.conn.total_changes == before
+    assert report["node_count"] == report["total_eligible_node_count"] == 1
+    assert report["node_selection_truncated"] is False
+    assert report["analysis_truncated"] is report["truncated"] is True
+    assert report["word_analysis_truncated_node_count"] == 1
+    assert report["nodes"][0]["word_count_is_lower_bound"] is True
+    assert report["score_breakdown"]["quality_points"] == 0
+
+
 def test_clarification_persistence_is_opt_in_and_keeps_requested_session(crawl_service):
     svc = crawl_service
     session_id = svc.start_session("alpha", repo="app", agent="codex")["session_id"]
