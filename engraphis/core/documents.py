@@ -32,6 +32,11 @@ from xml.etree import ElementTree
 
 from engraphis.core.obsidian import parse_obsidian_note
 from engraphis.core.secrets import secret_kind
+from engraphis.core.source_paths import (
+    SENSITIVE_FILENAMES as SENSITIVE_FILENAMES,
+    sensitive_filename as _sensitive_filename,
+    sensitive_path as _sensitive_path,
+)
 from engraphis.core.fsutil import is_link_indirection as _is_link_indirection
 
 
@@ -49,13 +54,7 @@ MAX_XML_ATTRIBUTE_METADATA_CHARS = 8_000
 MAX_SOURCE_PATH_CHARS = 4_096
 MAX_CONTAINER_TEXT_CHARS = MAX_DOCUMENT_CHARS
 MAX_JSON_NESTING = 128
-SENSITIVE_FILENAMES = {
-    ".env", "credentials", "credentials.json", "id_rsa", "id_dsa",
-    ".netrc", "_netrc", ".npmrc", ".pypirc", ".git-credentials", ".pgpass", "pgpass.conf",
-    "id_ecdsa", "id_ed25519", "authorized_keys", "known_hosts",
-    "recovery-codes", "recovery_codes", "tokens", "tokens.json",
-    "secrets", "secrets.json", "secret", "secret.json",
-}
+
 
 
 @dataclass(frozen=True)
@@ -262,6 +261,8 @@ def parse_document(
     a code-masked representation so snippets cannot fabricate links or tags.
     """
     relative_path = normalize_document_path(relative_path)
+    if _sensitive_path(relative_path):
+        raise DocumentParseError("sensitive filename")
     if not isinstance(raw, bytes):
         raise DocumentParseError("document data must be bytes")
     if len(raw) > MAX_DOCUMENT_BYTES:
@@ -383,6 +384,8 @@ def scan_document_tree(
 ) -> DocumentScan:
     """Discover recognised documents below a safe directory, continuing per-file errors."""
     selected = Path(root_path)
+    if _sensitive_path(str(selected)):
+        raise DocumentParseError("sensitive source path")
     try:
         selected_info = os.lstat(selected)
         if selected.is_symlink() or _is_link_indirection(selected_info):
@@ -390,6 +393,8 @@ def scan_document_tree(
         root = selected.resolve(strict=True)
     except OSError as exc:
         raise DocumentParseError("source path must be an existing directory") from exc
+    if _sensitive_path(str(root)):
+        raise DocumentParseError("sensitive source path")
     if not root.is_dir():
         raise DocumentParseError("source path must be an existing directory")
     result = DocumentScan(str(root), canonical_source_id(root))
@@ -399,6 +404,9 @@ def scan_document_tree(
     for path, issue in _walk_tree(root, root):
         raw_relative = path.relative_to(root).as_posix()
         if issue:
+            if issue == "sensitive filename":
+                result.rejected.append(DocumentFileIssue(raw_relative, issue))
+                continue
             # The root itself is represented by "." when its directory listing fails.
             # Keep that sentinel as a valid issue path so the incomplete flag is set
             # before normal path validation can reject it.
@@ -1644,13 +1652,6 @@ def _canonical(value: str) -> str:
     return value.replace("\r\n", "\n").replace("\r", "\n")
 
 
-def _sensitive_filename(name: str) -> bool:
-    lowered = name.casefold()
-    return (lowered in SENSITIVE_FILENAMES or lowered.startswith(".env.")
-            or lowered.endswith((".pem", ".key", ".p12", ".pfx"))
-            or bool(re.search(r"(?:credential|recovery[-_ ]?code|secret|token)", lowered)))
-
-
 def _safe_reason(exc: BaseException) -> str:
     text = str(exc)
     if "optional local document extractor" in text:
@@ -1665,6 +1666,8 @@ def _safe_reason(exc: BaseException) -> str:
 
 
 def _read_tree_file(root: Path, path: Path) -> Tuple[bytes, int]:
+    if _sensitive_path(str(path)):
+        raise DocumentParseError("sensitive filename")
     before = os.lstat(path)
     if not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode) or _is_link_indirection(before):
         raise DocumentParseError("unsafe file type")
@@ -1727,13 +1730,18 @@ def _walk_tree(root: Path, directory: Path) -> Iterable[Tuple[Path, Optional[str
     for entry in entries:
         try:
             relative = entry.relative_to(root)
+            # Names must be excluded before metadata, resolution or descent.
+            if any(part.startswith(".") for part in relative.parts):
+                yield entry, "hidden/configuration path skipped"
+                continue
+            if _sensitive_path(relative.as_posix()):
+                yield entry, "sensitive filename"
+                continue
             info = entry.lstat()
             if entry.is_symlink() or _is_link_indirection(info):
                 yield entry, "symlink skipped"
             elif not _is_within(root, entry.resolve()):
                 yield entry, "path escapes source root"
-            elif any(part.startswith(".") for part in relative.parts):
-                yield entry, "hidden/configuration path skipped"
             elif entry.is_dir():
                 yield from _walk_tree(root, entry)
             elif entry.is_file():

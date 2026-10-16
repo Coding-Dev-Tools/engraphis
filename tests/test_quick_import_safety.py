@@ -13,6 +13,8 @@ BLOCKED_PATHS = [
     "keys/client.pem", "project\\id_ed25519", "project/.aws/config",
     "project/node_modules/library/readme.md", "config/recovery-codes.txt",
     ".netrc", "_netrc", ".npmrc", ".pypirc", ".git-credentials", ".pgpass", "pgpass.conf",
+    "credentials/config.json", "project/SeCrEtS/mail.json", "tokens/notes.md",
+    "project/client.key/readme.txt", "project\\Credentials\\config.json",
 ]
 
 CREDENTIAL_RC_CASES = {
@@ -80,8 +82,10 @@ def test_real_credential_rc_uploads_stop_before_extraction_and_derivation(
 
 @pytest.mark.parametrize("name,content", CREDENTIAL_RC_CASES.items())
 def test_real_credential_rc_folders_preserve_safe_dotfiles_and_derivation(
-    service, monkeypatch, tmp_path, name, content,
+    service, monkeypatch, tmp_path_factory, name, content,
 ):
+    # Keep this positive source root benign; the test name contains a denied token.
+    tmp_path = tmp_path_factory.mktemp("quick-source")
     (tmp_path / name).write_text(content, encoding="utf-8")
     for safe_name, safe_content in SAFE_DOTFILES.items():
         (tmp_path / safe_name).write_text(safe_content, encoding="utf-8")

@@ -152,6 +152,33 @@ _SENSITIVE_MAPPING_KEY = re.compile(
 _REDACTION = re.compile(r"^<?(?:redacted|removed|withheld|not[_ -]?set)>?$", re.I)
 _REDACTED = "<redacted>"
 
+# Start only at the beginning of a scheme-character run, so a failed long scheme
+# cannot be retried at every suffix. Authorities exclude '/', keeping matches
+# disjoint even when malformed input repeats 'scheme://' anchors.
+_URI_AUTHORITY = re.compile(
+    r"(?<![a-z0-9+.-])[a-z][a-z0-9+.-]*://(?P<authority>[^\s/?#\"']+)", re.I,
+)
+
+
+def _credential_uri_spans(text: str) -> Iterable[tuple[int, int]]:
+    """Recognize authenticated URLs for any scheme, including mail protocols."""
+    for match in _URI_AUTHORITY.finditer(text):
+        userinfo, separator, _host = match.group("authority").rpartition("@")
+        username, colon, password = userinfo.partition(":")
+        if (separator and username and colon and password
+                and not _REDACTION.fullmatch(password)):
+            yield match.start(), match.start("authority") + len(userinfo) + 1
+
+
+def _redact_credential_uris(text: str) -> str:
+    parts: list[str] = []
+    start = 0
+    for begin, end in _credential_uri_spans(text):
+        parts.extend((text[start:begin], _REDACTED))
+        start = end
+    parts.append(text[start:])
+    return "".join(parts)
+
 
 def _redact_pem(text: str) -> str:
     """Safely redact PEM private key blocks in O(N) linear time without regex backtracking."""
@@ -248,7 +275,7 @@ def secret_kind(value: Any) -> str | None:
     for kind, pattern in _PATTERNS:
         if pattern.search(value):
             return kind
-    if _DSN.search(value):
+    if _DSN.search(value) or next(iter(_credential_uri_spans(value)), None) is not None:
         return "credential-bearing connection URI"
     if _ASSIGNMENT.search(value):
         return "credential assignment"
@@ -275,6 +302,7 @@ def redact_secrets(text: str) -> str:
             continue
         safe = pattern.sub(_REDACTED, safe)
     safe = _DSN.sub(_REDACTED, safe)
+    safe = _redact_credential_uris(safe)
     safe = _ASSIGNMENT.sub(_REDACTED, safe)
     return safe
 
