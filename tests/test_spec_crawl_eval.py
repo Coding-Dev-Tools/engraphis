@@ -94,4 +94,4 @@ def test_failed_memory_contracts_fail_the_gate_even_when_documents_pass(monkeypa
     with pytest.raises(SystemExit) as error:
         spec_crawl.main()
     assert error.value.code == 1
-    assert "memory audit contracts failed" in capsys.readouterr().err
+    assert "memory audit contracts below 100%" in capsys.readouterr().err
