@@ -96,6 +96,7 @@ The unified dashboard at `http://127.0.0.1:8700` includes a dedicated **Spec Stu
 Beyond inspecting isolated single-text prompt specifications, Spec Crawl provides cluster-level coherence auditing across multiple active memory records (`engraphis/core/spec_crawl.py::analyze_memory_nodes`):
 1. **Contradiction Detection**:
    - Parameter collisions for positively matching, nonempty subject keys (e.g. `port: 5432` vs `port: 5433` for the same database).
+   - Sentence-final periods on numeric port, timeout, and retry values do not create a parameter conflict; decimal values remain intact.
    - Opposing modal directives (e.g. `must enforce <target>` vs `never allow / forbid <target>`).
    - Divergences for the same `(subject_key, claim_kind)` are review suggestions; different keyed subjects do not establish parameter conflicts.
    - A keeper suggestion requires distinct, finite `valid_from` dates. Ingestion order never determines which fact is current. Missing, invalid, or equal effective dates require explicit clarification without a retirement target.
@@ -110,6 +111,8 @@ Beyond inspecting isolated single-text prompt specifications, Spec Crawl provide
    - 0–100 coherence score factoring in coverage, graph connectedness, clean node ratio, and deductions for contradictions and orphans.
 
 Memory bodies are used during analysis but are not returned in node summaries. The workspace audit analyzes at most 150 eligible memories per request and reports its eligible total and truncation state; Spec Studio warns when its health score and findings describe only a partial sample.
+
+Title aliases and body signals match whole words, so titles such as “Preview configuration” do not count as review policies. Similarity comparisons use at most 512 distinct tokens per memory, selected deterministically by token hash, and reuse each pair's result across link, orphan, divergence, and redundancy analysis. Reports expose `similarity_token_limit` and `similarity_sampled_node_count`; each node includes `similarity_token_count` and `similarity_sampled`. Sampled similarity is approximate and produces suggestions for review. Parameter and directive conflict checks still inspect the complete memory text.
 
 ---
 
