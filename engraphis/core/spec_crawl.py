@@ -955,6 +955,12 @@ def _extract_node_parameters(text: str) -> dict[str, str]:
             r"-?\d+(?:\.\d+)?\.", val,
         ):
             val = val[:-1]
+        elif key != "host" and re.fullmatch(r"[a-z_][a-z0-9_-]*\.", val):
+            # A simple bare label may end a prose sentence. Dotted identifiers,
+            # absolute hostnames and tokens continuing into a resource stay literal.
+            following = text[match.end():match.end() + 1]
+            if not following or following.isspace() or following in ",;!)]}'\"":
+                val = val[:-1]
         params[key] = val
     return params
 
