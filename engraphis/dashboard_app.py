@@ -909,7 +909,20 @@ def create_app() -> FastAPI:
         total = 0
         for upload in files:
             relative_path = _document_relative_path(upload.filename)
+            declared_size = getattr(upload, "size", None)
+            if declared_size is not None and (type(declared_size) is not int or declared_size < 0):
+                raise HTTPException(status_code=422, detail={"error": "invalid upload size"})
+            remaining = MAX_IMPORT_TOTAL_BYTES - total
+            if declared_size is not None and declared_size > MAX_IMPORT_RESOURCE_BYTES:
+                raise HTTPException(status_code=413, detail={"error": "document file is too large"})
+            if declared_size is not None and declared_size > remaining:
+                raise HTTPException(status_code=413, detail={"error": "document upload is too large"})
             if sensitive_path(relative_path):
+                if declared_size is None:
+                    raise HTTPException(status_code=422, detail={"error": "upload size is required"})
+                # Excluded multipart bytes are already spooled, even though their
+                # bodies must remain unread by the importer.
+                total += declared_size
                 uploads.append((relative_path, b""))
                 continue
             path_key = relative_path.casefold()
@@ -928,10 +941,10 @@ def create_app() -> FastAPI:
                     status_code=400,
                     detail={"error": "unsupported document format"},
                 )
-            raw = await upload.read(MAX_IMPORT_RESOURCE_BYTES + 1)
+            raw = await upload.read(min(MAX_IMPORT_RESOURCE_BYTES, max(0, remaining)) + 1)
             if len(raw) > MAX_IMPORT_RESOURCE_BYTES:
                 raise HTTPException(status_code=413, detail={"error": "document file is too large"})
-            total += len(raw)
+            total += max(len(raw), declared_size or 0)
             if total > MAX_IMPORT_TOTAL_BYTES:
                 raise HTTPException(status_code=413, detail={"error": "document upload is too large"})
             uploads.append((relative_path, raw))

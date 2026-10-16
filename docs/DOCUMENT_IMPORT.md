@@ -100,8 +100,10 @@ binary, or unsupported files are catalogued per file; one failure does not stop 
 collection. Reports never echo secret-like source content.
 
 Default filename exclusions include `.env` variants, credentials, secrets, tokens, recovery
-codes, SSH identity files, and `.pem`, `.key`, `.p12`, and `.pfx` material. These exclusions
-apply to every input path component, including a selected root. Lexical checks run before
+codes, SSH identity files, and `.pem`, `.key`, `.p12`, and `.pfx` material. Exclusions
+also cover known credential-store directories: `.aws`, `.ssh`, `.gnupg`, `.azure`, `.kube`,
+`.docker`, and `.engraphis`. Benign hidden selected roots such as `.worktrees` remain usable.
+All exclusions apply to every input path component, including a selected root. Lexical checks run before
 filesystem inspection, traversal, or reading excluded inputs.
 The shared capture boundary also rejects authenticated URLs, including mail protocols, when
 they contain a nonempty password; explicit redaction removes that user information.
@@ -111,6 +113,8 @@ bounded to 100 MB, while canonical memory text is capped at 100,000 characters a
 rather than silently split. Containers are additionally capped at 2,000 members and 20 MB of
 declared decompressed content. Invalid UTF-8/UTF-16 in permitted text is replaced explicitly and
 reported as a parsing warning.
+Uploaded files also count toward the per-file and batch byte budgets when an excluded path
+is skipped: the server accounts for multipart file sizes without reading the excluded bodies.
 
 Library Quick import applies the same credential filename exclusions to uploaded files and
 folder paths before extraction or optional fact derivation. Hidden and dependency directories
