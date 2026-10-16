@@ -1771,11 +1771,14 @@
     const epoch = state.refreshEpoch;
     const ids = state.memories.map(memory => memory.id);
     renderLibrary();
-    const moved = byId('library-list').querySelector(`[data-memory-id="${CSS.escape(movedId)}"]`);
-    if (moved) {
-      byId('library-list').querySelectorAll('[role="option"]').forEach(card => { card.tabIndex = card === moved ? 0 : -1; });
-      moved.focus();
-    }
+    const focusMoved = () => {
+      const moved = byId('library-list').querySelector(`[data-memory-id="${CSS.escape(movedId)}"]`);
+      if (moved) {
+        byId('library-list').querySelectorAll('[role="option"]').forEach(card => { card.tabIndex = card === moved ? 0 : -1; });
+        moved.focus();
+      }
+    };
+    focusMoved();
     // Preserve the order of accepted gestures even when the server is slow.
     const write = libraryOrderWrite.catch(() => {}).then(() => api('/memories/reorder', {
       method: 'POST', body: { workspace, ids },
@@ -1784,7 +1787,20 @@
     try {
       await write;
       if (write !== libraryOrderWrite) return;
-      if (workspace === state.workspace && epoch === state.refreshEpoch) byId('library-reorder-status').textContent = message;
+      if (workspace !== state.workspace || epoch !== state.refreshEpoch) return;
+      // Reordering advances the browse revision. Reload the first page with the
+      // current filters before offering another cursor from that revision.
+      state.libraryCursors = [null];
+      state.libraryNextCursor = null;
+      state.libraryPage = 0;
+      await loadMemories(workspace, epoch).catch(error => {
+        if (write === libraryOrderWrite && workspace === state.workspace && epoch === state.refreshEpoch) {
+          showNotice(`Order saved, but the Library could not refresh: ${error.message}`);
+        }
+      });
+      if (write !== libraryOrderWrite || workspace !== state.workspace || epoch !== state.refreshEpoch) return;
+      focusMoved();
+      byId('library-reorder-status').textContent = message;
     } catch (error) {
       if (write !== libraryOrderWrite) return;
       if (workspace !== state.workspace || epoch !== state.refreshEpoch) return;
