@@ -285,7 +285,19 @@ def _code_ranges(text: str) -> list[tuple[int, int]]:
         offset += len(line) + 1
     if fence_start is not None:
         ranges.append((fence_start, len(text)))
-    for match in re.finditer(r"`[^`\n]+`", text):
+    # Escaped delimiters are literal prose. Use an offset-preserving view only
+    # for delimiter matching; even backslash runs still leave a real delimiter.
+    inline_chars: Optional[list[str]] = None
+    for tick in re.finditer("`", text):
+        preceding = tick.start() - 1
+        while preceding >= 0 and text[preceding] == "\\":
+            preceding -= 1
+        if (tick.start() - preceding - 1) % 2:
+            if inline_chars is None:
+                inline_chars = list(text)
+            inline_chars[tick.start()] = "\0"
+    inline_text = "".join(inline_chars) if inline_chars is not None else text
+    for match in re.finditer(r"`[^`\n]+`", inline_text):
         ranges.append((match.start(), match.end()))
     merged: list[tuple[int, int]] = []
     for start, end in sorted(ranges):
@@ -569,9 +581,12 @@ def crawl_spec(text: str, *, template: SpecTemplate = DEFAULT_TEMPLATE,
     # Code examples are read but never scored as active instructions.
     injection_text = _mask_code_ranges(text, code)
     for section in sections:
+        # Detection returns signal codes rather than offsets. Compact whitespace
+        # here so a masked example cannot trigger quadratic whitespace searches;
+        # retain the full offset-preserving text for every other analysis pass.
         signals = detect_payload_signals(
-            injection_text[section.start:section.end],
-            title=injection_text[section.heading_start:section.start],
+            " ".join(injection_text[section.start:section.end].split()),
+            title=" ".join(injection_text[section.heading_start:section.start].split()),
         )
         if signals:
             add_flag("injection", signals[0], section.start, section.end, section.index,
@@ -747,7 +762,7 @@ def apply_answer(text: str, flag: Mapping[str, Any], answer: str) -> str:
 
 
 _PARAM_PATTERN = re.compile(
-    r"\b(database|db|port|timeout|retries|max_retries|version|model|auth|auth_mode|strategy|provider|host)\s*(?:=|:|\bis(?:\s+set to)?\b|\bset to\b)\s*([A-Za-z0-9._-]+)",
+    r"\b(database|db|port|timeout|retries|max_retries|version|model|auth|auth_mode|strategy|provider|host)\s*(=|:|\bis\s+set\s+to\b|\bset\s+to\b|\bis\b)\s*([A-Za-z0-9._-]+)",
     re.IGNORECASE,
 )
 _ENFORCE_PATTERN = re.compile(
@@ -835,8 +850,15 @@ def _extract_node_parameters(text: str) -> dict[str, str]:
     params: dict[str, str] = {}
     for match in _PARAM_PATTERN.finditer(text):
         key = match.group(1).lower()
-        val = match.group(2).strip().lower()
-        if key in {"port", "timeout", "retries", "max_retries"} and re.fullmatch(
+        val = match.group(3).strip().lower()
+        numeric_key = key in {"port", "timeout", "retries", "max_retries"}
+        # Plain copular prose can describe compatible properties. Only typed
+        # numeric fields make a bare "is" predicate an exclusive scalar value.
+        if match.group(2).lower() == "is" and not (
+            numeric_key and re.fullmatch(r"-?\d+(?:\.\d+)?\.?", val)
+        ):
+            continue
+        if numeric_key and re.fullmatch(
             r"-?\d+(?:\.\d+)?\.", val,
         ):
             val = val[:-1]
@@ -849,12 +871,14 @@ _FORBID_VERBS = frozenset({"never", "forbid", "deprecated", "disable", "prohibit
 _NEGATIVE_ACTION_VERBS = frozenset({"forbid", "disable", "prohibit", "skip", "omit"})
 _POSSIBLE_ENFORCE_VERBS = _ENFORCE_VERBS | {"do", "does", "should", "may", "can"}
 _DIRECTIVE_VERBS = _POSSIBLE_ENFORCE_VERBS | _FORBID_VERBS
+_DIRECTIVE_BOUNDARIES = _DIRECTIVE_VERBS | {"and", "or", "but"}
+_DIRECTIVE_SCOPE_WORDS = frozenset({"to", "on", "for", "in", "across", "within", "from"})
 
 
 def _extract_node_directives(text: str) -> dict[str, str]:
     directives: dict[str, str] = {}
     for clause in re.split(r"[.!?;,\n]", text):
-        tokens = [w.lower() for w in re.findall(r"[a-zA-Z_]{2,20}", clause)]
+        tokens = [w.lower() for w in re.findall(r"\b[a-zA-Z_][a-zA-Z_0-9-]*\b", clause)]
         if _DIRECTIVE_VERBS.isdisjoint(tokens):
             continue
         consumed: set[int] = set()
@@ -884,7 +908,17 @@ def _extract_node_directives(text: str) -> dict[str, str]:
                 elif target in _ENFORCE_VERBS | _FORBID_VERBS:
                     break
                 elif target not in _STOPWORDS:
-                    directives[target] = action
+                    # Match the governed phrase, including its object/scope,
+                    # instead of treating every nearby noun as an instruction.
+                    end = i + offset + 1
+                    while end < len(tokens) and tokens[end] not in _DIRECTIVE_BOUNDARIES:
+                        end += 1
+                    phrase = " ".join(tokens[i + offset:end])
+                    # Keep summaries bounded without dropping any identity suffix.
+                    identity = phrase if len(phrase) <= 120 else (
+                        target + ":" + hashlib.sha256(phrase.encode("utf-8")).hexdigest())
+                    directives[identity] = action
+                    break
     return directives
 
 
@@ -1266,12 +1300,41 @@ def analyze_memory_nodes(
         for target, action in node["directives"].items():
             dir_map[target][action].append(idx)
 
+    # Preserve potential general-policy versus scoped-exception conflicts.
+    # An alias exists only when a general/universal policy actually occurs;
+    # two differently scoped rules alone never acquire a shared action key.
+    exact_targets = set(dir_map)
+    universal_nodes: dict[str, set[int]] = defaultdict(set)
+    scoped_targets: list[tuple[str, str]] = []
+    for target, action_dict in list(dir_map.items()):
+        words = target.split()
+        for pos, word in enumerate(words):
+            if pos == 0 or word not in _DIRECTIVE_SCOPE_WORDS:
+                continue
+            base = " ".join(words[:pos])
+            scoped_targets.append((target, base))
+            if pos + 1 < len(words) and words[pos + 1] in {"all", "each", "every", "any"}:
+                for indices in action_dict.values():
+                    universal_nodes[base].update(indices)
+    for target, base in scoped_targets:
+        if base in exact_targets or base in universal_nodes:
+            for action, indices in dir_map[target].items():
+                dir_map[base][action].extend(indices)
+
     for target, action_dict in dir_map.items():
         if "enforce" in action_dict and "forbid" in action_dict:
             for idx_a in action_dict["enforce"]:
                 node_a = parsed_nodes[idx_a]
                 for idx_b in action_dict["forbid"]:
+                    if idx_a == idx_b:
+                        continue  # scope aliases must never create self-supersession
                     node_b = parsed_nodes[idx_b]
+                    exact_match = target in node_a["directives"] and target in node_b["directives"]
+                    if not exact_match and not (
+                        target in node_a["directives"] or target in node_b["directives"]
+                        or idx_a in universal_nodes[target] or idx_b in universal_nodes[target]
+                    ):
+                        continue
                     if (node_a["subject_key"] and node_b["subject_key"]
                             and node_a["subject_key"] != node_b["subject_key"]):
                         continue
@@ -1282,8 +1345,16 @@ def analyze_memory_nodes(
                     if pair_key in conflict_pairs or len(conflicts) >= 50:
                         continue
                     conflict_pairs.add(pair_key)
-                    shared_subject = bool(node_a["subject_key"] and
+                    shared_subject = bool(exact_match and node_a["subject_key"] and
                                           node_a["subject_key"] == node_b["subject_key"])
+                    detail = (
+                        f"Opposing policy directives for '{target}': '{node_a['title']}' enforces while '{node_b['title']}' forbids."
+                        if exact_match else f"Potential overlapping policy scopes for '{target}'; confirm whether both rules apply in the same context."
+                    )
+                    remedy = _conflict_remedy(node_a, node_b, shared_subject=shared_subject)
+                    if not exact_match:
+                        remedy["recommendation"] = remedy["detail"] = (
+                            "Confirm that the policy scopes overlap before choosing a retained memory.")
                     conflicts.append({
                         "id": f"conflict_{len(conflicts) + 1}",
                         "node_a": node_a["id"],
@@ -1292,9 +1363,9 @@ def analyze_memory_nodes(
                         "title_b": node_b["title"],
                         "subject": target,
                         "severity": "high" if shared_subject else "medium",
-                        "reason": f"Opposing policy directives for '{target}': '{node_a['title']}' enforces while '{node_b['title']}' forbids.",
-                        "detail": f"Opposing policy directives for '{target}': '{node_a['title']}' enforces while '{node_b['title']}' forbids.",
-                        "remedy": _conflict_remedy(node_a, node_b, shared_subject=shared_subject),
+                        "reason": detail,
+                        "detail": detail,
+                        "remedy": remedy,
                     })
 
     # 3d. Redundancies pre-filtered by length ratio
