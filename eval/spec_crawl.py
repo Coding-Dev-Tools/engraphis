@@ -13,6 +13,15 @@ from engraphis.core.spec_crawl import crawl_spec
 
 ROOT = Path(__file__).resolve().parents[1]
 DATASET_PATH = ROOT / "eval" / "datasets" / "spec_crawl.jsonl"
+METRIC_FLOORS = {
+    "determinism_rate": 0.90,
+    "axes_accuracy": 0.90,
+    "flag_recall": 0.90,
+    "qualifier_accuracy": 0.90,
+    "sections_accuracy": 0.90,
+    "scores_accuracy": 1.0,
+    "overall_accuracy": 0.90,
+}
 
 
 def run() -> dict:
@@ -113,8 +122,15 @@ def main() -> None:
     print(f"  Overall accuracy      : {res['overall_accuracy'] * 100:.1f}%")
     print(f"  AGENTS.md dogfooding  : {'PASSED' if res['agents_dogfood_ok'] else 'FAILED'}\n")
 
-    if res["overall_accuracy"] < 0.90 or not res["agents_dogfood_ok"] or res["scores_accuracy"] < 1:
-        sys.stderr.write("FLOOR VIOLATION: Spec Crawl evaluation fell below required 90% threshold\n")
+    violations = [
+        f"{metric} {res[metric]:.1%} < {floor:.1%}"
+        for metric, floor in METRIC_FLOORS.items()
+        if not res[metric] >= floor
+    ]
+    if not res["agents_dogfood_ok"]:
+        violations.append("AGENTS.md dogfooding failed")
+    if violations:
+        sys.stderr.write("FLOOR VIOLATION: Spec Crawl evaluation: " + "; ".join(violations) + "\n")
         sys.exit(1)
 
 
