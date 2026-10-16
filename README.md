@@ -42,7 +42,7 @@ Connect a coding agent over MCP with the [agent setup guide](https://github.com/
 - **Continuity:** Organize memories by workspace, repository, and session, with a last-session handoff.
 - **Useful recall:** Combine vector, lexical, graph, and code-aware retrieval, then pack results to a hard context budget.
 - **Grounded answers:** Preserve provenance and temporal history; cite support or abstain when it is insufficient.
-- **Temporal history:** Timeline can select known versions whose validity has ended before result limits. The dashboard uses `closed_only=true` on `GET /api/timeline` for “Only superseded versions.”
+- **Temporal history:** Timeline can select known versions whose validity has ended before result limits. The dashboard uses `closed_only=true` on `GET /api/timeline` for “Only superseded versions.” Closed history prioritizes lexical matches (the literal query and up to 32 expanded terms) before scoring at most 500 eligible candidates; semantic-only matches outside that window can be omitted.
 - **Operator control:** Keep the core local and offline-capable, with explicit controls for hosted services and external LLM providers.
 
 ## Benchmarks
