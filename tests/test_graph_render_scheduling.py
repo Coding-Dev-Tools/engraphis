@@ -92,6 +92,41 @@ console.log(JSON.stringify({ before, cleared, repainted: painted, paintCalls }))
     assert result == {"before": True, "cleared": True, "repainted": True, "paintCalls": 2}
 
 
+def test_layer_toggle_publishes_stats_matching_uploaded_edge_visibility():
+    result = run_node(r"""
+const reports = [], uploads = {}; let buffer;
+const ctx = {
+  state: { totalLinks: 2, ids: ['a', 'b', 'c'], visibleCount: 3, layers: null,
+    positions: new Float32Array([0, 0, 1, 1, 2, 2]),
+    edgeSources: new Uint32Array([0, 1]), edgeTargets: new Uint32Array([1, 2]),
+    edgeWeights: new Float32Array([1, 1]), edgeBridges: new Uint8Array([0, 0]),
+    edgeGhosts: new Uint8Array([0, 0]), edgeLayers: ['semantic', 'temporal'],
+    ghosts: true, bridges: false, settings: { flow: false } },
+  gl: { bindBuffer(_, next) { buffer = next; },
+    bufferData(_, values) { uploads[buffer] = Array.from(values); } },
+  nodeProgram: {}, edgeProgram: {},
+  edgeBuffers: { position: 'position', factor: 'factor', visible: 'visible' },
+  opts: { onStats(value) { reports.push({ drawn: value.drawnLinks, hidden: value.hiddenLinks }); } },
+  passesFilters() { return true; }, zoomRatio() { return 2; }, EDGE_START: 0.1,
+  clamp: (value, min, max) => Math.max(min, Math.min(max, value)),
+  schedule() {}, scheduleLabels() {}, explorerData: null,
+};
+load(ctx, ['edgePassesFilters', 'uploadEdges', 'drawnEdgeEstimate', 'stats']);
+const start = source.indexOf('      setLayers(value) {');
+const end = source.indexOf('\n      setRepoFilter', start);
+vm.runInContext('api = {' + source.slice(start, end).trim().replace(/,$/, '') + '};', ctx);
+ctx.uploadEdges(); ctx.stats();
+ctx.api.setLayers({ semantic: false }); const hidden = uploads.visible;
+ctx.api.setLayers({ semantic: true });
+console.log(JSON.stringify({ reports, hidden, restored: uploads.visible }));
+""")
+    assert result == {
+        "reports": [{"drawn": 2, "hidden": 0}, {"drawn": 1, "hidden": 1},
+                    {"drawn": 2, "hidden": 0}],
+        "hidden": [0, 0, 1, 1], "restored": [1, 1, 1, 1],
+    }
+
+
 def test_authored_cached_orbit_radius_survives_satellite_motion():
     result = run_node(r"""
 const window = {};
