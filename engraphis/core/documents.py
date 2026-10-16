@@ -384,7 +384,7 @@ def scan_document_tree(
 ) -> DocumentScan:
     """Discover recognised documents below a safe directory, continuing per-file errors."""
     selected = Path(root_path)
-    if _sensitive_path(str(selected)):
+    if _sensitive_path(str(selected), is_directory=True):
         raise DocumentParseError("sensitive source path")
     try:
         selected_info = os.lstat(selected)
@@ -393,7 +393,7 @@ def scan_document_tree(
         root = selected.resolve(strict=True)
     except OSError as exc:
         raise DocumentParseError("source path must be an existing directory") from exc
-    if _sensitive_path(str(root)):
+    if _sensitive_path(str(root), is_directory=True):
         raise DocumentParseError("sensitive source path")
     if not root.is_dir():
         raise DocumentParseError("source path must be an existing directory")
@@ -1734,7 +1734,7 @@ def _walk_tree(root: Path, directory: Path) -> Iterable[Tuple[Path, Optional[str
             if any(part.startswith(".") for part in relative.parts):
                 yield entry, "hidden/configuration path skipped"
                 continue
-            if _sensitive_path(relative.as_posix()):
+            if _sensitive_path(relative.as_posix(), is_directory=True):
                 yield entry, "sensitive filename"
                 continue
             info = entry.lstat()
