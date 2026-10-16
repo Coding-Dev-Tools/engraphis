@@ -1076,7 +1076,15 @@ def analyze_memory_nodes(
             content, [sec], code, classifier,
         )
         _apply_vague_qualifiers(raw_toks)
-        tok_set = tokenize(f"{title} {content}")
+        if "\n" not in title and not _FENCE.match(title):
+            # A plain title is a separate prose field. Reuse the content mask
+            # instead of scanning the whole body again.
+            visible_title = _mask_code_ranges(title, _code_ranges(title))
+            policy_text = f"{visible_title}\n{visible_content}"
+        else:
+            policy_text = f"{title}\n{content}"
+            policy_text = _mask_code_ranges(policy_text, _code_ranges(policy_text))
+        tok_set = tokenize(policy_text)
         similarity_sampled = len(tok_set) > MAX_MEMORY_SIMILARITY_TOKENS
         if similarity_sampled:
             # A stable hash sample avoids favouring a document's opening or lexical
@@ -1110,14 +1118,6 @@ def analyze_memory_nodes(
                 "question": f"In memory '{title}': \"{vf.text}\" is unbounded. What exact number, scope, or condition do you mean?",
             })
 
-        if "\n" not in title and not _FENCE.match(title):
-            # Inline ranges cannot cross the separating newline, and a plain
-            # title cannot change the content's fence state. Reuse its mask.
-            visible_title = _mask_code_ranges(title, _code_ranges(title))
-            policy_text = f"{visible_title}\n{visible_content}"
-        else:
-            policy_text = f"{title}\n{content}"
-            policy_text = _mask_code_ranges(policy_text, _code_ranges(policy_text))
         params = _extract_node_parameters(policy_text)
         directives = _extract_node_directives(policy_text)
 
@@ -1245,55 +1245,9 @@ def analyze_memory_nodes(
     redundancies: list[dict[str, Any]] = []
     conflict_pairs: set[tuple[str, str]] = set()
 
-    # 3a. Subject key index
-    subject_map: dict[tuple[str, str], list[int]] = defaultdict(list)
-    for idx, node in enumerate(parsed_nodes):
-        if node["subject_key"]:
-            subject_map[(node["subject_key"], node["claim_kind"])].append(idx)
-
-    for (subj, _claim_kind), indices in subject_map.items():
-        if len(indices) < 2:
-            continue
-        for i_pos in range(len(indices)):
-            idx_a = indices[i_pos]
-            node_a = parsed_nodes[idx_a]
-            for j_pos in range(i_pos + 1, min(len(indices), i_pos + 5)):
-                idx_b = indices[j_pos]
-                node_b = parsed_nodes[idx_b]
-                pair_key = (min(node_a["id"], node_b["id"]), max(node_a["id"], node_b["id"]))
-                if pair_key in conflict_pairs:
-                    continue
-                sim = similarity(node_a["id"], node_b["id"])
-                # Low overlap alone is insufficient evidence of contradiction.
-                # Parameter and directive comparisons below can prove a clash.
-                proven_clash = any(
-                    key in node_b["parameters"] and value != node_b["parameters"][key]
-                    for key, value in node_a["parameters"].items()
-                ) or any(
-                    key in node_b["directives"] and value != node_b["directives"][key]
-                    for key, value in node_a["directives"].items()
-                )
-                if sim < 0.70 and _claim_kind and not proven_clash:
-                    conflict_pairs.add(pair_key)
-                    conflicts.append({
-                        "id": f"conflict_{len(conflicts) + 1}",
-                        "node_a": node_a["id"],
-                        "node_b": node_b["id"],
-                        "title_a": node_a["title"],
-                        "title_b": node_b["title"],
-                        "subject": subj,
-                        "severity": "medium",
-                        "reason": f"Divergent assertions for common subject '{subj}'.",
-                        "detail": f"Divergent assertions for common subject '{subj}'.",
-                        "remedy": {
-                            "action": "clarify",
-                            "candidate_nodes": [node_a["id"], node_b["id"]],
-                            "recommendation": f"Verify whether these assertions for '{subj}' conflict before changing either memory.",
-                            "detail": f"Verify whether these assertions for '{subj}' conflict before changing either memory.",
-                        },
-                    })
-
-    # 3b. Parameter index
+    # Subject/claim metadata groups facts but does not establish exclusivity.
+    # Only parameter or opposing-directive evidence below can create a conflict.
+    # 3a. Parameter index
     param_map: dict[tuple[str, str], dict[str, list[int]]] = defaultdict(lambda: defaultdict(list))
     for idx, node in enumerate(parsed_nodes):
         if not node["subject_key"]:
@@ -1333,7 +1287,7 @@ def analyze_memory_nodes(
                             "remedy": _conflict_remedy(node_a, node_b, shared_subject=True),
                         })
 
-    # 3c. Directives index
+    # 3b. Directives index
     dir_map: dict[str, dict[str, list[int]]] = defaultdict(lambda: defaultdict(list))
     for idx, node in enumerate(parsed_nodes):
         for target, action in node["directives"].items():
@@ -1407,7 +1361,7 @@ def analyze_memory_nodes(
                         "remedy": remedy,
                     })
 
-    # 3d. Redundancies pre-filtered by length ratio
+    # 3c. Redundancies pre-filtered by length ratio
     for i in range(len(parsed_nodes)):
         if len(redundancies) >= 20:
             break
