@@ -2832,7 +2832,8 @@ class MemoryEngine:
                 closed_only: bool = False) -> list[MemoryRecord]:
         """Chronological, bi-temporal history of a fact: what we believed and when.
         Includes invalidated versions; sorted by ``valid_from``. ``closed_only`` selects
-        known closed intervals before candidate and result limits.
+        known closed intervals and prioritizes lexical matches before the 500-record
+        candidate cap. Semantic-only matches outside that window can still be omitted.
         """
         flt = SearchFilter(
             workspace_id=workspace_id, repo_id=repo_id, include_ancestors=True,
@@ -2852,7 +2853,7 @@ class MemoryEngine:
                      include_invalid: bool,
                      prompt_only: bool = False,
                      closed_only: bool = False) -> list[tuple[float, MemoryRecord]]:
-        """Score every matching memory — optionally including invalidated ones — by the
+        """Score bounded candidates — optionally including invalidated ones — by the
         max of semantic similarity and lexical token overlap. ``why``/``timeline`` need to
         search *through* bi-temporal history, which the normal vector index ``search()``
         deliberately excludes (it's the live-recall path), so this recomputes similarity
@@ -2879,7 +2880,7 @@ class MemoryEngine:
         out: list[tuple[float, MemoryRecord]] = []
         records = self.store.list_memories(
             flt, include_invalid=include_invalid, limit=500, prompt_only=prompt_only,
-            closed_only=closed_only,
+            closed_only=closed_only, candidate_query=query if closed_only else "",
         )
         if include_invalid:
             # History must retain closed valid-time intervals, but cannot expose a
