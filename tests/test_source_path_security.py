@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from urllib.parse import quote
 
 from engraphis.core.documents import parse_document, scan_document_tree
 from engraphis.core.obsidian import parse_obsidian_note, scan_obsidian_vault
@@ -168,6 +169,18 @@ def test_quick_walk_keeps_alphabetical_cap_total_and_unreadable_count(tmp_path_f
     assert files == [root / "a/z.md"] and matched == 3 and unreadable == 1
 
 
+def test_quick_walk_counts_cyclic_file_symlink_as_unreadable(tmp_path_factory):
+    root = tmp_path_factory.mktemp("source-fixtures")
+    safe = root / "notes.md"
+    safe.write_text("Readable project notes.")
+    try:
+        (root / "loop.md").symlink_to("loop.md")
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable")
+    files, matched, unreadable = _iter_import_files(root, "*.md", 10)
+    assert files == [safe] and matched == 1 and unreadable == 1
+
+
 @pytest.mark.parametrize("scheme", ["smtp", "smtps", "imap", "pop3s", "https", "sftp", "custom+mail"])
 def test_authenticated_uris_are_rejected_and_redactable_for_all_schemes(scheme):
     content = SYNTHETIC_URI.replace("smtp://", scheme + "://")
@@ -193,6 +206,30 @@ def test_short_and_percent_encoded_uri_passwords_are_credentials(userinfo):
     assert secret_kind(value) == "credential-bearing connection URI"
     safe = redact_secrets(value)
     assert userinfo not in safe and secret_kind(safe) is None
+    assert redact_secrets(safe) == safe
+
+
+@pytest.mark.parametrize("scheme", ["smtp", "https"])
+@pytest.mark.parametrize("userinfo", [":p", "fixture:p'ass", "f'ix:p"])
+def test_empty_username_and_apostrophe_authentication_cannot_be_captured(service, scheme, userinfo):
+    value = f"{scheme}://{userinfo}@mail.example.invalid"
+    assert secret_kind(value) == "credential-bearing connection URI"
+    safe = redact_secrets(value)
+    assert userinfo not in safe and secret_kind(safe) is None
+    assert redact_secrets(safe) == safe
+    with pytest.raises(ValidationError, match="credential-bearing connection URI"):
+        service.remember(value, workspace="sources")
+    assert service.store.count_memories() == 0
+
+
+@pytest.mark.parametrize("symbol", list("!$&'()*+,;=:@"))
+@pytest.mark.parametrize("encoded", [False, True])
+def test_userinfo_subdelimiters_and_percent_encodings_remain_credential_shaped(symbol, encoded):
+    password = "f" + (quote(symbol, safe="") if encoded else symbol) + "p"
+    value = f"smtp://fixture:{password}@mail.example.invalid"
+    assert secret_kind(value) == "credential-bearing connection URI"
+    safe = redact_secrets(value)
+    assert password not in safe and secret_kind(safe) is None
     assert redact_secrets(safe) == safe
 
 
