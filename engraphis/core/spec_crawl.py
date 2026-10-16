@@ -631,7 +631,7 @@ def crawl_spec(text: str, *, template: SpecTemplate = DEFAULT_TEMPLATE,
     claims: list[dict[str, Any]] = []
     checked = traced = attempts = 0
     for sid, start, end, section in _claim_sentences(text, tokens):
-        sentence = _excerpt(text, start, end, limit=400)
+        sentence = _excerpt(injection_text, start, end, limit=400)
         status, memory_id, support = "unchecked", None, None
         if support_lookup is not None and attempts < MAX_TRACED_CLAIMS:
             attempts += 1
