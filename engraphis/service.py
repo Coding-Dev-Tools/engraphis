@@ -12929,6 +12929,7 @@ class MemoryService:
         procedural_memory_count: Optional[int] = None
         procedural_total_eligible: Optional[int] = None
         procedural_source_truncated = False
+        procedural_sources: list[dict[str, Any]] = []
 
         if text is not None and str(text).strip():
             content = _clean_text(text, field="text", max_chars=64_000)
@@ -12943,7 +12944,7 @@ class MemoryService:
             recs = self.store.list_memories(flt, limit=100, prompt_only=True)
             procedural_memory_count = len(recs)
             content, content_truncated = compose_memory_spec_with_truncation(
-                [_mem_to_dict(r) for r in recs], limit=100,
+                [_mem_to_dict(r) for r in recs], limit=100, source_map=procedural_sources,
             )
             procedural_source_truncated = (
                 procedural_total_eligible > procedural_memory_count or content_truncated
@@ -12988,7 +12989,8 @@ class MemoryService:
             raise ValidationError("text, source_id, or crawl_procedural=True is required")
 
         support_lookup = None
-        if trace_claims and flt is not None:
+        # Copied source assertions are not independent corroborating evidence.
+        if trace_claims and not procedural_source_used and flt is not None:
             def _lookup(claim_sentence: str) -> Optional[dict]:
                 ans = self.engine.grounded_recall(
                     claim_sentence,
@@ -13016,7 +13018,33 @@ class MemoryService:
         except SpecCrawlError as exc:
             raise ValidationError(str(exc)) from exc
 
+        report["claim_tracing"] = {
+            "requested": trace_claims,
+            "enabled": support_lookup is not None,
+            "disabled_reason": (
+                "not_requested" if not trace_claims else
+                "procedural_sources_are_not_independent_evidence" if procedural_source_used else
+                "no_memory_scope" if flt is None else None
+            ),
+        }
         if procedural_source_used:
+            report["procedural_sources"] = procedural_sources
+            for section in report["sections"]:
+                # The capped final section can span several memories.
+                # Include the heading newline: an empty body can start at source.end.
+                section_start = max(0, section["start"] - 1)
+                section["source_memory_ids"] = [
+                    source["memory_id"] for source in procedural_sources
+                    if source["start"] < section["end"] and section_start < source["end"]
+                ]
+            for row in report["flags"] + report["claims"]:
+                source_ids = [
+                    source["memory_id"] for source in procedural_sources
+                    if source["start"] < row["end"] and row["start"] < source["end"]
+                ]
+                row["source_memory_ids"] = source_ids
+                if len(source_ids) == 1:
+                    row["source_memory_id"] = source_ids[0]
             report["procedural_memory_count"] = procedural_memory_count
             report["procedural_total_eligible_memory_count"] = procedural_total_eligible
             report["procedural_source_truncated"] = procedural_source_truncated
