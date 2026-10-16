@@ -168,7 +168,10 @@ def test_optional_derivation_failure_keeps_base_without_partial_facts(
         assert_consistent(service, ["1-good.md"])
 
 
-@pytest.mark.parametrize("backend", ["sqlite-adapter", "sqlite-vec"])
+@pytest.mark.parametrize(
+    "backend",
+    ["sqlite-adapter", pytest.param("sqlite-vec", marks=pytest.mark.native_sqlitevec)],
+)
 def test_index_failure_rolls_back_resource_and_native_rows(
     import_resources, tmp_path, monkeypatch, backend,
 ):
