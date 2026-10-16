@@ -1136,9 +1136,19 @@ def analyze_memory_nodes(
         memories = list(memories)
 
     if not memories:
+        empty_coverage = {a: 0.0 for a in DEFAULT_AXES}
         return {
             "cluster_health_score": 0,
-            "score_breakdown": {"base": 0, "penalties": 0},
+            "cluster_health": 0,
+            "score_breakdown": {
+                "coverage_points": 0,
+                "connected_points": 0,
+                "quality_points": 0,
+                "conflict_penalty": 0,
+                "orphan_penalty": 0,
+                "gap_penalty": 0,
+                "vague_penalty": 0,
+            },
             "node_count": 0,
             "nodes": [],
             "links": [],
@@ -1146,10 +1156,22 @@ def analyze_memory_nodes(
             "redundancies": [],
             "orphans": [],
             "policy_gaps": [
-                {"axis": a, "label": AXIS_LABELS.get(a, a.upper()), "severity": "high", "description": f"No memories for {a}"}
+                {
+                    "axis": a,
+                    "label": AXIS_LABELS.get(a, a.upper()),
+                    "severity": "high",
+                    "description": f"No memories for {a}",
+                    "remedy": {
+                        "action": "create_memory",
+                        "recommended_axis": a,
+                        "recommendation": f"Record a procedural or semantic memory establishing {AXIS_LABELS.get(a, a.upper())} policy.",
+                    },
+                }
                 for a in DEFAULT_AXES
             ],
-            "coverage": {a: 0.0 for a in DEFAULT_AXES},
+            "coverage": empty_coverage,
+            "radar": empty_coverage,
+            "axis_labels": {a: AXIS_LABELS.get(a, a.upper()[:5]) for a in DEFAULT_AXES},
             "flags": [],
             "remediation_plan": [],
             "trace": [],
