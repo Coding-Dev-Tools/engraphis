@@ -329,6 +329,7 @@ def test_file_backed_peer_erasure_does_not_require_an_embedder(tmp_path):
         engine.close()
 
 
+@pytest.mark.native_sqlitevec
 @pytest.mark.parametrize("failure_at", [1, 2])
 def test_sync_native_upsert_failure_rolls_back_current_batch(monkeypatch, failure_at):
     pytest.importorskip("sqlite_vec", reason="sqlite-vec extra not installed")
@@ -355,6 +356,7 @@ def test_sync_native_upsert_failure_rolls_back_current_batch(monkeypatch, failur
         engine.close()
 
 
+@pytest.mark.native_sqlitevec
 def test_sync_native_delete_failure_restores_canonical_and_native_state(monkeypatch):
     pytest.importorskip("sqlite_vec", reason="sqlite-vec extra not installed")
     engine = create_memory_engine(vector_backend="sqlite-vec", embed_dim=64, auto_evolve=False)
@@ -381,6 +383,7 @@ def test_sync_native_delete_failure_restores_canonical_and_native_state(monkeypa
         engine.close()
 
 
+@pytest.mark.native_sqlitevec
 def test_sync_native_batch_has_one_visibility_boundary(tmp_path, monkeypatch):
     pytest.importorskip("sqlite_vec", reason="sqlite-vec extra not installed")
     path = str(tmp_path / "sync-native.db")
