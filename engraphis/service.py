@@ -1113,7 +1113,7 @@ def _iter_import_files(
                     yield from walk(entry)
                 else:
                     yield entry
-            except (OSError, ValueError):
+            except (OSError, ValueError, RuntimeError):
                 unreadable += 1
 
     selected: list[tuple[Path, Path]] = []
@@ -1125,14 +1125,14 @@ def _iter_import_files(
             # deriving metadata and returning the path that ``import_folder`` will read.
             real = f.resolve(strict=True)
             rel = real.relative_to(folder)
-        except (OSError, ValueError):
+            # Check the resolved target as well as its selected name: a harmless-looking
+            # symlink must not turn an excluded credential file into an eligible document.
+            if _sensitive_source_path(str(real)) or _skip_import_path(rel.as_posix()):
+                continue
+            if not real.is_file():
+                continue
+        except (OSError, ValueError, RuntimeError):
             unreadable += 1
-            continue
-        # Check the resolved target as well as its selected name: a harmless-looking
-        # symlink must not turn an excluded credential file into an eligible document.
-        if _sensitive_source_path(str(real)) or _skip_import_path(rel.as_posix()):
-            continue
-        if not real.is_file():
             continue
         matched_total += 1
         if max_files <= 0:
