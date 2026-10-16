@@ -3930,7 +3930,7 @@ class MemoryEngine:
 
     # ── linking & events (A-MEM-style) ──────────────────────────────────────────
     def link(self, a: str, b: str, relation: str = "related", *, layer=None,
-             reason: str = "") -> None:
+             reason: str = "", valid_from: Optional[float] = None) -> None:
         records = []
         for mid in (a, b):
             record = self.store.get_memory(mid)
@@ -3942,7 +3942,8 @@ class MemoryEngine:
             raise ValueError("quarantined memories cannot be linked")
         if not all(provenance_is_approved(record.provenance) for record in records):
             raise ValueError("links require explicitly approved memories")
-        self.store.add_link(a, b, relation, layer=layer, reason=reason)
+        self.store.add_link(a, b, relation, layer=layer, reason=reason,
+                            valid_from=valid_from)
 
     def record_event(self, kind: str, content: str, *, workspace_id: str = "",
                      repo_id: str = "", session_id: str = "",
