@@ -156,7 +156,7 @@ _REDACTED = "<redacted>"
 # cannot be retried at every suffix. Authorities exclude '/', keeping matches
 # disjoint even when malformed input repeats 'scheme://' anchors.
 _URI_AUTHORITY = re.compile(
-    r"(?<![a-z0-9+.-])[a-z][a-z0-9+.-]*://(?P<authority>[^\s/?#\"']+)", re.I,
+    r"(?<![a-z0-9+.-])[a-z][a-z0-9+.-]*://(?P<authority>[^\s/?#\"]+)", re.I,
 )
 
 
@@ -164,8 +164,8 @@ def _credential_uri_spans(text: str) -> Iterable[tuple[int, int]]:
     """Recognize authenticated URLs for any scheme, including mail protocols."""
     for match in _URI_AUTHORITY.finditer(text):
         userinfo, separator, _host = match.group("authority").rpartition("@")
-        username, colon, password = userinfo.partition(":")
-        if (separator and username and colon and password
+        _username, colon, password = userinfo.partition(":")
+        if (separator and colon and password
                 and not _REDACTION.fullmatch(password)):
             yield match.start(), match.start("authority") + len(userinfo) + 1
 
