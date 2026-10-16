@@ -957,26 +957,52 @@
     });
   }
 
+  function memoryAuditTruncation(report) {
+    const nodes = Array.isArray(report.nodes) ? report.nodes : [];
+    const total = report.total_eligible_node_count;
+    const declaredWords = Number(report.word_analysis_truncated_node_count);
+    const detailedWords = nodes.filter(node => node.word_analysis_truncated).length;
+    const words = Math.max(detailedWords, Number.isFinite(declaredWords) ? Math.max(0, Math.floor(declaredWords)) : 0);
+    const partial = Boolean(report.truncated || report.analysis_truncated);
+    const selection = typeof report.node_selection_truncated === 'boolean'
+      ? report.node_selection_truncated
+      : Number.isFinite(total) ? total > nodes.length : partial && words === 0;
+    const wordLimit = Number(report.word_limit);
+    return {
+      selection, words, analyzed: nodes.length, partial: partial || selection || words > 0,
+      wordLimit: Number.isFinite(wordLimit) && wordLimit > 0 ? Math.floor(wordLimit) : 5000,
+    };
+  }
+
   function renderMemoryNodesPanel() {
     const list = document.getElementById('spec-sections-list');
     const badge = document.getElementById('spec-sections-count');
     if (!list || !currentReport || !currentReport.nodes) return;
-    const truncated = currentReport.truncated || currentReport.analysis_truncated;
+    const truncation = memoryAuditTruncation(currentReport);
     const total = currentReport.total_eligible_node_count;
-    if (badge) badge.textContent = truncated && Number.isFinite(total)
+    if (badge) badge.textContent = truncation.selection && Number.isFinite(total)
       ? `${currentReport.nodes.length} / ${total}`
-      : `${currentReport.nodes.length}${truncated ? '+' : ''}`;
+      : `${currentReport.nodes.length}${truncation.selection ? '+' : ''}`;
     list.innerHTML = '';
 
-    if (truncated) {
+    const notices = [];
+    if (truncation.selection) {
       const analyzed = currentReport.nodes.length;
       const analyzedLabel = Number.isFinite(total)
         ? `${analyzed} of ${total} eligible memories`
         : `at least ${analyzed} eligible memories`;
+      notices.push(`Partial audit: analyzed ${analyzedLabel}. Health score, conflicts, and policy gaps describe only this sample.`);
+    }
+    if (truncation.words > 0) {
+      const memories = `${truncation.words} ${truncation.words === 1 ? 'memory' : 'memories'}`;
+      notices.push(`Partial word analysis: stopped at ${truncation.wordLimit.toLocaleString()} tokens in ${memories}. Word counts are lower bounds and qualifier checks are incomplete.`);
+    }
+    if (truncation.partial && !notices.length) notices.push('Partial audit: analysis is incomplete.');
+    for (const message of notices) {
       const notice = document.createElement('p');
       notice.className = 'spec-truncation-notice';
       notice.setAttribute('role', 'status');
-      notice.textContent = `Partial audit: analyzed ${analyzedLabel}. Health score, conflicts, and policy gaps describe only this sample.`;
+      notice.textContent = message;
       list.appendChild(notice);
     }
 
@@ -1208,9 +1234,17 @@
     }
 
     const motto = document.getElementById('spec-score-motto');
-    if (motto) motto.textContent = currentReport && (currentReport.truncated || currentReport.analysis_truncated)
-      ? `sample health · first ${currentReport.node_count} nodes · more remain`
-      : 'cluster health';
+    if (motto && currentReport) {
+      const truncation = memoryAuditTruncation(currentReport);
+      const memories = `${truncation.words} ${truncation.words === 1 ? 'memory' : 'memories'}`;
+      if (truncation.selection) {
+        motto.textContent = `sample health · ${truncation.analyzed} memories analyzed · more remain`
+          + (truncation.words ? ` · word analysis partial in ${memories}` : '');
+      } else {
+        motto.textContent = truncation.words ? `partial word analysis · ${memories}`
+          : truncation.partial ? 'partial cluster analysis' : 'cluster health';
+      }
+    }
   }
 
   function updateKindCounts() {

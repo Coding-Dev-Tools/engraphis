@@ -43,6 +43,7 @@ Every specification is evaluated against 7 foundational axes of agent readiness:
 | `start` | START | Commands, quickstart guide, setup instructions, and installation |
 
 Coverage is normalized between 0.0 and 1.0 per axis and displayed as an SVG radar polygon in the dashboard and ASCII bar meters in the CLI.
+Fenced and inline code is read for replay, but contributes neither active-prose word credit nor body-signal credit to coverage.
 
 ---
 
@@ -107,6 +108,8 @@ Beyond inspecting isolated single-text prompt specifications, Spec Crawl provide
    - Detects duplicate memory claims ($\ge 0.75$ Jaccard similarity) and recommends consolidation.
 4. **7-Axis Memory Radar & Operational Gaps**:
    - Evaluates whether the workspace contains memory records covering each of the 7 foundational axes (identifies gaps like missing rules, lack of review procedures, or undefined team boundaries).
+   - Each memory retains its dominant `axis` label and separately reports `covered_axes`. Nonempty prose sections can cover multiple axes; repeated headings count an axis only once per memory. Code-only and empty sections do not establish coverage.
+   - Additional topics use the existing title/alias/signal weights with a three-point threshold, and active directives establish rules coverage. A lone incidental secondary signal does not remove a policy gap; uncategorized prose retains the legacy context fallback.
 5. **Cluster Health Score**:
    - 0–100 coherence score factoring in coverage, graph connectedness, clean node ratio, and deductions for contradictions and orphans.
 
@@ -115,6 +118,7 @@ Memory bodies are used during analysis but are not returned in node summaries. T
 Title aliases and body signals match whole words, so titles such as “Preview configuration” do not count as review policies. Similarity comparisons use at most 512 distinct tokens per memory, selected deterministically by token hash, and reuse each pair's result across link, orphan, divergence, and redundancy analysis. Reports expose `similarity_token_limit` and `similarity_sampled_node_count`; each node includes `similarity_token_count` and `similarity_sampled`. Sampled similarity is approximate and produces suggestions for review. Parameter and directive conflict checks inspect the complete memory prose outside fenced and inline code examples. Code examples are also excluded from prompt injection scoring.
 
 Word classification reads at most `word_limit` (5,000) tokens per memory. Each node reports `word_analysis_truncated` and `word_count_is_lower_bound`; a truncated `word_count` is the number analyzed, not the full memory length. Reports include `word_analysis_truncated_node_count`, and partial nodes receive no clean-node quality credit. HTTP and MCP audits set `truncated` and `analysis_truncated` for either omitted memories or incomplete word analysis; `node_selection_truncated` identifies an omitted-memory sample separately.
+Spec Studio reports these limits separately: omitted memories produce a node-sample warning, while partial word analysis identifies the affected memory count and token limit without claiming that more memories remain.
 
 ---
 
