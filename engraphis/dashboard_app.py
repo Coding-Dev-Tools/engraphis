@@ -900,6 +900,8 @@ def create_app() -> FastAPI:
     async def _document_uploads(
         files: list[UploadFile], *, source_mode: str,
     ) -> list[tuple[str, bytes]]:
+        from engraphis.core.source_paths import sensitive_path
+
         if not files or len(files) > MAX_IMPORT_FILES:
             raise HTTPException(status_code=413, detail={"error": "invalid document file count"})
         uploads: list[tuple[str, bytes]] = []
@@ -907,6 +909,9 @@ def create_app() -> FastAPI:
         total = 0
         for upload in files:
             relative_path = _document_relative_path(upload.filename)
+            if sensitive_path(relative_path):
+                uploads.append((relative_path, b""))
+                continue
             path_key = relative_path.casefold()
             if path_key in seen_paths:
                 raise HTTPException(status_code=400, detail={"error": "duplicate upload path"})

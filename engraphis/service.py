@@ -55,6 +55,7 @@ from engraphis.core.context import RegexTokenCounter
 from engraphis.core.evidence import make_exact_value_binding
 from engraphis.core.vector_repair import index_repair_identity
 from engraphis.core.ids import new_id as make_id
+from engraphis.core.source_paths import sensitive_path as _sensitive_source_path
 from engraphis.core.savings import annotate_usage, normalize_release_version
 from engraphis.core.interfaces import (
     Edge, FactSpec, GraphLayer, MemoryRecord, MemoryType, Node, Scope, SearchFilter,
@@ -1014,6 +1015,10 @@ def _resolve_import_root(raw_path: str) -> Path:
     ``/memory/vaults/import-folder`` endpoint's convention — home directory by default,
     widened via ``ENGRAPHIS_IMPORT_ROOTS`` (``os.pathsep``-separated) for server
     deployments that keep content outside ``$HOME``."""
+    # Reject selected names before realpath can follow symlinks or stat a tree.
+    expanded_path = os.path.expanduser(raw_path)
+    if _sensitive_source_path(raw_path) or _sensitive_source_path(expanded_path):
+        raise ValidationError("sensitive import path")
     home = os.path.realpath(str(Path.home().expanduser()))
     allowed_roots = [home]
     env_roots = os.environ.get("ENGRAPHIS_IMPORT_ROOTS", "")
@@ -1023,7 +1028,9 @@ def _resolve_import_root(raw_path: str) -> Path:
             for root in env_roots.split(os.pathsep)
             if root
         )
-    real_path = os.path.realpath(os.path.expanduser(raw_path))
+    real_path = os.path.realpath(expanded_path)
+    if _sensitive_source_path(real_path):
+        raise ValidationError("sensitive import path")
     comparable_path = os.path.normcase(real_path)
     safe_path = None
     for root in allowed_roots:
@@ -1049,12 +1056,10 @@ def _resolve_import_root(raw_path: str) -> Path:
 
 def _skip_import_path(name: str) -> bool:
     """Keep Quick import's filename policy aligned with document-source imports."""
-    from engraphis.core.documents import _sensitive_filename
-
     parts = [part for part in name.replace("\\", "/").split("/") if part]
     return not parts or (
         any(part == "node_modules" or part.startswith(".") for part in parts[:-1])
-        or _sensitive_filename(parts[-1])
+        or _sensitive_source_path(name)
     )
 
 
@@ -1071,18 +1076,49 @@ def _iter_import_files(
     counts candidates whose stat/resolve failed (e.g. paths beyond the Windows MAX_PATH
     limit without LongPathsEnabled) — previously these vanished from all counts.
 
-    Symlink escape guard: ``rglob`` follows symlinked directories, so a symlink placed
-    somewhere under an allowed root (by anything that ever had write access there) could
-    point outside the allowed root entirely and defeat ``_resolve_import_root`` — every
-    candidate is re-resolved and re-contained here, the same check the root itself got."""
+    Prune excluded names before metadata or descent, and never recurse through link
+    directories. Every candidate is resolved and contained before it can be read."""
     import fnmatch
+    from bisect import insort
+    from engraphis.core.fsutil import is_link_indirection
+
     files: list = []
     matched_total = 0
     unreadable = 0
-    for f in sorted(folder.rglob("*")):
-        if not f.is_file() or not fnmatch.fnmatch(f.name, pattern):
-            continue
-        if _skip_import_path(f.relative_to(folder).as_posix()):
+    if _sensitive_source_path(str(folder)):
+        return files, matched_total, unreadable
+
+    def walk(directory):
+        nonlocal unreadable
+        try:
+            entries = sorted(directory.iterdir())
+        except OSError:
+            unreadable += 1
+            return
+        for entry in entries:
+            if _skip_import_path(entry.relative_to(folder).as_posix()):
+                continue
+            try:
+                info = entry.lstat()
+                if entry.is_symlink() or is_link_indirection(info):
+                    yield entry
+                    continue
+                real = entry.resolve(strict=True)
+                rel = real.relative_to(folder)
+                if _sensitive_source_path(str(real)) or _skip_import_path(rel.as_posix()):
+                    continue
+                if entry.is_dir():
+                    if entry.name.startswith(".") or entry.name == "node_modules":
+                        continue
+                    yield from walk(entry)
+                else:
+                    yield entry
+            except (OSError, ValueError):
+                unreadable += 1
+
+    selected: list[tuple[Path, Path]] = []
+    for f in walk(folder):
+        if not fnmatch.fnmatch(f.name, pattern):
             continue
         try:
             # ``f`` came from a user-selected tree. Resolve and contain it before both
@@ -1094,13 +1130,18 @@ def _iter_import_files(
             continue
         # Check the resolved target as well as its selected name: a harmless-looking
         # symlink must not turn an excluded credential file into an eligible document.
-        if _skip_import_path(rel.as_posix()):
+        if _sensitive_source_path(str(real)) or _skip_import_path(rel.as_posix()):
+            continue
+        if not real.is_file():
             continue
         matched_total += 1
-        if len(files) >= max_files:
+        if max_files <= 0:
             continue
-        files.append(real)
-    return files, matched_total, unreadable
+        # Retain only the selected-name alphabetical prefix, not the whole tree.
+        insort(selected, (f, real))
+        if len(selected) > max_files:
+            selected.pop()
+    return [real for _name, real in selected], matched_total, unreadable
 
 
 def _title_from_content(content: str, fallback: str) -> str:
