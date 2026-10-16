@@ -20,11 +20,17 @@
   const SENSITIVE_FILENAMES = new Set([
     '.env', 'credentials', 'credentials.json', 'id_rsa', 'id_dsa', 'id_ecdsa', 'id_ed25519',
     '.netrc', '_netrc', '.npmrc', '.pypirc', '.git-credentials', '.pgpass', 'pgpass.conf',
+    '.aws', '.ssh', '.gnupg', '.azure', '.kube', '.docker', '.engraphis',
     'authorized_keys', 'known_hosts', 'recovery-codes', 'recovery_codes', 'tokens', 'tokens.json',
     'secrets', 'secrets.json', 'secret', 'secret.json',
   ]);
-  const sensitiveFilename = name => SENSITIVE_FILENAMES.has(name.toLowerCase())
-    || /^\.env\.|\.(?:pem|key|p12|pfx)$|credential|recovery[-_ ]?code|secret|token/i.test(name);
+  const SENSITIVE_DIRECTORIES = new Set([...SENSITIVE_FILENAMES,
+    'credential', 'token', '.credential', '.credentials', '.secrets', '.secret', '.token', '.tokens',
+  ]);
+  const sensitiveDirectory = name => SENSITIVE_DIRECTORIES.has(name.toLowerCase())
+    || /^\.env\.|\.(?:pem|key|p12|pfx)$|^\.?recovery[-_ ]?codes?$/i.test(name);
+  const sensitiveFilename = name => sensitiveDirectory(name)
+    || /credential|recovery[-_ ]?code|secret|token/i.test(name);
 
   function create({ api, workspace, notify, onImported, confirmDerive }) {
     const byId = id => document.getElementById(id);
@@ -110,10 +116,12 @@
       return { derive: ok, ok };
     }
 
-    function keep(name) {
+    function keep(name, isDirectory = false) {
       const parts = String(name || '').replace(/\\/g, '/').split('/').filter(Boolean);
-      return parts.length > 0 && !parts.slice(0, -1).some(SKIPPED_DIRECTORY)
-        && !parts.some(sensitiveFilename);
+      const directories = isDirectory ? parts : parts.slice(0, -1);
+      return parts.length > 0 && !directories.some(SKIPPED_DIRECTORY)
+        && !directories.some(sensitiveDirectory)
+        && (isDirectory || !sensitiveFilename(parts[parts.length - 1]));
     }
 
     async function upload(items) {
@@ -203,7 +211,7 @@
 
     async function walkEntry(entry, prefix, out) {
       if (out.length > MAX_FILES) return;
-      if (!keep(`${prefix}${entry.name}`)) return;
+      if (!keep(`${prefix}${entry.name}`, entry.isDirectory)) return;
       if (entry.isFile) {
         await new Promise(resolve => entry.file(file => {
           out.push({ file, name: `${prefix}${file.name}` });
