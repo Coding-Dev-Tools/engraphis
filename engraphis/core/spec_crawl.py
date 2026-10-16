@@ -301,6 +301,17 @@ def _in_ranges(pos: int, ranges: Sequence[tuple[int, int]]) -> bool:
     return index >= 0 and pos < ranges[index][1]
 
 
+def _mask_code_ranges(text: str, ranges: Sequence[tuple[int, int]]) -> str:
+    """Exclude code without joining surrounding clauses or changing offsets."""
+    if not ranges:
+        return text
+    masked = list(text)
+    for start, end in ranges:
+        masked[start:end] = ["\n" if char == "\n" else " " for char in text[start:end]]
+        masked[start] = ";"  # a removed inline example cannot supply a missing argument
+    return "".join(masked)
+
+
 def _parse_sections(text: str, template: SpecTemplate,
                     code: Sequence[tuple[int, int]]) -> list[_Section]:
     heads: list[tuple[int, int, str]] = []  # (heading_start, body_start, title)
@@ -549,9 +560,13 @@ def crawl_spec(text: str, *, template: SpecTemplate = DEFAULT_TEMPLATE,
              start=tok.start, end=tok.end, link_to=link_to,
              cross_from=cross_from if cross else None)
 
-    # Instruction-like payloads are data, flagged once per section.
+    # Code examples are read but never scored as active instructions.
+    injection_text = _mask_code_ranges(text, code)
     for section in sections:
-        signals = detect_payload_signals(text[section.start:section.end], title=section.title)
+        signals = detect_payload_signals(
+            injection_text[section.start:section.end],
+            title=injection_text[section.heading_start:section.start],
+        )
         if signals:
             add_flag("injection", signals[0], section.start, section.end, section.index,
                      (section.start, min(section.end, section.start + 160)),
@@ -900,6 +915,9 @@ def analyze_memory_nodes(
             "trace": [],
             "similarity_token_limit": MAX_MEMORY_SIMILARITY_TOKENS,
             "similarity_sampled_node_count": 0,
+            "word_limit": MAX_SPEC_WORDS,
+            "word_analysis_truncated_node_count": 0,
+            "analysis_truncated": False,
         }
 
     # 1. Parse individual nodes
@@ -924,7 +942,9 @@ def analyze_memory_nodes(
         # Tokens & vague words
         sec = _Section(index=0, title="node", axis="context", heading_start=0,
                        start=0, end=len(content))
-        raw_toks, _ = _tokenize(content, [sec], [], classifier)
+        raw_toks, word_analysis_truncated = _tokenize(
+            content, [sec], _code_ranges(content), classifier,
+        )
         _apply_vague_qualifiers(raw_toks)
         tok_set = tokenize(f"{title} {content}")
         similarity_sampled = len(tok_set) > MAX_MEMORY_SIMILARITY_TOKENS
@@ -959,8 +979,10 @@ def analyze_memory_nodes(
                 "question": f"In memory '{title}': \"{vf.text}\" is unbounded. What exact number, scope, or condition do you mean?",
             })
 
-        params = _extract_node_parameters(f"{title}\n{content}")
-        directives = _extract_node_directives(f"{title}\n{content}")
+        policy_text = f"{title}\n{content}"
+        policy_text = _mask_code_ranges(policy_text, _code_ranges(policy_text))
+        params = _extract_node_parameters(policy_text)
+        directives = _extract_node_directives(policy_text)
 
         parsed_nodes.append({
             "id": m_id,
@@ -974,6 +996,8 @@ def analyze_memory_nodes(
             "valid_from": valid_from,
             "axis": axis,
             "word_count": len(raw_toks),
+            "word_count_is_lower_bound": word_analysis_truncated,
+            "word_analysis_truncated": word_analysis_truncated,
             "similarity_token_count": len(tok_set),
             "similarity_sampled": similarity_sampled,
             "token_kinds": dict(kinds_counter),
@@ -1275,7 +1299,8 @@ def analyze_memory_nodes(
     covered_axes_count = sum(1 for c in coverage.values() if c > 0)
     axis_points = round((covered_axes_count / len(DEFAULT_AXES)) * 40)
     connected_points = round(((len(parsed_nodes) - len(orphans)) / max(1, len(parsed_nodes))) * 30)
-    clean_nodes = sum(1 for n in parsed_nodes if n["flag_count"] == 0)
+    clean_nodes = sum(1 for n in parsed_nodes
+                      if n["flag_count"] == 0 and not n["word_analysis_truncated"])
     quality_points = round((clean_nodes / max(1, len(parsed_nodes))) * 30)
 
     conflict_penalty = min(45, len(conflicts) * 15)
@@ -1378,6 +1403,9 @@ def analyze_memory_nodes(
         "node_count": len(parsed_nodes),
         "similarity_token_limit": MAX_MEMORY_SIMILARITY_TOKENS,
         "similarity_sampled_node_count": sum(node["similarity_sampled"] for node in parsed_nodes),
+        "word_limit": MAX_SPEC_WORDS,
+        "word_analysis_truncated_node_count": sum(node["word_analysis_truncated"] for node in parsed_nodes),
+        "analysis_truncated": any(node["word_analysis_truncated"] for node in parsed_nodes),
         "nodes": [{key: value for key, value in node.items() if key != "content"}
                   for node in parsed_nodes],
         "links": resolved_links,

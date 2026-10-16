@@ -13161,11 +13161,12 @@ class MemoryService:
         )
         report["workspace"] = ws
         report["repo"] = rp
-        report["truncated"] = truncated
+        report["node_selection_truncated"] = truncated
+        report["truncated"] = bool(truncated or report.get("analysis_truncated"))
         report["node_limit"] = 150
         report["count_semantics"] = "requested_selection" if memory_ids is not None else "bounded_scope_sample"
         report["total_eligible_node_count"] = total_eligible_node_count
-        report["analysis_truncated"] = truncated
+        report["analysis_truncated"] = report["truncated"]
         return report
 
     def spec_crawl_resolve(
