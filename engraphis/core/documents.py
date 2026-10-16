@@ -51,6 +51,7 @@ MAX_CONTAINER_TEXT_CHARS = MAX_DOCUMENT_CHARS
 MAX_JSON_NESTING = 128
 SENSITIVE_FILENAMES = {
     ".env", "credentials", "credentials.json", "id_rsa", "id_dsa",
+    ".netrc", "_netrc", ".npmrc", ".pypirc", ".git-credentials", ".pgpass", "pgpass.conf",
     "id_ecdsa", "id_ed25519", "authorized_keys", "known_hosts",
     "recovery-codes", "recovery_codes", "tokens", "tokens.json",
     "secrets", "secrets.json", "secret", "secret.json",
