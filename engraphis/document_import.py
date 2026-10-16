@@ -12,7 +12,6 @@ import json
 import os
 from pathlib import Path
 from pathlib import PurePosixPath
-import re
 from typing import Any, Iterable, Optional
 import unicodedata
 
@@ -21,7 +20,6 @@ from engraphis.core.documents import (
     MAX_DOCUMENT_BYTES,
     MAX_DOCUMENT_FILES,
     MAX_DOCUMENT_TREE_BYTES,
-    SENSITIVE_FILENAMES,
     DocumentFileIssue,
     DocumentRecord,
     DocumentScan,
@@ -29,6 +27,7 @@ from engraphis.core.documents import (
     normalize_document_path,
     parse_document,
 )
+from engraphis.core.source_paths import sensitive_path as _sensitive_path
 from engraphis.obsidian_import import ObsidianImportCancelled, ObsidianImporter
 
 
@@ -83,16 +82,6 @@ def local_document_adapter(
     )
 
 
-def _sensitive_filename(name: str) -> bool:
-    lowered = name.casefold()
-    return (
-        lowered in SENSITIVE_FILENAMES
-        or lowered.startswith(".env.")
-        or lowered.endswith((".pem", ".key", ".p12", ".pfx"))
-        or bool(re.search(r"(?:credential|recovery[-_ ]?code|secret|token)", lowered))
-    )
-
-
 def _safe_reason(exc: BaseException) -> str:
     text = str(exc).casefold()
     for label in (
@@ -143,7 +132,7 @@ def scan_document_upload(
         if document_format_for_path(relative_path) is None:
             scan.skipped.append(DocumentFileIssue(relative_path, "unsupported document format"))
             continue
-        if _sensitive_filename(parts[-1]):
+        if _sensitive_path(relative_path):
             scan.rejected.append(DocumentFileIssue(relative_path, "sensitive filename"))
             continue
         if not isinstance(raw, bytes):

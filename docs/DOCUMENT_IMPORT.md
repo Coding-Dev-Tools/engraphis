@@ -100,7 +100,12 @@ binary, or unsupported files are catalogued per file; one failure does not stop 
 collection. Reports never echo secret-like source content.
 
 Default filename exclusions include `.env` variants, credentials, secrets, tokens, recovery
-codes, SSH identity files, and `.pem`, `.key`, `.p12`, and `.pfx` material. A collection is
+codes, SSH identity files, and `.pem`, `.key`, `.p12`, and `.pfx` material. These exclusions
+apply to every input path component, including a selected root. Lexical checks run before
+filesystem inspection, traversal, or reading excluded inputs.
+The shared capture boundary also rejects authenticated URLs, including mail protocols, when
+they contain a nonempty password; explicit redaction removes that user information.
+A collection is
 bounded to 10,000 encountered files and 750 MB of read bytes; an individual adapter input is
 bounded to 100 MB, while canonical memory text is capped at 100,000 characters and is rejected
 rather than silently split. Containers are additionally capped at 2,000 members and 20 MB of

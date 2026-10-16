@@ -1233,6 +1233,7 @@ async def _import_uploaded_files(
         MAX_IMPORT_FILES,
         MAX_IMPORT_RESOURCE_BYTES,
         MAX_IMPORT_TOTAL_BYTES,
+        _skip_import_path,
     )
 
     if len(files) > MAX_IMPORT_FILES:
@@ -1242,6 +1243,11 @@ async def _import_uploaded_files(
     payload = []
     total = 0
     for uploaded in files:
+        name = getattr(uploaded, "filename", "") or "untitled"
+        if isinstance(name, str) and _skip_import_path(name):
+            # Preserve the service's scanned/skipped report without reading bytes.
+            payload.append({"name": name, "data": b""})
+            continue
         if not callable(getattr(uploaded, "read", None)):
             raise HTTPException(status_code=422, detail={
                 "error": "files must contain uploads",
@@ -1260,7 +1266,7 @@ async def _import_uploaded_files(
             })
         total += len(raw)
         payload.append({
-            "name": getattr(uploaded, "filename", "") or "untitled",
+            "name": name,
             "data": raw,
         })
     return await run_in_threadpool(
