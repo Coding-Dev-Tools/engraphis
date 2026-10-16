@@ -748,29 +748,43 @@ def _section_intent(text: str, section: _Section, tokens: Sequence[_Token]) -> s
 def compose_memory_spec(memories: Iterable[Mapping[str, Any]], *, limit: int = 200) -> str:
     """Render procedural memories as a crawlable Markdown spec (one section each).
 
-    Titles become headings so section/axis mapping still applies; the memory id is kept
-    in the heading suffix so flags can be traced back to the originating record.
+    Titles become headings so section/axis mapping still applies. The companion
+    composition helper can retain source IDs as metadata outside the audited text.
     """
     return compose_memory_spec_with_truncation(memories, limit=limit)[0]
 
 
 def compose_memory_spec_with_truncation(
     memories: Iterable[Mapping[str, Any]], *, limit: int = 200,
+    source_map: Optional[list[dict[str, Any]]] = None,
 ) -> tuple[str, bool]:
-    """Render procedural memories and report when count or character caps omit input."""
+    """Render memories, optionally appending full IDs and canonical text ranges.
+
+    IDs stay outside the spec so they cannot be classified as policy or claims.
+    Only included, nonempty records contribute ranges; the return tuple is unchanged.
+    """
     parts: list[str] = []
     total = 0
     for i, memory in enumerate(memories):
         if i >= limit:
             return "\n".join(parts), True
-        title = " ".join(str(memory.get("title") or "").split())[:80] or f"memory {i + 1}"
-        content = str(memory.get("content") or "").strip()
+        title = unicodedata.normalize(
+            "NFC", " ".join(str(memory.get("title") or "").split()),
+        )[:80] or f"memory {i + 1}"
+        content = unicodedata.normalize(
+            "NFC", str(memory.get("content") or "").replace("\r\n", "\n").replace("\r", "\n"),
+        ).strip()
         if not content:
             continue
         block = f"## {title}\n{content}\n"
         addition = len(block) + bool(parts)
         if total + addition > MAX_SPEC_CHARS:
             return "\n".join(parts), True
+        if source_map is not None and memory.get("id") is not None:
+            source_map.append({
+                "memory_id": str(memory["id"]),
+                "start": total + bool(parts), "end": total + addition,
+            })
         parts.append(block)
         total += addition
     return "\n".join(parts), False
