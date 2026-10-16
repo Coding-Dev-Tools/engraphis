@@ -103,8 +103,11 @@ Default filename exclusions include `.env` variants, credentials, secrets, token
 codes, SSH identity files, and `.pem`, `.key`, `.p12`, and `.pfx` material. Exclusions
 also cover known credential-store directories: `.aws`, `.ssh`, `.gnupg`, `.azure`, `.kube`,
 `.docker`, and `.engraphis`. Benign hidden selected roots such as `.worktrees` remain usable.
-All exclusions apply to every input path component, including a selected root. Lexical checks run before
-filesystem inspection, traversal, or reading excluded inputs.
+Known credential-directory names, rc names, environment variants, and key suffixes are checked
+in every directory component, including the selected root, before filesystem inspection or
+traversal. Broad credential/secret/token substring matching applies only to file basenames,
+before their contents are read; ordinary directories such as `tokenizer-project`,
+`secretary-notes`, and `credentialing` remain usable.
 The shared capture boundary also rejects authenticated URLs, including mail protocols, when
 they contain a nonempty password; explicit redaction removes that user information.
 A collection is
