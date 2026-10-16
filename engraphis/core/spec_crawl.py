@@ -313,9 +313,11 @@ def _mask_code_ranges(text: str, ranges: Sequence[tuple[int, int]]) -> str:
 
 
 def _parse_sections(text: str, template: SpecTemplate,
-                    code: Sequence[tuple[int, int]]) -> list[_Section]:
+                    code: Sequence[tuple[int, int]], *,
+                    visible_text: Optional[str] = None) -> list[_Section]:
     heads: list[tuple[int, int, str]] = []  # (heading_start, body_start, title)
-    visible_text = _mask_code_ranges(text, code)
+    if visible_text is None:
+        visible_text = _mask_code_ranges(text, code)
     offset = 0
     lines = text.split("\n")
     for n, line in enumerate(lines):
@@ -763,6 +765,10 @@ def _contains_axis_term(term: str, text: str, words: set[str]) -> bool:
     # rescanning a large memory for each term; retain phrase/hyphen matching.
     if term.isidentifier():
         return term in words
+    # A phrase cannot match unless each constituent word is present. Retain the
+    # exact regex check for order, separators, and word boundaries when possible.
+    if any(word not in words for word in re.findall(r"\w+", term)):
+        return False
     return re.search(r"\b" + re.escape(term) + r"\b", text) is not None
 
 
@@ -789,11 +795,16 @@ def _classify_node_axis(title: str, content: str) -> str:
     return scores.most_common(1)[0][0] if scores else "context"
 
 
-def _covered_node_axes(title: str, content: str) -> list[str]:
+def _covered_node_axes(
+    title: str, content: str, *, code: Optional[Sequence[tuple[int, int]]] = None,
+    visible: Optional[str] = None,
+) -> list[str]:
     """Keep primary labels separate from coverage supported by active policy prose."""
-    code = _code_ranges(content)
-    visible = _mask_code_ranges(content, code)
-    sections = _parse_sections(content, DEFAULT_TEMPLATE, code)
+    if code is None:
+        code = _code_ranges(content)
+    if visible is None:
+        visible = _mask_code_ranges(content, code)
+    sections = _parse_sections(content, DEFAULT_TEMPLATE, code, visible_text=visible)
     active_parts: list[str] = []
     heading_axes: set[str] = set()
     for section in sections:
@@ -836,12 +847,16 @@ def _extract_node_parameters(text: str) -> dict[str, str]:
 _ENFORCE_VERBS = frozenset({"must", "always", "required", "enforce", "mandatory", "require"})
 _FORBID_VERBS = frozenset({"never", "forbid", "deprecated", "disable", "prohibit", "skip", "omit"})
 _NEGATIVE_ACTION_VERBS = frozenset({"forbid", "disable", "prohibit", "skip", "omit"})
+_POSSIBLE_ENFORCE_VERBS = _ENFORCE_VERBS | {"do", "does", "should", "may", "can"}
+_DIRECTIVE_VERBS = _POSSIBLE_ENFORCE_VERBS | _FORBID_VERBS
 
 
 def _extract_node_directives(text: str) -> dict[str, str]:
     directives: dict[str, str] = {}
     for clause in re.split(r"[.!?;,\n]", text):
         tokens = [w.lower() for w in re.findall(r"[a-zA-Z_]{2,20}", clause)]
+        if _DIRECTIVE_VERBS.isdisjoint(tokens):
+            continue
         consumed: set[int] = set()
         for i, tok in enumerate(tokens):
             if i in consumed:
@@ -849,7 +864,7 @@ def _extract_node_directives(text: str) -> dict[str, str]:
             negated = (i + 1 < len(tokens) and tokens[i + 1] == "not") or (
                 i > 0 and tokens[i - 1] == "not")
             if tok in _FORBID_VERBS or (
-                tok in _ENFORCE_VERBS | {"do", "does", "should", "may", "can"} and negated
+                tok in _POSSIBLE_ENFORCE_VERBS and negated
             ):
                 action = "enforce" if tok in _NEGATIVE_ACTION_VERBS and negated else "forbid"
             elif tok in _ENFORCE_VERBS:
@@ -982,8 +997,10 @@ def analyze_memory_nodes(
         # Tokens & vague words
         sec = _Section(index=0, title="node", axis="context", heading_start=0,
                        start=0, end=len(content))
+        code = _code_ranges(content)
+        visible_content = _mask_code_ranges(content, code)
         raw_toks, word_analysis_truncated = _tokenize(
-            content, [sec], _code_ranges(content), classifier,
+            content, [sec], code, classifier,
         )
         _apply_vague_qualifiers(raw_toks)
         tok_set = tokenize(f"{title} {content}")
@@ -1000,7 +1017,7 @@ def analyze_memory_nodes(
 
         # Classify axis
         axis = _classify_node_axis(title, content)
-        covered_axes = _covered_node_axes(title, content)
+        covered_axes = _covered_node_axes(title, content, code=code, visible=visible_content)
         axis_counts.update(covered_axes)
 
         # Kinds summary
@@ -1020,8 +1037,14 @@ def analyze_memory_nodes(
                 "question": f"In memory '{title}': \"{vf.text}\" is unbounded. What exact number, scope, or condition do you mean?",
             })
 
-        policy_text = f"{title}\n{content}"
-        policy_text = _mask_code_ranges(policy_text, _code_ranges(policy_text))
+        if "\n" not in title and not _FENCE.match(title):
+            # Inline ranges cannot cross the separating newline, and a plain
+            # title cannot change the content's fence state. Reuse its mask.
+            visible_title = _mask_code_ranges(title, _code_ranges(title))
+            policy_text = f"{visible_title}\n{visible_content}"
+        else:
+            policy_text = f"{title}\n{content}"
+            policy_text = _mask_code_ranges(policy_text, _code_ranges(policy_text))
         params = _extract_node_parameters(policy_text)
         directives = _extract_node_directives(policy_text)
 
