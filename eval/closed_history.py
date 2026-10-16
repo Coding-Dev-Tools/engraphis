@@ -29,17 +29,27 @@ def evaluate() -> dict:
 
         content_id = add("quasar launch protocol")
         title_id = add("A preserved historical decision.", title="cerulean deploy region")
+        accent_id = add("CAFÉ")
+        unicode_title_id = add("A preserved historical decision.", title="ПРОТОКОЛ")
+        lower_contract_id = add("STRASSE")
         forbidden = set()
         for index in range(501):
             stamp = 2.0 + index
             add(f"Gardening weather bulletin {index}", ingested_at=stamp)
+            # Python's history tokenizer lowercases; it does not casefold ß to ss.
+            add("Straße", ingested_at=stamp)
             forbidden.add(add("quasar launch protocol", ingested_at=stamp, approved=False))
             forbidden.add(add("cerulean deploy region", ingested_at=stamp, workspace_id=foreign))
+            forbidden.add(add("CAFÉ", ingested_at=stamp, approved=False))
+            forbidden.add(add("ПРОТОКОЛ", ingested_at=stamp, workspace_id=foreign))
 
         cases = [
             ("quasar launch protocol", content_id),
             ("PROTOCOL launch quasar", content_id),
             ("cerulean deploy region", title_id),
+            ("café", accent_id),
+            ("протокол", unicode_title_id),
+            ("STRASSE", lower_contract_id),
         ]
         hits = 0
         leaks = 0
