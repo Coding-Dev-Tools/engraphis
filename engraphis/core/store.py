@@ -5212,13 +5212,19 @@ class Store:
 
     def list_memories(self, flt: Optional[SearchFilter] = None,
                       *, include_invalid: bool = False, limit: Optional[int] = None,
-                      prompt_only: bool = False, closed_only: bool = False) -> list[MemoryRecord]:
+                      prompt_only: bool = False, closed_only: bool = False,
+                      candidate_query: str = "") -> list[MemoryRecord]:
         """List scoped records, optionally capping only prompt-eligible rows.
 
         Public callers can opt into ``prompt_only`` when this bounded result will enter
         model-adjacent output.  Eligibility is deliberately checked while streaming SQL
         rows, before the result cap: a large pending import must not hide an older
         approved record simply by consuming the raw ``LIMIT`` window.
+
+        ``candidate_query`` puts lexical matches before the bounded candidate window.
+        It scores the literal query and at most 32 expanded terms in SQLite, without
+        hydrating the full history. Nonmatches remain a recency-ordered fallback; this
+        is candidate selection, not exhaustive semantic ranking.
         """
         if prompt_only and limit is not None and int(limit) <= 0:
             return []
@@ -5238,7 +5244,20 @@ class Store:
             params.extend([valid_at, known_at, known_at, known_at])
         if where:
             sql += " WHERE " + " AND ".join(where)
-        sql += " ORDER BY ingested_at DESC"
+        query = candidate_query.strip().lower()
+        if query:
+            terms = [query, *[term for term in _fts_terms(query) if term != query][:32]]
+            score_parts = []
+            for index, term in enumerate(terms):
+                boost = 2 if index == 0 else 1
+                score_parts.append(
+                    f"((CASE WHEN instr(lower(title), ?) > 0 THEN {2 * boost} ELSE 0 END)"
+                    f" + (CASE WHEN instr(lower(content), ?) > 0 THEN {boost} ELSE 0 END))"
+                )
+                params.extend([term, term])
+            sql += " ORDER BY (" + " + ".join(score_parts) + ") DESC, ingested_at DESC, id"
+        else:
+            sql += " ORDER BY ingested_at DESC"
         if limit and not prompt_only:
             sql += f" LIMIT {int(limit)}"
         if not prompt_only:
