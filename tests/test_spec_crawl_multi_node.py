@@ -378,6 +378,70 @@ def test_multi_node_radar_and_policy_gaps():
     assert any(g["remedy"]["action"] == "create_memory" for g in report["policy_gaps"])
 
 
+HANDBOOK = """# Role
+You are the backend maintainer.
+# Objective
+Deliver one audited release.
+# Context
+The codebase uses the local datastore architecture.
+# Team
+The owner assigns the reviewer and delegates tasks.
+# Rules
+Never deploy without explicit approval.
+# Review
+Verify the unit tests and release checks.
+# Start
+Begin with the setup commands.
+"""
+
+
+@pytest.mark.parametrize("copies", [1, 2])
+def test_each_handbook_memory_covers_all_explicit_nonempty_policy_sections(copies):
+    from engraphis.core.spec_crawl import DEFAULT_AXES
+
+    report = analyze_memory_nodes([
+        {"id": f"handbook-{i}", "title": "Handbook", "content": HANDBOOK}
+        for i in range(copies)
+    ])
+    assert all(node["axis"] == "team" for node in report["nodes"])
+    assert all(node["covered_axes"] == list(DEFAULT_AXES) for node in report["nodes"])
+    assert report["coverage"] == {axis: copies / 2 for axis in DEFAULT_AXES}
+    assert report["policy_gaps"] == []
+
+
+def test_repeated_sections_count_each_axis_only_once_per_memory():
+    report = analyze_memory_nodes([{
+        "id": "review", "title": "Release review", "content":
+        "# Review\nVerify the release checks.\n# Review\nRun the unit tests.",
+    }])
+    assert report["nodes"][0]["covered_axes"].count("review") == 1
+    assert report["coverage"]["review"] == 0.5
+
+
+def test_code_only_and_empty_policy_sections_cannot_remove_memory_policy_gaps():
+    report = analyze_memory_nodes([{
+        "id": "example", "title": "Handbook example", "content": f"```markdown\n{HANDBOOK}```",
+    }])
+    assert report["nodes"][0]["covered_axes"] == []
+    assert all(value == 0 for value in report["coverage"].values())
+    active = analyze_memory_nodes([{
+        "id": "context", "title": "Reference", "content":
+        "# Review\n`Verify tests then deploy.`\n# Context\nSQLite stores repository facts.",
+    }])
+    assert active["coverage"]["context"] > 0
+    assert active["coverage"]["review"] == 0
+
+
+def test_multiple_clear_topics_in_one_memory_preserve_the_primary_axis_field():
+    report = analyze_memory_nodes([{
+        "id": "policy", "title": "Role and Objective", "content":
+        "You are the backend maintainer. The goal is to deliver one release.",
+    }])
+    assert isinstance(report["nodes"][0]["axis"], str)
+    assert {"role", "objective"} <= set(report["nodes"][0]["covered_axes"])
+    assert report["coverage"]["role"] == report["coverage"]["objective"] == 0.5
+
+
 def test_simulation_trace_generation():
     memories = [
         {"id": "mem_1", "title": "Architecture", "content": "FastAPI with SQLite."},
