@@ -1289,6 +1289,9 @@ class Store:
             frozenset(allowed_workspaces) if allowed_workspaces else None
         )
         try:
+            # Register once before exposing this connection to any query/cursor. SQLite's
+            # built-in lower() is ASCII-only; history ranking uses Python Unicode lower().
+            self.conn.create_function("engraphis_unicode_lower", 1, _unicode_lower, deterministic=True)
             self.conn.execute("PRAGMA foreign_keys=ON")
             if self.read_only:
                 # Defense in depth after the stdlib immutable URI or the injected
@@ -5222,9 +5225,10 @@ class Store:
         approved record simply by consuming the raw ``LIMIT`` window.
 
         ``candidate_query`` puts lexical matches before the bounded candidate window.
-        It scores the literal query and at most 32 expanded terms in SQLite, without
-        hydrating the full history. Nonmatches remain a recency-ordered fallback; this
-        is candidate selection, not exhaustive semantic ranking.
+        It scores the literal query and at most 32 expanded terms in SQLite, using the
+        same Unicode lowercasing as the final Python history tokenizer. SQLite may scan
+        and sort more rows than the returned/hydrated candidate limit. Nonmatches remain
+        a recency-ordered fallback; this is not exhaustive semantic ranking.
         """
         if prompt_only and limit is not None and int(limit) <= 0:
             return []
@@ -5251,8 +5255,8 @@ class Store:
             for index, term in enumerate(terms):
                 boost = 2 if index == 0 else 1
                 score_parts.append(
-                    f"((CASE WHEN instr(lower(title), ?) > 0 THEN {2 * boost} ELSE 0 END)"
-                    f" + (CASE WHEN instr(lower(content), ?) > 0 THEN {boost} ELSE 0 END))"
+                    f"((CASE WHEN instr(engraphis_unicode_lower(title), ?) > 0 THEN {2 * boost} ELSE 0 END)"
+                    f" + (CASE WHEN instr(engraphis_unicode_lower(content), ?) > 0 THEN {boost} ELSE 0 END))"
                 )
                 params.extend([term, term])
             sql += " ORDER BY (" + " + ".join(score_parts) + ") DESC, ingested_at DESC, id"
@@ -10252,6 +10256,11 @@ def _row_to_edge(row: sqlite3.Row) -> Edge:
         ingested_at=row["ingested_at"], expired_at=row["expired_at"],
         provenance=_loads(row["provenance"], {}),
     )
+
+
+def _unicode_lower(value: Optional[str]) -> Optional[str]:
+    """NULL-safe SQL normalization matching ``textutil.tokenize`` without casefolding."""
+    return value.lower() if value is not None else None
 
 
 def _fts_terms(q: str) -> list[str]:
