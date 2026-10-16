@@ -99,7 +99,7 @@ The unified dashboard at `http://127.0.0.1:8700` includes a dedicated **Spec Stu
 Beyond inspecting isolated single-text prompt specifications, Spec Crawl provides cluster-level coherence auditing across multiple active memory records (`engraphis/core/spec_crawl.py::analyze_memory_nodes`):
 1. **Contradiction Detection**:
    - Parameter collisions for positively matching, nonempty subject keys (e.g. `port: 5432` vs `port: 5433` for the same database).
-   - Sentence-final periods on numeric port, timeout, and retry values do not create a parameter conflict; decimal values remain intact.
+   - Sentence-final periods on numeric port, timeout, and retry values or simple bare scalar labels (such as `database: postgres.`) do not create a parameter conflict. Embedded dots, dotted versions, host values, repeated dots, and tokens continuing into paths or URLs remain literal; this conservative rule does not infer whether an opaque resource ends a sentence.
    - Opposing modal directives (e.g. `must enforce <target>` vs `never allow / forbid <target>`).
    - Sharing a `(subject_key, claim_kind)` groups facts but does not establish a contradiction. Conflict findings require differing scalar values or opposing directives; compatible properties remain live. Different keyed subjects do not establish parameter conflicts.
    - A keeper suggestion requires distinct, finite `valid_from` dates. Ingestion order never determines which fact is current. Missing, invalid, or equal effective dates require explicit clarification without a retirement target.
