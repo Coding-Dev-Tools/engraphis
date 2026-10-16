@@ -163,6 +163,7 @@ _HEADING_LABEL = re.compile(r"^[ \t]{0,3}([A-Za-z][A-Za-z /&'\-]{1,40}):[ \t]*$"
 _XML_OPEN = re.compile(r"^[ \t]*<([A-Za-z][A-Za-z0-9_\-]{0,40})>[ \t]*$")
 _XML_CLOSE = re.compile(r"^[ \t]*</([A-Za-z][A-Za-z0-9_\-]{0,40})>[ \t]*$")
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})([^\n]*)")
+_INLINE_MARKER = re.compile(r"`+|\n[ \t\r]*\n")
 _TOKEN = re.compile(
     r"https?://[^\s<>()\"'`]+"
     r"|(?<![\w.\-])(?:\w[\w.\-]*|\.{1,2})(?:[/\\](?:\w[\w.\-]*|\.{1,2}))+"
@@ -293,20 +294,12 @@ def _code_ranges(text: str) -> list[tuple[int, int]]:
         offset += len(line) + 1
     if fence_start is not None:
         ranges.append((fence_start, len(text)))
-    # Escaped delimiters are literal prose. Use an offset-preserving view only
-    # for delimiter matching; even backslash runs still leave a real delimiter.
-    inline_chars: Optional[list[str]] = None
-    for tick in re.finditer("`", text):
-        preceding = tick.start() - 1
-        while preceding >= 0 and text[preceding] == "\\":
-            preceding -= 1
-        if (tick.start() - preceding - 1) % 2:
-            if inline_chars is None:
-                inline_chars = list(text)
-            inline_chars[tick.start()] = "\0"
-    inline_text = "".join(inline_chars) if inline_chars is not None else text
-    for match in re.finditer(r"`[^`\n]+`", inline_text):
-        ranges.append((match.start(), match.end()))
+    # Inline spans cannot cross a fenced block, even if its body has backticks.
+    prose_start = 0
+    for fence_start, fence_end in tuple(ranges):
+        ranges.extend(_inline_code_ranges(text, prose_start, fence_start))
+        prose_start = fence_end
+    ranges.extend(_inline_code_ranges(text, prose_start, len(text)))
     merged: list[tuple[int, int]] = []
     for start, end in sorted(ranges):
         if merged and start <= merged[-1][1]:
@@ -314,6 +307,39 @@ def _code_ranges(text: str) -> list[tuple[int, int]]:
         else:
             merged.append((start, end))
     return merged
+
+
+def _inline_code_ranges(text: str, start: int, end: int) -> list[tuple[int, int]]:
+    """Match equal backtick runs within prose paragraphs in linear time."""
+    markers = list(_INLINE_MARKER.finditer(text, start, end))
+    opener_starts = [marker.start() for marker in markers]
+    next_closers = [-1] * len(markers)
+    by_length: dict[int, int] = {}
+    # Precompute the next compatible closer so unmatched runs never rescan text.
+    for index in range(len(markers) - 1, -1, -1):
+        marker = markers[index]
+        if text[marker.start()] != "`":
+            by_length.clear()  # a blank line ends the prose paragraph
+            continue
+        preceding = marker.start() - 1
+        while preceding >= start and text[preceding] == "\\":
+            preceding -= 1
+        if (marker.start() - preceding - 1) % 2:
+            # Outside code, an escape consumes only the first tick of a run.
+            opener_starts[index] += 1
+        next_closers[index] = by_length.get(marker.end() - opener_starts[index], -1)
+        # Inside code, backslashes are literal and do not escape a closing run.
+        by_length[marker.end() - marker.start()] = index
+    ranges = []
+    index = 0
+    while index < len(markers):
+        closer = next_closers[index]
+        if closer < 0:
+            index += 1
+            continue
+        ranges.append((opener_starts[index], markers[closer].end()))
+        index = closer + 1
+    return ranges
 
 
 def _in_ranges(pos: int, ranges: Sequence[tuple[int, int]]) -> bool:
