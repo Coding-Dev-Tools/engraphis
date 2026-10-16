@@ -1544,7 +1544,7 @@
       setRepoFilter(value) { state.repoFilter = String(value || '').slice(0, 200); return api; },
       setAsOf(value) { state.asOf = value || null; return api; },
       setSizeBy(value) { state.sizeBy = ['degree', 'betweenness', 'evidence_mass'].includes(value) ? value : 'degree'; uploadNodeMeta(); schedule(); return api; },
-      setBridges(value) { state.bridges = value !== false; uploadEdges(); schedule(); if (typeof opts.onMetrics === 'function') opts.onMetrics(api.metrics()); return api; },
+      setBridges(value) { state.bridges = value !== false; uploadEdges(); schedule(); stats(); if (typeof opts.onMetrics === 'function') opts.onMetrics(api.metrics()); return api; },
       setCollapse(value) {
         state.collapse = value === true ? true : value === 'auto' ? 'auto' : false;
         state.collapsed = value === true;
