@@ -277,6 +277,7 @@ def test_authenticated_uri_capture_ingest_and_sync_fail_before_writes_or_extract
 
 
 def test_quick_http_upload_does_not_read_sensitive_file_bytes(service, monkeypatch):
+    pytest.importorskip("fastapi", reason="HTTP upload guard requires the optional server extra")
     from engraphis.routes import v2_api
     async def forbidden(*args, **kwargs):
         pytest.fail("excluded upload bytes were read")
