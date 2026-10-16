@@ -261,18 +261,25 @@
      reads as unknown instead of throwing from Date/Intl formatting and breaking a panel. */
   /* Server timestamps are epoch seconds or milliseconds, or ISO strings. Zero is the
      Unix epoch; blank text, booleans and nonscalar metadata are not recorded dates. */
-  const validDate = value => {
+  const validDate = (value, unit = 'auto') => {
     if (value == null || typeof value === 'boolean') return null;
+    if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : new Date(value.getTime());
     if (typeof value === 'object' && !(value instanceof Date)) return null;
     if (typeof value === 'string' && !value.trim()) return null;
     const numeric = Number(value);
+    // Explicit API units win. Unlabelled imported numbers with 12+ digits are
+    // milliseconds, including pre-2001 dates; smaller values retain epoch-seconds
+    // compatibility. Near-epoch milliseconds need a unit hint because they overlap
+    // valid seconds. Date objects and ISO text already carry their interpretation.
+    const milliseconds = unit === 'milliseconds'
+      || (unit === 'auto' && Math.abs(numeric) >= 1e11);
     const date = Number.isFinite(numeric)
-      ? new Date(numeric < 1e12 ? numeric * 1000 : numeric)
+      ? new Date(milliseconds ? numeric : numeric * 1000)
       : new Date(value);
     return Number.isNaN(date.getTime()) ? null : date;
   };
-  const relative = value => {
-    const date = validDate(value);
+  const relative = (value, unit = 'auto') => {
+    const date = validDate(value, unit);
     if (!date) return 'stored locally';
     const seconds = Math.max(0, Math.round((Date.now() - date.getTime()) / 1000));
     if (seconds < 60) return 'just now';
@@ -1312,11 +1319,16 @@
     // Audit rows use seconds (`ts`), while receipts use milliseconds (`ts_ms`).
     // Normalize before merging so both the newest-first order and 120-row cap are
     // chronological across the two independently paginated feeds.
-    const raw = item && (item.ts_ms ?? item.ts ?? item.timestamp ?? item.created_at);
-    const numeric = Number(raw);
-    if (Number.isFinite(numeric)) return numeric < 1e12 ? numeric * 1000 : numeric;
-    const parsed = Date.parse(raw);
-    return Number.isFinite(parsed) ? parsed : 0;
+    if (!item) return 0;
+    for (const [field, unit] of [
+      ['ts_ms', 'milliseconds'], ['ts', 'seconds'],
+      ['timestamp', 'auto'], ['created_at', 'seconds'],
+    ]) {
+      if (item[field] == null) continue;
+      const date = validDate(item[field], unit);
+      return date ? date.getTime() : 0;
+    }
+    return 0;
   }
 
   function auditField(item, ...names) {
@@ -1612,7 +1624,7 @@
   const graphExplorer = window.EngraphisGraphExplorer.create({
     onOpen: item => openGraphConnections(item),
     onFocus: (item, position, total) => {
-      focusGraphNode(item.id, item.name);
+      revealGraphNode(item.id, item.name);
       byId('graph-keyboard-status').textContent = `${item.name}, ${number(item.relations)} ${number(item.relations) === 1 ? 'relation' : 'relations'}, ${position} of ${total}. Press Enter to open its connections.`;
     },
     onClear: () => {
@@ -5442,7 +5454,7 @@
     combined.slice(0, 120).forEach(item => {
       const card = node('article', 'audit-card');
       card.append(
-        node('span', '', relative(provenanceTimestampMs(item))),
+        node('span', '', relative(provenanceTimestampMs(item), 'milliseconds')),
         node('strong', '', item.actor || item.source || 'local operator'),
         node('span', 'tag', item.operation || item.action || item.event || item._kind),
         node('span', '', item.scope || item.workspace || item.status || state.workspace),
