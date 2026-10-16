@@ -107,6 +107,10 @@ rather than silently split. Containers are additionally capped at 2,000 members 
 declared decompressed content. Invalid UTF-8/UTF-16 in permitted text is replaced explicitly and
 reported as a parsing warning.
 
+Library Quick import applies the same credential filename exclusions to uploaded files and
+folder paths before extraction or optional fact derivation. Hidden and dependency directories
+are skipped as well, and a symlink's target cannot bypass the filename exclusions.
+
 Markdown uses the Obsidian adapter's stricter 2 MB raw-note limit before decoding.
 
 Review a preview before importing sensitive material. The local importer makes no network request
