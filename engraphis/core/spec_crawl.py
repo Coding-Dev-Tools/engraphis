@@ -162,7 +162,7 @@ _HEADING_NUM = re.compile(r"^[ \t]{0,3}(\d{1,2})[.)][ \t]+([^\n]{1,60})$")
 _HEADING_LABEL = re.compile(r"^[ \t]{0,3}([A-Za-z][A-Za-z /&'\-]{1,40}):[ \t]*$")
 _XML_OPEN = re.compile(r"^[ \t]*<([A-Za-z][A-Za-z0-9_\-]{0,40})>[ \t]*$")
 _XML_CLOSE = re.compile(r"^[ \t]*</([A-Za-z][A-Za-z0-9_\-]{0,40})>[ \t]*$")
-_FENCE = re.compile(r"^[ \t]{0,3}(```|~~~)")
+_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})([^\n]*)")
 _TOKEN = re.compile(
     r"https?://[^\s<>()\"'`]+"
     r"|(?<![\w.\-])(?:\w[\w.\-]*|\.{1,2})(?:[/\\](?:\w[\w.\-]*|\.{1,2}))+"
@@ -275,11 +275,19 @@ def _code_ranges(text: str) -> list[tuple[int, int]]:
     ranges: list[tuple[int, int]] = []
     offset = 0
     fence_start: Optional[int] = None
+    fence_marker = ""
+    fence_length = 0
     for line in text.split("\n"):
-        if _FENCE.match(line):
+        fence = _FENCE.match(line)
+        if fence:
+            marker, trailing = fence.groups()
             if fence_start is None:
-                fence_start = offset
-            else:
+                # Backtick info strings cannot themselves contain backticks.
+                if marker[0] != "`" or "`" not in trailing:
+                    fence_start = offset
+                    fence_marker, fence_length = marker[0], len(marker)
+            elif (marker[0] == fence_marker and len(marker) >= fence_length
+                  and not trailing.strip(" \t\r")):
                 ranges.append((fence_start, offset + len(line)))
                 fence_start = None
         offset += len(line) + 1
