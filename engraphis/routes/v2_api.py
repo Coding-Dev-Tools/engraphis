@@ -1237,7 +1237,22 @@ async def _import_uploaded_files(
     total = 0
     for uploaded in files:
         name = getattr(uploaded, "filename", "") or "untitled"
+        declared_size = getattr(uploaded, "size", None)
+        if declared_size is not None and (type(declared_size) is not int or declared_size < 0):
+            raise HTTPException(status_code=422, detail={"error": "invalid upload size"})
+        remaining = MAX_IMPORT_TOTAL_BYTES - total
+        if declared_size is not None and declared_size > MAX_IMPORT_RESOURCE_BYTES:
+            raise HTTPException(status_code=413, detail={"error": f"{name} is too large"})
+        if declared_size is not None and declared_size > remaining:
+            raise HTTPException(status_code=413, detail={
+                "error": f"upload batch exceeds {MAX_IMPORT_TOTAL_BYTES} bytes"
+            })
         if isinstance(name, str) and _skip_import_path(name):
+            if declared_size is None:
+                raise HTTPException(status_code=422, detail={"error": "upload size is required"})
+            # Multipart parsing has already spooled these bytes; skipping reads must
+            # still account for the declared resource cost.
+            total += declared_size
             # Preserve the service's scanned/skipped report without reading bytes.
             payload.append({"name": name, "data": b""})
             continue
@@ -1245,7 +1260,6 @@ async def _import_uploaded_files(
             raise HTTPException(status_code=422, detail={
                 "error": "files must contain uploads",
             })
-        remaining = MAX_IMPORT_TOTAL_BYTES - total
         raw = await uploaded.read(
             min(MAX_IMPORT_RESOURCE_BYTES, max(0, remaining)) + 1
         )
@@ -1257,7 +1271,7 @@ async def _import_uploaded_files(
             raise HTTPException(status_code=413, detail={
                 "error": f"upload batch exceeds {MAX_IMPORT_TOTAL_BYTES} bytes"
             })
-        total += len(raw)
+        total += max(len(raw), declared_size or 0)
         payload.append({
             "name": name,
             "data": raw,
