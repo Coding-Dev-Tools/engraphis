@@ -1017,7 +1017,8 @@ def _resolve_import_root(raw_path: str) -> Path:
     deployments that keep content outside ``$HOME``."""
     # Reject selected names before realpath can follow symlinks or stat a tree.
     expanded_path = os.path.expanduser(raw_path)
-    if _sensitive_source_path(raw_path) or _sensitive_source_path(expanded_path):
+    if (_sensitive_source_path(raw_path, is_directory=True)
+            or _sensitive_source_path(expanded_path, is_directory=True)):
         raise ValidationError("sensitive import path")
     home = os.path.realpath(str(Path.home().expanduser()))
     allowed_roots = [home]
@@ -1029,7 +1030,7 @@ def _resolve_import_root(raw_path: str) -> Path:
             if root
         )
     real_path = os.path.realpath(expanded_path)
-    if _sensitive_source_path(real_path):
+    if _sensitive_source_path(real_path, is_directory=True):
         raise ValidationError("sensitive import path")
     comparable_path = os.path.normcase(real_path)
     safe_path = None
@@ -1054,12 +1055,12 @@ def _resolve_import_root(raw_path: str) -> Path:
     return folder
 
 
-def _skip_import_path(name: str) -> bool:
+def _skip_import_path(name: str, *, is_directory: bool = False) -> bool:
     """Keep Quick import's filename policy aligned with document-source imports."""
     parts = [part for part in name.replace("\\", "/").split("/") if part]
     return not parts or (
         any(part == "node_modules" or part.startswith(".") for part in parts[:-1])
-        or _sensitive_source_path(name)
+        or _sensitive_source_path(name, is_directory=is_directory)
     )
 
 
@@ -1085,7 +1086,7 @@ def _iter_import_files(
     files: list = []
     matched_total = 0
     unreadable = 0
-    if _sensitive_source_path(str(folder)):
+    if _sensitive_source_path(str(folder), is_directory=True):
         return files, matched_total, unreadable
 
     def walk(directory):
@@ -1096,7 +1097,8 @@ def _iter_import_files(
             unreadable += 1
             return
         for entry in entries:
-            if _skip_import_path(entry.relative_to(folder).as_posix()):
+            relative_name = entry.relative_to(folder).as_posix()
+            if _skip_import_path(relative_name, is_directory=True):
                 continue
             try:
                 info = entry.lstat()
@@ -1105,13 +1107,14 @@ def _iter_import_files(
                     continue
                 real = entry.resolve(strict=True)
                 rel = real.relative_to(folder)
-                if _sensitive_source_path(str(real)) or _skip_import_path(rel.as_posix()):
+                if (_sensitive_source_path(str(real), is_directory=True)
+                        or _skip_import_path(rel.as_posix(), is_directory=True)):
                     continue
                 if entry.is_dir():
                     if entry.name.startswith(".") or entry.name == "node_modules":
                         continue
                     yield from walk(entry)
-                else:
+                elif not _skip_import_path(relative_name):
                     yield entry
             except (OSError, ValueError, RuntimeError):
                 unreadable += 1
@@ -1127,9 +1130,13 @@ def _iter_import_files(
             rel = real.relative_to(folder)
             # Check the resolved target as well as its selected name: a harmless-looking
             # symlink must not turn an excluded credential file into an eligible document.
-            if _sensitive_source_path(str(real)) or _skip_import_path(rel.as_posix()):
+            if (_sensitive_source_path(str(real), is_directory=True)
+                    or _skip_import_path(rel.as_posix(), is_directory=True)):
                 continue
             if not real.is_file():
+                continue
+            if (_sensitive_source_path(str(real))
+                    or _skip_import_path(f.relative_to(folder).as_posix())):
                 continue
         except (OSError, ValueError, RuntimeError):
             unreadable += 1
