@@ -5550,7 +5550,7 @@ class MemoryService:
 
     def link(self, a: str, b: str, *, workspace: str, repo: Optional[str] = None,
              relation: str = "related", layer: Optional[str] = None,
-             reason: str = "") -> dict:
+             reason: str = "", _valid_from: Optional[float] = None) -> dict:
         a = _clean_text(a, field="a", max_chars=MAX_NAME_CHARS)
         b = _clean_text(b, field="b", max_chars=MAX_NAME_CHARS)
         relation = (_clean_text(relation, field="relation", max_chars=MAX_NAME_CHARS,
@@ -5567,7 +5567,8 @@ class MemoryService:
         self._check_owns(b, wid, rid)
         try:
             self.engine.link(
-                a, b, relation=relation, layer=graph_layer, reason=reason
+                a, b, relation=relation, layer=graph_layer, reason=reason,
+                valid_from=_valid_from,
             )
         except KeyError as exc:
             raise ValidationError(str(exc))
@@ -13286,6 +13287,7 @@ class MemoryService:
                 node_a_clean, node_b_clean, workspace=ws or "default",
                 relation="supersedes" if act == "supersede" else "related_to",
                 reason="spec_crawl_resolve",
+                _valid_from=records[node_a_clean].valid_from if act == "supersede" else None,
             )
             if act == "supersede":
                 self.retire(node_b_clean, workspace=ws or "default",
