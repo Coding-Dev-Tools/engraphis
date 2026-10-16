@@ -203,7 +203,7 @@ def parse_obsidian_note(
 def scan_obsidian_vault(vault_path: Union[os.PathLike[str], str]) -> ObsidianVaultScan:
     """Recursively discover safe Markdown notes; symlinks and hidden trees are skipped."""
     selected_root = Path(vault_path)
-    if _sensitive_path(str(selected_root)):
+    if _sensitive_path(str(selected_root), is_directory=True):
         raise ValueError("sensitive source path")
     try:
         selected_info = os.lstat(selected_root)
@@ -212,7 +212,7 @@ def scan_obsidian_vault(vault_path: Union[os.PathLike[str], str]) -> ObsidianVau
         root = selected_root.resolve(strict=True)
     except OSError as exc:
         raise ValueError("vault path must be an existing directory") from exc
-    if _sensitive_path(str(root)):
+    if _sensitive_path(str(root), is_directory=True):
         raise ValueError("sensitive source path")
     if not root.is_dir():
         raise ValueError("vault path must be an existing directory")
@@ -365,7 +365,7 @@ def _walk_vault(root: Path, directory: Path) -> Iterable[Tuple[Path, Optional[st
             if any(part.startswith(".") for part in relative.parts):
                 yield entry, "hidden/configuration path skipped"
                 continue
-            if _sensitive_path(relative.as_posix()):
+            if _sensitive_path(relative.as_posix(), is_directory=True):
                 yield entry, "sensitive filename"
                 continue
             info = entry.lstat()
