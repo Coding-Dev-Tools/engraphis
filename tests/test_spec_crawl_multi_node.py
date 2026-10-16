@@ -6,6 +6,119 @@ import pytest
 from engraphis.core.spec_crawl import analyze_memory_nodes
 
 
+@pytest.mark.parametrize("title,uncovered_axis", [
+    ("Preview configuration", "review"),
+    ("Rolex display", "role"),
+    ("Reagent inventory", "team"),
+])
+def test_axis_aliases_and_signals_require_whole_words(title, uncovered_axis):
+    report = analyze_memory_nodes([
+        {"id": "unrelated", "title": title, "content": "Raster output dimensions."},
+    ])
+    assert report["coverage"][uncovered_axis] == 0
+    assert any(gap["axis"] == uncovered_axis for gap in report["policy_gaps"])
+
+
+@pytest.mark.parametrize("title,axis", [
+    ("Review: deployment", "review"),
+    ("Roles & owners", "team"),
+    ("Non-negotiable boundaries", "rules"),
+])
+def test_whole_word_title_matching_preserves_real_aliases(title, axis):
+    report = analyze_memory_nodes([
+        {"id": "policy", "title": title, "content": "Raster output dimensions."},
+    ])
+    assert report["nodes"][0]["axis"] == axis
+
+
+@pytest.mark.parametrize("word,axis", [
+    ("Preview", "review"), ("Reagent", "team"), ("Firstly", "start"),
+])
+def test_single_document_body_signals_also_require_whole_words(word, axis):
+    from engraphis.core.spec_crawl import crawl_spec
+
+    report = crawl_spec(f"# Context\n{word} dimensions.")
+    assert report["coverage"][axis] == 0
+
+
+def test_large_memory_similarity_is_bounded_cached_and_disclosed():
+    from unittest.mock import patch
+
+    from engraphis.core import spec_crawl
+
+    token_limit = spec_crawl.MAX_MEMORY_SIMILARITY_TOKENS
+    content = " ".join(f"shared{i}" for i in range(token_limit + 100))
+    nodes = [{"id": f"node-{i}", "content": f"{content} distinct{i}",
+              "subject_key": "shared", "claim_kind": "status"} for i in range(8)]
+    calls = []
+    original_jaccard = spec_crawl.jaccard
+
+    def checked_jaccard(left, right):
+        assert len(left) <= token_limit
+        assert len(right) <= token_limit
+        calls.append((len(left), len(right)))
+        return original_jaccard(left, right)
+
+    with patch.object(spec_crawl, "jaccard", side_effect=checked_jaccard):
+        report = analyze_memory_nodes(nodes)
+    assert 0 < len(calls) <= len(nodes) * (len(nodes) - 1) // 2
+    assert report["similarity_token_limit"] == token_limit
+    assert report["similarity_sampled_node_count"] == len(nodes)
+    assert all(node["similarity_sampled"] for node in report["nodes"])
+    assert all(node["similarity_token_count"] == token_limit for node in report["nodes"])
+    assert report == analyze_memory_nodes(nodes)
+
+
+def test_similarity_sampling_preserves_full_text_policy_conflicts():
+    from engraphis.core.spec_crawl import MAX_MEMORY_SIMILARITY_TOKENS
+
+    prefix = " ".join(f"neutral{i}" for i in range(MAX_MEMORY_SIMILARITY_TOKENS * 2))
+    nodes = [
+        {"id": "old", "subject_key": "database", "valid_from": 1,
+         "content": f"{prefix}\nport: 5432. Always require authentication."},
+        {"id": "new", "subject_key": "database", "valid_from": 2,
+         "content": f"{prefix}\nport: 5433. Never require authentication."},
+    ]
+    report = analyze_memory_nodes(nodes)
+    assert report["similarity_sampled_node_count"] == 2
+    assert report["conflicts"]
+    assert report["conflicts"][0]["remedy"]["keep_node"] == "new"
+    assert report["conflicts"][0]["remedy"]["retire_node"] == "old"
+    assert report["nodes"][0]["parameters"]["port"] == "5432"
+    assert report["nodes"][1]["directives"]["authentication"] == "forbid"
+
+
+def test_small_memory_similarity_remains_exact_and_unsampled():
+    from engraphis.core.textutil import jaccard, tokenize
+
+    nodes = [{"id": "a", "title": "Authentication", "content": "Verify token authentication."},
+             {"id": "b", "title": "Authentication", "content": "Verify token authentication before deployment."}]
+    report = analyze_memory_nodes(nodes)
+    expected = jaccard(*(tokenize(f"{node['title']} {node['content']}") for node in nodes))
+    assert report["similarity_sampled_node_count"] == 0
+    assert not any(node["similarity_sampled"] for node in report["nodes"])
+    assert report["links"][0]["similarity"] == round(expected, 2)
+
+
+@pytest.mark.parametrize("key", ["port", "timeout", "retries", "max_retries"])
+@pytest.mark.parametrize("value", ["5432", "1.5", "-1"])
+def test_numeric_parameter_sentence_punctuation_does_not_create_a_conflict(key, value):
+    report = analyze_memory_nodes([
+        {"id": "sentence", "subject_key": "config", "content": f"{key}: {value}."},
+        {"id": "line", "subject_key": "config", "content": f"{key}: {value}"},
+    ])
+    assert not report["conflicts"]
+    assert all(node["parameters"][key] == value for node in report["nodes"])
+
+
+def test_numeric_parameter_normalization_preserves_dotted_identifiers():
+    from engraphis.core.spec_crawl import _extract_node_parameters
+
+    assert _extract_node_parameters("host: db.example.com. version: 1.2.3.") == {
+        "host": "db.example.com.", "version": "1.2.3.",
+    }
+
+
 def test_unrelated_policies_do_not_hide_an_earlier_directive_conflict():
     policies = [
         {"id": "require", "subject_key": "prod", "content": "Always require authentication."},
