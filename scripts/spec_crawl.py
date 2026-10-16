@@ -22,6 +22,7 @@ from pathlib import Path
 from engraphis.core.spec_crawl import (
     DEFAULT_TEMPLATE,
     MAX_SPEC_CHARS,
+    MAX_SPEC_WORDS,
     crawl_spec,
 )
 
@@ -50,6 +51,16 @@ def _audit_workspace_memories(
         repo=repo,
         session_id=session_id,
         include_trace=include_trace,
+    )
+
+
+def _print_word_analysis_notice(word_limit: int, memory_count: int | None = None) -> None:
+    detail = ""
+    if memory_count is not None:
+        detail = f" in {memory_count} {'memory' if memory_count == 1 else 'memories'}"
+    print(
+        f"Partial word analysis: stopped at {word_limit:,} tokens{detail}. "
+        "Word counts are lower bounds and qualifier checks are incomplete."
     )
 
 
@@ -129,10 +140,22 @@ def main(argv: list[str] | None = None) -> int:
             n_nodes = report.get("node_count", 0)
             print(f"=== Spec Crawl Memory Cluster Audit: workspace='{args.workspace}' ===")
             print(f"Cluster Health: {health}/100 ({n_nodes} active memory nodes)")
-            if report.get("truncated") or report.get("analysis_truncated"):
-                total = report.get("total_eligible_node_count")
+            partial = bool(report.get("truncated") or report.get("analysis_truncated"))
+            word_partial_count = max(
+                report.get("word_analysis_truncated_node_count") or 0,
+                sum(bool(node.get("word_analysis_truncated")) for node in report.get("nodes", [])),
+            )
+            total = report.get("total_eligible_node_count")
+            node_sample = report.get("node_selection_truncated")
+            if not isinstance(node_sample, bool):
+                node_sample = total > n_nodes if isinstance(total, int) else partial and not word_partial_count
+            if node_sample:
                 detail = f" of {total} eligible nodes" if total is not None else " nodes"
                 print(f"Partial audit: {n_nodes}{detail} analyzed; health and findings describe this sample.")
+            if word_partial_count:
+                _print_word_analysis_notice(report.get("word_limit") or MAX_SPEC_WORDS, word_partial_count)
+            if partial and not node_sample and not word_partial_count:
+                print("Partial audit: analysis is incomplete.")
 
             print("\n--- 7-Axis Memory Radar ---")
             for axis, val in report.get("radar", {}).items():
@@ -230,6 +253,8 @@ def main(argv: list[str] | None = None) -> int:
             f"flags={counts['flagged']} links={counts['links']} "
             f"cross_links={counts['cross_links']}"
         )
+        if report.get("truncated"):
+            _print_word_analysis_notice(MAX_SPEC_WORDS)
         print("\n--- Coverage Radar ---")
         for axis, val in report["coverage"].items():
             bar = "#" * int(val * 10) + "-" * (10 - int(val * 10))
