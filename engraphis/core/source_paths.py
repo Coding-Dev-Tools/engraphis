@@ -7,6 +7,7 @@ import re
 SENSITIVE_FILENAMES = {
     ".env", "credentials", "credentials.json", "id_rsa", "id_dsa",
     ".netrc", "_netrc", ".npmrc", ".pypirc", ".git-credentials", ".pgpass", "pgpass.conf",
+    ".aws", ".ssh", ".gnupg", ".azure", ".kube", ".docker", ".engraphis",
     "id_ecdsa", "id_ed25519", "authorized_keys", "known_hosts",
     "recovery-codes", "recovery_codes", "tokens", "tokens.json",
     "secrets", "secrets.json", "secret", "secret.json",
