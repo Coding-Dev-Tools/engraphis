@@ -242,8 +242,9 @@ const assert = require('node:assert/strict');
 const elements = new Map();
 function element() {
   return {
-    checked: false, classList: { toggle() {}, remove() {}, add() {} },
-    addEventListener() {}, setAttribute() {}, replaceChildren() {}, append() {},
+    checked: false, listeners: {}, classList: { toggle() {}, remove() {}, add() {} },
+    addEventListener(type, fn) { this.listeners[type] = fn; },
+    setAttribute() {}, replaceChildren() {}, append() {},
   };
 }
 global.window = {};
@@ -273,6 +274,21 @@ const file = name => ({ name, file: new File(['local source material'], name.spl
   assert.deepEqual(calls, [{
     url: '/workspaces/import-files', names: ['project/readme.txt', '.gitignore', '.editorconfig'],
   }]);
+  const excluded = {
+    name: 'Credentials', isDirectory: true,
+    createReader() { throw new Error('Excluded directory was traversed'); },
+  };
+  const excludedFile = {
+    name: 'client.key', isFile: true,
+    file() { throw new Error('Excluded file metadata was requested'); },
+  };
+  elements.get('quick-import-drop').listeners.drop({
+    preventDefault() {}, dataTransfer: {
+      items: [excluded, excludedFile].map(entry => ({ webkitGetAsEntry: () => entry })), files: [],
+    },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls.length, 1);
 })().catch(error => { console.error(error); process.exitCode = 1; });
 """, encoding="utf-8")
     source = Path(__file__).resolve().parents[1] / "engraphis/dashboard_assets/import-sources.js"

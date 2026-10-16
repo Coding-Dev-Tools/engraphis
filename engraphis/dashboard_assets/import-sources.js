@@ -113,7 +113,7 @@
     function keep(name) {
       const parts = String(name || '').replace(/\\/g, '/').split('/').filter(Boolean);
       return parts.length > 0 && !parts.slice(0, -1).some(SKIPPED_DIRECTORY)
-        && !sensitiveFilename(parts[parts.length - 1]);
+        && !parts.some(sensitiveFilename);
     }
 
     async function upload(items) {
@@ -203,6 +203,7 @@
 
     async function walkEntry(entry, prefix, out) {
       if (out.length > MAX_FILES) return;
+      if (!keep(`${prefix}${entry.name}`)) return;
       if (entry.isFile) {
         await new Promise(resolve => entry.file(file => {
           out.push({ file, name: `${prefix}${file.name}` });
