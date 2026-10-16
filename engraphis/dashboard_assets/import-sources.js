@@ -17,6 +17,14 @@
   const MAX_TOTAL_BYTES = 750_000_000;
   const LONG_REQUEST_MS = 15 * 60_000;
   const SKIPPED_DIRECTORY = part => part === 'node_modules' || part.startsWith('.');
+  const SENSITIVE_FILENAMES = new Set([
+    '.env', 'credentials', 'credentials.json', 'id_rsa', 'id_dsa', 'id_ecdsa', 'id_ed25519',
+    '.netrc', '_netrc', '.npmrc', '.pypirc', '.git-credentials', '.pgpass', 'pgpass.conf',
+    'authorized_keys', 'known_hosts', 'recovery-codes', 'recovery_codes', 'tokens', 'tokens.json',
+    'secrets', 'secrets.json', 'secret', 'secret.json',
+  ]);
+  const sensitiveFilename = name => SENSITIVE_FILENAMES.has(name.toLowerCase())
+    || /^\.env\.|\.(?:pem|key|p12|pfx)$|credential|recovery[-_ ]?code|secret|token/i.test(name);
 
   function create({ api, workspace, notify, onImported, confirmDerive }) {
     const byId = id => document.getElementById(id);
@@ -103,8 +111,9 @@
     }
 
     function keep(name) {
-      const parts = String(name || '').split('/').filter(Boolean);
-      return !parts.slice(0, -1).some(SKIPPED_DIRECTORY);
+      const parts = String(name || '').replace(/\\/g, '/').split('/').filter(Boolean);
+      return parts.length > 0 && !parts.slice(0, -1).some(SKIPPED_DIRECTORY)
+        && !sensitiveFilename(parts[parts.length - 1]);
     }
 
     async function upload(items) {
@@ -117,7 +126,7 @@
       const files = items.filter(item => item && item.file && keep(item.name));
       if (!files.length) {
         setStatus(items.length
-          ? 'Nothing to import: the selection only contained hidden or dependency folders.'
+          ? 'Nothing to import: the selection only contained hidden or dependency folders, or sensitive files.'
           : 'No files were found in that selection.', 'error');
         return;
       }

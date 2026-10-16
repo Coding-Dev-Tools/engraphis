@@ -34,6 +34,7 @@ MAX_SPEC_WORDS = 5_000
 MAX_SECTIONS = 64
 MAX_TRACED_CLAIMS = 40
 MAX_FLAGS = 200
+MAX_MEMORY_SIMILARITY_TOKENS = 512
 VAGUE_QUALIFIER_WINDOW = 3
 LEGS = 16
 
@@ -588,12 +589,16 @@ def crawl_spec(text: str, *, template: SpecTemplate = DEFAULT_TEMPLATE,
 
     # Coverage radar.
     body_lower = text.casefold()
+    body_words = set(re.findall(r"\w+", body_lower))
     axes: dict[str, float] = {}
     for axis in template.axes:
         mapped = [s for s in sections if s.axis == axis]
         words = sum(per_section[s.index]["read"] for s in mapped)
         section_score = min(1.0, words / 8.0) if mapped else 0.0
-        signal_score = 0.5 if any(sig in body_lower for sig in _AXIS_SIGNALS.get(axis, ())) else 0.0
+        signal_score = 0.5 if any(
+            _contains_axis_term(sig, body_lower, body_words)
+            for sig in _AXIS_SIGNALS.get(axis, ())
+        ) else 0.0
         axes[axis] = round(max(section_score, signal_score), 4)
     coverage = sum(axes.values()) / len(axes) if axes else 0.0
 
@@ -732,18 +737,28 @@ _FORBID_PATTERN = re.compile(
 )
 
 
+def _contains_axis_term(term: str, text: str, words: set[str]) -> bool:
+    # Most aliases/signals are individual words. Index them once instead of
+    # rescanning a large memory for each term; retain phrase/hyphen matching.
+    if term.isidentifier():
+        return term in words
+    return re.search(r"\b" + re.escape(term) + r"\b", text) is not None
+
+
 def _classify_node_axis(title: str, content: str) -> str:
     combined = f"{title} {content}".lower()
+    title_words = {word.casefold() for word in _HEADING_WORD.findall(title)}
+    combined_words = set(re.findall(r"\w+", combined))
     scores: Counter[str] = Counter()
     for axis, aliases in _AXIS_ALIASES.items():
         for alias in aliases:
-            if alias in title.lower():
+            if alias in title_words:
                 scores[axis] += 3
-            elif re.search(r"\b" + re.escape(alias) + r"\b", combined):
+            elif _contains_axis_term(alias, combined, combined_words):
                 scores[axis] += 1
     for axis, signals in _AXIS_SIGNALS.items():
         for sig in signals:
-            if sig in combined:
+            if _contains_axis_term(sig, combined, combined_words):
                 scores[axis] += 2
     if scores:
         return scores.most_common(1)[0][0]
@@ -755,6 +770,10 @@ def _extract_node_parameters(text: str) -> dict[str, str]:
     for match in _PARAM_PATTERN.finditer(text):
         key = match.group(1).lower()
         val = match.group(2).strip().lower()
+        if key in {"port", "timeout", "retries", "max_retries"} and re.fullmatch(
+            r"-?\d+(?:\.\d+)?\.", val,
+        ):
+            val = val[:-1]
         params[key] = val
     return params
 
@@ -879,6 +898,8 @@ def analyze_memory_nodes(
             "flags": [],
             "remediation_plan": [],
             "trace": [],
+            "similarity_token_limit": MAX_MEMORY_SIMILARITY_TOKENS,
+            "similarity_sampled_node_count": 0,
         }
 
     # 1. Parse individual nodes
@@ -906,6 +927,14 @@ def analyze_memory_nodes(
         raw_toks, _ = _tokenize(content, [sec], [], classifier)
         _apply_vague_qualifiers(raw_toks)
         tok_set = tokenize(f"{title} {content}")
+        similarity_sampled = len(tok_set) > MAX_MEMORY_SIMILARITY_TOKENS
+        if similarity_sampled:
+            # A stable hash sample avoids favouring a document's opening or lexical
+            # prefix. Only similarity suggestions are sampled; policy checks below
+            # still inspect the complete memory text.
+            tok_set = set(sorted(tok_set, key=lambda token: (
+                hashlib.sha256(token.encode("utf-8")).digest(), token,
+            ))[:MAX_MEMORY_SIMILARITY_TOKENS])
         node_tokens_map[m_id] = tok_set
         node_tokens_len[m_id] = len(tok_set)
 
@@ -945,11 +974,22 @@ def analyze_memory_nodes(
             "valid_from": valid_from,
             "axis": axis,
             "word_count": len(raw_toks),
+            "similarity_token_count": len(tok_set),
+            "similarity_sampled": similarity_sampled,
             "token_kinds": dict(kinds_counter),
             "flag_count": len(vague_tokens),
             "parameters": params,
             "directives": directives,
         })
+
+    # Each unordered pair is compared at most once, across all analysis passes.
+    similarity_cache: dict[tuple[str, str], float] = {}
+
+    def similarity(node_a: str, node_b: str) -> float:
+        pair = (min(node_a, node_b), max(node_a, node_b))
+        if pair not in similarity_cache:
+            similarity_cache[pair] = jaccard(node_tokens_map[node_a], node_tokens_map[node_b])
+        return similarity_cache[pair]
 
     # 2. Graph Connectivity & Edges
     node_ids = {n["id"] for n in parsed_nodes}
@@ -991,9 +1031,7 @@ def analyze_memory_nodes(
                 subj_match = bool(subj_i and subj_i == parsed_nodes[j]["subject_key"])
                 if not subj_match and (min_len / max_len < 0.35):
                     continue
-                toks_i = node_tokens_map[id_i]
-                toks_j = node_tokens_map[id_j]
-                sim = jaccard(toks_i, toks_j)
+                sim = similarity(id_i, id_j)
                 if sim >= 0.35 or subj_match:
                     # Inferred overlaps are suggestions, not persisted connectivity.
                     # Keep orphan degree and cluster health tied to declared links.
@@ -1018,7 +1056,6 @@ def analyze_memory_nodes(
             best_id: Optional[str] = None
             best_sim = 0.0
             if len_o > 0:
-                toks_o = node_tokens_map[n_id]
                 for other in parsed_nodes:
                     if other["id"] == n_id:
                         continue
@@ -1029,7 +1066,7 @@ def analyze_memory_nodes(
                     max_l = len_oth if len_o < len_oth else len_o
                     if (min_l / max_l) <= best_sim:
                         continue
-                    sim = jaccard(toks_o, node_tokens_map[other["id"]])
+                    sim = similarity(n_id, other["id"])
                     if sim > best_sim:
                         best_sim = sim
                         best_id = other["id"]
@@ -1058,14 +1095,13 @@ def analyze_memory_nodes(
         for i_pos in range(len(indices)):
             idx_a = indices[i_pos]
             node_a = parsed_nodes[idx_a]
-            toks_a = node_tokens_map[node_a["id"]]
             for j_pos in range(i_pos + 1, min(len(indices), i_pos + 5)):
                 idx_b = indices[j_pos]
                 node_b = parsed_nodes[idx_b]
                 pair_key = (min(node_a["id"], node_b["id"]), max(node_a["id"], node_b["id"]))
                 if pair_key in conflict_pairs:
                     continue
-                sim = jaccard(toks_a, node_tokens_map[node_b["id"]])
+                sim = similarity(node_a["id"], node_b["id"])
                 # Low overlap alone is insufficient evidence of contradiction.
                 # Parameter and directive comparisons below can prove a clash.
                 proven_clash = any(
@@ -1180,7 +1216,6 @@ def analyze_memory_nodes(
         len_a = node_tokens_len[id_a]
         if len_a == 0:
             continue
-        toks_a = node_tokens_map[id_a]
         for j in range(i + 1, len(parsed_nodes)):
             if len(redundancies) >= 20:
                 break
@@ -1195,7 +1230,7 @@ def analyze_memory_nodes(
             max_l = len_b if len_a < len_b else len_a
             if (min_l / max_l) < 0.75:
                 continue
-            sim = jaccard(toks_a, node_tokens_map[id_b])
+            sim = similarity(id_a, id_b)
             if sim >= 0.75:
                 redundancies.append({
                     "id": f"redundancy_{len(redundancies) + 1}",
@@ -1341,6 +1376,8 @@ def analyze_memory_nodes(
             "vague_penalty": -vague_penalty,
         },
         "node_count": len(parsed_nodes),
+        "similarity_token_limit": MAX_MEMORY_SIMILARITY_TOKENS,
+        "similarity_sampled_node_count": sum(node["similarity_sampled"] for node in parsed_nodes),
         "nodes": [{key: value for key, value in node.items() if key != "content"}
                   for node in parsed_nodes],
         "links": resolved_links,

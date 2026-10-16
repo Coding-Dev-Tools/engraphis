@@ -1047,6 +1047,17 @@ def _resolve_import_root(raw_path: str) -> Path:
     return folder
 
 
+def _skip_import_path(name: str) -> bool:
+    """Keep Quick import's filename policy aligned with document-source imports."""
+    from engraphis.core.documents import _sensitive_filename
+
+    parts = [part for part in name.replace("\\", "/").split("/") if part]
+    return not parts or (
+        any(part == "node_modules" or part.startswith(".") for part in parts[:-1])
+        or _sensitive_filename(parts[-1])
+    )
+
+
 def _iter_import_files(
     folder: Path, pattern: str, max_files: int,
 ) -> tuple[list, int, int]:
@@ -1071,6 +1082,8 @@ def _iter_import_files(
     for f in sorted(folder.rglob("*")):
         if not f.is_file() or not fnmatch.fnmatch(f.name, pattern):
             continue
+        if _skip_import_path(f.relative_to(folder).as_posix()):
+            continue
         try:
             # ``f`` came from a user-selected tree. Resolve and contain it before both
             # deriving metadata and returning the path that ``import_folder`` will read.
@@ -1079,8 +1092,9 @@ def _iter_import_files(
         except (OSError, ValueError):
             unreadable += 1
             continue
-        parts = rel.parts
-        if any(p == "node_modules" or p == ".git" or p.startswith(".") for p in parts[:-1]):
+        # Check the resolved target as well as its selected name: a harmless-looking
+        # symlink must not turn an excluded credential file into an eligible document.
+        if _skip_import_path(rel.as_posix()):
             continue
         matched_total += 1
         if len(files) >= max_files:
@@ -2899,6 +2913,9 @@ class MemoryService:
                 continue
             name = _clean_text(item.get("name"), field="name", max_chars=MAX_NAME_CHARS,
                                required=False) or "untitled"
+            if _skip_import_path(name):
+                skipped += 1
+                continue
             raw = item.get("data")
             content = item.get("content")
             if raw is None and isinstance(content, str):
