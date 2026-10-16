@@ -617,15 +617,13 @@ def test_zero_negative_and_numeric_string_effective_dates_are_preserved(dates):
     assert report["conflicts"][0]["remedy"]["keep_node"] == "current"
 
 
-def test_unproven_divergence_and_duplicate_suggestions_do_not_choose_a_keeper():
+def test_compatible_facts_are_not_conflicts_and_duplicate_suggestions_do_not_choose_a_keeper():
     divergence = analyze_memory_nodes([
         {"id": "a", "subject_key": "service", "claim_kind": "deployment", "content": "Blue deployment is active."},
         {"id": "b", "subject_key": "service", "claim_kind": "deployment", "content": "Manual maintenance procedures are documented."},
     ])
-    assert divergence["conflicts"]
-    assert divergence["conflicts"][0]["remedy"]["action"] == "clarify"
-    assert "keep_node" not in divergence["conflicts"][0]["remedy"]
-    assert "retire_node" not in divergence["conflicts"][0]["remedy"]
+    assert not divergence["conflicts"]
+    assert not any(remedy["action"] in {"clarify", "supersede"} for remedy in divergence["remediation_plan"])
     duplicates = analyze_memory_nodes([
         {"id": "a", "content": "Run the release verification suite."},
         {"id": "b", "content": "Run the release verification suite."},
