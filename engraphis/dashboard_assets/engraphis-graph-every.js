@@ -1537,6 +1537,7 @@
         state.labelLayout = [];
         schedule();
         scheduleLabels(true);
+        stats();
         if (typeof opts.onMetrics === 'function') opts.onMetrics(api.metrics());
         return api;
       },
