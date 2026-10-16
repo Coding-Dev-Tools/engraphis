@@ -152,6 +152,10 @@ Performs an offline, read-only analysis of up to 64,000 characters. HTTP callers
 
 If the first approved procedural memory cannot fit the character budget, the crawl returns a validation error instead of an empty-scope audit. Pass a smaller specification or use a selected-memory audit to inspect that record.
 
+Procedural audits do not trace claims: the source memories are the text being audited and cannot independently verify themselves. `claim_tracing` reports `requested`, `enabled`, and `disabled_reason`; when tracing was requested for this mode, the reason is `procedural_sources_are_not_independent_evidence`. Claims remain `unchecked`, with no grounding bonus or untraced-claim penalty. Direct-text audits can still trace claims against memories in their selected scope.
+
+`procedural_sources` retains the complete `memory_id` and its `start`/`end` range in the composed, NFC-normalized text with LF newlines. Only memories actually included in the text appear. Sections, flags, and claims list their `source_memory_ids` (several when the section cap merges a tail); flags and claims also carry `source_memory_id` when their origin is a single memory. This disambiguates duplicate titles without treating identifiers as instructions or factual claims.
+
 ### `POST /api/spec/crawl/answer`
 Submits a clarification for a current flagged ambiguity, returns updated text and a new report, and optionally persists a pending procedural memory.
 
