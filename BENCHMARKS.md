@@ -94,14 +94,14 @@ interpretation and do not count as additional benchmark-quality gains.
 ### Public numeric evidence registry
 
 Every exact public aggregate retained below comes from the checked-in, public-safe
-[`offline-fixtures-pr260-review-boundaries-20261016.json`](docs/benchmark-evidence/offline-fixtures-pr260-review-boundaries-20261016.json) artifact. Its
+[`offline-fixtures-pr260-policy-history-20261016.json`](docs/benchmark-evidence/offline-fixtures-pr260-policy-history-20261016.json) artifact. Its
 SHA-256 is
-`f18e3812e7f45c3cbc2d025b8a84457ae9348f74550bc48523c44a3681f3ce82`, also recorded in the
+`00f5b46e9a3b745284b41c7fb70ca4f205c5526d48188835194784fcd925d72d`, also recorded in the
 adjacent `.sha256` file. The artifact contains no raw questions, answers, prompts, customer data,
 or per-record content fingerprints.
 
 The fixture-suite digest is
-`a2b9e5d7af862a97c63e52be2b30d960dda7457fd2a0572f1423d4ad58f2ca83`. The artifact defines
+`7bf018bcdfe207936bc4a7c806c9360e27873b4aa8bbdc8662205bb18c1729a6`. The artifact defines
 the digest algorithm and records the SHA-256 of every suite and dataset file. Each evidence ID
 also binds its exact command through `sha256(UTF-8 exact command)`:
 
@@ -126,13 +126,13 @@ grounded checks in separate panels; provider billing and MCP transport are not m
 the SVG and matching PNG with:
 
 ```bash
-python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-pr260-review-boundaries-20261016.json --output docs/images/context-efficiency.svg --png-output docs/images/context-efficiency.png
+python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-pr260-policy-history-20261016.json --output docs/images/context-efficiency.svg --png-output docs/images/context-efficiency.png
 ```
 
 The companion examples are also generated from that artifact with:
 
 ```bash
-python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-pr260-review-boundaries-20261016.json --output docs/images/evidence-backed-agent-examples.svg --png-output docs/images/evidence-backed-agent-examples.png
+python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-pr260-policy-history-20261016.json --output docs/images/evidence-backed-agent-examples.svg --png-output docs/images/evidence-backed-agent-examples.png
 ```
 The historical-to-executable mapping is in
 [`docs/BENCHMARK_CHANGE_COVERAGE.md`](docs/BENCHMARK_CHANGE_COVERAGE.md).
