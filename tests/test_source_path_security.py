@@ -286,6 +286,6 @@ def test_quick_http_upload_does_not_read_sensitive_file_bytes(service, monkeypat
     monkeypatch.setattr(v2_api, "run_in_threadpool", inline)
     report = asyncio.run(v2_api._import_uploaded_files(
         workspace="sources", memory_type="semantic", derive_facts=False,
-        files=[SimpleNamespace(filename="credentials/config.json", read=forbidden)],
+        files=[SimpleNamespace(filename="credentials/config.json", size=0, read=forbidden)],
     ))
     assert report["skipped"] == report["scanned"] == 1 and report["imported"] == 0
