@@ -70,6 +70,8 @@ When prompt specifications contain ambiguous or unquantified qualifiers (such as
 
 > *[VAGUE] "all" is unbounded in: "We must verify all unit tests before release." What exact scope, number, or condition do you mean?*
 
+Numbers clear a qualifier only in an explicit bounded phrase: `all 5 tests`, `any of the 2 samples`, `every 5 minutes`, or a duration such as `quickly within 5 seconds`. Counts are integers; cadence and duration values can be fractional. The phrase must stay in one active prose sentence and section. Nearby ports, dates, version identifiers, code examples, or a number in another clause do not define the qualifier's scope. Subjective quality words such as `clean` remain questions even when a nearby task count is precise.
+
 Users or orchestrators can answer the clarification directly via:
 1. **Interactive Dashboard Modal**: clicking **Clarify** beside an ambiguity opens a prompt asking for concrete bounds (e.g. *"all 15 core unit tests in tests/"*).
 2. **REST API**: calling `POST /api/spec/crawl/answer`.
@@ -118,6 +120,8 @@ Memory bodies are used during analysis but are not returned in node summaries. T
 Title aliases and body signals match whole words, so titles such as “Preview configuration” do not count as review policies. Similarity comparisons use active title and body prose outside code examples, with at most 512 distinct tokens per memory selected deterministically by token hash. Each pair's result is reused across link, orphan, and redundancy analysis. Reports expose `similarity_token_limit` and `similarity_sampled_node_count`; each node includes `similarity_token_count` and `similarity_sampled`. Sampled similarity is approximate and produces suggestions for review. Parameter and directive conflict checks inspect the complete memory prose outside fenced and inline code examples. Code examples are also excluded from prompt injection scoring.
 
 Parameter conflicts use explicit scalar assignments (`=`, `:`, `is set to`, or `set to`). Bare `is` establishes a scalar value only for numeric port, timeout, and retry fields; descriptive predicates such as “the database is encrypted at rest” do not establish exclusive configuration values. Directive comparisons match the governed action or requirement together with its object and scope, preserving nested negation. Possible overlap between a general policy and a scoped exception requires clarification and never selects a memory to retire. These checks are heuristics, not general natural-language inference.
+
+Directive checks normalize straight and typographic contractions of `do`, `does`, `must`, `should`, `may`, and `can`, including `cannot`, to their explicit negative forms. Qualified hosts, addresses, URLs, paths, ports, and version strings remain complete target identifiers. Opaque resource spelling retains its case; ordinary governing and action words remain case-insensitive. Sentence-ending punctuation separates directives without truncating embedded target punctuation, and long target phrases retain their full identity through a bounded hash key.
 
 Inline code examples use matching backtick runs; runs of a different length inside a span remain literal. Outside code, a backslash escapes only the first backtick of a run. Inside code, backslashes do not escape a closing run. Inline spans can contain soft line breaks, but do not cross blank paragraphs or fenced blocks. Code examples remain excluded from active policy checks.
 
