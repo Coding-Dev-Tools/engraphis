@@ -35,7 +35,7 @@ MAX_SECTIONS = 64
 MAX_TRACED_CLAIMS = 40
 MAX_FLAGS = 200
 MAX_MEMORY_SIMILARITY_TOKENS = 512
-VAGUE_QUALIFIER_WINDOW = 3
+VAGUE_QUALIFIER_WINDOW = 8
 LEGS = 16
 
 #: Token kinds, in display order. ``word`` is read but neither linked nor flagged.
@@ -135,8 +135,8 @@ _ACTION_WORDS = frozenset({
     "use", "add", "remove", "commit", "push", "summarize", "document", "flag",
     "escalate", "measure", "record", "prefer", "avoid", "lint", "install",
 })
-#: Unbounded or subjective wording. Flagged unless a number appears within
-#: ``VAGUE_QUALIFIER_WINDOW`` tokens (e.g. "every 5 minutes" is precise).
+#: Unbounded or subjective wording. Only explicit count, cadence, or
+#: duration phrases qualify it (e.g. "every 5 minutes" is precise).
 _VAGUE_WORDS = frozenset({
     "every", "everything", "all", "any", "well", "good", "better", "best", "nice", "proper", "properly",
     "appropriate", "appropriately", "reasonable", "reasonably", "robust", "clean",
@@ -446,14 +446,59 @@ def _tokenize(text: str, sections: Sequence[_Section], code: Sequence[tuple[int,
     return tokens, truncated
 
 
-def _apply_vague_qualifiers(tokens: list[_Token]) -> None:
-    """A vague word bounded by a nearby number in the same sentence is precise."""
+_BOUND_NUMBER = r"\d+(?:,\d{3})*"
+_COUNT_BOUND = re.compile(
+    rf"[ \t]+(?:(?:of[ \t]+)?the[ \t]+|of[ \t]+)?{_BOUND_NUMBER}"
+    r"(?=$|[ \t);:!?]|\.(?!\d))", re.IGNORECASE,
+)
+_CADENCE_BOUND = re.compile(
+    rf"[ \t]+{_BOUND_NUMBER}(?:\.\d+)?[ \t]*(?P<unit>[a-zA-Z][a-zA-Z-]*)"
+    r"(?=$|[ \t.,;:!?])", re.IGNORECASE,
+)
+_DURATION_BOUND = re.compile(
+    rf"[ \t]+(?:within|under|in|at[ \t]+most|no[ \t]+more[ \t]+than)"
+    rf"[ \t]+{_BOUND_NUMBER}(?:\.\d+)?[ \t]*(?P<unit>[a-zA-Z]+)"
+    r"(?=$|[ \t.,;:!?])", re.IGNORECASE,
+)
+_TEMPORAL_VAGUE = frozenset({"quickly", "fast", "soon", "asap"})
+_DURATION_UNITS = frozenset({
+    "ms", "msec", "msecs", "millisecond", "milliseconds", "s", "sec", "secs",
+    "second", "seconds", "min", "mins", "minute", "minutes", "h", "hr", "hrs",
+    "hour", "hours", "day", "days", "week", "weeks",
+})
+_CADENCE_BOUNDARIES = _STOPWORDS | _VAGUE_WORDS | {
+    "but", "then", "because", "while", "when", "if", "else", "after", "before",
+    "since", "until", "unless",
+}
+
+
+def _apply_vague_qualifiers(tokens: list[_Token], text: str) -> None:
+    """Clear only explicit quantitative phrases within a bounded prose span."""
     for i, tok in enumerate(tokens):
         if tok.kind != "vague":
             continue
-        lo, hi = max(0, i - VAGUE_QUALIFIER_WINDOW), min(len(tokens), i + VAGUE_QUALIFIER_WINDOW + 1)
-        if any(tokens[j].kind == "spec" and tokens[j].sentence == tok.sentence
-               for j in range(lo, hi) if j != i):
+        word = tok.text.casefold()
+        if word in {"all", "any"}:
+            pattern = _COUNT_BOUND
+        elif word == "every":
+            pattern = _CADENCE_BOUND
+        elif word in _TEMPORAL_VAGUE:
+            pattern = _DURATION_BOUND
+        else:
+            continue
+        following = tokens[i + 1:i + 1 + VAGUE_QUALIFIER_WINDOW]
+        if not following:
+            continue
+        match = pattern.match(text, tok.end, following[-1].end)
+        if match is None:
+            continue
+        unit = (match.groupdict().get("unit") or "").casefold()
+        if (word == "every" and unit in _CADENCE_BOUNDARIES
+                or word in _TEMPORAL_VAGUE and unit not in _DURATION_UNITS):
+            continue
+        if all(not other.in_code and other.section == tok.section
+               and other.sentence == tok.sentence
+               for other in following if other.start < match.end()):
             tok.kind = "word"
 
 
@@ -542,7 +587,7 @@ def crawl_spec(text: str, *, template: SpecTemplate = DEFAULT_TEMPLATE,
     code = _code_ranges(text)
     sections = _parse_sections(text, template, code)
     tokens, truncated = _tokenize(text, sections, code, classifier)
-    _apply_vague_qualifiers(tokens)
+    _apply_vague_qualifiers(tokens, text)
     spans = _sentence_spans(tokens)
 
     trace: list[dict[str, Any]] = []
@@ -923,6 +968,21 @@ _DIRECTIVE_BOUNDARIES = _DIRECTIVE_VERBS | {"and", "or", "but"}
 _DIRECTIVE_SCOPE_WORDS = frozenset({"to", "on", "for", "in", "across", "within", "from"})
 
 
+_DIRECTIVE_NEGATION = re.compile(
+    r"(?<![\w./\\:@?=&%+#-])"
+    r"(?:cannot|(?:do|does|must|should|may)n['\u2019]t|can['\u2019]t)"
+    r"(?![\w./\\:@?=&%+#-])", re.IGNORECASE,
+)
+_DIRECTIVE_LEXEME = re.compile(
+    r"(?P<literal>"
+    r"[A-Za-z][A-Za-z0-9+.-]*://[^\s<>\"()\x60]+"
+    r"|(?:[A-Za-z]:[/\\]|\.{1,2}[/\\]|[/\\]|(?<![A-Za-z0-9_.-])[A-Za-z0-9_.-]+[/\\])[^\s<>\"()\x60]*"
+    r"|\[[0-9A-Fa-f:.]+\](?::[0-9]+)?)"
+    r"|(?P<word>[A-Za-z_0-9]+(?:[._:/\\@%+=~#?&'\u2019-]+[A-Za-z_0-9]+)*)"
+    r"|(?P<boundary>[.!?;,\n])"
+)
+
+
 def _extract_node_directives(text: str) -> dict[str, str]:
     directives: dict[str, str] = {}
     # Every governing token must also occur as a substring. Reject impossible
@@ -930,8 +990,40 @@ def _extract_node_directives(text: str) -> dict[str, str]:
     lowered = text.lower()
     if not any(verb in lowered for verb in _DIRECTIVE_VERBS):
         return directives
-    for clause in re.split(r"[.!?;,\n]", text):
-        tokens = [w.lower() for w in re.findall(r"\b[a-zA-Z_][a-zA-Z_0-9-]*\b", clause)]
+    if "'" in text or "\u2019" in text or "cannot" in lowered:
+        def expand_negation(match: re.Match[str]) -> str:
+            word = match.group().lower().replace("\u2019", "'")
+            return "can not" if word in {"cannot", "can't"} else word[:-3] + " not"
+
+        text = _DIRECTIVE_NEGATION.sub(expand_negation, text)
+    clauses: list[list[str]] = []
+    clause: list[str] = []
+    for match in _DIRECTIVE_LEXEME.finditer(text):
+        if match.lastgroup == "boundary":
+            if clause:
+                clauses.append(clause)
+                clause = []
+            continue
+        raw = match.group()
+        # Keep escaped inline delimiters from adding path separators to prose.
+        if text[match.end():match.end() + 1] == "\x60":
+            raw = raw.rstrip("\\")
+            if not raw:
+                continue
+        terminal = match.lastgroup == "literal" and raw[-1:] in {".", "!", "?", ";", ","}
+        if terminal:
+            raw = raw.rstrip(".!?;,")
+        if raw:
+            # Opaque resources can be case-sensitive. Ordinary action/scope
+            # words are case-insensitive, but never fold a path or URL object.
+            opaque = any(char in raw for char in ".:/\\")
+            clause.append(raw if opaque else raw.lower())
+        if terminal and clause:
+            clauses.append(clause)
+            clause = []
+    if clause:
+        clauses.append(clause)
+    for tokens in clauses:
         if _DIRECTIVE_VERBS.isdisjoint(tokens):
             continue
         consumed: set[int] = set()
@@ -969,7 +1061,7 @@ def _extract_node_directives(text: str) -> dict[str, str]:
                     phrase = " ".join(tokens[i + offset:end])
                     # Keep summaries bounded without dropping any identity suffix.
                     identity = phrase if len(phrase) <= 120 else (
-                        target + ":" + hashlib.sha256(phrase.encode("utf-8")).hexdigest())
+                        target[:56] + ":" + hashlib.sha256(phrase.encode("utf-8")).hexdigest())
                     directives[identity] = action
                     break
     return directives
@@ -1089,7 +1181,7 @@ def analyze_memory_nodes(
         raw_toks, word_analysis_truncated = _tokenize(
             content, [sec], code, classifier,
         )
-        _apply_vague_qualifiers(raw_toks)
+        _apply_vague_qualifiers(raw_toks, content)
         if "\n" not in title and not _FENCE.match(title):
             # A plain title is a separate prose field. Reuse the content mask
             # instead of scanning the whole body again.
