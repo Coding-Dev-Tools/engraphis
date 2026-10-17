@@ -319,3 +319,19 @@ def test_key_pragma_escapes_quotes():
     assert encrypted_db._key_pragma("ab'; DROP") == "PRAGMA key = 'ab''; DROP'"
     # a 64-hex key uses the raw blob form
     assert encrypted_db._key_pragma("ff" * 32).startswith("PRAGMA key = \"x'")
+
+
+def test_create_memory_engine_honors_db_key_from_env(monkeypatch, tmp_path):
+    from engraphis.factory import create_memory_engine
+
+    monkeypatch.setenv("ENGRAPHIS_DB_KEY", "ab" * 32)
+    db = str(tmp_path / "engine_enc.db")
+    eng = create_memory_engine(db)
+    try:
+        wid = eng.store.create_workspace("w")
+        eng.remember("encrypted via factory", workspace_id=wid, scope="workspace")
+    finally:
+        eng.close()
+    with pytest.raises(sqlite3.DatabaseError):
+        sqlite3.connect(db).execute("SELECT * FROM memories").fetchone()
+
