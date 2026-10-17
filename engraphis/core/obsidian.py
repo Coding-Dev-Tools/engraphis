@@ -16,6 +16,11 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 import unicodedata
 
 from engraphis.core.secrets import secret_kind
+from engraphis.core.source_paths import (
+    SENSITIVE_FILENAMES as SENSITIVE_FILENAMES,
+    sensitive_filename as _sensitive_filename,
+    sensitive_path as _sensitive_path,
+)
 from engraphis.core.fsutil import is_link_indirection as _is_link_indirection
 
 
@@ -32,12 +37,7 @@ ATTACHMENT_SUFFIXES = {
     ".m4a", ".md", ".mkv", ".mov", ".mp3", ".mp4", ".ogg", ".pdf",
     ".png", ".svg", ".tif", ".tiff", ".wav", ".webm", ".webp",
 }
-SENSITIVE_FILENAMES = {
-    ".env", "credentials", "credentials.json", "id_rsa", "id_dsa",
-    "id_ecdsa", "id_ed25519", "authorized_keys", "known_hosts",
-    "recovery-codes", "recovery_codes", "tokens", "tokens.json",
-    "secrets", "secrets.json", "secret", "secret.json",
-}
+
 _FENCE_START_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})[^\n]*$")
 _WIKILINK_RE = re.compile(r"(!?)\[\[([^\]\r\n]+)\]\]")
 _MARKDOWN_ATTACHMENT_RE = re.compile(r"!\[[^\]]*\]\(([^)\s]+)(?:\s+[^)]*)?\)")
@@ -150,6 +150,8 @@ def parse_obsidian_note(
 ) -> ObsidianNote:
     """Parse one Markdown file without evaluating any Obsidian/plugin content."""
     relative_path = normalize_obsidian_path(relative_path)
+    if _sensitive_path(relative_path):
+        raise ValueError("sensitive filename")
     if not isinstance(raw, bytes):
         raise ValueError("note data must be bytes")
     # Keep the direct parser as bounded as the filesystem and browser scanners.
@@ -201,6 +203,8 @@ def parse_obsidian_note(
 def scan_obsidian_vault(vault_path: Union[os.PathLike[str], str]) -> ObsidianVaultScan:
     """Recursively discover safe Markdown notes; symlinks and hidden trees are skipped."""
     selected_root = Path(vault_path)
+    if _sensitive_path(str(selected_root), is_directory=True):
+        raise ValueError("sensitive source path")
     try:
         selected_info = os.lstat(selected_root)
         if selected_root.is_symlink() or _is_link_indirection(selected_info):
@@ -208,6 +212,8 @@ def scan_obsidian_vault(vault_path: Union[os.PathLike[str], str]) -> ObsidianVau
         root = selected_root.resolve(strict=True)
     except OSError as exc:
         raise ValueError("vault path must be an existing directory") from exc
+    if _sensitive_path(str(root), is_directory=True):
+        raise ValueError("sensitive source path")
     if not root.is_dir():
         raise ValueError("vault path must be an existing directory")
     result = ObsidianVaultScan(vault_path=str(root), vault_id=canonical_vault_id(root))
@@ -218,6 +224,9 @@ def scan_obsidian_vault(vault_path: Union[os.PathLike[str], str]) -> ObsidianVau
     for path, issue in _walk_vault(root, root):
         raw_relative = path.relative_to(root).as_posix()
         if issue:
+            if issue == "sensitive filename":
+                result.rejected.append(ObsidianFileIssue(raw_relative, issue))
+                continue
             # The root itself is represented by "." when its directory listing
             # fails. Keep that sentinel as a valid issue path before normal path
             # validation can reject it, and defer reconciliation for all
@@ -285,6 +294,8 @@ def _read_vault_note(root: Path, path: Path) -> Tuple[bytes, int]:
     post-read stability checks also fail closed on platforms where that flag is
     unavailable (notably Windows) and discard bytes if the directory entry changed.
     """
+    if _sensitive_path(str(path)):
+        raise ValueError("sensitive filename")
     before = os.lstat(path)
     if stat.S_ISLNK(before.st_mode) or _is_link_indirection(before) or not stat.S_ISREG(before.st_mode):
         raise ValueError("unsafe file type")
@@ -351,15 +362,18 @@ def _walk_vault(root: Path, directory: Path) -> Iterable[Tuple[Path, Optional[st
     for entry in entries:
         try:
             relative = entry.relative_to(root)
+            if any(part.startswith(".") for part in relative.parts):
+                yield entry, "hidden/configuration path skipped"
+                continue
+            if _sensitive_path(relative.as_posix(), is_directory=True):
+                yield entry, "sensitive filename"
+                continue
             info = entry.lstat()
             if entry.is_symlink() or _is_link_indirection(info):
                 yield entry, "symlink skipped"
                 continue
             if not _is_within(root, entry.resolve()):
                 yield entry, "path escapes vault"
-                continue
-            if any(part.startswith(".") for part in relative.parts):
-                yield entry, "hidden/configuration path skipped"
                 continue
             if entry.is_dir():
                 yield from _walk_vault(root, entry)
@@ -556,13 +570,6 @@ def _dedupe(values: Iterable[str]) -> List[str]:
             seen.add(value)
             result.append(value)
     return result
-
-
-def _sensitive_filename(name: str) -> bool:
-    lowered = name.lower()
-    return (lowered in SENSITIVE_FILENAMES or lowered.startswith(".env.") or
-            lowered.endswith((".pem", ".key", ".p12", ".pfx")) or
-            bool(re.search(r"(?:credential|recovery[-_ ]?code|secret|token)", lowered)))
 
 
 def _contains_secret(content: str) -> bool:

@@ -58,6 +58,47 @@ def _hits(res):
     return [i.get("content", "") for i in items]
 
 
+def test_unicode_history_candidates_work_on_encrypted_and_read_only_connections(tmp_path):
+    from engraphis.core.interfaces import MemoryRecord, Scope, SearchFilter
+
+    path = str(tmp_path / "unicode-history.db")
+    connector = encrypted_db.make_connector(KEY)
+    workspace = ""
+    exact = ""
+    try:
+        for read_only in (False, True):
+            store = Store(path, connect=connector, read_only=read_only)
+            try:
+                if not read_only:
+                    workspace = store.get_or_create_workspace("history")
+                    for index in range(502):
+                        memory_id = store.add_memory(MemoryRecord(
+                            id="", content="CAFÉ" if index == 0 else f"Gardening bulletin {index}",
+                            workspace_id=workspace, scope=Scope.WORKSPACE,
+                            valid_from=-1.0, valid_to=0.0, valid_to_recorded_at=1.0,
+                            ingested_at=1.0 + index,
+                            provenance={"trusted": True, "review_state": "approved"},
+                        ))
+                        if index == 0:
+                            exact = memory_id
+                records = store.list_memories(
+                    SearchFilter(workspace_id=workspace, known_at=1000.0, valid_at=1000.0),
+                    include_invalid=True, closed_only=True, prompt_only=True,
+                    limit=500, candidate_query="café",
+                )
+                assert records[0].id == exact
+                assert len(records) == 500
+                assert tuple(store.conn.execute(
+                    "SELECT engraphis_unicode_lower(NULL), engraphis_unicode_lower(?)", ("Straße",),
+                ).fetchone()) == (None, "straße")
+                if not read_only:
+                    store.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            finally:
+                store.close()
+    finally:
+        connector.close()
+
+
 def test_encrypts_at_rest_unreadable_without_key(monkeypatch, tmp_path):
     import sqlcipher3
 
@@ -278,3 +319,18 @@ def test_key_pragma_escapes_quotes():
     assert encrypted_db._key_pragma("ab'; DROP") == "PRAGMA key = 'ab''; DROP'"
     # a 64-hex key uses the raw blob form
     assert encrypted_db._key_pragma("ff" * 32).startswith("PRAGMA key = \"x'")
+
+
+def test_create_memory_engine_honors_db_key_from_env(monkeypatch, tmp_path):
+    from engraphis.factory import create_memory_engine
+
+    monkeypatch.setenv("ENGRAPHIS_DB_KEY", "ab" * 32)
+    db = str(tmp_path / "engine_enc.db")
+    eng = create_memory_engine(db)
+    try:
+        wid = eng.store.create_workspace("w")
+        eng.remember("encrypted via factory", workspace_id=wid, scope="workspace")
+    finally:
+        eng.close()
+    with pytest.raises(sqlite3.DatabaseError):
+        sqlite3.connect(db).execute("SELECT * FROM memories").fetchone()

@@ -55,12 +55,19 @@ from engraphis.core.context import RegexTokenCounter
 from engraphis.core.evidence import make_exact_value_binding
 from engraphis.core.vector_repair import index_repair_identity
 from engraphis.core.ids import new_id as make_id
+from engraphis.core.source_paths import sensitive_path as _sensitive_source_path
 from engraphis.core.savings import annotate_usage, normalize_release_version
 from engraphis.core.interfaces import (
     Edge, FactSpec, GraphLayer, MemoryRecord, MemoryType, Node, Scope, SearchFilter,
     embedder_capabilities, embedding_space_fingerprint,
     vector_index_requires_sync,
     vector_index_shares_store_transaction,
+)
+from engraphis.core.spec_crawl import (
+    SpecCrawlError,
+    apply_answer,
+    compose_memory_spec_with_truncation,
+    crawl_spec,
 )
 from engraphis.core.poisoning import (
     REVIEW_APPROVED,
@@ -1008,6 +1015,11 @@ def _resolve_import_root(raw_path: str) -> Path:
     ``/memory/vaults/import-folder`` endpoint's convention — home directory by default,
     widened via ``ENGRAPHIS_IMPORT_ROOTS`` (``os.pathsep``-separated) for server
     deployments that keep content outside ``$HOME``."""
+    # Reject selected names before realpath can follow symlinks or stat a tree.
+    expanded_path = os.path.expanduser(raw_path)
+    if (_sensitive_source_path(raw_path, is_directory=True)
+            or _sensitive_source_path(expanded_path, is_directory=True)):
+        raise ValidationError("sensitive import path")
     home = os.path.realpath(str(Path.home().expanduser()))
     allowed_roots = [home]
     env_roots = os.environ.get("ENGRAPHIS_IMPORT_ROOTS", "")
@@ -1017,7 +1029,9 @@ def _resolve_import_root(raw_path: str) -> Path:
             for root in env_roots.split(os.pathsep)
             if root
         )
-    real_path = os.path.realpath(os.path.expanduser(raw_path))
+    real_path = os.path.realpath(expanded_path)
+    if _sensitive_source_path(real_path, is_directory=True):
+        raise ValidationError("sensitive import path")
     comparable_path = os.path.normcase(real_path)
     safe_path = None
     for root in allowed_roots:
@@ -1041,6 +1055,15 @@ def _resolve_import_root(raw_path: str) -> Path:
     return folder
 
 
+def _skip_import_path(name: str, *, is_directory: bool = False) -> bool:
+    """Keep Quick import's filename policy aligned with document-source imports."""
+    parts = [part for part in name.replace("\\", "/").split("/") if part]
+    return not parts or (
+        any(part == "node_modules" or part.startswith(".") for part in parts[:-1])
+        or _sensitive_source_path(name, is_directory=is_directory)
+    )
+
+
 def _iter_import_files(
     folder: Path, pattern: str, max_files: int,
 ) -> tuple[list, int, int]:
@@ -1054,33 +1077,78 @@ def _iter_import_files(
     counts candidates whose stat/resolve failed (e.g. paths beyond the Windows MAX_PATH
     limit without LongPathsEnabled) — previously these vanished from all counts.
 
-    Symlink escape guard: ``rglob`` follows symlinked directories, so a symlink placed
-    somewhere under an allowed root (by anything that ever had write access there) could
-    point outside the allowed root entirely and defeat ``_resolve_import_root`` — every
-    candidate is re-resolved and re-contained here, the same check the root itself got."""
+    Prune excluded names before metadata or descent, and never recurse through link
+    directories. Every candidate is resolved and contained before it can be read."""
     import fnmatch
+    from bisect import insort
+    from engraphis.core.fsutil import is_link_indirection
+
     files: list = []
     matched_total = 0
     unreadable = 0
-    for f in sorted(folder.rglob("*")):
-        if not f.is_file() or not fnmatch.fnmatch(f.name, pattern):
+    if _sensitive_source_path(str(folder), is_directory=True):
+        return files, matched_total, unreadable
+
+    def walk(directory):
+        nonlocal unreadable
+        try:
+            entries = sorted(directory.iterdir())
+        except OSError:
+            unreadable += 1
+            return
+        for entry in entries:
+            relative_name = entry.relative_to(folder).as_posix()
+            if _skip_import_path(relative_name, is_directory=True):
+                continue
+            try:
+                info = entry.lstat()
+                if entry.is_symlink() or is_link_indirection(info):
+                    yield entry
+                    continue
+                real = entry.resolve(strict=True)
+                rel = real.relative_to(folder)
+                if (_sensitive_source_path(str(real), is_directory=True)
+                        or _skip_import_path(rel.as_posix(), is_directory=True)):
+                    continue
+                if entry.is_dir():
+                    if entry.name.startswith(".") or entry.name == "node_modules":
+                        continue
+                    yield from walk(entry)
+                elif not _skip_import_path(relative_name):
+                    yield entry
+            except (OSError, ValueError, RuntimeError):
+                unreadable += 1
+
+    selected: list[tuple[Path, Path]] = []
+    for f in walk(folder):
+        if not fnmatch.fnmatch(f.name, pattern):
             continue
         try:
             # ``f`` came from a user-selected tree. Resolve and contain it before both
             # deriving metadata and returning the path that ``import_folder`` will read.
             real = f.resolve(strict=True)
             rel = real.relative_to(folder)
-        except (OSError, ValueError):
+            # Check the resolved target as well as its selected name: a harmless-looking
+            # symlink must not turn an excluded credential file into an eligible document.
+            if (_sensitive_source_path(str(real), is_directory=True)
+                    or _skip_import_path(rel.as_posix(), is_directory=True)):
+                continue
+            if not real.is_file():
+                continue
+            if (_sensitive_source_path(str(real))
+                    or _skip_import_path(f.relative_to(folder).as_posix())):
+                continue
+        except (OSError, ValueError, RuntimeError):
             unreadable += 1
             continue
-        parts = rel.parts
-        if any(p == "node_modules" or p == ".git" or p.startswith(".") for p in parts[:-1]):
-            continue
         matched_total += 1
-        if len(files) >= max_files:
+        if max_files <= 0:
             continue
-        files.append(real)
-    return files, matched_total, unreadable
+        # Retain only the selected-name alphabetical prefix, not the whole tree.
+        insort(selected, (f, real))
+        if len(selected) > max_files:
+            selected.pop()
+    return [real for _name, real in selected], matched_total, unreadable
 
 
 def _title_from_content(content: str, fallback: str) -> str:
@@ -2893,6 +2961,9 @@ class MemoryService:
                 continue
             name = _clean_text(item.get("name"), field="name", max_chars=MAX_NAME_CHARS,
                                required=False) or "untitled"
+            if _skip_import_path(name):
+                skipped += 1
+                continue
             raw = item.get("data")
             content = item.get("content")
             if raw is None and isinstance(content, str):
@@ -5013,7 +5084,7 @@ class MemoryService:
 
     # ── governance: retire / secure erase / pin / correct / promote ───────────
     def retire(self, memory_id: str, *, workspace: str, repo: Optional[str] = None,
-               reason: str = "", actor: str = "user") -> dict:
+               reason: str = "", actor: str = "user", at: Optional[float] = None) -> dict:
         """Bi-temporally retire one memory. This preserves history and indexes."""
         mid = _clean_text(memory_id, field="memory_id", max_chars=MAX_NAME_CHARS)
         reason = _clean_text(reason, field="reason", max_chars=MAX_TITLE_CHARS, required=False)
@@ -5023,7 +5094,7 @@ class MemoryService:
         wid, rid = self._require_scope(workspace, repo)
         self._check_owns(mid, wid, rid)
         try:
-            return self.engine.retire(mid, reason=reason, actor=actor)
+            return self.engine.retire(mid, reason=reason, actor=actor, at=at)
         except (KeyError, ValueError) as exc:
             raise ValidationError(str(exc))
 
@@ -5272,7 +5343,8 @@ class MemoryService:
 
     def timeline(self, query: str, *, workspace: str, repo: Optional[str] = None,
                 limit: int = 20, as_of: Optional[float] = None,
-                valid_at: Optional[float] = None, known_at: Optional[float] = None) -> dict:
+                valid_at: Optional[float] = None, known_at: Optional[float] = None,
+                closed_only: bool = False) -> dict:
         """Chronological, bi-temporal history of a fact: what we believed and when."""
         query = _clean_text(query, field="query", max_chars=MAX_CONTENT_CHARS)
         wid, rid = self._require_scope(workspace, repo)
@@ -5283,6 +5355,7 @@ class MemoryService:
         recs = self.engine.timeline(
             query, workspace_id=wid, repo_id=rid, limit=limit,
             valid_at=valid_at, known_at=known_at, prompt_only=True,
+            closed_only=closed_only,
         )
         return {"query": query, "history": [_mem_to_dict(r) for r in recs]}
 
@@ -5479,7 +5552,7 @@ class MemoryService:
 
     def link(self, a: str, b: str, *, workspace: str, repo: Optional[str] = None,
              relation: str = "related", layer: Optional[str] = None,
-             reason: str = "") -> dict:
+             reason: str = "", _valid_from: Optional[float] = None) -> dict:
         a = _clean_text(a, field="a", max_chars=MAX_NAME_CHARS)
         b = _clean_text(b, field="b", max_chars=MAX_NAME_CHARS)
         relation = (_clean_text(relation, field="relation", max_chars=MAX_NAME_CHARS,
@@ -5496,7 +5569,8 @@ class MemoryService:
         self._check_owns(b, wid, rid)
         try:
             self.engine.link(
-                a, b, relation=relation, layer=graph_layer, reason=reason
+                a, b, relation=relation, layer=graph_layer, reason=reason,
+                valid_from=_valid_from,
             )
         except KeyError as exc:
             raise ValidationError(str(exc))
@@ -7799,7 +7873,11 @@ class MemoryService:
         frontier = [rec]
         while frontier:
             cur = frontier.pop()
-            for pid in self._lineage_predecessors(cur.metadata):
+            lineage_ids = self._lineage_predecessors(cur.metadata)
+            for link in self.store.get_links(cur.id):
+                if link["relation"] == "supersedes":
+                    lineage_ids.append(link["b"] if link["a"] == cur.id else link["a"])
+            for pid in lineage_ids:
                 if pid in seen:
                     continue
                 seen.add(pid)
@@ -7819,7 +7897,7 @@ class MemoryService:
             return [rec]
         return sorted(members.values(), key=lambda r: (
             r.valid_to is None,
-            r.valid_from or r.ingested_at or 0,
+            r.valid_from if r.valid_from is not None else (r.ingested_at or 0),
             r.valid_to if r.valid_to is not None else float("inf"),
             r.id,
         ))
@@ -11877,7 +11955,7 @@ class MemoryService:
                 SELECT id FROM entities WHERE workspace_id=? AND (id=? OR canonical_id=?)
             ), raw_supports AS (
                 SELECT * FROM (
-                    SELECT support.memory_id, support.confidence
+                    SELECT support.memory_id, support.confidence, 0 AS endpoint_kind
                     FROM target
                     JOIN edges relation ON relation.src=target.id
                     JOIN edge_supports support ON support.edge_id=relation.id
@@ -11887,7 +11965,7 @@ class MemoryService:
                 )
                 UNION ALL
                 SELECT * FROM (
-                    SELECT support.memory_id, support.confidence
+                    SELECT support.memory_id, support.confidence, 1 AS endpoint_kind
                     FROM target
                     JOIN edges relation ON relation.dst=target.id
                     JOIN edge_supports support ON support.edge_id=relation.id
@@ -11902,7 +11980,10 @@ class MemoryService:
             SELECT memory.id, memory.title, memory.content, memory.mtype,
                    memory.valid_from, memory.valid_to, memory.valid_to_recorded_at,
                    memory.ingested_at,
-                   memory.expired_at, memory.provenance, ranked.confidence
+                   memory.expired_at, memory.provenance, ranked.confidence,
+                   (SELECT MAX(candidate_count) FROM (
+                       SELECT COUNT(*) AS candidate_count FROM raw_supports GROUP BY endpoint_kind
+                   )) AS candidate_count
             FROM ranked JOIN memories memory ON memory.id=ranked.memory_id
             WHERE memory.workspace_id=?
             ORDER BY ranked.confidence DESC,
@@ -11915,11 +11996,13 @@ class MemoryService:
         )
         rows = self.store.conn.execute(
             sql,
-            (*target_params, *branch_params, GRAPH_ENTITY_EVIDENCE_CANDIDATE_LIMIT,
-             *branch_params, GRAPH_ENTITY_EVIDENCE_CANDIDATE_LIMIT, wid,
+            (*target_params, *branch_params, GRAPH_ENTITY_EVIDENCE_CANDIDATE_LIMIT + 1,
+             *branch_params, GRAPH_ENTITY_EVIDENCE_CANDIDATE_LIMIT + 1, wid,
              GRAPH_ENTITY_EVIDENCE_LIMIT + 1),
         ).fetchall()
-        truncated = len(rows) > GRAPH_ENTITY_EVIDENCE_LIMIT
+        truncated = len(rows) > GRAPH_ENTITY_EVIDENCE_LIMIT or any(
+            row["candidate_count"] > GRAPH_ENTITY_EVIDENCE_CANDIDATE_LIMIT for row in rows
+        )
         rows = rows[:GRAPH_ENTITY_EVIDENCE_LIMIT]
         evidence = []
         for row in rows:
@@ -12833,6 +12916,411 @@ class MemoryService:
             },
             "computed_at": now,
         }
+
+    # ── spec / prompt crawl (studio.prompt style) ──────────────────────────────
+    def _spec_crawl_scope(
+        self, workspace: Optional[str], repo: Optional[str], session_id: Optional[str],
+        *, require_existing: bool = True,
+    ) -> tuple[str, Optional[str], Optional[SearchFilter]]:
+        route = self.resolve_workspace(workspace, repo=repo, session_id=session_id)
+        ws, rp = self._clean_ws(route["workspace"] or "default"), route["repo"]
+        wid = self._lookup_workspace(ws)
+        if wid is None:
+            if require_existing or rp or session_id:
+                raise ValidationError("spec crawl requires an existing workspace/repo")
+            return ws, rp, None
+        _, rid = self._require_scope(ws, rp)
+        sid = None
+        if session_id:
+            sid = _clean_text(session_id, field="session_id", max_chars=MAX_NAME_CHARS)
+            session = self.store.get_session(sid)
+            if session is None:
+                raise ValidationError("spec crawl session does not exist")
+            self._authorize_session(session)
+            if session["workspace_id"] != wid or (
+                    rid is not None and session.get("repo_id") != rid):
+                raise ValidationError("session_id does not belong to that workspace/repo")
+            if rid is None and session.get("repo_id"):
+                # Preserve a repository-backed session's exact repository scope even
+                # when callers omit the redundant repo name.
+                rid = str(session["repo_id"])
+                repo_row = self.store.conn.execute(
+                    "SELECT name FROM repos WHERE id=? AND workspace_id=?",
+                    (rid, wid),
+                ).fetchone()
+                if repo_row is not None:
+                    rp = str(repo_row["name"])
+        return ws, rp, SearchFilter(
+            workspace_id=wid, repo_id=rid, session_id=sid, include_ancestors=True,
+        )
+
+    def spec_crawl(
+        self,
+        text: Optional[str] = None,
+        *,
+        workspace: Optional[str] = None,
+        repo: Optional[str] = None,
+        session_id: Optional[str] = None,
+        source_id: Optional[str] = None,
+        crawl_procedural: bool = False,
+        trace_claims: bool = True,
+        include_trace: bool = True,
+    ) -> dict:
+        """Crawl an agent specification, prompt, or procedural memories and report quality.
+
+        Calculates seven-axis radar coverage, classifies tokens into explainable kinds,
+        links concepts within and across sections, flags ambiguous wording ('ask, don't guess'),
+        and optionally verifies claims against grounded memory evidence.
+        """
+        crawl_procedural = _strict_bool(crawl_procedural, field="crawl_procedural")
+        trace_claims = _strict_bool(trace_claims, field="trace_claims")
+        include_trace = _strict_bool(include_trace, field="include_trace")
+        ws, repo, flt = self._spec_crawl_scope(
+            workspace, repo, session_id, require_existing=crawl_procedural,
+        )
+
+        content: str = ""
+        source_label: str = ""
+        procedural_source_used = False
+        procedural_memory_count: Optional[int] = None
+        procedural_total_eligible: Optional[int] = None
+        procedural_source_truncated = False
+        procedural_sources: list[dict[str, Any]] = []
+
+        if text is not None and str(text).strip():
+            content = _clean_text(text, field="text", max_chars=64_000)
+            source_label = "prompt:direct"
+        elif crawl_procedural:
+            procedural_source_used = True
+            assert flt is not None
+            flt.mtypes = [MemoryType.PROCEDURAL]
+            procedural_total_eligible = self.store.prompt_eligibility_counts(
+                flt,
+            )["prompt_eligible"]
+            recs = self.store.list_memories(flt, limit=100, prompt_only=True)
+            procedural_memory_count = len(recs)
+            content, content_truncated = compose_memory_spec_with_truncation(
+                [_mem_to_dict(r) for r in recs], limit=100, source_map=procedural_sources,
+            )
+            procedural_source_truncated = (
+                procedural_total_eligible > procedural_memory_count or content_truncated
+            )
+            source_label = f"procedural:{ws}"
+            if not content.strip():
+                if recs:
+                    raise ValidationError(
+                        "No procedural memory fits the 64000-character audit limit; "
+                        "pass a smaller specification or audit selected memories."
+                    )
+                content = "# Procedural Rules\nNo procedural memories recorded yet.\n"
+        elif source_id:
+            if _authenticated_principal() is not None or self.allowed_workspaces is not None:
+                raise ValidationError("source_id file access requires the local operator; pass text instead")
+            from engraphis.core.engine import _approved_local_index_roots
+            clean_src = _clean_text(source_id, field="source_id", max_chars=500)
+            try:
+                path = Path(clean_src).expanduser().resolve(strict=True)
+                allowed = any(
+                    os.path.commonpath((os.path.normcase(str(path)), root)) == root
+                    for root in _approved_local_index_roots()
+                    if os.path.splitdrive(str(path))[0].casefold()
+                    == os.path.splitdrive(root)[0].casefold()
+                )
+                if not allowed or not path.is_file() or path.suffix.lower() not in {
+                    ".md", ".txt", ".rst", ".json", ".jsonl", ".yaml", ".yml", ".toml",
+                }:
+                    raise ValidationError("source_id must be a text specification under an approved local root")
+                with path.open("rb") as source:
+                    payload = source.read(128_001)
+                if len(payload) > 128_000:
+                    raise ValidationError("source file exceeds 128000 bytes")
+                content = _clean_text(payload.decode("utf-8"), field="text", max_chars=64_000)
+                _reject_secret_capture((("spec source", content),))
+                source_label = path.name
+            except (OSError, UnicodeError, ValueError) as exc:
+                if isinstance(exc, ValidationError):
+                    raise
+                raise ValidationError("source_id could not be read as an approved UTF-8 specification") from exc
+        else:
+            raise ValidationError("text, source_id, or crawl_procedural=True is required")
+
+        support_lookup = None
+        # Copied source assertions are not independent corroborating evidence.
+        if trace_claims and not procedural_source_used and flt is not None:
+            def _lookup(claim_sentence: str) -> Optional[dict]:
+                ans = self.engine.grounded_recall(
+                    claim_sentence,
+                    workspace_id=flt.workspace_id,
+                    repo_id=flt.repo_id,
+                    session_id=flt.session_id,
+                    k=4,
+                    min_support=0.25,
+                    max_citations=1,
+                    reinforce=False,
+                ).to_dict()
+                if ans.get("grounded") and ans.get("citations"):
+                    top = ans["citations"][0]
+                    return {"id": top["id"], "support": top.get("support", 0.0)}
+                return None
+            support_lookup = _lookup
+
+        try:
+            report = crawl_spec(
+                content,
+                support_lookup=support_lookup,
+                include_trace=include_trace,
+                source_label=source_label,
+            )
+        except SpecCrawlError as exc:
+            raise ValidationError(str(exc)) from exc
+
+        report["claim_tracing"] = {
+            "requested": trace_claims,
+            "enabled": support_lookup is not None,
+            "disabled_reason": (
+                "not_requested" if not trace_claims else
+                "procedural_sources_are_not_independent_evidence" if procedural_source_used else
+                "no_memory_scope" if flt is None else None
+            ),
+        }
+        if procedural_source_used:
+            report["procedural_sources"] = procedural_sources
+            for section in report["sections"]:
+                # The capped final section can span several memories.
+                # Include the heading newline: an empty body can start at source.end.
+                section_start = max(0, section["start"] - 1)
+                section["source_memory_ids"] = [
+                    source["memory_id"] for source in procedural_sources
+                    if source["start"] < section["end"] and section_start < source["end"]
+                ]
+            for row in report["flags"] + report["claims"]:
+                source_ids = [
+                    source["memory_id"] for source in procedural_sources
+                    if source["start"] < row["end"] and row["start"] < source["end"]
+                ]
+                row["source_memory_ids"] = source_ids
+                if len(source_ids) == 1:
+                    row["source_memory_id"] = source_ids[0]
+            report["procedural_memory_count"] = procedural_memory_count
+            report["procedural_total_eligible_memory_count"] = procedural_total_eligible
+            report["procedural_source_truncated"] = procedural_source_truncated
+            report["truncated"] = bool(report.get("truncated") or procedural_source_truncated)
+
+        return report
+
+    def spec_crawl_answer(
+        self,
+        flag: dict,
+        answer: str,
+        *,
+        spec_text: str,
+        workspace: Optional[str] = None,
+        repo: Optional[str] = None,
+        session_id: Optional[str] = None,
+        save_as_memory: bool = False,
+    ) -> dict:
+        """Apply a human clarification to an ambiguous spec flag and optionally record it."""
+        save_as_memory = _strict_bool(save_as_memory, field="save_as_memory")
+        clean_answer = _clean_text(answer, field="answer", max_chars=10_000).strip()
+        if not clean_answer:
+            raise ValidationError("answer is empty")
+        if not isinstance(flag, dict) or "start" not in flag or "end" not in flag:
+            raise ValidationError("flag must be an object with start and end offsets")
+        spec_text = _clean_text(spec_text, field="spec_text", max_chars=64_000)
+        canonical_flags = crawl_spec(spec_text, include_trace=False)["flags"]
+        canonical = next((candidate for candidate in canonical_flags
+                          if candidate["kind"] == "vague" and all(
+                              candidate[key] == flag.get(key)
+                              for key in ("start", "end", "token"))), None)
+        if canonical is None:
+            raise ValidationError("flag does not match an ambiguous token in the current specification")
+        flag = canonical
+
+        try:
+            updated_text = apply_answer(spec_text, flag, clean_answer)
+        except SpecCrawlError as exc:
+            raise ValidationError(str(exc)) from exc
+
+        new_report = self.spec_crawl(
+            updated_text, workspace=workspace, repo=repo, session_id=session_id,
+            trace_claims=True, include_trace=True,
+        )
+
+        mem_id: Optional[str] = None
+        if save_as_memory:
+            token = flag.get("token", "rule")
+            sentence = flag.get("sentence", "").strip()
+            body = f"Clarification for '{token}': {clean_answer}"
+            if sentence:
+                body = f"{sentence}\n{body}"
+            rem_res = self.remember(
+                body,
+                title=f"Spec Clarification: {token}",
+                workspace=workspace,
+                repo=repo,
+                session_id=session_id,
+                scope="session" if session_id else None,
+                mtype="procedural",
+                source="spec_crawl",
+                trusted=False,
+                metadata={"flag_id": flag.get("id")},
+            )
+            mem_id = rem_res.get("id") if isinstance(rem_res, dict) else str(rem_res)
+
+
+        return {
+            "updated_text": updated_text,
+            "new_report": new_report,
+            "memory_id": mem_id,
+        }
+
+    def spec_crawl_memories(
+        self,
+        *,
+        workspace: Optional[str] = None,
+        repo: Optional[str] = None,
+        session_id: Optional[str] = None,
+        memory_ids: Optional[list[str]] = None,
+        mtypes: Optional[list[str]] = None,
+        include_trace: bool = True,
+    ) -> dict[str, Any]:
+        """Analyze a bounded sample of live memories and explicitly report truncation."""
+        include_trace = _strict_bool(include_trace, field="include_trace")
+        from engraphis.core.spec_crawl import analyze_memory_nodes
+        ws, rp, flt = self._spec_crawl_scope(workspace, repo, session_id)
+        assert flt is not None
+        if mtypes is not None:
+            flt.mtypes = [_enum(mt, MemoryType, "mtype") for mt in
+                          _clean_string_list(mtypes, field="mtypes", max_items=4, max_chars=32)]
+
+        recs = []
+        truncated = False
+        total_eligible_node_count = 0
+        if memory_ids is not None:
+            clean_ids = _clean_string_list(
+                memory_ids, field="memory_ids", max_items=150, max_chars=MAX_NAME_CHARS,
+            )
+            with self.store.read_snapshot():
+                visible_ids = self.store.visible_memory_ids(clean_ids, flt)
+                rec_map = self.store.get_memories(sorted(visible_ids))
+                recs = [rec for rec in rec_map.values()
+                        if prompt_eligible(rec.provenance, rec.metadata)
+                        and self._memory_visible_to_caller(rec)]
+            total_eligible_node_count = len(recs)
+        else:
+            with self.store.read_snapshot():
+                total_eligible_node_count = self.store.prompt_eligibility_counts(
+                    flt,
+                )["prompt_eligible"]
+                recs = self.store.list_memories(flt, limit=150, prompt_only=True)
+                recs = [rec for rec in recs if self._memory_visible_to_caller(rec)]
+
+        truncated = total_eligible_node_count > len(recs)
+
+        # Gather declared links between these memories
+        mem_dicts = [_mem_to_dict(r) for r in recs]
+        mem_ids_set = {m["id"] for m in mem_dicts}
+        links = []
+        seen_links: set[tuple[str, str, str]] = set()
+        for mid in sorted(mem_ids_set):
+            node_links = self.store.get_links(mid)
+            for nl in node_links:
+                if nl.get("a") in mem_ids_set and nl.get("b") in mem_ids_set:
+                    key = (str(nl["a"]), str(nl["b"]), str(nl.get("relation") or "related_to"))
+                    if key in seen_links:
+                        continue
+                    seen_links.add(key)
+                    links.append(nl)
+
+        report = analyze_memory_nodes(
+            mem_dicts,
+            links=links,
+            workspace=ws,
+            include_trace=include_trace,
+        )
+        report["workspace"] = ws
+        report["repo"] = rp
+        report["node_selection_truncated"] = truncated
+        report["truncated"] = bool(truncated or report.get("analysis_truncated"))
+        report["node_limit"] = 150
+        report["count_semantics"] = "requested_selection" if memory_ids is not None else "bounded_scope_sample"
+        report["total_eligible_node_count"] = total_eligible_node_count
+        report["analysis_truncated"] = report["truncated"]
+        return report
+
+    def spec_crawl_resolve(
+        self,
+        *,
+        action: str,
+        node_a: str,
+        node_b: Optional[str] = None,
+        workspace: Optional[str] = None,
+        repo: Optional[str] = None,
+        session_id: Optional[str] = None,
+        confirmed: bool = False,
+    ) -> dict[str, Any]:
+        """Execute remediation on memory cluster audit: supersede older conflicting node or link orphan."""
+        confirmed = _strict_bool(confirmed, field="confirmed")
+        ws, rp, scope_filter = self._spec_crawl_scope(workspace, repo, session_id)
+        assert scope_filter is not None
+        act = str(action or "").strip().lower()
+        if act not in {"supersede", "link"}:
+            raise ValidationError("unknown resolution action; expected 'supersede' or 'link'")
+        if act == "supersede" and confirmed is not True:
+            raise ValidationError("supersede requires explicit confirmation (confirmed=True)")
+        node_a_clean = _clean_text(node_a, field="node_a", max_chars=MAX_NAME_CHARS)
+        node_b_clean = _clean_text(node_b, field="node_b", max_chars=MAX_NAME_CHARS)
+        if node_a_clean == node_b_clean:
+            raise ValidationError("resolution requires two distinct memories")
+        wid, _ = self._require_scope(ws or "default", rp)
+        with self.store.write_transaction():
+            visible_ids = self.store.visible_memory_ids(
+                [node_a_clean, node_b_clean], scope_filter,
+            )
+            records = {}
+            for mid in (node_a_clean, node_b_clean):
+                self._check_owns(mid, wid, None)
+                rec = self.store.get_memory(mid)
+                assert rec is not None
+                records[mid] = rec
+                if mid not in visible_ids or not prompt_eligible(rec.provenance, rec.metadata):
+                    raise ValidationError("resolution requires live, approved memories")
+            self.link(
+                node_a_clean, node_b_clean, workspace=ws or "default",
+                relation="supersedes" if act == "supersede" else "related_to",
+                reason="spec_crawl_resolve",
+                _valid_from=records[node_a_clean].valid_from if act == "supersede" else None,
+            )
+            if act == "supersede":
+                self.retire(node_b_clean, workspace=ws or "default",
+                            reason="spec_crawl_resolve", actor="spec_crawl",
+                            at=records[node_a_clean].valid_from)
+
+        if act == "supersede":
+            if not node_b_clean:
+                raise ValidationError("supersede requires both node_a (retained) and node_b (superseded)")
+            return {
+                "ok": True,
+                "action": "supersede",
+                "retained_node": node_a_clean,
+                "superseded_node": node_b_clean,
+                "message": f"Superseded node '{node_b_clean}' with retained node '{node_a_clean}'.",
+                "workspace": ws,
+            }
+        elif act == "link":
+            if not node_b_clean:
+                raise ValidationError("link requires both node_a and node_b")
+            return {
+                "ok": True,
+                "action": "link",
+                "from_node": node_a_clean,
+                "to_node": node_b_clean,
+                "message": f"Linked node '{node_a_clean}' to '{node_b_clean}'.",
+                "workspace": ws,
+            }
+        else:
+            raise ValidationError(f"unknown resolution action: {act}. Expected 'supersede' or 'link'.")
+
 
 
 def _filter(workspace_id, repo_id, mtypes, as_of, graph_layers=None, *, session_id=None,

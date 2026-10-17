@@ -247,12 +247,16 @@ def test_dashboard_warns_when_auto_enabled_extractor_cannot_persist():
     from pathlib import Path
 
     dashboard = (Path(__file__).resolve().parents[1]
-                 / "engraphis" / "static" / "dashboard.js").read_text(encoding="utf-8")
-    assert "d.auto_enabled&&d.persisted===false" in dashboard
-    assert "could not be saved for restart" in dashboard
-    assert "ENGRAPHIS_EXTRACTOR=llm_structured" in dashboard
-    assert "ENGRAPHIS_LLM_AUTO_EXTRACT=1" in dashboard
-    assert "d.reply" not in dashboard
+                 / "engraphis" / "dashboard_assets" / "ledger.js").read_text(encoding="utf-8")
+    test_llm = dashboard[dashboard.index("  async function testLlm()"):
+                         dashboard.index("  function switchView(")]
+    assert "result.auto_enabled && result.persisted === false" in test_llm
+    assert "could not be saved for restart" in test_llm
+    assert "ENGRAPHIS_EXTRACTOR=llm_structured" in test_llm
+    assert "ENGRAPHIS_LLM_AUTO_EXTRACT=1" in test_llm
+    assert "transient ? 'error' : 'ready'" in test_llm
+    # The provider's own reply is never echoed into the page.
+    assert "result.reply" not in dashboard
     assert "replied:" not in dashboard
 
 

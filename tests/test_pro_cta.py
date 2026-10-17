@@ -21,21 +21,14 @@ CTA_LABELS = (
 )
 
 
-def test_dashboard_shells_share_the_pro_cta_contract():
+def test_dashboard_carries_the_pro_cta_contract():
     ledger = (ROOT / "engraphis" / "dashboard_assets" / "ledger.js").read_text(encoding="utf-8")
-    classic = (ROOT / "engraphis" / "classic_assets" / "dashboard.js").read_text(encoding="utf-8")
-    static = (ROOT / "engraphis" / "static" / "dashboard.js").read_text(encoding="utf-8")
 
-    assert classic == static
-    for shell in (ledger, classic):
-        assert SUPPORT_COPY in shell
-        assert "utm_source" in shell
-        assert "utm_campaign" in shell
-        assert all(label in shell for label in CTA_LABELS)
-    # The dashboard shells share the dynamic CTA implementation, while the
-    # compatibility shell still matches the generated source exactly.
-    for shell in (ledger, classic):
-        assert "Subscribe to ${name}" in shell
+    assert SUPPORT_COPY in ledger
+    assert "utm_source" in ledger
+    assert "utm_campaign" in ledger
+    assert all(label in ledger for label in CTA_LABELS)
+    assert "Subscribe to ${name}" in ledger
 
 
 def _function(script, name):
@@ -48,17 +41,11 @@ def _function(script, name):
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is required to run the UI")
-@pytest.mark.parametrize("shell", ["ledger", "classic"])
-def test_trial_ctas_use_each_disclosed_plan_duration_without_guessing_team(tmp_path, shell):
-    """Execute both shipped helpers: a Pro fallback must never become a Team promise."""
-    if shell == "ledger":
-        script = (ROOT / "engraphis/dashboard_assets/ledger.js").read_text(encoding="utf-8")
-        functions = ("licenseAccessState", "licensePlanKey", "licenseTrialAvailable",
-                     "licenseHasHostedAccess", "licenseTrialDays", "hostedCta")
-    else:
-        script = (ROOT / "engraphis/classic_assets/dashboard.js").read_text(encoding="utf-8")
-        functions = ("licAccessState", "licPlanKey", "licTrialAvailable",
-                     "licAccessLive", "licTrialDays", "hostedCta")
+def test_trial_ctas_use_each_disclosed_plan_duration_without_guessing_team(tmp_path):
+    """Execute the shipped helpers: a Pro fallback must never become a Team promise."""
+    script = (ROOT / "engraphis/dashboard_assets/ledger.js").read_text(encoding="utf-8")
+    functions = ("licenseAccessState", "licensePlanKey", "licenseTrialAvailable",
+                 "licenseHasHostedAccess", "licenseTrialDays", "hostedCta")
     cases = [
         ({"trial_days": 7, "days_by_plan": {"pro": 7, "team": 14}},
          ["Start 7-day Pro trial", "Start 14-day Team trial"]),

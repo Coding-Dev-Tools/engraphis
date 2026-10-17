@@ -28,7 +28,7 @@ most common mistake here.
 |---|---|---|
 | Status | Primary scoped, bi-temporal, interface-driven implementation. | Compatibility/reference implementation with flat namespaces. |
 | Model | Scoped + bi-temporal + typed; interface-driven. | Single flat `namespace` string per memory. |
-| Code | `engraphis/core/`, `engraphis/backends/`, `eval/`, `tests/`, `scripts/migrate_to_v2.py` | `engraphis/app.py`, `config.py`, `models.py`, `routes/`, `stores/`, `engines/`, `llm/`, `static/` |
+| Code | `engraphis/core/`, `engraphis/backends/`, `eval/`, `tests/`, `scripts/migrate_to_v2.py` | `engraphis/app.py`, `config.py`, `models.py`, `routes/`, `stores/`, `engines/`, `llm/` |
 | Data | new v2 schema (`SCHEMA_VERSION = 18`) | `engraphis_v1.db` |
 | Entry | `engraphis.MemoryEngine.create()` / `engraphis.create_memory_engine()` → `engraphis/factory.py` → `core/engine.py` | Internal reference only; never a public launcher |
 
@@ -59,6 +59,7 @@ python -m eval.reinforcement                                        # bounded re
 python -m eval.adversarial_memory_security                          # prompt/graph boundary
 python -m eval.grounded                                             # grounded-abstain decision gate
 python -m eval.code_arm                                             # coding-agent arm gate
+python -m eval.spec_crawl                                           # agent spec quality & prompt crawl gate
 pyright                                                             # core + backends typecheck
 
 # ── External benchmarks (real numbers need torch + the dataset; see eval/external.py) ──
@@ -294,6 +295,8 @@ worktree is the delivery boundary:
 - **`docs/OBSIDIAN_IMPORT.md`** — the rich Obsidian Markdown adapter (frontmatter, wikilinks,
   aliases, attachments) and its compatibility command. It supplements, rather than replaces,
   the universal document-import guide.
+- **`docs/SPEC_CRAWL.md`** — agent specification quality crawler, 7-axis radar coverage,
+  concept tentacles, "ask, don't guess" clarification flow, and Dashboard Spec Studio.
 - **`AGENTS.md`** (this file) + **`CLAUDE.md`** — how to work in the repo.
 - **`skills/engraphis-memory/`** — portable Agent Skill (SKILL.md + `references/`) that teaches any
   MCP-capable agent the *memory discipline* (when to remember/recall, scoping, tool selection).
