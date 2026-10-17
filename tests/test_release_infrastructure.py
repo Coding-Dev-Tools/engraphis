@@ -453,7 +453,7 @@ def test_ci_linter_is_bounded_to_the_verified_release_series():
     # is not stable across minor releases -- 0.16 widened it from 59 rules to 413, which
     # would have turned `ruff check .` red on unchanged code. Pinning `select` explicitly
     # is what actually bounds CI, so the bound and the rule set are asserted together.
-    assert pyproject.count('"ruff>=0.15.22,<0.17"') == 2
+    assert pyproject.count('"ruff>=0.15.22,<0.18"') == 2
     assert 'select = ["E4", "E7", "E9", "F"]' in pyproject
 
 
