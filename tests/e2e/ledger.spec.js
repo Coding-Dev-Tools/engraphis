@@ -2987,9 +2987,8 @@ test('Explore explains its colours and lists every entity and relation for keybo
   await page.locator('#graph-canvas').focus();
   await page.keyboard.press('ArrowDown');
   await expect(page.locator('#graph-keyboard-status')).toContainText('Engraphis, 1 relation, 1 of 3');
-  await page.keyboard.press('End');
-  await expect(page.locator('#graph-keyboard-status')).toContainText('Postgres, 1 relation, 2 of 2');
-  await page.keyboard.press('Escape');
+  await page.keyboard.press('ArrowDown');
+  await expect(page.locator('#graph-keyboard-status')).toContainText('Postgres, 1 relation, 2 of 3');
   await page.keyboard.press('End');
   await expect(page.locator('#graph-keyboard-status')).toContainText('Unlinked Note, 0 relations, 3 of 3');
   await page.keyboard.press('Escape');
