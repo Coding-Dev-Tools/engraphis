@@ -110,6 +110,30 @@ def test_real_spec_fixtures_and_agents_dogfood_still_pass():
     assert all(measured[metric] >= floor for metric, floor in FLOORS)
 
 
+def test_permuted_axes_cannot_pass_with_the_same_coverage_set(tmp_path, monkeypatch):
+    item = json.loads(spec_crawl.DATASET_PATH.read_text(encoding="utf-8").splitlines()[0])
+    dataset = tmp_path / "seven-axes.jsonl"
+    dataset.write_text(json.dumps(item) + "\n", encoding="utf-8")
+    original = spec_crawl.crawl_spec
+
+    def permuted(text):
+        report = original(text)
+        if text == item["text"]:
+            axes = [section["axis"] for section in report["sections"]]
+            for section, axis in zip(report["sections"], axes[1:] + axes[:1]):
+                section["axis"] = axis
+        return report
+
+    monkeypatch.setattr(spec_crawl, "DATASET_PATH", dataset)
+    monkeypatch.setattr(spec_crawl, "crawl_spec", permuted)
+    measured = spec_crawl.run()
+    assert measured["axes_accuracy"] == 0.0
+    assert measured["sections_accuracy"] == 1.0
+    with pytest.raises(SystemExit) as exc:
+        spec_crawl.main()
+    assert exc.value.code == 1
+
+
 @pytest.mark.parametrize("accuracy", [0.0, float("nan")])
 def test_memory_contract_failure_cannot_hide_behind_passing_document_metrics(monkeypatch, capsys, accuracy):
     measured = result()
