@@ -92,6 +92,45 @@ console.log(JSON.stringify({ before, cleared, repainted: painted, paintCalls }))
     assert result == {"before": True, "cleared": True, "repainted": True, "paintCalls": 2}
 
 
+def test_layer_toggle_publishes_stats_matching_uploaded_edge_visibility():
+    result = run_node(r"""
+const reports = [], uploads = {}; let buffer;
+const ctx = {
+  state: { totalLinks: 2, ids: ['a', 'b', 'c'], visibleCount: 3, layers: null,
+    positions: new Float32Array([0, 0, 1, 1, 2, 2]),
+    edgeSources: new Uint32Array([0, 1]), edgeTargets: new Uint32Array([1, 2]),
+    edgeWeights: new Float32Array([0.1, 1]), edgeBridges: new Uint8Array([1, 0]),
+    edgeGhosts: new Uint8Array([0, 0]), edgeLayers: ['semantic', 'temporal'],
+    ghosts: true, bridges: true, settings: { flow: false } },
+  gl: { bindBuffer(_, next) { buffer = next; },
+    bufferData(_, values) { uploads[buffer] = Array.from(values); } },
+  nodeProgram: {}, edgeProgram: {},
+  edgeBuffers: { position: 'position', factor: 'factor', visible: 'visible' },
+  opts: { onStats(value) { reports.push({ drawn: value.drawnLinks, hidden: value.hiddenLinks }); } },
+  passesFilters() { return true; }, zoomRatio() { return 0.5; }, EDGE_START: 0.1,
+  clamp: (value, min, max) => Math.max(min, Math.min(max, value)),
+  schedule() {}, scheduleLabels() {}, explorerData: null,
+};
+load(ctx, ['edgePassesFilters', 'uploadEdges', 'drawnEdgeEstimate', 'stats']);
+const start = source.indexOf('      setLayers(value) {');
+const end = source.indexOf('\n      setRepoFilter', start);
+const bridgeStart = source.indexOf('      setBridges(value) {');
+const bridgeEnd = source.indexOf('\n      setCollapse', bridgeStart);
+vm.runInContext('api = {' + source.slice(start, end) + source.slice(bridgeStart, bridgeEnd) + '};', ctx);
+ctx.uploadEdges(); ctx.stats();
+ctx.api.setLayers({ semantic: false }); const hidden = uploads.visible;
+ctx.api.setLayers({ semantic: true });
+ctx.api.setBridges(false); ctx.api.setBridges(true);
+console.log(JSON.stringify({ reports, hidden, restored: uploads.visible }));
+""")
+    assert result == {
+        "reports": [{"drawn": 2, "hidden": 0}, {"drawn": 1, "hidden": 1},
+                    {"drawn": 2, "hidden": 0}, {"drawn": 1, "hidden": 1},
+                    {"drawn": 2, "hidden": 0}],
+        "hidden": [0, 0, 1, 1], "restored": [1, 1, 1, 1],
+    }
+
+
 def test_authored_cached_orbit_radius_survives_satellite_motion():
     result = run_node(r"""
 const window = {};
@@ -105,3 +144,146 @@ console.log(JSON.stringify({ lanes: lanes.map(({ radius, members, dynamicRadius 
   ({ radius, members, dynamicRadius })) }));
 """)
     assert result["lanes"] == [{"radius": 30, "members": 3, "dynamicRadius": False}]
+
+
+def test_hover_selection_and_clear_invalidate_settled_geometry():
+    result = run_node(r"""
+let scheduled = 0;
+const uploads = [];
+const ctx = {
+  state: { ready: true, contextLost: false, hover: 0, focus: -1,
+    neighbors: [[1], [0], []], nodeFlags: new Uint8Array([1, 1, 1]) },
+  gl: { bindBuffer() {}, bufferData(_, flags) { uploads.push(Array.from(flags)); } },
+  nodeProgram: {}, nodeBuffers: { flag: {} }, schedule() { scheduled++; },
+};
+load(ctx, ['applyHoverToFlags']);
+ctx.applyHoverToFlags();
+ctx.state.hover = -1; ctx.state.focus = 2; ctx.applyHoverToFlags();
+ctx.state.focus = -1; ctx.applyHoverToFlags();
+console.log(JSON.stringify({ scheduled, uploads }));
+""")
+    assert result == {"scheduled": 3, "uploads": [[1, 1, 2], [2, 2, 1], [1, 1, 1]]}
+
+
+def test_worker_refinement_repaints_without_overriding_owned_camera():
+    result = run_node(r"""
+let scheduled = 0, overlays = 0, uploads = 0;
+const ctx = {
+  state: { positions: new Float32Array([1, 2]), bounds: null, hover: 0, focus: -1,
+    camera: { x: 73, y: 29, scale: 2 }, cameraOwned: true, pendingFit: null,
+    edgeVertexCount: 0, lastLabelKey: 'old' },
+  uploadNodePositions() { uploads++; }, uploadEdges() {}, uploadEdgePositions() {},
+  computeCommunityRegions() {}, drawRegions() {}, schedule() { scheduled++; },
+  scheduleLabels() { overlays++; },
+};
+load(ctx, ['camera', 'fit', 'applyLayout']);
+ctx.applyLayout(new Float32Array([5, 8]), { minX: 0, maxX: 10, minY: 0, maxY: 10 }, true);
+console.log(JSON.stringify({ scheduled, overlays, uploads, camera: ctx.state.camera,
+  cameraOwned: ctx.state.cameraOwned, hoverPoint: ctx.state.hoverPoint,
+  pickDirty: ctx.state.pickDirty, lastLabelKey: ctx.state.lastLabelKey }));
+""")
+    assert result == {
+        "scheduled": 1, "overlays": 1, "uploads": 1,
+        "camera": {"x": 73, "y": 29, "scale": 2}, "cameraOwned": True,
+        "hoverPoint": [5, 8], "pickDirty": True, "lastLabelKey": "",
+    }
+
+
+@pytest.mark.parametrize("hz", [60, 120])
+def test_camera_invalidations_paint_each_frame_with_flow_without_redrawing_at_rest(hz):
+    result = run_node(r"""
+let draws = 0, scheduled = 0;
+const gl = new Proxy({ clear() { draws++; } }, { get(target, key) {
+  return target[key] || (() => {});
+}});
+const ctx = {
+  state: { destroyed: false, paused: false, contextLost: false, ready: true,
+    camera: { x: 0, y: 0, scale: 1 }, dpr: 1, ids: ['n'], settings: { flow: true },
+    edgeVertexCount: 0, hover: -1, focus: -1, hoverPoint: [0, 0], focusPoint: [0, 0] },
+  canvas: { width: 800, height: 600 }, gl, nodeProgram: {}, edgeProgram: {},
+  nodeBuffers: { attrs: {} }, edgeBuffers: { attrs: {} }, glowAmount: () => 0,
+  zoomRatio: () => 0, EDGE_START: 0.2, FLOW_FRAME_MS: 34,
+  clamp: (value, min, max) => Math.max(min, Math.min(max, value)),
+  flowAnimating: () => true, bindNodeGeometry() {}, bindEdgeGeometry() {},
+  drawRegions() {}, scheduleLabels() {}, schedule() { scheduled++; },
+};
+load(ctx, ['draw']);
+const hz = HZ;
+for (let frame = 1; frame <= hz; frame++) {
+  ctx.state.camera.x += 1;
+  ctx.draw(frame * 1000 / hz);
+}
+console.log(JSON.stringify({ draws, scheduled }));
+""".replace("HZ", str(hz)))
+    assert result == {"draws": hz, "scheduled": 0}
+
+
+def test_every_labels_obey_density_and_remeasure_font_changes():
+    result = run_node(r"""
+let measured = 0, paints = [];
+const context = { fillText(text) { paints.push(text); }, measureText(text) {
+  measured++; return { width: parseFloat(this.font) * text.length / 2 };
+}};
+const ctx = {
+  state: { ready: true, camera: { x: 0, y: 0, scale: 1 },
+    width: 1000, height: 600, settings: { labels: true, font: 12, labelDensity: 1 },
+    labelLayout: [], labelMetrics: new Map(), lastLabelKey: '',
+    nodeFlags: new Float32Array(30).fill(1), positions: new Float32Array(60),
+    topNodes: Array.from({ length: 30 }, (_, i) => i), hover: -1, focus: -1 },
+  labelContext: context, LABEL_MAX: 220, LABEL_CANDIDATE_MAX: 1800,
+  labelText: i => 'Name' + i,
+  screen: (_, __) => [0, 0],
+  clamp: (value, min, max) => Math.max(min, Math.min(max, value)),
+};
+for (let i = 0; i < 30; i++) {
+  ctx.state.positions[i * 2] = 50 + (i % 6) * 150;
+  ctx.state.positions[i * 2 + 1] = 50 + Math.floor(i / 6) * 100;
+}
+ctx.screen = (x, y) => [x, y];
+load(ctx, ['drawDeclutteredLabels']);
+ctx.drawDeclutteredLabels(); const low = paints.length;
+paints = []; ctx.state.settings.labelDensity = 24;
+ctx.drawDeclutteredLabels(); const normal = paints.length, before = measured;
+paints = []; ctx.state.settings.font = 24;
+ctx.drawDeclutteredLabels(); const remeasured = measured - before;
+console.log(JSON.stringify({ low, normal, remeasured, cache: [...ctx.state.labelMetrics.keys()] }));
+""")
+    assert result["low"] == 1
+    assert result["normal"] == 24
+    assert result["remeasured"] >= 24
+    assert any(key.startswith("24px ") for key in result["cache"])
+
+
+def test_zoomed_out_picking_respects_screen_hit_radius_and_visibility():
+    result = run_node(r"""
+const ctx = {
+  state: { ready: true, ids: ['near', 'hidden'], nodeFlags: [1, 0],
+    positions: [0, 0, 100, 0], pickDirty: true, camera: { scale: 0.02 } },
+  pointSize: () => 4,
+};
+load(ctx, ['buildPickGrid', 'pickAt']);
+const exact = ctx.pickAt(0, 0), twoPixels = ctx.pickAt(100, 0);
+const outside = ctx.pickAt(1000, 0);
+ctx.state.camera.scale = 4;
+const close = ctx.pickAt(2, 0), closeOutside = ctx.pickAt(3, 0);
+console.log(JSON.stringify({ exact, twoPixels, outside, close, closeOutside }));
+""")
+    assert result == {"exact": 0, "twoPixels": 0, "outside": -1, "close": 0, "closeOutside": -1}
+
+
+def test_hidden_refinement_defers_upload_until_resume():
+    result = run_node(r"""
+let applications = [];
+const ctx = {
+  state: { paused: true, contextLost: false, destroyed: false,
+    pendingLayout: { positions: [9, 12], bounds: { minX: 9 }, fit: true } },
+  applyLayout: (...args) => applications.push(args),
+};
+load(ctx, ['flushPendingLayout']);
+ctx.flushPendingLayout(); const hidden = applications.length;
+ctx.state.paused = false; ctx.flushPendingLayout(); ctx.flushPendingLayout();
+console.log(JSON.stringify({ hidden, applications, retained: ctx.state.pendingLayout }));
+""")
+    assert result == {
+        "hidden": 0, "applications": [[[9, 12], {"minX": 9}, True]], "retained": None,
+    }

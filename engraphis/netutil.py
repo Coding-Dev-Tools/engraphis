@@ -146,3 +146,75 @@ def is_local_request(request) -> bool:
     import os
     local_peers = os.environ.get("ENGRAPHIS_LOCAL_TRUSTED_PEERS", "").strip()
     return bool(local_peers and trusted_proxy(str(normalized), local_peers))
+
+
+def declared_host_names(*values: str) -> frozenset:
+    """Host names an operator declared for the token-free local servers.
+
+    Each value is a URL (``http://engraphis.lan:8700``), a ``name[:port]`` or a
+    comma-separated list of them, such as ``ENGRAPHIS_ALLOWED_HOSTS``. Names are
+    lower-cased and IDNA-encoded the way a browser sends them in ``Host``. Entries with
+    userinfo, a bad port or no host contribute nothing.
+    """
+    from urllib.parse import urlsplit
+
+    names = set()
+    for value in values:
+        for entry in str(value or "").split(","):
+            entry = entry.strip()
+            if not entry:
+                continue
+            try:
+                parts = urlsplit(entry if "://" in entry else "//" + entry)
+                parts.port
+                hostname = parts.hostname
+            except ValueError:
+                continue
+            if not hostname or parts.username is not None or parts.password is not None:
+                continue
+            try:
+                names.add(hostname.encode("idna").decode("ascii").lower())
+            except UnicodeError:
+                continue
+    return frozenset(names)
+
+
+def is_rebinding_safe_host(request, declared: frozenset = frozenset()) -> bool:
+    """Whether ``Host`` names this machine in a way DNS rebinding cannot forge.
+
+    A token-free local server trusts loopback peers (:func:`is_local_request`). A website
+    that points its own name at 127.0.0.1 (DNS rebinding) becomes same-origin with that
+    name, so its requests arrive from a loopback peer and pass every Origin check, yet
+    they still carry the website's name in ``Host``. Exactly ``localhost``, IP literals
+    (an address cannot be rebound) and names the operator declared are what a local
+    browser legitimately sends. ``localhost.`` and ``*.localhost`` are refused because
+    some resolvers send them to DNS.
+    """
+    import ipaddress
+    from urllib.parse import urlsplit
+
+    raw = (request.headers.get("host") or "").strip()
+    # A browser sends a bare host[:port]; anything URL-like could smuggle a second name.
+    if not raw or any(char in raw for char in "@/\\?#") or any(c.isspace() for c in raw):
+        return False
+    try:
+        parts = urlsplit("//" + raw)
+        parts.port
+        hostname = parts.hostname
+    except ValueError:
+        return False
+    if not hostname:
+        return False
+    if hostname == "localhost" or hostname in declared:
+        return True
+    try:
+        ipaddress.ip_address(hostname.split("%", 1)[0])
+        return True
+    except ValueError:
+        pass
+    # The name the ASGI server reports for itself. Uvicorn reports its socket address,
+    # which the checks above already accept; in-process test transports report the host
+    # of the URL they were given.
+    server = (getattr(request, "scope", {}) or {}).get("server")
+    own = server[0] if server and isinstance(server[0], str) else ""
+    return bool(own) and hostname == own.lower()

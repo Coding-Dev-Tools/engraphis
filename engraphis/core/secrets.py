@@ -152,6 +152,56 @@ _SENSITIVE_MAPPING_KEY = re.compile(
 _REDACTION = re.compile(r"^<?(?:redacted|removed|withheld|not[_ -]?set)>?$", re.I)
 _REDACTED = "<redacted>"
 
+# Preserve Python's case-insensitive [a-z], including its four non-ASCII letters.
+_URI_SCHEME_LETTERS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZİıſK"
+)
+_URI_SCHEME_CHARACTERS = _URI_SCHEME_LETTERS.union("0123456789+.-")
+
+
+def _credential_uri_spans(text: str) -> Iterable[tuple[int, int]]:
+    """Recognize authenticated URLs with disjoint, bounded scans of their parts.
+
+    Search separators forward, inspect each preceding scheme run once, and stop
+    authorities at their first delimiter. A consumed authority cannot supply the
+    scheme of a later match, even when malformed text repeats ``scheme://``.
+    """
+    cursor = 0
+    limit = len(text)
+    while True:
+        scheme_end = text.find("://", cursor)
+        if scheme_end == -1:
+            return
+        begin = scheme_end
+        while begin > cursor and text[begin - 1] in _URI_SCHEME_CHARACTERS:
+            begin -= 1
+        authority_start = scheme_end + 3
+        cursor = authority_start
+        if (begin == scheme_end or text[begin] not in _URI_SCHEME_LETTERS
+                or (begin > 0 and text[begin - 1] in _URI_SCHEME_CHARACTERS)):
+            continue
+        end = authority_start
+        while end < limit and not text[end].isspace() and text[end] not in '/?#"':
+            end += 1
+        if end == authority_start:
+            continue
+        cursor = end
+        userinfo, separator, _host = text[authority_start:end].rpartition("@")
+        _username, colon, password = userinfo.partition(":")
+        if (separator and colon and password
+                and not _REDACTION.fullmatch(password)):
+            yield begin, authority_start + len(userinfo) + 1
+
+
+def _redact_credential_uris(text: str) -> str:
+    parts: list[str] = []
+    start = 0
+    for begin, end in _credential_uri_spans(text):
+        parts.extend((text[start:begin], _REDACTED))
+        start = end
+    parts.append(text[start:])
+    return "".join(parts)
+
 
 def _redact_pem(text: str) -> str:
     """Safely redact PEM private key blocks in O(N) linear time without regex backtracking."""
@@ -248,7 +298,7 @@ def secret_kind(value: Any) -> str | None:
     for kind, pattern in _PATTERNS:
         if pattern.search(value):
             return kind
-    if _DSN.search(value):
+    if _DSN.search(value) or next(iter(_credential_uri_spans(value)), None) is not None:
         return "credential-bearing connection URI"
     if _ASSIGNMENT.search(value):
         return "credential assignment"
@@ -275,6 +325,7 @@ def redact_secrets(text: str) -> str:
             continue
         safe = pattern.sub(_REDACTED, safe)
     safe = _DSN.sub(_REDACTED, safe)
+    safe = _redact_credential_uris(safe)
     safe = _ASSIGNMENT.sub(_REDACTED, safe)
     return safe
 

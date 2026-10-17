@@ -92,6 +92,45 @@ def test_tokenless_read_only_factory_rejects_remote_peers():
     assert response.json() == {"detail": "remote access requires a bearer token"}
 
 
+def test_tokenless_read_only_api_refuses_names_dns_rebinding_could_forge(monkeypatch):
+    """A website that points its own name at 127.0.0.1 reaches the token-free graph server
+    from a loopback peer. Its requests still carry that name in ``Host``."""
+    monkeypatch.delenv("ENGRAPHIS_ALLOWED_HOSTS", raising=False)
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    svc.remember("The launch code is in the vault.", workspace="w", scope="workspace")
+    client = TestClient(create_read_only_app(svc, host_names=("graph.lan",)),
+                        client=("127.0.0.1", 50000))
+
+    def recall(host):
+        return client.get("/recall", params={"query": "launch code", "workspace": "w"},
+                          headers={"Host": host})
+
+    for host in ("attacker.test:8720", "localhost.:8720", "evil.localhost:8720"):
+        refused = recall(host)
+        assert refused.status_code == 403, host
+        assert "ENGRAPHIS_ALLOWED_HOSTS" in refused.json()["detail"]
+    assert client.get("/health", headers={"Host": "attacker.test"}).status_code == 200
+    for host in ("localhost:8720", "127.0.0.1:8720", "[::1]:8720", "graph.lan:8720"):
+        assert recall(host).status_code == 200, host
+
+    # A token is the boundary when one is configured, whatever the name.
+    tokened = TestClient(create_read_only_app(svc, token="secret"))
+    assert tokened.get(
+        "/recall", params={"query": "launch code", "workspace": "w"},
+        headers={"Host": "graph.example.com", "Authorization": "Bearer secret"},
+    ).status_code == 200
+
+
+def test_read_only_api_accepts_names_from_the_allowed_hosts_setting(monkeypatch):
+    monkeypatch.setenv("ENGRAPHIS_ALLOWED_HOSTS", "Desk-Top, graph.internal:8720")
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    client = TestClient(create_read_only_app(svc), client=("127.0.0.1", 50000))
+    for host, status in (("desk-top:8720", 200), ("graph.internal", 200),
+                         ("other.internal", 403)):
+        response = client.get("/graph", params={"workspace": "w"}, headers={"Host": host})
+        assert response.status_code == status, host
+
+
 def test_read_only_graph_capacity_error_uses_stable_code():
     class _Service:
         def graph(self, **_kwargs):

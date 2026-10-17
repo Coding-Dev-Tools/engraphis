@@ -19,7 +19,7 @@ issuer, relay, managed compute, Auto Dreaming, Auto Consolidation, or Team ident
 
 Hosted customer endpoint variables may be exposed as optional inputs, but a refresh credential
 must be injected as a secret or mounted owner-only state file. Readable managed processing
-is disabled until each workspace is explicitly confirmed in Manage → Settings. Existing
+is disabled until each workspace is explicitly confirmed in Settings → Preferences. Existing
 workspaces pause new uploads pending confirmation; a cloud connection does not grant approval.
 `ENGRAPHIS_MANAGED_COMPUTE_CONSENT=0` is a deny-only operator override. A truthy value
 cannot replace persisted workspace approval. Encrypted sync has separate controls.
