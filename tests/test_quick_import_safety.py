@@ -91,7 +91,7 @@ def test_real_credential_rc_folders_preserve_safe_dotfiles_and_derivation(
     tmp_path = tmp_path_factory.mktemp("quick-source")
     (tmp_path / name).write_text(content, encoding="utf-8")
     for safe_name, safe_content in SAFE_DOTFILES.items():
-        (tmp_path / safe_name).write_text(safe_content, encoding="utf-8", newline="\n")
+        (tmp_path / safe_name).write_bytes(safe_content.encode("utf-8"))
     monkeypatch.setenv("ENGRAPHIS_IMPORT_ROOTS", str(tmp_path))
     original_extractor = resources.get_resource_extractor()
     extracted = []
