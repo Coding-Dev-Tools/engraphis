@@ -427,6 +427,9 @@ def _keyword_search(ws, q, limit=20, *, as_of: Optional[float] = None,
     Recall/Why/Timeline tabs still return results when the embedder is unavailable."""
     import json as _json
     import sqlite3 as _sql
+    terms = (q or "").split()[:6]
+    if not terms:
+        return []
     current_service = service()
     route = current_service.resolve_workspace(ws, repo=repo, session_id=session_id)
     ws, repo = route["workspace"], route["repo"]
@@ -481,11 +484,9 @@ def _keyword_search(ws, q, limit=20, *, as_of: Optional[float] = None,
             args.append(rid)
         else:
             sql += " AND COALESCE(scope, 'workspace')!='session'"
-        terms = [t for t in (q or "").split() if len(t) > 2][:6]
-        if terms:
-            sql += " AND (" + " OR ".join(["title LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\'" for _ in terms]) + ")"
-            for t in terms:
-                args += ["%" + _escape_like(t) + "%", "%" + _escape_like(t) + "%"]
+        sql += " AND (" + " OR ".join(["title LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\'" for _ in terms]) + ")"
+        for t in terms:
+            args += ["%" + _escape_like(t) + "%", "%" + _escape_like(t) + "%"]
         sql += " ORDER BY COALESCE(last_access, valid_from) DESC"
         rows = conn.execute(sql, args).fetchall()
     except _sql.Error as exc:

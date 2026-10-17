@@ -13019,7 +13019,13 @@ class MemoryService:
             from engraphis.core.engine import _approved_local_index_roots
             clean_src = _clean_text(source_id, field="source_id", max_chars=500)
             try:
-                path = Path(clean_src).expanduser().resolve(strict=True)
+                selected = Path(clean_src).expanduser()
+                if (_sensitive_source_path(clean_src)
+                        or _sensitive_source_path(str(selected))):
+                    raise ValidationError("sensitive source_id path")
+                path = selected.resolve(strict=True)
+                if _sensitive_source_path(str(path)):
+                    raise ValidationError("sensitive source_id path")
                 allowed = any(
                     os.path.commonpath((os.path.normcase(str(path)), root)) == root
                     for root in _approved_local_index_roots()

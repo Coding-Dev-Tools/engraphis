@@ -943,6 +943,8 @@ def _extract_node_parameters(text: str) -> dict[str, str]:
     params: dict[str, str] = {}
     for match in _PARAM_PATTERN.finditer(text):
         key = match.group(1).lower()
+        if key == "db":
+            key = "database"
         val = match.group(3).strip().lower()
         numeric_key = key in {"port", "timeout", "retries", "max_retries"}
         # Plain copular prose can describe compatible properties. Only typed

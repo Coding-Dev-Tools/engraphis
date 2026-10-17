@@ -327,10 +327,13 @@ def test_create_memory_engine_honors_db_key_from_env(monkeypatch, tmp_path):
     monkeypatch.setenv("ENGRAPHIS_DB_KEY", "ab" * 32)
     db = str(tmp_path / "engine_enc.db")
     eng = create_memory_engine(db)
+    connector = eng.store._connect
+    assert connector._pragma
     try:
         wid = eng.store.create_workspace("w")
         eng.remember("encrypted via factory", workspace_id=wid, scope="workspace")
     finally:
         eng.close()
+    assert connector._pragma == ""
     with pytest.raises(sqlite3.DatabaseError):
         sqlite3.connect(db).execute("SELECT * FROM memories").fetchone()

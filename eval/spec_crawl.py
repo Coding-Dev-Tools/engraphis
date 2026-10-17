@@ -100,10 +100,10 @@ def run() -> dict:
                 deterministic_runs += 1
 
             # 2. Section axes check
-            actual_axes = {s["axis"] for s in r1["sections"]}
-            for exp_axis in item.get("expected_axes", []):
+            actual_axes = [s["axis"] for s in r1["sections"]]
+            for index, exp_axis in enumerate(item.get("expected_axes", [])):
                 total_expected_axes += 1
-                if exp_axis in actual_axes:
+                if index < len(actual_axes) and exp_axis == actual_axes[index]:
                     axes_correct += 1
 
             # 3. Expected flags check

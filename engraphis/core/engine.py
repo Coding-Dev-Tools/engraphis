@@ -531,7 +531,7 @@ class MemoryEngine:
             self._owned_resources = tuple(resources)
 
     def close(self) -> None:
-        """Close every owned collaborator exactly once, with the Store last."""
+        """Close each owned collaborator once in reverse acquisition order."""
         with self._resource_lock:
             if self._closed:
                 return
