@@ -3859,3 +3859,164 @@ test('Action dialogs cannot be reordered by bidi controls hidden in untrusted na
   expect(await answer).toBe(false);
   expect(errors).toEqual([]);
 });
+
+async function openQuickImport(page) {
+  await page.goto('/');
+  await page.locator('.nav-item[data-view="library"]').click();
+  await page.locator('#import-menu-button').click();
+  await page.locator('#import-quick-button').click();
+  await expect(page.locator('#quick-import-dialog')).toBeVisible();
+}
+
+test('review regression: Quick import shows bounded per-file failures as inert text', async ({ page }) => {
+  const errors = browserErrors(page);
+  await mockApi(page);
+  const unsafeName = '<img src=x onerror="window.__importErrorXss=true">.pdf';
+  const details = Array.from({ length: 52 }, (_, index) => ({
+    file: index === 0 ? unsafeName : `unreadable-${index}.pdf`,
+    error: index === 0 ? 'PDF is encrypted; unlock it and retry.' : 'upload content could not be processed',
+  }));
+  await page.route('**/api/workspaces/import-files', route => fulfillJson(route, {
+    imported: 1, skipped: 0, errors: details.length, details,
+    warnings: [{ file: 'notes.md', warnings: ['Some formatting was omitted.'] }],
+  }));
+  await openQuickImport(page);
+  await page.locator('#quick-import-files').setInputFiles({
+    name: 'notes.md', mimeType: 'text/markdown', buffer: Buffer.from('Synthetic import notes.'),
+  });
+  const status = page.locator('#quick-import-status');
+  await expect(status).toContainText('1 file imported · 0 skipped · 52 errors');
+  const failures = status.locator('details').filter({ hasText: '52 files with errors' });
+  await expect(failures).toBeVisible();
+  await failures.locator('summary').click();
+  await expect(failures.locator('li')).toHaveCount(51);
+  await expect(failures.locator('li').first()).toHaveText(`${unsafeName} — PDF is encrypted; unlock it and retry.`);
+  await expect(failures.locator('li').last()).toHaveText('2 more not shown.');
+  await expect(status.locator('img')).toHaveCount(0);
+  expect(await page.evaluate(() => window.__importErrorXss)).toBeUndefined();
+  const warnings = status.locator('details').filter({ hasText: '1 file with warnings' });
+  await warnings.locator('summary').click();
+  await expect(warnings).toContainText('notes.md — Some formatting was omitted.');
+  await expect(page.locator('#quick-import-choose-files')).toBeEnabled();
+  expect(errors).toEqual([]);
+});
+
+test('review regression: Timeline keeps world validity separate from system expiry', async ({ page }) => {
+  const errors = browserErrors(page);
+  await mockApi(page);
+  const now = Math.floor(Date.now() / 1000);
+  const history = [
+    { ...memories[0], id: 'scheduled-retention', valid_from: 0, expired_at: now + 86400 },
+    { ...memories[0], id: 'retired-system-version', valid_from: 0, expired_at: now - 60 },
+    { ...memories[0], id: 'closed-world-interval', valid_from: -1, valid_to: 0, expired_at: now + 86400 },
+  ];
+  await page.route('**/api/timeline**', route => fulfillJson(route, { history }));
+  await page.goto('/');
+  await page.locator('.nav-item[data-view="provenance"]').click();
+  await page.getByRole('tab', { name: 'Timeline' }).click();
+  await page.locator('#timeline-input').fill('database');
+  await page.locator('#timeline-form button[type="submit"]').click();
+  const cards = page.locator('#timeline-result .temporal-card');
+  await expect(cards).toHaveCount(3);
+  const validity = card => card.locator('.temporal-meta > div').filter({ hasText: 'Valid time' }).locator('dd');
+  await expect(validity(cards.nth(0))).toHaveText(/ — now$/);
+  await expect(validity(cards.nth(1))).toHaveText(/ — now$/);
+  await expect(cards.nth(0).locator('.temporal-state')).toHaveText('current');
+  await expect(cards.nth(1).locator('.temporal-state')).toHaveText('past');
+  await expect(validity(cards.nth(2))).not.toHaveText(/ — now$/);
+  const epoch = await page.evaluate(() => new Intl.DateTimeFormat(undefined,
+    { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(0)));
+  await expect(validity(cards.nth(2))).toHaveText(new RegExp(` — ${epoch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`));
+  expect(errors).toEqual([]);
+});
+
+test('review regression: Every node applies and persists custom entity colours', async ({ page }) => {
+  const errors = browserErrors(page);
+  const everyAssets = [];
+  page.on('request', request => {
+    if (new URL(request.url()).pathname.endsWith('/v2-assets/engraphis-graph-every.js')) everyAssets.push(request.url());
+  });
+  await mockApi(page);
+  await page.goto('/');
+  await page.locator('.nav-item[data-view="relations"]').click();
+  await revealAdvancedGraphControls(page);
+  await page.locator('[data-graph-preset-choice="every"]').click();
+  await expect(page.locator('#graph-mode')).toContainText('All nodes');
+  await expect(page.locator('#graph-canvas')).toHaveAttribute('aria-busy', 'false');
+  await page.locator('[data-graph-color-choice="type"]').click();
+  await page.getByLabel('Colour for Person or concept nodes').fill('#ff8800');
+  await expect(page.locator('[data-graph-palette-choice="custom"]')).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('#graph-legend-list li').first().locator('svg circle')).toHaveAttribute('fill', '#ff8800');
+  await expect.poll(() => page.evaluate(() => {
+    const preferences = JSON.parse(localStorage.getItem('engraphis-ledger-graph-preferences-v1') || '{}');
+    return Object.values(preferences.typeColors || {});
+  })).toContain('#ff8800');
+  expect(everyAssets).toHaveLength(1);
+  expect(errors).toEqual([]);
+
+  await page.reload();
+  await page.locator('.nav-item[data-view="relations"]').click();
+  await revealAdvancedGraphControls(page);
+  await expect(page.getByLabel('Colour for Person or concept nodes')).toHaveValue('#ff8800');
+  await page.locator('[data-graph-preset-choice="every"]').click();
+  await expect(page.locator('#graph-mode')).toContainText('All nodes');
+  await expect(page.locator('#graph-canvas')).toHaveAttribute('aria-busy', 'false');
+  await expect(page.getByLabel('Colour for Person or concept nodes')).toHaveValue('#ff8800');
+  await expect(page.locator('#graph-legend-list li').first().locator('svg circle')).toHaveAttribute('fill', '#ff8800');
+  expect(errors).toEqual([]);
+});
+
+async function makeImportFolder(testInfo, withReadableFile) {
+  const path = require('node:path');
+  const root = testInfo.outputPath('folder-fixture');
+  const deep = path.join(root, ...Array.from({ length: 6 }, (_, index) => `ordinary-project-${index}-${'a'.repeat(23)}`));
+  await fs.mkdir(deep, { recursive: true });
+  await fs.writeFile(path.join(deep, 'deep-notes.md'), 'Synthetic deeply nested notes.');
+  if (withReadableFile) {
+    await fs.writeFile(path.join(root, 'readable.md'), 'Synthetic readable notes.');
+    // Python bounds Unicode code points, not UTF-16 units. This valid relative
+    // name exceeds 200 UTF-16 units and must still reach the import API.
+    const unicode = path.join(root, ...Array.from({ length: 5 }, () => '🌍'.repeat(22)));
+    await fs.mkdir(unicode, { recursive: true });
+    await fs.writeFile(path.join(unicode, 'world-notes.md'), 'Synthetic Unicode path notes.');
+  }
+  return root;
+}
+
+for (const withReadableFile of [true, false]) {
+  test(`review regression: Quick import reports long folder paths ${withReadableFile ? 'without aborting valid files' : 'when every file is skipped'}`, async ({ page }, testInfo) => {
+    const errors = browserErrors(page);
+    await mockApi(page);
+    const uploaded = [];
+    await page.route('**/api/workspaces/import-files', route => {
+      const filenames = [...(route.request().postData() || '').matchAll(/name="files"; filename="([^"]*)"/g)].map(match => match[1]);
+      uploaded.push(filenames);
+      if (filenames.some(name => Array.from(name.trim()).length > 200)) {
+        return route.fulfill({ status: 400, json: { detail: 'name exceeds 200 characters' } });
+      }
+      return fulfillJson(route, { imported: filenames.length, skipped: 0, errors: 0 });
+    });
+    await openQuickImport(page);
+    const folder = await makeImportFolder(testInfo, withReadableFile);
+    await page.locator('#quick-import-folder').setInputFiles(folder);
+    const status = page.locator('#quick-import-status');
+    await expect(status).toContainText(`${withReadableFile ? '2 files' : '0 files'} imported · 1 skipped · 0 errors`);
+    const warnings = status.locator('details').filter({ hasText: '1 file with warnings' });
+    await warnings.locator('summary').click();
+    await expect(warnings).toContainText('deep-notes.md');
+    await expect(warnings).toContainText('200-character');
+    await expect(page.locator('#quick-import-choose-folder')).toBeEnabled();
+    await expect(page.locator('#quick-import-form')).toHaveAttribute('aria-busy', 'false');
+    if (withReadableFile) {
+      expect(uploaded).toHaveLength(1);
+      expect(uploaded[0]).toHaveLength(2);
+      expect(uploaded[0].some(name => name.endsWith('/readable.md'))).toBe(true);
+      const unicode = uploaded[0].find(name => name.endsWith('/world-notes.md'));
+      expect(unicode.length).toBeGreaterThan(200);
+      expect(Array.from(unicode).length).toBeLessThanOrEqual(200);
+    } else {
+      expect(uploaded).toEqual([]);
+    }
+    expect(errors).toEqual([]);
+  });
+}

@@ -13,6 +13,7 @@
   'use strict';
 
   const MAX_FILES = 1500;
+  const MAX_NAME_CHARS = 200;
   const MAX_FILE_BYTES = 100_000_000;
   const MAX_TOTAL_BYTES = 750_000_000;
   const LONG_REQUEST_MS = 15 * 60_000;
@@ -64,6 +65,26 @@
       byId('quick-import-drop').classList.toggle('busy', next);
     }
 
+    function renderFileNotes(target, items, label, describe) {
+      if (!items.length) return;
+      const details = document.createElement('details');
+      const summary = document.createElement('summary');
+      summary.textContent = `${count(items.length, 'file')} with ${label}`;
+      const list = document.createElement('ul');
+      items.slice(0, 50).forEach(item => {
+        const row = document.createElement('li');
+        row.textContent = `${String(item && item.file || 'file')} — ${describe(item)}`;
+        list.append(row);
+      });
+      if (items.length > 50) {
+        const more = document.createElement('li');
+        more.textContent = `${(items.length - 50).toLocaleString()} more not shown.`;
+        list.append(more);
+      }
+      details.append(summary, list);
+      target.append(details);
+    }
+
     function renderResult(result, ws) {
       const target = byId('quick-import-status');
       target.replaceChildren();
@@ -84,26 +105,13 @@
         truncated.textContent = `Only the first ${Number(result.scanned || 0).toLocaleString()} of ${Number(result.matched_total || 0).toLocaleString()} matching files were imported. Narrow the folder or pattern and import the rest separately.`;
         target.append(truncated);
       }
+      const failures = Array.isArray(result.details) ? result.details : [];
+      renderFileNotes(target, failures, 'errors', item => String(item && item.error || 'resource could not be imported'));
       const warnings = Array.isArray(result.warnings) ? result.warnings : [];
-      if (warnings.length) {
-        const details = document.createElement('details');
-        const summary = document.createElement('summary');
-        summary.textContent = `${count(warnings.length, 'file')} with warnings`;
-        const list = document.createElement('ul');
-        warnings.slice(0, 50).forEach(item => {
-          const row = document.createElement('li');
-          const notes = Array.isArray(item && item.warnings) ? item.warnings.join('; ') : String(item && item.warnings || '');
-          row.textContent = `${String(item && item.file || 'file')} — ${notes || 'warning'}`;
-          list.append(row);
-        });
-        if (warnings.length > 50) {
-          const more = document.createElement('li');
-          more.textContent = `${(warnings.length - 50).toLocaleString()} more not shown.`;
-          list.append(more);
-        }
-        details.append(summary, list);
-        target.append(details);
-      }
+      renderFileNotes(target, warnings, 'warnings', item => {
+        const notes = Array.isArray(item && item.warnings) ? item.warnings.join('; ') : String(item && item.warnings || '');
+        return notes || 'warning';
+      });
       const next = document.createElement('p');
       next.className = 'project-help';
       next.textContent = 'Imported records are untrusted until you review them. Open a record in the Library and choose Approve for prompt when its source is safe.';
@@ -131,15 +139,32 @@
         setStatus('Choose or create a workspace before importing.', 'error');
         return;
       }
-      const files = items.filter(item => item && item.file && keep(item.name));
-      if (!files.length) {
+      const eligible = items.filter(item => item && item.file && keep(item.name));
+      if (!eligible.length) {
         setStatus(items.length
           ? 'Nothing to import: the selection only contained hidden or dependency folders, or sensitive files.'
           : 'No files were found in that selection.', 'error');
         return;
       }
-      if (files.length > MAX_FILES) {
-        setStatus(`Choose at most ${MAX_FILES.toLocaleString()} files per import (this selection has ${files.length.toLocaleString()}). Import a smaller folder, or use a folder path with a file pattern.`, 'error');
+      if (eligible.length > MAX_FILES) {
+        setStatus(`Choose at most ${MAX_FILES.toLocaleString()} files per import (this selection has ${eligible.length.toLocaleString()}). Import a smaller folder, or use a folder path with a file pattern.`, 'error');
+        return;
+      }
+      const nameWarnings = [];
+      const files = eligible.filter(item => {
+        // Mirror the service's cleaned-name bound in Unicode code points, rather
+        // than UTF-16 units. A deep folder path must not reject unrelated files.
+        const name = String(item.name || '').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '')
+          .replace(/^\p{White_Space}+|\p{White_Space}+$/gu, '');
+        if (Array.from(name).length <= MAX_NAME_CHARS) return true;
+        nameWarnings.push({ file: item.name, warnings: [
+          `Relative path exceeds the ${MAX_NAME_CHARS}-character import limit. Move this file closer to the folder root, then retry.`,
+        ] });
+        return false;
+      });
+      if (!files.length) {
+        renderResult({ imported: 0, skipped: nameWarnings.length, errors: 0, warnings: nameWarnings }, ws);
+        setBusy(false);
         return;
       }
       const oversized = files.find(item => item.file.size > MAX_FILE_BYTES);
@@ -165,11 +190,17 @@
         const result = await api('/workspaces/import-files', {
           method: 'POST', body: form, timeoutMs: LONG_REQUEST_MS,
         });
-        renderResult(result || {}, ws);
+        const report = result || {};
+        renderResult({
+          ...report,
+          skipped: Number(report.skipped || 0) + nameWarnings.length,
+          warnings: [...nameWarnings, ...(Array.isArray(report.warnings) ? report.warnings : [])],
+        }, ws);
         notify(`${count((result || {}).imported, 'file')} imported into ${ws}.`);
         await onImported(ws);
       } catch (error) {
         setStatus(`Import failed: ${error.message}`, 'error');
+        renderFileNotes(byId('quick-import-status'), nameWarnings, 'warnings', item => item.warnings.join('; '));
       } finally {
         setBusy(false);
       }

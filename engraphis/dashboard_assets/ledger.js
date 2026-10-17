@@ -4645,7 +4645,7 @@
       }
     }
     state.graphTypeColors = { ...state.graphTypeColors, [type]: color.toLowerCase() };
-    if (state.graphEngine) state.graphEngine.setTypeColor(type, color.toLowerCase());
+    if (state.graphEngine) state.graphEngine.setTypeColors(customGraphColors());
     syncGraphChoices();
     renderGraphLegend();
     if (persist) {
@@ -5373,7 +5373,7 @@
       heading.append(document.createTextNode(' '),
         node('span', `temporal-state${current ? ' current' : ''}`, current ? 'current' : future ? 'future' : 'past'));
     }
-    const ended = memory.valid_to ?? memory.expired_at;
+    const ended = memory.valid_to;
     const meta = node('dl', 'temporal-meta');
     [
       ['Valid time', `${temporalTime(memory.valid_from) || 'unrecorded'} — ${ended != null ? temporalTime(ended) || 'closed' : 'now'}`],
