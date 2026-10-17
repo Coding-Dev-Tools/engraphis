@@ -334,4 +334,3 @@ def test_create_memory_engine_honors_db_key_from_env(monkeypatch, tmp_path):
         eng.close()
     with pytest.raises(sqlite3.DatabaseError):
         sqlite3.connect(db).execute("SELECT * FROM memories").fetchone()
-
