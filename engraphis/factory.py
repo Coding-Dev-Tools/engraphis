@@ -163,6 +163,10 @@ def create_memory_engine(
 
         engine_cls = MemoryEngine
 
+    if connect is None:
+        from engraphis.backends.encrypted_db import connector_from_env
+
+        connect = connector_from_env()
     store = Store(db_path, connect=connect, read_only=read_only,
                   sqlite_durability=sqlite_durability)
     owned = []
