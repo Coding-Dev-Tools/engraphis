@@ -1547,7 +1547,7 @@ def analyze_memory_nodes(
             if len(title_flags) >= MAX_FLAGS:
                 break
             title_flags.append({
-                "id": f"{m_id}_title_vague_{vf.start}",
+                "id": f"{m_id}_vague_title_{vf.start}",
                 "node_id": m_id,
                 "field": "title",
                 "start": vf.start,

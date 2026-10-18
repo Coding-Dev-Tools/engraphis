@@ -100,7 +100,7 @@ def test_masked_title_ambiguity_affects_flags_quality_and_trace(title, expected,
     starts = []
     for flag in report["flags"]:
         assert flag["field"] == "title"
-        assert flag["id"] == f"memory_title_vague_{flag['start']}"
+        assert flag["id"] == f"memory_vague_title_{flag['start']}"
         assert flag["node_id"] == "memory"
         assert title[flag["start"]:flag["end"]] == flag["token"]
         assert "title" in flag["question"]
@@ -142,7 +142,7 @@ def test_old_content_flag_records_and_offsets_precede_new_title_flags():
                  "question": f"In memory '{title}': \"{token}\" is unbounded. What exact number, scope, or condition do you mean?"}
                 for token in ["everything", "all"]]
     assert report["flags"][:2] == expected
-    assert report["flags"][2]["id"] == "stable_title_vague_7"
+    assert report["flags"][2]["id"] == "stable_vague_title_7"
     assert report["nodes"][0]["word_count"] == 5
     assert report["nodes"][0]["title_word_count"] == 2
     assert report["nodes"][0]["flag_count"] == 3
@@ -187,3 +187,16 @@ def test_long_title_word_bounds_are_disclosed_without_changing_body_offsets(coun
     assert report["word_analysis_truncated_node_count"] == int(partial)
     assert report["analysis_truncated"] is partial
     assert report["score_breakdown"]["quality_points"] == (0 if partial else 30)
+
+
+def test_title_flag_ids_cannot_collide_with_another_nodes_content_id():
+    report = analyze_memory_nodes([
+        {"id": "a", "title": "Verify everything", "content": "A factual note."},
+        {"id": "a_title", "title": "Note", "content": "Review everything."},
+    ], include_trace=False)
+    ids = [flag["id"] for flag in report["flags"]]
+    assert len(ids) == len(set(ids)) == 2
+    assert ids == ["a_title_vague_7", "a_vague_title_7"]
+    assert report["flags"][0]["node_id"] == "a_title"
+    assert report["flags"][1]["node_id"] == "a"
+    assert report["flags"][1]["field"] == "title"
