@@ -204,3 +204,33 @@ def test_scope_or_object_alternatives_do_not_relabel_prior_action_list_commas(ta
     report = analyze_memory_nodes(nodes)
     assert not report["conflicts"]
     assert not any(item.get("action") == "supersede" for item in report["remediation_plan"])
+
+
+@pytest.mark.parametrize("tail", [
+    "which produces red or green outputs",
+    "when mode is red or blue",
+    "operators prefer red or green",
+])
+@pytest.mark.parametrize("target", ["build", "test"])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_unknown_clause_coordinators_do_not_relabel_prior_action_list_commas(tail, target, reverse):
+    nodes = _pair("Never build, test, " + tail + ".", "Must " + target + ".")
+    if reverse:
+        nodes.reverse()
+    report = analyze_memory_nodes(nodes)
+    assert not report["conflicts"]
+    assert not any(item.get("action") == "supersede" for item in report["remediation_plan"])
+
+
+@pytest.mark.parametrize("separator", [", or ", " or "])
+@pytest.mark.parametrize("target", ["build", "test"])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_explicit_leading_list_or_still_governs_known_actions_before_an_opaque_tail(separator, target, reverse):
+    nodes = _pair("Never build, test" + separator + "reviewers prefer red or green.",
+                  "Must " + target + ".")
+    if reverse:
+        nodes.reverse()
+    report = analyze_memory_nodes(nodes)
+    assert len(report["conflicts"]) == 1
+    assert report["conflicts"][0]["subject"] == target
+    assert report["conflicts"][0]["remedy"]["retire_node"] == "old"

@@ -1193,7 +1193,12 @@ def _coordinated_directive_phrases(
     # action-list separators; punctuation inside opaque resource tokens stays literal.
     # A conjunction after an object/scope stop belongs to that opaque tail;
     # it may block distribution, but cannot turn earlier commas into alternatives.
-    list_connectors = [*connectors, *tail_tokens] if tail_coordinates else connectors
+    list_connectors = list(connectors)
+    if tail_coordinates:
+        for word in tail_tokens:
+            if word not in {",", "and", "or"}:
+                break  # Later clause words and their coordinators remain opaque.
+            list_connectors.append(word)
     coordinator = next((word for word in reversed(list_connectors)
                         if word in {"and", "or"}), "and")
     connectors = [coordinator if word == "," else word for word in connectors]
