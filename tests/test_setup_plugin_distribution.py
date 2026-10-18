@@ -8,7 +8,7 @@ from urllib.parse import unquote, urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY = "Coding-Dev-Tools/engraphis"
-README_BENCHMARK_PIN = "48727765604e08346ffee135e4480140198db753"
+README_BENCHMARK_PIN = "fb04d4f5de90c1ff3ecd84b54a07aa67ba7417b3"
 README_LINK_PINS = (
     "522def372c45a26d46bc7a05829964ae0240f3a9",
     "522def372c45a26d46bc7a05829964ae0240f3a9",
@@ -86,7 +86,7 @@ def test_pypi_readme_has_only_absolute_repository_assets_and_links() -> None:
     ) in targets
     assert (
         f"https://raw.githubusercontent.com/{REPOSITORY}/{README_BENCHMARK_PIN}/"
-        "docs/images/context-efficiency-pr260-masked-axis-runtime-20261018-efa4a9c83a5b.svg"
+        "docs/images/context-efficiency-pr260-transport-scope-runtime-20261018-65821cf6bfee.svg"
     ) in targets
 
 
