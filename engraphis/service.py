@@ -13017,7 +13017,9 @@ class MemoryService:
                     "pass a smaller specification or audit selected memories."
                 )
         elif source_id:
-            if _authenticated_principal() is not None or self.allowed_workspaces is not None:
+            from engraphis.service_context import local_source_access_allowed
+            if (not local_source_access_allowed() or _authenticated_principal() is not None
+                    or self.allowed_workspaces is not None):
                 raise ValidationError("source_id file access requires the local operator; pass text instead")
             from engraphis.core.engine import _approved_local_index_roots
             clean_src = _clean_text(source_id, field="source_id", max_chars=500)
@@ -13254,6 +13256,29 @@ class MemoryService:
         report["analysis_truncated"] = report["truncated"]
         return report
 
+    def _spec_crawl_resolution_domain(self, record: Any) -> tuple[str, Optional[str], Optional[str]]:
+        """Visibility domain used to authorize an audit remediation's endpoints.
+
+        Broad-scope legacy records can retain a repository/session provenance id; those
+        ids do not narrow their visibility. Session-private records must instead match
+        their authoritative session's workspace and repository exactly.
+        """
+        if record.scope in (Scope.WORKSPACE, Scope.USER):
+            return record.workspace_id, None, None
+        if record.scope == Scope.SESSION:
+            session = self.store.get_session(record.session_id) if record.session_id else None
+            if (session is None or session["workspace_id"] != record.workspace_id
+                    or session.get("repo_id") != record.repo_id):
+                raise ValidationError("resolution memory has inconsistent session scope")
+            return record.workspace_id, record.repo_id, record.session_id
+        if record.scope == Scope.REPO and record.repo_id:
+            repo = self.store.conn.execute(
+                "SELECT workspace_id FROM repos WHERE id=?", (record.repo_id,),
+            ).fetchone()
+            if repo is not None and repo["workspace_id"] == record.workspace_id:
+                return record.workspace_id, record.repo_id, None
+        raise ValidationError("resolution memory has invalid scope")
+
     def spec_crawl_resolve(
         self,
         *,
@@ -13278,7 +13303,7 @@ class MemoryService:
         node_b_clean = _clean_text(node_b, field="node_b", max_chars=MAX_NAME_CHARS)
         if node_a_clean == node_b_clean:
             raise ValidationError("resolution requires two distinct memories")
-        wid, _ = self._require_scope(ws or "default", rp)
+        wid, rid = self._require_scope(ws or "default", rp)
         with self.store.write_transaction():
             visible_ids = self.store.visible_memory_ids(
                 [node_a_clean, node_b_clean], scope_filter,
@@ -13291,6 +13316,30 @@ class MemoryService:
                 records[mid] = rec
                 if mid not in visible_ids or not prompt_eligible(rec.provenance, rec.metadata):
                     raise ValidationError("resolution requires live, approved memories")
+            domains = {
+                mid: self._spec_crawl_resolution_domain(record)
+                for mid, record in records.items()
+            }
+
+            def contains(broad, narrow):
+                return (broad[0] == narrow[0]
+                        and (broad[1] is None or broad[1] == narrow[1])
+                        and (broad[2] is None or broad[2] == narrow[2]))
+
+            retained_domain, retired_domain = domains[node_a_clean], domains[node_b_clean]
+            requested_domain = (wid, rid, scope_filter.session_id)
+            if act == "supersede":
+                if not contains(requested_domain, retired_domain):
+                    raise ValidationError("retired memory is outside the requested mutation scope")
+                if not contains(retained_domain, retired_domain):
+                    raise ValidationError("retained memory must cover the retired memory's scope")
+            elif (not (contains(retained_domain, retired_domain)
+                       or contains(retired_domain, retained_domain))
+                  or not any(contains(requested_domain, domain) for domain in domains.values())):
+                raise ValidationError("link endpoints must share the requested mutation scope")
+            # A read-visible broad endpoint may explain the selected narrow policy, so
+            # this link spans the already-validated domains. Retirement remains bound
+            # to the requested repository; ancestor visibility never authorizes it.
             self.link(
                 node_a_clean, node_b_clean, workspace=ws or "default",
                 relation="supersedes" if act == "supersede" else "related_to",
@@ -13298,7 +13347,7 @@ class MemoryService:
                 _valid_from=records[node_a_clean].valid_from if act == "supersede" else None,
             )
             if act == "supersede":
-                self.retire(node_b_clean, workspace=ws or "default",
+                self.retire(node_b_clean, workspace=ws or "default", repo=rp,
                             reason="spec_crawl_resolve", actor="spec_crawl",
                             at=records[node_a_clean].valid_from)
 

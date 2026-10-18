@@ -1362,8 +1362,7 @@ def create_app() -> FastAPI:
     app.include_router(bounded_router)
 
 
-    @app.middleware("http")
-    async def _auth_gate(request: Request, call_next):
+    async def _authorize_request(request: Request, call_next):
         from engraphis.service import set_current_user
         from engraphis.service_context import bound_service
 
@@ -1432,6 +1431,18 @@ def create_app() -> FastAPI:
                 status_code=403,
             )
         return await call_next(request)
+
+    @app.middleware("http")
+    async def _auth_gate(request: Request, call_next):
+        from engraphis.service import _CURRENT_USER
+        from engraphis.service_context import http_transport_context
+
+        previous_user = _CURRENT_USER.get()
+        try:
+            with http_transport_context():
+                return await _authorize_request(request, call_next)
+        finally:
+            _CURRENT_USER.set(previous_user)
 
     # The dashboard has one interface; its assets are served from ``dashboard_assets``.
     if _V2_ASSETS.is_dir():

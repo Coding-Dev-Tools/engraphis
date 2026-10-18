@@ -213,6 +213,13 @@ an omitted mode means it was not recorded, and is not inferred from current defa
 | Quality | `engraphis_spec_crawl_memories` | Analyzes a bounded sample of active memory nodes for contradictions, stored-graph orphans, operational gaps, and health; explicitly reports truncation. |
 | Quality | `engraphis_spec_crawl_resolve` | Applies an explicitly requested link or confirmed supersession to selected memory nodes. |
 
+`engraphis_spec_crawl(source_id=...)` reads approved local specification files only through
+direct Python or stdio use. All HTTP transports, including authenticated dashboard MCP,
+accept submitted text or procedural memories instead. Spec-audit supersession may retain
+a broader policy while retiring a selected narrower policy, but cannot retire a broader
+ancestor or cross repository/session identities. Links require compatible scopes and at
+least one endpoint within the requested mutation scope.
+
 Classic `engraphis_start_session` accepts optional `resume_from_session_id` for the same explicit,
 same-owner, exact-workspace/repository handoff. Its `handoff_usage` reports the deterministic output
 limit; it is context accounting and does not measure provider billing or task-time savings.
