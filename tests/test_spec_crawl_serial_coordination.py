@@ -2,6 +2,10 @@
 from __future__ import annotations
 
 import copy
+import json
+from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
@@ -26,6 +30,8 @@ def _pair(left, right):
     ("Must build, test.", "Never test.", "test"),
     ("Must build, test, deploy.", "Never deploy.", "deploy"),
     ("Must build, and test.", "Never test.", "test"),
+    ("Never build, or test.", "Always build.", "build"),
+    ("Never build, or test.", "Always test.", "test"),
     ("Must build, test, deploy, and lint.", "Never lint.", "lint"),
     ("Never build, test, or deploy.", "Always test.", "test"),
     ("Never build, test or deploy.", "Always deploy.", "deploy"),
@@ -41,6 +47,8 @@ def _pair(left, right):
     ("Must build, test, and connect https://api.example/Finance.",
      "Never connect https://api.example/Finance.", "connect https://api.example/Finance"),
     ("Must build, always test.", "Never test.", "test"),
+    ("Must carefully build, thoroughly test, and safely deploy.",
+     "Never safely deploy.", "safely deploy"),
 ])
 @pytest.mark.parametrize("reverse", [False, True])
 def test_serial_actions_prove_only_entailed_dated_opposition(left, right, target, reverse):
@@ -62,6 +70,10 @@ def test_serial_actions_prove_only_entailed_dated_opposition(left, right, target
     ("Must build, test, or deploy.", "Never build."),
     ("Must build, test, or deploy.", "Never test."),
     ("Must build, test, or deploy.", "Never deploy."),
+    ("Must build, or test.", "Never build."),
+    ("Must build, or test.", "Never test."),
+    ("Never build, and test.", "Always build."),
+    ("Never build, and test.", "Always test."),
     ("Never build, test, and deploy.", "Always build."),
     ("Never build, test, and deploy.", "Always test."),
     ("Never build, test.", "Always build."),
@@ -70,6 +82,8 @@ def test_serial_actions_prove_only_entailed_dated_opposition(left, right, target
     ("Must build and test, or deploy.", "Never build."),
     ("Must build, test cases, or deploy.", "Never build."),
     ("Must build, test, or reviewers deploy artifacts.", "Never build."),
+    ("Must build, test or may deploy.", "Never build."),
+    ("Must build, test, or may deploy.", "Never build."),
     ("Must build, may test.", "Never test."),
     ("Must build, should test.", "Never test."),
     ("Must build, can test.", "Never test."),
@@ -85,6 +99,7 @@ def test_serial_actions_prove_only_entailed_dated_opposition(left, right, target
     ("Must build in staging, test, and deploy.", "Never test."),
     ("Must build, test; deploy.", "Never deploy."),
     ("Must build, test\ndeploy.", "Never deploy."),
+    ("Must, test and deploy.", "Never test."),
     ("Must build,, test.", "Never test."),
     ("Must build, test, and read /etc/Production.", "Never read /etc/production."),
     ("Must build, test, and connect https://api.example/Finance.",
@@ -144,3 +159,27 @@ def test_serial_long_literal_identity_and_original_standalone_keys_stay_exact():
     assert not analyze_memory_nodes(_pair(
         "Must build, test, and connect " + target + "one.",
         "Never connect " + target + "two."))["conflicts"]
+
+
+@pytest.mark.parametrize("governor,connector,polarity", [
+    ("Must", "and", "enforce"), ("Never", "or", "forbid"),
+])
+def test_near_limit_serial_lists_are_bounded_and_retain_last_action(governor, connector, polarity):
+    program = r'''
+import json,sys,time
+from engraphis.core.spec_crawl import _extract_node_directives
+text=sys.argv[1]+' '+'build, '*8000+'test, '+sys.argv[2]+' deploy.'
+start=time.perf_counter()
+directives=_extract_node_directives(text)
+assert directives['build']==directives['test']==directives['deploy']==sys.argv[3]
+assert all(len(key)<125 for key in directives)
+print(json.dumps({'chars':len(text),'seconds':time.perf_counter()-start}))
+'''
+    result = subprocess.run(
+        [sys.executable, "-c", program, governor, connector, polarity],
+        cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+    timings = json.loads(result.stdout)
+    assert 50000 < timings["chars"] < 64000
+    assert timings["seconds"] < 4
