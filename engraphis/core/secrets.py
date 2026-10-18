@@ -159,12 +159,16 @@ _URI_SCHEME_LETTERS = frozenset(
 _URI_SCHEME_CHARACTERS = _URI_SCHEME_LETTERS.union("0123456789+.-")
 
 
-def _credential_uri_spans(text: str) -> Iterable[tuple[int, int]]:
+def _credential_uri_spans(
+    text: str, *, _redacting: bool = False,
+) -> Iterable[tuple[int, int]]:
     """Recognize authenticated URLs with disjoint, bounded scans of their parts.
 
     Search separators forward, inspect each preceding scheme run once, and stop
-    authorities at their first delimiter. A consumed authority cannot supply the
-    scheme of a later match, even when malformed text repeats ``scheme://``.
+    authorities at their first delimiter. Detection keeps consumed authorities
+    opaque. Redaction resumes at a removed userinfo's end: its retained host may
+    expose another credential URI. Searches still advance monotonically, with
+    only that retained host/scheme prefix inspected again.
     """
     cursor = 0
     limit = len(text)
@@ -190,13 +194,16 @@ def _credential_uri_spans(text: str) -> Iterable[tuple[int, int]]:
         _username, colon, password = userinfo.partition(":")
         if (separator and colon and password
                 and not _REDACTION.fullmatch(password)):
-            yield begin, authority_start + len(userinfo) + 1
+            redaction_end = authority_start + len(userinfo) + 1
+            if _redacting:
+                cursor = redaction_end
+            yield begin, redaction_end
 
 
 def _redact_credential_uris(text: str) -> str:
     parts: list[str] = []
     start = 0
-    for begin, end in _credential_uri_spans(text):
+    for begin, end in _credential_uri_spans(text, _redacting=True):
         parts.extend((text[start:begin], _REDACTED))
         start = end
     parts.append(text[start:])
