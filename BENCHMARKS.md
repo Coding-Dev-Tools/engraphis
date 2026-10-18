@@ -94,14 +94,14 @@ interpretation and do not count as additional benchmark-quality gains.
 ### Public numeric evidence registry
 
 Every exact public aggregate retained below comes from the checked-in, public-safe
-[`offline-fixtures-pr260-release-review-followups-20261018.json`](docs/benchmark-evidence/offline-fixtures-pr260-release-review-followups-20261018.json) artifact. Its
+[`offline-fixtures-pr260-postreset-final-runtime-20261018-e35939493c3d.json`](docs/benchmark-evidence/offline-fixtures-pr260-postreset-final-runtime-20261018-e35939493c3d.json) artifact. Its
 SHA-256 is
-`0a49dd37f3880096f584cacd77ccaea3e678e330f766054e36a7d1595be53272`, also recorded in the
+`cd8b1e670d7792a1458aa7f6d41f46a7b802ca7c4bac5755ecb1dfa65748e246`, also recorded in the
 adjacent `.sha256` file. The artifact contains no raw questions, answers, prompts, customer data,
 or per-record content fingerprints.
 
 The fixture-suite digest is
-`53bc8f979d037e68fffffeb52aa2cf712162e17823b4816d7960530317ba7d4a`. The artifact defines
+`68cd25808d182b111b01cac73f24d1fb990635f0db5fdf4bd281f943e7f5582e`. The artifact defines
 the digest algorithm and records the SHA-256 of every suite and dataset file. Each evidence ID
 also binds its exact command through `sha256(UTF-8 exact command)`:
 
@@ -110,6 +110,14 @@ also binds its exact command through `sha256(UTF-8 exact command)`:
 | `offline-chunking` | `python -m eval.chunking_eval --dataset eval/datasets/longdoc.jsonl --k 5` | `c1c8196aa7e1568ef3844a9fb2d76b87f342c39108e32d6ad144b885a76143b8` |
 | `offline-performance` | `python -m eval.performance --dataset eval/datasets/codemem.jsonl --k 5 --iterations 10 --json` | `bbe4aca81e58d4830e50a8fc7729a1d15b71d97a6299bccd79432b7f119677d7` |
 | `offline-grounded` | `python -m eval.grounded` | `590442e51e3642c10489165759919dc86ffac62c182937330c153e7f8d5fc26f` |
+
+The source manifest covers every Python file under `engraphis/` and `eval/`, the two
+fixture datasets, and the official exporter. Each rerun must use a new artifact and chart
+basename because existing evidence is immutable. The registered artifact was produced with:
+
+```bash
+python -m scripts.export_offline_evidence --output docs/benchmark-evidence/offline-fixtures-pr260-postreset-final-runtime-20261018-e35939493c3d.json
+```
 
 External, model-dependent, latency, consolidation, and productivity numbers are not included in
 this offline registry unless a redacted immutable artifact with the same three bindings exists. Use
@@ -126,13 +134,13 @@ grounded checks in separate panels; provider billing and MCP transport are not m
 the SVG and matching PNG with:
 
 ```bash
-python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-pr260-release-review-followups-20261018.json --output docs/images/context-efficiency-pr260-release-review-followups-20261018.svg --png-output docs/images/context-efficiency-pr260-release-review-followups-20261018.png
+python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-pr260-postreset-final-runtime-20261018-e35939493c3d.json --output docs/images/context-efficiency-pr260-postreset-final-runtime-20261018-e35939493c3d.svg --png-output docs/images/context-efficiency-pr260-postreset-final-runtime-20261018-e35939493c3d.png
 ```
 
 The companion examples are also generated from that artifact with:
 
 ```bash
-python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-pr260-release-review-followups-20261018.json --output docs/images/evidence-backed-agent-examples-pr260-release-review-followups-20261018.svg --png-output docs/images/evidence-backed-agent-examples-pr260-release-review-followups-20261018.png
+python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-pr260-postreset-final-runtime-20261018-e35939493c3d.json --output docs/images/evidence-backed-agent-examples-pr260-postreset-final-runtime-20261018-e35939493c3d.svg --png-output docs/images/evidence-backed-agent-examples-pr260-postreset-final-runtime-20261018-e35939493c3d.png
 ```
 The historical-to-executable mapping is in
 [`docs/BENCHMARK_CHANGE_COVERAGE.md`](docs/BENCHMARK_CHANGE_COVERAGE.md).
