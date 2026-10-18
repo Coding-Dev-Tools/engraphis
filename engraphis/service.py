@@ -55,7 +55,10 @@ from engraphis.core.context import RegexTokenCounter
 from engraphis.core.evidence import make_exact_value_binding
 from engraphis.core.vector_repair import index_repair_identity
 from engraphis.core.ids import new_id as make_id
-from engraphis.core.source_paths import sensitive_path as _sensitive_source_path
+from engraphis.core.source_paths import (
+    read_local_source as _read_local_source,
+    sensitive_path as _sensitive_source_path,
+)
 from engraphis.core.savings import annotate_usage, normalize_release_version
 from engraphis.core.interfaces import (
     Edge, FactSpec, GraphLayer, MemoryRecord, MemoryType, Node, Scope, SearchFilter,
@@ -13036,10 +13039,7 @@ class MemoryService:
                     ".md", ".txt", ".rst", ".json", ".jsonl", ".yaml", ".yml", ".toml",
                 }:
                     raise ValidationError("source_id must be a text specification under an approved local root")
-                with path.open("rb") as source:
-                    payload = source.read(128_001)
-                if len(payload) > 128_000:
-                    raise ValidationError("source file exceeds 128000 bytes")
+                payload = _read_local_source(path, max_bytes=128_000)
                 content = _clean_text(payload.decode("utf-8"), field="text", max_chars=64_000)
                 _reject_secret_capture((("spec source", content),))
                 source_label = path.name
