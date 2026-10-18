@@ -94,14 +94,14 @@ interpretation and do not count as additional benchmark-quality gains.
 ### Public numeric evidence registry
 
 Every exact public aggregate retained below comes from the checked-in, public-safe
-[`offline-fixtures-pr260-serial-policy-runtime-20261018-201303c2a1a6.json`](docs/benchmark-evidence/offline-fixtures-pr260-serial-policy-runtime-20261018-201303c2a1a6.json) artifact. Its
+[`offline-fixtures-pr260-masked-axis-runtime-20261018-efa4a9c83a5b.json`](docs/benchmark-evidence/offline-fixtures-pr260-masked-axis-runtime-20261018-efa4a9c83a5b.json) artifact. Its
 SHA-256 is
-`e6581158665bcf0407a6b9315fa58558076400b2fc7f23ca0fee2a21f08cd544`, also recorded in the
+`e0a083a0f6636da034fcf36cd9a49605f6e681352a83cc8f0648efaae98a2acb`, also recorded in the
 adjacent `.sha256` file. The artifact contains no raw questions, answers, prompts, customer data,
 or per-record content fingerprints.
 
 The fixture-suite digest is
-`578132ce4dfde30a5617e059f18c25647893452f52c5e238dc2293c3d7c3b008`. The artifact defines
+`077aba53bf28984361c04a0ab4989feb48a7eb52de8d3131f38f2e48ebcc1b5b`. The artifact defines
 the digest algorithm and records the SHA-256 of every suite and dataset file. Each evidence ID
 also binds its exact command through `sha256(UTF-8 exact command)`:
 
@@ -115,11 +115,11 @@ The source manifest covers every Python file under `engraphis/` and `eval/`, the
 fixture datasets, and the official exporter. Each rerun must use a new artifact and chart
 basename because existing evidence is immutable. This run used Python 3.12.14 and NumPy 2.5.4;
 the charts were rendered with CairoSVG 2.9.1. Its 587-file manifest binds the Python
-producer. Runtime commit `201303c2a1a6df176a8f8771f580a0dca5b3fe42` also identifies
+producer. Runtime commit `efa4a9c83a5b438a8f0fa6c634a96e277bc79813` also identifies
 the CLI and Dashboard source outside that manifest. The registered artifact was produced with:
 
 ```bash
-python -m scripts.export_offline_evidence --output docs/benchmark-evidence/offline-fixtures-pr260-serial-policy-runtime-20261018-201303c2a1a6.json
+python -m scripts.export_offline_evidence --output docs/benchmark-evidence/offline-fixtures-pr260-masked-axis-runtime-20261018-efa4a9c83a5b.json
 ```
 
 External, model-dependent, latency, consolidation, and productivity numbers are not included in
@@ -137,13 +137,13 @@ grounded checks in separate panels; provider billing and MCP transport are not m
 the SVG and matching PNG with:
 
 ```bash
-python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-pr260-serial-policy-runtime-20261018-201303c2a1a6.json --output docs/images/context-efficiency-pr260-serial-policy-runtime-20261018-201303c2a1a6.svg --png-output docs/images/context-efficiency-pr260-serial-policy-runtime-20261018-201303c2a1a6.png
+python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-pr260-masked-axis-runtime-20261018-efa4a9c83a5b.json --output docs/images/context-efficiency-pr260-masked-axis-runtime-20261018-efa4a9c83a5b.svg --png-output docs/images/context-efficiency-pr260-masked-axis-runtime-20261018-efa4a9c83a5b.png
 ```
 
 The companion examples are also generated from that artifact with:
 
 ```bash
-python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-pr260-serial-policy-runtime-20261018-201303c2a1a6.json --output docs/images/evidence-backed-agent-examples-pr260-serial-policy-runtime-20261018-201303c2a1a6.svg --png-output docs/images/evidence-backed-agent-examples-pr260-serial-policy-runtime-20261018-201303c2a1a6.png
+python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-pr260-masked-axis-runtime-20261018-efa4a9c83a5b.json --output docs/images/evidence-backed-agent-examples-pr260-masked-axis-runtime-20261018-efa4a9c83a5b.svg --png-output docs/images/evidence-backed-agent-examples-pr260-masked-axis-runtime-20261018-efa4a9c83a5b.png
 ```
 The historical-to-executable mapping is in
 [`docs/BENCHMARK_CHANGE_COVERAGE.md`](docs/BENCHMARK_CHANGE_COVERAGE.md).
