@@ -13,7 +13,7 @@ from engraphis.core.schema import SCHEMA_VERSION
 
 
 ROOT = Path(__file__).resolve().parents[1]
-README_BENCHMARK_PIN = "5f94cd2a1f01c5627cb62104015d184ca9c30f01"
+README_BENCHMARK_PIN = "e28458501f73d8e4af5b148705c0e1a3f0a67604"
 README_HOSTED_PLANS_PIN = "522def372c45a26d46bc7a05829964ae0240f3a9"
 
 
@@ -137,7 +137,7 @@ def test_benchmark_text_alternatives_match_registered_fixture_boundary() -> None
     measurements = {run["id"]: run["result"] for run in registry["runs"]}
     payload = measurements["offline-performance"]
     readme = _read("README.md")
-    svg_text = _read("docs/images/context-efficiency.svg")
+    svg_text = _read("docs/images/context-efficiency-pr260-release-review-followups-20261018.svg")
     svg_root = ET.fromstring(svg_text)
     namespace = {"svg": "http://www.w3.org/2000/svg"}
     visible_labels = {"".join(node.itertext()).strip()
@@ -148,7 +148,7 @@ def test_benchmark_text_alternatives_match_registered_fixture_boundary() -> None
     assert description_node is not None
     description = " ".join("".join(description_node.itertext()).lower().split())
     image = re.search(
-        r'<img[^>]+context-efficiency\.svg[^>]+alt="([^"]+)"',
+        r'<img[^>]+context-efficiency-pr260-release-review-followups-20261018\.svg[^>]+alt="([^"]+)"',
         readme,
         flags=re.IGNORECASE,
     )
@@ -167,7 +167,7 @@ def test_benchmark_text_alternatives_match_registered_fixture_boundary() -> None
     assert hashlib.sha256(registry_bytes).hexdigest()[:12] in alternative
 
     benchmark_image = re.search(
-        r'<img[^>]+context-efficiency\.svg[^>]*>', readme, flags=re.IGNORECASE,
+        r'<img[^>]+context-efficiency-pr260-release-review-followups-20261018\.svg[^>]*>', readme, flags=re.IGNORECASE,
     )
     assert benchmark_image is not None
     benchmark_paragraph_end = readme.find("</p>", benchmark_image.end())
