@@ -183,3 +183,24 @@ print(json.dumps({'chars':len(text),'seconds':time.perf_counter()-start}))
     timings = json.loads(result.stdout)
     assert 50000 < timings["chars"] < 64000
     assert timings["seconds"] < 4
+
+
+@pytest.mark.parametrize("tail,prefix", [
+    ("within blue or green", "within blue"),
+    ("within blue, or green", "within blue"),
+    ("using blue or green", "using blue"),
+    ("via blue or green", "via blue"),
+    ("from blue or green", "from blue"),
+    ("without approval or waiver", "without approval"),
+    ("blue or green", "blue"),
+])
+@pytest.mark.parametrize("first", [False, True])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_scope_or_object_alternatives_do_not_relabel_prior_action_list_commas(tail, prefix, first, reverse):
+    opposing = "build" if first else "test " + prefix
+    nodes = _pair("Never build, test " + tail + ".", "Must " + opposing + ".")
+    if reverse:
+        nodes.reverse()
+    report = analyze_memory_nodes(nodes)
+    assert not report["conflicts"]
+    assert not any(item.get("action") == "supersede" for item in report["remediation_plan"])
