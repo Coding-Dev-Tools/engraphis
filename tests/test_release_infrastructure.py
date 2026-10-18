@@ -453,7 +453,7 @@ def test_ci_linter_is_bounded_to_the_verified_release_series():
     # is not stable across minor releases -- 0.16 widened it from 59 rules to 413, which
     # would have turned `ruff check .` red on unchanged code. Pinning `select` explicitly
     # is what actually bounds CI, so the bound and the rule set are asserted together.
-    assert pyproject.count('"ruff>=0.15.22,<0.17"') == 2
+    assert pyproject.count('"ruff>=0.15.22,<0.18"') == 2
     assert 'select = ["E4", "E7", "E9", "F"]' in pyproject
 
 
@@ -538,7 +538,7 @@ def test_primary_github_release_targets_repository_without_checkout():
 def test_public_capability_and_support_docs_match_the_shipped_tree():
     server = _text("engraphis/mcp_server.py")
     tools = re.findall(r'@mcp\.tool\(\s*name="(engraphis_[^"]+)"', server)
-    assert len(tools) == len(set(tools)) == 39
+    assert len(tools) == len(set(tools)) == 43
 
     readme = _text("README.md")
     licensing = _text("docs/LICENSING.md")
@@ -551,7 +551,7 @@ def test_public_capability_and_support_docs_match_the_shipped_tree():
         assert "28-tool" not in content
         assert "(28 of them)" not in content
     assert "Smart MCP (9 tools)" in architecture
-    assert "Classic MCP (39 tools)" in architecture
+    assert "Classic MCP (43 tools)" in architecture
     assert "default Smart MCP surface has nine" in skill
     assert "Classic direct-tool guide" in skill
     assert "engraphis-mcp-classic" in skill
@@ -595,9 +595,11 @@ def test_public_capability_and_support_docs_match_the_shipped_tree():
             "engraphis/dashboard_assets/index.html",
             "engraphis/dashboard_assets/ledger.css",
             "engraphis/dashboard_assets/ledger.js",
-            "engraphis/classic_assets/index.html",
-            "engraphis/classic_assets/dashboard.js",
-            "engraphis/static/dashboard.js", "engraphis/static/index.html",
+            # First-party Ledger scripts split out of ledger.js.
+            "engraphis/dashboard_assets/action-dialog.js",
+            "engraphis/dashboard_assets/graph-explorer.js",
+            "engraphis/dashboard_assets/import-sources.js",
+            "engraphis/dashboard_assets/markdown.js",
         )
     ]
     public_paths.extend((ROOT / "docs").rglob("*.md"))
@@ -631,7 +633,7 @@ def test_public_capability_and_support_docs_match_the_shipped_tree():
     )
     assert re.search(
         r'src="https://raw\.githubusercontent\.com/Coding-Dev-Tools/engraphis/[0-9a-f]{40}/'
-        r'docs/images/context-efficiency\.svg"',
+        r'docs/images/context-efficiency-pr260-nested-uri-redaction-runtime-20261018-e2ebfb06550f\.svg"',
         readme,
     )
     assert "official hosted service" in licensing

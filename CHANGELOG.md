@@ -5,6 +5,52 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+- The dashboard has one interface. Every capability of the former Classic dashboard now lives
+  in Ledger, and `/classic` redirects to it. The `engraphis/classic_assets/` and duplicate
+  `engraphis/static/` asset trees, the dashboard switcher and the bundled Marked and DOMPurify
+  copies are removed; memory Markdown is rendered by a small DOM-only renderer that never
+  parses HTML.
+- Ledger adds: Markdown rendering with an editor Preview toggle, an unsaved-changes guard and
+  Ctrl/Cmd+S; word-level diffs between saved versions; each memory's audit trail; drag and
+  Alt+Arrow ordering in the Library; Quick import (drag-and-drop files and folders, or a
+  folder path on the machine running Engraphis) and a Code and database sources dialog
+  (repository indexing and PostgreSQL schema import; the connection string is never stored);
+  retrieval scores in Ask; bi-temporal Timeline cards with a superseded-only filter, which
+  replaces the separate Supersessions tab; inline receipt-chain status and packed-context
+  accounting; Home memory health and the selected project's last-session handoff; workspace
+  Describe, Merge, Export and Open library actions; plan status, automation run status and
+  on-demand proposals; connection-lost and semantic-search-off banners; graph colour modes,
+  palettes, editable entity-type colours, a legend, an entity and relation explorer and canvas
+  keyboard navigation; and Solarized and Sepia themes.
+- Confirmations and prompts use one accessible in-page dialog instead of the browser's native
+  boxes. Deleting a workspace now says plainly that it is a permanent hard delete, and the
+  copy and import summaries report the counts the API actually returns.
+- `GET /api/proactive` accepts an optional `repo` and returns that project's last-session
+  handoff, or `null`; before, the dashboard could only ever receive an empty handoff.
+- The dashboard CSP release gate (`scripts/externalize_dashboard_assets.py`) now checks the
+  Ledger page and every first-party dashboard script, and rejects HTML string injection in
+  all its forms (`+=`, bracket and object-literal property writes, `document.write`,
+  `DOMParser`, `srcdoc`) and inline style or handler attributes in any letter case.
+- Security: without `ENGRAPHIS_API_TOKEN`, the dashboard API refuses requests that a browser
+  marks as started by another website unless they carry the dashboard's session header or an
+  `Authorization` header, both of which need a CORS preflight. Another website can no longer
+  make a visitor's browser import files, start a sync or hosted upload, or change LLM settings
+  on a zero-config loopback install, even when `ENGRAPHIS_CORS_ORIGINS` is `*`. Without a
+  token the dashboard API, its `/dashboard/review` routes and the read-only graph server also
+  answer only exactly `localhost`, IP addresses, the bind host, the `ENGRAPHIS_DASHBOARD_URL`
+  host and the new `ENGRAPHIS_ALLOWED_HOSTS` names, so DNS rebinding (a website pointing its
+  own name at 127.0.0.1) cannot reach them either. The Markdown renderer is bounded (linear scans, an index
+  of backtick runs, capped tables and element counts), so crafted memory content cannot freeze
+  the page used to review it. Dialogs drop bidirectional control
+  characters from untrusted names, and an invalid timestamp reads as unknown instead of
+  breaking the Timeline and Why panels.
+- Fixes: Secure erase from the dashboard sends the confirmation the service requires (it
+  always failed before); a failed d3 download is retried by Reload, and a stalled graph
+  download no longer blocks the next attempt; the Every-node view applies the same Unlinked
+  nodes and Minimum links rules as the overview; entity-type colours follow the active theme;
+  leaving the editor while a save is in flight asks first, and a save that fails after you
+  leave is still reported.
+
 ## [1.7.9] - 2026-09-29
 
 - Classify local `engraphis_decide` command advice conservatively. Chained, piped,

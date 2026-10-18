@@ -934,9 +934,14 @@ class RecallEngine:
         }
         mark_phase("selection")
 
-        if reinforce and not requested_historical:
-            for c in final:
-                self.store.reinforce(c.id, boost=scoring.INTERACTION_BOOST["recall"])
+        if reinforce and not requested_historical and final:
+            if hasattr(self.store, "write_transaction"):
+                with self.store.write_transaction():
+                    for c in final:
+                        self.store.reinforce(c.id, boost=scoring.INTERACTION_BOOST["recall"])
+            else:
+                for c in final:
+                    self.store.reinforce(c.id, boost=scoring.INTERACTION_BOOST["recall"])
         mark_phase("reinforcement")
 
         # ``Candidate.score`` is deliberately query-relative: its retrieval arms are

@@ -5,10 +5,10 @@ import argparse
 from pathlib import Path
 from string import Template
 
-from scripts.render_benchmark_report import _integer, _number, _validate_rate, load_report_snapshot
+from scripts.render_benchmark_report import _integer, _number, _validate_rate, load_report_snapshot, render_png
 
 
-def render(source: Path, output: Path) -> None:
+def render(source: Path, output: Path) -> str:
     selected, raw = load_report_snapshot(source)
     runs = {row["id"]: row["result"] for row in raw["runs"]}
     chunking, grounded = runs["offline-chunking"], runs["offline-grounded"]
@@ -28,6 +28,7 @@ def render(source: Path, output: Path) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", encoding="utf-8", newline="\n") as handle:
         handle.write(template.substitute(values))
+    return values["artifact_sha256"]
 
 
 def main(argv=None) -> int:
@@ -37,13 +38,9 @@ def main(argv=None) -> int:
     parser.add_argument("--png-output", type=Path,
                         help="optional PNG export path (requires CairoSVG)")
     args = parser.parse_args(argv)
-    render(args.report, args.output)
+    artifact_sha256 = render(args.report, args.output)
     if args.png_output:
-        try:
-            import cairosvg
-        except ImportError as exc:
-            raise SystemExit("--png-output requires CairoSVG; install it with `pip install cairosvg`") from exc
-        cairosvg.svg2png(url=str(args.output), write_to=str(args.png_output))
+        render_png(args.output.read_text(encoding="utf-8"), args.png_output, artifact_sha256)
     return 0
 
 

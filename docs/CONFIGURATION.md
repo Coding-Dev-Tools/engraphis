@@ -51,6 +51,8 @@ control-plane, relay, compute, and worker implementations are private services.
 | `ENGRAPHIS_LLM_AUTO_EXTRACT` | `0` | Opt in to switching the running engine to `llm_structured` after a successful live connection test; the dashboard's extraction Off button persists `0`, and its On button restores `1` |
 | `ENGRAPHIS_FORWARDED_ALLOW_IPS` | *(none)* | Proxies trusted for forwarded client/TLS headers (`*` only when the service is reachable exclusively through that proxy) |
 | `ENGRAPHIS_LOCAL_TRUSTED_PEERS` | *(none)* | Exact peers/CIDRs treated as local without forwarding headers; use only for trusted Docker/LAN peers, never public deployments |
+| `ENGRAPHIS_DASHBOARD_URL` | Not set | The exact URL clients use to reach this dashboard. Its host name is accepted by the `/mcp` DNS-rebinding guard and, without an API token, by the dashboard API |
+| `ENGRAPHIS_ALLOWED_HOSTS` | *(none)* | Comma-separated extra host names (ports ignored) that the token-free dashboard API and read-only graph server answer. Without a token they otherwise accept only exactly `localhost`, IP addresses, the bind host and the `ENGRAPHIS_DASHBOARD_URL` host, which keeps DNS-rebinding websites out; with a token every name works |
 | `ENGRAPHIS_UPDATE_CACHE` | `86400` | Update-check cache TTL in seconds, bounded to `1..31622400`; this is never a cache-file path |
 | `ENGRAPHIS_UPDATE_CHECK` | Off | Opt-in release reminder surfaced in the dashboard, server startup log, and MCP. Update checks run only when this is set to an affirmative value; `0` keeps them off. |
 | `ENGRAPHIS_UPDATE_URL` | Not set | Overrides the release-check source URL; the outbound client accepts HTTPS and rejects private/reserved destinations. |
@@ -60,7 +62,7 @@ control-plane, relay, compute, and worker implementations are private services.
 | `ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL` | Not set | Bootstrap-only rotating hosted credential; after first use the owner-only cloud session replacement takes precedence |
 | `ENGRAPHIS_CLOUD_TOKEN_SUBJECT` | `member` | Subject fixed during hosted bootstrap (`device` or `member`); set explicitly with an environment-only refresh credential |
 | `ENGRAPHIS_CLOUD_ACCESS_TOKEN` | Not set | Optional short-lived access token for ephemeral jobs |
-| `ENGRAPHIS_MANAGED_COMPUTE_CONSENT` | *(unset)* | Deny-only operator override: `0` pauses readable managed processing. A truthy value cannot grant approval. Each workspace requires explicit confirmation in Manage → Settings; encrypted sync is separate |
+| `ENGRAPHIS_MANAGED_COMPUTE_CONSENT` | *(unset)* | Deny-only operator override: `0` pauses readable managed processing. A truthy value cannot grant approval. Each workspace requires explicit confirmation in Settings → Preferences; encrypted sync is separate |
 
 Managed Jev is currently `not_yet_available` pending release acceptance and
 service-capacity qualification; client configuration does not enable it. After

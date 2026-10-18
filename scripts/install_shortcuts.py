@@ -32,7 +32,7 @@ _BAT_OWNER_LINE = f"REM Engraphis-Managed: {_OWNER_ID}"
 
 
 def _icon_path(base: str) -> str:
-    return str(Path(base) / "engraphis" / "static" / "engraphis.ico")
+    return str(Path(base) / "engraphis" / "dashboard_assets" / "engraphis.ico")
 
 
 def _validated_icon_path(value: object) -> str:

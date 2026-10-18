@@ -421,11 +421,15 @@ def _is_embedder_mismatch(exc) -> bool:
 def _keyword_search(ws, q, limit=20, *, as_of: Optional[float] = None,
                     valid_at: Optional[float] = None,
                     known_at: Optional[float] = None,
-                    repo: Optional[str] = None, session_id: Optional[str] = None):
+                    repo: Optional[str] = None, session_id: Optional[str] = None,
+                    include_invalid: bool = False, closed_only: bool = False):
     """Non-semantic fallback: match memories by keyword (title/content LIKE) so the
     Recall/Why/Timeline tabs still return results when the embedder is unavailable."""
     import json as _json
     import sqlite3 as _sql
+    terms = (q or "").split()[:6]
+    if not terms:
+        return []
     current_service = service()
     route = current_service.resolve_workspace(ws, repo=repo, session_id=session_id)
     ws, repo = route["workspace"], route["repo"]
@@ -454,16 +458,20 @@ def _keyword_search(ws, q, limit=20, *, as_of: Optional[float] = None,
         sql = ("SELECT id, scope, mtype, title, content, summary, pinned, importance, "
                "valid_from, valid_to, valid_to_recorded_at, ingested_at, expired_at, "
                "subject_key, claim_kind, provenance, metadata FROM memories "
-               "WHERE workspace_id=? "
-               "AND (valid_from IS NULL OR valid_from<=?) "
-               "AND (valid_to IS NULL OR ?<valid_to "
-               "OR (valid_to_recorded_at IS NOT NULL AND ?<valid_to_recorded_at)) "
-               "AND (ingested_at IS NULL OR ingested_at<=?) "
-               "AND (expired_at IS NULL OR ?<expired_at)")
-        args = [
-            row["id"], world_anchor, world_anchor, system_anchor,
-            system_anchor, system_anchor,
-        ]
+               "WHERE workspace_id=?")
+        args = [row["id"]]
+        if not include_invalid:
+            sql += (" AND (valid_from IS NULL OR valid_from<=?) "
+                    "AND (valid_to IS NULL OR ?<valid_to "
+                    "OR (valid_to_recorded_at IS NOT NULL AND ?<valid_to_recorded_at))")
+            args.extend([world_anchor, world_anchor, system_anchor])
+        sql += (" AND (ingested_at IS NULL OR ingested_at<=?) "
+                "AND (expired_at IS NULL OR ?<expired_at)")
+        args.extend([system_anchor, system_anchor])
+        if closed_only:
+            sql += (" AND valid_to IS NOT NULL AND valid_to<=? "
+                    "AND (valid_to_recorded_at IS NULL OR valid_to_recorded_at<=?)")
+            args.extend([world_anchor, system_anchor])
         if session_id:
             sql += " AND (scope IN ('workspace','user') OR (scope='session' AND session_id=?)"
             args.append(session_id)
@@ -476,11 +484,9 @@ def _keyword_search(ws, q, limit=20, *, as_of: Optional[float] = None,
             args.append(rid)
         else:
             sql += " AND COALESCE(scope, 'workspace')!='session'"
-        terms = [t for t in (q or "").split() if len(t) > 2][:6]
-        if terms:
-            sql += " AND (" + " OR ".join(["title LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\'" for _ in terms]) + ")"
-            for t in terms:
-                args += ["%" + _escape_like(t) + "%", "%" + _escape_like(t) + "%"]
+        sql += " AND (" + " OR ".join(["title LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\'" for _ in terms]) + ")"
+        for t in terms:
+            args += ["%" + _escape_like(t) + "%", "%" + _escape_like(t) + "%"]
         sql += " ORDER BY COALESCE(last_access, valid_from) DESC"
         rows = conn.execute(sql, args).fetchall()
     except _sql.Error as exc:
@@ -593,7 +599,7 @@ def build():
 
 
 @router.get("/bootstrap")
-def bootstrap():
+def bootstrap(include_stats: bool = True):
     from engraphis import __version__
     lic = get_license()
     current_service = service()
@@ -607,7 +613,9 @@ def bootstrap():
             wss,
             key=lambda item: (int(item.get("memories") or 0), str(item.get("name") or "")),
         ).get("name")
-    if current_service.allowed_workspaces is not None and not wss:
+    if not include_stats:
+        bootstrap_stats = None
+    elif current_service.allowed_workspaces is not None and not wss:
         # A bound deployment must never fall back to a global aggregate when its
         # allow-list has no visible workspace.  ``stats()`` correctly rejects that
         # request for tenant isolation, but bootstrap is also the dashboard's empty
@@ -898,7 +906,7 @@ def llm_test():
         _record_llm_test({"ok": False})
         return _public_llm_test_result(
             {"ok": False},
-            error=("No API key configured. Set ENGRAPHIS_LLM_API_KEY in your .env "
+            error=("No API key configured. Set ENGRAPHIS_LLM_API_KEY in your owner-private ~/.engraphis/config.env "
                    "and restart."),
         )
     try:
@@ -1226,6 +1234,7 @@ async def _import_uploaded_files(
         MAX_IMPORT_FILES,
         MAX_IMPORT_RESOURCE_BYTES,
         MAX_IMPORT_TOTAL_BYTES,
+        _skip_import_path,
     )
 
     if len(files) > MAX_IMPORT_FILES:
@@ -1235,11 +1244,30 @@ async def _import_uploaded_files(
     payload = []
     total = 0
     for uploaded in files:
+        name = getattr(uploaded, "filename", "") or "untitled"
+        declared_size = getattr(uploaded, "size", None)
+        if declared_size is not None and (type(declared_size) is not int or declared_size < 0):
+            raise HTTPException(status_code=422, detail={"error": "invalid upload size"})
+        remaining = MAX_IMPORT_TOTAL_BYTES - total
+        if declared_size is not None and declared_size > MAX_IMPORT_RESOURCE_BYTES:
+            raise HTTPException(status_code=413, detail={"error": f"{name} is too large"})
+        if declared_size is not None and declared_size > remaining:
+            raise HTTPException(status_code=413, detail={
+                "error": f"upload batch exceeds {MAX_IMPORT_TOTAL_BYTES} bytes"
+            })
+        if isinstance(name, str) and _skip_import_path(name):
+            if declared_size is None:
+                raise HTTPException(status_code=422, detail={"error": "upload size is required"})
+            # Multipart parsing has already spooled these bytes; skipping reads must
+            # still account for the declared resource cost.
+            total += declared_size
+            # Preserve the service's scanned/skipped report without reading bytes.
+            payload.append({"name": name, "data": b""})
+            continue
         if not callable(getattr(uploaded, "read", None)):
             raise HTTPException(status_code=422, detail={
                 "error": "files must contain uploads",
             })
-        remaining = MAX_IMPORT_TOTAL_BYTES - total
         raw = await uploaded.read(
             min(MAX_IMPORT_RESOURCE_BYTES, max(0, remaining)) + 1
         )
@@ -1251,9 +1279,9 @@ async def _import_uploaded_files(
             raise HTTPException(status_code=413, detail={
                 "error": f"upload batch exceeds {MAX_IMPORT_TOTAL_BYTES} bytes"
             })
-        total += len(raw)
+        total += max(len(raw), declared_size or 0)
         payload.append({
-            "name": getattr(uploaded, "filename", "") or "untitled",
+            "name": name,
             "data": raw,
         })
     return await run_in_threadpool(
@@ -1852,10 +1880,10 @@ def why(q: str = Query(..., min_length=1, max_length=10_000),
 @router.get("/timeline")
 def timeline(q: str = Query(..., min_length=1, max_length=10_000),
              workspace: Optional[str] = None,
-             limit: int = Query(default=20, ge=1, le=100)):
+             limit: int = Query(default=20, ge=1, le=100), closed_only: bool = False):
     ws = workspace or _default_ws()
     try:
-        out = service().timeline(q, workspace=ws, limit=limit)
+        out = service().timeline(q, workspace=ws, limit=limit, closed_only=closed_only)
     except WorkspaceBindingError:
         logger.info("dashboard timeline request rejected by workspace binding")
         raise HTTPException(status_code=403, detail={
@@ -1871,7 +1899,9 @@ def timeline(q: str = Query(..., min_length=1, max_length=10_000),
                 raise _invalid_request() from None
             logger.error("dashboard timeline failed (%s)", type(exc).__name__)
             raise HTTPException(status_code=500, detail={"error": "internal server error"})
-        mems = _keyword_search(ws, q, limit)
+        mems = _keyword_search(ws, q, limit, include_invalid=True, closed_only=closed_only)
+        mems.sort(key=lambda record: record["valid_from"] if record.get("valid_from") is not None
+                  else record.get("ingested_at") or 0.0)
         return {"query": q, "workspace": ws, "history": mems, "mode": "keyword",
                 "note": "Keyword match — install sentence-transformers for semantic search."}
     return {"query": q, "workspace": ws, "mode": "semantic",
@@ -1887,12 +1917,15 @@ def review_inbox(workspace: Optional[str] = None, repo: Optional[str] = None,
 
 @router.get("/proactive")
 def proactive(workspace: Optional[str] = None,
-              k: int = Query(default=10, ge=1, le=50)):
+              k: int = Query(default=10, ge=1, le=50),
+              repo: Optional[str] = Query(default=None, max_length=200)):
+    """Queryless agenda. The last-session handoff is recorded per repository, so it is
+    only populated when ``repo`` names one; otherwise ``handoff`` is ``null``."""
     ws = workspace or _default_ws()
-    out = _run(service().recall_proactive, workspace=ws, k=k)
+    out = _run(service().recall_proactive, workspace=ws, repo=repo or None, k=k)
     mems = out.get("memories") or out.get("results") or []
     return {"workspace": ws, "memories": [_mem(m) for m in mems],
-            "handoff": out.get("handoff") or out.get("last_session")}
+            "handoff": out.get("handoff") or out.get("last_session") or None}
 
 
 class _ProactiveContextReq(BaseModel):
@@ -2737,7 +2770,10 @@ def graph_scene(workspace: Optional[str] = None, level: str = "overview",
             )
             return without_code_overlay("code_overlay_failed")
 
-    return _run(run_scene)
+    # Scenes already contain JSON primitives. Avoid FastAPI's recursive generic
+    # encoder walking every node/edge before Starlette serializes them again.
+    from fastapi.responses import JSONResponse
+    return JSONResponse(_run(run_scene))
 
 
 @router.get("/graph/suggest")
@@ -2863,6 +2899,111 @@ def graph_index_cancel(job_id: str, req: _GraphIndexCancelReq):
     return _run(
         service().cancel_graph_index_job, job_id, workspace=req.workspace
     )
+
+
+# ── spec / prompt crawl (studio.prompt style) ──────────────────────────────
+class _SpecCrawlReq(BaseModel):
+    text: Optional[str] = Field(default=None, max_length=64_000)
+    workspace: Optional[str] = None
+    repo: Optional[str] = None
+    session_id: Optional[str] = None
+    source_id: None = None
+    crawl_procedural: StrictBool = False
+    trace_claims: StrictBool = True
+    include_trace: StrictBool = True
+
+
+@router.post("/spec/crawl")
+def spec_crawl(req: _SpecCrawlReq):
+    """Crawl a spec or prompt, returning radar coverage, word kinds, links, flags, and replay trace."""
+    ws = req.workspace if req.workspace is not None or req.repo or req.session_id else _default_ws()
+    return _run(
+        service().spec_crawl,
+        req.text,
+        workspace=ws,
+        repo=req.repo,
+        session_id=req.session_id,
+        crawl_procedural=req.crawl_procedural,
+        trace_claims=req.trace_claims,
+        include_trace=req.include_trace,
+    )
+
+
+class _SpecCrawlAnswerReq(BaseModel):
+    flag: dict
+    answer: str = Field(min_length=1, max_length=10_000)
+    spec_text: str = Field(min_length=1, max_length=64_000)
+    workspace: Optional[str] = None
+    repo: Optional[str] = None
+    session_id: Optional[str] = None
+    save_as_memory: StrictBool = False
+
+
+@router.post("/spec/crawl/answer")
+def spec_crawl_answer(req: _SpecCrawlAnswerReq):
+    """Apply a human clarification to an ambiguous spec flag and optionally record it as procedural memory."""
+    ws = req.workspace if req.workspace is not None or req.repo or req.session_id else _default_ws()
+    return _run(
+        service().spec_crawl_answer,
+        req.flag,
+        req.answer,
+        spec_text=req.spec_text,
+        workspace=ws,
+        repo=req.repo,
+        session_id=req.session_id,
+        save_as_memory=req.save_as_memory,
+    )
+
+
+class _SpecCrawlMemoriesReq(BaseModel):
+    workspace: Optional[str] = None
+    repo: Optional[str] = None
+    session_id: Optional[str] = None
+    memory_ids: Optional[list[str]] = Field(default=None, max_length=150)
+    mtypes: Optional[list[str]] = Field(default=None, max_length=4)
+    include_trace: StrictBool = True
+
+
+@router.post("/spec/crawl/memories")
+def spec_crawl_memories(req: _SpecCrawlMemoriesReq):
+    """Analyze multiple live memory nodes for contradictions, orphans, policy gaps, and cluster health."""
+    ws = req.workspace if req.workspace is not None or req.repo or req.session_id else _default_ws()
+    return _run(
+        service().spec_crawl_memories,
+        workspace=ws,
+        repo=req.repo,
+        session_id=req.session_id,
+        memory_ids=req.memory_ids,
+        mtypes=req.mtypes,
+        include_trace=req.include_trace,
+    )
+
+
+class _SpecCrawlResolveReq(BaseModel):
+    action: str = Field(min_length=1, max_length=64)
+    node_a: str = Field(min_length=1, max_length=256)
+    node_b: str = Field(min_length=1, max_length=256)
+    workspace: Optional[str] = None
+    repo: Optional[str] = None
+    session_id: Optional[str] = None
+    confirmed: StrictBool = False
+
+
+@router.post("/spec/crawl/memories/resolve")
+def spec_crawl_resolve(req: _SpecCrawlResolveReq):
+    """Execute remediation on memory cluster audit: supersede older conflicting node or link orphan."""
+    ws = req.workspace if req.workspace is not None or req.repo or req.session_id else _default_ws()
+    return _run(
+        service().spec_crawl_resolve,
+        action=req.action,
+        node_a=req.node_a,
+        node_b=req.node_b,
+        workspace=ws,
+        repo=req.repo,
+        session_id=req.session_id,
+        confirmed=req.confirmed,
+    )
+
 
 
 class _CodeIndexReq(BaseModel):
