@@ -13160,10 +13160,9 @@ class MemoryService:
 
         mem_id: Optional[str] = None
         if save_as_memory:
-            token = flag.get("token", "rule")
             rem_res = self.remember(
                 resolved_sentence,
-                title=f"Spec Clarification: {token}",
+                title="Spec Clarification",
                 workspace=workspace,
                 repo=repo,
                 session_id=session_id,
