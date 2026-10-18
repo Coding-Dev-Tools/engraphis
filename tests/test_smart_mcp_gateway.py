@@ -46,7 +46,8 @@ CLASSIC_TOOL_NAMES = {
     "engraphis_ingest", "engraphis_consolidate", "engraphis_ingest_postgres_schema",
     "engraphis_receipts", "engraphis_context_savings", "engraphis_verify_receipts",
     "engraphis_export_receipts", "engraphis_check_update", "engraphis_link_symbol",
-    "engraphis_decide",
+    "engraphis_decide", "engraphis_spec_crawl", "engraphis_spec_crawl_answer",
+    "engraphis_spec_crawl_memories", "engraphis_spec_crawl_resolve",
 }
 
 
@@ -147,7 +148,7 @@ def test_classic_mcp_retains_the_named_tool_compatibility_surface(monkeypatch):
 
     classic = _tools(server, "classic_mcp")
     assert set(classic) == CLASSIC_TOOL_NAMES
-    assert len(classic) == 39
+    assert len(classic) == 43
     # These aliases carry distinct historical defaults and must not disappear.
     assert {"engraphis_answer", "engraphis_forget"} <= set(classic)
 

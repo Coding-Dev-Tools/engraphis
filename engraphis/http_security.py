@@ -19,13 +19,13 @@ Design notes
 * **Two policies, chosen by content type.** The JSON API and every error short-circuit
   get the strict :data:`DEFAULT_CSP` — they render no markup, so an ``unsafe-inline``
   allowance would buy an attacker nothing there. The dashboard assets are fully
-  externalized (``dashboard.js``, ``dashboard.css``, vendored libs loaded via
-  ``<script src>`` / ``<link rel="stylesheet">``), with event handlers delegated
-  through ``data-on*`` attributes — so ``text/html`` responses get
+  externalized (``ledger.js``, ``ledger.css`` and the vendored graph libraries, loaded
+  via ``<script src>`` / ``<link rel="stylesheet">``) and build the DOM with event
+  listeners rather than inline handlers — so ``text/html`` responses get
   :data:`DASHBOARD_CSP`, which is identical to :data:`DEFAULT_CSP` (no
-  ``unsafe-inline``). DOMPurify remains the sanitization boundary for ingested
-  memory content. An explicit ``ENGRAPHIS_CSP`` override still wins wholesale,
-  for both.
+  ``unsafe-inline``). Ingested memory content is rendered by the dashboard's DOM-only
+  Markdown renderer (``markdown.js``), which never parses HTML. An explicit
+  ``ENGRAPHIS_CSP`` override still wins wholesale, for both.
 """
 from __future__ import annotations
 
@@ -41,7 +41,8 @@ logger = logging.getLogger("engraphis.http")
 #: empty string to omit the header entirely (e.g. when a fronting proxy sets its own).
 DEFAULT_CSP = "; ".join([
     "default-src 'self'",
-    # Vendored d3/marked/DOMPurify and the dashboard assets are all served from /static.
+    # The dashboard's scripts, including the vendored graph libraries, are served from
+    # /v2-assets.
     "script-src 'self'",
     "script-src-attr 'none'",
     "worker-src 'self'",

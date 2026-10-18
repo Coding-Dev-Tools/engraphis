@@ -44,7 +44,7 @@ semantic-vector support.
 
 ## Dashboard
 
-Open the dashboard and choose **Import local documents**. Select **Documents** mode, choose files
+Open **Library → Import → Import documents with preview…**. Select **Documents** mode, choose files
 or a folder, then set the source label, workspace, optional repository/session, scope, memory
 type, and conflict policy. **Preview import** performs zero writes and shows every candidate,
 format, warning, skip, rejection, update, rename, conflict, and missing source. Check the local
@@ -100,12 +100,28 @@ binary, or unsupported files are catalogued per file; one failure does not stop 
 collection. Reports never echo secret-like source content.
 
 Default filename exclusions include `.env` variants, credentials, secrets, tokens, recovery
-codes, SSH identity files, and `.pem`, `.key`, `.p12`, and `.pfx` material. A collection is
+codes, SSH identity files, and `.pem`, `.key`, `.p12`, and `.pfx` material. Exclusions
+also cover known credential-store directories: `.aws`, `.ssh`, `.gnupg`, `.azure`, `.kube`,
+`.docker`, and `.engraphis`. Benign hidden selected roots such as `.worktrees` remain usable.
+Known credential-directory names, rc names, environment variants, and key suffixes are checked
+in every directory component, including the selected root, before filesystem inspection or
+traversal. Broad credential/secret/token substring matching applies only to file basenames,
+before their contents are read; ordinary directories such as `tokenizer-project`,
+`secretary-notes`, and `credentialing` remain usable.
+The shared capture boundary also rejects authenticated URLs, including mail protocols, when
+they contain a nonempty password; explicit redaction removes that user information.
+A collection is
 bounded to 10,000 encountered files and 750 MB of read bytes; an individual adapter input is
 bounded to 100 MB, while canonical memory text is capped at 100,000 characters and is rejected
 rather than silently split. Containers are additionally capped at 2,000 members and 20 MB of
 declared decompressed content. Invalid UTF-8/UTF-16 in permitted text is replaced explicitly and
 reported as a parsing warning.
+Uploaded files also count toward the per-file and batch byte budgets when an excluded path
+is skipped: the server accounts for multipart file sizes without reading the excluded bodies.
+
+Library Quick import applies the same credential filename exclusions to uploaded files and
+folder paths before extraction or optional fact derivation. Hidden and dependency directories
+are skipped as well, and a symlink's target cannot bypass the filename exclusions.
 
 Markdown uses the Obsidian adapter's stricter 2 MB raw-note limit before decoding.
 

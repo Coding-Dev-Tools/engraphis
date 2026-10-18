@@ -4,9 +4,9 @@ The dashboard serves committed browser bundles. The force-graph npm dependency
 records their reviewed upstream version; changing that dependency alone does not
 update the served code and breaks the version/provenance checks.
 
-The reviewed force-graph version is 1.51.4. All three shipped copies contain two
-local CSP changes that disable runtime stylesheet insertion. Equivalent static
-rules live in the dashboard stylesheets. The bundle also has an exact upstream
+The reviewed force-graph version is 1.51.4. The shipped copy contains two local
+CSP changes that disable runtime stylesheet insertion. Equivalent static rules
+live in the dashboard stylesheet. The bundle also has an exact upstream
 commit, npm integrity, source lock and dependency license inventory.
 
 The [upstream 1.51.5 comparison](https://github.com/vasturiano/force-graph/compare/v1.51.4...v1.51.5)
@@ -22,9 +22,8 @@ For a deliberate force-graph upgrade:
 
 1. Verify the exact upstream release artifact, npm integrity, source commit and
    source lock. Review the runtime diff and the locked dependency closure.
-2. Preserve both CSP patches and their equivalent static CSS. Update the bundles
-   and license copies in `engraphis/dashboard_assets/vendor/`,
-   `engraphis/classic_assets/vendor/` and `engraphis/static/vendor/` together.
+2. Preserve both CSP patches and their equivalent static CSS. Update the bundle,
+   its license copy and `manifest.json` in `engraphis/dashboard_assets/vendor/`.
 3. Regenerate the vendor manifest's version, source and hashes, plus the complete
    locked dependency license inventory in `deploy/`. Record actual artifact and
    source-lock hashes; do not relabel the previous bundle or inventory.

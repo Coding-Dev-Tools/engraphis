@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import math
 import os
 import re
 import stat
 import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -120,6 +122,64 @@ def _decode_json(payload: bytes) -> Any:
                           ValueError("non-finite JSON number")))
 
 
+def _prefixed_bytecode_paths(root: Path) -> list[str]:
+    """Reject mapped source caches without reading or executing their contents."""
+    if sys.pycache_prefix is None or sys.implementation.cache_tag is None:
+        return []
+    prefix = Path(sys.pycache_prefix).absolute()
+    tracked = subprocess.check_output(
+        ["git", "ls-files", "--cached", "-z"], cwd=root, stderr=subprocess.DEVNULL,
+    )
+    directories: dict[Path, list[re.Pattern]] = {}
+    for entry in tracked.split(b"\0"):
+        if not entry:
+            continue
+        relative = Path(os.fsdecode(entry))
+        if relative.suffix.lower() not in {".py", ".pyw"}:
+            continue
+        if (not _is_ignored_runtime_entrypoint(relative)
+                and {part.lower() for part in relative.parts} & _IGNORED_RUNTIME_DIRS):
+            continue
+        mapped = Path(importlib.util.cache_from_source(
+            str(root.absolute() / relative), optimization="",
+        )).absolute()
+        stem = mapped.name[:-len(str(sys.implementation.cache_tag) + ".pyc")]
+        # Match literal source names, alternate interpreter tags and optimization
+        # variants. Dotted sibling source names are separate, unrelated mappings.
+        pattern = re.compile(re.escape(os.path.normcase(stem)) + r"(?:[^.]+(?:\.opt-[^.]+)?\.)?py[co]\Z")
+        directories.setdefault(mapped.parent, []).append(pattern)
+    suspicious: list[str] = []
+    for directory, patterns in directories.items():
+        diagnostic = "__pycache__ prefix: " + str(directory)
+        try:
+            # Never traverse a linked prefix or mapped parent into unrelated data.
+            parents = [*reversed(prefix.parents), prefix]
+            for part in directory.relative_to(prefix).parts:
+                parents.append(parents[-1] / part)
+            for parent in parents:
+                metadata = parent.lstat()
+                if (stat.S_ISLNK(metadata.st_mode)
+                        or getattr(metadata, "st_file_attributes", 0)
+                        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+                        or getattr(parent, "is_junction", lambda: False)()
+                        or not stat.S_ISDIR(metadata.st_mode)):
+                    suspicious.append(diagnostic + " (linked or invalid directory)")
+                    break
+            else:
+                # Only names in the mapped directory are inspected. Bytecode is
+                # rejected regardless of header, permissions, type or link target.
+                with os.scandir(directory) as entries:
+                    for cached in entries:
+                        if any(pattern.fullmatch(os.path.normcase(cached.name)) for pattern in patterns):
+                            suspicious.append(diagnostic + "/" + cached.name)
+        except FileNotFoundError:
+            # A missing mapped directory cannot supply candidate bytecode.
+            continue
+        except OSError:
+            suspicious.append(diagnostic + " (directory cannot be inspected)")
+    return suspicious
+
+
 def _ignored_executable_paths(root: Path) -> list[str]:
     """Return ignored executable artifacts that can affect a source checkout.
 
@@ -128,7 +188,7 @@ def _ignored_executable_paths(root: Path) -> list[str]:
     artifact or runtime script can change behavior even when the tracked tree
     is clean. Standard tool/runtime directories are excluded because they are
     not candidate source paths; all matching artifacts elsewhere fail closed,
-    including bytecode under ``__pycache__``.
+    including bytecode under ``__pycache__`` or a configured cache prefix.
     """
     ignored = subprocess.check_output(
         ["git", "ls-files", "--others", "--ignored", "--exclude-standard", "-z"],
@@ -147,7 +207,7 @@ def _ignored_executable_paths(root: Path) -> list[str]:
             continue
         if _is_ignored_runtime_artifact(root, relative):
             suspicious.append(relative.as_posix())
-    return suspicious
+    return suspicious + _prefixed_bytecode_paths(root)
 
 
 def new_ledger(components: dict) -> dict:

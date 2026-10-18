@@ -77,28 +77,9 @@ def test_explicit_reference_uses_its_separate_database(monkeypatch, tmp_path):
     assert not current_v2_db.exists()
 
 
-def test_classic_graph_controls_call_the_live_workspace_loader_in_both_bundles():
-    classic = (ROOT / "engraphis" / "classic_assets" / "dashboard.js").read_bytes()
-    static = (ROOT / "engraphis" / "static" / "dashboard.js").read_bytes()
-    assert classic == static
-
-    script = classic.decode("utf-8")
-    assert "h24:function(event){loadGraphWorkspaceView()}" in script
-    assert "h28:function(event){loadGraphWorkspaceView()}" in script
-    assert "h52:function(event){if(event.key==='Enter')loadGraphWorkspaceView()}" in script
-    assert "h24:function(event){loadGraph()}" not in script
-    assert "h28:function(event){loadGraph()}" not in script
-
-
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is required for bundled JS")
-@pytest.mark.parametrize(
-    "asset",
-    [
-        ROOT / "engraphis" / "classic_assets" / "vendor" / "d3.min.js",
-        ROOT / "engraphis" / "static" / "vendor" / "d3.min.js",
-    ],
-)
-def test_bundled_d3_csv_parser_runs_without_dynamic_function(asset):
+def test_bundled_d3_csv_parser_runs_without_dynamic_function():
+    asset = ROOT / "engraphis" / "dashboard_assets" / "vendor" / "d3.min.js"
     script = asset.read_text(encoding="utf-8")
     assert "new Function" not in script
 
