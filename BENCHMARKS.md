@@ -94,14 +94,14 @@ interpretation and do not count as additional benchmark-quality gains.
 ### Public numeric evidence registry
 
 Every exact public aggregate retained below comes from the checked-in, public-safe
-[`offline-fixtures-pr260-transport-scope-runtime-20261018-65821cf6bfee.json`](docs/benchmark-evidence/offline-fixtures-pr260-transport-scope-runtime-20261018-65821cf6bfee.json) artifact. Its
+[`offline-fixtures-pr260-neutral-title-runtime-20261018-39628c9a99b0.json`](docs/benchmark-evidence/offline-fixtures-pr260-neutral-title-runtime-20261018-39628c9a99b0.json) artifact. Its
 SHA-256 is
-`0780183ebb55e95d3ca2a28691537da3fc0fdd6db335e18079bbaa8c46729b31`, also recorded in the
+`5795bc7eff4caaccdb05bade8e4483917d9e87055fbfb382cc98086f089b8c9b`, also recorded in the
 adjacent `.sha256` file. The artifact contains no raw questions, answers, prompts, customer data,
 or per-record content fingerprints.
 
 The fixture-suite digest is
-`aa739fba26449312459d276fc27fce27f69a6539e016a474886c448f183eff4f`. The artifact defines
+`a583a27bd2f930b27e86e18f9f7396977969658fe53e83e399d1443a9d1da2cc`. The artifact defines
 the digest algorithm and records the SHA-256 of every suite and dataset file. Each evidence ID
 also binds its exact command through `sha256(UTF-8 exact command)`:
 
@@ -115,11 +115,11 @@ The source manifest covers every Python file under `engraphis/` and `eval/`, the
 fixture datasets, and the official exporter. Each rerun must use a new artifact and chart
 basename because existing evidence is immutable. This run used Python 3.12.14 and NumPy 2.5.4;
 the charts were rendered with CairoSVG 2.9.1. Its 587-file manifest binds the Python
-producer. Runtime commit `65821cf6bfeef793e42190334b1d91bdd532ed48` also identifies
+producer. Runtime commit `39628c9a99b0c8263c8bd800812d4c0a0aa5653c` also identifies
 the CLI and Dashboard source outside that manifest. The registered artifact was produced with:
 
 ```bash
-python -m scripts.export_offline_evidence --output docs/benchmark-evidence/offline-fixtures-pr260-transport-scope-runtime-20261018-65821cf6bfee.json
+python -m scripts.export_offline_evidence --output docs/benchmark-evidence/offline-fixtures-pr260-neutral-title-runtime-20261018-39628c9a99b0.json
 ```
 
 External, model-dependent, latency, consolidation, and productivity numbers are not included in
@@ -137,13 +137,13 @@ grounded checks in separate panels; provider billing and MCP transport are not m
 the SVG and matching PNG with:
 
 ```bash
-python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-pr260-transport-scope-runtime-20261018-65821cf6bfee.json --output docs/images/context-efficiency-pr260-transport-scope-runtime-20261018-65821cf6bfee.svg --png-output docs/images/context-efficiency-pr260-transport-scope-runtime-20261018-65821cf6bfee.png
+python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-pr260-neutral-title-runtime-20261018-39628c9a99b0.json --output docs/images/context-efficiency-pr260-neutral-title-runtime-20261018-39628c9a99b0.svg --png-output docs/images/context-efficiency-pr260-neutral-title-runtime-20261018-39628c9a99b0.png
 ```
 
 The companion examples are also generated from that artifact with:
 
 ```bash
-python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-pr260-transport-scope-runtime-20261018-65821cf6bfee.json --output docs/images/evidence-backed-agent-examples-pr260-transport-scope-runtime-20261018-65821cf6bfee.svg --png-output docs/images/evidence-backed-agent-examples-pr260-transport-scope-runtime-20261018-65821cf6bfee.png
+python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-pr260-neutral-title-runtime-20261018-39628c9a99b0.json --output docs/images/evidence-backed-agent-examples-pr260-neutral-title-runtime-20261018-39628c9a99b0.svg --png-output docs/images/evidence-backed-agent-examples-pr260-neutral-title-runtime-20261018-39628c9a99b0.png
 ```
 The historical-to-executable mapping is in
 [`docs/BENCHMARK_CHANGE_COVERAGE.md`](docs/BENCHMARK_CHANGE_COVERAGE.md).
