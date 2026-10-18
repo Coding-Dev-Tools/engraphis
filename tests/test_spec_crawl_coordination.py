@@ -34,6 +34,7 @@ def _pair(left, right):
     ("Must build and not test.", "Always test.", "test"),
     ("Must build and require authentication.", "Never require authentication.", "authentication"),
     ("Never build or require authentication.", "Always require authentication.", "authentication"),
+    ("Must read notes and always test cases.", "Never test cases.", "test cases"),
 ])
 @pytest.mark.parametrize("reverse", [False, True])
 def test_coordinated_actions_prove_exact_dated_opposition(left, right, target, reverse):
@@ -57,6 +58,7 @@ def test_coordinated_actions_prove_exact_dated_opposition(left, right, target, r
     ("Never build and test.", "Always build."),
     ("Never build and test.", "Always test."),
     ("Must build and test or lint.", "Never build."),
+    ("Must build and test cases or lint.", "Never build."),
     ("Must build and may test.", "Never test."),
     ("Must build and should test.", "Never test."),
     ("Must build and can test.", "Never test."),
@@ -98,6 +100,19 @@ def test_whole_coordinated_expression_still_opposes_its_negation(connector):
         f"Must build {connector} test.", f"Never build {connector} test."), include_trace=False)
     assert len(report["conflicts"]) == 1
     assert report["conflicts"][0]["remedy"]["retire_node"] == "old"
+
+
+@pytest.mark.parametrize("left,right", [
+    ("Must review design and test plans.", "Never test plans."),
+    ("Must read notes and test cases.", "Never test cases."),
+    ("Must use authentication or authorization.", "Never use authentication."),
+])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_ambiguous_object_lists_never_become_new_action_obligations(left, right, reverse):
+    nodes = _pair(left, right)
+    if reverse:
+        nodes.reverse()
+    assert not analyze_memory_nodes(nodes)["conflicts"]
 
 
 @pytest.mark.parametrize("field", ["subject_key", "claim_kind"])
