@@ -48,9 +48,9 @@ def test_real_policy_before_or_after_an_example_still_proves_a_conflict(position
     active = "Never deploy to production."
     text = f"{active} {example}" if position == "before" else f"{example} {active}"
     report = analyze_memory_nodes(_pair(text, "Always deploy to production."))
-    assert report["nodes"][0]["directives"] == {"deploy to production": "forbid"}
+    assert report["nodes"][0]["directives"] == {"deploy production": "forbid"}
     assert len(report["conflicts"]) == 1
-    assert report["conflicts"][0]["subject"] == "deploy to production"
+    assert report["conflicts"][0]["subject"] == "deploy production"
     assert report["conflicts"][0]["remedy"]["retire_node"] == "example"
 
 

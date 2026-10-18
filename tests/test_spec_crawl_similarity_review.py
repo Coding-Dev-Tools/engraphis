@@ -44,7 +44,8 @@ def test_nonempty_but_compatible_evidence_does_not_become_a_subject_only_conflic
 @pytest.mark.parametrize("left,right,subject", [
     ("port: 5432", "port: 5433", "port"),
     ("host: primary.example", "host: secondary.example", "host"),
-    ("Always deploy to production.", "Never deploy to production.", "deploy to production"),
+    pytest.param("Always deploy to production.", "Never deploy to production.", "deploy production",
+                 id="Always deploy to production.-Never deploy to production.-deploy to production"),
     ("Always access production logs.", "Never access production logs.", "access production logs"),
 ])
 @pytest.mark.parametrize("reverse", [False, True])

@@ -109,7 +109,7 @@ def test_sentence_punctuation_remains_distinct_from_qualified_target_punctuation
         "connect api.foo.com": "enforce", "connect api.bar.com": "forbid",
     }
     assert _extract_node_directives("Always connect https://api.foo.com/v1?q=one. Never deploy to 10.0.0.2.") == {
-        "connect https://api.foo.com/v1?q=one": "enforce", "deploy to 10.0.0.2": "forbid",
+        "connect https://api.foo.com/v1?q=one": "enforce", "deploy 10.0.0.2": "forbid",
     }
 
 

@@ -64,6 +64,39 @@ def _print_word_analysis_notice(word_limit: int, memory_count: int | None = None
     )
 
 
+def _conflict_limit_notices(report: dict) -> tuple[list[str], str, bool]:
+    """Describe bounded conflict results independently of node and word limits."""
+    shown = len(report.get("conflicts", []))
+
+    def count(value):
+        return value if type(value) is int and 0 <= value <= 2 ** 53 - 1 else None
+
+    declared_total = count(report.get("conflicts_total"))
+    total = declared_total if declared_total is not None and declared_total >= shown else None
+    partial = report.get("conflicts_truncated") is True or (total is not None and total > shown)
+    declared_suggestions = count(report.get("conflict_remediation_count"))
+    limit = count(report.get("conflict_remediation_limit"))
+    suggestions = declared_suggestions if (
+        declared_suggestions is not None and declared_suggestions <= shown
+        and (limit is None or declared_suggestions <= limit)
+    ) else None
+    plan_partial = report.get("conflict_remediation_truncated") is True or (
+        total is not None and suggestions is not None and total > suggestions)
+    notices: list[str] = []
+    if partial:
+        notices.append(
+            f"Showing {shown} of {total} conflicts detected in the analyzed memories."
+            if total is not None else
+            f"Showing {shown} conflicts. Additional conflicts are omitted from the analyzed memories.")
+    if plan_partial:
+        notices.append(
+            f"Remediation plan includes {suggestions} of {total} conflict suggestions for the analyzed memories."
+            if total is not None and suggestions is not None else
+            "The conflict remediation plan is incomplete for the analyzed memories.")
+    label = (f"{shown}+" if total is None else f"{shown} / {total}") if partial else str(shown)
+    return notices, label, partial
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Run Engraphis Spec Crawl on a spec file, prompt, or workspace memory cluster.",
@@ -140,7 +173,8 @@ def main(argv: list[str] | None = None) -> int:
             n_nodes = report.get("node_count", 0)
             print(f"=== Spec Crawl Memory Cluster Audit: workspace='{args.workspace}' ===")
             print(f"Cluster Health: {health}/100 ({n_nodes} active memory nodes)")
-            partial = bool(report.get("truncated") or report.get("analysis_truncated"))
+            conflict_notices, conflict_label, conflict_partial = _conflict_limit_notices(report)
+            partial = bool(report.get("truncated") or report.get("analysis_truncated")) or conflict_partial
             word_partial_count = max(
                 report.get("word_analysis_truncated_node_count") or 0,
                 sum(bool(node.get("word_analysis_truncated")) for node in report.get("nodes", [])),
@@ -148,13 +182,15 @@ def main(argv: list[str] | None = None) -> int:
             total = report.get("total_eligible_node_count")
             node_sample = report.get("node_selection_truncated")
             if not isinstance(node_sample, bool):
-                node_sample = total > n_nodes if isinstance(total, int) else partial and not word_partial_count
+                node_sample = total > n_nodes if isinstance(total, int) else partial and not word_partial_count and not conflict_partial
             if node_sample:
                 detail = f" of {total} eligible nodes" if total is not None else " nodes"
                 print(f"Partial audit: {n_nodes}{detail} analyzed; health and findings describe this sample.")
             if word_partial_count:
                 _print_word_analysis_notice(report.get("word_limit") or MAX_SPEC_WORDS, word_partial_count)
-            if partial and not node_sample and not word_partial_count:
+            for notice in conflict_notices:
+                print(notice)
+            if partial and not node_sample and not word_partial_count and not conflict_notices:
                 print("Partial audit: analysis is incomplete.")
 
             print("\n--- 7-Axis Memory Radar ---")
@@ -172,7 +208,7 @@ def main(argv: list[str] | None = None) -> int:
 
             conflicts = report.get("conflicts", [])
             if conflicts:
-                print(f"\n--- Cross-Node Conflicts ({len(conflicts)}) ---")
+                print(f"\n--- Cross-Node Conflicts ({conflict_label}) ---")
                 for c in conflicts:
                     clean_detail = (c.get("reason") or c.get("detail", "")).replace("\u2014", "-").replace("\u2013", "-")
                     remedy = c.get("remedy", {})
