@@ -15,6 +15,7 @@ include docs/images/context-efficiency-pr260-postreset-final-runtime-20261018-e3
 include docs/images/context-efficiency-pr260-postreset-reviewed-runtime-20261018-7feffc9e2693.svg
 include docs/images/context-efficiency-pr260-coordinated-policy-runtime-20261018-f34d7cffe2b7.svg
 include docs/images/context-efficiency-pr260-serial-policy-runtime-20261018-201303c2a1a6.svg
+include docs/images/context-efficiency-pr260-masked-axis-runtime-20261018-efa4a9c83a5b.svg
 include pyproject.toml
 include .env.example requirements.txt
 include docker-entrypoint.sh Dockerfile docker-compose.yml docker-compose.lan.yml
