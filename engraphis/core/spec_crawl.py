@@ -1494,7 +1494,9 @@ def analyze_memory_nodes(
         node_tokens_len[m_id] = len(tok_set)
 
         # Classify axis
-        axis = _classify_node_axis(title, content)
+        axis = _classify_node_axis(
+            policy_text[:len(title)], policy_text[len(title) + 1:],
+        )
         covered_axes = _covered_node_axes(title, content, code=code, visible=visible_content)
         axis_counts.update(covered_axes)
 
