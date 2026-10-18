@@ -3,6 +3,9 @@
 Date: 2026-07-29
 Scope: v2 Ledger (`/`) and legacy Classic (`/classic`) dashboards.
 
+> This is a dated record. The Classic dashboard has since been retired: its features moved
+> into Ledger and `/classic` now redirects to `/`.
+
 ## Test setup
 
 The manual pass used four parallel browser lanes and an isolated local v2 server on

@@ -4,6 +4,55 @@ from types import SimpleNamespace
 import pytest
 
 
+@pytest.mark.parametrize("preserve_complete", [False, True])
+@pytest.mark.parametrize("failure", ["abort", "framing"])
+def test_watchdog_interruption_is_timeout_before_coarse_clock_deadline(monkeypatch, preserve_complete, failure):
+    import http.client
+    import threading
+    import time
+    from contextlib import contextmanager
+    from engraphis import http_deadline
+
+    interrupted = threading.Event()
+    interrupted.set()
+
+    @contextmanager
+    def watchdog(*args):
+        yield interrupted
+
+    class Response:
+        def read1(self, size):
+            if failure == "abort":
+                raise ConnectionAbortedError("synthetic interrupted socket")
+            raise http.client.IncompleteRead(b"", 1)
+
+    monkeypatch.setattr(http_deadline, "socket_deadline", watchdog)
+    with pytest.raises(TimeoutError, match="HTTP request deadline exceeded"):
+        http_deadline.read_response(
+            Response(), time.monotonic() + 60, max_bytes=4096,
+            preserve_complete=preserve_complete,
+        )
+
+
+def test_watchdog_eof_cannot_complete_a_normal_body_before_clock_deadline(monkeypatch):
+    import threading
+    import time
+    from contextlib import contextmanager
+    from engraphis import http_deadline
+
+    interrupted = threading.Event()
+    interrupted.set()
+
+    @contextmanager
+    def watchdog(*args):
+        yield interrupted
+
+    monkeypatch.setattr(http_deadline, "socket_deadline", watchdog)
+    response = SimpleNamespace(read1=lambda size: b"", length=10)
+    with pytest.raises(TimeoutError, match="HTTP request deadline exceeded"):
+        http_deadline.read_response(response, time.monotonic() + 60, max_bytes=4096)
+
+
 @pytest.mark.parametrize("chunk_framing", [False, True])
 def test_cloud_http_error_body_shares_the_request_deadline(monkeypatch, chunk_framing):
     import http.client

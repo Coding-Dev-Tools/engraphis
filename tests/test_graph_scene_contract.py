@@ -10,6 +10,35 @@ from engraphis.core.graph_scene import _hash_record, project_all_presentation
 FIXTURE = Path(__file__).with_name("graph_scene_fixture.json")
 
 
+def test_bridge_normalization_preserves_values_without_resorting_each_bridge():
+    from engraphis.core.graph_scene import _bridge_physics_strength, _quantile
+
+    population = [float(index) ** 1.2 for index in range(2048)]
+    low, high = _quantile(population, 0.05), _quantile(population, 0.95)
+
+    class OrderedPopulation:
+        reads = 0
+
+        def __len__(self):
+            return len(population)
+
+        def __getitem__(self, index):
+            self.reads += 1
+            return population[index]
+
+        def __iter__(self):
+            raise AssertionError("the bridge population is already ordered")
+
+    ordered = OrderedPopulation()
+    for index in (0, 25, 512, 1536, 2047):
+        value = population[index]
+        robust = min(1.0, max(0.0, (value - low) / (high - low)))
+        expected = 0.9 * robust + 0.1 * index / (len(population) - 1)
+        assert math.isclose(_bridge_physics_strength(value, ordered), expected)
+    # Five bridges require only quantile indexing and logarithmic percentile lookup.
+    assert ordered.reads < 200
+
+
 def _scene() -> dict:
     return json.loads(FIXTURE.read_text(encoding="utf-8"))
 

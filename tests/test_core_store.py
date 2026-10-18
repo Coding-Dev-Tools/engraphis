@@ -56,6 +56,14 @@ def test_schema_version(store):
     assert store.schema_version == SCHEMA_VERSION
 
 
+@pytest.mark.parametrize("value", [None, "", "CAFÉ", "STRAẞE", "Straße", "ΑΘΉΝΑ", "ПРОТОКОЛ"])
+def test_unicode_lower_sql_function_matches_python_without_writes(store, value):
+    before = store.conn.total_changes
+    result = store.conn.execute("SELECT engraphis_unicode_lower(?)", (value,)).fetchone()[0]
+    assert result == (value.lower() if value is not None else None)
+    assert store.conn.total_changes == before
+
+
 def test_store_preserves_regular_sqlite_uri_options(tmp_path):
     path = tmp_path / "uri.db"
     writable = Store(str(path))

@@ -314,9 +314,10 @@ def test_private_ledger_rejects_leaf_replacement_during_open(
             swapped = True
         return original_open(raw_path, flags, mode)
 
-    monkeypatch.setattr(private_state_module.os, "open", swap_on_open)
-    with pytest.raises(HostedLedgerError, match="unsafe"):
-        PrivateHostedLedger(path, _binding(), repo_root=repo)
+    with monkeypatch.context() as patch:
+        patch.setattr(private_state_module.os, "open", swap_on_open)
+        with pytest.raises(HostedLedgerError, match="unsafe"):
+            PrivateHostedLedger(path, _binding(), repo_root=repo)
     assert swapped is True
 
 
@@ -347,6 +348,7 @@ def test_private_ledger_rejects_reparse_point_attributes(
             return ReparseStat(result)
         return result
 
-    monkeypatch.setattr(private_state_module.os, "lstat", reparse_lstat)
-    with pytest.raises(HostedLedgerError, match="unsafe"):
-        PrivateHostedLedger(path, _binding(), repo_root=repo)
+    with monkeypatch.context() as patch:
+        patch.setattr(private_state_module.os, "lstat", reparse_lstat)
+        with pytest.raises(HostedLedgerError, match="unsafe"):
+            PrivateHostedLedger(path, _binding(), repo_root=repo)

@@ -163,8 +163,18 @@ def create_memory_engine(
 
         engine_cls = MemoryEngine
 
-    store = Store(db_path, connect=connect, read_only=read_only,
-                  sqlite_durability=sqlite_durability)
+    owned_connector = None
+    if connect is None:
+        from engraphis.backends.encrypted_db import connector_from_env
+
+        connect = connector_from_env()
+        owned_connector = connect
+    try:
+        store = Store(db_path, connect=connect, read_only=read_only,
+                      sqlite_durability=sqlite_durability)
+    except BaseException:
+        _close_quietly(owned_connector)
+        raise
     owned = []
     try:
         embedder = get_embedder(
@@ -264,7 +274,10 @@ def create_memory_engine(
         engine.backend_identities = backend_health(
             engine, vector_backend=effective_vector_backend,
         )
-        engine._adopt_resources([store, *owned])
+        # Reverse-order teardown closes every connection before clearing the key.
+        # Caller-supplied connectors remain owned by their injector.
+        resources = ([owned_connector] if owned_connector is not None else [])
+        engine._adopt_resources([*resources, store, *owned])
         return engine
     except BaseException:
         seen = set()
@@ -275,4 +288,5 @@ def create_memory_engine(
             seen.add(identity)
             _close_quietly(resource)
         _close_quietly(store)
+        _close_quietly(owned_connector)
         raise

@@ -64,6 +64,7 @@ def test_source_drift_is_reported_without_claiming_matching_evidence(monkeypatch
     assert report["metrics"]["source_stable"] is False
 
 
+@pytest.mark.native_sqlitevec
 def test_native_rebuild_and_restart_match_numpy_when_available():
     pytest.importorskip("sqlite_vec")
     native = _run(backend="sqlite-vec", concurrencies=[1])
