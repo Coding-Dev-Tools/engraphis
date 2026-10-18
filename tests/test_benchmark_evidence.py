@@ -2,6 +2,7 @@ import hashlib
 import json
 import re
 import struct
+import zlib
 from copy import deepcopy
 from pathlib import Path
 from xml.etree import ElementTree
@@ -33,8 +34,8 @@ from eval.performance import run as run_performance
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PUBLIC_OFFLINE_ARTIFACT = "offline-fixtures-pr253-four-gap-stack-20261008.json"
-PUBLIC_OFFLINE_SHA = "e423e99ba683c1928984903aef715ad97440c9717cecb3bd3f6fe4f6746ea7d0"
+PUBLIC_OFFLINE_ARTIFACT = "offline-fixtures-pr260-nested-uri-redaction-runtime-20261018-e2ebfb06550f.json"
+PUBLIC_OFFLINE_SHA = "434ec054dff38104a553ddb88b38a983c97227491e92ba482a7f3cd4ff5b560b"
 
 
 @pytest.fixture(scope="module")
@@ -227,14 +228,14 @@ def test_readme_makes_agent_benefits_and_visual_evidence_scannable():
         "cite support or abstain when it is insufficient",
         "bounded context",
         "docs/images/knowledge-graph.png",
-        "docs/images/context-efficiency.svg",
+        "docs/images/context-efficiency-pr260-nested-uri-redaction-runtime-20261018-e2ebfb06550f.svg",
             "Three offline fixtures separate context reduction",
     ):
         assert evidence in readme
 
     for removed in (
         "### See the behavior in reproducible fixtures",
-        "docs/images/evidence-backed-agent-examples.svg",
+        "docs/images/evidence-backed-agent-examples-pr260-nested-uri-redaction-runtime-20261018-e2ebfb06550f.svg",
         "Run `python -m eval.chunking_eval` and `python -m eval.grounded`",
     ):
         assert removed not in readme
@@ -242,10 +243,10 @@ def test_readme_makes_agent_benefits_and_visual_evidence_scannable():
     for filename in (
         "engraphis-benefit-flow.svg",
         "engraphis-benefit-flow.png",
-        "context-efficiency.svg",
-        "context-efficiency.png",
-        "evidence-backed-agent-examples.svg",
-        "evidence-backed-agent-examples.png",
+        "context-efficiency-pr260-nested-uri-redaction-runtime-20261018-e2ebfb06550f.svg",
+        "context-efficiency-pr260-nested-uri-redaction-runtime-20261018-e2ebfb06550f.png",
+        "evidence-backed-agent-examples-pr260-nested-uri-redaction-runtime-20261018-e2ebfb06550f.svg",
+        "evidence-backed-agent-examples-pr260-nested-uri-redaction-runtime-20261018-e2ebfb06550f.png",
     ):
         assert (ROOT / "docs" / "images" / filename).is_file()
 
@@ -255,8 +256,8 @@ def test_readme_visual_pngs_match_their_svg_canvas():
     image_dir = ROOT / "docs" / "images"
 
     for stem in (
-        "evidence-backed-agent-examples",
-        "context-efficiency",
+        "evidence-backed-agent-examples-pr260-nested-uri-redaction-runtime-20261018-e2ebfb06550f",
+        "context-efficiency-pr260-nested-uri-redaction-runtime-20261018-e2ebfb06550f",
     ):
         svg = ElementTree.parse(image_dir / f"{stem}.svg").getroot()
         expected = (int(svg.attrib["width"]), int(svg.attrib["height"]))
@@ -268,7 +269,7 @@ def test_readme_visual_pngs_match_their_svg_canvas():
 
 def test_benchmark_header_badge_fits_its_label():
     svg = ElementTree.parse(
-        ROOT / "docs" / "images" / "context-efficiency.svg"
+        ROOT / "docs" / "images" / "context-efficiency-pr260-nested-uri-redaction-runtime-20261018-e2ebfb06550f.svg"
     ).getroot()
     namespace = "{http://www.w3.org/2000/svg}"
     badge = next(
@@ -296,7 +297,7 @@ def test_example_visual_uses_the_checked_in_offline_fixture_results(
     chunked = chunking["reports"]["chunked"]
     grounded = offline_release_evidence["grounded"]
     visual = (
-        ROOT / "docs" / "images" / "evidence-backed-agent-examples.svg"
+        ROOT / "docs" / "images" / "evidence-backed-agent-examples-pr260-nested-uri-redaction-runtime-20261018-e2ebfb06550f.svg"
     ).read_text(encoding="utf-8")
 
     assert chunking["context_reduction_pct"] == 71.1
@@ -327,7 +328,7 @@ def test_context_savings_visual_uses_only_registered_measurements():
     Values are interpolated from the COMMITTED registry artifact — the publication
     source of truth — so chart text cannot drift from the evidence it cites.
     """
-    visual = (ROOT / "docs" / "images" / "context-efficiency.svg").read_text(
+    visual = (ROOT / "docs" / "images" / "context-efficiency-pr260-nested-uri-redaction-runtime-20261018-e2ebfb06550f.svg").read_text(
         encoding="utf-8"
     )
     committed = _committed_evidence()
@@ -500,8 +501,8 @@ def test_public_numeric_evidence_registry_is_complete_and_live(
     assert expected_sha[:12] in (ROOT / "README.md").read_text(encoding="utf-8")
     surfaces = (
         ROOT / "BENCHMARKS.md",
-        ROOT / "docs" / "images" / "context-efficiency.svg",
-        ROOT / "docs" / "images" / "evidence-backed-agent-examples.svg",
+        ROOT / "docs" / "images" / "context-efficiency-pr260-nested-uri-redaction-runtime-20261018-e2ebfb06550f.svg",
+        ROOT / "docs" / "images" / "evidence-backed-agent-examples-pr260-nested-uri-redaction-runtime-20261018-e2ebfb06550f.svg",
     )
     for surface in surfaces:
         assert expected_sha in surface.read_text(encoding="utf-8")
@@ -513,6 +514,24 @@ def test_public_numeric_evidence_registry_is_complete_and_live(
         )
     )
     assert claimed_ids == set(runs)
+
+
+@pytest.mark.parametrize("stem", ["context-efficiency-pr260-nested-uri-redaction-runtime-20261018-e2ebfb06550f", "evidence-backed-agent-examples-pr260-nested-uri-redaction-runtime-20261018-e2ebfb06550f"])
+def test_benchmark_png_provenance_matches_current_svg_and_artifact(stem):
+    png = (ROOT / "docs" / "images" / f"{stem}.png").read_bytes()
+    metadata = {}
+    offset = 8
+    while offset < len(png):
+        length = struct.unpack(">I", png[offset:offset + 4])[0]
+        chunk = png[offset + 4:offset + 8 + length]
+        assert zlib.crc32(chunk) == struct.unpack(">I", png[offset + 8 + length:offset + 12 + length])[0]
+        if chunk[:4] == b"tEXt":
+            key, value = chunk[4:].split(b"\0", 1)
+            metadata[key.decode("ascii")] = value.decode("ascii")
+        offset += 12 + length
+    assert metadata["engraphis_artifact_sha256"] == PUBLIC_OFFLINE_SHA
+    svg = (ROOT / "docs" / "images" / f"{stem}.svg").read_bytes()
+    assert metadata["engraphis_svg_sha256"] == hashlib.sha256(svg).hexdigest()
 
 
 def test_benchmark_guide_tracks_the_live_offline_evaluators():

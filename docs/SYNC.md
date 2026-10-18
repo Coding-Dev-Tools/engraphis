@@ -228,7 +228,7 @@ replica; a peer cannot attach graph edges to locally approved memories.
 - Local-only installations send no memory content to Engraphis. **Cloud Sync encrypts eligible
   shared-workspace changes end-to-end before they leave this device. Engraphis Cloud cannot read
   their contents; secret and session-scoped memories stay local.** Managed compute is separate:
-  explicit workspace approval in Manage → Settings is required before readable uploads;
+  explicit workspace approval in Settings → Preferences is required before readable uploads;
   connecting an account does not grant it. A deny-only operator override is available with
   `ENGRAPHIS_MANAGED_COMPUTE_CONSENT=0`. Approved processing sends a readable, bounded
   snapshot over TLS because Engraphis Cloud must process that snapshot to produce results.

@@ -315,11 +315,13 @@ def _yarn_v1_runtime_closure(
 def test_force_graph_bundle_has_exact_locked_license_closure():
     report_path = ROOT / "deploy" / "force-graph-1.51.4.licenses.json"
     lock_path = ROOT / "deploy" / "force-graph-1.51.4.yarn.lock"
-    bundle_path = ROOT / "engraphis" / "static" / "vendor" / "force-graph.min.js"
+    bundle_path = ROOT / "engraphis" / "dashboard_assets" / "vendor" / "force-graph.min.js"
     report = json.loads(report_path.read_text(encoding="utf-8"))
     root_lock = json.loads((ROOT / "package-lock.json").read_text(encoding="utf-8"))
 
     assert report["format"] == "engraphis-bundled-license-report/v1"
+    # The bundle ships exactly once, and the report must name that copy.
+    assert report["bundle"]["path"] == bundle_path.relative_to(ROOT).as_posix()
     assert report["bundle"]["sha256"] == hashlib.sha256(bundle_path.read_bytes()).hexdigest()
     assert report["source_lock"]["sha256"] == hashlib.sha256(lock_path.read_bytes()).hexdigest()
     assert report["source_lock"]["canonical_lf_sha256"] == hashlib.sha256(
@@ -356,22 +358,24 @@ def test_force_graph_bundle_has_exact_locked_license_closure():
 
 
 def test_every_vendored_browser_library_has_redistribution_notice():
-    vendor = ROOT / "engraphis" / "static" / "vendor"
+    vendor = ROOT / "engraphis" / "dashboard_assets" / "vendor"
     required = {
         "d3.min.js": "d3.LICENSE",
-        "marked.min.js": "marked.LICENSE",
         "force-graph.min.js": "force-graph.LICENSE",
-        "purify.min.js": None,  # Apache-2.0 header points at the packaged root LICENSE
     }
+    # A library added to (or restored in) the vendor directory must join this table and NOTICE.
+    assert {path.name for path in vendor.glob("*.js")} == set(required)
+    notice = (ROOT / "NOTICE").read_text(encoding="utf-8")
     for script, license_name in required.items():
         assert (vendor / script).is_file()
-        if license_name:
-            text = (vendor / license_name).read_text(encoding="utf-8")
-            assert "Copyright" in text and len(text) > 500
-    notice = (ROOT / "NOTICE").read_text(encoding="utf-8")
-    assert all(name in notice for name in (
-        "D3 7.9.0", "Marked 12.0.2", "force-graph 1.51.4", "DOMPurify 3.4.11",
-    ))
+        text = (vendor / license_name).read_text(encoding="utf-8")
+        assert "Copyright" in text and len(text) > 500
+        assert f"engraphis/dashboard_assets/vendor/{license_name}" in notice
+    assert all(name in notice for name in ("D3 7.9.0", "force-graph 1.51.4"))
+    # Marked and DOMPurify only served the retired Classic dashboard; NOTICE must not claim
+    # bundles that no longer ship, nor point at the removed asset trees.
+    for retired in ("Marked", "DOMPurify", "engraphis/static", "classic_assets"):
+        assert retired not in notice, retired
     assert "galaxy-dependencies.json" not in notice
     assert "galaxy-vendor.LICENSE.txt" not in notice
     assert "Trademark Policy" not in notice
@@ -432,15 +436,6 @@ def test_release_version_surfaces_are_synchronized():
     # (state.releaseVersion), so no hardcoded literal must drift from pyproject.
     assert "return `?release_version=${encodeURIComponent(state.releaseVersion)}`" in ledger
     assert re.findall(r"release_version=([0-9]+(?:\.[0-9]+)*)", ledger) == []
-
-    static = (ROOT / "engraphis" / "static" / "dashboard.js").read_bytes()
-    classic = (ROOT / "engraphis" / "classic_assets" / "dashboard.js").read_bytes()
-    assert static == classic
-    static_text = static.decode("utf-8")
-    # Classic sources release_version from the runtime RELEASE_VERSION (bootstrap),
-    # so no hardcoded literal must drift from pyproject either.
-    assert "p.set('release_version',RELEASE_VERSION)" in static_text
-    assert re.findall(r"p\.set\('release_version','([^']+)'\)", static_text) == []
 
 
 def test_withdrawn_hermes_provider_is_not_distributed():

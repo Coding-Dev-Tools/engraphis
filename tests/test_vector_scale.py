@@ -66,6 +66,7 @@ def test_cli_accepts_backend(capsys):
     assert json.loads(capsys.readouterr().out)["config"]["backend_requested"] == "numpy"
 
 
+@pytest.mark.native_sqlitevec
 def test_sqlite_vec_matches_numpy_result_ids_when_available():
     pytest.importorskip("sqlite_vec")
     kwargs = {"dim": 8, "queries": 2, "iterations": 2, "warmups": 0, "k": 2, "seed": 9}

@@ -27,7 +27,7 @@
 
   window.EngraphisWorkflow = {
     title,
-    create({ api, onProjectChange, onNavigate, onNewMemory }) {
+    create({ api, beforeProjectChange, onProjectChange, onNavigate, onNewMemory }) {
       const byId = id => document.getElementById(id);
       let workspace = '';
       let project = '';
@@ -181,9 +181,14 @@
         });
       }
 
-      function chooseProject(value) {
+      async function chooseProject(value) {
         const selected = clean(value);
         if (!workspace || selected === project) return;
+        // An unsaved editor draft belongs to the current project; let the page keep it.
+        if (beforeProjectChange && !(await beforeProjectChange(selected))) {
+          renderProjects();
+          return;
+        }
         project = selected;
         write(projectKey(), project);
         journey = readJourney(journeyKey());
@@ -194,11 +199,11 @@
         onProjectChange(project);
       }
 
-      byId('project-select').addEventListener('change', event => chooseProject(event.target.value));
+      byId('project-select').addEventListener('change', event => { void chooseProject(event.target.value); });
       byId('project-context-form').addEventListener('submit', event => {
         event.preventDefault();
         const value = byId('project-name').value.trim();
-        if (value) chooseProject(value);
+        if (value) void chooseProject(value);
         else byId('project-name').focus();
       });
       byId('connection-host').addEventListener('change', event => {

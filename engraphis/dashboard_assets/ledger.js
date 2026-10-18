@@ -26,6 +26,8 @@
     savingsPreset: 'all',
     manageTab: 'workspaces',
     refreshEpoch: 0,
+    bootstrapRequest: 0,
+    workspaceMutations: new Set(),
     graphWorkspace: '',
     graphData: null,
     graphDataMode: 'overview',
@@ -53,6 +55,7 @@
     graphConnectionsRequest: 0,
     graphConnectionsController: null,
     graphMetrics: {},
+    graphLegendData: null,
     graphFrozen: false,
     graphOrbitPaused: false,
     graphSpacetimeOverlay: null,
@@ -70,10 +73,21 @@
     syncStatus: null,
     license: null,
     releaseVersion: '',
+    embedder: null,
+    booted: false,
+    connectionLost: false,
+    bootFailure: '',
+    editorBaseline: '',
+    libraryDragId: '',
+    graphTypeColors: {},
   };
 
   const byId = id => document.getElementById(id);
+  const runtimeApi = byId('ledger-runtime-api');
+  if (runtimeApi) runtimeApi.textContent = location.host;
   const memoryTitle = window.EngraphisWorkflow.title;
+  const dialogs = window.EngraphisDialog;
+  const markdown = window.EngraphisMarkdown;
   const all = selector => [...document.querySelectorAll(selector)];
   const text = value => value == null ? '' : String(value);
   const number = value => Number.isFinite(Number(value)) ? Number(value) : 0;
@@ -103,6 +117,14 @@
     const control = node('button', className, label);
     control.type = 'button';
     control.addEventListener('click', action);
+    return control;
+  };
+  const memoryMutationButton = (label, className, action) => {
+    const control = button(label, className, async () => {
+      if (control.disabled) return;
+      control.disabled = true;
+      try { await action(); } finally { control.disabled = false; }
+    });
     return control;
   };
   const option = (value, label, selected = false) => {
@@ -234,16 +256,37 @@
     repo: '#c9a15b',
     file: '#8eb3e6',
   };
-  const relative = value => {
-    const raw = typeof value === 'number' && value < 1e12 ? value * 1000 : value;
-    const time = typeof raw === 'number' ? raw : Date.parse(raw);
-    if (!Number.isFinite(time)) return 'stored locally';
-    const seconds = Math.max(0, Math.round((Date.now() - time) / 1000));
+  /* Server timestamps are seconds (sometimes milliseconds or ISO text). Any finite number
+     passes validation and memory metadata is untrusted, so a value that is not a real date
+     reads as unknown instead of throwing from Date/Intl formatting and breaking a panel. */
+  /* Server timestamps are epoch seconds or milliseconds, or ISO strings. Zero is the
+     Unix epoch; blank text, booleans and nonscalar metadata are not recorded dates. */
+  const validDate = (value, unit = 'auto') => {
+    if (value == null || typeof value === 'boolean') return null;
+    if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : new Date(value.getTime());
+    if (typeof value === 'object' && !(value instanceof Date)) return null;
+    if (typeof value === 'string' && !value.trim()) return null;
+    const numeric = Number(value);
+    // Explicit API units win. Unlabelled imported numbers with 12+ digits are
+    // milliseconds, including pre-2001 dates; smaller values retain epoch-seconds
+    // compatibility. Near-epoch milliseconds need a unit hint because they overlap
+    // valid seconds. Date objects and ISO text already carry their interpretation.
+    const milliseconds = unit === 'milliseconds'
+      || (unit === 'auto' && Math.abs(numeric) >= 1e11);
+    const date = Number.isFinite(numeric)
+      ? new Date(milliseconds ? numeric : numeric * 1000)
+      : new Date(value);
+    return Number.isNaN(date.getTime()) ? null : date;
+  };
+  const relative = (value, unit = 'auto') => {
+    const date = validDate(value, unit);
+    if (!date) return 'stored locally';
+    const seconds = Math.max(0, Math.round((Date.now() - date.getTime()) / 1000));
     if (seconds < 60) return 'just now';
     if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
     if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
     if (seconds < 604800) return `${Math.floor(seconds / 86400)}d ago`;
-    return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' }).format(time);
+    return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' }).format(date);
   };
   const errorMessage = (payload, status) => {
     const detail = payload && (payload.detail || payload.error);
@@ -392,21 +435,31 @@
 
   async function approveForPrompt(memory) {
     if (!memory || !memory.id) return;
+    const request = beginScopedRequest('memory-mutation');
+    const editorSession = state.editorSession;
     const provenance = memory.provenance || {};
     const reviewState = provenance.review_state || 'pending';
-    const reason = window.prompt(
-      `Why is this ${reviewState} record safe to include in model context?`,
-    );
-    if (reason === null) return;
-    if (!reason.trim()) {
+    const review = await dialogs.open({
+      title: 'Approve for prompt context',
+      message: `Approving “${memoryTitle(memory)}” creates a fresh, audited approved memory that agents may include in model context. The reviewed ${reviewState} source remains preserved.`,
+      fields: [{
+        name: 'reason', type: 'textarea', rows: 3, required: true, maxLength: 500,
+        label: `Why is this ${reviewState} record safe to include in model context?`,
+      }],
+      confirmLabel: 'Approve for prompt',
+    });
+    if (review === null) return;
+    if (!isCurrentScopedRequest(request) || state.editorSession !== editorSession
+      || state.selectedMemory !== memory.id) return;
+    const reason = review.reason;
+    if (!reason) {
       showNotice('A non-empty review reason is required.');
       return;
     }
-    if (!window.confirm(
-      'Approve this record for model context? This creates a fresh, audited approved memory; the reviewed source remains preserved.',
-    )) return;
     try {
       const csrf = await reviewCsrfToken();
+      if (!isCurrentScopedRequest(request) || state.editorSession !== editorSession
+        || state.selectedMemory !== memory.id) return;
       const response = await fetch(`${location.origin}/dashboard/review/approve`, {
         method: 'POST',
         headers: {
@@ -422,10 +475,16 @@
         error.status = response.status;
         throw error;
       }
+      if (!isCurrentScopedRequest(request) || state.editorSession !== editorSession
+        || state.selectedMemory !== memory.id) return;
       showNotice('Approved successor created. The reviewed source remains in the audit trail.');
-      await selectWorkspace(state.workspace);
-      if (payload.id) await selectMemory(payload.id);
+      await selectWorkspace(request.workspace);
+      if (payload.id && state.workspace === request.workspace
+        && state.refreshEpoch === request.epoch + 1
+        && !state.editorSession && !state.selectedMemory) await selectMemory(payload.id);
     } catch (error) {
+      if (!isCurrentScopedRequest(request) || state.editorSession !== editorSession
+        || state.selectedMemory !== memory.id) return;
       showNotice(`Could not approve this memory: ${error.message}`);
     }
   }
@@ -457,6 +516,10 @@
         finish(reject, error);
       };
       script.src = src;
+      /* Graph assets download in parallel and each runs as soon as it arrives: none needs
+         another at load time, and callers wait for every global before creating a renderer.
+         Ordered execution (async = false) would let one stalled download hold back every
+         later attempt, even after Reload removed its tag. */
       script.dataset.engraphisGraphAsset = 'true';
       script.onload = () => window[globalName]
         ? finish(resolve)
@@ -478,7 +541,7 @@
     if (!graphAllAssetsPromise) {
       const controller = new AbortController();
       const attempt = loadScript(
-        graphAssetSource('/v2-assets/engraphis-graph-every.js?v=20260927-unmerged-readiness-3'),
+        graphAssetSource('/v2-assets/engraphis-graph-every.js?v=20261012-stacked-ledger-1'),
         'EngraphisEveryGraph', controller.signal,
       );
       graphAllAssetsPromise = attempt;
@@ -501,22 +564,18 @@
     if (loadAll) {
       return Promise.all([ensureGraphAllAsset(), ensureGraphAssets(false)]);
     }
-    const coreReady = window.ForceGraph && window.EngraphisGraph && window.EngraphisSpacetime;
+    /* Every global counts, d3 included: the engine only degrades without it, so a d3 load that
+       failed while the others succeeded must still be retried by the next Reload. */
+    const coreReady = window.d3 && window.ForceGraph && window.EngraphisGraph
+      && window.EngraphisSpacetime;
     if (!coreReady && !graphAssetsPromise) {
       const controller = new AbortController();
-      const attempt = loadScript(
-        graphAssetSource('/v2-assets/vendor/d3.min.js?v=20260727-final'),
-        'd3', controller.signal,
-      ).then(() => loadScript(
-        graphAssetSource('/v2-assets/vendor/force-graph.min.js?v=20260727-final'),
-        'ForceGraph', controller.signal,
-      )).then(() => loadScript(
-        graphAssetSource('/v2-assets/engraphis-graph.js?v=20260927-unmerged-readiness-3'),
-        'EngraphisGraph', controller.signal,
-      )).then(() => loadScript(
-        graphAssetSource('/v2-assets/engraphis-spacetime.js?v=20260927-unmerged-readiness-3'),
-        'EngraphisSpacetime', controller.signal,
-      ));
+      const attempt = Promise.all([
+        loadScript(graphAssetSource('/v2-assets/vendor/d3.min.js?v=20260727-final'), 'd3', controller.signal),
+        loadScript(graphAssetSource('/v2-assets/vendor/force-graph.min.js?v=20260727-final'), 'ForceGraph', controller.signal),
+        loadScript(graphAssetSource('/v2-assets/engraphis-graph.js?v=20261009-ledger-only-1'), 'EngraphisGraph', controller.signal),
+        loadScript(graphAssetSource('/v2-assets/engraphis-spacetime.js?v=20260927-unmerged-readiness-3'), 'EngraphisSpacetime', controller.signal),
+      ]);
       graphAssetsPromise = attempt;
       graphAssetsController = controller;
       attempt.catch(() => {
@@ -835,6 +894,144 @@
     if (dot) dot.classList.toggle('unhealthy', !healthy);
   }
 
+  function connectionLabel() {
+    const host = (location.hostname || '').toLowerCase();
+    return ['localhost', '127.0.0.1', '::1', '[::1]'].includes(host) || host.endsWith('.localhost')
+      ? 'Local engine' : 'Engraphis server';
+  }
+
+  /* A persistent banner, not a transient notice: when the server stops answering, every
+     panel goes stale, so the page says so until a retry or health check succeeds. */
+  function showConnectionProblem(detail) {
+    state.connectionLost = true;
+    setConnection(`${connectionLabel()} unavailable`, false);
+    byId('connection-banner-detail').textContent = detail;
+    byId('connection-banner').hidden = false;
+  }
+
+  function clearConnectionProblem() {
+    if (!state.connectionLost) return;
+    state.connectionLost = false;
+    byId('connection-banner').hidden = true;
+    setConnection(`${connectionLabel()} connected`);
+  }
+
+  function connectionProblemDetail(error) {
+    if (error && error.status === 401) {
+      return 'This Engraphis deployment needs its API token before the dashboard can load. Choose Retry now to enter it.';
+    }
+    if (error && error.status === 403) {
+      // The server explains a refused address or remote access; show its reason.
+      return `The dashboard server refused this page: ${error.message}`;
+    }
+    if (error && error.status === 404) {
+      return 'Dashboard APIs are unavailable at this address. If the legacy v1 reference server is running on this port, stop it and start engraphis-dashboard.';
+    }
+    if (error && error.status >= 500) {
+      return `The dashboard server answered with an error: ${error.message}. Run engraphis-init --check for diagnostics, then retry.`;
+    }
+    return 'This page cannot reach the dashboard server. Check that Engraphis is still running, then retry.';
+  }
+
+  let healthTimer = null;
+  let healthCheckRunning = false;
+  async function checkHealth() {
+    if (document.hidden || healthCheckRunning) return;
+    healthCheckRunning = true;
+    try {
+      await api('/health', { timeoutMs: 10_000 });
+      if (!state.booted) {
+        if (state.bootFailure !== 'auth') await boot();
+      } else if (state.connectionLost) {
+        clearConnectionProblem();
+        showNotice('Connection to Engraphis restored.');
+      }
+    } catch (error) {
+      /* Any 4xx means the server answered; authentication is handled by boot. */
+      if (error.status && error.status < 500) clearConnectionProblem();
+      else showConnectionProblem(connectionProblemDetail(error));
+    } finally {
+      healthCheckRunning = false;
+    }
+  }
+
+  function startHealthChecks() {
+    if (healthTimer !== null) return;
+    healthTimer = window.setInterval(() => { void checkHealth(); }, 30_000);
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden && state.connectionLost) void checkHealth();
+    });
+  }
+
+  async function retryConnection() {
+    const control = byId('connection-retry');
+    control.disabled = true;
+    control.textContent = 'Retrying…';
+    try {
+      if (!state.booted) await boot();
+      else {
+        /* The page still holds the open workspace, graph and any unsaved edit. Confirm the
+           server answers; re-running bootstrap would reselect the workspace and drop them. */
+        await api('/health', { timeoutMs: 10_000 });
+        clearConnectionProblem();
+        showNotice('Connection to Engraphis restored.');
+      }
+    } catch (error) {
+      showConnectionProblem(connectionProblemDetail(error));
+    } finally {
+      control.disabled = false;
+      control.textContent = 'Retry now';
+    }
+  }
+
+  function embedderDescription(embedder) {
+    if (!embedder) return 'Unavailable';
+    const dim = number(embedder.dim);
+    if (embedder.semantic === false) return `Hashing embedder · ${dim}-dim · word matching`;
+    const model = text(embedder.model).split('/').pop() || text(embedder.class) || 'Embedding model';
+    return `${model} · ${dim}-dim · semantic`;
+  }
+
+  /* Only warn when a model was configured but did not load. An empty model setting is a
+     deliberate offline choice, and the runtime card still reports the hashing embedder. */
+  function renderEmbedderBanner(embedder) {
+    state.embedder = embedder || null;
+    byId('runtime-embedder').textContent = embedderDescription(embedder);
+    const banner = byId('embedder-banner');
+    const model = embedder ? text(embedder.model).trim() : '';
+    if (!embedder || embedder.semantic !== false || !model) {
+      banner.hidden = true;
+      return;
+    }
+    byId('embedder-banner-detail').textContent = `The configured model ${model} is not loaded, so Engraphis is using its dependency-free hashing embedder: Ask, Library search and Activity match shared words rather than meaning. Restart engraphis-dashboard with network access so it can download the model once, then choose Recheck.`;
+    banner.hidden = false;
+  }
+
+  function renderRuntimeCard() {
+    byId('runtime-version').textContent = state.releaseVersion || 'Unknown';
+    byId('runtime-host').textContent = location.host || 'This browser';
+    byId('runtime-embedder').textContent = embedderDescription(state.embedder);
+  }
+
+  async function recheckEmbedder() {
+    const control = byId('embedder-recheck');
+    control.disabled = true;
+    try {
+      /* Recheck the embedder only. A full bootstrap would reselect the workspace and discard
+         an open graph or a memory being edited. */
+      const bootstrap = (await api('/bootstrap')) || {};
+      renderEmbedderBanner(bootstrap.embedder);
+      renderRuntimeCard();
+      showNotice(state.embedder && state.embedder.semantic === false
+        ? 'Semantic search is still off. Restart engraphis-dashboard so it can load the model.'
+        : 'Semantic search is on.');
+    } catch (error) {
+      showNotice(`Could not recheck the embedder: ${error.message}`);
+    } finally {
+      control.disabled = false;
+    }
+  }
+
   function setDeploymentMode(mode) {
     const el = byId('deployment-mode-badge');
     if (!el) return;
@@ -1029,6 +1226,24 @@
         target.append(counterRows);
       }
     }
+    const packed = (payload && Array.isArray(payload.by_token_counter) ? payload.by_token_counter : [])
+      .filter(row => number(row.receipt_count) > 0 || number(row.source_tokens) > 0);
+    target.append(node('h3', '', 'Packed context accounting'));
+    target.append(node('p', 'field-note', 'Retrieved source tokens compared with the context actually emitted. Packing savings are not added again to the estimate above.'));
+    if (!packed.length) {
+      target.append(node('p', 'field-note', 'No complete context-usage receipts yet.'));
+    } else {
+      const packedRows = node('div', 'savings-breakdown');
+      packed.forEach(row => {
+        const item = node('div', 'savings-breakdown-row');
+        item.append(
+          node('span', '', text(row.token_counter || 'unknown')),
+          node('span', '', `${formatSavingsTokens(row.context_tokens)} packed / ${formatSavingsTokens(row.source_tokens)} source · ${formatSavingsTokens(row.saved_tokens)} saved`),
+        );
+        packedRows.append(item);
+      });
+      target.append(packedRows);
+    }
     target.append(node('p', 'savings-note', `${excluded} excluded or unclassified deliver${excluded === 1 ? 'y' : 'ies'}. Measures estimated prompt-context reduction; it does not measure provider billing.`));
   }
 
@@ -1104,11 +1319,16 @@
     // Audit rows use seconds (`ts`), while receipts use milliseconds (`ts_ms`).
     // Normalize before merging so both the newest-first order and 120-row cap are
     // chronological across the two independently paginated feeds.
-    const raw = item && (item.ts_ms ?? item.ts ?? item.timestamp ?? item.created_at);
-    const numeric = Number(raw);
-    if (Number.isFinite(numeric)) return numeric < 1e12 ? numeric * 1000 : numeric;
-    const parsed = Date.parse(raw);
-    return Number.isFinite(parsed) ? parsed : 0;
+    if (!item) return 0;
+    for (const [field, unit] of [
+      ['ts_ms', 'milliseconds'], ['ts', 'seconds'],
+      ['timestamp', 'auto'], ['created_at', 'seconds'],
+    ]) {
+      if (item[field] == null) continue;
+      const date = validDate(item[field], unit);
+      return date ? date.getTime() : 0;
+    }
+    return 0;
   }
 
   function auditField(item, ...names) {
@@ -1165,8 +1385,9 @@
   }
 
   async function loadStats(workspace, epoch) {
+    const request = beginScopedRequest('stats');
     try {
-      const stats = await api(`/stats?${query(workspace)}`);
+      const stats = await api(`/stats?${query(workspace)}`, { signal: request.signal });
       if (epoch !== state.refreshEpoch) return;
       state.stats = stats;
       renderMetricValues(stats);
@@ -1216,6 +1437,7 @@
       state.libraryPage = page;
       if (!page) state.libraryCursors = [null];
       if (state.libraryNextCursor) state.libraryCursors[page + 1] = state.libraryNextCursor;
+      state.libraryLoading = false;
       renderLibrary();
       renderFirstMemoryJourney();
     } catch (error) {
@@ -1241,7 +1463,7 @@
     byId('library-refresh').disabled = state.libraryLoading || !state.workspace;
     byId('library-list').setAttribute('aria-busy', String(state.libraryLoading));
     byId('library-list').querySelectorAll('.memory-card').forEach(card => {
-      card.disabled = state.librarySelecting && state.libraryLoading;
+      card.disabled = state.libraryLoading;
     });
     renderMoveSelection();
   }
@@ -1260,12 +1482,93 @@
     byId('first-memory-add').textContent = state.workspace ? 'Add your first memory' : 'Create your first workspace';
   }
 
+  /* Local memory health is computed on this database for every plan: retention buckets,
+     memories without entity links, and recorded conflicts. */
+  function renderHealth(payload, error = null) {
+    const target = byId('home-health');
+    target.replaceChildren();
+    if (!payload) {
+      target.append(empty(error ? `Memory health is unavailable: ${error.message}` : 'Memory health is unavailable.'));
+      return;
+    }
+    const distribution = Array.isArray(payload.decay_distribution) ? payload.decay_distribution : [];
+    const conflicts = payload.conflict_frequency || {};
+    const total = distribution.reduce((sum, item) => sum + number(item.count), 0);
+    const stats = node('div', 'stat-grid');
+    [
+      ['Without entity links', payload.orphan_count],
+      ['Conflicts · 7 days', conflicts.last_7d],
+      ['Conflicts · all time', conflicts.total],
+    ].forEach(([label, value]) => {
+      const item = node('div', 'stat-item');
+      item.append(node('span', '', label), node('strong', '', number(value).toLocaleString()));
+      stats.append(item);
+    });
+    target.append(stats);
+    if (!total) {
+      target.append(empty('Retention appears once this workspace has live memories.'));
+      return;
+    }
+    const bars = node('div', 'type-bars');
+    bars.setAttribute('role', 'group');
+    bars.setAttribute('aria-label', 'Live memories by current retention');
+    const max = Math.max(1, ...distribution.map(item => number(item.count)));
+    distribution.forEach(item => {
+      const label = text(item.label || item.bucket);
+      const row = node('div', 'type-bar');
+      const bar = document.createElement('progress');
+      bar.max = max;
+      bar.value = number(item.count);
+      bar.setAttribute('aria-label', `Retention ${label}: ${number(item.count)} memories`);
+      row.append(node('span', '', label), bar, node('strong', '', number(item.count).toLocaleString()));
+      bars.append(row);
+    });
+    target.append(node('p', 'project-help', 'Current retention of live memories. Recall, pins and edits strengthen a memory; time weakens it without deleting it.'), bars);
+  }
+
+  /* The last-session handoff is recorded per project, so it is only shown when the sidebar
+     names one. An empty handoff ({}) is treated as none. */
+  function renderHandoff(project, handoff) {
+    const section = byId('home-handoff');
+    const body = byId('home-handoff-body');
+    body.replaceChildren();
+    const value = handoff && typeof handoff === 'object' ? handoff : {};
+    const summary = text(typeof handoff === 'string' ? handoff : value.summary).trim();
+    const outcome = text(value.outcome).trim();
+    const threads = (Array.isArray(value.open_threads) ? value.open_threads : [])
+      .map(item => text(typeof item === 'string' ? item : (item && (item.title || item.text || item.summary)) || '').trim())
+      .filter(Boolean);
+    if (!project || (!summary && !outcome && !threads.length)) {
+      section.hidden = true;
+      return;
+    }
+    byId('home-handoff-project').textContent = project;
+    if (summary) body.append(node('p', '', summary));
+    if (outcome) body.append(node('p', 'project-help', `Outcome: ${outcome}`));
+    if (threads.length) {
+      const list = node('ul');
+      threads.slice(0, 8).forEach(thread => list.append(node('li', '', thread)));
+      body.append(node('h3', '', 'Open threads'), list);
+    }
+    section.hidden = false;
+  }
+
   async function loadToday(workspace, epoch) {
-    const [proactiveResult, auditResult] = await Promise.allSettled([
-      api(`/proactive?${query(workspace)}&k=8`),
-      api(`/audit?${query(workspace)}&limit=12`),
+    const request = beginScopedRequest('today');
+    const project = state.project;
+    const [proactiveResult, auditResult, healthResult, handoffResult] = await Promise.allSettled([
+      api(`/proactive?${query(workspace)}&k=8`, { signal: request.signal }),
+      api(`/audit?${query(workspace)}&limit=12`, { signal: request.signal }),
+      api(`/analytics/health?${query(workspace)}`, { signal: request.signal }),
+      project
+        ? api(`/proactive?${query(workspace)}&repo=${encodeURIComponent(project)}&k=1`, { signal: request.signal })
+        : Promise.resolve(null),
     ]);
     if (epoch !== state.refreshEpoch) return;
+    renderHealth(healthResult.status === 'fulfilled' ? healthResult.value : null,
+      healthResult.status === 'rejected' ? healthResult.reason : null);
+    renderHandoff(project, handoffResult.status === 'fulfilled' && handoffResult.value
+      ? handoffResult.value.handoff : null);
     const proactive = proactiveResult.status === 'fulfilled'
       ? (proactiveResult.value.memories || proactiveResult.value.results || [])
       : [];
@@ -1293,7 +1596,6 @@
       'retrieval-list': 'Retrieved memories will appear here.',
       'why-result': 'Trace a claim to inspect live and superseded support.',
       'timeline-result': 'Search a topic to inspect its temporal history.',
-      'supersession-list': 'Search a topic to compare closed and current records.',
       'audit-list': 'Open Audit to load this workspace’s records and receipts.',
       'savings-detail': 'Open Audit to load this workspace’s receipt-backed estimate.',
       'analytics-result': 'Open this tab to check availability.',
@@ -1319,6 +1621,17 @@
     },
     onError: () => showNotice('A graph resource could not be paused or released. Reload this page if it stays active.'),
   });
+  const graphExplorer = window.EngraphisGraphExplorer.create({
+    onOpen: item => openGraphConnections(item),
+    onFocus: (item, position, total) => {
+      revealGraphNode(item.id, item.name);
+      byId('graph-keyboard-status').textContent = `${item.name}, ${number(item.relations)} ${number(item.relations) === 1 ? 'relation' : 'relations'}, ${position} of ${total}. Press Enter to open its connections.`;
+    },
+    onClear: () => {
+      if (state.graphEngine) state.graphEngine.clearFocus();
+      byId('graph-keyboard-status').textContent = 'Selection cleared.';
+    },
+  });
   const narrowSidebar = window.matchMedia('(max-width: 860px)');
   const syncSidebarOptions = () => { byId('sidebar-options').open = !narrowSidebar.matches; };
   if (narrowSidebar.addEventListener) narrowSidebar.addEventListener('change', syncSidebarOptions);
@@ -1329,9 +1642,14 @@
   const askRequests = window.EngraphisAskRequests.create({ renderAnswer, renderPreview });
   const workflow = window.EngraphisWorkflow.create({
     api,
+    beforeProjectChange: () => confirmDiscardEditor(),
     onProjectChange: () => { void selectWorkspace(state.workspace); },
     onNavigate: view => switchView(view),
-    onNewMemory: () => { switchView('library'); openEditor(); },
+    onNewMemory: async () => {
+      if (!await confirmDiscardEditor()) return;
+      switchView('library');
+      openEditor();
+    },
   });
 
   async function loadProjects(workspace, epoch) {
@@ -1351,11 +1669,16 @@
   }
 
   async function selectWorkspace(name) {
-    if (!name) return;
     resetMoveSelection(true);
     invalidateConsolidationReview();
     const epoch = ++state.refreshEpoch;
     invalidateScopedRequests();
+    const previousGraphController = state.graphLoadController;
+    state.graphLoadRequest += 1;
+    state.graphLoadPromise = null;
+    state.graphLoadKey = '';
+    state.graphLoadController = null;
+    if (previousGraphController) previousGraphController.abort();
     askRequests.reset();
     window.clearTimeout(librarySearchTimer);
     state.libraryCursors = [null];
@@ -1373,6 +1696,7 @@
     renderFirstMemoryJourney();
     workflow.selectWorkspace(name);
     state.project = workflow.project();
+    if (window.SpecStudio) window.SpecStudio.setScope(name, state.project);
     void processingControls.selectWorkspace(name);
     state.graphWorkspace = '';
     state.graphData = null;
@@ -1388,6 +1712,9 @@
     resetEditorSession();
     destroyMemoryHistory();
     byId('memory-editor').hidden = true;
+    state.editorBaseline = '';
+    setEditorMode(false);
+    refreshEditorDirty();
     const memoryDetail = byId('memory-detail');
     memoryDetail.replaceChildren();
     memoryDetail.hidden = true;
@@ -1396,36 +1723,160 @@
     graphLifecycle.clear();
     state.graphSpacetimeOverlay = null;
     state.graphEngine = null;
+    state.graphLegendData = null;
+    byId('graph-legend').hidden = true;
+    graphExplorer.setData(null);
     byId('workspace-select').value = name;
     renderWorkspaceNames();
     try {
       localStorage.setItem('engraphis-workspace', name);
     } catch (_) {}
     showNotice('');
+    if (!name) return;
     try {
+      // Start the visible panel independently of hidden Library/Home requests.
+      const visiblePanel = state.view === 'relations' ? loadGraph()
+        : state.view === 'provenance' && state.provenanceTab === 'audit' ? loadAudit()
+        : state.view === 'manage' ? Promise.all([loadSavings(epoch), loadManageTab(state.manageTab)])
+        : Promise.resolve();
       const results = await Promise.allSettled([
         loadStats(name, epoch),
         loadProjects(name, epoch),
         loadMemories(name, epoch),
         loadReviewInbox(),
         loadToday(name, epoch),
+        visiblePanel,
       ]);
       if (epoch !== state.refreshEpoch) return;
       const failed = results.find(result => result.status === 'rejected');
       if (failed) showNotice(`Some workspace panels could not refresh: ${failed.reason.message}`);
       renderWorkspaceList();
-      if (state.view === 'relations') await loadGraph();
-      if (state.view === 'provenance' && state.provenanceTab === 'audit') await loadAudit();
-      if (state.view === 'manage') {
-        await loadSavings(epoch);
-        await loadManageTab(state.manageTab);
-      }
     } catch (error) {
       if (epoch === state.refreshEpoch) showNotice(`Could not refresh ${name}: ${error.message}`);
     }
   }
 
-  function memoryCard(memory) {
+  /* Manual order is one global position per memory, so it is offered only on the unfiltered
+     first page of the all-projects list, where the visible order is the stored order. */
+  function libraryReorderEnabled() {
+    return Boolean(state.workspace) && !state.project && !state.librarySelecting
+      && !state.libraryLoading && state.libraryPage === 0 && state.memories.length > 1
+      && !byId('library-filter').value.trim() && !byId('library-type').value;
+  }
+
+  let libraryOrderWrite = Promise.resolve();
+
+  async function persistLibraryOrder(movedId, message) {
+    const workspace = state.workspace;
+    const epoch = state.refreshEpoch;
+    const ids = state.memories.map(memory => memory.id);
+    renderLibrary();
+    const focusMoved = () => {
+      const moved = byId('library-list').querySelector(`[data-memory-id="${CSS.escape(movedId)}"]`);
+      if (moved) {
+        byId('library-list').querySelectorAll('[role="option"]').forEach(card => { card.tabIndex = card === moved ? 0 : -1; });
+        moved.focus();
+      }
+    };
+    focusMoved();
+    // Preserve the order of accepted gestures even when the server is slow.
+    const write = libraryOrderWrite.catch(() => {}).then(() => api('/memories/reorder', {
+      method: 'POST', body: { workspace, ids },
+    }));
+    libraryOrderWrite = write;
+    try {
+      await write;
+      if (write !== libraryOrderWrite) return;
+      if (workspace !== state.workspace || epoch !== state.refreshEpoch) return;
+      // Reordering advances the browse revision. Reload the first page with the
+      // current filters before offering another cursor from that revision.
+      state.libraryCursors = [null];
+      state.libraryNextCursor = null;
+      state.libraryPage = 0;
+      await loadMemories(workspace, epoch).catch(error => {
+        if (write === libraryOrderWrite && workspace === state.workspace && epoch === state.refreshEpoch) {
+          showNotice(`Order saved, but the Library could not refresh: ${error.message}`);
+        }
+      });
+      if (write !== libraryOrderWrite || workspace !== state.workspace || epoch !== state.refreshEpoch) return;
+      focusMoved();
+      byId('library-reorder-status').textContent = message;
+    } catch (error) {
+      if (write !== libraryOrderWrite) return;
+      if (workspace !== state.workspace || epoch !== state.refreshEpoch) return;
+      showNotice(`Could not save the new order: ${error.message}`);
+      refreshLibrary();
+    }
+  }
+
+  function moveLibraryMemory(id, delta) {
+    const from = state.memories.findIndex(memory => memory.id === id);
+    const to = Math.max(0, Math.min(state.memories.length - 1, from + delta));
+    if (from < 0) return;
+    if (from === to) {
+      byId('library-reorder-status').textContent = delta < 0 ? 'Already first.' : 'Already last on this page.';
+      return;
+    }
+    const [moved] = state.memories.splice(from, 1);
+    state.memories.splice(to, 0, moved);
+    void persistLibraryOrder(id, `${memoryTitle(moved)} moved to position ${to + 1}.`);
+  }
+
+  function dropLibraryMemory(dragId, targetId, before) {
+    if (!dragId || dragId === targetId) return;
+    const from = state.memories.findIndex(memory => memory.id === dragId);
+    if (from < 0) return;
+    const [moved] = state.memories.splice(from, 1);
+    const anchor = state.memories.findIndex(memory => memory.id === targetId);
+    if (anchor < 0) {
+      state.memories.splice(from, 0, moved);
+      return;
+    }
+    const to = before ? anchor : anchor + 1;
+    state.memories.splice(to, 0, moved);
+    void persistLibraryOrder(dragId, `${memoryTitle(moved)} moved to position ${to + 1}.`);
+  }
+
+  function enableCardDragging(card, memory) {
+    card.draggable = true;
+    const handle = node('span', 'memory-drag-handle', '⠿');
+    handle.setAttribute('aria-hidden', 'true');
+    handle.title = 'Drag to reorder';
+    card.prepend(handle);
+    card.addEventListener('dragstart', event => {
+      state.libraryDragId = memory.id;
+      card.classList.add('dragging');
+      if (event.dataTransfer) {
+        event.dataTransfer.effectAllowed = 'move';
+        event.dataTransfer.setData('text/plain', memory.id);
+      }
+    });
+    card.addEventListener('dragover', event => {
+      if (!state.libraryDragId || state.libraryDragId === memory.id) return;
+      event.preventDefault();
+      const bounds = card.getBoundingClientRect();
+      const before = event.clientY - bounds.top < bounds.height / 2;
+      card.classList.toggle('drag-over-top', before);
+      card.classList.toggle('drag-over-bottom', !before);
+    });
+    card.addEventListener('dragleave', () => card.classList.remove('drag-over-top', 'drag-over-bottom'));
+    card.addEventListener('drop', event => {
+      event.preventDefault();
+      const before = card.classList.contains('drag-over-top');
+      card.classList.remove('drag-over-top', 'drag-over-bottom');
+      const dragId = state.libraryDragId;
+      state.libraryDragId = '';
+      dropLibraryMemory(dragId, memory.id, before);
+    });
+    card.addEventListener('dragend', () => {
+      state.libraryDragId = '';
+      byId('library-list').querySelectorAll('.memory-card').forEach(item => {
+        item.classList.remove('dragging', 'drag-over-top', 'drag-over-bottom');
+      });
+    });
+  }
+
+  function memoryCard(memory, reorderable = false) {
     const card = node('button', 'memory-card');
     card.type = 'button';
     card.setAttribute('role', 'option');
@@ -1443,8 +1894,15 @@
       node('p', '', truncate(memory.content || memory.summary, 240)),
       memoryMeta(memory),
     );
+    if (reorderable) {
+      enableCardDragging(card, memory);
+      card.setAttribute('aria-keyshortcuts', 'Alt+ArrowUp Alt+ArrowDown');
+    }
     card.addEventListener('click', () => {
-      if (!state.librarySelecting) { openMemory(memory); return; }
+      if (!state.librarySelecting) {
+        void openMemory(memory);
+        return;
+      }
       if (state.libraryLoading) return;
       if (state.moveMemoryIds.has(memory.id)) state.moveMemoryIds.delete(memory.id);
       else state.moveMemoryIds.add(memory.id);
@@ -1472,6 +1930,12 @@
         const cards = [...target.querySelectorAll('[role="option"]')];
         const current = event.target.closest('[role="option"]');
         if (!current || !cards.length) return;
+        if (event.altKey && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
+          event.preventDefault();
+          if (libraryReorderEnabled()) moveLibraryMemory(current.dataset.memoryId, event.key === 'ArrowUp' ? -1 : 1);
+          else byId('library-reorder-status').textContent = 'Clear the search, type and project filters and return to the first page to reorder.';
+          return;
+        }
         let index = cards.indexOf(current);
         if (event.key === 'Home') index = 0;
         else if (event.key === 'End') index = cards.length - 1;
@@ -1491,11 +1955,14 @@
       ? `${start.toLocaleString()}–${(start + memories.length - 1).toLocaleString()} of ${total.toLocaleString()} memories`
       : `${total.toLocaleString()} ${total === 1 ? 'memory' : 'memories'}`;
     if (!memories.length) {
+      byId('library-reorder-hint').hidden = true;
       target.append(empty(byId('library-filter').value.trim() || byId('library-type').value
         ? 'No memories match these filters.' : 'No active memories in this workspace. Add a fact or import local documents to begin.'));
       return;
     }
-    memories.forEach(memory => target.append(memoryCard(memory)));
+    const reorderable = libraryReorderEnabled();
+    byId('library-reorder-hint').hidden = !reorderable;
+    memories.forEach(memory => target.append(memoryCard(memory, reorderable)));
     const cards = [...target.querySelectorAll('[role="option"]')];
     const selectedIndex = cards.findIndex(card => card.getAttribute('aria-selected') === 'true');
     cards.forEach((card, index) => { card.tabIndex = index === (selectedIndex >= 0 ? selectedIndex : 0) ? 0 : -1; });
@@ -1664,6 +2131,8 @@
     const move = state.memoryMove;
     if (!move || move.loading || move.applying || !move.preview || move.preview.can_move !== true) return;
     const request = beginScopedRequest('memory-move');
+    if (!await confirmDiscardEditor() || state.memoryMove !== move
+      || !isCurrentScopedRequest(request)) return;
     const body = { ...memoryMoveBody(move), preview_token: move.preview.preview_token, confirmed: true };
     if (body.target_workspace !== move.preview.target || body.workspace !== move.preview.source) {
       invalidateMemoryMovePreview();
@@ -1703,6 +2172,32 @@
     return list;
   }
 
+  /* Governance actions recorded against this exact record, newest first. */
+  function auditTrail(rows) {
+    const entries = (Array.isArray(rows) ? rows : []).slice(-20).reverse();
+    if (!entries.length) return null;
+    const section = node('section', 'audit-trail');
+    section.setAttribute('aria-labelledby', 'memory-audit-title');
+    const heading = node('h3', '', 'Audit trail');
+    heading.id = 'memory-audit-title';
+    const list = node('ol');
+    entries.forEach(row => {
+      const item = node('li');
+      const when = node('time', '', relative(row.ts || row.at));
+      const date = validDate(row.ts || row.at);
+      if (date && date.getTime() > 0) when.dateTime = date.toISOString();
+      item.append(
+        node('span', 'tag', text(row.action || row.op || 'change').replaceAll('_', ' ')),
+        node('span', '', text(row.detail || row.reason || '')),
+        when,
+      );
+      if (row.actor) item.append(node('span', 'audit-actor', text(row.actor)));
+      list.append(item);
+    });
+    section.append(heading, list);
+    return section;
+  }
+
   async function selectMemory(id) {
     const workspace = state.workspace;
     const project = state.project;
@@ -1714,6 +2209,9 @@
     const target = byId('memory-detail');
     target.hidden = false;
     byId('memory-editor').hidden = true;
+    state.editorBaseline = '';
+    setEditorMode(false);
+    refreshEditorDirty();
     target.replaceChildren(empty('Loading memory…'));
     try {
       const payload = await api(`/memory/${encodeURIComponent(id)}?${query(workspace)}`, { signal: request.signal });
@@ -1723,10 +2221,12 @@
       target.replaceChildren();
       const title = node('h2', '', memoryTitle(memory));
       title.id = 'memory-detail-title';
+      const content = node('div', 'markdown-body memory-content');
+      markdown.renderInto(content, memory.content || memory.summary || 'No content.');
       target.append(
         node('p', 'eyebrow', `${memoryType(memory)} · ${memory.scope || 'workspace'}`),
         title,
-        node('p', '', memory.content || memory.summary || 'No content.'),
+        content,
         memoryMeta(memory),
         definitionList([
           ['Memory id', memory.id],
@@ -1743,17 +2243,19 @@
       const actions = node('div', 'detail-actions');
       const provenance = memory.provenance || {};
       if (provenance.review_state !== 'approved' || provenance.trusted !== true) {
-        actions.append(button('Approve for prompt…', 'primary-button', () => approveForPrompt(memory)));
+        actions.append(memoryMutationButton('Approve for prompt…', 'primary-button', () => approveForPrompt(memory)));
       }
       actions.append(
         button('Review with Jev', 'secondary-button', () => openJevReview(memory)),
         button(memory.can_revise === false ? 'Review saved versions' : 'Edit', 'secondary-button', () => openEditor(memory)),
-        button(memory.pinned ? 'Unpin' : 'Pin', 'secondary-button', () => togglePin(memory)),
+        memoryMutationButton(memory.pinned ? 'Unpin' : 'Pin', 'secondary-button', () => togglePin(memory)),
         button('Search topic timeline', 'secondary-button', () => openMemoryTimeline(memory)),
-        button('Retire', 'danger-button', () => retireMemory(memory)),
-        button('Secure erase leak', 'danger-button', () => secureEraseMemory(memory)),
+        memoryMutationButton('Retire', 'danger-button', () => retireMemory(memory)),
+        memoryMutationButton('Secure erase leak', 'danger-button', () => secureEraseMemory(memory)),
       );
       target.append(actions);
+      const trail = auditTrail(payload.audit);
+      if (trail) target.append(trail);
       state.memoryHistory = window.EngraphisMemoryHistory.create({
         api, id, workspace, repo: project,
         isCurrent: () => isCurrentScopedRequest(request) && state.selectedMemory === id,
@@ -1898,13 +2400,88 @@
     target.append(node('p', 'project-help', 'Jev cannot authorize a memory change, grounded answer, or command. Review the sources yourself.'));
   }
 
-  function openMemory(memory) {
+  async function openMemory(memory) {
     if (!memory || !memory.id) {
       showNotice('This result no longer identifies a memory to inspect.');
       return;
     }
+    if (!await confirmDiscardEditor()) return;
     switchView('library');
     selectMemory(memory.id);
+  }
+
+  /* ── editor draft state: unsaved-change indicator, discard guard, preview ── */
+  function editorSnapshot() {
+    return JSON.stringify([
+      byId('editor-memory-title').value,
+      byId('editor-memory-type').value,
+      byId('editor-memory-content').value,
+      byId('editor-memory-importance').value,
+      byId('editor-memory-scope').value,
+    ]);
+  }
+
+  function editorOpen() {
+    return !byId('memory-editor').hidden && Boolean(state.editorSession);
+  }
+
+  /* A submitted draft is being saved, not abandoned, so it does not count as unsaved while the
+     save is in flight; confirmDiscardEditor() asks separately before leaving such a save. */
+  function editorDirty() {
+    return editorOpen() && !state.editorSession.busy && Boolean(state.editorBaseline)
+      && editorSnapshot() !== state.editorBaseline;
+  }
+
+  function refreshEditorDirty() {
+    const label = byId('editor-save-state');
+    const dirty = editorDirty();
+    label.textContent = dirty ? 'Unsaved changes' : '';
+    label.classList.toggle('dirty', dirty);
+  }
+
+  function commitEditorBaseline() {
+    state.editorBaseline = editorOpen() ? editorSnapshot() : '';
+    refreshEditorDirty();
+  }
+
+  async function confirmDiscardEditor() {
+    if (editorOpen() && state.editorSession.busy) {
+      /* The save is still in flight. Leaving does not cancel it, but if it then fails the
+         draft is gone with the editor, so say so instead of asking to "discard". */
+      return dialogs.confirm({
+        title: 'Leave while saving?',
+        message: 'This memory is still being saved. If the save fails after you leave, the draft cannot be recovered.',
+        confirmLabel: 'Leave anyway',
+        cancelLabel: 'Stay',
+      });
+    }
+    if (!editorDirty()) return true;
+    const title = byId('editor-memory-title').value.trim() || 'this memory';
+    return dialogs.confirm({
+      title: 'Discard unsaved changes?',
+      message: `Your changes to “${title}” have not been saved. Discard them?`,
+      confirmLabel: 'Discard changes',
+      cancelLabel: 'Keep editing',
+      danger: true,
+    });
+  }
+
+  async function requestCloseEditor() {
+    if (await confirmDiscardEditor()) closeEditor();
+  }
+
+  function setEditorMode(preview) {
+    const content = byId('editor-memory-content');
+    const panel = byId('editor-preview');
+    if (preview) markdown.renderInto(panel, content.value.trim() ? content.value : 'Nothing to preview yet.');
+    else panel.replaceChildren();
+    panel.hidden = !preview;
+    content.hidden = preview;
+    [['editor-write-mode', !preview], ['editor-preview-mode', preview]].forEach(([id, active]) => {
+      const control = byId(id);
+      control.classList.toggle('active', active);
+      control.setAttribute('aria-pressed', String(active));
+    });
   }
 
   function simpleMemoryCard(memory, className = 'memory-card') {
@@ -1924,6 +2501,12 @@
   }
 
   function openEditor(memory = null) {
+    if (state.workspaceMutations.has(state.workspace)) {
+      showNotice('Wait for the workspace update before editing memories.');
+      return;
+    }
+    // A late detail response must not turn a new draft into an old revision.
+    beginScopedRequest('memory-detail');
     resetEditorSession();
     state.editorSession = {
       revision: window.EngraphisMemoryRevision.create(memory), busy: false,
@@ -1969,6 +2552,8 @@
       byId('editor-refresh').hidden = false;
       setEditorBusy(false);
     }
+    setEditorMode(false);
+    commitEditorBaseline();
     byId('editor-memory-title').focus();
   }
 
@@ -1988,6 +2573,10 @@
   }
 
   function setEditorBusy(busy) {
+    const updating = state.workspaceMutations.has(state.workspace);
+    byId('new-memory-button').disabled = updating || !state.workspace;
+    byId('first-memory-add').disabled = updating;
+    busy = busy || updating;
     const editor = byId('memory-editor');
     editor.setAttribute('aria-busy', String(busy));
     editor.querySelectorAll('input, select, textarea, button').forEach(control => { control.disabled = busy; });
@@ -2028,7 +2617,10 @@
   function closeEditor() {
     const returnFocus = state.editorReturnFocus;
     resetEditorSession();
+    setEditorMode(false);
+    state.editorBaseline = '';
     byId('memory-editor').hidden = true;
+    refreshEditorDirty();
     byId('memory-detail').hidden = false;
     state.editorMemory = null;
     state.editorReturnFocus = null;
@@ -2039,6 +2631,10 @@
 
   async function saveMemory(event) {
     event.preventDefault();
+    if (state.workspaceMutations.has(state.workspace)) {
+      showNotice('Wait for the workspace update before saving memories.');
+      return;
+    }
     const session = state.editorSession;
     if (!session || session.busy || session.conflicted) return;
     const current = state.editorMemory;
@@ -2066,6 +2662,7 @@
       return;
     }
     if (!content) {
+      setEditorMode(false);
       contentField.setAttribute('aria-invalid', 'true');
       editorError.textContent = 'Enter memory content before saving.';
       editorError.hidden = false;
@@ -2073,6 +2670,7 @@
       contentField.focus();
       return;
     }
+    let written = false;
     try {
       session.busy = true;
       setEditorBusy(true);
@@ -2115,10 +2713,12 @@
           showNotice('Memory saved locally. Review its source before approving it for model context.');
         }
       }
+      written = true;
       if (workspace !== state.workspace || epoch !== state.refreshEpoch || state.editorSession !== session) return;
       closeEditor();
       await selectWorkspace(workspace);
-      if (savedId && workspace === state.workspace && state.refreshEpoch === epoch + 1) await selectMemory(savedId);
+      if (savedId && workspace === state.workspace && state.refreshEpoch === epoch + 1
+        && !state.editorSession && !state.selectedMemory) await selectMemory(savedId);
     } catch (error) {
       if (workspace === state.workspace && epoch === state.refreshEpoch && state.editorSession === session) {
         session.conflicted = Boolean(current && (error.status === 409 || !current.version));
@@ -2128,6 +2728,9 @@
         editorError.hidden = false;
         byId('editor-refresh').hidden = !session.conflicted;
         showNotice(editorError.textContent);
+      } else if (!written) {
+        // The person left the editor while this save was in flight; still say it failed.
+        showNotice(`Could not save “${title || 'the memory'}”: ${error.message}`);
       }
     } finally {
       session.busy = false;
@@ -2136,49 +2739,89 @@
   }
 
   async function togglePin(memory) {
+    const request = beginScopedRequest('memory-mutation');
+    const editorSession = state.editorSession;
     try {
       await api('/pin', {
         method: 'POST',
-        body: { id: memory.id, workspace: state.workspace, pinned: !memory.pinned },
+        body: { id: memory.id, workspace: request.workspace, pinned: !memory.pinned },
       });
+      if (!isCurrentScopedRequest(request) || state.editorSession !== editorSession
+        || state.selectedMemory !== memory.id) return;
       showNotice(memory.pinned ? 'Memory unpinned.' : 'Memory pinned against decay.');
-      await selectWorkspace(state.workspace);
-      selectMemory(memory.id);
+      await selectWorkspace(request.workspace);
+      if (state.workspace === request.workspace && state.refreshEpoch === request.epoch + 1
+        && !state.editorSession && !state.selectedMemory) await selectMemory(memory.id);
     } catch (error) {
+      if (!isCurrentScopedRequest(request) || state.editorSession !== editorSession
+        || state.selectedMemory !== memory.id) return;
       showNotice(`Could not change pin: ${error.message}`);
     }
   }
 
   async function retireMemory(memory) {
-    if (!window.confirm(`Retire “${memory.title || memory.id}”? The record stays in temporal history but leaves live recall.`)) return;
+    const request = beginScopedRequest('memory-mutation');
+    const editorSession = state.editorSession;
+    if (!await dialogs.confirm({
+      title: 'Retire memory',
+      message: `Retire “${memory.title || memory.id}”? The record stays in temporal history but leaves live recall.`,
+      confirmLabel: 'Retire memory',
+      danger: true,
+    })) return;
+    if (!isCurrentScopedRequest(request) || state.editorSession !== editorSession
+      || state.selectedMemory !== memory.id) return;
     try {
       await api('/retire', {
         method: 'POST',
-        body: { id: memory.id, workspace: state.workspace, reason: 'retired in Ledger' },
+        body: { id: memory.id, workspace: request.workspace, reason: 'retired in Ledger' },
       });
+      if (!isCurrentScopedRequest(request) || state.editorSession !== editorSession
+        || state.selectedMemory !== memory.id) return;
       state.selectedMemory = '';
       byId('memory-detail').replaceChildren(empty('Memory moved out of live recall. Its history is retained.'));
       showNotice('Memory retired without hard deletion.');
-      await selectWorkspace(state.workspace);
+      await selectWorkspace(request.workspace);
     } catch (error) {
+      if (!isCurrentScopedRequest(request) || state.editorSession !== editorSession
+        || state.selectedMemory !== memory.id) return;
       showNotice(`Could not retire memory: ${error.message}`);
     }
   }
 
   async function secureEraseMemory(memory) {
+    const request = beginScopedRequest('memory-mutation');
+    const editorSession = state.editorSession;
     const name = memory.title || memory.id;
-    if (!window.confirm(`Securely erase “${name}”? This destroys temporal history and local index copies. Rotate the leaked credential; copied exports, snapshots, remote peers, and an already-compromised agent cannot be erased here.`)) return;
+    if (!await dialogs.confirm({
+      title: 'Securely erase a leaked secret',
+      message: [
+        `Securely erase “${name}”? This destroys its temporal history and local index copies and cannot be undone.`,
+        'Rotate the leaked credential as well: copied exports, snapshots, remote peers, and an already-compromised agent cannot be erased here.',
+      ],
+      confirmLabel: 'Securely erase',
+      danger: true,
+    })) return;
+    if (!isCurrentScopedRequest(request) || state.editorSession !== editorSession
+      || state.selectedMemory !== memory.id) return;
     try {
+      /* The confirmation above is the operator attestation the service requires; it
+         refuses an erase without `confirmed: true`. */
       const result = await api('/secure-erase', {
-        method: 'POST', body: { id: memory.id, workspace: state.workspace },
+        method: 'POST', body: { id: memory.id, workspace: request.workspace, confirmed: true },
       });
+      if (!isCurrentScopedRequest(request) || state.editorSession !== editorSession
+        || state.selectedMemory !== memory.id) return;
       state.selectedMemory = '';
       byId('memory-detail').replaceChildren(empty('Memory securely erased from this local store. Review the reported backup limitations and rotate the credential.'));
+      await selectWorkspace(request.workspace);
+      if (state.workspace !== request.workspace || state.refreshEpoch !== request.epoch + 1
+        || state.editorSession || state.selectedMemory) return;
       showNotice(result.vector_index_cleanup === 'deleted'
-        ? 'Memory securely erased from local persistence.'
-        : 'Memory removed locally; configured vector index needs separate remediation.');
-      await selectWorkspace(state.workspace);
+        ? 'Memory securely erased from this local store. Rotate the leaked credential too: exports, snapshots and remote peers keep their own copies.'
+        : 'Memory removed locally, but the configured vector index needs separate remediation. Rotate the leaked credential too.');
     } catch (error) {
+      if (!isCurrentScopedRequest(request) || state.editorSession !== editorSession
+        || state.selectedMemory !== memory.id) return;
       showNotice(`Could not securely erase memory: ${error.message}`);
     }
   }
@@ -2190,28 +2833,10 @@
     byId('timeline-form').requestSubmit();
   }
 
-  async function importFiles(files) {
-    if (!files.length) return;
-    const form = new FormData();
-    form.append('workspace', state.workspace);
-    form.append('memory_type', 'semantic');
-    form.append('derive_facts', 'false');
-    [...files].forEach(file => form.append('files', file));
-    try {
-      showNotice(`Importing ${files.length} ${files.length === 1 ? 'file' : 'files'} locally…`);
-      const result = await api('/workspaces/import-files', { method: 'POST', body: form });
-      showNotice(`Import complete${result.count != null ? ` · ${result.count} memories` : ''}.`);
-      await selectWorkspace(state.workspace);
-    } catch (error) {
-      showNotice(`Import failed: ${error.message}`);
-    } finally {
-      byId('import-files').value = '';
-    }
-  }
-
   const obsidianImport = {
     preview: null, job: null, poll: null, selection: null, sources: [],
-    jobWorkspace: '', running: false, reviewGeneration: 0,
+    jobWorkspace: '', jobId: '', running: false, reviewGeneration: 0,
+    polling: false, pollFailures: 0, reportPage: 0, reportKey: '',
   };
   let documentExtensions = null;
 
@@ -2342,19 +2967,31 @@
   function renderObsidianReport(result) {
     const target = byId('obsidian-import-report');
     const wanted = byId('obsidian-report-filter').value;
-    target.replaceChildren();
+    // Keep monitoring closed imports without rebuilding an invisible report.
+    if (!byId('obsidian-import-dialog').open) return;
     const rows = obsidianRows(result).filter(row => {
       const status = String(row.status || row.action || row.result || '').toLowerCase();
       if (wanted === 'all') return true;
       if (wanted === 'reject') return /reject|error|warn|conflict/.test(status) || Boolean(row.warning || row.error);
       return status.includes(wanted);
     });
+    const pageSize = 100;
+    obsidianImport.reportPage = Math.min(obsidianImport.reportPage, Math.max(0, Math.ceil(rows.length / pageSize) - 1));
+    const start = obsidianImport.reportPage * pageSize;
+    const page = rows.slice(start, start + pageSize);
+    const reportKey = JSON.stringify([wanted, start, rows.length, page]);
+    if (reportKey === obsidianImport.reportKey) return;
+    obsidianImport.reportKey = reportKey;
+    byId('obsidian-report-count').textContent = rows.length ? `${start + 1}–${start + page.length} of ${rows.length} files` : '0 files';
+    byId('obsidian-report-previous').disabled = start === 0;
+    byId('obsidian-report-next').disabled = start + page.length >= rows.length;
+    target.replaceChildren();
     if (!rows.length) {
       target.append(empty(wanted === 'all' ? 'No per-file details were returned.' : 'No files match this filter.'));
       return;
     }
     const list = node('ul');
-    rows.forEach(row => {
+    page.forEach(row => {
       const status = String(row.status || row.action || row.result || 'reported').toLowerCase();
       const action = row.action && String(row.action).toLowerCase() !== status
         ? ` · action: ${row.action}` : '';
@@ -2427,6 +3064,18 @@
     if (obsidianImport.running) return;
     if (!requireNewSourceLabel()) return;
     const selection = obsidianSelection();
+    const requiredScopeField = !selection.fields.workspace
+      ? ['obsidian-workspace', 'Enter a workspace before previewing this import.']
+      : selection.fields.scope === 'repo' && !selection.fields.repo
+        ? ['obsidian-repo', 'Repository scope requires a repository name.']
+        : selection.fields.scope === 'session' && !selection.fields.session_id
+          ? ['obsidian-session', 'Session scope requires a session ID.']
+          : null;
+    if (requiredScopeField) {
+      byId('obsidian-import-progress').textContent = requiredScopeField[1];
+      byId(requiredScopeField[0]).focus();
+      return;
+    }
     if (!selection.uploadFiles.length) {
       byId('obsidian-import-progress').textContent = selection.sourceMode === 'obsidian'
         ? 'Choose a folder containing Markdown notes.'
@@ -2466,9 +3115,17 @@
   }
 
   async function pollObsidianImport(jobId, workspace) {
+    if (obsidianImport.polling) return;
+    obsidianImport.polling = true;
+    let refreshWorkspace = false;
+    obsidianImport.jobId = jobId;
+    obsidianImport.jobWorkspace = workspace;
+    obsidianImport.poll = null;
     try {
       const result = await obsidianApi(`/workspaces/import-documents/jobs/${encodeURIComponent(jobId)}?${query(workspace)}`);
       obsidianImport.job = result;
+      obsidianImport.pollFailures = 0;
+      byId('obsidian-retry-progress').hidden = true;
       renderObsidianReport(result);
       obsidianSummary(result, 'Import');
       if (!['complete', 'completed', 'partial', 'failed', 'cancelled'].includes(String(result.state || result.status || '').toLowerCase())) {
@@ -2484,10 +3141,24 @@
       byId('obsidian-run').disabled = true;
       byId('obsidian-preview').disabled = false;
       showNotice('Document import finished.');
-      await selectWorkspace(state.workspace);
+      refreshWorkspace = true;
     } catch (error) {
-      byId('obsidian-import-progress').textContent = `Could not read import progress: ${error.message}`;
+      obsidianImport.pollFailures += 1;
+      const retrying = obsidianImport.pollFailures <= 3;
+      byId('obsidian-import-progress').textContent = `Could not read import progress: ${error.message}. ${retrying ? 'Reconnecting to this job…' : 'Retry progress to reconnect to this job.'}`;
       byId('obsidian-run').disabled = true;
+      byId('obsidian-retry-progress').hidden = false;
+      if (retrying) obsidianImport.poll = window.setTimeout(() => pollObsidianImport(jobId, workspace), Math.min(6000, 750 * 2 ** obsidianImport.pollFailures));
+    } finally {
+      obsidianImport.polling = false;
+    }
+    // Release status-request ownership before the refresh can expose a new import.
+    if (refreshWorkspace && workspace === state.workspace && !state.editorSession) {
+      try {
+        await selectWorkspace(workspace);
+      } catch (error) {
+        showNotice(`Document import finished, but the workspace could not refresh: ${error.message}`);
+      }
     }
   }
 
@@ -2516,6 +3187,8 @@
     byId('obsidian-preview').disabled = true;
     byId('obsidian-import-progress').textContent = 'Starting local document import…';
     obsidianImport.running = true;
+    obsidianImport.pollFailures = 0;
+    byId('obsidian-retry-progress').hidden = true;
     obsidianImport.jobWorkspace = workspace;
     try {
       const result = await obsidianApi('/workspaces/import-documents/run', {
@@ -2540,7 +3213,7 @@
         byId('obsidian-run').disabled = true;
         byId('obsidian-preview').disabled = false;
         showNotice('Document import finished.');
-        await selectWorkspace(state.workspace);
+        if (workspace === state.workspace && !state.editorSession) await selectWorkspace(workspace);
       }
     } catch (error) {
       obsidianImport.running = false;
@@ -2581,6 +3254,9 @@
       obsidianImport.poll = null;
       obsidianImport.selection = null;
       obsidianImport.jobWorkspace = '';
+      obsidianImport.jobId = '';
+      obsidianImport.pollFailures = 0;
+      byId('obsidian-retry-progress').hidden = true;
       delete byId('obsidian-cancel').dataset.jobId;
       delete byId('obsidian-cancel').dataset.workspace;
     }
@@ -2595,12 +3271,14 @@
     byId('obsidian-run').disabled = true;
     byId('obsidian-preview').disabled = obsidianImport.running;
     byId('obsidian-cancel').hidden = !obsidianImport.running;
-    if (!obsidianImport.running) renderObsidianReport(null);
     await Promise.all([loadObsidianVaults(), loadDocumentFormats()]);
     byId('obsidian-vault-id').value = '';
     updateSourceLabelRequirement();
     updateDocumentImportMode();
     dialog.showModal();
+    obsidianImport.reportKey = '';
+    if (!obsidianImport.running) obsidianImport.reportPage = 0;
+    renderObsidianReport(obsidianImport.job || obsidianImport.preview);
     byId('obsidian-import-files').focus();
   }
 
@@ -2717,12 +3395,47 @@
     });
   }
 
+  function retrievalScore(label, value, { percent = false, max = 1 } = {}) {
+    const score = node('div', 'retrieval-score');
+    const numeric = Number(value);
+    score.append(node('span', '', label));
+    if (value == null || value === '' || !Number.isFinite(numeric)) {
+      score.append(node('strong', '', '—'));
+      return score;
+    }
+    const bounded = Math.max(0, Math.min(max, numeric));
+    const bar = document.createElement('progress');
+    bar.max = max;
+    bar.value = bounded;
+    bar.setAttribute('aria-hidden', 'true');
+    score.append(node('strong', '', percent ? `${Math.round(bounded / max * 100)}%` : numeric.toFixed(2)), bar);
+    return score;
+  }
+
+  /* Rank is relative to this answer's candidates; support is the absolute overlap that the
+     grounding gate uses; retention is how strongly the record is currently held. */
   function renderPreview(retrieval) {
     const target = byId('retrieval-list');
     target.replaceChildren();
     const memories = retrieval.memories || [];
-    if (!memories.length) target.append(empty('No raw candidates were returned.'));
-    else memories.forEach(memory => target.append(simpleMemoryCard(memory)));
+    if (!memories.length) {
+      target.append(empty('No raw candidates were returned.'));
+      return;
+    }
+    const rankOf = memory => Number(memory.relative_score != null ? memory.relative_score : memory.score);
+    const top = Math.max(0, ...memories.map(rankOf).filter(Number.isFinite));
+    memories.forEach((memory, index) => {
+      const card = simpleMemoryCard(memory);
+      const scores = node('div', 'retrieval-scores');
+      scores.append(
+        retrievalScore(`Rank #${index + 1}`, rankOf(memory), { max: top > 0 ? top : 1 }),
+        retrievalScore('Support', memory.absolute_support),
+        retrievalScore('Retention', memory.retention, { percent: true }),
+      );
+      card.append(scores);
+      if (memory.arm) card.append(node('p', 'project-help', `Found by ${text(memory.arm).replaceAll('_', ' ')} retrieval`));
+      target.append(card);
+    });
   }
 
   function graphCommunityIndex(value) {
@@ -2892,10 +3605,13 @@
   }
 
   function graphConnectionEntries(item) {
-    const graph = state.graphEngine && state.graphEngine.exportData
-      ? state.graphEngine.exportData() : state.graphData;
+    const graph = state.graphEngine && state.graphEngine.visibleData
+      ? state.graphEngine.visibleData()
+      : state.graphEngine && state.graphEngine.exportData
+        ? state.graphEngine.exportData() : state.graphData;
     if (!graph) return [];
-    const nodes = new Map(graph.nodes.map(candidate => [candidate.id, candidate]));
+    const loaded = new Map(state.graphData.nodes.map(candidate => [candidate.id, candidate]));
+    const nodes = new Map(graph.nodes.map(candidate => [candidate.id, { ...loaded.get(candidate.id), ...candidate }]));
     const connections = new Map();
     graph.links.forEach(link => {
       const source = link.source;
@@ -2952,6 +3668,9 @@
       const evidence = detail.evidence || [];
       const total = number(detail.totals && detail.totals.evidence) || evidence.length;
       byId('graph-connection-memory-title').textContent = `${total} ${total === 1 ? 'memory' : 'memories'} for ${title}`;
+      if (detail.truncation && detail.truncation.evidence) {
+        byId('graph-connection-memory-title').textContent += ' · bounded evidence sample';
+      }
       renderGraphConnectionMemories(
         evidence.map(graphMemoryCard),
         'No active memories support this connected node.',
@@ -3055,7 +3774,7 @@
     if (repoLabel) repoLabel.textContent = full
       ? 'Filter by exact repository name'
       : 'Filter to a repository or topic';
-    ['graph-min-degree', 'graph-tune-min-degree', 'graph-collapse', 'graph-depth',
+    ['graph-min-degree', 'graph-collapse', 'graph-depth',
       'graph-show-unlinked', 'graph-flow', 'graph-flow-speed'].forEach(id => {
       const control = byId(id);
       if (control) { control.disabled = false; control.title = ''; }
@@ -3409,9 +4128,6 @@
     byId('graph-min-degree').value = String(next);
     byId('graph-min-degree-output').value = String(Math.round(next));
     byId('graph-min-degree-output').textContent = String(Math.round(next));
-    byId('graph-tune-min-degree').value = String(next);
-    byId('graph-tune-min-degree-output').value = String(Math.round(next));
-    byId('graph-tune-min-degree-output').textContent = String(Math.round(next));
     if (apply) applyGraphScope();
   }
 
@@ -3494,6 +4210,7 @@
       style: byId('graph-style').value,
       color: byId('graph-color').value,
       palette: byId('graph-palette').value,
+      typeColors: { ...state.graphTypeColors },
       flow: byId('graph-flow').getAttribute('aria-checked') === 'true',
       labels: byId('graph-labels').getAttribute('aria-checked') === 'true',
       tuning: graphTuningSettings(),
@@ -3539,6 +4256,13 @@
     byId('graph-style').value = style;
     byId('graph-color').value = color;
     byId('graph-palette').value = palette;
+    const savedTypeColors = graphPreference('typeColors', {});
+    state.graphTypeColors = {};
+    if (savedTypeColors && typeof savedTypeColors === 'object') {
+      Object.entries(savedTypeColors).slice(0, 40).forEach(([type, value]) => {
+        if (type.length <= 80 && validGraphColor(value)) state.graphTypeColors[type] = value.toLowerCase();
+      });
+    }
 
     const savedTuning = graphPreference('tuning', {});
     const savedPhysicsVersion = Number(graphPreference('physicsVersion', 0));
@@ -3706,6 +4430,8 @@
     setGraphLayers(view.layers);
     state.graphSavedView = id === 'custom' ? '' : id;
     syncGraphChoices();
+    renderGraphTypeColors();
+    renderGraphLegend();
     if (state.graphEngine) {
       state.graphEngine.apply(graph => {
         graph.setPreset(preset);
@@ -3782,22 +4508,180 @@
     showNotice('Graph tuning reset to the selected layout defaults.');
   }
 
+  const GRAPH_TYPE_LABELS = {
+    person_or_concept: 'Person or concept', mention: 'Mention', hashtag: 'Hashtag', email: 'Email',
+    organization: 'Organization', location: 'Location', memory: 'Memory', repo: 'Repository', file: 'File',
+  };
+  const validGraphColor = value => /^#[0-9a-f]{6}$/i.test(String(value || ''));
+  const graphTypeLabel = type => GRAPH_TYPE_LABELS[type] || text(type || 'entity').replace(/_/g, ' ');
+
+  function customGraphColors() {
+    return { ...GRAPH_CUSTOM_PALETTE, ...state.graphTypeColors };
+  }
+
   function applyGraphPalette(name) {
     const graph = state.graphEngine;
-    if (!graph) return;
-    graph.setPalette(name);
-    if (name === 'custom') graph.setTypeColors(GRAPH_CUSTOM_PALETTE);
+    if (graph) {
+      graph.setPalette(name);
+      if (name === 'custom') graph.setTypeColors(customGraphColors());
+    }
+    renderGraphTypeColors();
+    renderGraphLegend();
+  }
+
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  function legendSwatch(color) {
+    const svg = document.createElementNS(SVG_NS, 'svg');
+    svg.setAttribute('viewBox', '0 0 10 10');
+    svg.setAttribute('aria-hidden', 'true');
+    svg.setAttribute('focusable', 'false');
+    const dot = document.createElementNS(SVG_NS, 'circle');
+    dot.setAttribute('cx', '5');
+    dot.setAttribute('cy', '5');
+    dot.setAttribute('r', '4.5');
+    dot.setAttribute('fill', text(color) || '#888888');
+    svg.append(dot);
+    return svg;
+  }
+
+  /* The canvas cannot explain its own colours, so the engine reports what each colour
+     means and the legend is drawn from that report (SVG fills, no inline styles). */
+  function renderGraphLegend() {
+    const section = byId('graph-legend');
+    if (!section) return;
+    const engine = state.graphEngine;
+    const legend = engine && typeof engine.legend === 'function' ? engine.legend(8) : null;
+    const items = legend && Array.isArray(legend.items) ? legend.items : [];
+    if (!legend || (legend.mode !== 'connections' && !items.length)) {
+      section.hidden = true;
+      return;
+    }
+    const titles = { community: 'Clusters', type: 'Entity types', connections: 'Connections' };
+    byId('graph-legend-title').textContent = titles[legend.mode] || 'Colours';
+    const list = byId('graph-legend-list');
+    const note = byId('graph-legend-note');
+    list.replaceChildren();
+    note.textContent = '';
+    if (legend.mode === 'connections') {
+      const colors = Array.isArray(legend.scale) ? legend.scale : [];
+      const row = node('li', 'graph-legend-scale');
+      const svg = document.createElementNS(SVG_NS, 'svg');
+      svg.setAttribute('viewBox', `0 0 ${Math.max(1, colors.length)} 1`);
+      svg.setAttribute('preserveAspectRatio', 'none');
+      svg.setAttribute('aria-hidden', 'true');
+      svg.setAttribute('focusable', 'false');
+      colors.forEach((color, index) => {
+        const band = document.createElementNS(SVG_NS, 'rect');
+        band.setAttribute('x', String(index));
+        band.setAttribute('y', '0');
+        band.setAttribute('width', '1');
+        band.setAttribute('height', '1');
+        band.setAttribute('fill', text(color));
+        svg.append(band);
+      });
+      const ends = node('div', 'graph-legend-ends');
+      ends.append(node('span', '', legend.first || 'Most connected'), node('span', '', legend.last || 'Least connected'));
+      row.append(svg, ends);
+      list.append(row);
+    } else {
+      items.forEach(entry => {
+        const row = node('li');
+        row.append(legendSwatch(entry.color),
+          node('span', '', legend.mode === 'type' ? graphTypeLabel(entry.key) : text(entry.label)),
+          node('small', '', number(entry.count).toLocaleString()));
+        list.append(row);
+      });
+      const hidden = number(legend.total) - items.length;
+      if (hidden > 0) note.textContent = `${hidden.toLocaleString()} more ${legend.mode === 'type' ? 'types' : 'clusters'} not shown`;
+    }
+    section.hidden = false;
+  }
+
+  function graphLegendColor(type) {
+    const engine = state.graphEngine;
+    const legend = engine && typeof engine.legend === 'function' ? engine.legend(24) : null;
+    const entry = legend && legend.mode === 'type' && Array.isArray(legend.items)
+      ? legend.items.find(item => item.key === type) : null;
+    if (entry && validGraphColor(entry.color)) return entry.color.toLowerCase();
+    const custom = customGraphColors()[type];
+    return validGraphColor(custom) ? custom.toLowerCase() : '#8c83e8';
+  }
+
+  /* Per-type colour pickers. They appear in Entity type mode; editing one switches the
+     palette to Custom so the change persists alongside the other saved graph settings. */
+  function renderGraphTypeColors() {
+    const target = byId('graph-type-colors');
+    if (!target) return;
+    target.replaceChildren();
+    if (byId('graph-color').value !== 'type') return;
+    const counts = new Map();
+    ((state.graphData && state.graphData.nodes) || []).forEach(item => {
+      counts.set(item.etype, (counts.get(item.etype) || 0) + 1);
+    });
+    const types = counts.size
+      ? [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([type]) => type).slice(0, 16)
+      : Object.keys(GRAPH_TYPE_LABELS).slice(0, 6);
+    types.forEach(type => {
+      const label = node('label', 'graph-type-color');
+      const input = node('input');
+      input.type = 'color';
+      input.value = graphLegendColor(type);
+      input.dataset.nodeType = type;
+      input.setAttribute('aria-label', `Colour for ${graphTypeLabel(type)} nodes`);
+      input.addEventListener('input', () => setGraphTypeColor(type, input.value, false));
+      input.addEventListener('change', () => setGraphTypeColor(type, input.value, true));
+      label.append(input, node('span', '', graphTypeLabel(type)));
+      target.append(label);
+    });
+  }
+
+  function setGraphTypeColor(type, color, persist) {
+    if (!type || !validGraphColor(color)) return;
+    if (byId('graph-palette').value !== 'custom') {
+      byId('graph-palette').value = 'custom';
+      if (state.graphEngine) {
+        state.graphEngine.setPalette('custom');
+        state.graphEngine.setTypeColors(customGraphColors());
+      }
+    }
+    state.graphTypeColors = { ...state.graphTypeColors, [type]: color.toLowerCase() };
+    if (state.graphEngine) state.graphEngine.setTypeColors(customGraphColors());
+    syncGraphChoices();
+    renderGraphLegend();
+    if (persist) {
+      clearGraphSavedView();
+      saveGraphPreferences();
+    }
+  }
+
+  function resetGraphColors() {
+    state.graphTypeColors = {};
+    byId('graph-palette').value = 'theme';
+    applyGraphPalette('theme');
+    clearGraphSavedView();
+    syncGraphChoices();
+    saveGraphPreferences();
+    showNotice('Graph colours reset to the active theme.');
   }
 
   function graphThemeColors() {
     const css = getComputedStyle(document.body);
-    return {
+    const colors = {
       accent: css.getPropertyValue('--c-acc').trim() || '#a39bf1',
       surface: css.getPropertyValue('--c-surface').trim() || '#16191f',
       canvas: css.getPropertyValue('--c-bg').trim() || '#0e1014',
       label: css.getPropertyValue('--c-fg').trim() || '#e7e9ee',
       relation_label: css.getPropertyValue('--c-dim').trim() || '#929baa',
     };
+    /* Entity-type colours belong to the theme (ledger.css `--c-entity-*`), so colouring by
+       type with the Theme palette stays legible on light themes as well as dark ones. */
+    [['person_or_concept', 'concept'], ['mention', 'mention'], ['hashtag', 'hashtag'],
+      ['email', 'email'], ['organization', 'organization'], ['location', 'location']]
+      .forEach(([type, token]) => {
+        const value = css.getPropertyValue(`--c-entity-${token}`).trim();
+        if (validGraphColor(value)) colors[type] = value;
+      });
+    return colors;
   }
 
   function setGraphTab(tab) {
@@ -3891,8 +4775,20 @@
     return `${prefix} · ${entityText} · ${number(links).toLocaleString()} relations${hidden}`;
   }
 
+  function syncGraphExplorer() {
+    if (state.graphEngine && state.graphEngine.visibleData) {
+      const data = state.graphEngine.visibleData();
+      graphExplorer.setData(data);
+      if (data !== state.graphLegendData) {
+        state.graphLegendData = data;
+        renderGraphLegend();
+      }
+    }
+  }
+
   function graphStatsChanged(stats) {
     if (!stats) return;
+    syncGraphExplorer();
     const nodes = stats.nodes == null ? state.graphData.nodes.length : stats.nodes;
     const links = stats.links == null ? state.graphData.links.length : stats.links;
     byId('graph-count').textContent = graphCountText(
@@ -3910,6 +4806,7 @@
   }
 
   function graphMetricsChanged(metrics) {
+    syncGraphExplorer();
     state.graphMetrics = metrics || {};
     byId('graph-bridge-count').textContent = metrics && metrics.bridges != null
       ? `${metrics.bridges} bridge ${metrics.bridges === 1 ? 'edge' : 'edges'}`
@@ -4126,7 +5023,9 @@
         candidateHost = null;
       };
       const timeout = window.setTimeout(() => {
-        if (!window.ForceGraph || !window.EngraphisGraph || !window.EngraphisSpacetime) {
+        // The same globals ensureGraphAssets() waits for, so a stalled d3 is released too.
+        if (!window.d3 || !window.ForceGraph || !window.EngraphisGraph
+          || !window.EngraphisSpacetime) {
           releaseGraphAssetsAttempt(graphAssetsPromise);
         }
         if (fullGraph && !window.EngraphisEveryGraph) {
@@ -4200,6 +5099,7 @@
         candidateHost.id = `graph-canvas-candidate-${request.id}`;
         candidateHost.classList.add('graph-canvas-candidate');
         candidateHost.setAttribute('aria-hidden', 'true');
+        candidateHost.tabIndex = -1;
         oldHost.insertAdjacentElement('afterend', candidateHost);
         /* Authored-Galaxy detection must key off scene markers, not the toolbar preset:
            entering Every via its chip sets the preset to 'every', but a complete scene
@@ -4221,7 +5121,10 @@
         }
         candidateEngine = graphFactory.create(candidateHost, {
           renderMode: fullGraph ? 'all' : 'overview',
-          onNodeClick: item => openGraphConnections(item),
+          onNodeClick: item => {
+            graphExplorer.select(item && item.id);
+            openGraphConnections(item);
+          },
           onBackgroundClick: () => candidateEngine.clearFocus(),
           onStats: stats => {
             if (state.graphEngine === candidateEngine
@@ -4271,7 +5174,7 @@
           graph.setThemeColors(graphThemeColors());
           const paletteName = byId('graph-palette').value;
           graph.setPalette(paletteName);
-          if (paletteName === 'custom') graph.setTypeColors(GRAPH_CUSTOM_PALETTE);
+          if (paletteName === 'custom') graph.setTypeColors(customGraphColors());
           graph.setSettings({
             ...graphTuningEngineSettings(),
             ...graphSpacetimeEngineSettings(),
@@ -4288,6 +5191,8 @@
           graph.setCollapse(byId('graph-collapse').checked ? 'auto' : false);
           graph.setGhosts(byId('graph-ghosts').checked);
         }, false, false);
+        /* Renderers may make their host focusable; a hidden candidate must not be. */
+        candidateHost.tabIndex = -1;
         candidateEngine.setData(data);
         candidateEngine.freeze(fullGraph ? false : state.graphFrozen);
         if ((!fullGraph || galaxyQuality) && window.EngraphisSpacetime
@@ -4312,6 +5217,7 @@
         candidateHost.id = 'graph-canvas';
         candidateHost.classList.remove('graph-canvas-candidate');
         candidateHost.removeAttribute('aria-hidden');
+        candidateHost.tabIndex = 0;
         oldHost.replaceWith(candidateHost);
         candidateHost = null;
         state.graphEngine = candidateEngine;
@@ -4343,6 +5249,9 @@
         if (!data.nodes.length) byId('graph-empty').textContent = 'No entities exist in this workspace yet.';
         updateGraphModeControls();
         updateGraphFacts(data);
+        graphExplorer.setData(candidateEngine.visibleData ? candidateEngine.visibleData() : data);
+        renderGraphTypeColors();
+        renderGraphLegend();
         // Candidate stats emitted before commit are retained, then published only after the
         // renderer transaction commits. Raw payload counts are wrong when a frozen renderer
         // has already applied repository, layer, ghost, or collapse visibility filters.
@@ -4445,6 +5354,46 @@
     if (tab === 'audit') loadAudit();
   }
 
+  function temporalTime(value) {
+    const date = validDate(value);
+    return date ? new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(date) : '';
+  }
+
+  /* Bi-temporal card: when the fact was true in the world, when Engraphis learned it, and
+     where it came from. An ended interval marks a superseded or retired version. */
+  function temporalCard(memory) {
+    const now = Date.now() / 1000;
+    const past = (memory.valid_to != null && number(memory.valid_to) <= now)
+      || (memory.expired_at != null && number(memory.expired_at) <= now);
+    const future = !past && memory.valid_from != null && number(memory.valid_from) > now;
+    const current = !past && !future;
+    const card = simpleMemoryCard(memory, 'timeline-card temporal-card');
+    const heading = card.querySelector('h3');
+    if (heading) {
+      heading.append(document.createTextNode(' '),
+        node('span', `temporal-state${current ? ' current' : ''}`, current ? 'current' : future ? 'future' : 'past'));
+    }
+    const ended = memory.valid_to;
+    const meta = node('dl', 'temporal-meta');
+    [
+      ['Valid time', `${temporalTime(memory.valid_from) || 'unrecorded'} — ${ended != null ? temporalTime(ended) || 'closed' : 'now'}`],
+      ['Recorded', temporalTime(memory.ingested_at) || 'unrecorded'],
+      ['Source', text((memory.provenance && (memory.provenance.source || memory.provenance.kind)) || 'unrecorded')],
+    ].forEach(([term, value]) => {
+      const row = node('div');
+      row.append(node('dt', '', term), node('dd', '', value));
+      meta.append(row);
+    });
+    card.append(meta);
+    return card;
+  }
+
+  function searchModeNote(payload) {
+    return payload && payload.mode === 'keyword'
+      ? node('p', 'search-mode-note', 'Keyword match: semantic search is unavailable on this server, so these results share words with your query rather than its meaning.')
+      : null;
+  }
+
   async function whySearch(event) {
     event.preventDefault();
     const question = byId('why-input').value.trim();
@@ -4463,37 +5412,44 @@
       target.replaceChildren();
       const live = payload.answer || [];
       const superseded = payload.supersedes || [];
+      const note = searchModeNote(payload);
+      if (note) target.append(note);
       target.append(node('h2', '', 'Live support'));
       if (!live.length) target.append(empty('No live supporting memory was found.'));
       else live.forEach(memory => target.append(simpleMemoryCard(memory)));
       target.append(node('h2', '', 'Superseded history'));
       if (!superseded.length) target.append(empty('No superseded versions were found.'));
-      else superseded.forEach(memory => target.append(simpleMemoryCard(memory, 'timeline-card')));
+      else superseded.forEach(memory => target.append(temporalCard(memory)));
     } catch (error) {
       if (!isCurrentScopedRequest(request)) return;
       target.replaceChildren(empty(`Could not trace belief: ${error.message}`));
     }
   }
 
-  async function timelineSearch(event, supersessionsOnly = false) {
+  async function timelineSearch(event) {
     event.preventDefault();
-    const input = byId(supersessionsOnly ? 'supersession-input' : 'timeline-input');
-    const target = byId(supersessionsOnly ? 'supersession-list' : 'timeline-result');
+    const input = byId('timeline-input');
+    const target = byId('timeline-result');
+    const closedOnly = byId('timeline-closed-only').checked;
     const question = input.value.trim();
     if (!question) {
-      showNotice(`Enter a topic before ${supersessionsOnly ? 'finding supersessions' : 'showing history'}.`);
+      showNotice('Enter a topic before showing history.');
       input.focus();
       return;
     }
-    const request = beginScopedRequest(supersessionsOnly ? 'supersessions' : 'timeline');
+    const request = beginScopedRequest('timeline');
     showNotice('');
     target.replaceChildren(empty('Loading temporal history…'));
     try {
-      const payload = await api(`/timeline?q=${encodeURIComponent(question)}&${query(request.workspace)}&limit=50`);
+      const payload = await api(`/timeline?q=${encodeURIComponent(question)}&${query(request.workspace)}&limit=50&closed_only=${closedOnly}`);
       if (!isCurrentScopedRequest(request)) return;
-      let history = payload.history || [];
-      if (supersessionsOnly) history = history.filter(item => item.valid_to || item.expired_at);
-      renderMemoryCollection(target, history, supersessionsOnly ? 'No closed versions were found for this topic.' : 'No temporal history was found.');
+      const history = payload.history || [];
+      target.replaceChildren();
+      const note = searchModeNote(payload);
+      if (note) target.append(note);
+      if (!history.length) {
+        target.append(empty(closedOnly ? 'No superseded versions were found for this topic.' : 'No temporal history was found.'));
+      } else history.forEach(memory => target.append(temporalCard(memory)));
     } catch (error) {
       if (!isCurrentScopedRequest(request)) return;
       target.replaceChildren(empty(`Could not load history: ${error.message}`));
@@ -4514,7 +5470,7 @@
     combined.slice(0, 120).forEach(item => {
       const card = node('article', 'audit-card');
       card.append(
-        node('span', '', relative(provenanceTimestampMs(item))),
+        node('span', '', relative(provenanceTimestampMs(item), 'milliseconds')),
         node('strong', '', item.actor || item.source || 'local operator'),
         node('span', 'tag', item.operation || item.action || item.event || item._kind),
         node('span', '', item.scope || item.workspace || item.status || state.workspace),
@@ -4524,17 +5480,48 @@
     });
   }
 
+  function renderReceiptChain(result, error = null) {
+    const target = byId('receipt-chain-status');
+    target.replaceChildren();
+    if (!result) {
+      target.dataset.state = 'unknown';
+      target.textContent = `The receipt chain could not be checked${error ? `: ${error.message}` : '.'}`;
+      return;
+    }
+    const valid = result.valid != null ? result.valid : result.verified;
+    const count = number(result.count);
+    if (valid !== true && valid !== false) {
+      target.dataset.state = 'unknown';
+      target.textContent = 'The receipt chain status is unavailable.';
+      return;
+    }
+    target.dataset.state = valid ? 'valid' : 'invalid';
+    target.append(document.createTextNode(valid === false
+      ? `Receipt chain broken · ${count.toLocaleString()} receipts checked`
+      : `Receipt chain verified · ${count.toLocaleString()} ${count === 1 ? 'receipt' : 'receipts'}`));
+    if (result.head) target.append(document.createTextNode(' · head '), node('code', '', truncate(result.head, 24)));
+    if (valid === false && Array.isArray(result.errors) && result.errors.length) {
+      target.append(document.createTextNode(` · first problem at receipt ${number(result.errors[0].index) + 1}`));
+    }
+    target.append(document.createTextNode(` · checked ${new Date().toLocaleTimeString()}`));
+  }
+
   async function loadAudit() {
     const request = beginScopedRequest('audit');
     const target = byId('audit-list');
     target.replaceChildren(empty('Loading audit records and receipts…'));
     byId('savings-detail').replaceChildren(empty('Loading receipt-backed estimate…'));
-    const [auditResult, receiptsResult, savingsResult] = await Promise.allSettled([
-      api(`/audit?${query(request.workspace)}&limit=100`),
-      api(`/receipts?${query(request.workspace)}&limit=100`),
-      api(`/context-savings${savingsQuery(state.savingsPreset)}`),
+    byId('receipt-chain-status').textContent = 'Checking the receipt chain…';
+    byId('receipt-chain-status').dataset.state = 'unknown';
+    const [auditResult, receiptsResult, savingsResult, chainResult] = await Promise.allSettled([
+      api(`/audit?${query(request.workspace)}&limit=100`, { signal: request.signal }),
+      api(`/receipts?${query(request.workspace)}&limit=100`, { signal: request.signal }),
+      api(`/context-savings${savingsQuery(state.savingsPreset)}`, { signal: request.signal }),
+      api(`/receipts/verify?${query(request.workspace)}`, { signal: request.signal }),
     ]);
     if (!isCurrentScopedRequest(request)) return;
+    renderReceiptChain(chainResult.status === 'fulfilled' ? chainResult.value : null,
+      chainResult.status === 'rejected' ? chainResult.reason : null);
     if (savingsResult.status === 'fulfilled') {
       renderSavingsDetail(savingsResult.value);
     } else {
@@ -4553,11 +5540,18 @@
   }
 
   async function verifyReceipts() {
+    const workspace = state.workspace;
+    byId('receipt-chain-status').textContent = 'Checking the receipt chain…';
     try {
-      const result = await api(`/receipts/verify?${query()}`);
+      const result = await api(`/receipts/verify?${query(workspace)}`);
+      if (workspace !== state.workspace) return;
+      renderReceiptChain(result);
       const valid = result.valid != null ? result.valid : result.verified;
-      showNotice(valid === false ? 'Receipt verification found a broken chain.' : 'Receipt chain verified.');
+      showNotice(valid === false ? 'Receipt verification found a broken chain.'
+        : valid === true ? 'Receipt chain verified.' : 'The receipt chain status is unavailable.');
     } catch (error) {
+      if (workspace !== state.workspace) return;
+      renderReceiptChain(null, error);
       showNotice(`Could not verify receipts: ${error.message}`);
     }
   }
@@ -4602,6 +5596,11 @@
     if (tab === 'sync') await loadSync();
   }
 
+  function workspaceRepoCount(item) {
+    if (Array.isArray(item.repos)) return item.repos.length;
+    return number(item.repos);
+  }
+
   function renderWorkspaceList() {
     const target = byId('workspace-list');
     target.replaceChildren();
@@ -4611,32 +5610,102 @@
     }
     state.workspaces.forEach(item => {
       const name = workspaceName(item);
-      const card = node('article', `workspace-card${name === state.workspace ? ' active' : ''}`);
+      const active = name === state.workspace;
+      const card = node('article', `workspace-card${active ? ' active' : ''}`);
       const copy = node('div');
+      const title = node('h3', '', name);
+      if (active) title.append(document.createTextNode(' '), node('span', 'tag', 'active'));
+      const repos = workspaceRepoCount(item);
       copy.append(
-        node('h3', '', name),
+        title,
         ...(item.description ? [node('p', '', item.description)] : []),
-        node('p', '', `${number(item.memories).toLocaleString()} memories · ${item.visibility === 'personal'
+        node('p', '', `${number(item.memories).toLocaleString()} ${number(item.memories) === 1 ? 'memory' : 'memories'}${repos ? ` · ${repos.toLocaleString()} ${repos === 1 ? 'project' : 'projects'}` : ''} · ${item.visibility === 'personal'
           ? 'Personal · excluded from Cloud Sync'
           : item.visibility === 'shared'
             ? 'Shared · eligible for encrypted Cloud Sync'
             : 'Local workspace'}`),
       );
       const actions = node('div', 'workspace-card-actions');
-      if (name !== state.workspace) actions.append(button('Switch to', 'secondary-button', () => selectWorkspace(name)));
+      if (!active) actions.append(button('Switch to', 'secondary-button', async () => {
+        if (await confirmDiscardEditor()) await selectWorkspace(name);
+      }));
       actions.append(
+        button('Open library', 'secondary-button', () => openWorkspaceLibrary(name)),
         button('Rename', 'secondary-button', () => renameWorkspace(name)),
+        button('Describe', 'secondary-button', () => describeWorkspace(name)),
         button('Copy', 'secondary-button', () => copyWorkspace(name)),
+        button('Merge into…', 'secondary-button', () => mergeWorkspace(name)),
+        button('Export JSON', 'secondary-button', () => exportWorkspace(name)),
       );
       if (item.visibility === 'personal' && item.can_change_access === true) {
         actions.append(button('Share for Cloud Sync', 'secondary-button', () => changeWorkspaceVisibility(name, 'shared')));
       } else if (item.visibility === 'shared' && item.can_change_access === true) {
         actions.append(button('Make personal', 'secondary-button', () => changeWorkspaceVisibility(name, 'personal')));
       }
-      if (name !== state.workspace) actions.append(button('Delete', 'danger-button', () => deleteWorkspace(name)));
+      actions.append(button('Delete', 'danger-button', () => deleteWorkspace(name)));
+      if (state.workspaceMutations.has(name)) {
+        actions.querySelectorAll('button').forEach(control => { control.disabled = true; });
+      }
       card.append(copy, actions);
       target.append(card);
     });
+  }
+
+  async function openWorkspaceLibrary(name) {
+    if (name !== state.workspace) {
+      if (!await confirmDiscardEditor()) return;
+      await selectWorkspace(name);
+    }
+    switchView('library');
+  }
+
+  /* Changing the workspace list reselects a workspace, which clears notices. Report the
+     outcome once the list is current, so the confirmation is not wiped as it appears. */
+  async function refreshAfterWorkspaceChange(preferred, message) {
+    try {
+      await refreshBootstrap(preferred);
+      showNotice(message);
+    } catch (error) {
+      showNotice(`${message} The workspace list could not be refreshed: ${error.message}`);
+    }
+  }
+
+  async function withWorkspaceMutation(name, operation) {
+    if (state.workspaceMutations.has(name)) throw new Error('This workspace is already being updated.');
+    state.workspaceMutations.add(name);
+    setEditorBusy(Boolean(state.editorSession && state.editorSession.busy));
+    renderWorkspaceList();
+    try {
+      await operation();
+    } finally {
+      state.workspaceMutations.delete(name);
+      setEditorBusy(Boolean(state.editorSession && state.editorSession.busy));
+      renderWorkspaceList();
+    }
+  }
+
+  async function refreshAfterWorkspaceMutation(name, message, renamed = '', destination = '') {
+    // The successful API response is authoritative even if the following list refresh is
+    // delayed, superseded, or fails. Remove the obsolete owner before allowing new drafts.
+    state.workspaces = renamed
+      ? state.workspaces.map(item => workspaceName(item) === name
+        ? (typeof item === 'string' ? renamed : { ...item, name: renamed }) : item)
+      : state.workspaces.filter(item => workspaceName(item) !== name);
+    const select = byId('workspace-select');
+    const previous = [...select.options].find(option => option.value === name);
+    if (previous) {
+      if (renamed) { previous.value = renamed; previous.textContent = renamed; }
+      else previous.remove();
+    }
+    select.disabled = !state.workspaces.length;
+    if (!state.workspaces.length) select.append(option('', 'No workspace'));
+    if (state.workspace === name) {
+      const next = renamed || destination || workspaceName(
+        [...state.workspaces].sort((a, b) => number(b.memories) - number(a.memories))[0] || '',
+      );
+      await selectWorkspace(next);
+    }
+    await refreshAfterWorkspaceChange(state.workspace, message);
   }
 
   async function createWorkspace(event) {
@@ -4654,10 +5723,9 @@
         method: 'POST',
         body: { workspace: name, description, visibility: 'personal', confirmed: false },
       });
-      showNotice(`Workspace ${name} created.`);
       byId('create-workspace-form').reset();
       byId('create-workspace-form').hidden = true;
-      await refreshBootstrap(name);
+      await refreshAfterWorkspaceChange(name, `Workspace ${name} created.`);
     } catch (error) {
       showNotice(`Could not create workspace: ${error.message}`);
     }
@@ -4668,7 +5736,11 @@
     const question = sharing
       ? `Share “${name}” with signed-in Team members and make it eligible for encrypted Cloud Sync? Other Team members with access can read this workspace. This changes its visibility from personal to shared.`
       : `Make “${name}” personal? Other Team members will lose access and future Cloud Sync rounds will exclude it. This does not erase data already uploaded to the encrypted relay.`;
-    if (!window.confirm(question)) return;
+    if (!await dialogs.confirm({
+      title: sharing ? 'Share workspace' : 'Make workspace personal',
+      message: question,
+      confirmLabel: sharing ? 'Share workspace' : 'Make personal',
+    })) return;
     try {
       await api('/workspaces/visibility', {
         method: 'POST',
@@ -4684,33 +5756,139 @@
   }
 
   async function renameWorkspace(name) {
-    const next = window.prompt(`Rename ${name} to:`, name);
+    if (name === state.workspace && !await confirmDiscardEditor()) return;
+    const next = await dialogs.prompt({
+      title: 'Rename workspace',
+      message: `Choose a new name for “${name}”. Agents that name this workspace explicitly need the new name.`,
+      label: 'Workspace name',
+      value: name,
+      maxLength: 200,
+      confirmLabel: 'Rename',
+    });
     if (!next || next === name) return;
     try {
-      await api('/workspaces/rename', { method: 'POST', body: { workspace: name, new_name: next } });
-      showNotice(`Workspace renamed to ${next}.`);
-      await refreshBootstrap(name === state.workspace ? next : state.workspace);
+      await withWorkspaceMutation(name, async () => {
+        await api('/workspaces/rename', { method: 'POST', body: { workspace: name, new_name: next } });
+        await refreshAfterWorkspaceMutation(name, `Workspace renamed to ${next}.`, next);
+      });
     } catch (error) {
       showNotice(`Could not rename workspace: ${error.message}`);
+    }
+  }
+
+  async function describeWorkspace(name) {
+    const item = state.workspaces.find(entry => workspaceName(entry) === name) || {};
+    const description = await dialogs.prompt({
+      title: 'Describe workspace',
+      message: `Say what belongs in “${name}”. The description helps you and your agents choose the right workspace.`,
+      label: 'Description (optional)',
+      value: item.description || '',
+      multiline: true,
+      required: false,
+      maxLength: 500,
+      confirmLabel: 'Save description',
+    });
+    if (description === null) return;
+    try {
+      const saved = await api('/workspaces/describe', { method: 'POST', body: { workspace: name, description } });
+      const savedDescription = saved && typeof saved.description === 'string' ? saved.description : description;
+      state.workspaces = state.workspaces.map(entry => workspaceName(entry) === name
+        ? { ...(typeof entry === 'string' ? { name: entry } : entry), description: savedDescription }
+        : entry);
+      renderWorkspaceList();
+      showNotice(savedDescription ? `Description saved for ${name}.` : `Description cleared for ${name}.`);
+    } catch (error) {
+      showNotice(`Could not save the description: ${error.message}`);
     }
   }
 
   async function copyWorkspace(name) {
     try {
       const result = await api('/workspaces/copy', { method: 'POST', body: { workspace: name } });
-      showNotice(`Workspace copied${result.name ? ` to ${result.name}` : ''}.`);
-      await refreshBootstrap(state.workspace);
+      const copied = number(result && result.memories_copied);
+      await refreshAfterWorkspaceChange(state.workspace,
+        `Workspace copied${result && result.workspace ? ` to ${result.workspace}` : ''} · ${copied.toLocaleString()} ${copied === 1 ? 'memory' : 'memories'}.`);
     } catch (error) {
       showNotice(`Could not copy workspace: ${error.message}`);
     }
   }
 
-  async function deleteWorkspace(name) {
-    if (!window.confirm(`Delete workspace “${name}”? Its memories are retired through the governed workspace operation.`)) return;
+  async function mergeWorkspace(name) {
+    const others = state.workspaces.map(workspaceName).filter(other => other !== name);
+    if (!others.length) {
+      showNotice('Create another workspace before merging this one into it.');
+      return;
+    }
+    if (name === state.workspace && !await confirmDiscardEditor()) return;
+    const item = state.workspaces.find(entry => workspaceName(entry) === name) || {};
+    const count = number(item.memories);
+    const result = await dialogs.open({
+      title: 'Merge workspace',
+      message: [
+        `Move all ${count.toLocaleString()} ${count === 1 ? 'memory' : 'memories'} in “${name}”, with their history, projects and graph, into another workspace. “${name}” is removed afterwards.`,
+        'The moved memories take on the destination workspace’s access rules. This cannot be undone; export the workspace first if you may need it separately.',
+      ],
+      fields: [{
+        name: 'target', type: 'select', label: 'Destination workspace', required: true,
+        options: others.map(value => ({ value, label: value })), value: others[0],
+      }],
+      confirmLabel: 'Merge workspace',
+      danger: true,
+    });
+    if (result === null || !result.target) return;
     try {
-      await api('/workspaces/delete', { method: 'POST', body: { workspace: name } });
-      showNotice(`Workspace ${name} deleted.`);
-      await refreshBootstrap(state.workspace);
+      await withWorkspaceMutation(name, async () => {
+        const merged = await api('/workspaces/merge', { method: 'POST', body: { source: name, target: result.target } });
+        const moved = number(merged && merged.memories_moved);
+        await refreshAfterWorkspaceMutation(name,
+          `Merged ${moved.toLocaleString()} ${moved === 1 ? 'memory' : 'memories'} into ${result.target}.`, '', result.target);
+      });
+    } catch (error) {
+      showNotice(`Could not merge workspace: ${error.message}`);
+    }
+  }
+
+  async function exportWorkspace(name) {
+    try {
+      const snapshot = await api(`/export?${query(name)}`, { timeoutMs: 120_000 });
+      const blob = new Blob([JSON.stringify(snapshot, null, 2)], { type: 'application/json' });
+      const link = document.createElement('a');
+      const url = URL.createObjectURL(blob);
+      link.href = url;
+      link.download = `engraphis-export-${name.replace(/[^\w.-]+/g, '-') || 'workspace'}.json`;
+      document.body.append(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 0);
+      showNotice(`Exported ${name} as portable JSON. It contains memory content; store it like the database itself.`);
+    } catch (error) {
+      showNotice(`Could not export workspace: ${error.message}`);
+    }
+  }
+
+  async function deleteWorkspace(name) {
+    if (name === state.workspace && !await confirmDiscardEditor()) return;
+    const item = state.workspaces.find(entry => workspaceName(entry) === name) || {};
+    const count = number(item.memories);
+    const active = name === state.workspace;
+    const confirmed = await dialogs.confirm({
+      title: 'Delete workspace permanently',
+      message: [
+        `Permanently delete “${name}” and its ${count.toLocaleString()} ${count === 1 ? 'memory' : 'memories'}, sessions, projects and graph from this Engraphis store? This is a hard delete and cannot be undone; only the audit log keeps a record of it.`,
+        active ? 'This is the active workspace. Another workspace becomes active afterwards.' : '',
+        'Export the workspace first if you might need its contents.',
+      ],
+      confirmLabel: 'Delete workspace',
+      danger: true,
+    });
+    if (!confirmed) return;
+    try {
+      await withWorkspaceMutation(name, async () => {
+        const result = await api('/workspaces/delete', { method: 'POST', body: { workspace: name } });
+        const removed = number(result && result.memories_removed);
+        await refreshAfterWorkspaceMutation(name,
+          `Workspace ${name} deleted · ${removed.toLocaleString()} ${removed === 1 ? 'memory' : 'memories'} removed.`);
+      });
     } catch (error) {
       showNotice(`Could not delete workspace: ${error.message}`);
     }
@@ -4732,7 +5910,81 @@
     void loadHosted('analytics');
   }
 
-  function renderAnalyticsStartError(target, workspace, message) {
+  /* Why a hosted request was refused, in the customer's terms. Only 402/501 are entitlement
+     answers. 409 consent_required means the plan is fine but this workspace has not been
+     approved for readable processing. 401 is a credential problem — except on an
+     unconfigured installation that may still start a trial. Anything else is not a denial. */
+  function lockReason() {
+    const access = licenseAccessState();
+    const plan = (licensePlanKey() || 'pro').toUpperCase();
+    if (access === 'trial_expired') return 'Your free trial has ended, so hosted features are locked. The trial cannot be started again.';
+    if (access === 'lapsed') return `Your ${plan} subscription is no longer active, so hosted features are locked until billing is up to date.`;
+    if (access === 'trial') {
+      const ends = licenseTrialEnds();
+      return `Your free trial is live${ends ? ` until ${ends}` : ''}, but it does not include this.`;
+    }
+    if (access === 'active') return `Your ${plan} plan does not include this.`;
+    if (licenseTrialAvailable()) {
+      const days = licenseTrialDays('pro');
+      return days ? `An email-confirmed, no-card Pro trial lasts exactly ${days} active days.` : 'An email-confirmed, no-card Pro trial is available.';
+    }
+    return 'Hosted features need an active Pro or Team plan.';
+  }
+
+  function hostedFailure(kind, error) {
+    const feature = kind === 'analytics' ? 'Analytics' : kind === 'automation' ? 'Hosted automation'
+      : kind === 'sync' ? 'Cloud Sync' : 'This feature';
+    const status = error && error.status;
+    if (status === 409 && error.code === 'consent_required') {
+      return {
+        title: `${feature} is waiting for your approval`,
+        detail: licenseHasHostedAccess()
+          ? `Your plan includes ${feature}. Readable managed processing is paused until you approve this workspace in Settings → Preferences. Secret and session-scoped memories stay local.`
+          : 'After connecting to Engraphis Cloud, approve each workspace in Settings → Preferences before readable processing starts. Secret and session-scoped memories stay local.',
+        action: 'consent',
+      };
+    }
+    if (status === 402 || status === 501) {
+      return { title: `${feature} needs Engraphis Pro`, detail: lockReason(), action: 'plan' };
+    }
+    if (status === 401) {
+      if (error.code === 'cloud_unconfigured' && licenseTrialAvailable()) {
+        return { title: `${feature} runs in Engraphis Cloud`, detail: `${lockReason()} Start a trial to connect this installation, then approve each workspace in Settings → Preferences.`, action: 'plan' };
+      }
+      return {
+        title: 'Reconnect Engraphis Cloud',
+        detail: 'This installation’s Engraphis Cloud session expired or was revoked. Connect again to resume hosted features; your plan is unchanged.',
+        action: 'reconnect',
+      };
+    }
+    return null;
+  }
+
+  function renderHostedFailure(target, failure) {
+    target.replaceChildren(node('h3', '', failure.title), node('p', 'automation-policy-note', failure.detail));
+    const actions = node('div', 'automation-policy-actions');
+    if (failure.action === 'consent') {
+      actions.append(button('Review workspace processing', 'primary-button', () => switchManageTab('settings')));
+    } else if (failure.action === 'reconnect') {
+      const href = hostedAccountUrl('reconnect');
+      if (href) {
+        const link = node('a', 'secondary-button', 'Open Engraphis Cloud');
+        link.href = href;
+        link.target = '_blank';
+        link.rel = 'noopener';
+        actions.append(link);
+      }
+    } else actions.append(button('Compare plans', 'secondary-button', () => switchManageTab('plans')));
+    target.append(actions);
+  }
+
+  function renderAnalyticsStartError(target, workspace, error) {
+    const failure = hostedFailure('analytics', error);
+    if (failure) {
+      renderHostedFailure(target, failure);
+      return;
+    }
+    const message = error && error.message ? error.message : text(error);
     target.replaceChildren(
       node('h3', '', 'Analytics request unconfirmed'),
       node('p', 'automation-policy-note',
@@ -4844,6 +6096,7 @@
   async function previewConsolidation(event) {
     event.preventDefault();
     const options = consolidationOptions();
+    const request = beginScopedRequest('consolidation');
     invalidateConsolidationReview();
     const target = byId('consolidate-result');
     target.replaceChildren(empty('Scanning local memory without writing changes…'));
@@ -4857,11 +6110,13 @@
       });
       // The preview is an approval only for the exact workspace and choices that
       // produced it; never let a late response authorize a changed form.
-      if (!sameConsolidationOptions(options, consolidationOptions())) return;
+      if (!isCurrentScopedRequest(request)
+        || !sameConsolidationOptions(options, consolidationOptions())) return;
       state.consolidationReview = options;
       byId('consolidate-commit').disabled = false;
       renderObject(target, result, 'Dry preview complete · nothing written');
     } catch (error) {
+      if (!isCurrentScopedRequest(request)) return;
       invalidateConsolidationReview();
       target.replaceChildren(empty(`Preview failed: ${error.message}`));
     }
@@ -4874,7 +6129,15 @@
       showNotice('Run a new dry preview after changing the workspace or consolidation options.');
       return;
     }
-    if (!window.confirm(`Commit the reviewed consolidation result for ${state.workspace}? Original records remain in temporal history.`)) return;
+    const request = beginScopedRequest('consolidation');
+    if (!await dialogs.confirm({
+      title: 'Commit consolidation',
+      message: `Commit the reviewed consolidation result for ${state.workspace}? Original records remain in temporal history.`,
+      confirmLabel: 'Commit result',
+    })) return;
+    if (!isCurrentScopedRequest(request)
+      || !sameConsolidationOptions(state.consolidationReview, options)
+      || !sameConsolidationOptions(options, consolidationOptions())) return;
     const target = byId('consolidate-result');
     target.replaceChildren(empty('Committing the reviewed local consolidation…'));
     try {
@@ -4885,10 +6148,13 @@
           dry_run: false,
         },
       });
+      if (!isCurrentScopedRequest(request)) return;
       invalidateConsolidationReview();
       renderObject(target, result, 'Consolidation committed');
-      await selectWorkspace(state.workspace);
+      if (editorOpen()) await refreshLibrary();
+      else await selectWorkspace(request.workspace);
     } catch (error) {
+      if (!isCurrentScopedRequest(request)) return;
       target.replaceChildren(empty(`Commit failed: ${error.message}`));
     }
   }
@@ -4955,17 +6221,76 @@
     const actions = node('div', 'automation-policy-actions');
     const save = node('button', 'primary-button', enabled ? 'Save & send policy to Cloud' : 'Save hosted policy');
     save.type = 'submit';
+    // The label names the transfer before it happens, so it follows the checkbox.
+    const toggle = form.querySelector('#automation-enabled');
+    if (toggle) toggle.addEventListener('change', () => {
+      save.textContent = toggle.checked ? 'Save & send policy to Cloud' : 'Save hosted policy';
+    });
     actions.append(save);
     form.append(actions);
     form.addEventListener('submit', saveAutomationPolicy);
-    target.append(form);
+    target.append(form, automationRunPanel(policy, workspace));
+  }
+
+  function automationTime(value) {
+    const date = validDate(value);
+    return date ? new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(date) : '';
+  }
+
+  function automationRunPanel(policy, workspace) {
+    const panel = node('section', 'automation-run-panel');
+    panel.setAttribute('aria-label', 'Hosted maintenance runs');
+    panel.append(node('h3', '', 'Runs'), definitionList([
+      ['Status', policy.enabled ? 'Enabled' : 'Paused'],
+      ['Last run', policy.last_run ? `${automationTime(policy.last_run)} (${relative(policy.last_run)})` : 'Never'],
+      ['Next run', policy.enabled ? (automationTime(policy.next_run_at) || 'Scheduled by Engraphis Cloud') : 'Paused'],
+    ]));
+    const request = button('Request a proposal now', 'secondary-button', () => requestMaintenanceProposal(workspace, request, result));
+    const result = node('div', 'automation-run-result');
+    result.setAttribute('role', 'status');
+    result.setAttribute('aria-live', 'polite');
+    panel.append(
+      node('p', 'automation-policy-note', 'A proposal uploads this workspace’s normal and sensitive memory content, excluding secret and session-scoped records, for one managed consolidation pass. Results are proposals and never change the local database on their own.'),
+      request, result,
+    );
+    return panel;
+  }
+
+  async function requestMaintenanceProposal(workspace, control, target) {
+    if (!workspace || workspace !== state.workspace) return;
+    if (!await dialogs.confirm({
+      title: 'Request a hosted proposal',
+      message: `Send ${workspace}’s normal and sensitive memory content to Engraphis Cloud for a reviewable consolidation proposal? Secret and session-scoped records stay local.`,
+      confirmLabel: 'Request proposal',
+    })) return;
+    const request = beginScopedRequest('automation-proposal');
+    control.disabled = true;
+    target.replaceChildren(empty('Requesting a managed proposal…'));
+    try {
+      const response = await api(`/maintenance/run?${query(workspace)}`, {
+        method: 'POST', body: { dry_run: true }, timeoutMs: 120_000,
+      });
+      if (!isCurrentScopedRequest(request) || !target.isConnected) return;
+      const run = (response && Array.isArray(response.runs) && response.runs[0]) || {};
+      renderObject(target, run.consolidate && typeof run.consolidate === 'object' ? run.consolidate : response, 'Proposal submitted for review');
+      showNotice('Managed proposal requested. Review it before applying anything locally.');
+    } catch (error) {
+      if (!isCurrentScopedRequest(request) || !target.isConnected) return;
+      const failure = hostedFailure('automation', error);
+      if (failure) renderHostedFailure(target, failure);
+      else target.replaceChildren(empty(`Could not request a proposal: ${error.message}`, 'form-error'));
+    } finally {
+      control.disabled = false;
+    }
   }
 
   async function bootstrapAutomation(workspace, control) {
     if (!workspace || workspace !== state.workspace) return;
-    if (!window.confirm(
-      `Initialize hosted automation for ${workspace}? Engraphis will upload one bounded snapshot of that workspace's normal and sensitive memory content and save the default Cloud policy.`,
-    )) return;
+    if (!await dialogs.confirm({
+      title: 'Initialize hosted automation',
+      message: `Initialize hosted automation for ${workspace}? Engraphis will upload one bounded snapshot of that workspace's normal and sensitive memory content and save the default Cloud policy.`,
+      confirmLabel: 'Upload snapshot and initialize',
+    })) return;
     const request = beginScopedRequest('automation-bootstrap');
     control.disabled = true;
     control.textContent = 'Initializing…';
@@ -5002,9 +6327,14 @@
       dream_idle_minutes: Math.max(0, Number(byId('automation-dream-idle').value) || 0),
       infer: byId('automation-infer').checked,
     };
-    if (policy.enabled && !window.confirm(
-      `Save this hosted policy for ${workspace}? Engraphis will submit a bounded snapshot of that workspace’s normal and sensitive memory content to Cloud for managed compute.\n\nCloud Sync: ${CLOUD_SYNC_PRIVACY_NOTICE}`,
-    )) return;
+    if (policy.enabled && !await dialogs.confirm({
+      title: 'Save hosted policy',
+      message: [
+        `Save this hosted policy for ${workspace}? Engraphis will submit a bounded snapshot of that workspace’s normal and sensitive memory content to Cloud for managed compute.`,
+        `Cloud Sync: ${CLOUD_SYNC_PRIVACY_NOTICE}`,
+      ],
+      confirmLabel: 'Save and send policy',
+    })) return;
     const save = form.querySelector('button[type="submit"]');
     if (save) {
       save.disabled = true;
@@ -5021,6 +6351,12 @@
       if (save) {
         save.disabled = false;
         save.textContent = policy.enabled ? 'Save & send policy to Cloud' : 'Save hosted policy';
+      }
+      const failure = hostedFailure('automation', error);
+      if (failure) {
+        const notice = node('div', 'automation-run-result');
+        renderHostedFailure(notice, failure);
+        form.append(notice);
       }
       showNotice(`Could not save the hosted policy: ${error.message}`);
     }
@@ -5061,14 +6397,7 @@
         updatePlanBadge();
         renderSidebarCta();
         setDeploymentMode(auth.deployment_mode || 'local');
-        renderObject(target, {
-          deployment_mode: auth.deployment_mode || 'local',
-          local_mode: auth.mode || 'open',
-          hosted_team: Boolean(auth.hosted_team),
-          local_invitations: Boolean(auth.local_invitations),
-          cloud_access: Boolean(license.cloud_access_active),
-          plan: license.plan || 'local',
-        }, 'Connection state');
+        renderTeamState(target, auth, license);
       } else {
         if (kind === 'analytics') state.analyticsStarting.add(workspace);
         const result = await api(`/${kind}?${query(workspace)}`,
@@ -5101,17 +6430,38 @@
       if (kind !== 'analytics' && isCurrentScopedRequest(request)) state.hostedLoaded.add(cacheKey);
     } catch (error) {
       if (kind === 'analytics') {
-        state.analyticsStartErrors.set(workspace, error.message);
+        state.analyticsStartErrors.set(workspace, error);
         if (state.workspace === workspace && state.view === 'manage' && state.manageTab === 'analytics') {
-          renderAnalyticsStartError(target, workspace, error.message);
+          renderAnalyticsStartError(target, workspace, error);
         }
       } else if (isCurrentScopedRequest(request)) {
-        target.replaceChildren(empty(`${kind[0].toUpperCase()}${kind.slice(1)} is not active: ${error.message}`));
+        const failure = hostedFailure(kind, error);
+        if (failure) renderHostedFailure(target, failure);
+        else target.replaceChildren(empty(`${kind[0].toUpperCase()}${kind.slice(1)} is not active: ${error.message}`));
       }
     } finally {
       if (kind === 'analytics') state.analyticsStarting.delete(workspace);
     }
   }
+  function renderTeamState(target, auth, license) {
+    target.replaceChildren();
+    const access = licenseAccessState(license);
+    const teamLive = licensePlanKey(license) === 'team' && licenseHasHostedAccess(license);
+    const ends = licenseTrialEnds(license);
+    const note = teamLive
+      ? (access === 'trial'
+        ? `Your free trial includes Team${ends ? ` until ${ends}` : ''}. Organizations, roles and seats are managed in Engraphis Cloud.`
+        : 'Your Team subscription is active. Organizations, roles and seats are managed in Engraphis Cloud.')
+      : access === 'lapsed'
+        ? 'Your hosted subscription is not active, so Team features are paused until billing is up to date.'
+        : 'Team is a hosted plan. Per-member agent accounts, roles, named seats and rotating device credentials are managed in Engraphis Cloud, not by this dashboard.';
+    target.append(node('p', 'automation-policy-note', note), definitionList([
+      ['Deployment', auth.deployment_mode === 'local' || !auth.deployment_mode ? 'Local · single user' : 'Hosted'],
+      ['Dashboard access', auth.enabled ? 'Deployment token required' : 'Open on this machine'],
+      ['Plan', licensePlanLabel(license)],
+    ]));
+  }
+
   function syncSummaryMessage(summary) {
     if (!summary) return 'No sync has run in this dashboard process.';
     const attempted = number(summary.attempted);
@@ -5190,7 +6540,7 @@
     if (!target) return;
     target.replaceChildren(empty('Checking Cloud Sync connection…'));
     try {
-      const status = await api('/sync/status');
+      const status = await api('/sync/status', { signal: request.signal });
       if (!isCurrentScopedRequest(request)) return;
       renderSyncStatus(status);
     } catch (error) {
@@ -5225,6 +6575,14 @@
     } catch (error) {
       if (!isCurrentScopedRequest(request)) return;
       renderSyncStatus(state.syncStatus || {}, `Cloud Sync failed: ${error.message}`);
+      /* A refused sync gets the same classified next step as the other hosted features. */
+      const failure = hostedFailure('sync', error);
+      const target = byId('sync-result');
+      if (failure && target) {
+        const panel = node('div', 'automation-run-result');
+        renderHostedFailure(panel, failure);
+        target.append(panel);
+      }
       showNotice(`Cloud Sync failed: ${error.message}`);
     }
   }
@@ -5235,6 +6593,22 @@
       ? { free: '$0', pro: '$100 / owner / year', team: '$200 / seat / year' }
       : { free: '$0', pro: '$10 / owner / month', team: '$20 / seat / month' };
   }
+
+  /* What each hosted plan adds, as docs/HOSTED_PLANS.md describes it. */
+  const PLAN_BENEFITS = {
+    pro: [
+      'Hosted Cloud Sync across your installations',
+      'Growth, retention, decay and entity Analytics',
+      'Auto Consolidation with hosted retention policies',
+      'Auto Dreaming with reviewable managed proposals',
+      'Private account and billing support',
+    ],
+    team: [
+      'Everything in Pro',
+      'Hosted organizations, invitations and named seats',
+      'Roles, scoped credentials and Team audit history',
+    ],
+  };
 
   function renderPlans() {
     const target = byId('plan-cards');
@@ -5258,6 +6632,12 @@
           node('p', 'plan-support', 'Support continued Engraphis development with Pro. Your subscription helps cover hosted infrastructure and ongoing development.'),
           node('p', 'plan-benefits', 'Cloud Sync, Analytics, Auto Consolidation, and Auto Dreaming across your installations.'),
         );
+      }
+      if (PLAN_BENEFITS[plan.id]) {
+        const list = node('ul', 'plan-benefit-list');
+        list.setAttribute('aria-label', `${plan.name} includes`);
+        PLAN_BENEFITS[plan.id].forEach(item => list.append(node('li', '', item)));
+        card.append(list);
       }
       if (plan.id === 'free') {
         const status = node('span', 'secondary-button', plan.action);
@@ -5284,18 +6664,104 @@
     });
   }
 
+  const LICENSE_STATUS_NOTES = {
+    past_due: 'the last payment did not go through',
+    canceled: 'the subscription was cancelled',
+    expired: 'the billing period ended',
+    revoked: 'access was revoked',
+  };
+  const LICENSE_SOURCES = {
+    environment: 'Operator override',
+    override: 'Operator override',
+    session: 'Cloud handshake',
+    cloud: 'Cloud entitlements',
+    connected: 'Not yet confirmed',
+    local: 'Not connected',
+  };
+
+  function licenseTrialEnds(license = state.license) {
+    const ends = Number(license && license.trial && license.trial.ends_at);
+    const date = ends > 0 ? validDate(ends) : null;
+    return date ? new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' }).format(date) : '';
+  }
+
+  function licensePlanLabel(license = state.license) {
+    const access = licenseAccessState(license);
+    const plan = (licensePlanKey(license) || 'pro').toUpperCase();
+    if (access === 'active') return plan;
+    if (access === 'trial') return `${plan} trial`;
+    if (access === 'trial_expired') return `${plan} trial ended`;
+    if (access === 'lapsed') return `${plan} inactive`;
+    return 'Local core (free)';
+  }
+
+  /* Say why hosted features are locked and what fixes it — never a bare plan badge. */
+  function renderLicenseStatus(license, error = null) {
+    const target = byId('license-status-body');
+    if (!target) return;
+    target.replaceChildren();
+    if (!license) {
+      target.append(empty(`Plan status is unavailable${error ? `: ${error.message}` : '.'}`));
+      return;
+    }
+    const access = licenseAccessState(license);
+    const ends = licenseTrialEnds(license);
+    const rows = [['Plan', licensePlanLabel(license)]];
+    if (access !== 'inactive' && license.email && license.email !== 'trial') rows.push(['Hosted account', text(license.email)]);
+    if (access === 'trial' && ends) rows.push(['Trial ends', ends]);
+    else if (access !== 'inactive' && license.expires) {
+      const expires = Number(license.expires) > 0 ? validDate(license.expires) : null;
+      if (expires) rows.push(['Authorization expires', new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' }).format(expires)]);
+    }
+    if (license.plan_source) {
+      rows.push(['Plan source', `${LICENSE_SOURCES[license.plan_source] || text(license.plan_source)}${license.plan_checked_at ? ` · confirmed ${relative(license.plan_checked_at)}` : ''}`]);
+    }
+    target.append(definitionList(rows));
+    const callout = (title, detail) => {
+      const box = node('p', 'license-callout');
+      box.append(node('strong', '', title), document.createTextNode(detail));
+      target.append(box);
+    };
+    if (license.error) callout('Hosted authorization unavailable', text(license.error));
+    if (access === 'trial_expired') {
+      callout(`Your free trial has ended${ends ? ` on ${ends}` : ''}`, 'Hosted features are locked. Everything you wrote is still in your local database and fully usable. The trial runs once per account, so restoring hosted features means subscribing.');
+    } else if (access === 'lapsed') {
+      const reason = LICENSE_STATUS_NOTES[license.entitlement_status];
+      callout(`Your ${(licensePlanKey(license) || 'hosted').toUpperCase()} subscription is no longer active`,
+        `${reason ? `${reason[0].toUpperCase()}${reason.slice(1)}, so hosted` : 'Hosted'} features are locked until billing is up to date. Local memories are unaffected.`);
+    } else if (access === 'inactive') {
+      callout('No hosted plan on this installation', 'The local memory engine is free and complete on its own. Cloud Sync, Analytics, Automation and Team administration run in Engraphis Cloud.');
+    }
+    const known = license.known_features && typeof license.known_features === 'object' ? license.known_features : {};
+    const included = new Set(Array.isArray(license.features) ? license.features : []);
+    if (access !== 'inactive' && Object.keys(known).length) {
+      const list = node('ul', 'license-features');
+      list.setAttribute('aria-label', 'Hosted features');
+      Object.entries(known).forEach(([key, label]) => {
+        const item = node('li', included.has(key) ? 'included' : '', `${included.has(key) ? '✓' : '○'} ${text(label)}`);
+        item.setAttribute('aria-label', `${text(label)}: ${included.has(key) ? 'included' : 'not included'}`);
+        list.append(item);
+      });
+      target.append(list);
+    }
+    if (access === 'active') target.append(node('p', 'plan-support', 'Thank you for supporting Engraphis. Your subscription funds hosted infrastructure and ongoing development.'));
+  }
+
   async function loadPlans() {
     const request = beginScopedRequest('plans');
+    let failure = null;
     try {
       const license = await api(`/license?${query(request.workspace)}`);
       if (!isCurrentScopedRequest(request)) return;
       state.license = license;
-    } catch (_) {
+    } catch (error) {
       if (!isCurrentScopedRequest(request)) return;
+      failure = error;
       state.license = { plan: 'free' };
     }
     updatePlanBadge();
     renderSidebarCta();
+    renderLicenseStatus(failure ? null : state.license, failure);
     renderPlans();
   }
 
@@ -5357,8 +6823,8 @@
 
     const keyState = node('p', 'llm-key-state', status.key_set ? 'API key set' : 'No API key set');
     keyState.append(node('span', '', ` · extractor: ${status.extractor || 'none'}`));
-    const setupNote = node('p', 'llm-setup-note', 'Choose a provider and model for the copyable .env snippet. Update it locally, then restart Engraphis to apply the change.');
-    const snippetLabel = node('label', 'llm-snippet-label', 'Local .env setup');
+    const setupNote = node('p', 'llm-setup-note', 'Choose a provider and model for the copyable configuration snippet. Save it in your owner-private ~/.engraphis/config.env, then restart Engraphis to apply the change.');
+    const snippetLabel = node('label', 'llm-snippet-label', 'Owner-private config.env setup');
     const snippet = node('textarea', 'llm-env-snippet');
     snippet.id = 'llm-env-snippet';
     snippet.readOnly = true;
@@ -5423,6 +6889,7 @@
   }
 
   async function loadSettings() {
+    renderRuntimeCard();
     try {
       state.license = await api('/license');
       updatePlanBadge();
@@ -5437,7 +6904,11 @@
   }
 
   async function setLlmExtractor(enabled) {
-    if (enabled && !window.confirm(`Turn on LLM extraction? ${EXTERNAL_LLM_PRIVACY_NOTICE}`)) return;
+    if (enabled && !await dialogs.confirm({
+      title: 'Turn on LLM extraction',
+      message: `Turn on LLM extraction? ${EXTERNAL_LLM_PRIVACY_NOTICE}`,
+      confirmLabel: 'Turn on extraction',
+    })) return;
     setLlmTestResult(enabled ? 'Verifying the configured provider…' : 'Turning extraction off…');
     try {
       const result = await api('/llm/extractor', { method: 'POST', body: { enabled } });
@@ -5455,8 +6926,13 @@
       const result = await api('/llm/test', { method: 'POST' });
       await loadSettings();
       if (result.ok) {
-        const suffix = result.auto_enabled ? ' Extraction is active for new ingested memories.' : '';
-        setLlmTestResult(`Connected — ${result.provider}/${result.model}.${suffix}`, 'ready');
+        /* A successful test can switch extraction on for this process; when the setting could
+           not be written for restart, say so rather than letting it silently lapse. */
+        const transient = result.auto_enabled && result.persisted === false;
+        const suffix = transient
+          ? ' Extraction is active for this process, but the setting could not be saved for restart. Set ENGRAPHIS_EXTRACTOR=llm_structured and ENGRAPHIS_LLM_AUTO_EXTRACT=1 in the deployment environment.'
+          : result.auto_enabled ? ' Extraction is active for new ingested memories.' : '';
+        setLlmTestResult(`Connected — ${result.provider}/${result.model}.${suffix}`, transient ? 'error' : 'ready');
       } else {
         setLlmTestResult(`Could not connect: ${result.error || 'Check the provider, model, API key, and network.'}`, 'error');
       }
@@ -5466,7 +6942,7 @@
   }
 
   function switchView(view, { pushHistory = true } = {}) {
-    const validViews = ['today', 'ask', 'library', 'connections', 'relations', 'provenance', 'manage'];
+    const validViews = ['today', 'ask', 'library', 'connections', 'relations', 'specstudio', 'provenance', 'manage'];
     if (!validViews.includes(view)) view = 'today';
     if (pushHistory && state.view !== view) {
       const url = new URL(location.href);
@@ -5485,11 +6961,15 @@
       localStorage.setItem('engraphis-ledger-view', view);
     } catch (_) {}
     graphLifecycle.sync();
-    if (view === 'relations') loadGraph();
-    if (view === 'provenance' && state.provenanceTab === 'audit') loadAudit();
-    if (view === 'manage') {
+    if (state.workspace && view === 'relations') loadGraph();
+    if (state.workspace && view === 'provenance' && state.provenanceTab === 'audit') loadAudit();
+    if (state.workspace && view === 'manage') {
       loadSavings(state.refreshEpoch);
       loadManageTab(state.manageTab);
+    }
+    if (view === 'specstudio' && window.SpecStudio && typeof window.SpecStudio.resizeCanvas === 'function') {
+      window.SpecStudio.setScope(state.workspace, state.project);
+      window.SpecStudio.resizeCanvas();
     }
     window.scrollTo({ top: 0, behavior: 'instant' });
     const heading = byId(`${view}-title`);
@@ -5499,25 +6979,36 @@
     }
   }
 
+  const THEMES = ['slate', 'midnight', 'solarized', 'paper', 'sepia', 'matrix'];
+  /* Theme names used by the retired Classic dashboard, read once so a person who chose a
+     theme there keeps it. */
+  const CLASSIC_THEMES = {
+    dark: 'slate', light: 'paper', midnight: 'midnight', solarized: 'solarized', sepia: 'sepia', matrix: 'matrix',
+  };
+
   function applyTheme(theme) {
-    const valid = ['slate', 'midnight', 'paper', 'matrix'];
-    const selected = valid.includes(theme) ? theme : 'slate';
+    const selected = THEMES.includes(theme) ? theme : 'slate';
     document.body.dataset.theme = selected;
-    byId('theme-select').value = selected;
     byId('sidebar-theme-select').value = selected;
     try {
       localStorage.setItem('engraphis-ledger-theme', selected);
-      localStorage.setItem('engraphis-theme', ({ slate: 'dark', paper: 'light', midnight: 'midnight', matrix: 'matrix' })[selected]);
     } catch (_) {}
     if (state.graphEngine) state.graphEngine.setThemeColors(graphThemeColors());
+    renderGraphLegend();
   }
 
   async function refreshBootstrap(preferred = '') {
-    const bootstrap = (await api('/bootstrap')) || {};
+    const request = ++state.bootstrapRequest;
+    const epoch = state.refreshEpoch;
+    const workspace = state.workspace;
+    const bootstrap = (await api('/bootstrap?include_stats=false')) || {};
+    if (request !== state.bootstrapRequest) return;
     renderUpdateBanner(bootstrap.update);
     if (typeof bootstrap.version === 'string' && bootstrap.version.trim()) {
       state.releaseVersion = bootstrap.version.trim();
     }
+    renderEmbedderBanner(bootstrap.embedder);
+    renderRuntimeCard();
     state.workspaces = bootstrap.workspaces || [];
     state.license = bootstrap.license || state.license;
     updatePlanBadge();
@@ -5532,10 +7023,7 @@
       select.append(option('', 'No workspace'));
       select.disabled = true;
       setConnection('Local engine connected · no workspace');
-      state.workspace = '';
-      state.project = '';
-      workflow.selectWorkspace('');
-      state.stats = {};
+      await selectWorkspace('');
       state.libraryTotal = 0;
       renderFirstMemoryJourney();
       renderWorkspaceNames();
@@ -5550,6 +7038,8 @@
       emptyActivity.append(emptyActivityCell);
       byId('activity-body').replaceChildren(emptyActivity);
       byId('proactive-list').replaceChildren(empty('Create a workspace to see proactive context.'));
+      byId('home-health').replaceChildren(empty('Create a workspace to see its memory health.'));
+      byId('home-handoff').hidden = true;
       byId('context-savings-persistent-value').textContent = '—';
       byId('context-savings-persistent-meta').textContent = 'Create a workspace to start tracking context savings.';
       byId('context-savings-persistent-rate').textContent = '—';
@@ -5564,29 +7054,49 @@
     const selected = names.includes(saved)
       ? saved
       : workspaceName([...state.workspaces].sort((a, b) => number(b.memories) - number(a.memories))[0]);
-    await selectWorkspace(selected);
+    const navigated = epoch !== state.refreshEpoch || workspace !== state.workspace;
+    if (names.includes(state.workspace)
+      && (navigated || (editorOpen()
+        && (selected === state.workspace || !await confirmDiscardEditor())))) {
+      select.value = state.workspace;
+      renderWorkspaceNames();
+      renderWorkspaceList();
+      return;
+    }
     setConnection('Local engine connected');
+    await selectWorkspace(selected);
   }
 
-  async function boot() {
+  let bootPromise = null;
+  function boot() {
+    if (!bootPromise) bootPromise = runBoot().finally(() => { bootPromise = null; });
+    return bootPromise;
+  }
+
+  async function runBoot() {
     byId('today-date').textContent = new Intl.DateTimeFormat(undefined, { dateStyle: 'long' }).format(new Date());
     let theme = 'slate';
     try {
-      theme = localStorage.getItem('engraphis-ledger-theme') || theme;
+      theme = localStorage.getItem('engraphis-ledger-theme')
+        || CLASSIC_THEMES[localStorage.getItem('engraphis-theme')] || theme;
     } catch (_) {}
     applyTheme(theme);
+    startHealthChecks();
     try {
       const entry = new URL(location.href);
-      // Classic links to this workspace's approval controls. Bootstrap still
-      // validates the name against the authorized workspace list.
-      await refreshBootstrap(entry.searchParams.get('workspace') || '');
+      // Links may name a workspace (for example from an approval prompt). Bootstrap
+      // still validates the name against the authorized workspace list.
       let view = 'today';
       try {
         const saved = localStorage.getItem('engraphis-ledger-view');
-        if (['today', 'ask', 'library', 'connections', 'relations', 'provenance', 'manage'].includes(saved)) view = saved;
+        if (['today', 'ask', 'library', 'connections', 'relations', 'specstudio', 'provenance', 'manage'].includes(saved)) view = saved;
       } catch (_) {}
       const urlView = new URL(location.href).searchParams.get('view');
-      switchView(['today', 'ask', 'library', 'connections', 'relations', 'provenance', 'manage'].includes(urlView) ? urlView : view, { pushHistory: false });
+      switchView(['today', 'ask', 'library', 'connections', 'relations', 'specstudio', 'provenance', 'manage'].includes(urlView) ? urlView : view, { pushHistory: false });
+      await refreshBootstrap(entry.searchParams.get('workspace') || '');
+      state.booted = true;
+      state.bootFailure = '';
+      clearConnectionProblem();
       const requestedManageTab = entry.searchParams.get('tab');
       if (urlView === 'manage' && ['settings', 'sync', 'analytics'].includes(requestedManageTab)) {
         switchManageTab(requestedManageTab);
@@ -5596,17 +7106,13 @@
         location.reload();
         return;
       }
-      setConnection('Local engine unavailable', false);
-      showNotice(`Ledger could not connect: ${error.message}`);
+      state.bootFailure = error.status === 401 ? 'auth' : 'connection';
+      showConnectionProblem(connectionProblemDetail(error));
     }
   }
 
   all('[data-view]').forEach(control => control.addEventListener('click', () => switchView(control.dataset.view)));
   all('[data-go]').forEach(control => control.addEventListener('click', () => switchView(control.dataset.go)));
-  all('[data-manage]').forEach(control => control.addEventListener('click', () => {
-    switchView('manage');
-    switchManageTab(control.dataset.manage);
-  }));
   const planBadge = byId('plan-badge');
   if (planBadge) {
     planBadge.addEventListener('click', event => {
@@ -5651,7 +7157,14 @@
     switchView(view, { pushHistory: false });
   });
 
-  byId('workspace-select').addEventListener('change', event => selectWorkspace(event.target.value));
+  byId('workspace-select').addEventListener('change', async event => {
+    const next = event.target.value;
+    if (!await confirmDiscardEditor()) {
+      event.target.value = state.workspace;
+      return;
+    }
+    void selectWorkspace(next);
+  });
   byId('ask-form').addEventListener('submit', askMemory);
   const updateJevRecallControls = () => {
     const enabled = byId('ask-jev-assisted').checked;
@@ -5698,7 +7211,8 @@
     event.preventDefault();
     if (!state.memoryMove || !state.memoryMove.applying) closeMemoryMove();
   });
-  byId('first-memory-add').addEventListener('click', () => {
+  byId('first-memory-add').addEventListener('click', async () => {
+    if (!await confirmDiscardEditor()) return;
     if (!state.workspace) {
       switchView('manage');
       switchManageTab('workspaces');
@@ -5709,9 +7223,33 @@
     switchView('library');
     openEditor();
   });
-  byId('new-memory-button').addEventListener('click', () => openEditor());
-  byId('editor-close').addEventListener('click', closeEditor);
-  byId('editor-cancel').addEventListener('click', closeEditor);
+  byId('new-memory-button').addEventListener('click', async () => {
+    if (await confirmDiscardEditor()) openEditor();
+  });
+  byId('editor-close').addEventListener('click', () => { void requestCloseEditor(); });
+  byId('editor-cancel').addEventListener('click', () => { void requestCloseEditor(); });
+  byId('editor-write-mode').addEventListener('click', () => {
+    setEditorMode(false);
+    byId('editor-memory-content').focus();
+  });
+  byId('editor-preview-mode').addEventListener('click', () => setEditorMode(true));
+  ['editor-memory-title', 'editor-memory-type', 'editor-memory-content', 'editor-memory-importance',
+    'editor-memory-scope'].forEach(id => {
+    byId(id).addEventListener('input', refreshEditorDirty);
+    byId(id).addEventListener('change', refreshEditorDirty);
+  });
+  document.addEventListener('keydown', event => {
+    if (!(event.ctrlKey || event.metaKey) || event.altKey || event.key.toLowerCase() !== 's') return;
+    if (!editorOpen() || state.view !== 'library') return;
+    event.preventDefault();
+    if (state.editorSession && !state.editorSession.busy) byId('memory-editor').requestSubmit();
+  });
+  window.addEventListener('beforeunload', event => {
+    // Leaving the page can also cancel a save that is still in flight.
+    if (!editorDirty() && !(editorOpen() && state.editorSession.busy)) return;
+    event.preventDefault();
+    event.returnValue = '';
+  });
   byId('editor-refresh').addEventListener('click', refreshEditorVersions);
   byId('memory-editor').addEventListener('submit', saveMemory);
   byId('editor-memory-importance').addEventListener('input', event => {
@@ -5722,9 +7260,62 @@
     const importanceOutput = byId('editor-memory-importance-output');
     if (importanceOutput) importanceOutput.textContent = effective.toFixed(2);
   });
-  byId('import-button').addEventListener('click', () => byId('import-files').click());
-  byId('import-files').addEventListener('change', event => importFiles(event.target.files));
-  byId('obsidian-import-button').addEventListener('click', openObsidianImport);
+  const importMenuWrap = byId('import-menu-button').closest('.menu-wrap');
+  function setImportMenuOpen(open, restoreFocus = false) {
+    const trigger = byId('import-menu-button');
+    const menu = byId('import-menu');
+    menu.hidden = !open;
+    trigger.setAttribute('aria-expanded', String(open));
+    if (open) menu.querySelector('button').focus();
+    else if (restoreFocus) trigger.focus();
+  }
+  byId('import-menu-button').addEventListener('click', () => setImportMenuOpen(byId('import-menu').hidden));
+  importMenuWrap.addEventListener('keydown', event => {
+    const menu = byId('import-menu');
+    if (menu.hidden) return;
+    const items = [...menu.querySelectorAll('button')];
+    const index = items.indexOf(document.activeElement);
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      setImportMenuOpen(false, true);
+    } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      const step = event.key === 'ArrowDown' ? 1 : -1;
+      items[(index + step + items.length) % items.length].focus();
+    }
+  });
+  ['pointerdown', 'focusin'].forEach(type => document.addEventListener(type, event => {
+    if (!byId('import-menu').hidden && !importMenuWrap.contains(event.target)) setImportMenuOpen(false);
+  }));
+  const imports = window.EngraphisImports.create({
+    api,
+    workspace: () => state.workspace,
+    notify: showNotice,
+    onImported: async workspace => {
+      if (workspace !== state.workspace) return;
+      // Keep open drafts, including pending saves whose failure must retain the draft.
+      if (editorOpen()) refreshLibrary();
+      else await selectWorkspace(workspace);
+    },
+    confirmDerive: () => dialogs.confirm({
+      title: 'Derive facts with your LLM provider?',
+      message: ['Deriving facts sends the imported text to your configured LLM provider for extraction.', EXTERNAL_LLM_PRIVACY_NOTICE],
+      confirmLabel: 'Send for extraction',
+    }),
+  });
+  byId('import-quick-button').addEventListener('click', () => {
+    setImportMenuOpen(false, true);
+    imports.openQuick();
+  });
+  byId('obsidian-import-button').addEventListener('click', () => {
+    setImportMenuOpen(false, true);
+    openObsidianImport();
+  });
+  byId('import-sources-button').addEventListener('click', () => {
+    setImportMenuOpen(false, true);
+    imports.openSources();
+  });
   byId('obsidian-import-close').addEventListener('click', () => byId('obsidian-import-dialog').close());
   byId('obsidian-preview').addEventListener('click', previewObsidianImport);
   byId('obsidian-cancel').addEventListener('click', cancelObsidianImport);
@@ -5747,7 +7338,22 @@
   ].forEach(([id, eventName]) => {
     byId(id).addEventListener(eventName, () => invalidateDocumentImportPreview());
   });
-  byId('obsidian-report-filter').addEventListener('change', () => renderObsidianReport(obsidianImport.job || obsidianImport.preview));
+  byId('obsidian-report-filter').addEventListener('change', () => {
+    obsidianImport.reportPage = 0;
+    renderObsidianReport(obsidianImport.job || obsidianImport.preview);
+  });
+  [['obsidian-report-previous', -1], ['obsidian-report-next', 1]].forEach(([id, delta]) => {
+    byId(id).addEventListener('click', () => {
+      obsidianImport.reportPage = Math.max(0, obsidianImport.reportPage + delta);
+      renderObsidianReport(obsidianImport.job || obsidianImport.preview);
+    });
+  });
+  byId('obsidian-retry-progress').addEventListener('click', () => {
+    if (!obsidianImport.running || !obsidianImport.jobId || obsidianImport.polling) return;
+    window.clearTimeout(obsidianImport.poll);
+    obsidianImport.pollFailures = 0;
+    void pollObsidianImport(obsidianImport.jobId, obsidianImport.jobWorkspace);
+  });
 
   all('[data-graph-tab]').forEach(control => control.addEventListener('click', () => setGraphTab(control.dataset.graphTab)));
   byId('graph-fit').addEventListener('click', () => state.graphEngine && state.graphEngine.fit());
@@ -5891,6 +7497,7 @@
     clearGraphSavedView();
     syncGraphChoices();
     saveGraphPreferences();
+    renderGraphLegend();
   }));
   all('[data-graph-color-choice]').forEach(control => control.addEventListener('click', () => {
     byId('graph-color').value = control.dataset.graphColorChoice;
@@ -5898,7 +7505,18 @@
     clearGraphSavedView();
     syncGraphChoices();
     saveGraphPreferences();
+    renderGraphTypeColors();
+    renderGraphLegend();
   }));
+  byId('graph-reset-colors').addEventListener('click', resetGraphColors);
+  document.querySelector('.graph-stage').addEventListener('keydown', event => {
+    if (event.target.id !== 'graph-canvas' || event.defaultPrevented
+      || event.altKey || event.ctrlKey || event.metaKey) return;
+    if (graphExplorer.handleKey(event)) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+  }, true);
   all('[data-graph-palette-choice]').forEach(control => control.addEventListener('click', () => {
     const palette = control.dataset.graphPaletteChoice;
     byId('graph-palette').value = palette;
@@ -5918,11 +7536,6 @@
     clearGraphSavedView();
     saveGraphPreferences();
     if (state.graphMode !== 'full') loadGraph({ force: true });
-  });
-  byId('graph-tune-min-degree').addEventListener('input', event => {
-    setGraphMinDegree(event.target.value);
-    clearGraphSavedView();
-    scheduleGraphPreferencesSave();
   });
   byId('graph-depth').addEventListener('input', event => {
     setGraphDepth(event.target.value);
@@ -6049,8 +7662,10 @@
   syncGraphChoices();
 
   byId('why-form').addEventListener('submit', whySearch);
-  byId('timeline-form').addEventListener('submit', event => timelineSearch(event, false));
-  byId('supersession-form').addEventListener('submit', event => timelineSearch(event, true));
+  byId('timeline-form').addEventListener('submit', timelineSearch);
+  byId('timeline-closed-only').addEventListener('change', () => {
+    if (byId('timeline-input').value.trim()) byId('timeline-form').requestSubmit();
+  });
   byId('verify-receipts').addEventListener('click', verifyReceipts);
   byId('export-receipts').addEventListener('click', exportReceipts);
 
@@ -6066,10 +7681,8 @@
     byId(id).addEventListener('change', invalidateConsolidationReview);
   });
   byId('billing-select').addEventListener('change', renderPlans);
-  byId('dashboard-select').addEventListener('change', event => {
-    location.assign(event.target.value === 'classic' ? '/classic' : '/');
-  });
-  byId('theme-select').addEventListener('change', event => applyTheme(event.target.value));
   byId('sidebar-theme-select').addEventListener('change', event => applyTheme(event.target.value));
+  byId('connection-retry').addEventListener('click', () => { void retryConnection(); });
+  byId('embedder-recheck').addEventListener('click', () => { void recheckEmbedder(); });
   boot();
 })();
