@@ -4,10 +4,13 @@ Fixtures compile only unchanged benign source and never import or execute it.
 Cache headers and payloads are irrelevant: the policy rejects their presence.
 """
 import importlib.util
+import ntpath
 import py_compile
+import stat
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -236,3 +239,53 @@ def test_unreadable_mapped_directory_fails_closed(candidate, tmp_path, monkeypat
         monkeypatch.setattr(checker.os, "scandir", denied)
     assert any("__pycache__" in entry and "cannot be inspected" in entry
                for entry in checker._ignored_executable_paths(candidate))
+
+
+@pytest.mark.parametrize("name", [
+    "ENGINE.cpython-312.pyc", "engine.cpython-312.PYC", "ENGINE.PYC",
+    "ENGINE.cpython-312.opt-1.pyc", "engine.cpython-312.OPT-2.PYC", "ENGINE.PYO",
+])
+@pytest.mark.parametrize("platform_model", ["windows", "posix"])
+def test_cache_names_follow_platform_case_rules(
+    candidate, tmp_path, monkeypatch, name, platform_model,
+):
+    # Filename-only models; no Windows execution or cache payload access.
+    monkeypatch.setattr(sys, "pycache_prefix", str(tmp_path / "cache"))
+    cache = _mapped(candidate / "engine.py").with_name(name)
+    _write_cache(cache)
+    normalizer = ntpath.normcase if platform_model == "windows" else lambda value: value
+    monkeypatch.setattr(checker.os.path, "normcase", normalizer)
+    assert bool(checker._ignored_executable_paths(candidate)) is (platform_model == "windows")
+
+
+@pytest.mark.parametrize("where", ["prefix-ancestor", "prefix", "mapped-ancestor", "mapped-directory"])
+@pytest.mark.parametrize("junction_helper", ["absent", "returns-false"])
+def test_directory_reparse_metadata_fails_before_traversal(
+    candidate, tmp_path, monkeypatch, where, junction_helper,
+):
+    prefix = tmp_path / "prefix-parent" / "cache"
+    monkeypatch.setattr(sys, "pycache_prefix", str(prefix))
+    directory = _mapped(candidate / "engine.py").parent
+    directory.mkdir(parents=True)
+    affected = {"prefix-ancestor": prefix.parent, "prefix": prefix,
+                "mapped-ancestor": directory.parent, "mapped-directory": directory}[where]
+    original = Path.lstat
+
+    def reparse_metadata(path):
+        if path == affected:
+            # Model Windows lstat: directory mode, reparse attribute, no symlink bit.
+            return SimpleNamespace(st_mode=stat.S_IFDIR | 0o700,
+                                   st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT)
+        return original(path)
+
+    def no_scandir(*args, **kwargs):
+        pytest.fail("a directory reparse point must fail before any traversal")
+
+    monkeypatch.setattr(Path, "lstat", reparse_metadata)
+    if junction_helper == "absent":
+        monkeypatch.delattr(Path, "is_junction", raising=False)
+    else:
+        monkeypatch.setattr(Path, "is_junction", lambda path: False, raising=False)
+    monkeypatch.setattr(checker.os, "scandir", no_scandir)
+    suspicious = checker._ignored_executable_paths(candidate)
+    assert any("__pycache__" in entry and "linked" in entry for entry in suspicious)

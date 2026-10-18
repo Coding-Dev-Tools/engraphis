@@ -146,7 +146,7 @@ def _prefixed_bytecode_paths(root: Path) -> list[str]:
         stem = mapped.name[:-len(str(sys.implementation.cache_tag) + ".pyc")]
         # Match literal source names, alternate interpreter tags and optimization
         # variants. Dotted sibling source names are separate, unrelated mappings.
-        pattern = re.compile(re.escape(stem) + r"(?:[^.]+(?:\.opt-[^.]+)?\.)?py[co]\Z")
+        pattern = re.compile(re.escape(os.path.normcase(stem)) + r"(?:[^.]+(?:\.opt-[^.]+)?\.)?py[co]\Z")
         directories.setdefault(mapped.parent, []).append(pattern)
     suspicious: list[str] = []
     for directory, patterns in directories.items():
@@ -157,10 +157,12 @@ def _prefixed_bytecode_paths(root: Path) -> list[str]:
             for part in directory.relative_to(prefix).parts:
                 parents.append(parents[-1] / part)
             for parent in parents:
-                mode = parent.lstat().st_mode
-                if (stat.S_ISLNK(mode)
+                metadata = parent.lstat()
+                if (stat.S_ISLNK(metadata.st_mode)
+                        or getattr(metadata, "st_file_attributes", 0)
+                        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
                         or getattr(parent, "is_junction", lambda: False)()
-                        or not stat.S_ISDIR(mode)):
+                        or not stat.S_ISDIR(metadata.st_mode)):
                     suspicious.append(diagnostic + " (linked or invalid directory)")
                     break
             else:
@@ -168,7 +170,7 @@ def _prefixed_bytecode_paths(root: Path) -> list[str]:
                 # rejected regardless of header, permissions, type or link target.
                 with os.scandir(directory) as entries:
                     for cached in entries:
-                        if any(pattern.fullmatch(cached.name) for pattern in patterns):
+                        if any(pattern.fullmatch(os.path.normcase(cached.name)) for pattern in patterns):
                             suspicious.append(diagnostic + "/" + cached.name)
         except FileNotFoundError:
             # A missing mapped directory cannot supply candidate bytecode.
