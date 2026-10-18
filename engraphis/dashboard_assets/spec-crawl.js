@@ -347,6 +347,7 @@
   }
 
   function setPromptReport(report) {
+    requestEpoch++;
     currentReport = report;
     reportScopeKey = scopeKey();
     traceSteps = report.trace || [];
@@ -367,6 +368,7 @@
   }
 
   function setMemoryReport(report) {
+    requestEpoch++;
     currentReport = report;
     reportScopeKey = scopeKey();
     traceSteps = report.trace || [];
@@ -1235,10 +1237,42 @@
 
   async function resolveRemedy(action, nodeA, nodeB) {
     if (mutationPending || reportScopeKey !== scopeKey() || currentMode !== 'memories') return;
-    const confirmed = action === 'supersede' && window.confirm(`Retire memory '${nodeB}' from live recall and retain '${nodeA}'? Its history remains available.`);
-    if (action === 'supersede' && !confirmed) return;
+    const report = currentReport;
+    const key = reportScopeKey;
+    const epoch = requestEpoch;
+    const isCurrent = () => {
+      if (!report || currentReport !== report || key !== scopeKey() || reportScopeKey !== key
+        || epoch !== requestEpoch || currentMode !== 'memories') return false;
+      if (![nodeA, nodeB].every(id => typeof id === 'string' && id.length > 0 && id.length <= 200
+        && (report.nodes || []).some(node => node.id === id)) || nodeA === nodeB) return false;
+      if (action === 'supersede') return (report.conflicts || []).some(conflict =>
+        conflict.remedy && conflict.remedy.action === action
+        && conflict.remedy.keep_node === nodeA && conflict.remedy.retire_node === nodeB);
+      return action === 'link' && (report.orphans || []).some(orphan =>
+        orphan.node_id === nodeA && orphan.suggested_link_to === nodeB);
+    };
+    if (!isCurrent()) return;
     mutationPending = true;
     try {
+      let confirmed = false;
+      if (action === 'supersede') {
+        try {
+          const dialog = window.EngraphisDialog;
+          if (!dialog || typeof dialog.confirm !== 'function') throw new Error('Confirmation unavailable');
+          confirmed = await dialog.confirm({
+            title: 'Retire memory?',
+            message: `Retire memory '${nodeB}' from live recall and retain '${nodeA}'? Its history remains available.`,
+            confirmLabel: 'Retire memory', danger: true,
+          });
+        } catch (_) {
+          showToast('Confirmation is unavailable. Refresh the dashboard and try again.');
+          return;
+        }
+        if (confirmed !== true) return;
+      }
+      // The in-page dialog yields control: a new scope, request, report or remedy
+      // requires a fresh confirmation, even if the selected scope later returns.
+      if (!isCurrent()) return;
       const data = await postSpec('/api/spec/crawl/memories/resolve', {
         action, node_a: nodeA, node_b: nodeB, confirmed
       }, 'memories');
