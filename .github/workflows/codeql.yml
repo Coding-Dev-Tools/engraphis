@@ -14,10 +14,16 @@ permissions:
   packages: read
   security-events: write
 
+# Keep every non-PR run; only superseded PR validation is cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   analyze:
     name: Analyze ${{ matrix.language }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     # Pull-request analyses otherwise use diff-informed queries, whose SARIF
     # intentionally omits findings outside changed lines. The release gate
     # must inspect complete raw SARIF on both pull requests and pushes.
