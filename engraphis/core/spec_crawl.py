@@ -856,6 +856,36 @@ def apply_answer(text: str, flag: Mapping[str, Any], answer: str) -> str:
     return text[:start] + answer + text[end:]
 
 
+def clarified_sentence(text: str, flag: Mapping[str, Any], answer: str) -> str:
+    """Return the complete resolved sentence, retaining opaque code and its delimiters.
+
+    Flag excerpts are display-only and can be truncated. Use the crawler's bounded
+    parser and original offsets instead; punctuation inside code cannot delimit prose.
+    """
+    text = _validate(text)
+    updated_text = apply_answer(text, flag, answer)
+    code = _code_ranges(text)
+    visible = list(text)
+    for start, end in code:
+        visible[start:end] = " " * (end - start)
+    visible_text = "".join(visible)
+    sections = _parse_sections(text, DEFAULT_TEMPLATE, code)
+    tokens, _ = _tokenize(visible_text, sections, code, LexiconClassifier())
+    selected = next((token for token in tokens
+                     if token.start == flag["start"] and token.end == flag["end"]), None)
+    if selected is None:
+        raise SpecCrawlError("flag does not identify a prose token")
+    start, end, section = _sentence_spans(tokens)[selected.sentence]
+    # Include complete leading/trailing inline literals, quotes and list markers.
+    # The visible gaps exclude code punctuation while keeping the original offsets.
+    sentence_boundary = re.compile(r"[.!?;\n]")
+    boundaries = list(sentence_boundary.finditer(visible_text, sections[section].start, start))
+    start = boundaries[-1].end() if boundaries else sections[section].start
+    boundary = sentence_boundary.search(visible_text, end, sections[section].end)
+    end = boundary.start() if boundary else sections[section].end
+    return updated_text[start:end + len(updated_text) - len(text)].strip()
+
+
 _PARAM_PATTERN = re.compile(
     r"\b(database|db|port|timeout|retries|max_retries|version|model|auth|auth_mode|strategy|provider|host)\s*(=|:|\bis\s+set\s+to\b|\bset\s+to\b|\bis\b)\s*([A-Za-z0-9._-]+)",
     re.IGNORECASE,

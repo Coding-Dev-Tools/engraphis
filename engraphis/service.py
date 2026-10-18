@@ -69,6 +69,7 @@ from engraphis.core.interfaces import (
 from engraphis.core.spec_crawl import (
     SpecCrawlError,
     apply_answer,
+    clarified_sentence,
     compose_memory_spec_with_truncation,
     crawl_spec,
 )
@@ -13144,6 +13145,7 @@ class MemoryService:
 
         try:
             updated_text = apply_answer(spec_text, flag, clean_answer)
+            resolved_sentence = clarified_sentence(spec_text, flag, clean_answer) if save_as_memory else ""
         except SpecCrawlError as exc:
             raise ValidationError(str(exc)) from exc
 
@@ -13155,12 +13157,8 @@ class MemoryService:
         mem_id: Optional[str] = None
         if save_as_memory:
             token = flag.get("token", "rule")
-            sentence = flag.get("sentence", "").strip()
-            body = f"Clarification for '{token}': {clean_answer}"
-            if sentence:
-                body = f"{sentence}\n{body}"
             rem_res = self.remember(
-                body,
+                resolved_sentence,
                 title=f"Spec Clarification: {token}",
                 workspace=workspace,
                 repo=repo,

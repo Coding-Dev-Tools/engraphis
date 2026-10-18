@@ -1,5 +1,6 @@
 const { test, expect } = require('@playwright/test');
 const AxeBuilder = require('@axe-core/playwright').default;
+const { answerActionDialog } = require('./action-dialog-helper');
 
 const prompt = {
   score: 18, word_count: 4,
@@ -233,6 +234,10 @@ test('scope changes clear old logs and ignore late memory responses', async ({ p
 
 test('remediation uses the recommended keeper and requires confirmation', async ({ page }) => {
   const { requests } = await fixture(page);
+  await page.evaluate(() => {
+    window.__nativeConfirmationCalls = 0;
+    window.confirm = () => { window.__nativeConfirmationCalls++; return false; };
+  });
   await page.evaluate(() => SpecStudio.setScope('alpha', 'repoA'));
   await page.route('**/api/spec/crawl/memories/resolve', async route => {
     requests.push({ path: '/spec/crawl/memories/resolve', body: route.request().postDataJSON() });
@@ -240,17 +245,54 @@ test('remediation uses the recommended keeper and requires confirmation', async 
   });
   await page.locator('#spec-mode-memories').click();
   await expect(page.locator('#spec-panel4-body')).toContainText('Missing ownership policy.');
-  page.once('dialog', dialog => dialog.dismiss());
   await page.getByRole('button', { name: 'Supersede', exact: true }).click();
+  await answerActionDialog(page, { accept: false, expectText: ['old', 'new'] });
   expect(requests.filter(item => item.path.endsWith('/resolve'))).toHaveLength(0);
-  page.once('dialog', dialog => dialog.accept());
   await page.getByRole('button', { name: 'Supersede', exact: true }).click();
+  await answerActionDialog(page, { expectText: ['old', 'new'] });
   await expect(page.locator('#spec-toast')).toContainText('Forbidden');
   expect(requests.find(item => item.path.endsWith('/resolve')).body).toMatchObject({
     node_a: 'new', node_b: 'old', workspace: 'alpha', repo: 'repoA', confirmed: true,
   });
   await expect(page.locator('#spec-score-display')).toHaveText('—');
+  expect(await page.evaluate(() => window.__nativeConfirmationCalls)).toBe(0);
 });
+
+for (const change of ['workspace', 'repo', 'scope roundtrip', 'mode', 'report', 'report roundtrip', 'ids', 'nodes', 'refresh']) {
+  test(`supersession cancels when ${change} changes while the in-page confirmation is open`, async ({ page }) => {
+    const { requests, errors } = await fixture(page);
+    await page.evaluate(report => {
+      window.confirm = () => false;
+      window.__confirmationReport = report;
+      SpecStudio.setScope('alpha', 'repoA');
+    }, cluster);
+    await page.locator('#spec-mode-memories').click();
+    await expect(page.getByRole('button', { name: 'Supersede', exact: true })).toBeVisible();
+    // Expose the same ordinary report object to the public report setter so that the
+    // in-place ID case exercises authorization, independently of identity/epoch.
+    await page.evaluate(() => SpecStudio.setMemoryReport(window.__confirmationReport));
+    await page.getByRole('button', { name: 'Supersede', exact: true }).click();
+    await expect(page.locator('#action-dialog')).toBeVisible();
+    await page.evaluate(kind => {
+      if (kind === 'workspace') SpecStudio.setScope('beta', 'repoA');
+      if (kind === 'repo') SpecStudio.setScope('alpha', 'repoB');
+      if (kind === 'scope roundtrip') { SpecStudio.setScope('beta', 'repoA'); SpecStudio.setScope('alpha', 'repoA'); }
+      if (kind === 'mode') SpecStudio.setMode('prompt');
+      if (kind === 'report') SpecStudio.setMemoryReport({ ...window.__confirmationReport });
+      if (kind === 'report roundtrip') {
+        SpecStudio.setMemoryReport({ ...window.__confirmationReport });
+        SpecStudio.setMemoryReport(window.__confirmationReport);
+      }
+      if (kind === 'ids') window.__confirmationReport.conflicts[0].remedy.retire_node = 'unreviewed';
+      if (kind === 'nodes') window.__confirmationReport.nodes = [{ id: 'new' }];
+      if (kind === 'refresh') document.getElementById('spec-btn-new').click();
+    }, change);
+    await answerActionDialog(page);
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    expect(requests.filter(item => item.path.endsWith('/resolve'))).toHaveLength(0);
+    expect(errors).toEqual([]);
+  });
+}
 
 test('untrusted report text stays text and the view passes accessibility checks', async ({ page }) => {
   await fixture(page);
