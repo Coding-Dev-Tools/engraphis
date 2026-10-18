@@ -94,14 +94,14 @@ interpretation and do not count as additional benchmark-quality gains.
 ### Public numeric evidence registry
 
 Every exact public aggregate retained below comes from the checked-in, public-safe
-[`offline-fixtures-pr253-four-gap-stack-20261008.json`](docs/benchmark-evidence/offline-fixtures-pr253-four-gap-stack-20261008.json) artifact. Its
+[`offline-fixtures-pr260-nested-uri-redaction-runtime-20261018-e2ebfb06550f.json`](docs/benchmark-evidence/offline-fixtures-pr260-nested-uri-redaction-runtime-20261018-e2ebfb06550f.json) artifact. Its
 SHA-256 is
-`e423e99ba683c1928984903aef715ad97440c9717cecb3bd3f6fe4f6746ea7d0`, also recorded in the
+`434ec054dff38104a553ddb88b38a983c97227491e92ba482a7f3cd4ff5b560b`, also recorded in the
 adjacent `.sha256` file. The artifact contains no raw questions, answers, prompts, customer data,
 or per-record content fingerprints.
 
 The fixture-suite digest is
-`e1b7fcea31cb7bf8f8ec85b56e097a0cbfc7d496aef4aef51de73b849b2d17c6`. The artifact defines
+`28a67b9a2b182aaff93603e5631d2bf803538f5b81a67767effeb54f456c29fa`. The artifact defines
 the digest algorithm and records the SHA-256 of every suite and dataset file. Each evidence ID
 also binds its exact command through `sha256(UTF-8 exact command)`:
 
@@ -110,6 +110,17 @@ also binds its exact command through `sha256(UTF-8 exact command)`:
 | `offline-chunking` | `python -m eval.chunking_eval --dataset eval/datasets/longdoc.jsonl --k 5` | `c1c8196aa7e1568ef3844a9fb2d76b87f342c39108e32d6ad144b885a76143b8` |
 | `offline-performance` | `python -m eval.performance --dataset eval/datasets/codemem.jsonl --k 5 --iterations 10 --json` | `bbe4aca81e58d4830e50a8fc7729a1d15b71d97a6299bccd79432b7f119677d7` |
 | `offline-grounded` | `python -m eval.grounded` | `590442e51e3642c10489165759919dc86ffac62c182937330c153e7f8d5fc26f` |
+
+The source manifest covers every Python file under `engraphis/` and `eval/`, the two
+fixture datasets, and the official exporter. Each rerun must use a new artifact and chart
+basename because existing evidence is immutable. This run used Python 3.12.14 and NumPy 2.5.4;
+the charts were rendered with CairoSVG 2.9.1. Its 587-file manifest binds the Python
+producer. Runtime commit `e2ebfb06550fdcda0eb03590aecd9cf5e27a6dbc` also identifies
+the CLI and Dashboard source outside that manifest. The registered artifact was produced with:
+
+```bash
+python -m scripts.export_offline_evidence --output docs/benchmark-evidence/offline-fixtures-pr260-nested-uri-redaction-runtime-20261018-e2ebfb06550f.json
+```
 
 External, model-dependent, latency, consolidation, and productivity numbers are not included in
 this offline registry unless a redacted immutable artifact with the same three bindings exists. Use
@@ -126,13 +137,13 @@ grounded checks in separate panels; provider billing and MCP transport are not m
 the SVG and matching PNG with:
 
 ```bash
-python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-pr253-four-gap-stack-20261008.json --output docs/images/context-efficiency.svg --png-output docs/images/context-efficiency.png
+python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-pr260-nested-uri-redaction-runtime-20261018-e2ebfb06550f.json --output docs/images/context-efficiency-pr260-nested-uri-redaction-runtime-20261018-e2ebfb06550f.svg --png-output docs/images/context-efficiency-pr260-nested-uri-redaction-runtime-20261018-e2ebfb06550f.png
 ```
 
 The companion examples are also generated from that artifact with:
 
 ```bash
-python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-pr253-four-gap-stack-20261008.json --output docs/images/evidence-backed-agent-examples.svg --png-output docs/images/evidence-backed-agent-examples.png
+python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-pr260-nested-uri-redaction-runtime-20261018-e2ebfb06550f.json --output docs/images/evidence-backed-agent-examples-pr260-nested-uri-redaction-runtime-20261018-e2ebfb06550f.svg --png-output docs/images/evidence-backed-agent-examples-pr260-nested-uri-redaction-runtime-20261018-e2ebfb06550f.png
 ```
 The historical-to-executable mapping is in
 [`docs/BENCHMARK_CHANGE_COVERAGE.md`](docs/BENCHMARK_CHANGE_COVERAGE.md).

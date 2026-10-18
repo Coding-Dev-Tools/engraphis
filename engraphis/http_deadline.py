@@ -184,8 +184,15 @@ def read_response(response, deadline: float, *, max_bytes: int,
     """Bound body reads; optionally retain a complete body for credential rotation."""
     sock = getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None)
     with socket_deadline(sock, deadline) as interrupted:
-        return read_response_chunks(response, deadline, max_bytes=max_bytes,
-                                    preserve_complete=preserve_complete, interrupted=interrupted)
+        try:
+            return read_response_chunks(response, deadline, max_bytes=max_bytes,
+                                        preserve_complete=preserve_complete, interrupted=interrupted)
+        except Exception:
+            # Socket shutdown can surface an abort before a coarse monotonic clock reaches
+            # the timer's deadline (notably on Windows). The watchdog is authoritative.
+            if interrupted.is_set():
+                raise TimeoutError("HTTP request deadline exceeded") from None
+            raise
 
 
 def read_response_chunks(response, deadline: float, *, max_bytes: int,
@@ -226,6 +233,8 @@ def read_response_chunks(response, deadline: float, *, max_bytes: int,
                     from http.client import IncompleteRead
                     raise IncompleteRead(bytes(data), outstanding)
                 break
+        if interrupted is not None and interrupted.is_set():
+            raise TimeoutError("HTTP request deadline exceeded")
         remaining_time(deadline)
         if not chunk:
             break

@@ -1264,7 +1264,11 @@ def test_release_workflow_publishes_complete_captured_evidence():
     assert "installed-journey.json" in platform_smoke
     assert '"pip", "check"' in platform_smoke
     assert "scripts.smoke_entry_points" in platform_smoke
-    assert "anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26" in docker_job
+    assert re.search(
+        r"uses: anchore/sbom-action@[0-9a-f]{40} # v\d+\.\d+\.\d+\s*$",
+        docker_job,
+        flags=re.MULTILINE,
+    )
     assert "anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439" in docker_job
     assert "docker buildx build --pull --load" in docker_job
     assert '"containerimage.digest"' in docker_job

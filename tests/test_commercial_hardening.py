@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -267,7 +269,6 @@ def test_the_published_prices_match_the_manifest_where_pricing_is_documented() -
     manifest = commercial.manifest()
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     hosted_plans = (ROOT / "docs" / "HOSTED_PLANS.md").read_text(encoding="utf-8")
-    dashboard = (ROOT / "engraphis" / "static" / "dashboard.js").read_text(encoding="utf-8")
     ledger = (ROOT / "engraphis" / "dashboard_assets" / "ledger.js").read_text(
         encoding="utf-8"
     )
@@ -279,7 +280,6 @@ def test_the_published_prices_match_the_manifest_where_pricing_is_documented() -
             "docs/HOSTED_PLANS.md)" in readme
         )
         assert monthly in hosted_plans and annual in hosted_plans, plan
-        assert monthly in dashboard and annual in dashboard, plan
         assert monthly in ledger and annual in ledger, plan
         unit = manifest["plans"][plan]["billing_unit"]
         assert "/ %s / month" % unit in ledger, plan
@@ -345,42 +345,39 @@ def test_a_credential_never_survives_redaction_in_any_rendering(line: str) -> No
 
 # ------------------------------------------------------------------------ dashboard href
 
-def test_both_dashboard_bundles_strip_control_characters_before_the_scheme_test() -> None:
-    """``java\\tscript:`` defeated the scheme match and passed through unmodified; the
-    URL parser then removed the tab and re-formed the ``javascript:`` scheme."""
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is required to run the UI")
+def test_dashboard_hrefs_fail_closed_on_hidden_schemes() -> None:
+    """``java\\tscript:`` once defeated a scheme regex; the URL parser then removed the tab
+    and re-formed ``javascript:``. Ledger judges the *parsed* protocol instead, so every
+    control-character, case or whitespace disguise must come back empty."""
 
-    static = (ROOT / "engraphis" / "static" / "dashboard.js").read_text(encoding="utf-8")
-    classic = (ROOT / "engraphis" / "classic_assets" / "dashboard.js").read_text(
-        encoding="utf-8"
+    script = (ROOT / "engraphis" / "dashboard_assets" / "ledger.js").read_text(encoding="utf-8")
+    start = script.index("  function safeUrl(value) {")
+    end = script.index("\n  }\n", start) + len("\n  }\n")
+    hostile = [
+        "java\tscript:alert(1)", "java\nscript:alert(1)", "\u0000javascript:alert(1)",
+        " JAVASCRIPT:alert(1)", "javascript:alert(1)", "vbscript:msgbox(1)",
+        "data:text/html,<script>alert(1)</script>", "file:///etc/passwd", "mailto:x@example.com",
+        "", None, 7,
+    ]
+    driver = (
+        "const location = { href: 'https://127.0.0.1:8700/' };\n" + script[start:end]
+        + "process.stdout.write(JSON.stringify(JSON.parse(process.argv[1]).map(safeUrl)));"
     )
-    assert static == classic, "the two bundles must stay byte-identical"
-    assert "u0000-\\u001F" in static or "u0000-\\u001f" in static.lower()
-    # A scheme-less string that still carries a colon must fail closed rather than pass.
-    assert "return /:/.test(s)?'#':s" in static
-
-
-def test_classic_dashboard_selector_has_a_unique_registered_handler() -> None:
-    """Duplicate object keys silently replaced the selector with the trial action."""
-
-    script = (ROOT / "engraphis" / "classic_assets" / "dashboard.js").read_text(
-        encoding="utf-8"
+    result = subprocess.run(
+        ["node", "-e", driver, json.dumps(hostile + ["https://engraphis.example/account?x=1"])],
+        capture_output=True, text=True, timeout=30,
     )
-    page = (ROOT / "engraphis" / "classic_assets" / "index.html").read_text(
-        encoding="utf-8"
-    )
-    assert page.count('data-onchange="h146"') == 1
-    assert script.count("h146:function(event){selectDashboard(this.value)}") == 1
-    assert script.count("h84:function(event){startTrial()}") == 1
+    assert result.returncode == 0, result.stderr
+    cleaned = json.loads(result.stdout)
+    assert cleaned[:-1] == [""] * len(hostile)
+    assert cleaned[-1] == "https://engraphis.example/account?x=1"
 
 
 def test_dashboard_bundles_use_the_httponly_browser_session_exchange() -> None:
     """A configured API bearer must not make the browser dashboard unusable."""
 
-    for path in (
-        ROOT / "engraphis" / "static" / "dashboard.js",
-        ROOT / "engraphis" / "classic_assets" / "dashboard.js",
-        ROOT / "engraphis" / "dashboard_assets" / "ledger.js",
-    ):
+    for path in (ROOT / "engraphis" / "dashboard_assets" / "ledger.js",):
         script = path.read_text(encoding="utf-8")
         assert "/auth/session" in script
         assert "X-Engraphis-Browser-Session" in script
