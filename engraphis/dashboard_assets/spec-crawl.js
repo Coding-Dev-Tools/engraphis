@@ -966,16 +966,43 @@
     });
   }
 
+  function memoryConflictLimits(report) {
+    const shown = Array.isArray(report.conflicts) ? report.conflicts.length : 0;
+    const count = value => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
+    const declaredTotal = count(report.conflicts_total);
+    const total = declaredTotal !== null && declaredTotal >= shown ? declaredTotal : null;
+    const partial = report.conflicts_truncated === true || (total !== null && total > shown);
+    const declaredSuggestions = count(report.conflict_remediation_count);
+    const limit = count(report.conflict_remediation_limit);
+    const suggestions = declaredSuggestions !== null && declaredSuggestions <= shown
+      && (limit === null || declaredSuggestions <= limit) ? declaredSuggestions : null;
+    const planPartial = report.conflict_remediation_truncated === true
+      || (total !== null && suggestions !== null && total > suggestions);
+    const notices = [];
+    if (partial) {
+      notices.push(total !== null
+        ? `Showing ${shown} of ${total} conflicts detected in the analyzed memories.`
+        : `Showing ${shown} conflicts. Additional conflicts are omitted from the analyzed memories.`);
+    }
+    if (planPartial) {
+      notices.push(total !== null && suggestions !== null
+        ? `Remediation plan includes ${suggestions} of ${total} conflict suggestions for the analyzed memories.`
+        : 'The conflict remediation plan is incomplete for the analyzed memories.');
+    }
+    return { partial, notices, label: partial ? (total === null ? `${shown}+` : `${shown} / ${total}`) : String(shown) };
+  }
+
   function memoryAuditTruncation(report) {
     const nodes = Array.isArray(report.nodes) ? report.nodes : [];
     const total = report.total_eligible_node_count;
     const declaredWords = Number(report.word_analysis_truncated_node_count);
     const detailedWords = nodes.filter(node => node.word_analysis_truncated).length;
     const words = Math.max(detailedWords, Number.isFinite(declaredWords) ? Math.max(0, Math.floor(declaredWords)) : 0);
-    const partial = Boolean(report.truncated || report.analysis_truncated);
+    const conflicts = memoryConflictLimits(report);
+    const partial = Boolean(report.truncated || report.analysis_truncated) || conflicts.partial;
     const selection = typeof report.node_selection_truncated === 'boolean'
       ? report.node_selection_truncated
-      : Number.isFinite(total) ? total > nodes.length : partial && words === 0;
+      : Number.isFinite(total) ? total > nodes.length : partial && words === 0 && !conflicts.partial;
     const wordLimit = Number(report.word_limit);
     return {
       selection, words, analyzed: nodes.length, partial: partial || selection || words > 0,
@@ -1006,6 +1033,7 @@
       const memories = `${truncation.words} ${truncation.words === 1 ? 'memory' : 'memories'}`;
       notices.push(`Partial word analysis: stopped at ${truncation.wordLimit.toLocaleString()} tokens in ${memories}. Word counts are lower bounds and qualifier checks are incomplete.`);
     }
+    notices.push(...memoryConflictLimits(currentReport).notices);
     if (truncation.partial && !notices.length) notices.push('Partial audit: analysis is incomplete.');
     for (const message of notices) {
       const notice = document.createElement('p');
@@ -1105,10 +1133,18 @@
     const orphans = currentReport.orphans || [];
     const gaps = currentReport.policy_gaps || [];
 
-    if (badge) badge.textContent = `${conflicts.length} conf · ${orphans.length} orph`;
+    const limits = memoryConflictLimits(currentReport);
+    if (badge) badge.textContent = `${limits.label} conf · ${orphans.length} orph`;
 
     const container = document.createElement('div');
     container.className = 'spec-conflicts-list';
+    for (const message of limits.notices) {
+      const notice = document.createElement('p');
+      notice.className = 'spec-truncation-notice';
+      notice.setAttribute('role', 'status');
+      notice.textContent = message;
+      container.appendChild(notice);
+    }
 
     if (conflicts.length === 0 && orphans.length === 0 && gaps.length === 0) {
       const empty = document.createElement('div');
@@ -1250,7 +1286,7 @@
 
     const flagsAsk = document.getElementById('spec-flags-ask');
     if (flagsAsk && currentReport) {
-      const confCount = (currentReport.conflicts || []).length;
+      const confCount = memoryConflictLimits(currentReport).label;
       const orphCount = (currentReport.orphans || []).length;
       flagsAsk.textContent = `${confCount} conflicts · ${orphCount} orphans`;
     }

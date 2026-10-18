@@ -10,6 +10,8 @@ import pytest
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node is required for DOM rendering")
 @pytest.mark.parametrize("case", [
     "words_only", "nodes_only", "both", "legacy", "complete", "word_details_only",
+    "conflicts_only", "conflicts_words", "conflicts_nodes", "conflicts_both", "exact50",
+    "conflicts_no_selection",
 ])
 def test_memory_audit_labels_distinguish_missing_nodes_and_incomplete_words(tmp_path, case):
     script = tmp_path / "spec-studio-truncation.cjs"
@@ -48,16 +50,27 @@ window.__renderAudit = report => {
 };`);
 vm.runInNewContext(source, sandbox);
 const which = process.argv[3];
-const nodes = which === 'nodes_only' || which === 'both';
-const words = ['words_only', 'both', 'word_details_only'].includes(which);
+const nodes = ['nodes_only', 'both', 'conflicts_nodes', 'conflicts_both'].includes(which);
+const words = ['words_only', 'both', 'word_details_only', 'conflicts_words', 'conflicts_both'].includes(which);
+const capped = which.startsWith('conflicts_');
 const report = {
   node_count: 1, nodes: [{ id: 'policy', title: 'Policy', mtype: 'procedural' }],
   total_eligible_node_count: nodes || which === 'legacy' ? 151 : 1,
   node_selection_truncated: nodes, word_analysis_truncated_node_count: words ? 1 : 0,
-  word_limit: 5000, analysis_truncated: nodes || words || which === 'legacy',
-  truncated: nodes || words || which === 'legacy',
+  word_limit: 5000, analysis_truncated: nodes || words || capped || which === 'legacy',
+  truncated: nodes || words || capped || which === 'legacy',
 };
+if (capped || which === 'exact50') Object.assign(report, {
+  conflicts: Array.from({ length: 50 }, () => ({})),
+  conflicts_total: capped ? 120 : 50, conflict_limit: 50, conflicts_truncated: capped,
+  conflict_remediation_count: 10, conflict_remediation_limit: 10,
+  conflict_remediation_truncated: true,
+});
 if (which === 'legacy') delete report.node_selection_truncated;
+if (which === 'conflicts_no_selection') {
+  delete report.node_selection_truncated;
+  delete report.total_eligible_node_count;
+}
 if (which === 'word_details_only') {
   delete report.word_analysis_truncated_node_count;
   report.nodes[0].word_analysis_truncated = true;
@@ -77,8 +90,10 @@ console.log(JSON.stringify({
     )
     assert completed.returncode == 0, completed.stderr
     rendered = json.loads(completed.stdout)
-    node_sample = case in {"nodes_only", "both", "legacy"}
-    word_sample = case in {"words_only", "both", "word_details_only"}
+    node_sample = case in {"nodes_only", "both", "legacy", "conflicts_nodes", "conflicts_both"}
+    word_sample = case in {"words_only", "both", "word_details_only", "conflicts_words", "conflicts_both"}
+    conflict_sample = case.startswith("conflicts_")
+    remedy_sample = conflict_sample or case == "exact50"
     assert rendered["badge"] == ("1 / 151" if node_sample else "1")
     if node_sample:
         assert "sample health" in rendered["motto"]
@@ -91,6 +106,13 @@ console.log(JSON.stringify({
         assert "word" in rendered["motto"]
         assert "5,000" in rendered["panel"]
         assert "1 memory" in rendered["panel"]
-    assert rendered["notices"] == int(node_sample) + int(word_sample)
+    if conflict_sample:
+        assert "Showing 50 of 120 conflicts" in rendered["panel"]
+        assert "analyzed memories" in rendered["panel"]
+    if remedy_sample:
+        total = 120 if conflict_sample else 50
+        assert f"10 of {total} conflict suggestions" in rendered["panel"]
+    assert rendered["notices"] == (int(node_sample) + int(word_sample)
+                                   + int(conflict_sample) + int(remedy_sample))
     if case == "complete":
         assert rendered["motto"] == "cluster health"

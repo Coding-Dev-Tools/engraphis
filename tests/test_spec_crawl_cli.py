@@ -82,6 +82,48 @@ def test_workspace_cli_uses_reported_word_limit_and_affected_memory_count(monkey
     assert "describe this sample" not in output
 
 
+@pytest.mark.parametrize("case", ["complete", "words_only", "nodes_only", "both"])
+@pytest.mark.parametrize("total", [0, 10, 50, 120])
+def test_workspace_cli_discloses_conflict_and_plan_limits_alongside_other_limits(
+    monkeypatch, capsys, case, total,
+):
+    report = _memory_report(case)
+    report.update({
+        "conflicts": [{"node_a": "a", "node_b": "b", "reason": "Configured ports differ.",
+                       "remedy": {"action": "clarify", "recommendation": "Choose explicitly."}}]
+                     * min(total, 50),
+        "conflicts_total": total, "conflict_limit": 50, "conflicts_truncated": total > 50,
+        "conflict_remediation_count": min(total, 10), "conflict_remediation_limit": 10,
+        "conflict_remediation_truncated": total > 10,
+    })
+    report["analysis_truncated"] = report["truncated"] = report["truncated"] or total > 50
+    monkeypatch.setattr(cli, "_audit_workspace_memories", lambda **kwargs: report)
+    assert cli.main(["--workspace", "alpha", "--no-trace"]) == 0
+    output = capsys.readouterr().out
+    if total > 50:
+        assert "Showing 50 of 120 conflicts detected in the analyzed memories" in output
+    else:
+        assert "Additional conflicts" not in output
+    if total > 10:
+        assert f"10 of {total} conflict suggestions" in output
+    else:
+        assert "Remediation plan" not in output
+    assert ("Partial word analysis" in output) is (case in {"words_only", "both"})
+    assert ("describe this sample" in output) is (case in {"nodes_only", "both"})
+
+
+def test_workspace_cli_count_metadata_cannot_inject_untrusted_text(monkeypatch, capsys):
+    report = _memory_report("complete")
+    payload = "untrusted-count-value"
+    report.update({"conflicts_truncated": True, "conflicts_total": payload,
+                   "conflict_remediation_count": payload, "conflict_remediation_truncated": True})
+    monkeypatch.setattr(cli, "_audit_workspace_memories", lambda **kwargs: report)
+    assert cli.main(["--workspace", "alpha", "--no-trace"]) == 0
+    output = capsys.readouterr().out
+    assert "Additional conflicts are omitted" in output
+    assert payload not in output
+
+
 @pytest.mark.parametrize("word_count", [5000, 5001])
 def test_stdin_cli_reports_partial_word_analysis_at_the_actual_limit(word_count):
     result = subprocess.run(

@@ -34,6 +34,8 @@ MAX_SPEC_WORDS = 5_000
 MAX_SECTIONS = 64
 MAX_TRACED_CLAIMS = 40
 MAX_FLAGS = 200
+MAX_NODE_CONFLICTS = 50
+MAX_CONFLICT_REMEDIES = 10
 MAX_MEMORY_SIMILARITY_TOKENS = 512
 VAGUE_QUALIFIER_WINDOW = 8
 LEGS = 16
@@ -932,7 +934,8 @@ def _covered_node_axes(
     # Three points already represent a title alias or an alias backed by a
     # body signal. A lone incidental secondary signal is not policy coverage.
     covered = {axis for axis, score in scores.items() if score >= 3}
-    covered.add(scores.most_common(1)[0][0] if scores else "context")
+    if not scores:
+        covered.add("context")
     covered.update(heading_axes)
     if _extract_node_directives(prose):
         covered.add("rules")
@@ -989,6 +992,39 @@ _DIRECTIVE_LEXEME = re.compile(
     r"|(?P<word>[A-Za-z_0-9]+(?:[._:/\\@%+=~#?&'\u2019-]+[A-Za-z_0-9]+)*)"
     r"|(?P<boundary>[.!?;,\n])"
 )
+
+
+
+_DIRECTIVE_ARTICLES = frozenset({"a", "an", "the"})
+_DIRECTIVE_PREPOSITIONS = _DIRECTIVE_SCOPE_WORDS | {
+    "into", "at", "via", "without", "with", "except",
+}
+_DIRECTIVE_ARTICLE_HEAD_STOPS = (
+    _DIRECTIVE_PREPOSITIONS | _DIRECTIVE_ARTICLES | _DIRECTIVE_BOUNDARIES | _STOPWORDS
+)
+
+
+def _normalize_directive_phrase(words: Sequence[str]) -> str:
+    """Canonicalize limited grammatical variants without erasing scope values."""
+    normalized = [
+        word for pos, word in enumerate(words)
+        if not (word in _DIRECTIVE_ARTICLES and pos + 1 < len(words)
+                and words[pos + 1] not in _DIRECTIVE_ARTICLE_HEAD_STOPS
+                and (pos == 1 or pos > 0 and words[pos - 1] in _DIRECTIVE_PREPOSITIONS))
+    ]
+    if len(normalized) > 2 and normalized[0] == "deploy":
+        if normalized[1] in {"to", "into"}:
+            # For deployment, the bare object can name the destination.
+            del normalized[1]
+        else:
+            # Retain the object and destination; only alias deployment's first
+            # destination preposition, before source/method/condition scope.
+            for pos in range(2, len(normalized) - 1):
+                if normalized[pos] in _DIRECTIVE_PREPOSITIONS:
+                    if normalized[pos] == "into":
+                        normalized[pos] = "to"
+                    break
+    return " ".join(normalized)
 
 
 def _extract_node_directives(text: str) -> dict[str, str]:
@@ -1066,7 +1102,7 @@ def _extract_node_directives(text: str) -> dict[str, str]:
                     end = i + offset + 1
                     while end < len(tokens) and tokens[end] not in _DIRECTIVE_BOUNDARIES:
                         end += 1
-                    phrase = " ".join(tokens[i + offset:end])
+                    phrase = _normalize_directive_phrase(tokens[i + offset:end])
                     # Keep summaries bounded without dropping any identity suffix.
                     identity = phrase if len(phrase) <= 120 else (
                         target[:56] + ":" + hashlib.sha256(phrase.encode("utf-8")).hexdigest())
@@ -1155,6 +1191,12 @@ def analyze_memory_nodes(
             "nodes": [],
             "links": [],
             "conflicts": [],
+            "conflicts_total": 0,
+            "conflict_limit": MAX_NODE_CONFLICTS,
+            "conflicts_truncated": False,
+            "conflict_remediation_count": 0,
+            "conflict_remediation_limit": MAX_CONFLICT_REMEDIES,
+            "conflict_remediation_truncated": False,
             "redundancies": [],
             "orphans": [],
             "policy_gaps": [
@@ -1407,9 +1449,11 @@ def analyze_memory_nodes(
                                 and node_a["claim_kind"] != node_b["claim_kind"]):
                             continue
                         pair_key = (min(node_a["id"], node_b["id"]), max(node_a["id"], node_b["id"]))
-                        if pair_key in conflict_pairs or len(conflicts) >= 50:
+                        if pair_key in conflict_pairs:
                             continue
                         conflict_pairs.add(pair_key)
+                        if len(conflicts) >= MAX_NODE_CONFLICTS:
+                            continue
                         conflicts.append({
                             "id": f"conflict_{len(conflicts) + 1}",
                             "node_a": node_a["id"],
@@ -1437,6 +1481,14 @@ def analyze_memory_nodes(
     scoped_targets: list[tuple[str, str]] = []
     for target, action_dict in list(dir_map.items()):
         words = target.split()
+        # Canonical bare deployment destinations retain their scope relationship
+        # to an actually present general policy; unrelated destinations stay apart.
+        if (len(words) > 1 and words[0] == "deploy"
+                and words[1] not in _DIRECTIVE_PREPOSITIONS):
+            scoped_targets.append((target, "deploy"))
+            if words[1] in {"all", "each", "every", "any"}:
+                for indices in action_dict.values():
+                    universal_nodes["deploy"].update(indices)
         for pos, word in enumerate(words):
             if pos == 0 or word not in _DIRECTIVE_SCOPE_WORDS:
                 continue
@@ -1471,9 +1523,11 @@ def analyze_memory_nodes(
                             and node_a["claim_kind"] != node_b["claim_kind"]):
                         continue
                     pair_key = (min(node_a["id"], node_b["id"]), max(node_a["id"], node_b["id"]))
-                    if pair_key in conflict_pairs or len(conflicts) >= 50:
+                    if pair_key in conflict_pairs:
                         continue
                     conflict_pairs.add(pair_key)
+                    if len(conflicts) >= MAX_NODE_CONFLICTS:
+                        continue
                     shared_subject = bool(exact_match and node_a["subject_key"] and
                                           node_a["subject_key"] == node_b["subject_key"])
                     detail = (
@@ -1579,7 +1633,7 @@ def analyze_memory_nodes(
 
     # 6. Actionable Remediation Plan
     remediation_plan: list[dict[str, Any]] = []
-    for c in conflicts[:10]:
+    for c in conflicts[:MAX_CONFLICT_REMEDIES]:
         remediation_plan.append(c["remedy"])
     for o in orphans[:10]:
         if o["suggested_link_to"]:
@@ -1670,11 +1724,18 @@ def analyze_memory_nodes(
         "similarity_sampled_node_count": sum(node["similarity_sampled"] for node in parsed_nodes),
         "word_limit": MAX_SPEC_WORDS,
         "word_analysis_truncated_node_count": sum(node["word_analysis_truncated"] for node in parsed_nodes),
-        "analysis_truncated": any(node["word_analysis_truncated"] for node in parsed_nodes),
+        "analysis_truncated": (any(node["word_analysis_truncated"] for node in parsed_nodes)
+                               or len(conflict_pairs) > len(conflicts)),
         "nodes": [{key: value for key, value in node.items() if key != "content"}
                   for node in parsed_nodes],
         "links": resolved_links,
         "conflicts": conflicts,
+        "conflicts_total": len(conflict_pairs),
+        "conflict_limit": MAX_NODE_CONFLICTS,
+        "conflicts_truncated": len(conflict_pairs) > len(conflicts),
+        "conflict_remediation_count": min(len(conflicts), MAX_CONFLICT_REMEDIES),
+        "conflict_remediation_limit": MAX_CONFLICT_REMEDIES,
+        "conflict_remediation_truncated": len(conflict_pairs) > MAX_CONFLICT_REMEDIES,
         "redundancies": redundancies,
         "orphans": orphans,
         "policy_gaps": policy_gaps,

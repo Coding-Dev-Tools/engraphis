@@ -51,6 +51,84 @@ async function crawl(page, text = '# Rules\nVerify all tests.') {
   await expect(page.locator('#spec-score-display')).toHaveText(String(prompt.score));
 }
 
+function limitedCluster({ nodes = false, words = false, total = 120 } = {}) {
+  const memories = Array.from({ length: nodes ? 150 : 16 }, (_, i) => ({
+    id: `entry-${i}`, title: `Entry ${i}`, mtype: 'semantic',
+    word_analysis_truncated: words && i === 0,
+  }));
+  const conflicts = [];
+  for (let i = 0; i < 16 && conflicts.length < Math.min(total, 50); i++) {
+    for (let j = i + 1; j < 16 && conflicts.length < Math.min(total, 50); j++) {
+      conflicts.push({ node_a: memories[i].id, node_b: memories[j].id,
+        subject: 'port', reason: 'Different configured ports.',
+        remedy: { action: 'clarify', candidate_nodes: [memories[i].id, memories[j].id],
+          recommendation: 'Choose the retained configuration explicitly.' } });
+    }
+  }
+  return { ...cluster, nodes: memories, node_count: memories.length, conflicts,
+    orphans: [], policy_gaps: [], trace: [],
+    total_eligible_node_count: nodes ? 151 : memories.length, node_selection_truncated: nodes,
+    word_analysis_truncated_node_count: words ? 1 : 0, word_limit: 5000,
+    conflicts_total: total, conflict_limit: 50, conflicts_truncated: total > 50,
+    conflict_remediation_count: Math.min(total, 10), conflict_remediation_limit: 10,
+    conflict_remediation_truncated: total > 10,
+    analysis_truncated: nodes || words || total > 50, truncated: nodes || words || total > 50,
+  };
+}
+
+for (const scenario of [
+  { name: 'conflicts only', total: 120 },
+  { name: 'word and conflict limits', words: true, total: 120 },
+  { name: 'node and conflict limits', nodes: true, total: 120 },
+  { name: 'node word and conflict limits', nodes: true, words: true, total: 120 },
+  { name: 'exactly fifty complete conflicts with a partial plan', total: 50 },
+  { name: 'zero conflicts', total: 0 },
+  { name: 'exactly ten complete conflict suggestions', total: 10 },
+  { name: 'eleven conflicts with a partial plan', total: 11 },
+]) {
+  test(`memory audit discloses ${scenario.name} without hiding other limits`, async ({ page }) => {
+    const { errors } = await fixture(page);
+    const report = limitedCluster(scenario);
+    await page.route('**/api/spec/crawl/memories', route => route.fulfill({ json: report }));
+    await page.locator('#spec-mode-memories').click();
+    const list = page.locator('#spec-sections-list');
+    const panel = page.locator('#spec-panel4-body');
+    if (scenario.total > 50) {
+      await expect(list).toContainText('Showing 50 of 120 conflicts');
+      await expect(panel).toContainText('Showing 50 of 120 conflicts');
+      await expect(page.locator('#spec-panel4-badge')).toContainText('50 / 120 conf');
+    }
+    if (scenario.total > 10) {
+      await expect(list).toContainText(`10 of ${scenario.total} conflict suggestions`);
+      await expect(panel).toContainText(`10 of ${scenario.total} conflict suggestions`);
+    }
+    if (scenario.nodes) await expect(list).toContainText('150 of 151 eligible memories');
+    if (scenario.words) await expect(list).toContainText('Partial word analysis');
+    await expect(list.locator('.spec-truncation-notice')).toHaveCount(
+      Number(Boolean(scenario.nodes)) + Number(Boolean(scenario.words))
+      + Number(scenario.total > 50) + Number(scenario.total > 10));
+    await expect(panel.locator('.spec-conflict-card')).toHaveCount(Math.min(scenario.total, 50));
+    expect(errors).toEqual([]);
+  });
+}
+
+test('memory audit rejects unsafe count metadata and keeps report text inert', async ({ page }) => {
+  const { errors } = await fixture(page);
+  const report = limitedCluster();
+  const payload = '<img src=x onerror="window.__countXss=true">';
+  Object.assign(report, { conflicts_total: payload, conflict_remediation_count: payload,
+    conflict_remediation_limit: -1 });
+  report.conflicts[0].reason = payload;
+  await page.route('**/api/spec/crawl/memories', route => route.fulfill({ json: report }));
+  await page.locator('#spec-mode-memories').click();
+  await expect(page.locator('#spec-sections-list')).toContainText('Additional conflicts are omitted');
+  await expect(page.locator('#spec-panel4-body')).toContainText(payload);
+  await expect(page.locator('#spec-panel4-body img')).toHaveCount(0);
+  await expect(page.locator('#spec-panel4-body .spec-conflict-card')).toHaveCount(50);
+  expect(await page.evaluate(() => window.__countXss)).toBeUndefined();
+  expect(errors).toEqual([]);
+});
+
 test('bounded memory audits label health and node counts as a sample', async ({ page }) => {
   await fixture(page);
   await page.route('**/api/spec/crawl/memories', route => route.fulfill({ json: {
