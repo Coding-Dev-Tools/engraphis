@@ -37,6 +37,7 @@ MAX_FLAGS = 200
 MAX_NODE_CONFLICTS = 50
 MAX_CONFLICT_REMEDIES = 10
 MAX_MEMORY_SIMILARITY_TOKENS = 512
+MAX_MEMORY_NODES = 200
 VAGUE_QUALIFIER_WINDOW = 8
 LEGS = 16
 
@@ -1391,6 +1392,8 @@ def analyze_memory_nodes(
     """
     if not isinstance(memories, Sequence):
         memories = list(memories)
+    input_node_count = len(memories)
+    node_selection_truncated = input_node_count > MAX_MEMORY_NODES
 
     if not memories:
         empty_coverage = {a: 0.0 for a in DEFAULT_AXES}
@@ -1407,6 +1410,12 @@ def analyze_memory_nodes(
                 "vague_penalty": 0,
             },
             "node_count": 0,
+            "input_node_count": input_node_count,
+            "total_eligible_node_count": input_node_count,
+            "count_semantics": "provided_input",
+            "node_limit": MAX_MEMORY_NODES,
+            "node_selection_truncated": False,
+            "truncated": False,
             "nodes": [],
             "links": [],
             "conflicts": [],
@@ -1436,6 +1445,9 @@ def analyze_memory_nodes(
             "radar": empty_coverage,
             "axis_labels": {a: AXIS_LABELS.get(a, a.upper()[:5]) for a in DEFAULT_AXES},
             "flags": [],
+            "flags_total": 0,
+            "flag_limit": MAX_FLAGS,
+            "flags_truncated": False,
             "remediation_plan": [],
             "trace": [],
             "similarity_token_limit": MAX_MEMORY_SIMILARITY_TOKENS,
@@ -1450,10 +1462,11 @@ def analyze_memory_nodes(
     node_tokens_map: dict[str, set[str]] = {}
     node_tokens_len: dict[str, int] = {}
     all_flags: list[dict[str, Any]] = []
+    title_flags: list[dict[str, Any]] = []
     axis_counts: Counter[str] = Counter()
 
     classifier = LexiconClassifier()
-    for idx, m in enumerate(memories[:200]):
+    for idx, m in enumerate(memories[:MAX_MEMORY_NODES]):
         m_id = str(m.get("id") or f"mem_{idx:03d}")
         title = str(m.get("title") or "").strip() or f"Memory {idx + 1}"
         content = str(m.get("content") or "").strip()
@@ -1481,6 +1494,15 @@ def analyze_memory_nodes(
         else:
             policy_text = f"{title}\n{content}"
             policy_text = _mask_code_ranges(policy_text, _code_ranges(policy_text))
+        # Titles are a separate bounded field: code masking preserves title-local
+        # offsets, and title qualifiers cannot borrow a bound from the body.
+        title_text = policy_text[:len(title)]
+        title_section = _Section(index=0, title="title", axis="context", heading_start=0,
+                                 start=0, end=len(title_text))
+        title_toks, title_word_analysis_truncated = _tokenize(
+            title_text, [title_section], [], classifier,
+        )
+        _apply_vague_qualifiers(title_toks, title_text)
         tok_set = tokenize(policy_text)
         similarity_sampled = len(tok_set) > MAX_MEMORY_SIMILARITY_TOKENS
         if similarity_sampled:
@@ -1504,6 +1526,7 @@ def analyze_memory_nodes(
         kinds_counter: Counter[str] = Counter()
         for tok in raw_toks:
             kinds_counter[tok.kind] += 1
+        kinds_counter.update(tok.kind for tok in title_toks)
 
         # Vague qualifiers
         vague_tokens = [tok for tok in raw_toks if tok.kind == "vague"]
@@ -1515,6 +1538,22 @@ def analyze_memory_nodes(
                 "node_id": m_id,
                 "token": vf.text,
                 "question": f"In memory '{title}': \"{vf.text}\" is unbounded. What exact number, scope, or condition do you mean?",
+            })
+
+        # Preserve all existing content flag IDs and their priority at the
+        # global display cap. Defer bounded title previews until content is read.
+        title_vague_tokens = [tok for tok in title_toks if tok.kind == "vague"]
+        for vf in title_vague_tokens:
+            if len(title_flags) >= MAX_FLAGS:
+                break
+            title_flags.append({
+                "id": f"{m_id}_vague_title_{vf.start}",
+                "node_id": m_id,
+                "field": "title",
+                "start": vf.start,
+                "end": vf.end,
+                "token": vf.text,
+                "question": f"In title of memory '{title}': \"{vf.text}\" is unbounded. What exact number, scope, or condition do you mean?",
             })
 
         params = _extract_node_parameters(policy_text)
@@ -1534,14 +1573,21 @@ def analyze_memory_nodes(
             "covered_axes": covered_axes,
             "word_count": len(raw_toks),
             "word_count_is_lower_bound": word_analysis_truncated,
-            "word_analysis_truncated": word_analysis_truncated,
+            "title_word_count": len(title_toks),
+            "title_word_count_is_lower_bound": title_word_analysis_truncated,
+            "title_word_analysis_truncated": title_word_analysis_truncated,
+            "word_analysis_truncated": word_analysis_truncated or title_word_analysis_truncated,
             "similarity_token_count": len(tok_set),
             "similarity_sampled": similarity_sampled,
             "token_kinds": dict(kinds_counter),
-            "flag_count": len(vague_tokens),
+            "flag_count": len(vague_tokens) + len(title_vague_tokens),
             "parameters": params,
             "directives": directives,
         })
+
+    all_flags.extend(title_flags[:MAX_FLAGS - len(all_flags)])
+    flags_total = sum(node["flag_count"] for node in parsed_nodes)
+    flags_truncated = flags_total > len(all_flags)
 
     # Each unordered pair is compared at most once, across all analysis passes.
     similarity_cache: dict[tuple[str, str], float] = {}
@@ -1930,6 +1976,9 @@ def analyze_memory_nodes(
                 "label": g["label"],
             })
 
+    analysis_truncated = (node_selection_truncated or flags_truncated
+                          or any(node["word_analysis_truncated"] for node in parsed_nodes)
+                          or len(conflict_pairs) > len(conflicts))
     return {
         "cluster_health_score": cluster_score,
         "cluster_health": cluster_score,
@@ -1943,12 +1992,17 @@ def analyze_memory_nodes(
             "vague_penalty": -vague_penalty,
         },
         "node_count": len(parsed_nodes),
+        "input_node_count": input_node_count,
+        "total_eligible_node_count": input_node_count,
+        "count_semantics": "provided_input",
+        "node_limit": MAX_MEMORY_NODES,
+        "node_selection_truncated": node_selection_truncated,
+        "truncated": analysis_truncated,
         "similarity_token_limit": MAX_MEMORY_SIMILARITY_TOKENS,
         "similarity_sampled_node_count": sum(node["similarity_sampled"] for node in parsed_nodes),
         "word_limit": MAX_SPEC_WORDS,
         "word_analysis_truncated_node_count": sum(node["word_analysis_truncated"] for node in parsed_nodes),
-        "analysis_truncated": (any(node["word_analysis_truncated"] for node in parsed_nodes)
-                               or len(conflict_pairs) > len(conflicts)),
+        "analysis_truncated": analysis_truncated,
         "nodes": [{key: value for key, value in node.items() if key != "content"}
                   for node in parsed_nodes],
         "links": resolved_links,
@@ -1966,6 +2020,9 @@ def analyze_memory_nodes(
         "radar": coverage,
         "axis_labels": {a: AXIS_LABELS.get(a, a.upper()[:5]) for a in DEFAULT_AXES},
         "flags": all_flags,
+        "flags_total": flags_total,
+        "flag_limit": MAX_FLAGS,
+        "flags_truncated": flags_truncated,
         "remediation_plan": remediation_plan,
         "trace": trace,
     }
