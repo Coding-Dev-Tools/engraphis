@@ -1090,8 +1090,11 @@ def test_spec_crawl_wrappers_inherit_nondefault_session_scope(monkeypatch):
     assert cluster["workspace"] == "team" and cluster["repo"] == "alpha"
     assert {node["id"] for node in cluster["nodes"]} == {local, ancestor}
     assert other not in {node["id"] for node in cluster["nodes"]}
-    assert json.loads(srv.engraphis_spec_crawl_resolve(
+    assert srv.engraphis_spec_crawl_resolve(
         action="link", node_a=local, node_b=ancestor, session_id=sid,
+    ).startswith("Error:")
+    assert json.loads(srv.engraphis_spec_crawl_resolve(
+        action="link", node_a=local, node_b=ancestor, workspace="team", repo="alpha",
     ))["ok"] is True
     assert "error" not in json.loads(srv.engraphis_spec_crawl(crawl_procedural=True, session_id=sid))
     spec = "# Rules\nVerify all tests."

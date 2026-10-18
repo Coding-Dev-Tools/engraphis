@@ -161,7 +161,10 @@ def main(argv=None) -> None:
     server.settings.stateless_http = True
     _preload_sentence_transformers()
     _eager_exact_backend_check()
-    server.run(transport=args.transport)
+    from engraphis.service_context import http_transport_context
+
+    with http_transport_context():
+        server.run(transport=args.transport)
 
 
 if __name__ == "__main__":

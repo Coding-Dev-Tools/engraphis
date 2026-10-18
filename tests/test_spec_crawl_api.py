@@ -566,6 +566,13 @@ def test_repo_resolution_accepts_visible_workspace_ancestors(crawl_service, acti
                          resolve_conflicts=False)["id"]
     assert {node["id"] for node in svc.spec_crawl_memories(workspace="alpha", repo="one")["nodes"]} == {ancestor, local}
     retained, retired = (ancestor, local) if ancestor_is_retained else (local, ancestor)
+    if action == "supersede" and not ancestor_is_retained:
+        before = list(svc.store.conn.iterdump())
+        with pytest.raises(ValidationError):
+            svc.spec_crawl_resolve(action=action, node_a=retained, node_b=retired,
+                                   workspace="alpha", repo="one", confirmed=True)
+        assert list(svc.store.conn.iterdump()) == before
+        return
     result = svc.spec_crawl_resolve(action=action, node_a=retained, node_b=retired,
                                    workspace="alpha", repo="one", confirmed=True)
     assert result["ok"] is True

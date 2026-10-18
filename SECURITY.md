@@ -66,6 +66,11 @@ capped tables and element count) so crafted content cannot freeze the page used 
   invitations, roles, named seats, token rotation, and organization audit are hosted and are
   not mounted by this package.
 - **CORS allow-list** defaults to loopback only
+- **Specification file reads are local-transport only:** `spec_crawl(source_id=...)`
+  is available to direct Python and stdio operators under approved roots. HTTP requests,
+  including authenticated dashboard MCP and standalone loopback MCP, must submit text or
+  select procedural memories. Bearer tokens and nested service bindings do not grant
+  access to operator-local files; work inherited from HTTP retains this restriction.
 - **Cross-site browser requests refused without a token:** the zero-config API trusts loopback
   callers, so it refuses requests that a browser marks (`Origin`, `Sec-Fetch-Site`) as started
   by another website unless they carry the dashboard's `X-Engraphis-Browser-Session` header or
@@ -82,6 +87,11 @@ capped tables and element count) so crafted content cannot freeze the page used 
 ### 3. Scope isolation
 - Every read takes a `SearchFilter`; tools only return memories within requested `workspace`/`repo`
 - Every write targeting a memory by ID re-validates scope membership
+- Spec-audit remediation treats ancestor visibility as read access. Supersession requires
+  the retained policy to cover the retired policy's workspace/repository/session domain,
+  and retirement must stay within the explicitly selected mutation scope. Links require
+  compatible domains and a selected endpoint. Validation and temporal link/retirement
+  changes share one transaction, preserving history and rolling back partial changes.
 - Workspace creation is not controlled by a process-wide allow-list; each operation still
   carries its explicit workspace/repo/session scope and authenticated personal workspaces
   enforce their owner boundary
