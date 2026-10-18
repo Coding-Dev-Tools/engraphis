@@ -34,6 +34,7 @@ jobs:
   build:
     name: Build distributions
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     if: >-
       github.event_name == 'push' ||
       inputs.release_tag == ''
@@ -50,6 +51,10 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            .github/release-constraints.txt
           python-version: "3.11"
 
       - name: Install release gate and the production dependency set (without SQLCipher)
@@ -167,6 +172,7 @@ jobs:
   reproducibility-build:
     name: Independent distribution builder ${{ matrix.builder }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     if: >-
       github.event_name == 'push' ||
       inputs.release_tag == ''
@@ -184,6 +190,10 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            .github/release-constraints.txt
           python-version: "3.11"
       - name: Build in isolated pinned environment
         shell: bash
@@ -207,6 +217,7 @@ jobs:
     name: Compare independent distribution builders
     needs: [build, reproducibility-build]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     if: >-
       github.event_name == 'push' ||
       inputs.release_tag == ''
@@ -295,6 +306,7 @@ jobs:
   python-matrix:
     name: Python ${{ matrix.python-version }} release gate
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -306,6 +318,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            .github/release-constraints.txt
           python-version: ${{ matrix.python-version }}
       - name: Install version-appropriate gate
         shell: bash
@@ -336,6 +352,7 @@ jobs:
       github.event_name == 'push' ||
       inputs.release_tag == ''
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -405,6 +422,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            .github/release-constraints.txt
           python-version: "3.11"
       - name: Download exact release distributions
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
@@ -473,6 +494,7 @@ jobs:
   encryption:
     name: Encryption driver release gate (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -484,6 +506,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            .github/release-constraints.txt
           python-version: ${{ matrix.python-version }}
       - name: Install encryption integration gate
         run: |
@@ -497,6 +523,7 @@ jobs:
   browser-accessibility:
     name: Browser accessibility release gate
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     if: >-
       github.event_name == 'push' ||
       inputs.release_tag == ''
@@ -504,9 +531,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            .github/release-constraints.txt
           python-version: "3.11"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
           node-version: "24"
       - name: Install browser gate
         run: |
@@ -526,6 +560,7 @@ jobs:
   pi-extension:
     name: Pi extension release gate
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     if: >-
       github.event_name == 'push' ||
       inputs.release_tag == ''
@@ -533,6 +568,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            .github/release-constraints.txt
           python-version: "3.11"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -556,6 +595,7 @@ jobs:
   docker-smoke:
     name: Production image release gate
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     if: >-
       github.event_name == 'push' ||
       inputs.release_tag == ''
@@ -723,6 +763,7 @@ jobs:
       github.event_name == 'push' ||
       inputs.release_tag == ''
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       security-events: write
@@ -757,6 +798,7 @@ jobs:
     needs: [build, reproducibility-check, python-matrix, artifact-core-py39, installed-artifact-platform-smoke, encryption, browser-accessibility, pi-extension, docker-smoke, code-security]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
 
@@ -841,6 +883,7 @@ jobs:
     # semver tag, whose value was matched to pyproject.toml in the build job above.
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       id-token: write
       contents: read
@@ -849,6 +892,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            .github/release-constraints.txt
           python-version: "3.11"
       - name: Download distributions
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
@@ -906,6 +953,7 @@ jobs:
     environment: release-qualification
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: write
 
@@ -913,6 +961,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            .github/release-constraints.txt
           python-version: "3.11"
       - name: Download distributions
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
@@ -974,6 +1026,7 @@ jobs:
       github.ref == 'refs/heads/main' &&
       inputs.release_tag != ''
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       actions: read
       contents: write
@@ -983,6 +1036,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            .github/release-constraints.txt
           python-version: "3.11"
       - name: Enforce and record the release-specific qualification waiver
         if: inputs.waive_v176_qualification || inputs.waive_v178_qualification || inputs.waive_v179_qualification
