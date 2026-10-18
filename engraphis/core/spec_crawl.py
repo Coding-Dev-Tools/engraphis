@@ -1091,6 +1091,116 @@ def _normalize_directive_phrase(words: Sequence[str]) -> str:
     return " ".join(normalized)
 
 
+_DIRECTIVE_COORDINATE_ACTIONS = _ACTION_WORDS | {
+    "access", "archive", "compile", "connect", "delete", "deploy", "download",
+    "encrypt", "merge", "publish", "upload", "require", "enforce",
+} | _NEGATIVE_ACTION_VERBS
+_DIRECTIVE_MANNER_WORDS = frozenset({
+    "also", "carefully", "correctly", "explicitly", "fully", "independently",
+    "properly", "safely", "then", "thoroughly",
+})
+_DIRECTIVE_COORDINATE_STOPS = _DIRECTIVE_PREPOSITIONS | {
+    "after", "as", "because", "before", "by", "during", "if", "of", "once",
+    "since", "than", "that", "until", "unless", "when", "where", "whether",
+    "which", "while", "who", "whose",
+}
+
+
+def _coordinated_directive_phrases(
+    tokens: Sequence[str], start: int, end: int, action: str,
+    governor: str, consumed: set[int],
+) -> list[tuple[Sequence[str], str]]:
+    """Carry a governor across recognized action phrases, not noun/scope lists."""
+    terms: list[tuple[Sequence[str], str]] = [(tokens[start:end], action)]
+    connectors: list[str] = []
+    inherited: set[int] = set()
+    cursor = end
+    while cursor < len(tokens) and tokens[cursor] in {"and", "or"}:
+        previous = terms[-1][0]
+        head = 0
+        while head < len(previous) and previous[head] in _DIRECTIVE_MANNER_WORDS:
+            head += 1
+        if (head == len(previous) or previous[head] not in _DIRECTIVE_COORDINATE_ACTIONS
+                or not _DIRECTIVE_COORDINATE_STOPS.isdisjoint(previous)
+                or any(word not in _DIRECTIVE_MANNER_WORDS for word in previous[head + 1:])):
+            break
+        next_start = cursor + 1
+        pos = next_start
+        negative = False
+        while pos < len(tokens) and tokens[pos] in _DIRECTIVE_MANNER_WORDS | {"not"}:
+            if tokens[pos] == "not":
+                negative = not negative
+            pos += 1
+        if pos == len(tokens) or tokens[pos] not in _DIRECTIVE_COORDINATE_ACTIONS:
+            break  # A fresh modal, subject or object does not inherit this governor.
+        polarity = ("forbid" if governor == "enforce" else "enforce") if negative else governor
+        local_consumed: set[int] = set()
+        target_start = next_start
+        if tokens[pos] in {"require", "enforce"} | _NEGATIVE_ACTION_VERBS:
+            # Reuse the existing nested-operator semantics for a coordinated
+            # requirement. A manner prefix before such an operator is ambiguous.
+            if any(word in _DIRECTIVE_MANNER_WORDS for word in tokens[next_start:pos]):
+                break
+            target_start = -1
+            for offset in range(4):
+                current = pos + offset
+                if current >= len(tokens):
+                    break
+                word = tokens[current]
+                if word in {"require", "enforce"}:
+                    local_consumed.add(current)
+                elif word in _NEGATIVE_ACTION_VERBS:
+                    local_consumed.add(current)
+                    polarity = "forbid" if polarity == "enforce" else "enforce"
+                elif word in _DIRECTIVE_BOUNDARIES:
+                    break
+                elif word not in _STOPWORDS:
+                    target_start = current
+                    break
+            if target_start < 0:
+                break
+        next_end = max(pos, target_start) + 1
+        while next_end < len(tokens) and tokens[next_end] not in _DIRECTIVE_BOUNDARIES:
+            next_end += 1
+        words = [word for index, word in enumerate(tokens[target_start:next_end], target_start)
+                 if not (index < pos and word == "not")]
+        terms.append((words, polarity))
+        connectors.append(tokens[cursor])
+        inherited.update(local_consumed)
+        cursor = next_end
+    # Preserve an unparsed coordinated tail as part of the expression, never
+    # as a new action. A later OR must not leave a mandatory AND prefix behind.
+    tail: list[str] = []
+    if cursor < len(tokens) and tokens[cursor] in {"and", "or"}:
+        tail_end = cursor + 1
+        while tail_end < len(tokens) and tokens[tail_end] not in _DIRECTIVE_VERBS | {"but"}:
+            tail_end += 1
+        if any(word not in _DIRECTIVE_MANNER_WORDS | {"not"}
+               for word in tokens[cursor + 1:tail_end]):
+            tail = list(tokens[cursor:tail_end])
+            while tail and tail[-1] in {"and", "or"}:
+                tail.pop()
+    if not connectors and not tail:
+        return terms
+    consumed.update(inherited)
+    # Keep a whole-expression key as well as the logically entailed leaves.
+    # This preserves an expression's opposition to its own negation without
+    # claiming that either alternative is independently mandatory/prohibited.
+    group: list[str] = []
+    for index, (words, polarity) in enumerate(terms):
+        if index:
+            group.append(connectors[index - 1])
+        if polarity != governor:
+            group.append("not")
+        group.extend(_normalize_directive_phrase(words).split())
+    group.extend(tail)
+    compound: list[tuple[Sequence[str], str]] = [(group, governor)]
+    distributive = ({"and"} if governor == "enforce" else {"or"})
+    if set(connectors) | ({"and", "or"} & set(tail)) == distributive:
+        compound.extend(terms)
+    return compound
+
+
 def _extract_node_directives(text: str) -> dict[str, str]:
     directives: dict[str, str] = {}
     # Every governing token must also occur as a substring. Reject impossible
@@ -1148,6 +1258,7 @@ def _extract_node_directives(text: str) -> dict[str, str]:
                 action = "enforce"
             else:
                 continue
+            governor = action
             for offset in (1, 2, 3):
                 if i + offset >= len(tokens):
                     break
@@ -1166,11 +1277,14 @@ def _extract_node_directives(text: str) -> dict[str, str]:
                     end = i + offset + 1
                     while end < len(tokens) and tokens[end] not in _DIRECTIVE_BOUNDARIES:
                         end += 1
-                    phrase = _normalize_directive_phrase(tokens[i + offset:end])
-                    # Keep summaries bounded without dropping any identity suffix.
-                    identity = phrase if len(phrase) <= 120 else (
-                        target[:56] + ":" + hashlib.sha256(phrase.encode("utf-8")).hexdigest())
-                    directives[identity] = action
+                    for words, polarity in _coordinated_directive_phrases(
+                        tokens, i + offset, end, action, governor, consumed,
+                    ):
+                        phrase = _normalize_directive_phrase(words)
+                        # Keep summaries bounded without dropping any identity suffix.
+                        identity = phrase if len(phrase) <= 120 else (
+                            words[0][:56] + ":" + hashlib.sha256(phrase.encode("utf-8")).hexdigest())
+                        directives[identity] = polarity
                     break
     return directives
 
