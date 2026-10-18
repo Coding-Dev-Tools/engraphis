@@ -12,6 +12,7 @@ include docs/DOCUMENT_IMPORT.md docs/OBSIDIAN_IMPORT.md
 include docs/images/context-efficiency.svg
 include docs/images/context-efficiency-pr260-release-review-followups-20261018.svg
 include docs/images/context-efficiency-pr260-postreset-final-runtime-20261018-e35939493c3d.svg
+include docs/images/context-efficiency-pr260-postreset-reviewed-runtime-20261018-7feffc9e2693.svg
 include pyproject.toml
 include .env.example requirements.txt
 include docker-entrypoint.sh Dockerfile docker-compose.yml docker-compose.lan.yml

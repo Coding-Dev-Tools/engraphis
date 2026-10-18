@@ -94,14 +94,14 @@ interpretation and do not count as additional benchmark-quality gains.
 ### Public numeric evidence registry
 
 Every exact public aggregate retained below comes from the checked-in, public-safe
-[`offline-fixtures-pr260-postreset-final-runtime-20261018-e35939493c3d.json`](docs/benchmark-evidence/offline-fixtures-pr260-postreset-final-runtime-20261018-e35939493c3d.json) artifact. Its
+[`offline-fixtures-pr260-postreset-reviewed-runtime-20261018-7feffc9e2693.json`](docs/benchmark-evidence/offline-fixtures-pr260-postreset-reviewed-runtime-20261018-7feffc9e2693.json) artifact. Its
 SHA-256 is
-`cd8b1e670d7792a1458aa7f6d41f46a7b802ca7c4bac5755ecb1dfa65748e246`, also recorded in the
+`83ec4316fa5f7dfe98f039639f248e6da35e0c5664951cc9e06f36ba321e9c03`, also recorded in the
 adjacent `.sha256` file. The artifact contains no raw questions, answers, prompts, customer data,
 or per-record content fingerprints.
 
 The fixture-suite digest is
-`68cd25808d182b111b01cac73f24d1fb990635f0db5fdf4bd281f943e7f5582e`. The artifact defines
+`1112ae81eb9861b93df6139d2f702412a9075b69221f9614053e9fe8b340df39`. The artifact defines
 the digest algorithm and records the SHA-256 of every suite and dataset file. Each evidence ID
 also binds its exact command through `sha256(UTF-8 exact command)`:
 
@@ -113,10 +113,13 @@ also binds its exact command through `sha256(UTF-8 exact command)`:
 
 The source manifest covers every Python file under `engraphis/` and `eval/`, the two
 fixture datasets, and the official exporter. Each rerun must use a new artifact and chart
-basename because existing evidence is immutable. The registered artifact was produced with:
+basename because existing evidence is immutable. This run used Python 3.12.14 and NumPy 2.5.4;
+the charts were rendered with CairoSVG 2.9.1. Its 587-file manifest binds the Python
+producer. Runtime commit `7feffc9e2693f4495a71f1731126e2f219e006a0` also identifies
+the CLI and Dashboard source outside that manifest. The registered artifact was produced with:
 
 ```bash
-python -m scripts.export_offline_evidence --output docs/benchmark-evidence/offline-fixtures-pr260-postreset-final-runtime-20261018-e35939493c3d.json
+python -m scripts.export_offline_evidence --output docs/benchmark-evidence/offline-fixtures-pr260-postreset-reviewed-runtime-20261018-7feffc9e2693.json
 ```
 
 External, model-dependent, latency, consolidation, and productivity numbers are not included in
@@ -134,13 +137,13 @@ grounded checks in separate panels; provider billing and MCP transport are not m
 the SVG and matching PNG with:
 
 ```bash
-python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-pr260-postreset-final-runtime-20261018-e35939493c3d.json --output docs/images/context-efficiency-pr260-postreset-final-runtime-20261018-e35939493c3d.svg --png-output docs/images/context-efficiency-pr260-postreset-final-runtime-20261018-e35939493c3d.png
+python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-pr260-postreset-reviewed-runtime-20261018-7feffc9e2693.json --output docs/images/context-efficiency-pr260-postreset-reviewed-runtime-20261018-7feffc9e2693.svg --png-output docs/images/context-efficiency-pr260-postreset-reviewed-runtime-20261018-7feffc9e2693.png
 ```
 
 The companion examples are also generated from that artifact with:
 
 ```bash
-python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-pr260-postreset-final-runtime-20261018-e35939493c3d.json --output docs/images/evidence-backed-agent-examples-pr260-postreset-final-runtime-20261018-e35939493c3d.svg --png-output docs/images/evidence-backed-agent-examples-pr260-postreset-final-runtime-20261018-e35939493c3d.png
+python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-pr260-postreset-reviewed-runtime-20261018-7feffc9e2693.json --output docs/images/evidence-backed-agent-examples-pr260-postreset-reviewed-runtime-20261018-7feffc9e2693.svg --png-output docs/images/evidence-backed-agent-examples-pr260-postreset-reviewed-runtime-20261018-7feffc9e2693.png
 ```
 The historical-to-executable mapping is in
 [`docs/BENCHMARK_CHANGE_COVERAGE.md`](docs/BENCHMARK_CHANGE_COVERAGE.md).
