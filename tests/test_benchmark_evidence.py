@@ -34,8 +34,8 @@ from eval.performance import run as run_performance
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PUBLIC_OFFLINE_ARTIFACT = "offline-fixtures-pr260-transport-scope-runtime-20261018-65821cf6bfee.json"
-PUBLIC_OFFLINE_SHA = "0780183ebb55e95d3ca2a28691537da3fc0fdd6db335e18079bbaa8c46729b31"
+PUBLIC_OFFLINE_ARTIFACT = "offline-fixtures-pr260-neutral-title-runtime-20261018-39628c9a99b0.json"
+PUBLIC_OFFLINE_SHA = "5795bc7eff4caaccdb05bade8e4483917d9e87055fbfb382cc98086f089b8c9b"
 
 
 @pytest.fixture(scope="module")
@@ -228,14 +228,14 @@ def test_readme_makes_agent_benefits_and_visual_evidence_scannable():
         "cite support or abstain when it is insufficient",
         "bounded context",
         "docs/images/knowledge-graph.png",
-        "docs/images/context-efficiency-pr260-transport-scope-runtime-20261018-65821cf6bfee.svg",
+        "docs/images/context-efficiency-pr260-neutral-title-runtime-20261018-39628c9a99b0.svg",
             "Three offline fixtures separate context reduction",
     ):
         assert evidence in readme
 
     for removed in (
         "### See the behavior in reproducible fixtures",
-        "docs/images/evidence-backed-agent-examples-pr260-transport-scope-runtime-20261018-65821cf6bfee.svg",
+        "docs/images/evidence-backed-agent-examples-pr260-neutral-title-runtime-20261018-39628c9a99b0.svg",
         "Run `python -m eval.chunking_eval` and `python -m eval.grounded`",
     ):
         assert removed not in readme
@@ -243,10 +243,10 @@ def test_readme_makes_agent_benefits_and_visual_evidence_scannable():
     for filename in (
         "engraphis-benefit-flow.svg",
         "engraphis-benefit-flow.png",
-        "context-efficiency-pr260-transport-scope-runtime-20261018-65821cf6bfee.svg",
-        "context-efficiency-pr260-transport-scope-runtime-20261018-65821cf6bfee.png",
-        "evidence-backed-agent-examples-pr260-transport-scope-runtime-20261018-65821cf6bfee.svg",
-        "evidence-backed-agent-examples-pr260-transport-scope-runtime-20261018-65821cf6bfee.png",
+        "context-efficiency-pr260-neutral-title-runtime-20261018-39628c9a99b0.svg",
+        "context-efficiency-pr260-neutral-title-runtime-20261018-39628c9a99b0.png",
+        "evidence-backed-agent-examples-pr260-neutral-title-runtime-20261018-39628c9a99b0.svg",
+        "evidence-backed-agent-examples-pr260-neutral-title-runtime-20261018-39628c9a99b0.png",
     ):
         assert (ROOT / "docs" / "images" / filename).is_file()
 
@@ -256,8 +256,8 @@ def test_readme_visual_pngs_match_their_svg_canvas():
     image_dir = ROOT / "docs" / "images"
 
     for stem in (
-        "evidence-backed-agent-examples-pr260-transport-scope-runtime-20261018-65821cf6bfee",
-        "context-efficiency-pr260-transport-scope-runtime-20261018-65821cf6bfee",
+        "evidence-backed-agent-examples-pr260-neutral-title-runtime-20261018-39628c9a99b0",
+        "context-efficiency-pr260-neutral-title-runtime-20261018-39628c9a99b0",
     ):
         svg = ElementTree.parse(image_dir / f"{stem}.svg").getroot()
         expected = (int(svg.attrib["width"]), int(svg.attrib["height"]))
@@ -269,7 +269,7 @@ def test_readme_visual_pngs_match_their_svg_canvas():
 
 def test_benchmark_header_badge_fits_its_label():
     svg = ElementTree.parse(
-        ROOT / "docs" / "images" / "context-efficiency-pr260-transport-scope-runtime-20261018-65821cf6bfee.svg"
+        ROOT / "docs" / "images" / "context-efficiency-pr260-neutral-title-runtime-20261018-39628c9a99b0.svg"
     ).getroot()
     namespace = "{http://www.w3.org/2000/svg}"
     badge = next(
@@ -297,7 +297,7 @@ def test_example_visual_uses_the_checked_in_offline_fixture_results(
     chunked = chunking["reports"]["chunked"]
     grounded = offline_release_evidence["grounded"]
     visual = (
-        ROOT / "docs" / "images" / "evidence-backed-agent-examples-pr260-transport-scope-runtime-20261018-65821cf6bfee.svg"
+        ROOT / "docs" / "images" / "evidence-backed-agent-examples-pr260-neutral-title-runtime-20261018-39628c9a99b0.svg"
     ).read_text(encoding="utf-8")
 
     assert chunking["context_reduction_pct"] == 71.1
@@ -328,7 +328,7 @@ def test_context_savings_visual_uses_only_registered_measurements():
     Values are interpolated from the COMMITTED registry artifact — the publication
     source of truth — so chart text cannot drift from the evidence it cites.
     """
-    visual = (ROOT / "docs" / "images" / "context-efficiency-pr260-transport-scope-runtime-20261018-65821cf6bfee.svg").read_text(
+    visual = (ROOT / "docs" / "images" / "context-efficiency-pr260-neutral-title-runtime-20261018-39628c9a99b0.svg").read_text(
         encoding="utf-8"
     )
     committed = _committed_evidence()
@@ -501,8 +501,8 @@ def test_public_numeric_evidence_registry_is_complete_and_live(
     assert expected_sha[:12] in (ROOT / "README.md").read_text(encoding="utf-8")
     surfaces = (
         ROOT / "BENCHMARKS.md",
-        ROOT / "docs" / "images" / "context-efficiency-pr260-transport-scope-runtime-20261018-65821cf6bfee.svg",
-        ROOT / "docs" / "images" / "evidence-backed-agent-examples-pr260-transport-scope-runtime-20261018-65821cf6bfee.svg",
+        ROOT / "docs" / "images" / "context-efficiency-pr260-neutral-title-runtime-20261018-39628c9a99b0.svg",
+        ROOT / "docs" / "images" / "evidence-backed-agent-examples-pr260-neutral-title-runtime-20261018-39628c9a99b0.svg",
     )
     for surface in surfaces:
         assert expected_sha in surface.read_text(encoding="utf-8")
@@ -516,7 +516,7 @@ def test_public_numeric_evidence_registry_is_complete_and_live(
     assert claimed_ids == set(runs)
 
 
-@pytest.mark.parametrize("stem", ["context-efficiency-pr260-transport-scope-runtime-20261018-65821cf6bfee", "evidence-backed-agent-examples-pr260-transport-scope-runtime-20261018-65821cf6bfee"])
+@pytest.mark.parametrize("stem", ["context-efficiency-pr260-neutral-title-runtime-20261018-39628c9a99b0", "evidence-backed-agent-examples-pr260-neutral-title-runtime-20261018-39628c9a99b0"])
 def test_benchmark_png_provenance_matches_current_svg_and_artifact(stem):
     png = (ROOT / "docs" / "images" / f"{stem}.png").read_bytes()
     metadata = {}
