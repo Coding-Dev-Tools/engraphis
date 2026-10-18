@@ -32,7 +32,24 @@ def test_equivalent_bare_scalar_sentences_never_recommend_retirement(key, value,
         nodes.reverse()
     original = deepcopy(nodes)
     report = analyze_memory_nodes(nodes, include_trace=True)
-    assert all(node["parameters"][key] == value for node in report["nodes"])
+    expected_key = "database" if key == "db" else key
+    assert all(node["parameters"][expected_key] == value for node in report["nodes"])
+    if key == "db":
+        assert all("db" not in node["parameters"] for node in report["nodes"])
+    assert not report["conflicts"]
+    assert not any("retire_node" in item for item in report["remediation_plan"])
+    assert nodes == original
+
+
+@pytest.mark.parametrize("assignment", [":", "=", "is set to", "set to"])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_equivalent_database_aliases_and_punctuation_share_the_canonical_key(assignment, reverse):
+    nodes = pair(f"db {assignment} postgres.", f"database {assignment} postgres")
+    if reverse:
+        nodes.reverse()
+    original = deepcopy(nodes)
+    report = analyze_memory_nodes(nodes, include_trace=True)
+    assert all(node["parameters"] == {"database": "postgres"} for node in report["nodes"])
     assert not report["conflicts"]
     assert not any("retire_node" in item for item in report["remediation_plan"])
     assert nodes == original
