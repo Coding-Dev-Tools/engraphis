@@ -633,7 +633,7 @@ def test_public_capability_and_support_docs_match_the_shipped_tree():
     )
     assert re.search(
         r'src="https://raw\.githubusercontent\.com/Coding-Dev-Tools/engraphis/[0-9a-f]{40}/'
-        r'docs/images/context-efficiency\.svg"',
+        r'docs/images/context-efficiency-pr260-release-review-followups-20261018\.svg"',
         readme,
     )
     assert "official hosted service" in licensing
