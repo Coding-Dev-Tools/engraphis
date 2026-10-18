@@ -13,7 +13,7 @@ from engraphis.core.schema import SCHEMA_VERSION
 
 
 ROOT = Path(__file__).resolve().parents[1]
-README_BENCHMARK_PIN = "ce4fd5a8fd1357b12fc3cf9db0c73bf20fa75bb7"
+README_BENCHMARK_PIN = "0132bf05c3f5f8766dce28017a63bce6cd54e564"
 README_HOSTED_PLANS_PIN = "522def372c45a26d46bc7a05829964ae0240f3a9"
 
 
@@ -137,7 +137,7 @@ def test_benchmark_text_alternatives_match_registered_fixture_boundary() -> None
     measurements = {run["id"]: run["result"] for run in registry["runs"]}
     payload = measurements["offline-performance"]
     readme = _read("README.md")
-    svg_text = _read("docs/images/context-efficiency-pr260-neutral-title-runtime-20261018-39628c9a99b0.svg")
+    svg_text = _read("docs/images/context-efficiency-pr260-nested-uri-redaction-runtime-20261018-e2ebfb06550f.svg")
     svg_root = ET.fromstring(svg_text)
     namespace = {"svg": "http://www.w3.org/2000/svg"}
     visible_labels = {"".join(node.itertext()).strip()
@@ -148,7 +148,7 @@ def test_benchmark_text_alternatives_match_registered_fixture_boundary() -> None
     assert description_node is not None
     description = " ".join("".join(description_node.itertext()).lower().split())
     image = re.search(
-        r'<img[^>]+context-efficiency-pr260-neutral-title-runtime-20261018-39628c9a99b0\.svg[^>]+alt="([^"]+)"',
+        r'<img[^>]+context-efficiency-pr260-nested-uri-redaction-runtime-20261018-e2ebfb06550f\.svg[^>]+alt="([^"]+)"',
         readme,
         flags=re.IGNORECASE,
     )
@@ -167,7 +167,7 @@ def test_benchmark_text_alternatives_match_registered_fixture_boundary() -> None
     assert hashlib.sha256(registry_bytes).hexdigest()[:12] in alternative
 
     benchmark_image = re.search(
-        r'<img[^>]+context-efficiency-pr260-neutral-title-runtime-20261018-39628c9a99b0\.svg[^>]*>', readme, flags=re.IGNORECASE,
+        r'<img[^>]+context-efficiency-pr260-nested-uri-redaction-runtime-20261018-e2ebfb06550f\.svg[^>]*>', readme, flags=re.IGNORECASE,
     )
     assert benchmark_image is not None
     benchmark_paragraph_end = readme.find("</p>", benchmark_image.end())
