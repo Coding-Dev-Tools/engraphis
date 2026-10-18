@@ -1039,7 +1039,7 @@ _FORBID_VERBS = frozenset({"never", "forbid", "deprecated", "disable", "prohibit
 _NEGATIVE_ACTION_VERBS = frozenset({"forbid", "disable", "prohibit", "skip", "omit"})
 _POSSIBLE_ENFORCE_VERBS = _ENFORCE_VERBS | {"do", "does", "should", "may", "can"}
 _DIRECTIVE_VERBS = _POSSIBLE_ENFORCE_VERBS | _FORBID_VERBS
-_DIRECTIVE_BOUNDARIES = _DIRECTIVE_VERBS | {"and", "or", "but"}
+_DIRECTIVE_BOUNDARIES = _DIRECTIVE_VERBS | {"and", "or", "but", ","}
 _DIRECTIVE_SCOPE_WORDS = frozenset({"to", "on", "for", "in", "across", "within", "from"})
 
 
@@ -1115,7 +1115,7 @@ def _coordinated_directive_phrases(
     connectors: list[str] = []
     inherited: set[int] = set()
     cursor = end
-    while cursor < len(tokens) and tokens[cursor] in {"and", "or"}:
+    while cursor < len(tokens) and tokens[cursor] in {"and", "or", ","}:
         previous = terms[-1][0]
         head = 0
         while head < len(previous) and previous[head] in _DIRECTIVE_MANNER_WORDS:
@@ -1124,14 +1124,21 @@ def _coordinated_directive_phrases(
                 or not _DIRECTIVE_COORDINATE_STOPS.isdisjoint(previous)
                 or any(word not in _DIRECTIVE_MANNER_WORDS for word in previous[head + 1:])):
             break
+        connector = tokens[cursor]
         next_start = cursor + 1
+        # An Oxford comma belongs to its following coordinator. Other serial
+        # commas inherit the list's final coordinator after all members are read.
+        if connector == "," and next_start < len(tokens) and tokens[next_start] in {"and", "or"}:
+            connector = tokens[next_start]
+            next_start += 1
         pos = next_start
         negative = False
         while pos < len(tokens) and tokens[pos] in _DIRECTIVE_MANNER_WORDS | {"not"}:
             if tokens[pos] == "not":
                 negative = not negative
             pos += 1
-        if pos == len(tokens) or tokens[pos] not in _DIRECTIVE_COORDINATE_ACTIONS:
+        if (pos == len(tokens) or tokens[pos] not in _DIRECTIVE_COORDINATE_ACTIONS
+                or connector == "," and tokens[pos] in _DIRECTIVE_VERBS):
             break  # A fresh modal, subject or object does not inherit this governor.
         polarity = ("forbid" if governor == "enforce" else "enforce") if negative else governor
         local_consumed: set[int] = set()
@@ -1165,21 +1172,35 @@ def _coordinated_directive_phrases(
         words = [word for index, word in enumerate(tokens[target_start:next_end], target_start)
                  if not (index < pos and word == "not")]
         terms.append((words, polarity))
-        connectors.append(tokens[cursor])
+        connectors.append(connector)
         inherited.update(local_consumed)
         cursor = next_end
     # Preserve an unparsed coordinated tail as part of the expression, never
     # as a new action. A later OR must not leave a mandatory AND prefix behind.
     tail: list[str] = []
-    if cursor < len(tokens) and tokens[cursor] in {"and", "or"}:
+    tail_tokens: Sequence[str] = ()
+    if cursor < len(tokens) and (tokens[cursor] in {"and", "or"}
+                                 or tokens[cursor] == "," and connectors):
         tail_end = cursor + 1
         while tail_end < len(tokens) and tokens[tail_end] not in _DIRECTIVE_VERBS | {"but"}:
             tail_end += 1
-        if any(word not in _DIRECTIVE_MANNER_WORDS | {"not"}
-               for word in tokens[cursor + 1:tail_end]):
-            tail = list(tokens[cursor:tail_end])
-            while tail and tail[-1] in {"and", "or"}:
-                tail.pop()
+        tail_tokens = tokens[cursor:tail_end]
+    # "A, B, or C" has alternatives from its first member, not an AND prefix.
+    # Without a final conjunction, commas denote sequential AND. Resolve only
+    # action-list separators; punctuation inside opaque resource tokens stays literal.
+    coordinator = next((word for word in reversed([*connectors, *tail_tokens])
+                        if word in {"and", "or"}), "and")
+    connectors = [coordinator if word == "," else word for word in connectors]
+    if any(word not in _DIRECTIVE_MANNER_WORDS | {"not", "and", "or", ","}
+           for word in tail_tokens[1:]):
+        for index, word in enumerate(tail_tokens):
+            if word == ",":
+                if index + 1 < len(tail_tokens) and tail_tokens[index + 1] in {"and", "or"}:
+                    continue
+                word = coordinator
+            tail.append(word)
+        while tail and tail[-1] in {"and", "or"}:
+            tail.pop()
     normalized = [(_normalize_directive_phrase(words), polarity) for words, polarity in terms]
     if not connectors and not tail:
         return normalized
@@ -1199,7 +1220,7 @@ def _coordinated_directive_phrases(
     # could apply deployment's destination alias to a different action's scope.
     compound: list[tuple[str, str]] = [(" ".join(group), governor)]
     distributive = ({"and"} if governor == "enforce" else {"or"})
-    if set(connectors) | ({"and", "or"} & set(tail)) == distributive:
+    if set(connectors) | ({"and", "or"} & set(tail_tokens)) == distributive:
         compound.extend(normalized)
     return compound
 
@@ -1221,7 +1242,9 @@ def _extract_node_directives(text: str) -> dict[str, str]:
     clause: list[str] = []
     for match in _DIRECTIVE_LEXEME.finditer(text):
         if match.lastgroup == "boundary":
-            if clause:
+            if match.group() == ",":
+                clause.append(",")
+            elif clause:
                 clauses.append(clause)
                 clause = []
             continue
@@ -1231,7 +1254,7 @@ def _extract_node_directives(text: str) -> dict[str, str]:
             raw = raw.rstrip("\\")
             if not raw:
                 continue
-        terminal = match.lastgroup == "literal" and raw[-1:] in {".", "!", "?", ";", ","}
+        terminal = raw[-1:] if match.lastgroup == "literal" and raw[-1:] in {".", "!", "?", ";", ","} else ""
         if terminal:
             raw = raw.rstrip(".!?;,")
         if raw:
@@ -1239,7 +1262,9 @@ def _extract_node_directives(text: str) -> dict[str, str]:
             # words are case-insensitive, but never fold a path or URL object.
             opaque = any(char in raw for char in ".:/\\")
             clause.append(raw if opaque else raw.lower())
-        if terminal and clause:
+        if terminal == ",":
+            clause.append(",")
+        elif terminal and clause:
             clauses.append(clause)
             clause = []
     if clause:
@@ -1266,6 +1291,8 @@ def _extract_node_directives(text: str) -> dict[str, str]:
                 if i + offset >= len(tokens):
                     break
                 target = tokens[i + offset]
+                if target == ",":
+                    break  # Commas never bridge a governor to its initial action.
                 if target in {"require", "enforce"}:
                     # Nested verbs inherit the governing directive, including its negation.
                     consumed.add(i + offset)
