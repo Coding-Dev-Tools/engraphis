@@ -927,12 +927,22 @@
     }
   }
 
+  function appendPromptTruncationNotice(panel) {
+    if (!currentReport || !currentReport.truncated) return;
+    const notice = document.createElement('p');
+    notice.className = 'spec-truncation-notice';
+    notice.setAttribute('role', 'status');
+    notice.textContent = 'Only part of the specification was analyzed. Score, coverage and flags describe that part.';
+    panel.appendChild(notice);
+  }
+
   function renderPromptSectionsPanel() {
     const list = document.getElementById('spec-sections-list');
     const badge = document.getElementById('spec-sections-count');
     if (!list || !currentReport || !currentReport.sections) return;
     if (badge) badge.textContent = currentReport.sections.length;
     list.replaceChildren();
+    appendPromptTruncationNotice(list);
 
     currentReport.sections.forEach(sec => {
       const item = document.createElement('div');
@@ -1104,9 +1114,10 @@
     const badge = document.getElementById('spec-panel4-badge');
     if (!panel || !currentReport) return;
     panel.replaceChildren();
+    appendPromptTruncationNotice(panel);
     if (badge) badge.textContent = currentReport.word_count || 0;
     const counts = document.createElement('p');
-    counts.textContent = `${currentReport.word_count || 0} words · ${(currentReport.flags || []).length} displayed flags`;
+    counts.textContent = `${currentReport.word_count || 0} ${currentReport.truncated ? 'analyzed words' : 'words'} · ${(currentReport.flags || []).length} displayed flags`;
     panel.appendChild(counts);
     for (const flag of currentReport.flags || []) {
       const card = document.createElement('div');
@@ -1307,7 +1318,8 @@
     }
 
     const motto = document.getElementById('spec-score-motto');
-    if (motto) motto.textContent = "ask, don't guess";
+    if (motto) motto.textContent = currentMode === 'prompt' && currentReport && currentReport.truncated
+      ? "partial specification score · ask, don't guess" : "ask, don't guess";
   }
 
   function renderMemoryHealthScore(score) {

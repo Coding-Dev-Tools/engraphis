@@ -52,6 +52,46 @@ async function crawl(page, text = '# Rules\nVerify all tests.') {
   await expect(page.locator('#spec-score-display')).toHaveText(String(prompt.score));
 }
 
+for (const count of [5000, 5001]) {
+  test(`real prompt API discloses the ${count}-token analysis boundary and clears partial state`, async ({ page }) => {
+    const { errors } = await fixture(page);
+    const session = await page.request.post('/api/auth/session', {
+      data: { token: 'engraphis-playwright-local-only' },
+    });
+    expect(session.ok()).toBe(true);
+    await page.route('**/api/spec/crawl', route => route.continue());
+    async function submit(text) {
+      expect(text.length).toBeLessThan(64000);
+      await page.locator('#spec-btn-new').click();
+      await page.locator('#spec-input-text').fill(text);
+      const completed = page.waitForResponse(response => new URL(response.url()).pathname === '/api/spec/crawl'
+        && response.request().method() === 'POST');
+      await page.locator('#spec-modal-submit').click();
+      const response = await completed;
+      expect(response.status()).toBe(200);
+      const data = await response.json();
+      await expect(page.locator('#spec-score-display')).toHaveText(String(data.score));
+      return data;
+    }
+    const report = await submit('# Rules\n' + 'neutral '.repeat(5000) + (count > 5000 ? 'all' : ''));
+    expect(report.word_count).toBe(5000);
+    expect(report.truncated).toBe(count > 5000);
+    expect(report.flags).toEqual([]);
+    for (const panel of ['#spec-sections-list', '#spec-panel4-body']) {
+      await expect(page.locator(`${panel} .spec-truncation-notice`)).toHaveCount(count > 5000 ? 1 : 0);
+      if (count > 5000) await expect(page.locator(panel)).toContainText('Only part of the specification was analyzed');
+    }
+    if (count > 5000) {
+      await expect(page.locator('#spec-score-motto')).toContainText('partial');
+      const replacement = await submit('# Rules\nVerify 12 tests.');
+      expect(replacement.truncated).toBe(false);
+      await expect(page.locator('.spec-truncation-notice')).toHaveCount(0);
+      await expect(page.locator('#spec-score-motto')).not.toContainText('partial');
+    }
+    expect(errors).toEqual([]);
+  });
+}
+
 function limitedCluster({ nodes = false, words = false, total = 120 } = {}) {
   const memories = Array.from({ length: nodes ? 150 : 16 }, (_, i) => ({
     id: `entry-${i}`, title: `Entry ${i}`, mtype: 'semantic',
