@@ -1115,7 +1115,9 @@ def _coordinated_directive_phrases(
     connectors: list[str] = []
     inherited: set[int] = set()
     cursor = end
+    tail_coordinates = False
     while cursor < len(tokens) and tokens[cursor] in {"and", "or", ","}:
+        tail_coordinates = False
         previous = terms[-1][0]
         head = 0
         while head < len(previous) and previous[head] in _DIRECTIVE_MANNER_WORDS:
@@ -1124,6 +1126,7 @@ def _coordinated_directive_phrases(
                 or not _DIRECTIVE_COORDINATE_STOPS.isdisjoint(previous)
                 or any(word not in _DIRECTIVE_MANNER_WORDS for word in previous[head + 1:])):
             break
+        tail_coordinates = True
         connector = tokens[cursor]
         next_start = cursor + 1
         # An Oxford comma belongs to its following coordinator. Other serial
@@ -1188,7 +1191,10 @@ def _coordinated_directive_phrases(
     # "A, B, or C" has alternatives from its first member, not an AND prefix.
     # Without a final conjunction, commas denote sequential AND. Resolve only
     # action-list separators; punctuation inside opaque resource tokens stays literal.
-    coordinator = next((word for word in reversed([*connectors, *tail_tokens])
+    # A conjunction after an object/scope stop belongs to that opaque tail;
+    # it may block distribution, but cannot turn earlier commas into alternatives.
+    list_connectors = [*connectors, *tail_tokens] if tail_coordinates else connectors
+    coordinator = next((word for word in reversed(list_connectors)
                         if word in {"and", "or"}), "and")
     connectors = [coordinator if word == "," else word for word in connectors]
     if any(word not in _DIRECTIVE_MANNER_WORDS | {"not", "and", "or", ","}
