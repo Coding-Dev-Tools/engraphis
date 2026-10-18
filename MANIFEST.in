@@ -18,6 +18,7 @@ include docs/images/context-efficiency-pr260-serial-policy-runtime-20261018-2013
 include docs/images/context-efficiency-pr260-masked-axis-runtime-20261018-efa4a9c83a5b.svg
 include docs/images/context-efficiency-pr260-transport-scope-runtime-20261018-65821cf6bfee.svg
 include docs/images/context-efficiency-pr260-neutral-title-runtime-20261018-39628c9a99b0.svg
+include docs/images/context-efficiency-pr260-nested-uri-redaction-runtime-20261018-e2ebfb06550f.svg
 include pyproject.toml
 include .env.example requirements.txt
 include docker-entrypoint.sh Dockerfile docker-compose.yml docker-compose.lan.yml
