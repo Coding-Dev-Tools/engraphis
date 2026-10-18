@@ -50,8 +50,16 @@ We must verify all unit tests before release.
             assert ans_res["memory_id"] is not None
             assert ans_res["new_report"] is not None
 
-            # 3. Procedural memories crawl
+            # 3. Pending evidence does not create procedural policy coverage.
             proc_report = svc.spec_crawl(workspace=ws, crawl_procedural=True)
+            assert proc_report["procedural_memory_count"] == proc_report["score"] == 0
+            assert proc_report["sections"] == []
+            approved = svc.engine.approve_for_prompt(
+                ans_res["memory_id"], reviewer="owner", reason="Verified the required test coverage",
+            )
+            proc_report = svc.spec_crawl(workspace=ws, crawl_procedural=True)
+            assert proc_report["procedural_memory_count"] == 1
+            assert proc_report["procedural_sources"][0]["memory_id"] == approved["id"]
             assert proc_report["score"] > 0
             assert len(proc_report["sections"]) >= 1
         finally:

@@ -72,6 +72,7 @@ from engraphis.core.spec_crawl import (
     clarified_sentence,
     compose_memory_spec_with_truncation,
     crawl_spec,
+    empty_spec_report,
 )
 from engraphis.core.poisoning import (
     REVIEW_APPROVED,
@@ -13010,13 +13011,11 @@ class MemoryService:
                 procedural_total_eligible > procedural_memory_count or content_truncated
             )
             source_label = f"procedural:{ws}"
-            if not content.strip():
-                if recs:
-                    raise ValidationError(
-                        "No procedural memory fits the 64000-character audit limit; "
-                        "pass a smaller specification or audit selected memories."
-                    )
-                content = "# Procedural Rules\nNo procedural memories recorded yet.\n"
+            if not content.strip() and recs:
+                raise ValidationError(
+                    "No procedural memory fits the 64000-character audit limit; "
+                    "pass a smaller specification or audit selected memories."
+                )
         elif source_id:
             if _authenticated_principal() is not None or self.allowed_workspaces is not None:
                 raise ValidationError("source_id file access requires the local operator; pass text instead")
@@ -13072,12 +13071,15 @@ class MemoryService:
             support_lookup = _lookup
 
         try:
-            report = crawl_spec(
-                content,
-                support_lookup=support_lookup,
-                include_trace=include_trace,
-                source_label=source_label,
-            )
+            if procedural_source_used and procedural_memory_count == 0:
+                report = empty_spec_report(include_trace=include_trace, source_label=source_label)
+            else:
+                report = crawl_spec(
+                    content,
+                    support_lookup=support_lookup,
+                    include_trace=include_trace,
+                    source_label=source_label,
+                )
         except SpecCrawlError as exc:
             raise ValidationError(str(exc)) from exc
 

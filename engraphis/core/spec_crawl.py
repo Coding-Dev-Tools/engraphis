@@ -783,6 +783,40 @@ def crawl_spec(text: str, *, template: SpecTemplate = DEFAULT_TEMPLATE,
     return report
 
 
+def empty_spec_report(*, template: SpecTemplate = DEFAULT_TEMPLATE, include_trace: bool = True,
+                      source_label: str = "") -> dict[str, Any]:
+    """Describe an authorized, empty source without inventing scored policy text."""
+    _, parts = score_spec(coverage=0.0, ownership=0.0, approvals=0.0, traced_ratio=None,
+                          vague_flags=0, untraced_flags=0, injection_flags=0)
+    report: dict[str, Any] = {
+        "algorithm_version": ALGORITHM_VERSION,
+        "content_sha256": hashlib.sha256(b"").hexdigest(),
+        "source_label": str(source_label or "")[:200],
+        "template": template.name,
+        "axes_order": list(template.axes),
+        "axis_labels": {axis: AXIS_LABELS.get(axis, axis.upper()[:5]) for axis in template.axes},
+        "legs": LEGS,
+        "truncated": False,
+        "word_count": 0,
+        "sections": [],
+        "coverage": dict.fromkeys(template.axes, 0.0),
+        "counts": {
+            **dict.fromkeys(("read", "linked", "flagged", "guessed", "links", "cross_links",
+                             "claims", "claims_checked", "claims_traced", "claim_lookup_attempts",
+                             "flagged_total", "owners", "approvals"), 0),
+            "kinds": dict.fromkeys(TOKEN_KINDS, 0),
+        },
+        "score": 0,
+        "score_breakdown": dict.fromkeys(parts, 0.0),
+        "flags": [],
+        "claims": [],
+    }
+    if include_trace:
+        report["trace"] = []
+        report["trace_sha256"] = hashlib.sha256(repr([]).encode("utf-8")).hexdigest()
+    return report
+
+
 def _section_intent(text: str, section: _Section, tokens: Sequence[_Token]) -> str:
     for tok in tokens:
         if tok.section == section.index and not tok.in_code:
