@@ -115,6 +115,25 @@ def test_ambiguous_object_lists_never_become_new_action_obligations(left, right,
     assert not analyze_memory_nodes(nodes)["conflicts"]
 
 
+@pytest.mark.parametrize("verb", ["connect", "read", "test"])
+def test_compound_normalization_does_not_cross_an_action_boundary(verb):
+    report = analyze_memory_nodes(_pair(
+        f"Must deploy and {verb} into staging.",
+        f"Never deploy and {verb} to staging."))
+    assert not report["conflicts"]
+    assert not any(item.get("action") == "supersede" for item in report["remediation_plan"])
+
+
+@pytest.mark.parametrize("left,right", [
+    ("Must deploy and connect into staging.", "Never deploy and connect into staging."),
+    ("Must deploy into production and test.", "Never deploy to production and test."),
+])
+def test_each_member_keeps_its_own_exact_identity_and_deployment_alias(left, right):
+    report = analyze_memory_nodes(_pair(left, right))
+    assert report["conflicts"]
+    assert report["conflicts"][0]["remedy"]["retire_node"] == "old"
+
+
 @pytest.mark.parametrize("field", ["subject_key", "claim_kind"])
 def test_coordinated_actions_preserve_metadata_partitions(field):
     nodes = _pair("Must build and test.", "Never test.")

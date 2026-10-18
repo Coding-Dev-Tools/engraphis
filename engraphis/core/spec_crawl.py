@@ -1109,7 +1109,7 @@ _DIRECTIVE_COORDINATE_STOPS = _DIRECTIVE_PREPOSITIONS | {
 def _coordinated_directive_phrases(
     tokens: Sequence[str], start: int, end: int, action: str,
     governor: str, consumed: set[int],
-) -> list[tuple[Sequence[str], str]]:
+) -> list[tuple[str, str]]:
     """Carry a governor across recognized action phrases, not noun/scope lists."""
     terms: list[tuple[Sequence[str], str]] = [(tokens[start:end], action)]
     connectors: list[str] = []
@@ -1180,24 +1180,27 @@ def _coordinated_directive_phrases(
             tail = list(tokens[cursor:tail_end])
             while tail and tail[-1] in {"and", "or"}:
                 tail.pop()
+    normalized = [(_normalize_directive_phrase(words), polarity) for words, polarity in terms]
     if not connectors and not tail:
-        return terms
+        return normalized
     consumed.update(inherited)
     # Keep a whole-expression key as well as the logically entailed leaves.
     # This preserves an expression's opposition to its own negation without
     # claiming that either alternative is independently mandatory/prohibited.
     group: list[str] = []
-    for index, (words, polarity) in enumerate(terms):
+    for index, (phrase, polarity) in enumerate(normalized):
         if index:
             group.append(connectors[index - 1])
         if polarity != governor:
             group.append("not")
-        group.extend(_normalize_directive_phrase(words).split())
+        group.extend(phrase.split())
     group.extend(tail)
-    compound: list[tuple[Sequence[str], str]] = [(group, governor)]
+    # Each member is already canonical. Re-normalizing the joined expression
+    # could apply deployment's destination alias to a different action's scope.
+    compound: list[tuple[str, str]] = [(" ".join(group), governor)]
     distributive = ({"and"} if governor == "enforce" else {"or"})
     if set(connectors) | ({"and", "or"} & set(tail)) == distributive:
-        compound.extend(terms)
+        compound.extend(normalized)
     return compound
 
 
@@ -1277,13 +1280,13 @@ def _extract_node_directives(text: str) -> dict[str, str]:
                     end = i + offset + 1
                     while end < len(tokens) and tokens[end] not in _DIRECTIVE_BOUNDARIES:
                         end += 1
-                    for words, polarity in _coordinated_directive_phrases(
+                    for phrase, polarity in _coordinated_directive_phrases(
                         tokens, i + offset, end, action, governor, consumed,
                     ):
-                        phrase = _normalize_directive_phrase(words)
                         # Keep summaries bounded without dropping any identity suffix.
                         identity = phrase if len(phrase) <= 120 else (
-                            words[0][:56] + ":" + hashlib.sha256(phrase.encode("utf-8")).hexdigest())
+                            phrase.split(" ", 1)[0][:56] + ":"
+                            + hashlib.sha256(phrase.encode("utf-8")).hexdigest())
                         directives[identity] = polarity
                     break
     return directives
@@ -1659,6 +1662,8 @@ def analyze_memory_nodes(
     scoped_targets: list[tuple[str, str]] = []
     for target, action_dict in list(dir_map.items()):
         words = target.split()
+        if "and" in words or "or" in words:
+            continue  # Whole expressions do not establish single-action scope aliases.
         # Canonical bare deployment destinations retain their scope relationship
         # to an actually present general policy; unrelated destinations stay apart.
         if (len(words) > 1 and words[0] == "deploy"
