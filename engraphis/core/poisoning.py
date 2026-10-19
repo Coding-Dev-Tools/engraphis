@@ -171,7 +171,7 @@ _SIGNALS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "privilege_impersonation",
         re.compile(
-            r"(?:^|\s|;)\s*(?:system|developer|assistant)\s*"
+            r"(?:^|\s|;)(?:system|developer|assistant)\s*"
             r"(?:message|prompt|instructions?)\s*[:\-]",
             re.IGNORECASE,
         ),

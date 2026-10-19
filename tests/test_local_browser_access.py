@@ -220,4 +220,3 @@ def test_only_middleware_rejections_carry_the_safe_retry_code(client_factory):
         assert application_error.status_code == 401
         assert "code" not in application_error.json()
         assert calls == [True]
-

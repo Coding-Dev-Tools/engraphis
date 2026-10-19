@@ -25,6 +25,10 @@ ENGRAPHIS_COMPOSE_PORT=8787
 
 Then open `http://127.0.0.1:8787`. License issuance, trials, leases, and revocations remain on the private control plane.
 
+Without an API token, the dashboard API answers only `localhost`, IP addresses and the names in
+`ENGRAPHIS_ALLOWED_HOSTS`, which keeps websites that use DNS rebinding out. Another container
+that calls the API by its Compose service name needs that name in `ENGRAPHIS_ALLOWED_HOSTS`.
+
 The root entrypoint repairs ownership only for the managed `/data` volume. When a custom
 container configuration places `ENGRAPHIS_STATE_DIR` outside `/data`, create that directory
 with the container's `engraphis` UID as owner and provision its contents for that UID before

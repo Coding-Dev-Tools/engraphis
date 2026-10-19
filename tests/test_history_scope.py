@@ -36,6 +36,37 @@ def test_why_and_timeline_find_old_facts_beyond_the_first_page():
         engine.close()
 
 
+@pytest.mark.parametrize("helper", ["why", "timeline"])
+def test_public_history_exhausts_keyset_pages_without_a_recency_cap(helper):
+    from engraphis.core.engine import MemoryEngine
+    from engraphis.core.interfaces import MemoryRecord, Scope
+
+    engine = MemoryEngine.create(":memory:", auto_evolve=False)
+    try:
+        workspace = engine.store.get_or_create_workspace("history")
+        for index in range(501):
+            engine.store.add_memory(MemoryRecord(
+                id="", content="Unrelated lighthouse observation %s." % index,
+                workspace_id=workspace, scope=Scope.WORKSPACE,
+                ingested_at=100.0 + index, valid_from=1.0,
+                provenance={"trusted": True, "review_state": "approved"},
+            ))
+        # Insert last but backdate ingestion: this is beyond both the first ID page
+        # and the recency window. Either accidental 500-record cap loses the result.
+        old = engine.store.add_memory(MemoryRecord(
+            id="", content="Zephyr database migration chooses PostgreSQL.",
+            workspace_id=workspace, scope=Scope.WORKSPACE,
+            ingested_at=1.0, valid_from=1.0,
+            provenance={"trusted": True, "review_state": "approved"},
+        ))
+        service = MemoryService(engine)
+        output = getattr(service, helper)("Zephyr database migration", workspace="history")
+        records = output["answer" if helper == "why" else "history"]
+        assert [row["id"] for row in records] == [old]
+    finally:
+        engine.close()
+
+
 @pytest.fixture
 def svc(tmp_path):
     service = MemoryService.create(

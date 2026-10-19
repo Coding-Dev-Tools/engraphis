@@ -34,6 +34,7 @@ jobs:
   build:
     name: Build distributions
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     if: >-
       github.event_name == 'push' ||
       inputs.release_tag == ''
@@ -50,6 +51,10 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            .github/release-constraints.txt
           python-version: "3.11"
 
       - name: Install release gate and the production dependency set (without SQLCipher)
@@ -91,6 +96,7 @@ jobs:
           python -m eval.adversarial_memory_security
           python -m eval.grounded
           python -m eval.code_arm
+          python -m eval.spec_crawl
           python -m eval.evidence_contracts
           python -m pip_audit --local --skip-editable
 
@@ -170,6 +176,7 @@ jobs:
   reproducibility-build:
     name: Independent distribution builder ${{ matrix.builder }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     if: >-
       github.event_name == 'push' ||
       inputs.release_tag == ''
@@ -187,6 +194,10 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            .github/release-constraints.txt
           python-version: "3.11"
       - name: Build in isolated pinned environment
         shell: bash
@@ -210,23 +221,24 @@ jobs:
     name: Compare independent distribution builders
     needs: [build, reproducibility-build]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     if: >-
       github.event_name == 'push' ||
       inputs.release_tag == ''
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Download primary distributions
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: python-package-distributions
           path: primary/
       - name: Download builder A
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: reproducibility-builder-a
           path: builder-a/
       - name: Download builder B
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: reproducibility-builder-b
           path: builder-b/
@@ -298,6 +310,7 @@ jobs:
   python-matrix:
     name: Python ${{ matrix.python-version }} release gate
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -309,6 +322,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            .github/release-constraints.txt
           python-version: ${{ matrix.python-version }}
       - name: Install version-appropriate gate
         shell: bash
@@ -333,6 +350,7 @@ jobs:
           python -m eval.adversarial_memory_security
           python -m eval.grounded
           python -m eval.code_arm
+          python -m eval.spec_crawl
           python -m eval.evidence_contracts
 
   artifact-core-py39:
@@ -342,12 +360,13 @@ jobs:
       github.event_name == 'push' ||
       inputs.release_tag == ''
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.9"
       - name: Download exact release distributions
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: python-package-distributions
           path: dist/
@@ -411,9 +430,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            .github/release-constraints.txt
           python-version: "3.11"
       - name: Download exact release distributions
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: python-package-distributions
           path: dist/
@@ -479,6 +502,7 @@ jobs:
   encryption:
     name: Encryption driver release gate (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -490,6 +514,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            .github/release-constraints.txt
           python-version: ${{ matrix.python-version }}
       - name: Install encryption integration gate
         run: |
@@ -503,6 +531,7 @@ jobs:
   browser-accessibility:
     name: Browser accessibility release gate
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     if: >-
       github.event_name == 'push' ||
       inputs.release_tag == ''
@@ -510,9 +539,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            .github/release-constraints.txt
           python-version: "3.11"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
           node-version: "24"
       - name: Install browser gate
         run: |
@@ -532,6 +568,7 @@ jobs:
   pi-extension:
     name: Pi extension release gate
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     if: >-
       github.event_name == 'push' ||
       inputs.release_tag == ''
@@ -539,6 +576,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            .github/release-constraints.txt
           python-version: "3.11"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -562,6 +603,7 @@ jobs:
   docker-smoke:
     name: Production image release gate
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     if: >-
       github.event_name == 'push' ||
       inputs.release_tag == ''
@@ -608,7 +650,7 @@ jobs:
           metadata.unlink()
           PY
       - name: Generate whole-image SBOM
-        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           image: engraphis:release
           format: cyclonedx-json
@@ -729,6 +771,7 @@ jobs:
       github.event_name == 'push' ||
       inputs.release_tag == ''
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       security-events: write
@@ -744,14 +787,14 @@ jobs:
         with:
           python-version: "3.11"
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4
+        uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4
         with:
           languages: ${{ matrix.language }}
           build-mode: none
           config-file: ./.github/codeql/codeql-config.yml
       - name: Analyze complete source tree
         id: analyze
-        uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4
+        uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d # v4
         with:
           output: codeql-results
           upload: never
@@ -763,6 +806,7 @@ jobs:
     needs: [build, reproducibility-check, python-matrix, artifact-core-py39, installed-artifact-platform-smoke, encryption, browser-accessibility, pi-extension, docker-smoke, code-security]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
 
@@ -772,27 +816,27 @@ jobs:
         with:
           python-version: "3.11"
       - name: Download distributions
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: python-package-distributions
           path: dist/
       - name: Download exact build environment evidence
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: build-environment-evidence
           path: release-evidence/
       - name: Download whole-image evidence
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: production-image-evidence
           path: release-evidence/
       - name: Download independent reproducibility evidence
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: independent-reproducibility
           path: release-evidence/
       - name: Download complete installed journey evidence
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: installed-journey-*
           path: installed-journey-inputs/
@@ -847,6 +891,7 @@ jobs:
     # semver tag, whose value was matched to pyproject.toml in the build job above.
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       id-token: write
       contents: read
@@ -855,9 +900,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            .github/release-constraints.txt
           python-version: "3.11"
       - name: Download distributions
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: python-package-distributions
           path: dist/
@@ -912,6 +961,7 @@ jobs:
     environment: release-qualification
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: write
 
@@ -919,15 +969,19 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            .github/release-constraints.txt
           python-version: "3.11"
       - name: Download distributions
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: python-package-distributions
           path: dist/
 
       - name: Download public release evidence
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: public-release-evidence
           path: release-evidence/
@@ -980,6 +1034,7 @@ jobs:
       github.ref == 'refs/heads/main' &&
       inputs.release_tag != ''
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       actions: read
       contents: write
@@ -989,6 +1044,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            .github/release-constraints.txt
           python-version: "3.11"
       - name: Enforce and record the release-specific qualification waiver
         if: inputs.waive_v176_qualification || inputs.waive_v178_qualification || inputs.waive_v179_qualification

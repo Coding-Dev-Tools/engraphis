@@ -8,6 +8,11 @@ on:
 permissions:
   contents: read
 
+# Keep every non-PR run; only superseded PR validation is cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
     name: test + lint (full offline stack)
@@ -52,6 +57,8 @@ jobs:
         run: python -m eval.grounded
       - name: Code-agent arm gate
         run: python -m eval.code_arm
+      - name: Agent specification quality gate
+        run: python -m eval.spec_crawl
       - name: Evidence contract boundary gate
         run: python -m eval.evidence_contracts
 
@@ -129,6 +136,8 @@ jobs:
         run: python -m eval.adversarial_memory_security
       - name: Evidence contract boundary gate
         run: python -m eval.evidence_contracts
+      - name: Agent specification quality gate (numpy-only)
+        run: python -m eval.spec_crawl
       - name: Build and smoke installed core artifacts
         shell: bash
         run: |
@@ -223,6 +232,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
           python-version: ${{ matrix.python-version }}
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -261,9 +273,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
           python-version: "3.11"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
           node-version: "24"
       - name: Install dashboard and browser test dependencies
         run: |
@@ -390,6 +408,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
           python-version: "3.11"
       - name: Install pinned build and audit tooling
         run: >-
@@ -426,6 +447,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            .github/release-constraints.txt
           python-version: "3.11"
       - name: Build the candidate wheel
         run: |
@@ -471,6 +496,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: candidate-journey-${{ matrix.os }}-${{ matrix.profile }}
+          retention-days: 14
           path: |
             ${{ runner.temp }}/installed-candidate/journey.json
             ${{ runner.temp }}/installed-candidate/environment.lock

@@ -270,6 +270,18 @@ def test_ci_and_release_never_hide_skips_or_lose_the_full_stack_silently():
     assert required in _text(".github/workflows/release.yml")
 
 
+def test_release_runs_the_offline_evaluations_required_by_ci():
+    """A protected-main CI gate must remain a gate on the exact release source."""
+
+    ci = _text(".github/workflows/ci.yml")
+    release = _text(".github/workflows/release.yml")
+    build = release.split("  build:\n", 1)[1].split("  reproducibility-build:\n", 1)[0]
+    evaluations = re.findall(r"run:\s*(python -m eval\.[^\n]+)", ci)
+    assert "python -m eval.spec_crawl" in evaluations
+    for command in evaluations:
+        assert command in build, f"release build omits the CI evaluation: {command}"
+
+
 def test_sqlcipher_driver_has_a_dedicated_short_lived_integration_gate():
     """A bundled SQLCipher extension must not leak into the general test process.
 
@@ -453,7 +465,7 @@ def test_ci_linter_is_bounded_to_the_verified_release_series():
     # is not stable across minor releases -- 0.16 widened it from 59 rules to 413, which
     # would have turned `ruff check .` red on unchanged code. Pinning `select` explicitly
     # is what actually bounds CI, so the bound and the rule set are asserted together.
-    assert pyproject.count('"ruff>=0.15.22,<0.17"') == 2
+    assert pyproject.count('"ruff>=0.15.22,<0.18"') == 2
     assert 'select = ["E4", "E7", "E9", "F"]' in pyproject
 
 
@@ -538,7 +550,7 @@ def test_primary_github_release_targets_repository_without_checkout():
 def test_public_capability_and_support_docs_match_the_shipped_tree():
     server = _text("engraphis/mcp_server.py")
     tools = re.findall(r'@mcp\.tool\(\s*name="(engraphis_[^"]+)"', server)
-    assert len(tools) == len(set(tools)) == 39
+    assert len(tools) == len(set(tools)) == 43
 
     readme = _text("README.md")
     licensing = _text("docs/LICENSING.md")
@@ -551,7 +563,7 @@ def test_public_capability_and_support_docs_match_the_shipped_tree():
         assert "28-tool" not in content
         assert "(28 of them)" not in content
     assert "Smart MCP (9 tools)" in architecture
-    assert "Classic MCP (39 tools)" in architecture
+    assert "Classic MCP (43 tools)" in architecture
     assert "default Smart MCP surface has nine" in skill
     assert "Classic direct-tool guide" in skill
     assert "engraphis-mcp-classic" in skill
@@ -595,9 +607,11 @@ def test_public_capability_and_support_docs_match_the_shipped_tree():
             "engraphis/dashboard_assets/index.html",
             "engraphis/dashboard_assets/ledger.css",
             "engraphis/dashboard_assets/ledger.js",
-            "engraphis/classic_assets/index.html",
-            "engraphis/classic_assets/dashboard.js",
-            "engraphis/static/dashboard.js", "engraphis/static/index.html",
+            # First-party Ledger scripts split out of ledger.js.
+            "engraphis/dashboard_assets/action-dialog.js",
+            "engraphis/dashboard_assets/graph-explorer.js",
+            "engraphis/dashboard_assets/import-sources.js",
+            "engraphis/dashboard_assets/markdown.js",
         )
     ]
     public_paths.extend((ROOT / "docs").rglob("*.md"))

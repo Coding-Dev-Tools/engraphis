@@ -1313,6 +1313,9 @@ class Store:
             frozenset(allowed_workspaces) if allowed_workspaces else None
         )
         try:
+            # Register once before exposing this connection to any query/cursor. SQLite's
+            # built-in lower() is ASCII-only; history ranking uses Python Unicode lower().
+            self.conn.create_function("engraphis_unicode_lower", 1, _unicode_lower, deterministic=True)
             self.conn.execute("PRAGMA foreign_keys=ON")
             if self.read_only:
                 # Defense in depth after the stdlib immutable URI or the injected
@@ -5297,21 +5300,55 @@ class Store:
 
     def list_memories(self, flt: Optional[SearchFilter] = None,
                       *, include_invalid: bool = False, limit: Optional[int] = None,
-                      prompt_only: bool = False) -> list[MemoryRecord]:
+                      prompt_only: bool = False, closed_only: bool = False,
+                      candidate_query: str = "") -> list[MemoryRecord]:
         """List scoped records, optionally capping only prompt-eligible rows.
 
         Public callers can opt into ``prompt_only`` when this bounded result will enter
         model-adjacent output.  Eligibility is deliberately checked while streaming SQL
         rows, before the result cap: a large pending import must not hide an older
         approved record simply by consuming the raw ``LIMIT`` window.
+
+        ``candidate_query`` puts lexical matches before the bounded candidate window.
+        It scores the literal query and at most 32 expanded terms in SQLite, using the
+        same Unicode lowercasing as the final Python history tokenizer. SQLite may scan
+        and sort more rows than the returned/hydrated candidate limit. Nonmatches remain
+        a recency-ordered fallback; this is not exhaustive semantic ranking.
         """
         if prompt_only and limit is not None and int(limit) <= 0:
             return []
         sql = "SELECT * FROM memories"
         where, params = self._where(flt, include_invalid)
+        if closed_only:
+            # Select known closed world-time intervals before either result cap. Public
+            # history must still hide records outside the requested system-time snapshot.
+            valid_at, known_at = _temporal_anchors(flt)
+            where.extend([
+                "((valid_to IS NOT NULL AND valid_to<=? "
+                "AND (valid_to_recorded_at IS NULL OR valid_to_recorded_at<=?)) "
+                "OR EXISTS (SELECT 1 FROM memory_closures mc "
+                "WHERE mc.memory_id=memories.id AND mc.valid_to<=? "
+                "AND (mc.recorded_at IS NULL OR mc.recorded_at<=?)))",
+                "(ingested_at IS NULL OR ingested_at<=?)",
+                "(expired_at IS NULL OR ?<expired_at)",
+            ])
+            params.extend([valid_at, known_at, valid_at, known_at, known_at, known_at])
         if where:
             sql += " WHERE " + " AND ".join(where)
-        sql += " ORDER BY ingested_at DESC"
+        query = candidate_query.strip().lower()
+        if query:
+            terms = [query, *[term for term in _fts_terms(query) if term != query][:32]]
+            score_parts = []
+            for index, term in enumerate(terms):
+                boost = 2 if index == 0 else 1
+                score_parts.append(
+                    f"((CASE WHEN instr(engraphis_unicode_lower(title), ?) > 0 THEN {2 * boost} ELSE 0 END)"
+                    f" + (CASE WHEN instr(engraphis_unicode_lower(content), ?) > 0 THEN {boost} ELSE 0 END))"
+                )
+                params.extend([term, term])
+            sql += " ORDER BY (" + " + ".join(score_parts) + ") DESC, ingested_at DESC, id"
+        else:
+            sql += " ORDER BY ingested_at DESC"
         if limit and not prompt_only:
             sql += f" LIMIT {int(limit)}"
         if not prompt_only:
@@ -7674,7 +7711,7 @@ class Store:
         if include_invalid:
             return ordinary, params
 
-        # Promotion and merge links intentionally keep retired source history
+        # Lifecycle lineage links intentionally keep retired source history
         # queryable from the live successor. They still require both endpoints
         # to satisfy every non-temporal scope/type predicate.
         historical_clauses: list[str] = []
@@ -7685,7 +7722,14 @@ class Store:
             )
             historical_clauses.extend(where)
             historical_params.extend(values)
-        lineage = "l.relation IN ('promotes','merges')"
+        lineage = "l.relation IN ('promotes','merges','supersedes')"
+        _, known = _temporal_anchors(flt)
+        for alias in ("ma", "mb"):
+            historical_clauses.extend([
+                f"({alias}.ingested_at IS NULL OR {alias}.ingested_at<=?)",
+                f"({alias}.expired_at IS NULL OR ?<{alias}.expired_at)",
+            ])
+            historical_params.extend([known, known])
         if historical_clauses:
             lineage += " AND " + " AND ".join(historical_clauses)
         return f"(({ordinary}) OR ({lineage}))", params + historical_params
@@ -10340,6 +10384,11 @@ def _row_to_edge(row: sqlite3.Row) -> Edge:
         ingested_at=row["ingested_at"], expired_at=row["expired_at"],
         provenance=_loads(row["provenance"], {}),
     )
+
+
+def _unicode_lower(value: Optional[str]) -> Optional[str]:
+    """NULL-safe SQL normalization matching ``textutil.tokenize`` without casefolding."""
+    return value.lower() if value is not None else None
 
 
 def _fts_terms(q: str) -> list[str]:

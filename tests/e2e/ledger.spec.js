@@ -1,6 +1,7 @@
 const { test, expect } = require('@playwright/test');
 const fs = require('fs/promises');
 const AxeBuilder = require('@axe-core/playwright').default;
+const { answerActionDialog } = require('./action-dialog-helper');
 
 const workspace = 'ledger-e2e';
 const memories = [
@@ -91,6 +92,12 @@ async function mockApi(page, options = {}) {
       contentType: 'application/json',
       body: JSON.stringify(body),
     });
+    if (path === '/auth/local-session') {
+      expect(request.method()).toBe('POST');
+      expect(request.postData()).toBeNull();
+      expect(request.headers()['x-engraphis-browser-session']).toBe('1');
+      return ok({ authenticated: true, review_csrf_token: 'public-test-fixture' });
+    }
     if (path === '/bootstrap') {
       return ok({
         license: licenseState,
@@ -314,6 +321,7 @@ async function mockApi(page, options = {}) {
           automationPolicy = {
             ...automationPolicy,
             ...body,
+            ...(body.cadence_hours != null ? { cadence_minutes: body.cadence_hours * 60 } : {}),
             dream: body.dream_enabled,
           };
         }
@@ -338,6 +346,227 @@ function browserErrors(page) {
   page.on('pageerror', error => errors.push(error.message));
   return errors;
 }
+
+test('release regression: a pending detail cannot change a new draft into a revision', async ({ page }) => {
+  await mockApi(page);
+  let releaseDetail;
+  const detailGate = new Promise(resolve => { releaseDetail = resolve; });
+  let detailStarted;
+  const started = new Promise(resolve => { detailStarted = resolve; });
+  await page.route('**/api/memory/mem_database**', async route => {
+    detailStarted();
+    await detailGate;
+    await route.fulfill({ json: { memory: memories[0], chain: [] } }).catch(() => {});
+  });
+  const saved = [];
+  await page.route('**/api/remember', async route => {
+    saved.push(route.request().postDataJSON());
+    await route.fulfill({ json: { id: 'mem_new' } });
+  });
+  await page.goto('/?view=library');
+  await page.getByRole('option', { name: /^Database choice/ }).click();
+  await started;
+  await page.getByRole('button', { name: 'New memory', exact: true }).click();
+  await page.locator('#editor-memory-title').fill('Independent draft');
+  await page.locator('#editor-memory-content').fill('A new fact survives a stale detail response.');
+  releaseDetail();
+  await expect(page.locator('#editor-title')).toHaveText('New memory');
+  await page.getByRole('button', { name: 'Save memory', exact: true }).click();
+  await expect.poll(() => saved.length).toBe(1);
+  expect(saved[0].content).toBe('A new fact survives a stale detail response.');
+  await expect(page.locator('#editor-error')).toBeHidden();
+});
+
+test('release regression: delayed pin completion preserves another workspace draft', async ({ page }) => {
+  await mockApi(page, { workspaces: [{ name: workspace, memories: 2 }, { name: 'other', memories: 0 }] });
+  let releasePin;
+  const pinGate = new Promise(resolve => { releasePin = resolve; });
+  let pinStarted;
+  const started = new Promise(resolve => { pinStarted = resolve; });
+  let completed;
+  const completion = new Promise(resolve => { completed = resolve; });
+  await page.route('**/api/pin', async route => {
+    pinStarted();
+    await pinGate;
+    await route.fulfill({ json: { ok: true } });
+    completed();
+  });
+  await page.goto('/?view=library');
+  await page.getByRole('option', { name: /^Database choice/ }).click();
+  await page.getByRole('button', { name: 'Pin', exact: true }).click();
+  await started;
+  await expect(page.getByRole('button', { name: 'Pin', exact: true })).toBeDisabled();
+  await page.getByLabel('Active workspace').selectOption('other');
+  await page.getByRole('button', { name: 'New memory', exact: true }).click();
+  await page.locator('#editor-memory-title').fill('Other workspace draft');
+  await page.locator('#editor-memory-content').fill('Keep this draft.');
+  releasePin();
+  await completion;
+  await expect(page.locator('#memory-editor')).toBeVisible();
+  await expect(page.locator('#editor-memory-content')).toHaveValue('Keep this draft.');
+  await expect(page.locator('#editor-scope-note')).toContainText('other');
+});
+
+for (const mutation of ['pin', 'approval']) {
+  for (const nextAction of ['draft', 'another record']) {
+    test(`release regression: ${mutation} refresh preserves a same-workspace ${nextAction}`, async ({ page }) => {
+      await mockApi(page);
+      await page.route('**/dashboard/review/csrf', route => route.fulfill({ json: { review_csrf_token: 'public-test-fixture' } }));
+      await page.route('**/dashboard/review/approve', route => {
+        expect(route.request().headers()['x-engraphis-browser-session']).toBe('1');
+        expect(route.request().headers()['x-engraphis-review-csrf']).toBe('public-test-fixture');
+        return route.fulfill({ json: { id: 'mem_approved' } });
+      });
+      let holdRefresh = false, releaseRefresh, refreshStarted;
+      const gate = new Promise(resolve => { releaseRefresh = resolve; });
+      const started = new Promise(resolve => { refreshStarted = resolve; });
+      await page.route(/\/api\/proactive\?/, async route => {
+        if (holdRefresh) { refreshStarted(); await gate; }
+        await route.fallback();
+      });
+      try {
+        await page.goto('/?view=library');
+        await page.getByRole('option', { name: /^Database choice/ }).click();
+        await expect(page.getByRole('button', { name: 'Pin', exact: true })).toBeVisible();
+        holdRefresh = true;
+        await page.getByRole('button', { name: mutation === 'pin' ? 'Pin' : 'Approve for prompt…', exact: true }).click();
+        if (mutation === 'approval') {
+          await answerActionDialog(page, { fields: { reason: 'Reviewed this test fixture.' } });
+        }
+        await started;
+        if (nextAction === 'draft') {
+          await page.getByRole('button', { name: 'New memory', exact: true }).click();
+          await page.locator('#editor-memory-title').fill('Draft during refresh');
+          await page.locator('#editor-memory-content').fill('Keep this same-workspace draft.');
+        } else {
+          await page.getByRole('option', { name: /^Safe rendering/ }).click();
+          await expect(page.locator('#memory-detail')).toContainText('Safe rendering');
+        }
+        const refreshed = page.waitForResponse(response => /\/api\/proactive\?/.test(response.url()));
+        releaseRefresh();
+        await refreshed;
+        await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+        if (nextAction === 'draft') {
+          await expect(page.locator('#memory-editor')).toBeVisible();
+          await expect(page.locator('#editor-memory-content')).toHaveValue('Keep this same-workspace draft.');
+        } else {
+          await expect(page.locator('#memory-detail')).toContainText('Safe rendering');
+          await expect(page.locator('#memory-editor')).toBeHidden();
+        }
+      } finally {
+        releaseRefresh();
+      }
+    });
+  }
+}
+
+test('release regression: same-workspace refresh replaces an aborted graph load', async ({ page }) => {
+  const errors = browserErrors(page);
+  await mockApi(page);
+  let releasePin, releaseGraph;
+  const pinPending = new Promise(resolve => { releasePin = resolve; });
+  const graphPending = new Promise(resolve => { releaseGraph = resolve; });
+  let pinStarted = false, graphRequests = 0;
+  await page.route('**/api/pin', async route => {
+    pinStarted = true;
+    await pinPending;
+    await route.fulfill({ json: { ok: true } });
+  });
+  await page.route('**/api/graph/scene**', async route => {
+    graphRequests++;
+    if (graphRequests === 1) await graphPending;
+    await route.fallback().catch(() => {});
+  });
+  try {
+    await page.goto('/?view=library');
+    await page.getByRole('option', { name: /^Database choice/ }).click();
+    await page.getByRole('button', { name: 'Pin', exact: true }).click();
+    await expect.poll(() => pinStarted).toBe(true);
+    await page.locator('.nav-item[data-view="relations"]').click();
+    await expect.poll(() => graphRequests).toBe(1);
+    releasePin();
+    await expect.poll(() => graphRequests).toBe(2);
+    await expect(page.locator('#graph-count')).toContainText('entities');
+    await expect(page.locator('#graph-canvas')).toHaveAttribute('aria-busy', 'false');
+    await expect(page.locator('#graph-empty')).not.toContainText('Graph unavailable');
+    expect(errors).toEqual([]);
+  } finally {
+    releasePin();
+    releaseGraph();
+  }
+});
+
+test('release regression: requested graph loads before slow hidden library and agenda', async ({ page }) => {
+  await mockApi(page);
+  let releaseHidden;
+  const hiddenGate = new Promise(resolve => { releaseHidden = resolve; });
+  await page.route(/\/api\/(memories|proactive)\?/, async route => {
+    await hiddenGate;
+    await route.fallback();
+  });
+  try {
+    await page.goto('/?view=relations');
+    await expect(page.locator('#graph-count')).toContainText('entities', { timeout: 5000 });
+    await expect(page.getByRole('region', { name: 'Explore project connections' })).toBeVisible();
+    await expect(page.locator('#connection-status')).toContainText('connected');
+  } finally {
+    releaseHidden();
+  }
+});
+
+test('release regression: import polling recovers the same job and reports stay paged', async ({ page }) => {
+  await mockApi(page);
+  await page.route('**/dashboard/review/csrf', route => route.fulfill({ json: { review_csrf_token: 'review-fixture' } }));
+  const files = Array.from({ length: 1500 }, (_, i) => ({
+    path: `note-${i}.md`, status: i % 2 ? 'skip' : 'import',
+  }));
+  let runs = 0, polls = 0;
+  await page.route('**/api/workspaces/import-documents/**', async route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith('/formats')) return route.fulfill({ json: { extensions: ['md'] } });
+    if (path.endsWith('/sources')) return route.fulfill({ json: { sources: [] } });
+    if (path.endsWith('/preview')) return route.fulfill({ json: { review_token: 'bound-preview', files, counts: { import: 750, skip: 750 } } });
+    if (path.endsWith('/run')) {
+      runs++;
+      return route.fulfill({ json: { job_id: 'job_review', state: 'running', files } });
+    }
+    if (path.endsWith('/jobs/job_review')) {
+      polls++;
+      if (polls === 1) return route.fulfill({ status: 503, json: { error: 'temporary progress failure' } });
+      return route.fulfill({ json: { job_id: 'job_review', state: 'complete', files } });
+    }
+    return route.fallback();
+  });
+  await page.goto('/?view=library');
+  await page.locator('#import-menu-button').click();
+  await page.locator('#obsidian-import-button').click();
+  await page.locator('#obsidian-vault-label').fill('Release fixture');
+  await page.locator('#obsidian-import-files').setInputFiles({
+    name: 'note.md', mimeType: 'text/markdown', buffer: Buffer.from('A local fixture fact.'),
+  });
+  await page.locator('#obsidian-scope').selectOption('session');
+  await page.getByRole('button', { name: 'Preview import', exact: true }).click();
+  await expect(page.locator('#obsidian-import-progress')).toHaveText('Session scope requires a session ID.');
+  await expect(page.locator('#obsidian-session')).toBeFocused();
+  await page.locator('#obsidian-scope').selectOption('workspace');
+  await page.getByRole('button', { name: 'Preview import', exact: true }).click();
+  await expect(page.locator('#obsidian-report-count')).toHaveText('1–100 of 1500 files');
+  await expect(page.locator('#obsidian-import-report li')).toHaveCount(100);
+  await page.getByRole('button', { name: 'Next report page' }).click();
+  await expect(page.locator('#obsidian-report-count')).toHaveText('101–200 of 1500 files');
+  await page.locator('#obsidian-report-filter').selectOption('skip');
+  await expect(page.locator('#obsidian-report-count')).toHaveText('1–100 of 750 files');
+  await page.locator('#obsidian-confirmed').check();
+  await page.getByRole('button', { name: 'Import documents', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Retry progress' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Import documents', exact: true })).toBeDisabled();
+  await page.getByRole('button', { name: 'Retry progress' }).click();
+  await expect(page.getByRole('button', { name: 'Preview import', exact: true })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Retry progress' })).toBeHidden();
+  expect(runs).toBe(1);
+  expect(polls).toBe(2);
+  await expect(page.locator('#obsidian-import-report li')).toHaveCount(100);
+});
 
 async function openProcessingSettings(page) {
   await page.goto('/?view=manage');
@@ -404,7 +633,7 @@ test('Pending Analytics checks the same job and shows a completed result', async
 
   await result.getByRole('button', { name: 'Refresh result' }).click();
   await expect(result).toContainText('The Cloud job is running');
-  await page.getByRole('tab', { name: 'Settings' }).click();
+  await page.getByRole('tab', { name: 'Preferences' }).click();
   await page.getByRole('tab', { name: 'Analytics' }).click();
   await expect(result).toContainText('Live memories1');
   await expect(result).toContainText('Average retention82%');
@@ -474,7 +703,7 @@ test('An unconfirmed Analytics start requires an explicit new run', async ({ pag
   await expect(result).toContainText('Starting a fresh analysis creates another run');
   expect(starts).toBe(1);
 
-  await page.getByRole('tab', { name: 'Settings' }).click();
+  await page.getByRole('tab', { name: 'Preferences' }).click();
   await page.getByRole('tab', { name: 'Analytics' }).click();
   await expect(result).toContainText('Analytics request unconfirmed');
   expect(starts).toBe(1);
@@ -862,10 +1091,15 @@ test('Ledger enters Every node from a loaded overview without losing its scope',
   await expect(page.locator('#graph-repel-output')).toHaveText('82');
   await expect(page.locator('#graph-link-output')).toHaveText('34');
   await expect(page.locator('#graph-gravity-output')).toHaveText('27');
-  await page.locator('#graph-tune-min-degree').fill('2');
-  await expect(page.locator('#graph-count')).toContainText('0 visible of 3 entities');
-  await page.locator('#graph-tune-min-degree').fill('1');
-  await expect(page.locator('#graph-count')).toContainText('2 visible of 3 entities');
+  await page.getByRole('tab', { name: 'Analyse' }).click();
+  // Minimum links applies to linked entities; the Unlinked nodes switch alone decides the
+  // isolated ones, in the Every-node view exactly as in the overview.
+  await page.locator('#graph-min-degree').fill('2');
+  await expect(page.locator('#graph-count')).toContainText('1 visible of 3 entities');
+  await page.locator('#graph-min-degree').fill('1');
+  await expect(page.locator('#graph-count')).not.toContainText('visible of');
+  await expect(page.locator('#graph-count')).toContainText('3 entities');
+  await page.getByRole('tab', { name: 'Explore' }).click();
   const persistedInAllMode = await page.evaluate(() => JSON.parse(
     localStorage.getItem('engraphis-ledger-graph-preferences-v1') || '{}',
   ));
@@ -1007,14 +1241,16 @@ test('Ledger cache-busts a graph renderer that fetched but did not register', as
   await expect(page.locator('#graph-empty')).toContainText('Graph unavailable');
   expect(rendererRequests).toHaveLength(1);
   const first = new URL(rendererRequests[0]);
-  expect(first.searchParams.get('v')).toBe('20260927-unmerged-readiness-3');
+  const version = first.searchParams.get('v');
+  expect(version).toBeTruthy();
   expect(first.searchParams.has('retry')).toBe(false);
 
   await page.getByRole('button', { name: 'Reload data' }).click();
   await expect(page.locator('#graph-count')).toContainText('3 entities · 1 relations');
   expect(rendererRequests).toHaveLength(2);
+  // The retry keeps the release's cache key and only adds a fresh retry marker.
   const second = new URL(rendererRequests[1]);
-  expect(second.searchParams.get('v')).toBe('20260927-unmerged-readiness-3');
+  expect(second.searchParams.get('v')).toBe(version);
   expect(second.searchParams.get('retry')).toBe('1');
 });
 
@@ -1179,6 +1415,7 @@ test('Ledger deadline includes stalled graph assets and Reload data starts a fre
     return route.fallback();
   });
   await page.goto('/');
+  await expect(page.locator('#connection-status')).toContainText('Local engine connected');
   await page.locator('.nav-item[data-view="relations"]').click();
   await revealAdvancedGraphControls(page);
   await expect(page.locator('#graph-empty')).toContainText('High-quality graph loading timed out');
@@ -1249,7 +1486,7 @@ test('Ledger local renewal failure gives recovery guidance without requesting a 
   });
   await page.goto('/');
   await expect(page.locator('#connection-status')).toContainText('Local engine unavailable');
-  await expect(page.locator('#notice-text')).toContainText('Reload this page to retry');
+  await expect(page.locator('#connection-banner-detail')).toContainText('Reload this page to retry');
   await expect(page.locator('#browser-auth-dialog')).not.toBeVisible();
   expect(sessions).toBe(1);
 });
@@ -1268,7 +1505,7 @@ test('Ledger preserves paid cloud authentication errors without retrying or aski
     return route.abort();
   });
   await page.goto('/');
-  await expect(page.locator('#notice-text')).toContainText('Reconnect your Engraphis Cloud account.');
+  await expect(page.locator('#connection-banner-detail')).toContainText('Reconnect your Engraphis Cloud account.');
   await expect(page.locator('#browser-auth-dialog')).not.toBeVisible();
   expect(bootstraps).toBe(1);
   expect(sessions).toBe(0);
@@ -1466,16 +1703,14 @@ test('A personal Team workspace needs explicit consent before sharing for Cloud 
   const share = page.getByRole('button', { name: 'Share for Cloud Sync' });
   await expect(share).toHaveCount(1);
 
-  page.once('dialog', async dialog => {
-    expect(dialog.message()).toContain('signed-in Team members');
-    expect(dialog.message()).toContain('encrypted Cloud Sync');
-    await dialog.dismiss();
-  });
   await share.click();
+  await answerActionDialog(page, {
+    accept: false, expectText: ['signed-in Team members', 'encrypted Cloud Sync'],
+  });
   expect(requests.visibilityChanges).toEqual([]);
 
-  page.once('dialog', dialog => dialog.accept());
   await share.click();
+  await answerActionDialog(page);
   await expect(page.locator('#notice-text')).toContainText('shared and eligible for Cloud Sync');
   expect(requests.visibilityChanges).toEqual([
     { workspace, visibility: 'shared', confirmed: true },
@@ -1484,11 +1719,8 @@ test('A personal Team workspace needs explicit consent before sharing for Cloud 
 
   const unshare = page.getByRole('button', { name: 'Make personal' });
   await expect(unshare).toHaveCount(1);
-  page.once('dialog', async dialog => {
-    expect(dialog.message()).toContain('does not erase data already uploaded');
-    await dialog.accept();
-  });
   await unshare.click();
+  await answerActionDialog(page, { expectText: ['does not erase data already uploaded'] });
   await expect(page.locator('#notice-text')).toContainText('excluded from future Cloud Sync');
   expect(requests.visibilityChanges).toEqual([
     { workspace, visibility: 'shared', confirmed: true },
@@ -1497,7 +1729,6 @@ test('A personal Team workspace needs explicit consent before sharing for Cloud 
 });
 
 test('Ledger initializes hosted automation only after an explicit upload action', async ({ page }) => {
-  page.on('dialog', dialog => dialog.accept());
   const requests = await mockApi(page, {
     automationPolicy: {
       enabled: false,
@@ -1527,6 +1758,7 @@ test('Ledger initializes hosted automation only after an explicit upload action'
   await expect(result).toContainText('No upload occurs until you choose this action.');
   await expect(page.locator('#automation-enabled')).toHaveCount(0);
   await page.getByRole('button', { name: 'Initialize hosted automation' }).click();
+  await answerActionDialog(page, { expectText: ['upload one bounded snapshot'] });
   await expect(page.locator('#automation-enabled')).toBeChecked();
   expect(requests.automationBootstraps).toEqual([workspace]);
   expect(requests.automationPolicies).toEqual([]);
@@ -2422,7 +2654,7 @@ test('a saved code view reloads when only its repository changes', async ({ page
   await after;
 });
 
-test('themes persist and both visible interface selectors round-trip', async ({ page }) => {
+test('themes persist, stay accessible, and the retired Classic URL opens Ledger', async ({ page }) => {
   const errors = browserErrors(page);
   const isAxeStyleProbe = message => (
     message.startsWith('Applying inline style violates')
@@ -2445,40 +2677,37 @@ test('themes persist and both visible interface selectors round-trip', async ({ 
   };
   await mockApi(page);
   await page.goto('/');
-  await page.getByRole('button', { name: 'Settings' }).click();
-  await page.getByRole('tab', { name: 'Settings' }).click();
 
-  const theme = page.locator('#theme-select');
+  const theme = page.locator('#sidebar-theme-select');
+  await expect(page.locator('#theme-select')).toHaveCount(0);
+  await expect(page.locator('#dashboard-select')).toHaveCount(0);
   await theme.selectOption('matrix');
   await expect(page.locator('body')).toHaveAttribute('data-theme', 'matrix');
   await page.reload();
-  await page.getByRole('tab', { name: 'Settings' }).click();
   await expect(theme).toHaveValue('matrix');
+  await expect(page.locator('body')).toHaveAttribute('data-theme', 'matrix');
 
   await page.keyboard.press('Tab');
   const focused = page.locator(':focus');
   expect(await focused.evaluate(element => getComputedStyle(element).outlineStyle))
     .not.toBe('none');
 
-  for (const value of ['slate', 'midnight', 'paper', 'matrix']) {
+  for (const value of ['slate', 'midnight', 'solarized', 'paper', 'sepia', 'matrix']) {
     await theme.selectOption(value);
+    await expect(page.locator('body')).toHaveAttribute('data-theme', value);
     const accessibility = await analyzeUnderStrictCsp(new AxeBuilder({ page }));
     expect(accessibility.violations, `${value} theme accessibility`).toEqual([]);
   }
 
-  await page.getByRole('combobox', { name: 'Interface' }).selectOption('classic');
-  await expect(page).toHaveURL(/\/classic$/);
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
-  await expect(page.getByRole('combobox', { name: 'Dashboard interface' }))
-    .toHaveValue('classic');
-  await expect(page.getByRole('combobox', { name: 'theme select' }))
-    .toHaveValue('matrix');
-  const classicAccessibility = await analyzeUnderStrictCsp(new AxeBuilder({ page })
-    .include('#view-settings')
-    .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa']));
-  expect(classicAccessibility.violations).toEqual([]);
-  await page.getByRole('combobox', { name: 'Dashboard interface' }).selectOption('primary');
+  // A theme chosen in the retired Classic dashboard carries over once.
+  await page.evaluate(() => {
+    localStorage.removeItem('engraphis-ledger-theme');
+    localStorage.setItem('engraphis-theme', 'sepia');
+  });
+  await page.goto('/classic');
   await expect(page).toHaveURL(/\/$/);
+  await expect(page.locator('body')).toHaveAttribute('data-theme', 'sepia');
+  await expect(theme).toHaveValue('sepia');
   expect(errors.filter(message => !isAxeStyleProbe(message))).toEqual([]);
 });
 
@@ -2486,7 +2715,7 @@ test('Ledger exposes local LLM setup and extraction controls', async ({ page }) 
   await mockApi(page);
   await page.goto('/');
   await page.getByRole('button', { name: 'Settings' }).click();
-  await page.getByRole('tab', { name: 'Settings' }).click();
+  await page.getByRole('tab', { name: 'Preferences' }).click();
 
   await expect(page.getByRole('heading', { name: 'Connect an LLM' })).toBeVisible();
   await expect(page.getByText('not configured', { exact: true })).toBeVisible();
@@ -2494,13 +2723,13 @@ test('Ledger exposes local LLM setup and extraction controls', async ({ page }) 
   const model = page.getByRole('combobox', { name: 'Model' });
   await expect(provider).toHaveValue('openai');
   await expect(model).toHaveValue('gpt-4o-mini');
-  await expect(page.getByLabel('Local .env setup')).toHaveValue(/ENGRAPHIS_LLM_PROVIDER=openai/);
+  await expect(page.getByLabel('Owner-private config.env setup')).toHaveValue(/ENGRAPHIS_LLM_PROVIDER=openai/);
   await expect(page.locator('#llm-connection').getByRole('button', { name: 'Turn on' })).toBeDisabled();
   await expect(page.locator('#llm-connection').getByRole('button', { name: 'Turn off' })).toBeDisabled();
 
   await provider.selectOption('anthropic');
   await expect(model).toHaveValue('claude-sonnet-5-5');
-  await expect(page.getByLabel('Local .env setup')).toHaveValue(/ENGRAPHIS_LLM_PROVIDER=anthropic/);
+  await expect(page.getByLabel('Owner-private config.env setup')).toHaveValue(/ENGRAPHIS_LLM_PROVIDER=anthropic/);
   await page.getByRole('button', { name: 'Test connection' }).click();
   await expect(page.locator('#llm-test-result')).toContainText('No API key configured');
 });
@@ -2518,18 +2747,16 @@ test('Ledger applies the configured LLM extraction toggle', async ({ page }) => 
   } });
   await page.goto('/');
   await page.getByRole('button', { name: 'Settings' }).click();
-  await page.getByRole('tab', { name: 'Settings' }).click();
+  await page.getByRole('tab', { name: 'Preferences' }).click();
 
   const turnOn = page.locator('#llm-connection').getByRole('button', { name: 'Turn on' });
   await expect(turnOn).toBeEnabled();
   await expect(page.getByText(/Retention supervision is ON/)).toBeVisible();
   await expect(page.getByText(/bounded excerpt/)).toBeVisible();
-  page.once('dialog', dialog => {
-    expect(dialog.message()).toContain('configured LLM provider');
-    expect(dialog.message()).toContain('provider must read that text');
-    return dialog.accept();
-  });
   await turnOn.click();
+  await answerActionDialog(page, {
+    expectText: ['configured LLM provider', 'provider must read that text'],
+  });
   await expect(page.getByText('ON', { exact: true })).toBeVisible();
   await expect(page.locator('#llm-connection').getByRole('button', { name: 'Turn off' })).toBeEnabled();
 
@@ -2576,7 +2803,7 @@ test('Ledger gives active Pro members direct Cloud access and saves hosted polic
   await expect(page.locator('#plan-badge')).toHaveText('PRO');
 
   await page.getByRole('button', { name: 'Settings' }).click();
-  await page.getByRole('tab', { name: 'Settings' }).click();
+  await page.getByRole('tab', { name: 'Preferences' }).click();
   const cloudSettings = page.locator('#cloud-account-settings');
   await expect(cloudSettings.getByRole('link', { name: 'Open Engraphis Cloud' })).toHaveAttribute(
     'href',
@@ -2586,19 +2813,16 @@ test('Ledger gives active Pro members direct Cloud access and saves hosted polic
   await page.getByRole('tab', { name: 'Automation' }).click();
   await expect(page.getByRole('checkbox', { name: 'Enable hosted maintenance' })).toBeChecked();
   await page.getByRole('spinbutton', { name: 'Run every (hours)' }).fill('12');
-  page.once('dialog', dialog => {
-    expect(dialog.message()).toContain(
-      'Cloud Sync encrypts eligible shared-workspace changes end-to-end',
-    );
-    expect(dialog.message()).toContain('Engraphis Cloud cannot read their contents');
-    expect(dialog.message()).toContain('Engraphis will submit a bounded snapshot');
-    expect(dialog.message()).toContain(
-      'normal and sensitive memory content to Cloud for managed compute',
-    );
-    expect(dialog.message()).not.toContain('Privacy, by design.');
-    return dialog.accept();
-  });
   await page.getByRole('button', { name: 'Save & send policy to Cloud' }).click();
+  await expect(page.locator('#action-dialog')).not.toContainText('Privacy, by design.');
+  await answerActionDialog(page, {
+    expectText: [
+      'Cloud Sync encrypts eligible shared-workspace changes end-to-end',
+      'Engraphis Cloud cannot read their contents',
+      'Engraphis will submit a bounded snapshot',
+      'normal and sensitive memory content to Cloud for managed compute',
+    ],
+  });
   await expect.poll(() => requests.automationPolicies.length).toBe(1);
   expect(requests.details.filter(({ path, method }) => (
     path === '/automation' && method === 'POST'
@@ -2822,3 +3046,1161 @@ test('renderer construction failure removes its candidate host', async ({ page }
   await expect(page.locator('.graph-canvas-candidate')).toHaveCount(0);
   await expect(page.locator('#graph-count')).toContainText('entities');
 });
+
+// ── Capabilities carried over from the retired Classic dashboard ────────────────────────
+
+const fulfillJson = (route, body) => route.fulfill({
+  status: 200, contentType: 'application/json', body: JSON.stringify(body),
+});
+
+test('Explore explains its colours and lists every entity and relation for keyboard users', async ({ page }) => {
+  const errors = browserErrors(page);
+  await mockApi(page);
+  await page.goto('/');
+  await page.locator('.nav-item[data-view="relations"]').click();
+  await expect(page.locator('#graph-canvas canvas').first()).toBeAttached({ timeout: 20_000 });
+
+  const legend = page.locator('#graph-legend');
+  const rows = page.locator('#graph-legend-list li');
+  await expect(legend).toBeVisible();
+  await expect(page.locator('#graph-legend-title')).toHaveText('Clusters');
+  await expect(rows.first().locator('svg circle')).toHaveAttribute('fill', /^#[0-9a-f]{6}$/i);
+
+  await revealAdvancedGraphControls(page);
+  await page.locator('[data-graph-color-choice="type"]').click();
+  await expect(page.locator('#graph-legend-title')).toHaveText('Entity types');
+  await expect(rows.first()).toContainText('Person or concept');
+  await page.getByLabel('Colour for Person or concept nodes').fill('#ff8800');
+  await expect(page.locator('[data-graph-palette-choice="custom"]')).toHaveAttribute('aria-pressed', 'true');
+  await expect(rows.first().locator('svg circle')).toHaveAttribute('fill', '#ff8800');
+  await page.locator('#graph-reset-colors').click();
+  await expect(page.locator('[data-graph-palette-choice="theme"]')).toHaveAttribute('aria-pressed', 'true');
+  await expect(rows.first().locator('svg circle')).not.toHaveAttribute('fill', '#ff8800');
+  await page.locator('[data-graph-color-choice="connections"]').click();
+  await expect(page.locator('#graph-legend-title')).toHaveText('Connections');
+  await expect(legend).toContainText('Most connected');
+
+  // The canvas steps through entities, most related first, and says where it is.
+  await page.locator('#graph-canvas').focus();
+  await page.keyboard.press('ArrowDown');
+  await expect(page.locator('#graph-keyboard-status')).toContainText('Engraphis, 1 relation, 1 of 3');
+  await page.keyboard.press('ArrowDown');
+  await expect(page.locator('#graph-keyboard-status')).toContainText('Postgres, 1 relation, 2 of 3');
+  await page.keyboard.press('End');
+  await expect(page.locator('#graph-keyboard-status')).toContainText('Unlinked Note, 0 relations, 3 of 3');
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#graph-keyboard-status')).toHaveText('Selection cleared.');
+
+  // Analyse lists the same entities and relations as ordinary, filterable buttons.
+  await page.getByRole('tab', { name: 'Analyse' }).click();
+  const entities = page.locator('#graph-entity-list button.graph-explorer-item');
+  await expect(entities).toHaveCount(3);
+  const relation = page.locator('#graph-relation-list .graph-relation-row');
+  await expect(relation).toHaveCount(1);
+  await expect(relation.getByRole('button', { name: 'Engraphis' })).toBeEnabled();
+  await expect(relation.getByRole('button', { name: 'Postgres' })).toBeEnabled();
+  await page.locator('#graph-explorer-filter').fill('postgres');
+  await expect(entities).toHaveCount(1);
+  await expect(entities.first()).toContainText('Postgres');
+  expect(errors).toEqual([]);
+});
+
+test('relation pagination focuses the first newly revealed row', async ({ page }) => {
+  const nodes = Array.from({ length: 82 }, (_, i) => ({
+    id: `node-${i}`, label: `Node ${i}`, type: 'concept',
+  }));
+  const edges = nodes.slice(1).map(node => ({
+    source: nodes[0].id, target: node.id, label: 'related', layer: 'semantic',
+  }));
+  await mockApi(page, { graphScene: { nodes, edges, meta: { total_nodes: 82, total_edges: 81 } } });
+  await page.goto('/');
+  await expect(page.locator('#connection-status')).toContainText('Local engine connected');
+  await page.locator('.nav-item[data-view="relations"]').click();
+  await expect(page.locator('#graph-canvas')).toHaveAttribute('aria-busy', 'false');
+  await page.getByRole('tab', { name: 'Analyse' }).click();
+  const rows = page.locator('#graph-relation-list .graph-relation-row');
+  await expect(rows).toHaveCount(40);
+  await page.getByRole('button', { name: 'Show 40 more relations', exact: true }).click();
+  await expect(rows).toHaveCount(80);
+  await expect(rows.nth(40).locator('button').first()).toBeFocused();
+  await page.getByRole('button', { name: 'Show 1 more relations', exact: true }).click();
+  await expect(rows).toHaveCount(81);
+  await expect(rows.nth(80).locator('button').first()).toBeFocused();
+});
+
+for (const every of [false, true]) {
+  test(`Explore keeps accessible navigation within the ${every ? 'Every-node' : 'overview'} scope`, async ({ page }) => {
+    const errors = browserErrors(page);
+    await page.addInitScript(() => {
+      for (const name of ['EngraphisGraph', 'EngraphisEveryGraph']) {
+        let factory;
+        Object.defineProperty(window, name, {
+          configurable: true,
+          get: () => factory,
+          set: value => {
+            factory = { ...value, create: (...args) => {
+              const engine = value.create(...args);
+              window.__scopeEngine = engine;
+              return engine;
+            } };
+          },
+        });
+      }
+      // Preview has no authoritative degrees. Ready must refresh the committed explorer,
+      // even when it arrives after the user can already see the progressive canvas.
+      const NativeWorker = window.Worker;
+      window.Worker = class extends NativeWorker {
+        set onmessage(callback) {
+          super.onmessage = callback && (event => {
+            if (event.data.type === 'ready') {
+              window.setTimeout(() => callback.call(this, event), 200);
+            } else callback.call(this, event);
+          });
+        }
+      };
+    });
+    await mockApi(page, { graphScene: {
+      nodes: [
+        { id: 'hub', label: 'Hub', type: 'artifact' },
+        { id: 'leaf-a', label: 'Leaf A', type: 'technology' },
+        { id: 'leaf-b', label: 'Leaf B', type: 'technology' },
+        { id: 'free', label: 'Free', type: 'concept' },
+      ],
+      edges: [
+        { source: 'hub', target: 'leaf-a', label: 'uses', layer: 'semantic' },
+        { source: 'hub', target: 'leaf-b', label: 'mentions', layer: 'entity' },
+      ],
+      meta: { total_nodes: 4, total_edges: 2 },
+    } });
+    await page.goto('/');
+    await expect(page.locator('#connection-status')).toContainText('Local engine connected');
+    await page.locator('.nav-item[data-view="relations"]').click();
+    await revealAdvancedGraphControls(page);
+    await expect(page.locator('#graph-canvas')).toHaveAttribute('aria-busy', 'false');
+    if (every) {
+      await page.locator('[data-graph-preset-choice="every"]').click();
+      await expect(page.locator('#graph-mode')).toContainText('All nodes');
+      await expect(page.locator('#graph-canvas')).toHaveAttribute('aria-busy', 'false');
+    }
+    await page.getByRole('tab', { name: 'Analyse' }).click();
+    const entities = page.locator('#graph-entity-list button.graph-explorer-item');
+    const relations = page.locator('#graph-relation-list .graph-relation-row');
+    await expect(entities).toHaveCount(4);
+    await expect(relations).toHaveCount(2);
+    await page.getByRole('tab', { name: 'Explore' }).click();
+    await page.locator('[data-graph-color-choice="type"]').click();
+    await expect(page.locator('#graph-legend-list li')).toHaveCount(3);
+    await page.getByRole('tab', { name: 'Analyse' }).click();
+
+    await page.locator('#graph-min-degree').fill('2');
+    await expect(entities).toHaveCount(2);
+    expect(await entities.evaluateAll(items => items.map(item => item.dataset.entity).sort()))
+      .toEqual(['free', 'hub']);
+    await expect(page.locator('#graph-legend-list li')).toHaveCount(2);
+    await expect(page.locator('#graph-legend-list')).not.toContainText('technology');
+    await page.getByRole('tab', { name: 'Explore' }).click();
+    await page.locator('#graph-show-unlinked').click();
+    await expect(page.locator('#graph-canvas')).toHaveAttribute('aria-busy', 'false');
+    await expect(entities).toHaveCount(1);
+    await expect(entities).toHaveAttribute('data-entity', 'hub');
+    await expect(page.locator('#graph-legend-list li')).toHaveCount(1);
+    await expect(relations).toHaveCount(0);
+    await page.getByRole('tab', { name: 'Analyse' }).click();
+    await page.locator('#graph-min-degree').fill('3');
+    await expect(entities).toHaveCount(0);
+    await expect(page.locator('#graph-legend')).toBeHidden();
+    await expect(page.locator('#graph-entity-list')).toContainText('No entities are visible in the current graph scope.');
+    await page.locator('#graph-min-degree').fill('2');
+    await expect(entities).toHaveCount(1);
+    await page.getByRole('tab', { name: 'Explore' }).click();
+    await page.locator('#graph-canvas').focus();
+    await page.keyboard.press('End');
+    await expect(page.locator('#graph-keyboard-status')).toContainText('Hub, 0 relations, 1 of 1');
+    await page.keyboard.press('Escape');
+    await page.getByRole('tab', { name: 'Analyse' }).click();
+    await page.locator('#graph-min-degree').fill('1');
+    await expect(entities).toHaveCount(3);
+    await expect(page.locator('#graph-legend-list li')).toHaveCount(2);
+    await expect(relations).toHaveCount(2);
+
+    await page.getByRole('tab', { name: 'Explore' }).click();
+    await page.locator('[data-graph-layer="semantic"]').click();
+    await expect(relations).toHaveCount(1);
+    await expect(relations).toContainText('mentions');
+    await page.locator('#graph-canvas').focus();
+    await page.keyboard.press('End');
+    await expect(page.locator('#graph-keyboard-status')).toContainText('Leaf A, 0 relations, 3 of 3');
+    await page.keyboard.press('Enter');
+    await expect(page.locator('#graph-connections-dialog')).toBeVisible();
+    await expect(page.locator('#graph-connections-meta')).toContainText('0 direct connections');
+    await page.keyboard.press('Escape');
+    await expect(page.locator('#graph-connections-dialog')).not.toBeVisible();
+    await page.locator('[data-graph-layer="semantic"]').click();
+    await expect(relations).toHaveCount(2);
+    // Restoring a layer changes relation counts/order but retains the selected entity.
+    await expect(page.locator('#graph-entity-list [aria-current="true"]')).toHaveAttribute('data-entity', 'leaf-a');
+    await page.locator('#graph-canvas').focus();
+    await page.keyboard.press('ArrowDown');
+    await expect(page.locator('#graph-keyboard-status')).toContainText('Leaf B, 1 relation, 3 of 3');
+
+    const stable = await page.evaluate(() => {
+      const engine = window.__scopeEngine;
+      const snapshot = engine.visibleData();
+      const control = document.querySelector('#graph-entity-list button');
+      engine.setSettings({ font: 14 });
+      return { snapshot: snapshot === engine.visibleData(), control: control === document.querySelector('#graph-entity-list button') };
+    });
+    expect(stable).toEqual({ snapshot: true, control: true });
+    if (!every) {
+      await page.evaluate(() => {
+        window.__scopeEngine.clearFocus();
+        window.__scopeEngine.setScope({ depth: 1 });
+        window.__scopeEngine.focus('leaf-a');
+      });
+      await expect(entities).toHaveCount(2);
+      expect(await entities.evaluateAll(items => items.map(item => item.dataset.entity).sort()))
+        .toEqual(['hub', 'leaf-a']);
+      await page.locator('#graph-canvas').focus();
+      await page.keyboard.press('Escape');
+      await expect(entities).toHaveCount(3);
+    }
+    await page.getByRole('tab', { name: 'Explore' }).click();
+    await page.locator('#graph-show-unlinked').click();
+    await expect(entities).toHaveCount(4);
+    await expect(page.locator('#graph-legend-list li')).toHaveCount(3);
+    expect(errors).toEqual([]);
+  });
+}
+
+test('Activity verifies the receipt chain and says plainly when it cannot', async ({ page }) => {
+  const errors = browserErrors(page);
+  await mockApi(page);
+  let verification = { valid: true, count: 3, head: 'rcpt_0123456789abcdefghijklmnop' };
+  await page.route('**/api/receipts/verify**', route => fulfillJson(route, verification));
+  await page.goto('/');
+  await page.locator('.nav-item[data-view="provenance"]').click();
+  await page.getByRole('tab', { name: 'Audit & receipts' }).click();
+
+  const status = page.locator('#receipt-chain-status');
+  await expect(status).toHaveAttribute('data-state', 'valid');
+  await expect(status).toContainText('Receipt chain verified · 3 receipts');
+  await expect(status.locator('code')).toContainText('rcpt_0123');
+  verification = { valid: false, count: 3, errors: [{ index: 1 }] };
+  await page.locator('#verify-receipts').click();
+  await expect(status).toHaveAttribute('data-state', 'invalid');
+  await expect(status).toContainText('Receipt chain broken · 3 receipts checked');
+  await expect(status).toContainText('first problem at receipt 2');
+  // An answer without a verdict is never presented as a verified chain.
+  verification = {};
+  await page.locator('#verify-receipts').click();
+  await expect(status).toHaveAttribute('data-state', 'unknown');
+  await expect(status).toContainText('status is unavailable');
+  expect(errors).toEqual([]);
+});
+
+for (const discard of [false, true]) {
+  test(`Renaming an active workspace ${discard ? 'requires consent before discarding' : 'keeps'} a hidden draft`, async ({ page }) => {
+    const workspaces = [{ name: workspace, memories: 2 }];
+    await mockApi(page, { workspaces });
+    let renames = 0;
+    await page.route('**/api/workspaces/rename', async route => {
+      const body = route.request().postDataJSON();
+      renames++;
+      workspaces[0].name = body.new_name;
+      await fulfillJson(route, body);
+    });
+    await page.goto('/?view=library');
+    await page.locator('#new-memory-button').click();
+    await page.locator('#editor-memory-content').fill('Keep this draft unless I consent.');
+    await page.locator('.nav-item[data-view="manage"]').click();
+    await page.getByRole('button', { name: 'Rename', exact: true }).click();
+    const dialog = page.locator('#action-dialog');
+    await expect(page.locator('#action-dialog-title')).toContainText('Discard');
+    expect(renames).toBe(0);
+    await page.locator(discard ? '#action-dialog-submit' : '#action-dialog-cancel').click();
+    if (discard) {
+      await expect(page.locator('#action-dialog-title')).toHaveText('Rename workspace');
+      await answerActionDialog(page, { fields: { value: workspace + '-renamed' } });
+      await expect(page.locator('#workspace-select')).toHaveValue(workspace + '-renamed');
+      expect(renames).toBe(1);
+    } else {
+      await expect(dialog).toBeHidden();
+      expect(renames).toBe(0);
+    }
+    await page.locator('.nav-item[data-view="library"]').click();
+    if (discard) await expect(page.locator('#memory-editor')).toBeHidden();
+    else {
+      await expect(page.locator('#memory-editor')).toBeVisible();
+      await expect(page.locator('#editor-memory-content')).toHaveValue('Keep this draft unless I consent.');
+    }
+  });
+}
+
+for (const operation of ['merge', 'delete', 'switch']) {
+  for (const discard of [false, true]) {
+    test(`${operation} from Settings ${discard ? 'requires consent before discarding' : 'keeps'} the active workspace draft`, async ({ page }) => {
+      const workspaces = [{ name: workspace, memories: 2 }, { name: 'other', memories: 1 }];
+      await mockApi(page, { workspaces });
+      let mutations = 0;
+      for (const endpoint of ['merge', 'delete']) {
+        await page.route(`**/api/workspaces/${endpoint}`, async route => {
+          mutations++;
+          workspaces.splice(0, 1);
+          await fulfillJson(route, { memories_moved: 2, memories_removed: 2 });
+        });
+      }
+      await page.goto('/?view=library');
+      await page.locator('#new-memory-button').click();
+      await page.locator('#editor-memory-content').fill('Preserve this draft until I consent.');
+      await page.locator('.nav-item[data-view="manage"]').click();
+      const card = page.locator('.workspace-card').filter({
+        has: page.getByRole('heading', { name: operation === 'switch' ? 'other' : `${workspace} active`, exact: true }),
+      });
+      const label = { merge: 'Merge into…', delete: 'Delete', switch: 'Switch to' }[operation];
+      await card.getByRole('button', { name: label, exact: true }).click();
+      await expect(page.locator('#action-dialog-title')).toContainText('Discard');
+      expect(mutations).toBe(0);
+      await page.locator(discard ? '#action-dialog-submit' : '#action-dialog-cancel').click();
+      if (discard) {
+        if (operation !== 'switch') {
+          await expect(page.locator('#action-dialog-title')).toContainText(operation === 'merge' ? 'Merge workspace' : 'Delete workspace');
+          await answerActionDialog(page);
+        }
+        await expect(page.locator('#workspace-select')).toHaveValue('other');
+        expect(mutations).toBe(operation === 'switch' ? 0 : 1);
+      } else {
+        await expect(page.locator('#action-dialog')).toBeHidden();
+        await expect(page.locator('#workspace-select')).toHaveValue(workspace);
+        expect(mutations).toBe(0);
+      }
+      await page.locator('.nav-item[data-view="library"]').click();
+      if (discard) await expect(page.locator('#memory-editor')).toBeHidden();
+      else await expect(page.locator('#editor-memory-content')).toHaveValue('Preserve this draft until I consent.');
+    });
+  }
+}
+
+test('Consolidation refresh preserves a hidden draft', async ({ page }) => {
+  await mockApi(page);
+  await page.route('**/api/consolidate', route => fulfillJson(route, { reinforced: 2 }));
+  await page.goto('/?view=library');
+  await page.locator('#new-memory-button').click();
+  await page.locator('#editor-memory-content').fill('Maintenance must keep this draft.');
+  await page.locator('.nav-item[data-view="manage"]').click();
+  await page.locator('#manage-consolidate-tab').click();
+  await page.locator('#consolidate-form button[type="submit"]').click();
+  await expect(page.locator('#consolidate-commit')).toBeEnabled();
+  await page.locator('#consolidate-commit').click();
+  await answerActionDialog(page);
+  await expect(page.locator('#consolidate-result')).toContainText('Consolidation committed');
+  await page.locator('.nav-item[data-view="library"]').click();
+  await expect(page.locator('#memory-editor')).toBeVisible();
+  await expect(page.locator('#editor-memory-content')).toHaveValue('Maintenance must keep this draft.');
+});
+
+for (const operation of ['rename', 'merge', 'delete']) {
+  test(`pending ${operation} locks its workspace and preserves a newer workspace draft`, async ({ page }) => {
+    const workspaces = [{ name: workspace, memories: 2 }, { name: 'other', memories: 1 }];
+    await mockApi(page, { workspaces });
+    let release, started = false;
+    const pending = new Promise(resolve => { release = resolve; });
+    const completed = page.waitForResponse(response => response.url().endsWith(`/api/workspaces/${operation}`));
+    await page.route(`**/api/workspaces/${operation}`, async route => {
+      started = true;
+      await pending;
+      if (operation === 'rename') workspaces[0].name = workspace + '-renamed';
+      else workspaces.splice(0, 1);
+      await fulfillJson(route, { memories_moved: 2, memories_removed: 2 });
+    });
+    try {
+      await page.goto('/?view=manage');
+      const card = page.locator('.workspace-card').filter({
+        has: page.getByRole('heading', { name: `${workspace} active`, exact: true }),
+      });
+      await card.getByRole('button', { name: { rename: 'Rename', merge: 'Merge into…', delete: 'Delete' }[operation], exact: true }).click();
+      await answerActionDialog(page, operation === 'rename' ? { fields: { value: workspace + '-renamed' } } : {});
+      await expect.poll(() => started).toBe(true);
+      await page.locator('.nav-item[data-view="library"]').click();
+      await expect(page.locator('#new-memory-button')).toBeDisabled();
+      await page.locator('#workspace-select').selectOption('other');
+      await expect(page.locator('#new-memory-button')).toBeEnabled();
+      await page.locator('#new-memory-button').click();
+      await page.locator('#editor-memory-content').fill('Keep the newer workspace draft.');
+      release();
+      await (await completed).finished();
+      await expect(page.locator('#workspace-select option[value="' + workspace + '"]')).toHaveCount(0);
+      await expect(page.locator('#workspace-select')).toHaveValue('other');
+      await expect(page.locator('#memory-editor')).toBeVisible();
+      await expect(page.locator('#editor-memory-content')).toHaveValue('Keep the newer workspace draft.');
+      await expect(page.locator('#new-memory-button')).toBeEnabled();
+    } finally { release(); }
+  });
+}
+
+for (const operation of ['rename', 'merge', 'delete']) {
+  test(`successful ${operation} retains the confirmed owner when bootstrap fails`, async ({ page }) => {
+    const workspaces = [{ name: workspace, memories: 2 }, { name: 'other', memories: 1 }];
+    await mockApi(page, { workspaces });
+    let failRefresh = false;
+    await page.route(`**/api/workspaces/${operation}`, async route => {
+      if (operation === 'rename') workspaces[0].name = workspace + '-renamed';
+      else workspaces.splice(0, 1);
+      failRefresh = true;
+      await fulfillJson(route, { memories_moved: 2, memories_removed: 2 });
+    });
+    await page.route('**/api/bootstrap*', async route => {
+      if (failRefresh) return route.fulfill({ status: 503, json: { detail: 'Workspace list unavailable' } });
+      await route.fallback();
+    });
+    await page.goto('/?view=manage');
+    await page.locator('.workspace-card').filter({
+      has: page.getByRole('heading', { name: `${workspace} active`, exact: true }),
+    }).getByRole('button', { name: { rename: 'Rename', merge: 'Merge into…', delete: 'Delete' }[operation], exact: true }).click();
+    await answerActionDialog(page, operation === 'rename' ? { fields: { value: workspace + '-renamed' } } : {});
+    await expect(page.locator('#notice-banner')).toContainText('workspace list could not be refreshed');
+    const owner = operation === 'rename' ? workspace + '-renamed' : 'other';
+    await expect(page.locator('#workspace-select')).toHaveValue(owner);
+    await expect(page.locator('#workspace-select option[value="' + workspace + '"]')).toHaveCount(0);
+    await page.locator('.nav-item[data-view="library"]').click();
+    await page.locator('#new-memory-button').click();
+    await expect(page.locator('#editor-scope-note')).toContainText('Workspace: ' + owner);
+  });
+}
+
+test('deleting the last workspace clears the approved editor and loaded records', async ({ page }) => {
+  const workspaces = [{ name: workspace, memories: 2 }];
+  await mockApi(page, { workspaces });
+  await page.route('**/api/workspaces/delete', async route => {
+    workspaces.length = 0;
+    await fulfillJson(route, { memories_removed: 2 });
+  });
+  await page.goto('/?view=library');
+  await expect(page.locator('#library-list [data-memory-id]')).toHaveCount(2);
+  await page.locator('#new-memory-button').click();
+  await page.locator('#editor-memory-content').fill('Discard only with my consent.');
+  await page.locator('.nav-item[data-view="manage"]').click();
+  await page.getByRole('button', { name: 'Delete', exact: true }).click();
+  await page.locator('#action-dialog-submit').click();
+  await expect(page.locator('#action-dialog-title')).toHaveText('Delete workspace permanently');
+  await answerActionDialog(page);
+  await expect(page.locator('#workspace-select')).toBeDisabled();
+  await page.locator('.nav-item[data-view="library"]').click();
+  await expect(page.locator('#memory-editor')).toBeHidden();
+  await expect(page.locator('#library-list [data-memory-id]')).toHaveCount(0);
+  await expect(page.locator('#new-memory-button')).toBeDisabled();
+});
+
+test('a delayed copy bootstrap respects newer workspace navigation', async ({ page }) => {
+  const workspaces = [{ name: workspace, memories: 2 }, { name: 'other', memories: 1 }];
+  await mockApi(page, { workspaces });
+  let release, hold = false, started = false;
+  const pending = new Promise(resolve => { release = resolve; });
+  await page.route('**/api/workspaces/copy', async route => {
+    workspaces.push({ name: workspace + '-copy', memories: 2 });
+    hold = true;
+    await fulfillJson(route, { workspace: workspace + '-copy', memories_copied: 2 });
+  });
+  await page.route('**/api/bootstrap*', async route => {
+    if (hold) { started = true; await pending; }
+    await route.fallback();
+  });
+  try {
+    await page.goto('/?view=manage');
+    await page.locator('.workspace-card').filter({
+      has: page.getByRole('heading', { name: `${workspace} active`, exact: true }),
+    }).getByRole('button', { name: 'Copy', exact: true }).click();
+    await expect.poll(() => started).toBe(true);
+    await page.locator('#workspace-select').selectOption('other');
+    release();
+    await expect(page.locator('#workspace-select option')).toHaveCount(3);
+    await expect(page.locator('#workspace-select')).toHaveValue('other');
+  } finally { release(); }
+});
+
+for (const failed of [false, true]) {
+  test(`a late ${failed ? 'failed' : 'successful'} consolidation preview cannot replace a newer review after a scope round trip`, async ({ page }) => {
+    await mockApi(page, { workspaces: [{ name: workspace, memories: 2 }, { name: 'other', memories: 1 }] });
+    let release, oldRequest, requests = 0;
+    const pending = new Promise(resolve => { release = resolve; });
+    const oldResponse = page.waitForResponse(response => response.request() === oldRequest);
+    await page.route('**/api/consolidate', async route => {
+      requests++;
+      if (requests === 1) {
+        oldRequest = route.request();
+        await pending;
+        if (failed) return route.fulfill({ status: 503, json: { detail: 'Old preview failed' } });
+        return fulfillJson(route, { fixture: 'stale preview' });
+      }
+      await fulfillJson(route, { fixture: 'current preview' });
+    });
+    try {
+      await page.goto('/?view=manage');
+      await page.locator('#manage-consolidate-tab').click();
+      await page.locator('#consolidate-form button[type="submit"]').click();
+      await expect.poll(() => requests).toBe(1);
+      await page.locator('#workspace-select').selectOption('other');
+      await page.locator('#workspace-select').selectOption(workspace);
+      await page.locator('#consolidate-form button[type="submit"]').click();
+      await expect(page.locator('#consolidate-result')).toContainText('current preview');
+      release();
+      await (await oldResponse).finished();
+      await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      await expect(page.locator('#consolidate-result')).toContainText('current preview');
+      await expect(page.locator('#consolidate-commit')).toBeEnabled();
+    } finally { release(); }
+  });
+}
+
+test('a late consolidation commit cannot refresh a newer workspace draft', async ({ page }) => {
+  await mockApi(page, { workspaces: [{ name: workspace, memories: 2 }, { name: 'other', memories: 1 }] });
+  let release, started = false;
+  const pending = new Promise(resolve => { release = resolve; });
+  const completed = page.waitForResponse(response => response.url().endsWith('/api/consolidate') && !response.request().postDataJSON().dry_run);
+  await page.route('**/api/consolidate', async route => {
+    if (!route.request().postDataJSON().dry_run) { started = true; await pending; }
+    await fulfillJson(route, { reinforced: 2 });
+  });
+  try {
+    await page.goto('/?view=manage');
+    await page.locator('#manage-consolidate-tab').click();
+    await page.locator('#consolidate-form button[type="submit"]').click();
+    await expect(page.locator('#consolidate-commit')).toBeEnabled();
+    await page.locator('#consolidate-commit').click();
+    await answerActionDialog(page);
+    await expect.poll(() => started).toBe(true);
+    await page.locator('#workspace-select').selectOption('other');
+    await page.locator('.nav-item[data-view="library"]').click();
+    await page.locator('#new-memory-button').click();
+    await page.locator('#editor-memory-content').fill('Do not refresh this newer workspace editor.');
+    release();
+    await (await completed).finished();
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    await expect(page.locator('#workspace-select')).toHaveValue('other');
+    await expect(page.locator('#editor-memory-content')).toHaveValue('Do not refresh this newer workspace editor.');
+    await expect(page.locator('#memory-editor')).toBeVisible();
+  } finally { release(); }
+});
+
+test('Copying a workspace refreshes its list without clearing a hidden draft', async ({ page }) => {
+  const workspaces = [{ name: workspace, memories: 2 }];
+  await mockApi(page, { workspaces });
+  await page.route('**/api/workspaces/copy', async route => {
+    workspaces.push({ name: workspace + '-copy', memories: 2 });
+    await fulfillJson(route, { workspace: workspace + '-copy', memories_copied: 2 });
+  });
+  await page.goto('/?view=library');
+  await page.locator('#new-memory-button').click();
+  await page.locator('#editor-memory-content').fill('Preserve the original workspace draft.');
+  await page.locator('.nav-item[data-view="manage"]').click();
+  await page.getByRole('button', { name: 'Copy', exact: true }).click();
+  await expect(page.locator('#workspace-select option')).toHaveCount(2);
+  await expect(page.locator('#workspace-select')).toHaveValue(workspace);
+  await page.locator('.nav-item[data-view="library"]').click();
+  await expect(page.locator('#memory-editor')).toBeVisible();
+  await expect(page.locator('#editor-memory-content')).toHaveValue('Preserve the original workspace draft.');
+});
+
+for (const pendingSave of [false, true]) {
+  test(`Saving a workspace description preserves ${pendingSave ? 'a pending save' : 'an unsaved draft'} across navigation`, async ({ page }) => {
+    const errors = browserErrors(page);
+    const workspaces = [{ name: workspace, memories: 2, description: 'Original description' }];
+    await mockApi(page, { workspaces });
+    let releaseSave;
+    const savePending = new Promise(resolve => { releaseSave = resolve; });
+    let saveStarted = false;
+    await page.route('**/api/remember', async route => {
+      saveStarted = true;
+      await savePending;
+      await route.fulfill({ status: 503, json: { detail: 'Save unavailable' } });
+    });
+    await page.route('**/api/workspaces/describe', async route => {
+      const body = route.request().postDataJSON();
+      workspaces[0].description = body.description;
+      await fulfillJson(route, body);
+    });
+    try {
+      await page.goto('/?view=library');
+      await page.locator('#new-memory-button').click();
+      await page.locator('#editor-memory-title').fill('Keep my hidden draft');
+      await page.locator('#editor-memory-content').fill('Editing metadata must preserve this text.');
+      if (pendingSave) {
+        await page.locator('#memory-editor button[type="submit"]').click();
+        await expect.poll(() => saveStarted).toBe(true);
+      }
+      await page.locator('.nav-item[data-view="manage"]').click();
+      await page.getByRole('button', { name: 'Describe', exact: true }).click();
+      await answerActionDialog(page, { fields: { value: 'Updated description' } });
+      await expect(page.locator('.workspace-card')).toContainText('Updated description');
+      await page.locator('.nav-item[data-view="library"]').click();
+      await expect(page.locator('#memory-editor')).toBeVisible();
+      await expect(page.locator('#editor-memory-title')).toHaveValue('Keep my hidden draft');
+      await expect(page.locator('#editor-memory-content')).toHaveValue('Editing metadata must preserve this text.');
+      if (pendingSave) {
+        releaseSave();
+        await expect(page.locator('#editor-error')).toContainText('Your draft is retained');
+      }
+      expect(errors.filter(error => error !==
+        'Failed to load resource: the server responded with a status of 503 (Service Unavailable)')).toEqual([]);
+    } finally {
+      releaseSave();
+    }
+  });
+}
+
+test('Source completion preserves an editor while its save is pending and then fails', async ({ page }) => {
+  const errors = browserErrors(page);
+  const requests = await mockApi(page);
+  let releaseIndex, releaseSave;
+  const indexPending = new Promise(resolve => { releaseIndex = resolve; });
+  const savePending = new Promise(resolve => { releaseSave = resolve; });
+  let indexStarted = false, saveStarted = false;
+  await page.route('**/api/code/index', async route => {
+    indexStarted = true;
+    await indexPending;
+    await fulfillJson(route, { files_indexed: 1, symbols: 2 });
+  });
+  await page.route('**/api/remember', async route => {
+    saveStarted = true;
+    await savePending;
+    await route.fulfill({ status: 503, json: { detail: 'Save unavailable' } });
+  });
+  try {
+    await page.goto('/');
+    await page.locator('.nav-item[data-view="library"]').click();
+    await page.locator('#import-menu-button').click();
+    await page.locator('#import-sources-button').click();
+    await page.locator('#code-index-repo').fill('engraphis');
+    await page.locator('#code-index-root').fill('/srv/engraphis');
+    await page.locator('#code-index-form button[type="submit"]').click();
+    await expect.poll(() => indexStarted).toBe(true);
+    await page.locator('#sources-close').click();
+    await page.locator('#new-memory-button').click();
+    await page.locator('#editor-memory-title').fill('Keep the pending draft');
+    await page.locator('#editor-memory-content').fill('This draft must survive an import.');
+    await page.locator('#memory-editor button[type="submit"]').click();
+    await expect.poll(() => saveStarted).toBe(true);
+    const libraryLoads = requests.filter(path => path === '/memories').length;
+    releaseIndex();
+    await expect.poll(() => requests.filter(path => path === '/memories').length).toBeGreaterThan(libraryLoads);
+    await expect(page.locator('#memory-editor')).toBeVisible();
+    await expect(page.locator('#editor-memory-content')).toHaveValue('This draft must survive an import.');
+    releaseSave();
+    await expect(page.locator('#editor-error')).toContainText('Your draft is retained');
+    await expect(page.locator('#editor-memory-title')).toHaveValue('Keep the pending draft');
+    expect(errors.filter(error => error !==
+      'Failed to load resource: the server responded with a status of 503 (Service Unavailable)')).toEqual([]);
+  } finally {
+    releaseIndex();
+    releaseSave();
+  }
+});
+
+test('Fast library reorders are written in gesture order while the first write is pending', async ({ page }) => {
+  const errors = browserErrors(page);
+  const ordered = [...memories, { ...memories[0], id: 'mem_third', title: 'Third record' }];
+  await mockApi(page, { memoriesByWorkspace: { [workspace]: ordered } });
+  await page.addInitScript(() => {
+    const fetch = window.fetch.bind(window);
+    window.__reorderFetches = [];
+    window.fetch = (url, options) => {
+      if (String(url).includes('/api/memories/reorder')) {
+        window.__reorderFetches.push(JSON.parse(options.body).ids);
+      }
+      return fetch(url, options);
+    };
+  });
+  let releaseFirst;
+  const firstPending = new Promise(resolve => { releaseFirst = resolve; });
+  const writes = [], committed = [];
+  await page.route('**/api/memories/reorder', async route => {
+    const ids = route.request().postDataJSON().ids;
+    writes.push(ids);
+    if (writes.length === 1) await firstPending;
+    committed.push(ids);
+    await fulfillJson(route, { updated: ids.length });
+  });
+  try {
+    await page.goto('/');
+    await page.locator('.nav-item[data-view="library"]').click();
+    const cards = page.locator('#library-list [role="option"]');
+    await expect(cards).toHaveCount(3);
+    await cards.first().focus();
+    await page.keyboard.press('Alt+ArrowDown');
+    await expect.poll(() => writes.length).toBe(1);
+    await page.keyboard.press('Alt+ArrowDown');
+    await expect(cards.nth(2)).toContainText('Database choice');
+    expect(await page.evaluate(() => window.__reorderFetches.length)).toBe(1);
+    releaseFirst();
+    await expect.poll(() => committed.length).toBe(2);
+    expect(committed).toEqual([
+      ['mem_safety', 'mem_database', 'mem_third'],
+      ['mem_safety', 'mem_third', 'mem_database'],
+    ]);
+    await expect(page.locator('#library-reorder-status')).toContainText('position 3');
+    expect(errors).toEqual([]);
+  } finally {
+    releaseFirst();
+  }
+});
+
+test('Home shows memory health and the selected project’s last-session handoff', async ({ page }) => {
+  const errors = browserErrors(page);
+  await mockApi(page);
+  await page.route('**/api/analytics/health**', route => fulfillJson(route, {
+    workspace,
+    decay_distribution: [
+      { bucket: 'critical', label: '< 20%', count: 1 },
+      { bucket: 'strong', label: '> 80%', count: 4 },
+    ],
+    orphan_count: 2,
+    conflict_frequency: { total: 3, last_7d: 1 },
+  }));
+  await page.route('**/api/repos**', route => fulfillJson(route, { repos: [{ id: 'repo_api', name: 'api' }] }));
+  await page.route('**/api/proactive**', route => {
+    const scoped = new URL(route.request().url()).searchParams.get('repo') === 'api';
+    return fulfillJson(route, scoped
+      ? { workspace, memories: [], handoff: {
+        summary: 'Shipped the migration.', outcome: 'done', open_threads: ['Rotate the staging keys'],
+      } }
+      : { workspace, memories, handoff: null });
+  });
+  await page.goto('/');
+
+  const health = page.locator('#home-health');
+  await expect(health).toContainText('Without entity links');
+  await expect(health).toContainText('Conflicts · 7 days');
+  await expect(health.getByLabel('Retention > 80%: 4 memories')).toBeAttached();
+  // Handoffs belong to a project, so none is shown for "All projects".
+  await expect(page.locator('#home-handoff')).toBeHidden();
+  await page.locator('#project-select').selectOption('api');
+  const handoff = page.locator('#home-handoff');
+  await expect(handoff).toBeVisible();
+  await expect(page.locator('#home-handoff-project')).toHaveText('api');
+  await expect(handoff).toContainText('Shipped the migration.');
+  await expect(handoff).toContainText('Outcome: done');
+  await expect(handoff.getByRole('listitem')).toHaveText(['Rotate the staging keys']);
+  expect(errors).toEqual([]);
+});
+
+test('Ask shows each candidate’s rank, support and retention', async ({ page }) => {
+  const errors = browserErrors(page);
+  await mockApi(page, {
+    rawCandidates: [
+      { ...memories[0], relative_score: 0.9, absolute_support: 0.62, retention: 0.8, arm: 'lexical' },
+      { ...memories[1], relative_score: 0.45, absolute_support: 0.1, retention: 0.25, arm: 'vector' },
+    ],
+  });
+  await page.goto('/');
+  await page.locator('.nav-item[data-view="ask"]').click();
+  await page.locator('#ask-input').fill('Which database?');
+  await page.getByRole('button', { name: 'Grounded answer', exact: true }).click();
+  await expect(page.locator('#answer-panel')).toContainText('Postgres 16');
+  await page.locator('.retrieval-details summary').click();
+  const scores = page.locator('#retrieval-list .retrieval-scores');
+  await expect(scores).toHaveCount(2);
+  await expect(scores.first()).toContainText('Rank #1');
+  await expect(scores.first()).toContainText('0.90');
+  await expect(scores.first()).toContainText('0.62');
+  await expect(scores.first()).toContainText('80%');
+  await expect(scores.nth(1)).toContainText('25%');
+  await expect(page.locator('#retrieval-list')).toContainText('Found by lexical retrieval');
+  expect(errors).toEqual([]);
+});
+
+test('A missing embedding model is explained and rechecked without resetting open work', async ({ page }) => {
+  const errors = browserErrors(page);
+  const requests = await mockApi(page);
+  let embedder = { semantic: false, model: 'all-MiniLM-L6-v2' };
+  await page.route('**/api/bootstrap*', route => fulfillJson(route, {
+    license: license(),
+    workspaces: [{ name: workspace, memories: memories.length }],
+    stats: { memories: memories.length, total_rows: memories.length, workspaces: 1, sessions: 1 },
+    embedder,
+  }));
+  await page.goto('/');
+  const banner = page.locator('#embedder-banner');
+  await expect(banner).toBeVisible();
+  await expect(banner).toContainText('The configured model all-MiniLM-L6-v2 is not loaded');
+
+  await page.locator('.nav-item[data-view="library"]').click();
+  await page.locator('#library-list [role="option"]').first().press('Enter');
+  await expect(page.locator('#memory-detail')).toContainText('Postgres 16');
+  const libraryLoads = requests.filter(path => path === '/memories').length;
+  embedder = { semantic: true, model: 'all-MiniLM-L6-v2' };
+  await page.locator('#embedder-recheck').click();
+  await expect(banner).toBeHidden();
+  await expect(page.locator('#notice-banner')).toContainText('Semantic search is on.');
+  // The open memory survives: a recheck never reselects the workspace.
+  await expect(page.locator('#memory-detail')).toContainText('Postgres 16');
+  expect(requests.filter(path => path === '/memories').length).toBe(libraryLoads);
+  expect(errors).toEqual([]);
+});
+
+test('Timeline shows validity windows and narrows to superseded versions', async ({ page }) => {
+  const errors = browserErrors(page);
+  await mockApi(page);
+  const history = Array.from({ length: 60 }, (_, index) => (
+    { ...memories[0], id: `mem_live_${index}`, valid_from: 1_700_000_000, provenance: { source: 'human:ledger' } }
+  )).concat([
+    {
+      id: 'mem_database_old', title: 'Database choice', content: 'MySQL 8 was the main database.',
+      memory_type: 'semantic', valid_from: -1, valid_to: 0, ingested_at: 1,
+    },
+  ]);
+  const now = Math.floor(Date.now() / 1000);
+  history.unshift(
+    { ...memories[0], id: 'mem_scheduled', valid_from: 0, valid_to: now + 86400, provenance: { source: 'human:ledger' } },
+    { ...memories[0], id: 'mem_planned', valid_from: now + 86400 },
+  );
+  const queries = [];
+  await page.route('**/api/timeline**', route => {
+    const params = new URL(route.request().url()).searchParams;
+    const closed = params.get('closed_only') === 'true';
+    queries.push(closed);
+    const eligible = closed ? history.filter(item => item.valid_to != null && item.valid_to <= now) : history;
+    return fulfillJson(route, { history: eligible.slice(0, Number(params.get('limit'))) });
+  });
+  await page.goto('/');
+  await page.locator('.nav-item[data-view="provenance"]').click();
+  await page.getByRole('tab', { name: 'Timeline' }).click();
+  await page.locator('#timeline-input').fill('database');
+  await page.locator('#timeline-form button[type="submit"]').click();
+
+  const cards = page.locator('#timeline-result .temporal-card');
+  await expect(cards).toHaveCount(50);
+  await expect(cards.first().locator('.temporal-state')).toHaveText('current');
+  await expect(cards.nth(1).locator('.temporal-state')).toHaveText('future');
+  await expect(cards.first()).toContainText('human:ledger');
+  const epoch = await page.evaluate(() => new Intl.DateTimeFormat(undefined,
+    { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(0)));
+  await expect(cards.first().locator('.temporal-meta')).toContainText(epoch);
+  await page.locator('#timeline-closed-only').check();
+  await expect(cards).toHaveCount(1);
+  await expect(cards.first()).toContainText('MySQL 8');
+  await expect(cards.first().locator('.temporal-state')).toHaveText('past');
+  await expect(cards.first().locator('.temporal-meta')).not.toContainText('— now');
+  await expect(cards.first().locator('.temporal-meta')).toContainText(epoch);
+  expect(queries).toEqual([false, true]);
+  expect(errors).toEqual([]);
+});
+
+test('Sources index a repository and send a database connection string only once', async ({ page }) => {
+  const errors = browserErrors(page);
+  await mockApi(page);
+  const posted = [];
+  let releasePostgres = null;
+  await page.route('**/api/code/index', route => {
+    posted.push(['code', JSON.parse(route.request().postData() || '{}')]);
+    return fulfillJson(route, { files_indexed: 3, files_unchanged: 1, symbols: 12, edges: 4, code_memory_links: 2 });
+  });
+  await page.route('**/api/resources/postgres', async route => {
+    posted.push(['postgres', JSON.parse(route.request().postData() || '{}')]);
+    await new Promise(resolve => { releasePostgres = resolve; });
+    return fulfillJson(route, { schema: { tables: 2 }, entities: 5, relations: 1 });
+  });
+  await page.goto('/');
+  await page.locator('.nav-item[data-view="library"]').click();
+  await page.locator('#import-menu-button').click();
+  await page.locator('#import-sources-button').click();
+  const dialog = page.locator('#sources-dialog');
+  await expect(dialog).toBeVisible();
+  await expect(page.locator('#code-index-repo')).toBeFocused();
+
+  await page.locator('#code-index-repo').fill('engraphis');
+  await page.locator('#code-index-root').fill('/srv/engraphis');
+  await page.locator('#code-index-form button[type="submit"]').click();
+  await expect(page.locator('#code-index-status')).toContainText(
+    'engraphis: 3 changed and 1 unchanged files · 12 symbols · 4 edges · 2 memory links.',
+  );
+
+  await page.locator('#postgres-dsn').fill('postgresql://reader:s3cret@db.internal/app');
+  await page.locator('#postgres-repo').fill('app-db');
+  await page.locator('#postgres-import-form button[type="submit"]').click();
+  // The secret leaves the page before the import has even answered.
+  await expect.poll(() => posted.length).toBe(2);
+  await expect(page.locator('#postgres-dsn')).toHaveValue('');
+  releasePostgres();
+  await expect(page.locator('#postgres-import-status')).toContainText(
+    'Imported 2 tables, 5 entities and 1 relation. The connection string was not stored.',
+  );
+  expect(posted).toEqual([
+    ['code', { workspace, repo: 'engraphis', root_path: '/srv/engraphis' }],
+    ['postgres', { workspace, repo: 'app-db', dsn: 'postgresql://reader:s3cret@db.internal/app' }],
+  ]);
+  await page.locator('#sources-close').click();
+  await expect(dialog).toBeHidden();
+  await expect(page.locator('#import-menu-button')).toBeFocused();
+  expect(errors).toEqual([]);
+});
+
+test('Action dialogs cannot be reordered by bidi controls hidden in untrusted names', async ({ page }) => {
+  const errors = browserErrors(page);
+  await mockApi(page);
+  await page.goto('/');
+  // U+202E reverses the text after it; U+2066..U+2069 isolate. A memory title or workspace
+  // name carrying them could make one action read as another inside the confirmation.
+  const answer = page.evaluate(() => window.EngraphisDialog.confirm({
+    title: 'Retire ‮tpmorp rof evorppA',
+    message: ['Retire ⁦“notes”⁩ now?', 'Name: ‭abc‬'],
+    confirmLabel: 'Retire',
+    danger: true,
+  }));
+  const dialog = page.locator('#action-dialog');
+  await expect(dialog).toBeVisible();
+  const shown = await dialog.evaluate(element => element.textContent);
+  expect(shown).not.toMatch(/[‪-‮⁦-⁩]/);
+  await expect(page.locator('#action-dialog-title')).toHaveText('Retire tpmorp rof evorppA');
+  // A destructive confirmation starts on Cancel, and cancelling resolves false.
+  await expect(page.locator('#action-dialog-cancel')).toBeFocused();
+  await page.keyboard.press('Escape');
+  expect(await answer).toBe(false);
+  expect(errors).toEqual([]);
+});
+
+async function openQuickImport(page) {
+  await page.goto('/');
+  await page.locator('.nav-item[data-view="library"]').click();
+  await page.locator('#import-menu-button').click();
+  await page.locator('#import-quick-button').click();
+  await expect(page.locator('#quick-import-dialog')).toBeVisible();
+}
+
+test('review regression: Quick import shows bounded per-file failures as inert text', async ({ page }) => {
+  const errors = browserErrors(page);
+  await mockApi(page);
+  const unsafeName = '<img src=x onerror="window.__importErrorXss=true">.pdf';
+  const details = Array.from({ length: 52 }, (_, index) => ({
+    file: index === 0 ? unsafeName : `unreadable-${index}.pdf`,
+    error: index === 0 ? 'PDF is encrypted; unlock it and retry.' : 'upload content could not be processed',
+  }));
+  await page.route('**/api/workspaces/import-files', route => fulfillJson(route, {
+    imported: 1, skipped: 0, errors: details.length, details,
+    warnings: [{ file: 'notes.md', warnings: ['Some formatting was omitted.'] }],
+  }));
+  await openQuickImport(page);
+  await page.locator('#quick-import-files').setInputFiles({
+    name: 'notes.md', mimeType: 'text/markdown', buffer: Buffer.from('Synthetic import notes.'),
+  });
+  const status = page.locator('#quick-import-status');
+  await expect(status).toContainText('1 file imported · 0 skipped · 52 errors');
+  const failures = status.locator('details').filter({ hasText: '52 files with errors' });
+  await expect(failures).toBeVisible();
+  await failures.locator('summary').click();
+  await expect(failures.locator('li')).toHaveCount(51);
+  await expect(failures.locator('li').first()).toHaveText(`${unsafeName} — PDF is encrypted; unlock it and retry.`);
+  await expect(failures.locator('li').last()).toHaveText('2 more not shown.');
+  await expect(status.locator('img')).toHaveCount(0);
+  expect(await page.evaluate(() => window.__importErrorXss)).toBeUndefined();
+  const warnings = status.locator('details').filter({ hasText: '1 file with warnings' });
+  await warnings.locator('summary').click();
+  await expect(warnings).toContainText('notes.md — Some formatting was omitted.');
+  await expect(page.locator('#quick-import-choose-files')).toBeEnabled();
+  expect(errors).toEqual([]);
+});
+
+test('review regression: Timeline keeps world validity separate from system expiry', async ({ page }) => {
+  const errors = browserErrors(page);
+  await mockApi(page);
+  const now = Math.floor(Date.now() / 1000);
+  const history = [
+    { ...memories[0], id: 'scheduled-retention', valid_from: 0, expired_at: now + 86400 },
+    { ...memories[0], id: 'retired-system-version', valid_from: 0, expired_at: now - 60 },
+    { ...memories[0], id: 'closed-world-interval', valid_from: -1, valid_to: 0, expired_at: now + 86400 },
+  ];
+  await page.route('**/api/timeline**', route => fulfillJson(route, { history }));
+  await page.goto('/');
+  await page.locator('.nav-item[data-view="provenance"]').click();
+  await page.getByRole('tab', { name: 'Timeline' }).click();
+  await page.locator('#timeline-input').fill('database');
+  await page.locator('#timeline-form button[type="submit"]').click();
+  const cards = page.locator('#timeline-result .temporal-card');
+  await expect(cards).toHaveCount(3);
+  const validity = card => card.locator('.temporal-meta > div').filter({ hasText: 'Valid time' }).locator('dd');
+  await expect(validity(cards.nth(0))).toHaveText(/ — now$/);
+  await expect(validity(cards.nth(1))).toHaveText(/ — now$/);
+  await expect(cards.nth(0).locator('.temporal-state')).toHaveText('current');
+  await expect(cards.nth(1).locator('.temporal-state')).toHaveText('past');
+  await expect(validity(cards.nth(2))).not.toHaveText(/ — now$/);
+  const epoch = await page.evaluate(() => new Intl.DateTimeFormat(undefined,
+    { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(0)));
+  await expect(validity(cards.nth(2))).toHaveText(new RegExp(` — ${epoch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`));
+  expect(errors).toEqual([]);
+});
+
+test('review regression: Every node applies and persists custom entity colours', async ({ page }) => {
+  const errors = browserErrors(page);
+  const everyAssets = [];
+  page.on('request', request => {
+    if (new URL(request.url()).pathname.endsWith('/v2-assets/engraphis-graph-every.js')) everyAssets.push(request.url());
+  });
+  await mockApi(page);
+  await page.goto('/');
+  await page.locator('.nav-item[data-view="relations"]').click();
+  await revealAdvancedGraphControls(page);
+  await page.locator('[data-graph-preset-choice="every"]').click();
+  await expect(page.locator('#graph-mode')).toContainText('All nodes');
+  await expect(page.locator('#graph-canvas')).toHaveAttribute('aria-busy', 'false');
+  await page.locator('[data-graph-color-choice="type"]').click();
+  await page.getByLabel('Colour for Person or concept nodes').fill('#ff8800');
+  await expect(page.locator('[data-graph-palette-choice="custom"]')).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('#graph-legend-list li').first().locator('svg circle')).toHaveAttribute('fill', '#ff8800');
+  await expect.poll(() => page.evaluate(() => {
+    const preferences = JSON.parse(localStorage.getItem('engraphis-ledger-graph-preferences-v1') || '{}');
+    return Object.values(preferences.typeColors || {});
+  })).toContain('#ff8800');
+  expect(everyAssets).toHaveLength(1);
+  expect(errors).toEqual([]);
+
+  await page.reload();
+  await page.locator('.nav-item[data-view="relations"]').click();
+  await revealAdvancedGraphControls(page);
+  await expect(page.getByLabel('Colour for Person or concept nodes')).toHaveValue('#ff8800');
+  await page.locator('[data-graph-preset-choice="every"]').click();
+  await expect(page.locator('#graph-mode')).toContainText('All nodes');
+  await expect(page.locator('#graph-canvas')).toHaveAttribute('aria-busy', 'false');
+  await expect(page.getByLabel('Colour for Person or concept nodes')).toHaveValue('#ff8800');
+  await expect(page.locator('#graph-legend-list li').first().locator('svg circle')).toHaveAttribute('fill', '#ff8800');
+  expect(errors).toEqual([]);
+});
+
+async function makeImportFolder(testInfo, withReadableFile) {
+  const path = require('node:path');
+  const root = testInfo.outputPath('folder-fixture');
+  const deep = path.join(root, ...Array.from({ length: 6 }, (_, index) => `ordinary-project-${index}-${'a'.repeat(23)}`));
+  await fs.mkdir(deep, { recursive: true });
+  await fs.writeFile(path.join(deep, 'deep-notes.md'), 'Synthetic deeply nested notes.');
+  if (withReadableFile) {
+    await fs.writeFile(path.join(root, 'readable.md'), 'Synthetic readable notes.');
+    // Python bounds Unicode code points, not UTF-16 units. This valid relative
+    // name exceeds 200 UTF-16 units and must still reach the import API.
+    const unicode = path.join(root, ...Array.from({ length: 5 }, () => '🌍'.repeat(22)));
+    await fs.mkdir(unicode, { recursive: true });
+    await fs.writeFile(path.join(unicode, 'world-notes.md'), 'Synthetic Unicode path notes.');
+  }
+  // Native Chromium directory enumeration needs the Windows extended-length path.
+  return process.platform === 'win32' ? path.toNamespacedPath(root) : root;
+}
+
+for (const withReadableFile of [true, false]) {
+  test(`review regression: Quick import reports long folder paths ${withReadableFile ? 'without aborting valid files' : 'when every file is skipped'}`, async ({ page }, testInfo) => {
+    const errors = browserErrors(page);
+    await mockApi(page);
+    const uploaded = [];
+    await page.route('**/api/workspaces/import-files', route => {
+      const filenames = [...(route.request().postData() || '').matchAll(/name="files"; filename="([^"]*)"/g)].map(match => match[1]);
+      uploaded.push(filenames);
+      if (filenames.some(name => Array.from(name.trim()).length > 200)) {
+        return route.fulfill({ status: 400, json: { detail: 'name exceeds 200 characters' } });
+      }
+      return fulfillJson(route, { imported: filenames.length, skipped: 0, errors: 0 });
+    });
+    await openQuickImport(page);
+    const folder = await makeImportFolder(testInfo, withReadableFile);
+    await page.locator('#quick-import-folder').setInputFiles(folder);
+    const status = page.locator('#quick-import-status');
+    await expect(status).toContainText(`${withReadableFile ? '2 files' : '0 files'} imported · 1 skipped · 0 errors`);
+    const warnings = status.locator('details').filter({ hasText: '1 file with warnings' });
+    await warnings.locator('summary').click();
+    await expect(warnings).toContainText('deep-notes.md');
+    await expect(warnings).toContainText('200-character');
+    await expect(page.locator('#quick-import-choose-folder')).toBeEnabled();
+    await expect(page.locator('#quick-import-form')).toHaveAttribute('aria-busy', 'false');
+    if (withReadableFile) {
+      expect(uploaded).toHaveLength(1);
+      expect(uploaded[0]).toHaveLength(2);
+      expect(uploaded[0].some(name => name.endsWith('/readable.md'))).toBe(true);
+      const unicode = uploaded[0].find(name => name.endsWith('/world-notes.md'));
+      expect(unicode.length).toBeGreaterThan(200);
+      expect(Array.from(unicode).length).toBeLessThanOrEqual(200);
+    } else {
+      expect(uploaded).toEqual([]);
+    }
+    expect(errors).toEqual([]);
+  });
+}
+
+
+test('Automation editor preserves zero idle and enforces the actual API numeric bounds', async ({ page }) => {
+  const requests = await mockApi(page, {
+    automationPolicy: { enabled: false, cadence_hours: 1, dream: false,
+      dream_min_new: 2, dream_idle_minutes: 0, infer: false, version: 1 },
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('tab', { name: 'Automation' }).click();
+  const fields = [
+    ['#automation-cadence', '1', '720', '1'],
+    ['#automation-dream-min', '2', '10000', '2'],
+    ['#automation-dream-idle', '0', '10080', '0'],
+  ];
+  for (const [selector, minimum, maximum, value] of fields) {
+    const field = page.locator(selector);
+    await expect(field).toHaveAttribute('min', minimum);
+    await expect(field).toHaveAttribute('max', maximum);
+    await expect(field).toHaveAttribute('required', '');
+    await expect(field).toHaveValue(value);
+    for (const invalid of [String(Number(minimum) - 1), String(Number(maximum) + 1), '', '2.5']) {
+      await field.fill(invalid);
+      expect(await field.evaluate(input => input.checkValidity())).toBe(false);
+    }
+    await field.fill(maximum);
+    expect(await field.evaluate(input => input.checkValidity())).toBe(true);
+  }
+  await page.locator('#automation-dream-idle').fill('0');
+  await page.getByRole('button', { name: 'Save hosted policy', exact: true }).click();
+  await expect.poll(() => requests.automationPolicies.length).toBe(1);
+  expect(requests.automationPolicies[0]).toMatchObject({ cadence_hours: 720,
+    dream_min_new: 10000, dream_idle_minutes: 0, dream_enabled: false, infer: false });
+  await page.reload();
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('tab', { name: 'Automation' }).click();
+  await expect(page.locator('#automation-dream-idle')).toHaveValue('0');
+});
+
+test('Automation editor uses service defaults for missing or null numeric values', async ({ page }) => {
+  await mockApi(page, { automationPolicy: { enabled: false, cadence_hours: null,
+    dream_enabled: null, dream_min_new: null, dream_idle_minutes: null, infer: null, version: 1 } });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('tab', { name: 'Automation' }).click();
+  await expect(page.locator('#automation-cadence')).toHaveValue('24');
+  await expect(page.locator('#automation-dream-min')).toHaveValue('25');
+  await expect(page.locator('#automation-dream-idle')).toHaveValue('15');
+  await expect(page.locator('#automation-dream')).toBeChecked();
+});
+
+
+for (const cadenceMinutes of [15, 90]) {
+  test(`Automation cadence ${cadenceMinutes} minutes survives unrelated saves and explicit one-hour edits`, async ({ page }) => {
+    const errors = browserErrors(page);
+    const requests = await mockApi(page, {
+      automationPolicy: { enabled: false, cadence_minutes: cadenceMinutes, cadence_hours: 1,
+        dream: false, dream_min_new: 2, dream_idle_minutes: 0, infer: false, version: 1 },
+    });
+    await page.goto('/');
+    await page.getByRole('button', { name: 'Settings' }).click();
+    await page.getByRole('tab', { name: 'Automation' }).click();
+    const result = page.locator('#automation-result');
+    const hours = page.locator('#automation-cadence');
+    await expect(hours).toHaveValue('1');
+    await page.locator('#automation-dream-min').fill('3');
+    await page.getByRole('button', { name: 'Save hosted policy', exact: true }).click();
+    await expect.poll(() => requests.automationPolicies.length).toBe(1);
+    expect(requests.automationPolicies[0]).not.toHaveProperty('cadence_hours');
+    expect(requests.automationPolicies[0]).toMatchObject({ dream_min_new: 3, dream_idle_minutes: 0 });
+    await expect(result).toContainText(`Current cadence: every ${cadenceMinutes} minutes.`);
+
+    await page.reload();
+    await page.getByRole('button', { name: 'Settings' }).click();
+    await page.getByRole('tab', { name: 'Automation' }).click();
+    await expect(result).toContainText(`Current cadence: every ${cadenceMinutes} minutes.`);
+    await expect(hours).toHaveValue('1');
+    // Real input intent matters even though the initial display is already 1.
+    await hours.fill('1');
+    await page.getByRole('button', { name: 'Save hosted policy', exact: true }).click();
+    await expect.poll(() => requests.automationPolicies.length).toBe(2);
+    expect(requests.automationPolicies[1]).toMatchObject({ cadence_hours: 1, dream_min_new: 3 });
+    await expect(result).toContainText('Current cadence: every 60 minutes.');
+    expect(errors).toEqual([]);
+  });
+}
