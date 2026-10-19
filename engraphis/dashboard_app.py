@@ -43,6 +43,7 @@ from engraphis.local_auth import (
     bearer_ok,
     browser_session,
     browser_session_ok,
+    local_browser_request,
     token_ok,
 )
 from engraphis.routes import v2_api
@@ -298,6 +299,7 @@ _PUBLIC = {
     "/api/ready",
     "/api/auth/state",
     "/api/auth/session",
+    "/api/auth/local-session",
 }
 
 
@@ -548,6 +550,9 @@ def create_app() -> FastAPI:
     # credential. It is minted alongside a short-lived browser session and exists only
     # to authorize the narrowly scoped human-approval dashboard action below.
     app.state.review_csrf_tokens = {}
+    # Zero-config local dashboards still need a cookie/CSRF owner ceremony for
+    # reviewed writes. This process-local secret never becomes an API credential.
+    app.state.local_browser_secret = secrets.token_urlsafe(32)
     # A document preview authorizes exactly one subsequent import of the reviewed
     # bytes into the reviewed target.  Records contain only a request digest, the
     # already-opaque browser-session value, and a short process-local expiry.
@@ -597,6 +602,45 @@ def create_app() -> FastAPI:
             "local_invitations": local,
         }
 
+    def _browser_signing_key():
+        return settings.api_token or app.state.local_browser_secret
+
+    def _browser_session_response(request: Request, *, reuse: bool = False):
+        session_value = request.cookies.get(BROWSER_SESSION_COOKIE) if reuse else None
+        if not browser_session_ok(session_value, _browser_signing_key()):
+            session_value = browser_session(_browser_signing_key())
+        if reuse:
+            # First visits in two tabs can mint the same second-resolution cookie.
+            # setdefault preserves their shared confirmation even across that race.
+            review_csrf_token = app.state.review_csrf_tokens.setdefault(
+                session_value, secrets.token_urlsafe(32),
+            )
+        else:
+            review_csrf_token = secrets.token_urlsafe(32)
+            app.state.review_csrf_tokens[session_value] = review_csrf_token
+        response = JSONResponse(
+            {"authenticated": True, "review_csrf_token": review_csrf_token}
+        )
+        response.headers["Cache-Control"] = "no-store"
+        response.set_cookie(
+            BROWSER_SESSION_COOKIE,
+            session_value,
+            max_age=BROWSER_SESSION_SECONDS,
+            httponly=True,
+            secure=wants_https(request),
+            samesite="strict",
+            path="/",
+        )
+        return response
+
+    @app.post("/api/auth/local-session", include_in_schema=False)
+    def open_local_browser_session(request: Request):
+        """Open this computer's dashboard without exposing or entering its API token."""
+        if not local_browser_request(request):
+            return JSONResponse({"error": "automatic access requires the local dashboard"},
+                                status_code=403)
+        return _browser_session_response(request, reuse=True)
+
     @app.post("/api/auth/session", include_in_schema=False)
     def open_browser_session(req: _BrowserSessionReq, request: Request):
         """Exchange the deployment token for a short-lived HttpOnly browser cookie.
@@ -613,26 +657,10 @@ def create_app() -> FastAPI:
             )
         if not token_ok(req.token, settings.api_token):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
-        session_value = browser_session(settings.api_token)
-        review_csrf_token = secrets.token_urlsafe(32)
         # A dashboard restart deliberately invalidates this token. Keep only the latest
         # token for each session value; unlike an API bearer, it has no authority by
         # itself and is not persisted to disk or browser storage.
-        app.state.review_csrf_tokens[session_value] = review_csrf_token
-        response = JSONResponse(
-            {"authenticated": True, "review_csrf_token": review_csrf_token}
-        )
-        response.headers["Cache-Control"] = "no-store"
-        response.set_cookie(
-            BROWSER_SESSION_COOKIE,
-            session_value,
-            max_age=BROWSER_SESSION_SECONDS,
-            httponly=True,
-            secure=wants_https(request),
-            samesite="strict",
-            path="/",
-        )
-        return response
+        return _browser_session_response(request)
 
     @app.post("/dashboard/review/approve", include_in_schema=False)
     def dashboard_review_approve(req: _DashboardApprovalReq, request: Request):
@@ -644,13 +672,8 @@ def create_app() -> FastAPI:
         private hosted service owns owner/admin approval for hosted deployments.
         """
 
-        if not settings.api_token:
-            return JSONResponse(
-                {"error": "dashboard approval requires ENGRAPHIS_API_TOKEN"},
-                status_code=409,
-            )
         session_value = request.cookies.get(BROWSER_SESSION_COOKIE)
-        if not browser_session_ok(session_value, settings.api_token):
+        if not browser_session_ok(session_value, _browser_signing_key()):
             return JSONResponse({"error": "browser session required"}, status_code=401)
         if request.headers.get("X-Engraphis-Browser-Session") != "1":
             return JSONResponse({"error": "browser session header required"}, status_code=403)
@@ -726,8 +749,8 @@ def create_app() -> FastAPI:
         """
 
         session_value = request.cookies.get(BROWSER_SESSION_COOKIE)
-        if settings.api_token:
-            if not browser_session_ok(session_value, settings.api_token):
+        if settings.api_token or session_value:
+            if not browser_session_ok(session_value, _browser_signing_key()):
                 return JSONResponse({"error": "browser session required"}, status_code=401)
             if request.headers.get("X-Engraphis-Browser-Session") != "1":
                 return JSONResponse({"error": "browser session header required"}, status_code=403)
@@ -760,8 +783,8 @@ def create_app() -> FastAPI:
         ride the user's browser into a local multipart upload.
         """
         session_value = request.cookies.get(BROWSER_SESSION_COOKIE)
-        if settings.api_token:
-            if not browser_session_ok(session_value, settings.api_token):
+        if settings.api_token or session_value:
+            if not browser_session_ok(session_value, _browser_signing_key()):
                 raise HTTPException(status_code=401, detail={"error": "browser session required"})
             if request.headers.get("X-Engraphis-Browser-Session") != "1":
                 raise HTTPException(status_code=403, detail={"error": "browser session header required"})
@@ -1329,7 +1352,11 @@ def create_app() -> FastAPI:
                     return JSONResponse({"error": "browser session header required"},
                                         status_code=403)
                 return await call_next(request)
-            return JSONResponse({"error": "unauthorized"}, status_code=401)
+            return JSONResponse(
+                {"error": "unauthorized", "code": "local_browser_session_required",
+                 "local_browser": local_browser_request(request, require_origin=False)},
+                status_code=401,
+            )
 
         # Zero-config access is intentionally loopback-only. Hosted Team deployments use
         # the private cloud service, never this local app's removed account database.

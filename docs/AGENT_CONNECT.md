@@ -21,6 +21,10 @@ legacy client pins direct tool names, configure `engraphis-mcp-classic` instead.
 Use `ENGRAPHIS_API_TOKEN` only when protecting a local HTTP surface; it is not a Team identity or
 seat credential.
 
+The dashboard on the same computer opens automatically without an account or token entry.
+Its browser session is established locally while remote API clients still supply their bearer
+credential. Pro and Team account connection is a separate, optional hosted-service flow.
+
 ## Local MCP over HTTP
 
 For a local MCP client that requires HTTP rather than stdio, install the same `mcp` extra and run

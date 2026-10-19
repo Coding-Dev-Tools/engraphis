@@ -56,7 +56,7 @@ def test_first_boot_is_local_and_commercial_actions_open_hosted_cloud():
     assert "ENGRAPHIS_DEPLOYMENT_TOKEN" not in script
     assert "startTrialPlan" in script
     assert "Hosted signup URL is not configured" in script
-    assert "Local API token required" in script
+    assert "Local dashboard opens automatically" in script
     assert "'/auth/state'" in script
 
 

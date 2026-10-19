@@ -224,7 +224,8 @@ def test_distribution_configuration_includes_public_evidence_tools():
     manifest = (ROOT / "MANIFEST.in").read_text(encoding="utf-8")
     package_data = pyproject[pyproject.index('[tool.setuptools.package-data]'):
                              pyproject.index('[tool.setuptools.exclude-package-data]')]
-    assert 'include = ["engraphis*", "scripts*", "eval*"]' in pyproject
+    assert 'include = ["engraphis*", "scripts*", "eval*", "integrations.commandcode"]' in pyproject
+    assert '"scripts" = ["templates/*.svg"]' in package_data
     assert '"datasets/locomo10_repair_manifest.json"' in package_data
     for rule in (
         "include LICENSE NOTICE README.md CHANGELOG.md BENCHMARKS.md",
@@ -233,6 +234,8 @@ def test_distribution_configuration_includes_public_evidence_tools():
         "include docs/images/context-efficiency.svg",
         "include docker-entrypoint.sh Dockerfile docker-compose.yml docker-compose.lan.yml",
         "recursive-include eval *.py",
+        "recursive-include integrations/commandcode *.py",
+        "recursive-include scripts/templates *.svg",
         "include deploy/force-graph-1.51.4.licenses.json",
         "include deploy/force-graph-1.51.4.yarn.lock",
         "include eval/BASELINES.md",
@@ -492,10 +495,10 @@ def test_extras_stay_resolvable_on_the_lowest_supported_python():
 def test_dependency_floors_exclude_known_vulnerable_and_breaking_releases():
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
-    expected = '"mcp>=1.28.1,<2; python_version >= \'3.10\'"'
+    expected = '"mcp>=1.30.0,<2; python_version >= \'3.10\'"'
     assert pyproject.count(expected) == 3
     combined = pyproject + requirements
-    assert "mcp>=1.28.1,<2" in requirements
+    assert "mcp>=1.30.0,<2" in requirements
     assert "mcp>=1.14.0" not in combined
     assert "python-multipart>=0.0.31" in combined
     assert "starlette>=1.3.1,<2" in combined

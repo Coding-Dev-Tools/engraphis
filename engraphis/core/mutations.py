@@ -11,7 +11,7 @@ import json
 import time
 from typing import Any, Optional, Protocol
 
-from .interfaces import MemoryRecord, Scope
+from .interfaces import MemoryRecord, Scope, normalize_closure_observations
 from .poisoning import metadata_is_quarantined
 
 
@@ -53,7 +53,20 @@ def memory_version(record: MemoryRecord) -> str:
         "claim_kind", "valid_from", "valid_to", "valid_to_recorded_at",
         "ingested_at", "expired_at", "modified_hlc",
     )
-    return "mv1:" + _digest({name: getattr(record, name, None) for name in fields})
+    values = {name: getattr(record, name, None) for name in fields}
+    observations = normalize_closure_observations(
+        getattr(record, "closure_observations", ()),
+        valid_to=record.valid_to, valid_to_recorded_at=record.valid_to_recorded_at,
+    )
+    scalar_observations = normalize_closure_observations(
+        (), valid_to=record.valid_to, valid_to_recorded_at=record.valid_to_recorded_at,
+    )
+    # Scalar closures already participate in the established mv1 digest. Preserve
+    # that digest until history carries additional evidence; history-only joins do
+    # not advance the descriptive HLC but must invalidate a prepared command.
+    if observations != scalar_observations:
+        values["closure_observations"] = observations
+    return "mv1:" + _digest(values)
 
 
 class MutationStore(Protocol):

@@ -630,7 +630,7 @@ def test_public_capability_and_support_docs_match_the_shipped_tree():
         'docs/images/knowledge-graph.png"' in readme
     )
     assert re.search(
-        r'src="https://raw\.githubusercontent\.com/Coding-Dev-Tools/engraphis/[0-9a-f]{40}/'
+        r'src="https://raw\.githubusercontent\.com/Coding-Dev-Tools/engraphis/(?:[0-9a-f]{40}|v1\.7\.10)/'
         r'docs/images/context-efficiency\.svg"',
         readme,
     )

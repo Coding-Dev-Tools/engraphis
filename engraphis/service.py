@@ -78,6 +78,7 @@ from engraphis.core.retrieval_policy import (
 )
 from engraphis.core.secrets import SecretDetectedError, redact_secrets as _redact_secrets, reject_secrets
 from engraphis.core.store import (
+    _memory_temporal_visibility_sql,
     _loads,
     _merge_edge_provenance,
     _public_receipt_row,
@@ -6944,6 +6945,11 @@ class MemoryService:
                  m["valid_to_recorded_at"], m["ingested_at"], m["expired_at"],
                  _remap_copy_text(m["subject_key"]), m["claim_kind"], m["pinned"], m["sensitivity"],
                  _remap_json_memory_ids(m["provenance"]), m["sort_order"]))
+            c.execute(
+                "INSERT OR IGNORE INTO memory_closures(memory_id,valid_to,recorded_at) "
+                "SELECT ?,valid_to,recorded_at FROM memory_closures WHERE memory_id=?",
+                (nmid, m["id"]),
+            )
             fts_row = c.execute(
                 "SELECT title, content, keywords FROM mem_fts WHERE id=?", (m["id"],)).fetchone()
             if fts_row:
@@ -8164,6 +8170,15 @@ class MemoryService:
         else:
             memories = all_memories
         memory_ids = {str(row["id"]) for row in memories}
+        memory_closures = [
+            dict(row) for row in conn.execute(
+                "SELECT mc.memory_id,mc.valid_to,mc.recorded_at FROM memory_closures mc "
+                "JOIN memories m ON m.id=mc.memory_id WHERE m.workspace_id=? "
+                "ORDER BY mc.memory_id,mc.valid_to,mc.recorded_at",
+                (wid,),
+            ).fetchall()
+            if str(row["memory_id"]) in memory_ids
+        ]
 
         all_source_vaults = [dict(row) for row in conn.execute(
             "SELECT * FROM source_vaults WHERE workspace_id=? ORDER BY id",
@@ -8598,6 +8613,7 @@ class MemoryService:
             "repos": repos,
             "sessions": sessions,
             "memories": memories,
+            "memory_closures": memory_closures,
             "source_vaults": source_vaults,
             "source_imports": source_imports,
             "entities": entities,
@@ -8626,6 +8642,7 @@ class MemoryService:
                 "repos": ["id"],
                 "sessions": ["id"],
                 "memories": ["id"],
+                "memory_closures": ["memory_id", "valid_to", "recorded_at"],
                 "source_vaults": ["id"],
                 "source_imports": ["vault_id", "source_key", "id"],
                 "entities": ["id"],
@@ -9523,6 +9540,24 @@ class MemoryService:
             except (TypeError, ValueError):
                 return False
 
+        closed_memory_ids: set[str] = set()
+
+        def load_memory_ghosts(memory_ids: list[str]) -> None:
+            for start in range(0, len(memory_ids), 500):
+                chunk = memory_ids[start:start + 500]
+                marks = ",".join("?" for _ in chunk)
+                closed_memory_ids.update(
+                    str(row["memory_id"]) for row in self.store.conn.execute(
+                        "SELECT DISTINCT memory_id FROM memory_closures "
+                        f"WHERE memory_id IN ({marks}) AND valid_to<=? "
+                        "AND (recorded_at IS NULL OR recorded_at<=?)",
+                        (*chunk, t, known_t),
+                    )
+                )
+
+        def memory_ghost(memory_id: str) -> bool:
+            return memory_id in closed_memory_ids
+
         try:
             lower_time = float(time_from) if time_from is not None else None
             upper_time = float(time_to) if time_to is not None else None
@@ -9592,7 +9627,7 @@ class MemoryService:
                 "AND (visibility_support.expired_at IS NULL "
                 "OR ?<visibility_support.expired_at) "
             )
-            visibility_params.extend((t, t, t, known_t, known_t))
+            visibility_params.extend((t, t, known_t, known_t, known_t))
         else:
             visibility_sql += (
                 "AND (visibility_support.valid_from IS NULL "
@@ -9609,19 +9644,14 @@ class MemoryService:
         )
         if not include_history:
             visibility_sql += (
-                "AND visibility_memory.workspace_id=? "
-                "AND (visibility_memory.valid_from IS NULL "
-                "OR visibility_memory.valid_from<=?) "
-                "AND (visibility_memory.valid_to IS NULL "
-                "OR ?<visibility_memory.valid_to "
-                "OR (visibility_memory.valid_to_recorded_at IS NOT NULL "
-                "AND ?<visibility_memory.valid_to_recorded_at)) "
-                "AND (visibility_memory.ingested_at IS NULL "
-                "OR visibility_memory.ingested_at<=?) "
-                "AND (visibility_memory.expired_at IS NULL "
-                "OR ?<visibility_memory.expired_at) "
+                "AND visibility_memory.workspace_id=? AND (visibility_memory.valid_from IS NULL OR "
+                "visibility_memory.valid_from<=?) AND NOT EXISTS (SELECT 1 FROM memory_closures graph_closure WHERE "
+                "graph_closure.memory_id=visibility_memory.id AND graph_closure.valid_to<=? AND "
+                "(graph_closure.recorded_at IS NULL OR graph_closure.recorded_at<=?)) AND "
+                "(visibility_memory.ingested_at IS NULL OR visibility_memory.ingested_at<=?) AND "
+                "(visibility_memory.expired_at IS NULL OR ?<visibility_memory.expired_at) "
             )
-            visibility_params.extend((wid, t, t, t, known_t, known_t))
+            visibility_params.extend((wid, t, t, known_t, known_t, known_t))
         else:
             visibility_sql += (
                 "AND visibility_memory.workspace_id=? "
@@ -9651,7 +9681,7 @@ class MemoryService:
                 "AND (visibility_edge.expired_at IS NULL "
                 "OR ?<visibility_edge.expired_at) "
             )
-            visibility_params.extend((t, t, t, known_t, known_t))
+            visibility_params.extend((t, t, known_t, known_t, known_t))
         else:
             visibility_sql += (
                 "AND (visibility_edge.valid_from IS NULL "
@@ -9713,7 +9743,7 @@ class MemoryService:
                 "AND (touching_edge.expired_at IS NULL "
                 "OR ?<touching_edge.expired_at) "
             )
-            touching_edge_time_params: tuple[float, ...] = (t, t, t, known_t, known_t)
+            touching_edge_time_params: tuple[float, ...] = (t, t, known_t, known_t, known_t)
         else:
             touching_edge_time_sql = (
                 "AND (touching_edge.valid_from IS NULL "
@@ -9761,7 +9791,7 @@ class MemoryService:
                 "AND (s.expired_at IS NULL "
                 "OR ?<s.expired_at) "
             )
-            touching_params.extend((t, t, t, known_t, known_t))
+            touching_params.extend((t, t, known_t, known_t, known_t))
         else:
             touching_sql += (
                 "AND (s.valid_from IS NULL "
@@ -9782,19 +9812,14 @@ class MemoryService:
         )
         if not include_history:
             touching_sql += (
-                "AND touching_memory.workspace_id=? "
-                "AND (touching_memory.valid_from IS NULL "
-                "OR touching_memory.valid_from<=?) "
-                "AND (touching_memory.valid_to IS NULL "
-                "OR ?<touching_memory.valid_to "
-                "OR (touching_memory.valid_to_recorded_at IS NOT NULL "
-                "AND ?<touching_memory.valid_to_recorded_at)) "
-                "AND (touching_memory.ingested_at IS NULL "
-                "OR touching_memory.ingested_at<=?) "
-                "AND (touching_memory.expired_at IS NULL "
-                "OR ?<touching_memory.expired_at) "
+                "AND touching_memory.workspace_id=? AND (touching_memory.valid_from IS NULL OR "
+                "touching_memory.valid_from<=?) AND NOT EXISTS (SELECT 1 FROM memory_closures graph_closure WHERE "
+                "graph_closure.memory_id=touching_memory.id AND graph_closure.valid_to<=? AND "
+                "(graph_closure.recorded_at IS NULL OR graph_closure.recorded_at<=?)) AND "
+                "(touching_memory.ingested_at IS NULL OR touching_memory.ingested_at<=?) AND "
+                "(touching_memory.expired_at IS NULL OR ?<touching_memory.expired_at) "
             )
-            touching_params.extend((wid, t, t, t, known_t, known_t))
+            touching_params.extend((wid, t, t, known_t, known_t, known_t))
         else:
             touching_sql += (
                 "AND touching_memory.workspace_id=? "
@@ -9913,46 +9938,30 @@ class MemoryService:
         entity_params.extend((wid, wid, known_t))
         if not include_history:
             entity_sql += (
-                "WHERE ((public_edge.workspace_id=? AND public_edge.src=entity.id) "
-                "OR (public_edge.workspace_id=? AND public_edge.dst=entity.id)) "
-                "AND (public_edge.valid_from IS NULL OR public_edge.valid_from<=?) "
-                "AND (public_edge.valid_to IS NULL OR ?<public_edge.valid_to "
-                "OR (public_edge.valid_to_recorded_at IS NOT NULL "
-                "AND ?<public_edge.valid_to_recorded_at)) "
-                "AND (public_edge.ingested_at IS NULL OR public_edge.ingested_at<=?) "
-                "AND (public_edge.expired_at IS NULL OR ?<public_edge.expired_at) "
-                "AND (NOT EXISTS (SELECT 1 FROM edge_supports public_any_support "
-                "WHERE public_any_support.edge_id=public_edge.id) "
-                "OR EXISTS (SELECT 1 FROM edge_supports public_support "
-                "JOIN memories public_memory "
-                "ON public_memory.id=public_support.memory_id "
-                "WHERE public_support.edge_id=public_edge.id "
-                "AND (public_support.valid_from IS NULL "
-                "OR public_support.valid_from<=?) "
-                "AND (public_support.valid_to IS NULL OR ?<public_support.valid_to "
-                "OR (public_support.valid_to_recorded_at IS NOT NULL "
-                "AND ?<public_support.valid_to_recorded_at)) "
-                "AND (public_support.ingested_at IS NULL "
-                "OR public_support.ingested_at<=?) "
-                "AND (public_support.expired_at IS NULL "
-                "OR ?<public_support.expired_at) "
-                "AND public_memory.workspace_id=? "
-                "AND (public_memory.valid_from IS NULL "
-                "OR public_memory.valid_from<=?) "
-                "AND (public_memory.valid_to IS NULL "
-                "OR ?<public_memory.valid_to "
-                "OR (public_memory.valid_to_recorded_at IS NOT NULL "
-                "AND ?<public_memory.valid_to_recorded_at)) "
-                "AND (public_memory.ingested_at IS NULL "
-                "OR public_memory.ingested_at<=?) "
-                "AND (public_memory.expired_at IS NULL "
-                "OR ?<public_memory.expired_at) "
-                "AND COALESCE(public_memory.scope, 'workspace')!='session')))"
+                "WHERE ((public_edge.workspace_id=? AND public_edge.src=entity.id) OR (public_edge.workspace_id=? AND "
+                "public_edge.dst=entity.id)) AND (public_edge.valid_from IS NULL OR public_edge.valid_from<=?) AND "
+                "(public_edge.valid_to IS NULL OR ?<public_edge.valid_to OR (public_edge.valid_to_recorded_at IS NOT "
+                "NULL AND ?<public_edge.valid_to_recorded_at)) AND (public_edge.ingested_at IS NULL OR "
+                "public_edge.ingested_at<=?) AND (public_edge.expired_at IS NULL OR ?<public_edge.expired_at) AND "
+                "(NOT EXISTS (SELECT 1 FROM edge_supports public_any_support WHERE "
+                "public_any_support.edge_id=public_edge.id) OR EXISTS (SELECT 1 FROM edge_supports public_support "
+                "JOIN memories public_memory ON public_memory.id=public_support.memory_id WHERE "
+                "public_support.edge_id=public_edge.id AND (public_support.valid_from IS NULL OR "
+                "public_support.valid_from<=?) AND (public_support.valid_to IS NULL OR ?<public_support.valid_to OR "
+                "(public_support.valid_to_recorded_at IS NOT NULL AND ?<public_support.valid_to_recorded_at)) AND "
+                "(public_support.ingested_at IS NULL OR public_support.ingested_at<=?) AND (public_support.expired_at "
+                "IS NULL OR ?<public_support.expired_at) AND public_memory.workspace_id=? AND "
+                "(public_memory.valid_from IS NULL OR public_memory.valid_from<=?) AND NOT EXISTS (SELECT 1 FROM "
+                "memory_closures graph_closure WHERE graph_closure.memory_id=public_memory.id AND "
+                "graph_closure.valid_to<=? AND (graph_closure.recorded_at IS NULL OR graph_closure.recorded_at<=?)) "
+                "AND (public_memory.ingested_at IS NULL OR public_memory.ingested_at<=?) AND "
+                "(public_memory.expired_at IS NULL OR ?<public_memory.expired_at) AND COALESCE(public_memory.scope, "
+                "'workspace')!='session')))"
             )
             entity_params.extend((
-                wid, wid, t, t, t, known_t, known_t,
-                t, t, t, known_t, known_t,
-                wid, t, t, t, known_t, known_t,
+                wid, wid, t, t, known_t, known_t, known_t,
+                t, t, known_t, known_t, known_t,
+                wid, t, t, known_t, known_t, known_t,
             ))
         else:
             entity_sql += (
@@ -10070,26 +10079,21 @@ class MemoryService:
                     "WHERE any_graph_support.edge_id=edges.id) OR "
                 )
             edge_sql += (
-                "EXISTS (SELECT 1 FROM edge_supports graph_support "
-                "JOIN memories graph_memory ON graph_memory.id=graph_support.memory_id "
-                "WHERE graph_support.edge_id=edges.id "
-                "AND (graph_support.valid_from IS NULL OR graph_support.valid_from<=?) "
-                "AND (graph_support.valid_to IS NULL OR ?<graph_support.valid_to "
-                "OR (graph_support.valid_to_recorded_at IS NOT NULL "
-                "AND ?<graph_support.valid_to_recorded_at)) "
-                "AND (graph_support.ingested_at IS NULL OR graph_support.ingested_at<=?) "
-                "AND (graph_support.expired_at IS NULL OR ?<graph_support.expired_at) "
-                "AND graph_memory.workspace_id=? "
-                "AND (graph_memory.valid_from IS NULL OR graph_memory.valid_from<=?) "
-                "AND (graph_memory.valid_to IS NULL OR ?<graph_memory.valid_to "
-                "OR (graph_memory.valid_to_recorded_at IS NOT NULL "
-                "AND ?<graph_memory.valid_to_recorded_at)) "
-                "AND (graph_memory.ingested_at IS NULL OR graph_memory.ingested_at<=?) "
-                "AND (graph_memory.expired_at IS NULL OR ?<graph_memory.expired_at)"
+                "EXISTS (SELECT 1 FROM edge_supports graph_support JOIN memories graph_memory ON "
+                "graph_memory.id=graph_support.memory_id WHERE graph_support.edge_id=edges.id AND "
+                "(graph_support.valid_from IS NULL OR graph_support.valid_from<=?) AND (graph_support.valid_to IS "
+                "NULL OR ?<graph_support.valid_to OR (graph_support.valid_to_recorded_at IS NOT NULL AND "
+                "?<graph_support.valid_to_recorded_at)) AND (graph_support.ingested_at IS NULL OR "
+                "graph_support.ingested_at<=?) AND (graph_support.expired_at IS NULL OR ?<graph_support.expired_at) "
+                "AND graph_memory.workspace_id=? AND (graph_memory.valid_from IS NULL OR graph_memory.valid_from<=?) "
+                "AND NOT EXISTS (SELECT 1 FROM memory_closures graph_closure WHERE "
+                "graph_closure.memory_id=graph_memory.id AND graph_closure.valid_to<=? AND (graph_closure.recorded_at "
+                "IS NULL OR graph_closure.recorded_at<=?)) AND (graph_memory.ingested_at IS NULL OR "
+                "graph_memory.ingested_at<=?) AND (graph_memory.expired_at IS NULL OR ?<graph_memory.expired_at)"
             )
             edge_params.extend((
-                t, t, t, known_t, known_t,
-                wid, t, t, t, known_t, known_t,
+                t, t, known_t, known_t, known_t,
+                wid, t, t, known_t, known_t, known_t,
             ))
             if restrict_sessions:
                 edge_sql += " AND COALESCE(graph_memory.scope, 'workspace')!='session'"
@@ -10435,7 +10439,12 @@ class MemoryService:
                     "OR (historical_edge.valid_to IS NOT NULL "
                     "AND historical_edge.valid_to<=? "
                     "AND (historical_edge.valid_to_recorded_at IS NULL "
-                    "OR historical_edge.valid_to_recorded_at<=?))) "
+                    "OR historical_edge.valid_to_recorded_at<=?)) "
+                    "OR EXISTS (SELECT 1 FROM memory_closures historical_memory_closure "
+                    "WHERE historical_memory_closure.memory_id=memory.id "
+                    "AND historical_memory_closure.valid_to<=? "
+                    "AND (historical_memory_closure.recorded_at IS NULL "
+                    "OR historical_memory_closure.recorded_at<=?))) "
                     # An older version of a currently visible evidence key belongs
                     # to the live arm already. Exclude it before LIMIT so duplicate
                     # keys cannot consume the global historical-support budget.
@@ -10460,13 +10469,18 @@ class MemoryService:
                     "AND ?<current_edge.valid_to_recorded_at)) "
                     "AND (current_edge.ingested_at IS NULL "
                     "OR current_edge.ingested_at<=?) "
-                    "AND (current_edge.expired_at IS NULL OR ?<current_edge.expired_at)) "
+                    "AND (current_edge.expired_at IS NULL OR ?<current_edge.expired_at) "
+                    "AND NOT EXISTS (SELECT 1 FROM memory_closures current_memory_closure "
+                    "WHERE current_memory_closure.memory_id=current_support.memory_id "
+                    "AND current_memory_closure.valid_to<=? "
+                    "AND (current_memory_closure.recorded_at IS NULL "
+                    "OR current_memory_closure.recorded_at<=?))) "
                 )
                 historical_params: list[Any] = [
                     *chunk, t, known_t, known_t, t, known_t, known_t, wid,
-                    t, known_t, t, known_t,
+                    t, known_t, t, known_t, t, known_t,
                     t, t, known_t, known_t, known_t,
-                    t, t, known_t, known_t, known_t,
+                    t, t, known_t, known_t, known_t, t, known_t,
                 ]
                 if repo_id:
                     historical_sql += "AND " + _repo_memory_scope_sql("memory") + " "
@@ -10517,6 +10531,7 @@ class MemoryService:
             str(row.get("memory_id") or "") for row in support_rows
             if row.get("memory_id")
         })
+        load_memory_ghosts(support_memory_ids)
         support_memory_meta: dict[str, dict[str, Any]] = {}
         for start in range(0, len(support_memory_ids), 500):
             chunk = support_memory_ids[start:start + 500]
@@ -10544,10 +10559,10 @@ class MemoryService:
                 memory_params.extend([known_t, known_t])
             else:
                 memory_sql += (
-                    "AND (valid_to IS NULL OR ?<valid_to "
-                    "OR (valid_to_recorded_at IS NOT NULL AND ?<valid_to_recorded_at)) "
-                    "AND (ingested_at IS NULL OR ingested_at<=?) "
-                    "AND (expired_at IS NULL OR ?<expired_at)"
+                    "AND NOT EXISTS (SELECT 1 FROM memory_closures graph_closure WHERE "
+                    "graph_closure.memory_id=memories.id AND graph_closure.valid_to<=? AND (graph_closure.recorded_at IS "
+                    "NULL OR graph_closure.recorded_at<=?)) AND (ingested_at IS NULL OR ingested_at<=?) AND (expired_at "
+                    "IS NULL OR ?<expired_at)"
                 )
                 memory_params.extend([t, known_t, known_t, known_t])
             memory_sql += " AND COALESCE(scope, 'workspace')!='session'"
@@ -10565,7 +10580,7 @@ class MemoryService:
                 support_memory_meta[str(memory["id"])] = {
                     "memory_type": str(memory["mtype"] or ""),
                     "support_time": float(memory["support_time"] or 0.0),
-                    "ghost": temporal_ghost(memory),
+                    "ghost": memory_ghost(str(memory["id"])),
                 }
         enriched_supports = []
         for support in support_rows:
@@ -10579,6 +10594,16 @@ class MemoryService:
                 enriched["support_time"] = metadata["support_time"]
                 enriched["memory_ghost"] = metadata["ghost"]
             enriched_supports.append(enriched)
+        if include_history:
+            support_ghosts: dict[str, list[bool]] = {}
+            for support in enriched_supports:
+                support_ghosts.setdefault(str(support["edge_id"]), []).append(
+                    bool(support.get("ghost") or support.get("memory_ghost"))
+                )
+            for edge in edge_rows:
+                evidence_ghosts = support_ghosts.get(str(edge["id"]))
+                if evidence_ghosts and all(evidence_ghosts):
+                    edge["ghost"] = True
         if prune_entities:
             matching_edge_ids = {
                 str(support.get("edge_id") or "")
@@ -10626,8 +10651,9 @@ class MemoryService:
                 memory_where = [
                     "workspace_id=?",
                     "(valid_from IS NULL OR valid_from<=?)",
-                    "(valid_to IS NULL OR ?<valid_to "
-                    "OR (valid_to_recorded_at IS NOT NULL AND ?<valid_to_recorded_at))",
+                    "NOT EXISTS (SELECT 1 FROM memory_closures graph_closure WHERE graph_closure.memory_id=memories.id "
+                    "AND graph_closure.valid_to<=? AND (graph_closure.recorded_at IS NULL OR "
+                    "graph_closure.recorded_at<=?))",
                     "(ingested_at IS NULL OR ingested_at<=?)",
                     "(expired_at IS NULL OR ?<expired_at)",
                 ]
@@ -10685,6 +10711,7 @@ class MemoryService:
                         count=MAX_GRAPH_COMPLETE_MEMORY_CANDIDATES + 1,
                         limit=MAX_GRAPH_COMPLETE_MEMORY_CANDIDATES,
                     )
+                load_memory_ghosts([str(row["id"]) for row in raw_memory_rows])
                 for row in raw_memory_rows:
                     memory = dict(row)
                     metadata = _loads(memory.pop("metadata", None), {})
@@ -10700,16 +10727,7 @@ class MemoryService:
                 last_memory_id = str(raw_memory_rows[-1]["id"])
             if include_history:
                 for memory in memory_rows:
-                    valid_to_value = memory.get("valid_to")
-                    recorded_at = memory.get("valid_to_recorded_at")
-                    try:
-                        memory["ghost"] = bool(
-                            valid_to_value is not None
-                            and float(valid_to_value) <= t
-                            and (recorded_at is None or float(recorded_at) <= known_t)
-                        )
-                    except (TypeError, ValueError):
-                        memory["ghost"] = False
+                    memory["ghost"] = memory_ghost(str(memory["id"]))
             if len(memory_rows) > MAX_GRAPH_COMPLETE_MEMORIES:
                 raise GraphSceneCapacityExceeded(
                     resource="memory nodes", count=len(memory_rows),
@@ -11225,7 +11243,11 @@ class MemoryService:
         like = f"%{escaped}%"
         prefix = f"{escaped}%"
 
-        def visible_sql(alias: str) -> tuple[str, list[float]]:
+        def visible_sql(alias: str) -> tuple[str, list[Any]]:
+            if alias in {"memory", "memories", "suggest_memory"}:
+                return _memory_temporal_visibility_sql(
+                    alias, SearchFilter(valid_at=suggestion_at, known_at=suggestion_known_at),
+                )
             prefix = f"{alias}."
             return (
                 f"({prefix}valid_from IS NULL OR {prefix}valid_from<=?) "
@@ -11673,9 +11695,16 @@ class MemoryService:
             "ON history_memory.id=history_support.memory_id "
             "WHERE history_support.edge_id=edges.id "
             "AND history_memory.workspace_id=? "
+            "AND (history_memory.ingested_at IS NULL OR history_memory.ingested_at<=?) "
+            "AND (history_memory.expired_at IS NULL OR ?<history_memory.expired_at) "
+            "AND (history_support.ingested_at IS NULL OR history_support.ingested_at<=?) "
+            "AND (history_support.expired_at IS NULL OR ?<history_support.expired_at) "
             "AND COALESCE(history_memory.scope, 'workspace')!='session'))"
         )
-        history_params = (*history_params, wid)
+        history_params = (
+            *history_params, wid, history_known_at, history_known_at,
+            history_known_at, history_known_at,
+        )
         history_total = int(self.store.conn.execute(
             f"SELECT COUNT(*) AS n FROM edges WHERE {history_filter}", history_params
         ).fetchone()["n"])
@@ -11796,9 +11825,9 @@ class MemoryService:
                 "OR (support.valid_to IS NOT NULL AND support.valid_to<=? "
                 "AND (support.valid_to_recorded_at IS NULL "
                 "OR support.valid_to_recorded_at<=?)) "
-                "OR (memory.valid_to IS NOT NULL AND memory.valid_to<=? "
-                "AND (memory.valid_to_recorded_at IS NULL "
-                "OR memory.valid_to_recorded_at<=?))"
+                "OR EXISTS (SELECT 1 FROM memory_closures evidence_closure "
+                "WHERE evidence_closure.memory_id=memory.id AND evidence_closure.valid_to<=? "
+                "AND (evidence_closure.recorded_at IS NULL OR evidence_closure.recorded_at<=?))"
                 ") "
                 "AND (relation.ingested_at IS NULL OR relation.ingested_at<=?) "
                 "AND (relation.expired_at IS NULL OR ?<relation.expired_at) "
@@ -11818,6 +11847,9 @@ class MemoryService:
                 wid, anchor, known_anchor, known_anchor,
             )
         else:
+            memory_visibility, memory_visibility_params = _memory_temporal_visibility_sql(
+                "memory", SearchFilter(valid_at=anchor, known_at=known_anchor),
+            )
             support_conditions = (
                 "relation.workspace_id=? AND relation.{endpoint}=target.id "
                 "AND (relation.valid_from IS NULL OR relation.valid_from<=?) "
@@ -11833,20 +11865,14 @@ class MemoryService:
                 "AND (support.ingested_at IS NULL OR support.ingested_at<=?) "
                 "AND (support.expired_at IS NULL OR ?<support.expired_at) "
                 "AND memory.workspace_id=? "
-                "AND (memory.valid_from IS NULL OR memory.valid_from<=?) "
-                "AND (memory.valid_to IS NULL OR ?<memory.valid_to "
-                "OR (memory.valid_to_recorded_at IS NOT NULL "
-                "AND ?<memory.valid_to_recorded_at)) "
-                "AND (memory.ingested_at IS NULL OR memory.ingested_at<=?) "
-                "AND (memory.expired_at IS NULL OR ?<memory.expired_at) "
+                f"AND {memory_visibility} "
                 "AND COALESCE(memory.scope, 'workspace')!='session'"
             )
             branch_params = (
                 wid,
                 anchor, anchor, known_anchor, known_anchor, known_anchor,
                 anchor, anchor, known_anchor, known_anchor, known_anchor,
-                wid,
-                anchor, anchor, known_anchor, known_anchor, known_anchor,
+                wid, *memory_visibility_params,
             )
         if repo_id is not None:
             support_conditions = support_conditions.replace(
@@ -11868,7 +11894,7 @@ class MemoryService:
                 branch_params = (
                     wid, repo_id, anchor, anchor, known_anchor, known_anchor, known_anchor,
                     anchor, anchor, known_anchor, known_anchor, known_anchor,
-                    wid, repo_id, anchor, anchor, known_anchor, known_anchor, known_anchor,
+                    wid, repo_id, *memory_visibility_params,
                 )
         source_conditions = support_conditions.format(endpoint="src")
         target_conditions = support_conditions.format(endpoint="dst")
@@ -12043,12 +12069,16 @@ class MemoryService:
             selected_layers = {layer.value for layer in selected_graph_layers}
 
         def temporal_sql(alias: str, *, history: bool = False
-                         ) -> tuple[str, list[float]]:
+                         ) -> tuple[str, list[Any]]:
             """Parameterized world/system visibility for graph-owned SQL.
 
             ``history`` retains world-time closures for the Time view, but never
             relaxes system time: future ingestion and later expiry stay invisible.
             """
+            if not history and alias in {"visibility_memory", "left_memory", "right_memory"}:
+                return _memory_temporal_visibility_sql(
+                    alias, SearchFilter(valid_at=world_anchor, known_at=system_anchor),
+                )
             prefix = f"{alias}."
             if history:
                 world_sql = f"({prefix}valid_from IS NULL OR {prefix}valid_from<=?)"
@@ -12297,7 +12327,8 @@ class MemoryService:
             )
             history_sql = (
                 "SELECT relation.id, relation.src, relation.dst, relation.relation, "
-                "relation.layer, relation.valid_from, relation.valid_to "
+                "relation.layer, relation.valid_from, relation.valid_to, "
+                "relation.valid_to_recorded_at "
                 "FROM edges relation WHERE relation.workspace_id=? "
                 f"AND {relation_visibility} AND {public_visibility}"
             )
@@ -12330,6 +12361,58 @@ class MemoryService:
                 dict(row) for row in conn.execute(history_sql, history_params).fetchall()
                 if row["src"] in node_ids and row["dst"] in node_ids
             ]
+        if include_relation_history and edgs:
+            # The physical edge keeps its first recorded interval. Derive the
+            # Time-view ending from every source observation known at this anchor;
+            # a later shortening must not make a closed relation appear live.
+            support_endings: dict[str, Optional[float]] = {}
+            for start in range(0, len(edgs), 500):
+                chunk = [str(edge["id"]) for edge in edgs[start:start + 500]]
+                marks = ",".join("?" for _ in chunk)
+                ending_sql = (
+                    "WITH source_endings AS (SELECT support.edge_id, "
+                    "CASE WHEN support.valid_to_recorded_at IS NULL "
+                    "OR support.valid_to_recorded_at<=? THEN support.valid_to "
+                    "ELSE NULL END AS support_end, "
+                    "(SELECT MIN(closure.valid_to) FROM memory_closures closure "
+                    "WHERE closure.memory_id=memory.id AND (closure.recorded_at IS NULL "
+                    "OR closure.recorded_at<=?)) AS memory_end "
+                    "FROM edge_supports support JOIN memories memory "
+                    "ON memory.id=support.memory_id "
+                    f"WHERE support.edge_id IN ({marks}) "
+                    "AND memory.workspace_id=? "
+                    "AND COALESCE(memory.scope,'workspace')!='session' "
+                    "AND (support.valid_from IS NULL OR support.valid_from<=?) "
+                    "AND (support.ingested_at IS NULL OR support.ingested_at<=?) "
+                    "AND (support.expired_at IS NULL OR ?<support.expired_at) "
+                    "AND (memory.valid_from IS NULL OR memory.valid_from<=?) "
+                    "AND (memory.ingested_at IS NULL OR memory.ingested_at<=?) "
+                    "AND (memory.expired_at IS NULL OR ?<memory.expired_at)), "
+                    "support_endings AS (SELECT edge_id, "
+                    "CASE WHEN support_end IS NULL THEN memory_end "
+                    "WHEN memory_end IS NULL THEN support_end "
+                    "ELSE MIN(support_end,memory_end) END AS ending FROM source_endings) "
+                    "SELECT edge_id, COUNT(*) AS source_count, COUNT(ending) AS closed_count, "
+                    "MAX(ending) AS ending FROM support_endings GROUP BY edge_id"
+                )
+                ending_params: list[Any] = [
+                    system_anchor, system_anchor, *chunk, wid,
+                    world_anchor, system_anchor, system_anchor,
+                    world_anchor, system_anchor, system_anchor,
+                ]
+                for row in conn.execute(ending_sql, ending_params):
+                    support_endings[str(row["edge_id"])] = (
+                        float(row["ending"])
+                        if row["source_count"] == row["closed_count"] else None
+                    )
+            for edge in edgs:
+                physical_end = edge.get("valid_to")
+                recorded_at = edge.get("valid_to_recorded_at")
+                if recorded_at is not None and recorded_at > system_anchor:
+                    physical_end = None
+                source_end = support_endings.get(str(edge["id"]))
+                endings = [value for value in (physical_end, source_end) if value is not None]
+                edge["valid_to"] = min(endings) if endings else None
         for link in memory_link_fallback:
             if len(edgs) >= edge_cap:
                 break
@@ -13006,6 +13089,7 @@ def _mem_to_dict(rec: Any) -> dict:
         "subject_key": rec.subject_key, "claim_kind": rec.claim_kind,
         "valid_from": rec.valid_from, "valid_to": rec.valid_to,
         "valid_to_recorded_at": rec.valid_to_recorded_at,
+        "closure_observations": [list(pair) for pair in rec.closure_observations],
         "ingested_at": rec.ingested_at, "expired_at": rec.expired_at,
         "provenance": rec.provenance,
     }

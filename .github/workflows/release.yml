@@ -89,6 +89,9 @@ jobs:
           python -m eval.ablation
           python -m eval.reinforcement
           python -m eval.adversarial_memory_security
+          python -m eval.grounded
+          python -m eval.code_arm
+          python -m eval.evidence_contracts
           python -m pip_audit --local --skip-editable
 
       - name: Capture the exact build environment and Python SBOM
@@ -328,6 +331,9 @@ jobs:
           python -m eval.ablation
           python -m eval.reinforcement
           python -m eval.adversarial_memory_security
+          python -m eval.grounded
+          python -m eval.code_arm
+          python -m eval.evidence_contracts
 
   artifact-core-py39:
     name: Python 3.9 installed release artifacts

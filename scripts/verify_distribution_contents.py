@@ -11,6 +11,9 @@ from typing import Iterable, Optional
 
 
 REQUIRED_COMMON = frozenset({
+    "integrations/commandcode/session_start_hook.py",
+    "integrations/commandcode/file_guard_hook.py",
+    "scripts/templates/benchmark_examples.svg",
     "engraphis/core/mutations.py",
     "engraphis/core/vector_repair.py",
     "engraphis/dashboard_assets/ask-requests.js",
