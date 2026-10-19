@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from engraphis.local_auth import (
-    BROWSER_SESSION_COOKIE, browser_session, local_browser_request,
+    BROWSER_SESSION_COOKIE, browser_session, browser_session_ok, local_browser_request,
 )
 
 TOKEN = "local-browser-fixture-credential"
@@ -141,6 +141,8 @@ def test_local_dashboard_opens_without_token_and_reuses_cookie_and_confirmation(
         repeated = client.post("/api/auth/local-session", headers=HEADERS)
         assert repeated.json()["review_csrf_token"] == csrf
         assert client.cookies.get(BROWSER_SESSION_COOKIE) == cookie
+        assert "set-cookie" not in repeated.headers
+        assert browser_session_ok(cookie, TOKEN)
 
 
 @pytest.mark.parametrize("peer", ["203.0.113.9", "192.168.1.12"])
@@ -160,8 +162,45 @@ def test_expired_local_session_renews_without_entering_a_credential(client_facto
     with client_factory() as client:
         client.cookies.set(BROWSER_SESSION_COOKIE, expired, domain="127.0.0.1", path="/")
         assert client.get("/api/memories", headers=BROWSER).status_code == 401
-        assert client.post("/api/auth/local-session", headers=HEADERS).status_code == 200
+        renewed = client.post("/api/auth/local-session", headers=HEADERS)
+        assert renewed.status_code == 200
+        assert "set-cookie" in renewed.headers
+        assert expired not in renewed.headers["set-cookie"]
         assert client.cookies.get(BROWSER_SESSION_COOKIE) != expired
+        assert browser_session_ok(client.cookies.get(BROWSER_SESSION_COOKIE), TOKEN)
+        assert client.get("/api/memories", headers=BROWSER).status_code == 200
+
+
+@pytest.mark.parametrize("cookie_kind", ["malformed", "forged"])
+def test_invalid_local_cookie_is_replaced_without_echo(client_factory, cookie_kind):
+    supplied = ("not-a-signed-session" if cookie_kind == "malformed"
+                else browser_session(TOKEN + "-wrong-signing-key"))
+    assert not browser_session_ok(supplied, TOKEN)
+    with client_factory() as client:
+        client.cookies.set(BROWSER_SESSION_COOKIE, supplied, domain="127.0.0.1", path="/")
+        assert client.get("/api/memories", headers=BROWSER).status_code == 401
+        opened = client.post("/api/auth/local-session", headers=HEADERS)
+        assert opened.status_code == 200
+        assert "set-cookie" in opened.headers
+        assert supplied not in opened.headers["set-cookie"]
+        assert browser_session_ok(client.cookies.get(BROWSER_SESSION_COOKIE), TOKEN)
+        assert client.get("/api/memories", headers=BROWSER).status_code == 200
+
+
+def test_explicit_token_exchange_emits_cookie_with_valid_existing_session(client_factory):
+    with client_factory() as client:
+        initial = client.post("/api/auth/local-session", headers=HEADERS)
+        assert initial.status_code == 200
+        assert "set-cookie" in initial.headers
+        csrf = initial.json()["review_csrf_token"]
+        exchanged = client.post("/api/auth/session", json={"token": TOKEN}, headers=HEADERS)
+        assert exchanged.status_code == 200
+        assert "set-cookie" in exchanged.headers
+        assert "HttpOnly" in exchanged.headers["set-cookie"]
+        assert "SameSite=strict" in exchanged.headers["set-cookie"]
+        assert TOKEN not in exchanged.headers["set-cookie"]
+        assert exchanged.json()["review_csrf_token"] != csrf
+        assert browser_session_ok(client.cookies.get(BROWSER_SESSION_COOKIE), TOKEN)
         assert client.get("/api/memories", headers=BROWSER).status_code == 200
 
 
