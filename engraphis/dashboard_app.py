@@ -662,8 +662,10 @@ def create_app() -> FastAPI:
 
     def _browser_session_response(request: Request, *, reuse: bool = False):
         session_value = request.cookies.get(BROWSER_SESSION_COOKIE) if reuse else None
+        fresh_session_value = None
         if not browser_session_ok(session_value, _browser_signing_key()):
-            session_value = browser_session(_browser_signing_key())
+            fresh_session_value = browser_session(_browser_signing_key())
+            session_value = fresh_session_value
         if reuse:
             # First visits in two tabs can mint the same second-resolution cookie.
             # setdefault preserves their shared confirmation even across that race.
@@ -677,15 +679,18 @@ def create_app() -> FastAPI:
             {"authenticated": True, "review_csrf_token": review_csrf_token}
         )
         response.headers["Cache-Control"] = "no-store"
-        response.set_cookie(
-            BROWSER_SESSION_COOKIE,
-            session_value,
-            max_age=BROWSER_SESSION_SECONDS,
-            httponly=True,
-            secure=wants_https(request),
-            samesite="strict",
-            path="/",
-        )
+        # A validated reused cookie remains in the browser. Only server-minted
+        # values are emitted in Set-Cookie; request cookie bytes are never echoed.
+        if fresh_session_value is not None:
+            response.set_cookie(
+                BROWSER_SESSION_COOKIE,
+                fresh_session_value,
+                max_age=BROWSER_SESSION_SECONDS,
+                httponly=True,
+                secure=wants_https(request),
+                samesite="strict",
+                path="/",
+            )
         return response
 
     @app.post("/api/auth/local-session", include_in_schema=False)

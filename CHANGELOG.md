@@ -92,6 +92,9 @@ Candidate package version: **1.7.10**. Publication and hosted-service qualificat
 - Preserve byte-hashed evaluation fixtures with LF checkout rules on Windows.
 - Preserve immutable historical report bytes and retry transient Windows reader locks
   when publishing local benchmark queue status.
+- Emit a browser session cookie only when the server mints it. Valid local-session
+  reuse preserves its existing cookie and review confirmation without echoing request
+  cookie bytes in the response.
 - Include automatic same-origin loopback dashboard sessions without user-entered tokens,
   retaining remote authentication and reviewed-write protections.
 
