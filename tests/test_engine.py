@@ -1072,6 +1072,94 @@ def test_prompt_timeline_fills_eligible_history_after_pending_rows():
     assert [record.id for record in history] == [approved]
 
 
+def test_closed_timeline_filters_before_candidate_and_result_limits():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    closed = eng.store.add_memory(MemoryRecord(
+        id="", content="History previously used another database.", workspace_id=wid,
+        scope=Scope.WORKSPACE, valid_from=-1.0, valid_to=0.0,
+        valid_to_recorded_at=1.0, ingested_at=1.0,
+        provenance={"trusted": True, "review_state": "approved"},
+    ))
+    for index in range(501):
+        eng.store.add_memory(MemoryRecord(
+            id="", content="History", workspace_id=wid, scope=Scope.WORKSPACE,
+            ingested_at=2.0 + index, provenance={"trusted": True, "review_state": "approved"},
+        ))
+    ordinary = eng.timeline("history", workspace_id=wid, limit=50, known_at=1000.0, prompt_only=True)
+    assert len(ordinary) == 50 and all(record.valid_to is None for record in ordinary)
+    history = eng.timeline(
+        "history", workspace_id=wid, limit=50, known_at=1000.0,
+        prompt_only=True, closed_only=True,
+    )
+    assert [record.id for record in history] == [closed]
+    assert history[0].valid_to == 0.0
+
+
+def test_closed_timeline_applies_review_and_system_time_before_candidate_cap():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    other = eng.store.get_or_create_workspace("other")
+    approved = eng.store.add_memory(MemoryRecord(
+        id="", content="History", workspace_id=wid, scope=Scope.WORKSPACE,
+        valid_from=0.0, valid_to=1.0, ingested_at=1.0,
+        provenance={"trusted": True, "review_state": "approved"},
+    ))
+    for index in range(501):
+        for extra in (
+            {"provenance": {"trusted": False, "review_state": "pending"}},
+            {"ingested_at": 2000.0 + index},
+            {"expired_at": 10.0},
+            {"valid_to_recorded_at": 2000.0},
+            {"workspace_id": other},
+        ):
+            fields = dict(
+                id="", content="History", workspace_id=wid, scope=Scope.WORKSPACE,
+                valid_from=0.0, valid_to=1.0, ingested_at=2.0 + index,
+                provenance={"trusted": True, "review_state": "approved"},
+            )
+            fields.update(extra)
+            eng.store.add_memory(MemoryRecord(**fields))
+    history = eng.timeline(
+        "history", workspace_id=wid, limit=1, known_at=1000.0,
+        prompt_only=True, closed_only=True,
+    )
+    assert [record.id for record in history] == [approved]
+
+
+def test_closed_timeline_respects_world_time_separately_from_system_time():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    mid = eng.store.add_memory(MemoryRecord(
+        id="", content="History", workspace_id=wid, scope=Scope.WORKSPACE,
+        valid_from=0.0, valid_to=20.0, valid_to_recorded_at=2.0, ingested_at=1.0,
+        provenance={"trusted": True, "review_state": "approved"},
+    ))
+    assert eng.timeline("history", workspace_id=wid, valid_at=10.0, known_at=100.0,
+                        closed_only=True, prompt_only=True) == []
+    assert [record.id for record in eng.timeline(
+        "history", workspace_id=wid, valid_at=20.0, known_at=100.0,
+        closed_only=True, prompt_only=True,
+    )] == [mid]
+    assert eng.timeline("history", workspace_id=wid, valid_at=30.0, known_at=1.5,
+                        closed_only=True, prompt_only=True) == []
+
+
+def test_timeline_orders_zero_world_time_before_later_versions():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    first = eng.store.add_memory(MemoryRecord(
+        id="", content="History", workspace_id=wid, scope=Scope.WORKSPACE,
+        valid_from=0.0, valid_to=5.0, ingested_at=90.0,
+    ))
+    second = eng.store.add_memory(MemoryRecord(
+        id="", content="History", workspace_id=wid, scope=Scope.WORKSPACE,
+        valid_from=10.0, valid_to=20.0, ingested_at=1.0,
+    ))
+    history = eng.timeline("history", workspace_id=wid, known_at=1000.0, closed_only=True)
+    assert [record.id for record in history] == [first, second]
+
+
 def test_why_and_timeline_history_respect_known_time_but_keep_closed_records():
     eng = MemoryEngine.create(":memory:")
     wid = eng.store.get_or_create_workspace("w")

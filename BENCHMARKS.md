@@ -94,14 +94,14 @@ interpretation and do not count as additional benchmark-quality gains.
 ### Public numeric evidence registry
 
 Every exact public aggregate retained below comes from the checked-in, public-safe
-[`offline-fixtures-governed-history-20261018.json`](docs/benchmark-evidence/offline-fixtures-governed-history-20261018.json) artifact. Its
+[`offline-fixtures-reconciled-automation-20261019.json`](docs/benchmark-evidence/offline-fixtures-reconciled-automation-20261019.json) artifact. Its
 SHA-256 is
-`23203af13a30a78df9f2bf849f2cefdad1c426a9f494ebb0128abd5fa6e19ce9`, also recorded in the
+`694765e499a089bdcc00ed0b2b6f763bd3f5606f0f4cb6aa3061338d2cb012a1`, also recorded in the
 adjacent `.sha256` file. The artifact contains no raw questions, answers, prompts, customer data,
 or per-record content fingerprints.
 
 The fixture-suite digest is
-`2e0b6b93e1de27f54d11557de0a161a24a6086f44d77b788a28aefcd15f94c27`. The artifact defines
+`eb85ce2c4309e6beed37d37b8eb6ecef12e29ef2ed828049006fd5c3b4c1fb30`. The artifact defines
 the digest algorithm and records the SHA-256 of every suite and dataset file. Each evidence ID
 also binds its exact command through `sha256(UTF-8 exact command)`:
 
@@ -110,6 +110,41 @@ also binds its exact command through `sha256(UTF-8 exact command)`:
 | `offline-chunking` | `python -m eval.chunking_eval --dataset eval/datasets/longdoc.jsonl --k 5` | `c1c8196aa7e1568ef3844a9fb2d76b87f342c39108e32d6ad144b885a76143b8` |
 | `offline-performance` | `python -m eval.performance --dataset eval/datasets/codemem.jsonl --k 5 --iterations 10 --json` | `bbe4aca81e58d4830e50a8fc7729a1d15b71d97a6299bccd79432b7f119677d7` |
 | `offline-grounded` | `python -m eval.grounded` | `590442e51e3642c10489165759919dc86ffac62c182937330c153e7f8d5fc26f` |
+
+The source manifest covers every Python file under `engraphis/` and `eval/`, the two
+fixture datasets, and the official exporter. Each rerun must use a new artifact basename.
+The canonical chart aliases are regenerated from that new artifact and carry its checksum;
+historical per-run artifacts and chart files remain unchanged. The PNG views use
+Playwright Chromium 156.0.8078.4 at the SVG canvas size, with embedded artifact and SVG
+checksums. This run used Python
+3.11.17 and NumPy 2.4.6. Its 588-file manifest binds the exact
+reconciled canonical LF Python producer after the protected-path and Automation
+policy corrections. Dashboard assets are outside this producer manifest. It does not
+qualify browser behavior, hosted services, external models, or provider billing. The
+registered artifact was produced with:
+
+```bash
+python -m scripts.export_offline_evidence --output docs/benchmark-evidence/offline-fixtures-reconciled-automation-20261019.json
+```
+
+The earlier [protected-path snapshot artifact](docs/benchmark-evidence/offline-fixtures-reconciled-path-guard-20261019.json)
+remains bound to SHA-256 `10d5c8111647190479aa7dd16831e5e741873d43fc9385190e1f195937a4084d`. It predates the Automation
+policy and dashboard recovery corrections and remains unchanged.
+
+The earlier [canonical LF snapshot artifact](docs/benchmark-evidence/offline-fixtures-reconciled-canonical-lf-20261019.json)
+remains bound to SHA-256 `26d75c8a38127edbc51e6c51792cd85f04bf707c32bb1ff8d7c33ae95fb4c34d`. It predates the Windows protected-path
+case-matching correction and remains unchanged.
+
+The earlier [reconciled snapshot artifact](docs/benchmark-evidence/offline-fixtures-reconciled-release-20261019.json)
+remains bound to SHA-256 `4de6ca8011e45146d98d855cedca6f7e3f84d8c7e75852405f36ac0f74e96f6d`.
+It predates canonical LF normalization of the two Python producer files and remains unchanged.
+
+The historical [governed-history artifact](docs/benchmark-evidence/offline-fixtures-governed-history-20261018.json)
+remains bound to SHA-256 `23203af13a30a78df9f2bf849f2cefdad1c426a9f494ebb0128abd5fa6e19ce9`.
+The separate [main-branch runtime artifact](docs/benchmark-evidence/offline-fixtures-pr260-nested-uri-redaction-runtime-20261018-e2ebfb06550f.json)
+remains bound to SHA-256 `434ec054dff38104a553ddb88b38a983c97227491e92ba482a7f3cd4ff5b560b`
+and its original runtime revision `e2ebfb06550fdcda0eb03590aecd9cf5e27a6dbc`.
+Neither historical run is relabeled as evidence for this reconciliation.
 
 External, model-dependent, latency, consolidation, and productivity numbers are not included in
 this offline registry unless a redacted immutable artifact with the same three bindings exists. Use
@@ -126,13 +161,13 @@ grounded checks in separate panels; provider billing and MCP transport are not m
 the SVG and matching PNG with:
 
 ```bash
-python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-governed-history-20261018.json --output docs/images/context-efficiency.svg --png-output docs/images/context-efficiency.png
+python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-reconciled-automation-20261019.json --output docs/images/context-efficiency.svg --png-output docs/images/context-efficiency.png
 ```
 
 The companion examples are also generated from that artifact with:
 
 ```bash
-python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-governed-history-20261018.json --output docs/images/evidence-backed-agent-examples.svg --png-output docs/images/evidence-backed-agent-examples.png
+python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-reconciled-automation-20261019.json --output docs/images/evidence-backed-agent-examples.svg --png-output docs/images/evidence-backed-agent-examples.png
 ```
 The historical-to-executable mapping is in
 [`docs/BENCHMARK_CHANGE_COVERAGE.md`](docs/BENCHMARK_CHANGE_COVERAGE.md).
@@ -191,7 +226,9 @@ frontier-model QA score.
   tokens (**54.71% lower**), while 260 recalls are timed. Packed context across the same 26
   samples averages **85.38** tokens and reaches **108** under a 1,500-token cap; Recall@5,
   hit@5, and answer-token recall remain 1.000 for the legacy candidate-page view. The registered
-  v9 artifact predates `packed_quality`, so no packed-quality aggregate is published from it.
+  v9 artifact predates `packed_quality` and retains no inferred packed-quality result.
+  The new artifact reports candidate and packed Recall@5, Hit@5, and answer-token recall
+  separately; all six aggregates are 1.000 on these 26 questions.
   These aggregates are evidence ID
   `offline-performance` in the registry above. `--filler-memories`, `--candidate-k`, and
   `--retrieval-profile` make scaling and routing experiments executable, but their results need

@@ -1,4 +1,5 @@
-* whitespace=cr-at-eol
+# Preserve exact Git bytes for checksum-bound evidence and frozen fixtures on every platform.
+* -text whitespace=cr-at-eol
 *.pyd binary
 *.so binary
 *.dll binary

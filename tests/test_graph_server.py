@@ -80,8 +80,11 @@ def test_main_blank_graph_token_falls_back_to_api_token(monkeypatch):
     read_only_api = types.ModuleType("engraphis.read_only_api")
     app = object()
 
-    def create_read_only_app(*, token):
+    captured_hosts = []
+
+    def create_read_only_app(*, token, host_names=()):
         captured_tokens.append(token)
+        captured_hosts.append(tuple(host_names))
         return app
 
     read_only_api.create_read_only_app = create_read_only_app
@@ -92,6 +95,9 @@ def test_main_blank_graph_token_falls_back_to_api_token(monkeypatch):
 
     assert main(["--host", "0.0.0.0", "--port", "8720"]) == 0
     assert captured_tokens == ["api-token"]
+    # The bind host is the name the launcher's users type, so the token-free Host check
+    # must accept it.
+    assert captured_hosts == [("0.0.0.0",)]
     assert len(run_calls) == 1
     launched_app, options = run_calls[0]
     assert launched_app is app

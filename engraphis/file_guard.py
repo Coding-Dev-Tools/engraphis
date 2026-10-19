@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import fnmatch
 import json
 import os
+from os.path import normcase as _normcase
 from pathlib import Path
 import stat
 from typing import Any, Mapping, Optional, Sequence
@@ -124,14 +125,16 @@ def _rule_for_path(path: Path, rules: Sequence[ProtectionRule]) -> tuple[Optiona
     for rule in rules:
         for candidate in candidates:
             try:
-                relative = candidate.relative_to(rule.root).as_posix()
+                relative = _normcase(candidate.relative_to(rule.root).as_posix())
             except ValueError:
                 continue
             for pattern in rule.patterns:
                 # ``fnmatch`` makes ``dir/**`` useful for descendants; the explicit
                 # directory comparison also protects the directory entry itself.
-                prefix = pattern[:-3].rstrip("/") if pattern.endswith("/**") else None
-                if fnmatch.fnmatchcase(relative, pattern) or relative == prefix:
+                # realpath cannot correct the casing of a target that does not exist yet.
+                normalized_pattern = _normcase(pattern)
+                prefix = _normcase(pattern[:-3].rstrip("/")) if pattern.endswith("/**") else None
+                if fnmatch.fnmatchcase(relative, normalized_pattern) or relative == prefix:
                     return rule, pattern
     return None, None
 

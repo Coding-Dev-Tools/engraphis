@@ -177,7 +177,13 @@ def _edge_weight(value: Any) -> float:
 def _quantile(values: Sequence[float], fraction: float) -> float:
     if not values:
         return 0.0
-    ordered = sorted(values)
+    return _sorted_quantile(sorted(values), fraction)
+
+
+def _sorted_quantile(ordered: Sequence[float], fraction: float) -> float:
+    """Interpolate an already ordered population without sorting it per bridge."""
+    if not ordered:
+        return 0.0
     position = (len(ordered) - 1) * fraction
     lower = int(math.floor(position))
     upper = int(math.ceil(position))
@@ -1665,7 +1671,7 @@ def _bridge_physics_strength(value: float, ordered: Sequence[float]) -> float:
         return 0.0
     if len(ordered) == 1 or ordered[-1] - ordered[0] <= 1e-12:
         return 1.0
-    low, high = _quantile(ordered, 0.05), _quantile(ordered, 0.95)
+    low, high = _sorted_quantile(ordered, 0.05), _sorted_quantile(ordered, 0.95)
     if high - low <= 1e-12:
         robust = _percentile(value, ordered)
     else:

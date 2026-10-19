@@ -1,5 +1,6 @@
 const { test, expect } = require('@playwright/test');
 const AxeBuilder = require('@axe-core/playwright').default;
+const { answerActionDialog } = require('./action-dialog-helper');
 
 async function workflowFixture(page, { projectsUnavailable = false, delayProject = '', idsOnly = false, delayProjectList = false, revisionFailures = [], delayRevision = false } = {}) {
   const requests = [];
@@ -144,7 +145,7 @@ test('unknown project ownership never adopts the selected project and workspace-
 
 test('Library keeps task navigation before appearance controls at wide and narrow widths', async ({ page }, testInfo) => {
   const { errors } = await workflowFixture(page);
-  await expect(page.locator('.manage-nav [data-view] > span')).toHaveText(['Explore', 'Activity', 'Settings']);
+  await expect(page.locator('.manage-nav [data-view] > span')).toHaveText(['Explore', 'Spec Studio', 'Activity', 'Settings']);
   await expect(page.locator('#library-list')).toContainText('Alpha uses Postgres');
   const layout = [];
   for (const [name, width, height] of [['wide', 1280, 900], ['narrow', 390, 844]]) {
@@ -359,6 +360,8 @@ test('a pending save locks its draft and a late result cannot replace another wo
   await expect(page.locator('#editor-memory-content')).toBeDisabled();
   await expect(page.locator('#editor-close')).toBeDisabled();
   await page.locator('#workspace-select').selectOption('work-two');
+  // Leaving does not cancel the save, but a failure after leaving would lose the draft.
+  await answerActionDialog(page, { expectText: ['still being saved'] });
   await page.locator('#new-memory-button').click();
   await page.locator('#editor-memory-content').fill('A separate workspace draft.');
   release();
@@ -424,7 +427,6 @@ test('record history pages by lineage and recovers visibly from a stale continua
 
 test('a real project memory is scoped, discoverable, revised atomically, and retained after reload', async ({ page }) => {
   const workspace = 'project-workflow-' + Date.now();
-  page.on('dialog', dialog => dialog.accept(dialog.type() === 'prompt' ? 'Reviewed the project fixture.' : undefined));
   await page.goto('/?view=manage');
   await expect(page.locator('#connection-status')).toContainText('Local engine connected');
   await page.locator('#create-workspace-toggle').click();
@@ -442,6 +444,7 @@ test('a real project memory is scoped, discoverable, revised atomically, and ret
   await expect(page.locator('#memory-detail')).toContainText('Project A uses Postgres for durable memory.');
   const approvalResponse = page.waitForResponse(response => response.url().endsWith('/dashboard/review/approve'));
   await page.locator('#memory-detail').getByRole('button', { name: 'Approve for prompt…' }).click();
+  await answerActionDialog(page, { fields: { reason: 'Reviewed the project fixture.' } });
   const approved = await (await approvalResponse).json();
   await expect(page.locator('#memory-detail')).toContainText('approved');
   await page.locator('[data-view="ask"]').click();

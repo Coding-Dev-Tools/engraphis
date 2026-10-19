@@ -157,7 +157,7 @@ def test_epub_titles_are_checked_for_secrets():
         "EPUB/one.xhtml": "<html><body><p>Safe chapter</p></body></html>",
     })
     with pytest.raises(DocumentParseError, match="secret"):
-        parse_document(epub, "secret-title.epub")
+        parse_document(epub, "title.epub")
 
 
 def test_epub_titles_are_bounded_before_record_creation():
@@ -324,7 +324,7 @@ def test_xml_attributes_are_preserved_and_secrets_are_rejected():
     with pytest.raises(DocumentParseError, match="secret"):
         parse_document(
             b'<server api_key="sk-proj-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ">ok</server>',
-            "secret.xml",
+            "settings.xml",
         )
 
 

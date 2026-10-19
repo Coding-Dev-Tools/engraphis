@@ -28,7 +28,7 @@ most common mistake here.
 |---|---|---|
 | Status | Primary scoped, bi-temporal, interface-driven implementation. | Compatibility/reference implementation with flat namespaces. |
 | Model | Scoped + bi-temporal + typed; interface-driven. | Single flat `namespace` string per memory. |
-| Code | `engraphis/core/`, `engraphis/backends/`, `eval/`, `tests/`, `scripts/migrate_to_v2.py` | `engraphis/app.py`, `config.py`, `models.py`, `routes/`, `stores/`, `engines/`, `llm/`, `static/` |
+| Code | `engraphis/core/`, `engraphis/backends/`, `eval/`, `tests/`, `scripts/migrate_to_v2.py` | `engraphis/app.py`, `config.py`, `models.py`, `routes/`, `stores/`, `engines/`, `llm/` |
 | Data | new v2 schema (`SCHEMA_VERSION = 19`) | `engraphis_v1.db` |
 | Entry | `engraphis.MemoryEngine.create()` / `engraphis.create_memory_engine()` → `engraphis/factory.py` → `core/engine.py` | Internal reference only; never a public launcher |
 
@@ -59,6 +59,8 @@ python -m eval.reinforcement                                        # bounded re
 python -m eval.adversarial_memory_security                          # prompt/graph boundary
 python -m eval.grounded                                             # grounded-abstain decision gate
 python -m eval.code_arm                                             # coding-agent arm gate
+python -m eval.spec_crawl                                           # specification and memory-audit gate
+python -m eval.spec_crawl                                           # agent spec quality & prompt crawl gate
 pyright                                                             # core + backends typecheck
 
 # ── External benchmarks (real numbers need torch + the dataset; see eval/external.py) ──
@@ -223,7 +225,8 @@ These are pure, unit-tested functions — change them only with a corresponding 
   `mem_fts` (FTS5 + plain-table fallback), `entities`, `edges` (bi-temporal), `mem_links`,
   `memory_entities`, `symbols`, `code_edges`, `code_files`, `code_memory_links`,
   `operation_receipts`, `events`, `audit`, `memory_tombstones`, `source_vaults`,
-  `source_imports`, `source_import_items`, `schema_migrations`.
+  `source_imports`, `source_import_items`, `memory_closures`, `schema_migrations`,
+  `migration_executions`.
 - **Local document sources:** source collections are scope-bound, resumable manifests. Their
   paths, digests, and import state are provenance; source folders never create implicit memory
   scopes. `kind="documents"` is the source-neutral adapter, while `kind="obsidian"` retains
@@ -236,6 +239,7 @@ These are pure, unit-tested functions — change them only with a corresponding 
   Historical visibility uses the earliest endpoint known at `known_at`; the scalar
   `valid_to` pair is only the current compatibility summary. Sync v4 transports the
   observation union; earlier clients must upgrade before receiving v4 bundles.
+  Legacy observations with no recorded knowledge time remain visible at every knowledge anchor.
 
 ---
 
@@ -298,6 +302,8 @@ worktree is the delivery boundary:
 - **`docs/OBSIDIAN_IMPORT.md`** — the rich Obsidian Markdown adapter (frontmatter, wikilinks,
   aliases, attachments) and its compatibility command. It supplements, rather than replaces,
   the universal document-import guide.
+- **`docs/SPEC_CRAWL.md`** — agent specification quality crawler, 7-axis radar coverage,
+  concept tentacles, "ask, don't guess" clarification flow, and Dashboard Spec Studio.
 - **`AGENTS.md`** (this file) + **`CLAUDE.md`** — how to work in the repo.
 - **`skills/engraphis-memory/`** — portable Agent Skill (SKILL.md + `references/`) that teaches any
   MCP-capable agent the *memory discipline* (when to remember/recall, scoping, tool selection).

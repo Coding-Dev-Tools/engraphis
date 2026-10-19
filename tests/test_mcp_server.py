@@ -547,6 +547,8 @@ _ALL_TOOLS = {
     "engraphis_receipts", "engraphis_context_savings", "engraphis_verify_receipts",
     "engraphis_export_receipts", "engraphis_link_symbol",
     "engraphis_check_update", "engraphis_decide",
+    "engraphis_spec_crawl", "engraphis_spec_crawl_answer",
+    "engraphis_spec_crawl_memories", "engraphis_spec_crawl_resolve",
 }
 
 _SMART_TOOLS = {
@@ -577,11 +579,15 @@ def test_server_identity_and_tools_registered():
 
     classic = {t.name: t for t in asyncio.run(srv.classic_mcp.list_tools())}
     assert srv.classic_mcp.name == "engraphis_mcp"
-    assert len(_ALL_TOOLS) == 39
+    assert len(_ALL_TOOLS) == 43
     assert set(classic) == _ALL_TOOLS
     assert srv.minimum_role("engraphis_context_savings") == "viewer"
+    assert srv.minimum_role("engraphis_spec_crawl") == "viewer"
+    assert srv.minimum_role("engraphis_spec_crawl_memories") == "viewer"
+    assert srv.minimum_role("engraphis_spec_crawl_answer") == "member"
+    assert srv.minimum_role("engraphis_spec_crawl_resolve") == "member"
     kilo = (ROOT / "docs" / "KILO_CODE_INTEGRATION.md").read_text(encoding="utf-8")
-    full_surface = kilo.split("### Classic 39-tool inventory", 1)[1].split("\n---", 1)[0]
+    full_surface = kilo.split("### Classic 43-tool inventory", 1)[1].split("\n---", 1)[0]
     assert set(re.findall(r"`(engraphis_[a-z_]+)`", full_surface)) == _ALL_TOOLS
     # Flat schema (not a nested "params" object) so agents can call fields directly.
     props = classic["engraphis_remember"].inputSchema.get("properties", {})
@@ -1069,6 +1075,36 @@ def test_mcp_ingest_creates_prompt_visible_memory_without_owner_approval(monkeyp
         query="When is the deployment window?", workspace="acme", repo="web",
     ))
     assert memory_id in {item["id"] for item in recalled["memories"]}
+
+
+def test_spec_crawl_wrappers_inherit_nondefault_session_scope(monkeypatch):
+    srv = _module_with_memory_db(monkeypatch)
+    svc = srv.service()
+    sid = svc.start_session("team", repo="alpha", agent="codex")["session_id"]
+    local = svc.remember("Alpha repository policy", workspace="team", repo="alpha",
+                         mtype="procedural", trusted=True)["id"]
+    ancestor = svc.remember("Workspace policy", workspace="team", mtype="procedural", trusted=True)["id"]
+    other = svc.remember("Beta repository policy", workspace="team", repo="beta",
+                         mtype="procedural", trusted=True)["id"]
+    cluster = json.loads(srv.engraphis_spec_crawl_memories(session_id=sid))
+    assert cluster["workspace"] == "team" and cluster["repo"] == "alpha"
+    assert {node["id"] for node in cluster["nodes"]} == {local, ancestor}
+    assert other not in {node["id"] for node in cluster["nodes"]}
+    assert srv.engraphis_spec_crawl_resolve(
+        action="link", node_a=local, node_b=ancestor, session_id=sid,
+    ).startswith("Error:")
+    assert json.loads(srv.engraphis_spec_crawl_resolve(
+        action="link", node_a=local, node_b=ancestor, workspace="team", repo="alpha",
+    ))["ok"] is True
+    assert "error" not in json.loads(srv.engraphis_spec_crawl(crawl_procedural=True, session_id=sid))
+    spec = "# Rules\nVerify all tests."
+    flag = svc.spec_crawl(spec, session_id=sid)["flags"][0]
+    clarified = json.loads(srv.engraphis_spec_crawl_answer(
+        flag=flag, answer="the 12 required tests", spec_text=spec,
+        session_id=sid, save_as_memory=False,
+    ))
+    assert "error" not in clarified and clarified["memory_id"] is None
+    assert srv.engraphis_spec_crawl_memories(workspace="default", session_id=sid).startswith("Error:")
 
 
 def test_remember_session_id_keeps_repo_default_scope(monkeypatch):

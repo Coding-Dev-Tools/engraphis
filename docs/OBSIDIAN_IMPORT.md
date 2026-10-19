@@ -37,7 +37,8 @@ Unattended and JSON-mode writes require `--yes`; an interactive terminal asks fo
 confirmation. An unattended preview must also name `--workspace`. Use `--db` to
 select a database other than the configured v2 database.
 
-The dashboard offers the same flow through **Import local documents**: select **Obsidian vault**
+The dashboard offers the same flow through **Library → Import → Import documents with
+preview…**: select **Obsidian vault**
 as the import mode, select the workspace/repository/session target, review the preview, then
 start the import. The preview is strict: it performs zero database writes.
 It shows discovered Markdown files, folders, tags, aliases, links, attachments,

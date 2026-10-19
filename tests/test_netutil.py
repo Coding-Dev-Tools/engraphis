@@ -4,7 +4,8 @@ from types import SimpleNamespace
 import pytest
 
 from engraphis.netutil import (
-    bracket_host, client_ip, connect_host, display_base_url, is_local_request,
+    bracket_host, client_ip, connect_host, declared_host_names, display_base_url,
+    is_local_request, is_rebinding_safe_host,
 )
 
 
@@ -98,3 +99,47 @@ def test_local_request_accepts_only_explicit_container_nat_peers(monkeypatch):
     assert is_local_request(request)
     request.headers["x-forwarded-for"] = "127.0.0.1"
     assert not is_local_request(request)
+
+
+def test_declared_host_names_accept_urls_names_and_lists():
+    assert declared_host_names(
+        "http://Engraphis.LAN:8700/", "desk-top, graph.internal:8720", "", " , ",
+    ) == frozenset({"engraphis.lan", "desk-top", "graph.internal"})
+    # Browsers send internationalised names as punycode.
+    assert declared_host_names("bücher.example") == frozenset({"xn--bcher-kva.example"})
+    # Userinfo, a bad port or no host at all declares nothing.
+    assert declared_host_names(
+        "http://user@evil.example", "host:notaport", "http://", "a..b",
+    ) == frozenset()
+
+
+def _host_request(host, server=("127.0.0.1", 8700)):
+    return SimpleNamespace(headers={"host": host} if host is not None else {},
+                           scope={"server": server})
+
+
+@pytest.mark.parametrize("host", [
+    "localhost", "localhost:8700", "LOCALHOST:8700", "127.0.0.1:8700", "[::1]:8700",
+    "10.0.0.7", "engraphis.lan:8700",
+])
+def test_rebinding_safe_hosts(host):
+    assert is_rebinding_safe_host(
+        _host_request(host), declared_host_names("engraphis.lan"),
+    )
+
+
+@pytest.mark.parametrize("host", [
+    None, "", "attacker.test", "attacker.test:8700", "127.0.0.1.attacker.test",
+    "localhost.", "localhost..", "evil.localhost", "localhost.attacker.test",
+    "attacker.test@127.0.0.1", "localhost:attacker.test", "local host", "[::1",
+    "localhost/x", "localhost?x", "localhost#x", "localhost\\x",
+])
+def test_rebinding_prone_hosts(host):
+    assert not is_rebinding_safe_host(_host_request(host), declared_host_names("engraphis.lan"))
+
+
+def test_the_servers_own_reported_name_is_accepted():
+    # In-process transports report the URL host they were given; a real server reports
+    # its socket address, which the IP rule already accepts.
+    assert is_rebinding_safe_host(_host_request("testserver", server=("testserver", 80)))
+    assert not is_rebinding_safe_host(_host_request("testserver", server=None))

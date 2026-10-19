@@ -37,6 +37,10 @@ entirely whenever any rule has `allow_shell: false`: inspecting a shell command 
 redirections, subprocesses, or invoked scripts will not mutate a protected file. A missing,
 malformed, symlinked, non-owner-owned, or group/world-writable policy fails closed.
 
+Pattern matching is case-insensitive on Windows and case-sensitive on POSIX, including targets
+that do not exist yet. A pattern ending in `/**` protects both the directory entry and its
+descendants.
+
 Set `allow_shell: true` only if a stronger OS/container sandbox independently makes the protected
 paths read-only. This option merely allows the shell tool; it does not parse or secure commands.
 

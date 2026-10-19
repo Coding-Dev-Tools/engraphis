@@ -19,8 +19,11 @@ implementations are not part of this repository.
 | Advisory Jev decisions | Local heuristics; optional BYOK | Included managed decisions per eligible individual after service acceptance | Included managed decisions per eligible named seat after service acceptance; no shared pool |
 | Hosted Cloud Sync, Analytics, and managed automation | | Yes | Yes |
 | Private account and billing support | | Yes | Yes |
-| Hosted multi-user dashboard, roles, seats, and audit export | | | Yes |
+| Team account roster, roles, named seats, invitations, and activity | | | Yes |
 | Per-user agent and sync tokens | | | Yes |
+
+Team activity covers selected account events and is visible to current owners and admins.
+Shared hosted Team memory and hosted MCP are currently `not_yet_available`.
 
 Start or manage a hosted subscription in the [Engraphis account portal](https://api.engraphis.com/account?plan=pro&interval=monthly&utm_source=engraphis&utm_medium=docs&utm_campaign=pro_conversion&utm_content=hosted_plans_pricing#billing).
 
