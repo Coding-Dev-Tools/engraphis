@@ -5,6 +5,40 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [1.7.10] - 2026-10-18
+
+Candidate package version: **1.7.10**. Publication and hosted-service qualification remain separate.
+
+- Preserve repeated validity closures in schema 19 so later corrections cannot change
+  fixed historical queries. Apply the same knowledge-time rule to recall, graph evidence,
+  browsing, scoring, workspace copies, and exports. Sync v4 carries the closure history
+  and accepts v1-v3 input; older peers must upgrade before receiving v4 bundles.
+- Preserve original session lineage when correcting, revising, or approving repo and
+  workspace memories after that session ends. Ordinary writes and session-scoped
+  memories retain active-session checks.
+- Include additional closure observations in optimistic memory versions, rejecting
+  concurrent history changes without changing existing scalar-only version hashes.
+- Prevent dashboard sync from sending a managed Cloud credential to a custom relay.
+  Preserve authorization failures during read-only pulls so the dashboard offers recovery.
+- Reject XML document types through the parser, including UTF-16 XML and Office containers.
+- Enforce bound-workspace access for session reads/closure and memory pinning,
+  reinforcement, and validity closure.
+- Search all scoped history pages for `why` and `timeline`, preserving relevant older facts.
+- Make dense measurement tokenization linear while preserving the deterministic features.
+- Pin the default MiniLM model revision so newer loaders that omit resolved commit
+  metadata can still identify its persistent embedding space.
+- Require MCP SDK 1.30.0 or later in the 1.x line, including the upstream HTTP
+  session-retention security fix.
+- Ship both Command Code hooks and the benchmark renderer template in wheel and source
+  distributions; installed hooks use the installation's Python interpreter.
+- Remove unsupported hosted Automation controls, align supported input bounds with Cloud,
+  and run grounded, code-arm, and evidence-contract gates in release validation.
+- Preserve byte-hashed evaluation fixtures with LF checkout rules on Windows.
+- Preserve immutable historical report bytes and retry transient Windows reader locks
+  when publishing local benchmark queue status.
+- Include automatic same-origin loopback dashboard sessions without user-entered tokens,
+  retaining remote authentication and reviewed-write protections.
+
 ## [1.7.9] - 2026-09-29
 
 - Classify local `engraphis_decide` command advice conservatively. Chained, piped,

@@ -5,8 +5,9 @@ test('a real local workspace saves, recalls, and corrects a memory with history'
   page.on('pageerror', error => errors.push(error.message));
   page.on('dialog', dialog => dialog.accept(dialog.type() === 'prompt' ? 'Reviewed the local smoke-test fixture.' : undefined));
   const workspace = `browser-smoke-${browserName}-${Date.now()}`;
-  await page.goto('/#token=engraphis-playwright-local-only');
+  await page.goto('/');
   await expect(page.locator('#connection-status')).toContainText('Local engine connected');
+  await expect(page.locator('#browser-auth-dialog')).not.toBeVisible();
   await expect(page).not.toHaveURL(/token=/);
   await page.locator('.nav-item[data-view="manage"]').click();
   await page.locator('#create-workspace-toggle').click();

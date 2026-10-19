@@ -24,6 +24,10 @@ implementations are not part of this repository.
 
 Start or manage a hosted subscription in the [Engraphis account portal](https://api.engraphis.com/account?plan=pro&interval=monthly&utm_source=engraphis&utm_medium=docs&utm_campaign=pro_conversion&utm_content=hosted_plans_pricing#billing).
 
+Managed Automation schedules consolidation and dreaming proposals. Results require
+review and never automatically rewrite the local database; local governance tools
+apply the changes you choose.
+
 ## Included System 1 Decision Engine (Jev)
 
 After release acceptance and service enablement, every legitimate Pro user and each
@@ -49,7 +53,7 @@ accuracy, or cost savings.
 
 The managed transport and MCP decision route require client **1.7.9 or newer**.
 The published 1.7.8 client has an experimental adapter but does not provide this route.
-After 1.7.9 is published, upgrade the Python environment that launches your MCP host
+Version 1.7.9 was published on October 1, 2026. Upgrade the Python environment that launches your MCP host
 and restart that host. See the [1.7.9 upgrade and release checklist](RELEASE_1_7_9.md).
 Installing a new client does not enable a deployment whose managed service is disabled.
 

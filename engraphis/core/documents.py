@@ -1072,11 +1072,19 @@ def _validate_archive(archive: zipfile.ZipFile) -> None:
             raise DocumentParseError("container compression ratio is unsafe")
 
 
+class _NoDocumentType(ElementTree.TreeBuilder):
+    def doctype(self, name, pubid, system):
+        # The parser decodes XML before this callback, including UTF-16 input.
+        # A byte-pattern check alone cannot enforce the declaration boundary.
+        raise DocumentParseError("XML declarations and entities are not allowed")
+
+
 def _xml_root(raw: bytes, label: str) -> ElementTree.Element:
     if re.search(br"<!\s*(?:DOCTYPE|ENTITY)\b", raw, flags=re.I):
         raise DocumentParseError("%s XML declarations and entities are not allowed" % label)
     try:
-        return ElementTree.fromstring(raw)  # nosec B314 -- explicit size and DTD limits above
+        parser = ElementTree.XMLParser(target=_NoDocumentType())
+        return ElementTree.fromstring(raw, parser=parser)  # nosec B314 -- parser rejects DTDs
     except ElementTree.ParseError:
         raise DocumentParseError("invalid %s XML" % label) from None
 

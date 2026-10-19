@@ -1224,7 +1224,7 @@ def test_sidebar_keeps_manage_and_compare_plans_in_separate_flex_rows(monkeypatc
     with _client(monkeypatch, tmp_path) as client:
         stylesheet = client.get("/v2-assets/ledger.css")
         assert stylesheet.status_code == 200
-        css = stylesheet.text
+        css = stylesheet.text.replace("\r\n", "\n")
         sidebar = css[css.index(".sidebar {"):css.index(".brand-row {")]
         assert "display: flex;" in sidebar
         assert "flex-direction: column;" in sidebar
@@ -1649,6 +1649,26 @@ def test_hosted_automation_accepts_the_cloud_policy_field(monkeypatch, tmp_path)
         assert response.status_code == 200
         assert response.json()["dream_enabled"] is True
         assert saved["dream_enabled"] is True
+
+
+@pytest.mark.parametrize("invalid", [
+    {"consolidate": False}, {"min_cluster": 9}, {"archive_below": 0.4},
+    {"dream_min_new": 1}, {"dream_min_new": 10001},
+    {"dream_idle_minutes": -1}, {"dream_idle_minutes": 10081},
+    {"cadence_hours": 0}, {"cadence_hours": 721},
+])
+def test_hosted_automation_rejects_unsupported_or_out_of_contract_controls(
+    monkeypatch, tmp_path, invalid,
+):
+    def unexpected_cloud_call(*args, **kwargs):
+        pytest.fail("invalid policy reached a hosted service")
+
+    monkeypatch.setattr(
+        "engraphis.cloud_features.CloudFeatureClient.from_environment", unexpected_cloud_call,
+    )
+    with _client(monkeypatch, tmp_path) as client:
+        response = client.post("/api/automation", json=invalid)
+    assert response.status_code == 422
 
 
 def test_first_hosted_automation_view_waits_for_explicit_bootstrap(
