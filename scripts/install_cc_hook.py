@@ -95,6 +95,8 @@ def _is_our_entry(entry: dict) -> bool:
         return True
     return entry.get("command", "") in {
         _entry_command(), _file_guard_entry()["command"],
+        # Before the explicit interpreter path, nameless legacy entries used this form.
+        f'python "{HOOK_PATH}"',
     }
 
 

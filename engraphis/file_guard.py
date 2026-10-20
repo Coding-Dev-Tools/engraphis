@@ -112,7 +112,9 @@ def load_policy(path: Optional[Path] = None) -> tuple[ProtectionRule, ...]:
     # A direct file-edit tool must not be able to rewrite the policy that will
     # adjudicate its next call.  Host hook configuration remains a host/OS
     # boundary and should likewise be owner-protected.
-    rules.append(ProtectionRule(policy_path.parent, (policy_path.name,), allow_shell=True))
+    rules.append(ProtectionRule(
+        _canonical(policy_path.parent), (policy_path.name,), allow_shell=True,
+    ))
     return tuple(rules)
 
 

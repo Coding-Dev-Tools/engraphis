@@ -88,6 +88,32 @@ def test_policy_file_protects_itself(tmp_path: Path) -> None:
     assert decision.matched_pattern == policy.name
 
 
+@pytest.mark.parametrize(
+    "edit_through_alias", [False, True], ids=["real-parent", "alias-parent"],
+)
+def test_policy_protects_itself_through_a_symlinked_parent(
+    tmp_path: Path, edit_through_alias: bool,
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    policy_directory = tmp_path / "operator"
+    policy_directory.mkdir()
+    policy = _policy(policy_directory, root)
+    alias = tmp_path / "operator-alias"
+    try:
+        alias.symlink_to(policy_directory, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable")
+    aliased_policy = alias / policy.name
+    rules = load_policy(aliased_policy)
+    target = aliased_policy if edit_through_alias else policy
+    decision = decide_tool_call(
+        "Edit", {"file_path": str(target)}, cwd=root, rules=rules,
+    )
+    assert not decision.allowed
+    assert decision.matched_pattern == policy.name
+
+
 def test_policy_rejects_relative_roots_and_unsafe_permissions(tmp_path: Path) -> None:
     malformed = tmp_path / "malformed.json"
     malformed.write_text(
