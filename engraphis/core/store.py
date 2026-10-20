@@ -2979,7 +2979,12 @@ class Store:
                 )
 
         self._execute_script_transactional(BROWSE_SCHEMA_SQL)
-        self._execute_script_transactional(MEMORY_CLOSURE_SCHEMA_SQL)
+        if (int(previous_version or 0) < SCHEMA_VERSION
+                or getattr(self, "_closures_incomplete", True)):
+            # Install, repair, and backfill closure history. A complete current schema's
+            # triggers already maintain every observation, so re-running the seed would
+            # only rescan all closed memories on every writable open.
+            self._execute_script_transactional(MEMORY_CLOSURE_SCHEMA_SQL)
         if getattr(self, "_browse_schema_incomplete", False):
             # A missing trigger could have allowed untracked changes. Repaired
             # schemas start a new cursor epoch instead of trusting prior tokens.
