@@ -5,6 +5,10 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [1.7.10] - 2026-10-18
+
+Candidate package version: **1.7.10**. Publication and hosted-service qualification remain separate.
+
 - Preserve Spec Crawl and dashboard Spec Studio for offline prompt and memory-cluster
   audits. Clarification saves remain opt-in pending procedural memories, and suggestions
   require review before changing memory. Run `python -m eval.spec_crawl` in CI and release gates.
@@ -54,10 +58,6 @@ All notable changes to Engraphis are documented here. Format loosely follows
   leaving the editor while a save is in flight asks first, and a save that fails after you
   leave is still reported.
 
-## [1.7.10] - 2026-10-18
-
-Candidate package version: **1.7.10**. Publication and hosted-service qualification remain separate.
-
 - Preserve repeated validity closures in schema 19 so later corrections cannot change
   fixed historical queries. Apply the same knowledge-time rule to recall, graph evidence,
   browsing, scoring, workspace copies, and exports. Sync v4 carries the closure history
@@ -97,6 +97,18 @@ Candidate package version: **1.7.10**. Publication and hosted-service qualificat
   cookie bytes in the response.
 - Include automatic same-origin loopback dashboard sessions without user-entered tokens,
   retaining remote authentication and reviewed-write protections.
+- Resume an ended session explicitly from another agent: pass its ID as `session_id` when
+  starting `engraphis_session`, or as `resume_from_session_id` to classic
+  `engraphis_start_session`. Only an ended session owned by the same user in the exact
+  workspace and repository qualifies; any other source fails closed, and the returned
+  bootstrap is bounded.
+- Improve opt-in Jev decision workflows. Remote evaluation requires explicit consent;
+  managed requests accept only fixed, bounded workflows, reject custom and route decisions
+  before credentials are sent, and keep one absolute deadline across HTTP 429 handling.
+- Add a fail-closed host file protection policy evaluator (`engraphis/file_guard.py`) and an
+  optional Command Code `PreToolUse` hook installed with `install_cc_hook.py --file-guard`.
+  The policy file protects itself through symlinked parents, and upgrading replaces legacy
+  hook entries. See `docs/FILE_PROTECTION.md`.
 
 ## [1.7.9] - 2026-09-29
 
@@ -438,9 +450,9 @@ Candidate package version: **1.7.10**. Publication and hosted-service qualificat
 - The new `engraphis_recall_context` tool emits one `INFO` log per call with
   workspace, k, budget, packed/omitted counts, and the call's measured ms.
   Operators get visibility without changing the on-the-wire contract.
-  The standalone \engraphis-mcp-http\ launcher only configures the root logger when
-  \ENGRAPHIS_MCP_LOG\ is set to a truthy value (\ / \	rue\ / \yes\ / \info\ /
-  \on\); the default stays silent so the CLI keeps its quiet profile.
+  The standalone `engraphis-mcp-http` launcher only configures the root logger when
+  `ENGRAPHIS_MCP_LOG` is set to a truthy value (`1` / `true` / `yes` / `info` /
+  `on`); the default stays silent so the CLI keeps its quiet profile.
 
 - The graph's "Show all nodes" toggle is replaced by a dedicated **Every node** layout built
   on a new ultra-performance engine (`engraphis-graph-every.js` +
