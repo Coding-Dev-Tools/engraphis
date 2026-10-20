@@ -67,8 +67,29 @@ def test_file_guard_install_is_explicit_idempotent_and_fail_closed(fake_settings
     payload = json.loads(settings_path.read_text(encoding="utf-8"))
     entries = payload["hooks"]["PreToolUse"]
     assert len(entries) == 1
-    assert entries[0]["matcher"] == "Write|Edit|MultiEdit|NotebookEdit|Bash"
+    assert entries[0]["matcher"] == module.FILE_GUARD_MATCHER
+    # Command Code's documented matcher literals must be routed to the guard.
+    assert {"write", "edit", "shell"} <= set(entries[0]["matcher"].split("|"))
     assert entries[0]["hooks"] == [module._file_guard_entry()]
+
+
+@pytest.mark.parametrize("matcher,expected", [
+    ("Write|Edit|MultiEdit|NotebookEdit|Bash", None),  # earlier installer default: upgrade
+    ("Write|Bash|my_tool", "Write|Bash|my_tool"),       # operator customization: keep
+])
+def test_file_guard_reinstall_upgrades_only_legacy_default_matcher(
+    fake_settings, matcher: str, expected,
+) -> None:
+    module, settings_path = fake_settings
+    settings_path.write_text(json.dumps({"hooks": {"PreToolUse": [
+        {"matcher": matcher, "hooks": [module._file_guard_entry()]},
+    ]}}), encoding="utf-8")
+    module.install(enable_file_guard=True)
+    entries = json.loads(settings_path.read_text(encoding="utf-8"))["hooks"]["PreToolUse"]
+    assert len(entries) == 1
+    assert entries[0]["matcher"] == (expected or module.FILE_GUARD_MATCHER)
+    for name in ("WRITE", "EDIT", "SHELL"):
+        assert expected or name in entries[0]["matcher"].split("|")
 
 
 def test_default_install_does_not_enable_file_guard(fake_settings) -> None:
