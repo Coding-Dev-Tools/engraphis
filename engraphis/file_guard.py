@@ -19,8 +19,15 @@ from typing import Any, Mapping, Optional, Sequence
 
 POLICY_VERSION = 1
 DEFAULT_POLICY_PATH = Path.home() / ".engraphis" / "file-protection.json"
-SHELL_TOOLS = frozenset({"bash", "shell", "terminal", "execute", "runcommand"})
-FILE_TOOLS = frozenset({"write", "edit", "multiedit", "notebookedit"})
+# Names are compared after removing underscores and case-folding.  Command Code
+# sends canonical ids (``shell_command``, ``write_file``, ``edit_file``) as
+# ``tool_name``; the other entries cover Claude-Code-style hosts.
+SHELL_TOOLS = frozenset({
+    "bash", "shell", "terminal", "execute", "runcommand", "shellcommand",
+})
+FILE_TOOLS = frozenset({
+    "write", "edit", "multiedit", "notebookedit", "writefile", "editfile",
+})
 
 
 class FileProtectionError(ValueError):
@@ -123,7 +130,10 @@ def _rule_for_path(path: Path, rules: Sequence[ProtectionRule]) -> tuple[Optiona
     # protected symlink entry; the latter prevents an unprotected alias from
     # reaching a protected target.
     named = Path(os.path.abspath(os.path.expanduser(os.fspath(path))))
-    candidates = (named, _canonical(named))
+    # Resolve the *unnormalized* path: on POSIX the kernel follows a symlink
+    # before applying a later ``..``, so ``link/../x`` must not be collapsed
+    # lexically first or it can name a protected target as an unprotected one.
+    candidates = (named, _canonical(path))
     for rule in rules:
         for candidate in candidates:
             try:

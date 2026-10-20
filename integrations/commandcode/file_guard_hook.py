@@ -6,11 +6,15 @@ import os
 from pathlib import Path
 import sys
 
-from engraphis.file_guard import FileProtectionError, decide_tool_call, load_policy
 
 
 def main() -> int:
+    # Command Code lets the tool proceed on any exit status other than 2, so
+    # every failure -- including a missing ``engraphis`` install, deep JSON
+    # recursion, or an unexpected bug -- must be reported as a denial.
     try:
+        from engraphis.file_guard import decide_tool_call, load_policy
+
         payload = json.load(sys.stdin)
         if not isinstance(payload, dict):
             raise ValueError("hook payload must be an object")
@@ -22,7 +26,7 @@ def main() -> int:
             cwd=Path(str(payload.get("cwd") or os.getcwd())),
             rules=load_policy(),
         )
-    except (FileProtectionError, OSError, ValueError, TypeError) as exc:
+    except Exception as exc:
         # A configured security hook must never fail open.
         print(f"Engraphis file guard denied the tool call: {exc}", file=sys.stderr)
         return 2

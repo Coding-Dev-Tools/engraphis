@@ -27,6 +27,17 @@ FILE_GUARD_PATH = (
     / "integrations" / "commandcode" / "file_guard_hook.py"
 )
 FILE_GUARD_KEY = "cc-engraphis-file-guard"
+# Command Code tests matchers against display names (WRITE/EDIT/SHELL) while documenting
+# lowercase literals; list both spellings so the guard fires whether or not matching is
+# case-sensitive. The capitalized names keep Claude-Code-style hosts covered.
+FILE_GUARD_MATCHER = (
+    "write|edit|shell|WRITE|EDIT|SHELL|Write|Edit|MultiEdit|NotebookEdit|Bash"
+)
+# Matchers written by earlier unreleased installers; upgraded in place on reinstall.
+_LEGACY_FILE_GUARD_MATCHERS = frozenset({
+    "Write|Edit|MultiEdit|NotebookEdit|Bash",
+    "write|edit|shell|Write|Edit|MultiEdit|NotebookEdit|Bash",
+})
 
 
 def _utc_stamp() -> str:
@@ -168,10 +179,14 @@ def install(*, enable_file_guard: bool = False) -> None:
                 wrapper["hooks"] = [
                     entry for entry in entries if entry.get("name") != FILE_GUARD_KEY
                 ] + [_file_guard_entry()]
+                # A matcher an earlier installer wrote would skip Command Code's real tool
+                # names; upgrade it, but keep any matcher the operator customized.
+                if wrapper.get("matcher") in _LEGACY_FILE_GUARD_MATCHERS:
+                    wrapper["matcher"] = FILE_GUARD_MATCHER
                 found = True
         if not found:
             guard_hooks.append({
-                "matcher": "Write|Edit|MultiEdit|NotebookEdit|Bash",
+                "matcher": FILE_GUARD_MATCHER,
                 "hooks": [_file_guard_entry()],
             })
     _backup(SETTINGS_PATH)

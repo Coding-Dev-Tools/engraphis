@@ -221,3 +221,97 @@ def test_platform_case_rules_preserve_posix_matching(
     assert decision.allowed is not denied
     assert decision.matched_pattern == (pattern if denied else None)
     assert os.path.normcase is native_normalizer
+
+
+@pytest.mark.parametrize("tool_name,tool_input", [
+    ("write_file", {"file_path": ".env", "content": "x"}),
+    ("edit_file", {"file_path": ".github/workflows/ci.yml", "old_value": "a", "new_value": "b"}),
+    ("shell_command", {"command": "echo x > .env"}),
+])
+def test_command_code_canonical_tool_ids_are_enforced(
+    tmp_path: Path, tool_name: str, tool_input: dict,
+) -> None:
+    # Command Code's PreToolUse payload carries canonical ids, not display names.
+    root = tmp_path / "repo"
+    root.mkdir()
+    rules = load_policy(_policy(tmp_path, root))
+    assert not decide_tool_call(tool_name, tool_input, cwd=root, rules=rules).allowed
+
+
+def test_symlink_followed_by_parent_segment_cannot_reach_protected_target(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repo"
+    (root / ".github" / "workflows" / "deep").mkdir(parents=True)
+    (root / "sub").mkdir()
+    try:
+        (root / "sub" / "link").symlink_to(
+            root / ".github" / "workflows" / "deep", target_is_directory=True,
+        )
+    except OSError:
+        pytest.skip("directory symlinks are unavailable")
+    rules = load_policy(_policy(tmp_path, root))
+    target = "sub/link/../release.yml"
+    # Confirm the platform resolves the symlink before ``..`` for this alias.
+    if os.path.realpath(root / target) != os.path.realpath(
+        root / ".github" / "workflows" / "release.yml"
+    ):
+        pytest.skip("platform normalizes '..' before following symlinks")
+    decision = decide_tool_call("Write", {"file_path": target}, cwd=root, rules=rules)
+    assert not decision.allowed
+    assert decision.matched_pattern == ".github/workflows/**"
+
+
+_HOOK = Path(__file__).resolve().parent.parent / "integrations" / "commandcode" / "file_guard_hook.py"
+
+
+def _run_hook(payload: str, policy: Path, *python_flags: str) -> int:
+    import subprocess
+    import sys
+
+    env = {
+        k: v for k, v in os.environ.items()
+        if not k.startswith("ENGRAPHIS_") and k != "PYTHONPATH"
+    }
+    env["ENGRAPHIS_FILE_PROTECTION_POLICY"] = str(policy)
+    if "-S" not in python_flags:
+        # Exercise this checkout rather than whichever ``engraphis`` is installed.
+        env["PYTHONPATH"] = str(_HOOK.parent.parent.parent)
+    return subprocess.run(
+        [sys.executable, *python_flags, str(_HOOK)], input=payload, text=True,
+        capture_output=True, env=env, timeout=60,
+    ).returncode
+
+
+def test_command_code_hook_blocks_canonical_payload(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    policy = _policy(tmp_path, root)
+    write = json.dumps({
+        "hook_event_name": "PreToolUse", "tool_name": "write_file",
+        "tool_display_name": "WRITE", "cwd": str(root),
+        "tool_input": {"file_path": str(root / ".env"), "content": "x"},
+    })
+    read = json.dumps({
+        "hook_event_name": "PreToolUse", "tool_name": "read_file",
+        "tool_display_name": "READ", "cwd": str(root),
+        "tool_input": {"file_path": str(root / ".env")},
+    })
+    assert _run_hook(write, policy) == 2
+    assert _run_hook(read, policy) == 0
+
+
+@pytest.mark.parametrize("case", ["deeply-nested-json", "engraphis-not-importable"])
+def test_command_code_hook_fails_closed_on_unexpected_errors(
+    tmp_path: Path, case: str,
+) -> None:
+    # Command Code runs the tool on any exit status other than 2.
+    root = tmp_path / "repo"
+    root.mkdir()
+    policy = _policy(tmp_path, root)
+    if case == "deeply-nested-json":
+        assert _run_hook("[" * 100_000 + "]" * 100_000, policy) == 2
+    else:
+        payload = json.dumps({"tool_name": "write_file", "tool_input": {"file_path": ".env"}})
+        # ``-S`` skips site-packages, so ``engraphis`` cannot be imported.
+        assert _run_hook(payload, policy, "-S") == 2
