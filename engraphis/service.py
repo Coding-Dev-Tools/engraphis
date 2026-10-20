@@ -5859,7 +5859,6 @@ class MemoryService:
         survive unrelated writes; relevant scope edits require refreshing the same filters.
         """
         from engraphis.core.browsing import browse_memories
-        from engraphis.core.store import _row_to_record
 
         ws = self._clean_ws(workspace)
         q = _clean_text(q, field="q", max_chars=10_000, required=False)
@@ -5881,10 +5880,15 @@ class MemoryService:
             workspace_id=wid, repo_id=rid, include_ancestors=True,
             mtypes=mtypes, valid_at=valid_at, known_at=known_at,
         ), q=q, limit=limit, cursor=cursor)
+        # The optimistic version covers closure history beyond the scalar summary, so
+        # hydrate it exactly like get_memory(); a bare row hash is never accepted.
+        hydrated = {
+            record.id: record for record in self.store._records_from_rows(page["rows"])
+        }
         records = [{
             "id": row["id"], "document_id": row["id"], "title": row["title"] or "",
-            "version": memory_version(_row_to_record(row)),
-            "can_revise": can_revise(_row_to_record(row), self.store),
+            "version": memory_version(hydrated[row["id"]]),
+            "can_revise": can_revise(hydrated[row["id"]], self.store),
             "workspace_id": row["workspace_id"], "repo_id": row["repo_id"],
             "session_id": row["session_id"],
             "content": row["content"] or row["summary"] or "",
@@ -13415,6 +13419,16 @@ class MemoryService:
                     raise ValidationError("retired memory is outside the requested mutation scope")
                 if not contains(retained_domain, retired_domain):
                     raise ValidationError("retained memory must cover the retired memory's scope")
+                # The retirement is backdated to the successor's start. An equal start
+                # would persist an empty interval that the Store and sync peers reject.
+                retained_from = records[node_a_clean].valid_from
+                retired_from = records[node_b_clean].valid_from
+                if (retained_from is not None and retired_from is not None
+                        and retained_from <= retired_from):
+                    raise ValidationError(
+                        "superseded memory's valid_to cannot predate or equal its valid_from; "
+                        "the retained memory must take effect later"
+                    )
             elif (not (contains(retained_domain, retired_domain)
                        or contains(retired_domain, retained_domain))
                   or not any(contains(requested_domain, domain) for domain in domains.values())):

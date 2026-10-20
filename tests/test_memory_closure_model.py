@@ -217,3 +217,40 @@ def test_memory_erasure_cascades_observations():
     conn.execute("DELETE FROM memories")
     assert observations(conn) == ()
     conn.close()
+
+
+def test_current_schema_reopen_skips_closure_backfill_but_repair_reseeds(tmp_path, monkeypatch):
+    from engraphis.core.store import Store
+
+    path = str(tmp_path / "closure-reopen.db")
+    store = Store(path)
+    workspace = store.get_or_create_workspace("closure-reopen")
+    memory_id = store.add_memory(MemoryRecord(
+        id="", content="A retired deployment fact", workspace_id=workspace,
+        valid_from=100.0, valid_to=300.0, valid_to_recorded_at=400.0,
+    ))
+    store.close()
+
+    executed = []
+    original = Store._execute_script_transactional
+
+    def record(self, script):
+        executed.append(script == MEMORY_CLOSURE_SCHEMA_SQL)
+        return original(self, script)
+
+    monkeypatch.setattr(Store, "_execute_script_transactional", record)
+    Store(path).close()
+    assert not any(executed)
+
+    conn = sqlite3.connect(path)
+    conn.execute("DROP TRIGGER trg_memory_closure_update")
+    conn.execute("DELETE FROM memory_closures")
+    conn.commit()
+    conn.close()
+    executed.clear()
+    repaired = Store(path)
+    try:
+        assert any(executed)
+        assert repaired.get_memory(memory_id).closure_observations == ((300.0, 400.0),)
+    finally:
+        repaired.close()

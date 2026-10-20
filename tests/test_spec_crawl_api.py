@@ -222,8 +222,9 @@ def test_resolution_requires_confirmation_and_ownership_before_writing(crawl_ser
 
 def test_resolution_rolls_back_all_changes_on_lifecycle_failure(crawl_service, monkeypatch):
     svc = crawl_service
-    a = svc.remember("New database port: 5433", workspace="alpha", trusted=True)["id"]
+    # The superseded memory must start before the retained memory.
     b = svc.remember("Old database port: 5432", workspace="alpha", trusted=True)["id"]
+    a = svc.remember("New database port: 5433", workspace="alpha", trusted=True)["id"]
     def unavailable(*args, **kwargs):
         raise RuntimeError("retire unavailable")
     monkeypatch.setattr(svc, "retire", unavailable)
