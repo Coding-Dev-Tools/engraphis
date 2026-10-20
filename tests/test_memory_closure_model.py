@@ -254,3 +254,27 @@ def test_current_schema_reopen_skips_closure_backfill_but_repair_reseeds(tmp_pat
         assert repaired.get_memory(memory_id).closure_observations == ((300.0, 400.0),)
     finally:
         repaired.close()
+
+
+def test_close_validity_at_observation_limit_is_a_value_error(tmp_path):
+    from engraphis.core.interfaces import MAX_CLOSURE_OBSERVATIONS
+    from engraphis.core.store import Store
+
+    store = Store(str(tmp_path / "closure-limit.db"))
+    try:
+        workspace = store.get_or_create_workspace("closure-limit")
+        memory_id = store.add_memory(MemoryRecord(
+            id="", content="A fact with a long correction history", workspace_id=workspace,
+            valid_from=100.0,
+        ))
+        # Fill the bound directly, as an accepted sync peer can.
+        store.conn.executemany(
+            "INSERT INTO memory_closures(memory_id,valid_to,recorded_at) VALUES (?,?,?)",
+            [(memory_id, 10_000.0 + i, 50.0) for i in range(MAX_CLOSURE_OBSERVATIONS)],
+        )
+        store.conn.commit()
+        with pytest.raises(ValueError, match="maximum of"):
+            store.close_validity(memory_id, at=200.0)
+        assert len(store.get_memory(memory_id).closure_observations) == MAX_CLOSURE_OBSERVATIONS
+    finally:
+        store.close()
