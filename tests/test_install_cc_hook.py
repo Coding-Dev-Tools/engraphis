@@ -259,3 +259,26 @@ def test_uninstall_preserves_wrapper_level_metadata_with_sibling(fake_settings) 
     assert len(entries) == 1
     assert entries[0]["matcher"] == "session_id == 'abc'"
     assert entries[0]["hooks"] == [sibling]
+
+
+@pytest.mark.parametrize("operation", ["install", "uninstall"])
+def test_nameless_previous_python_command_is_migrated_or_removed(
+    fake_settings, operation: str,
+) -> None:
+    module, settings_path = fake_settings
+    # Freeze the command emitted by the pre-1.7.10 installer. It intentionally
+    # lacks the newer stable name so only legacy command recognition can match.
+    legacy = {"type": "command", "command": f'python "{module.HOOK_PATH}"', "timeout": 5}
+    sibling = {"type": "command", "command": "some-other-tool --flag"}
+    settings_path.write_text(json.dumps({"hooks": {"SessionStart": [{
+        "matcher": "operator-filter", "hooks": [legacy, sibling],
+    }]}}), encoding="utf-8")
+
+    for _ in range(2):
+        getattr(module, operation)()
+
+    wrappers = json.loads(settings_path.read_text(encoding="utf-8"))["hooks"]["SessionStart"]
+    assert len(wrappers) == 1
+    assert wrappers[0]["matcher"] == "operator-filter"
+    expected = [sibling, module._hook_entry()] if operation == "install" else [sibling]
+    assert wrappers[0]["hooks"] == expected
