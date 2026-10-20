@@ -59,8 +59,8 @@ python -m eval.reinforcement                                        # bounded re
 python -m eval.adversarial_memory_security                          # prompt/graph boundary
 python -m eval.grounded                                             # grounded-abstain decision gate
 python -m eval.code_arm                                             # coding-agent arm gate
-python -m eval.spec_crawl                                           # specification and memory-audit gate
-python -m eval.spec_crawl                                           # agent spec quality & prompt crawl gate
+python -m eval.spec_crawl                                           # agent spec quality & memory-audit gate
+python -m eval.evidence_contracts                                   # benchmark evidence contracts
 pyright                                                             # core + backends typecheck
 
 # ── External benchmarks (real numbers need torch + the dataset; see eval/external.py) ──
