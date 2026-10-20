@@ -107,8 +107,10 @@ Candidate package version: **1.7.10**. Publication and hosted-service qualificat
   before credentials are sent, and keep one absolute deadline across HTTP 429 handling.
 - Add a fail-closed host file protection policy evaluator (`engraphis/file_guard.py`) and an
   optional Command Code `PreToolUse` hook installed with `install_cc_hook.py --file-guard`.
-  The policy file protects itself through symlinked parents, and upgrading replaces legacy
-  hook entries. See `docs/FILE_PROTECTION.md`.
+  The hook enforces Command Code's canonical `write_file`/`edit_file`/`shell_command` ids,
+  denies the call on any hook error, and on Windows denies device, UNC, and alternate-data-stream
+  targets. The policy file protects itself through symlinked parents, and upgrading replaces
+  legacy hook entries. See `docs/FILE_PROTECTION.md`.
 
 ## [1.7.9] - 2026-09-29
 
