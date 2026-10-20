@@ -315,3 +315,35 @@ def test_command_code_hook_fails_closed_on_unexpected_errors(
         payload = json.dumps({"tool_name": "write_file", "tool_input": {"file_path": ".env"}})
         # ``-S`` skips site-packages, so ``engraphis`` cannot be imported.
         assert _run_hook(payload, policy, "-S") == 2
+
+
+@pytest.mark.parametrize("value,unverifiable", [
+    ("\\\\?\\C:\\repo\\.env", True),             # extended-length prefix
+    ("\\\\.\\C:\\repo\\.env", True),             # device namespace
+    ("//?/C:/repo/.env", True),                   # forward-slash spelling
+    ("\\\\localhost\\C$\\repo\\.env", True),      # admin share alias
+    ("\\\\?\\UNC\\localhost\\C$\\repo\\.env", True),
+    ("C:\\repo\\.env::$DATA", True),             # NTFS default data stream
+    (".env:hidden", True),                        # relative alternate data stream
+    ("C:\\repo\\src\\app.py", False),
+    ("src/app.py", False),
+    ("C:relative.txt", False),
+])
+def test_windows_alias_targets_are_unverifiable(value: str, unverifiable: bool) -> None:
+    from engraphis.file_guard import _unverifiable_windows_target
+
+    assert _unverifiable_windows_target(value) is unverifiable
+
+
+def test_windows_alias_targets_are_denied(tmp_path: Path, monkeypatch) -> None:
+    import engraphis.file_guard as guard
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    rules = load_policy(_policy(tmp_path, root))
+    monkeypatch.setattr(guard, "_WINDOWS", True)
+    for value in ("\\\\?\\C:\\repo\\.env", ".env::$DATA"):
+        decision = decide_tool_call("write_file", {"file_path": value}, cwd=root, rules=rules)
+        assert not decision.allowed and "Windows" in decision.reason
+    allowed = decide_tool_call("write_file", {"file_path": "notes.md"}, cwd=root, rules=rules)
+    assert allowed.allowed

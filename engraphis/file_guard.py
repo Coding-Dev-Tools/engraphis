@@ -30,6 +30,25 @@ FILE_TOOLS = frozenset({
 })
 
 
+# Win32 accepts path aliases this evaluator cannot map back to a protected root.
+_WINDOWS = os.name == "nt"
+
+
+def _unverifiable_windows_target(value: str) -> bool:
+    r"""Return True for a Win32 target this evaluator cannot map to a protected root.
+
+    Device and extended-length prefixes (``\\?\``, ``\\.\``), UNC and admin shares
+    (``\\localhost\C$\...``), and NTFS alternate data streams (``.env::$DATA`` writes
+    ``.env``) all name files without matching the root-relative patterns, so writes
+    through them are denied while protection is active.
+    """
+    text = value.replace("/", "\\")
+    if text.startswith("\\\\"):
+        return True
+    has_drive = len(text) >= 2 and text[1] == ":" and text[0].isascii() and text[0].isalpha()
+    return ":" in (text[2:] if has_drive else text)
+
+
 class FileProtectionError(ValueError):
     """The operator-owned protection policy is absent, unsafe, or malformed."""
 
@@ -179,6 +198,10 @@ def decide_tool_call(
     if not values:
         return GuardDecision(False, "file-writing tool did not provide a target path")
     for value in values:
+        if _WINDOWS and _unverifiable_windows_target(value):
+            return GuardDecision(
+                False, "Windows device, UNC, or alternate-data-stream targets cannot be verified",
+            )
         target = Path(value)
         if not target.is_absolute():
             target = current / target

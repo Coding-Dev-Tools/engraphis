@@ -41,7 +41,10 @@ malformed, symlinked, non-owner-owned, or group/world-writable policy, or any ho
 
 Pattern matching is case-insensitive on Windows and case-sensitive on POSIX, including targets
 that do not exist yet. A pattern ending in `/**` protects both the directory entry and its
-descendants.
+descendants. On Windows, direct file-tool targets that cannot be mapped back to a protected root
+are denied: extended-length and device paths (`\\?\`, `\\.\`), UNC and admin-share paths
+(`\\localhost\C$\...`), and NTFS alternate data streams (`.env::$DATA`). Repositories on network
+shares therefore need a different control while the guard is active.
 
 Set `allow_shell: true` only if a stronger OS/container sandbox independently makes the protected
 paths read-only. This option merely allows the shell tool; it does not parse or secure commands.
