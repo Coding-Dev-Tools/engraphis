@@ -13,7 +13,7 @@ from engraphis.core.schema import SCHEMA_VERSION
 
 
 ROOT = Path(__file__).resolve().parents[1]
-README_BENCHMARK_PIN = "v1.7.10"
+README_BENCHMARK_PIN = "c050d734c55af9fbea8ef299dc80e28cc7c62868"
 README_HOSTED_PLANS_PIN = "522def372c45a26d46bc7a05829964ae0240f3a9"
 
 
@@ -24,6 +24,11 @@ def _read(path: str) -> str:
 
 def test_readme_targets_resolve_in_the_repository() -> None:
     readme = _read("README.md")
+    assert re.fullmatch(r"[0-9a-f]{40}", README_BENCHMARK_PIN)
+    assert (
+        f'<img src="https://raw.githubusercontent.com/Coding-Dev-Tools/engraphis/{README_BENCHMARK_PIN}/'
+        'docs/images/context-efficiency.svg"' in readme
+    )
     destinations = re.findall(
         r"!?\[[^\]]*\]\(([^) ]+)|(?:href|src)=\"([^\"]+)\"",
         readme,
