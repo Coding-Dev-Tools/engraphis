@@ -103,7 +103,7 @@ See [hosted plans and Jev details](https://github.com/Coding-Dev-Tools/engraphis
 - [Pi extension](https://github.com/Coding-Dev-Tools/engraphis/blob/522def372c45a26d46bc7a05829964ae0240f3a9/integrations/pi/README.md)
 - [Spec Crawl and Spec Studio](https://github.com/Coding-Dev-Tools/engraphis/blob/c050d734c55af9fbea8ef299dc80e28cc7c62868/docs/SPEC_CRAWL.md)
 - [Memory write review](https://github.com/Coding-Dev-Tools/engraphis/blob/522def372c45a26d46bc7a05829964ae0240f3a9/docs/WRITE_REVIEW.md)
-- [Coding-agent file protection](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/FILE_PROTECTION.md)
+- [Coding-agent file protection](https://github.com/Coding-Dev-Tools/engraphis/blob/c050d734c55af9fbea8ef299dc80e28cc7c62868/docs/FILE_PROTECTION.md)
 - [Security policy](https://github.com/Coding-Dev-Tools/engraphis/blob/522def372c45a26d46bc7a05829964ae0240f3a9/SECURITY.md)
 - [Hosted plans and licensing](https://github.com/Coding-Dev-Tools/engraphis/blob/522def372c45a26d46bc7a05829964ae0240f3a9/docs/HOSTED_PLANS.md)
 
