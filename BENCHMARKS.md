@@ -94,14 +94,14 @@ interpretation and do not count as additional benchmark-quality gains.
 ### Public numeric evidence registry
 
 Every exact public aggregate retained below comes from the checked-in, public-safe
-[`offline-fixtures-reconciled-browser-session-20261019.json`](docs/benchmark-evidence/offline-fixtures-reconciled-browser-session-20261019.json) artifact. Its
+[`offline-fixtures-pr270-guard-installer-20261020.json`](docs/benchmark-evidence/offline-fixtures-pr270-guard-installer-20261020.json) artifact. Its
 SHA-256 is
-`b3a65eea3559a1b994e6e4b81ade81db914ce1ae94b947ed7454e5cf8550998f`, also recorded in the
+`047cbdfee604c54c2fe211f7cac54a532563ceecadc310f368dec331bf443ce3`, also recorded in the
 adjacent `.sha256` file. The artifact contains no raw questions, answers, prompts, customer data,
 or per-record content fingerprints.
 
 The fixture-suite digest is
-`749a5e44bf274400d1310d96384ae461b1dad98b57ef250cb6a2f8ac823120f9`. The artifact defines
+`8607a2a500065adf7bd72f85e4c35462b9958ddfdbb34ef53896360fe2e1d86d`. The artifact defines
 the digest algorithm and records the SHA-256 of every suite and dataset file. Each evidence ID
 also binds its exact command through `sha256(UTF-8 exact command)`:
 
@@ -114,20 +114,27 @@ also binds its exact command through `sha256(UTF-8 exact command)`:
 The source manifest covers every Python file under `engraphis/` and `eval/`, the two
 fixture datasets, and the official exporter. Each rerun must use a new artifact basename.
 The canonical chart aliases are regenerated from that new artifact and carry its checksum;
-historical per-run artifacts and chart files remain unchanged. The PNG views use
-Playwright Chromium 156.0.8078.4 at the SVG canvas size, with embedded artifact and SVG
-checksums. This run used Python
-3.11.17 and NumPy 2.4.6. Its 588-file manifest binds the exact
-reconciled canonical LF Python producer after the protected-path, Automation policy,
-and browser-session cookie-response corrections. Dashboard assets are outside this
-producer manifest. The three measured fixture results are unchanged; this source
-rebind is not a new retrieval-quality improvement. It does not
-qualify browser behavior, hosted services, external models, or provider billing. The
-registered artifact was produced with:
+historical per-run artifacts and their preserved chart bytes remain unchanged. The current
+PNG views were freshly rendered from the registered artifact with CairoSVG 2.9.1 and
+Cairo 1.18.4 on Linux at each SVG canvas size, using sealed LiberationSans and DejaVuSans
+fonts and embedded artifact and SVG checksums. The fresh evaluator run used Linux
+CPython 3.12.14 and NumPy 2.4.6. Its 588-file manifest binds the producer after the
+policy-file parent-directory canonicalization fix. The hook installer fix, dashboard
+assets, tests, documentation, and generated images are outside this producer manifest.
+The three measured fixture results are unchanged; this rerun establishes current
+source and render provenance without claiming a retrieval-quality improvement. It does
+not qualify browser behavior, hosted services, external models, or provider billing.
+The registered artifact was produced with:
 
 ```bash
-python -m scripts.export_offline_evidence --output docs/benchmark-evidence/offline-fixtures-reconciled-browser-session-20261019.json
+python -m scripts.export_offline_evidence --output docs/benchmark-evidence/offline-fixtures-pr270-guard-installer-20261020.json
 ```
+
+The earlier [browser-session snapshot artifact](docs/benchmark-evidence/offline-fixtures-reconciled-browser-session-20261019.json)
+remains bound to SHA-256 `b3a65eea3559a1b994e6e4b81ade81db914ce1ae94b947ed7454e5cf8550998f` and its original
+CPython 3.11.17 / NumPy 2.4.6 execution and Playwright Chromium 156.0.8078.4 rendering.
+It predates the policy-parent canonicalization fix and remains historical and unchanged;
+its results and rendered bytes are not relabeled as this fresh run.
 
 The earlier [Automation snapshot artifact](docs/benchmark-evidence/offline-fixtures-reconciled-automation-20261019.json)
 remains bound to SHA-256 `694765e499a089bdcc00ed0b2b6f763bd3f5606f0f4cb6aa3061338d2cb012a1`. It predates the browser-session
@@ -167,13 +174,13 @@ grounded checks in separate panels; provider billing and MCP transport are not m
 the SVG and matching PNG with:
 
 ```bash
-python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-reconciled-browser-session-20261019.json --output docs/images/context-efficiency.svg --png-output docs/images/context-efficiency.png
+python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-pr270-guard-installer-20261020.json --output docs/images/context-efficiency.svg --png-output docs/images/context-efficiency.png
 ```
 
 The companion examples are also generated from that artifact with:
 
 ```bash
-python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-reconciled-browser-session-20261019.json --output docs/images/evidence-backed-agent-examples.svg --png-output docs/images/evidence-backed-agent-examples.png
+python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-pr270-guard-installer-20261020.json --output docs/images/evidence-backed-agent-examples.svg --png-output docs/images/evidence-backed-agent-examples.png
 ```
 The historical-to-executable mapping is in
 [`docs/BENCHMARK_CHANGE_COVERAGE.md`](docs/BENCHMARK_CHANGE_COVERAGE.md).
