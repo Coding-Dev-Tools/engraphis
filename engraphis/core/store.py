@@ -36,6 +36,7 @@ from engraphis.private_state import ensure_owner_private_dir
 from engraphis.core import ids
 from engraphis.core.graph_layers import infer_graph_layer, normalize_graph_layer
 from engraphis.core.interfaces import (
+    MAX_CLOSURE_OBSERVATIONS,
     Edge,
     GraphLayer,
     MemoryRecord,
@@ -89,6 +90,14 @@ from engraphis.core.schema import (
 
 class SavepointError(RuntimeError):
     """A sub-operation could not settle; its enclosing transaction must abort."""
+
+
+class ClosureObservationLimitError(ValueError, sqlite3.IntegrityError):
+    """A closure would exceed ``MAX_CLOSURE_OBSERVATIONS``; history is never truncated.
+
+    A ``ValueError`` so service and HTTP layers report a caller error rather than a
+    500, and still an ``IntegrityError`` for callers that relied on the trigger abort.
+    """
 
 
 class ReceiptChainIntegrityError(sqlite3.IntegrityError):
@@ -5609,11 +5618,21 @@ class Store:
             if row is not None:
                 # Concurrent or out-of-order observations remain part of history
                 # even when another writer already installed a shorter summary.
-                self.conn.execute(
-                    "INSERT INTO memory_closures(memory_id,valid_to,recorded_at) "
-                    "VALUES (?,?,?) ON CONFLICT DO NOTHING",
-                    (memory_id, at, recorded_at),
-                )
+                try:
+                    self.conn.execute(
+                        "INSERT INTO memory_closures(memory_id,valid_to,recorded_at) "
+                        "VALUES (?,?,?) ON CONFLICT DO NOTHING",
+                        (memory_id, at, recorded_at),
+                    )
+                except sqlite3.IntegrityError as exc:
+                    # History is never truncated; report the full bound as a caller
+                    # error instead of leaking a raw database failure (HTTP 500).
+                    if "closure observation limit" not in str(exc):
+                        raise
+                    raise ClosureObservationLimitError(
+                        "closure observation limit reached: memory already holds the "
+                        f"maximum of {MAX_CLOSURE_OBSERVATIONS} observations"
+                    ) from exc
             updated = self.conn.execute(
                 "UPDATE memories SET valid_to=?, valid_to_recorded_at=? "
                 "WHERE id=? AND (valid_to IS NULL OR valid_to>?)",
