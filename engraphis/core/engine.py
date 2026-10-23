@@ -16,12 +16,13 @@ import logging
 import math
 import os
 import re
+import sqlite3
 import tempfile
 import threading
 import time
 from collections import defaultdict, deque
 from pathlib import Path
-from typing import Any, Callable, Iterator, Optional
+from typing import Any, Callable, Optional
 
 import numpy as np
 
@@ -75,6 +76,7 @@ from engraphis.core.resolve import (
 )
 from engraphis.core.secrets import redact_secrets as _redact_secrets, reject_secrets
 from engraphis.core.store import (
+    DEFAULT_HISTORY_CANDIDATE_BUDGET,
     SavepointError,
     Store,
     _is_memory_database_path,
@@ -330,6 +332,28 @@ def _required_memory_workspace_id(record: MemoryRecord) -> str:
     if not isinstance(workspace_id, str) or not workspace_id:
         raise RuntimeError(f"memory {record.id!r} has no workspace id")
     return workspace_id
+
+
+def _reject_empty_validity_interval(record: Optional[MemoryRecord], at: Optional[float],
+                                    *, action: str) -> None:
+    """Refuse a closure that would persist an empty validity interval.
+
+    ``valid_from == valid_to`` is only representable as an explicit quarantine
+    marker: the Store's persistence boundary rejects it for every other record
+    and a sync peer drops such a record outright (``core/sync.py`` treats an
+    endpoint equal to ``valid_from`` as an unauthorised empty interval). A
+    supersession or retirement that lands on the record's own start instant
+    therefore fails closed here instead of writing a record other peers
+    silently discard.
+    """
+    if record is None or at is None or record.valid_from is None:
+        return
+    if at <= record.valid_from:
+        raise ValueError(
+            "valid_to cannot predate valid_from; an empty validity interval is "
+            "only valid as an explicit quarantine marker "
+            f"({action}: {at!r} <= {record.valid_from!r})"
+        )
 
 
 def _writable_scope(scope: Scope, repo_id: Optional[str]) -> Scope:
@@ -1673,6 +1697,13 @@ class MemoryEngine:
                 target_id = _required_resolution_target(decision)
                 resolution_reason = decision.reason
                 predecessor = self.store.get_memory(target_id)
+                # Both branches below close the predecessor at ``rec.valid_from``.
+                # Landing on the predecessor's own start instant would persist an
+                # empty validity interval, which the Store's persistence boundary
+                # and every sync peer reject, so the supersession fails closed.
+                _reject_empty_validity_interval(
+                    predecessor, rec.valid_from, action="superseding write",
+                )
                 predecessor_end = predecessor.valid_to if predecessor is not None else None
                 if (predecessor_end is not None and rec.valid_from is not None
                         and rec.valid_from < predecessor_end):
@@ -2904,26 +2935,41 @@ class MemoryEngine:
                 sem[mid] = float(np.dot(qn, vec))
         q_tokens = tokenize(query)
         out: list[tuple[float, MemoryRecord]] = []
-        def matching_records() -> Iterator[MemoryRecord]:
-            after_id = ""
-            while True:
-                page = self.store.list_memories_page(
-                    flt, after_id=after_id, limit=500, include_invalid=include_invalid,
-                )
-                if not page:
-                    return
-                yield from page
-                after_id = page[-1].id
 
         if closed_only:
             # Explicit closed-history lookup keeps its topic-ranked candidate budget.
-            # Ordinary why/timeline must still search every historical keyset page.
-            records = iter(self.store.list_memories(
-                flt, include_invalid=include_invalid, limit=500,
+            records = self.store.list_memories(
+                flt, include_invalid=include_invalid, limit=DEFAULT_HISTORY_CANDIDATE_BUDGET,
                 prompt_only=prompt_only, closed_only=True, candidate_query=query,
-            ))
+            )
         else:
-            records = matching_records()
+            # Bound history inspection by an explicit candidate window instead of
+            # hydrating every memory row.  The window is the union of the indexed
+            # lexical arm (``mem_fts``) and the semantic arm's ranked hits, so a
+            # superseded record outside the newest-N window is still reachable,
+            # while the cost follows the window size rather than the corpus size.
+            # Hydrated records keep their complete ``memory_closures`` history.
+            semantic_ranked = sorted(sem.items(), key=lambda item: (-item[1], item[0]))
+            extra_ids = [
+                memory_id for memory_id, score in semantic_ranked if score > 0.05
+            ][:DEFAULT_HISTORY_CANDIDATE_BUDGET]
+            try:
+                records = self.store.list_history_candidates(
+                    flt, query=query, extra_ids=extra_ids,
+                    budget=DEFAULT_HISTORY_CANDIDATE_BUDGET,
+                    include_invalid=include_invalid, prompt_only=prompt_only,
+                )
+            except sqlite3.Error:
+                # Never let a broken index collapse history inspection to an empty
+                # answer: degrade to one bounded newest-first page and keep going.
+                logger.warning(
+                    "history candidate selection failed; falling back to a bounded "
+                    "newest-first page", exc_info=True,
+                )
+                records = self.store.list_memories(
+                    flt, include_invalid=include_invalid,
+                    limit=DEFAULT_HISTORY_CANDIDATE_BUDGET, prompt_only=prompt_only,
+                )
         if include_invalid:
             # History must retain closed valid-time intervals, but cannot expose a
             # record that was not known at the requested system-time snapshot.

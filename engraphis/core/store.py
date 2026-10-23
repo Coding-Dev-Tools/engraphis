@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -88,6 +89,9 @@ from engraphis.core.schema import (
 )
 
 
+logger = logging.getLogger("engraphis.core.store")
+
+
 class SavepointError(RuntimeError):
     """A sub-operation could not settle; its enclosing transaction must abort."""
 
@@ -121,6 +125,13 @@ IN_CLAUSE_CHUNK = 500
 ENTITY_BLOCK_TOKEN_CHUNK = 200
 # Do not materialize unbounded common-token buckets during migration/live writes.
 ENTITY_BLOCK_BUCKET_LIMIT = 1024
+# A history inspection (``why``/``timeline``) must be able to reach a superseded
+# record that sits far outside the newest-N window, yet it must not hydrate the
+# whole corpus on every call.  The candidate window is explicit, documented, and
+# configurable; it bounds the *candidate* set only — every returned record still
+# carries its complete ``memory_closures`` observation set, so no closure
+# history is ever truncated.
+DEFAULT_HISTORY_CANDIDATE_BUDGET = 500
 
 def _is_memory_database_path(path: str) -> bool:
     """Detect SQLite memory databases including named shared-memory URIs.
@@ -5570,6 +5581,157 @@ class Store:
         sql += " ORDER BY id LIMIT ?"
         params.append(max(1, int(limit)))
         return self._select_memory_records(sql, params)
+
+    def list_history_candidates(
+        self,
+        flt: Optional[SearchFilter] = None,
+        *,
+        query: str = "",
+        extra_ids: Iterable[str] = (),
+        budget: int = DEFAULT_HISTORY_CANDIDATE_BUDGET,
+        include_invalid: bool = False,
+        prompt_only: bool = False,
+    ) -> list[MemoryRecord]:
+        """Return an index-selected candidate window for history inspection.
+
+        ``why``/``timeline`` must be able to show a superseded record that sits far
+        outside the newest-N window, but they must not hydrate the whole corpus on
+        every call.  Candidate selection therefore runs as one indexed lookup over
+        the lexical mirror (``mem_fts``) instead of a Python scan of every memory
+        row, and only the selected rows are hydrated — each with its complete
+        ``memory_closures`` observation set.
+
+        The window is explicit and configurable through ``budget``.  It bounds the
+        *candidate* set only: no closure history is truncated, and the caller
+        receives the records in the order the two ranked arms produced them.
+        ``extra_ids`` adds caller-ranked candidates (for example the semantic
+        arm's top hits) that the lexical index cannot express.  The two arms are
+        interleaved so a large lexical match set cannot starve the semantic arm.
+
+        Args:
+            query: Free-text query whose lexical matches seed the candidate set.
+            extra_ids: Additional candidate ids, already ranked by the caller.
+            budget: Maximum number of candidates to hydrate (per selection).
+            include_invalid: Include records outside their current validity window.
+            prompt_only: Keep only records that may enter model-adjacent output.
+        """
+        limit = max(1, int(budget))
+        where, params = self._where(flt, include_invalid, alias="m")
+        lexical = self._lexical_candidate_ids(
+            query, where, params, limit, prompt_only=prompt_only,
+        )
+        extra = [str(memory_id) for memory_id in extra_ids if str(memory_id)]
+        selected: list[str] = []
+        seen: set[str] = set()
+        lexical_iter = iter(lexical)
+        extra_iter = iter(extra)
+        while len(selected) < limit:
+            progressed = False
+            for source in (lexical_iter, extra_iter):
+                candidate = next(source, None)
+                if candidate is None:
+                    continue
+                progressed = True
+                if candidate not in seen:
+                    seen.add(candidate)
+                    selected.append(candidate)
+                if len(selected) >= limit:
+                    break
+            if not progressed:
+                break
+        if not selected:
+            return []
+        return self._hydrate_candidate_ids(selected, where, params)
+
+    def _lexical_candidate_ids(
+        self, query: str, where: list[str], params: list[Any], limit: int, *,
+        prompt_only: bool = False,
+    ) -> list[str]:
+        """Select candidate ids for a query through the indexed lexical mirror.
+
+        FTS5 resolves the match through its own index, so the cost follows the
+        number of matching documents rather than the size of the corpus.  A build
+        without FTS5 falls back to the plain mirror's LIKE scan, which is bounded
+        by the same explicit limit.
+        """
+        terms = _fts_terms(query)[:32] if query else []
+        if not terms:
+            return []
+        if self.has_fts5:
+            match = " OR ".join(f"{term}*" for term in terms)
+            sql = ("SELECT m.id, m.provenance, m.metadata FROM mem_fts f "
+                   "JOIN memories m ON m.id=f.id WHERE mem_fts MATCH ?")
+            args: list[Any] = [match]
+            if where:
+                sql += " AND " + " AND ".join(where)
+                args.extend(params)
+            sql += " ORDER BY bm25(mem_fts) LIMIT ?"
+            args.append(limit if not prompt_only else limit * 4)
+            try:
+                rows = self.conn.execute(sql, args).fetchall()
+            except sqlite3.OperationalError:
+                # A broken FTS index must not turn history inspection into a silent
+                # empty answer. Degrade to the plain-mirror LIKE scan below, and let a
+                # second failure propagate so the caller can fall back explicitly.
+                logger.warning(
+                    "lexical history candidate lookup failed; using the plain mirror",
+                    exc_info=True,
+                )
+                return self._like_candidate_ids(
+                    query, where, params, limit, prompt_only=prompt_only,
+                )
+        else:
+            return self._like_candidate_ids(
+                query, where, params, limit, prompt_only=prompt_only,
+            )
+        if prompt_only:
+            rows = [
+                row for row in rows
+                if _row_is_prompt_eligible(row["provenance"], row["metadata"])
+            ]
+        return [str(row["id"]) for row in rows][:limit]
+
+    def _like_candidate_ids(
+        self, query: str, where: list[str], params: list[Any], limit: int, *,
+        prompt_only: bool = False,
+    ) -> list[str]:
+        """Bounded lexical fallback for builds or queries without a usable FTS index."""
+        like = f"%{_escape_like(query.strip().lower())}%"
+        sql = ("SELECT m.id, m.provenance, m.metadata FROM mem_fts f "
+               "JOIN memories m ON m.id=f.id WHERE "
+               "(f.title LIKE ? ESCAPE '\\' OR f.content LIKE ? ESCAPE '\\' "
+               "OR f.keywords LIKE ? ESCAPE '\\')")
+        args = [like, like, like]
+        if where:
+            sql += " AND " + " AND ".join(where)
+            args.extend(params)
+        sql += " LIMIT ?"
+        args.append(limit if not prompt_only else limit * 4)
+        rows = self.conn.execute(sql, args).fetchall()
+        if prompt_only:
+            rows = [
+                row for row in rows
+                if _row_is_prompt_eligible(row["provenance"], row["metadata"])
+            ]
+        return [str(row["id"]) for row in rows][:limit]
+
+    def _hydrate_candidate_ids(
+        self, memory_ids: list[str], where: list[str], params: list[Any],
+    ) -> list[MemoryRecord]:
+        """Hydrate selected candidates under the same scope/temporal predicate."""
+        records: dict[str, MemoryRecord] = {}
+        for start in range(0, len(memory_ids), IN_CLAUSE_CHUNK):
+            chunk = memory_ids[start:start + IN_CLAUSE_CHUNK]
+            marks = ",".join("?" for _ in chunk)
+            sql = "SELECT m.* FROM memories m"
+            clause = list(where)
+            clause.append(f"m.id IN ({marks})")
+            if clause:
+                sql += " WHERE " + " AND ".join(clause)
+            rows = self.conn.execute(sql, [*params, *chunk]).fetchall()
+            for record in self._records_from_rows(rows):
+                records[record.id] = record
+        return [records[mid] for mid in memory_ids if mid in records]
 
     def list_memories_needing_vectors_page(self, *, fingerprint: str,
                                            after_id: str = "",
