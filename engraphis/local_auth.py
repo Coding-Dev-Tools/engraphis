@@ -20,12 +20,39 @@ BROWSER_SESSION_SECONDS = 12 * 60 * 60
 _BROWSER_SESSION_VERSION = "v1"
 
 
+def automatic_browser_session_allowed(api_token: Optional[str]) -> bool:
+    """Whether this instance may open a browser session without an operator credential.
+
+    A deployment that configured ``ENGRAPHIS_API_TOKEN`` opted into token-gated
+    access, so every browser session it hands out is minted from that token through
+    ``POST /api/auth/session``.  Only a zero-token (open) instance may open a
+    session on its own.
+
+    The alternative - trusting the browser's own signals - is not a boundary.
+    ``Origin``, ``Sec-Fetch-Site`` and the dashboard's marker header are ordinary
+    request headers that any client can write, and a raw TCP tunnel (``ssh -L``,
+    ``netsh portproxy``) makes a remote caller look exactly like a loopback peer
+    while the tunneler chooses ``Host`` and ``Origin`` itself.  Nothing the server
+    can read separates a real local browser from a tunneled requester once the app
+    listens on a loopback port, so the token policy is the only reliable gate.
+    This is the owner's release-review decision for the local dashboard session
+    (PR #270): the automatic session exists only where the operator did not opt
+    into token-gated access.
+    """
+    return not str(api_token or "").strip()
+
+
 def local_browser_request(request, *, require_origin: bool = True) -> bool:
     """Authenticate a same-origin browser bootstrap at the local-machine boundary.
 
     Unlike the open-mode network helper, this never trusts configured LAN peers or
     forwarding proxies. Literal loopback, a loopback Host, an exact browser Origin,
     and the dashboard's non-simple header are all required to mint a session.
+
+    This is a *necessary* condition, never a sufficient one: every signal it reads
+    is a request header a non-browser client can write, so it cannot by itself
+    decide that a caller is the local browser.  Callers must also apply
+    :func:`automatic_browser_session_allowed` before treating a caller as trusted.
     """
     scope = request.scope
     client = scope.get("client")
@@ -91,11 +118,25 @@ def bearer_token(authorization: Optional[str]) -> str:
     return value[7:].strip()
 
 
+def _constant_time_equals(supplied: Optional[str], expected: Optional[str]) -> bool:
+    """Compare two credentials in constant time, whatever their encoding.
+
+    ``hmac.compare_digest`` refuses non-ASCII ``str`` operands and raises
+    ``TypeError``, so a client-supplied credential with a non-ASCII byte turned a
+    rejected secret into an unhandled 500.  Both sides are compared as UTF-8
+    bytes instead: the comparison stays constant time and every input shape is
+    simply a mismatch.
+    """
+    left = str(supplied or "").encode("utf-8")
+    right = str(expected or "").encode("utf-8")
+    return hmac.compare_digest(left, right)
+
+
 def bearer_ok(authorization: Optional[str], expected: Optional[str]) -> bool:
     """Constant-time validation for the local runtime's optional API token."""
     configured = str(expected or "")
     supplied = bearer_token(authorization)
-    return bool(configured and supplied) and hmac.compare_digest(supplied, configured)
+    return bool(configured and supplied) and _constant_time_equals(supplied, configured)
 
 
 def token_ok(supplied: Optional[str], expected: Optional[str]) -> bool:
@@ -103,7 +144,7 @@ def token_ok(supplied: Optional[str], expected: Optional[str]) -> bool:
 
     configured = str(expected or "")
     candidate = str(supplied or "")
-    return bool(configured and candidate) and hmac.compare_digest(candidate, configured)
+    return bool(configured and candidate) and _constant_time_equals(candidate, configured)
 
 
 def _session_signature(expected: str, issued_at: int) -> str:
@@ -148,4 +189,4 @@ def browser_session_ok(
     # session minted arbitrarily far in the future.
     if issued_at > current + 300 or current - issued_at > max(0, int(max_age)):
         return False
-    return hmac.compare_digest(parts[2], _session_signature(configured, issued_at))
+    return _constant_time_equals(parts[2], _session_signature(configured, issued_at))

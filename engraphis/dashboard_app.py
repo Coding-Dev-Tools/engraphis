@@ -40,6 +40,7 @@ from engraphis.http_security import wants_https
 from engraphis.local_auth import (
     BROWSER_SESSION_COOKIE,
     BROWSER_SESSION_SECONDS,
+    automatic_browser_session_allowed,
     bearer_ok,
     browser_session,
     browser_session_ok,
@@ -695,7 +696,28 @@ def create_app() -> FastAPI:
 
     @app.post("/api/auth/local-session", include_in_schema=False)
     def open_local_browser_session(request: Request):
-        """Open this computer's dashboard without exposing or entering its API token."""
+        """Open this computer's dashboard without exposing or entering its API token.
+
+        Only a zero-token instance may do this.  An instance that configured
+        ``ENGRAPHIS_API_TOKEN`` is token-gated: the browser exchanges that token for
+        the same HttpOnly session through ``/api/auth/session``.  The automatic
+        session exists because its browser signals (``Origin``, ``Sec-Fetch-Site``,
+        the marker header) are ordinary request headers that any client can write,
+        and a raw loopback tunnel (``ssh -L``, ``netsh portproxy``) makes a remote
+        caller look like a loopback peer while choosing ``Host`` and ``Origin``
+        itself.  No server-side signal separates the real local browser from a
+        tunneled requester, so an operator who opted into a token keeps the token
+        boundary on every browser session, including review approval.
+        """
+        if not automatic_browser_session_allowed(settings.api_token):
+            return JSONResponse(
+                {
+                    "error": "automatic browser access is disabled while an API token is configured",
+                    "code": "local_token_required",
+                    "token_required": True,
+                },
+                status_code=403,
+            )
         if not local_browser_request(request):
             return JSONResponse({"error": "automatic access requires the local dashboard"},
                                 status_code=403)
@@ -1428,7 +1450,13 @@ def create_app() -> FastAPI:
                 return await call_next(request)
             return JSONResponse(
                 {"error": "unauthorized", "code": "local_browser_session_required",
-                 "local_browser": local_browser_request(request, require_origin=False)},
+                 # "An automatic local browser session is available for this request."
+                 # Only a zero-token instance offers one, so a token-gated server
+                 # never hints at the automatic path: the browser must exchange
+                 # the deployment token for the same HttpOnly session.
+                 "local_browser": automatic_browser_session_allowed(settings.api_token)
+                 and local_browser_request(request, require_origin=False),
+                 "token_required": not automatic_browser_session_allowed(settings.api_token)},
                 status_code=401,
             )
 
