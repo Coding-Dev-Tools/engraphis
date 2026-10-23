@@ -5701,7 +5701,7 @@ class Store:
                "JOIN memories m ON m.id=f.id WHERE "
                "(f.title LIKE ? ESCAPE '\\' OR f.content LIKE ? ESCAPE '\\' "
                "OR f.keywords LIKE ? ESCAPE '\\')")
-        args = [like, like, like]
+        args: list[Any] = [like, like, like]
         if where:
             sql += " AND " + " AND ".join(where)
             args.extend(params)
