@@ -12,7 +12,7 @@ from urllib.parse import quote
 
 from engraphis.core import source_paths
 from engraphis.core.documents import parse_document, scan_document_tree
-from engraphis.core.obsidian import parse_obsidian_note, scan_obsidian_vault
+from engraphis.core.obsidian import canonical_vault_id, parse_obsidian_note, scan_obsidian_vault
 from engraphis.core.secrets import SecretDetectedError, redact_secrets, secret_kind
 from engraphis.core.sync import SyncEngine, dict_to_record
 from engraphis.document_import import scan_document_upload
@@ -326,6 +326,27 @@ def test_import_root_rejects_remote_allowed_root_entries(monkeypatch):
     monkeypatch.setenv("ENGRAPHIS_IMPORT_ROOTS", r"\\synthetic-host\share")
     with pytest.raises(ValidationError, match="ENGRAPHIS_IMPORT_ROOTS"):
         _resolve_import_root(str(Path.home()))
+
+
+@pytest.mark.parametrize("root", [
+    r"\\synthetic-host\share\vault",
+    "//synthetic-host/share/vault",
+    r"  \\synthetic-host\share\vault",
+])
+def test_vault_identity_rejects_remote_paths_before_resolution(root, monkeypatch):
+    """A vault path must be refused before resolve() can open an SMB session."""
+    resolved = []
+    original = Path.resolve
+
+    def guarded(self, *args, **kwargs):
+        resolved.append(str(self))
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", guarded)
+    for reader in (scan_obsidian_vault, canonical_vault_id):
+        with pytest.raises(ValueError, match="existing directory"):
+            reader(root)
+    assert resolved == []
 
 
 def test_windows_creation_time_skew_is_not_a_content_change(monkeypatch):
