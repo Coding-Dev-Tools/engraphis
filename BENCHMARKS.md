@@ -130,8 +130,14 @@ retrieval-quality improvement. It does not qualify browser behavior, hosted serv
 external models, or provider billing. The registered artifact was produced with:
 
 ```bash
-python -m scripts.export_offline_evidence --output docs/benchmark-evidence/offline-fixtures-release-review-20261022.json
+python -m scripts.export_offline_evidence --output docs/benchmark-evidence/offline-fixtures-release-review-20261022-v2.json
 ```
+
+The immediate same-day predecessor,
+[`offline-fixtures-release-review-20261022.json`](docs/benchmark-evidence/offline-fixtures-release-review-20261022.json),
+remains bound to SHA-256 `bbdbf607143e776d599a013cca6ca0ab8326398e0ffadd4bb65ba2948fa3920e`.
+It was produced before a type-annotation-only change to `engraphis/core/store.py` and is superseded
+by this artifact; its recorded results are identical.
 
 The earlier [guard-installer snapshot artifact](docs/benchmark-evidence/offline-fixtures-pr270-guard-installer-20261020.json)
 remains bound to SHA-256 `047cbdfee604c54c2fe211f7cac54a532563ceecadc310f368dec331bf443ce3` and its original
@@ -183,13 +189,13 @@ grounded checks in separate panels; provider billing and MCP transport are not m
 the SVG and matching PNG with:
 
 ```bash
-python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-release-review-20261022.json --output docs/images/context-efficiency.svg --png-output docs/images/context-efficiency.png
+python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-release-review-20261022-v2.json --output docs/images/context-efficiency.svg --png-output docs/images/context-efficiency.png
 ```
 
 The companion examples are also generated from that artifact with:
 
 ```bash
-python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-release-review-20261022.json --output docs/images/evidence-backed-agent-examples.svg --png-output docs/images/evidence-backed-agent-examples.png
+python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-release-review-20261022-v2.json --output docs/images/evidence-backed-agent-examples.svg --png-output docs/images/evidence-backed-agent-examples.png
 ```
 The historical-to-executable mapping is in
 [`docs/BENCHMARK_CHANGE_COVERAGE.md`](docs/BENCHMARK_CHANGE_COVERAGE.md).
