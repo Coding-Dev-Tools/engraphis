@@ -94,14 +94,14 @@ interpretation and do not count as additional benchmark-quality gains.
 ### Public numeric evidence registry
 
 Every exact public aggregate retained below comes from the checked-in, public-safe
-[`offline-fixtures-release-review-20261022-v2.json`](docs/benchmark-evidence/offline-fixtures-release-review-20261022-v2.json) artifact. Its
+[`offline-fixtures-release-review-20261022-v3.json`](docs/benchmark-evidence/offline-fixtures-release-review-20261022-v3.json) artifact. Its
 SHA-256 is
-`4a7f9117f3126edaa765f08f4ab9a4e65788041931a4209e50d8ca70197a8a93`, also recorded in the
+`aac955672785c01ab9ec60e841d6f566469ce126d3f95c2927aa8b8616a99fb0`, also recorded in the
 adjacent `.sha256` file. The artifact contains no raw questions, answers, prompts, customer data,
 or per-record content fingerprints.
 
 The fixture-suite digest is
-`c34febf5c20fbf685232aee86c47cd9130831a54e21d204378541a5ca3d13a4d`. The artifact defines
+`f2d085128e6951d0a319888bfb700ca788ff26cf1e5041a6f0b74753cac0754e`. The artifact defines
 the digest algorithm and records the SHA-256 of every suite and dataset file. Each evidence ID
 also binds its exact command through `sha256(UTF-8 exact command)`:
 
@@ -117,27 +117,31 @@ The canonical chart aliases are regenerated from that new artifact and carry its
 historical per-run artifacts and their preserved chart bytes remain unchanged. The current
 PNG views were freshly rendered from the registered artifact with CairoSVG 2.9.1 and
 Cairo 1.18.4 on Windows at each SVG canvas size, with embedded artifact and SVG checksums.
-The fresh evaluator run used Windows CPython 3.12.10 and NumPy 2.5.4. Its 588-file manifest
+The fresh evaluator run used Windows CPython 3.11.17 and NumPy 2.4.6. Its 588-file manifest
 binds the producer after the 1.7.10 release-review fixes: Command Code file-guard tool
 ids, fail-closed hook errors, symlink-then-parent and Windows alias targets, the linear
 Spec Studio heading pattern, closure-limit and browse-version handling, the equal-start
 supersede guard, bounded history candidate windows for `why` and `timeline`, UNC/device
 import-root rejection before resolution, token-gated automatic browser sessions, a
-partitioned sync closure budget, and Windows source-read timestamp revalidation. Dashboard assets, tests, documentation, and generated images
+partitioned sync closure budget, Windows source-read timestamp revalidation, non-blocking
+engine write guards and atomic receipt transactions, and worker-isolated MCP tool
+execution. Dashboard assets, tests, documentation, and generated images
 are outside this producer manifest. The three measured fixture results are unchanged;
 this rerun establishes current source and render provenance without claiming a
 retrieval-quality improvement. It does not qualify browser behavior, hosted services,
 external models, or provider billing. The registered artifact was produced with:
 
 ```bash
-python -m scripts.export_offline_evidence --output docs/benchmark-evidence/offline-fixtures-release-review-20261022-v2.json
+python -m scripts.export_offline_evidence --output docs/benchmark-evidence/offline-fixtures-release-review-20261022-v3.json
 ```
 
-The immediate same-day predecessor,
+The immediate same-day predecessors,
+[`offline-fixtures-release-review-20261022-v2.json`](docs/benchmark-evidence/offline-fixtures-release-review-20261022-v2.json)
+(SHA-256 `4a7f9117f3126edaa765f08f4ab9a4e65788041931a4209e50d8ca70197a8a93`) and
 [`offline-fixtures-release-review-20261022.json`](docs/benchmark-evidence/offline-fixtures-release-review-20261022.json),
-remains bound to SHA-256 `bbdbf607143e776d599a013cca6ca0ab8326398e0ffadd4bb65ba2948fa3920e`.
-It was produced before a type-annotation-only change to `engraphis/core/store.py` and is superseded
-by this artifact; its recorded results are identical.
+remain bound to their original SHA-256 digests (`bbdbf607143e776d599a013cca6ca0ab8326398e0ffadd4bb65ba2948fa3920e` for the first run).
+They are superseded
+by this artifact; their recorded results are identical.
 
 The earlier [guard-installer snapshot artifact](docs/benchmark-evidence/offline-fixtures-pr270-guard-installer-20261020.json)
 remains bound to SHA-256 `047cbdfee604c54c2fe211f7cac54a532563ceecadc310f368dec331bf443ce3` and its original

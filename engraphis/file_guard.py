@@ -64,7 +64,7 @@ def _unverifiable_windows_target(value: str) -> bool:
     current directory *of that drive*, which this evaluator cannot map back to a
     protected root.
     """
-    text = value.replace("/", "\\")
+    text = value.lstrip().replace("/", "\\")
     if text.startswith("\\\\"):
         return True
     has_drive = len(text) >= 2 and text[1] == ":" and text[0].isascii() and text[0].isalpha()
@@ -399,11 +399,17 @@ def decide_tool_call(
     opt out with ``allow_shell`` after providing a stronger OS sandbox.
     """
     normalized_tool = _normalize_tool_name(tool_name)
-    current = _canonical(cwd)
     if normalized_tool in SHELL_TOOLS and any(not rule.allow_shell for rule in rules):
         return GuardDecision(False, "shell tools are disabled while file protection is active")
     if normalized_tool not in FILE_TOOLS:
         return GuardDecision(True, "tool does not expose a recognized direct file write")
+    if _WINDOWS and _unverifiable_windows_target(os.fspath(cwd)):
+        return GuardDecision(
+            False,
+            "Windows device, UNC, drive-relative, or alternate-data-stream "
+            "targets cannot be verified",
+        )
+    current = _canonical(cwd)
     values = []
     for key in ("file_path", "filePath", "path", "notebook_path", "notebookPath"):
         value = tool_input.get(key)

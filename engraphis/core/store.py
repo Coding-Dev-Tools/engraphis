@@ -1328,7 +1328,6 @@ class Store:
         )
         self.has_fts5 = False
         self._fts_orphan_ids: Optional[set[str]] = None
-        self._receipt_lock = threading.Lock()
         self.allowed_workspaces: Optional[frozenset] = (
             frozenset(allowed_workspaces) if allowed_workspaces else None
         )
@@ -9326,140 +9325,130 @@ class Store:
         actor = str(actor or "system")[:200]
         workspace_id = str(workspace_id or "")
         repo_id = str(repo_id or "")
-        with self._receipt_lock:
-            # The Python lock serializes threads sharing this Store. BEGIN IMMEDIATE also
-            # serializes separate Store/process connections before predecessor selection,
-            # preventing two Team workers from forking the same workspace chain.
-            transaction_started = not self.conn.transaction_owned_by_current_thread()
-            try:
-                if transaction_started:
-                    self.conn.execute("BEGIN IMMEDIATE")
-                ts = now_ts()
-                receipt_id = ids.new_id("receipt")
-                scope_digest = _receipt_scope_digest(workspace_id, repo_id)
-                actor_digest = hashlib.sha256(actor.encode("utf-8")).hexdigest()[:16]
-                anchor = self.conn.execute(
-                    "SELECT receipt_count, head_hash, integrity_error "
-                    "FROM receipt_chain_heads "
-                    "WHERE workspace_id=?",
-                    (workspace_id,),
-                ).fetchone()
-                anchor_error = str(anchor["integrity_error"] or "") if anchor else ""
-                latest = self.conn.execute(
-                    "SELECT sequence FROM operation_receipts "
-                    "WHERE workspace_id=? ORDER BY sequence DESC LIMIT 1",
-                    (workspace_id,),
-                ).fetchone()
-                current_count: Optional[int] = None
-                prev_hash = ""
-                if anchor is None and latest is None:
-                    # First receipt for a workspace: no scan and no anchor are expected.
+        # SQLite reserves the writer before predecessor selection. The shared
+        # connection also serializes threads; a separate receipt mutex would
+        # invert that order when a caller already owns the transaction.
+        with self.write_transaction():
+            ts = now_ts()
+            receipt_id = ids.new_id("receipt")
+            scope_digest = _receipt_scope_digest(workspace_id, repo_id)
+            actor_digest = hashlib.sha256(actor.encode("utf-8")).hexdigest()[:16]
+            anchor = self.conn.execute(
+                "SELECT receipt_count, head_hash, integrity_error "
+                "FROM receipt_chain_heads "
+                "WHERE workspace_id=?",
+                (workspace_id,),
+            ).fetchone()
+            anchor_error = str(anchor["integrity_error"] or "") if anchor else ""
+            latest = self.conn.execute(
+                "SELECT sequence FROM operation_receipts "
+                "WHERE workspace_id=? ORDER BY sequence DESC LIMIT 1",
+                (workspace_id,),
+            ).fetchone()
+            current_count: Optional[int] = None
+            prev_hash = ""
+            if anchor is None and latest is None:
+                # First receipt for a workspace: no scan and no anchor are expected.
+                current_count = 0
+            elif anchor is not None:
+                anchor_count = anchor["receipt_count"]
+                anchor_head = anchor["head_hash"]
+                if (
+                    type(anchor_count) is int
+                    and anchor_count == 0
+                    and anchor_head == ""
+                    and latest is None
+                ):
                     current_count = 0
-                elif anchor is not None:
-                    anchor_count = anchor["receipt_count"]
-                    anchor_head = anchor["head_hash"]
+                elif (
+                    type(anchor_count) is int
+                    and anchor_count > 0
+                    and latest is not None
+                    and latest["sequence"] == anchor_count
+                ):
+                    head_row = self.conn.execute(
+                        "SELECT id, sequence, payload, prev_hash, receipt_hash "
+                        "FROM operation_receipts "
+                        "WHERE workspace_id=? AND sequence=?",
+                        (workspace_id, anchor_count),
+                    ).fetchone()
                     if (
-                        type(anchor_count) is int
-                        and anchor_count == 0
-                        and anchor_head == ""
-                        and latest is None
-                    ):
-                        current_count = 0
-                    elif (
-                        type(anchor_count) is int
-                        and anchor_count > 0
-                        and latest is not None
-                        and latest["sequence"] == anchor_count
-                    ):
-                        head_row = self.conn.execute(
-                            "SELECT id, sequence, payload, prev_hash, receipt_hash "
-                            "FROM operation_receipts "
-                            "WHERE workspace_id=? AND sequence=?",
-                            (workspace_id, anchor_count),
-                        ).fetchone()
-                        if (
-                            head_row is not None
-                            and head_row["receipt_hash"] == anchor_head
-                            and not _public_receipt_row(dict(head_row)).get(
-                                "invalid_payload", False
-                            )
-                        ):
-                            current_count = anchor_count
-                            prev_hash = str(anchor_head)
-
-                if current_count is None:
-                    # The independently stored anchor/ordinal did not describe a healthy
-                    # head. Reconstruct only on this exceptional path so a safe unique
-                    # predecessor can still be extended without retrying the memory action.
-                    chain = self._receipt_chain_state(workspace_id)
-                    if chain["structure_errors"]:
-                        raise ReceiptChainIntegrityError(
-                            "receipt chain has no unique structural head; append refused"
+                        head_row is not None
+                        and head_row["receipt_hash"] == anchor_head
+                        and not _public_receipt_row(dict(head_row)).get(
+                            "invalid_payload", False
                         )
-                    current_count = len(chain["rows"])
-                    prev_hash = str(chain["head"] or "")
-                    if chain["row_errors"]:
-                        anchor_error = anchor_error or "pre_append_chain_corruption"
-                    if anchor is None and current_count:
-                        anchor_error = anchor_error or "pre_append_anchor_missing"
-                    elif anchor is not None and (
-                        type(anchor["receipt_count"]) is not int
-                        or anchor["receipt_count"] != current_count
-                        or str(anchor["head_hash"]) != prev_hash
                     ):
-                        # Keep evidence of deletion or anchor damage while extending the
-                        # unique chain that actually remains.
-                        anchor_error = anchor_error or "pre_append_anchor_mismatch"
-                next_sequence = current_count + 1
-                safe_meta = _receipt_metadata(metadata or {})
-                payload_obj = {
-                    "version": 1,
-                    "id": receipt_id,
-                    "ts_ms": int(ts * 1000),
-                    "operation": operation,
-                    "scope_digest": scope_digest,
-                    "actor_digest": actor_digest,
-                    "target_count": safe_target_count,
-                    "status": safe_status,
-                    "metadata": safe_meta,
-                    "prev_hash": prev_hash,
-                }
-                payload = json.dumps(
-                    payload_obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-                )
-                receipt_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
-                self.conn.execute(
-                    "INSERT INTO operation_receipts(id, ts, operation, workspace_id, repo_id, "
-                    "sequence, scope_digest, actor, target_count, status, payload, prev_hash, "
-                    "receipt_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (
-                        receipt_id, ts, operation, workspace_id, repo_id, next_sequence,
-                        scope_digest,
-                        actor_digest, payload_obj["target_count"], payload_obj["status"],
-                        payload, prev_hash, receipt_hash,
-                    ),
-                )
-                self.conn.execute(
-                    "INSERT INTO receipt_chain_heads "
-                    "(workspace_id, receipt_count, head_hash, integrity_error, updated_at) "
-                    "VALUES (?,?,?,?,?) "
-                    "ON CONFLICT(workspace_id) DO UPDATE SET "
-                    "receipt_count=excluded.receipt_count, "
-                    "head_hash=excluded.head_hash, "
-                    "integrity_error=CASE "
-                    "WHEN receipt_chain_heads.integrity_error!='' "
-                    "THEN receipt_chain_heads.integrity_error "
-                    "ELSE excluded.integrity_error END, "
-                    "updated_at=excluded.updated_at",
-                    (workspace_id, current_count + 1, receipt_hash, anchor_error, ts),
-                )
-                if transaction_started:
-                    self.conn.commit()
-                return {**payload_obj, "hash": receipt_hash}
-            except Exception:
-                if transaction_started:
-                    self.conn.rollback()
-                raise
+                        current_count = anchor_count
+                        prev_hash = str(anchor_head)
+
+            if current_count is None:
+                # The independently stored anchor/ordinal did not describe a healthy
+                # head. Reconstruct only on this exceptional path so a safe unique
+                # predecessor can still be extended without retrying the memory action.
+                chain = self._receipt_chain_state(workspace_id)
+                if chain["structure_errors"]:
+                    raise ReceiptChainIntegrityError(
+                        "receipt chain has no unique structural head; append refused"
+                    )
+                current_count = len(chain["rows"])
+                prev_hash = str(chain["head"] or "")
+                if chain["row_errors"]:
+                    anchor_error = anchor_error or "pre_append_chain_corruption"
+                if anchor is None and current_count:
+                    anchor_error = anchor_error or "pre_append_anchor_missing"
+                elif anchor is not None and (
+                    type(anchor["receipt_count"]) is not int
+                    or anchor["receipt_count"] != current_count
+                    or str(anchor["head_hash"]) != prev_hash
+                ):
+                    # Keep evidence of deletion or anchor damage while extending the
+                    # unique chain that actually remains.
+                    anchor_error = anchor_error or "pre_append_anchor_mismatch"
+            next_sequence = current_count + 1
+            safe_meta = _receipt_metadata(metadata or {})
+            payload_obj = {
+                "version": 1,
+                "id": receipt_id,
+                "ts_ms": int(ts * 1000),
+                "operation": operation,
+                "scope_digest": scope_digest,
+                "actor_digest": actor_digest,
+                "target_count": safe_target_count,
+                "status": safe_status,
+                "metadata": safe_meta,
+                "prev_hash": prev_hash,
+            }
+            payload = json.dumps(
+                payload_obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+            )
+            receipt_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+            self.conn.execute(
+                "INSERT INTO operation_receipts(id, ts, operation, workspace_id, repo_id, "
+                "sequence, scope_digest, actor, target_count, status, payload, prev_hash, "
+                "receipt_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    receipt_id, ts, operation, workspace_id, repo_id, next_sequence,
+                    scope_digest,
+                    actor_digest, payload_obj["target_count"], payload_obj["status"],
+                    payload, prev_hash, receipt_hash,
+                ),
+            )
+            self.conn.execute(
+                "INSERT INTO receipt_chain_heads "
+                "(workspace_id, receipt_count, head_hash, integrity_error, updated_at) "
+                "VALUES (?,?,?,?,?) "
+                "ON CONFLICT(workspace_id) DO UPDATE SET "
+                "receipt_count=excluded.receipt_count, "
+                "head_hash=excluded.head_hash, "
+                "integrity_error=CASE "
+                "WHEN receipt_chain_heads.integrity_error!='' "
+                "THEN receipt_chain_heads.integrity_error "
+                "ELSE excluded.integrity_error END, "
+                "updated_at=excluded.updated_at",
+                (workspace_id, current_count + 1, receipt_hash, anchor_error, ts),
+            )
+            return {**payload_obj, "hash": receipt_hash}
 
     def list_receipts(self, *, workspace_id: str, limit: int = 100) -> list[dict]:
         safe_limit = max(1, min(10_000, int(limit)))

@@ -555,23 +555,24 @@ def _rollback_service_transaction(method):
     """
     @wraps(method)
     def wrapped(self, *args, **kwargs):
-        conn = self.store.conn
-        owns_transaction = not conn.transaction_owned_by_current_thread()
-        try:
-            if owns_transaction:
-                conn.execute("BEGIN IMMEDIATE")
-            with conn.defer_commits():
-                result = method(self, *args, **kwargs)
-            if owns_transaction and conn.transaction_owned_by_current_thread():
-                conn.commit()
-            return result
-        except BaseException:
-            if owns_transaction and conn.transaction_owned_by_current_thread():
-                try:
-                    conn.rollback()
-                except Exception:  # noqa: BLE001 - preserve the original failure
-                    pass
-            raise
+        with self.engine._write_guard():
+            conn = self.store.conn
+            owns_transaction = not conn.transaction_owned_by_current_thread()
+            try:
+                if owns_transaction:
+                    conn.execute("BEGIN IMMEDIATE")
+                with conn.defer_commits():
+                    result = method(self, *args, **kwargs)
+                if owns_transaction and conn.transaction_owned_by_current_thread():
+                    conn.commit()
+                return result
+            except BaseException:
+                if owns_transaction and conn.transaction_owned_by_current_thread():
+                    try:
+                        conn.rollback()
+                    except Exception:  # noqa: BLE001 - preserve the original failure
+                        pass
+                raise
     return wrapped
 
 
@@ -13117,6 +13118,7 @@ class MemoryService:
             if (not local_source_access_allowed() or _authenticated_principal() is not None
                     or self.allowed_workspaces is not None):
                 raise ValidationError("source_id file access requires the local operator; pass text instead")
+            from engraphis.core.documents import remote_or_device_path
             from engraphis.core.engine import _approved_local_index_roots
             clean_src = _clean_text(source_id, field="source_id", max_chars=500)
             try:
@@ -13124,6 +13126,9 @@ class MemoryService:
                 if (_sensitive_source_path(clean_src)
                         or _sensitive_source_path(str(selected))):
                     raise ValidationError("sensitive source_id path")
+                if (remote_or_device_path(clean_src)
+                        or remote_or_device_path(str(selected))):
+                    raise ValidationError("source_id must be a text specification under an approved local root")
                 path = selected.resolve(strict=True)
                 if _sensitive_source_path(str(path)):
                     raise ValidationError("sensitive source_id path")
