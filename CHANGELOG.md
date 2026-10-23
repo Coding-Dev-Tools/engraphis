@@ -72,7 +72,19 @@ Candidate package version: **1.7.10**. Publication and hosted-service qualificat
 - Reject XML document types through the parser, including UTF-16 XML and Office containers.
 - Enforce bound-workspace access for session reads/closure and memory pinning,
   reinforcement, and validity closure.
-- Search all scoped history pages for `why` and `timeline`, preserving relevant older facts.
+- Search `why` and `timeline` history through a bounded, index-selected candidate window
+  instead of scanning every memory row. A superseded record outside the newest page is still
+  found, while the cost follows the window rather than the corpus size.
+- Partition the 1,024-observation closure ceiling: a sync peer may install at most 960
+  observations and 64 stay reserved for the local writer, so a peer cannot block a local
+  retirement. Only new observations spend that budget, keeping replay idempotent.
+- Reject UNC shares and Windows device paths for document import roots and
+  `ENGRAPHIS_IMPORT_ROOTS` before any resolution or stat, so a crafted path cannot open an
+  SMB session or disclose NTLM credentials.
+- Stop rejecting an approved local source on Windows because creation time moved: the read
+  compares size, mtime, and identity, and compares `st_ctime` only where it is an inode change
+  time. Freshly written files reported it about a millisecond apart between the path and the
+  open handle, which failed roughly one read in five.
 - Make dense measurement tokenization linear while preserving the deterministic features.
 - Pin the default MiniLM model revision so newer loaders that omit resolved commit
   metadata can still identify its persistent embedding space.
@@ -95,8 +107,10 @@ Candidate package version: **1.7.10**. Publication and hosted-service qualificat
 - Emit a browser session cookie only when the server mints it. Valid local-session
   reuse preserves its existing cookie and review confirmation without echoing request
   cookie bytes in the response.
-- Include automatic same-origin loopback dashboard sessions without user-entered tokens,
-  retaining remote authentication and reviewed-write protections.
+- Issue the automatic same-origin loopback dashboard session only when no `ENGRAPHIS_API_TOKEN`
+  is configured. A token-gated instance refuses it with `403 local_token_required` and uses the
+  token exchange instead, so a forged loopback forward cannot obtain a session, reach the review
+  CSRF confirmation, or approve a memory.
 - Resume an ended session explicitly from another agent: pass its ID as `session_id` when
   starting `engraphis_session`, or as `resume_from_session_id` to classic
   `engraphis_start_session`. Only an ended session owned by the same user in the exact
@@ -108,9 +122,13 @@ Candidate package version: **1.7.10**. Publication and hosted-service qualificat
 - Add a fail-closed host file protection policy evaluator (`engraphis/file_guard.py`) and an
   optional Command Code `PreToolUse` hook installed with `install_cc_hook.py --file-guard`.
   The hook enforces Command Code's canonical `write_file`/`edit_file`/`shell_command` ids,
-  denies the call on any hook error, and on Windows denies device, UNC, and alternate-data-stream
-  targets. The policy file protects itself through symlinked parents, and upgrading replaces
-  legacy hook entries. See `docs/FILE_PROTECTION.md`.
+  denies the call on any hook error, and on Windows denies device, UNC, alternate-data-stream
+  and drive-relative targets. Tool ids compare after dropping separators, so `write_file` and
+  `Write` name one tool while `rewrite` stays a different tool; `ApplyPatch`, create, delete,
+  move, rename and copy ids are guarded too. Paths compare case-insensitively on Windows and
+  on case-insensitive POSIX volumes, a symlinked or non-owner policy file is refused, and hook
+  payloads are bounded in size and nesting. The policy file protects itself through symlinked
+  parents, and upgrading replaces legacy hook entries. See `docs/FILE_PROTECTION.md`.
 
 ## [1.7.9] - 2026-09-29
 

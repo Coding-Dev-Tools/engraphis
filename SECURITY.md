@@ -62,13 +62,18 @@ capped tables and element count) so crafted content cannot freeze the page used 
 - **Loopback by default** (`ENGRAPHIS_HOST=127.0.0.1`)
 - **Optional bearer token** (`ENGRAPHIS_API_TOKEN`): constant-time comparison (single
   shared implementation in the local customer runtime)
-- **Automatic local dashboard access:** the browser on this computer obtains its
-  HttpOnly, SameSite session without entering an API token. Session issuance requires
-  a literal loopback peer, a loopback/localhost Host, an exact same-origin POST, and
-  the dashboard's custom browser header. Forwarding headers, nonlocal peers, DNS
+- **Automatic local dashboard access (zero-token instances only):** the browser on this
+  computer obtains its HttpOnly, SameSite session without entering an API token. Session
+  issuance requires a literal loopback peer, a loopback/localhost Host, an exact same-origin
+  POST, and the dashboard's custom browser header. Forwarding headers, nonlocal peers, DNS
   hostnames, cross-site requests, and configured LAN-trust exceptions cannot mint it.
-  Existing browser confirmations and CSRF checks still govern reviewed writes.
-  Local programs already able to act as this user remain inside the local trust boundary.
+  Existing browser confirmations and CSRF checks still govern reviewed writes. Local programs
+  already able to act as this user remain inside the local trust boundary. When
+  `ENGRAPHIS_API_TOKEN` is configured the automatic session is refused with
+  `403 local_token_required`, and the browser exchanges that token at `POST /api/auth/session`
+  instead. Every signal the automatic path checks is an ordinary request header, so a loopback
+  port-forward (`ssh -L`, `netsh portproxy`) can forge all of them while choosing `Host` and
+  `Origin` itself; none of them distinguishes that caller from the real local browser.
 - Pro and Team account sign-in belongs to optional hosted services; it does not gate
   opening the local dashboard. Remote API and operator access still require credentials.
 - **No local Team identity service:** the public dashboard is single-user. Team logins,
@@ -130,6 +135,10 @@ CLI indexing retain the `ENGRAPHIS_INDEX_ROOTS` allow-list semantics.
 does not follow file symlinks outside the root, prunes dependency/build directories during the
 walk, and honors the root `.engraphisignore` without allowing negation rules to re-expose
 hardcoded excludes.
+`import_folder` resolves the requested folder inside the home directory and widens that boundary
+only through `ENGRAPHIS_IMPORT_ROOTS`. UNC shares and Windows device paths are rejected on the raw
+path before any resolution or stat, for the requested folder and for every allow-list entry, so a
+crafted path cannot open an SMB session or disclose NTLM credentials.
 Anyone who can reach an authenticated local mutation route has the authority of that local
 installation, so do not share its bearer token.
 
@@ -138,7 +147,16 @@ installation, so do not share its bearer token.
 Memory governance is not a filesystem sandbox. For hosts that mediate tool calls, Engraphis ships
 a fail-closed protected-path evaluator and an optional Command Code `PreToolUse` hook. Its policy
 lives outside the repository, direct file tools are checked before execution, and general shell
-access is denied by default because command inspection cannot guarantee non-mutation. See
+access is denied by default because command inspection cannot guarantee non-mutation. The hook
+exits with status 2 (the only status the host treats as a denial) for every failure: a missing
+install, a missing/malformed/unsafe policy, an unusable or oversized payload, or an unexpected
+error. A missing policy denies every call rather than allowing everything.
+
+Path comparison follows the platform: case-insensitive on Windows and on case-insensitive volumes
+(macOS), Unicode-normalized everywhere, and on Windows extended-length, device, UNC,
+admin-share, alternate-data-stream and drive-relative targets are denied because they cannot be
+mapped back to a protected root. The policy file and the host's hook configuration are themselves
+protected, so a guarded process cannot switch the guard off through a direct file write. See
 [`docs/FILE_PROTECTION.md`](docs/FILE_PROTECTION.md) for setup, host integration, and limitations.
 Use OS ACLs or read-only mounts when the agent can invoke tools outside that hook.
 
