@@ -32,6 +32,7 @@ from starlette.concurrency import run_in_threadpool
 from engraphis import licensing
 from engraphis.commercial import trial_days_by_plan
 from engraphis.config import DEFAULT_RELAY_URL, canonicalize_relay_url, settings
+from engraphis.core.documents import remote_or_device_path
 from engraphis.core.mutations import MemoryConflict
 from engraphis.core.poisoning import prompt_eligible
 from engraphis.core.scoring import normalize
@@ -3037,6 +3038,8 @@ def _http_code_index_path(root_path: str) -> str:
         raise _HttpCodeIndexConfigurationError("HTTP code index root must be configured absolutely")
 
     base = os.path.normcase(os.path.realpath(configured_root or os.getcwd()))
+    if remote_or_device_path(root_path):
+        raise ValidationError("code index root is outside the HTTP index root")
     candidate = os.path.normcase(os.path.realpath(os.path.join(base, root_path)))
 
     # Keep a separator on both values so /operator/root-copy cannot pass as a

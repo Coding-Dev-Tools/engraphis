@@ -58,6 +58,15 @@ Candidate package version: **1.7.10**. Publication and hosted-service qualificat
   leaving the editor while a save is in flight asks first, and a save that fails after you
   leave is still reported.
 
+- Prevent concurrent batch writes and receipt recording from stalling on inverted locks.
+  Reserve the engine writer before SQLite, and reject a conflicting caller-owned
+  transaction without committing or rolling back its work. Receipt payloads and
+  chain anchors now share the existing atomic Store transaction boundary.
+- Run synchronous MCP handlers in context-preserving workers so slow memory work
+  does not block protocol peers. Preserve direct calls and tool schemas, wait for
+  in-flight work under AnyIO cancellation, and synchronize capability registry
+  issuance, expiry and resolution.
+
 - Preserve repeated validity closures in schema 19 so later corrections cannot change
   fixed historical queries. Apply the same knowledge-time rule to recall, graph evidence,
   browsing, scoring, workspace copies, and exports. Sync v4 carries the closure history

@@ -234,7 +234,7 @@ def remote_or_device_path(path_text: str) -> bool:
     to an attacker-controlled host.  ``Path.resolve()`` cannot be called first to
     decide, because the leak happens during resolution itself.
     """
-    text = path_text or ""
+    text = (path_text or "").lstrip()
     if text.startswith(("\\\\", "//")):
         return True
     windows = PureWindowsPath(text)

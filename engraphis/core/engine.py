@@ -21,14 +21,16 @@ import tempfile
 import threading
 import time
 from collections import defaultdict, deque
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterator, Optional
 
 import numpy as np
 
 from engraphis.core import scoring
 from engraphis.core.adaptive_context import AdaptiveContextResult, fit_recent_history
 from engraphis.core.conflicts import detect_conflicts
+from engraphis.core.documents import remote_or_device_path
 from engraphis.core.evidence import exact_value_binding, make_exact_value_binding
 from engraphis.core.interfaces import (
     MemoryRecord,
@@ -547,6 +549,28 @@ class MemoryEngine:
         self.backend_identities: dict = {}
         self._closed = False
 
+    @contextmanager
+    def _write_guard(self) -> Iterator[None]:
+        """Enter the writer without waiting while holding a caller's SQLite transaction.
+
+        Ordinary writes take this guard before SQLite. A caller may already own
+        SQLite, so it must fail before any mutation if another thread owns this
+        engine. Same-thread nested writes remain reentrant and caller-owned work
+        is never committed or rolled back by a failed admission.
+        """
+        if self.store.conn.transaction_owned_by_current_thread():
+            acquired = self._write_lock.acquire(blocking=False)
+            if not acquired:
+                raise RuntimeError(
+                    "engine writer is busy; settle the caller-owned transaction before retrying"
+                )
+        else:
+            self._write_lock.acquire()
+        try:
+            yield
+        finally:
+            self._write_lock.release()
+
     def _adopt_resources(self, resources: list[Any]) -> None:
         """Take ownership of factory-created collaborators after composition succeeds."""
         with self._resource_lock:
@@ -1048,7 +1072,7 @@ class MemoryEngine:
         # Reserve SQLite's writer before neighbor discovery, after embedding. The
         # database boundary serializes independent engines/processes as well as
         # threads, and defers nested helper commits until the decision is durable.
-        with self._write_lock:
+        with self._write_guard():
             caller_owned_transaction = self.store.conn.transaction_owned_by_current_thread()
             external_index = bool(
                 vector_index_requires_sync(self.index, self.store)
@@ -1287,7 +1311,7 @@ class MemoryEngine:
         inserted: list[tuple[str, dict]] = []  # (memory_id, prepared item)
         pending_vectors: list[tuple[str, np.ndarray]] = []
 
-        with self._write_lock:
+        with self._write_guard():
             caller_owned_transaction = (
                 self.store.conn.transaction_owned_by_current_thread()
             )
@@ -3103,7 +3127,7 @@ class MemoryEngine:
         Separate indexes require an engine-owned transaction so a caller cannot later
         roll back the durable repair debt after an irreversible provider deletion.
         """
-        with self._write_lock:
+        with self._write_guard():
             repair_target = index_repair_identity(self.index, self.store)
             transaction_started = not self.store.conn.transaction_owned_by_current_thread()
             if repair_target is not None and not transaction_started:
@@ -3193,7 +3217,7 @@ class MemoryEngine:
                 exact_value_type: str = "literal",
                 exact_value_span: Optional[tuple[int, int]] = None,
                 clear_exact_value: bool = False) -> dict:
-        with self._write_lock:
+        with self._write_guard():
             return self._correct_locked(
                 memory_id, new_content, reason=reason, actor=actor,
                 exact_value=exact_value, exact_value_type=exact_value_type,
@@ -3231,7 +3255,7 @@ class MemoryEngine:
             or not math.isfinite(importance) or not 0 <= importance <= 1
         ):
             raise ValueError("importance must be between zero and one")
-        with self._write_lock:
+        with self._write_guard():
             old = self.store.get_memory(memory_id)
             if old is None:
                 raise KeyError(f"no memory with id '{memory_id}'")
@@ -3414,7 +3438,7 @@ class MemoryEngine:
         # Keep lookup and insert in the engine's write critical section. Without it two
         # retries of the same pending source could each observe no successor and create
         # duplicate prompt-visible records. The normal remember path re-enters this RLock.
-        with self._write_lock:
+        with self._write_guard():
             old = self.store.get_memory(memory_id)
             if old is None:
                 raise KeyError(f"no memory with id '{memory_id}'")
@@ -3564,7 +3588,7 @@ class MemoryEngine:
 
     def promote(self, memory_id: str, target_scope: Scope, *, reason: str = "",
                 actor: str = "user") -> dict:
-        with self._write_lock:
+        with self._write_guard():
             return self._promote_locked(
                 memory_id, target_scope, reason=reason, actor=actor,
             )
@@ -3765,7 +3789,7 @@ class MemoryEngine:
               scope: Optional[Scope] = None, keywords: Optional[list] = None,
               reason: str = "", actor: str = "user") -> dict:
         """Merge live memories into one atomic, temporally bounded successor."""
-        with self._write_lock:
+        with self._write_guard():
             return self._merge_locked(
                 source_ids, merged_content, title=title, mtype=mtype, scope=scope,
                 keywords=keywords, reason=reason, actor=actor,
@@ -4088,9 +4112,10 @@ class MemoryEngine:
         # Normalize before the root-prefix check.  Keep this check at the filesystem
         # call site (rather than hiding it in a helper) so both human review and static
         # analysis can establish that every later path is constrained by this boundary.
-        canonical_root = os.path.normcase(
-            os.path.realpath(os.path.expanduser(os.fspath(root_path)))
-        )
+        expanded_root = os.path.expanduser(os.fspath(root_path))
+        if remote_or_device_path(os.fspath(root_path)) or remote_or_device_path(expanded_root):
+            raise ValueError("repo root is outside approved local roots")
+        canonical_root = os.path.normcase(os.path.realpath(expanded_root))
         # Retain a separator on the checked value.  This makes an approved root
         # itself and every child use the same normalized-prefix check (and avoids
         # accepting a sibling such as ``/work/repo-copy`` for ``/work/repo``).
@@ -4264,9 +4289,10 @@ class MemoryEngine:
         ):
             raise RuntimeError("code indexing backend is not configured")
 
-        canonical_root = os.path.normcase(
-            os.path.realpath(os.path.expanduser(os.fspath(root_path)))
-        )
+        expanded_root = os.path.expanduser(os.fspath(root_path))
+        if remote_or_device_path(os.fspath(root_path)) or remote_or_device_path(expanded_root):
+            raise ValueError("repo root is outside approved local roots")
+        canonical_root = os.path.normcase(os.path.realpath(expanded_root))
         canonical_root_with_sep = canonical_root.rstrip(os.sep) + os.sep
         safe_root: Optional[str] = None
         for approved_root in _approved_local_index_roots():
