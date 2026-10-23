@@ -78,6 +78,8 @@ Candidate package version: **1.7.10**. Publication and hosted-service qualificat
 - Partition the 1,024-observation closure ceiling: a sync peer may install at most 960
   observations and 64 stay reserved for the local writer, so a peer cannot block a local
   retirement. Only new observations spend that budget, keeping replay idempotent.
+- Refuse a supersession that would land on the predecessor's own `valid_from`, which would
+  persist an empty validity interval that the store and every sync peer reject.
 - Reject UNC shares and Windows device paths for document import roots and
   `ENGRAPHIS_IMPORT_ROOTS` before any resolution or stat, so a crafted path cannot open an
   SMB session or disclose NTLM credentials.
