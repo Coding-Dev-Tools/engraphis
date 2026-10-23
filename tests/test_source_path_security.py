@@ -290,3 +290,38 @@ def test_quick_http_upload_does_not_read_sensitive_file_bytes(service, monkeypat
         files=[SimpleNamespace(filename="credentials/config.json", size=0, read=forbidden)],
     ))
     assert report["skipped"] == report["scanned"] == 1 and report["imported"] == 0
+
+
+@pytest.mark.parametrize("root", [
+    r"\\synthetic-host\share\notes",
+    "//synthetic-host/share/notes",
+    r"\\?\C:\synthetic\notes",
+    r"\\.\C:\synthetic\notes",
+])
+def test_import_root_rejects_remote_or_device_paths_before_resolution(root, monkeypatch):
+    """A UNC/device root must be refused before realpath opens an SMB session.
+
+    ``os.path.realpath`` on ``\\\\host\\share`` contacts the remote host, so the
+    ordering matters: the raw text has to be refused first, not after resolution.
+    """
+    calls = []
+    real_realpath = os.path.realpath
+
+
+    def guarded(path, *args, **kwargs):
+        calls.append(str(path))
+        return real_realpath(path, *args, **kwargs)
+
+    monkeypatch.setattr(os.path, "realpath", guarded)
+    with pytest.raises(ValidationError, match="local path"):
+        _resolve_import_root(root)
+    monkeypatch.undo()
+    assert [call for call in calls if "synthetic-host" in call or root.startswith("\\\\?")] == []
+
+
+def test_import_root_rejects_remote_allowed_root_entries(monkeypatch):
+    """``ENGRAPHIS_IMPORT_ROOTS`` cannot widen the policy to a remote share either."""
+    monkeypatch.setenv("ENGRAPHIS_IMPORT_ROOTS", r"\\synthetic-host\share")
+    with pytest.raises(ValidationError, match="ENGRAPHIS_IMPORT_ROOTS"):
+        _resolve_import_root(str(Path.home()))
+

@@ -1022,19 +1022,28 @@ def _resolve_import_root(raw_path: str) -> Path:
     widened via ``ENGRAPHIS_IMPORT_ROOTS`` (``os.pathsep``-separated) for server
     deployments that keep content outside ``$HOME``."""
     # Reject selected names before realpath can follow symlinks or stat a tree.
+    from engraphis.core.documents import remote_or_device_path
+
     expanded_path = os.path.expanduser(raw_path)
     if (_sensitive_source_path(raw_path, is_directory=True)
             or _sensitive_source_path(expanded_path, is_directory=True)):
         raise ValidationError("sensitive import path")
+    # A UNC or device root must be refused *before* realpath/stat: on Windows those
+    # calls open an SMB session and can leak NTLM credentials to a remote host.
+    if remote_or_device_path(raw_path) or remote_or_device_path(expanded_path):
+        raise ValidationError("import path must be a local path, not a UNC share or device")
     home = os.path.realpath(str(Path.home().expanduser()))
     allowed_roots = [home]
     env_roots = os.environ.get("ENGRAPHIS_IMPORT_ROOTS", "")
     if env_roots:
-        allowed_roots.extend(
-            os.path.realpath(os.path.expanduser(root))
-            for root in env_roots.split(os.pathsep)
-            if root
-        )
+        for root in env_roots.split(os.pathsep):
+            if not root:
+                continue
+            if remote_or_device_path(os.path.expanduser(root)):
+                raise ValidationError(
+                    "ENGRAPHIS_IMPORT_ROOTS entries must be local paths, not UNC shares"
+                )
+            allowed_roots.append(os.path.realpath(os.path.expanduser(root)))
     real_path = os.path.realpath(expanded_path)
     if _sensitive_source_path(real_path, is_directory=True):
         raise ValidationError("sensitive import path")

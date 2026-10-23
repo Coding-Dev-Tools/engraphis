@@ -15,6 +15,7 @@ from engraphis.core.documents import (
     MAX_DOCUMENT_WARNINGS,
     DocumentRecord,
     DocumentParseError,
+    canonical_source_id,
     document_format_for_path,
     normalize_document_path,
     parse_document,
@@ -921,3 +922,34 @@ def test_adapter_must_return_matching_source_identity():
 
     with pytest.raises(DocumentParseError, match="invalid source identity"):
         parse_document(raw, "report.pdf", adapter=bad_identity_adapter)
+
+
+@pytest.mark.parametrize("root", [
+    r"\\synthetic-host\share\notes",
+    "//synthetic-host/share/notes",
+    r"\\?\C:\synthetic\notes",
+    r"\\.\C:\synthetic\notes",
+])
+def test_document_scan_rejects_remote_or_device_roots_before_any_stat(root, monkeypatch):
+    """A UNC/device root must be refused before ``lstat`` opens an SMB session."""
+    import os
+
+    calls = []
+    real_lstat = os.lstat
+
+    def guarded(path, *args, **kwargs):
+        calls.append(str(path))
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "lstat", guarded)
+    with pytest.raises(DocumentParseError, match="UNC share or device"):
+        scan_document_tree(root)
+    monkeypatch.undo()
+    assert calls == []
+
+
+@pytest.mark.parametrize("root", [r"\\synthetic-host\share\notes", r"\\?\C:\synthetic"])
+def test_canonical_source_id_rejects_remote_or_device_roots(root):
+    with pytest.raises(DocumentParseError, match="UNC share or device"):
+        canonical_source_id(root)
+
