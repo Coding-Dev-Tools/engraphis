@@ -94,14 +94,14 @@ interpretation and do not count as additional benchmark-quality gains.
 ### Public numeric evidence registry
 
 Every exact public aggregate retained below comes from the checked-in, public-safe
-[`offline-fixtures-release-review-20261022.json`](docs/benchmark-evidence/offline-fixtures-release-review-20261022.json) artifact. Its
+[`offline-fixtures-release-review-20261022-v2.json`](docs/benchmark-evidence/offline-fixtures-release-review-20261022-v2.json) artifact. Its
 SHA-256 is
-`bbdbf607143e776d599a013cca6ca0ab8326398e0ffadd4bb65ba2948fa3920e`, also recorded in the
+`4a7f9117f3126edaa765f08f4ab9a4e65788041931a4209e50d8ca70197a8a93`, also recorded in the
 adjacent `.sha256` file. The artifact contains no raw questions, answers, prompts, customer data,
 or per-record content fingerprints.
 
 The fixture-suite digest is
-`ba6a13419aaceff0b18179660b93de797e42343d8e075ce2c975d44eabce98e1`. The artifact defines
+`c34febf5c20fbf685232aee86c47cd9130831a54e21d204378541a5ca3d13a4d`. The artifact defines
 the digest algorithm and records the SHA-256 of every suite and dataset file. Each evidence ID
 also binds its exact command through `sha256(UTF-8 exact command)`:
 
