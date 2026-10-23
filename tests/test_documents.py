@@ -929,6 +929,7 @@ def test_adapter_must_return_matching_source_identity():
     "//synthetic-host/share/notes",
     r"\\?\C:\synthetic\notes",
     r"\\.\C:\synthetic\notes",
+    r"  \\synthetic-host\share\notes",
 ])
 def test_document_scan_rejects_remote_or_device_roots_before_any_stat(root, monkeypatch):
     """A UNC/device root must be refused before ``lstat`` opens an SMB session."""
@@ -948,7 +949,11 @@ def test_document_scan_rejects_remote_or_device_roots_before_any_stat(root, monk
     assert calls == []
 
 
-@pytest.mark.parametrize("root", [r"\\synthetic-host\share\notes", r"\\?\C:\synthetic"])
+@pytest.mark.parametrize("root", [
+    r"\\synthetic-host\share\notes",
+    r"\\?\C:\synthetic",
+    r"  \\synthetic-host\share\notes",
+])
 def test_canonical_source_id_rejects_remote_or_device_roots(root):
     with pytest.raises(DocumentParseError, match="UNC share or device"):
         canonical_source_id(root)

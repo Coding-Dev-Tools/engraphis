@@ -440,6 +440,8 @@ def test_command_code_hook_report_never_raises(
     ("C:", True),                                 # bare drive-relative path
     ("C:\\repo\\src\\app.py", False),
     ("src/app.py", False),
+    ("  \\\\localhost\\C$\\repo\\.env", True),      # leading whitespace is stripped
+    ("\t\\\\.\\C:\\repo\\.env", True),
 ])
 def test_windows_alias_targets_are_unverifiable(value: str, unverifiable: bool) -> None:
     from engraphis.file_guard import _unverifiable_windows_target
@@ -538,6 +540,23 @@ def test_windows_drive_relative_target_is_denied(tmp_path: Path, monkeypatch) ->
     rules = load_policy(_policy(tmp_path, root))
     monkeypatch.setattr(guard, "_WINDOWS", True)
     decision = decide_tool_call("write_file", {"file_path": "C:.env"}, cwd=root, rules=rules)
+    assert not decision.allowed
+    assert "Windows" in decision.reason
+
+
+def test_windows_unverifiable_cwd_is_denied(tmp_path: Path, monkeypatch) -> None:
+    # The working directory decides whether a relative target is protected, so a
+    # UNC or device cwd must be refused before it is resolved.
+    import engraphis.file_guard as guard
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    rules = load_policy(_policy(tmp_path, root))
+    monkeypatch.setattr(guard, "_WINDOWS", True)
+    decision = decide_tool_call(
+        "write_file", {"file_path": ".env"}, cwd="  \\\\synthetic-host\\share\\repo",
+        rules=rules,
+    )
     assert not decision.allowed
     assert "Windows" in decision.reason
 

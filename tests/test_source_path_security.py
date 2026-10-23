@@ -298,6 +298,7 @@ def test_quick_http_upload_does_not_read_sensitive_file_bytes(service, monkeypat
     "//synthetic-host/share/notes",
     r"\\?\C:\synthetic\notes",
     r"\\.\C:\synthetic\notes",
+    r"  \\synthetic-host\share\notes",
 ])
 def test_import_root_rejects_remote_or_device_paths_before_resolution(root, monkeypatch):
     """A UNC/device root must be refused before realpath opens an SMB session.
