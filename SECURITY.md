@@ -139,7 +139,7 @@ hardcoded excludes.
 only through `ENGRAPHIS_IMPORT_ROOTS`. UNC shares and Windows device paths are rejected on the raw
 path before any resolution or stat, for the requested folder and for every allow-list entry, so a
 crafted path cannot open an SMB session or disclose NTLM credentials. The same raw-text rule
-covers Obsidian vault scans, code-index roots, and `source_id` reads, and the file guard applies
+covers Markdown vault scans, code-index roots, and `source_id` reads, and the file guard applies
 it to both the target and the working directory.
 Anyone who can reach an authenticated local mutation route has the authority of that local
 installation, so do not share its bearer token.
