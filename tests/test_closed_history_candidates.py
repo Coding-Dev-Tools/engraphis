@@ -262,3 +262,65 @@ def test_known_closure_is_filtered_before_the_bounded_prompt_window(engine, monk
     )
     assert [row.id for row in result] == [memory]
     assert hydrated == [memory]
+
+
+def test_history_candidate_window_caps_hydration_and_interleaves_the_semantic_arm(
+    engine, monkeypatch,
+):
+    """The window is bounded, and a large lexical match set cannot starve semantics."""
+    workspace = engine.store.get_or_create_workspace("history")
+    lexical = _closed(engine, workspace, content="quasar launch protocol lexical")
+    semantic = engine.store.add_memory(MemoryRecord(
+        id="", content="An unrelated opening-day checklist item.",
+        workspace_id=workspace, scope=Scope.WORKSPACE,
+        ingested_at=5.0, valid_from=5.0,
+        provenance={"trusted": True, "review_state": "approved"},
+    ))
+    for index in range(800):
+        engine.store.add_memory(MemoryRecord(
+            id="", content=f"Gardening weather bulletin {index}",
+            workspace_id=workspace, scope=Scope.WORKSPACE,
+            ingested_at=10.0 + index, valid_from=10.0,
+            provenance={"trusted": True, "review_state": "approved"},
+        ))
+
+    hydrated = []
+    original = store_module._row_to_record
+
+    def record_hydration(row):
+        hydrated.append(row["id"])
+        return original(row)
+
+    monkeypatch.setattr(store_module, "_row_to_record", record_hydration)
+    window = engine.store.list_history_candidates(
+        SearchFilter(workspace_id=workspace),
+        query="quasar launch protocol",
+        extra_ids=[semantic],
+        budget=4,
+        include_invalid=True,
+    )
+    assert len(window) <= 4
+    assert len(hydrated) <= 4
+    ids = [row.id for row in window]
+    assert lexical in ids
+    assert semantic in ids
+
+
+def test_history_candidate_window_keeps_semantic_only_matches(engine):
+    """A record the lexical index cannot express is still a candidate."""
+    workspace = engine.store.get_or_create_workspace("history")
+    semantic = engine.store.add_memory(MemoryRecord(
+        id="", content="An unrelated opening-day checklist item.",
+        workspace_id=workspace, scope=Scope.WORKSPACE,
+        ingested_at=5.0, valid_from=5.0,
+        provenance={"trusted": True, "review_state": "approved"},
+    ))
+    window = engine.store.list_history_candidates(
+        SearchFilter(workspace_id=workspace),
+        query="nonexistenttoken",
+        extra_ids=[semantic],
+        budget=8,
+        include_invalid=True,
+    )
+    assert [row.id for row in window] == [semantic]
+

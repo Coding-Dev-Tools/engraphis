@@ -67,6 +67,106 @@ def test_public_history_exhausts_keyset_pages_without_a_recency_cap(helper):
         engine.close()
 
 
+@pytest.mark.parametrize("helper", ["why", "timeline"])
+def test_history_helpers_use_a_bounded_candidate_window(helper, monkeypatch):
+    """History inspection must not hydrate every memory row on each call.
+
+    The candidate window is the union of the indexed lexical arm and the semantic
+    arm's ranked hits, so the previous unbounded keyset page loop is gone.
+    """
+    from engraphis.core import store as store_module
+    from engraphis.core.engine import MemoryEngine
+    from engraphis.core.interfaces import MemoryRecord, Scope
+
+    engine = MemoryEngine.create(":memory:", auto_evolve=False)
+    try:
+        workspace = engine.store.get_or_create_workspace("history")
+        for index in range(1200):
+            engine.store.add_memory(MemoryRecord(
+                id="", content="Unrelated lighthouse observation %s." % index,
+                workspace_id=workspace, scope=Scope.WORKSPACE,
+                ingested_at=100.0 + index, valid_from=1.0,
+            ))
+        seen_budgets = []
+        original = engine.store.list_history_candidates
+
+        def spy(*args, **kwargs):
+            seen_budgets.append(kwargs.get("budget"))
+            return original(*args, **kwargs)
+
+        def forbidden(*args, **kwargs):
+            raise AssertionError("history must not scan every memory row")
+
+        monkeypatch.setattr(engine.store, "list_history_candidates", spy)
+        monkeypatch.setattr(engine.store, "list_memories_page", forbidden)
+        getattr(engine, helper)("lighthouse observation", workspace_id=workspace)
+        assert seen_budgets
+        assert set(seen_budgets) == {store_module.DEFAULT_HISTORY_CANDIDATE_BUDGET}
+    finally:
+        engine.close()
+
+
+def test_why_finds_a_superseded_record_beyond_the_recency_window():
+    """The lexical arm reaches a closed record that sits past the newest-N window."""
+    from engraphis.core.engine import MemoryEngine
+    from engraphis.core.interfaces import MemoryRecord, Scope
+
+    engine = MemoryEngine.create(":memory:", auto_evolve=False)
+    try:
+        workspace = engine.store.get_or_create_workspace("history")
+        superseded = engine.store.add_memory(MemoryRecord(
+            id="", content="Zephyr database migration chooses PostgreSQL.",
+            workspace_id=workspace, scope=Scope.WORKSPACE,
+            ingested_at=1.0, valid_from=1.0, valid_to=2.0,
+        ))
+        for index in range(800):
+            engine.store.add_memory(MemoryRecord(
+                id="", content="Unrelated lighthouse observation %s." % index,
+                workspace_id=workspace, scope=Scope.WORKSPACE,
+                ingested_at=100.0 + index, valid_from=1.0,
+            ))
+        live = engine.store.add_memory(MemoryRecord(
+            id="", content="Zephyr database migration chooses PostgreSQL.",
+            workspace_id=workspace, scope=Scope.WORKSPACE,
+            ingested_at=900.0, valid_from=2.0,
+        ))
+        output = engine.why("Zephyr database migration", workspace_id=workspace)
+        assert [row.id for row in output["answer"]] == [live]
+        assert superseded in {row.id for row in output["supersedes"]}
+    finally:
+        engine.close()
+
+
+@pytest.mark.parametrize("helper", ["why", "timeline"])
+def test_history_never_silently_empties_when_the_lexical_index_fails(
+    helper, monkeypatch,
+):
+    """A broken lexical index degrades to one bounded page instead of no results."""
+    import sqlite3
+
+    from engraphis.core.engine import MemoryEngine
+    from engraphis.core.interfaces import MemoryRecord, Scope
+
+    engine = MemoryEngine.create(":memory:", auto_evolve=False)
+    try:
+        workspace = engine.store.get_or_create_workspace("history")
+        record = engine.store.add_memory(MemoryRecord(
+            id="", content="Zephyr database migration chooses PostgreSQL.",
+            workspace_id=workspace, scope=Scope.WORKSPACE,
+            ingested_at=1.0, valid_from=1.0,
+        ))
+
+        def broken(*args, **kwargs):
+            raise sqlite3.OperationalError("fts index unavailable")
+
+        monkeypatch.setattr(engine.store, "_lexical_candidate_ids", broken)
+        output = getattr(engine, helper)("Zephyr database migration", workspace_id=workspace)
+        rows = output["answer"] if helper == "why" else output
+        assert [row.id for row in rows] == [record]
+    finally:
+        engine.close()
+
+
 @pytest.fixture
 def svc(tmp_path):
     service = MemoryService.create(
