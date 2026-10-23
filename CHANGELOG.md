@@ -89,9 +89,10 @@ Candidate package version: **1.7.10**. Publication and hosted-service qualificat
   retirement. Only new observations spend that budget, keeping replay idempotent.
 - Refuse a supersession that would land on the predecessor's own `valid_from`, which would
   persist an empty validity interval that the store and every sync peer reject.
-- Reject UNC shares and Windows device paths for document import roots and
-  `ENGRAPHIS_IMPORT_ROOTS` before any resolution or stat, so a crafted path cannot open an
-  SMB session or disclose NTLM credentials.
+- Reject UNC shares and Windows device paths on the raw text, before any resolution or
+  stat, for document import roots and `ENGRAPHIS_IMPORT_ROOTS`, Obsidian vault paths,
+  code-index roots, and `source_id` reads, so a crafted path cannot open an SMB session or
+  disclose NTLM credentials.
 - Stop rejecting an approved local source on Windows because creation time moved: the read
   compares size, mtime, and identity, and compares `st_ctime` only where it is an inode change
   time. Freshly written files reported it about a millisecond apart between the path and the
