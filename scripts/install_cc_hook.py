@@ -15,7 +15,9 @@ import argparse
 import datetime
 import json
 import os
+import stat
 import sys
+import tempfile
 from pathlib import Path
 
 SETTINGS_PATH = Path(os.environ.get("COMMANDCODE_SETTINGS_PATH")
@@ -29,14 +31,22 @@ FILE_GUARD_PATH = (
 FILE_GUARD_KEY = "cc-engraphis-file-guard"
 # Command Code tests matchers against display names (WRITE/EDIT/SHELL) while documenting
 # lowercase literals; list both spellings so the guard fires whether or not matching is
-# case-sensitive. The capitalized names keep Claude-Code-style hosts covered.
+# case-sensitive. The canonical tool ids are listed as well: a host that matches the
+# matcher against the tool *id* it sends would otherwise never route ``write_file``,
+# ``edit_file`` or ``shell_command`` to the guard at all. The capitalized names keep
+# Claude-Code-style hosts covered.
 FILE_GUARD_MATCHER = (
-    "write|edit|shell|WRITE|EDIT|SHELL|Write|Edit|MultiEdit|NotebookEdit|Bash"
+    "write|edit|shell|WRITE|EDIT|SHELL"
+    "|Write|Edit|MultiEdit|NotebookEdit|ApplyPatch|Bash"
+    "|write_file|edit_file|shell_command"
+    "|create_file|delete_file|move_file|copy_file|update_file|write_to_file"
+    "|str_replace_editor"
 )
 # Matchers written by earlier unreleased installers; upgraded in place on reinstall.
 _LEGACY_FILE_GUARD_MATCHERS = frozenset({
     "Write|Edit|MultiEdit|NotebookEdit|Bash",
     "write|edit|shell|Write|Edit|MultiEdit|NotebookEdit|Bash",
+    "write|edit|shell|WRITE|EDIT|SHELL|Write|Edit|MultiEdit|NotebookEdit|Bash",
 })
 
 
@@ -59,18 +69,84 @@ def _read_settings(settings_path: Path) -> dict:
     if not settings_path.exists():
         return {}
     try:
-        return json.loads(settings_path.read_text(encoding="utf-8") or "{}")
+        text = settings_path.read_text(encoding="utf-8") or "{}"
+    except OSError as exc:
+        print(f"error: cannot read {settings_path}: {exc}", file=sys.stderr)
+        sys.exit(2)
+    try:
+        settings = json.loads(text)
     except json.JSONDecodeError as exc:
         print(f"error: {settings_path} is not valid JSON: {exc}", file=sys.stderr)
         sys.exit(2)
+    if not isinstance(settings, dict):
+        print(f"error: {settings_path} must contain a JSON object", file=sys.stderr)
+        sys.exit(2)
+    hooks = settings.get("hooks")
+    if hooks is not None and not isinstance(hooks, dict):
+        print(f"error: {settings_path} has a non-object 'hooks' entry", file=sys.stderr)
+        sys.exit(2)
+    for event, wrappers in (hooks or {}).items():
+        if not isinstance(wrappers, list):
+            print(
+                f"error: {settings_path} has a non-list 'hooks.{event}' entry",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        for wrapper in wrappers:
+            if not isinstance(wrapper, dict):
+                print(
+                    f"error: {settings_path} has a non-object 'hooks.{event}' entry",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            entries = wrapper.get("hooks", [])
+            if not isinstance(entries, list) or not all(
+                isinstance(entry, dict) for entry in entries
+            ):
+                print(
+                    f"error: {settings_path} has a malformed 'hooks.{event}.hooks' entry",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+    return settings
 
 
 def _write_settings(settings_path: Path, settings: dict) -> None:
+    """Write the settings file atomically, preserving its permissions.
+
+    A crash or a concurrent run must not leave the operator with a truncated
+    settings file, so the new content is staged next to the target and moved
+    into place with an atomic replace.
+    """
     settings_path.parent.mkdir(parents=True, exist_ok=True)
-    settings_path.write_text(
-        json.dumps(settings, indent=2, sort_keys=True) + "\n",
+    payload = json.dumps(settings, indent=2, sort_keys=True) + "\n"
+    try:
+        mode = stat.S_IMODE(settings_path.stat().st_mode)
+    except OSError:
+        mode = None
+    handle = tempfile.NamedTemporaryFile(
+        mode="w",
         encoding="utf-8",
+        dir=str(settings_path.parent),
+        prefix=f"{settings_path.name}.",
+        suffix=".tmp",
+        delete=False,
     )
+    staged = handle.name
+    try:
+        with handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if mode is not None:
+            os.chmod(staged, mode)
+        os.replace(staged, str(settings_path))
+    except BaseException:
+        try:
+            os.unlink(staged)
+        except OSError:
+            pass
+        raise
 
 
 def _hook_entry() -> dict:
@@ -109,6 +185,18 @@ def _is_our_entry(entry: dict) -> bool:
         # Before the explicit interpreter path, nameless legacy entries used this form.
         f'python "{HOOK_PATH}"',
     }
+
+
+def _is_file_guard_entry(entry: dict) -> bool:
+    """Match the file-guard hook by its stable name, then by its command.
+
+    The command string is a second identity for an entry whose ``name`` was
+    edited or dropped by hand, so a reinstall upgrades that entry instead of
+    appending a second copy of the guard.
+    """
+    if entry.get("name") == FILE_GUARD_KEY:
+        return True
+    return entry.get("command", "") == _file_guard_entry()["command"]
 
 
 def _session_start_has_our_entry(hooks: list) -> bool:
@@ -175,9 +263,9 @@ def install(*, enable_file_guard: bool = False) -> None:
         found = False
         for wrapper in guard_hooks:
             entries = wrapper.get("hooks", []) or []
-            if any(entry.get("name") == FILE_GUARD_KEY for entry in entries):
+            if any(_is_file_guard_entry(entry) for entry in entries):
                 wrapper["hooks"] = [
-                    entry for entry in entries if entry.get("name") != FILE_GUARD_KEY
+                    entry for entry in entries if not _is_file_guard_entry(entry)
                 ] + [_file_guard_entry()]
                 # A matcher an earlier installer wrote would skip Command Code's real tool
                 # names; upgrade it, but keep any matcher the operator customized.
@@ -192,6 +280,8 @@ def install(*, enable_file_guard: bool = False) -> None:
     _backup(SETTINGS_PATH)
     _write_settings(SETTINGS_PATH, settings)
     print(f"installed SessionStart hook into {SETTINGS_PATH}")
+    if enable_file_guard:
+        print(f"installed the file-protection PreToolUse hook into {SETTINGS_PATH}")
 
 
 def uninstall() -> None:
@@ -214,7 +304,7 @@ def uninstall() -> None:
         del settings["hooks"]
     _backup(SETTINGS_PATH)
     _write_settings(SETTINGS_PATH, settings)
-    print(f"removed SessionStart hook from {SETTINGS_PATH}")
+    print(f"removed the Engraphis hooks from {SETTINGS_PATH}")
 
 
 def main() -> int:
@@ -226,16 +316,26 @@ def main() -> int:
         help="Also install the fail-closed protected-file PreToolUse hook.",
     )
     args = parser.parse_args()
+    if args.uninstall:
+        # Removal must work even when the hook scripts are gone: the entries
+        # in the settings file have to be removable on their own.
+        try:
+            uninstall()
+        except OSError as exc:
+            print(f"error: could not update {SETTINGS_PATH}: {exc}", file=sys.stderr)
+            return 2
+        return 0
     if not HOOK_PATH.exists():
         print(f"error: hook script not found at {HOOK_PATH}", file=sys.stderr)
         return 2
     if args.file_guard and not FILE_GUARD_PATH.exists():
         print(f"error: file guard hook not found at {FILE_GUARD_PATH}", file=sys.stderr)
         return 2
-    if args.uninstall:
-        uninstall()
-    else:
+    try:
         install(enable_file_guard=args.file_guard)
+    except OSError as exc:
+        print(f"error: could not update {SETTINGS_PATH}: {exc}", file=sys.stderr)
+        return 2
     return 0
 
 
