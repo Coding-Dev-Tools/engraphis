@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 from pathlib import Path
+import stat
+import sys
 
 import pytest
 
@@ -75,6 +78,11 @@ def test_file_guard_install_is_explicit_idempotent_and_fail_closed(fake_settings
 
 @pytest.mark.parametrize("matcher,expected", [
     ("Write|Edit|MultiEdit|NotebookEdit|Bash", None),  # earlier installer default: upgrade
+    ("write|edit|shell|Write|Edit|MultiEdit|NotebookEdit|Bash", None),  # 1.7.10 default: upgrade
+    (
+        "write|edit|shell|WRITE|EDIT|SHELL|Write|Edit|MultiEdit|NotebookEdit|Bash",
+        None,
+    ),  # the matcher shipped by the 1.7.10 candidate: upgrade
     ("Write|Bash|my_tool", "Write|Bash|my_tool"),       # operator customization: keep
 ])
 def test_file_guard_reinstall_upgrades_only_legacy_default_matcher(
@@ -90,6 +98,101 @@ def test_file_guard_reinstall_upgrades_only_legacy_default_matcher(
     assert entries[0]["matcher"] == (expected or module.FILE_GUARD_MATCHER)
     for name in ("WRITE", "EDIT", "SHELL"):
         assert expected or name in entries[0]["matcher"].split("|")
+
+
+def test_file_guard_matcher_covers_the_canonical_tool_ids(fake_settings) -> None:
+    # A host that matches the matcher against the tool *id* it sends would
+    # never route the canonical ids to the guard without them.
+    module, _ = fake_settings
+    alternatives = set(module.FILE_GUARD_MATCHER.split("|"))
+    assert {"write_file", "edit_file", "shell_command"} <= alternatives
+    assert {"WRITE", "EDIT", "SHELL"} <= alternatives
+    assert {"Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"} <= alternatives
+
+
+def test_file_guard_install_upgrades_a_nameless_entry_in_place(fake_settings) -> None:
+    # An entry whose ``name`` was edited by hand must be upgraded in place
+    # instead of leaving a second copy of the guard behind.
+    module, settings_path = fake_settings
+    nameless = {
+        "type": "command",
+        "command": module._file_guard_entry()["command"],
+        "timeout": 5,
+    }
+    settings_path.write_text(json.dumps({"hooks": {"PreToolUse": [
+        {"matcher": module.FILE_GUARD_MATCHER, "hooks": [nameless]},
+    ]}}), encoding="utf-8")
+    module.install(enable_file_guard=True)
+    entries = json.loads(settings_path.read_text(encoding="utf-8"))["hooks"]["PreToolUse"]
+    assert len(entries) == 1
+    assert entries[0]["hooks"] == [module._file_guard_entry()]
+
+
+def test_install_leaves_no_temporary_files_behind(fake_settings) -> None:
+    module, settings_path = fake_settings
+    module.install(enable_file_guard=True)
+    leftovers = [p.name for p in settings_path.parent.iterdir() if p.name.endswith(".tmp")]
+    assert leftovers == []
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permission bits")
+def test_install_preserves_the_settings_file_mode(fake_settings) -> None:
+    module, settings_path = fake_settings
+    settings_path.write_text("{}\n", encoding="utf-8")
+    settings_path.chmod(0o600)
+    module.install(enable_file_guard=True)
+    assert stat.S_IMODE(settings_path.stat().st_mode) == 0o600
+
+
+@pytest.mark.parametrize("payload", [
+    "not json",
+    json.dumps([1, 2, 3]),
+    json.dumps({"hooks": []}),
+    json.dumps({"hooks": {"SessionStart": {}}}),
+    json.dumps({"hooks": {"SessionStart": ["not-a-wrapper"]}}),
+    json.dumps({"hooks": {"SessionStart": [{"hooks": "not-a-list"}]}}),
+])
+def test_malformed_settings_fail_loudly(fake_settings, payload: str) -> None:
+    # The installer must not report success on a settings file it cannot use.
+    module, settings_path = fake_settings
+    settings_path.write_text(payload, encoding="utf-8")
+    with pytest.raises(SystemExit) as excinfo:
+        module.install(enable_file_guard=True)
+    assert excinfo.value.code == 2
+
+
+def test_uninstall_removes_the_file_guard_entries(fake_settings) -> None:
+    module, settings_path = fake_settings
+    module.install(enable_file_guard=True)
+    module.uninstall()
+    payload = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert "PreToolUse" not in payload.get("hooks", {})
+
+
+def test_main_reports_a_failed_write(fake_settings, monkeypatch, capsys) -> None:
+    module, _ = fake_settings
+
+    def boom(_settings_path, _settings):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(module, "_write_settings", boom)
+    monkeypatch.setattr(sys, "argv", ["install_cc_hook.py", "--file-guard"])
+    assert module.main() == 2
+    assert "error" in capsys.readouterr().err
+
+
+def test_main_uninstall_works_when_the_hook_script_is_gone(
+    fake_settings, monkeypatch, tmp_path: Path,
+) -> None:
+    # Removal has to work on its own: the entries in the settings file must be
+    # removable even when the repository is no longer present.
+    module, settings_path = fake_settings
+    module.install(enable_file_guard=True)
+    monkeypatch.setattr(module, "HOOK_PATH", tmp_path / "absent-hook.py")
+    monkeypatch.setattr(sys, "argv", ["install_cc_hook.py", "--uninstall"])
+    assert module.main() == 0
+    payload = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert "PreToolUse" not in payload.get("hooks", {})
 
 
 def test_default_install_does_not_enable_file_guard(fake_settings) -> None:
