@@ -157,14 +157,14 @@ jobs:
           done
 
       - name: Store distributions
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: python-package-distributions
           path: dist/
 
 
       - name: Store exact build environment evidence
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: build-environment-evidence
           path: build-environment-evidence/
@@ -208,7 +208,7 @@ jobs:
             | LC_ALL=C sort > reproducibility/environment.lock
           python scripts/verify_distribution_contents.py reproducibility/dist/*
       - name: Store independent builder output
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: reproducibility-builder-${{ matrix.builder }}
           path: reproducibility/
@@ -298,7 +298,7 @@ jobs:
           )
           PY
       - name: Store independent reproducibility evidence
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: independent-reproducibility
           path: reproducibility-evidence/
@@ -482,7 +482,7 @@ jobs:
           PY
       - name: Retain installed journey evidence
         if: matrix.profile != 'base'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: installed-journey-${{ matrix.os }}-${{ matrix.profile }}
           path: |
@@ -749,7 +749,7 @@ jobs:
           exit 1
       - name: Store whole-image evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: production-image-evidence
           path: container-evidence/
@@ -870,7 +870,7 @@ jobs:
             --verified-check adversarial-memory-security \
             --output release-evidence/release-evidence.json
       - name: Store public release evidence
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: public-release-evidence
           path: release-evidence/
