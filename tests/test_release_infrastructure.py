@@ -660,3 +660,111 @@ def test_grype_configuration_ignores_upstream_cpython_cves():
     assert 'vulnerability: "CVE-2026-82049"' in grype
     assert 'name: "stdlib"' in grype
     assert 'type: "go-module"' in grype
+
+
+def _job_block(workflow: str, job: str) -> str:
+    match = re.search(rf"(?ms)^  {re.escape(job)}:\n(.*?)(?=^  \S[^:\n]*:\n|\Z)", workflow)
+    assert match is not None, f"release job {job!r} is missing"
+    return match.group(1)
+
+
+def test_privileged_publication_jobs_use_no_dependency_cache():
+    """A privileged publication job must not be fed by a shared dependency cache.
+
+    ``actions/setup-python``'s pip cache key is derived only from the runner
+    image, the interpreter version, and the hashed dependency files — not from
+    the ref — so a job that holds the PyPI OIDC token or release write
+    permission can be served by a cache that branch CI also writes.  The
+    privileged jobs therefore declare no cache at all.
+    """
+    release = _text(".github/workflows/release.yml")
+    for job in ("publish", "github-release", "github-release-repair"):
+        body = _job_block(release, job)
+        assert "cache:" not in body, f"{job} declares a dependency cache"
+        assert "cache-dependency-path:" not in body, f"{job} declares a cache path"
+
+    # The non-privileged verification jobs may still cache, and their cache
+    # key is bound to the pinned release constraints so it cannot be reused
+    # for a different dependency set.
+    build = _job_block(release, "build")
+    assert "cache: pip" in build
+    assert ".github/release-constraints.txt" in build
+
+    # Nothing in the publication path may run on an untrusted pull request.
+    assert "pull_request_target" not in release
+    assert "pull_request" not in release
+
+
+def test_release_publication_fails_closed_without_the_signed_qualification():
+    """A tag run without the qualification secrets must stop before publishing."""
+    release = _text(".github/workflows/release.yml")
+    publish = _job_block(release, "publish")
+    release_job = _job_block(release, "github-release")
+
+    for body in (publish, release_job):
+        assert "environment: release-qualification" in body
+        for secret in (
+            "ENGRAPHIS_RELEASE_QUALIFICATION",
+            "ENGRAPHIS_RELEASE_VERIFY_KEY",
+            "ENGRAPHIS_RELEASE_CANDIDATE_ID",
+            "ENGRAPHIS_RELEASE_LEDGER_SHA256",
+        ):
+            assert f"secrets.{secret}" in body, secret
+        qualification = body.index("scripts.verify_release_qualification")
+        assert "pypa/gh-action-pypi-publish" not in body[:qualification]
+        assert "gh release create" not in body[:qualification]
+
+    # The qualification gate runs before the publisher and before the release.
+    publish_qualification = publish.index("scripts.verify_release_qualification")
+    assert publish.index("pypa/gh-action-pypi-publish") > publish_qualification
+    assert publish.index("Freeze verified distribution set") < publish_qualification
+    release_qualification = release_job.index("scripts.verify_release_qualification")
+    assert release_job.index("Create GitHub Release") > release_qualification
+
+    # The publisher is the only step that can write to PyPI, and the exact
+    # published file set is re-verified afterwards.
+    assert publish.count("pypa/gh-action-pypi-publish") == 1
+    assert "skip-existing: true" in publish
+    assert "Require the exact complete PyPI file set" in publish
+    assert "--retries 18 --delay 10" in publish
+
+
+def test_release_tag_must_be_pushed_from_protected_main():
+    """A tag on an unmerged commit must never reach the publication jobs."""
+    release = _text(".github/workflows/release.yml")
+    build = _job_block(release, "build")
+
+    assert "Require tag and package version to match" in build
+    assert 'test "$GITHUB_REF_NAME" = "v$actual"' in build
+    assert "Require release tag commit to be on protected main" in build
+    assert "git fetch --no-tags origin main:refs/remotes/origin/main" in build
+    assert 'git merge-base --is-ancestor "$GITHUB_SHA" origin/main' in build
+
+    # The trigger accepts version tags only, and never a branch push.
+    assert re.search(r"(?ms)^on:\n  push:\n    tags:\n      - \"v\*\.\*\"\n", release)
+    assert "branches:" not in release.split("jobs:", 1)[0]
+
+
+def test_release_workflow_permissions_are_least_privilege():
+    """Only the jobs that need a write scope may request one."""
+    release = _text(".github/workflows/release.yml")
+
+    publish = _job_block(release, "publish")
+    assert "id-token: write" in publish
+    assert "contents: read" in publish
+    assert "contents: write" not in publish
+
+    release_job = _job_block(release, "github-release")
+    assert "contents: write" in release_job
+    assert "id-token: write" not in release_job
+
+    repair = _job_block(release, "github-release-repair")
+    assert "contents: write" in repair
+    assert "id-token: write" in repair
+
+    # The verification jobs stay read-only.
+    for job in ("build", "reproducibility-build", "python-matrix", "release-evidence"):
+        body = _job_block(release, job)
+        assert "contents: write" not in body, job
+        assert "id-token: write" not in body, job
+
