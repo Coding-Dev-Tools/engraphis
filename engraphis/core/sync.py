@@ -22,6 +22,10 @@ therefore a **state-based CRDT** over memory rows, not a bespoke replication log
       ``valid_to`` is the earliest currently known closure; historical reads derive
       the boundary from observations visible at their knowledge anchor.
       ``expired_at`` uses earliest non-null wins (never resurrected).
+      The 1,024-observation ceiling is partitioned, not shared: a peer may
+      install at most ``PEER_CLOSURE_OBSERVATION_BUDGET`` observations on a
+      memory and the rest is reserved for the local writer, so no peer can
+      starve a local retirement.
     - ``stability`` / ``access_count`` / ``last_access``: ``max`` (reinforcement is
       monotone; the spacing effect only ever grows stability).
     - ``pinned``: a per-field pin lattice — ``pinned_at``/``unpinned_at`` markers
@@ -59,6 +63,7 @@ from typing import Any, Iterable, Optional
 
 from engraphis.core.graph_layers import merge_graph_layers, normalize_graph_layer
 from engraphis.core.interfaces import (
+    MAX_CLOSURE_OBSERVATIONS,
     MemoryRecord,
     MemoryType,
     Scope,
@@ -124,6 +129,21 @@ MAX_REPO_NAME_CHARS = 200
 TS_FUTURE_SKEW = 2 * 86400         # tolerate 2 days of cross-device clock skew, no more
 _VALID_SENSITIVITY = ("normal", "sensitive", "secret")
 _VALID_SCOPES = frozenset(scope.value for scope in Scope)
+
+# ── closure-observation budget (peer share vs. local headroom) ───────────────
+# A memory's closure history is a bounded, append-only set of world-time /
+# knowledge-time pairs. The Store and its database trigger enforce the hard
+# ceiling (``MAX_CLOSURE_OBSERVATIONS``) for every writer, local or remote.
+#
+# A sync peer must not be able to consume that whole budget: the local
+# installation still needs room to retire or revise the memory it owns, and a
+# saturated memory turns a routine local governance action into a caller error.
+# Partition the budget instead of raising it — the local (authoritative) writer
+# keeps a reserved headroom and a peer may install at most its own share.
+RESERVED_LOCAL_CLOSURE_OBSERVATIONS = 64
+PEER_CLOSURE_OBSERVATION_BUDGET = (
+    MAX_CLOSURE_OBSERVATIONS - RESERVED_LOCAL_CLOSURE_OBSERVATIONS
+)
 
 # Strip C0/C1 control + ANSI-escape bytes (keep \t\n\r) — the same defense the rest of
 # the ingest surface applies (service.py) against hidden-instruction / terminal-injection
@@ -323,6 +343,31 @@ def _closure_projection(
     # Canonical ordering places the earliest world closure first, with a legacy
     # always-known assertion before dated observations of the same endpoint.
     return observations[0] if observations else (None, None)
+
+
+def _peer_closure_budget_exceeded(
+    incoming: tuple[tuple[float, Optional[float]], ...],
+    existing: Optional[MemoryRecord],
+) -> bool:
+    """Whether accepting this row would let a peer consume the local headroom.
+
+    Only *new* observations spend the peer budget.  A replay of an unchanged
+    history, or a peer update that carries no observation the local record does
+    not already hold, is therefore accepted: sync stays idempotent and a peer
+    cannot be locked out of a memory merely because the local writer already
+    used its own share.  The verdict depends only on the pair of histories, so
+    two peers reach the same decision for the same pair.
+
+    An outright oversized row (more observations than the hard ceiling) is
+    refused whatever the local state, because no writer may store it.
+    """
+    incoming_set = set(incoming)
+    if len(incoming_set) > MAX_CLOSURE_OBSERVATIONS:
+        return True
+    known = set(existing.closure_observations) if existing is not None else set()
+    if incoming_set.issubset(known):
+        return False
+    return len(known | incoming_set) > PEER_CLOSURE_OBSERVATION_BUDGET
 
 
 def _has_valid_closure_interval(rec: MemoryRecord) -> bool:
@@ -1079,6 +1124,7 @@ class SyncEngine:
             "added": 0, "updated": 0, "unchanged": 0, "rejected": 0,
             "conflicts_preserved": 0, "links_added": 0, "links_updated": 0,
             "tombstones_applied": 0, "tombstones_held": 0,
+            "closure_budget_exceeded": 0,
                   "workspace": ws_name, "from_device": src_device,
                   "dry_run": bool(dry_run)}
 
@@ -1601,6 +1647,20 @@ class SyncEngine:
             # mutation. A saturated record must keep all existing observations.
             rec.closure_observations = _record_closure_observations(rec)
             merged = merge_record(existing, rec) if existing is not None else None
+            if _peer_closure_budget_exceeded(
+                (merged.closure_observations if merged is not None
+                 else rec.closure_observations),
+                existing,
+            ):
+                # A peer may not consume the closure budget reserved for the
+                # local writer. Refuse the row whole: the local history stays
+                # intact (the Store's closure history only ever grows), nothing
+                # is partially written, and the local installation keeps room
+                # to retire or revise the memory it owns. A replay that adds no
+                # new observation is still accepted, so sync stays idempotent.
+                report["rejected"] += 1
+                report["closure_budget_exceeded"] += 1
+                return
             if not _has_valid_closure_interval(merged if merged is not None else rec):
                 report["rejected"] += 1
                 return
@@ -2264,6 +2324,7 @@ class SyncEngine:
             "added": 0, "updated": 0, "unchanged": 0, "rejected": 0,
             "conflicts_preserved": 0, "links_added": 0, "links_updated": 0,
             "tombstones_applied": 0, "tombstones_held": 0,
+            "closure_budget_exceeded": 0,
         }
         received_bytes = 0
         peers_applied = 0
