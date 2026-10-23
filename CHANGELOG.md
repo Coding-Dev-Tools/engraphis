@@ -83,7 +83,9 @@ Candidate package version: **1.7.10**. Publication and hosted-service qualificat
   reinforcement, and validity closure.
 - Search `why` and `timeline` history through a bounded, index-selected candidate window
   instead of scanning every memory row. A superseded record outside the newest page is still
-  found, while the cost follows the window rather than the corpus size.
+  found, while hydration follows the window rather than the corpus size. With a semantic
+  embedder the ranking pass still scans the stored vectors, which is bounded in memory but
+  grows with the corpus.
 - Partition the 1,024-observation closure ceiling: a sync peer may install at most 960
   observations and 64 stay reserved for the local writer, so a peer cannot block a local
   retirement. Only new observations spend that budget, keeping replay idempotent.
