@@ -310,14 +310,22 @@
             method: 'POST', cache: 'no-store', signal: controller.signal,
             headers: { 'X-Engraphis-Browser-Session': '1' },
           });
-          const session = await response.json();
-          if (!response.ok || !session.authenticated) throw new Error('Local session unavailable');
+          const session = await response.json().catch(() => null);
+          if (!response.ok || !session || !session.authenticated) {
+            const error = new Error('Local session unavailable');
+            // A token-gated instance refuses the automatic session on purpose, so the
+            // caller must fall back to the token exchange instead of reporting an outage.
+            error.status = response.status;
+            error.code = session && session.code;
+            throw error;
+          }
           state.reviewCsrf = text(session.review_csrf_token);
           return true;
-        } catch (_) {
-          const error = new Error('Local Engraphis could not connect. Reload this page to retry.');
-          error.localBrowser = true;
-          throw error;
+        } catch (error) {
+          if (error && error.code === 'local_token_required') throw error;
+          const failure = new Error('Local Engraphis could not connect. Reload this page to retry.');
+          failure.localBrowser = true;
+          throw failure;
         } finally {
           window.clearTimeout(timer);
         }
@@ -440,11 +448,16 @@
       showNotice('Local Engraphis could not connect. Reload this page to retry.');
       return false;
     }
-    let token = '';
+    // The exchange can run after the router normalised the address bar, so the
+    // one-shot fragment token captured during boot takes precedence.
+    let token = bootToken;
+    bootToken = '';
     let failure = '';
     try {
-      const fragment = new URLSearchParams(location.hash.slice(1));
-      token = fragment.get('token') || '';
+      if (!token) {
+        const fragment = new URLSearchParams(location.hash.slice(1));
+        token = fragment.get('token') || '';
+      }
       if (token) history.replaceState(null, '', `${location.pathname}${location.search}`);
     } catch (_) {}
     while (true) {
@@ -471,7 +484,16 @@
   }
 
   async function reviewCsrfToken() {
-    if (localDashboardUrl()) await ensureLocalBrowserSession();
+    if (state.reviewCsrf) return state.reviewCsrf;
+    if (localDashboardUrl()) {
+      try {
+        await ensureLocalBrowserSession();
+      } catch (error) {
+        // Token-gated instances have no automatic session. Their confirmation comes
+        // from the token exchange, or from the cookie-authenticated endpoint below.
+        if (error.code !== 'local_token_required') throw error;
+      }
+    }
     if (state.reviewCsrf) return state.reviewCsrf;
     const response = await fetch(`${location.origin}/dashboard/review/csrf`, {
       headers: { 'X-Engraphis-Browser-Session': '1' },
@@ -7142,6 +7164,7 @@
   }
 
   let bootPromise = null;
+  let bootToken = '';
   function boot() {
     if (!bootPromise) bootPromise = runBoot().finally(() => { bootPromise = null; });
     return bootPromise;
@@ -7151,6 +7174,9 @@
     if (localDashboardUrl()) {
       const fragment = new URLSearchParams(location.hash.slice(1));
       if (fragment.has('token')) {
+        // Keep the one-shot credential for the exchange: this bookmark cleanup runs
+        // before the first bootstrap request can authenticate with it.
+        bootToken = fragment.get('token') || '';
         fragment.delete('token');
         history.replaceState(null, '', location.pathname + location.search
           + (fragment.size ? '#' + fragment.toString() : ''));
