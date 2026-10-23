@@ -121,8 +121,8 @@ The fresh evaluator run used Windows CPython 3.11.17 and NumPy 2.4.6. Its 588-fi
 binds the producer after the 1.7.10 release-review fixes: Command Code file-guard tool
 ids, fail-closed hook errors, symlink-then-parent and Windows alias targets, the linear
 Spec Studio heading pattern, closure-limit and browse-version handling, the equal-start
-supersede guard, bounded history candidate windows for `why` and `timeline`, UNC/device
-import-root rejection before resolution, token-gated automatic browser sessions, a
+supersede guard, bounded history candidate windows for `why` and `timeline`, raw-path UNC/device
+rejection across import, vault, code-index and source-id surfaces, token-gated automatic browser sessions, a
 partitioned sync closure budget, Windows source-read timestamp revalidation, non-blocking
 engine write guards and atomic receipt transactions, and worker-isolated MCP tool
 execution. Dashboard assets, tests, documentation, and generated images

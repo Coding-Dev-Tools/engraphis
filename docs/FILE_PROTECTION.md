@@ -82,7 +82,9 @@ extended-length and device paths (`\\?\`, `\\.\`), UNC and admin-share paths
 (`\\localhost\C$\...`), NTFS alternate data streams (`.env::$DATA`), and drive-relative paths
 (`C:notes.txt`, which resolves against the current directory *of that drive*). Win32 also strips
 trailing dots and spaces from a path component, so `.env ` and `.env.` name the protected `.env`
-file; the comparison applies the same normalization. Repositories on network shares therefore need
+file; the comparison applies the same normalization. The call's working directory is checked the
+same way, because a relative target is only as safe as the directory it resolves against.
+Repositories on network shares therefore need
 a different control while the guard is active.
 
 ### Self-protection
