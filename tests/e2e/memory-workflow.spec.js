@@ -427,7 +427,7 @@ test('record history pages by lineage and recovers visibly from a stale continua
 
 test('a real project memory is scoped, discoverable, revised atomically, and retained after reload', async ({ page }) => {
   const workspace = 'project-workflow-' + Date.now();
-  await page.goto('/?view=manage');
+  await page.goto('/?view=manage#token=engraphis-playwright-local-only');
   await expect(page.locator('#connection-status')).toContainText('Local engine connected');
   await page.locator('#create-workspace-toggle').click();
   await page.locator('#new-workspace-name').fill(workspace);
