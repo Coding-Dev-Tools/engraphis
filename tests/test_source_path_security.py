@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 from urllib.parse import quote
 
+from engraphis.core import source_paths
 from engraphis.core.documents import parse_document, scan_document_tree
 from engraphis.core.obsidian import parse_obsidian_note, scan_obsidian_vault
 from engraphis.core.secrets import SecretDetectedError, redact_secrets, secret_kind
@@ -324,4 +325,25 @@ def test_import_root_rejects_remote_allowed_root_entries(monkeypatch):
     monkeypatch.setenv("ENGRAPHIS_IMPORT_ROOTS", r"\\synthetic-host\share")
     with pytest.raises(ValidationError, match="ENGRAPHIS_IMPORT_ROOTS"):
         _resolve_import_root(str(Path.home()))
+
+
+def test_windows_creation_time_skew_is_not_a_content_change(monkeypatch):
+    """Windows ``st_ctime`` is creation time and cannot detect a content change.
+
+    Python 3.12 can report the same file's creation time about a millisecond
+    apart depending on whether the metadata came from the directory entry or
+    the open handle, which made ``read_local_source`` reject freshly written
+    files at random. Size and mtime stay authoritative there; POSIX keeps the
+    inode change time.
+    """
+    def stamp(*, size=10, mtime=1_000, ctime=2_000):
+        return SimpleNamespace(st_size=size, st_mtime_ns=mtime, st_ctime_ns=ctime)
+
+    monkeypatch.setattr(source_paths, "_CTIME_IS_CHANGE_TIME", False)
+    assert not source_paths._stamp_changed(stamp(ctime=2_000), stamp(ctime=2_001))
+    assert source_paths._stamp_changed(stamp(mtime=1_000), stamp(mtime=1_001))
+    assert source_paths._stamp_changed(stamp(size=10), stamp(size=11))
+
+    monkeypatch.setattr(source_paths, "_CTIME_IS_CHANGE_TIME", True)
+    assert source_paths._stamp_changed(stamp(ctime=2_000), stamp(ctime=2_001))
 
