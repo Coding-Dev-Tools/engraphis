@@ -38,8 +38,12 @@ def automatic_browser_session_allowed(api_token: Optional[str]) -> bool:
     This is the owner's release-review decision for the local dashboard session
     (PR #270): the automatic session exists only where the operator did not opt
     into token-gated access.
+
+    "Configured" means exactly what the request middleware means by it: any
+    non-empty value.  Stripping whitespace here would let a present-but-blank
+    deployment skip the browser gate while the API still demanded a credential.
     """
-    return not str(api_token or "").strip()
+    return not str(api_token or "")
 
 
 def local_browser_request(request, *, require_origin: bool = True) -> bool:

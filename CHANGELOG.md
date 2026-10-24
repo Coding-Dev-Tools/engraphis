@@ -124,7 +124,9 @@ Candidate package version: **1.7.10**. Publication and hosted-service qualificat
 - Issue the automatic same-origin loopback dashboard session only when no `ENGRAPHIS_API_TOKEN`
   is configured. A token-gated instance refuses it with `403 local_token_required` and uses the
   token exchange instead, so a forged loopback forward cannot obtain a session, reach the review
-  CSRF confirmation, or approve a memory.
+  CSRF confirmation, or approve a memory. Any non-empty configured value gates the browser, even
+  one that is only whitespace, matching the API middleware instead of stripping it back into the
+  zero-token path.
 - Resume an ended session explicitly from another agent: pass its ID as `session_id` when
   starting `engraphis_session`, or as `resume_from_session_id` to classic
   `engraphis_start_session`. Only an ended session owned by the same user in the exact
