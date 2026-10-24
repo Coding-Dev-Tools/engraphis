@@ -15,7 +15,7 @@ ctranslate2==4.8.2
 distro==1.9.0
 fastapi==0.141.1
 faster-whisper==1.2.1
-filelock==3.32.7
+filelock==4.2.1
 flatbuffers==25.12.19
 fsspec==2026.7.0
 graphiti-core==0.29.3
