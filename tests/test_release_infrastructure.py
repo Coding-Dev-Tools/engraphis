@@ -695,14 +695,24 @@ def test_privileged_publication_jobs_use_no_dependency_cache():
     assert "pull_request" not in release
 
 
-def test_release_publication_fails_closed_without_the_signed_qualification():
-    """A tag run without the qualification secrets must stop before publishing."""
+def test_release_publication_verifies_signed_qualification_when_opted_in():
+    """Environment approval always gates publication; the signed envelope is opt-in.
+
+    With ``REQUIRE_SIGNED_QUALIFICATION=true`` a tag run without the qualification
+    secrets must stop before publishing. Unset, the verifier step is skipped and the
+    protected environment approval plus the build gates remain the requirement.
+    """
     release = _text(".github/workflows/release.yml")
     publish = _job_block(release, "publish")
     release_job = _job_block(release, "github-release")
 
     for body in (publish, release_job):
         assert "environment: release-qualification" in body
+        step = body.split("- name: Require signed full-product qualification before ", 1)[1]
+        step = step.split("\n      - ", 1)[0]
+        assert "\n        if: vars.REQUIRE_SIGNED_QUALIFICATION == 'true'\n" in step
+        assert "scripts.verify_release_qualification" in step
+        assert "continue-on-error" not in step
         for secret in (
             "ENGRAPHIS_RELEASE_QUALIFICATION",
             "ENGRAPHIS_RELEASE_VERIFY_KEY",
