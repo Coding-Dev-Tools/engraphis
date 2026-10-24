@@ -111,15 +111,42 @@ def _read_settings(settings_path: Path) -> dict:
     return settings
 
 
+def _fsync_directory(directory: Path) -> None:
+    """Best-effort persist of a rename in ``directory``.
+
+    Windows has no directory descriptors, and some network filesystems reject a
+    directory fsync. The replace has already succeeded by then, so a refusal here
+    must not turn a completed install into a reported failure.
+    """
+    if os.name == "nt":
+        return
+    try:
+        descriptor = os.open(str(directory), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
+
+
 def _write_settings(settings_path: Path, settings: dict) -> None:
-    """Write the settings file atomically, preserving its permissions.
+    """Write the settings file atomically, preserving its permissions and key order.
 
     A crash or a concurrent run must not leave the operator with a truncated
-    settings file, so the new content is staged next to the target and moved
-    into place with an atomic replace.
+    settings file, so the new content is staged next to the target, flushed to
+    disk, and moved into place with an atomic replace whose directory entry is
+    then synced too. Keys keep the order the operator wrote them in.
+
+    This standalone script deliberately stays stdlib-only, so it mirrors
+    ``engraphis.private_state.atomic_private_text`` rather than importing it.
+    That helper also defaults to a private ``0o600`` mode and rejects a concurrent
+    edit as a conflict; this one keeps the settings file's existing mode.
     """
     settings_path.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(settings, indent=2, sort_keys=True) + "\n"
+    payload = json.dumps(settings, indent=2) + "\n"
     try:
         mode = stat.S_IMODE(settings_path.stat().st_mode)
     except OSError:
@@ -147,6 +174,7 @@ def _write_settings(settings_path: Path, settings: dict) -> None:
         except OSError:
             pass
         raise
+    _fsync_directory(settings_path.parent)
 
 
 def _hook_entry() -> dict:

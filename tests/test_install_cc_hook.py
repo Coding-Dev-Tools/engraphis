@@ -135,6 +135,85 @@ def test_install_leaves_no_temporary_files_behind(fake_settings) -> None:
     assert leftovers == []
 
 
+def test_install_and_uninstall_preserve_the_operators_key_order(fake_settings) -> None:
+    # Re-sorting a hand-maintained settings file turns every install into a
+    # noisy diff of the operator's own configuration.
+    module, settings_path = fake_settings
+    original = {
+        "theme": "dark",
+        "permissions": {"deny": ["rm -rf"], "allow": ["ls"]},
+        "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "notify"}]}]},
+        "apiKeyHelper": "helper",
+    }
+    settings_path.write_text(json.dumps(original, indent=2) + "\n", encoding="utf-8")
+
+    module.install(enable_file_guard=True)
+    installed = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert list(installed) == ["theme", "permissions", "hooks", "apiKeyHelper"]
+    assert list(installed["permissions"]) == ["deny", "allow"]
+    assert list(installed["hooks"]) == ["Stop", "SessionStart", "PreToolUse"]
+    assert list(installed["hooks"]["SessionStart"][0]["hooks"][0]) == [
+        "type", "command", "name", "timeout",
+    ]
+
+    module.uninstall()
+    assert settings_path.read_text(encoding="utf-8") == json.dumps(original, indent=2) + "\n"
+
+
+def test_failed_replace_leaves_the_previous_settings_intact(fake_settings, monkeypatch) -> None:
+    # A crash between staging and the atomic replace must leave the operator's
+    # complete previous file, never a truncated or zero-filled one.
+    module, settings_path = fake_settings
+    previous = json.dumps({"theme": "dark"}, indent=2) + "\n"
+    settings_path.write_text(previous, encoding="utf-8")
+
+    def interrupted(_source, _target):
+        raise OSError("simulated crash before the replace")
+
+    monkeypatch.setattr(module.os, "replace", interrupted)
+    with pytest.raises(OSError, match="simulated crash"):
+        module.install(enable_file_guard=True)
+    assert settings_path.read_text(encoding="utf-8") == previous
+    leftovers = [p.name for p in settings_path.parent.iterdir() if p.name.endswith(".tmp")]
+    assert leftovers == []
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX directory fsync")
+def test_install_syncs_the_staged_file_and_the_directory_entry(
+    fake_settings, monkeypatch,
+) -> None:
+    module, settings_path = fake_settings
+    synced = []
+    real_fsync = os.fsync
+
+    def recording_fsync(descriptor):
+        synced.append(stat.S_ISDIR(os.fstat(descriptor).st_mode))
+        return real_fsync(descriptor)
+
+    monkeypatch.setattr(module.os, "fsync", recording_fsync)
+    module.install()
+    # The staged file is flushed before the replace, and the parent directory after it.
+    assert synced == [False, True]
+    assert json.loads(settings_path.read_text(encoding="utf-8"))["hooks"]["SessionStart"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX directory fsync")
+def test_a_refused_directory_sync_does_not_fail_a_completed_install(
+    fake_settings, monkeypatch,
+) -> None:
+    module, settings_path = fake_settings
+    real_fsync = os.fsync
+
+    def directory_sync_refused(descriptor):
+        if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            raise OSError("EINVAL: directory fsync unsupported")
+        return real_fsync(descriptor)
+
+    monkeypatch.setattr(module.os, "fsync", directory_sync_refused)
+    module.install()
+    assert json.loads(settings_path.read_text(encoding="utf-8"))["hooks"]["SessionStart"]
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX permission bits")
 def test_install_preserves_the_settings_file_mode(fake_settings) -> None:
     module, settings_path = fake_settings
