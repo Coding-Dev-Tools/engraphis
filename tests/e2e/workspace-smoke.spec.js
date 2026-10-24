@@ -5,8 +5,10 @@ test('a real local workspace saves, recalls, and corrects a memory with history'
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   const workspace = `browser-smoke-${browserName}-${Date.now()}`;
+  // The Playwright server is token-gated, so the one-shot fragment token signs in.
   await page.goto('/#token=engraphis-playwright-local-only');
   await expect(page.locator('#connection-status')).toContainText('Local engine connected');
+  await expect(page.locator('#browser-auth-dialog')).not.toBeVisible();
   await expect(page).not.toHaveURL(/token=/);
   await page.locator('.nav-item[data-view="manage"]').click();
   await page.locator('#create-workspace-toggle').click();

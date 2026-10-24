@@ -94,6 +94,10 @@ jobs:
           python -m eval.ablation
           python -m eval.reinforcement
           python -m eval.adversarial_memory_security
+          python -m eval.grounded
+          python -m eval.code_arm
+          python -m eval.spec_crawl
+          python -m eval.evidence_contracts
           python -m pip_audit --local --skip-editable
 
       - name: Capture the exact build environment and Python SBOM
@@ -344,6 +348,10 @@ jobs:
           python -m eval.ablation
           python -m eval.reinforcement
           python -m eval.adversarial_memory_security
+          python -m eval.grounded
+          python -m eval.code_arm
+          python -m eval.spec_crawl
+          python -m eval.evidence_contracts
 
   artifact-core-py39:
     name: Python 3.9 installed release artifacts
@@ -890,12 +898,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      # No dependency cache in publication jobs: a cache shared with branch CI must not
+      # feed a job that holds the PyPI OIDC token or release write permission.
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          cache: pip
-          cache-dependency-path: |
-            pyproject.toml
-            .github/release-constraints.txt
           python-version: "3.11"
       - name: Download distributions
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
@@ -961,10 +967,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          cache: pip
-          cache-dependency-path: |
-            pyproject.toml
-            .github/release-constraints.txt
           python-version: "3.11"
       - name: Download distributions
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
@@ -1036,10 +1038,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          cache: pip
-          cache-dependency-path: |
-            pyproject.toml
-            .github/release-constraints.txt
           python-version: "3.11"
       - name: Enforce and record the release-specific qualification waiver
         if: inputs.waive_v176_qualification || inputs.waive_v178_qualification || inputs.waive_v179_qualification

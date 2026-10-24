@@ -5,6 +5,13 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [1.7.10] - 2026-10-18
+
+Candidate package version: **1.7.10**. Publication and hosted-service qualification remain separate.
+
+- Preserve Spec Crawl and dashboard Spec Studio for offline prompt and memory-cluster
+  audits. Clarification saves remain opt-in pending procedural memories, and suggestions
+  require review before changing memory. Run `python -m eval.spec_crawl` in CI and release gates.
 - The dashboard has one interface. Every capability of the former Classic dashboard now lives
   in Ledger, and `/classic` redirects to it. The `engraphis/classic_assets/` and duplicate
   `engraphis/static/` asset trees, the dashboard switcher and the bundled Marked and DOMPurify
@@ -50,6 +57,94 @@ All notable changes to Engraphis are documented here. Format loosely follows
   nodes and Minimum links rules as the overview; entity-type colours follow the active theme;
   leaving the editor while a save is in flight asks first, and a save that fails after you
   leave is still reported.
+
+- Prevent concurrent batch writes and receipt recording from stalling on inverted locks.
+  Reserve the engine writer before SQLite, and reject a conflicting caller-owned
+  transaction without committing or rolling back its work. Receipt payloads and
+  chain anchors now share the existing atomic Store transaction boundary.
+- Run synchronous MCP handlers in context-preserving workers so slow memory work
+  does not block protocol peers. Preserve direct calls and tool schemas, wait for
+  in-flight work under AnyIO cancellation, and synchronize capability registry
+  issuance, expiry and resolution.
+
+- Preserve repeated validity closures in schema 19 so later corrections cannot change
+  fixed historical queries. Apply the same knowledge-time rule to recall, graph evidence,
+  browsing, scoring, workspace copies, and exports. Sync v4 carries the closure history
+  and accepts v1-v3 input; older peers must upgrade before receiving v4 bundles.
+- Preserve original session lineage when correcting, revising, or approving repo and
+  workspace memories after that session ends. Ordinary writes and session-scoped
+  memories retain active-session checks.
+- Include additional closure observations in optimistic memory versions, rejecting
+  concurrent history changes without changing existing scalar-only version hashes.
+- Prevent dashboard sync from sending a managed Cloud credential to a custom relay.
+  Preserve authorization failures during read-only pulls so the dashboard offers recovery.
+- Reject XML document types through the parser, including UTF-16 XML and Office containers.
+- Enforce bound-workspace access for session reads/closure and memory pinning,
+  reinforcement, and validity closure.
+- Search `why` and `timeline` history through a bounded, index-selected candidate window
+  instead of scanning every memory row. A superseded record outside the newest page is still
+  found, while hydration follows the window rather than the corpus size. With a semantic
+  embedder the ranking pass still scans the stored vectors, which is bounded in memory but
+  grows with the corpus.
+- Partition the 1,024-observation closure ceiling: a sync peer may install at most 960
+  observations and 64 stay reserved for the local writer, so a peer cannot block a local
+  retirement. Only new observations spend that budget, keeping replay idempotent.
+- Refuse a supersession that would land on the predecessor's own `valid_from`, which would
+  persist an empty validity interval that the store and every sync peer reject.
+- Reject UNC shares and Windows device paths on the raw text, before any resolution or
+  stat, for document import roots and `ENGRAPHIS_IMPORT_ROOTS`, Obsidian vault paths,
+  code-index roots, and `source_id` reads, so a crafted path cannot open an SMB session or
+  disclose NTLM credentials.
+- Stop rejecting an approved local source on Windows because creation time moved: the read
+  compares size, mtime, and identity, and compares `st_ctime` only where it is an inode change
+  time. Freshly written files reported it about a millisecond apart between the path and the
+  open handle, which failed roughly one read in five.
+- Make dense measurement tokenization linear while preserving the deterministic features.
+- Pin the default MiniLM model revision so newer loaders that omit resolved commit
+  metadata can still identify its persistent embedding space.
+- Require MCP SDK 1.30.0 or later in the 1.x line, including the upstream HTTP
+  session-retention security fix.
+- Ship both Command Code hooks and the benchmark renderer template in wheel and source
+  distributions; installed hooks use the installation's Python interpreter.
+- Match protected file paths case-insensitively on Windows, including targets
+  that do not exist yet, while preserving case-sensitive POSIX policy matching.
+- Preserve zero idle time and exact-minute Automation schedules during partial edits
+  and unrelated dashboard saves; show the saved cadence and enforce supported bounds.
+- Keep hosted relationship inference visibly unavailable and reject unsupported
+  inference requests before uploading a workspace snapshot.
+- Offer an explicit fresh Analytics run after repairing consent, authentication,
+  billing, or hosted availability, while preserving pending jobs and cached refusals.
+- Run grounded, code-arm, and evidence-contract gates in release validation.
+- Preserve byte-hashed evaluation fixtures with LF checkout rules on Windows.
+- Preserve immutable historical report bytes and retry transient Windows reader locks
+  when publishing local benchmark queue status.
+- Emit a browser session cookie only when the server mints it. Valid local-session
+  reuse preserves its existing cookie and review confirmation without echoing request
+  cookie bytes in the response.
+- Issue the automatic same-origin loopback dashboard session only when no `ENGRAPHIS_API_TOKEN`
+  is configured. A token-gated instance refuses it with `403 local_token_required` and uses the
+  token exchange instead, so a forged loopback forward cannot obtain a session, reach the review
+  CSRF confirmation, or approve a memory. Any non-empty configured value gates the browser, even
+  one that is only whitespace, matching the API middleware instead of stripping it back into the
+  zero-token path.
+- Resume an ended session explicitly from another agent: pass its ID as `session_id` when
+  starting `engraphis_session`, or as `resume_from_session_id` to classic
+  `engraphis_start_session`. Only an ended session owned by the same user in the exact
+  workspace and repository qualifies; any other source fails closed, and the returned
+  bootstrap is bounded.
+- Improve opt-in Jev decision workflows. Remote evaluation requires explicit consent;
+  managed requests accept only fixed, bounded workflows, reject custom and route decisions
+  before credentials are sent, and keep one absolute deadline across HTTP 429 handling.
+- Add a fail-closed host file protection policy evaluator (`engraphis/file_guard.py`) and an
+  optional Command Code `PreToolUse` hook installed with `install_cc_hook.py --file-guard`.
+  The hook enforces Command Code's canonical `write_file`/`edit_file`/`shell_command` ids,
+  denies the call on any hook error, and on Windows denies device, UNC, alternate-data-stream
+  and drive-relative targets. Tool ids compare after dropping separators, so `write_file` and
+  `Write` name one tool while `rewrite` stays a different tool; `ApplyPatch`, create, delete,
+  move, rename and copy ids are guarded too. Paths compare case-insensitively on Windows and
+  on case-insensitive POSIX volumes, a symlinked or non-owner policy file is refused, and hook
+  payloads are bounded in size and nesting. The policy file protects itself through symlinked
+  parents, and upgrading replaces legacy hook entries. See `docs/FILE_PROTECTION.md`.
 
 ## [1.7.9] - 2026-09-29
 
@@ -391,9 +486,9 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - The new `engraphis_recall_context` tool emits one `INFO` log per call with
   workspace, k, budget, packed/omitted counts, and the call's measured ms.
   Operators get visibility without changing the on-the-wire contract.
-  The standalone \engraphis-mcp-http\ launcher only configures the root logger when
-  \ENGRAPHIS_MCP_LOG\ is set to a truthy value (\ / \	rue\ / \yes\ / \info\ /
-  \on\); the default stays silent so the CLI keeps its quiet profile.
+  The standalone `engraphis-mcp-http` launcher only configures the root logger when
+  `ENGRAPHIS_MCP_LOG` is set to a truthy value (`1` / `true` / `yes` / `info` /
+  `on`); the default stays silent so the CLI keeps its quiet profile.
 
 - The graph's "Show all nodes" toggle is replaced by a dedicated **Every node** layout built
   on a new ultra-performance engine (`engraphis-graph-every.js` +

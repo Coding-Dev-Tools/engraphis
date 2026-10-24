@@ -182,8 +182,8 @@ an omitted mode means it was not recorded, and is not inferred from current defa
 | Stateful read | `engraphis_answer` | Backward-compatible alias for `engraphis_recall_grounded`. |
 | Pure read | `engraphis_recall_proactive` | Returns high-signal, queryless context and a last-session handoff. It does not reinforce or record a receipt. |
 | Stateful read | `engraphis_proactive_context` | Builds task-aware cited context and attempts a receipt without reinforcement. |
-| Read | `engraphis_why` | Returns the current answer and the memories it superseded. |
-| Read | `engraphis_timeline` | Returns complete bi-temporal history, oldest first. |
+| Read | `engraphis_why` | Returns the current answer and the memories it superseded. History hydrates an indexed candidate window instead of every corpus row; a semantic embedder still ranks against its stored vectors. |
+| Read | `engraphis_timeline` | Returns bi-temporal history, oldest first. Each returned memory carries its complete closure set; hydration is bounded, while a semantic embedder still ranks against its stored vectors. |
 | Code | `engraphis_index_repo` | Incrementally parses a repository into the code and memory graph. Each run attempts a receipt. |
 | Code | `engraphis_search_code` | Finds symbols, callers, and linked memories. |
 | Code | `engraphis_code_path` | Finds a path across definitions, calls, imports, and memories. |

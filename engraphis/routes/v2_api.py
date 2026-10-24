@@ -23,7 +23,7 @@ import weakref
 from dataclasses import replace
 from pathlib import Path
 from typing import Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field, StrictBool, StrictInt
@@ -32,6 +32,7 @@ from starlette.concurrency import run_in_threadpool
 from engraphis import licensing
 from engraphis.commercial import trial_days_by_plan
 from engraphis.config import DEFAULT_RELAY_URL, canonicalize_relay_url, settings
+from engraphis.core.documents import remote_or_device_path
 from engraphis.core.mutations import MemoryConflict
 from engraphis.core.poisoning import prompt_eligible
 from engraphis.core.scoring import normalize
@@ -2428,17 +2429,20 @@ def export(workspace: Optional[str] = None, signed: bool = False,
 
 # ── automated maintenance (Pro) ───────────────────────────────────────────────
 class _AutomationReq(BaseModel):
+    model_config = {"extra": "forbid"}
     enabled: Optional[bool] = None
-    cadence_hours: Optional[int] = None
-    consolidate: Optional[bool] = None
-    min_cluster: Optional[int] = None
-    archive_below: Optional[float] = None
+    cadence_hours: Optional[int] = Field(None, ge=1, le=720)
     workspaces: Optional[list] = None
     dream: Optional[bool] = None
     dream_enabled: Optional[bool] = None
-    dream_min_new: Optional[int] = None
-    dream_idle_minutes: Optional[int] = None
+    dream_min_new: Optional[int] = Field(None, ge=2, le=10000)
+    dream_idle_minutes: Optional[int] = Field(None, ge=0, le=10080)
     infer: Optional[bool] = None
+
+
+def _automation_policy_value(policy: dict, field: str, default):
+    value = policy.get(field)
+    return default if value is None else value
 
 
 @router.get("/automation")
@@ -2465,16 +2469,14 @@ def automation_get(workspace: Optional[str] = None):
         recent_jobs = []
     last_job = recent_jobs[0] if recent_jobs and isinstance(recent_jobs[0], dict) else {}
     return {
-        "enabled": bool(policy.get("enabled")),
-        "cadence_hours": max(1, int(policy.get("cadence_minutes") or 1440) // 60),
-        "consolidate": True,
-        "min_cluster": 3,
-        "archive_below": 0.05,
+        "enabled": bool(_automation_policy_value(policy, "enabled", False)),
+        "cadence_minutes": int(_automation_policy_value(policy, "cadence_minutes", 1440)),
+        "cadence_hours": max(1, int(_automation_policy_value(policy, "cadence_minutes", 1440)) // 60),
         "workspaces": [ws],
-        "dream": bool(policy.get("dream_enabled", True)),
-        "dream_min_new": int(policy.get("dream_min_new") or 25),
-        "dream_idle_minutes": int(policy.get("dream_idle_minutes") or 15),
-        "infer": bool(policy.get("infer")),
+        "dream": bool(_automation_policy_value(policy, "dream_enabled", True)),
+        "dream_min_new": int(_automation_policy_value(policy, "dream_min_new", 25)),
+        "dream_idle_minutes": int(_automation_policy_value(policy, "dream_idle_minutes", 15)),
+        "infer": bool(_automation_policy_value(policy, "infer", False)),
         "last_run": last_job.get("updated_at") or last_job.get("created_at"),
         "recent_jobs": recent_jobs,
         "next_run_at": policy.get("next_run_at"),
@@ -2552,6 +2554,11 @@ def automation_bootstrap(workspace: Optional[str] = None):
 @router.post("/automation")
 def automation_set(req: _AutomationReq, workspace: Optional[str] = None):
     """Persist scheduling only in the private cloud data store."""
+    if req.infer is True:
+        raise HTTPException(status_code=422, detail={
+            "error": "Hosted relationship inference is not available.",
+            "code": "inference_unavailable",
+        })
     from engraphis.cloud_features import CloudFeatureClient, build_managed_snapshot
 
     ws = _require_ws(workspace)
@@ -2563,24 +2570,28 @@ def automation_set(req: _AutomationReq, workspace: Optional[str] = None):
         })
     cloud = _managed_call(CloudFeatureClient.from_environment, workspace_id)
     current = _managed_call(cloud.get_policy, workspace_id)
-    current_hours = max(1, int(current.get("cadence_minutes") or 1440) // 60)
-    cadence_hours = req.cadence_hours if req.cadence_hours is not None else current_hours
-    enabled = req.enabled if req.enabled is not None else bool(current.get("enabled"))
+    cadence_minutes = (
+        req.cadence_hours * 60 if req.cadence_hours is not None
+        else int(_automation_policy_value(current, "cadence_minutes", 1440))
+    )
+    enabled = req.enabled if req.enabled is not None else bool(
+        _automation_policy_value(current, "enabled", False)
+    )
     policy = {
         "enabled": enabled,
-        "cadence_minutes": max(15, int(cadence_hours) * 60),
+        "cadence_minutes": cadence_minutes,
         "dream_enabled": (
             req.dream_enabled
             if req.dream_enabled is not None
             else req.dream
             if req.dream is not None
-            else bool(current.get("dream_enabled", True))
+            else bool(_automation_policy_value(current, "dream_enabled", True))
         ),
         "dream_min_new": req.dream_min_new if req.dream_min_new is not None
-        else int(current.get("dream_min_new") or 25),
+        else int(_automation_policy_value(current, "dream_min_new", 25)),
         "dream_idle_minutes": req.dream_idle_minutes if req.dream_idle_minutes is not None
-        else int(current.get("dream_idle_minutes") or 15),
-        "infer": req.infer if req.infer is not None else bool(current.get("infer")),
+        else int(_automation_policy_value(current, "dream_idle_minutes", 15)),
+        "infer": False,
     }
     if enabled:
         # Upload only when managed processing is actually enabled. Merely viewing or
@@ -2591,9 +2602,8 @@ def automation_set(req: _AutomationReq, workspace: Optional[str] = None):
     return {
         **policy,
         **saved,
-        "cadence_hours": policy["cadence_minutes"] // 60,
+        "cadence_hours": max(1, policy["cadence_minutes"] // 60),
         "dream": policy["dream_enabled"],
-        "consolidate": True,
     }
 
 
@@ -3028,6 +3038,8 @@ def _http_code_index_path(root_path: str) -> str:
         raise _HttpCodeIndexConfigurationError("HTTP code index root must be configured absolutely")
 
     base = os.path.normcase(os.path.realpath(configured_root or os.getcwd()))
+    if remote_or_device_path(root_path):
+        raise ValidationError("code index root is outside the HTTP index root")
     candidate = os.path.normcase(os.path.realpath(os.path.join(base, root_path)))
 
     # Keep a separator on both values so /operator/root-copy cannot pass as a
@@ -4430,11 +4442,27 @@ def _sync_all(svc) -> dict:
         attempted += 1
         try:
             cloud_access = None
+            relay_url = _relay_url()
             if not legacy_token_configured:
+                target = urlsplit(relay_url)
+                canonical = urlsplit(DEFAULT_RELAY_URL)
+                if (
+                    target.scheme != canonical.scheme
+                    or target.hostname != canonical.hostname
+                    or (443 if target.port is None else target.port)
+                    != (443 if canonical.port is None else canonical.port)
+                    or target.username is not None or target.password is not None
+                ):
+                    errors.append({
+                        "workspace": name,
+                        "error": "custom relay requires an explicitly origin-bound sync token",
+                        "status": 409,
+                    })
+                    continue
                 cloud_access, _, _ = access_for_workspace(name, require_compute=False)
             transport = get_transport(
                 "relay",
-                base_url=_relay_url(),
+                base_url=relay_url,
                 workspace_id=name,
                 access_token=cloud_access,
             )
@@ -4481,11 +4509,18 @@ def _sync_all(svc) -> dict:
         else:
             round_errors = rep.get("errors")
             failed_items = len(round_errors) if isinstance(round_errors, list) else 1
-            errors.append({
+            failure = {
                 "workspace": name,
                 "error": "sync round incomplete",
                 "failed_items": max(1, min(failed_items, 10_000)),
-            })
+            }
+            if isinstance(round_errors, list) and round_errors and all(
+                isinstance(item, dict) and item.get("status") in {401, 402, 403}
+                for item in round_errors
+            ):
+                failure["error"] = "cloud relay synchronization failed"
+                failure["status"] = round_errors[0]["status"]
+            errors.append(failure)
         for k in totals:
             totals[k] += int((rep.get("totals") or {}).get(k, 0) or 0)
 
