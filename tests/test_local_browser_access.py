@@ -207,6 +207,24 @@ def test_explicit_token_exchange_emits_cookie_and_rotates_confirmation(client_fa
         assert client.get("/api/memories", headers=BROWSER).status_code == 200
 
 
+def test_whitespace_only_token_still_gates_the_automatic_session(client_factory):
+    """A present-but-blank token is configured, not absent.
+
+    The API middleware treats any non-empty value as a configured credential, so
+    the automatic session must not strip it into the zero-token path.
+    """
+    with client_factory(token="   ") as client:
+        refused = client.post("/api/auth/local-session", headers=HEADERS)
+        assert refused.status_code == 403
+        assert refused.json()["code"] == "local_token_required"
+        # The literal value still exchanges for a session, so the instance stays
+        # recoverable by a client that can send it.
+        exchanged = client.post(
+            "/api/auth/session", json={"token": "   "}, headers=HEADERS,
+        )
+        assert exchanged.status_code == 200
+
+
 def test_token_gated_instance_refuses_the_automatic_browser_session(client_factory):
     """An operator who configured a token keeps that boundary on every browser session.
 
