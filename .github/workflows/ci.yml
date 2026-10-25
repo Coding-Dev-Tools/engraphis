@@ -302,7 +302,7 @@ jobs:
         run: npx playwright test
       - name: Retain browser failure diagnostics
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: browser-failure-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
           path: test-results/
@@ -500,7 +500,7 @@ jobs:
                          cwd=root, check=True)
       - name: Preserve installed journey evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: candidate-journey-${{ matrix.os }}-${{ matrix.profile }}
           retention-days: 14
