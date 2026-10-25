@@ -160,7 +160,9 @@ _STOPWORDS = frozenset({
     "of", "on", "or", "that", "the", "this", "to", "was", "were", "with", "not", "no",
 })
 
-_HEADING_MD = re.compile(r"^[ \t]{0,3}(#{1,6})[ \t]+(.+?)[ \t#]*$")
+# Same capture as ``(.+?)[ \t#]*$`` -- through the last non-closing character, else one
+# character -- without the lazy quantifier's quadratic rescans of a long " # # #" tail.
+_HEADING_MD = re.compile(r"^[ \t]{0,3}(#{1,6})[ \t]+(.*[^ \t#\n]|[ \t#])[ \t#]*$")
 _HEADING_NUM = re.compile(r"^[ \t]{0,3}(\d{1,2})[.)][ \t]+([^\n]{1,60})$")
 _HEADING_LABEL = re.compile(r"^[ \t]{0,3}([A-Za-z][A-Za-z /&'\-]{1,40}):[ \t]*$")
 _XML_OPEN = re.compile(r"^[ \t]*<([A-Za-z][A-Za-z0-9_\-]{0,40})>[ \t]*$")

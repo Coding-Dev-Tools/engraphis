@@ -171,6 +171,56 @@ def test_sync_run_pushes_and_records_summary(monkeypatch, tmp_path):
         assert st["last"] and st["last"]["exported"] >= 1
 
 
+def test_custom_relay_never_receives_or_refreshes_a_managed_credential(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(settings, "relay_url", "https://custom-relay.example")
+    monkeypatch.setattr("engraphis.backends.sync_relay.has_sync_token", lambda: False)
+    monkeypatch.setattr(
+        "engraphis.cloud_session.access_for_workspace",
+        lambda *args, **kwargs: calls.append("credential") or ("managed-secret", None, None),
+    )
+    monkeypatch.setattr(
+        "engraphis.backends.sync_folder.get_transport",
+        lambda *args, **kwargs: calls.append("transport") or _FakeTransport(),
+    )
+    with _client(monkeypatch, tmp_path, cloud=True) as client:
+        result = client.post("/api/sync/run", json={})
+    assert result.status_code == 200
+    assert result.json()["ok"] is False
+    assert result.json()["summary"]["errors"][0]["status"] == 409
+    assert calls == []
+    assert "managed-secret" not in result.text
+
+
+@pytest.mark.parametrize("status", [401, 402, 403])
+@pytest.mark.parametrize("lazy", [False, True])
+def test_read_only_pull_denial_retains_the_recovery_response(monkeypatch, tmp_path, status, lazy):
+    from engraphis.backends.sync_relay import RelayError
+
+    class DeniedTransport(_FakeTransport):
+        def pull(self):
+            if lazy:
+                return self.denied_stream()
+            raise RelayError("sensitive provider detail", status=status)
+
+        def denied_stream(self):
+            raise RelayError("sensitive provider detail", status=status)
+            yield  # make failure occur while iterating, after pull() returns
+
+        def push(self, *args):
+            pytest.fail("read-only sync attempted an upload")
+
+    monkeypatch.setenv("ENGRAPHIS_SYNC_READ_ONLY", "1")
+    monkeypatch.setattr(
+        "engraphis.backends.sync_folder.get_transport", lambda *args, **kwargs: DeniedTransport(),
+    )
+    with _client(monkeypatch, tmp_path, cloud=True) as client:
+        result = client.post("/api/sync/run", json={})
+    assert result.status_code == status
+    assert result.json()["detail"]["upgrade_url"].startswith("https://")
+    assert "sensitive provider detail" not in result.text
+
+
 def test_open_mode_new_workspace_is_sync_eligible_without_team_sharing(monkeypatch, tmp_path):
     """A local Pro owner has no Team principal: creating a workspace must not
     strand it as a personal folder that the Sync relay always skips.
