@@ -101,7 +101,7 @@ python -m scripts.migrate_to_v2 --old engraphis_v1.db --new engraphis_v2.db
 
 `requires-python >= 3.9` (ruff targets `py39`). CI tests the NumPy-only core on 3.9, the full
 offline stack on 3.10–3.14, and Pyright on 3.11; dedicated jobs also exercise encryption and built
-artifacts, and further jobs run the coverage gate (`--cov-fail-under=60`), repo hygiene, the Pi
+artifacts, and further jobs run the coverage gate (`--cov-fail-under=80`), repo hygiene, the Pi
 extension, browser accessibility, and the Docker smoke. `.github/workflows/ci.yml` is
 authoritative when the matrix changes.
 
