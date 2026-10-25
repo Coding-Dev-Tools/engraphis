@@ -411,7 +411,7 @@ def test_tag_release_binds_codeql_reproducibility_and_installed_artifact_smokes(
     assert "PIP_BUILD_CONSTRAINT: ${{ github.workspace }}/.github/release-constraints.txt" in build
     for pin in (
         "pip==26.2",
-        "setuptools==83.0.0",
+        "setuptools==84.1.0",
         "wheel==0.47.0",
         "build==1.5.0",
         "twine==6.2.0",
