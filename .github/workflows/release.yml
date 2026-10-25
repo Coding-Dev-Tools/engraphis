@@ -70,7 +70,7 @@ jobs:
           ruff check .
           pyright
           python -c "import fastapi, httpx, mcp, multipart, pydantic, uvicorn"
-          ENGRAPHIS_INDEX_ROOTS="${GITHUB_WORKSPACE}:${RUNNER_TEMP}:$(python -c 'import tempfile; print(tempfile.gettempdir())')" python -m pytest -o addopts="" tests/ -q -rs --basetemp="${RUNNER_TEMP}/engraphis-pytest"
+          ENGRAPHIS_INDEX_ROOTS="${GITHUB_WORKSPACE}:${RUNNER_TEMP}:$(python -c 'import tempfile; print(tempfile.gettempdir())')" python -m pytest -o addopts="" tests/ -q -rs -n auto --basetemp="${RUNNER_TEMP}/engraphis-pytest"
           ENGRAPHIS_INDEX_ROOTS="${GITHUB_WORKSPACE}:${RUNNER_TEMP}:$(python -c 'import tempfile; print(tempfile.gettempdir())')" python -m pytest -o addopts="" tests/test_public_research_boundary.py -q --basetemp="${RUNNER_TEMP}/engraphis-pytest"
           ENGRAPHIS_INDEX_ROOTS="${GITHUB_WORKSPACE}:${RUNNER_TEMP}:$(python -c 'import tempfile; print(tempfile.gettempdir())')" python -m pytest -o addopts="" tests/test_compact_recall.py tests/test_eval_performance.py -q --basetemp="${RUNNER_TEMP}/engraphis-pytest"
           ENGRAPHIS_INDEX_ROOTS="${GITHUB_WORKSPACE}:${RUNNER_TEMP}:$(python -c 'import tempfile; print(tempfile.gettempdir())')" python -m pytest -o addopts="" tests/test_eval_harness.py tests/test_benchmark_evidence.py -q --basetemp="${RUNNER_TEMP}/engraphis-pytest"
