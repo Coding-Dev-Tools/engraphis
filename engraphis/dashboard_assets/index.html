@@ -1021,20 +1021,25 @@
     </form>
   </dialog>
 
-  <dialog id="browser-auth-dialog" class="graph-connections-dialog browser-auth-dialog" aria-labelledby="browser-auth-title" aria-describedby="browser-auth-description">
+  <dialog id="browser-auth-dialog" class="graph-connections-dialog browser-auth-dialog" aria-labelledby="browser-auth-title" aria-describedby="browser-auth-description browser-auth-session-note">
     <form id="browser-auth-form" class="graph-connections-panel browser-auth-form" novalidate>
       <header class="graph-connections-header">
         <div>
-          <p class="eyebrow">Remote deployment</p>
-          <h2 id="browser-auth-title">Connect to this Engraphis deployment</h2>
+          <p class="eyebrow">Remote server access</p>
+          <h2 id="browser-auth-title">Connect to a remote Engraphis server</h2>
         </div>
       </header>
-      <p id="browser-auth-description">Enter the deployment API token. It is exchanged for an HttpOnly browser session and is never stored in the page or URL.</p>
-      <label>Deployment token<input id="browser-auth-token" type="password" autocomplete="off" spellcheck="false" required aria-describedby="browser-auth-error"></label>
+      <p id="browser-auth-description">This remote server requires an administrator access token. The dashboard on your own computer opens automatically.</p>
+      <details>
+        <summary>Where do I find my access token?</summary>
+        <p>Ask the person who set up this Engraphis server. If you set it up yourself, use the <code>ENGRAPHIS_API_TOKEN</code> value in your Engraphis configuration.</p>
+      </details>
+      <p id="browser-auth-session-note">This browser stays signed in for up to 12 hours. The token is cleared from this form after you submit it.</p>
+      <label>Access token<input id="browser-auth-token" type="password" autocomplete="off" spellcheck="false" required aria-describedby="browser-auth-error"></label>
       <p id="browser-auth-error" class="form-error" role="alert" aria-live="assertive" hidden></p>
       <div class="form-actions">
         <button id="browser-auth-cancel" class="secondary-button" type="button">Cancel</button>
-        <button class="primary-button" type="submit">Connect</button>
+        <button class="primary-button" type="submit">Sign in</button>
       </div>
     </form>
   </dialog>

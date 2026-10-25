@@ -15,6 +15,7 @@ from engraphis.core.documents import (
     MAX_DOCUMENT_WARNINGS,
     DocumentRecord,
     DocumentParseError,
+    canonical_source_id,
     document_format_for_path,
     normalize_document_path,
     parse_document,
@@ -573,6 +574,28 @@ def test_xml_and_container_attacks_and_invalid_rtf_fail_closed():
         parse_document(duplicate.getvalue(), "duplicate.docx")
 
 
+@pytest.mark.parametrize("encoding", ["utf-16", "utf-16-le", "utf-16-be"])
+@pytest.mark.parametrize("container", [False, True])
+def test_encoded_xml_entities_are_rejected_before_expansion(encoding, container):
+    xml = (
+        '<?xml version="1.0" encoding="UTF-16"?>'
+        '<!DOCTYPE x [<!ENTITY custom "unexpected expanded entity">]>'
+        '<x>&custom;</x>'
+    ).encode(encoding)
+    if encoding == "utf-16-le":
+        xml = b"\xff\xfe" + xml
+    elif encoding == "utf-16-be":
+        xml = b"\xfe\xff" + xml
+    payload = _zip({"word/document.xml": xml}) if container else xml
+    with pytest.raises(DocumentParseError, match="entities"):
+        parse_document(payload, "unsafe.docx" if container else "unsafe.xml")
+
+
+def test_utf16_xml_without_a_doctype_remains_readable():
+    xml = '<?xml version="1.0" encoding="UTF-16"?><x>Valid café</x>'
+    assert parse_document(xml.encode("utf-16"), "valid.xml").body == "Valid café"
+
+
 def test_adapter_contract_is_bounded_and_redacts_failures():
     raw = b"%PDF-local"
     with pytest.raises(DocumentParseError, match="requires an optional"):
@@ -899,3 +922,39 @@ def test_adapter_must_return_matching_source_identity():
 
     with pytest.raises(DocumentParseError, match="invalid source identity"):
         parse_document(raw, "report.pdf", adapter=bad_identity_adapter)
+
+
+@pytest.mark.parametrize("root", [
+    r"\\synthetic-host\share\notes",
+    "//synthetic-host/share/notes",
+    r"\\?\C:\synthetic\notes",
+    r"\\.\C:\synthetic\notes",
+    r"  \\synthetic-host\share\notes",
+])
+def test_document_scan_rejects_remote_or_device_roots_before_any_stat(root, monkeypatch):
+    """A UNC/device root must be refused before ``lstat`` opens an SMB session."""
+    import os
+
+    calls = []
+    real_lstat = os.lstat
+
+    def guarded(path, *args, **kwargs):
+        calls.append(str(path))
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "lstat", guarded)
+    with pytest.raises(DocumentParseError, match="UNC share or device"):
+        scan_document_tree(root)
+    monkeypatch.undo()
+    assert calls == []
+
+
+@pytest.mark.parametrize("root", [
+    r"\\synthetic-host\share\notes",
+    r"\\?\C:\synthetic",
+    r"  \\synthetic-host\share\notes",
+])
+def test_canonical_source_id_rejects_remote_or_device_roots(root):
+    with pytest.raises(DocumentParseError, match="UNC share or device"):
+        canonical_source_id(root)
+

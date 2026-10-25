@@ -111,7 +111,13 @@ def test_v4_migration_backfills_canonical_entities_and_edge_supports(tmp_path):
         "SELECT id, normalized_name, canonical_id, canonical_confidence "
         "FROM entities ORDER BY id"
     ).fetchall()]
-    supports = store.edge_supports_in_scope(["edg_a"], at=2)
+    # This minimal legacy schema intentionally has no source memories. Verify
+    # migration persistence separately from the visibility of dangling evidence.
+    supports = store.conn.execute(
+        "SELECT memory_id,source_kind,confidence FROM edge_supports "
+        "WHERE edge_id='edg_a' ORDER BY memory_id"
+    ).fetchall()
+    assert store.edge_supports_in_scope(["edg_a"], at=2) == []
 
     assert store.schema_version == SCHEMA_VERSION
     assert {row["normalized_name"] for row in rows} == {"redis"}
@@ -161,7 +167,10 @@ def test_v4_migration_converges_duplicate_live_relations_without_losing_support(
     retired = store.conn.execute(
         "SELECT id, valid_to FROM edges WHERE valid_to IS NOT NULL"
     ).fetchall()
-    supports = store.edge_supports_in_scope(["edg_a"])
+    supports = store.conn.execute(
+        "SELECT memory_id FROM edge_supports WHERE edge_id='edg_a' ORDER BY memory_id"
+    ).fetchall()
+    assert store.edge_supports_in_scope(["edg_a"]) == []
 
     assert len(live) == 1 and live[0]["id"] == "edg_a" and live[0]["weight"] == 2
     assert len(retired) == 1 and retired[0]["id"] == "edg_b"
@@ -216,15 +225,23 @@ def test_v4_migration_normalizes_reversed_undirected_endpoints_before_dedup(tmp_
     assert [(row["id"], row["src"], row["dst"], row["weight"])
             for row in cooccurs] == [("edg_old", "a", "z", 0.4)]
     assert (singleton["src"], singleton["dst"]) == ("x", "y")
-    assert {row["memory_id"] for row in store.edge_supports_in_scope(["edg_old"])} == {
+    assert {row["memory_id"] for row in store.conn.execute(
+        "SELECT memory_id FROM edge_supports WHERE edge_id='edg_old'"
+    )} == {
         "mem_a", "mem_b",
     }
+    assert store.edge_supports_in_scope(["edg_old"]) == []
     store.close()
 
 
 def test_edge_writer_merges_equivalent_live_relation_supports():
     store = Store(":memory:")
     workspace_id = store.get_or_create_workspace("acme")
+    for memory_id in ("mem_a", "mem_b"):
+        store.add_memory(MemoryRecord(
+            id=memory_id, content="Durable graph evidence.",
+            workspace_id=workspace_id, scope=Scope.WORKSPACE,
+        ))
     first = store.upsert_edge(Edge(
         id="edg_first", src="ent_a", dst="ent_b", relation="uses",
         workspace_id=workspace_id,
@@ -390,6 +407,11 @@ def test_repeated_support_writer_keeps_one_live_row_and_upgrades_confidence():
 def test_undirected_equivalent_writers_converge_after_endpoint_normalization():
     store = Store(":memory:")
     workspace_id = store.get_or_create_workspace("acme")
+    for memory_id in ("mem_a", "mem_b"):
+        store.add_memory(MemoryRecord(
+            id=memory_id, content="Durable graph evidence.",
+            workspace_id=workspace_id, scope=Scope.WORKSPACE,
+        ))
     first = store.upsert_edge(Edge(
         id="edg_forward", src="ent_a", dst="ent_b", relation="co_occurs",
         workspace_id=workspace_id,

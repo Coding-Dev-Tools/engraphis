@@ -13,12 +13,20 @@ records remain inspectable and auditable, but cannot enter model-ready recall/co
 links, graph/code backfill, derived prompt context, or public `why`/`timeline` history.
 Corrections, promotions, and merges fail closed when their inputs are untrusted or quarantined.
 
+Repo and workspace memories keep their original session as provenance when a governed
+correction, revision, or owner approval creates a successor after that session ends. The
+session stays closed. Ordinary writes and session-scoped memories still require an active
+session. Optimistic memory versions include additional closure observations, so a concurrent
+history update requires refreshing the source before editing; reinforcement does not change
+that version.
+
 Approval is only for releasing external evidence. It creates a fresh `approved`
 successor and preserves the reviewed source plus an audit link; it never relabels the source in
 place. There is deliberately no MCP tool or general REST approval endpoint. A local owner can
-approve through the dashboard's **Approve for prompt** action after configuring
-`ENGRAPHIS_API_TOKEN` (short-lived browser session plus CSRF confirmation), or from an interactive
-terminal:
+approve through the local dashboard's **Approve for prompt** action. Its short-lived browser
+session is established automatically on the same computer, including zero-config free installs;
+CSRF confirmation is still required. Remote operator sessions remain authenticated. An owner
+can also approve from an interactive terminal:
 
 ```bash
 python -m scripts.approve_memory mem_... --reason "verified against the owner runbook"

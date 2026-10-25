@@ -33,7 +33,15 @@ def main(argv=None) -> None:
         epilog="Configuration comes from the environment / .env (ENGRAPHIS_DB_PATH, "
                "ENGRAPHIS_PORT, ...). Generate a client config with: engraphis-init",
     )
-    ap.parse_args(argv)
+    ap.add_argument(
+        "--connect", metavar="LOOPBACK_MCP_URL",
+        help="bridge stdio to an existing loopback MCP HTTP service, sharing its warmed engine",
+    )
+    args = ap.parse_args(argv)
+    if args.connect:
+        from engraphis.mcp_stdio_bridge import main as bridge_main
+        bridge_main(["--url", args.connect])
+        return
     error = _dependency_error()
     if error:
         raise SystemExit(error)

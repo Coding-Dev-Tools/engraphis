@@ -25,6 +25,12 @@ class, and execution revalidates availability, scope, authorization, and argumen
 The Smart gateway exposes these nine tools directly; advanced capabilities remain available through
 discovery and the validated executors.
 
+Remember responses include `stored`, the resolved workspace/repo, `review_state`, and
+`prompt_eligible`. A stored external or quarantined memory can still be excluded from prompt
+recall. These fields describe the persisted record, including when deduplication returns an
+existing ID. Keep the returned `session_id` from session start on later remember and recall
+calls so that every desktop client uses the intended workspace and repository.
+
 For a deliberate cross-agent handoff, pass the source ID as `session_id` when starting
 `engraphis_session`, or as `resume_from_session_id` to `engraphis_start_session`. The source must
 be an ended session owned by the same authenticated user in the exact resolved workspace and
@@ -182,8 +188,8 @@ an omitted mode means it was not recorded, and is not inferred from current defa
 | Stateful read | `engraphis_answer` | Backward-compatible alias for `engraphis_recall_grounded`. |
 | Pure read | `engraphis_recall_proactive` | Returns high-signal, queryless context and a last-session handoff. It does not reinforce or record a receipt. |
 | Stateful read | `engraphis_proactive_context` | Builds task-aware cited context and attempts a receipt without reinforcement. |
-| Read | `engraphis_why` | Returns the current answer and the memories it superseded. |
-| Read | `engraphis_timeline` | Returns complete bi-temporal history, oldest first. |
+| Read | `engraphis_why` | Returns the current answer and the memories it superseded. History hydrates an indexed candidate window instead of every corpus row; a semantic embedder still ranks against its stored vectors. |
+| Read | `engraphis_timeline` | Returns bi-temporal history, oldest first. Each returned memory carries its complete closure set; hydration is bounded, while a semantic embedder still ranks against its stored vectors. |
 | Code | `engraphis_index_repo` | Incrementally parses a repository into the code and memory graph. Each run attempts a receipt. |
 | Code | `engraphis_search_code` | Finds symbols, callers, and linked memories. |
 | Code | `engraphis_code_path` | Finds a path across definitions, calls, imports, and memories. |

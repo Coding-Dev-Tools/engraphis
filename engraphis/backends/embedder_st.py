@@ -33,6 +33,11 @@ LOCAL_MODEL_PREFIX = "local:"
 
 _IMMUTABLE_COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 
+# The shipped default must retain a durable identity even when a newer loader
+# omits its resolved Hub commit. Operators can still select an explicit revision.
+_DEFAULT_MINILM_COMMIT = "1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
+_DEFAULT_MINILM_NAMES = {"all-MiniLM-L6-v2", "sentence-transformers/all-MiniLM-L6-v2"}
+
 
 _LOCAL_ARTIFACT_HASH_CHUNK = 1_048_576
 
@@ -186,6 +191,8 @@ class SentenceTransformerEmbedder:
             loader="sentence-transformers model",
         )
         local_source = is_local_model_source(model_name)
+        if not revision and not local_source and model_name in _DEFAULT_MINILM_NAMES:
+            revision = _DEFAULT_MINILM_COMMIT
         local_before = _local_artifact_state(model_name) if local_source else None
         from sentence_transformers import SentenceTransformer  # pyright: ignore[reportMissingImports]  # lazy: optional dependency
         kwargs: dict[str, Any] = {"trust_remote_code": False}

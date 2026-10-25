@@ -496,7 +496,7 @@ def test_real_loopback_refresh_shares_deadline_and_never_uses_proxy(
             assert cloud_session._load()["refresh_credential"] == "synthetic-rotated"
         else:
             with pytest.raises(jev_transport.DecisionClientError, match="^remote_timeout$"):
-                _evaluate(0.15)
+                _evaluate(0.75)
             assert time.monotonic() - started < 1.5
             assert [entry[0] for entry in requests] == ["/v1/tokens/refresh"]
             assert cloud_session._refresh_is_unusable(cloud_session._load(), "synthetic-unspent")

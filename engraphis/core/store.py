@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -24,6 +25,7 @@ import time
 import unicodedata
 import weakref
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional, Protocol, cast
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -35,6 +37,7 @@ from engraphis.private_state import ensure_owner_private_dir
 from engraphis.core import ids
 from engraphis.core.graph_layers import infer_graph_layer, normalize_graph_layer
 from engraphis.core.interfaces import (
+    MAX_CLOSURE_OBSERVATIONS,
     Edge,
     GraphLayer,
     MemoryRecord,
@@ -50,6 +53,7 @@ from engraphis.core.interfaces import (
     _finite_timestamp,
     advance_modified_hlc,
     normalize_modified_hlc,
+    normalize_closure_observations,
 )
 from engraphis.core.secrets import reject_secrets
 from engraphis.core.poisoning import (
@@ -77,6 +81,7 @@ from engraphis.core.read_snapshots import (
 )
 from engraphis.core.schema import (
     BROWSE_SCHEMA_SQL,
+    MEMORY_CLOSURE_SCHEMA_SQL,
     FTS_SQL_FALLBACK,
     FTS_SQL_FTS5,
     SCHEMA_SQL,
@@ -84,8 +89,19 @@ from engraphis.core.schema import (
 )
 
 
+logger = logging.getLogger("engraphis.core.store")
+
+
 class SavepointError(RuntimeError):
     """A sub-operation could not settle; its enclosing transaction must abort."""
+
+
+class ClosureObservationLimitError(ValueError, sqlite3.IntegrityError):
+    """A closure would exceed ``MAX_CLOSURE_OBSERVATIONS``; history is never truncated.
+
+    A ``ValueError`` so service and HTTP layers report a caller error rather than a
+    500, and still an ``IntegrityError`` for callers that relied on the trigger abort.
+    """
 
 
 class ReceiptChainIntegrityError(sqlite3.IntegrityError):
@@ -109,6 +125,13 @@ IN_CLAUSE_CHUNK = 500
 ENTITY_BLOCK_TOKEN_CHUNK = 200
 # Do not materialize unbounded common-token buckets during migration/live writes.
 ENTITY_BLOCK_BUCKET_LIMIT = 1024
+# A history inspection (``why``/``timeline``) must be able to reach a superseded
+# record that sits far outside the newest-N window, yet it must not hydrate the
+# whole corpus on every call.  The candidate window is explicit, documented, and
+# configurable; it bounds the *candidate* set only — every returned record still
+# carries its complete ``memory_closures`` observation set, so no closure
+# history is ever truncated.
+DEFAULT_HISTORY_CANDIDATE_BUDGET = 500
 
 def _is_memory_database_path(path: str) -> bool:
     """Detect SQLite memory databases including named shared-memory URIs.
@@ -856,6 +879,30 @@ def _temporal_visibility_sql(alias: str, flt: Optional[SearchFilter], *,
     )
 
 
+def _memory_temporal_visibility_sql(
+    alias: str, flt: Optional[SearchFilter], *, valid_at: Optional[float] = None,
+) -> tuple[str, list[Any]]:
+    """Apply every closure observation known at the requested system time.
+
+    The scalar interval remains a compatibility summary. An earlier observation
+    must still close a historical view after a later correction shortens it.
+    """
+    world, known = _temporal_anchors(flt, valid_at=valid_at)
+    p = f"{alias}." if alias else ""
+    owner = alias or "memories"
+    return (
+        f"({p}valid_from IS NULL OR {p}valid_from<=?) "
+        f"AND ({p}valid_to IS NULL OR ?<{p}valid_to "
+        f"OR ({p}valid_to_recorded_at IS NOT NULL AND ?<{p}valid_to_recorded_at)) "
+        f"AND ({p}ingested_at IS NULL OR {p}ingested_at<=?) "
+        f"AND ({p}expired_at IS NULL OR ?<{p}expired_at) "
+        "AND NOT EXISTS (SELECT 1 FROM memory_closures mc "
+        f"WHERE mc.memory_id={owner}.id AND mc.valid_to<=? "
+        "AND (mc.recorded_at IS NULL OR mc.recorded_at<=?))",
+        [world, world, known, known, known, world, known],
+    )
+
+
 def memory_matches_filter(rec: MemoryRecord, flt: Optional[SearchFilter], *,
                           at: Optional[float] = None,
                           include_invalid: bool = False) -> bool:
@@ -910,11 +957,8 @@ def memory_matches_filter(rec: MemoryRecord, flt: Optional[SearchFilter], *,
         return False
     if rec.valid_from is not None and rec.valid_from > valid_at:
         return False
-    if (rec.valid_to is not None and valid_at >= rec.valid_to
-            and not (
-                rec.valid_to_recorded_at is not None
-                and known_at < rec.valid_to_recorded_at
-            )):
+    valid_to = rec.effective_valid_to(known_at)
+    if valid_to is not None and valid_at >= valid_to:
         return False
     return True
 
@@ -1284,7 +1328,6 @@ class Store:
         )
         self.has_fts5 = False
         self._fts_orphan_ids: Optional[set[str]] = None
-        self._receipt_lock = threading.Lock()
         self.allowed_workspaces: Optional[frozenset] = (
             frozenset(allowed_workspaces) if allowed_workspaces else None
         )
@@ -1460,6 +1503,7 @@ class Store:
             "repos",
             "sessions",
             "memories",
+            "memory_closures",
             "mem_vectors",
             "vector_store_state",
             "vector_index_targets",
@@ -1495,6 +1539,13 @@ class Store:
             ).fetchall()
         }
         required_source_security_objects = {
+            "idx_memory_closures_identity",
+            "idx_memory_closures_legacy_unique",
+            "idx_memory_closures_known",
+            "trg_memory_closure_insert",
+            "trg_memory_closure_update",
+            "trg_memory_closure_bound",
+            "trg_browse_memory_closure_insert",
             "trg_browse_memory_insert",
             "trg_browse_memory_update",
             "trg_browse_memory_delete",
@@ -1560,6 +1611,13 @@ class Store:
                 "read-only Store requires a complete current schema; missing "
                 "memories.modified_hlc"
             )
+        closure_columns = {
+            str(item["name"]) for item in self.conn.execute(
+                "PRAGMA table_info(memory_closures)"
+            ).fetchall()
+        }
+        if not {"memory_id", "valid_to", "recorded_at"} <= closure_columns:
+            raise RuntimeError("read-only Store requires complete memory_closures history")
         sync_export_columns = {
             str(item["name"]) for item in self.conn.execute(
                 "PRAGMA table_info(memory_sync_exports)"
@@ -2463,6 +2521,13 @@ class Store:
             "trg_browse_memory_update", "trg_browse_memory_delete",
         } <= object_names
         self._browse_schema_incomplete = browse_schema_incomplete
+        closures_incomplete = not {
+            "memory_closures", "idx_memory_closures_identity",
+            "idx_memory_closures_legacy_unique", "idx_memory_closures_known",
+            "trg_memory_closure_insert", "trg_memory_closure_update",
+            "trg_memory_closure_bound", "trg_browse_memory_closure_insert",
+        } <= object_names
+        self._closures_incomplete = closures_incomplete
         if previous_version > SCHEMA_VERSION:
             raise RuntimeError(
                 f"database schema {previous_version} is newer than supported "
@@ -2477,6 +2542,7 @@ class Store:
             or sync_exports_need_table
             or bool(pending_transforms)
             or browse_schema_incomplete
+            or closures_incomplete
         )
         return previous_version, needs_backup
 
@@ -2932,6 +2998,12 @@ class Store:
                 )
 
         self._execute_script_transactional(BROWSE_SCHEMA_SQL)
+        if (int(previous_version or 0) < SCHEMA_VERSION
+                or getattr(self, "_closures_incomplete", True)):
+            # Install, repair, and backfill closure history. A complete current schema's
+            # triggers already maintain every observation, so re-running the seed would
+            # only rescan all closed memories on every writable open.
+            self._execute_script_transactional(MEMORY_CLOSURE_SCHEMA_SQL)
         if getattr(self, "_browse_schema_incomplete", False):
             # A missing trigger could have allowed untracked changes. Repaired
             # schemas start a new cursor epoch instead of trusting prior tokens.
@@ -4454,26 +4526,29 @@ class Store:
             if owns_transaction:
                 self.conn.execute("BEGIN IMMEDIATE")
             row = self.conn.execute(
-                "SELECT status, summary, open_threads, outcome FROM sessions WHERE id=?",
+                "SELECT workspace_id, status, summary, open_threads, outcome "
+                "FROM sessions WHERE id=?",
                 (session_id,),
             ).fetchone()
             if row is None:
                 result = "missing"
-            elif row["status"] == "active":
+            else:
+                self._authorize_workspace_id(row["workspace_id"])
+            if row is not None and row["status"] == "active":
                 self.conn.execute(
                     "UPDATE sessions SET status='summarized', ended_at=?, summary=?, "
                     "open_threads=?, outcome=? WHERE id=? AND status='active'",
                     (now_ts(), summary, encoded_threads, outcome, session_id),
                 )
                 result = "ended"
-            elif (
+            elif row is not None and (
                 row["status"] == "summarized"
                 and (row["summary"] or "") == summary
                 and _loads(row["open_threads"], []) == threads
                 and (row["outcome"] or "") == outcome
             ):
                 result = "unchanged"
-            else:
+            elif row is not None:
                 result = "conflict"
             if owns_transaction:
                 self.conn.commit()
@@ -4486,6 +4561,10 @@ class Store:
     def get_session(self, session_id: str) -> Optional[dict]:
         row = self.conn.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
         if not row:
+            return None
+        try:
+            self._authorize_workspace_id(row["workspace_id"])
+        except ValueError:
             return None
         d = dict(row)
         d["open_threads"] = _loads(d.get("open_threads"), [])
@@ -4930,6 +5009,11 @@ class Store:
         rec.modified_hlc = normalize_modified_hlc(
             rec.modified_hlc, allow_empty=True
         )
+        rec.closure_observations = normalize_closure_observations(
+            rec.closure_observations,
+            valid_to=rec.valid_to,
+            valid_to_recorded_at=rec.valid_to_recorded_at,
+        )
         if (
             rec.valid_from is not None
             and rec.valid_to is not None
@@ -5002,7 +5086,7 @@ class Store:
                 rec.id = ids.new_id("memory")
                 existing = None
             else:
-                existing_record = _row_to_record(existing)
+                existing_record = self._records_from_rows([existing])[0]
                 if audit:
                     # Generic provenance-change record for direct writes. The sync path
                     # passes audit=False and logs its own semantic 'sync_overwrite'
@@ -5015,6 +5099,14 @@ class Store:
                         f"incoming provenance={_dumps(rec.provenance)}",
                         commit=False,
                     )
+        # Closure knowledge is append-only even when a caller reconstructs an old
+        # record for an upsert. Keep the scalar pair as the current minimum summary.
+        rec.closure_observations = normalize_closure_observations((
+            *(existing_record.closure_observations if existing_record else ()),
+            *rec.closure_observations,
+        ))
+        if rec.closure_observations:
+            rec.valid_to, rec.valid_to_recorded_at = rec.closure_observations[0]
         ts = now_ts()
         # A "closed history" record may legitimately carry only a past ``valid_to`` with
         # ``valid_from`` defaulting to ingest time (the fixture/backfill convention). The
@@ -5110,6 +5202,13 @@ class Store:
              _dumps(rec.provenance), rec.confidence,
              rec.pinned_at, rec.unpinned_at),
         )
+        if rec.closure_observations:
+            self.conn.executemany(
+                "INSERT OR IGNORE INTO memory_closures(memory_id,valid_to,recorded_at) "
+                "VALUES (?,?,?)",
+                [(rec.id, endpoint, learned) for endpoint, learned
+                 in rec.closure_observations],
+            )
         # The method-level transaction/savepoint keeps the row, FTS mirror, and
         # vector mirror atomic without settling a caller-owned transaction.
         self._fts_upsert(
@@ -5124,14 +5223,45 @@ class Store:
             )
         return rec.id
 
+    def _records_from_rows(self, rows: Iterable[sqlite3.Row]) -> list[MemoryRecord]:
+        """Hydrate closure history in bounded batches, never one query per hit."""
+        records = [_row_to_record(row) for row in rows]
+        by_id = {record.id: record for record in records}
+        memory_ids = list(by_id)
+        observations: dict[str, list[tuple[float, Optional[float]]]] = {}
+        for start in range(0, len(memory_ids), IN_CLAUSE_CHUNK):
+            chunk = memory_ids[start:start + IN_CLAUSE_CHUNK]
+            marks = ",".join("?" for _ in chunk)
+            for row in self.conn.execute(
+                "SELECT memory_id,valid_to,recorded_at FROM memory_closures "
+                f"WHERE memory_id IN ({marks}) ORDER BY memory_id,valid_to,recorded_at",
+                chunk,
+            ):
+                observations.setdefault(row["memory_id"], []).append(
+                    (row["valid_to"], row["recorded_at"])
+                )
+        for record in records:
+            record.closure_observations = normalize_closure_observations(
+                observations.get(record.id, ()), valid_to=record.valid_to,
+                valid_to_recorded_at=record.valid_to_recorded_at,
+            )
+        return records
+
+    def _select_memory_records(self, sql: str, params: Iterable[Any]) -> list[MemoryRecord]:
+        with self.read_snapshot():
+            return self._records_from_rows(self.conn.execute(sql, params).fetchall())
+
     def get_memory(self, memory_id: str) -> Optional[MemoryRecord]:
-        row = self.conn.execute("SELECT * FROM memories WHERE id=?", (memory_id,)).fetchone()
-        if row is not None and self.allowed_workspaces is not None:
-            try:
-                self._authorize_workspace_id(row["workspace_id"])
-            except ValueError:
-                return None
-        return _row_to_record(row) if row else None
+        with self.read_snapshot():
+            row = self.conn.execute(
+                "SELECT * FROM memories WHERE id=?", (memory_id,)
+            ).fetchone()
+            if row is not None and self.allowed_workspaces is not None:
+                try:
+                    self._authorize_workspace_id(row["workspace_id"])
+                except ValueError:
+                    return None
+            return self._records_from_rows([row])[0] if row else None
 
     def get_memories(self, memory_ids: Iterable[str]) -> dict[str, MemoryRecord]:
         """Batched :meth:`get_memory` — one ``IN (...)`` query per chunk.
@@ -5146,20 +5276,21 @@ class Store:
             if mid and mid not in seen:
                 seen.add(mid)
                 unique.append(mid)
-        out: dict[str, MemoryRecord] = {}
-        for start in range(0, len(unique), IN_CLAUSE_CHUNK):
-            chunk = unique[start:start + IN_CLAUSE_CHUNK]
-            marks = ",".join("?" for _ in chunk)
-            rows = self.conn.fetchall(
-                f"SELECT * FROM memories WHERE id IN ({marks})", chunk)
-            for row in rows:
-                if self.allowed_workspaces is not None:
-                    try:
-                        self._authorize_workspace_id(row["workspace_id"])
-                    except ValueError:
-                        continue
-                out[row["id"]] = _row_to_record(row)
-        return out
+        selected: list[sqlite3.Row] = []
+        with self.read_snapshot():
+            for start in range(0, len(unique), IN_CLAUSE_CHUNK):
+                chunk = unique[start:start + IN_CLAUSE_CHUNK]
+                marks = ",".join("?" for _ in chunk)
+                rows = self.conn.fetchall(
+                    f"SELECT * FROM memories WHERE id IN ({marks})", chunk)
+                for row in rows:
+                    if self.allowed_workspaces is not None:
+                        try:
+                            self._authorize_workspace_id(row["workspace_id"])
+                        except ValueError:
+                            continue
+                    selected.append(row)
+            return {rec.id: rec for rec in self._records_from_rows(selected)}
 
     def visible_memory_ids(self, memory_ids: list[str],
                            flt: Optional[SearchFilter], *,
@@ -5183,35 +5314,13 @@ class Store:
         marks = ",".join("?" for _ in unique)
         # Preserve the instance authority even when the caller has no workspace
         # filter. Apply it in the same bounded query, without per-ID lookups.
-        where, params = self._where(None, include_invalid=True)
+        where, params = self._where(flt, include_invalid=include_invalid)
         where.insert(0, f"id IN ({marks})")
         rows = self.conn.execute(
-            "SELECT id, workspace_id, repo_id, session_id, scope, mtype, "
-            "valid_from, valid_to, valid_to_recorded_at, ingested_at, expired_at "
-            "FROM memories WHERE " + " AND ".join(where),
+            "SELECT id FROM memories WHERE " + " AND ".join(where),
             [*unique, *params],
         ).fetchall()
-        visible: set[str] = set()
-        for row in rows:
-            record = MemoryRecord(
-                id=row["id"],
-                content="",
-                workspace_id=row["workspace_id"],
-                repo_id=row["repo_id"],
-                session_id=row["session_id"],
-                scope=Scope(row["scope"]),
-                mtype=MemoryType(row["mtype"]),
-                valid_from=row["valid_from"],
-                valid_to=row["valid_to"],
-                valid_to_recorded_at=row["valid_to_recorded_at"],
-                ingested_at=row["ingested_at"],
-                expired_at=row["expired_at"],
-            )
-            if memory_matches_filter(
-                record, flt, include_invalid=include_invalid
-            ):
-                visible.add(record.id)
-        return visible
+        return {row["id"] for row in rows}
 
     def list_memories(self, flt: Optional[SearchFilter] = None,
                       *, include_invalid: bool = False, limit: Optional[int] = None,
@@ -5237,15 +5346,17 @@ class Store:
         if closed_only:
             # Select known closed world-time intervals before either result cap. Public
             # history must still hide records outside the requested system-time snapshot.
-            known_at = flt.known_at if flt and flt.known_at is not None else now_ts()
-            valid_at = flt.valid_at if flt and flt.valid_at is not None else now_ts()
+            valid_at, known_at = _temporal_anchors(flt)
             where.extend([
-                "valid_to IS NOT NULL AND valid_to<=?",
-                "(valid_to_recorded_at IS NULL OR valid_to_recorded_at<=?)",
+                "((valid_to IS NOT NULL AND valid_to<=? "
+                "AND (valid_to_recorded_at IS NULL OR valid_to_recorded_at<=?)) "
+                "OR EXISTS (SELECT 1 FROM memory_closures mc "
+                "WHERE mc.memory_id=memories.id AND mc.valid_to<=? "
+                "AND (mc.recorded_at IS NULL OR mc.recorded_at<=?)))",
                 "(ingested_at IS NULL OR ingested_at<=?)",
                 "(expired_at IS NULL OR ?<expired_at)",
             ])
-            params.extend([valid_at, known_at, known_at, known_at])
+            params.extend([valid_at, known_at, valid_at, known_at, known_at, known_at])
         if where:
             sql += " WHERE " + " AND ".join(where)
         query = candidate_query.strip().lower()
@@ -5265,18 +5376,18 @@ class Store:
         if limit and not prompt_only:
             sql += f" LIMIT {int(limit)}"
         if not prompt_only:
-            rows = self.conn.execute(sql, params).fetchall()
-            return [_row_to_record(r) for r in rows]
+            return self._select_memory_records(sql, params)
 
         eligible_limit = None if limit is None else int(limit)
-        out: list[MemoryRecord] = []
-        for row in self.conn.execute(sql, params):
-            if not _row_is_prompt_eligible(row["provenance"], row["metadata"]):
-                continue
-            out.append(_row_to_record(row))
-            if eligible_limit is not None and len(out) >= eligible_limit:
-                break
-        return out
+        selected: list[sqlite3.Row] = []
+        with self.read_snapshot():
+            for row in self.conn.execute(sql, params):
+                if not _row_is_prompt_eligible(row["provenance"], row["metadata"]):
+                    continue
+                selected.append(row)
+                if eligible_limit is not None and len(selected) >= eligible_limit:
+                    break
+            return self._records_from_rows(selected)
 
     def list_memory_ids(self, flt: Optional[SearchFilter] = None,
                         *, include_invalid: bool = False, limit: Optional[int] = None,
@@ -5389,16 +5500,16 @@ class Store:
         params.append('%"proactive"%')
         sql += " WHERE " + " AND ".join(where)
         sql += " ORDER BY ingested_at DESC"
-        out: list[MemoryRecord] = []
-        for row in self.conn.execute(sql, params):
-            rec = _row_to_record(row)
-            proactive = str((rec.metadata or {}).get("proactive") or "").lower()
-            if not rec.pinned and proactive != "always":
-                continue
-            if prompt_only and not _row_is_prompt_eligible(row["provenance"], row["metadata"]):
-                continue
-            out.append(rec)
-        return out
+        selected: list[sqlite3.Row] = []
+        with self.read_snapshot():
+            for row in self.conn.execute(sql, params):
+                proactive = str((_loads(row["metadata"], {}) or {}).get("proactive") or "").lower()
+                if not row["pinned"] and proactive != "always":
+                    continue
+                if prompt_only and not _row_is_prompt_eligible(row["provenance"], row["metadata"]):
+                    continue
+                selected.append(row)
+            return self._records_from_rows(selected)
 
     def list_live_claims(self, *, workspace_id: str, repo_id: Optional[str],
                          session_id: Optional[str], scope: Scope, mtype: MemoryType,
@@ -5426,8 +5537,7 @@ class Store:
             sql += " AND session_id=?"
             params.append(session_id)
         sql += " ORDER BY ingested_at DESC, id"
-        rows = self.conn.execute(sql, params).fetchall()
-        return [_row_to_record(row) for row in rows]
+        return self._select_memory_records(sql, params)
 
     def list_claim_history(self, *, workspace_id: str, repo_id: Optional[str],
                            session_id: Optional[str], scope: Scope, mtype: MemoryType,
@@ -5454,8 +5564,7 @@ class Store:
             sql += " AND session_id=?"
             params.append(session_id)
         sql += " ORDER BY valid_from, ingested_at, id"
-        rows = self.conn.execute(sql, params).fetchall()
-        return [_row_to_record(row) for row in rows]
+        return self._select_memory_records(sql, params)
 
     def list_memories_page(self, flt: Optional[SearchFilter] = None, *,
                            after_id: str = "", limit: int = 500,
@@ -5470,8 +5579,158 @@ class Store:
             sql += " WHERE " + " AND ".join(where)
         sql += " ORDER BY id LIMIT ?"
         params.append(max(1, int(limit)))
-        rows = self.conn.execute(sql, params).fetchall()
-        return [_row_to_record(row) for row in rows]
+        return self._select_memory_records(sql, params)
+
+    def list_history_candidates(
+        self,
+        flt: Optional[SearchFilter] = None,
+        *,
+        query: str = "",
+        extra_ids: Iterable[str] = (),
+        budget: int = DEFAULT_HISTORY_CANDIDATE_BUDGET,
+        include_invalid: bool = False,
+        prompt_only: bool = False,
+    ) -> list[MemoryRecord]:
+        """Return an index-selected candidate window for history inspection.
+
+        ``why``/``timeline`` must be able to show a superseded record that sits far
+        outside the newest-N window, but they must not hydrate the whole corpus on
+        every call.  Candidate selection therefore runs as one indexed lookup over
+        the lexical mirror (``mem_fts``) instead of a Python scan of every memory
+        row, and only the selected rows are hydrated — each with its complete
+        ``memory_closures`` observation set.
+
+        The window is explicit and configurable through ``budget``.  It bounds the
+        *candidate* set only: no closure history is truncated, and the caller
+        receives the records in the order the two ranked arms produced them.
+        ``extra_ids`` adds caller-ranked candidates (for example the semantic
+        arm's top hits) that the lexical index cannot express.  The two arms are
+        interleaved so a large lexical match set cannot starve the semantic arm.
+
+        Args:
+            query: Free-text query whose lexical matches seed the candidate set.
+            extra_ids: Additional candidate ids, already ranked by the caller.
+            budget: Maximum number of candidates to hydrate (per selection).
+            include_invalid: Include records outside their current validity window.
+            prompt_only: Keep only records that may enter model-adjacent output.
+        """
+        limit = max(1, int(budget))
+        where, params = self._where(flt, include_invalid, alias="m")
+        lexical = self._lexical_candidate_ids(
+            query, where, params, limit, prompt_only=prompt_only,
+        )
+        extra = [str(memory_id) for memory_id in extra_ids if str(memory_id)]
+        selected: list[str] = []
+        seen: set[str] = set()
+        lexical_iter = iter(lexical)
+        extra_iter = iter(extra)
+        while len(selected) < limit:
+            progressed = False
+            for source in (lexical_iter, extra_iter):
+                candidate = next(source, None)
+                if candidate is None:
+                    continue
+                progressed = True
+                if candidate not in seen:
+                    seen.add(candidate)
+                    selected.append(candidate)
+                if len(selected) >= limit:
+                    break
+            if not progressed:
+                break
+        if not selected:
+            return []
+        return self._hydrate_candidate_ids(selected, where, params)
+
+    def _lexical_candidate_ids(
+        self, query: str, where: list[str], params: list[Any], limit: int, *,
+        prompt_only: bool = False,
+    ) -> list[str]:
+        """Select candidate ids for a query through the indexed lexical mirror.
+
+        FTS5 resolves the match through its own index, so the cost follows the
+        number of matching documents rather than the size of the corpus.  A build
+        without FTS5 falls back to the plain mirror's LIKE scan, which is bounded
+        by the same explicit limit.
+        """
+        terms = _fts_terms(query)[:32] if query else []
+        if not terms:
+            return []
+        if self.has_fts5:
+            match = " OR ".join(f"{term}*" for term in terms)
+            sql = ("SELECT m.id, m.provenance, m.metadata FROM mem_fts f "
+                   "JOIN memories m ON m.id=f.id WHERE mem_fts MATCH ?")
+            args: list[Any] = [match]
+            if where:
+                sql += " AND " + " AND ".join(where)
+                args.extend(params)
+            sql += " ORDER BY bm25(mem_fts) LIMIT ?"
+            args.append(limit if not prompt_only else limit * 4)
+            try:
+                rows = self.conn.execute(sql, args).fetchall()
+            except sqlite3.OperationalError:
+                # A broken FTS index must not turn history inspection into a silent
+                # empty answer. Degrade to the plain-mirror LIKE scan below, and let a
+                # second failure propagate so the caller can fall back explicitly.
+                logger.warning(
+                    "lexical history candidate lookup failed; using the plain mirror",
+                    exc_info=True,
+                )
+                return self._like_candidate_ids(
+                    query, where, params, limit, prompt_only=prompt_only,
+                )
+        else:
+            return self._like_candidate_ids(
+                query, where, params, limit, prompt_only=prompt_only,
+            )
+        if prompt_only:
+            rows = [
+                row for row in rows
+                if _row_is_prompt_eligible(row["provenance"], row["metadata"])
+            ]
+        return [str(row["id"]) for row in rows][:limit]
+
+    def _like_candidate_ids(
+        self, query: str, where: list[str], params: list[Any], limit: int, *,
+        prompt_only: bool = False,
+    ) -> list[str]:
+        """Bounded lexical fallback for builds or queries without a usable FTS index."""
+        like = f"%{_escape_like(query.strip().lower())}%"
+        sql = ("SELECT m.id, m.provenance, m.metadata FROM mem_fts f "
+               "JOIN memories m ON m.id=f.id WHERE "
+               "(f.title LIKE ? ESCAPE '\\' OR f.content LIKE ? ESCAPE '\\' "
+               "OR f.keywords LIKE ? ESCAPE '\\')")
+        args: list[Any] = [like, like, like]
+        if where:
+            sql += " AND " + " AND ".join(where)
+            args.extend(params)
+        sql += " LIMIT ?"
+        args.append(limit if not prompt_only else limit * 4)
+        rows = self.conn.execute(sql, args).fetchall()
+        if prompt_only:
+            rows = [
+                row for row in rows
+                if _row_is_prompt_eligible(row["provenance"], row["metadata"])
+            ]
+        return [str(row["id"]) for row in rows][:limit]
+
+    def _hydrate_candidate_ids(
+        self, memory_ids: list[str], where: list[str], params: list[Any],
+    ) -> list[MemoryRecord]:
+        """Hydrate selected candidates under the same scope/temporal predicate."""
+        records: dict[str, MemoryRecord] = {}
+        for start in range(0, len(memory_ids), IN_CLAUSE_CHUNK):
+            chunk = memory_ids[start:start + IN_CLAUSE_CHUNK]
+            marks = ",".join("?" for _ in chunk)
+            sql = "SELECT m.* FROM memories m"
+            clause = list(where)
+            clause.append(f"m.id IN ({marks})")
+            if clause:
+                sql += " WHERE " + " AND ".join(clause)
+            rows = self.conn.execute(sql, [*params, *chunk]).fetchall()
+            for record in self._records_from_rows(rows):
+                records[record.id] = record
+        return [records[mid] for mid in memory_ids if mid in records]
 
     def list_memories_needing_vectors_page(self, *, fingerprint: str,
                                            after_id: str = "",
@@ -5496,8 +5755,7 @@ class Store:
             params.append(after_id)
         sql += " ORDER BY m.id LIMIT ?"
         params.append(max(1, int(limit)))
-        rows = self.conn.execute(sql, params).fetchall()
-        return [_row_to_record(row) for row in rows]
+        return self._select_memory_records(sql, params)
 
 
     def close_validity(self, memory_id: str, *, at: Optional[float] = None,
@@ -5508,14 +5766,34 @@ class Store:
         at = _finite_timestamp(recorded_at if at is None else at, "at")
         with self._write_operation("close_validity", commit=commit):
             row = self.conn.execute(
-                "SELECT valid_from FROM memories WHERE id=?", (memory_id,)
+                "SELECT workspace_id, valid_from FROM memories WHERE id=?", (memory_id,)
             ).fetchone()
+            if row is not None:
+                self._authorize_workspace_id(row["workspace_id"])
             if (
                 row is not None
                 and row["valid_from"] is not None
                 and at < row["valid_from"]
             ):
                 raise ValueError("valid_to cannot predate valid_from")
+            if row is not None:
+                # Concurrent or out-of-order observations remain part of history
+                # even when another writer already installed a shorter summary.
+                try:
+                    self.conn.execute(
+                        "INSERT INTO memory_closures(memory_id,valid_to,recorded_at) "
+                        "VALUES (?,?,?) ON CONFLICT DO NOTHING",
+                        (memory_id, at, recorded_at),
+                    )
+                except sqlite3.IntegrityError as exc:
+                    # History is never truncated; report the full bound as a caller
+                    # error instead of leaking a raw database failure (HTTP 500).
+                    if "closure observation limit" not in str(exc):
+                        raise
+                    raise ClosureObservationLimitError(
+                        "closure observation limit reached: memory already holds the "
+                        f"maximum of {MAX_CLOSURE_OBSERVATIONS} observations"
+                    ) from exc
             updated = self.conn.execute(
                 "UPDATE memories SET valid_to=?, valid_to_recorded_at=? "
                 "WHERE id=? AND (valid_to IS NULL OR valid_to>?)",
@@ -5538,34 +5816,36 @@ class Store:
         A re-pin preserves the unpin marker, so peers converge on whichever
         transition happened last instead of allowing a stale pin to resurrect.
         """
-        row = self.conn.execute(
-            "SELECT pinned FROM memories WHERE id=?", (memory_id,)
-        ).fetchone()
-        if row is None:
-            return
-        now = now_ts()
-        if pinned:
-            self.conn.execute(
-                "UPDATE memories SET pinned=1, pinned_at=? "
-                "WHERE id=? AND pinned=0",
-                (now, memory_id),
-            )
-        else:
-            self.conn.execute(
-                "UPDATE memories SET pinned=0, unpinned_at=? "
-                "WHERE id=? AND pinned=1",
-                (now, memory_id),
-            )
-        self.conn.commit()
+        with self._write_operation("set_pinned", commit=True):
+            row = self.conn.execute(
+                "SELECT workspace_id, pinned FROM memories WHERE id=?", (memory_id,)
+            ).fetchone()
+            if row is None:
+                return
+            self._authorize_workspace_id(row["workspace_id"])
+            now = now_ts()
+            if pinned:
+                self.conn.execute(
+                    "UPDATE memories SET pinned=1, pinned_at=? "
+                    "WHERE id=? AND pinned=0",
+                    (now, memory_id),
+                )
+            else:
+                self.conn.execute(
+                    "UPDATE memories SET pinned=0, unpinned_at=? "
+                    "WHERE id=? AND pinned=1",
+                    (now, memory_id),
+                )
 
     def reinforce(self, memory_id: str, *, alpha: float = 0.3, boost: float = 0.0) -> None:
         """Apply one spacing-effect transition atomically across Store instances."""
         with self._write_operation("reinforce", commit=True):
             row = self.conn.execute(
-                "SELECT stability, access_count FROM memories WHERE id=?", (memory_id,)
+                "SELECT workspace_id, stability, access_count FROM memories WHERE id=?", (memory_id,)
             ).fetchone()
             if row is None:
                 return
+            self._authorize_workspace_id(row["workspace_id"])
             new_stab, new_count = reinforced_stability(
                 row["stability"], row["access_count"], alpha=alpha, boost=boost,
             )
@@ -6084,7 +6364,7 @@ class Store:
         tables = {
             name for name in (
                 "mem_fts", "mem_vectors", "mem_vec_ann", "code_memory_links",
-                "memory_entities", "edge_supports", "edges", "entities", "mem_links",
+                "memory_entities", "memory_closures", "edge_supports", "edges", "entities", "mem_links",
                 "source_imports", "source_import_items", "audit",
             ) if cls._has_table(conn, name)
         }
@@ -6102,6 +6382,7 @@ class Store:
         for table, column in (
             ("mem_fts", "id"), ("mem_vectors", "id"), ("mem_vec_ann", "id"),
             ("code_memory_links", "memory_id"), ("memory_entities", "memory_id"),
+            ("memory_closures", "memory_id"),
             ("edge_supports", "memory_id"),
             ("source_imports", "memory_id"),
         ):
@@ -7413,6 +7694,8 @@ class Store:
             # load time. CROSS JOIN fixes only loop order; its ON predicate retains
             # the exact inner-join and scope/temporal semantics.
             "FROM edge_supports s CROSS JOIN edges e ON e.id=s.edge_id "
+            "CROSS JOIN memories source_memory ON source_memory.id=s.memory_id "
+            "AND source_memory.workspace_id=e.workspace_id "
             "WHERE (s.valid_from IS NULL OR s.valid_from<=?) "
             "AND (s.valid_to IS NULL OR ?<s.valid_to "
             "OR (s.valid_to_recorded_at IS NOT NULL "
@@ -7430,6 +7713,15 @@ class Store:
             valid_at, valid_at, known_at, known_at, known_at,
             valid_at, valid_at, known_at, known_at, known_at,
         ]
+        source_filter = replace(
+            flt or SearchFilter(), as_of=valid_at, valid_at=valid_at, known_at=known_at,
+        )
+        source_where, source_params = self._where(
+            source_filter, include_invalid=False, alias="source_memory",
+        )
+        if source_where:
+            sql += " AND " + " AND ".join(source_where)
+            params.extend(source_params)
         if flt and flt.workspace_id:
             sql += " AND e.workspace_id=?"
             params.append(flt.workspace_id)
@@ -7918,13 +8210,22 @@ class Store:
         support_visibility, support_params = _temporal_visibility_sql(
             "s", flt, valid_at=valid_at
         )
+        source_filter = replace(
+            flt or SearchFilter(), as_of=valid_at, valid_at=valid_at, known_at=known_at,
+        )
+        source_where, source_params = self._where(
+            source_filter, include_invalid=False, alias="source_memory",
+        )
         sql += (
             " AND (NOT EXISTS (SELECT 1 FROM edge_supports any_support "
             "WHERE any_support.edge_id=edges.id) OR EXISTS (SELECT 1 FROM "
-            "edge_supports s WHERE s.edge_id=edges.id AND "
-            + support_visibility + "))"
+            "edge_supports s JOIN memories source_memory "
+            "ON source_memory.id=s.memory_id "
+            "AND source_memory.workspace_id=edges.workspace_id "
+            "WHERE s.edge_id=edges.id AND " + support_visibility
+            + " AND " + " AND ".join(source_where) + "))"
         )
-        params.extend(support_params)
+        params.extend((*support_params, *source_params))
         if flt and flt.workspace_id:
             sql += " AND workspace_id=?"
             params.append(flt.workspace_id)
@@ -8115,13 +8416,22 @@ class Store:
         support_visibility, support_params = _temporal_visibility_sql(
             "s", flt, valid_at=valid_at
         )
+        source_filter = replace(
+            flt or SearchFilter(), as_of=valid_at, valid_at=valid_at, known_at=known_at,
+        )
+        source_where, source_params = self._where(
+            source_filter, include_invalid=False, alias="source_memory",
+        )
         sql += (
             " AND (NOT EXISTS (SELECT 1 FROM edge_supports any_support "
             "WHERE any_support.edge_id=edges.id) OR EXISTS (SELECT 1 FROM "
-            "edge_supports s WHERE s.edge_id=edges.id AND "
-            + support_visibility + "))"
+            "edge_supports s JOIN memories source_memory "
+            "ON source_memory.id=s.memory_id "
+            "AND source_memory.workspace_id=edges.workspace_id "
+            "WHERE s.edge_id=edges.id AND " + support_visibility
+            + " AND " + " AND ".join(source_where) + "))"
         )
-        params.extend(support_params)
+        params.extend((*support_params, *source_params))
         if layers is not None:
             if not layers:
                 return []
@@ -8174,11 +8484,24 @@ class Store:
                 supports_by_edge.setdefault(str(support["edge_id"]), set()).add(
                     str(support["memory_id"])
                 )
+            normalized_edges: set[str] = set()
+            for start in range(0, len(edges), IN_CLAUSE_CHUNK):
+                chunk = edges[start:start + IN_CLAUSE_CHUNK]
+                edge_marks = ",".join("?" for _ in chunk)
+                normalized_edges.update(
+                    str(row["edge_id"]) for row in self.conn.execute(
+                        "SELECT DISTINCT edge_id FROM edge_supports "
+                        f"WHERE edge_id IN ({edge_marks})", [edge.id for edge in chunk],
+                    )
+                )
             for edge in edges:
                 if not _edge_is_prompt_eligible(edge.provenance):
                     continue
-                sources = set(_provenance_memory_ids(edge.provenance))
-                sources.update(supports_by_edge.get(edge.id, set()))
+                sources = (
+                    supports_by_edge.get(edge.id, set())
+                    if edge.id in normalized_edges
+                    else set(_provenance_memory_ids(edge.provenance))
+                )
                 if sources and not all(
                     (memory := memories.get(memory_id))
                     and (flt is None or memory_matches_filter(memory, flt, at=valid_at))
@@ -9002,140 +9325,130 @@ class Store:
         actor = str(actor or "system")[:200]
         workspace_id = str(workspace_id or "")
         repo_id = str(repo_id or "")
-        with self._receipt_lock:
-            # The Python lock serializes threads sharing this Store. BEGIN IMMEDIATE also
-            # serializes separate Store/process connections before predecessor selection,
-            # preventing two Team workers from forking the same workspace chain.
-            transaction_started = not self.conn.transaction_owned_by_current_thread()
-            try:
-                if transaction_started:
-                    self.conn.execute("BEGIN IMMEDIATE")
-                ts = now_ts()
-                receipt_id = ids.new_id("receipt")
-                scope_digest = _receipt_scope_digest(workspace_id, repo_id)
-                actor_digest = hashlib.sha256(actor.encode("utf-8")).hexdigest()[:16]
-                anchor = self.conn.execute(
-                    "SELECT receipt_count, head_hash, integrity_error "
-                    "FROM receipt_chain_heads "
-                    "WHERE workspace_id=?",
-                    (workspace_id,),
-                ).fetchone()
-                anchor_error = str(anchor["integrity_error"] or "") if anchor else ""
-                latest = self.conn.execute(
-                    "SELECT sequence FROM operation_receipts "
-                    "WHERE workspace_id=? ORDER BY sequence DESC LIMIT 1",
-                    (workspace_id,),
-                ).fetchone()
-                current_count: Optional[int] = None
-                prev_hash = ""
-                if anchor is None and latest is None:
-                    # First receipt for a workspace: no scan and no anchor are expected.
+        # SQLite reserves the writer before predecessor selection. The shared
+        # connection also serializes threads; a separate receipt mutex would
+        # invert that order when a caller already owns the transaction.
+        with self.write_transaction():
+            ts = now_ts()
+            receipt_id = ids.new_id("receipt")
+            scope_digest = _receipt_scope_digest(workspace_id, repo_id)
+            actor_digest = hashlib.sha256(actor.encode("utf-8")).hexdigest()[:16]
+            anchor = self.conn.execute(
+                "SELECT receipt_count, head_hash, integrity_error "
+                "FROM receipt_chain_heads "
+                "WHERE workspace_id=?",
+                (workspace_id,),
+            ).fetchone()
+            anchor_error = str(anchor["integrity_error"] or "") if anchor else ""
+            latest = self.conn.execute(
+                "SELECT sequence FROM operation_receipts "
+                "WHERE workspace_id=? ORDER BY sequence DESC LIMIT 1",
+                (workspace_id,),
+            ).fetchone()
+            current_count: Optional[int] = None
+            prev_hash = ""
+            if anchor is None and latest is None:
+                # First receipt for a workspace: no scan and no anchor are expected.
+                current_count = 0
+            elif anchor is not None:
+                anchor_count = anchor["receipt_count"]
+                anchor_head = anchor["head_hash"]
+                if (
+                    type(anchor_count) is int
+                    and anchor_count == 0
+                    and anchor_head == ""
+                    and latest is None
+                ):
                     current_count = 0
-                elif anchor is not None:
-                    anchor_count = anchor["receipt_count"]
-                    anchor_head = anchor["head_hash"]
+                elif (
+                    type(anchor_count) is int
+                    and anchor_count > 0
+                    and latest is not None
+                    and latest["sequence"] == anchor_count
+                ):
+                    head_row = self.conn.execute(
+                        "SELECT id, sequence, payload, prev_hash, receipt_hash "
+                        "FROM operation_receipts "
+                        "WHERE workspace_id=? AND sequence=?",
+                        (workspace_id, anchor_count),
+                    ).fetchone()
                     if (
-                        type(anchor_count) is int
-                        and anchor_count == 0
-                        and anchor_head == ""
-                        and latest is None
-                    ):
-                        current_count = 0
-                    elif (
-                        type(anchor_count) is int
-                        and anchor_count > 0
-                        and latest is not None
-                        and latest["sequence"] == anchor_count
-                    ):
-                        head_row = self.conn.execute(
-                            "SELECT id, sequence, payload, prev_hash, receipt_hash "
-                            "FROM operation_receipts "
-                            "WHERE workspace_id=? AND sequence=?",
-                            (workspace_id, anchor_count),
-                        ).fetchone()
-                        if (
-                            head_row is not None
-                            and head_row["receipt_hash"] == anchor_head
-                            and not _public_receipt_row(dict(head_row)).get(
-                                "invalid_payload", False
-                            )
-                        ):
-                            current_count = anchor_count
-                            prev_hash = str(anchor_head)
-
-                if current_count is None:
-                    # The independently stored anchor/ordinal did not describe a healthy
-                    # head. Reconstruct only on this exceptional path so a safe unique
-                    # predecessor can still be extended without retrying the memory action.
-                    chain = self._receipt_chain_state(workspace_id)
-                    if chain["structure_errors"]:
-                        raise ReceiptChainIntegrityError(
-                            "receipt chain has no unique structural head; append refused"
+                        head_row is not None
+                        and head_row["receipt_hash"] == anchor_head
+                        and not _public_receipt_row(dict(head_row)).get(
+                            "invalid_payload", False
                         )
-                    current_count = len(chain["rows"])
-                    prev_hash = str(chain["head"] or "")
-                    if chain["row_errors"]:
-                        anchor_error = anchor_error or "pre_append_chain_corruption"
-                    if anchor is None and current_count:
-                        anchor_error = anchor_error or "pre_append_anchor_missing"
-                    elif anchor is not None and (
-                        type(anchor["receipt_count"]) is not int
-                        or anchor["receipt_count"] != current_count
-                        or str(anchor["head_hash"]) != prev_hash
                     ):
-                        # Keep evidence of deletion or anchor damage while extending the
-                        # unique chain that actually remains.
-                        anchor_error = anchor_error or "pre_append_anchor_mismatch"
-                next_sequence = current_count + 1
-                safe_meta = _receipt_metadata(metadata or {})
-                payload_obj = {
-                    "version": 1,
-                    "id": receipt_id,
-                    "ts_ms": int(ts * 1000),
-                    "operation": operation,
-                    "scope_digest": scope_digest,
-                    "actor_digest": actor_digest,
-                    "target_count": safe_target_count,
-                    "status": safe_status,
-                    "metadata": safe_meta,
-                    "prev_hash": prev_hash,
-                }
-                payload = json.dumps(
-                    payload_obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-                )
-                receipt_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
-                self.conn.execute(
-                    "INSERT INTO operation_receipts(id, ts, operation, workspace_id, repo_id, "
-                    "sequence, scope_digest, actor, target_count, status, payload, prev_hash, "
-                    "receipt_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (
-                        receipt_id, ts, operation, workspace_id, repo_id, next_sequence,
-                        scope_digest,
-                        actor_digest, payload_obj["target_count"], payload_obj["status"],
-                        payload, prev_hash, receipt_hash,
-                    ),
-                )
-                self.conn.execute(
-                    "INSERT INTO receipt_chain_heads "
-                    "(workspace_id, receipt_count, head_hash, integrity_error, updated_at) "
-                    "VALUES (?,?,?,?,?) "
-                    "ON CONFLICT(workspace_id) DO UPDATE SET "
-                    "receipt_count=excluded.receipt_count, "
-                    "head_hash=excluded.head_hash, "
-                    "integrity_error=CASE "
-                    "WHEN receipt_chain_heads.integrity_error!='' "
-                    "THEN receipt_chain_heads.integrity_error "
-                    "ELSE excluded.integrity_error END, "
-                    "updated_at=excluded.updated_at",
-                    (workspace_id, current_count + 1, receipt_hash, anchor_error, ts),
-                )
-                if transaction_started:
-                    self.conn.commit()
-                return {**payload_obj, "hash": receipt_hash}
-            except Exception:
-                if transaction_started:
-                    self.conn.rollback()
-                raise
+                        current_count = anchor_count
+                        prev_hash = str(anchor_head)
+
+            if current_count is None:
+                # The independently stored anchor/ordinal did not describe a healthy
+                # head. Reconstruct only on this exceptional path so a safe unique
+                # predecessor can still be extended without retrying the memory action.
+                chain = self._receipt_chain_state(workspace_id)
+                if chain["structure_errors"]:
+                    raise ReceiptChainIntegrityError(
+                        "receipt chain has no unique structural head; append refused"
+                    )
+                current_count = len(chain["rows"])
+                prev_hash = str(chain["head"] or "")
+                if chain["row_errors"]:
+                    anchor_error = anchor_error or "pre_append_chain_corruption"
+                if anchor is None and current_count:
+                    anchor_error = anchor_error or "pre_append_anchor_missing"
+                elif anchor is not None and (
+                    type(anchor["receipt_count"]) is not int
+                    or anchor["receipt_count"] != current_count
+                    or str(anchor["head_hash"]) != prev_hash
+                ):
+                    # Keep evidence of deletion or anchor damage while extending the
+                    # unique chain that actually remains.
+                    anchor_error = anchor_error or "pre_append_anchor_mismatch"
+            next_sequence = current_count + 1
+            safe_meta = _receipt_metadata(metadata or {})
+            payload_obj = {
+                "version": 1,
+                "id": receipt_id,
+                "ts_ms": int(ts * 1000),
+                "operation": operation,
+                "scope_digest": scope_digest,
+                "actor_digest": actor_digest,
+                "target_count": safe_target_count,
+                "status": safe_status,
+                "metadata": safe_meta,
+                "prev_hash": prev_hash,
+            }
+            payload = json.dumps(
+                payload_obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+            )
+            receipt_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+            self.conn.execute(
+                "INSERT INTO operation_receipts(id, ts, operation, workspace_id, repo_id, "
+                "sequence, scope_digest, actor, target_count, status, payload, prev_hash, "
+                "receipt_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    receipt_id, ts, operation, workspace_id, repo_id, next_sequence,
+                    scope_digest,
+                    actor_digest, payload_obj["target_count"], payload_obj["status"],
+                    payload, prev_hash, receipt_hash,
+                ),
+            )
+            self.conn.execute(
+                "INSERT INTO receipt_chain_heads "
+                "(workspace_id, receipt_count, head_hash, integrity_error, updated_at) "
+                "VALUES (?,?,?,?,?) "
+                "ON CONFLICT(workspace_id) DO UPDATE SET "
+                "receipt_count=excluded.receipt_count, "
+                "head_hash=excluded.head_hash, "
+                "integrity_error=CASE "
+                "WHEN receipt_chain_heads.integrity_error!='' "
+                "THEN receipt_chain_heads.integrity_error "
+                "ELSE excluded.integrity_error END, "
+                "updated_at=excluded.updated_at",
+                (workspace_id, current_count + 1, receipt_hash, anchor_error, ts),
+            )
+            return {**payload_obj, "hash": receipt_hash}
 
     def list_receipts(self, *, workspace_id: str, limit: int = 100) -> list[dict]:
         safe_limit = max(1, min(10_000, int(limit)))
@@ -10164,19 +10477,9 @@ class Store:
                 where.append(f"{p}ingested_at>=?")
                 params.append(flt.modified_since)
         if not include_invalid:
-            valid_at, known_at = _temporal_anchors(flt)
-            where.append(f"({p}valid_from IS NULL OR {p}valid_from<=?)")
-            params.append(valid_at)
-            where.append(
-                f"({p}valid_to IS NULL OR ?<{p}valid_to OR "
-                f"({p}valid_to_recorded_at IS NOT NULL "
-                f"AND ?<{p}valid_to_recorded_at))"
-            )
-            params.extend((valid_at, known_at))
-            where.append(f"({p}ingested_at IS NULL OR {p}ingested_at<=?)")
-            params.append(known_at)
-            where.append(f"({p}expired_at IS NULL OR ?<{p}expired_at)")
-            params.append(known_at)
+            temporal, temporal_params = _memory_temporal_visibility_sql(alias, flt)
+            where.append(temporal)
+            params.extend(temporal_params)
         return where, params
 
 
