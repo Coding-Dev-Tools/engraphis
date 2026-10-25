@@ -93,6 +93,7 @@
   const number = value => Number.isFinite(Number(value)) ? Number(value) : 0;
   const NOTICE_DURATION_MS = 3000;
   let noticeTimer = null;
+  let localSessionPromise = null;
   let graphRepoLoadTimer = null;
   let librarySearchTimer = null;
   const CLOUD_SYNC_PRIVACY_NOTICE = 'Cloud Sync encrypts eligible shared-workspace changes end-to-end before they leave this device. Engraphis Cloud cannot read their contents; secret and session-scoped memories stay local.';
@@ -295,6 +296,44 @@
     return `Request failed (${status})`;
   };
 
+  function localDashboardUrl() {
+    return /^(localhost|127(?:\.\d{1,3}){3}|\[::1\])$/i.test(location.hostname);
+  }
+
+  async function ensureLocalBrowserSession() {
+    if (!localSessionPromise) {
+      localSessionPromise = (async () => {
+        const controller = new AbortController();
+        const timer = window.setTimeout(() => controller.abort(), 8000);
+        try {
+          const response = await fetch(`${apiRoot}/auth/local-session`, {
+            method: 'POST', cache: 'no-store', signal: controller.signal,
+            headers: { 'X-Engraphis-Browser-Session': '1' },
+          });
+          const session = await response.json().catch(() => null);
+          if (!response.ok || !session || !session.authenticated) {
+            const error = new Error('Local session unavailable');
+            // A token-gated instance refuses the automatic session on purpose, so the
+            // caller must fall back to the token exchange instead of reporting an outage.
+            error.status = response.status;
+            error.code = session && session.code;
+            throw error;
+          }
+          state.reviewCsrf = text(session.review_csrf_token);
+          return true;
+        } catch (error) {
+          if (error && error.code === 'local_token_required') throw error;
+          const failure = new Error('Local Engraphis could not connect. Reload this page to retry.');
+          failure.localBrowser = true;
+          throw failure;
+        } finally {
+          window.clearTimeout(timer);
+        }
+      })().finally(() => { localSessionPromise = null; });
+    }
+    return localSessionPromise;
+  }
+
   async function api(path, options = {}) {
     const { timeoutMs = 30_000, signal, ...requestOptions } = options;
     const controller = new AbortController();
@@ -312,15 +351,30 @@
       init.body = JSON.stringify(init.body);
     }
     try {
-      const response = await fetch(`${apiRoot}${path}`, init);
-      const payload = await response.json().catch(error => {
-        if (controller.signal.aborted) throw error;
-        return null;
-      });
+      const request = async () => {
+        const response = await fetch(`${apiRoot}${path}`, init);
+        const payload = await response.json().catch(error => {
+          if (controller.signal.aborted) throw error;
+          return null;
+        });
+        return { response, payload };
+      };
+      let { response, payload } = await request();
+      // Only this middleware code guarantees the rejected request never ran.
+      // A hosted account's 401 must never trigger a local retry or hide its error.
+      if (response.status === 401 && payload?.code === 'local_browser_session_required'
+          && payload.local_browser === true) {
+        await ensureLocalBrowserSession();
+        if (init.headers['X-Engraphis-Review-CSRF']) {
+          init.headers['X-Engraphis-Review-CSRF'] = state.reviewCsrf;
+        }
+        ({ response, payload } = await request());
+      }
       if (!response.ok) {
         const error = new Error(errorMessage(payload, response.status));
         error.status = response.status;
         error.code = payload && ((payload.detail && payload.detail.code) || payload.code);
+        error.localBrowser = payload && payload.local_browser;
         throw error;
       }
       return payload;
@@ -367,7 +421,7 @@
         event.preventDefault();
         const value = input.value.trim();
         if (!value) {
-          error.textContent = 'Enter the deployment token.';
+          error.textContent = 'Enter your access token.';
           error.hidden = false;
           input.focus();
           return;
@@ -389,12 +443,21 @@
     });
   }
 
-  async function authenticateBrowser() {
-    let token = '';
+  async function authenticateBrowser(error = null) {
+    if (error?.localBrowser === true || (error?.localBrowser !== false && localDashboardUrl())) {
+      showNotice('Local Engraphis could not connect. Reload this page to retry.');
+      return false;
+    }
+    // The exchange can run after the router normalised the address bar, so the
+    // one-shot fragment token captured during boot takes precedence.
+    let token = bootToken;
+    bootToken = '';
     let failure = '';
     try {
-      const fragment = new URLSearchParams(location.hash.slice(1));
-      token = fragment.get('token') || '';
+      if (!token) {
+        const fragment = new URLSearchParams(location.hash.slice(1));
+        token = fragment.get('token') || '';
+      }
       if (token) history.replaceState(null, '', `${location.pathname}${location.search}`);
     } catch (_) {}
     while (true) {
@@ -412,13 +475,25 @@
         return true;
       } catch (error) {
         submitted = '';
-        failure = error.message;
-        showNotice(`Authentication failed: ${failure}`);
+        failure = error.status === 401
+          ? 'That access token was not accepted. Check it with the person who set up Engraphis and try again.'
+          : error.message;
+        showNotice(`Sign-in failed: ${failure}`);
       }
     }
   }
 
   async function reviewCsrfToken() {
+    if (state.reviewCsrf) return state.reviewCsrf;
+    if (localDashboardUrl()) {
+      try {
+        await ensureLocalBrowserSession();
+      } catch (error) {
+        // Token-gated instances have no automatic session. Their confirmation comes
+        // from the token exchange, or from the cookie-authenticated endpoint below.
+        if (error.code !== 'local_token_required') throw error;
+      }
+    }
     if (state.reviewCsrf) return state.reviewCsrf;
     const response = await fetch(`${location.origin}/dashboard/review/csrf`, {
       headers: { 'X-Engraphis-Browser-Session': '1' },
@@ -917,7 +992,13 @@
   }
 
   function connectionProblemDetail(error) {
+    if (error && error.localBrowser === true) {
+      return 'Local Engraphis could not connect. Reload this page to retry.';
+    }
     if (error && error.status === 401) {
+      if (error.code !== 'local_browser_session_required') {
+        return error.message || 'Sign-in is required before this request can continue.';
+      }
       return 'This Engraphis deployment needs its API token before the dashboard can load. Choose Retry now to enter it.';
     }
     if (error && error.status === 403) {
@@ -5982,6 +6063,8 @@
     const failure = hostedFailure('analytics', error);
     if (failure) {
       renderHostedFailure(target, failure);
+      target.append(button('Run fresh analysis', 'secondary-button',
+        () => runFreshAnalytics(workspace)));
       return;
     }
     const message = error && error.message ? error.message : text(error);
@@ -6159,12 +6242,13 @@
     }
   }
 
-  function automationCheckbox(id, label, checked) {
+  function automationCheckbox(id, label, checked, disabled = false) {
     const field = node('label', 'check-row');
     const input = node('input');
     input.id = id;
     input.type = 'checkbox';
     input.checked = Boolean(checked);
+    input.disabled = disabled;
     field.htmlFor = id;
     field.append(input, document.createTextNode(label));
     return field;
@@ -6177,6 +6261,8 @@
     input.type = 'number';
     input.min = String(min);
     input.max = String(max);
+    input.required = true;
+    input.step = '1';
     input.value = String(value);
     field.htmlFor = id;
     field.append(input);
@@ -6204,21 +6290,29 @@
       return;
     }
     const enabled = Boolean(policy.enabled);
-    const dreamEnabled = policy.dream_enabled != null ? policy.dream_enabled : policy.dream;
+    const dreamEnabled = policy.dream_enabled ?? policy.dream ?? true;
+    const cadenceMinutes = Number(policy.cadence_minutes ?? Number(policy.cadence_hours ?? 24) * 60);
     const lastRun = policy.last_run ? ` Last managed run: ${relative(policy.last_run)}.` : '';
     form.append(
       node('p', 'automation-policy-note', enabled
         ? `This workspace has an active hosted maintenance policy.${lastRun}`
         : 'Hosted maintenance is paused for this workspace.'),
       automationCheckbox('automation-enabled', 'Enable hosted maintenance', enabled),
-      automationNumber('automation-cadence', 'Run every (hours)', Math.max(1, Number(policy.cadence_hours) || 24), 1, 8760),
+      node('p', 'automation-policy-note', `Current cadence: every ${cadenceMinutes} minutes. The saved cadence is preserved unless you edit Run every (hours).`),
+      automationNumber('automation-cadence', 'Run every (hours)', Math.max(1, Number(policy.cadence_hours ?? 24)), 1, 720),
       automationCheckbox('automation-dream', 'Enable Auto Dreaming after accumulation and idle time', dreamEnabled),
-      automationNumber('automation-dream-min', 'Minimum new memories', Math.max(1, Number(policy.dream_min_new) || 25), 1, 100000),
-      automationNumber('automation-dream-idle', 'Idle minutes before Dreaming', Math.max(0, Number(policy.dream_idle_minutes) || 0), 0, 10080),
-      automationCheckbox('automation-infer', 'Allow hosted relationship inference proposals', policy.infer),
+      automationNumber('automation-dream-min', 'Minimum eligible memories', Math.max(2, Number(policy.dream_min_new ?? 25)), 2, 10000),
+      automationNumber('automation-dream-idle', 'Idle minutes before Dreaming', Math.max(0, Number(policy.dream_idle_minutes ?? 15)), 0, 10080),
+      automationCheckbox('automation-infer', 'Hosted relationship inference is not available', false, true),
       node('p', 'automation-policy-note', `Cloud Sync: ${CLOUD_SYNC_PRIVACY_NOTICE} Managed compute: saving an enabled policy submits a bounded snapshot of this workspace’s normal and sensitive memory content to Engraphis Cloud. Cloud work returns proposals and never silently changes the local database.`),
     );
     const actions = node('div', 'automation-policy-actions');
+    // An unchanged whole-hour display must not round a saved 15- or 90-minute cadence.
+    // Track input intent so explicitly entering the displayed 1 still selects one hour.
+    const cadenceInput = form.querySelector('#automation-cadence');
+    if (cadenceInput) cadenceInput.addEventListener('input', () => {
+      form.dataset.cadenceEdited = '1';
+    });
     const save = node('button', 'primary-button', enabled ? 'Save & send policy to Cloud' : 'Save hosted policy');
     save.type = 'submit';
     // The label names the transfer before it happens, so it follows the checkbox.
@@ -6321,12 +6415,14 @@
     const request = beginScopedRequest('automation-save');
     const policy = {
       enabled: byId('automation-enabled').checked,
-      cadence_hours: Math.max(1, Number(byId('automation-cadence').value) || 1),
       dream_enabled: byId('automation-dream').checked,
-      dream_min_new: Math.max(1, Number(byId('automation-dream-min').value) || 1),
+      dream_min_new: Math.max(2, Number(byId('automation-dream-min').value) || 2),
       dream_idle_minutes: Math.max(0, Number(byId('automation-dream-idle').value) || 0),
-      infer: byId('automation-infer').checked,
+      infer: false,
     };
+    if (form.dataset.cadenceEdited === '1') {
+      policy.cadence_hours = Math.max(1, Number(byId('automation-cadence').value) || 1);
+    }
     if (policy.enabled && !await dialogs.confirm({
       title: 'Save hosted policy',
       message: [
@@ -7068,12 +7164,24 @@
   }
 
   let bootPromise = null;
+  let bootToken = '';
   function boot() {
     if (!bootPromise) bootPromise = runBoot().finally(() => { bootPromise = null; });
     return bootPromise;
   }
 
   async function runBoot() {
+    if (localDashboardUrl()) {
+      const fragment = new URLSearchParams(location.hash.slice(1));
+      if (fragment.has('token')) {
+        // Keep the one-shot credential for the exchange: this bookmark cleanup runs
+        // before the first bootstrap request can authenticate with it.
+        bootToken = fragment.get('token') || '';
+        fragment.delete('token');
+        history.replaceState(null, '', location.pathname + location.search
+          + (fragment.size ? '#' + fragment.toString() : ''));
+      }
+    }
     byId('today-date').textContent = new Intl.DateTimeFormat(undefined, { dateStyle: 'long' }).format(new Date());
     let theme = 'slate';
     try {
@@ -7102,7 +7210,8 @@
         switchManageTab(requestedManageTab);
       }
     } catch (error) {
-      if (error.status === 401 && await authenticateBrowser()) {
+      if (error.status === 401 && error.code === 'local_browser_session_required'
+          && await authenticateBrowser(error)) {
         location.reload();
         return;
       }

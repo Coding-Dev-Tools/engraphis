@@ -12,7 +12,7 @@
 
   <g filter="url(#shadow)">
     <rect x="70" y="267" width="493" height="521" rx="20" fill="#fff" stroke="#1763e8" stroke-width="3"/>
-    <rect x="112" y="314" width="255" height="53" rx="14" fill="#eaf2ff" stroke="#a9c9ff" stroke-width="2"/>
+    <rect x="112" y="314" width="300" height="53" rx="14" fill="#eaf2ff" stroke="#a9c9ff" stroke-width="2"/>
     <text x="134" y="350" font-family="Inter, Arial, sans-serif" font-size="25" font-weight="700" fill="#1554c0">FOCUSED CONTEXT</text>
     <text x="112" y="483" font-family="Inter, Arial, sans-serif" font-size="49" font-weight="700" fill="#061a43">Find the</text>
     <text x="112" y="541" font-family="Inter, Arial, sans-serif" font-size="49" font-weight="700" fill="#061a43">relevant passage</text>
@@ -24,7 +24,7 @@
 
   <g filter="url(#shadow)">
     <rect x="603" y="267" width="493" height="521" rx="20" fill="#fff" stroke="#109252" stroke-width="3"/>
-    <rect x="645" y="314" width="221" height="53" rx="14" fill="#eafbf1" stroke="#ade9c7" stroke-width="2"/>
+    <rect x="645" y="314" width="265" height="53" rx="14" fill="#eafbf1" stroke="#ade9c7" stroke-width="2"/>
     <text x="667" y="350" font-family="Inter, Arial, sans-serif" font-size="25" font-weight="700" fill="#08773f">CITED ANSWER</text>
     <text x="645" y="483" font-family="Inter, Arial, sans-serif" font-size="49" font-weight="700" fill="#061a43">Answer only</text>
     <text x="645" y="541" font-family="Inter, Arial, sans-serif" font-size="49" font-weight="700" fill="#061a43">with support</text>
@@ -36,7 +36,7 @@
 
   <g filter="url(#shadow)">
     <rect x="1136" y="267" width="493" height="521" rx="20" fill="#fff" stroke="#f57a19" stroke-width="3"/>
-    <rect x="1178" y="314" width="195" height="53" rx="14" fill="#fff4e9" stroke="#ffd1a4" stroke-width="2"/>
+    <rect x="1178" y="314" width="245" height="53" rx="14" fill="#fff4e9" stroke="#ffd1a4" stroke-width="2"/>
     <text x="1200" y="350" font-family="Inter, Arial, sans-serif" font-size="25" font-weight="700" fill="#d75c06">SAFE ABSTAIN</text>
     <text x="1178" y="483" font-family="Inter, Arial, sans-serif" font-size="49" font-weight="700" fill="#061a43">No support,</text>
     <text x="1178" y="541" font-family="Inter, Arial, sans-serif" font-size="49" font-weight="700" fill="#061a43">no answer</text>

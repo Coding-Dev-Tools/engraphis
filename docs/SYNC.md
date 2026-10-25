@@ -190,12 +190,26 @@ when both endpoints remain in the export. Inbound legacy or untrusted bundles ca
 relabel, or overwrite session-scoped state because the sync format carries no authenticated
 session owner or lifecycle contract.
 
-Bundle format v3 preserves durable claim identity and the system-time at which a world-time
-invalidation was learned. It also carries a per-device `generation`, `previous_hash`,
+Bundle format v4 preserves durable claim identity and the complete set of world-time closure
+observations with their knowledge timestamps. A later shortening never replaces an earlier
+observation: historical reads use the earliest endpoint known at their `known_at` anchor.
+The set is merged by union, deterministically ordered, and included in snapshot hashes.
+Each memory accepts at most 1,024 distinct observations; an oversized union is rejected
+without truncating the existing history. That ceiling is partitioned rather than shared: a
+sync peer may install at most 960 observations on one memory, and the remaining 64 stay
+reserved for the local writer so a peer can never starve a local retirement or revision.
+The budget is spent only by observations the local record does not already hold, so a
+replay or a closure-neutral peer update is always accepted and stays idempotent. A new
+observation that would push the union past 960 is refused whole: the existing history is
+preserved and nothing is partially written. Schema 19 upgrades seed the available scalar closure;
+observations already lost by an earlier version cannot be reconstructed automatically.
+
+The format also carries a per-device `generation`, `previous_hash`,
 `state_hash`, and `tombstone_checkpoint`. Engraphis pulls its own device's remote snapshot before
 replacement and rejects an observed generation/hash-chain rollback. Current clients accept
-inbound v1 and v2 bundles for compatibility but export v3; older clients reject unknown versions
-instead of silently forwarding a downgraded snapshot.
+inbound v1, v2, and v3 bundles for compatibility but export v4. Older clients reject v4;
+upgrade all participating devices before syncing this release. Exporting history under an older
+version number would allow older peers to discard observations silently.
 
 Erasure markers remain content-free and carry an `export_class`. Export includes only
 `remote_erasure` markers created for non-secret workspace/repo records that were eligible for

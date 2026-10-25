@@ -16,18 +16,21 @@ import logging
 import math
 import os
 import re
+import sqlite3
 import tempfile
 import threading
 import time
 from collections import defaultdict, deque
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterator, Optional
 
 import numpy as np
 
 from engraphis.core import scoring
 from engraphis.core.adaptive_context import AdaptiveContextResult, fit_recent_history
 from engraphis.core.conflicts import detect_conflicts
+from engraphis.core.documents import remote_or_device_path
 from engraphis.core.evidence import exact_value_binding, make_exact_value_binding
 from engraphis.core.interfaces import (
     MemoryRecord,
@@ -75,6 +78,7 @@ from engraphis.core.resolve import (
 )
 from engraphis.core.secrets import redact_secrets as _redact_secrets, reject_secrets
 from engraphis.core.store import (
+    DEFAULT_HISTORY_CANDIDATE_BUDGET,
     SavepointError,
     Store,
     _is_memory_database_path,
@@ -332,6 +336,28 @@ def _required_memory_workspace_id(record: MemoryRecord) -> str:
     return workspace_id
 
 
+def _reject_empty_validity_interval(record: Optional[MemoryRecord], at: Optional[float],
+                                    *, action: str) -> None:
+    """Refuse a closure that would persist an empty validity interval.
+
+    ``valid_from == valid_to`` is only representable as an explicit quarantine
+    marker: the Store's persistence boundary rejects it for every other record
+    and a sync peer drops such a record outright (``core/sync.py`` treats an
+    endpoint equal to ``valid_from`` as an unauthorised empty interval). A
+    supersession or retirement that lands on the record's own start instant
+    therefore fails closed here instead of writing a record other peers
+    silently discard.
+    """
+    if record is None or at is None or record.valid_from is None:
+        return
+    if at <= record.valid_from:
+        raise ValueError(
+            "valid_to cannot predate valid_from; an empty validity interval is "
+            "only valid as an explicit quarantine marker "
+            f"({action}: {at!r} <= {record.valid_from!r})"
+        )
+
+
 def _writable_scope(scope: Scope, repo_id: Optional[str]) -> Scope:
     """The nearest scope ``remember()`` will actually accept for ``repo_id``.
 
@@ -522,6 +548,28 @@ class MemoryEngine:
         self.vector_backend: str = ""
         self.backend_identities: dict = {}
         self._closed = False
+
+    @contextmanager
+    def _write_guard(self) -> Iterator[None]:
+        """Enter the writer without waiting while holding a caller's SQLite transaction.
+
+        Ordinary writes take this guard before SQLite. A caller may already own
+        SQLite, so it must fail before any mutation if another thread owns this
+        engine. Same-thread nested writes remain reentrant and caller-owned work
+        is never committed or rolled back by a failed admission.
+        """
+        if self.store.conn.transaction_owned_by_current_thread():
+            acquired = self._write_lock.acquire(blocking=False)
+            if not acquired:
+                raise RuntimeError(
+                    "engine writer is busy; settle the caller-owned transaction before retrying"
+                )
+        else:
+            self._write_lock.acquire()
+        try:
+            yield
+        finally:
+            self._write_lock.release()
 
     def _adopt_resources(self, resources: list[Any]) -> None:
         """Take ownership of factory-created collaborators after composition succeeds."""
@@ -878,6 +926,7 @@ class MemoryEngine:
                  _trusted_graph_keys: Optional[frozenset] = None,
                  _transactional_finalizer: Optional[Callable[[str], None]] = None,
                  _transactional_validator: Optional[Callable[[], Optional[dict]]] = None,
+                 _session_lineage_source_id: Optional[str] = None,
                  redact_secrets: bool = False) -> str:
         """Store one memory. Returns the resulting record id: a new id for ADD/
         INVALIDATE/quarantine, or the existing memory's id if this was resolved as a
@@ -892,6 +941,7 @@ class MemoryEngine:
             _trusted_graph_keys=_trusted_graph_keys,
             _transactional_finalizer=_transactional_finalizer,
             _transactional_validator=_transactional_validator,
+            _session_lineage_source_id=_session_lineage_source_id,
             redact_secrets=redact_secrets,
         )["id"]
 
@@ -907,6 +957,7 @@ class MemoryEngine:
                  _approval_override: bool = False,
                  _transactional_finalizer: Optional[Callable[[str], None]] = None,
                  _transactional_validator: Optional[Callable[[], Optional[dict]]] = None,
+                 _session_lineage_source_id: Optional[str] = None,
                  extra_neighbors: Optional[list] = None,
                  redact_secrets: bool = False) -> dict:
         """Store one memory with deterministic conflict resolution.
@@ -1021,7 +1072,7 @@ class MemoryEngine:
         # Reserve SQLite's writer before neighbor discovery, after embedding. The
         # database boundary serializes independent engines/processes as well as
         # threads, and defers nested helper commits until the decision is durable.
-        with self._write_lock:
+        with self._write_guard():
             caller_owned_transaction = self.store.conn.transaction_owned_by_current_thread()
             external_index = bool(
                 vector_index_requires_sync(self.index, self.store)
@@ -1040,7 +1091,30 @@ class MemoryEngine:
                 target = index_repair_identity(self.index, self.store)
                 if target is not None:
                     self.store.register_vector_index(target)
-                if session_id:
+                if _session_lineage_source_id is not None:
+                    # Governed same-scope derivations retain a durable memory's
+                    # original session as provenance. This is not a new write into
+                    # that session: its active lifetime may already have ended.
+                    # Re-read both owners under the writer, after command validation;
+                    # ordinary ingress and all session-scoped writes stay fenced.
+                    source = self.store.get_memory(_session_lineage_source_id)
+                    lineage = self.store.get_session(session_id) if session_id else None
+                    if (
+                        _transactional_validator is None
+                        or _transactional_finalizer is None
+                        or scope not in (Scope.REPO, Scope.WORKSPACE)
+                        or source is None
+                        or source.scope != scope
+                        or source.workspace_id != workspace_id
+                        or source.repo_id != repo_id
+                        or source.session_id != session_id
+                        or lineage is None
+                        or lineage.get("workspace_id") != workspace_id
+                        or (repo_id is not None and lineage.get("repo_id") != repo_id)
+                        or not _governable_source(source, at=now_ts())
+                    ):
+                        raise ValueError("session lineage requires a matching governed source")
+                elif session_id:
                     self.store.begin_session_write(
                         session_id, workspace_id=workspace_id, repo_id=repo_id,
                     )
@@ -1237,7 +1311,7 @@ class MemoryEngine:
         inserted: list[tuple[str, dict]] = []  # (memory_id, prepared item)
         pending_vectors: list[tuple[str, np.ndarray]] = []
 
-        with self._write_lock:
+        with self._write_guard():
             caller_owned_transaction = (
                 self.store.conn.transaction_owned_by_current_thread()
             )
@@ -1647,6 +1721,13 @@ class MemoryEngine:
                 target_id = _required_resolution_target(decision)
                 resolution_reason = decision.reason
                 predecessor = self.store.get_memory(target_id)
+                # Both branches below close the predecessor at ``rec.valid_from``.
+                # Landing on the predecessor's own start instant would persist an
+                # empty validity interval, which the Store's persistence boundary
+                # and every sync peer reject, so the supersession fails closed.
+                _reject_empty_validity_interval(
+                    predecessor, rec.valid_from, action="superseding write",
+                )
                 predecessor_end = predecessor.valid_to if predecessor is not None else None
                 if (predecessor_end is not None and rec.valid_from is not None
                         and rec.valid_from < predecessor_end):
@@ -2853,7 +2934,7 @@ class MemoryEngine:
                      include_invalid: bool,
                      prompt_only: bool = False,
                      closed_only: bool = False) -> list[tuple[float, MemoryRecord]]:
-        """Score bounded candidates — optionally including invalidated ones — by the
+        """Score matching memories — optionally including invalidated ones — by the
         max of semantic similarity and lexical token overlap. ``why``/``timeline`` need to
         search *through* bi-temporal history, which the normal vector index ``search()``
         deliberately excludes (it's the live-recall path), so this recomputes similarity
@@ -2878,21 +2959,52 @@ class MemoryEngine:
                 sem[mid] = float(np.dot(qn, vec))
         q_tokens = tokenize(query)
         out: list[tuple[float, MemoryRecord]] = []
-        records = self.store.list_memories(
-            flt, include_invalid=include_invalid, limit=500, prompt_only=prompt_only,
-            closed_only=closed_only, candidate_query=query if closed_only else "",
-        )
+
+        if closed_only:
+            # Explicit closed-history lookup keeps its topic-ranked candidate budget.
+            records = self.store.list_memories(
+                flt, include_invalid=include_invalid, limit=DEFAULT_HISTORY_CANDIDATE_BUDGET,
+                prompt_only=prompt_only, closed_only=True, candidate_query=query,
+            )
+        else:
+            # Bound history inspection by an explicit candidate window instead of
+            # hydrating every memory row.  The window is the union of the indexed
+            # lexical arm (``mem_fts``) and the semantic arm's ranked hits, so a
+            # superseded record outside the newest-N window is still reachable,
+            # while the cost follows the window size rather than the corpus size.
+            # Hydrated records keep their complete ``memory_closures`` history.
+            semantic_ranked = sorted(sem.items(), key=lambda item: (-item[1], item[0]))
+            extra_ids = [
+                memory_id for memory_id, score in semantic_ranked if score > 0.05
+            ][:DEFAULT_HISTORY_CANDIDATE_BUDGET]
+            try:
+                records = self.store.list_history_candidates(
+                    flt, query=query, extra_ids=extra_ids,
+                    budget=DEFAULT_HISTORY_CANDIDATE_BUDGET,
+                    include_invalid=include_invalid, prompt_only=prompt_only,
+                )
+            except sqlite3.Error:
+                # Never let a broken index collapse history inspection to an empty
+                # answer: degrade to one bounded newest-first page and keep going.
+                logger.warning(
+                    "history candidate selection failed; falling back to a bounded "
+                    "newest-first page", exc_info=True,
+                )
+                records = self.store.list_memories(
+                    flt, include_invalid=include_invalid,
+                    limit=DEFAULT_HISTORY_CANDIDATE_BUDGET, prompt_only=prompt_only,
+                )
         if include_invalid:
             # History must retain closed valid-time intervals, but cannot expose a
             # record that was not known at the requested system-time snapshot.
             # Default to the current snapshot when the caller omitted known_at —
             # same normalization RecallEngine.recall applies (core/recall.py).
             system_time = flt.known_at if flt.known_at is not None else now_ts()
-            records = [
+            records = (
                 rec for rec in records
                 if (rec.ingested_at is None or rec.ingested_at <= system_time)
                 and (rec.expired_at is None or system_time < rec.expired_at)
-            ]
+            )
         for rec in records:
             # Public history is model-adjacent just like ordinary recall: tool output
             # can be inserted into an agent transcript. Pending records therefore stay
@@ -3015,7 +3127,7 @@ class MemoryEngine:
         Separate indexes require an engine-owned transaction so a caller cannot later
         roll back the durable repair debt after an irreversible provider deletion.
         """
-        with self._write_lock:
+        with self._write_guard():
             repair_target = index_repair_identity(self.index, self.store)
             transaction_started = not self.store.conn.transaction_owned_by_current_thread()
             if repair_target is not None and not transaction_started:
@@ -3105,7 +3217,7 @@ class MemoryEngine:
                 exact_value_type: str = "literal",
                 exact_value_span: Optional[tuple[int, int]] = None,
                 clear_exact_value: bool = False) -> dict:
-        with self._write_lock:
+        with self._write_guard():
             return self._correct_locked(
                 memory_id, new_content, reason=reason, actor=actor,
                 exact_value=exact_value, exact_value_type=exact_value_type,
@@ -3143,7 +3255,7 @@ class MemoryEngine:
             or not math.isfinite(importance) or not 0 <= importance <= 1
         ):
             raise ValueError("importance must be between zero and one")
-        with self._write_lock:
+        with self._write_guard():
             old = self.store.get_memory(memory_id)
             if old is None:
                 raise KeyError(f"no memory with id '{memory_id}'")
@@ -3292,6 +3404,10 @@ class MemoryEngine:
             claim_kind=old.claim_kind,
             _transactional_finalizer=finalize_correction,
             _transactional_validator=validate_correction,
+            _session_lineage_source_id=(
+                old.id if old.session_id and old.scope in (Scope.REPO, Scope.WORKSPACE)
+                else None
+            ),
         )
         # The old vector is historical evidence; temporal filtering hides it from
         # current recall while keeping semantic time travel complete.
@@ -3322,7 +3438,7 @@ class MemoryEngine:
         # Keep lookup and insert in the engine's write critical section. Without it two
         # retries of the same pending source could each observe no successor and create
         # duplicate prompt-visible records. The normal remember path re-enters this RLock.
-        with self._write_lock:
+        with self._write_guard():
             old = self.store.get_memory(memory_id)
             if old is None:
                 raise KeyError(f"no memory with id '{memory_id}'")
@@ -3463,12 +3579,16 @@ class MemoryEngine:
                 _approval_override=True,
                 _transactional_finalizer=finalize_approval,
                 _transactional_validator=validate_approval,
+                _session_lineage_source_id=(
+                    old.id if old.session_id and old.scope in (Scope.REPO, Scope.WORKSPACE)
+                    else None
+                ),
             )
             return approval_result(result)
 
     def promote(self, memory_id: str, target_scope: Scope, *, reason: str = "",
                 actor: str = "user") -> dict:
-        with self._write_lock:
+        with self._write_guard():
             return self._promote_locked(
                 memory_id, target_scope, reason=reason, actor=actor,
             )
@@ -3669,7 +3789,7 @@ class MemoryEngine:
               scope: Optional[Scope] = None, keywords: Optional[list] = None,
               reason: str = "", actor: str = "user") -> dict:
         """Merge live memories into one atomic, temporally bounded successor."""
-        with self._write_lock:
+        with self._write_guard():
             return self._merge_locked(
                 source_ids, merged_content, title=title, mtype=mtype, scope=scope,
                 keywords=keywords, reason=reason, actor=actor,
@@ -3992,9 +4112,10 @@ class MemoryEngine:
         # Normalize before the root-prefix check.  Keep this check at the filesystem
         # call site (rather than hiding it in a helper) so both human review and static
         # analysis can establish that every later path is constrained by this boundary.
-        canonical_root = os.path.normcase(
-            os.path.realpath(os.path.expanduser(os.fspath(root_path)))
-        )
+        expanded_root = os.path.expanduser(os.fspath(root_path))
+        if remote_or_device_path(os.fspath(root_path)) or remote_or_device_path(expanded_root):
+            raise ValueError("repo root is outside approved local roots")
+        canonical_root = os.path.normcase(os.path.realpath(expanded_root))
         # Retain a separator on the checked value.  This makes an approved root
         # itself and every child use the same normalized-prefix check (and avoids
         # accepting a sibling such as ``/work/repo-copy`` for ``/work/repo``).
@@ -4168,9 +4289,10 @@ class MemoryEngine:
         ):
             raise RuntimeError("code indexing backend is not configured")
 
-        canonical_root = os.path.normcase(
-            os.path.realpath(os.path.expanduser(os.fspath(root_path)))
-        )
+        expanded_root = os.path.expanduser(os.fspath(root_path))
+        if remote_or_device_path(os.fspath(root_path)) or remote_or_device_path(expanded_root):
+            raise ValueError("repo root is outside approved local roots")
+        canonical_root = os.path.normcase(os.path.realpath(expanded_root))
         canonical_root_with_sep = canonical_root.rstrip(os.sep) + os.sep
         safe_root: Optional[str] = None
         for approved_root in _approved_local_index_roots():
