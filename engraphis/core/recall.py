@@ -90,6 +90,14 @@ from engraphis.core.vector_search import canonical_vector_search
 logger = logging.getLogger("engraphis.core.recall")
 
 
+def _exact_identifier_pattern(query: str) -> Optional[re.Pattern[str]]:
+    """Recognize a literal lookup without changing natural-language ranking."""
+    identifier = query.strip().casefold()
+    if not re.fullmatch(r"[a-z0-9]+(?:[-_/.][a-z0-9]+)+", identifier):
+        return None
+    return re.compile(r"(?<!\w)(?<!\w[./-])" + re.escape(identifier) + r"(?!\w|[./-]\w)")
+
+
 # Prompt-safe recall may search farther than ordinary recall because backends cannot
 # filter provenance. Keep the second page bounded so a mostly untrusted import never
 # turns one prompt build into a full-scope scan.
@@ -821,8 +829,23 @@ class RecallEngine:
                 ),
                 "consolidation_source_ids": evidence,
             }
+        # A literal identifier lookup must not lose its exact content match to
+        # unrelated memories' type/retention priors. Only prioritize candidates
+        # that have already passed the normal scope, time and provenance gates.
+        identifier_pattern = _exact_identifier_pattern(query)
+        exact_identifier_ids = {
+            mid for mid, record in recs.items()
+            if identifier_pattern is not None
+            and identifier_pattern.search(record.content.casefold())
+        }
+
+        def ranking_key(candidate: Candidate) -> tuple[bool, float, str]:
+            return candidate.id not in exact_identifier_ids, -candidate.score, candidate.id
+
         # Tie-break on id so equal scores get a stable, process-independent order.
-        scored.sort(key=lambda c: (-c.score, c.id))
+        scored.sort(key=ranking_key)
+        for mid in exact_identifier_ids:
+            score_details[mid]["exact_identifier_match"] = True
 
         # ── rerank top-N, keep k ─────────────────────────────────────────────
         # Type limits need candidates beyond the ordinary top-4k window, but sending
@@ -830,7 +853,7 @@ class RecallEngine:
         # latency/cost hazard. Add the best pre-rerank candidates required to fill k
         # from every eligible memory type; with four types this remains <= 8k.
         pool = _type_aware_rerank_pool(scored, effective_limits, k=max(0, int(k)))
-        rerank_k = len(pool) if effective_limits else k
+        rerank_k = len(pool) if effective_limits or exact_identifier_ids else k
         mark_phase("fusion_scoring")
         rerank_changed = False
         if self.reranker:
@@ -905,6 +928,26 @@ class RecallEngine:
                 detail["calibrated_score"] = candidate.score
         else:
             ranked_final = pool
+        if exact_identifier_ids:
+            # Some providers return fewer candidates than requested. Preserve
+            # eligible exact matches from the bounded pool in that case too.
+            returned_ids = {candidate.id for candidate in ranked_final}
+            ranked_final.extend(
+                candidate for candidate in pool
+                if candidate.id in exact_identifier_ids and candidate.id not in returned_ids
+            )
+            ranked_final.sort(key=ranking_key)
+            # Context packing uses scores as well as order. Keep the literal
+            # priority through that boundary instead of allowing lifecycle
+            # priors to push the exact match out of the emitted prompt again.
+            matches = [c for c in ranked_final if c.id in exact_identifier_ids]
+            others = [c.score for c in ranked_final if c.id not in exact_identifier_ids]
+            if matches and others:
+                lift = max(0.0, max(others) - min(c.score for c in matches) + 1.0)
+                for candidate in matches:
+                    candidate.score += lift
+                    score_details[candidate.id]["exact_identifier_bonus"] = lift
+                    score_details[candidate.id]["calibrated_score"] = candidate.score
         mark_phase("reranking")
 
         final, type_limit_drops = _apply_mtype_limits(

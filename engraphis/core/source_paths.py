@@ -65,6 +65,21 @@ def _same_identity(left: os.stat_result, right: os.stat_result) -> bool:
     return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
 
 
+# Windows reports ``st_ctime`` as file creation time, and the path-based and
+# handle-based views can disagree by about a millisecond for a freshly written
+# file. Creation time never changes when content changes, so it cannot act as a
+# change detector there. POSIX ``st_ctime`` is the inode change time and stays
+# exact. The rest of the package already excludes it on Windows for this reason.
+_CTIME_IS_CHANGE_TIME = os.name != "nt"
+
+
+def _stamp_changed(left: os.stat_result, right: os.stat_result) -> bool:
+    """Return whether size, mtime, or the platform change time differ."""
+    if left.st_size != right.st_size or left.st_mtime_ns != right.st_mtime_ns:
+        return True
+    return _CTIME_IS_CHANGE_TIME and left.st_ctime_ns != right.st_ctime_ns
+
+
 def read_local_source(path: Path, *, max_bytes: int) -> bytes:
     """Read an already approved canonical file, rejecting entry substitution.
 
@@ -119,9 +134,7 @@ def read_local_source(path: Path, *, max_bytes: int) -> bytes:
         opened = os.fstat(file_fd)
         if (not stat.S_ISREG(opened.st_mode) or _link_indirection(opened)
                 or not _same_identity(before, opened)
-                or before.st_size != opened.st_size
-                or before.st_mtime_ns != opened.st_mtime_ns
-                or before.st_ctime_ns != opened.st_ctime_ns):
+                or _stamp_changed(before, opened)):
             raise ValueError("source file changed during open")
         check_path()
         if opened.st_size > max_bytes:
@@ -137,9 +150,7 @@ def read_local_source(path: Path, *, max_bytes: int) -> bytes:
             if total > max_bytes:
                 raise ValueError(f"source file exceeds {max_bytes} bytes")
         finished = os.fstat(file_fd)
-        if (not _same_identity(opened, finished) or opened.st_size != finished.st_size
-                or opened.st_mtime_ns != finished.st_mtime_ns
-                or opened.st_ctime_ns != finished.st_ctime_ns):
+        if not _same_identity(opened, finished) or _stamp_changed(opened, finished):
             raise ValueError("source file changed during read")
         check_path()
         return b"".join(chunks)
