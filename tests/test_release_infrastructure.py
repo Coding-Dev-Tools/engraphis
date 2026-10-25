@@ -216,7 +216,7 @@ def test_ci_and_release_audit_production_image_dependencies():
     assert (
         _text("Dockerfile").splitlines()[1]
         == "FROM python:3.11-slim@sha256:"
-        "a630a63cdb314e2d138a2fca3e375e319e8568346ffafac5b980f888630ac4f1 AS base"
+        "b7a9e5f6a93d6d4a31f129bbd4bdee69efccb6ded0fb230d78aafaf37af98377 AS base"
     )
     assert "Verify production image OCR runtime" in ci
     assert "Verify production image OCR runtime" in release
@@ -411,7 +411,7 @@ def test_tag_release_binds_codeql_reproducibility_and_installed_artifact_smokes(
     assert "PIP_BUILD_CONSTRAINT: ${{ github.workspace }}/.github/release-constraints.txt" in build
     for pin in (
         "pip==26.2",
-        "setuptools==83.0.0",
+        "setuptools==84.1.0",
         "wheel==0.47.0",
         "build==1.5.0",
         "twine==6.2.0",
