@@ -928,7 +928,7 @@ jobs:
             --commit "$GITHUB_SHA" --tag "$GITHUB_REF_NAME"
 
       - name: Publish distributions to PyPI
-        uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # v1.14.1
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
         with:
           skip-existing: true
 
@@ -1189,7 +1189,7 @@ jobs:
             --commit "$ENGRAPHIS_REPAIR_COMMIT" --tag "$RELEASE_TAG"
 
       - name: Publish only missing verified distributions
-        uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # v1.14.1
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
         with:
           skip-existing: true
 
