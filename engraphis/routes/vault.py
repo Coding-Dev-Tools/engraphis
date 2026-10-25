@@ -35,6 +35,7 @@ from engraphis.engines.reweight import retention_score
 from engraphis.stores import blob_to_vector, get_conn, now_ts
 from engraphis.stores import vaults as vault_store
 from engraphis.stores import vectors as mem_store
+from engraphis.core.documents import remote_or_device_path
 from engraphis.core.fsutil import is_link_indirection as _is_link_indirection
 
 logger = logging.getLogger("engraphis.routes.vault")
@@ -363,7 +364,14 @@ def import_folder(req: FolderImportReq):
             for root in env_roots.split(os.pathsep)
             if root
         )
-    real_path = os.path.realpath(os.path.expanduser(req.path))
+    expanded_path = os.path.expanduser(req.path)
+    if remote_or_device_path(req.path) or remote_or_device_path(expanded_path):
+        raise HTTPException(
+            403,
+            "Import path must be under an allowed root "
+            "(home directory or ENGRAPHIS_IMPORT_ROOTS)",
+        )
+    real_path = os.path.realpath(expanded_path)
     comparable_path = os.path.normcase(real_path)
     safe_path = None
     for root in allowed_roots:

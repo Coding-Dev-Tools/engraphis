@@ -30,7 +30,7 @@ def candidate(tmp_path):
     repository = tmp_path / "source [candidate]"
     repository.mkdir()
     (repository / ".gitignore").write_text("__pycache__/\n*.pyc\n*.pyo\n", encoding="utf-8")
-    (repository / "engine.py").write_text("value = 'tracked'\n", encoding="utf-8")
+    (repository / "engine.py").write_bytes(b"value = 'tracked'\n")
     subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
     _commit(repository)
     return repository
@@ -106,7 +106,8 @@ def test_nested_literal_names_and_pyw_mapping(candidate, tmp_path, monkeypatch, 
     _commit(candidate)
     cache = _mapped(source)
     _write_cache(cache)
-    assert any(str(cache) in entry for entry in checker._ignored_executable_paths(candidate))
+    assert any(cache.as_posix() in entry.replace("\\", "/")
+               for entry in checker._ignored_executable_paths(candidate))
 
 
 def test_relative_prefix_uses_runtime_mapping_from_process_cwd(candidate, tmp_path, monkeypatch):
@@ -115,7 +116,8 @@ def test_relative_prefix_uses_runtime_mapping_from_process_cwd(candidate, tmp_pa
     cache = _mapped(candidate / "engine.py")
     assert not cache.is_absolute()
     _write_cache(cache)
-    assert any(str(cache.absolute()) in entry for entry in checker._ignored_executable_paths(candidate))
+    assert any(cache.absolute().as_posix() in entry.replace("\\", "/")
+               for entry in checker._ignored_executable_paths(candidate))
 
 
 def test_unrelated_cache_names_directories_and_payloads_are_not_read(candidate, tmp_path, monkeypatch):
@@ -164,7 +166,7 @@ def test_existing_runtime_directory_exclusions_are_preserved(
     suspicious = checker._ignored_executable_paths(candidate)
     assert bool(suspicious) is blocked
     if blocked:
-        assert any(str(cache) in entry for entry in suspicious)
+        assert any(cache.as_posix() in entry.replace("\\", "/") for entry in suspicious)
 
 
 @pytest.mark.parametrize("kind", ["link", "broken-link", "unreadable", "directory"])

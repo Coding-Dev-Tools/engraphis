@@ -84,6 +84,9 @@ def test_first_boot_is_local_and_commercial_actions_open_hosted_cloud():
     # Team state comes from the local auth surface; plans open hosted Cloud.
     assert "api('/auth/state')" in script
     assert "hostedCta(plan.id, 'plans', interval)" in _ledger_declaration("renderPlans")
+    assert "The dashboard on your own computer opens automatically." in html
+    assert 'aria-describedby="browser-auth-description browser-auth-session-note"' in html
+    assert 'id="action-dialog"' in html
 
 
 def test_ledger_receipt_export_uses_authenticated_fetch_not_navigation():

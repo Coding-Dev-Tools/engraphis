@@ -239,9 +239,21 @@ test('the local dashboard ships a strict CSP and no local account or license sur
   for (const selector of ['#auth-overlay', '#session-action', '#lic-key']) {
     await expect(page.locator(selector)).toHaveCount(0);
   }
-  for (const removedLabel of ['Create admin account', 'Sign in', 'Accept team invitation', 'Activate license']) {
+  for (const removedLabel of ['Create admin account', 'Accept team invitation', 'Activate license']) {
     await expect(page.getByText(removedLabel, { exact: true })).toHaveCount(0);
   }
+  // The only sign-in markup is the closed remote administrator token dialog;
+  // local account/password login must remain absent from the usable dashboard.
+  const remoteAccess = page.locator('#browser-auth-dialog');
+  await expect(remoteAccess).toBeHidden();
+  const signIn = page.getByText('Sign in', { exact: true });
+  await expect(signIn).toHaveCount(1);
+  await expect(signIn).toBeHidden();
+  await expect(remoteAccess.getByRole('button', {
+    name: 'Sign in', exact: true, includeHidden: true,
+  })).toHaveCount(1);
+  await expect(remoteAccess.locator('#browser-auth-token')).toHaveAttribute('type', 'password');
+  await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toHaveCount(0);
 
   await openSettingsTab(page, 'Team');
   await expect(page.locator('#team-result')).toContainText('Team is a hosted plan.');
@@ -487,5 +499,155 @@ test('A refused Cloud Sync run explains the cause and the plan that unlocks it',
   await expect(sync).toContainText('Cloud Sync needs Engraphis Pro');
   await expect(sync.getByRole('button', { name: 'Compare plans' })).toBeVisible();
   expect(calls.some(call => call.path === '/sync/run' && call.method === 'POST')).toBe(true);
+  expect(errors).toEqual([]);
+});
+
+
+// Recovery of a classified refusal is an explicit new run. Reopening the tab must
+// neither remain stuck without a recovery action nor silently submit another job.
+async function mockRecoverableAnalytics(page, status) {
+  const initialLicense = status === 402 ? lapsedTeamLicense : proLicense;
+  await mockLocalClient(page, { cloudStatus: 200, license: initialLicense });
+  const recovery = { ready: false, starts: [], approvals: [] };
+  let policy = {
+    workspace, enabled: status !== 409, confirmed: status !== 409,
+    confirmation_required: status === 409, operator_disabled: false,
+    remote_sync_pending: false, revision: status === 409 ? 0 : 1,
+  };
+  await page.route('**/api/**', async route => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const path = url.pathname.replace(/^\/api/, '');
+    if (path === '/license') {
+      await route.fulfill({ json: recovery.ready ? proLicense : initialLicense });
+      return;
+    }
+    if (path === '/managed-processing') {
+      if (request.method() === 'POST') {
+        const body = request.postDataJSON();
+        recovery.approvals.push(body);
+        policy = {
+          ...policy, enabled: body.enabled, confirmed: true,
+          confirmation_required: false, revision: policy.revision + 1,
+        };
+        recovery.ready = body.enabled && body.confirmed;
+      }
+      await route.fulfill({ json: policy });
+      return;
+    }
+    if (path !== '/analytics') {
+      await route.fallback();
+      return;
+    }
+    recovery.starts.push({ workspace: url.searchParams.get('workspace'), method: request.method() });
+    if (!recovery.ready) {
+      await route.fulfill({ status, json: { detail: {
+        error: status === 409 ? 'Approve workspace processing first.'
+          : status === 401 ? 'The Cloud session needs reconnection.'
+          : 'Hosted Analytics is not currently authorized.',
+        code: status === 409 ? 'consent_required' : 'hosted_authorization_unavailable',
+      } } });
+      return;
+    }
+    await route.fulfill({ json: {
+      kind: 'analytics', memory_count: 2,
+      totals: { live: 2, pinned: 1, avg_retention: 0.9 },
+      decay_forecast: { at_risk_7d: 0 },
+    } });
+  });
+  return recovery;
+}
+
+test('Analytics recovers after workspace approval only when the customer runs a fresh analysis', async ({ page }) => {
+  const errors = recordBrowserErrors(page);
+  const recovery = await mockRecoverableAnalytics(page, 409);
+  await openDashboard(page);
+  await openSettingsTab(page, 'Analytics');
+  const analytics = page.locator('#analytics-result');
+  await expect(analytics).toContainText('Analytics is waiting for your approval');
+  expect(recovery.starts).toEqual([{ workspace, method: 'GET' }]);
+
+  await analytics.getByRole('button', { name: 'Review workspace processing' }).click();
+  await expect(page.getByRole('tab', { name: 'Preferences' })).toHaveAttribute('aria-selected', 'true');
+  await page.locator('#managed-processing-approval').check();
+  await page.getByRole('button', { name: 'Enable for this workspace' }).click();
+  await expect(page.locator('#managed-processing-status')).toHaveText(`Managed processing is enabled for ${workspace}.`);
+  expect(recovery.approvals).toEqual([{ workspace, enabled: true, confirmed: true }]);
+  expect(recovery.starts).toHaveLength(1);
+
+  await openSettingsTab(page, 'Analytics');
+  const runFresh = analytics.getByRole('button', { name: 'Run fresh analysis', exact: true });
+  await expect(runFresh).toBeVisible();
+  expect(recovery.starts).toHaveLength(1);
+  await runFresh.click();
+  await expect(analytics.getByRole('heading', { name: 'Analytics result', exact: true })).toBeVisible();
+  await expect(analytics).toContainText('90%');
+  expect(recovery.starts).toEqual([{ workspace, method: 'GET' }, { workspace, method: 'GET' }]);
+  expect(errors).toEqual([]);
+});
+
+for (const [status, title] of [
+  [401, 'Cloud reconnection'],
+  [402, 'billing restoration'],
+  [501, 'hosted capability restoration'],
+]) {
+  test(`Analytics recovers after ${title} only on an explicit fresh run`, async ({ page }) => {
+    const errors = recordBrowserErrors(page);
+    const recovery = await mockRecoverableAnalytics(page, status);
+    await openDashboard(page);
+    await openSettingsTab(page, 'Analytics');
+    const analytics = page.locator('#analytics-result');
+    await expect(analytics).toContainText(status === 401 ? 'Reconnect Engraphis Cloud' : 'Analytics needs Engraphis Pro');
+    expect(recovery.starts).toHaveLength(1);
+
+    // The next API call can succeed after the customer repaired their account in
+    // Cloud. Returning from Preferences refreshes /license without starting a job.
+    recovery.ready = true;
+    await openSettingsTab(page, 'Preferences');
+    await expect(page.locator('#cloud-account-settings')).toContainText('Your hosted account is connected.');
+    await openSettingsTab(page, 'Analytics');
+    const runFresh = analytics.getByRole('button', { name: 'Run fresh analysis', exact: true });
+    await expect(runFresh).toBeVisible();
+    expect(recovery.starts).toHaveLength(1);
+    await runFresh.click();
+    await expect(analytics.getByRole('heading', { name: 'Analytics result', exact: true })).toBeVisible();
+    expect(recovery.starts).toEqual([{ workspace, method: 'GET' }, { workspace, method: 'GET' }]);
+    expect(recovery.approvals).toHaveLength(0);
+    expect(errors).toEqual([]);
+  });
+}
+
+
+test('Hosted inference is visibly unavailable and never enabled by a normal policy save', async ({ page }) => {
+  const errors = recordBrowserErrors(page);
+  await mockLocalClient(page, { cloudStatus: 200, license: proLicense });
+  const saves = [];
+  const policy = {
+    enabled: false, cadence_hours: 24, dream_enabled: true, dream_min_new: 25,
+    dream_idle_minutes: 15, infer: true, version: 1,
+  };
+  await page.route('**/api/automation?*', async route => {
+    if (route.request().method() === 'POST') {
+      const body = route.request().postDataJSON();
+      saves.push(body);
+      await route.fulfill({ json: { ...body, version: 2 } });
+    } else await route.fulfill({ json: policy });
+  });
+  await openDashboard(page);
+  await openSettingsTab(page, 'Automation');
+  const unavailable = page.getByRole('checkbox', { name: 'Hosted relationship inference is not available', exact: true });
+  await expect(unavailable).toBeVisible();
+  await expect(unavailable).toBeDisabled();
+  await expect(unavailable).not.toBeChecked();
+  await expect(page.getByRole('spinbutton', { name: 'Minimum eligible memories', exact: true })).toHaveValue('25');
+  await page.getByRole('checkbox', { name: 'Enable hosted maintenance', exact: true }).check();
+  await page.getByRole('button', { name: 'Save & send policy to Cloud', exact: true }).click();
+  await answerActionDialog(page, { expectText: ['normal and sensitive memory content'] });
+  await expect.poll(() => saves.length).toBe(1);
+  expect(saves[0].enabled).toBe(true);
+  expect(saves[0].infer).toBe(false);
+  await expect(page.locator('#automation-result')).toContainText('active hosted maintenance policy');
+  await expect(unavailable).toBeDisabled();
+  await expect(unavailable).not.toBeChecked();
   expect(errors).toEqual([]);
 });

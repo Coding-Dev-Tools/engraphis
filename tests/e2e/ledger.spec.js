@@ -92,6 +92,12 @@ async function mockApi(page, options = {}) {
       contentType: 'application/json',
       body: JSON.stringify(body),
     });
+    if (path === '/auth/local-session') {
+      expect(request.method()).toBe('POST');
+      expect(request.postData()).toBeNull();
+      expect(request.headers()['x-engraphis-browser-session']).toBe('1');
+      return ok({ authenticated: true, review_csrf_token: 'public-test-fixture' });
+    }
     if (path === '/bootstrap') {
       return ok({
         license: licenseState,
@@ -315,6 +321,7 @@ async function mockApi(page, options = {}) {
           automationPolicy = {
             ...automationPolicy,
             ...body,
+            ...(body.cadence_hours != null ? { cadence_minutes: body.cadence_hours * 60 } : {}),
             dream: body.dream_enabled,
           };
         }
@@ -405,7 +412,11 @@ for (const mutation of ['pin', 'approval']) {
     test(`release regression: ${mutation} refresh preserves a same-workspace ${nextAction}`, async ({ page }) => {
       await mockApi(page);
       await page.route('**/dashboard/review/csrf', route => route.fulfill({ json: { review_csrf_token: 'public-test-fixture' } }));
-      await page.route('**/dashboard/review/approve', route => route.fulfill({ json: { id: 'mem_approved' } }));
+      await page.route('**/dashboard/review/approve', route => {
+        expect(route.request().headers()['x-engraphis-browser-session']).toBe('1');
+        expect(route.request().headers()['x-engraphis-review-csrf']).toBe('public-test-fixture');
+        return route.fulfill({ json: { id: 'mem_approved' } });
+      });
       let holdRefresh = false, releaseRefresh, refreshStarted;
       const gate = new Promise(resolve => { releaseRefresh = resolve; });
       const started = new Promise(resolve => { refreshStarted = resolve; });
@@ -1415,7 +1426,93 @@ test('Ledger deadline includes stalled graph assets and Reload data starts a fre
   releaseStalledAsset();
 });
 
-test('Ledger requests a remote token in a masked retryable dialog', async ({ page }) => {
+
+test('Ledger opens locally without entering or exposing an access token', async ({ page }) => {
+  let opened = false;
+  let sessions = 0;
+  await mockApi(page);
+  await page.route('**/api/bootstrap*', route => opened ? route.fallback() : route.fulfill({
+    status: 401, contentType: 'application/json',
+    body: JSON.stringify({ error: 'unauthorized', code: 'local_browser_session_required', local_browser: true }),
+  }));
+  await page.route('**/api/auth/local-session', route => {
+    sessions += 1;
+    opened = true;
+    expect(route.request().postData()).toBeNull();
+    return route.fulfill({ contentType: 'application/json',
+      body: JSON.stringify({ authenticated: true, review_csrf_token: 'local-test-confirmation' }) });
+  });
+  await page.goto('/');
+  await expect(page.locator('#connection-status')).toContainText('Local engine connected');
+  await expect(page.locator('#browser-auth-dialog')).not.toBeVisible();
+  expect(sessions).toBe(1);
+  expect(page.url()).not.toContain('token');
+});
+
+test('Ledger coalesces concurrent local renewals and retries each rejected request once', async ({ page }) => {
+  let renewed = false;
+  let sessions = 0;
+  await mockApi(page);
+  await page.route('**/api/**', route => {
+    const path = new URL(route.request().url()).pathname;
+    if (renewed || path === '/api/bootstrap' || path.startsWith('/api/auth/')) return route.fallback();
+    return route.fulfill({ status: 401, contentType: 'application/json',
+      body: JSON.stringify({ error: 'unauthorized', code: 'local_browser_session_required', local_browser: true }) });
+  });
+  await page.route('**/api/auth/local-session', async route => {
+    sessions += 1;
+    await new Promise(resolve => setTimeout(resolve, 100));
+    renewed = true;
+    return route.fulfill({ contentType: 'application/json',
+      body: JSON.stringify({ authenticated: true, review_csrf_token: 'renewed-confirmation' }) });
+  });
+  await page.goto('/');
+  await expect(page.locator('#connection-status')).toContainText('Local engine connected');
+  await expect(page.locator('#browser-auth-dialog')).not.toBeVisible();
+  expect(sessions).toBe(1);
+});
+
+test('Ledger local renewal failure gives recovery guidance without requesting a token', async ({ page }) => {
+  let sessions = 0;
+  await mockApi(page);
+  await page.route('**/api/bootstrap*', route => route.fulfill({
+    status: 401, contentType: 'application/json',
+    body: JSON.stringify({ error: 'unauthorized', code: 'local_browser_session_required', local_browser: true }),
+  }));
+  await page.route('**/api/auth/local-session', route => {
+    sessions += 1;
+    return route.fulfill({ status: 503, contentType: 'application/json',
+      body: JSON.stringify({ error: 'temporarily unavailable' }) });
+  });
+  await page.goto('/');
+  await expect(page.locator('#connection-status')).toContainText('Local engine unavailable');
+  await expect(page.locator('#connection-banner-detail')).toContainText('Reload this page to retry');
+  await expect(page.locator('#browser-auth-dialog')).not.toBeVisible();
+  expect(sessions).toBe(1);
+});
+
+test('Ledger preserves paid cloud authentication errors without retrying or asking for a local token', async ({ page }) => {
+  let bootstraps = 0;
+  let sessions = 0;
+  await mockApi(page);
+  await page.route('**/api/bootstrap*', route => {
+    bootstraps += 1;
+    return route.fulfill({ status: 401, contentType: 'application/json',
+      body: JSON.stringify({ error: 'Reconnect your Engraphis Cloud account.', code: 'cloud_session_expired' }) });
+  });
+  await page.route('**/api/auth/local-session', route => {
+    sessions += 1;
+    return route.abort();
+  });
+  await page.goto('/');
+  await expect(page.locator('#connection-banner-detail')).toContainText('Reconnect your Engraphis Cloud account.');
+  await expect(page.locator('#browser-auth-dialog')).not.toBeVisible();
+  expect(bootstraps).toBe(1);
+  expect(sessions).toBe(0);
+});
+
+
+test('Ledger requests a remote administrator token in a masked retryable sign-in dialog', async ({ page }) => {
   let authenticated = false;
   await mockApi(page);
   await page.route('**/api/bootstrap*', async route => {
@@ -1423,7 +1520,7 @@ test('Ledger requests a remote token in a masked retryable dialog', async ({ pag
     return route.fulfill({
       status: 401,
       contentType: 'application/json',
-      body: JSON.stringify({ detail: 'Authentication required' }),
+      body: JSON.stringify({ error: 'unauthorized', code: 'local_browser_session_required', local_browser: false }),
     });
   });
   await page.route('**/auth/session', async route => {
@@ -1432,7 +1529,7 @@ test('Ledger requests a remote token in a masked retryable dialog', async ({ pag
       return route.fulfill({
         status: 401,
         contentType: 'application/json',
-        body: JSON.stringify({ detail: 'Invalid deployment token' }),
+        body: JSON.stringify({ error: 'unauthorized' }),
       });
     }
     authenticated = true;
@@ -1451,14 +1548,14 @@ test('Ledger requests a remote token in a masked retryable dialog', async ({ pag
   await expect(token).toHaveAttribute('autocomplete', 'off');
 
   await token.fill('wrong-token');
-  await dialog.getByRole('button', { name: 'Connect', exact: true }).click();
-  await expect(page.locator('#browser-auth-error')).toContainText('Invalid deployment token');
+  await dialog.getByRole('button', { name: 'Sign in', exact: true }).click();
+  await expect(page.locator('#browser-auth-error')).toContainText('That access token was not accepted.');
   await expect(token).toHaveValue('');
 
   await token.fill('correct-token');
   await Promise.all([
     page.waitForNavigation(),
-    dialog.getByRole('button', { name: 'Connect', exact: true }).click(),
+    dialog.getByRole('button', { name: 'Sign in', exact: true }).click(),
   ]);
   await expect(page.getByRole('heading', { name: `Home for ${workspace}` })).toBeVisible();
   expect(page.url()).not.toContain('token');
@@ -3980,7 +4077,8 @@ async function makeImportFolder(testInfo, withReadableFile) {
     await fs.mkdir(unicode, { recursive: true });
     await fs.writeFile(path.join(unicode, 'world-notes.md'), 'Synthetic Unicode path notes.');
   }
-  return root;
+  // Native Chromium directory enumeration needs the Windows extended-length path.
+  return process.platform === 'win32' ? path.toNamespacedPath(root) : root;
 }
 
 for (const withReadableFile of [true, false]) {
@@ -4017,6 +4115,92 @@ for (const withReadableFile of [true, false]) {
     } else {
       expect(uploaded).toEqual([]);
     }
+    expect(errors).toEqual([]);
+  });
+}
+
+
+test('Automation editor preserves zero idle and enforces the actual API numeric bounds', async ({ page }) => {
+  const requests = await mockApi(page, {
+    automationPolicy: { enabled: false, cadence_hours: 1, dream: false,
+      dream_min_new: 2, dream_idle_minutes: 0, infer: false, version: 1 },
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('tab', { name: 'Automation' }).click();
+  const fields = [
+    ['#automation-cadence', '1', '720', '1'],
+    ['#automation-dream-min', '2', '10000', '2'],
+    ['#automation-dream-idle', '0', '10080', '0'],
+  ];
+  for (const [selector, minimum, maximum, value] of fields) {
+    const field = page.locator(selector);
+    await expect(field).toHaveAttribute('min', minimum);
+    await expect(field).toHaveAttribute('max', maximum);
+    await expect(field).toHaveAttribute('required', '');
+    await expect(field).toHaveValue(value);
+    for (const invalid of [String(Number(minimum) - 1), String(Number(maximum) + 1), '', '2.5']) {
+      await field.fill(invalid);
+      expect(await field.evaluate(input => input.checkValidity())).toBe(false);
+    }
+    await field.fill(maximum);
+    expect(await field.evaluate(input => input.checkValidity())).toBe(true);
+  }
+  await page.locator('#automation-dream-idle').fill('0');
+  await page.getByRole('button', { name: 'Save hosted policy', exact: true }).click();
+  await expect.poll(() => requests.automationPolicies.length).toBe(1);
+  expect(requests.automationPolicies[0]).toMatchObject({ cadence_hours: 720,
+    dream_min_new: 10000, dream_idle_minutes: 0, dream_enabled: false, infer: false });
+  await page.reload();
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('tab', { name: 'Automation' }).click();
+  await expect(page.locator('#automation-dream-idle')).toHaveValue('0');
+});
+
+test('Automation editor uses service defaults for missing or null numeric values', async ({ page }) => {
+  await mockApi(page, { automationPolicy: { enabled: false, cadence_hours: null,
+    dream_enabled: null, dream_min_new: null, dream_idle_minutes: null, infer: null, version: 1 } });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('tab', { name: 'Automation' }).click();
+  await expect(page.locator('#automation-cadence')).toHaveValue('24');
+  await expect(page.locator('#automation-dream-min')).toHaveValue('25');
+  await expect(page.locator('#automation-dream-idle')).toHaveValue('15');
+  await expect(page.locator('#automation-dream')).toBeChecked();
+});
+
+
+for (const cadenceMinutes of [15, 90]) {
+  test(`Automation cadence ${cadenceMinutes} minutes survives unrelated saves and explicit one-hour edits`, async ({ page }) => {
+    const errors = browserErrors(page);
+    const requests = await mockApi(page, {
+      automationPolicy: { enabled: false, cadence_minutes: cadenceMinutes, cadence_hours: 1,
+        dream: false, dream_min_new: 2, dream_idle_minutes: 0, infer: false, version: 1 },
+    });
+    await page.goto('/');
+    await page.getByRole('button', { name: 'Settings' }).click();
+    await page.getByRole('tab', { name: 'Automation' }).click();
+    const result = page.locator('#automation-result');
+    const hours = page.locator('#automation-cadence');
+    await expect(hours).toHaveValue('1');
+    await page.locator('#automation-dream-min').fill('3');
+    await page.getByRole('button', { name: 'Save hosted policy', exact: true }).click();
+    await expect.poll(() => requests.automationPolicies.length).toBe(1);
+    expect(requests.automationPolicies[0]).not.toHaveProperty('cadence_hours');
+    expect(requests.automationPolicies[0]).toMatchObject({ dream_min_new: 3, dream_idle_minutes: 0 });
+    await expect(result).toContainText(`Current cadence: every ${cadenceMinutes} minutes.`);
+
+    await page.reload();
+    await page.getByRole('button', { name: 'Settings' }).click();
+    await page.getByRole('tab', { name: 'Automation' }).click();
+    await expect(result).toContainText(`Current cadence: every ${cadenceMinutes} minutes.`);
+    await expect(hours).toHaveValue('1');
+    // Real input intent matters even though the initial display is already 1.
+    await hours.fill('1');
+    await page.getByRole('button', { name: 'Save hosted policy', exact: true }).click();
+    await expect.poll(() => requests.automationPolicies.length).toBe(2);
+    expect(requests.automationPolicies[1]).toMatchObject({ cadence_hours: 1, dream_min_new: 3 });
+    await expect(result).toContainText('Current cadence: every 60 minutes.');
     expect(errors).toEqual([]);
   });
 }
