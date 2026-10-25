@@ -55,10 +55,11 @@ name. This label is part of the local source identity, so unrelated collections 
 share a re-import lineage. Select a saved source when resuming or re-importing that collection.
 
 The browser processes selected bytes locally and does not retain a dashboard upload copy. The
-wizard always runs behind the local owner-browser/CSRF boundary. In token deployments that
-boundary is bound to the browser session minted from `ENGRAPHIS_API_TOKEN`; in zero-token
-loopback mode the same CSRF confirmation applies to the loopback-only runtime, so the wizard
-works without configuration.
+wizard always runs behind the local owner-browser/CSRF boundary. Its same-computer browser
+session is established automatically and signed with `ENGRAPHIS_API_TOKEN` when configured,
+or a process-local secret otherwise. Local users never enter that token. Legacy zero-token
+loopback clients retain their existing CSRF confirmation, so the wizard works without
+configuration.
 
 ## Supported formats
 

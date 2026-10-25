@@ -195,13 +195,13 @@ def _variant_features(text: str, tokens: list[str]) -> list[str]:
         elif token in _NUMBER_WORDS:
             values.append((index, _NUMBER_WORDS[token]))
 
-    unit_positions = [(index, _UNITS[token]) for index, token in enumerate(tokens)
-                      if token in _UNITS]
     for number_index, number in values:
-        for unit_index, (dimension, multiplier) in unit_positions:
-            # A short window handles both "60 seconds" and "60 per second"
-            # without making unrelated numbers in a long sentence collide.
-            if abs(number_index - unit_index) <= 3:
+        # Inspect only the qualifying window. Scanning every unit for every
+        # number made dense measurement documents quadratic in input length.
+        for unit_index in range(max(0, number_index - 3), min(len(tokens), number_index + 4)):
+            unit = _UNITS.get(tokens[unit_index])
+            if unit is not None:
+                dimension, multiplier = unit
                 normalized = number * multiplier
                 features.append(f"measure:{dimension}:{normalized:g}")
 
@@ -210,8 +210,10 @@ def _variant_features(text: str, tokens: list[str]) -> list[str]:
     # canonical unit feature above.
     if any(token in {"per", "each"} for token in tokens) or "/" in text:
         for number_index, number in values:
-            for unit_index, (dimension, _) in unit_positions:
-                if abs(number_index - unit_index) <= 3:
+            for unit_index in range(max(0, number_index - 3), min(len(tokens), number_index + 4)):
+                unit = _UNITS.get(tokens[unit_index])
+                if unit is not None:
+                    dimension, _ = unit
                     features.append(f"rate:{dimension}:{number:g}")
                     break
     return features
