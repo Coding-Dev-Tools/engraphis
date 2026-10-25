@@ -152,3 +152,32 @@ def test_code_index_uses_current_directory_without_operator_root_configuration(i
 
     assert response.status_code == 200
     assert service.calls[0]["root_path"] == _canonical_with_sep(os.getcwd())
+
+
+@pytest.mark.parametrize("bad_root", [
+    "\\\\198.51.100.10\\share\\repo",
+    "//198.51.100.10/share/repo",
+    "\\\\?\\UNC\\198.51.100.10\\share\\repo",
+    "\\\\.\\GLOBALROOT\\Device\\HarddiskVolume1\\repo",
+])
+def test_code_index_rejects_unc_and_device_paths_before_realpath(
+    indexed_client, monkeypatch, tmp_path, bad_root,
+):
+    client, service = indexed_client
+    monkeypatch.setenv("ENGRAPHIS_HTTP_INDEX_ROOT", str(tmp_path))
+    real_realpath = os.path.realpath
+    seen_targets = []
+
+    def guarded_realpath(target):
+        seen_targets.append(os.fspath(target))
+        if "198.51.100.10" in str(target) or "GLOBALROOT" in str(target):
+            raise AssertionError(f"realpath called on remote/device target: {target}")
+        return real_realpath(target)
+
+    monkeypatch.setattr("engraphis.routes.v2_api.os.path.realpath", guarded_realpath)
+
+    response = _request(client, bad_root)
+
+    assert response.status_code == 400
+    assert service.calls == []
+    assert seen_targets == [str(tmp_path)]

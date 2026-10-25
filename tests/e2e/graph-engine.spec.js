@@ -804,6 +804,7 @@ async function renderedAllLocalOrbitSnapshot(page) {
     const byId = new Map(nodes.map(node => [String(node.id), node]));
     const blackHole = nodes.find(node => node.anchor_role === 'global');
     const radius = node => Number(node.radius || node.visual_radius || 0);
+    const diagnostics = engine.physicsDiagnostics();
     const members = nodes.flatMap(node => {
       const anchorId = node.system_anchor_id == null ? null : String(node.system_anchor_id);
       const anchor = anchorId && byId.get(anchorId);
@@ -818,12 +819,11 @@ async function renderedAllLocalOrbitSnapshot(page) {
         angle: Math.atan2(dy, dx), tangent: dx * dvy - dy * dvx,
         paintedRadius: radius(node), anchorPaintedRadius: radius(anchor),
         clearance: Math.hypot(dx, dy) - radius(node) - radius(anchor)
-          - Number(engine.physicsDiagnostics().systemAnchorExclusionPadding || 0),
+          - Number(diagnostics.systemAnchorExclusionPadding || 0),
         finite: [node.x, node.y, node.vx, node.vy, anchor.x, anchor.y, anchor.vx, anchor.vy]
           .every(Number.isFinite),
       }];
     });
-    const diagnostics = engine.physicsDiagnostics();
     /* The oversized renderer stores a star's black-hole carrier phase directly on that star.
        Its world coordinate must be exactly that carrier, not a mass-weighted local COM offset.
        Reading this in the served browser catches the visual failure a pure angle test misses:

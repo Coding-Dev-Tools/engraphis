@@ -41,7 +41,7 @@ _USAGE = """usage: engraphis <command> [options]
 
 commands:
   connect        redeem the connect token from your account portal
-  init           write a project .env and print agent setup snippets
+  init           write owner-private config.env and print agent setup snippets
   cli            store and recall memories from the terminal
   mcp            run the MCP server (Claude Code, Cursor, Cline, Zed)
   mcp-classic    run the legacy MCP server with all direct tools

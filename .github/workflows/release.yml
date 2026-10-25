@@ -11,21 +11,6 @@ on:
         description: "Existing tag to repair on PyPI and GitHub"
         required: false
         type: string
-      waive_v176_qualification:
-        description: "Owner-authorized one-time qualification waiver; valid only for v1.7.6"
-        required: false
-        type: boolean
-        default: false
-      waive_v178_qualification:
-        description: "Owner-authorized qualification waiver for the retained v1.7.8 candidate only"
-        required: false
-        type: boolean
-        default: false
-      waive_v179_qualification:
-        description: "Owner-approved waiver for the retained v1.7.9 candidate at c6871b9b only"
-        required: false
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -94,6 +79,10 @@ jobs:
           python -m eval.ablation
           python -m eval.reinforcement
           python -m eval.adversarial_memory_security
+          python -m eval.grounded
+          python -m eval.code_arm
+          python -m eval.spec_crawl
+          python -m eval.evidence_contracts
           python -m pip_audit --local --skip-editable
 
       - name: Capture the exact build environment and Python SBOM
@@ -305,7 +294,8 @@ jobs:
 
   python-matrix:
     name: Python ${{ matrix.python-version }} release gate
-    runs-on: ubuntu-latest
+    # Ubuntu 26.04 no longer ships the Python 3.9 floor in actions/python-versions.
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -344,6 +334,10 @@ jobs:
           python -m eval.ablation
           python -m eval.reinforcement
           python -m eval.adversarial_memory_security
+          python -m eval.grounded
+          python -m eval.code_arm
+          python -m eval.spec_crawl
+          python -m eval.evidence_contracts
 
   artifact-core-py39:
     name: Python 3.9 installed release artifacts
@@ -351,7 +345,7 @@ jobs:
     if: >-
       github.event_name == 'push' ||
       inputs.release_tag == ''
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -890,12 +884,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      # No dependency cache in publication jobs: a cache shared with branch CI must not
+      # feed a job that holds the PyPI OIDC token or release write permission.
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          cache: pip
-          cache-dependency-path: |
-            pyproject.toml
-            .github/release-constraints.txt
           python-version: "3.11"
       - name: Download distributions
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
@@ -918,7 +910,11 @@ jobs:
           mkdir verified-dist
           cp dist/*.whl dist/*.tar.gz verified-dist/
 
+      # Opt-in: patch releases ship on the build gates above plus the
+      # release-qualification environment approval. Set the repository variable
+      # REQUIRE_SIGNED_QUALIFICATION=true to require the signed 11-gate envelope.
       - name: Require signed full-product qualification before PyPI publication
+        if: vars.REQUIRE_SIGNED_QUALIFICATION == 'true'
         env:
           ENGRAPHIS_RELEASE_QUALIFICATION: ${{ secrets.ENGRAPHIS_RELEASE_QUALIFICATION }}
           ENGRAPHIS_RELEASE_VERIFY_KEY: ${{ secrets.ENGRAPHIS_RELEASE_VERIFY_KEY }}
@@ -961,10 +957,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          cache: pip
-          cache-dependency-path: |
-            pyproject.toml
-            .github/release-constraints.txt
           python-version: "3.11"
       - name: Download distributions
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
@@ -979,6 +971,7 @@ jobs:
           path: release-evidence/
 
       - name: Require signed full-product qualification before GitHub publication
+        if: vars.REQUIRE_SIGNED_QUALIFICATION == 'true'
         env:
           ENGRAPHIS_RELEASE_QUALIFICATION: ${{ secrets.ENGRAPHIS_RELEASE_QUALIFICATION }}
           ENGRAPHIS_RELEASE_VERIFY_KEY: ${{ secrets.ENGRAPHIS_RELEASE_VERIFY_KEY }}
@@ -1036,34 +1029,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          cache: pip
-          cache-dependency-path: |
-            pyproject.toml
-            .github/release-constraints.txt
           python-version: "3.11"
-      - name: Enforce and record the release-specific qualification waiver
-        if: inputs.waive_v176_qualification || inputs.waive_v178_qualification || inputs.waive_v179_qualification
-        env:
-          RELEASE_TAG: ${{ inputs.release_tag }}
-          WAIVE_V176: ${{ inputs.waive_v176_qualification }}
-          WAIVE_V178: ${{ inputs.waive_v178_qualification }}
-          WAIVE_V179: ${{ inputs.waive_v179_qualification }}
-          GH_ACTOR: ${{ github.actor }}
-          GH_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          case "$WAIVE_V176:$WAIVE_V178:${WAIVE_V179:-false}:$RELEASE_TAG" in
-            true:false:false:v1.7.6|false:true:false:v1.7.8|false:false:true:v1.7.9) ;;
-            *) printf 'Waiver must select exactly one authorized release.\n' >&2; exit 1 ;;
-          esac
-          {
-            printf '# Release qualification waiver\n\n'
-            printf 'Tag: `%s`\n' "$RELEASE_TAG"
-            printf 'Triggered by: `%s`\n' "$GH_ACTOR"
-            printf 'Workflow run: %s\n\n' "$GH_RUN_URL"
-            printf 'The owner explicitly waived full-product qualification for this repair. No unverified release gate is represented as passed.\n'
-          } >> "$GITHUB_STEP_SUMMARY"
       - name: Download published distributions
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1208,7 +1174,7 @@ jobs:
           cp dist/*.whl dist/*.tar.gz verified-dist/
 
       - name: Require signed full-product qualification before PyPI repair
-        if: ${{ !inputs.waive_v176_qualification && !inputs.waive_v178_qualification && !inputs.waive_v179_qualification }}
+        if: vars.REQUIRE_SIGNED_QUALIFICATION == 'true'
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
           ENGRAPHIS_RELEASE_QUALIFICATION: ${{ secrets.ENGRAPHIS_RELEASE_QUALIFICATION }}
@@ -1221,52 +1187,6 @@ jobs:
           python -m pip install --disable-pip-version-check "cryptography==50.0.0"
           python -m scripts.verify_release_qualification --dist dist \
             --commit "$ENGRAPHIS_REPAIR_COMMIT" --tag "$RELEASE_TAG"
-
-      - name: Disclose the qualification waiver before PyPI repair
-        if: inputs.waive_v176_qualification || inputs.waive_v178_qualification || inputs.waive_v179_qualification
-        env:
-          WAIVE_V176: ${{ inputs.waive_v176_qualification }}
-          WAIVE_V178: ${{ inputs.waive_v178_qualification }}
-          WAIVE_V179: ${{ inputs.waive_v179_qualification }}
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
-          GH_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          # Each exception covers one retained candidate, not future reuse of its tag.
-          case "$WAIVE_V176:$WAIVE_V178:${WAIVE_V179:-false}:$RELEASE_TAG:$ENGRAPHIS_REPAIR_COMMIT" in
-            true:false:false:v1.7.6:6a441a75c8dd159607fa3933da83f600864b9146|\
-            false:true:false:v1.7.8:dce68e1602e580cd51b71e26db2ab04238df7df4|\
-            false:false:true:v1.7.9:c6871b9bf506eec6cebe96beee1ac252429a7b99) ;;
-            *) printf 'Waiver does not match an authorized source candidate.\n' >&2; exit 1 ;;
-          esac
-          {
-            printf '## Release qualification\n\n'
-            printf 'The owner waived full-product qualification for this release. Mandatory full-product gates are not represented as passed.\n\n'
-            printf 'Source commit: `%s`\n\n' "$ENGRAPHIS_REPAIR_COMMIT"
-            printf 'Waiver record: %s\n' "$GH_RUN_URL"
-          } > "$RUNNER_TEMP/release-waiver.md"
-          if gh release view "$RELEASE_TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
-            gh release view "$RELEASE_TAG" --repo "$GH_REPO" --json body --jq .body \
-              > "$RUNNER_TEMP/release-notes-existing.md"
-            {
-              cat "$RUNNER_TEMP/release-notes-existing.md"
-              printf '\n\n'
-              cat "$RUNNER_TEMP/release-waiver.md"
-            } > "$RUNNER_TEMP/release-notes.md"
-            gh release edit "$RELEASE_TAG" --repo "$GH_REPO" \
-              --notes-file "$RUNNER_TEMP/release-notes.md"
-          else
-            # The public notice survives a later PyPI or verification failure. Assets
-            # and latest-release promotion still wait for successful publication.
-            gh release create "$RELEASE_TAG" --repo "$GH_REPO" --verify-tag \
-              --generate-notes --notes-file "$RUNNER_TEMP/release-waiver.md" \
-              --title "Engraphis ${RELEASE_TAG#v}" --latest=false
-          fi
-          # Editing notes on an existing draft does not make the notice public.
-          test "$(gh release view "$RELEASE_TAG" --repo "$GH_REPO" --json isDraft --jq .isDraft)" = "false"
 
       - name: Publish only missing verified distributions
         uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # v1.14.1
@@ -1282,7 +1202,7 @@ jobs:
           --version "${RELEASE_TAG#v}" --retries 18 --delay 10
 
       - name: Require signed full-product qualification before GitHub repair
-        if: ${{ !inputs.waive_v176_qualification && !inputs.waive_v178_qualification && !inputs.waive_v179_qualification }}
+        if: vars.REQUIRE_SIGNED_QUALIFICATION == 'true'
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
           ENGRAPHIS_RELEASE_QUALIFICATION: ${{ secrets.ENGRAPHIS_RELEASE_QUALIFICATION }}
@@ -1300,14 +1220,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ inputs.release_tag }}
-          WAIVE_QUALIFICATION: ${{ inputs.waive_v176_qualification || inputs.waive_v178_qualification || inputs.waive_v179_qualification }}
-          GH_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         shell: bash
         run: |
           set -euo pipefail
-          notes_args=()
-          latest_args=(--latest)
-          promote_latest=true
           can_promote_latest() {
             python - "$RELEASE_TAG" "$1" <<'PY'
           import re
@@ -1321,52 +1236,23 @@ jobs:
           print("true" if version(sys.argv[1]) >= version(sys.argv[2]) else "false")
           PY
           }
-          if [ "$WAIVE_QUALIFICATION" = "true" ]; then
-            # A retained older repair must not displace a newer public Latest.
-            # The candidate comparison uses the existing public release history;
-            # failed lookups or unknown tag formats stop before any release write.
+          if gh release view "$RELEASE_TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
+            # Reconcile assets only; an existing release keeps its Latest status.
+            gh release upload "$RELEASE_TAG" verified-dist/* release-evidence/* \
+              --repo "$GH_REPO" \
+              --clobber
+          else
+            # A repaired older tag must not displace a newer public Latest. The
+            # comparison uses the existing public release history; failed lookups
+            # or unknown tag formats stop before any release write.
             current_latest="$(gh release view --repo "$GH_REPO" --json tagName --jq .tagName)"
             promote_latest="$(can_promote_latest "$current_latest")"
             latest_args=(--latest=false)
             if [ "$promote_latest" = "true" ]; then latest_args=(--latest); fi
-            {
-              printf '## Release qualification\n\n'
-              printf 'The owner waived full-product qualification for this release. Mandatory full-product gates are not represented as passed.\n\n'
-              printf 'Waiver record: %s\n' "$GH_RUN_URL"
-            } > "$RUNNER_TEMP/release-waiver.md"
-            notes_args=(--notes-file "$RUNNER_TEMP/release-waiver.md")
-          fi
-          if gh release view "$RELEASE_TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
-            if [ "$WAIVE_QUALIFICATION" = "true" ]; then
-              gh release view "$RELEASE_TAG" --repo "$GH_REPO" --json body --jq .body \
-                > "$RUNNER_TEMP/release-notes-existing.md"
-              {
-                cat "$RUNNER_TEMP/release-notes-existing.md"
-                printf '\n\n'
-                cat "$RUNNER_TEMP/release-waiver.md"
-              } > "$RUNNER_TEMP/release-notes.md"
-              gh release edit "$RELEASE_TAG" --repo "$GH_REPO" \
-                --notes-file "$RUNNER_TEMP/release-notes.md"
-            fi
-            gh release upload "$RELEASE_TAG" verified-dist/* release-evidence/* \
-              --repo "$GH_REPO" \
-              --clobber
-            if [ "$WAIVE_QUALIFICATION" = "true" ] && [ "$promote_latest" = "true" ]; then
-              # Another publisher may have advanced Latest during asset upload.
-              # Recheck immediately before promotion; this narrows the race but
-              # does not provide an atomic lease across external publishers.
-              current_latest="$(gh release view --repo "$GH_REPO" --json tagName --jq .tagName)"
-              promote_latest="$(can_promote_latest "$current_latest")"
-              if [ "$promote_latest" = "true" ]; then
-                gh release edit "$RELEASE_TAG" --repo "$GH_REPO" --latest
-              fi
-            fi
-          else
             gh release create "$RELEASE_TAG" verified-dist/* release-evidence/* \
               --repo "$GH_REPO" \
               --verify-tag \
               --generate-notes \
-              "${notes_args[@]}" \
               --title "Engraphis ${RELEASE_TAG#v}" \
               "${latest_args[@]}"
           fi

@@ -9,7 +9,7 @@ const answer = {
 };
 const emptyInbox = { items: [], count: 0, has_more: false, truncated: false, count_semantics: 'returned_sample' };
 
-async function fixture(page, { coverage, answerFailures = 0, reviews = emptyInbox, statsUnavailable = false } = {}) {
+async function fixture(page, { coverage, answerFailures = 0, reviews = emptyInbox, statsUnavailable = false, entryUrl = '/?workspace=home-work&view=ask' } = {}) {
   const requests = [];
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
@@ -37,7 +37,7 @@ async function fixture(page, { coverage, answerFailures = 0, reviews = emptyInbo
     }
     return ok({});
   });
-  await page.goto('/?workspace=home-work&view=ask');
+  await page.goto(entryUrl);
   await expect(page.locator('#connection-status')).toContainText('Local engine connected');
   return { requests, errors };
 }
@@ -46,6 +46,19 @@ async function ask(page, question = 'Which database and retention period?') {
   await page.locator('#ask-input').fill(question);
   await page.locator('#ask-form button[type="submit"]').click();
 }
+
+test('local boot removes obsolete token fragments while retaining navigation context', async ({ page }) => {
+  const token = 'obsolete-public-browser-fixture';
+  await fixture(page, { entryUrl: '/?workspace=home-work&view=ask#token=' + token + '&panel=evidence' });
+  await expect(page.locator('#connection-status')).toContainText('Local engine connected');
+  const current = new URL(page.url());
+  expect(current.searchParams.get('workspace')).toBe('home-work');
+  expect(current.searchParams.get('view')).toBe('ask');
+  expect(new URLSearchParams(current.hash.slice(1)).get('panel')).toBe('evidence');
+  expect(current.hash).not.toContain('token');
+  expect(await page.evaluate(() => JSON.stringify([localStorage, sessionStorage]))).not.toContain(token);
+  await expect(page.locator('#browser-auth-dialog')).not.toBeVisible();
+});
 
 for (const coverage of [undefined, 'partial', 'complete', 'unrecognized']) {
   test('question coverage is independent of support and citations: ' + String(coverage), async ({ page }) => {
