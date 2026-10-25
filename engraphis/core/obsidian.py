@@ -113,8 +113,24 @@ class ObsidianVaultScan:
     complete: bool = True
 
 
+def _remote_or_device_path(path_text: str) -> bool:
+    text = (path_text or "").lstrip()
+    if text.startswith(("\\\\", "//")):
+        return True
+    windows = PureWindowsPath(text)
+    return (
+        windows.drive.startswith(("\\\\", "//"))
+        or windows.drive.startswith(("\\\\?\\", "\\\\.\\"))
+        or text.startswith(("\\\\?\\", "\\\\.\\"))
+    )
+
+
 def canonical_vault_id(vault_path: Union[os.PathLike[str], str]) -> str:
     """Return a stable local identity without reading vault contents."""
+    raw = os.fspath(vault_path)
+    text = raw.decode("utf-8", "surrogateescape") if isinstance(raw, bytes) else str(raw)
+    if _remote_or_device_path(text):
+        raise ValueError("vault path must be an existing directory")
     root = Path(vault_path).resolve()
     return hashlib.sha256(str(root).encode("utf-8", "surrogatepass")).hexdigest()
 
@@ -202,6 +218,10 @@ def parse_obsidian_note(
 
 def scan_obsidian_vault(vault_path: Union[os.PathLike[str], str]) -> ObsidianVaultScan:
     """Recursively discover safe Markdown notes; symlinks and hidden trees are skipped."""
+    raw_vault = os.fspath(vault_path)
+    text_vault = raw_vault.decode("utf-8", "surrogateescape") if isinstance(raw_vault, bytes) else str(raw_vault)
+    if _remote_or_device_path(text_vault):
+        raise ValueError("vault path must be an existing directory")
     selected_root = Path(vault_path)
     if _sensitive_path(str(selected_root), is_directory=True):
         raise ValueError("sensitive source path")

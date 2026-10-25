@@ -129,3 +129,19 @@ def test_reversed_transition_rolls_back_link_versions_and_receipts(temporal_serv
     assert svc.store.conn.execute("SELECT COUNT(*) FROM mem_links").fetchone()[0] == 0
     assert svc.store.conn.execute("SELECT COUNT(*) FROM operation_receipts").fetchone()[0] == before
     assert svc.store.get_memory(current).valid_to is None
+
+
+def test_equal_effective_times_cannot_persist_an_empty_retired_interval(temporal_service):
+    svc, clock = temporal_service
+    old, current = _pair(svc)
+    svc.store.conn.execute(
+        "UPDATE memories SET valid_from=(SELECT valid_from FROM memories WHERE id=?) WHERE id=?",
+        (current, old),
+    )
+    svc.store.conn.commit()
+    clock["now"] = 30_000
+    with pytest.raises(ValidationError, match="predate or equal"):
+        _supersede(svc, old, current)
+    assert svc.store.conn.execute("SELECT COUNT(*) FROM mem_links").fetchone()[0] == 0
+    retired = svc.store.get_memory(old)
+    assert retired.valid_to is None and retired.closure_observations == ()

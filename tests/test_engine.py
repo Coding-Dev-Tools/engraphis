@@ -7,7 +7,7 @@ import time
 import pytest
 
 from engraphis.backends.vector_numpy import NumpyVectorIndex
-from engraphis.core.engine import MemoryEngine
+from engraphis.core.engine import MemoryEngine, _reject_empty_validity_interval
 from engraphis.core.interfaces import MemoryRecord, MemoryType, Node, Scope, SearchFilter
 
 
@@ -592,6 +592,29 @@ def test_remember_invalidates_superseded_fact():
     assert new["superseded"] == [old["id"]]
     live_ids = [m.id for m in eng.store.list_memories(SearchFilter(workspace_id=wid, repo_id=rid))]
     assert old["id"] not in live_ids and new["id"] in live_ids
+
+
+def test_supersession_at_the_predecessor_start_is_rejected():
+    """An empty validity interval is not writable, so supersession fails closed."""
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    old = eng.remember_with_resolution(
+        "The audit log retention period is 30 days.", workspace_id=wid)
+    record = eng.store.get_memory(old["id"])
+    assert record.valid_from is not None
+
+    with pytest.raises(ValueError, match="empty validity interval"):
+        _reject_empty_validity_interval(
+            record, record.valid_from, action="superseding write")
+    with pytest.raises(ValueError, match="empty validity interval"):
+        _reject_empty_validity_interval(
+            record, record.valid_from - 1.0, action="superseding write")
+    # A later start still closes the predecessor, and an absent predecessor or
+    # start instant has nothing to validate.
+    _reject_empty_validity_interval(
+        record, record.valid_from + 1.0, action="superseding write")
+    _reject_empty_validity_interval(None, record.valid_from, action="superseding write")
+    _reject_empty_validity_interval(record, None, action="superseding write")
 
 
 def test_keyed_supersession_rolls_back_if_predecessor_close_fails(monkeypatch):

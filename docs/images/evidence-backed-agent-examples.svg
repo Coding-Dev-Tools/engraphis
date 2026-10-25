@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1693" height="929" viewBox="0 0 1693 929" role="img" aria-labelledby="title desc">
   <title id="title">Three evidence-backed Engraphis agent behaviors</title>
-  <desc id="desc">A three-card summary of deterministic offline fixtures. Focused context returns 740.3 to 214.3 tokens while retaining Recall at 5 of 1.000. A grounded answer returns support for 5/5 answerable questions. An unsupported question safely abstains for 6/6 off-topic questions. Reproduce with eval.chunking_eval and eval.grounded. Exact commands and config digests are registered in BENCHMARKS.md. Public-safe artifact SHA-256: e455482c0ddb4c59afc0a831c910252d5ef20323bcbe27c3f6a90d449f6ffaee.</desc>
+  <desc id="desc">A three-card summary of deterministic offline fixtures. Focused context returns 740.3 to 214.3 tokens while retaining Recall at 5 of 1.000. A grounded answer returns support for 5/5 answerable questions. An unsupported question safely abstains for 6/6 off-topic questions. Reproduce with eval.chunking_eval and eval.grounded. Exact commands and config digests are registered in BENCHMARKS.md. Public-safe artifact SHA-256: 641299111434f59def9a1b9e48059deeef13c5fbda6cdb86af7d2e0c62e24cb1.</desc>
   <defs>
     <linearGradient id="page" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#f8fbff"/><stop offset="1" stop-color="#eef4fb"/></linearGradient>
     <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%"><feDropShadow dx="0" dy="5" stdDeviation="8" flood-opacity=".12"/></filter>
@@ -12,7 +12,7 @@
 
   <g filter="url(#shadow)">
     <rect x="70" y="267" width="493" height="521" rx="20" fill="#fff" stroke="#1763e8" stroke-width="3"/>
-    <rect x="112" y="314" width="255" height="53" rx="14" fill="#eaf2ff" stroke="#a9c9ff" stroke-width="2"/>
+    <rect x="112" y="314" width="300" height="53" rx="14" fill="#eaf2ff" stroke="#a9c9ff" stroke-width="2"/>
     <text x="134" y="350" font-family="Inter, Arial, sans-serif" font-size="25" font-weight="700" fill="#1554c0">FOCUSED CONTEXT</text>
     <text x="112" y="483" font-family="Inter, Arial, sans-serif" font-size="49" font-weight="700" fill="#061a43">Find the</text>
     <text x="112" y="541" font-family="Inter, Arial, sans-serif" font-size="49" font-weight="700" fill="#061a43">relevant passage</text>
@@ -24,7 +24,7 @@
 
   <g filter="url(#shadow)">
     <rect x="603" y="267" width="493" height="521" rx="20" fill="#fff" stroke="#109252" stroke-width="3"/>
-    <rect x="645" y="314" width="221" height="53" rx="14" fill="#eafbf1" stroke="#ade9c7" stroke-width="2"/>
+    <rect x="645" y="314" width="265" height="53" rx="14" fill="#eafbf1" stroke="#ade9c7" stroke-width="2"/>
     <text x="667" y="350" font-family="Inter, Arial, sans-serif" font-size="25" font-weight="700" fill="#08773f">CITED ANSWER</text>
     <text x="645" y="483" font-family="Inter, Arial, sans-serif" font-size="49" font-weight="700" fill="#061a43">Answer only</text>
     <text x="645" y="541" font-family="Inter, Arial, sans-serif" font-size="49" font-weight="700" fill="#061a43">with support</text>
@@ -36,7 +36,7 @@
 
   <g filter="url(#shadow)">
     <rect x="1136" y="267" width="493" height="521" rx="20" fill="#fff" stroke="#f57a19" stroke-width="3"/>
-    <rect x="1178" y="314" width="195" height="53" rx="14" fill="#fff4e9" stroke="#ffd1a4" stroke-width="2"/>
+    <rect x="1178" y="314" width="245" height="53" rx="14" fill="#fff4e9" stroke="#ffd1a4" stroke-width="2"/>
     <text x="1200" y="350" font-family="Inter, Arial, sans-serif" font-size="25" font-weight="700" fill="#d75c06">SAFE ABSTAIN</text>
     <text x="1178" y="483" font-family="Inter, Arial, sans-serif" font-size="49" font-weight="700" fill="#061a43">No support,</text>
     <text x="1178" y="541" font-family="Inter, Arial, sans-serif" font-size="49" font-weight="700" fill="#061a43">no answer</text>
@@ -47,5 +47,5 @@
   </g>
   <line x1="70" y1="832" x2="1623" y2="832" stroke="#ced8e7" stroke-width="2"/>
   <text x="846" y="875" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="24" font-weight="600" fill="#53627b">Reproduce: eval.chunking_eval + eval.grounded</text>
-  <text x="846" y="910" text-anchor="middle" font-family="ui-monospace, monospace" font-size="15" font-weight="600" fill="#53627b">SHA256 e455482c0ddb4c59afc0a831c910252d5ef20323bcbe27c3f6a90d449f6ffaee</text>
+  <text x="846" y="910" text-anchor="middle" font-family="ui-monospace, monospace" font-size="15" font-weight="600" fill="#53627b">SHA256 641299111434f59def9a1b9e48059deeef13c5fbda6cdb86af7d2e0c62e24cb1</text>
 </svg>

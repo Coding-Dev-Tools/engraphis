@@ -89,12 +89,14 @@ The first command checks consistency and may return success for an honestly inco
 ledger. `--require-release` additionally requires every release gate and a clean matching
 engine checkout; `--require-leadership` requires both decisions. All modes retain
 `publication_authorized=false` and `execution_authenticity_verified=false`.
-Actual publication additionally requires the protected, owner-signed approval in
-[RELEASE_QUALIFICATION.md](RELEASE_QUALIFICATION.md), verified immediately before each
-normal or repair write. Its environment, authority and approval remain owner setup;
-this source change does not configure or issue them. The owner-authorized repair
-waivers for the exact v1.7.6 and v1.7.8 candidates documented there are explicit
-exceptions and do not establish full-product readiness or change any gate status.
+Actual publication requires green release gates and approval of the protected
+`release-qualification` environment, as described in
+[RELEASE_QUALIFICATION.md](RELEASE_QUALIFICATION.md). The owner-signed approval of
+this ledger is opt-in. When the `REQUIRE_SIGNED_QUALIFICATION` variable is `true`,
+it is verified immediately before each normal or repair write. The environment,
+the signing authority and the approval remain owner setup, and this source change
+does not configure or issue any of them. A release published without signed
+qualification does not establish full-product readiness or change any gate status.
 
 Planner experiments remain off by default. To require their existing optimization gate:
 

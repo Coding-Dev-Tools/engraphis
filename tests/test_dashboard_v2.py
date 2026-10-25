@@ -1509,7 +1509,7 @@ def test_sidebar_keeps_manage_and_compare_plans_in_separate_flex_rows(monkeypatc
     with _client(monkeypatch, tmp_path) as client:
         stylesheet = client.get("/v2-assets/ledger.css")
         assert stylesheet.status_code == 200
-        css = stylesheet.text
+        css = stylesheet.text.replace("\r\n", "\n")
         sidebar = css[css.index(".sidebar {"):css.index(".brand-row {")]
         assert "display: flex;" in sidebar
         assert "flex-direction: column;" in sidebar
@@ -1934,6 +1934,26 @@ def test_hosted_automation_accepts_the_cloud_policy_field(monkeypatch, tmp_path)
         assert response.status_code == 200
         assert response.json()["dream_enabled"] is True
         assert saved["dream_enabled"] is True
+
+
+@pytest.mark.parametrize("invalid", [
+    {"consolidate": False}, {"min_cluster": 9}, {"archive_below": 0.4},
+    {"dream_min_new": 1}, {"dream_min_new": 10001},
+    {"dream_idle_minutes": -1}, {"dream_idle_minutes": 10081},
+    {"cadence_hours": 0}, {"cadence_hours": 721},
+])
+def test_hosted_automation_rejects_unsupported_or_out_of_contract_controls(
+    monkeypatch, tmp_path, invalid,
+):
+    def unexpected_cloud_call(*args, **kwargs):
+        pytest.fail("invalid policy reached a hosted service")
+
+    monkeypatch.setattr(
+        "engraphis.cloud_features.CloudFeatureClient.from_environment", unexpected_cloud_call,
+    )
+    with _client(monkeypatch, tmp_path) as client:
+        response = client.post("/api/automation", json=invalid)
+    assert response.status_code == 422
 
 
 def test_first_hosted_automation_view_waits_for_explicit_bootstrap(
@@ -2680,3 +2700,138 @@ def test_spec_studio_in_ledger_dashboard(monkeypatch, tmp_path):
         assert ans_resp.status_code == 200
         ans_data = ans_resp.json()
         assert "ISO 27001" in ans_data["updated_text"]
+
+
+@pytest.mark.parametrize("edit", [
+    {}, {"enabled": False}, {"enabled": True}, {"dream_enabled": False},
+    {"dream": False}, {"infer": False},
+    {"enabled": None, "cadence_hours": None, "dream_enabled": None,
+     "dream": None, "dream_min_new": None, "dream_idle_minutes": None, "infer": None},
+])
+@pytest.mark.parametrize("initially_enabled", [False, True])
+@pytest.mark.parametrize("cadence_minutes", [15, 90])
+def test_automation_partial_edits_preserve_zero_idle_and_sdk_cadence(
+    monkeypatch, tmp_path, edit, initially_enabled, cadence_minutes,
+):
+    policy = {
+        "enabled": initially_enabled, "cadence_minutes": cadence_minutes, "dream_enabled": True,
+        "dream_min_new": 2, "dream_idle_minutes": 0, "infer": False, "version": 1,
+    }
+    saved = []
+    uploads = []
+
+    class Cloud:
+        def get_policy(self, workspace_id):
+            return dict(policy)
+
+        def list_jobs(self, workspace_id, *, limit=10):
+            return {"jobs": []}
+
+        def upload_snapshot(self, workspace_id, snapshot):
+            uploads.append(snapshot)
+            return {"generation": snapshot["generation"]}
+
+        def save_policy(self, workspace_id, body):
+            saved.append(dict(body))
+            policy.update(body, version=policy["version"] + 1)
+            return dict(policy)
+
+    monkeypatch.setattr(
+        "engraphis.cloud_features.CloudFeatureClient.from_environment", lambda *_: Cloud(),
+    )
+    monkeypatch.setattr(
+        "engraphis.cloud_features.build_managed_snapshot",
+        lambda *_: ("ws_test", {"generation": 17}),
+    )
+    with _client(monkeypatch, tmp_path) as client:
+        before = client.get("/api/automation").json()
+        assert before["dream_idle_minutes"] == 0
+        assert before["cadence_hours"] == 1
+        assert before["cadence_minutes"] == cadence_minutes
+        response = client.post("/api/automation", json=edit)
+        assert response.status_code == 200
+        assert response.json()["cadence_hours"] >= 1
+        after = client.get("/api/automation").json()
+    assert saved[0]["cadence_minutes"] == cadence_minutes
+    assert response.json()["cadence_minutes"] == after["cadence_minutes"] == cadence_minutes
+    assert saved[0]["dream_idle_minutes"] == after["dream_idle_minutes"] == 0
+    assert saved[0]["dream_min_new"] == 2
+    assert saved[0]["infer"] is False
+    expected_dream = edit.get("dream_enabled")
+    if expected_dream is None:
+        expected_dream = edit.get("dream")
+    if expected_dream is None:
+        expected_dream = True
+    expected_enabled = edit.get("enabled")
+    if expected_enabled is None:
+        expected_enabled = initially_enabled
+    assert saved[0]["dream_enabled"] is expected_dream
+    assert len(uploads) == int(expected_enabled)
+
+
+@pytest.mark.parametrize("fields", [{}, {
+    "cadence_minutes": None, "dream_min_new": None,
+    "dream_idle_minutes": None, "dream_enabled": None, "infer": None,
+}])
+def test_automation_missing_and_null_values_use_the_same_read_edit_defaults(
+    monkeypatch, tmp_path, fields,
+):
+    saved = []
+
+    class Cloud:
+        def get_policy(self, workspace_id):
+            return {"enabled": False, "version": 1, **fields}
+
+        def list_jobs(self, workspace_id, *, limit=10):
+            return {"jobs": []}
+
+        def save_policy(self, workspace_id, body):
+            saved.append(body)
+            return {"version": 2}
+
+    monkeypatch.setattr(
+        "engraphis.cloud_features.CloudFeatureClient.from_environment", lambda *_: Cloud(),
+    )
+    with _client(monkeypatch, tmp_path) as client:
+        read = client.get("/api/automation").json()
+        response = client.post("/api/automation", json={})
+    assert response.status_code == 200
+    assert saved == [{
+        "enabled": False, "cadence_minutes": 1440, "dream_enabled": True,
+        "dream_min_new": 25, "dream_idle_minutes": 15, "infer": False,
+    }]
+    assert read["dream"] is True and read["infer"] is False
+    assert read["dream_min_new"] == 25 and read["dream_idle_minutes"] == 15
+
+
+@pytest.mark.parametrize("hours,minimum,idle", [(1, 2, 0), (720, 10000, 10080)])
+def test_automation_endpoint_roundtrips_supported_editor_boundaries(
+    monkeypatch, tmp_path, hours, minimum, idle,
+):
+    policy = {"enabled": False, "version": 1}
+
+    class Cloud:
+        def get_policy(self, workspace_id):
+            return dict(policy)
+
+        def list_jobs(self, workspace_id, *, limit=10):
+            return {"jobs": []}
+
+        def save_policy(self, workspace_id, body):
+            policy.update(body)
+            return dict(policy)
+
+    monkeypatch.setattr(
+        "engraphis.cloud_features.CloudFeatureClient.from_environment", lambda *_: Cloud(),
+    )
+    with _client(monkeypatch, tmp_path) as client:
+        response = client.post("/api/automation", json={
+            "enabled": False, "cadence_hours": hours, "dream_min_new": minimum,
+            "dream_idle_minutes": idle, "dream_enabled": False, "infer": False,
+        })
+        assert response.status_code == 200
+        read = client.get("/api/automation").json()
+    assert policy["cadence_minutes"] == hours * 60
+    assert read["cadence_hours"] == hours
+    assert read["dream_min_new"] == minimum and read["dream_idle_minutes"] == idle
+    assert read["dream"] is False and read["infer"] is False

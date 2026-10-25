@@ -29,7 +29,7 @@ most common mistake here.
 | Status | Primary scoped, bi-temporal, interface-driven implementation. | Compatibility/reference implementation with flat namespaces. |
 | Model | Scoped + bi-temporal + typed; interface-driven. | Single flat `namespace` string per memory. |
 | Code | `engraphis/core/`, `engraphis/backends/`, `eval/`, `tests/`, `scripts/migrate_to_v2.py` | `engraphis/app.py`, `config.py`, `models.py`, `routes/`, `stores/`, `engines/`, `llm/` |
-| Data | new v2 schema (`SCHEMA_VERSION = 18`) | `engraphis_v1.db` |
+| Data | new v2 schema (`SCHEMA_VERSION = 19`) | `engraphis_v1.db` |
 | Entry | `engraphis.MemoryEngine.create()` / `engraphis.create_memory_engine()` → `engraphis/factory.py` → `core/engine.py` | Internal reference only; never a public launcher |
 
 **Rule:** build new capability on **v2** (`core/` + `backends/`) behind the interfaces.
@@ -59,7 +59,8 @@ python -m eval.reinforcement                                        # bounded re
 python -m eval.adversarial_memory_security                          # prompt/graph boundary
 python -m eval.grounded                                             # grounded-abstain decision gate
 python -m eval.code_arm                                             # coding-agent arm gate
-python -m eval.spec_crawl                                           # agent spec quality & prompt crawl gate
+python -m eval.spec_crawl                                           # agent spec quality & memory-audit gate
+python -m eval.evidence_contracts                                   # benchmark evidence contracts
 pyright                                                             # core + backends typecheck
 
 # ── External benchmarks (real numbers need torch + the dataset; see eval/external.py) ──
@@ -100,7 +101,7 @@ python -m scripts.migrate_to_v2 --old engraphis_v1.db --new engraphis_v2.db
 
 `requires-python >= 3.9` (ruff targets `py39`). CI tests the NumPy-only core on 3.9, the full
 offline stack on 3.10–3.14, and Pyright on 3.11; dedicated jobs also exercise encryption and built
-artifacts, and further jobs run the coverage gate (`--cov-fail-under=60`), repo hygiene, the Pi
+artifacts, and further jobs run the coverage gate (`--cov-fail-under=80`), repo hygiene, the Pi
 extension, browser accessibility, and the Docker smoke. `.github/workflows/ci.yml` is
 authoritative when the matrix changes.
 
@@ -211,7 +212,7 @@ These are pure, unit-tested functions — change them only with a corresponding 
 
 ---
 
-## 5. Data model cheat-sheet (`core/interfaces.py`, `core/schema.py` — `SCHEMA_VERSION = 18`)
+## 5. Data model cheat-sheet (`core/interfaces.py`, `core/schema.py` — `SCHEMA_VERSION = 19`)
 
 - **Scope hierarchy:** `workspace → repo → session → memory`. Scopes: `session|repo|workspace|user`.
 - **Bi-temporal validity on every record:** world-time `valid_from/valid_to` +
@@ -224,7 +225,8 @@ These are pure, unit-tested functions — change them only with a corresponding 
   `mem_fts` (FTS5 + plain-table fallback), `entities`, `edges` (bi-temporal), `mem_links`,
   `memory_entities`, `symbols`, `code_edges`, `code_files`, `code_memory_links`,
   `operation_receipts`, `events`, `audit`, `memory_tombstones`, `source_vaults`,
-  `source_imports`, `source_import_items`, `schema_migrations`.
+  `source_imports`, `source_import_items`, `memory_closures`, `schema_migrations`,
+  `migration_executions`.
 - **Local document sources:** source collections are scope-bound, resumable manifests. Their
   paths, digests, and import state are provenance; source folders never create implicit memory
   scopes. `kind="documents"` is the source-neutral adapter, while `kind="obsidian"` retains
@@ -233,6 +235,11 @@ These are pure, unit-tested functions — change them only with a corresponding 
 - **Erasure markers contain no memory content.** `memory_tombstones.export_class` is strictly
   `never_export|remote_erasure`; only `remote_erasure` may cross a sync boundary.
 - **Vectors are stored L2-normalized** so cosine similarity == dot product.
+- **Closure history is append-only:** `memory_closures` preserves each known closure.
+  Historical visibility uses the earliest endpoint known at `known_at`; the scalar
+  `valid_to` pair is only the current compatibility summary. Sync v4 transports the
+  observation union; earlier clients must upgrade before receiving v4 bundles.
+  Legacy observations with no recorded knowledge time remain visible at every knowledge anchor.
 
 ---
 
