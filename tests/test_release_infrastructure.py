@@ -668,6 +668,42 @@ def _job_block(workflow: str, job: str) -> str:
     return match.group(1)
 
 
+def test_python39_jobs_use_a_runner_with_the_supported_toolcache():
+    """Ubuntu 26.04 does not provide Python 3.9 through actions/setup-python."""
+    for workflow, jobs in (
+        (".github/workflows/ci.yml", ("core-py39",)),
+        (".github/workflows/release.yml", ("python-matrix", "artifact-core-py39")),
+    ):
+        content = _text(workflow)
+        for job in jobs:
+            body = _job_block(content, job)
+            assert re.search(r"(?m)^    runs-on: ubuntu-24\.04$", body), job
+
+
+def test_release_transitive_dependency_security_floors_cannot_regress():
+    package = json.loads(_text("integrations/pi/package.json"))
+    lock = json.loads(_text("integrations/pi/npm-shrinkwrap.json"))
+    expected_overrides = {
+        "body-parser": "^2.4.0",
+        "fast-uri": "^3.1.9",
+        "zod": "^4.6.6",
+    }
+    for name, floor in expected_overrides.items():
+        assert package["overrides"][name] == floor
+        locked = lock["packages"][f"node_modules/{name}"]["version"]
+        assert tuple(map(int, locked.split("."))) >= tuple(
+            map(int, floor.removeprefix("^").split("."))
+        )
+
+    # Pi's published development host has its own shrinkwrap, so its exact nested
+    # undici pin must be repaired before auditing the actual installed tree.
+    ci = _text(".github/workflows/ci.yml")
+    assert "brace-expansion@5.0.12 undici@8.12.2" in ci
+    assert "npm audit --omit=dev" in ci
+    assert "npm audit --no-package-lock --include=dev" in ci
+    assert 'pip install --upgrade "filelock>=4.2.1,<5"' in _text("Dockerfile")
+
+
 def test_privileged_publication_jobs_use_no_dependency_cache():
     """A privileged publication job must not be fed by a shared dependency cache.
 

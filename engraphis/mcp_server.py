@@ -619,7 +619,8 @@ def engraphis_remember(
     rationale, a bug's cause and fix, a user preference, or a reusable procedure.
 
     Returns:
-        str: JSON ``{"id","workspace","repo","scope","mtype","stored":true,"op"}`` where
+        str: JSON with ``id``, resolved scope, ``stored``, ``op``, ``review_state`` and
+        ``prompt_eligible``. Stored memories may still require review before recall. Here
         ``op`` is ``"add"`` (new), ``"noop"`` (matched an existing memory almost exactly —
         that one was reinforced, ``id`` points to it), or ``"invalidate"`` (superseded an
         existing memory on the same subject — see ``superseded`` for the old id(s); history
@@ -3963,7 +3964,7 @@ def smart_remember(
         description="Literal type: literal, string, identifier, path, number, date, enum, or json.",
         max_length=32)] = "literal",
 ) -> str:
-    """Store a durable fact with safe default provenance and deduplication."""
+    """Store a fact; check prompt_eligible and review_state before recall."""
     result = engraphis_remember(
         content=content, workspace=workspace, repo=repo, session_id=session_id,
         mtype=mtype, importance=importance,

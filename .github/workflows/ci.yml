@@ -111,7 +111,8 @@ jobs:
 
   core-py39:
     name: core floor (numpy-only, Python 3.9)
-    runs-on: ubuntu-latest
+    # Ubuntu 26.04 no longer ships Python 3.9 in actions/python-versions.
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -259,14 +260,16 @@ jobs:
           # npm 10 crashes while repairing a nested published shrinkwrap.
           npm install --global --ignore-scripts npm@11.12.1
           npm ci --ignore-scripts
-          # The test host's published shrinkwrap overrides this package's nested pin.
-          # Repair that exact leaf in the installed host, preserving its other locked deps.
+          # The test host's published shrinkwrap overrides this package's nested pins.
+          # Repair those exact leaves in the installed host, preserving its other locked deps.
           # --omit=dev excludes the host's own authoring tools, not this package's test tools.
-          npm install --prefix node_modules/@earendil-works/pi-coding-agent --ignore-scripts --no-save --omit=dev brace-expansion@5.0.12
+          npm install --prefix node_modules/@earendil-works/pi-coding-agent --ignore-scripts --no-save --omit=dev brace-expansion@5.0.12 undici@8.12.2
           node -e "require('node:assert/strict').equal(require('./node_modules/@earendil-works/pi-coding-agent/node_modules/brace-expansion/package.json').version, '5.0.12')"
+          node -e "require('node:assert/strict').equal(require('./node_modules/@earendil-works/pi-coding-agent/node_modules/undici/package.json').version, '8.12.2')"
           npm run verify
           npm run test:integration
-          npm audit
+          # Audit production from the lock, then the complete repaired install including dev.
+          npm audit --omit=dev
           npm audit --no-package-lock --include=dev
 
   browser-accessibility:

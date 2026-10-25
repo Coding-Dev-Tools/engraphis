@@ -273,8 +273,9 @@ cmd mcp get engraphis
 Windows note above -- `cmd` resolved to `cmd.exe`.)
 
 Start a normal Command Code session with `cmd`, open `/mcp`, and confirm that `engraphis` is
-connected and exposes tools. Then ask Command Code: "Call `engraphis_stats` and show me the
-result." A response with memory counts confirms the end-to-end connection.
+connected and exposes tools. Then ask Command Code to discover the local memory store health
+action with `engraphis_discover_actions` and call its returned schema through
+`engraphis_execute_read`. A response with memory counts confirms the end-to-end connection.
 
 Command Code disables MCP tools in plan mode. Start a tool-enabled session before expecting it to
 call `engraphis_recall`, `engraphis_remember`, or another Engraphis tool. For the broader memory
