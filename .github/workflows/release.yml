@@ -146,14 +146,14 @@ jobs:
           done
 
       - name: Store distributions
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: python-package-distributions
           path: dist/
 
 
       - name: Store exact build environment evidence
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: build-environment-evidence
           path: build-environment-evidence/
@@ -197,7 +197,7 @@ jobs:
             | LC_ALL=C sort > reproducibility/environment.lock
           python scripts/verify_distribution_contents.py reproducibility/dist/*
       - name: Store independent builder output
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: reproducibility-builder-${{ matrix.builder }}
           path: reproducibility/
@@ -287,7 +287,7 @@ jobs:
           )
           PY
       - name: Store independent reproducibility evidence
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: independent-reproducibility
           path: reproducibility-evidence/
@@ -476,7 +476,7 @@ jobs:
           PY
       - name: Retain installed journey evidence
         if: matrix.profile != 'base'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: installed-journey-${{ matrix.os }}-${{ matrix.profile }}
           path: |
@@ -743,7 +743,7 @@ jobs:
           exit 1
       - name: Store whole-image evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: production-image-evidence
           path: container-evidence/
@@ -773,14 +773,14 @@ jobs:
         with:
           python-version: "3.11"
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4
+        uses: github/codeql-action/init@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4
         with:
           languages: ${{ matrix.language }}
           build-mode: none
           config-file: ./.github/codeql/codeql-config.yml
       - name: Analyze complete source tree
         id: analyze
-        uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d # v4
+        uses: github/codeql-action/analyze@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4
         with:
           output: codeql-results
           upload: never
@@ -864,7 +864,7 @@ jobs:
             --verified-check adversarial-memory-security \
             --output release-evidence/release-evidence.json
       - name: Store public release evidence
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: public-release-evidence
           path: release-evidence/
@@ -928,7 +928,7 @@ jobs:
             --commit "$GITHUB_SHA" --tag "$GITHUB_REF_NAME"
 
       - name: Publish distributions to PyPI
-        uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # v1.14.1
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
         with:
           skip-existing: true
 
@@ -1189,7 +1189,7 @@ jobs:
             --commit "$ENGRAPHIS_REPAIR_COMMIT" --tag "$RELEASE_TAG"
 
       - name: Publish only missing verified distributions
-        uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # v1.14.1
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
         with:
           skip-existing: true
 
