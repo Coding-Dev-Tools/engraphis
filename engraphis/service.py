@@ -2197,6 +2197,16 @@ class MemoryService:
             "workspace_source": route["source"],
             "scope": sc.value, "mtype": mt.value, "stored": True, "op": result["op"],
         }
+        # A successful write may still require review. Report the persisted
+        # target's state (also for dedupe/noop), rather than implying that stored
+        # content is necessarily available to the next agent's prompt.
+        stored_record = self.store.get_memory(result["id"])
+        out["prompt_eligible"] = bool(
+            stored_record and prompt_eligible(stored_record.provenance, stored_record.metadata)
+        )
+        out["review_state"] = (
+            str(stored_record.provenance.get("review_state") or "") if stored_record else ""
+        )
         if result["op"] in ("noop", "invalidate", "relate"):
             out["resolution"] = result.get("reason", "")
         if result.get("exact_value_bound"):
