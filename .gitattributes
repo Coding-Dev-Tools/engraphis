@@ -3,9 +3,16 @@
 *.pyd binary
 *.so binary
 *.dll binary
+*.py text eol=lf
 .github/workflows/*.yml text eol=lf
 .github/workflows/*.yaml text eol=lf
 *.sh text eol=lf
+# Frozen corpus/evidence manifests hash exact bytes, including executable oracles.
+eval/datasets/** text eol=lf
+eval/artifacts/** text eol=lf
+# Historical reports include both LF and CRLF snapshots; preserve their signed bytes.
+docs/benchmark-evidence/** -text
+engraphis/**/vendor/*.js text eol=lf
 deploy/*.lock text eol=lf
 deploy/*.licenses.json text eol=lf
 .claude-plugin/*.json text eol=lf

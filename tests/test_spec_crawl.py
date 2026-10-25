@@ -378,3 +378,30 @@ def test_overlapping_code_spans_merge_and_membership_does_not_rescan_them():
     assert _in_ranges(63_998, dense)
     assert not _in_ranges(63_999, dense)
     assert dense.reads <= 40
+
+
+@pytest.mark.parametrize("line", [
+    "# a" + " #" * 31_990 + "x",
+    "#\t" + "\t#" * 31_990 + "y",
+], ids=["space-hash-tail", "tab-hash-tail"])
+def test_markdown_heading_with_long_closing_run_is_linear(line):
+    # ``(.+?)[ \t#]*$`` rescanned the tail for every lazy step: ~48 s at 64k chars.
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    program = (
+        "import sys,time\n"
+        "from engraphis.core.spec_crawl import crawl_spec\n"
+        "line=sys.stdin.read()\n"
+        "start=time.perf_counter()\n"
+        "report=crawl_spec(line,include_trace=False)\n"
+        "assert len(report['sections'])==1, report['sections']\n"
+        "print(time.perf_counter()-start)\n"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", program], input=line, text=True, capture_output=True,
+        cwd=Path(__file__).resolve().parents[1], timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert float(completed.stdout) < 4
