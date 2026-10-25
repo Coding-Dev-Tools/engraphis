@@ -41,10 +41,12 @@ COPY deploy ./deploy
 # Railway runs CPU workloads.  Install the CPU-only PyTorch wheel before the embedding
 # stack so pip cannot select PyPI's multi-gigabyte CUDA dependency chain.  The public
 # customer image needs the dashboard/server surface, MCP-over-HTTP, and its advertised local
-# OCR path; transcription, PostgreSQL, and code graph remain opt-in deployment baggage. pip is
-# build-only here, so remove it and its vendored dependency snapshot from the runtime image.
+# OCR path; transcription, PostgreSQL, and code graph remain opt-in deployment baggage. The
+# pinned CPython/Torch layer can carry an older transitive filelock, so enforce its security
+# floor explicitly. pip is build-only here, so remove it and its vendored snapshot at the end.
 RUN pip install --upgrade pip "setuptools>=83" \
     && pip install --index-url https://download.pytorch.org/whl/cpu torch \
+    && pip install --upgrade "filelock>=4.2.1,<5" \
     && pip install ".[server,mcp,documents,cloud-sync]" \
     && rm -rf /root/.cache/pip \
         /usr/local/lib/python3.11/site-packages/pip \

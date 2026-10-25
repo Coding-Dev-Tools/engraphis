@@ -49,8 +49,11 @@
     "@modelcontextprotocol/sdk": "1.32.1"
   },
   "overrides": {
-    "hono": "^4.13.5",
-    "proxy-addr": "2.0.8"
+    "body-parser": "^2.4.0",
+    "fast-uri": "^3.1.9",
+    "hono": "^4.13.13",
+    "proxy-addr": "2.0.8",
+    "zod": "^4.6.6"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

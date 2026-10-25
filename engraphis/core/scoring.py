@@ -210,13 +210,7 @@ def score_memory(rec: MemoryRecord, *, now: float, weights: Weights,
     """
     w = weights
     r = retention(rec.stability, rec.last_access, now)
-    known_valid_to = rec.valid_to
-    if (
-        known_at is not None
-        and rec.valid_to_recorded_at is not None
-        and known_at < rec.valid_to_recorded_at
-    ):
-        known_valid_to = None
+    known_valid_to = rec.effective_valid_to(known_at)
     x = staleness_penalty(known_valid_to, now)
     confidence = _confidence(getattr(rec, "confidence", 1.0))
     importance = _bounded(getattr(rec, "importance", 0.0))
@@ -250,6 +244,6 @@ def score_proactive(rec: MemoryRecord, *, now: float, weights: Optional[Weights]
         + _finite_number(getattr(w, "c", 0.0)) * recency(rec_ref, now)
         + _finite_number(getattr(w, "r", 0.0)) * r
         - _finite_number(getattr(w, "x", 0.0)) * staleness_penalty(
-            rec.valid_to, now
+            rec.effective_valid_to(), now
         )
     )

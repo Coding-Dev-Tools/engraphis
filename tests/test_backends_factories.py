@@ -275,6 +275,26 @@ def test_sentence_transformer_disables_remote_code(monkeypatch):
     assert captured == {"trust_remote_code": False, "revision": "a" * 40}
 
 
+@pytest.mark.parametrize("name", ["all-MiniLM-L6-v2", "sentence-transformers/all-MiniLM-L6-v2"])
+@pytest.mark.parametrize("revision", [None, "b" * 40])
+def test_default_semantic_model_has_an_identity_without_loader_commit_metadata(monkeypatch, name, revision):
+    from engraphis.backends.embedder_st import _DEFAULT_MINILM_COMMIT
+
+    calls = []
+
+    class Model:
+        def __init__(self, model_name, **kwargs):
+            calls.append((model_name, kwargs))
+
+        def get_embedding_dimension(self):
+            return 384
+
+    monkeypatch.setitem(sys.modules, "sentence_transformers", SimpleNamespace(SentenceTransformer=Model))
+    embedder = SentenceTransformerEmbedder(name, revision=revision)
+    assert embedder.embedding_version
+    assert calls == [(name, {"trust_remote_code": False, "revision": revision or _DEFAULT_MINILM_COMMIT})]
+
+
 def test_sentence_transformer_strict_local_cache_selector_never_requires_remote_revision(
     monkeypatch,
 ):

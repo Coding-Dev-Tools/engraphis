@@ -131,7 +131,7 @@ def test_build_and_review_routes_do_not_expose_secrets(svc, monkeypatch):
         build = client.get("/api/build")
         assert build.status_code == 200
         value = build.json()
-        assert value["database_schema_version"] == 18
+        assert value["database_schema_version"] == 19
         assert value["contracts"]["listing"] == "cursor/2"
         assert value["readers"]["independent_browsing"] is True
         assert len(value["package_source_sha256"]) == 64

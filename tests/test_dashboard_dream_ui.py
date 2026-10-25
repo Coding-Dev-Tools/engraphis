@@ -15,9 +15,9 @@ def test_automation_form_renders_dream_controls():
     script = SCRIPT.read_text(encoding="utf-8")
     for el in ("automation-dream", "automation-dream-min", "automation-dream-idle"):
         assert "'%s'" % el in script, el
-    # Inference is offered only as a hosted proposal policy, never as local inference.
-    assert ("automationCheckbox('automation-infer', 'Allow hosted relationship inference "
-            "proposals', policy.infer)") in script
+    # Unsupported inference stays disabled in the public policy editor.
+    assert ("automationCheckbox('automation-infer', 'Hosted relationship inference "
+            "is not available', false, true)") in script
     assert "submits a bounded snapshot of this workspace’s normal and sensitive memory content" \
         in script
     # Consent travels with the workspace approval. The dashboard must never name the operator
@@ -29,8 +29,12 @@ def test_automation_form_renders_dream_controls():
 def test_save_body_posts_dream_fields():
     script = SCRIPT.read_text(encoding="utf-8")
     assert "dream_enabled: byId('automation-dream').checked" in script
-    assert "dream_min_new: Math.max(1, Number(byId('automation-dream-min').value) || 1)" in script
+    assert "dream_min_new: Math.max(2, Number(byId('automation-dream-min').value) || 2)" in script
     # Zero idle minutes is a valid hosted policy value, so it must survive the coercion.
     assert ("dream_idle_minutes: Math.max(0, Number(byId('automation-dream-idle').value) || 0)"
             in script)
-    assert "infer: byId('automation-infer').checked," in script
+    save_body = script.split("  async function saveAutomationPolicy(", 1)[1].split(
+        "    if (form.dataset.cadenceEdited", 1
+    )[0]
+    assert "infer: false," in save_body
+    assert "byId('automation-infer').checked" not in script

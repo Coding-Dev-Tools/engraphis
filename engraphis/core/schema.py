@@ -8,7 +8,9 @@ with a plain-table fallback so the schema initializes on any SQLite build).
 """
 from __future__ import annotations
 
-SCHEMA_VERSION = 18
+from engraphis.core.interfaces import MAX_CLOSURE_OBSERVATIONS
+
+SCHEMA_VERSION = 19
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -114,6 +116,33 @@ CREATE TABLE IF NOT EXISTS memories (
 CREATE INDEX IF NOT EXISTS idx_mem_scope   ON memories(workspace_id, repo_id, scope, mtype);
 CREATE INDEX IF NOT EXISTS idx_mem_session ON memories(session_id);
 CREATE INDEX IF NOT EXISTS idx_mem_valid   ON memories(valid_from, valid_to, expired_at);
+
+
+-- Closure observations form an append-only earliest-endpoint lattice. Their
+-- ownership and erasure boundary is the referenced memory, never peer-supplied
+-- workspace pointers. A legacy null recorded_at is an always-known closure.
+CREATE TABLE IF NOT EXISTS memory_closures (
+    memory_id   TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    valid_to    REAL NOT NULL CHECK(
+        typeof(valid_to) IN ('real','integer')
+        AND valid_to BETWEEN -1.7976931348623157e308 AND 1.7976931348623157e308
+    ),
+    recorded_at REAL CHECK(
+        recorded_at IS NULL OR (
+            typeof(recorded_at) IN ('real','integer')
+            AND recorded_at BETWEEN -1.7976931348623157e308 AND 1.7976931348623157e308
+        )
+    )
+);
+-- The main covering index also serves memory_id + valid_to visibility probes.
+-- SQLite treats nulls as distinct in UNIQUE indexes, so legacy pairs need their
+-- own partial unique index to make migration and sync replays idempotent.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_closures_identity
+    ON memory_closures(memory_id, valid_to, recorded_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_closures_legacy_unique
+    ON memory_closures(memory_id, valid_to) WHERE recorded_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_memory_closures_known
+    ON memory_closures(memory_id, recorded_at, valid_to);
 
 
 -- Persisted memory↔entity incidence lets graph retrieval attach evidence without
@@ -908,6 +937,68 @@ FTS_SQL_FALLBACK = (
     "CREATE TABLE IF NOT EXISTS mem_fts "
     "(id TEXT PRIMARY KEY, title TEXT, content TEXT, keywords TEXT);"
 )
+
+
+# Install AFTER additive temporal-column migrations and BROWSE_SCHEMA_SQL. The
+# main SCHEMA_SQL above must remain valid for old tables missing recorded_at.
+# This script is intentionally idempotent and uses no optional JSON extension.
+MEMORY_CLOSURE_SCHEMA_SQL = f"""
+CREATE TRIGGER IF NOT EXISTS trg_memory_closure_bound
+BEFORE INSERT ON memory_closures
+WHEN NOT EXISTS (
+    SELECT 1 FROM memory_closures AS existing
+    WHERE existing.memory_id=NEW.memory_id AND existing.valid_to=NEW.valid_to
+      AND existing.recorded_at IS NEW.recorded_at
+) AND (
+    SELECT COUNT(*) FROM memory_closures WHERE memory_id=NEW.memory_id
+) >= {MAX_CLOSURE_OBSERVATIONS}
+BEGIN
+    SELECT RAISE(ABORT, 'memory closure observation limit exceeded');
+END;
+
+-- A new observation can change historical visibility while leaving the scalar
+-- minimum unchanged. Invalidate its existing scope's browse revision as well.
+CREATE TRIGGER IF NOT EXISTS trg_browse_memory_closure_insert
+AFTER INSERT ON memory_closures
+BEGIN
+    INSERT INTO browse_scope_revisions
+    SELECT memory.workspace_id, COALESCE(memory.repo_id,''),
+           COALESCE(memory.session_id,''), memory.scope, memory.mtype,
+           lower(hex(randomblob(16)))
+    FROM memories AS memory WHERE memory.id=NEW.memory_id
+    ON CONFLICT(workspace_id,repo_id,session_id,scope,mtype)
+      DO UPDATE SET revision=excluded.revision;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_memory_closure_insert
+AFTER INSERT ON memories
+WHEN NEW.valid_to IS NOT NULL
+BEGIN
+    INSERT INTO memory_closures(memory_id,valid_to,recorded_at)
+    VALUES(NEW.id,NEW.valid_to,NEW.valid_to_recorded_at) ON CONFLICT DO NOTHING;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_memory_closure_update
+AFTER UPDATE OF valid_to,valid_to_recorded_at ON memories
+WHEN OLD.valid_to IS NOT NEW.valid_to
+  OR OLD.valid_to_recorded_at IS NOT NEW.valid_to_recorded_at
+BEGIN
+    INSERT INTO memory_closures(memory_id,valid_to,recorded_at)
+    SELECT NEW.id,OLD.valid_to,OLD.valid_to_recorded_at
+    WHERE OLD.valid_to IS NOT NULL ON CONFLICT DO NOTHING;
+    INSERT INTO memory_closures(memory_id,valid_to,recorded_at)
+    SELECT NEW.id,NEW.valid_to,NEW.valid_to_recorded_at
+    WHERE NEW.valid_to IS NOT NULL ON CONFLICT DO NOTHING;
+END;
+
+-- Existing databases can seed only their still-available scalar observation.
+-- Null recorded_at stays null; inventing a migration timestamp would hide it
+-- from snapshots where the legacy record's closure was already observable.
+INSERT INTO memory_closures(memory_id,valid_to,recorded_at)
+SELECT id,valid_to,valid_to_recorded_at FROM memories
+WHERE valid_to IS NOT NULL ON CONFLICT DO NOTHING;
+"""
+
 
 # Installed after additive memory-column migrations. These revisions are local,
 # content-free cursor state; they are never included in a sync bundle.

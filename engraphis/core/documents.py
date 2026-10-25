@@ -226,8 +226,45 @@ def document_format_for_path(relative_path: str) -> Optional[DocumentFormat]:
     return next((spec for spec in DOCUMENT_FORMATS.values() if suffix in spec.extensions), None)
 
 
+def remote_or_device_path(path_text: str) -> bool:
+    """Return whether a *raw* path names a UNC share or a Windows device namespace.
+
+    These forms must be rejected before any resolution, stat or open: on Windows a
+    ``\\\\server\\share`` path opens an SMB session and can disclose NTLM credentials
+    to an attacker-controlled host.  ``Path.resolve()`` cannot be called first to
+    decide, because the leak happens during resolution itself.
+    """
+    text = (path_text or "").lstrip()
+    if text.startswith(("\\\\", "//")):
+        return True
+    windows = PureWindowsPath(text)
+    return (
+        windows.drive.startswith(("\\\\", "//"))
+        or windows.drive.startswith(("\\\\?\\", "\\\\.\\"))
+        or text.startswith(("\\\\?\\", "\\\\.\\"))
+    )
+
+
+def _raw_local_root(root_path: Union[os.PathLike[str], str]) -> str:
+    """Return a root's raw text, rejecting UNC/device forms before any filesystem call.
+
+    Validation has to inspect the *raw* string first: once this helper returns, the
+    caller may resolve and stat safely, because resolution of a local drive path
+    cannot be redirected to a remote host by the path text alone.
+    """
+    raw = os.fspath(root_path)
+    text = raw.decode("utf-8", "surrogateescape") if isinstance(raw, bytes) else str(raw)
+    if not text:
+        raise DocumentParseError("source root must not be empty")
+    if any(ord(char) < 32 for char in text):
+        raise DocumentParseError("source root contains control characters")
+    if remote_or_device_path(text):
+        raise DocumentParseError("source root must be a local path, not a UNC share or device")
+    return text
+
+
 def canonical_source_id(root_path: Union[os.PathLike[str], str]) -> str:
-    root = Path(root_path).resolve()
+    root = Path(_raw_local_root(root_path)).resolve()
     return hashlib.sha256(str(root).encode("utf-8", "surrogatepass")).hexdigest()
 
 
@@ -383,7 +420,9 @@ def scan_document_tree(
     root_path: Union[os.PathLike[str], str], *, adapter: Optional[DocumentAdapter] = None,
 ) -> DocumentScan:
     """Discover recognised documents below a safe directory, continuing per-file errors."""
-    selected = Path(root_path)
+    # Validate the raw text before constructing or statting a Path: on Windows a UNC
+    # root would otherwise open an SMB session (and leak NTLM) during ``os.lstat``.
+    selected = Path(_raw_local_root(root_path))
     if _sensitive_path(str(selected), is_directory=True):
         raise DocumentParseError("sensitive source path")
     try:
@@ -1081,11 +1120,19 @@ def _validate_archive(archive: zipfile.ZipFile) -> None:
             raise DocumentParseError("container compression ratio is unsafe")
 
 
+class _NoDocumentType(ElementTree.TreeBuilder):
+    def doctype(self, name, pubid, system):
+        # The parser decodes XML before this callback, including UTF-16 input.
+        # A byte-pattern check alone cannot enforce the declaration boundary.
+        raise DocumentParseError("XML declarations and entities are not allowed")
+
+
 def _xml_root(raw: bytes, label: str) -> ElementTree.Element:
     if re.search(br"<!\s*(?:DOCTYPE|ENTITY)\b", raw, flags=re.I):
         raise DocumentParseError("%s XML declarations and entities are not allowed" % label)
     try:
-        return ElementTree.fromstring(raw)  # nosec B314 -- explicit size and DTD limits above
+        parser = ElementTree.XMLParser(target=_NoDocumentType())
+        return ElementTree.fromstring(raw, parser=parser)  # nosec B314 -- parser rejects DTDs
     except ElementTree.ParseError:
         raise DocumentParseError("invalid %s XML" % label) from None
 
@@ -1764,5 +1811,6 @@ __all__ = [
     "MAX_DOCUMENT_BYTES", "MAX_DOCUMENT_CHARS", "MAX_DOCUMENT_FILES", "MAX_DOCUMENT_TREE_BYTES",
     "MAX_DOCUMENT_WARNINGS",
     "canonical_source_id", "document_format_for_path", "normalize_document_path",
-    "parse_document", "scan_document_tree", "supported_document_extensions",
+    "parse_document", "remote_or_device_path", "scan_document_tree",
+    "supported_document_extensions",
 ]
