@@ -151,7 +151,7 @@ def _release_inputs(root, dist):
             "toolchain": {
                 "build": "1.5.0",
                 "pip": "26.2",
-                "setuptools": "83.0.0",
+                "setuptools": "84.1.0",
                 "wheel": "0.47.0",
             },
             "artifacts": artifact_digests,
