@@ -60,3 +60,39 @@ def test_sync_apply_preserves_future_world_validity():
     poisoned = dict_to_record({"id": "mem_y", "content": "c", "ingested_at": future,
                                "last_access": future})
     assert poisoned is None
+
+
+def test_bound_store_protects_foreign_session_and_governance_ids(tmp_path):
+    from engraphis.core.interfaces import MemoryRecord
+    from engraphis.core.store import Store
+
+    path = tmp_path / "governance.db"
+    with Store(str(path)) as seed:
+        seed.get_or_create_workspace("allowed")
+        secret = seed.get_or_create_workspace("secret")
+        memory = seed.add_memory(MemoryRecord(id="", content="private", workspace_id=secret))
+        session = seed.start_session(secret, goal="private session")
+        before_memory = dict(seed.conn.execute(
+            "SELECT * FROM memories WHERE id=?", (memory,),
+        ).fetchone())
+        before_session = seed.get_session(session)
+        before_audit = seed.conn.execute("SELECT count(*) FROM audit").fetchone()[0]
+
+    with Store(str(path), allowed_workspaces={"allowed"}) as bound:
+        assert bound.get_session(session) is None
+        for mutation in (
+            lambda: bound.end_session(session),
+            lambda: bound.close_validity(memory),
+            lambda: bound.set_pinned(memory, True),
+            lambda: bound.reinforce(memory),
+        ):
+            with pytest.raises(ValueError, match="not permitted"):
+                mutation()
+        assert not bound.conn.in_transaction
+
+    with Store(str(path)) as verify:
+        assert dict(verify.conn.execute(
+            "SELECT * FROM memories WHERE id=?", (memory,),
+        ).fetchone()) == before_memory
+        assert verify.get_session(session) == before_session
+        assert verify.conn.execute("SELECT count(*) FROM audit").fetchone()[0] == before_audit

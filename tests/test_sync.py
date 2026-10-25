@@ -28,6 +28,7 @@ from engraphis.core.interfaces import (
 from engraphis.core.store import Store
 from engraphis.core.sync import (
     MAX_CONTENT_CHARS,
+    PEER_CLOSURE_OBSERVATION_BUDGET,
     TS_FUTURE_SKEW,
     SYNC_FORMAT,
     SyncEngine,
@@ -584,7 +585,7 @@ def test_shared_database_device_identity_is_atomic_and_durable(tmp_path):
         reopened.close()
 
 
-def test_sync_exports_v3_freshness_and_accepts_legacy_v1_without_silent_downgrade():
+def test_sync_exports_v4_freshness_and_accepts_legacy_v1_without_silent_downgrade():
     engine = MemoryEngine.create(":memory:")
     wid = engine.store.get_or_create_workspace("w")
     engine.remember(
@@ -596,7 +597,7 @@ def test_sync_exports_v3_freshness_and_accepts_legacy_v1_without_silent_downgrad
     )
     syncer = SyncEngine(engine.store)
     exported = syncer.export_bundle(wid)
-    assert exported["version"] == 3
+    assert exported["version"] == 4
     assert exported["generation"] == 1
     assert exported["previous_hash"] == ""
     assert len(exported["state_hash"]) == 64
@@ -609,6 +610,7 @@ def test_sync_exports_v3_freshness_and_accepts_legacy_v1_without_silent_downgrad
         for key, value in exported["memories"][0].items()
         if key not in {
             "subject_key", "claim_kind", "valid_to_recorded_at", "modified_hlc",
+            "closure_observations",
         }
     }]
     target = Store(":memory:")
@@ -3111,6 +3113,34 @@ def _peer_bundle(device, mem_id):
     return json.dumps(bundle).encode("utf-8")
 
 
+def _versioned_peer_bundle(device, mem_id, version, *, observations=()):
+    """A peer bundle of an explicit wire version, optionally carrying a closure
+    history that the peer is not allowed to install."""
+    bundle = {
+        "format": SYNC_FORMAT,
+        "version": version,
+        "device_id": device,
+        "workspace_name": "w",
+        "repos": {},
+        "memories": [{
+            "id": mem_id,
+            "content": "from %s" % device,
+            "last_access": 5.0,
+            "valid_from": 10.0,
+            "ingested_at": 10.0,
+            "closure_observations": [list(pair) for pair in observations],
+        }],
+        "mem_links": [],
+        "tombstones": [],
+        "generation": 1,
+        "previous_hash": "",
+        "tombstone_count": 0,
+        "tombstone_checkpoint": _stable_hash([]),
+    }
+    bundle["state_hash"] = _snapshot_hash(bundle)
+    return json.dumps(bundle).encode("utf-8")
+
+
 def test_sync_round_survives_a_transport_failure_mid_round():
     store = Store(":memory:")
     wid = store.get_or_create_workspace("w")
@@ -3631,3 +3661,65 @@ def test_status_for_an_absent_repo_reports_an_empty_scope(tmp_path, capsys):
     assert "last_generation" not in out
     assert "last_state_hash" not in out
     assert "(not found locally)" in out
+
+
+# ── closure budget + version negotiation at the round boundary ───────────────
+
+def test_sync_round_refuses_a_peer_closure_history_over_the_peer_budget():
+    """A peer that ships more closure history than its share of the budget is
+    refused as a bounded row rejection, not a failed round."""
+    store = Store(":memory:")
+    wid = store.get_or_create_workspace("w")
+    transport = _FlakyTransport(
+        ("bundle-peer1.json", _versioned_peer_bundle(
+            "dev_peer1", "mem_p1", 4,
+            observations=[(100.0 + index, 200.0)
+                          for index in range(PEER_CLOSURE_OBSERVATION_BUDGET + 1)],
+        )),
+        fail_after=99,
+    )
+    result = SyncEngine(store).sync(transport, wid)
+    assert store.get_memory("mem_p1") is None
+    assert result["totals"]["added"] == 0
+    assert result["totals"]["rejected"] == 1
+    assert result["totals"]["closure_budget_exceeded"] == 1
+    # A refused row is a normal row-level rejection: the only round-level
+    # complaint is the unanchored first contact with this peer's snapshot.
+    assert {item["error"] for item in result["errors"]} == {
+        "snapshot freshness unavailable",
+    }
+
+
+def test_sync_round_refuses_a_v4_bundle_on_a_legacy_peer_without_writes(monkeypatch):
+    """A v1-v3 peer rejects a v4 bundle before any mutation, and the round
+    reports the refusal instead of silently importing part of it."""
+    monkeypatch.setattr(
+        "engraphis.core.sync.SYNC_ACCEPTED_VERSIONS", frozenset({1, 2, 3})
+    )
+    store = Store(":memory:")
+    wid = store.get_or_create_workspace("w")
+    transport = _FlakyTransport(
+        ("bundle-peer1.json", _versioned_peer_bundle("dev_peer1", "mem_p1", 4)),
+        fail_after=99,
+    )
+    result = SyncEngine(store).sync(transport, wid)
+    assert store.get_memory("mem_p1") is None
+    assert store.conn.execute("SELECT COUNT(*) FROM audit").fetchone()[0] == 0
+    assert result["complete"] is False
+    assert result["errors"][0]["error"] == "bundle rejected"
+    assert result["errors"][0]["error_type"] == "SyncError"
+    assert result["totals"]["added"] == 0
+
+
+@pytest.mark.parametrize("version", [1, 2, 3])
+def test_sync_round_still_imports_legacy_bundle_versions(version):
+    """Older peers keep working: v1-v3 bundles are still imported."""
+    store = Store(":memory:")
+    wid = store.get_or_create_workspace("w")
+    transport = _FlakyTransport(
+        ("bundle-peer1.json", _versioned_peer_bundle("dev_peer1", "mem_p1", version)),
+        fail_after=99,
+    )
+    result = SyncEngine(store).sync(transport, wid)
+    assert store.get_memory("mem_p1") is not None
+    assert result["totals"]["added"] == 1

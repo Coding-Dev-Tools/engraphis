@@ -4,7 +4,7 @@ import pytest
 
 from engraphis.core import store as store_module
 from engraphis.core.engine import MemoryEngine
-from engraphis.core.interfaces import MemoryRecord, Scope
+from engraphis.core.interfaces import MemoryRecord, Scope, SearchFilter
 from engraphis.service import MemoryService
 
 
@@ -192,3 +192,135 @@ def test_candidate_query_binds_literals_and_bounds_expanded_terms(engine):
     assert len(records) == 1
     query = next(statement for statement in statements if statement.startswith("SELECT * FROM memories"))
     assert query.count("CASE WHEN instr(") == 2 * (1 + 32)
+
+
+@pytest.mark.parametrize("through_service", [False, True])
+@pytest.mark.parametrize(
+    "valid_at,known_at,expected",
+    [(13.0, 15.0, True), (10.0, 15.0, False), (10.0, 25.0, True),
+     (6.0, 25.0, False), (6.0, 35.0, True), (100.0, 5.0, False)],
+)
+def test_closed_candidates_resolve_every_closure_known_at_the_snapshot(
+    engine, through_service, valid_at, known_at, expected,
+):
+    workspace = engine.store.get_or_create_workspace("history")
+    memory = _closed(
+        engine, workspace, valid_to=5.0, valid_to_recorded_at=30.0,
+        closure_observations=((12.0, 10.0), (9.0, 20.0), (5.0, 30.0)),
+    )
+    if through_service:
+        result = MemoryService(engine).timeline(
+            "quasar launch protocol", workspace="history", valid_at=valid_at,
+            known_at=known_at, closed_only=True,
+        )
+        actual = [row["id"] for row in result["history"]]
+    else:
+        result = engine.store.list_memories(
+            SearchFilter(workspace_id=workspace, valid_at=valid_at, known_at=known_at),
+            include_invalid=True, closed_only=True, prompt_only=True, limit=1,
+            candidate_query="quasar launch protocol",
+        )
+        actual = [row.id for row in result]
+    assert actual == ([memory] if expected else [])
+
+
+def test_legacy_null_recorded_closure_remains_known_after_a_later_correction(engine):
+    workspace = engine.store.get_or_create_workspace("history")
+    memory = _closed(
+        engine, workspace, valid_to=5.0, valid_to_recorded_at=30.0,
+        closure_observations=((12.0, None), (5.0, 30.0)),
+    )
+    result = engine.timeline(
+        "quasar launch protocol", workspace_id=workspace, valid_at=13.0,
+        known_at=1.0, closed_only=True, prompt_only=True,
+    )
+    assert [row.id for row in result] == [memory]
+
+
+def test_known_closure_is_filtered_before_the_bounded_prompt_window(engine, monkeypatch):
+    workspace = engine.store.get_or_create_workspace("history")
+    memory = _closed(
+        engine, workspace, valid_to=5.0, valid_to_recorded_at=30.0,
+        closure_observations=((12.0, 10.0), (5.0, 30.0)),
+    )
+    for index in range(501):
+        _closed(
+            engine, workspace, ingested_at=2.0, valid_to=0.0,
+            valid_to_recorded_at=40.0,
+        )
+    hydrated = []
+    original = store_module._row_to_record
+
+    def record_hydration(row):
+        hydrated.append(row["id"])
+        return original(row)
+
+    monkeypatch.setattr(store_module, "_row_to_record", record_hydration)
+    result = engine.timeline(
+        "quasar launch protocol", workspace_id=workspace, valid_at=13.0,
+        known_at=15.0, closed_only=True, prompt_only=True,
+    )
+    assert [row.id for row in result] == [memory]
+    assert hydrated == [memory]
+
+
+def test_history_candidate_window_caps_hydration_and_interleaves_the_semantic_arm(
+    engine, monkeypatch,
+):
+    """The window is bounded, and a large lexical match set cannot starve semantics."""
+    workspace = engine.store.get_or_create_workspace("history")
+    lexical = _closed(engine, workspace, content="quasar launch protocol lexical")
+    semantic = engine.store.add_memory(MemoryRecord(
+        id="", content="An unrelated opening-day checklist item.",
+        workspace_id=workspace, scope=Scope.WORKSPACE,
+        ingested_at=5.0, valid_from=5.0,
+        provenance={"trusted": True, "review_state": "approved"},
+    ))
+    for index in range(800):
+        engine.store.add_memory(MemoryRecord(
+            id="", content=f"Gardening weather bulletin {index}",
+            workspace_id=workspace, scope=Scope.WORKSPACE,
+            ingested_at=10.0 + index, valid_from=10.0,
+            provenance={"trusted": True, "review_state": "approved"},
+        ))
+
+    hydrated = []
+    original = store_module._row_to_record
+
+    def record_hydration(row):
+        hydrated.append(row["id"])
+        return original(row)
+
+    monkeypatch.setattr(store_module, "_row_to_record", record_hydration)
+    window = engine.store.list_history_candidates(
+        SearchFilter(workspace_id=workspace),
+        query="quasar launch protocol",
+        extra_ids=[semantic],
+        budget=4,
+        include_invalid=True,
+    )
+    assert len(window) <= 4
+    assert len(hydrated) <= 4
+    ids = [row.id for row in window]
+    assert lexical in ids
+    assert semantic in ids
+
+
+def test_history_candidate_window_keeps_semantic_only_matches(engine):
+    """A record the lexical index cannot express is still a candidate."""
+    workspace = engine.store.get_or_create_workspace("history")
+    semantic = engine.store.add_memory(MemoryRecord(
+        id="", content="An unrelated opening-day checklist item.",
+        workspace_id=workspace, scope=Scope.WORKSPACE,
+        ingested_at=5.0, valid_from=5.0,
+        provenance={"trusted": True, "review_state": "approved"},
+    ))
+    window = engine.store.list_history_candidates(
+        SearchFilter(workspace_id=workspace),
+        query="nonexistenttoken",
+        extra_ids=[semantic],
+        budget=8,
+        include_invalid=True,
+    )
+    assert [row.id for row in window] == [semantic]
+

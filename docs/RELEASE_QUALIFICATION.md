@@ -1,11 +1,52 @@
-# Owner-signed release qualification
+# Release qualification
 
-Every ordinary PyPI publication, GitHub release write, and repair requires a valid
-full-product qualification. Passing the public build jobs is necessary but does
-not replace the mandatory private readiness evidence. The workflow fails closed
-when qualification configuration is missing, malformed, expired or inconsistent
-with the selected source and distribution bytes. The owner-authorized repair
-waivers for the retained v1.7.6, v1.7.8 and v1.7.9 candidates are documented below.
+## What a release requires
+
+Every PyPI publication, GitHub release write and repair in
+`.github/workflows/release.yml` requires:
+
+1. **Green release gates.** The tag must match `pyproject.toml` and sit on protected
+   `main`, and every build job must pass: the full test suite on Python 3.9–3.14, the
+   offline evals, Pyright, CodeQL, the dependency audits, the browser, Pi-extension
+   and container gates, the installed-artifact smokes, and the two-builder
+   reproducibility check. A repair reuses a retained tag run whose build and
+   evidence jobs passed, and re-verifies its exact artifact and evidence hashes.
+2. **Approval of the protected `release-qualification` environment.** The
+   `publish`, `github-release` and `github-release-repair` jobs always run in this
+   environment, so a required reviewer has to approve each one before it can write.
+
+That is the whole requirement for a patch release.
+
+The owner-signed full-product qualification described below is **opt-in**. Set the
+repository (or `release-qualification` environment) variable
+`REQUIRE_SIGNED_QUALIFICATION` to `true` to switch it on. Once it is on, each of the
+four publication-write points also verifies a signed 11-gate envelope before it
+writes. Use this for a major release, or for any release that comes with public
+claims backed by the pilot, usability or hosted-journey evidence. If the variable is
+unset, or set to anything other than `true` (GitHub compares it without regard to
+case), the four verification steps are skipped. The verifier then never runs, the
+four qualification secrets are not read, and the public release evidence lists
+only the automated checks that actually ran. A skipped qualification is not
+recorded as a pass.
+
+To turn signed qualification on:
+
+```console
+gh variable set REQUIRE_SIGNED_QUALIFICATION --body true --repo Coding-Dev-Tools/engraphis
+```
+
+Delete the variable, or set it to `false`, to return to patch-release mode.
+Once the variable is `true`, the workflow fails closed if the qualification
+configuration is missing, malformed, expired or inconsistent with the selected
+source and distribution bytes.
+
+v1.7.6, v1.7.8 and v1.7.9 were published through single-use, owner-authorized
+waiver inputs that were hard-coded for those three retained candidates. Those
+inputs have been removed, because the opt-in variable now covers the same case
+without a workflow change for every release. The release notes for those
+versions and the git history keep the disclosures.
+
+## Signed qualification (opt-in)
 
 The public verifier is `scripts/verify_release_qualification.py`. It verifies
 Ed25519 signatures using `cryptography==50.0.0` in release jobs. It contains no
@@ -14,10 +55,10 @@ Its input is a content-free approval; private evidence stays with its accountabl
 owners. A valid signature establishes the configured authority's assertion, not
 independent proof that each observation happened.
 
-## Pending owner setup
+### Owner setup for signed qualification
 
-These operations have **not been performed** by this source change. Ordinary
-publication will remain blocked until the release owner completes them.
+Step 1 is required for every release. Steps 2–4 are needed only before you set
+`REQUIRE_SIGNED_QUALIFICATION=true`.
 
 1. Create and protect the GitHub environment `release-qualification`. Restrict its
    deployment branches/tags to the protected release sources, require an authorized
@@ -42,8 +83,9 @@ publication will remain blocked until the release owner completes them.
 | `ENGRAPHIS_RELEASE_CANDIDATE_ID` | The expected full-product candidate ID from the validated private ledger. |
 | `ENGRAPHIS_RELEASE_LEDGER_SHA256` | SHA-256 of the exact private ledger file bytes the owner reviewed. |
 
-The jobs always enter the protected `release-qualification` environment. Do not
-use GitHub Actions variables for these values: Actions logs render variable-backed
+The jobs always enter the protected `release-qualification` environment. Only the
+on/off switch `REQUIRE_SIGNED_QUALIFICATION` is a variable. Do not use GitHub
+Actions variables for the four values above: Actions logs render variable-backed
 step environment values, including a signed receipt, even when the verifier itself
 does not print them. Migrate any existing variable-backed configuration to protected
 environment secrets and remove the variable copies. Missing secrets fail closed.
@@ -52,12 +94,13 @@ The verifier reads the four values from its process environment and never prints
 them. Review earlier public logs for exposed receipts; revoke a still-valid receipt
 before issuing a new candidate approval.
 
-To revoke future attempts, remove the receipt or rotate the configured authority;
-cancel any already-running publication job separately. An expired approval needs
-fresh owner review and issuance. Repair is subject to the same requirement even
-when the selected historical release used the older evidence format.
+While signed qualification is on, you can revoke future attempts by removing the
+receipt or rotating the configured authority. Cancel any publication job that is
+already running separately. An expired approval needs a fresh owner review and a
+new issuance. When the variable is on, repair has the same requirement, even if
+the selected historical release used the older evidence format.
 
-## Signed contract
+### Signed contract
 
 The JSON envelope has exactly `schema`, `payload` and `signature`. Duplicate keys,
 unknown fields, numeric JSON values and noncanonical base64 are rejected. The
@@ -102,58 +145,12 @@ With the four variables configured, the read-only verification command is:
 python -m scripts.verify_release_qualification --dist dist --commit FULL_COMMIT --tag vVERSION
 ```
 
-The normal workflow checks before both PyPI and GitHub writes. Repair first selects
-a matching historical push run and verifies its exact public distribution/evidence
-hashes, then checks the current owner approval before both repair writes. It uses
-the peeled release tag commit, never the repair workflow's `main` checkout commit.
-
-On 2026-09-27, the repository owner explicitly authorized qualification waivers
-for these retained release candidates:
-
-| Dispatch input | Release tag | Required source commit |
-| --- | --- | --- |
-| `waive_v176_qualification` | `v1.7.6` | `6a441a75c8dd159607fa3933da83f600864b9146` |
-| `waive_v178_qualification` | `v1.7.8` | `dce68e1602e580cd51b71e26db2ab04238df7df4` |
-
-Select exactly one waiver input together with its matching `release_tag`. All
-waiver inputs default to false. Combining them, selecting the wrong version, or
-reusing a tag for another commit fails before any public write. The v1.7.8 waiver follows
-the owner's explicit instruction to remove publication blockers after integrating
-and reviewing the beneficial local work. It reuses the distributions and evidence
-from the successful automated validations of that tagged source.
-
-The protected environment approval, exact distribution/evidence verification,
-and PyPI file identity checks remain required. The workflow records the actor
-and run URL, and publishes the waiver in GitHub Release notes before the first
-PyPI write. An existing draft must already be public before publication can
-proceed; a successful notes edit alone is insufficient. A failed disclosure
-prevents publication; a later repair failure
-leaves the public disclosure in place. These waivers are not qualifications and
-do not mark any unverified gate as passing. All ordinary tag publications and
-repairs outside these exact candidates still require a valid owner-signed
-qualification.
-
-## Owner-authorized retained v1.7.9 repair
-
-On 2026-10-01, after reviewing the prepared exception and required public
-disclosure, the repository owner explicitly approved this retained-candidate
-repair and publication. This approval does not qualify the full product or
-authorize exceptions for future candidates.
-
-The `waive_v179_qualification` input defaults to false and is bound only
-to `v1.7.9` at `c6871b9bf506eec6cebe96beee1ac252429a7b99`. It cannot be combined
-with either earlier waiver or applied to a different tag or source commit.
-The retained tag run's automated validation jobs passed; its publisher failed
-because the signed full-product qualification receipt was absent. The repair
-reuses the exact retained wheel, source archive and public evidence from that run.
-
-This exception waives only the signed full-product qualification
-requirement for those retained bytes. Protected environment review, retained
-artifact verification and PyPI file identity checks remain required. Public
-GitHub release disclosure must succeed before the first PyPI write and must
-state that mandatory full-product acceptance gates remain unverified. Ordinary
-tag publication and repair outside the explicitly selected exception still
-require signed qualification.
+When the variable is `true`, the normal workflow checks before both the PyPI write
+and the GitHub write. Repair first selects a matching historical push run and
+verifies the exact hashes of its public distributions and evidence. It then checks
+the current owner approval before both repair writes, using the peeled release tag
+commit and never the commit of the repair workflow's `main` checkout. Repair keeps
+those artifact and evidence checks whether or not signed qualification is on.
 
 ## Public installed evidence
 
@@ -174,5 +171,6 @@ Raw logs, extra report fields and incomplete matrices are rejected.
 The format-3 public manifest records hashes of both the original captures and the
 normalized published files. The 18 flat files are included in GitHub release assets.
 Repair verifies all indexed file hashes when this matrix is present. Historical
-format-3 manifests without the optional matrix remain readable, but they still need
-a fresh signed full-product approval before any publication or repair write.
+format-3 manifests without the optional matrix remain readable. When signed
+qualification is on, they still need a fresh signed full-product approval before
+any publication or repair write.

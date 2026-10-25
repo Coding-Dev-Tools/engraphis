@@ -1077,6 +1077,16 @@ def test_graph_neighbors(store):
 
 def test_edge_visibility_requires_a_timestamp_paired_support(store):
     wid = store.get_or_create_workspace("w")
+    store.add_memory(MemoryRecord(
+        id="mem_initial", content="Initial edge evidence",
+        workspace_id=wid, scope=Scope.WORKSPACE,
+        valid_from=100.0, ingested_at=100.0,
+    ))
+    store.add_memory(MemoryRecord(
+        id="mem_later_knowledge", content="Later-known edge evidence",
+        workspace_id=wid, scope=Scope.WORKSPACE,
+        valid_from=50.0, ingested_at=300.0,
+    ))
     edge_id = store.upsert_edge(Edge(
         id="edg_pair", src="a", dst="b", relation="uses", workspace_id=wid,
         valid_from=100.0, ingested_at=100.0,
@@ -1094,6 +1104,42 @@ def test_edge_visibility_requires_a_timestamp_paired_support(store):
     assert store.edges_in_scope(invisible) == []
     assert store.neighbors(["a"], flt=invisible) == []
     assert [edge.id for edge in store.edges_in_scope(visible)] == [edge_id]
+    assert [edge.id for edge in store.neighbors(["a"], flt=visible)] == [edge_id]
+    assert store.edge_supports_in_scope([edge_id], flt=invisible) == []
+    assert [row["memory_id"] for row in store.edge_supports_in_scope(
+        [edge_id], flt=visible,
+    )] == ["mem_later_knowledge"]
+
+
+@pytest.mark.parametrize("source_state", [
+    "missing", "other_workspace", "future_world", "future_knowledge",
+])
+def test_edge_support_visibility_requires_visible_source_memory(store, source_state):
+    workspace_id = store.get_or_create_workspace("support-source")
+    source_workspace = workspace_id
+    if source_state == "other_workspace":
+        source_workspace = store.get_or_create_workspace("support-source-other")
+    if source_state != "missing":
+        store.add_memory(MemoryRecord(
+            id="mem_support_source", content="Source evidence",
+            workspace_id=source_workspace, scope=Scope.WORKSPACE,
+            valid_from=150.0 if source_state == "future_world" else 10.0,
+            ingested_at=250.0 if source_state == "future_knowledge" else 10.0,
+        ))
+    edge_id = store.upsert_edge(Edge(
+        id="edg_source_guard", src="a", dst="b", relation="uses",
+        workspace_id=workspace_id, valid_from=10.0, ingested_at=10.0,
+        provenance={"memory_id": "mem_support_source"},
+    ))
+    flt = SearchFilter(workspace_id=workspace_id, valid_at=100.0, known_at=200.0)
+
+    # The support itself exists and passes both time anchors; its source must too.
+    assert store.conn.execute(
+        "SELECT COUNT(*) FROM edge_supports WHERE edge_id=?", (edge_id,),
+    ).fetchone()[0] == 1
+    assert store.edges_in_scope(flt) == []
+    assert store.neighbors(["a"], flt=flt) == []
+    assert store.edge_supports_in_scope([edge_id], flt=flt) == []
 
 
 def test_graph_neighbors_filters_by_layer(store):
@@ -1896,11 +1942,19 @@ def test_edge_supports_scoped_lookup_drives_from_requested_edge_ids(store, monke
     workspace_id = store.get_or_create_workspace("support-lookup")
     other_workspace = store.get_or_create_workspace("other-support-lookup")
     for index in range(5):
+        store.add_memory(MemoryRecord(
+            id=f"mem_{index}", content=f"Visible evidence {index}",
+            workspace_id=workspace_id, scope=Scope.WORKSPACE,
+        ))
         store.upsert_edge(Edge(
             id=f"edg_{index}", src=f"source_{index}", dst=f"target_{index}",
             relation="related", workspace_id=workspace_id,
             provenance={"memory_id": f"mem_{index}"},
         ))
+    store.add_memory(MemoryRecord(
+        id="mem_other", content="Other-workspace evidence",
+        workspace_id=other_workspace, scope=Scope.WORKSPACE,
+    ))
     store.upsert_edge(Edge(
         id="edg_other", src="other_source", dst="other_target",
         relation="related", workspace_id=other_workspace,

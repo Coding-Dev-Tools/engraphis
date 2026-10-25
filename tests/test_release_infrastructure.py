@@ -270,6 +270,18 @@ def test_ci_and_release_never_hide_skips_or_lose_the_full_stack_silently():
     assert required in _text(".github/workflows/release.yml")
 
 
+def test_release_runs_the_offline_evaluations_required_by_ci():
+    """A protected-main CI gate must remain a gate on the exact release source."""
+
+    ci = _text(".github/workflows/ci.yml")
+    release = _text(".github/workflows/release.yml")
+    build = release.split("  build:\n", 1)[1].split("  reproducibility-build:\n", 1)[0]
+    evaluations = re.findall(r"run:\s*(python -m eval\.[^\n]+)", ci)
+    assert "python -m eval.spec_crawl" in evaluations
+    for command in evaluations:
+        assert command in build, f"release build omits the CI evaluation: {command}"
+
+
 def test_sqlcipher_driver_has_a_dedicated_short_lived_integration_gate():
     """A bundled SQLCipher extension must not leak into the general test process.
 
@@ -632,8 +644,8 @@ def test_public_capability_and_support_docs_match_the_shipped_tree():
         'docs/images/knowledge-graph.png"' in readme
     )
     assert re.search(
-        r'src="https://raw\.githubusercontent\.com/Coding-Dev-Tools/engraphis/[0-9a-f]{40}/'
-        r'docs/images/context-efficiency-pr260-nested-uri-redaction-runtime-20261018-e2ebfb06550f\.svg"',
+        r'src="https://raw\.githubusercontent\.com/Coding-Dev-Tools/engraphis/(?:[0-9a-f]{40}|v1\.7\.10)/'
+        r'docs/images/context-efficiency\.svg"',
         readme,
     )
     assert "official hosted service" in licensing
@@ -648,3 +660,157 @@ def test_grype_configuration_ignores_upstream_cpython_cves():
     assert 'vulnerability: "CVE-2026-82049"' in grype
     assert 'name: "stdlib"' in grype
     assert 'type: "go-module"' in grype
+
+
+def _job_block(workflow: str, job: str) -> str:
+    match = re.search(rf"(?ms)^  {re.escape(job)}:\n(.*?)(?=^  \S[^:\n]*:\n|\Z)", workflow)
+    assert match is not None, f"release job {job!r} is missing"
+    return match.group(1)
+
+
+def test_python39_jobs_use_a_runner_with_the_supported_toolcache():
+    """Ubuntu 26.04 does not provide Python 3.9 through actions/setup-python."""
+    for workflow, jobs in (
+        (".github/workflows/ci.yml", ("core-py39",)),
+        (".github/workflows/release.yml", ("python-matrix", "artifact-core-py39")),
+    ):
+        content = _text(workflow)
+        for job in jobs:
+            body = _job_block(content, job)
+            assert re.search(r"(?m)^    runs-on: ubuntu-24\.04$", body), job
+
+
+def test_release_transitive_dependency_security_floors_cannot_regress():
+    package = json.loads(_text("integrations/pi/package.json"))
+    lock = json.loads(_text("integrations/pi/npm-shrinkwrap.json"))
+    expected_overrides = {
+        "body-parser": "^2.4.0",
+        "fast-uri": "^3.1.9",
+        "zod": "^4.6.6",
+    }
+    for name, floor in expected_overrides.items():
+        assert package["overrides"][name] == floor
+        locked = lock["packages"][f"node_modules/{name}"]["version"]
+        assert tuple(map(int, locked.split("."))) >= tuple(
+            map(int, floor.removeprefix("^").split("."))
+        )
+
+    # Pi's published development host has its own shrinkwrap, so its exact nested
+    # undici pin must be repaired before auditing the actual installed tree.
+    ci = _text(".github/workflows/ci.yml")
+    assert "brace-expansion@5.0.12 undici@8.12.2" in ci
+    assert "npm audit --omit=dev" in ci
+    assert "npm audit --no-package-lock --include=dev" in ci
+    assert 'pip install --upgrade "filelock>=4.2.1,<5"' in _text("Dockerfile")
+
+
+def test_privileged_publication_jobs_use_no_dependency_cache():
+    """A privileged publication job must not be fed by a shared dependency cache.
+
+    ``actions/setup-python``'s pip cache key is derived only from the runner
+    image, the interpreter version, and the hashed dependency files — not from
+    the ref — so a job that holds the PyPI OIDC token or release write
+    permission can be served by a cache that branch CI also writes.  The
+    privileged jobs therefore declare no cache at all.
+    """
+    release = _text(".github/workflows/release.yml")
+    for job in ("publish", "github-release", "github-release-repair"):
+        body = _job_block(release, job)
+        assert "cache:" not in body, f"{job} declares a dependency cache"
+        assert "cache-dependency-path:" not in body, f"{job} declares a cache path"
+
+    # The non-privileged verification jobs may still cache, and their cache
+    # key is bound to the pinned release constraints so it cannot be reused
+    # for a different dependency set.
+    build = _job_block(release, "build")
+    assert "cache: pip" in build
+    assert ".github/release-constraints.txt" in build
+
+    # Nothing in the publication path may run on an untrusted pull request.
+    assert "pull_request_target" not in release
+    assert "pull_request" not in release
+
+
+def test_release_publication_verifies_signed_qualification_when_opted_in():
+    """Environment approval always gates publication; the signed envelope is opt-in.
+
+    With ``REQUIRE_SIGNED_QUALIFICATION=true`` a tag run without the qualification
+    secrets must stop before publishing. Unset, the verifier step is skipped and the
+    protected environment approval plus the build gates remain the requirement.
+    """
+    release = _text(".github/workflows/release.yml")
+    publish = _job_block(release, "publish")
+    release_job = _job_block(release, "github-release")
+
+    for body in (publish, release_job):
+        assert "environment: release-qualification" in body
+        step = body.split("- name: Require signed full-product qualification before ", 1)[1]
+        step = step.split("\n      - ", 1)[0]
+        assert "\n        if: vars.REQUIRE_SIGNED_QUALIFICATION == 'true'\n" in step
+        assert "scripts.verify_release_qualification" in step
+        assert "continue-on-error" not in step
+        for secret in (
+            "ENGRAPHIS_RELEASE_QUALIFICATION",
+            "ENGRAPHIS_RELEASE_VERIFY_KEY",
+            "ENGRAPHIS_RELEASE_CANDIDATE_ID",
+            "ENGRAPHIS_RELEASE_LEDGER_SHA256",
+        ):
+            assert f"secrets.{secret}" in body, secret
+        qualification = body.index("scripts.verify_release_qualification")
+        assert "pypa/gh-action-pypi-publish" not in body[:qualification]
+        assert "gh release create" not in body[:qualification]
+
+    # The qualification gate runs before the publisher and before the release.
+    publish_qualification = publish.index("scripts.verify_release_qualification")
+    assert publish.index("pypa/gh-action-pypi-publish") > publish_qualification
+    assert publish.index("Freeze verified distribution set") < publish_qualification
+    release_qualification = release_job.index("scripts.verify_release_qualification")
+    assert release_job.index("Create GitHub Release") > release_qualification
+
+    # The publisher is the only step that can write to PyPI, and the exact
+    # published file set is re-verified afterwards.
+    assert publish.count("pypa/gh-action-pypi-publish") == 1
+    assert "skip-existing: true" in publish
+    assert "Require the exact complete PyPI file set" in publish
+    assert "--retries 18 --delay 10" in publish
+
+
+def test_release_tag_must_be_pushed_from_protected_main():
+    """A tag on an unmerged commit must never reach the publication jobs."""
+    release = _text(".github/workflows/release.yml")
+    build = _job_block(release, "build")
+
+    assert "Require tag and package version to match" in build
+    assert 'test "$GITHUB_REF_NAME" = "v$actual"' in build
+    assert "Require release tag commit to be on protected main" in build
+    assert "git fetch --no-tags origin main:refs/remotes/origin/main" in build
+    assert 'git merge-base --is-ancestor "$GITHUB_SHA" origin/main' in build
+
+    # The trigger accepts version tags only, and never a branch push.
+    assert re.search(r"(?ms)^on:\n  push:\n    tags:\n      - \"v\*\.\*\"\n", release)
+    assert "branches:" not in release.split("jobs:", 1)[0]
+
+
+def test_release_workflow_permissions_are_least_privilege():
+    """Only the jobs that need a write scope may request one."""
+    release = _text(".github/workflows/release.yml")
+
+    publish = _job_block(release, "publish")
+    assert "id-token: write" in publish
+    assert "contents: read" in publish
+    assert "contents: write" not in publish
+
+    release_job = _job_block(release, "github-release")
+    assert "contents: write" in release_job
+    assert "id-token: write" not in release_job
+
+    repair = _job_block(release, "github-release-repair")
+    assert "contents: write" in repair
+    assert "id-token: write" in repair
+
+    # The verification jobs stay read-only.
+    for job in ("build", "reproducibility-build", "python-matrix", "release-evidence"):
+        body = _job_block(release, job)
+        assert "contents: write" not in body, job
+        assert "id-token: write" not in body, job
+

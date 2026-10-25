@@ -1232,7 +1232,9 @@ def build_canonical_graph(
             source, target = target, source
         edge_id = str(edge.get("id") or _stable_id("edge_", source, target, relation, layer))
         evidence = [dict(item) for item in supports_by_edge.get(edge_id, [])]
-        if not evidence and not edge.get("_has_normalized_support"):
+        if not evidence and edge.get("_has_normalized_support"):
+            continue
+        if not evidence:
             source_kind, default_confidence = _source_default(relation, edge.get("provenance"))
             memory_ids = _memory_ids(edge.get("provenance"))
             evidence = [{
@@ -1839,7 +1841,9 @@ def _complete_relations(
         ))
         ghost = bool(edge.get("ghost"))
         evidence = [dict(item) for item in supports_by_edge.get(edge_id, [])]
-        if not evidence and not edge.get("_has_normalized_support"):
+        if not evidence and edge.get("_has_normalized_support"):
+            continue
+        if not evidence:
             source_kind, default_confidence = _source_default(
                 relation, edge.get("provenance")
             )
