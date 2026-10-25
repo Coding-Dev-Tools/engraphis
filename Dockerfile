@@ -1,5 +1,5 @@
 # Engraphis — self-hosted AI memory engine. Local-first; you bring the LLM.
-FROM python:3.11-slim@sha256:a630a63cdb314e2d138a2fca3e375e319e8568346ffafac5b980f888630ac4f1 AS base
+FROM python:3.11-slim@sha256:b7a9e5f6a93d6d4a31f129bbd4bdee69efccb6ded0fb230d78aafaf37af98377 AS base
 
 # ENGRAPHIS_HOST is deliberately NOT set here: docker-entrypoint.sh chooses IPv6 for a
 # Railway deployment (which injects RAILWAY_SERVICE_NAME) and 0.0.0.0 for ordinary Docker.
