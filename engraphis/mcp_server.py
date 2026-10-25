@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import importlib
+import inspect
 import json
 import logging
 import math
@@ -38,6 +39,7 @@ import time
 
 from collections import OrderedDict
 from dataclasses import dataclass
+from functools import partial, wraps
 from typing import Any, Annotated, Callable, List, Optional
 
 try:
@@ -101,7 +103,29 @@ work and report the exact memory failure once instead of fabricating memory stat
 # ``classic_mcp`` retains the public, named-tool protocol for integrations that pinned a
 # tool name.  ``mcp`` temporarily refers to it while the legacy decorators below execute;
 # it is rebound to the small Smart MCP surface after every classic tool has registered.
-classic_mcp = FastMCP("engraphis_mcp", instructions=_SESSION_PROTOCOL,
+class _WorkerFastMCP(FastMCP):
+    """Keep protocol tasks responsive while synchronous memory work completes."""
+
+    def add_tool(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
+        if inspect.iscoroutinefunction(fn) or inspect.iscoroutinefunction(getattr(fn, "__call__", None)):
+            super().add_tool(fn, *args, **kwargs)
+            return
+
+        @wraps(fn)
+        async def worker(*args: Any, **arguments: Any) -> Any:
+            import anyio
+
+            # AnyIO propagates request ContextVars and shields an in-flight write
+            # from abandonment on cancellation. Never replay/abandon mutations.
+            return await anyio.to_thread.run_sync(partial(fn, *args, **arguments))
+
+        # Smart dispatch runs inside the worker already. Keep its original sync
+        # handler available without bypassing the SDK's schema/argument metadata.
+        setattr(worker, "_engraphis_sync_handler", fn)
+        super().add_tool(worker, *args, **kwargs)
+
+
+classic_mcp = _WorkerFastMCP("engraphis_mcp", instructions=_SESSION_PROTOCOL,
                       log_level="WARNING")
 mcp = classic_mcp
 
@@ -595,7 +619,8 @@ def engraphis_remember(
     rationale, a bug's cause and fix, a user preference, or a reusable procedure.
 
     Returns:
-        str: JSON ``{"id","workspace","repo","scope","mtype","stored":true,"op"}`` where
+        str: JSON with ``id``, resolved scope, ``stored``, ``op``, ``review_state`` and
+        ``prompt_eligible``. Stored memories may still require review before recall. Here
         ``op`` is ``"add"`` (new), ``"noop"`` (matched an existing memory almost exactly —
         that one was reinforced, ``id`` points to it), or ``"invalidate"`` (superseded an
         existing memory on the same subject — see ``superseded`` for the old id(s); history
@@ -3150,6 +3175,7 @@ _CAPABILITY_MAX_ENTRIES = 256  # hard cap: oldest entries evict first (LRU)
 # yet. The TTL and size cap bound a long-lived stdio process's memory and stop a
 # leaked capability id from remaining usable indefinitely.
 _CAPABILITY_INDEX: "OrderedDict[str, tuple[str, str, str, str, float]]" = OrderedDict()
+_CAPABILITY_LOCK = threading.RLock()
 _GATEWAY_RESULT_COUNTER = RegexTokenCounter()
 
 
@@ -3397,30 +3423,32 @@ def _rank_actions(task: str, *, category: str = "", intent: str = "") -> list[Ac
 
 
 def _prune_capabilities(now: float) -> None:
-    """Drop expired capabilities so a leaked id stops resolving after its TTL."""
-    expired = [
-        capability_id for capability_id, entry in _CAPABILITY_INDEX.items()
-        if now - entry[4] > _CAPABILITY_TTL_SECONDS
-    ]
-    for capability_id in expired:
-        del _CAPABILITY_INDEX[capability_id]
+    """Drop expired capabilities under the compound-operation registry lock."""
+    with _CAPABILITY_LOCK:
+        expired = [
+            capability_id for capability_id, entry in _CAPABILITY_INDEX.items()
+            if now - entry[4] > _CAPABILITY_TTL_SECONDS
+        ]
+        for capability_id in expired:
+            del _CAPABILITY_INDEX[capability_id]
 
 
 def _issue_capability(spec: ActionSpec) -> str:
-    body = (
-        f"{_CAPABILITY_VERSION}:{_DEPLOYMENT_POLICY}:{spec.canonical_id}:{spec.schema_digest}"
-    ).encode("utf-8")
-    signature = hmac.new(_CAPABILITY_SECRET, body, hashlib.sha256).hexdigest()[:24]
-    capability_id = f"cap_{signature}"
-    now = time.time()
-    _prune_capabilities(now)
-    while len(_CAPABILITY_INDEX) >= _CAPABILITY_MAX_ENTRIES:
-        _CAPABILITY_INDEX.popitem(last=False)  # evict oldest first (LRU)
-    _CAPABILITY_INDEX[capability_id] = (
-        spec.canonical_id, spec.schema_digest, _CAPABILITY_VERSION, _DEPLOYMENT_POLICY,
-        now,
-    )
-    return capability_id
+    with _CAPABILITY_LOCK:
+        body = (
+            f"{_CAPABILITY_VERSION}:{_DEPLOYMENT_POLICY}:{spec.canonical_id}:{spec.schema_digest}"
+        ).encode("utf-8")
+        signature = hmac.new(_CAPABILITY_SECRET, body, hashlib.sha256).hexdigest()[:24]
+        capability_id = f"cap_{signature}"
+        now = time.time()
+        _prune_capabilities(now)
+        while len(_CAPABILITY_INDEX) >= _CAPABILITY_MAX_ENTRIES:
+            _CAPABILITY_INDEX.popitem(last=False)  # evict oldest first (LRU)
+        _CAPABILITY_INDEX[capability_id] = (
+            spec.canonical_id, spec.schema_digest, _CAPABILITY_VERSION, _DEPLOYMENT_POLICY,
+            now,
+        )
+        return capability_id
 
 
 def _example_for(spec: ActionSpec) -> dict[str, Any]:
@@ -3607,33 +3635,47 @@ def _bounded_gateway_success(spec: ActionSpec, payload: dict[str, Any]) -> str:
 
 
 def _resolve_capability(capability_id: str, schema_digest: str) -> Optional[ActionSpec]:
-    entry = _CAPABILITY_INDEX.get(str(capability_id or ""))
-    if entry is None:
+    key = str(capability_id or "")
+    with _CAPABILITY_LOCK:
+        entry = _CAPABILITY_INDEX.get(key)
+        if entry is None:
+            return None
+        action_id, issued_digest, issued_version, issued_policy, issued_at = entry
+        if time.time() - issued_at > _CAPABILITY_TTL_SECONDS:
+            del _CAPABILITY_INDEX[key]
+            return None
+        spec = ACTION_SPECS.get(action_id)
+        expected_body = (
+            f"{_CAPABILITY_VERSION}:{_DEPLOYMENT_POLICY}:{action_id}:{schema_digest}"
+        ).encode("utf-8")
+        expected_id = "cap_" + hmac.new(
+            _CAPABILITY_SECRET, expected_body, hashlib.sha256,
+        ).hexdigest()[:24]
+        if (
+            spec is None
+            or issued_digest != schema_digest
+            or spec.schema_digest != schema_digest
+            or issued_version != _CAPABILITY_VERSION
+            or issued_policy != _DEPLOYMENT_POLICY
+            or not hmac.compare_digest(str(capability_id), expected_id)
+        ):
+            return None
+    # Availability may consult another subsystem. Never create a registry ->
+    # service/Store lock order; revalidate the snapshot after this callback.
+    if not spec.availability_predicate():
         return None
-    action_id, issued_digest, issued_version, issued_policy, issued_at = entry
-    if time.time() - issued_at > _CAPABILITY_TTL_SECONDS:
-        # Expired: forget the id so it can never resolve again, even within a
-        # long-lived stdio process that outlives the TTL.
-        del _CAPABILITY_INDEX[str(capability_id or "")]
-        return None
-    spec = ACTION_SPECS.get(action_id)
-    expected_body = (
-        f"{_CAPABILITY_VERSION}:{_DEPLOYMENT_POLICY}:{action_id}:{schema_digest}"
-    ).encode("utf-8")
-    expected_id = "cap_" + hmac.new(
-        _CAPABILITY_SECRET, expected_body, hashlib.sha256,
-    ).hexdigest()[:24]
-    if (
-        spec is None
-        or issued_digest != schema_digest
-        or spec.schema_digest != schema_digest
-        or issued_version != _CAPABILITY_VERSION
-        or issued_policy != _DEPLOYMENT_POLICY
-        or not hmac.compare_digest(str(capability_id), expected_id)
-        or not spec.availability_predicate()
-    ):
-        return None
-    _CAPABILITY_INDEX.move_to_end(str(capability_id or ""))  # LRU refresh
+    with _CAPABILITY_LOCK:
+        if (
+            _CAPABILITY_INDEX.get(key) != entry
+            or ACTION_SPECS.get(action_id) is not spec
+            or issued_version != _CAPABILITY_VERSION
+            or issued_policy != _DEPLOYMENT_POLICY
+        ):
+            return None
+        if time.time() - issued_at > _CAPABILITY_TTL_SECONDS:
+            del _CAPABILITY_INDEX[key]
+            return None
+        _CAPABILITY_INDEX.move_to_end(key)  # LRU refresh
     return spec
 
 
@@ -3692,7 +3734,8 @@ def _run_action(spec: ActionSpec, arguments: dict[str, Any]) -> tuple[bool, Any,
     except Exception:  # noqa: BLE001 - validation errors stay content-free
         return False, "invalid_arguments", {}
     try:
-        raw = tool.fn(**validated_arguments)
+        handler = getattr(tool.fn, "_engraphis_sync_handler", tool.fn)
+        raw = handler(**validated_arguments)
     except Exception as exc:  # noqa: BLE001 - handler errors stay content-free
         # Surface the exception object (never its internals) so the Smart gateway can
         # tag timeouts / locked-store contention as E_RETRYABLE while keeping the
@@ -3759,7 +3802,7 @@ def _record_gateway_execution(
         logger.info("smart MCP telemetry receipt was unavailable")
 
 
-smart_mcp = FastMCP("engraphis_mcp", instructions=_SMART_SESSION_PROTOCOL,
+smart_mcp = _WorkerFastMCP("engraphis_mcp", instructions=_SMART_SESSION_PROTOCOL,
                     log_level="WARNING")
 
 
@@ -3921,7 +3964,7 @@ def smart_remember(
         description="Literal type: literal, string, identifier, path, number, date, enum, or json.",
         max_length=32)] = "literal",
 ) -> str:
-    """Store a durable fact with safe default provenance and deduplication."""
+    """Store a fact; check prompt_eligible and review_state before recall."""
     result = engraphis_remember(
         content=content, workspace=workspace, repo=repo, session_id=session_id,
         mtype=mtype, importance=importance,

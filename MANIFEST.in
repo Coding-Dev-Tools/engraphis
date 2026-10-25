@@ -4,6 +4,8 @@ global-exclude *.pyo
 recursive-include engraphis/dashboard_assets *.html *.css *.js *.png *.ico
 recursive-include engraphis/dashboard_assets/vendor *
 include engraphis/commercial_manifest.json
+recursive-include integrations/commandcode *.py
+recursive-include scripts/templates *.svg
 include LICENSE NOTICE README.md CHANGELOG.md BENCHMARKS.md
 include docs/RECALL_RECOVERY.md
 include docs/REWORK_EXECUTION.md docs/ENGINE_CAPACITY_PROTOCOL.md docs/CODING_ACCEPTANCE_CORPUS.md

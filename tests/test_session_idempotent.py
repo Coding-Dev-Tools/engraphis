@@ -583,9 +583,12 @@ def test_bound_service_cannot_close_a_foreign_workspace_session():
     seed.remember("create allowed workspace", workspace="alpha")
     bound = MemoryService(seed.engine, allowed_workspaces=["alpha"])
 
-    with pytest.raises(ValidationError, match="not permitted"):
+    # ID lookups hide rows outside the bound Store's authority, matching memories.
+    with pytest.raises(ValidationError, match="no session with id"):
         bound.end_session(foreign["session_id"], summary="foreign close")
-    assert seed.store.get_session(foreign["session_id"])["status"] == "active"
+    assert seed.store.conn.execute(
+        "SELECT status FROM sessions WHERE id=?", (foreign["session_id"],)
+    ).fetchone()["status"] == "active"
 
 
 def test_end_session_is_idempotent_but_conflicting_retry_cannot_overwrite():

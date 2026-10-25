@@ -1,4 +1,8 @@
-# Engraphis 1.7.9 release preparation
+# Engraphis 1.7.9 release record
+
+Version 1.7.9 was published to PyPI on October 1, 2026. The preparation and
+qualification checklist below is retained as release history; publication did not
+enable a disabled managed service.
 
 This candidate packages the managed Jev client, workspace routing, graph fixes,
 local decision hardening, Anthropic compatibility, and Pi dependency repairs from
@@ -12,7 +16,7 @@ The final source is bound by immutable `offline-fixtures-v128.json`; those local
 fixtures establish their documented deterministic boundaries. They do not qualify
 the hosted provider or authorize publication.
 
-## Customer upgrade after publication
+## Customer upgrade
 
 Managed Jev requires both this client and an enabled, qualified Cloud deployment.
 The published 1.7.8 distribution contains an experimental injected adapter but
@@ -20,7 +24,7 @@ does not ship the managed transport or the registered MCP decision tool.
 
 1. Upgrade the Python environment that actually launches MCP. For an MCP
    installation, run `python -m pip install --upgrade "engraphis[mcp]==1.7.9"`
-   after this version is published. Preserve any other extras your installation
+   to install that release. Preserve any other extras your installation
    needs. Check the installation with `python -m pip show engraphis`.
 2. Keep an existing valid saved Cloud session. If the installation is not
    connected, use the account portal's generated `engraphis connect` command in
