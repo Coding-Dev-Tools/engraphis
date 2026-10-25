@@ -94,14 +94,14 @@ interpretation and do not count as additional benchmark-quality gains.
 ### Public numeric evidence registry
 
 Every exact public aggregate retained below comes from the checked-in, public-safe
-[`offline-fixtures-release-review-20261022-v4.json`](docs/benchmark-evidence/offline-fixtures-release-review-20261022-v4.json) artifact. Its
+[`offline-fixtures-release-review-20261025.json`](docs/benchmark-evidence/offline-fixtures-release-review-20261025.json) artifact. Its
 SHA-256 is
-`38582da42a04bd1c637724d6351fa516ab867a263a6848d502b2fa37934a3edf`, also recorded in the
+`641299111434f59def9a1b9e48059deeef13c5fbda6cdb86af7d2e0c62e24cb1`, also recorded in the
 adjacent `.sha256` file. The artifact contains no raw questions, answers, prompts, customer data,
 or per-record content fingerprints.
 
 The fixture-suite digest is
-`1fa23e6b5baa2a43e4a351fb696872b1d6de7aa62ab98ab42c6275f50c696bff`. The artifact defines
+`8b6946dadbaf865346fa1489ae04c4b482c94d00931a936ac2cb802b1d561274`. The artifact defines
 the digest algorithm and records the SHA-256 of every suite and dataset file. Each evidence ID
 also binds its exact command through `sha256(UTF-8 exact command)`:
 
@@ -117,25 +117,28 @@ The canonical chart aliases are regenerated from that new artifact and carry its
 historical per-run artifacts and their preserved chart bytes remain unchanged. The current
 PNG views were freshly rendered from the registered artifact with CairoSVG 2.9.1 and
 Cairo 1.18.4 on Windows at each SVG canvas size, with embedded artifact and SVG checksums.
-The fresh evaluator run used Windows CPython 3.12.10 and NumPy 2.5.4. Its 588-file manifest
+The fresh evaluator run used Windows CPython 3.14.7 and NumPy 2.5.4. Its 590-file manifest
 binds the producer after the 1.7.10 release-review fixes: Command Code file-guard tool
 ids, fail-closed hook errors, symlink-then-parent and Windows alias targets, the linear
 Spec Studio heading pattern, closure-limit and browse-version handling, the equal-start
 supersede guard, bounded history candidate windows for `why` and `timeline`, raw-path UNC/device
 rejection across import, vault, code-index and source-id surfaces, token-gated automatic browser sessions, a
 partitioned sync closure budget, Windows source-read timestamp revalidation, non-blocking
-engine write guards and atomic receipt transactions, and worker-isolated MCP tool
-execution. Dashboard assets, tests, documentation, and generated images
+engine write guards and atomic receipt transactions, worker-isolated MCP tool
+execution, loopback stdio-to-HTTP MCP bridging, exact-identifier recall priority, and
+`prompt_eligible`/`review_state` remember reporting. Dashboard assets, tests, documentation, and generated images
 are outside this producer manifest. The three measured fixture results are unchanged;
 this rerun establishes current source and render provenance without claiming a
 retrieval-quality improvement. It does not qualify browser behavior, hosted services,
 external models, or provider billing. The registered artifact was produced with:
 
 ```bash
-python -m scripts.export_offline_evidence --output docs/benchmark-evidence/offline-fixtures-release-review-20261022-v4.json
+python -m scripts.export_offline_evidence --output docs/benchmark-evidence/offline-fixtures-release-review-20261025.json
 ```
 
-The same-day predecessors,
+The earlier release-review predecessors,
+[`offline-fixtures-release-review-20261022-v4.json`](docs/benchmark-evidence/offline-fixtures-release-review-20261022-v4.json)
+(SHA-256 `38582da42a04bd1c637724d6351fa516ab867a263a6848d502b2fa37934a3edf`),
 [`offline-fixtures-release-review-20261022-v3.json`](docs/benchmark-evidence/offline-fixtures-release-review-20261022-v3.json)
 (SHA-256 `aac955672785c01ab9ec60e841d6f566469ce126d3f95c2927aa8b8616a99fb0`),
 [`offline-fixtures-release-review-20261022-v2.json`](docs/benchmark-evidence/offline-fixtures-release-review-20261022-v2.json)
@@ -195,13 +198,13 @@ grounded checks in separate panels; provider billing and MCP transport are not m
 the SVG and matching PNG with:
 
 ```bash
-python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-release-review-20261022-v4.json --output docs/images/context-efficiency.svg --png-output docs/images/context-efficiency.png
+python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-release-review-20261025.json --output docs/images/context-efficiency.svg --png-output docs/images/context-efficiency.png
 ```
 
 The companion examples are also generated from that artifact with:
 
 ```bash
-python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-release-review-20261022-v4.json --output docs/images/evidence-backed-agent-examples.svg --png-output docs/images/evidence-backed-agent-examples.png
+python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-release-review-20261025.json --output docs/images/evidence-backed-agent-examples.svg --png-output docs/images/evidence-backed-agent-examples.png
 ```
 The historical-to-executable mapping is in
 [`docs/BENCHMARK_CHANGE_COVERAGE.md`](docs/BENCHMARK_CHANGE_COVERAGE.md).
