@@ -3,7 +3,8 @@
 Reads the SessionStart payload from stdin, opens a session against the local
 Engraphis MCP server, and emits hook JSON whose ``additionalContext`` carries
 bounded recalled memory into the new session's first turn. Fails open: any
-error, timeout, or empty context prints nothing and exits 0.
+error or timeout prints nothing and exits 0. A successful session is reported
+even when there are no recalled memories, so later writes retain its routing.
 """
 
 import json
@@ -183,7 +184,22 @@ def extract_session_result(result):
         workspace = parsed.get("workspace")
         if not isinstance(workspace, str) or not workspace.strip():
             workspace = None
-        return parsed["context"].strip(), workspace
+        context = parsed["context"].strip()
+        memory_session_id = parsed.get("session_id")
+        if isinstance(memory_session_id, str) and re.fullmatch(
+            r"ses_[0-9A-HJKMNP-TV-Z]{26}", memory_session_id
+        ):
+            routing = {"session_id": memory_session_id}
+            if workspace is not None:
+                routing["workspace"] = workspace
+            repo = parsed.get("repo")
+            if isinstance(repo, str) and repo.strip():
+                routing["repo"] = repo
+            context = (
+                "Active Engraphis session: " + json.dumps(routing, ensure_ascii=True)
+                + ". Pass session_id on remember and recall calls.\n" + context
+            )
+        return context, workspace
     return "", None
 
 
@@ -219,6 +235,7 @@ def session_context(repo, workspace, deadline, mcp_url=None):
     arguments = {
         "action": "start",
         "repo": repo,
+        "agent": "command-code",
         # Context is only returned when a goal is supplied.
         "goal": (
             "Resume work on this repository: surface relevant durable "
@@ -322,17 +339,25 @@ def build_additional_context(context, workspace, max_context_chars=None, format=
         else "Durable memory (engraphis) relevant to this repo:\n"
     )
     footer = CONTEXT_FOOTER
-    body_budget = max_context_chars - len(header) - len(footer)
+    routing = ""
+    if context.startswith("Active Engraphis session: "):
+        first_line, separator, remainder = context.partition("\n")
+        if separator:
+            # Routing is operational metadata, not recalled prose. Reserve it
+            # before terse compression, which otherwise drops unnumbered text.
+            routing = first_line + "\n"
+            context = remainder
+    body_budget = max_context_chars - len(header) - len(footer) - len(routing)
     if body_budget <= 0:
         # Header+footer already exceed the budget. Truncate the header so the
         # final payload stays within the limit and the agent still gets
         # a recognisable prompt header for the workspace.
-        return (header + footer)[:max_context_chars]
+        return (header + routing + footer)[:max_context_chars]
     if format == "terse":
         body = _compress_prose_to_terse(context, body_budget)
     else:
         body = context[:body_budget]
-    return (header + body + footer)[:max_context_chars]
+    return (header + routing + body + footer)[:max_context_chars]
 
 
 def main():

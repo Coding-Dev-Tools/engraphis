@@ -66,6 +66,12 @@ Candidate package version: **1.7.10**. Publication and hosted-service qualificat
   does not block protocol peers. Preserve direct calls and tool schemas, wait for
   in-flight work under AnyIO cancellation, and synchronize capability registry
   issuance, expiry and resolution.
+- Add `engraphis-mcp --connect` (`engraphis/mcp_stdio_bridge.py`) so stdio desktop clients
+  can share one loopback HTTP MCP service without loading duplicate embedding models.
+  Prioritize exact identifier matches in recall without bypassing scope, validity, or
+  review filters, report `prompt_eligible` and `review_state` on `remember` responses,
+  and preserve `session_id` routing in the Command Code `SessionStart` hook even when
+  initial recalled context is empty.
 
 - Preserve repeated validity closures in schema 19 so later corrections cannot change
   fixed historical queries. Apply the same knowledge-time rule to recall, graph evidence,
@@ -114,7 +120,9 @@ Candidate package version: **1.7.10**. Publication and hosted-service qualificat
   inference requests before uploading a workspace snapshot.
 - Offer an explicit fresh Analytics run after repairing consent, authentication,
   billing, or hosted availability, while preserving pending jobs and cached refusals.
-- Run grounded, code-arm, and evidence-contract gates in release validation.
+- Run grounded, code-arm, and evidence-contract gates in release validation. Keep the
+  Python 3.9 floor on a supported Ubuntu runner, refresh Pi transitive dependency security
+  floors, and enforce the patched `filelock` floor in the production Docker image.
 - Preserve byte-hashed evaluation fixtures with LF checkout rules on Windows.
 - Preserve immutable historical report bytes and retry transient Windows reader locks
   when publishing local benchmark queue status.
