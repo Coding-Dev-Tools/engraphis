@@ -5390,6 +5390,7 @@ class Store:
                     self.reconnect()
                     continue
                 raise
+        return None
 
     def get_memories(self, memory_ids: Iterable[str]) -> dict[str, MemoryRecord]:
         """Batched :meth:`get_memory` — one ``IN (...)`` query per chunk.
@@ -5432,6 +5433,7 @@ class Store:
                     self.reconnect()
                     continue
                 raise
+        return {}
 
     def visible_memory_ids(self, memory_ids: list[str],
                            flt: Optional[SearchFilter], *,
