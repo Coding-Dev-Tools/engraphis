@@ -1188,16 +1188,57 @@ class _SerializedConnection:
             # A deferred constraint can make commit() raise while SQLite deliberately
             # leaves the transaction open. Preserve this thread's pin in that case so a
             # waiter cannot adopt the failed transaction; the owner can still roll back.
+            # However, if fn is rollback() itself, keeping a pin is invalid since no further
+            # rollback is possible and would permanently strand the transaction lock.
             keep_pin = False
             if self._pinned() and not succeeded:
                 try:
-                    keep_pin = bool(self._raw.in_transaction)
+                    is_rollback = getattr(fn, "__name__", "") == "rollback"
+                    keep_pin = bool(self._raw.in_transaction) and not is_rollback
                 except Exception:  # noqa: BLE001 - a failed/closed connector cannot be kept
                     keep_pin = False
             if self._pinned() and not keep_pin:
                 self._pin.held = False
                 self._lock.release()          # release the transaction pin
             self._lock.release()              # release this call's acquire
+
+    def reset_pin(self) -> None:
+        """Clear any transaction pin held by the current thread or reset state."""
+        if self._pinned():
+            self._pin.held = False
+            for attribute in ("defer_commits", "defer_savepoint"):
+                try:
+                    delattr(self._pin, attribute)
+                except AttributeError:
+                    pass
+            try:
+                self._lock.release()
+            except RuntimeError:
+                pass
+
+    def replace_raw(self, new_raw: Any) -> None:
+        """Safely replace the underlying raw connection and clear transaction state."""
+        if not self._lock.acquire(timeout=self._ACQUIRE_TIMEOUT):
+            self.reset_pin()
+            if not self._lock.acquire(timeout=5.0):
+                raise sqlite3.OperationalError(
+                    "cannot replace raw SQLite connection while lock is held"
+                )
+        try:
+            old_raw = self._raw
+            object.__setattr__(self, "_raw", new_raw)
+            self._pin.held = False
+            for attribute in ("defer_commits", "defer_savepoint"):
+                try:
+                    delattr(self._pin, attribute)
+                except AttributeError:
+                    pass
+            try:
+                old_raw.close()
+            except Exception:
+                pass
+        finally:
+            self._lock.release()
 
     def execute(self, *a, **k):
         def execute_and_snapshot(*aa, **kk):
@@ -1331,37 +1372,20 @@ class Store:
         self.allowed_workspaces: Optional[frozenset] = (
             frozenset(allowed_workspaces) if allowed_workspaces else None
         )
-        try:
-            # Register once before exposing this connection to any query/cursor. SQLite's
-            # built-in lower() is ASCII-only; history ranking uses Python Unicode lower().
-            self.conn.create_function("engraphis_unicode_lower", 1, _unicode_lower, deterministic=True)
-            self.conn.execute("PRAGMA foreign_keys=ON")
-            if self.read_only:
-                # Defense in depth after the stdlib immutable URI or the injected
-                # connector's explicit immutable-open contract. Do not probe FTS5 by
-                # creating a temporary table here: an inspection must not write anything.
-                self.conn.execute("PRAGMA query_only=ON")
-                self._validate_read_only_ready()
-                row = self.conn.execute(
-                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='mem_fts'"
-                ).fetchone()
-                self.has_fts5 = bool(
-                    row and "virtual table" in str(row["sql"] or "").casefold()
-                    and "fts5" in str(row["sql"] or "").casefold()
+        if not _is_memory_database_path(self.path):
+            try:
+                stat_info = os.stat(self.path)
+                self._opened_identity: Optional[tuple[int, int]] = (
+                    int(stat_info.st_dev), int(stat_info.st_ino)
                 )
-            else:
-                # Keep deleted pages scrubbed even when an emergency erase cannot run a
-                # final VACUUM because another connection has the database busy.  The
-                # per-erase helper sets this too for legacy connections and backups;
-                # setting it at writable-store startup makes the protection durable for
-                # every normal v2 connection without changing the schema or data model.
-                self.conn.execute("PRAGMA secure_delete=ON")
-                synchronization = "FULL" if self.sqlite_durability == "durable" else "NORMAL"
-                self.conn.execute(f"PRAGMA synchronous={synchronization}")
+            except OSError:
+                self._opened_identity = None
+        else:
+            self._opened_identity = None
+        try:
+            self._configure_connection(self.conn)
+            if not self.read_only:
                 self.init_schema()
-                # journal_mode is persistent state, so set it only after a required backup
-                # and the transactional migration have completed successfully.
-                self.conn.execute("PRAGMA journal_mode=WAL")
                 if (not _is_memory_database_path(self.path)
                         and not self.durability_health()["matches_requested"]):
                     raise RuntimeError(
@@ -1374,6 +1398,86 @@ class Store:
             finally:
                 self.close()
             raise
+
+    def _configure_connection(self, conn: Any) -> None:
+        """Apply required pragmas, scalar functions, and durability settings to an open connection."""
+        conn.create_function("engraphis_unicode_lower", 1, _unicode_lower, deterministic=True)
+        conn.execute("PRAGMA foreign_keys=ON")
+        if self.read_only:
+            conn.execute("PRAGMA query_only=ON")
+            self._validate_read_only_ready()
+            row = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='mem_fts'"
+            ).fetchone()
+            self.has_fts5 = bool(
+                row and "virtual table" in str(row["sql"] or "").casefold()
+                and "fts5" in str(row["sql"] or "").casefold()
+            )
+        else:
+            conn.execute("PRAGMA secure_delete=ON")
+            synchronization = "FULL" if self.sqlite_durability == "durable" else "NORMAL"
+            conn.execute(f"PRAGMA synchronous={synchronization}")
+            conn.execute("PRAGMA journal_mode=WAL")
+
+    def is_stale(self) -> bool:
+        """Return True if the database file on disk has been replaced by another process."""
+        if self.read_only or _is_memory_database_path(self.path) or self._opened_identity is None:
+            return False
+        try:
+            stat_info = os.stat(self.path)
+            return (int(stat_info.st_dev), int(stat_info.st_ino)) != self._opened_identity
+        except OSError:
+            return True
+
+    def reconnect(self) -> None:
+        """Safely re-open the underlying SQLite connection, re-apply pragmas, and refresh snapshots."""
+        with self._close_lock:
+            read_only_path = self._preflight_read_only_path(self.path) if self.read_only else None
+            new_raw = self._open_connection(read_only_path or self.path)
+            self._configure_connection(new_raw)
+            self.conn.replace_raw(new_raw)
+            if not _is_memory_database_path(self.path):
+                try:
+                    stat_info = os.stat(self.path)
+                    self._opened_identity = (int(stat_info.st_dev), int(stat_info.st_ino))
+                except OSError:
+                    self._opened_identity = None
+            try:
+                self._read_snapshot_pool.close()
+            except Exception:
+                pass
+            self._read_snapshot_pool = ReadSnapshotPool(self._read_snapshot_pool.limit)
+
+    def check_health(self) -> dict[str, Any]:
+        """Verify that the SQLite connection is live and responsive; auto-reconnect if stale."""
+        try:
+            if self.is_stale():
+                logger.info("Database file replaced on disk; reconnecting Store...")
+                self.reconnect()
+            row = self.conn.execute("SELECT 1").fetchone()
+            data_ver = None
+            try:
+                ver = self.conn.execute("PRAGMA data_version").fetchone()
+                if ver is not None:
+                    data_ver = int(ver[0])
+            except Exception:
+                pass
+            return {"status": "ok", "responsive": bool(row), "data_version": data_ver}
+        except Exception as exc:
+            logger.warning(
+                "Database health check probe failed (%s); attempting reconnect...",
+                type(exc).__name__,
+            )
+            try:
+                self.reconnect()
+                row = self.conn.execute("SELECT 1").fetchone()
+                return {"status": "ok", "recovered": True, "responsive": bool(row)}
+            except Exception as reconnect_exc:
+                return {
+                    "status": "unhealthy",
+                    "error": type(reconnect_exc).__name__,
+                    "sqlite_errorname": getattr(reconnect_exc, "sqlite_errorname", None),
+                }
 
     def durability_health(self) -> dict:
         """Read effective connection settings without paths, content or writes.
@@ -5248,20 +5352,45 @@ class Store:
         return records
 
     def _select_memory_records(self, sql: str, params: Iterable[Any]) -> list[MemoryRecord]:
-        with self.read_snapshot():
-            return self._records_from_rows(self.conn.execute(sql, params).fetchall())
+        try:
+            if self.is_stale():
+                self.reconnect()
+            with self.read_snapshot():
+                return self._records_from_rows(self.conn.execute(sql, params).fetchall())
+        except sqlite3.DatabaseError as exc:
+            logger.warning(
+                "_select_memory_records hit %s (%s); reconnecting and retrying once",
+                type(exc).__name__, getattr(exc, "sqlite_errorname", "unknown"),
+            )
+            self.reconnect()
+            with self.read_snapshot():
+                return self._records_from_rows(self.conn.execute(sql, params).fetchall())
 
     def get_memory(self, memory_id: str) -> Optional[MemoryRecord]:
-        with self.read_snapshot():
-            row = self.conn.execute(
-                "SELECT * FROM memories WHERE id=?", (memory_id,)
-            ).fetchone()
-            if row is not None and self.allowed_workspaces is not None:
-                try:
-                    self._authorize_workspace_id(row["workspace_id"])
-                except ValueError:
-                    return None
-            return self._records_from_rows([row])[0] if row else None
+        for attempt in range(2):
+            try:
+                if attempt == 0 and self.is_stale():
+                    self.reconnect()
+                with self.read_snapshot():
+                    row = self.conn.execute(
+                        "SELECT * FROM memories WHERE id=?", (memory_id,)
+                    ).fetchone()
+                    if row is not None and self.allowed_workspaces is not None:
+                        try:
+                            self._authorize_workspace_id(row["workspace_id"])
+                        except ValueError:
+                            return None
+                    return self._records_from_rows([row])[0] if row else None
+            except sqlite3.DatabaseError as exc:
+                if attempt == 0:
+                    logger.warning(
+                        "get_memory hit %s (%s); reconnecting and retrying once",
+                        type(exc).__name__, getattr(exc, "sqlite_errorname", "unknown"),
+                    )
+                    self.reconnect()
+                    continue
+                raise
+        return None
 
     def get_memories(self, memory_ids: Iterable[str]) -> dict[str, MemoryRecord]:
         """Batched :meth:`get_memory` — one ``IN (...)`` query per chunk.
@@ -5270,27 +5399,41 @@ class Store:
         resolves a whole bundle; doing that one ``SELECT`` at a time is the dominant cost
         on both paths. Ids that do not exist are simply absent from the result, mirroring
         ``get_memory`` returning ``None``."""
-        unique: list[str] = []
-        seen: set = set()
-        for mid in memory_ids:
-            if mid and mid not in seen:
-                seen.add(mid)
-                unique.append(mid)
-        selected: list[sqlite3.Row] = []
-        with self.read_snapshot():
-            for start in range(0, len(unique), IN_CLAUSE_CHUNK):
-                chunk = unique[start:start + IN_CLAUSE_CHUNK]
-                marks = ",".join("?" for _ in chunk)
-                rows = self.conn.fetchall(
-                    f"SELECT * FROM memories WHERE id IN ({marks})", chunk)
-                for row in rows:
-                    if self.allowed_workspaces is not None:
-                        try:
-                            self._authorize_workspace_id(row["workspace_id"])
-                        except ValueError:
-                            continue
-                    selected.append(row)
-            return {rec.id: rec for rec in self._records_from_rows(selected)}
+        for attempt in range(2):
+            try:
+                if attempt == 0 and self.is_stale():
+                    self.reconnect()
+                unique: list[str] = []
+                seen: set = set()
+                for mid in memory_ids:
+                    if mid and mid not in seen:
+                        seen.add(mid)
+                        unique.append(mid)
+                selected: list[sqlite3.Row] = []
+                with self.read_snapshot():
+                    for start in range(0, len(unique), IN_CLAUSE_CHUNK):
+                        chunk = unique[start:start + IN_CLAUSE_CHUNK]
+                        marks = ",".join("?" for _ in chunk)
+                        rows = self.conn.fetchall(
+                            f"SELECT * FROM memories WHERE id IN ({marks})", chunk)
+                        for row in rows:
+                            if self.allowed_workspaces is not None:
+                                try:
+                                    self._authorize_workspace_id(row["workspace_id"])
+                                except ValueError:
+                                    continue
+                            selected.append(row)
+                    return {rec.id: rec for rec in self._records_from_rows(selected)}
+            except sqlite3.DatabaseError as exc:
+                if attempt == 0:
+                    logger.warning(
+                        "get_memories hit %s (%s); reconnecting and retrying once",
+                        type(exc).__name__, getattr(exc, "sqlite_errorname", "unknown"),
+                    )
+                    self.reconnect()
+                    continue
+                raise
+        return {}
 
     def visible_memory_ids(self, memory_ids: list[str],
                            flt: Optional[SearchFilter], *,
