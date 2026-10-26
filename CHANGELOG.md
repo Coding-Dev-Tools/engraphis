@@ -5,6 +5,16 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [1.7.11] - 2026-10-26
+
+Candidate package version: **1.7.11**. Publication and hosted-service qualification remain separate.
+
+- Fix long-lived MCP server database recovery (fixes #286):
+  - Add safe SQLite error classification (`_safe_exception_marker`) distinguishing `SQLITE_CORRUPT`, `SQLITE_BUSY`, `SQLITE_LOCKED`, `SQLITE_IOERR`, `SQLITE_NOTADB`, and `write_lock_timeout` in logs without sensitive query, file path, secret, or memory content leakage.
+  - Implement active device and inode tracking (`_opened_identity`), `Store.is_stale()`, and `Store.reconnect()` to automatically detect and reconnect stale SQLite connections following external file replacement or vacuum.
+  - Fix transaction pin retention in `_SerializedConnection._finish()` when rollback encounters an error, preventing leaked transaction locks and worker thread timeouts.
+  - Add single-retry recovery loops on transient driver errors and stale reads across `engraphis_recall_context`, `engraphis_recall`, `engraphis_recall_grounded`, and `engraphis_get_memory`.
+
 ## [1.7.10] - 2026-10-18
 
 Candidate package version: **1.7.10**. Publication and hosted-service qualification remain separate.
