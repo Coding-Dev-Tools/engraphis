@@ -183,6 +183,49 @@ def _ok(payload: dict) -> str:
 
 
 
+_KNOWN_SQLITE_ERROR_CODES = {
+    1: "SQLITE_ERROR",
+    5: "SQLITE_BUSY",
+    6: "SQLITE_LOCKED",
+    8: "SQLITE_READONLY",
+    10: "SQLITE_IOERR",
+    11: "SQLITE_CORRUPT",
+    14: "SQLITE_CANTOPEN",
+    15: "SQLITE_PROTOCOL",
+    17: "SQLITE_SCHEMA",
+    26: "SQLITE_NOTADB",
+}
+
+
+def _safe_exception_marker(exc: Exception) -> str:
+    """Class marker for error logging without leaking message text or paths."""
+    exc_type = type(exc).__name__
+    import sqlite3
+    if isinstance(exc, sqlite3.Error):
+        error_name = getattr(exc, "sqlite_errorname", None)
+        if not error_name:
+            code = getattr(exc, "sqlite_errorcode", None)
+            if code is not None:
+                error_name = _KNOWN_SQLITE_ERROR_CODES.get(code)
+        if not error_name:
+            msg = str(exc).lower()
+            if "write lock timeout" in msg or "transaction appears stuck" in msg:
+                error_name = "write_lock_timeout"
+            elif "database is locked" in msg or "locked" in msg:
+                error_name = "SQLITE_LOCKED"
+            elif "busy" in msg:
+                error_name = "SQLITE_BUSY"
+            elif "disk i/o error" in msg:
+                error_name = "SQLITE_IOERR"
+            elif "malformed" in msg or "corrupt" in msg:
+                error_name = "SQLITE_CORRUPT"
+            elif "not a database" in msg:
+                error_name = "SQLITE_NOTADB"
+        if error_name:
+            return f"{exc_type}: {error_name}"
+    return exc_type
+
+
 def _err(exc: Exception) -> str:
     """Actionable, safe error string (never leaks internals or credentials)."""
     if isinstance(exc, MemoryConflict):
@@ -190,12 +233,22 @@ def _err(exc: Exception) -> str:
                     "code": exc.code, "retryable": False})
     if isinstance(exc, ValidationError):
         return f"Error: {exc}"
-    exc_type = type(exc).__name__
+    exc_marker = _safe_exception_marker(exc)
     # Redact exception messages to prevent credential/path/memory leakage.
     # Log only a safe class marker and never attach exc_info/tracebacks. The
     # class goes INTO the message: `extra=` fields are dropped by most
     # formatters, which made every failure log identically unattributable.
-    logger.error("MCP tool operation failed (%s)", exc_type)
+    logger.error("MCP tool operation failed (%s)", exc_marker)
+    import sqlite3
+    if isinstance(exc, (sqlite3.DatabaseError, sqlite3.OperationalError)):
+        try:
+            svc = service()
+            if hasattr(svc, "check_health"):
+                svc.check_health()
+            elif hasattr(svc, "store") and hasattr(svc.store, "reconnect"):
+                svc.store.reconnect()
+        except Exception:
+            pass
     return "Error: operation failed. Check the Engraphis server logs for details."
 
 
@@ -817,25 +870,33 @@ def engraphis_recall(
         was disabled because the active embedder is not declared semantic.
         Returns count 0 with a "note" if the workspace/repo isn't known yet.
     """
-    try:
-        payload = service().recall(
-            query, workspace=workspace, repo=repo, session_id=session_id,
-            mtypes=mtypes, k=k, as_of=as_of, valid_at=valid_at,
-            known_at=known_at, token_budget=token_budget,
-            retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
-            packing_mode=packing_mode, retrieval_recipe=retrieval_recipe,
-            response_mode=response_mode,
-            diagnostics=diagnostics,
-            planning=planning,
-            mtype_limits=mtype_limits,
-            jev_assisted=jev_assisted,
-            allow_remote=allow_remote,
-            data_classification=data_classification,
-        )
-        payload = _apply_response_budget(payload, max_response_tokens)
-        return _ok(payload)
-    except Exception as exc:  # noqa: BLE001
-        return _err(exc)
+    for attempt in range(2):
+        try:
+            payload = service().recall(
+                query, workspace=workspace, repo=repo, session_id=session_id,
+                mtypes=mtypes, k=k, as_of=as_of, valid_at=valid_at,
+                known_at=known_at, token_budget=token_budget,
+                retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
+                packing_mode=packing_mode, retrieval_recipe=retrieval_recipe,
+                response_mode=response_mode,
+                diagnostics=diagnostics,
+                planning=planning,
+                mtype_limits=mtype_limits,
+                jev_assisted=jev_assisted,
+                allow_remote=allow_remote,
+                data_classification=data_classification,
+            )
+            payload = _apply_response_budget(payload, max_response_tokens)
+            return _ok(payload)
+        except Exception as exc:  # noqa: BLE001
+            import sqlite3
+            if attempt == 0 and isinstance(exc, (sqlite3.DatabaseError, sqlite3.OperationalError)):
+                try:
+                    service().store.reconnect()
+                    continue
+                except Exception:
+                    pass
+            return _err(exc)
 
 
 @mcp.tool(
@@ -907,142 +968,150 @@ def engraphis_recall_context(
     with a format marker. It does not apply another summary or claim extra savings.
     Use ``engraphis_get_memory`` for the full source behind a citation.
     """
-    try:
-        format = str(format or "full").strip().lower()
-        if format not in {"full", "gist"}:
-            raise ValidationError("format must be one of: full, gist")
-        _recall_started = time.monotonic()
-        payload = service().recall(
-            query,
-            workspace=workspace,
-            repo=repo,
-            session_id=session_id,
-            mtypes=mtypes,
-            k=k,
-            _default_k=50,
-            as_of=as_of,
-            valid_at=valid_at,
-            known_at=known_at,
-            token_budget=token_budget,
-            _default_token_budget=1024,
-            retrieval_profile=retrieval_profile,
-            candidate_depth=candidate_depth,
-            packing_mode=packing_mode,
-            retrieval_recipe=retrieval_recipe,
-            response_mode="compact",
-            diagnostics=diagnostics,
-            planning=planning,
-            mtype_limits=mtype_limits,
-            jev_assisted=jev_assisted,
-            allow_remote=allow_remote,
-            data_classification=data_classification,
-            intent="recall_context",
-        )
-        by_id = {
-            str(source.get("id") or ""): source
-            for source in payload.pop("memories", [])
-        }
-        sources = []
-        for ordinal, packed in enumerate(payload.pop("packed_sources", []), start=1):
-            detail = by_id.get(str(packed.get("id") or ""), {})
-            source = {
-                "n": ordinal,
-                "id": packed.get("id"),
-                "tokens": packed.get("tokens"),
+    format = str(format or "full").strip().lower()
+    if format not in {"full", "gist"}:
+        raise ValidationError("format must be one of: full, gist")
+    for attempt in range(2):
+        try:
+            _recall_started = time.monotonic()
+            payload = service().recall(
+                query,
+                workspace=workspace,
+                repo=repo,
+                session_id=session_id,
+                mtypes=mtypes,
+                k=k,
+                _default_k=50,
+                as_of=as_of,
+                valid_at=valid_at,
+                known_at=known_at,
+                token_budget=token_budget,
+                _default_token_budget=1024,
+                retrieval_profile=retrieval_profile,
+                candidate_depth=candidate_depth,
+                packing_mode=packing_mode,
+                retrieval_recipe=retrieval_recipe,
+                response_mode="compact",
+                diagnostics=diagnostics,
+                planning=planning,
+                mtype_limits=mtype_limits,
+                jev_assisted=jev_assisted,
+                allow_remote=allow_remote,
+                data_classification=data_classification,
+                intent="recall_context",
+            )
+            by_id = {
+                str(source.get("id") or ""): source
+                for source in payload.pop("memories", [])
             }
-            if packed.get("exact_value"):
-                source["exact_value"] = packed["exact_value"]
-            if packed.get("source_span") is not None:
-                source["source_span"] = packed["source_span"]
-            if packed.get("evidence_unit_id"):
-                source["evidence_unit_id"] = packed["evidence_unit_id"]
-            if packed.get("evidence_unit"):
-                source["evidence_unit"] = packed["evidence_unit"]
-            if packed.get("attribution"):
-                source["attribution"] = packed["attribution"]
-            if detail.get("title"):
-                source["title"] = detail["title"]
-            # Compact recall omits source bodies, but keeps both scoring contracts so
-            # callers can rank locally without mistaking rank for absolute evidence.
-            if "relative_score" in detail:
-                source["relative_score"] = detail["relative_score"]
-            if "absolute_support" in detail:
-                source["absolute_support"] = detail["absolute_support"]
-            provenance = detail.get("provenance")
-            if provenance:
-                source["provenance"] = provenance
-            if packed.get("truncated"):
-                source["truncated"] = True
-            reason = packed.get("reason")
-            if reason and reason not in {"full", "summary"}:
-                source["reason"] = reason
-            sources.append(source)
-        payload["sources"] = sources
-
-        if format == "gist":
-            # The packer already selected the admissible evidence within the budget.
-            # A raw reread or prefix summary here can revive excluded content, lose a
-            # qualification, or exceed that budget. Keep its text and accounting.
-            payload["format"] = "gist"
-
-        if not diagnostics:
-            if "score_semantics" in payload:
-                payload["score_semantics"] = {
-                    "relative_score": "query-relative",
-                    "absolute_support": "[0, 1]",
+            sources = []
+            for ordinal, packed in enumerate(payload.pop("packed_sources", []), start=1):
+                detail = by_id.get(str(packed.get("id") or ""), {})
+                source = {
+                    "n": ordinal,
+                    "id": packed.get("id"),
+                    "tokens": packed.get("tokens"),
                 }
-            for field in (
-                "candidate_depth_reason",
-                "candidate_k_requested",
-                "candidate_k_used",
-                "context_revision",
-                "vector_index_backend",
-                "reranker_mode",
-                "receipt",
-                "vector_search_ready",
-                "degraded_reason",
-                "embedding_mode",
-                "retrieval_trace",
-                "planning_details",
-                "graph_traversal_details",
-            ):
-                payload.pop(field, None)
+                if packed.get("exact_value"):
+                    source["exact_value"] = packed["exact_value"]
+                if packed.get("source_span") is not None:
+                    source["source_span"] = packed["source_span"]
+                if packed.get("evidence_unit_id"):
+                    source["evidence_unit_id"] = packed["evidence_unit_id"]
+                if packed.get("evidence_unit"):
+                    source["evidence_unit"] = packed["evidence_unit"]
+                if packed.get("attribution"):
+                    source["attribution"] = packed["attribution"]
+                if detail.get("title"):
+                    source["title"] = detail["title"]
+                # Compact recall omits source bodies, but keeps both scoring contracts so
+                # callers can rank locally without mistaking rank for absolute evidence.
+                if "relative_score" in detail:
+                    source["relative_score"] = detail["relative_score"]
+                if "absolute_support" in detail:
+                    source["absolute_support"] = detail["absolute_support"]
+                provenance = detail.get("provenance")
+                if provenance:
+                    source["provenance"] = provenance
+                if packed.get("truncated"):
+                    source["truncated"] = True
+                reason = packed.get("reason")
+                if reason and reason not in {"full", "summary"}:
+                    source["reason"] = reason
+                sources.append(source)
+            payload["sources"] = sources
 
-            default_settings = {
-                "retrieval_profile": "balanced",
-                "candidate_depth": "fixed",
-                "packing_mode": "legacy",
-                "retrieval_recipe": "default",
-                "planning": "off",
-                "response_mode": "compact",
-                "historical": False,
-                "include_untrusted": False,
-            }
-            for key, default_val in default_settings.items():
-                if payload.get(key) == default_val:
-                    payload.pop(key, None)
+            if format == "gist":
+                # The packer already selected the admissible evidence within the budget.
+                # A raw reread or prefix summary here can revive excluded content, lose a
+                # qualification, or exceed that budget. Keep its text and accounting.
+                payload["format"] = "gist"
 
-            preserve_keys = {"context", "sources"}
-            for key, val in list(payload.items()):
-                if key not in preserve_keys and (
-                    val is None or val == "" or val == {} or val == []
+            if not diagnostics:
+                if "score_semantics" in payload:
+                    payload["score_semantics"] = {
+                        "relative_score": "query-relative",
+                        "absolute_support": "[0, 1]",
+                    }
+                for field in (
+                    "candidate_depth_reason",
+                    "candidate_k_requested",
+                    "candidate_k_used",
+                    "context_revision",
+                    "vector_index_backend",
+                    "reranker_mode",
+                    "receipt",
+                    "vector_search_ready",
+                    "degraded_reason",
+                    "embedding_mode",
+                    "retrieval_trace",
+                    "planning_details",
+                    "graph_traversal_details",
                 ):
-                    payload.pop(key, None)
-        payload = _apply_response_budget(payload, max_response_tokens)
-        usage = payload.get("usage") or {}
-        # The recall usage dict only carries token and packing counters; latency
-        # is captured here so the operational log reports the real per-call
-        # cost of the recall (not a fixed zero from a non-existent field).
-        elapsed_ms = (time.monotonic() - _recall_started) * 1000.0
-        logger.info(
-            "recall_context workspace=%s k=%s budget=%s packed=%s omitted=%s ms=%.0f",
-            workspace, k, token_budget,
-            usage.get("packed_count"), usage.get("omitted_count"),
-            elapsed_ms,
-        )
-        return _ok(payload)
-    except Exception as exc:  # noqa: BLE001
-        return _err(exc)
+                    payload.pop(field, None)
+
+                default_settings = {
+                    "retrieval_profile": "balanced",
+                    "candidate_depth": "fixed",
+                    "packing_mode": "legacy",
+                    "retrieval_recipe": "default",
+                    "planning": "off",
+                    "response_mode": "compact",
+                    "historical": False,
+                    "include_untrusted": False,
+                }
+                for key, default_val in default_settings.items():
+                    if payload.get(key) == default_val:
+                        payload.pop(key, None)
+
+                preserve_keys = {"context", "sources"}
+                for key, val in list(payload.items()):
+                    if key not in preserve_keys and (
+                        val is None or val == "" or val == {} or val == []
+                    ):
+                        payload.pop(key, None)
+            payload = _apply_response_budget(payload, max_response_tokens)
+            usage = payload.get("usage") or {}
+            # The recall usage dict only carries token and packing counters; latency
+            # is captured here so the operational log reports the real per-call
+            # cost of the recall (not a fixed zero from a non-existent field).
+            elapsed_ms = (time.monotonic() - _recall_started) * 1000.0
+            logger.info(
+                "recall_context workspace=%s k=%s budget=%s packed=%s omitted=%s ms=%.0f",
+                workspace, k, token_budget,
+                usage.get("packed_count"), usage.get("omitted_count"),
+                elapsed_ms,
+            )
+            return _ok(payload)
+        except Exception as exc:  # noqa: BLE001
+            import sqlite3
+            if attempt == 0 and isinstance(exc, (sqlite3.DatabaseError, sqlite3.OperationalError)):
+                try:
+                    service().store.reconnect()
+                    continue
+                except Exception:
+                    pass
+            return _err(exc)
 
 
 @mcp.tool(
@@ -1125,32 +1194,40 @@ def engraphis_recall_grounded(
         explains why (insufficient evidence, or unknown workspace/repo).
     """
     llm = None
-    try:
-        if synthesize:
-            try:
-                from engraphis.llm.client import LLMClient
-                llm = LLMClient()
-            except Exception:
-                llm = None
-        payload = service().grounded_recall(
-            query, workspace=workspace, repo=repo, session_id=session_id,
-            mtypes=mtypes, k=k, as_of=as_of, valid_at=valid_at,
-            known_at=known_at, token_budget=token_budget,
-            retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
-            response_mode=response_mode,
-            diagnostics=diagnostics, planning=planning, mtype_limits=mtype_limits,
-            min_support=min_support, llm=llm,
-        )
-        payload = _apply_response_budget(payload, max_response_tokens)
-        return _ok(payload)
-    except Exception as exc:  # noqa: BLE001
-        return _err(exc)
-    finally:
-        if llm is not None and hasattr(llm, "close"):
-            try:
-                llm.close()
-            except Exception:
-                pass
+    for attempt in range(2):
+        try:
+            if synthesize:
+                try:
+                    from engraphis.llm.client import LLMClient
+                    llm = LLMClient()
+                except Exception:
+                    llm = None
+            payload = service().grounded_recall(
+                query, workspace=workspace, repo=repo, session_id=session_id,
+                mtypes=mtypes, k=k, as_of=as_of, valid_at=valid_at,
+                known_at=known_at, token_budget=token_budget,
+                retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
+                response_mode=response_mode,
+                diagnostics=diagnostics, planning=planning, mtype_limits=mtype_limits,
+                min_support=min_support, llm=llm,
+            )
+            payload = _apply_response_budget(payload, max_response_tokens)
+            return _ok(payload)
+        except Exception as exc:  # noqa: BLE001
+            import sqlite3
+            if attempt == 0 and isinstance(exc, (sqlite3.DatabaseError, sqlite3.OperationalError)):
+                try:
+                    service().store.reconnect()
+                    continue
+                except Exception:
+                    pass
+            return _err(exc)
+        finally:
+            if llm is not None and hasattr(llm, "close"):
+                try:
+                    llm.close()
+                except Exception:
+                    pass
 
 
 @mcp.tool(
@@ -3570,19 +3647,32 @@ def _classify_gateway_exception(exc: Exception) -> CallToolResult:
         message = f"Error: {exc}"
         code = "E_NOT_FOUND" if str(exc).startswith("no memory with id ") else "E_VALIDATION"
         return _smart_error(code, message, retryable=False)
+    import sqlite3
+    error_name = getattr(exc, "sqlite_errorname", "") if isinstance(exc, sqlite3.Error) else ""
     message = str(exc)
     lowered = message.lower()
     retryable = (
         isinstance(exc, TimeoutError)
+        or error_name in {"SQLITE_BUSY", "SQLITE_LOCKED"}
         or "timed out" in lowered
         or "timeout" in lowered
         or "database is locked" in lowered
         or "locked" in lowered
+        or "busy" in lowered
     )
     if retryable:
         return _smart_error("E_RETRYABLE", "Error: operation timed out or the store "
                             "is temporarily locked; retry the request.",
                             retryable=True)
+    if isinstance(exc, (sqlite3.DatabaseError, sqlite3.OperationalError)):
+        try:
+            svc = service()
+            if hasattr(svc, "check_health"):
+                svc.check_health()
+            elif hasattr(svc, "store") and hasattr(svc.store, "reconnect"):
+                svc.store.reconnect()
+        except Exception:
+            pass
     return _smart_error("E_INTERNAL",
                         "Error: operation failed. Check the Engraphis server logs for details.",
                         retryable=False)
@@ -4077,7 +4167,15 @@ def engraphis_get_memory(
     try:
         record = service().inspect(memory_id=memory_id, workspace=workspace, repo=repo)
     except Exception as exc:  # noqa: BLE001 — Smart gateway classification
-        return _classify_gateway_exception(exc)
+        import sqlite3
+        if isinstance(exc, (sqlite3.DatabaseError, sqlite3.OperationalError)):
+            try:
+                service().store.reconnect()
+                record = service().inspect(memory_id=memory_id, workspace=workspace, repo=repo)
+            except Exception as retry_exc:
+                return _classify_gateway_exception(retry_exc)
+        else:
+            return _classify_gateway_exception(exc)
     try:
         mem = record.get("memory") or {}
         if not mem.get("id"):
@@ -4085,7 +4183,11 @@ def engraphis_get_memory(
         svc = service()
         target = svc.store.get_memory(mem["id"])
         if target is None:
-            return _gateway_error("memory_not_found")
+            if hasattr(svc.store, "is_stale") and svc.store.is_stale():
+                svc.store.reconnect()
+                target = svc.store.get_memory(mem["id"])
+            if target is None:
+                return _gateway_error("memory_not_found")
         provenance = target.provenance
         metadata = target.metadata
         if not prompt_eligible(provenance, metadata):
