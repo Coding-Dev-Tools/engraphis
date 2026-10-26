@@ -7703,13 +7703,26 @@ class MemoryService:
         self._authorize_memory_session(record)
         return record
 
+    def check_health(self) -> dict:
+        """Verify underlying store responsiveness, repairing stale connections if needed."""
+        if hasattr(self.store, "check_health"):
+            return self.store.check_health()
+        return {"status": "ok"}
+
     def inspect(self, memory_id: str, *, workspace: str, repo: Optional[str] = None) -> dict:
         """Everything the inspector shows for one memory: the record, its links, its
         audit trail, and the full supersession chain (oldest→newest) reconstructed from
         the ``supersedes``/``corrects`` pointers the write path records."""
         mid = _clean_text(memory_id, field="memory_id", max_chars=MAX_NAME_CHARS)
         wid, rid = self._require_scope(workspace, repo)
-        self._check_owns(mid, wid, rid)
+        try:
+            self._check_owns(mid, wid, rid)
+        except ValidationError:
+            if hasattr(self.store, "is_stale") and self.store.is_stale():
+                self.store.reconnect()
+                self._check_owns(mid, wid, rid)
+            else:
+                raise
         rec = self.store.get_memory(mid)
         links = []
         for link in self.store.get_links(mid):
