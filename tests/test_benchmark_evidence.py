@@ -34,8 +34,8 @@ from eval.performance import run as run_performance
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PUBLIC_OFFLINE_ARTIFACT = "offline-fixtures-release-review-20261026.json"
-PUBLIC_OFFLINE_SHA = "1d44ccba3aa08c036f6824bcce7ba4904b8d7228587433b8ffdcc472ecb5bfd5"
+PUBLIC_OFFLINE_ARTIFACT = "offline-fixtures-release-review-20261026-1.7.11.json"
+PUBLIC_OFFLINE_SHA = "befc75b82980205a4fbe9074509d82ab5b84b1bcc4fade7c4dc1195dc9bc00c2"
 
 
 @pytest.fixture(scope="module")
