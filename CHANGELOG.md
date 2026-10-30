@@ -5,6 +5,21 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [1.7.12] - 2026-10-30
+
+Candidate package version: **1.7.12**. Publication and hosted-service qualification remain separate.
+
+- Add a dependency-free stdio MCP bridge that proxies desktop clients to one warmed loopback
+  MCP service; it accepts numeric loopback HTTP endpoints only and bounds message size.
+- Add desktop-memory evaluation plus closure, session-lineage, and temporal-history coverage
+  for governed recall across ended and resumed sessions.
+- Preserve session lineage when memories are corrected, revised, or approved after their
+  session ends, and include closure observations in optimistic memory versions.
+- Publish local benchmark queue status atomically and keep deterministic measurement helpers
+  linear.
+- Add same-origin loopback browser sessions to local authentication and refresh the dashboard,
+  documentation, and benchmark-evidence surfaces.
+
 ## [1.7.10] - 2026-10-18
 
 Candidate package version: **1.7.10**. Publication and hosted-service qualification remain separate.
