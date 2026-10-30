@@ -31,6 +31,7 @@ MODULES = {"eval.external", "eval.agent_benchmarks", "eval.engine_capacity",
 CAPACITY_SUMMARY_SCHEMA = "engraphis-local-capacity-summary/v1"
 DEFAULT_JOB_TIMEOUT_SECONDS = 7 * 24 * 60 * 60.0
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_STATUS_REPLACE_ATTEMPTS = 20 if os.name == "nt" else 1
 _RUNTIME_PACKAGES = (
     "engraphis", "numpy", "torch", "sentence-transformers", "transformers",
     "sqlite-vec", "psutil",
@@ -83,7 +84,16 @@ def _status(directory: Path, **value) -> None:
     temporary = directory / "status.tmp"
     temporary.write_text(canonical_json({"pid": os.getpid(), "updated_unix": time.time(), **value}) + "\n",
                          encoding="utf-8")
-    os.replace(temporary, target)
+    for attempt in range(_STATUS_REPLACE_ATTEMPTS):
+        try:
+            os.replace(temporary, target)
+            return
+        except PermissionError:
+            # Windows readers briefly hold a handle that disallows replacement.
+            # Retain atomic publication and fail on a persistent access denial.
+            if attempt + 1 == _STATUS_REPLACE_ATTEMPTS:
+                raise
+            time.sleep(min(0.01 * (2 ** attempt), 0.1))
 
 
 def _positive_finite(value: object, name: str) -> float:

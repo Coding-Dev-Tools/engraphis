@@ -573,6 +573,28 @@ def test_xml_and_container_attacks_and_invalid_rtf_fail_closed():
         parse_document(duplicate.getvalue(), "duplicate.docx")
 
 
+@pytest.mark.parametrize("encoding", ["utf-16", "utf-16-le", "utf-16-be"])
+@pytest.mark.parametrize("container", [False, True])
+def test_encoded_xml_entities_are_rejected_before_expansion(encoding, container):
+    xml = (
+        '<?xml version="1.0" encoding="UTF-16"?>'
+        '<!DOCTYPE x [<!ENTITY custom "unexpected expanded entity">]>'
+        '<x>&custom;</x>'
+    ).encode(encoding)
+    if encoding == "utf-16-le":
+        xml = b"\xff\xfe" + xml
+    elif encoding == "utf-16-be":
+        xml = b"\xfe\xff" + xml
+    payload = _zip({"word/document.xml": xml}) if container else xml
+    with pytest.raises(DocumentParseError, match="entities"):
+        parse_document(payload, "unsafe.docx" if container else "unsafe.xml")
+
+
+def test_utf16_xml_without_a_doctype_remains_readable():
+    xml = '<?xml version="1.0" encoding="UTF-16"?><x>Valid café</x>'
+    assert parse_document(xml.encode("utf-16"), "valid.xml").body == "Valid café"
+
+
 def test_adapter_contract_is_bounded_and_redacts_failures():
     raw = b"%PDF-local"
     with pytest.raises(DocumentParseError, match="requires an optional"):

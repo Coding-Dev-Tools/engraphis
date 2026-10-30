@@ -6,6 +6,36 @@ import pytest
 from engraphis.service import MemoryService, ValidationError, set_current_user
 
 
+def test_why_and_timeline_find_old_facts_beyond_the_first_page():
+    from engraphis.core.engine import MemoryEngine
+    from engraphis.core.interfaces import MemoryRecord, Scope
+
+    engine = MemoryEngine.create(":memory:", auto_evolve=False)
+    try:
+        workspace = engine.store.get_or_create_workspace("history")
+        repo = engine.store.get_or_create_repo(workspace, "api")
+        old = engine.store.add_memory(MemoryRecord(
+            id="", content="Zephyr database migration chooses PostgreSQL.",
+            workspace_id=workspace, repo_id=repo, scope=Scope.REPO,
+            ingested_at=1.0, valid_from=1.0,
+        ))
+        for index in range(501):
+            engine.store.add_memory(MemoryRecord(
+                id="", content="Unrelated lighthouse observation %s." % index,
+                workspace_id=workspace, repo_id=repo, scope=Scope.REPO,
+                ingested_at=100.0 + index, valid_from=1.0,
+            ))
+        query = "Zephyr database migration"
+        assert [row.id for row in engine.timeline(
+            query, workspace_id=workspace, repo_id=repo,
+        )] == [old]
+        assert [row.id for row in engine.why(
+            query, workspace_id=workspace, repo_id=repo,
+        )["answer"]] == [old]
+    finally:
+        engine.close()
+
+
 @pytest.fixture
 def svc(tmp_path):
     service = MemoryService.create(

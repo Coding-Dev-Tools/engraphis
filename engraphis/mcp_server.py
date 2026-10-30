@@ -38,6 +38,7 @@ import time
 
 from collections import OrderedDict
 from dataclasses import dataclass
+from functools import partial, wraps
 from typing import Any, Annotated, Callable, List, Optional
 
 try:
@@ -49,6 +50,7 @@ except ImportError:  # pragma: no cover - core-floor (numpy-only) installs
     BeforeValidator = None  # type: ignore[assignment,misc]
 
 try:
+    import anyio
     from mcp.server.fastmcp import FastMCP
     from mcp.types import CallToolResult, TextContent
     try:
@@ -101,6 +103,24 @@ work and report the exact memory failure once instead of fabricating memory stat
 # ``classic_mcp`` retains the public, named-tool protocol for integrations that pinned a
 # tool name.  ``mcp`` temporarily refers to it while the legacy decorators below execute;
 # it is rebound to the small Smart MCP surface after every classic tool has registered.
+def _threaded_tool(server, **options):
+    """Keep blocking memory work off the shared MCP transport's event loop.
+
+    AnyIO copies the bound service, caller and MCP request ContextVars into the
+    worker. Its default cancellation shielding lets an in-flight mutation finish
+    its transaction. Direct Python callers and gateway dispatch stay synchronous.
+    """
+    def register(function):
+        @wraps(function)
+        async def run(*args, **kwargs):
+            return await anyio.to_thread.run_sync(partial(function, *args, **kwargs))
+
+        run._engraphis_sync_handler = function
+        server.tool(**options)(run)
+        return function
+    return register
+
+
 classic_mcp = FastMCP("engraphis_mcp", instructions=_SESSION_PROTOCOL,
                       log_level="WARNING")
 mcp = classic_mcp
@@ -469,7 +489,7 @@ def minimum_role(tool_name: str) -> str:
     return "member"
 
 
-@mcp.tool(
+@_threaded_tool(mcp,
     name="engraphis_list_workspaces",
     annotations={"title": "List available memory workspaces", "readOnlyHint": True,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
@@ -482,7 +502,7 @@ def engraphis_list_workspaces() -> str:
         return _err(exc)
 
 
-@mcp.tool(
+@_threaded_tool(mcp,
     name="engraphis_get_workspace_routing",
     annotations={"title": "Read a project's workspace choice", "readOnlyHint": True,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
@@ -498,7 +518,7 @@ def engraphis_get_workspace_routing(
         return _err(exc)
 
 
-@mcp.tool(
+@_threaded_tool(mcp,
     name="engraphis_set_workspace_routing",
     annotations={"title": "Save a project's workspace choice", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
@@ -518,7 +538,7 @@ def engraphis_set_workspace_routing(
         return _err(exc)
 
 
-@mcp.tool(
+@_threaded_tool(mcp,
     name="engraphis_remember",
     annotations={"title": "Remember a fact", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
@@ -593,7 +613,8 @@ def engraphis_remember(
     rationale, a bug's cause and fix, a user preference, or a reusable procedure.
 
     Returns:
-        str: JSON ``{"id","workspace","repo","scope","mtype","stored":true,"op"}`` where
+        str: JSON with ``id``, resolved scope, ``stored``, ``op``, ``review_state`` and
+        ``prompt_eligible``. Stored memories may still require review before recall. Here
         ``op`` is ``"add"`` (new), ``"noop"`` (matched an existing memory almost exactly —
         that one was reinforced, ``id`` points to it), or ``"invalidate"`` (superseded an
         existing memory on the same subject — see ``superseded`` for the old id(s); history
@@ -627,7 +648,7 @@ def engraphis_remember(
         return _err(exc)
 
 
-@mcp.tool(
+@_threaded_tool(mcp,
     name="engraphis_remember_many",
     annotations={"title": "Remember a batch of facts", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
@@ -699,7 +720,7 @@ def engraphis_remember_many(
         return _err(exc)
 
 
-@mcp.tool(
+@_threaded_tool(mcp,
     name="engraphis_recall",
     annotations={"title": "Recall relevant memories", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": False,
@@ -811,7 +832,7 @@ def engraphis_recall(
         return _err(exc)
 
 
-@mcp.tool(
+@_threaded_tool(mcp,
     name="engraphis_recall_context",
     annotations={"title": "Recall token-efficient context", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": False,
@@ -1018,7 +1039,7 @@ def engraphis_recall_context(
         return _err(exc)
 
 
-@mcp.tool(
+@_threaded_tool(mcp,
     name="engraphis_recall_grounded",
     annotations={"title": "Grounded recall (cited answer, or abstain)",
                  "readOnlyHint": False, "destructiveHint": False,
@@ -1126,7 +1147,7 @@ def engraphis_recall_grounded(
                 pass
 
 
-@mcp.tool(
+@_threaded_tool(mcp,
     name="engraphis_answer",
     annotations={"title": "Grounded answer (compatibility alias)",
                  "readOnlyHint": False, "destructiveHint": False,
@@ -1184,7 +1205,7 @@ def engraphis_answer(
     )
 
 
-@mcp.tool(
+@_threaded_tool(mcp,
     name="engraphis_why",
     annotations={"title": "Explain the rationale behind a fact", "readOnlyHint": True,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
@@ -1218,7 +1239,7 @@ def engraphis_why(
         return _err(exc)
 
 
-@mcp.tool(
+@_threaded_tool(mcp,
     name="engraphis_timeline",
     annotations={"title": "Bi-temporal history of a fact", "readOnlyHint": True,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
@@ -1248,7 +1269,7 @@ def engraphis_timeline(
         return _err(exc)
 
 
-@mcp.tool(
+@_threaded_tool(mcp,
     name="engraphis_recall_proactive",
     annotations={"title": "What should I know right now", "readOnlyHint": True,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
@@ -1281,7 +1302,7 @@ def engraphis_recall_proactive(
         return _err(exc)
 
 
-@mcp.tool(
+@_threaded_tool(mcp,
     name="engraphis_proactive_context",
     annotations={"title": "Agent-ready proactive context", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": False,
@@ -1344,7 +1365,7 @@ def _require_local_operator_attestation(tool_name: str, confirmed: bool) -> Opti
     return None
 
 
-@mcp.tool(
+@_threaded_tool(mcp,
     name="engraphis_retire",
     annotations={"title": "Retire a memory", "readOnlyHint": False,
                  "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
@@ -1387,7 +1408,7 @@ def engraphis_retire(
         return _err(exc)
 
 
-@mcp.tool(
+@_threaded_tool(mcp,
     name="engraphis_forget",
     annotations={"title": "Forget a memory (deprecated; use retire)", "readOnlyHint": False,
                  "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
@@ -1421,7 +1442,7 @@ def engraphis_forget(
         return _err(exc)
 
 
-@mcp.tool(
+@_threaded_tool(mcp,
     name="engraphis_secure_erase",
     annotations={"title": "Securely erase a leaked memory", "readOnlyHint": False,
                  "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
@@ -1458,7 +1479,7 @@ def engraphis_secure_erase(
         return _err(exc)
 
 
-@mcp.tool(
+@_threaded_tool(mcp,
     name="engraphis_pin",
     annotations={"title": "Pin or unpin a memory", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": False,
@@ -1491,7 +1512,7 @@ def engraphis_pin(
         return _err(exc)
 
 
-@mcp.tool(
+@_threaded_tool(mcp,
     name="engraphis_correct",
     annotations={"title": "Correct a memory", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
@@ -1541,7 +1562,7 @@ def engraphis_correct(
         return _err(exc)
 
 
-@mcp.tool(
+@_threaded_tool(mcp,
     name="engraphis_promote",
     annotations={"title": "Promote a memory to a wider scope", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": False,
@@ -1583,7 +1604,7 @@ def engraphis_promote(
         return _err(exc)
 
 
-@mcp.tool(
+@_threaded_tool(mcp,
     name="engraphis_link",
     annotations={"title": "Link two memories", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
@@ -1625,7 +1646,7 @@ def engraphis_link(
         return _err(exc)
 
 
-@mcp.tool(
+@_threaded_tool(mcp,
     name="engraphis_record_event",
     annotations={"title": "Log an episodic event", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
@@ -1657,7 +1678,7 @@ def engraphis_record_event(
         return _err(exc)
 
 
-@mcp.tool(
+@_threaded_tool(mcp,
     name="engraphis_index_repo",
     annotations={"title": "Index a repository's code graph", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": False,
@@ -1709,7 +1730,7 @@ def engraphis_index_repo(
         return _err(exc)
 
 
-@mcp.tool(
+@_threaded_tool(mcp,
     name="engraphis_search_code",
     annotations={"title": "Search the code symbol graph", "readOnlyHint": True,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
@@ -1748,7 +1769,7 @@ def engraphis_search_code(
         return _err(exc)
 
 
-@mcp.tool(
+@_threaded_tool(mcp,
     name="engraphis_code_path",
     annotations={"title": "Find a path through the code graph", "readOnlyHint": True,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
@@ -1786,7 +1807,7 @@ def engraphis_code_path(
         return _err(exc)
 
 
-@mcp.tool(
+@_threaded_tool(mcp,
     name="engraphis_code_impact",
     annotations={"title": "Estimate change impact from the code graph", "readOnlyHint": True,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
@@ -1817,7 +1838,7 @@ def engraphis_code_impact(
         return _err(exc)
 
 
-@mcp.tool(
+@_threaded_tool(mcp,
     name="engraphis_export_code_graph",
     annotations={"title": "Export the indexed code graph", "readOnlyHint": True,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
@@ -1844,7 +1865,7 @@ def engraphis_export_code_graph(
         return _err(exc)
 
 
-@mcp.tool(
+@_threaded_tool(mcp,
     name="engraphis_link_symbol",
     annotations={"title": "Link a code symbol to a memory", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
@@ -1886,7 +1907,7 @@ def engraphis_link_symbol(
         return _err(exc)
 
 
-@mcp.tool(
+@_threaded_tool(mcp,
     name="engraphis_start_session",
     annotations={"title": "Start a memory session", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": False,
@@ -1943,7 +1964,7 @@ def engraphis_start_session(
         return _err(exc)
 
 
-@mcp.tool(
+@_threaded_tool(mcp,
     name="engraphis_end_session",
     annotations={"title": "End a memory session", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
@@ -1974,7 +1995,7 @@ def engraphis_end_session(
         return _err(exc)
 
 
-@mcp.tool(
+@_threaded_tool(mcp,
     name="engraphis_receipts",
     annotations={"title": "List privacy-safe operation receipts", "readOnlyHint": True,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
@@ -1992,7 +2013,7 @@ def engraphis_receipts(
         return _err(exc)
 
 
-@mcp.tool(
+@_threaded_tool(mcp,
     name="engraphis_context_savings",
     annotations={"title": "Summarize context savings", "readOnlyHint": True,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
@@ -2032,7 +2053,7 @@ def engraphis_context_savings(
         return _err(exc)
 
 
-@mcp.tool(
+@_threaded_tool(mcp,
     name="engraphis_verify_receipts",
     annotations={"title": "Verify an operation receipt chain", "readOnlyHint": True,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
@@ -2061,7 +2082,7 @@ def engraphis_verify_receipts(
         return _err(exc)
 
 
-@mcp.tool(
+@_threaded_tool(mcp,
     name="engraphis_export_receipts",
     annotations={"title": "Export operation receipts", "readOnlyHint": True,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
@@ -2077,7 +2098,7 @@ def engraphis_export_receipts(
         return _err(exc)
 
 
-@mcp.tool(
+@_threaded_tool(mcp,
     name="engraphis_stats",
     annotations={"title": "Memory store stats", "readOnlyHint": True,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
@@ -2097,7 +2118,7 @@ def engraphis_stats(
         return _err(exc)
 
 
-@mcp.tool(
+@_threaded_tool(mcp,
     name="engraphis_check_update",
     annotations={"title": "Check for an Engraphis update", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": False,
@@ -2127,7 +2148,7 @@ def engraphis_check_update(
         return _err(exc)
 
 
-@mcp.tool(
+@_threaded_tool(mcp,
     name="engraphis_ingest",
     annotations={"title": "Ingest raw text (extract facts first)", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
@@ -2177,7 +2198,7 @@ def engraphis_ingest(
         return _err(exc)
 
 
-@mcp.tool(
+@_threaded_tool(mcp,
     name="engraphis_ingest_postgres_schema",
     annotations={"title": "Ingest a live PostgreSQL schema", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": False,
@@ -2209,7 +2230,7 @@ def engraphis_ingest_postgres_schema(
         return _err(exc)
 
 
-@mcp.tool(
+@_threaded_tool(mcp,
     name="engraphis_consolidate",
     annotations={"title": "Consolidate memories (sleep-time sweep)", "readOnlyHint": False,
                  "destructiveHint": True, "idempotentHint": False,
@@ -2552,7 +2573,7 @@ def _heuristic_decision(
     }
 
 
-@mcp.tool(
+@_threaded_tool(mcp,
     name="engraphis_decide",
     annotations={
         "title": "System 1 decision gating (Jev / TypeSafe AI)",
@@ -2833,6 +2854,7 @@ _CAPABILITY_MAX_ENTRIES = 256  # hard cap: oldest entries evict first (LRU)
 # yet. The TTL and size cap bound a long-lived stdio process's memory and stop a
 # leaked capability id from remaining usable indefinitely.
 _CAPABILITY_INDEX: "OrderedDict[str, tuple[str, str, str, str, float]]" = OrderedDict()
+_CAPABILITY_LOCK = threading.RLock()
 _GATEWAY_RESULT_COUNTER = RegexTokenCounter()
 
 
@@ -3081,12 +3103,13 @@ def _rank_actions(task: str, *, category: str = "", intent: str = "") -> list[Ac
 
 def _prune_capabilities(now: float) -> None:
     """Drop expired capabilities so a leaked id stops resolving after its TTL."""
-    expired = [
-        capability_id for capability_id, entry in _CAPABILITY_INDEX.items()
-        if now - entry[4] > _CAPABILITY_TTL_SECONDS
-    ]
-    for capability_id in expired:
-        del _CAPABILITY_INDEX[capability_id]
+    with _CAPABILITY_LOCK:
+        expired = [
+            capability_id for capability_id, entry in _CAPABILITY_INDEX.items()
+            if now - entry[4] > _CAPABILITY_TTL_SECONDS
+        ]
+        for capability_id in expired:
+            del _CAPABILITY_INDEX[capability_id]
 
 
 def _issue_capability(spec: ActionSpec) -> str:
@@ -3096,13 +3119,14 @@ def _issue_capability(spec: ActionSpec) -> str:
     signature = hmac.new(_CAPABILITY_SECRET, body, hashlib.sha256).hexdigest()[:24]
     capability_id = f"cap_{signature}"
     now = time.time()
-    _prune_capabilities(now)
-    while len(_CAPABILITY_INDEX) >= _CAPABILITY_MAX_ENTRIES:
-        _CAPABILITY_INDEX.popitem(last=False)  # evict oldest first (LRU)
-    _CAPABILITY_INDEX[capability_id] = (
-        spec.canonical_id, spec.schema_digest, _CAPABILITY_VERSION, _DEPLOYMENT_POLICY,
-        now,
-    )
+    with _CAPABILITY_LOCK:
+        _prune_capabilities(now)
+        while len(_CAPABILITY_INDEX) >= _CAPABILITY_MAX_ENTRIES:
+            _CAPABILITY_INDEX.popitem(last=False)  # evict oldest first (LRU)
+        _CAPABILITY_INDEX[capability_id] = (
+            spec.canonical_id, spec.schema_digest, _CAPABILITY_VERSION, _DEPLOYMENT_POLICY,
+            now,
+        )
     return capability_id
 
 
@@ -3290,34 +3314,35 @@ def _bounded_gateway_success(spec: ActionSpec, payload: dict[str, Any]) -> str:
 
 
 def _resolve_capability(capability_id: str, schema_digest: str) -> Optional[ActionSpec]:
-    entry = _CAPABILITY_INDEX.get(str(capability_id or ""))
-    if entry is None:
-        return None
-    action_id, issued_digest, issued_version, issued_policy, issued_at = entry
-    if time.time() - issued_at > _CAPABILITY_TTL_SECONDS:
-        # Expired: forget the id so it can never resolve again, even within a
-        # long-lived stdio process that outlives the TTL.
-        del _CAPABILITY_INDEX[str(capability_id or "")]
-        return None
-    spec = ACTION_SPECS.get(action_id)
-    expected_body = (
-        f"{_CAPABILITY_VERSION}:{_DEPLOYMENT_POLICY}:{action_id}:{schema_digest}"
-    ).encode("utf-8")
-    expected_id = "cap_" + hmac.new(
-        _CAPABILITY_SECRET, expected_body, hashlib.sha256,
-    ).hexdigest()[:24]
-    if (
-        spec is None
-        or issued_digest != schema_digest
-        or spec.schema_digest != schema_digest
-        or issued_version != _CAPABILITY_VERSION
-        or issued_policy != _DEPLOYMENT_POLICY
-        or not hmac.compare_digest(str(capability_id), expected_id)
-        or not spec.availability_predicate()
-    ):
-        return None
-    _CAPABILITY_INDEX.move_to_end(str(capability_id or ""))  # LRU refresh
-    return spec
+    with _CAPABILITY_LOCK:
+        entry = _CAPABILITY_INDEX.get(str(capability_id or ""))
+        if entry is None:
+            return None
+        action_id, issued_digest, issued_version, issued_policy, issued_at = entry
+        if time.time() - issued_at > _CAPABILITY_TTL_SECONDS:
+            # Expired: forget the id so it can never resolve again, even within a
+            # long-lived stdio process that outlives the TTL.
+            del _CAPABILITY_INDEX[str(capability_id or "")]
+            return None
+        spec = ACTION_SPECS.get(action_id)
+        expected_body = (
+            f"{_CAPABILITY_VERSION}:{_DEPLOYMENT_POLICY}:{action_id}:{schema_digest}"
+        ).encode("utf-8")
+        expected_id = "cap_" + hmac.new(
+            _CAPABILITY_SECRET, expected_body, hashlib.sha256,
+        ).hexdigest()[:24]
+        if (
+            spec is None
+            or issued_digest != schema_digest
+            or spec.schema_digest != schema_digest
+            or issued_version != _CAPABILITY_VERSION
+            or issued_policy != _DEPLOYMENT_POLICY
+            or not hmac.compare_digest(str(capability_id), expected_id)
+        ):
+            return None
+        _CAPABILITY_INDEX.move_to_end(str(capability_id or ""))  # LRU refresh
+    # Availability may consult a bound service; never hold the index lock over I/O.
+    return spec if spec.availability_predicate() else None
 
 
 _MAX_GATEWAY_ARGUMENT_BYTES = 256 * 1024
@@ -3375,7 +3400,8 @@ def _run_action(spec: ActionSpec, arguments: dict[str, Any]) -> tuple[bool, Any,
     except Exception:  # noqa: BLE001 - validation errors stay content-free
         return False, "invalid_arguments", {}
     try:
-        raw = tool.fn(**validated_arguments)
+        handler = getattr(tool.fn, "_engraphis_sync_handler", tool.fn)
+        raw = handler(**validated_arguments)
     except Exception as exc:  # noqa: BLE001 - handler errors stay content-free
         # Surface the exception object (never its internals) so the Smart gateway can
         # tag timeouts / locked-store contention as E_RETRYABLE while keeping the
@@ -3461,7 +3487,7 @@ def _normalize_session_action(value: Any) -> Any:
     return value
 
 
-@smart_mcp.tool(
+@_threaded_tool(smart_mcp,
     name="engraphis_session",
     annotations={"title": "Start or end a memory session", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
@@ -3536,7 +3562,7 @@ def engraphis_session(
     return _ok(payload)
 
 
-@smart_mcp.tool(
+@_threaded_tool(smart_mcp,
     name="engraphis_recall_context",
     annotations={"title": "Recall compact project context", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
@@ -3574,7 +3600,7 @@ def smart_recall_context(
     return result
 
 
-@smart_mcp.tool(
+@_threaded_tool(smart_mcp,
     name="engraphis_remember",
     annotations={"title": "Remember a durable fact", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
@@ -3604,7 +3630,7 @@ def smart_remember(
         description="Literal type: literal, string, identifier, path, number, date, enum, or json.",
         max_length=32)] = "literal",
 ) -> str:
-    """Store a durable fact with safe default provenance and deduplication."""
+    """Store a fact; check prompt_eligible and review_state before recall."""
     result = engraphis_remember(
         content=content, workspace=workspace, repo=repo, session_id=session_id,
         mtype=mtype, importance=importance,
@@ -3616,7 +3642,7 @@ def smart_remember(
     return result
 
 
-@smart_mcp.tool(
+@_threaded_tool(smart_mcp,
     name="engraphis_discover_actions",
     annotations={"title": "Discover an advanced Engraphis capability", "readOnlyHint": True,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
@@ -3661,7 +3687,7 @@ def _execute_gateway(capability_id: str, schema_digest: str, arguments: dict[str
     })
 
 
-@smart_mcp.tool(
+@_threaded_tool(smart_mcp,
     name="engraphis_execute_read",
     annotations={"title": "Execute a discovered read action", "readOnlyHint": True,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
@@ -3678,7 +3704,7 @@ def engraphis_execute_read(
     return _execute_gateway(capability_id, schema_digest, arguments, expected="read")
 
 
-@smart_mcp.tool(
+@_threaded_tool(smart_mcp,
     name="engraphis_execute_action",
     annotations={"title": "Execute a discovered stateful action", "readOnlyHint": False,
                  "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
@@ -3695,7 +3721,7 @@ def engraphis_execute_action(
     return _execute_gateway(capability_id, schema_digest, arguments, expected="action")
 
 
-@smart_mcp.tool(
+@_threaded_tool(smart_mcp,
     name="engraphis_get_memory",
     annotations={"title": "Read one memory's governed record", "readOnlyHint": True,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
@@ -3788,7 +3814,7 @@ def engraphis_get_memory(
         return _classify_gateway_exception(exc)
 
 
-@smart_mcp.tool(
+@_threaded_tool(smart_mcp,
     name="engraphis_update_memory",
     annotations={"title": "Edit a memory's metadata fields", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
@@ -3828,7 +3854,7 @@ def engraphis_update_memory(
         return _classify_gateway_exception(exc)
 
 
-@smart_mcp.tool(
+@_threaded_tool(smart_mcp,
     name="engraphis_conflict_review",
     annotations={"title": "List pending/quarantined/conflicting memories", "readOnlyHint": True,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},

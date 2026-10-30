@@ -29,7 +29,7 @@ async function historyFixture(page) {
     repo: 'beta', content: 'Beta has a separate lineage claim.', dedupe: false,
     metadata: { corrects: alpha.id },
   });
-  await page.goto('/?workspace=' + workspace + '&view=library#token=' + token);
+  await page.goto('/?workspace=' + workspace + '&view=library');
   await expect(page.locator('#workspace-select')).toHaveValue(workspace);
   await expect(page.locator('#project-select')).toBeEnabled();
   await page.locator('#project-select').selectOption('alpha');

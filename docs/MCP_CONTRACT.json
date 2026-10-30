@@ -1,6 +1,6 @@
 {
   "schema": "engraphis-mcp-contract/v1",
-  "sha256": "c45b4e1de83058b50b6da9def894fd5d5d8a5cc7c37466cd9dbef65c1fcf2b5d",
+  "sha256": "cc15a2a2425557ec13be88f97635081c84fb48533206ad49486643e5e6b2f59d",
   "surfaces": {
     "classic": [
       {
@@ -2513,7 +2513,7 @@
           "readOnlyHint": false,
           "title": "Remember a fact"
         },
-        "description": "Store a memory so it can be recalled in later turns, sessions, or repos.\n\nUse this whenever you learn something worth keeping: a convention, a decision and its\nrationale, a bug's cause and fix, a user preference, or a reusable procedure.\n\nReturns:\n    str: JSON ``{\"id\",\"workspace\",\"repo\",\"scope\",\"mtype\",\"stored\":true,\"op\"}`` where\n    ``op`` is ``\"add\"`` (new), ``\"noop\"`` (matched an existing memory almost exactly \u2014\n    that one was reinforced, ``id`` points to it), or ``\"invalidate\"`` (superseded an\n    existing memory on the same subject \u2014 see ``superseded`` for the old id(s); history\n    is preserved, never deleted), ``\"relate\"`` (kept both uncertain neighboring claims and\n    linked them), or ``\"quarantined\"`` (a suspicious explicitly untrusted payload was\n    retained for governance inspection but excluded from normal recall). Quarantine returns\n    content-free ``policy`` and ``reasons`` codes. Returns ``\"Error: <reason>\"`` if\n    validation fails.",
+        "description": "Store a memory so it can be recalled in later turns, sessions, or repos.\n\nUse this whenever you learn something worth keeping: a convention, a decision and its\nrationale, a bug's cause and fix, a user preference, or a reusable procedure.\n\nReturns:\n    str: JSON with ``id``, resolved scope, ``stored``, ``op``, ``review_state`` and\n    ``prompt_eligible``. Stored memories may still require review before recall. Here\n    ``op`` is ``\"add\"`` (new), ``\"noop\"`` (matched an existing memory almost exactly \u2014\n    that one was reinforced, ``id`` points to it), or ``\"invalidate\"`` (superseded an\n    existing memory on the same subject \u2014 see ``superseded`` for the old id(s); history\n    is preserved, never deleted), ``\"relate\"`` (kept both uncertain neighboring claims and\n    linked them), or ``\"quarantined\"`` (a suspicious explicitly untrusted payload was\n    retained for governance inspection but excluded from normal recall). Quarantine returns\n    content-free ``policy`` and ``reasons`` codes. Returns ``\"Error: <reason>\"`` if\n    validation fails.",
         "inputSchema": {
           "properties": {
             "claim_kind": {
@@ -3720,7 +3720,7 @@
           "readOnlyHint": false,
           "title": "Remember a durable fact"
         },
-        "description": "Store a durable fact with safe default provenance and deduplication.",
+        "description": "Store a fact; check prompt_eligible and review_state before recall.",
         "inputSchema": {
           "properties": {
             "claim_kind": {

@@ -9,13 +9,78 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import ipaddress
 import time
 from typing import Optional
+from urllib.parse import urlsplit
 
 
 BROWSER_SESSION_COOKIE = "engraphis_local_session"
 BROWSER_SESSION_SECONDS = 12 * 60 * 60
 _BROWSER_SESSION_VERSION = "v1"
+
+
+def local_browser_request(request, *, require_origin: bool = True) -> bool:
+    """Authenticate a same-origin browser bootstrap at the local-machine boundary.
+
+    Unlike the open-mode network helper, this never trusts configured LAN peers or
+    forwarding proxies. Literal loopback, a loopback Host, an exact browser Origin,
+    and the dashboard's non-simple header are all required to mint a session.
+    """
+    scope = request.scope
+    client = scope.get("client")
+    try:
+        peer = ipaddress.ip_address(client[0] if client else "")
+    except ValueError:
+        return False
+    if not (getattr(peer, "ipv4_mapped", None) or peer).is_loopback:
+        return False
+
+    headers = {}
+    for name, value in scope.get("headers", ()):
+        name = name.decode("latin1").lower()
+        if name.startswith("x-forwarded-") or name in {"forwarded", "x-real-ip", "via"}:
+            return False
+        headers.setdefault(name, []).append(value.decode("latin1"))
+    if headers.get("x-engraphis-browser-session") != ["1"]:
+        return False
+    if "sec-fetch-site" in headers and headers["sec-fetch-site"] != ["same-origin"]:
+        return False
+    hosts = headers.get("host", [])
+    origins = headers.get("origin", [])
+    if len(hosts) != 1 or len(origins) > 1:
+        return False
+    host = hosts[0]
+    scheme = scope.get("scheme", "")
+    if scheme not in {"http", "https"} or any(
+        char.isspace() or ord(char) < 32 or char in "\\/@?#," for char in host
+    ):
+        return False
+    try:
+        target = urlsplit(scheme + "://" + host)
+        hostname = target.hostname or ""
+        if hostname.lower() != "localhost":
+            address = ipaddress.ip_address(hostname)
+            if not (getattr(address, "ipv4_mapped", None) or address).is_loopback:
+                return False
+        target_port = target.port if target.port is not None else (443 if scheme == "https" else 80)
+        if target_port < 1:
+            return False
+        if not origins:
+            return not require_origin
+        origin = origins[0]
+        if any(char.isspace() or ord(char) < 32 or char == "\\" for char in origin):
+            return False
+        parsed = urlsplit(origin)
+        origin_port = parsed.port if parsed.port is not None else (443 if parsed.scheme == "https" else 80)
+        return bool(
+            parsed.scheme == scheme and parsed.hostname == target.hostname
+            and origin_port == target_port
+            and parsed.username is None and parsed.password is None
+            and not parsed.path and not parsed.query and not parsed.fragment
+        )
+    except ValueError:
+        return False
 
 
 def bearer_token(authorization: Optional[str]) -> str:

@@ -21,6 +21,10 @@ legacy client pins direct tool names, configure `engraphis-mcp-classic` instead.
 Use `ENGRAPHIS_API_TOKEN` only when protecting a local HTTP surface; it is not a Team identity or
 seat credential.
 
+The dashboard on the same computer opens automatically without an account or token entry.
+Its browser session is established locally while remote API clients still supply their bearer
+credential. Pro and Team account connection is a separate, optional hosted-service flow.
+
 ## Local MCP over HTTP
 
 For a local MCP client that requires HTTP rather than stdio, install the same `mcp` extra and run
@@ -40,6 +44,26 @@ authenticated `/mcp` endpoint instead.
 
 Use `engraphis-mcp-http --classic` only for an existing integration that requires the 36 direct
 tool names. New integrations should keep the nine-tool Smart default.
+
+When several desktop apps use the same local installation, they can share that running HTTP
+service instead of loading a separate embedding model per app:
+
+```bash
+engraphis-mcp --connect http://127.0.0.1:8711/mcp
+```
+
+Configure each stdio client with command `engraphis-mcp` and arguments
+`["--connect", "http://127.0.0.1:8711/mcp"]`. Start `engraphis-mcp-http` first and pin its
+`ENGRAPHIS_DB_PATH` to the same database as the dashboard. The bridge accepts numeric loopback
+HTTP URLs only, disables proxies and redirects, and forwards MCP session and protocol headers.
+It requires the shared service to remain running. This avoids desktop initialization timeouts
+and repeated model loads without changing the stored memories or embedding model.
+
+A successful `engraphis_remember` returns a memory ID and resolved workspace/repo. Check
+`prompt_eligible` and `review_state`: `stored: true` alone does not mean externally sourced
+content is approved for prompt recall. Verify storage with `engraphis_get_memory`, and use the
+same workspace/repo or returned `session_id` for subsequent recall. Memory saves require an
+actual Engraphis tool call; connecting an app does not copy its entire chat history.
 
 Engraphis documents and tests generic MCP transports; it does not claim client-specific support
 unless that client has a maintained setup guide and integration test.

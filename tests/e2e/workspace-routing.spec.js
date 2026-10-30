@@ -212,7 +212,7 @@ test('saved routing and a selected-memory move work against the isolated local s
   const repo = 'routing-project-' + suffix;
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
-  await page.goto('/?view=manage#token=engraphis-playwright-local-only');
+  await page.goto('/?view=manage');
   await expect(page.locator('#connection-status')).toContainText('Local engine connected');
   for (const workspace of [from, to]) {
     await page.locator('#create-workspace-toggle').click();
