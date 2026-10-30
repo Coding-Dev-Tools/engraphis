@@ -65,7 +65,7 @@ def _write_settings(settings_path: Path, settings: dict) -> None:
 def _hook_entry() -> dict:
     return {
         "type": "command",
-        "command": f"python \"{HOOK_PATH}\"",
+        "command": f"\"{sys.executable}\" \"{HOOK_PATH}\"",
         "name": HOOK_KEY,
         "timeout": 5,
     }
@@ -78,7 +78,7 @@ def _entry_command() -> str:
 def _file_guard_entry() -> dict:
     return {
         "type": "command",
-        "command": f"python \"{FILE_GUARD_PATH}\"",
+        "command": f"\"{sys.executable}\" \"{FILE_GUARD_PATH}\"",
         "name": FILE_GUARD_KEY,
         "timeout": 5,
     }

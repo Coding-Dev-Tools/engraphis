@@ -71,6 +71,59 @@ def _finite_number(value: float, name: str) -> float:
         raise ValueError(f"{name} must be a finite number")
     return number
 
+
+# A closure is an immutable observation, not a mutable recorded-at scalar. Keep
+# its history bounded across local writes and untrusted sync without truncating it.
+MAX_CLOSURE_OBSERVATIONS = 1024
+
+
+def normalize_closure_observations(
+    value: Any,
+    *,
+    valid_to: Optional[float] = None,
+    valid_to_recorded_at: Optional[float] = None,
+) -> tuple[tuple[float, Optional[float]], ...]:
+    """Validate and canonically union closure observations and a scalar summary.
+
+    A null knowledge timestamp is the legacy always-known assertion. Pairs sort
+    by endpoint, then null knowledge time first, then increasing knowledge time.
+    The bound applies to distinct pairs, including the supplied scalar closure;
+    rejecting an oversized union preserves existing history instead of truncating it.
+    """
+    if value is None:
+        value = ()
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("closure_observations must be a list or tuple of pairs")
+    observations: set[tuple[float, Optional[float]]] = set()
+
+    def observe(endpoint: Any, recorded_at: Any) -> None:
+        endpoint = _finite_timestamp(endpoint, "closure valid_to")
+        if endpoint is None:
+            raise ValueError("closure valid_to must be a finite timestamp")
+        recorded_at = _finite_timestamp(recorded_at, "closure recorded_at")
+        observations.add((endpoint, recorded_at))
+        if len(observations) > MAX_CLOSURE_OBSERVATIONS:
+            raise ValueError(
+                "closure_observations exceeds the maximum of "
+                f"{MAX_CLOSURE_OBSERVATIONS} distinct observations"
+            )
+
+    for item in value:
+        if not isinstance(item, (list, tuple)) or len(item) != 2:
+            raise ValueError("each closure observation must be a pair")
+        observe(item[0], item[1])
+    scalar_endpoint = _finite_timestamp(valid_to, "valid_to")
+    scalar_recorded = _finite_timestamp(valid_to_recorded_at, "valid_to_recorded_at")
+    if scalar_endpoint is not None:
+        observe(scalar_endpoint, scalar_recorded)
+    return tuple(sorted(
+        observations,
+        key=lambda observation: (
+            observation[0], observation[1] is not None,
+            0.0 if observation[1] is None else observation[1],
+        ),
+    ))
+
 _MODIFIED_HLC_RE = re.compile(
     r"^(?P<physical>[0-9A-F]{12}):(?P<logical>[0-9A-F]{8}):"
     r"(?P<node>dev_[0-9A-HJKMNPQRSTVWXYZ]{26})$"
@@ -200,6 +253,8 @@ class MemoryRecord:
     unpinned_at: Optional[float] = None   # system-time when an unpin became effective
     confidence: float = 1.0          # 0..1, extraction/model confidence (scoring multiplier)
     modified_hlc: str = ""            # monotonic version of descriptive/LWW fields
+    # Appended to preserve every established positional constructor argument.
+    closure_observations: tuple[tuple[float, Optional[float]], ...] = ()
 
     def __post_init__(self) -> None:
         for name in (
@@ -216,6 +271,11 @@ class MemoryRecord:
         self.modified_hlc = normalize_modified_hlc(
             self.modified_hlc, allow_empty=True
         )
+        self.closure_observations = normalize_closure_observations(
+            self.closure_observations,
+            valid_to=self.valid_to,
+            valid_to_recorded_at=self.valid_to_recorded_at,
+        )
         try:
             c = float(self.confidence)
         except (TypeError, ValueError, OverflowError):
@@ -223,6 +283,29 @@ class MemoryRecord:
         if not math.isfinite(c):
             c = 1.0
         self.confidence = max(0.0, min(1.0, c))
+
+
+    def effective_valid_to(self, known_at: Optional[float] = None) -> Optional[float]:
+        """Earliest closure known at this system-time anchor, or no known closure.
+
+        ``None`` retains the scalar API's all-known/current interpretation. With
+        an explicit anchor, later-learned corrections cannot alter the endpoint
+        already known at that snapshot. Revalidate mutable dataclass fields so
+        defensive record post-filters and scoring cannot disagree with storage.
+        """
+        known = _finite_timestamp(known_at, "known_at")
+        observations = normalize_closure_observations(
+            self.closure_observations,
+            valid_to=self.valid_to,
+            valid_to_recorded_at=self.valid_to_recorded_at,
+        )
+        return min(
+            (
+                endpoint for endpoint, recorded_at in observations
+                if known is None or recorded_at is None or recorded_at <= known
+            ),
+            default=None,
+        )
 
 
 @dataclass

@@ -48,10 +48,11 @@ A new browser vault requires a nonblank source label; folder selection prefills 
 name. Select the saved source identity when resuming or re-importing that vault.
 
 The trusted dashboard wizard runs behind the existing owner browser-session and
-CSRF confirmation boundary. In token deployments that session is minted from
-`ENGRAPHIS_API_TOKEN`; in zero-token loopback mode the same CSRF confirmation
-applies to the loopback-only runtime, so the wizard works without
-configuration. The CLI importer remains available for scripted flows.
+CSRF confirmation boundary. The session is signed with `ENGRAPHIS_API_TOKEN` when configured,
+or a process-local secret otherwise. The browser on the same computer establishes it
+automatically; users do not enter that token. Legacy zero-token loopback clients retain their
+existing CSRF confirmation, so the wizard works without configuration. The CLI importer
+remains available for scripted flows.
 
 ## What is imported
 

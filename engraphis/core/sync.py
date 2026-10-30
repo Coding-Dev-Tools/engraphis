@@ -18,8 +18,10 @@ therefore a **state-based CRDT** over memory rows, not a bespoke replication log
   rows) — memory identity stays stable, its scope pointers are re-homed locally.
 * **Fields merge by a commutative lattice**, so the merged state is identical
   regardless of which device syncs first, and re-applying a bundle is a no-op:
-    - ``valid_to`` / ``expired_at``: earliest non-null wins (an invalidation on any
-      device invalidates everywhere — never resurrected).
+    - closure observations: bounded set union of world-time/knowledge-time pairs.
+      ``valid_to`` is the earliest currently known closure; historical reads derive
+      the boundary from observations visible at their knowledge anchor.
+      ``expired_at`` uses earliest non-null wins (never resurrected).
     - ``stability`` / ``access_count`` / ``last_access``: ``max`` (reinforcement is
       monotone; the spacing effect only ever grows stability).
     - ``pinned``: a per-field pin lattice — ``pinned_at``/``unpinned_at`` markers
@@ -52,6 +54,7 @@ import json
 import logging
 import math
 import re
+from dataclasses import replace
 from typing import Any, Iterable, Optional
 
 from engraphis.core.graph_layers import merge_graph_layers, normalize_graph_layer
@@ -62,6 +65,7 @@ from engraphis.core.interfaces import (
     SearchFilter,
     SyncTransport,
     embedding_space_fingerprint,
+    normalize_closure_observations,
     normalize_modified_hlc,
     parse_modified_hlc,
     vector_index_requires_sync,
@@ -94,8 +98,8 @@ _VectorIndexAction = tuple[str, str, Any, str]
 
 # ── bundle format ─────────────────────────────────────────────────────────────
 SYNC_FORMAT = "engraphis-sync"
-SYNC_VERSION = 3
-SYNC_ACCEPTED_VERSIONS = frozenset({1, 2, 3})
+SYNC_VERSION = 4
+SYNC_ACCEPTED_VERSIONS = frozenset({1, 2, 3, 4})
 
 # ── tombstone bundle constants ────────────────────────────────────────────────
 MAX_TOMBSTONES = 200_000             # same cap as MAX_MEMORIES (ids only, no content)
@@ -148,6 +152,14 @@ _LOCAL_METADATA_FIELDS = frozenset({
     "sync_ingress",
     "embed_model",
 })
+
+
+def _transport_error_status(exc: Exception) -> dict[str, int]:
+    """Retain bounded HTTP failure metadata without depending on a transport backend."""
+    status = getattr(exc, "status", None)
+    if isinstance(status, int) and not isinstance(status, bool) and 400 <= status <= 599:
+        return {"status": status}
+    return {}
 
 
 class SyncError(Exception):
@@ -243,7 +255,8 @@ def merge_record(local: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
     are taken from ``local`` here and never LWW-merged, so re-homing is never undone.
     """
     winner = local if _version_key(local) >= _version_key(incoming) else incoming
-    valid_to, valid_to_recorded_at = _merge_closure(local, incoming)
+    closure_observations = _merge_closure_observations(local, incoming)
+    valid_to, valid_to_recorded_at = _closure_projection(closure_observations)
     pinned, pinned_at, unpinned_at = _pin_lattice(local, incoming)
     return MemoryRecord(
         id=local.id,
@@ -273,33 +286,53 @@ def merge_record(local: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
         pinned_at=pinned_at,
         unpinned_at=unpinned_at,
         valid_to_recorded_at=valid_to_recorded_at,
+        closure_observations=closure_observations,
     )
 
 
 def _merge_closure(
     local: MemoryRecord, incoming: MemoryRecord,
 ) -> tuple[Optional[float], Optional[float]]:
-    """Join a world-time closure with the system-time at which it was learned.
+    """Project the current boundary from the complete convergent history."""
+    return _closure_projection(_merge_closure_observations(local, incoming))
 
-    The earliest world-time closure wins. Its knowledge timestamp must travel
-    with it; independently learned equal closures use the earliest timestamp.
-    A missing timestamp is legacy v1 state whose closure was always visible, so
-    it remains ``None`` rather than being silently assigned a later time.
-    """
-    if local.valid_to is None:
-        return incoming.valid_to, (
-            incoming.valid_to_recorded_at if incoming.valid_to is not None else None
-        )
-    if incoming.valid_to is None:
-        return local.valid_to, local.valid_to_recorded_at
-    if local.valid_to < incoming.valid_to:
-        return local.valid_to, local.valid_to_recorded_at
-    if incoming.valid_to < local.valid_to:
-        return incoming.valid_to, incoming.valid_to_recorded_at
-    if local.valid_to_recorded_at is None or incoming.valid_to_recorded_at is None:
-        return local.valid_to, None
-    return local.valid_to, min(
-        local.valid_to_recorded_at, incoming.valid_to_recorded_at
+
+def _record_closure_observations(
+    rec: MemoryRecord,
+) -> tuple[tuple[float, Optional[float]], ...]:
+    """Include scalar changes made after construction without losing past observations."""
+    return normalize_closure_observations(
+        rec.closure_observations,
+        valid_to=rec.valid_to,
+        valid_to_recorded_at=rec.valid_to_recorded_at,
+    )
+
+
+def _merge_closure_observations(
+    local: MemoryRecord, incoming: MemoryRecord,
+) -> tuple[tuple[float, Optional[float]], ...]:
+    """Bounded set union; overflow rejects the update instead of truncating history."""
+    return normalize_closure_observations(
+        _record_closure_observations(local) + _record_closure_observations(incoming)
+    )
+
+
+def _closure_projection(
+    observations: tuple[tuple[float, Optional[float]], ...],
+) -> tuple[Optional[float], Optional[float]]:
+    # Canonical ordering places the earliest world closure first, with a legacy
+    # always-known assertion before dated observations of the same endpoint.
+    return observations[0] if observations else (None, None)
+
+
+def _has_valid_closure_interval(rec: MemoryRecord) -> bool:
+    """Check the projected interval after local trust policy and the full join."""
+    endpoint = rec.effective_valid_to()
+    if endpoint is None or rec.valid_from is None or endpoint > rec.valid_from:
+        return True
+    return endpoint == rec.valid_from and (
+        metadata_is_quarantined(rec.metadata)
+        or (rec.provenance or {}).get("quarantined") is True
     )
 
 
@@ -424,6 +457,7 @@ def _signature(rec: MemoryRecord) -> str:
         json.dumps(rec.provenance or {}, sort_keys=True, default=str),
         rec.modified_hlc,
         rec.valid_to, rec.valid_to_recorded_at, rec.expired_at,
+        _record_closure_observations(rec),
         rec.stability, rec.access_count, rec.last_access, bool(rec.pinned),
         rec.pinned_at, rec.unpinned_at,
     ])
@@ -442,6 +476,7 @@ def record_to_dict(rec: MemoryRecord) -> dict:
         "last_access": rec.last_access,
         "valid_from": rec.valid_from, "valid_to": rec.valid_to,
         "valid_to_recorded_at": rec.valid_to_recorded_at,
+        "closure_observations": [list(pair) for pair in _record_closure_observations(rec)],
         "ingested_at": rec.ingested_at, "expired_at": rec.expired_at,
         "modified_hlc": rec.modified_hlc,
         "pinned": bool(rec.pinned), "sensitivity": rec.sensitivity,
@@ -623,7 +658,7 @@ def _snapshot_hash(bundle: dict) -> str:
 
 
 def _validated_snapshot_freshness(bundle: dict) -> Optional[tuple[int, str, str]]:
-    """Validate v3 generation/hash-chain metadata before any destructive apply."""
+    """Validate v3/v4 generation/hash-chain metadata before any destructive apply."""
     version = _as_int(bundle.get("version"), 0)
     if version < 3:
         return None
@@ -729,6 +764,38 @@ def dict_to_record(d: Any) -> Optional[MemoryRecord]:
     ):
         return None
     valid_from = _clamp_world_ts(d.get("valid_from"))
+    valid_to = _clamp_world_ts(d.get("valid_to"))
+    raw_observations = d.get("closure_observations", [])
+    # v1-v3 peers have only the scalar pair. Modern history is an explicit,
+    # bounded set of finite pairs, never a source of authority-bearing coercions.
+    if (not isinstance(raw_observations, list)
+            or isinstance(d.get("valid_to"), bool)
+            or isinstance(d.get("valid_to_recorded_at"), bool)):
+        return None
+    try:
+        observations = normalize_closure_observations(
+            raw_observations,
+            valid_to=valid_to,
+            valid_to_recorded_at=valid_to_recorded_at,
+        )
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if any(
+        not 0.0 <= endpoint <= _WORLD_TS_MAX
+        or (recorded is not None and not 0.0 <= recorded <= now + TS_FUTURE_SKEW)
+        for endpoint, recorded in observations
+    ):
+        return None
+    if valid_from is not None and observations:
+        endpoint = observations[0][0]
+        if endpoint < valid_from:
+            return None
+        if endpoint == valid_from and not assess_untrusted_payload(
+            _clamp_str(content, MAX_CONTENT_CHARS),
+            title=_clamp_str(d.get("title"), MAX_TITLE_CHARS),
+        ).quarantined:
+            # An arbitrary peer quarantine marker cannot authorize an empty interval.
+            return None
     if modified_hlc and (ingested_at is None or valid_from is None):
         # A real descriptive clock identifies a complete modern write. Allowing its
         # descriptive timestamps to be omitted would synthesize receiver-side values
@@ -752,8 +819,9 @@ def dict_to_record(d: Any) -> Optional[MemoryRecord]:
         # World-time validity may be in the future. System timestamps and the HLC
         # above are bounded against peer-controlled future-time authority.
         valid_from=valid_from,
-        valid_to=_clamp_world_ts(d.get("valid_to")),
+        valid_to=valid_to,
         valid_to_recorded_at=valid_to_recorded_at,
+        closure_observations=observations,
         ingested_at=ingested_at,
         expired_at=expired_at,
         modified_hlc=modified_hlc,
@@ -1433,6 +1501,13 @@ class SyncEngine:
                 rec.claim_kind = existing.claim_kind
             if "valid_to_recorded_at" not in d and rec.valid_to == existing.valid_to:
                 rec.valid_to_recorded_at = existing.valid_to_recorded_at
+                if "closure_observations" not in d:
+                    # Legacy omission inherits the already-known scalar clock;
+                    # do not retain the parser's temporary always-known seed.
+                    rec.closure_observations = normalize_closure_observations(
+                        (), valid_to=rec.valid_to,
+                        valid_to_recorded_at=rec.valid_to_recorded_at,
+                    )
         if (existing is not None and only_repo_id is not None
                 and existing.repo_id != only_repo_id):
             # The incoming row's claimed repo cannot re-home an existing memory from
@@ -1447,9 +1522,13 @@ class SyncEngine:
         if existing is not None and provenance_is_approved(existing.provenance):
             content_changed = rec.content != existing.content
             self._rehome_external_record(rec, src_device=src_device)
-            conflict_action = self._preserve_hlc_conflict(
-                existing, rec, report=report, known=known, dry_run=dry_run,
-            )
+            try:
+                conflict_action = self._preserve_hlc_conflict(
+                    existing, rec, report=report, known=known, dry_run=dry_run,
+                )
+            except ValueError:
+                report["rejected"] += 1
+                return
             if conflict_action is not None:
                 pending_index_actions.append(conflict_action)
             if not dry_run and content_changed:
@@ -1512,14 +1591,28 @@ class SyncEngine:
             rec.valid_to = (
                 existing.valid_to if existing.valid_to is not None else now_ts()
             )
-            rec.valid_to_recorded_at = now_ts()
-            rec.embedding = None
-        if existing is not None:
-            conflict_action = self._preserve_hlc_conflict(
-                existing, rec, report=report, known=known, dry_run=dry_run,
+            rec.valid_to_recorded_at = (
+                existing.valid_to_recorded_at
+                if existing.valid_to is not None else now_ts()
             )
-            if conflict_action is not None:
-                pending_index_actions.append(conflict_action)
+            rec.embedding = None
+        try:
+            # Validate the complete join before any conflict row, audit, or index
+            # mutation. A saturated record must keep all existing observations.
+            rec.closure_observations = _record_closure_observations(rec)
+            merged = merge_record(existing, rec) if existing is not None else None
+            if not _has_valid_closure_interval(merged if merged is not None else rec):
+                report["rejected"] += 1
+                return
+            if existing is not None:
+                conflict_action = self._preserve_hlc_conflict(
+                    existing, rec, report=report, known=known, dry_run=dry_run,
+                )
+                if conflict_action is not None:
+                    pending_index_actions.append(conflict_action)
+        except ValueError:
+            report["rejected"] += 1
+            return
         if existing is None:
             if not dry_run:
                 index_action = self._write(rec, commit=False)
@@ -1543,7 +1636,7 @@ class SyncEngine:
             accepted[rec.id] = rec
         else:
             accepted[rec.id] = existing
-            merged = merge_record(existing, rec)
+            assert merged is not None
             if _signature(merged) == _signature(existing):
                 report["unchanged"] += 1
             else:
@@ -1934,6 +2027,7 @@ class SyncEngine:
             unpinned_at=loser.unpinned_at,
             confidence=loser.confidence,
             modified_hlc=loser.modified_hlc,
+            closure_observations=_record_closure_observations(loser),
         )
         if already_preserved is not None:
             marker = (already_preserved.metadata or {}).get("sync_conflict")
@@ -1949,6 +2043,21 @@ class SyncEngine:
                 or not _same_sync_payload(already_preserved, preserved)
             ):
                 raise SyncError("sync conflict identity collision")
+            if (provenance_is_approved(already_preserved.provenance)
+                    or already_preserved.sensitivity == "secret"
+                    or already_preserved.scope == Scope.SESSION):
+                return None
+            observations = _merge_closure_observations(already_preserved, preserved)
+            valid_to, recorded_at = _closure_projection(observations)
+            updated = replace(
+                already_preserved, valid_to=valid_to,
+                valid_to_recorded_at=recorded_at,
+                closure_observations=observations,
+            )
+            if _signature(updated) != _signature(already_preserved):
+                index_action = None if dry_run else self._write(updated, commit=False)
+                known[conflict_id] = updated
+                return index_action
             return None
         index_action = None
         if not dry_run:
@@ -2166,6 +2275,7 @@ class SyncEngine:
                 "bundle": "?",
                 "error": "transport failure",
                 "error_type": type(exc).__name__,
+                **_transport_error_status(exc),
             })
             bundles = iter(())
 
@@ -2180,6 +2290,7 @@ class SyncEngine:
                     "bundle": "?",
                     "error": "transport failure",
                     "error_type": type(exc).__name__,
+                    **_transport_error_status(exc),
                 })
                 break
             try:

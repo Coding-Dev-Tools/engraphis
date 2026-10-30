@@ -64,10 +64,15 @@ def test_reopen_does_not_repeat_completed_graph_transforms(tmp_path, monkeypatch
     assert not list(tmp_path.glob("*.bak"))
 
 
-@pytest.mark.parametrize("previous_version", [17, SCHEMA_VERSION])
+# Backup names identify the first pending schema transition. A skipped-version
+# upgrade must retain its v18 name even when the final schema target is v19.
+@pytest.mark.parametrize(("previous_version", "backup_version"), [
+    (17, 18), (SCHEMA_VERSION - 1, SCHEMA_VERSION),
+    (SCHEMA_VERSION, SCHEMA_VERSION),
+])
 @pytest.mark.parametrize("failure_type", [RuntimeError, KeyboardInterrupt])
 def test_interrupted_transform_restores_state_and_retries_once(
-        tmp_path, monkeypatch, previous_version, failure_type):
+        tmp_path, monkeypatch, previous_version, backup_version, failure_type):
     path = tmp_path / "restart.db"
     _prepare_upgrade(path, previous_version=previous_version)
     original = Store._deduplicate_live_edges
@@ -85,7 +90,7 @@ def test_interrupted_transform_restores_state_and_retries_once(
         assert not _executions(raw)
         assert raw.execute("SELECT COUNT(*) FROM edge_supports").fetchone()[0] == 0
         assert raw.execute("SELECT COUNT(*) FROM edges WHERE valid_to IS NULL").fetchone()[0] == 2
-    backup = Path(f"{path}.pre-migration-v{SCHEMA_VERSION}.bak")
+    backup = Path(f"{path}.pre-migration-v{backup_version}.bak")
     assert backup.is_file()
     with sqlite3.connect(backup) as raw:
         assert raw.execute("PRAGMA quick_check").fetchone()[0] == "ok"

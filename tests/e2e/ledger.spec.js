@@ -1189,7 +1189,93 @@ test('Ledger deadline includes stalled graph assets and Reload data starts a fre
   releaseStalledAsset();
 });
 
-test('Ledger requests a remote token in a masked retryable dialog', async ({ page }) => {
+
+test('Ledger opens locally without entering or exposing an access token', async ({ page }) => {
+  let opened = false;
+  let sessions = 0;
+  await mockApi(page);
+  await page.route('**/api/bootstrap*', route => opened ? route.fallback() : route.fulfill({
+    status: 401, contentType: 'application/json',
+    body: JSON.stringify({ error: 'unauthorized', code: 'local_browser_session_required', local_browser: true }),
+  }));
+  await page.route('**/api/auth/local-session', route => {
+    sessions += 1;
+    opened = true;
+    expect(route.request().postData()).toBeNull();
+    return route.fulfill({ contentType: 'application/json',
+      body: JSON.stringify({ authenticated: true, review_csrf_token: 'local-test-confirmation' }) });
+  });
+  await page.goto('/');
+  await expect(page.locator('#connection-status')).toContainText('Local engine connected');
+  await expect(page.locator('#browser-auth-dialog')).not.toBeVisible();
+  expect(sessions).toBe(1);
+  expect(page.url()).not.toContain('token');
+});
+
+test('Ledger coalesces concurrent local renewals and retries each rejected request once', async ({ page }) => {
+  let renewed = false;
+  let sessions = 0;
+  await mockApi(page);
+  await page.route('**/api/**', route => {
+    const path = new URL(route.request().url()).pathname;
+    if (renewed || path === '/api/bootstrap' || path.startsWith('/api/auth/')) return route.fallback();
+    return route.fulfill({ status: 401, contentType: 'application/json',
+      body: JSON.stringify({ error: 'unauthorized', code: 'local_browser_session_required', local_browser: true }) });
+  });
+  await page.route('**/api/auth/local-session', async route => {
+    sessions += 1;
+    await new Promise(resolve => setTimeout(resolve, 100));
+    renewed = true;
+    return route.fulfill({ contentType: 'application/json',
+      body: JSON.stringify({ authenticated: true, review_csrf_token: 'renewed-confirmation' }) });
+  });
+  await page.goto('/');
+  await expect(page.locator('#connection-status')).toContainText('Local engine connected');
+  await expect(page.locator('#browser-auth-dialog')).not.toBeVisible();
+  expect(sessions).toBe(1);
+});
+
+test('Ledger local renewal failure gives recovery guidance without requesting a token', async ({ page }) => {
+  let sessions = 0;
+  await mockApi(page);
+  await page.route('**/api/bootstrap*', route => route.fulfill({
+    status: 401, contentType: 'application/json',
+    body: JSON.stringify({ error: 'unauthorized', code: 'local_browser_session_required', local_browser: true }),
+  }));
+  await page.route('**/api/auth/local-session', route => {
+    sessions += 1;
+    return route.fulfill({ status: 503, contentType: 'application/json',
+      body: JSON.stringify({ error: 'temporarily unavailable' }) });
+  });
+  await page.goto('/');
+  await expect(page.locator('#connection-status')).toContainText('Local engine unavailable');
+  await expect(page.locator('#notice-text')).toContainText('Reload this page to retry');
+  await expect(page.locator('#browser-auth-dialog')).not.toBeVisible();
+  expect(sessions).toBe(1);
+});
+
+test('Ledger preserves paid cloud authentication errors without retrying or asking for a local token', async ({ page }) => {
+  let bootstraps = 0;
+  let sessions = 0;
+  await mockApi(page);
+  await page.route('**/api/bootstrap*', route => {
+    bootstraps += 1;
+    return route.fulfill({ status: 401, contentType: 'application/json',
+      body: JSON.stringify({ error: 'Reconnect your Engraphis Cloud account.', code: 'cloud_session_expired' }) });
+  });
+  await page.route('**/api/auth/local-session', route => {
+    sessions += 1;
+    return route.abort();
+  });
+  await page.goto('/');
+  await expect(page.locator('#notice-text')).toContainText('Reconnect your Engraphis Cloud account.');
+  await expect(page.locator('#browser-auth-dialog')).not.toBeVisible();
+  expect(bootstraps).toBe(1);
+  expect(sessions).toBe(0);
+});
+
+
+test('Ledger requests a remote administrator token in a masked retryable sign-in dialog', async ({ page }) => {
   let authenticated = false;
   await mockApi(page);
   await page.route('**/api/bootstrap*', async route => {
@@ -1197,7 +1283,7 @@ test('Ledger requests a remote token in a masked retryable dialog', async ({ pag
     return route.fulfill({
       status: 401,
       contentType: 'application/json',
-      body: JSON.stringify({ detail: 'Authentication required' }),
+      body: JSON.stringify({ error: 'unauthorized', code: 'local_browser_session_required', local_browser: false }),
     });
   });
   await page.route('**/auth/session', async route => {
@@ -1206,7 +1292,7 @@ test('Ledger requests a remote token in a masked retryable dialog', async ({ pag
       return route.fulfill({
         status: 401,
         contentType: 'application/json',
-        body: JSON.stringify({ detail: 'Invalid deployment token' }),
+        body: JSON.stringify({ error: 'unauthorized' }),
       });
     }
     authenticated = true;
@@ -1225,14 +1311,14 @@ test('Ledger requests a remote token in a masked retryable dialog', async ({ pag
   await expect(token).toHaveAttribute('autocomplete', 'off');
 
   await token.fill('wrong-token');
-  await dialog.getByRole('button', { name: 'Connect', exact: true }).click();
-  await expect(page.locator('#browser-auth-error')).toContainText('Invalid deployment token');
+  await dialog.getByRole('button', { name: 'Sign in', exact: true }).click();
+  await expect(page.locator('#browser-auth-error')).toContainText('That access token was not accepted.');
   await expect(token).toHaveValue('');
 
   await token.fill('correct-token');
   await Promise.all([
     page.waitForNavigation(),
-    dialog.getByRole('button', { name: 'Connect', exact: true }).click(),
+    dialog.getByRole('button', { name: 'Sign in', exact: true }).click(),
   ]);
   await expect(page.getByRole('heading', { name: `Home for ${workspace}` })).toBeVisible();
   expect(page.url()).not.toContain('token');

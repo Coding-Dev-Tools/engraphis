@@ -584,7 +584,7 @@ def test_shared_database_device_identity_is_atomic_and_durable(tmp_path):
         reopened.close()
 
 
-def test_sync_exports_v3_freshness_and_accepts_legacy_v1_without_silent_downgrade():
+def test_sync_exports_v4_freshness_and_accepts_legacy_v1_without_silent_downgrade():
     engine = MemoryEngine.create(":memory:")
     wid = engine.store.get_or_create_workspace("w")
     engine.remember(
@@ -596,7 +596,7 @@ def test_sync_exports_v3_freshness_and_accepts_legacy_v1_without_silent_downgrad
     )
     syncer = SyncEngine(engine.store)
     exported = syncer.export_bundle(wid)
-    assert exported["version"] == 3
+    assert exported["version"] == 4
     assert exported["generation"] == 1
     assert exported["previous_hash"] == ""
     assert len(exported["state_hash"]) == 64
@@ -609,6 +609,7 @@ def test_sync_exports_v3_freshness_and_accepts_legacy_v1_without_silent_downgrad
         for key, value in exported["memories"][0].items()
         if key not in {
             "subject_key", "claim_kind", "valid_to_recorded_at", "modified_hlc",
+            "closure_observations",
         }
     }]
     target = Store(":memory:")

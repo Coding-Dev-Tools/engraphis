@@ -298,7 +298,7 @@ test('Ask controls and Home remain accessible at a narrow width', async ({ page 
 
 test('a real pending source leaves the Home review inbox after governed approval', async ({ page }) => {
   page.on('dialog', dialog => dialog.accept(dialog.type() === 'prompt' ? 'Reviewed this local browser fixture.' : undefined));
-  await page.goto('/?view=manage#token=engraphis-playwright-local-only');
+  await page.goto('/?view=manage');
   await expect(page.locator('#connection-status')).toContainText('Local engine connected');
   await page.locator('#create-workspace-toggle').click();
   await page.locator('#new-workspace-name').fill('home-review-' + Date.now());

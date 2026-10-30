@@ -537,7 +537,7 @@ def test_primary_github_release_targets_repository_without_checkout():
 
 def test_public_capability_and_support_docs_match_the_shipped_tree():
     server = _text("engraphis/mcp_server.py")
-    tools = re.findall(r'@mcp\.tool\(\s*name="(engraphis_[^"]+)"', server)
+    tools = re.findall(r'@(?:_threaded_tool\(\s*mcp,\s*|\s*mcp\.tool\(\s*)name="(engraphis_[^"]+)"', server)
     assert len(tools) == len(set(tools)) == 39
 
     readme = _text("README.md")
@@ -630,7 +630,7 @@ def test_public_capability_and_support_docs_match_the_shipped_tree():
         'docs/images/knowledge-graph.png"' in readme
     )
     assert re.search(
-        r'src="https://raw\.githubusercontent\.com/Coding-Dev-Tools/engraphis/[0-9a-f]{40}/'
+        r'src="https://raw\.githubusercontent\.com/Coding-Dev-Tools/engraphis/(?:[0-9a-f]{40}|v1\.7\.10)/'
         r'docs/images/context-efficiency\.svg"',
         readme,
     )

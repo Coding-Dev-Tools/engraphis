@@ -79,6 +79,7 @@
   const number = value => Number.isFinite(Number(value)) ? Number(value) : 0;
   const NOTICE_DURATION_MS = 3000;
   let noticeTimer = null;
+  let localSessionPromise = null;
   let graphRepoLoadTimer = null;
   let librarySearchTimer = null;
   const CLOUD_SYNC_PRIVACY_NOTICE = 'Cloud Sync encrypts eligible shared-workspace changes end-to-end before they leave this device. Engraphis Cloud cannot read their contents; secret and session-scoped memories stay local.';
@@ -252,6 +253,36 @@
     return `Request failed (${status})`;
   };
 
+  function localDashboardUrl() {
+    return /^(localhost|127(?:\.\d{1,3}){3}|\[::1\])$/i.test(location.hostname);
+  }
+
+  async function ensureLocalBrowserSession() {
+    if (!localSessionPromise) {
+      localSessionPromise = (async () => {
+        const controller = new AbortController();
+        const timer = window.setTimeout(() => controller.abort(), 8000);
+        try {
+          const response = await fetch(`${apiRoot}/auth/local-session`, {
+            method: 'POST', cache: 'no-store', signal: controller.signal,
+            headers: { 'X-Engraphis-Browser-Session': '1' },
+          });
+          const session = await response.json();
+          if (!response.ok || !session.authenticated) throw new Error('Local session unavailable');
+          state.reviewCsrf = text(session.review_csrf_token);
+          return true;
+        } catch (_) {
+          const error = new Error('Local Engraphis could not connect. Reload this page to retry.');
+          error.localBrowser = true;
+          throw error;
+        } finally {
+          window.clearTimeout(timer);
+        }
+      })().finally(() => { localSessionPromise = null; });
+    }
+    return localSessionPromise;
+  }
+
   async function api(path, options = {}) {
     const { timeoutMs = 30_000, signal, ...requestOptions } = options;
     const controller = new AbortController();
@@ -269,15 +300,30 @@
       init.body = JSON.stringify(init.body);
     }
     try {
-      const response = await fetch(`${apiRoot}${path}`, init);
-      const payload = await response.json().catch(error => {
-        if (controller.signal.aborted) throw error;
-        return null;
-      });
+      const request = async () => {
+        const response = await fetch(`${apiRoot}${path}`, init);
+        const payload = await response.json().catch(error => {
+          if (controller.signal.aborted) throw error;
+          return null;
+        });
+        return { response, payload };
+      };
+      let { response, payload } = await request();
+      // Only this middleware code guarantees the rejected request never ran.
+      // A hosted account's 401 must never trigger a local retry or hide its error.
+      if (response.status === 401 && payload?.code === 'local_browser_session_required'
+          && payload.local_browser === true) {
+        await ensureLocalBrowserSession();
+        if (init.headers['X-Engraphis-Review-CSRF']) {
+          init.headers['X-Engraphis-Review-CSRF'] = state.reviewCsrf;
+        }
+        ({ response, payload } = await request());
+      }
       if (!response.ok) {
         const error = new Error(errorMessage(payload, response.status));
         error.status = response.status;
         error.code = payload && ((payload.detail && payload.detail.code) || payload.code);
+        error.localBrowser = payload && payload.local_browser;
         throw error;
       }
       return payload;
@@ -324,7 +370,7 @@
         event.preventDefault();
         const value = input.value.trim();
         if (!value) {
-          error.textContent = 'Enter the deployment token.';
+          error.textContent = 'Enter your access token.';
           error.hidden = false;
           input.focus();
           return;
@@ -346,7 +392,11 @@
     });
   }
 
-  async function authenticateBrowser() {
+  async function authenticateBrowser(error = null) {
+    if (error?.localBrowser === true || (error?.localBrowser !== false && localDashboardUrl())) {
+      showNotice('Local Engraphis could not connect. Reload this page to retry.');
+      return false;
+    }
     let token = '';
     let failure = '';
     try {
@@ -369,13 +419,16 @@
         return true;
       } catch (error) {
         submitted = '';
-        failure = error.message;
-        showNotice(`Authentication failed: ${failure}`);
+        failure = error.status === 401
+          ? 'That access token was not accepted. Check it with the person who set up Engraphis and try again.'
+          : error.message;
+        showNotice(`Sign-in failed: ${failure}`);
       }
     }
   }
 
   async function reviewCsrfToken() {
+    if (localDashboardUrl()) await ensureLocalBrowserSession();
     if (state.reviewCsrf) return state.reviewCsrf;
     const response = await fetch(`${location.origin}/dashboard/review/csrf`, {
       headers: { 'X-Engraphis-Browser-Session': '1' },
@@ -5569,6 +5622,14 @@
   }
 
   async function boot() {
+    if (localDashboardUrl()) {
+      const fragment = new URLSearchParams(location.hash.slice(1));
+      if (fragment.has('token')) {
+        fragment.delete('token');
+        history.replaceState(null, '', location.pathname + location.search
+          + (fragment.size ? '#' + fragment.toString() : ''));
+      }
+    }
     byId('today-date').textContent = new Intl.DateTimeFormat(undefined, { dateStyle: 'long' }).format(new Date());
     let theme = 'slate';
     try {
@@ -5592,7 +5653,8 @@
         switchManageTab(requestedManageTab);
       }
     } catch (error) {
-      if (error.status === 401 && await authenticateBrowser()) {
+      if (error.status === 401 && error.code === 'local_browser_session_required'
+          && await authenticateBrowser(error)) {
         location.reload();
         return;
       }

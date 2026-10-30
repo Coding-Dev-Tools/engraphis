@@ -23,7 +23,7 @@ import weakref
 from dataclasses import replace
 from pathlib import Path
 from typing import Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field, StrictBool, StrictInt
@@ -2395,16 +2395,14 @@ def export(workspace: Optional[str] = None, signed: bool = False,
 
 # ── automated maintenance (Pro) ───────────────────────────────────────────────
 class _AutomationReq(BaseModel):
+    model_config = {"extra": "forbid"}
     enabled: Optional[bool] = None
-    cadence_hours: Optional[int] = None
-    consolidate: Optional[bool] = None
-    min_cluster: Optional[int] = None
-    archive_below: Optional[float] = None
+    cadence_hours: Optional[int] = Field(None, ge=1, le=720)
     workspaces: Optional[list] = None
     dream: Optional[bool] = None
     dream_enabled: Optional[bool] = None
-    dream_min_new: Optional[int] = None
-    dream_idle_minutes: Optional[int] = None
+    dream_min_new: Optional[int] = Field(None, ge=2, le=10000)
+    dream_idle_minutes: Optional[int] = Field(None, ge=0, le=10080)
     infer: Optional[bool] = None
 
 
@@ -2434,9 +2432,6 @@ def automation_get(workspace: Optional[str] = None):
     return {
         "enabled": bool(policy.get("enabled")),
         "cadence_hours": max(1, int(policy.get("cadence_minutes") or 1440) // 60),
-        "consolidate": True,
-        "min_cluster": 3,
-        "archive_below": 0.05,
         "workspaces": [ws],
         "dream": bool(policy.get("dream_enabled", True)),
         "dream_min_new": int(policy.get("dream_min_new") or 25),
@@ -2560,7 +2555,6 @@ def automation_set(req: _AutomationReq, workspace: Optional[str] = None):
         **saved,
         "cadence_hours": policy["cadence_minutes"] // 60,
         "dream": policy["dream_enabled"],
-        "consolidate": True,
     }
 
 
@@ -4289,11 +4283,27 @@ def _sync_all(svc) -> dict:
         attempted += 1
         try:
             cloud_access = None
+            relay_url = _relay_url()
             if not legacy_token_configured:
+                target = urlsplit(relay_url)
+                canonical = urlsplit(DEFAULT_RELAY_URL)
+                if (
+                    target.scheme != canonical.scheme
+                    or target.hostname != canonical.hostname
+                    or (443 if target.port is None else target.port)
+                    != (443 if canonical.port is None else canonical.port)
+                    or target.username is not None or target.password is not None
+                ):
+                    errors.append({
+                        "workspace": name,
+                        "error": "custom relay requires an explicitly origin-bound sync token",
+                        "status": 409,
+                    })
+                    continue
                 cloud_access, _, _ = access_for_workspace(name, require_compute=False)
             transport = get_transport(
                 "relay",
-                base_url=_relay_url(),
+                base_url=relay_url,
                 workspace_id=name,
                 access_token=cloud_access,
             )
@@ -4340,11 +4350,18 @@ def _sync_all(svc) -> dict:
         else:
             round_errors = rep.get("errors")
             failed_items = len(round_errors) if isinstance(round_errors, list) else 1
-            errors.append({
+            failure = {
                 "workspace": name,
                 "error": "sync round incomplete",
                 "failed_items": max(1, min(failed_items, 10_000)),
-            })
+            }
+            if isinstance(round_errors, list) and round_errors and all(
+                isinstance(item, dict) and item.get("status") in {401, 402, 403}
+                for item in round_errors
+            ):
+                failure["error"] = "cloud relay synchronization failed"
+                failure["status"] = round_errors[0]["status"]
+            errors.append(failure)
         for k in totals:
             totals[k] += int((rep.get("totals") or {}).get(k, 0) or 0)
 

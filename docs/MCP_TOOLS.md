@@ -25,6 +25,12 @@ class, and execution revalidates availability, scope, authorization, and argumen
 The Smart gateway exposes these nine tools directly; advanced capabilities remain available through
 discovery and the validated executors.
 
+Remember responses include `stored`, the resolved workspace/repo, `review_state`, and
+`prompt_eligible`. A stored external or quarantined memory can still be excluded from prompt
+recall. These fields describe the persisted record, including when deduplication returns an
+existing ID. Keep the returned `session_id` from session start on later remember and recall
+calls so that every desktop client uses the intended workspace and repository.
+
 For a deliberate cross-agent handoff, pass the source ID as `session_id` when starting
 `engraphis_session`, or as `resume_from_session_id` to `engraphis_start_session`. The source must
 be an ended session owned by the same authenticated user in the exact resolved workspace and

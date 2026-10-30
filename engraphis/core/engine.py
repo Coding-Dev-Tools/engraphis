@@ -21,7 +21,7 @@ import threading
 import time
 from collections import defaultdict, deque
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterator, Optional
 
 import numpy as np
 
@@ -878,6 +878,7 @@ class MemoryEngine:
                  _trusted_graph_keys: Optional[frozenset] = None,
                  _transactional_finalizer: Optional[Callable[[str], None]] = None,
                  _transactional_validator: Optional[Callable[[], Optional[dict]]] = None,
+                 _session_lineage_source_id: Optional[str] = None,
                  redact_secrets: bool = False) -> str:
         """Store one memory. Returns the resulting record id: a new id for ADD/
         INVALIDATE/quarantine, or the existing memory's id if this was resolved as a
@@ -892,6 +893,7 @@ class MemoryEngine:
             _trusted_graph_keys=_trusted_graph_keys,
             _transactional_finalizer=_transactional_finalizer,
             _transactional_validator=_transactional_validator,
+            _session_lineage_source_id=_session_lineage_source_id,
             redact_secrets=redact_secrets,
         )["id"]
 
@@ -907,6 +909,7 @@ class MemoryEngine:
                  _approval_override: bool = False,
                  _transactional_finalizer: Optional[Callable[[str], None]] = None,
                  _transactional_validator: Optional[Callable[[], Optional[dict]]] = None,
+                 _session_lineage_source_id: Optional[str] = None,
                  extra_neighbors: Optional[list] = None,
                  redact_secrets: bool = False) -> dict:
         """Store one memory with deterministic conflict resolution.
@@ -1040,7 +1043,30 @@ class MemoryEngine:
                 target = index_repair_identity(self.index, self.store)
                 if target is not None:
                     self.store.register_vector_index(target)
-                if session_id:
+                if _session_lineage_source_id is not None:
+                    # Governed same-scope derivations retain a durable memory's
+                    # original session as provenance. This is not a new write into
+                    # that session: its active lifetime may already have ended.
+                    # Re-read both owners under the writer, after command validation;
+                    # ordinary ingress and all session-scoped writes stay fenced.
+                    source = self.store.get_memory(_session_lineage_source_id)
+                    lineage = self.store.get_session(session_id) if session_id else None
+                    if (
+                        _transactional_validator is None
+                        or _transactional_finalizer is None
+                        or scope not in (Scope.REPO, Scope.WORKSPACE)
+                        or source is None
+                        or source.scope != scope
+                        or source.workspace_id != workspace_id
+                        or source.repo_id != repo_id
+                        or source.session_id != session_id
+                        or lineage is None
+                        or lineage.get("workspace_id") != workspace_id
+                        or (repo_id is not None and lineage.get("repo_id") != repo_id)
+                        or not _governable_source(source, at=now_ts())
+                    ):
+                        raise ValueError("session lineage requires a matching governed source")
+                elif session_id:
                     self.store.begin_session_write(
                         session_id, workspace_id=workspace_id, repo_id=repo_id,
                     )
@@ -2872,20 +2898,29 @@ class MemoryEngine:
                 sem[mid] = float(np.dot(qn, vec))
         q_tokens = tokenize(query)
         out: list[tuple[float, MemoryRecord]] = []
-        records = self.store.list_memories(
-            flt, include_invalid=include_invalid, limit=500, prompt_only=prompt_only,
-        )
+        def matching_records() -> Iterator[MemoryRecord]:
+            after_id = ""
+            while True:
+                page = self.store.list_memories_page(
+                    flt, after_id=after_id, limit=500, include_invalid=include_invalid,
+                )
+                if not page:
+                    return
+                yield from page
+                after_id = page[-1].id
+
+        records = matching_records()
         if include_invalid:
             # History must retain closed valid-time intervals, but cannot expose a
             # record that was not known at the requested system-time snapshot.
             # Default to the current snapshot when the caller omitted known_at —
             # same normalization RecallEngine.recall applies (core/recall.py).
             system_time = flt.known_at if flt.known_at is not None else now_ts()
-            records = [
+            records = (
                 rec for rec in records
                 if (rec.ingested_at is None or rec.ingested_at <= system_time)
                 and (rec.expired_at is None or system_time < rec.expired_at)
-            ]
+            )
         for rec in records:
             # Public history is model-adjacent just like ordinary recall: tool output
             # can be inserted into an agent transcript. Pending records therefore stay
@@ -3283,6 +3318,10 @@ class MemoryEngine:
             claim_kind=old.claim_kind,
             _transactional_finalizer=finalize_correction,
             _transactional_validator=validate_correction,
+            _session_lineage_source_id=(
+                old.id if old.session_id and old.scope in (Scope.REPO, Scope.WORKSPACE)
+                else None
+            ),
         )
         # The old vector is historical evidence; temporal filtering hides it from
         # current recall while keeping semantic time travel complete.
@@ -3454,6 +3493,10 @@ class MemoryEngine:
                 _approval_override=True,
                 _transactional_finalizer=finalize_approval,
                 _transactional_validator=validate_approval,
+                _session_lineage_source_id=(
+                    old.id if old.session_id and old.scope in (Scope.REPO, Scope.WORKSPACE)
+                    else None
+                ),
             )
             return approval_result(result)
 

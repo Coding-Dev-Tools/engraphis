@@ -58,6 +58,15 @@ DOMPurify at all render sites. Verified against payloads with `onerror` handlers
 - **Loopback by default** (`ENGRAPHIS_HOST=127.0.0.1`)
 - **Optional bearer token** (`ENGRAPHIS_API_TOKEN`): constant-time comparison (single
   shared implementation in the local customer runtime)
+- **Automatic local dashboard access:** the browser on this computer obtains its
+  HttpOnly, SameSite session without entering an API token. Session issuance requires
+  a literal loopback peer, a loopback/localhost Host, an exact same-origin POST, and
+  the dashboard's custom browser header. Forwarding headers, nonlocal peers, DNS
+  hostnames, cross-site requests, and configured LAN-trust exceptions cannot mint it.
+  Existing browser confirmations and CSRF checks still govern reviewed writes.
+  Local programs already able to act as this user remain inside the local trust boundary.
+- Pro and Team account sign-in belongs to optional hosted services; it does not gate
+  opening the local dashboard. Remote API and operator access still require credentials.
 - **No local Team identity service:** the public dashboard is single-user. Team logins,
   invitations, roles, named seats, token rotation, and organization audit are hosted and are
   not mounted by this package.
