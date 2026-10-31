@@ -69,6 +69,20 @@ without `ENGRAPHIS_API_TOKEN`; it replaces the loopback port mapping with an all
 After this opt-in, other machines on the LAN can use
 `http://<host-LAN-IP>:8700`.
 
+Any browser that can reach the dashboard opens it: no token, no link. The port's network
+reachability is the dashboard's boundary, while API and MCP clients still present
+`Authorization: Bearer <ENGRAPHIS_API_TOKEN>`. If the LAN itself is not trusted, set
+`ENGRAPHIS_BROWSER_AUTO_SESSION=0` and hand out one-time links instead:
+
+```bash
+docker compose exec engraphis engraphis-dashboard --link
+```
+
+Open the printed link in the browser (it is single use and expires in 15 minutes; the resulting
+browser session lasts 12 hours). The link is built from `ENGRAPHIS_DASHBOARD_URL` when set, so
+configure that to the address clients actually use. Links are bound to the running process:
+restarting the container invalidates any link that has not been used yet.
+
 The Docker image includes the streamable HTTP MCP endpoint at `/mcp/` (the `/mcp` path redirects
 there). Configure `ENGRAPHIS_DASHBOARD_URL` to the exact LAN IP or hostname clients use so MCP's
 DNS-rebinding protection accepts the request. For example, use

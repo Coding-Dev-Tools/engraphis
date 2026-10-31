@@ -5,6 +5,15 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+- Browsers no longer enter a token. The dashboard opens automatically for any browser that
+  can reach it; the deployment's network reachability is the dashboard boundary. Session
+  issuance still requires the same-origin custom header and a published Host, and only an
+  operator-declared forwarding proxy may supply proxy headers. Machine clients and `/mcp`
+  continue to require `Authorization: Bearer ENGRAPHIS_API_TOKEN`. Set
+  `ENGRAPHIS_BROWSER_AUTO_SESSION=0` for a hardened deployment, where
+  `engraphis-dashboard --link` (or `POST /api/auth/link`) issues a single-use, 15-minute
+  sign-in link that opens a 12-hour browser session.
+
 ## [1.7.11] - 2026-10-26
 
 Candidate package version: **1.7.11**. Publication and hosted-service qualification remain separate.

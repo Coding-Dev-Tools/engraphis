@@ -1512,52 +1512,38 @@ test('Ledger preserves paid cloud authentication errors without retrying or aski
 });
 
 
-test('Ledger requests a remote administrator token in a masked retryable sign-in dialog', async ({ page }) => {
-  let authenticated = false;
+test('Ledger remote entry uses a one-time link and never asks for a token', async ({ page }) => {
+  let linked = false;
+  let redeemed = 0;
   await mockApi(page);
-  await page.route('**/api/bootstrap*', async route => {
-    if (authenticated) return route.fallback();
-    return route.fulfill({
-      status: 401,
-      contentType: 'application/json',
-      body: JSON.stringify({ error: 'unauthorized', code: 'local_browser_session_required', local_browser: false }),
-    });
-  });
-  await page.route('**/auth/session', async route => {
-    const token = JSON.parse(route.request().postData() || '{}').token;
-    if (token !== 'correct-token') {
-      return route.fulfill({
-        status: 401,
-        contentType: 'application/json',
-        body: JSON.stringify({ error: 'unauthorized' }),
-      });
+  await page.route('**/api/bootstrap*', route => linked ? route.fallback() : route.fulfill({
+    status: 401,
+    contentType: 'application/json',
+    body: JSON.stringify({ error: 'unauthorized', code: 'local_browser_session_required', local_browser: false }),
+  }));
+  await page.route('**/api/auth/handoff', async route => {
+    redeemed += 1;
+    const code = JSON.parse(route.request().postData() || '{}').code;
+    if (code !== 'one-time-code') {
+      return route.fulfill({ status: 401, contentType: 'application/json',
+        body: JSON.stringify({ error: 'unauthorized' }) });
     }
-    authenticated = true;
-    return route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify({ authenticated: true }),
-    });
+    linked = true;
+    return route.fulfill({ status: 200, contentType: 'application/json',
+      body: JSON.stringify({ authenticated: true, review_csrf_token: 'link-confirmation' }) });
   });
+
   await page.goto('/');
+  await expect(page.locator('#browser-auth-dialog')).toHaveCount(0);
+  await expect(page.locator('#browser-auth-token')).toHaveCount(0);
+  await expect(page.locator('#connection-banner-detail')).toContainText('one-time sign-in link');
+  expect(redeemed).toBe(0);
 
-  const dialog = page.locator('#browser-auth-dialog');
-  const token = page.locator('#browser-auth-token');
-  await expect(dialog).toBeVisible();
-  await expect(token).toHaveAttribute('type', 'password');
-  await expect(token).toHaveAttribute('autocomplete', 'off');
-
-  await token.fill('wrong-token');
-  await dialog.getByRole('button', { name: 'Sign in', exact: true }).click();
-  await expect(page.locator('#browser-auth-error')).toContainText('That access token was not accepted.');
-  await expect(token).toHaveValue('');
-
-  await token.fill('correct-token');
-  await Promise.all([
-    page.waitForNavigation(),
-    dialog.getByRole('button', { name: 'Sign in', exact: true }).click(),
-  ]);
+  // A click on the link is a fresh top-level navigation, not an in-page hash change.
+  await page.goto('about:blank');
+  await page.goto('/#token=one-time-code');
   await expect(page.getByRole('heading', { name: `Home for ${workspace}` })).toBeVisible();
+  expect(redeemed).toBe(1);
   expect(page.url()).not.toContain('token');
 });
 

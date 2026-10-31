@@ -37,6 +37,22 @@ loosening its host/origin allow-list. If you attach a custom domain, override it
 canonical HTTPS URL after Railway has activated the domain; do not use an internal Railway domain
 or a URL containing credentials.
 
+A browser opens the dashboard automatically once it can reach the public URL. The URL's
+reachability is therefore the dashboard boundary; API and MCP clients still use
+`Authorization: Bearer <ENGRAPHIS_API_TOKEN>`.
+
+> **Public exposure:** a Railway service on a public domain is reachable by anyone who learns
+> the URL, and by default that browser opens the dashboard with full access to this node's
+> memories. For a public deployment, set `ENGRAPHIS_BROWSER_AUTO_SESSION=0` and use one-time
+> links:
+
+```bash
+railway run engraphis-dashboard --link
+```
+
+> The printed link is single use and expires in 15 minutes; it is built from
+> `ENGRAPHIS_DASHBOARD_URL` and opens a 12-hour browser session.
+
 Do not add Resend (or any other email-provider) credentials to this customer node. The public
 runtime has no transactional-email sender, verification, invitation, or billing-email service;
 those systems remain in the official hosted control plane.

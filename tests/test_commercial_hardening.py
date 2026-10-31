@@ -379,7 +379,10 @@ def test_dashboard_bundles_use_the_httponly_browser_session_exchange() -> None:
 
     for path in (ROOT / "engraphis" / "dashboard_assets" / "ledger.js",):
         script = path.read_text(encoding="utf-8")
-        assert "/auth/session" in script
+        # Browsers redeem a one-time link; the deployment token stays machine-only.
+        assert "/auth/handoff" in script
+        assert "/auth/session" not in script
+        assert "Enter the access token" not in script
         assert "X-Engraphis-Browser-Session" in script
         assert "localstorage.setitem('engraphis-api-token" not in script.lower()
         assert "sessionStorage" not in script
