@@ -819,8 +819,10 @@ def create_app() -> FastAPI:
                 {"error": "local API authentication is not configured"}, status_code=409)
         try:
             base = _dashboard_public_url(request)
-        except ValueError as exc:
-            return JSONResponse({"error": str(exc)}, status_code=500)
+        except ValueError:
+            return JSONResponse(
+                {"error": "ENGRAPHIS_DASHBOARD_URL must be an http(s) URL without userinfo"},
+                status_code=500)
         code, expires_at = browser_handoff(
             settings.api_token, app.state.browser_handoff_epoch)
         response = JSONResponse({
