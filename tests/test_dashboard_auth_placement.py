@@ -79,13 +79,14 @@ def test_first_boot_is_local_and_commercial_actions_open_hosted_cloud():
     for removed in ("renderHostedBootstrap", "showHostedBootstrap", "ENGRAPHIS_DEPLOYMENT_TOKEN"):
         assert removed not in script
         assert removed not in html
-    # A protected deployment asks for its token in the masked in-page dialog.
-    assert "needs its API token before the dashboard can load" in script
+    # A protected deployment no longer asks people to type a credential: a browser opens
+    # automatically, and a hardened one uses a one-time sign-in link.
+    assert "needs its API token before the dashboard can load" not in script
+    assert "one-time sign-in link" in script
     # Team state comes from the local auth surface; plans open hosted Cloud.
     assert "api('/auth/state')" in script
     assert "hostedCta(plan.id, 'plans', interval)" in _ledger_declaration("renderPlans")
-    assert "The dashboard on your own computer opens automatically." in html
-    assert 'aria-describedby="browser-auth-description browser-auth-session-note"' in html
+    assert "browser-auth" not in html
     assert 'id="action-dialog"' in html
 
 
@@ -104,21 +105,23 @@ def test_ledger_receipt_export_uses_authenticated_fetch_not_navigation():
     assert "byId('export-receipts').addEventListener('click', exportReceipts)" in script
 
 
-def test_ledger_remote_token_entry_is_masked_and_cleared_between_attempts():
+def test_ledger_remote_access_uses_a_one_time_link_instead_of_token_entry():
     html = INDEX.read_text(encoding="utf-8")
     script = SCRIPT.read_text(encoding="utf-8")
 
-    assert 'id="browser-auth-dialog"' in html
-    assert 'id="browser-auth-token" type="password"' in html
-    assert 'autocomplete="off"' in html
-    prompt = script[script.index("function promptBrowserToken("):
-                    script.index("async function authenticateBrowser")]
-    authenticate = script[script.index("async function authenticateBrowser"):
+    # No page, bundle, or prompt may ask a person to type the deployment token.
+    assert "browser-auth" not in html
+    assert "browser-auth" not in script
+    assert "Enter your access token" not in script + html
+
+    # Remote entry is a one-click, single-use link redeemed for an HttpOnly session.
+    authenticate = script[script.index("function signInCode()"):
                           script.index("async function reviewCsrfToken")]
-    assert "window.prompt(" not in prompt + authenticate
-    assert "input.value = ''" in prompt
-    assert "dialog.showModal()" in prompt
-    assert "form.addEventListener('submit'" in prompt
+    assert "window.prompt(" not in authenticate
+    assert "/auth/handoff" in authenticate
+    assert "location.hash" in authenticate
+    assert "history.replaceState" in authenticate
+    assert "one-time sign-in link" in authenticate
 
 
 def test_hosted_views_delegate_entitlement_to_cloud_proxy_responses():
