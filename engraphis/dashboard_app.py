@@ -41,6 +41,9 @@ from engraphis.local_auth import (
     BROWSER_SESSION_COOKIE,
     BROWSER_SESSION_SECONDS,
     bearer_ok,
+    browser_bootstrap_request,
+    browser_handoff,
+    browser_handoff_ok,
     browser_session,
     browser_session_ok,
     local_browser_request,
@@ -299,12 +302,19 @@ _PUBLIC = {
     "/api/ready",
     "/api/auth/state",
     "/api/auth/session",
+    "/api/auth/handoff",
     "/api/auth/local-session",
 }
 
 
 class _BrowserSessionReq(BaseModel):
     token: str = Field(min_length=1, max_length=4096)
+
+
+class _BrowserHandoffReq(BaseModel):
+    """One-time sign-in code redeemed from a fragment link."""
+
+    code: str = Field(min_length=1, max_length=2048)
 
 
 class _DashboardApprovalReq(BaseModel):
@@ -553,6 +563,11 @@ def create_app() -> FastAPI:
     # Zero-config local dashboards still need a cookie/CSRF owner ceremony for
     # reviewed writes. This process-local secret never becomes an API credential.
     app.state.local_browser_secret = secrets.token_urlsafe(32)
+    # One-time browser sign-in links are bound to this process. A restart invalidates
+    # every outstanding link, and redeemed codes are remembered only for their lifetime,
+    # so a link cannot be replayed even if it leaks out of the browser's address bar.
+    app.state.browser_handoff_epoch = secrets.token_bytes(16)
+    app.state.browser_handoff_used = {}
     # A document preview authorizes exactly one subsequent import of the reviewed
     # bytes into the reviewed target.  Records contain only a request digest, the
     # already-opaque browser-session value, and a short process-local expiry.
@@ -605,6 +620,32 @@ def create_app() -> FastAPI:
     def _browser_signing_key():
         return settings.api_token or app.state.local_browser_secret
 
+    def _browser_may_bootstrap(request: Request, *, require_origin: bool = True) -> bool:
+        """Whether this browser may open the dashboard without a credential.
+
+        Automatic access is the default: reaching the dashboard's own origin is the
+        boundary, while API and MCP clients still need the bearer token. Operators who
+        expose the dashboard to an untrusted network can set
+        ``ENGRAPHIS_BROWSER_AUTO_SESSION=0`` and hand out one-time links instead.
+        """
+        if settings.browser_auto_session:
+            return browser_bootstrap_request(request, require_origin=require_origin)
+        return local_browser_request(
+            request, require_origin=require_origin, allow_trusted_peers=True,
+        )
+
+    def _dashboard_public_url(request: Request) -> str:
+        """Where sign-in links should point, preferring the operator's public URL."""
+        configured = _os.environ.get("ENGRAPHIS_DASHBOARD_URL", "").strip()
+        if configured:
+            parsed = urlsplit(configured)
+            if (parsed.scheme not in ("http", "https") or not parsed.hostname
+                    or parsed.username is not None or parsed.password is not None):
+                raise ValueError(
+                    "ENGRAPHIS_DASHBOARD_URL must be an http(s) URL without userinfo")
+            return configured.rstrip("/")
+        return str(request.base_url).rstrip("/")
+
     def _browser_session_response(request: Request, *, reuse: bool = False):
         session_value = request.cookies.get(BROWSER_SESSION_COOKIE) if reuse else None
         if not browser_session_ok(session_value, _browser_signing_key()):
@@ -635,8 +676,8 @@ def create_app() -> FastAPI:
 
     @app.post("/api/auth/local-session", include_in_schema=False)
     def open_local_browser_session(request: Request):
-        """Open this computer's dashboard without exposing or entering its API token."""
-        if not local_browser_request(request):
+        """Open this browser's dashboard session without asking for a credential."""
+        if not _browser_may_bootstrap(request):
             return JSONResponse({"error": "automatic access requires the local dashboard"},
                                 status_code=403)
         return _browser_session_response(request, reuse=True)
@@ -661,6 +702,57 @@ def create_app() -> FastAPI:
         # token for each session value; unlike an API bearer, it has no authority by
         # itself and is not persisted to disk or browser storage.
         return _browser_session_response(request)
+
+    @app.post("/api/auth/handoff", include_in_schema=False)
+    def redeem_sign_in_link(req: _BrowserHandoffReq, request: Request):
+        """Trade a one-time sign-in code for an HttpOnly browser session.
+
+        The code is minted by ``POST /api/auth/link`` and delivered in a URL fragment,
+        so it never reaches server logs, request queries, or the Referer header.
+        """
+        if not settings.api_token:
+            return JSONResponse(
+                {"error": "local API authentication is not configured"}, status_code=409)
+        verified = browser_handoff_ok(
+            req.code, settings.api_token, app.state.browser_handoff_epoch)
+        if verified is None:
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        nonce, expires_at = verified
+        used = app.state.browser_handoff_used
+        now = int(time.time())
+        for seen, seen_expiry in list(used.items()):
+            if seen_expiry <= now:
+                used.pop(seen, None)
+        if nonce in used:
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        if len(used) >= 1024:
+            used.clear()
+        used[nonce] = expires_at
+        return _browser_session_response(request)
+
+    @app.post("/api/auth/link", include_in_schema=False)
+    def create_sign_in_link(request: Request):
+        """Mint a one-time browser sign-in link for this deployment.
+
+        Reached only with the deployment bearer (the middleware protects ``/api/*``).
+        The returned link is shown once and is never stored server-side.
+        """
+        if not settings.api_token:
+            return JSONResponse(
+                {"error": "local API authentication is not configured"}, status_code=409)
+        try:
+            base = _dashboard_public_url(request)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=500)
+        code, expires_at = browser_handoff(
+            settings.api_token, app.state.browser_handoff_epoch)
+        response = JSONResponse({
+            "url": "%s/#token=%s" % (base, code),
+            "expires_at": expires_at,
+            "expires_in": max(0, expires_at - int(time.time())),
+        })
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
     @app.post("/dashboard/review/approve", include_in_schema=False)
     def dashboard_review_approve(req: _DashboardApprovalReq, request: Request):
@@ -1354,7 +1446,7 @@ def create_app() -> FastAPI:
                 return await call_next(request)
             return JSONResponse(
                 {"error": "unauthorized", "code": "local_browser_session_required",
-                 "local_browser": local_browser_request(request, require_origin=False)},
+                 "local_browser": _browser_may_bootstrap(request, require_origin=False)},
                 status_code=401,
             )
 

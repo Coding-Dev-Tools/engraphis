@@ -58,13 +58,17 @@ DOMPurify at all render sites. Verified against payloads with `onerror` handlers
 - **Loopback by default** (`ENGRAPHIS_HOST=127.0.0.1`)
 - **Optional bearer token** (`ENGRAPHIS_API_TOKEN`): constant-time comparison (single
   shared implementation in the local customer runtime)
-- **Automatic local dashboard access:** the browser on this computer obtains its
-  HttpOnly, SameSite session without entering an API token. Session issuance requires
-  a literal loopback peer, a loopback/localhost Host, an exact same-origin POST, and
-  the dashboard's custom browser header. Forwarding headers, nonlocal peers, DNS
-  hostnames, cross-site requests, and configured LAN-trust exceptions cannot mint it.
-  Existing browser confirmations and CSRF checks still govern reviewed writes.
-  Local programs already able to act as this user remain inside the local trust boundary.
+- **Automatic dashboard access (default):** a browser that can reach the dashboard opens it
+  without entering a credential. Session issuance requires a same-origin POST carrying the
+  dashboard's custom browser header and an Origin that exactly matches a published Host
+  (loopback, a literal address, a single-label/mDNS name, or the configured
+  `ENGRAPHIS_DASHBOARD_URL`). Forwarding headers are honored only from a proxy listed in
+  `ENGRAPHIS_FORWARDED_ALLOW_IPS`, so another website cannot drive a browser into this
+  server through DNS rebinding. Existing browser confirmations and CSRF checks still govern
+  reviewed writes. **The deployment's network reachability is the dashboard's boundary:**
+  anyone who can open that origin has full access to this node's memories. Set
+  `ENGRAPHIS_BROWSER_AUTO_SESSION=0` to require one-time sign-in links instead. Remote API
+  and MCP clients always need `Authorization: Bearer`.
 - Pro and Team account sign-in belongs to optional hosted services; it does not gate
   opening the local dashboard. Remote API and operator access still require credentials.
 - **No local Team identity service:** the public dashboard is single-user. Team logins,

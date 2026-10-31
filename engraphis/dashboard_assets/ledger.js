@@ -336,95 +336,39 @@
     }
   }
 
-  function promptBrowserToken(message = '') {
-    const dialog = byId('browser-auth-dialog');
-    const form = byId('browser-auth-form');
-    const input = byId('browser-auth-token');
-    const error = byId('browser-auth-error');
-    const cancel = byId('browser-auth-cancel');
-    if (!dialog || !form || !input || !error || !cancel) return Promise.resolve('');
-
-    error.textContent = message;
-    error.hidden = !message;
-    input.value = '';
-    const returnFocus = document.activeElement;
-
-    return new Promise(resolve => {
-      let settled = false;
-      const cleanup = () => {
-        form.removeEventListener('submit', submit);
-        cancel.removeEventListener('click', dismiss);
-        dialog.removeEventListener('cancel', dismiss);
-        dialog.removeEventListener('close', closed);
-      };
-      const finish = value => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        input.value = '';
-        if (dialog.open) dialog.close();
-        if (returnFocus && typeof returnFocus.focus === 'function') returnFocus.focus();
-        resolve(value);
-      };
-      const submit = event => {
-        event.preventDefault();
-        const value = input.value.trim();
-        if (!value) {
-          error.textContent = 'Enter your access token.';
-          error.hidden = false;
-          input.focus();
-          return;
-        }
-        finish(value);
-      };
-      const dismiss = event => {
-        if (event) event.preventDefault();
-        finish('');
-      };
-      const closed = () => finish('');
-
-      form.addEventListener('submit', submit);
-      cancel.addEventListener('click', dismiss);
-      dialog.addEventListener('cancel', dismiss);
-      dialog.addEventListener('close', closed);
-      if (!dialog.open) dialog.showModal();
-      input.focus();
-    });
+  function signInCode() {
+    try {
+      const fragment = new URLSearchParams(location.hash.slice(1));
+      const code = fragment.get('token') || '';
+      if (code) history.replaceState(null, '', `${location.pathname}${location.search}`);
+      return code;
+    } catch (_) {
+      return '';
+    }
   }
 
   async function authenticateBrowser(error = null) {
-    if (error?.localBrowser === true || (error?.localBrowser !== false && localDashboardUrl())) {
-      showNotice('Local Engraphis could not connect. Reload this page to retry.');
-      return false;
-    }
-    let token = '';
+    // A one-click sign-in link carries a short-lived, single-use code. A person never
+    // types a credential into this page; the deployment token stays machine-only.
+    const code = signInCode();
     let failure = '';
-    try {
-      const fragment = new URLSearchParams(location.hash.slice(1));
-      token = fragment.get('token') || '';
-      if (token) history.replaceState(null, '', `${location.pathname}${location.search}`);
-    } catch (_) {}
-    while (true) {
-      if (!token) token = await promptBrowserToken(failure);
-      if (!token) return false;
-      let submitted = token;
-      token = '';
+    if (code) {
       try {
-        const session = await api('/auth/session', {
-          method: 'POST',
-          body: { token: submitted },
-        });
+        const session = await api('/auth/handoff', { method: 'POST', body: { code } });
         state.reviewCsrf = text(session && session.review_csrf_token);
-        submitted = '';
         return true;
-      } catch (error) {
-        submitted = '';
-        failure = error.status === 401
-          ? 'That access token was not accepted. Check it with the person who set up Engraphis and try again.'
-          : error.message;
-        showNotice(`Sign-in failed: ${failure}`);
+      } catch (redeemError) {
+        failure = redeemError.status === 401
+          ? 'That sign-in link has already been used or has expired. '
+          : `Sign-in failed: ${redeemError.message} `;
       }
     }
+    if (error?.localBrowser === true || (error?.localBrowser !== false && localDashboardUrl())) {
+      showNotice(`${failure}Local Engraphis could not connect. Reload this page to retry.`);
+      return false;
+    }
+    showNotice(`${failure}This Engraphis server is private. Open a one-time sign-in link from the server (run engraphis-dashboard --link there), or open the dashboard on that computer.`);
+    return false;
   }
 
   async function reviewCsrfToken() {
@@ -5622,14 +5566,6 @@
   }
 
   async function boot() {
-    if (localDashboardUrl()) {
-      const fragment = new URLSearchParams(location.hash.slice(1));
-      if (fragment.has('token')) {
-        fragment.delete('token');
-        history.replaceState(null, '', location.pathname + location.search
-          + (fragment.size ? '#' + fragment.toString() : ''));
-      }
-    }
     byId('today-date').textContent = new Intl.DateTimeFormat(undefined, { dateStyle: 'long' }).format(new Date());
     let theme = 'slate';
     try {
@@ -5653,9 +5589,14 @@
         switchManageTab(requestedManageTab);
       }
     } catch (error) {
-      if (error.status === 401 && error.code === 'local_browser_session_required'
-          && await authenticateBrowser(error)) {
-        location.reload();
+      if (error.status === 401 && error.code === 'local_browser_session_required') {
+        // authenticateBrowser explains the next step (a one-time link), so the generic
+        // connection message must not overwrite it.
+        if (await authenticateBrowser(error)) {
+          location.reload();
+          return;
+        }
+        setConnection('Sign-in required', false);
         return;
       }
       setConnection('Local engine unavailable', false);

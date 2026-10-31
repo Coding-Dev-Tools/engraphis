@@ -76,23 +76,26 @@ def test_ledger_receipt_export_uses_authenticated_fetch_not_navigation():
     assert "URL.createObjectURL(blob)" in body
     assert "byId('export-receipts').addEventListener('click', exportReceipts)" in script
 
-def test_ledger_remote_token_entry_is_masked_and_cleared_between_attempts():
+def test_ledger_remote_access_uses_a_one_time_link_instead_of_token_entry():
     html = (Path(__file__).resolve().parents[1] / "engraphis" / "dashboard_assets"
             / "index.html").read_text(encoding="utf-8")
     script = (Path(__file__).resolve().parents[1] / "engraphis" / "dashboard_assets"
               / "ledger.js").read_text(encoding="utf-8")
 
-    assert 'id="browser-auth-dialog"' in html
-    assert 'id="browser-auth-token" type="password"' in html
-    assert 'autocomplete="off"' in html
-    prompt = script[script.index("function promptBrowserToken("):
-                    script.index("async function authenticateBrowser")]
-    authenticate = script[script.index("async function authenticateBrowser"):
+    # No page, bundle, or prompt may ask a person to type the deployment token.
+    assert "browser-auth" not in html
+    assert "browser-auth" not in script
+    assert "type=\"password\"" not in html
+    assert "Enter your access token" not in script + html
+
+    # Remote entry is a one-click, single-use link redeemed for an HttpOnly session.
+    authenticate = script[script.index("function signInCode()"):
                           script.index("async function reviewCsrfToken")]
-    assert "window.prompt(" not in prompt + authenticate
-    assert "input.value = ''" in prompt
-    assert "dialog.showModal()" in prompt
-    assert "form.addEventListener('submit'" in prompt
+    assert "window.prompt(" not in authenticate
+    assert "/auth/handoff" in authenticate
+    assert "location.hash" in authenticate
+    assert "history.replaceState" in authenticate
+    assert "one-time sign-in link" in authenticate
 
 
 def test_hosted_views_delegate_entitlement_to_cloud_proxy_responses():
