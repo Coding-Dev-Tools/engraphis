@@ -4,6 +4,8 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    # Keep open PRs mergeable: main requires branches to be up to date before merging.
+    rebase-strategy: "auto"
     open-pull-requests-limit: 5
     # This file reproduces retained campaigns and must match their observed inventory.
     # New campaigns use benchmark-requirements-windows-py312-current.txt instead.
@@ -19,6 +21,8 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    # Keep open PRs mergeable: main requires branches to be up to date before merging.
+    rebase-strategy: "auto"
     open-pull-requests-limit: 3
     # The shipped force-graph bundle has local CSP patches and locked provenance.
     # Version upgrades follow docs/DASHBOARD_VENDOR_ASSETS.md; security updates remain enabled.
@@ -34,6 +38,8 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    # Keep open PRs mergeable: main requires branches to be up to date before merging.
+    rebase-strategy: "auto"
     open-pull-requests-limit: 3
     labels:
       - "dependencies"
@@ -41,6 +47,8 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    # Keep open PRs mergeable: main requires branches to be up to date before merging.
+    rebase-strategy: "auto"
     open-pull-requests-limit: 3
     groups:
       # codeql-action's init and analyze steps must always bump together —
