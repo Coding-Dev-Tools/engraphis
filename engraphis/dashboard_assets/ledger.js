@@ -387,100 +387,43 @@
     }
   }
 
-  function promptBrowserToken(message = '') {
-    const dialog = byId('browser-auth-dialog');
-    const form = byId('browser-auth-form');
-    const input = byId('browser-auth-token');
-    const error = byId('browser-auth-error');
-    const cancel = byId('browser-auth-cancel');
-    if (!dialog || !form || !input || !error || !cancel) return Promise.resolve('');
-
-    error.textContent = message;
-    error.hidden = !message;
-    input.value = '';
-    const returnFocus = document.activeElement;
-
-    return new Promise(resolve => {
-      let settled = false;
-      const cleanup = () => {
-        form.removeEventListener('submit', submit);
-        cancel.removeEventListener('click', dismiss);
-        dialog.removeEventListener('cancel', dismiss);
-        dialog.removeEventListener('close', closed);
-      };
-      const finish = value => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        input.value = '';
-        if (dialog.open) dialog.close();
-        if (returnFocus && typeof returnFocus.focus === 'function') returnFocus.focus();
-        resolve(value);
-      };
-      const submit = event => {
-        event.preventDefault();
-        const value = input.value.trim();
-        if (!value) {
-          error.textContent = 'Enter your access token.';
-          error.hidden = false;
-          input.focus();
-          return;
-        }
-        finish(value);
-      };
-      const dismiss = event => {
-        if (event) event.preventDefault();
-        finish('');
-      };
-      const closed = () => finish('');
-
-      form.addEventListener('submit', submit);
-      cancel.addEventListener('click', dismiss);
-      dialog.addEventListener('cancel', dismiss);
-      dialog.addEventListener('close', closed);
-      if (!dialog.open) dialog.showModal();
-      input.focus();
-    });
+  function signInCode() {
+    // The exchange can run after the router normalised the address bar, so the one-shot
+    // fragment code captured during boot takes precedence.
+    let code = bootToken;
+    bootToken = '';
+    try {
+      if (!code) {
+        const fragment = new URLSearchParams(location.hash.slice(1));
+        code = fragment.get('token') || '';
+      }
+      if (code) history.replaceState(null, '', `${location.pathname}${location.search}`);
+    } catch (_) {}
+    return code;
   }
 
   async function authenticateBrowser(error = null) {
+    // A one-click sign-in link carries a short-lived, single-use code. A person never
+    // types a credential into this page; the deployment token stays machine-only.
+    const code = signInCode();
+    let failure = '';
+    if (code) {
+      try {
+        const session = await api('/auth/handoff', { method: 'POST', body: { code } });
+        state.reviewCsrf = text(session && session.review_csrf_token);
+        return true;
+      } catch (redeemError) {
+        failure = redeemError.status === 401
+          ? 'That sign-in link has already been used or has expired. '
+          : `Sign-in failed: ${redeemError.message} `;
+      }
+    }
     if (error?.localBrowser === true || (error?.localBrowser !== false && localDashboardUrl())) {
-      showNotice('Local Engraphis could not connect. Reload this page to retry.');
+      showNotice(`${failure}Local Engraphis could not connect. Reload this page to retry.`);
       return false;
     }
-    // The exchange can run after the router normalised the address bar, so the
-    // one-shot fragment token captured during boot takes precedence.
-    let token = bootToken;
-    bootToken = '';
-    let failure = '';
-    try {
-      if (!token) {
-        const fragment = new URLSearchParams(location.hash.slice(1));
-        token = fragment.get('token') || '';
-      }
-      if (token) history.replaceState(null, '', `${location.pathname}${location.search}`);
-    } catch (_) {}
-    while (true) {
-      if (!token) token = await promptBrowserToken(failure);
-      if (!token) return false;
-      let submitted = token;
-      token = '';
-      try {
-        const session = await api('/auth/session', {
-          method: 'POST',
-          body: { token: submitted },
-        });
-        state.reviewCsrf = text(session && session.review_csrf_token);
-        submitted = '';
-        return true;
-      } catch (error) {
-        submitted = '';
-        failure = error.status === 401
-          ? 'That access token was not accepted. Check it with the person who set up Engraphis and try again.'
-          : error.message;
-        showNotice(`Sign-in failed: ${failure}`);
-      }
-    }
+    showNotice(`${failure}This Engraphis server is private. Open a one-time sign-in link from the server (run engraphis-dashboard --link there), or open the dashboard on that computer.`);
+    return false;
   }
 
   async function reviewCsrfToken() {
@@ -999,7 +942,7 @@
       if (error.code !== 'local_browser_session_required') {
         return error.message || 'Sign-in is required before this request can continue.';
       }
-      return 'This Engraphis deployment needs its API token before the dashboard can load. Choose Retry now to enter it.';
+      return 'This Engraphis deployment is private. Open a one-time sign-in link from the server (run engraphis-dashboard --link there), then choose Retry.';
     }
     if (error && error.status === 403) {
       // The server explains a refused address or remote access; show its reason.
