@@ -686,6 +686,8 @@ def test_release_transitive_dependency_security_floors_cannot_regress():
     expected_overrides = {
         "body-parser": "^2.4.0",
         "fast-uri": "^3.1.9",
+        "minimatch": "^11.0.3",
+        "undici": "^8.12.3",
         "zod": "^4.6.6",
     }
     for name, floor in expected_overrides.items():
@@ -695,10 +697,12 @@ def test_release_transitive_dependency_security_floors_cannot_regress():
             map(int, floor.removeprefix("^").split("."))
         )
 
-    # Pi's published development host has its own shrinkwrap, so its exact nested
-    # undici pin must be repaired before auditing the actual installed tree.
+    # The Pi test host is pinned to a release whose own shrinkwrap resolves the patched
+    # leaves. Earlier releases needed a post-install repair, which could not clear the
+    # lock-based audit; the overrides now do, so CI audits without rewriting node_modules.
+    assert package["devDependencies"]["@earendil-works/pi-coding-agent"] == "1.4.0"
     ci = _text(".github/workflows/ci.yml")
-    assert "brace-expansion@5.0.12 undici@8.12.2" in ci
+    assert "brace-expansion@" not in ci
     assert "npm audit --omit=dev" in ci
     assert "npm audit --no-package-lock --include=dev" in ci
     assert 'pip install --upgrade "filelock>=4.2.1,<5"' in _text("Dockerfile")
