@@ -273,6 +273,20 @@ def test_malformed_boolean_values_use_safe_default(monkeypatch):
     monkeypatch.setenv("ENGRAPHIS_UPDATE_CHECK", "perhaps")
     assert Settings().update_check is False
 
+
+def test_browser_auto_session_defaults_on_and_can_be_hardened(monkeypatch):
+    monkeypatch.delenv("ENGRAPHIS_BROWSER_AUTO_SESSION", raising=False)
+    assert Settings().browser_auto_session is True
+
+    for raw in ("0", "false", "off", "no"):
+        monkeypatch.setenv("ENGRAPHIS_BROWSER_AUTO_SESSION", raw)
+        assert Settings().browser_auto_session is False
+
+    # A malformed value keeps the documented default instead of silently flipping the
+    # dashboard's access posture.
+    monkeypatch.setenv("ENGRAPHIS_BROWSER_AUTO_SESSION", "perhaps")
+    assert Settings().browser_auto_session is True
+
 @pytest.mark.parametrize("url", RETIRED_RELAY_URLS)
 def test_retired_relay_url_override_is_canonicalized(url):
     assert config.canonicalize_relay_url(url) == config.DEFAULT_RELAY_URL
