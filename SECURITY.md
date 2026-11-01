@@ -62,18 +62,21 @@ capped tables and element count) so crafted content cannot freeze the page used 
 - **Loopback by default** (`ENGRAPHIS_HOST=127.0.0.1`)
 - **Optional bearer token** (`ENGRAPHIS_API_TOKEN`): constant-time comparison (single
   shared implementation in the local customer runtime)
-- **Automatic local dashboard access (zero-token instances only):** the browser on this
-  computer obtains its HttpOnly, SameSite session without entering an API token. Session
-  issuance requires a literal loopback peer, a loopback/localhost Host, an exact same-origin
-  POST, and the dashboard's custom browser header. Forwarding headers, nonlocal peers, DNS
-  hostnames, cross-site requests, and configured LAN-trust exceptions cannot mint it.
-  Existing browser confirmations and CSRF checks still govern reviewed writes. Local programs
-  already able to act as this user remain inside the local trust boundary. When
-  `ENGRAPHIS_API_TOKEN` is configured the automatic session is refused with
-  `403 local_token_required`, and the browser exchanges that token at `POST /api/auth/session`
-  instead. Every signal the automatic path checks is an ordinary request header, so a loopback
-  port-forward (`ssh -L`, `netsh portproxy`) can forge all of them while choosing `Host` and
-  `Origin` itself; none of them distinguishes that caller from the real local browser.
+- **Automatic dashboard access (default):** a browser that can reach the dashboard opens it
+  without entering a credential. Session issuance requires a same-origin POST carrying the
+  dashboard's custom browser header and an Origin that exactly matches a published Host
+  (loopback, a literal address, a single-label/mDNS name, or the configured
+  `ENGRAPHIS_DASHBOARD_URL`). Forwarding headers are honored only from a proxy listed in
+  `ENGRAPHIS_FORWARDED_ALLOW_IPS`, so another website cannot drive a browser into this
+  server through DNS rebinding. Existing browser confirmations and CSRF checks still govern
+  reviewed writes. **The deployment's network reachability is the dashboard's boundary:**
+  anyone who can open that origin has full access to this node's memories. Set
+  `ENGRAPHIS_BROWSER_AUTO_SESSION=0` to require one-time sign-in links instead; a token-gated
+  instance then refuses automatic sessions with `403 local_token_required` and does not hint
+  at them. Every automatic signal is an ordinary request header, so a loopback port-forward
+  (`ssh -L`, `netsh portproxy`) can forge all of them while choosing `Host` and `Origin`
+  itself; that is why hardened mode exists for exposed deployments. Remote API and MCP
+  clients always need `Authorization: Bearer`.
 - Pro and Team account sign-in belongs to optional hosted services; it does not gate
   opening the local dashboard. Remote API and operator access still require credentials.
 - **No local Team identity service:** the public dashboard is single-user. Team logins,
