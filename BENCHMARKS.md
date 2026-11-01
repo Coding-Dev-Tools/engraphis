@@ -94,14 +94,14 @@ interpretation and do not count as additional benchmark-quality gains.
 ### Public numeric evidence registry
 
 Every exact public aggregate retained below comes from the checked-in, public-safe
-[`offline-fixtures-automatic-browser-access-20261031.json`](docs/benchmark-evidence/offline-fixtures-automatic-browser-access-20261031.json) artifact. Its
+[`offline-fixtures-automatic-browser-access-20261101.json`](docs/benchmark-evidence/offline-fixtures-automatic-browser-access-20261101.json) artifact. Its
 SHA-256 is
-`99b615d8ce7712b5efbfa7c11db810de695cb0e5a3e44293532a5505133e03b0`, also recorded in the
+`8df20fd0a97f20070ac26628e19b5ae1be653cd7aa9c7399d424cedf0e839a01`, also recorded in the
 adjacent `.sha256` file. The artifact contains no raw questions, answers, prompts, customer data,
 or per-record content fingerprints.
 
 The fixture-suite digest is
-`d7dd6ab27442e8195b4dc3c2bb3a76e1d157c68018f2d88a422e0665ff4eb807`. The artifact defines
+`0179ada4cfffd827e2d1cf2cce1b5110862ac9a5cafbbf0db6dcd6e975e864ce`. The artifact defines
 the digest algorithm and records the SHA-256 of every suite and dataset file. Each evidence ID
 also binds its exact command through `sha256(UTF-8 exact command)`:
 
@@ -134,10 +134,12 @@ retrieval-quality improvement. It does not qualify browser behavior, hosted serv
 external models, or provider billing. The registered artifact was produced with:
 
 ```bash
-python -m scripts.export_offline_evidence --output docs/benchmark-evidence/offline-fixtures-automatic-browser-access-20261031.json
+python -m scripts.export_offline_evidence --output docs/benchmark-evidence/offline-fixtures-automatic-browser-access-20261101.json
 ```
 
 The earlier release-review predecessors,
+[`offline-fixtures-automatic-browser-access-20261031.json`](docs/benchmark-evidence/offline-fixtures-automatic-browser-access-20261031.json)
+(SHA-256 `99b615d8ce7712b5efbfa7c11db810de695cb0e5a3e44293532a5505133e03b0`),
 [`offline-fixtures-release-review-20261026-1.7.11.json`](docs/benchmark-evidence/offline-fixtures-release-review-20261026-1.7.11.json)
 (SHA-256 `befc75b82980205a4fbe9074509d82ab5b84b1bcc4fade7c4dc1195dc9bc00c2`),
 [`offline-fixtures-release-review-20261022-v4.json`](docs/benchmark-evidence/offline-fixtures-release-review-20261022-v4.json)
@@ -201,13 +203,13 @@ grounded checks in separate panels; provider billing and MCP transport are not m
 the SVG and matching PNG with:
 
 ```bash
-python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-automatic-browser-access-20261031.json --output docs/images/context-efficiency.svg --png-output docs/images/context-efficiency.png
+python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-automatic-browser-access-20261101.json --output docs/images/context-efficiency.svg --png-output docs/images/context-efficiency.png
 ```
 
 The companion examples are also generated from that artifact with:
 
 ```bash
-python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-automatic-browser-access-20261031.json --output docs/images/evidence-backed-agent-examples.svg --png-output docs/images/evidence-backed-agent-examples.png
+python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-automatic-browser-access-20261101.json --output docs/images/evidence-backed-agent-examples.svg --png-output docs/images/evidence-backed-agent-examples.png
 ```
 The historical-to-executable mapping is in
 [`docs/BENCHMARK_CHANGE_COVERAGE.md`](docs/BENCHMARK_CHANGE_COVERAGE.md).
