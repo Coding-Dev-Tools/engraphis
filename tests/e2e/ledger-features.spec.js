@@ -4,10 +4,11 @@
 const { test, expect } = require('@playwright/test');
 const { answerActionDialog } = require('./action-dialog-helper');
 
-const TOKEN_URL = '/#token=engraphis-playwright-local-only';
+const DASHBOARD_URL = '/';
 
-// The real server answers the very first request with 401 until the URL token has been
-// exchanged for the browser session, so resource-load reports are expected noise here.
+// The dashboard opens automatically for the Playwright server (it runs with an API token,
+// but automatic browser access is the default), so resource-load reports are expected noise
+// only while the first bootstrap request settles.
 function pageErrors(page) {
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
@@ -52,7 +53,7 @@ const MARKDOWN = [
 test('Quick import renders Markdown inertly and the editor previews, guards and diffs edits', async ({ page }) => {
   const errors = pageErrors(page);
   const workspace = `features-import-${Date.now()}`;
-  await page.goto(TOKEN_URL);
+  await page.goto(DASHBOARD_URL);
   await expect(page.locator('#connection-status')).toContainText('connected');
   await createWorkspace(page, workspace);
 
@@ -122,7 +123,7 @@ test('Quick import renders Markdown inertly and the editor previews, guards and 
 test('Library keeps a keyboard reorder across reloads', async ({ page }) => {
   const errors = pageErrors(page);
   const workspace = `features-order-${Date.now()}`;
-  await page.goto(TOKEN_URL);
+  await page.goto(DASHBOARD_URL);
   await expect(page.locator('#connection-status')).toContainText('connected');
   await createWorkspace(page, workspace);
   await addMemory(page, 'First written', 'Written first.');
@@ -154,7 +155,7 @@ test('Workspaces can be described, copied, merged, exported and hard-deleted', a
   const stamp = Date.now();
   const source = `features-source-${stamp}`;
   const target = `features-target-${stamp}`;
-  await page.goto(TOKEN_URL);
+  await page.goto(DASHBOARD_URL);
   await expect(page.locator('#connection-status')).toContainText('connected');
   await createWorkspace(page, target);
   await createWorkspace(page, source);
@@ -197,7 +198,7 @@ test('Workspaces can be described, copied, merged, exported and hard-deleted', a
 test('Secure erase removes a leaked secret only after an explicit confirmation', async ({ page }) => {
   const errors = pageErrors(page);
   const workspace = `features-erase-${Date.now()}`;
-  await page.goto(TOKEN_URL);
+  await page.goto(DASHBOARD_URL);
   await expect(page.locator('#connection-status')).toContainText('connected');
   await createWorkspace(page, workspace);
   await addMemory(page, 'Leaked deploy key', 'The deploy key is test-key-not-real-0001.');
@@ -220,7 +221,7 @@ test('Secure erase removes a leaked secret only after an explicit confirmation',
 
 test('Dialogs never display bidi controls carried by untrusted names', async ({ page }) => {
   const errors = pageErrors(page);
-  await page.goto(TOKEN_URL);
+  await page.goto(DASHBOARD_URL);
   await expect(page.locator('#connection-status')).toContainText('connected');
   // A crafted title could reorder the dialog's prose on screen, e.g. to make "Delete" read
   // as something harmless. Every explicit and implicit direction control is dropped.
@@ -247,7 +248,7 @@ test('Dialogs never display bidi controls carried by untrusted names', async ({ 
 test('A save that fails after leaving the editor is still reported', async ({ page }) => {
   const errors = pageErrors(page);
   const workspace = `features-save-${Date.now()}`;
-  await page.goto(TOKEN_URL);
+  await page.goto(DASHBOARD_URL);
   await expect(page.locator('#connection-status')).toContainText('connected');
   await createWorkspace(page, workspace);
   await addMemory(page, 'Existing note', 'Already saved.');
