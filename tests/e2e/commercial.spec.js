@@ -242,18 +242,12 @@ test('the local dashboard ships a strict CSP and no local account or license sur
   for (const removedLabel of ['Create admin account', 'Accept team invitation', 'Activate license']) {
     await expect(page.getByText(removedLabel, { exact: true })).toHaveCount(0);
   }
-  // The only sign-in markup is the closed remote administrator token dialog;
-  // local account/password login must remain absent from the usable dashboard.
-  const remoteAccess = page.locator('#browser-auth-dialog');
-  await expect(remoteAccess).toBeHidden();
-  const signIn = page.getByText('Sign in', { exact: true });
-  await expect(signIn).toHaveCount(1);
-  await expect(signIn).toBeHidden();
-  await expect(remoteAccess.getByRole('button', {
-    name: 'Sign in', exact: true, includeHidden: true,
-  })).toHaveCount(1);
-  await expect(remoteAccess.locator('#browser-auth-token')).toHaveAttribute('type', 'password');
-  await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toHaveCount(0);
+  // No account/password/login markup ships with the dashboard at all, and no page asks
+  // a person to type the deployment token.
+  await expect(page.locator('#browser-auth-dialog')).toHaveCount(0);
+  await expect(page.locator('#browser-auth-token')).toHaveCount(0);
+  await expect(page.getByText('Sign in', { exact: true })).toHaveCount(0);
+  await expect(page.getByText('Enter your access token.', { exact: true })).toHaveCount(0);
 
   await openSettingsTab(page, 'Team');
   await expect(page.locator('#team-result')).toContainText('Team is a hosted plan.');
