@@ -18,6 +18,8 @@ Candidate package version: **1.7.12**. Publication and hosted-service qualificat
   `engraphis-dashboard --link` (or `POST /api/auth/link`) issues a single-use, 15-minute
   sign-in link that opens a 12-hour browser session.
 - Add a Windows RAM integrity probe, a local pre-flight verification harness, and MCP memory concurrency test coverage.
+- State plainly in the README that Jev is included free with every paid plan (Pro and Team),
+  with the existing rolling limits and per-call consent rules unchanged.
 - Refresh evaluation, CI, and development dependencies and update the registered benchmark evidence registry.
 
 ## [1.7.11] - 2026-10-26
