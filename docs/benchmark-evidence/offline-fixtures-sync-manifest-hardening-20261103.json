@@ -103,7 +103,7 @@
   ],
   "schema": "engraphis-public-offline-fixtures/v1",
   "suite": {
-    "digest": "192ca02472f964a95b7312e0176b94cfc070480f81eba1b9183612e11d7c1853",
+    "digest": "f0c2e3341307b48a44df2f3da4adc082c67cb912de6ca8d93d75cb6fb73bc04b",
     "digest_method": "sha256(canonical compact JSON mapping each sorted path to its file SHA-256)",
     "files": {
       "engraphis/__init__.py": "54c83cf75637c6d12314b474aaeab66ffd2bf817f066d6148ec8aa3bf2c4952a",
@@ -216,7 +216,7 @@
       "engraphis/redirector.py": "5ba964b81f09008c9369180cb49d247519000763274aabc5e046215b12fa641d",
       "engraphis/routes/__init__.py": "f0d59080212cfa0d9b50877bca28e5832d1ae917899500d52c68b1c8821231af",
       "engraphis/routes/memory.py": "9ca066e1762eeeaafd9790ed57d730efcaceb57742dbe0c830ad8764500ff9e5",
-      "engraphis/routes/v2_api.py": "7eeeb82b201bd144994b77cb810181a8c7390dde4a564917bcbaa1fb804eda66",
+      "engraphis/routes/v2_api.py": "a263af0f7d5be7d9a60a5c54129005705d02a0fa1ad3aba00c4b4667beb4fdab",
       "engraphis/routes/vault.py": "503304c177cf4d81bec5a9836731c0c32b62159175dea6d0fb8ce30c97a2bc6b",
       "engraphis/service.py": "dec62fa2912c19b13c904e1d7585babc5c55edfd995846f0bab33d62a20dff85",
       "engraphis/service_context.py": "0cd84538ca18b07d6440fa4cb0147510eacef2af5cf04b7a0519f2ac15a7ff87",
