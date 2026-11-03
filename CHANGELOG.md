@@ -13,6 +13,8 @@ All notable changes to Engraphis are documented here. Format loosely follows
   `ENGRAPHIS_BROWSER_AUTO_SESSION=0` for a hardened deployment, where
   `engraphis-dashboard --link` (or `POST /api/auth/link`) issues a single-use, 15-minute
   sign-in link that opens a 12-hour browser session.
+- State plainly in the README that Jev is included free with every paid plan (Pro and Team),
+  with the existing rolling limits and per-call consent rules unchanged.
 
 ## [1.7.11] - 2026-10-26
 
