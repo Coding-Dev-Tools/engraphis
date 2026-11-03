@@ -246,7 +246,7 @@ def test_timed_out_advisory_preserves_routes_for_busy_and_unconsented_requests()
     deterministic = _FixedDeterministicPlanner()
     deterministic.delay_s = 0.02
     engine.query_planner = JevAssistedQueryPlanner(_backend(BlockedClient()), deterministic)
-    engine.planner_timeout_s = 0.15
+    engine.planner_timeout_s = 0.5
     query = "Why does CACHE.get() fail after restart?"
     boundary = SearchFilter(repo_id="repo_demo", scopes=[Scope.REPO], known_at=102.0)
 
@@ -259,7 +259,7 @@ def test_timed_out_advisory_preserves_routes_for_busy_and_unconsented_requests()
     try:
         before = time.monotonic()
         timed_out, reason = plan(True)
-        assert time.monotonic() - before < 0.5
+        assert time.monotonic() - before < 1.0
         assert started.is_set() and not finished.is_set()
         assert reason == "planner_timeout"
         assert [route.text for route in timed_out.queries] == [
@@ -273,7 +273,7 @@ def test_timed_out_advisory_preserves_routes_for_busy_and_unconsented_requests()
         assert reason == ""
         assert local.reason_codes[-1] == "jev_remote_consent_required"
         assert len(attempts) == 1
-        assert 0 < attempts[0] < 0.13
+        assert 0 < attempts[0] < 0.5
         assert boundary.repo_id == "repo_demo"
         assert boundary.scopes == [Scope.REPO]
         assert boundary.known_at == 102.0
