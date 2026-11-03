@@ -29,6 +29,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field, StrictBool, StrictInt
 from starlette.concurrency import run_in_threadpool
 
+from engraphis import entitlements as _entitlements
 from engraphis import licensing
 from engraphis.commercial import trial_days_by_plan
 from engraphis.config import DEFAULT_RELAY_URL, canonicalize_relay_url, settings
@@ -3140,35 +3141,27 @@ def code_export(workspace: str, repo: str,
 
 
 # ── license ───────────────────────────────────────────────────────────────────
-# Mirror of the private control plane's plan→feature table (read-only reference:
-# the hosted entitlement contract the hosted plan-feature contract). Plans are lowercase
-# and only ``pro``/``team`` are paid; any other value — unknown, empty, or mis-cased —
-# resolves to no features, exactly as the server treats it.
+# One read-only mirror of the private control plane's plan→feature contract, loaded from
+# ``engraphis/entitlement_contract.json``. Plans are lowercase and only ``pro``/``team`` are
+# paid; any other value — unknown, empty, or mis-cased — resolves to no features, exactly as
+# the server treats it.
 #
-# The server's own keys are {analytics, automation, export, sync, team}. This client's
-# commercial manifest additionally names Auto Consolidation and Auto Dreaming, which the
-# server grants under ``automation``. They are expanded here so the dashboard can never
-# draw a lock on a capability the customer's plan already includes.
+# The server grants Auto Consolidation and Auto Dreaming under ``automation``; this client
+# lists them separately so a paying customer never sees a lock on a capability the plan
+# already includes. ``_normalized_features`` expands that alias on the way in.
 _AUTOMATION_FEATURES = ("automation", "consolidation", "dreaming")
-_PRO_FEATURES = ("analytics", "sync") + _AUTOMATION_FEATURES
+_PRO_FEATURES = tuple(_entitlements.features_for("pro"))
 _HOSTED_ENTITLEMENTS = {
-    "free": (),
-    "local": (),
+    "free": tuple(_entitlements.features_for("free")),
+    "local": tuple(_entitlements.features_for("local")),
     "pro": _PRO_FEATURES,
-    "team": _PRO_FEATURES + ("team",),
+    "team": tuple(_entitlements.features_for("team")),
 }
 
 # Labels for the dashboard's entitlement list; it renders one row per key and ticks the
-# ones ``features`` contains. Naming follows the customer-facing vocabulary in
-# .env.example and the commercial manifest.
-_FEATURE_LABELS = {
-    "analytics": "Analytics",
-    "automation": "Automation",
-    "consolidation": "Auto Consolidation",
-    "dreaming": "Auto Dreaming",
-    "sync": "Cloud Sync",
-    "team": "Team administration",
-}
+# ones ``features`` contains. Only capabilities this build can render are labelled, so the
+# set of known labels stays equal to the Team plan's grant.
+_FEATURE_LABELS = dict(_entitlements.labels())
 
 
 def entitled_features(plan: str) -> list:
@@ -3179,7 +3172,7 @@ def entitled_features(plan: str) -> list:
     Cloud and gated on its response status.
     """
 
-    return sorted(_HOSTED_ENTITLEMENTS.get(str(plan or "").strip().lower(), ()))
+    return _entitlements.features_for(plan)
 
 
 # ── authoritative plan resolution ─────────────────────────────────────────────────────
@@ -3434,6 +3427,12 @@ def _normalized_features(values: object, plan: str) -> list:
     return sorted(granted & allowed & set(_FEATURE_LABELS))
 
 
+def _unrecognized_features(values: object, plan: str) -> list:
+    """Return server grants this build cannot render, so the dashboard can say so."""
+
+    return _entitlements.unrecognized(values, plan)
+
+
 def _session_entitlement_snapshot() -> tuple[dict, Optional[str]]:
     """Read the session once; return its entitlement and the digest of those bytes.
 
@@ -3465,6 +3464,9 @@ def _session_entitlement_snapshot() -> tuple[dict, Optional[str]]:
             # own plan table fills it in.
             "features": _normalized_features(declared.get("cloud_features"), plan)
             if active else [],
+            "unrecognized_features": _unrecognized_features(
+                declared.get("cloud_features"), plan
+            ) if active else [],
             "cloud_access_active": active,
             "organization_id": str(declared.get("organization_id") or ""),
             "fetched_at": float(declared.get("entitlement_checked_at") or 0.0),
@@ -3552,6 +3554,8 @@ def _read_entitlement_cache_snapshot() -> tuple[dict, Optional[str]]:
     resolved = {
         "plan": plan,
         "features": _normalized_features(value.get("features"), plan) if active else [],
+        "unrecognized_features": _unrecognized_features(value.get("features"), plan)
+        if active else [],
         "cloud_access_active": active,
         "organization_id": organization_id,
         "fetched_at": fetched_at,
@@ -4061,6 +4065,7 @@ def _resolved_entitlement(known: dict, *, source: str) -> dict:
     resolved = {
         "plan": known["plan"],
         "features": list(known["features"]),
+        "unrecognized_features": list(known.get("unrecognized_features") or []),
         "source": source,
         "cloud_access_active": known["cloud_access_active"],
         "checked_at": known["fetched_at"],
@@ -4116,9 +4121,18 @@ def hosted_plan_summary() -> dict:
     # every hosted call is about to reject. One rule for both: the features are the ones
     # that are live right now.
     features = list(entitlement["features"]) if state in ("active", "trial") else []
+    # A server grant this build cannot render is not a grant either, but silence is how a
+    # paying customer ends up staring at a lock over something they bought. Keep it out of
+    # ``features`` (the lock-badge loop would tick a row it cannot verify) and surface it
+    # separately so the dashboard can ask for an update.
+    unrecognized = (
+        list(entitlement.get("unrecognized_features") or [])
+        if state in ("active", "trial") else []
+    )
     return {
         "plan": entitlement["plan"],
         "features": features,
+        "unrecognized_features": unrecognized,
         "plan_source": entitlement["source"],
         "cloud_access_active": entitlement["cloud_access_active"],
         "plan_checked_at": entitlement["checked_at"],
@@ -4192,6 +4206,9 @@ def get_license():
         "plan": plan,
         "features": summary["features"],
         "known_features": dict(_FEATURE_LABELS),
+        # Keys the control plane granted that this build does not know. They are never
+        # rendered as feature rows; the dashboard offers an update instead of a lock.
+        "unrecognized_features": summary["unrecognized_features"],
         # Diagnostics for support: which resolution rule produced this plan — one of
         # ``environment`` (the operator override), ``session`` (the entitlement the cloud
         # returned on registration/refresh), ``cloud`` (the cached entitlements read),

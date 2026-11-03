@@ -239,7 +239,7 @@ include = ["engraphis*", "scripts*", "eval*", "integrations.commandcode"]
 # runtime artifacts such as dashboard_assets/__pycache__/*.pyc after a local compile check.
 # vendor/**/* covers nested vendor assets too (vendor/* alone doesn't cross "/").
 "engraphis.dashboard_assets" = ["*.html", "*.css", "*.js", "*.png", "*.ico", "vendor/*", "vendor/**/*"]
-"engraphis" = ["commercial_manifest.json"]
+"engraphis" = ["commercial_manifest.json", "entitlement_contract.json"]
 "eval" = [
     "BASELINES.md",
     "EVIDENCE.md",
