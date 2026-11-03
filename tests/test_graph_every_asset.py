@@ -307,7 +307,8 @@ def test_renderer_uploads_change_driven_and_reports_honest_edge_counts() -> None
 
 def test_renderer_scales_picking_and_highlight_points_in_world_units() -> None:
     renderer = RENDERER.read_text(encoding="utf-8")
-    assert "(pointSize(best) + 7) / Math.max(0.005, state.camera.scale)" in renderer
+    assert "const scale = Math.max(0.005, state.camera.scale);" in renderer
+    assert "(pointSize(index) + 7) / scale" in renderer
     assert "state[key] = [state.positions[index * 2], state.positions[index * 2 + 1]];" in renderer
 
 
@@ -506,6 +507,68 @@ try {
     )
     report = json.loads(result.stdout)
     assert report["ok"], report.get("error")
+
+
+def test_every_community_legend_keeps_names_and_colors_when_scope_changes():
+    script = r"""
+const fs = require('fs');
+const source = fs.readFileSync('engraphis/dashboard_assets/engraphis-graph-every.js', 'utf8');
+const start = source.indexOf('      legend(limit) {');
+const end = source.indexOf('\n      resize, fit,', start);
+if (start < 0 || end < 0) throw new Error('missing legend');
+const state = { colorBy: 'community', ready: true,
+  ids: ['h1', 'h2', 'h3', 'v1', 'v2'], communities: [0, 0, 0, 1, 1] };
+let filtered = false;
+const passesFilters = index => !filtered || index >= 3;
+const nodeColor = index => ['red', 'blue'][state.communities[index]];
+eval('function ' + source.slice(start, end).trim().replace(/,$/, ''));
+const before = legend(); filtered = true; const hidden = legend();
+filtered = false; const restored = legend();
+console.log(JSON.stringify({ before, hidden, restored }));
+"""
+    result = subprocess.run(
+        ["node", "-e", script], cwd=ROOT, check=True, capture_output=True, text=True, timeout=20,
+    )
+    report = json.loads(result.stdout)
+    assert report["hidden"]["items"] == [report["before"]["items"][1]]
+    assert report["hidden"]["items"][0]["label"] == "Cluster 2"
+    assert report["restored"] == report["before"]
+
+
+def test_renderer_scope_filters_match_the_main_engine() -> None:
+    """"Unlinked nodes" governs degree-zero entities; "Minimum links" only linked ones.
+
+    The main engine has always kept unlinked entities visible while the toggle is on, whatever
+    the Minimum links value. The Every-node renderer used to hide them as soon as Minimum links
+    reached 1, so the same two controls showed different graphs in the two layouts.
+    """
+    renderer = RENDERER.read_text(encoding="utf-8")
+    start = renderer.index("    function passesFilters(index) {")
+    end = renderer.index("    function edgePassesFilters(index) {")
+    script = (
+        "const state = { ghosts: true, nodeGhosts: [], degrees: [0, 1, 3], scope: {} };\n"
+        + renderer[start:end]
+        + """
+const out = [];
+for (const scope of [
+  { showUnlinked: true, minDegree: 0 }, { showUnlinked: true, minDegree: 2 },
+  { showUnlinked: false, minDegree: 0 }, { showUnlinked: false, minDegree: 2 },
+]) {
+  state.scope = scope;
+  out.push([0, 1, 2].map(passesFilters));
+}
+console.log(JSON.stringify(out));
+"""
+    )
+    result = subprocess.run(
+        ["node", "-e", script], cwd=ROOT, check=True, capture_output=True, text=True, timeout=60,
+    )
+    assert json.loads(result.stdout) == [
+        [True, True, True],
+        [True, False, True],
+        [False, True, True],
+        [False, False, True],
+    ]
 
 
 def test_renderer_keeps_labeled_gl_canvas_accessible() -> None:

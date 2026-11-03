@@ -195,7 +195,13 @@ observations with their knowledge timestamps. A later shortening never replaces 
 observation: historical reads use the earliest endpoint known at their `known_at` anchor.
 The set is merged by union, deterministically ordered, and included in snapshot hashes.
 Each memory accepts at most 1,024 distinct observations; an oversized union is rejected
-without truncating the existing history. Schema 19 upgrades seed the available scalar closure;
+without truncating the existing history. That ceiling is partitioned rather than shared: a
+sync peer may install at most 960 observations on one memory, and the remaining 64 stay
+reserved for the local writer so a peer can never starve a local retirement or revision.
+The budget is spent only by observations the local record does not already hold, so a
+replay or a closure-neutral peer update is always accepted and stays idempotent. A new
+observation that would push the union past 960 is refused whole: the existing history is
+preserved and nothing is partially written. Schema 19 upgrades seed the available scalar closure;
 observations already lost by an earlier version cannot be reconstructed automatically.
 
 The format also carries a per-device `generation`, `previous_hash`,
@@ -236,7 +242,7 @@ replica; a peer cannot attach graph edges to locally approved memories.
 - Local-only installations send no memory content to Engraphis. **Cloud Sync encrypts eligible
   shared-workspace changes end-to-end before they leave this device. Engraphis Cloud cannot read
   their contents; secret and session-scoped memories stay local.** Managed compute is separate:
-  explicit workspace approval in Manage → Settings is required before readable uploads;
+  explicit workspace approval in Settings → Preferences is required before readable uploads;
   connecting an account does not grant it. A deny-only operator override is available with
   `ENGRAPHIS_MANAGED_COMPUTE_CONSENT=0`. Approved processing sends a readable, bounded
   snapshot over TLS because Engraphis Cloud must process that snapshot to produce results.

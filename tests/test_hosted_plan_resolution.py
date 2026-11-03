@@ -46,7 +46,7 @@ from engraphis import cloud_session  # noqa: E402
 from engraphis.routes import v2_api  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DASHBOARD_JS = REPO_ROOT / "engraphis" / "static" / "dashboard.js"
+DASHBOARD_JS = REPO_ROOT / "engraphis" / "dashboard_assets" / "ledger.js"
 
 ORGANIZATION = "org_paying_team"
 CONTROL_URL = "https://control.example.test"
@@ -325,11 +325,11 @@ def test_a_lapsed_subscription_keeps_its_plan_name_but_loses_its_features(
 def test_the_dashboards_gated_navigation_unlocks_for_an_authoritative_team_plan(
     monkeypatch,
 ) -> None:
-    """Close the loop on the shipped JS: ``locked = !features.includes(f)``."""
+    """Close the loop on the shipped JS: every hosted tab's feature key is granted."""
 
     script = DASHBOARD_JS.read_text(encoding="utf-8")
-    block = script[script.index("function updateFeatureLocks()"):]
-    gated = re.findall(r"apply\('[^']+',\s*'([^']+)'", block[:block.index("\n}")])
+    block = script[script.index("const renderFeatureCtas = () => {"):]
+    gated = re.findall(r"\['[^']+', '([^']+)', '(?:pro|team)'\]", block[:block.index("].forEach(")])
     assert set(gated) == {"analytics", "automation", "team"}, gated
 
     _connect(monkeypatch)
@@ -2203,8 +2203,8 @@ def test_every_access_state_the_dashboard_renders_is_one_the_client_can_produce(
     """Close the loop on the shipped JS: an unhandled state would render as a blank badge."""
 
     script = DASHBOARD_JS.read_text(encoding="utf-8")
-    block = script[script.index("function licAccessState()"):]
-    handled = set(re.findall(r"s==='([a-z_]+)'", block[:block.index("\n")]))
+    block = script[script.index("function licenseAccessState("):]
+    handled = set(re.findall(r"'([a-z_]+)'", block[:block.index("].includes(value)")]))
 
     assert handled | {"inactive"} == set(v2_api._ACCESS_STATES)
 
@@ -2227,43 +2227,38 @@ def test_the_dashboard_never_offers_a_trial_it_was_not_told_is_available() -> No
 
     script = DASHBOARD_JS.read_text(encoding="utf-8")
 
-    assert "function licTrialAvailable(){return !!(LIC&&LIC.trial&&LIC.trial.available)}" \
-        in script
+    available = script[script.index("  function licenseTrialAvailable("):]
+    available = available[:available.index("\n  }\n")]
+    assert "license.trial.available" in available
+    # Only an unconnected installation may be offered a trial.
+    assert "licenseAccessState(license) === 'inactive'" in available
+    assert "license.plan_source === 'local'" in available
     # No affordance may still be gated on the old always-false flag.
-    assert "LIC.trial.used" not in script
-    hosted_cta = script[script.index("function hostedCta("):]
-    hosted_cta = hosted_cta[:hosted_cta.index("\n")]
-    assert "days=licTrialDays(plan)" in hosted_cta
-    assert "Start ${days?`${days}-day `:''}${name} trial" in hosted_cta
-    assert "licTrialAvailable()&&state==='inactive'" in hosted_cta
-    team = script[script.index("async function loadTeam()"):
-                  script.index("/* health + settings */")]
-    assert "hostedCta('team','team_tab')" in team
-    marker = "esc(hostedCta('pro','analytics').label)"
-    index = script.index(marker)
-    window = script[max(0, index - 400):index]
-    assert "licTrialAvailable()" in window, marker
+    assert "trial.used" not in script
+    hosted_cta = script[script.index("  function hostedCta("):]
+    hosted_cta = hosted_cta[:hosted_cta.index("\n  }\n")]
+    assert "const days = licenseTrialDays(plan);" in hosted_cta
+    assert "`Start ${days ? `${days}-day ` : ''}${name} trial`" in hosted_cta
+    assert "const trial = licenseTrialAvailable() && stateName === 'inactive';" in hosted_cta
+    # Every feature call to action -- Analytics, Automation and Team -- goes through it.
+    features = script[script.index("const renderFeatureCtas = () => {"):]
+    assert "const featureCta = hostedCta(plan, content);" in features[:features.index("};")]
 
 
-def test_the_dashboard_explains_a_locked_state_without_a_header_badge() -> None:
-    """The side-menu header must not render a plan or upgrade badge."""
+def test_the_dashboard_explains_a_locked_state_in_words() -> None:
+    """A locked plan is explained -- what happened and what is still safe -- not just badged."""
 
     script = DASHBOARD_JS.read_text(encoding="utf-8")
-    banner = script[script.index("function licStateBanner("):]
-    banner = banner[:banner.index("\nfunction licActionsHtml")]
+    status = script[script.index("  function renderLicenseStatus("):]
+    status = status[:status.index("\n  async function loadPlans")]
 
     for state in ("trial_expired", "lapsed", "inactive"):
-        assert "state==='%s'" % state in banner, state
+        assert "access === '%s'" % state in status, state
     # Each locked state says what happened and what is still safe.
-    assert "free trial has ended" in banner
-    assert "no longer active" in banner
-    assert "local database" in banner
-    # The updater remains as a compatibility hook, but it must not render a badge.
-    assert "function updateLicBadge()" in script
-    badge = script[script.index("function updateLicBadge()"):]
-    badge = badge[:badge.index("\n")]
-    assert "licAccessState()" not in badge
-    assert "GET PRO" not in badge and "BILLING" not in badge
+    assert "free trial has ended" in status
+    assert "no longer active" in status
+    assert "local database" in status
+    assert "Local memories are unaffected" in status
 
 
 def test_both_persisted_answers_read_every_trial_field_the_server_sends() -> None:
@@ -2284,9 +2279,9 @@ def test_the_plan_source_diagnostic_is_finally_rendered() -> None:
 
     script = DASHBOARD_JS.read_text(encoding="utf-8")
 
-    assert "d.plan_source" in script
-    assert "d.plan_checked_at" in script
-    assert "LIC_SOURCE_LABEL" in script
+    assert "license.plan_source" in script
+    assert "license.plan_checked_at" in script
+    assert "LICENSE_SOURCES[license.plan_source]" in script
 
 
 # ── (8) the shipped modules must still build on the supported floor ───────────

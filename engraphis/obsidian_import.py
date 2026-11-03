@@ -11,7 +11,6 @@ import hashlib
 import json
 from pathlib import PurePosixPath
 import posixpath
-import re
 import time
 from typing import Any, Callable, Iterable, Optional, Protocol, Sequence
 import unicodedata
@@ -29,18 +28,14 @@ from engraphis.core.obsidian import (
     normalize_obsidian_path,
     parse_obsidian_note,
 )
+from engraphis.core.source_paths import sensitive_path as _sensitive_path
 from engraphis.core.store import ReceiptChainIntegrityError
 
 
 _SAFE_ERROR = "note import failed"
 _CONFLICT_POLICIES = {"error", "replace", "new"}
 _ACTIVE_ITEM_STATES = {"imported", "unchanged", "renamed", "skipped"}
-_SENSITIVE_NAMES = {
-    ".env", "credentials", "credentials.json", "id_dsa", "id_rsa",
-    "id_ecdsa", "id_ed25519", "authorized_keys", "known_hosts",
-    "recovery-codes", "recovery_codes", "secret", "secret.json",
-    "secrets", "secrets.json", "token", "tokens",
-}
+
 
 
 class _ImportLink(Protocol):
@@ -200,8 +195,7 @@ def scan_obsidian_upload(
         if not relative_path.casefold().endswith(".md"):
             scan.skipped.append(ObsidianFileIssue(relative_path, "non-Markdown file skipped"))
             continue
-        name = parts[-1].casefold()
-        if _sensitive_name(name):
+        if _sensitive_path(relative_path):
             scan.rejected.append(ObsidianFileIssue(relative_path, "sensitive filename"))
             continue
         if not isinstance(raw, bytes):
@@ -222,16 +216,6 @@ def scan_obsidian_upload(
         except ValueError as exc:
             scan.rejected.append(ObsidianFileIssue(relative_path, _safe_parse_reason(exc)))
     return scan
-
-
-def _sensitive_name(name: str) -> bool:
-    lowered = name.casefold()
-    return (
-        lowered in _SENSITIVE_NAMES
-        or lowered.startswith(".env.")
-        or lowered.endswith((".key", ".p12", ".pem", ".pfx"))
-        or bool(re.search(r"(?:credential|recovery[-_ ]?code|secret|token)", lowered))
-    )
 
 
 def _safe_parse_reason(exc: BaseException) -> str:

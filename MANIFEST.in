@@ -1,10 +1,6 @@
 global-exclude *.pyc
 global-exclude *.pyo
 
-recursive-include engraphis/static *.html *.css *.js *.png *.ico
-recursive-include engraphis/static/vendor *
-recursive-include engraphis/classic_assets *.html *.css *.js *.png *.ico
-recursive-include engraphis/classic_assets/vendor *
 recursive-include engraphis/dashboard_assets *.html *.css *.js *.png *.ico
 recursive-include engraphis/dashboard_assets/vendor *
 include engraphis/commercial_manifest.json
@@ -16,6 +12,15 @@ include docs/REWORK_EXECUTION.md docs/ENGINE_CAPACITY_PROTOCOL.md docs/CODING_AC
 include docs/PAID_EVALUATION_PROPOSAL.md
 include docs/DOCUMENT_IMPORT.md docs/OBSIDIAN_IMPORT.md
 include docs/images/context-efficiency.svg
+include docs/images/context-efficiency-pr260-release-review-followups-20261018.svg
+include docs/images/context-efficiency-pr260-postreset-final-runtime-20261018-e35939493c3d.svg
+include docs/images/context-efficiency-pr260-postreset-reviewed-runtime-20261018-7feffc9e2693.svg
+include docs/images/context-efficiency-pr260-coordinated-policy-runtime-20261018-f34d7cffe2b7.svg
+include docs/images/context-efficiency-pr260-serial-policy-runtime-20261018-201303c2a1a6.svg
+include docs/images/context-efficiency-pr260-masked-axis-runtime-20261018-efa4a9c83a5b.svg
+include docs/images/context-efficiency-pr260-transport-scope-runtime-20261018-65821cf6bfee.svg
+include docs/images/context-efficiency-pr260-neutral-title-runtime-20261018-39628c9a99b0.svg
+include docs/images/context-efficiency-pr260-nested-uri-redaction-runtime-20261018-e2ebfb06550f.svg
 include pyproject.toml
 include .env.example requirements.txt
 include docker-entrypoint.sh Dockerfile docker-compose.yml docker-compose.lan.yml

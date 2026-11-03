@@ -51,31 +51,64 @@ Memories may originate from web pages, tool output, or other untrusted sources.
 > detector bypass through ingest, and a mislabeled trusted case. Its metrics apply only to those
 > declared synthetic cases.
 
-**Dashboard XSS (fixed):** Memory content rendered as markdown is now sanitized via
-DOMPurify at all render sites. Verified against payloads with `onerror` handlers.
+**Dashboard XSS (fixed):** The dashboard renders memory content as Markdown with its own
+DOM-only renderer (`engraphis/dashboard_assets/markdown.js`): it builds elements with
+`textContent`, never parses HTML or assigns `innerHTML`, and links only absolute `http(s)` and
+`mailto` URLs. Raw HTML in a memory is shown as text. The renderer is bounded (linear scans,
+capped tables and element count) so crafted content cannot freeze the page used to review it;
+`tests/test_markdown_renderer.py` exercises hostile and oversized inputs.
 
 ### 2. Network exposure & authentication
 - **Loopback by default** (`ENGRAPHIS_HOST=127.0.0.1`)
 - **Optional bearer token** (`ENGRAPHIS_API_TOKEN`): constant-time comparison (single
   shared implementation in the local customer runtime)
-- **Automatic local dashboard access:** the browser on this computer obtains its
-  HttpOnly, SameSite session without entering an API token. Session issuance requires
-  a literal loopback peer, a loopback/localhost Host, an exact same-origin POST, and
-  the dashboard's custom browser header. Forwarding headers, nonlocal peers, DNS
-  hostnames, cross-site requests, and configured LAN-trust exceptions cannot mint it.
-  Existing browser confirmations and CSRF checks still govern reviewed writes.
-  Local programs already able to act as this user remain inside the local trust boundary.
+- **Automatic dashboard access (default):** a browser that can reach the dashboard opens it
+  without entering a credential. Session issuance requires a same-origin POST carrying the
+  dashboard's custom browser header and an Origin that exactly matches a published Host
+  (loopback, a literal address, a single-label/mDNS name, or the configured
+  `ENGRAPHIS_DASHBOARD_URL`). Forwarding headers are honored only from a proxy listed in
+  `ENGRAPHIS_FORWARDED_ALLOW_IPS`, so another website cannot drive a browser into this
+  server through DNS rebinding. Existing browser confirmations and CSRF checks still govern
+  reviewed writes. **The deployment's network reachability is the dashboard's boundary:**
+  anyone who can open that origin has full access to this node's memories. Set
+  `ENGRAPHIS_BROWSER_AUTO_SESSION=0` to require one-time sign-in links instead; a token-gated
+  instance then refuses automatic sessions with `403 local_token_required` and does not hint
+  at them. Every automatic signal is an ordinary request header, so a loopback port-forward
+  (`ssh -L`, `netsh portproxy`) can forge all of them while choosing `Host` and `Origin`
+  itself; that is why hardened mode exists for exposed deployments. Remote API and MCP
+  clients always need `Authorization: Bearer`.
 - Pro and Team account sign-in belongs to optional hosted services; it does not gate
   opening the local dashboard. Remote API and operator access still require credentials.
 - **No local Team identity service:** the public dashboard is single-user. Team logins,
   invitations, roles, named seats, token rotation, and organization audit are hosted and are
   not mounted by this package.
 - **CORS allow-list** defaults to loopback only
+- **Specification file reads are local-transport only:** `spec_crawl(source_id=...)`
+  is available to direct Python and stdio operators under approved roots. HTTP requests,
+  including authenticated dashboard MCP and standalone loopback MCP, must submit text or
+  select procedural memories. Bearer tokens and nested service bindings do not grant
+  access to operator-local files; work inherited from HTTP retains this restriction.
+- **Cross-site browser requests refused without a token:** the zero-config API trusts loopback
+  callers, so it refuses requests that a browser marks (`Origin`, `Sec-Fetch-Site`) as started
+  by another website unless they carry the dashboard's `X-Engraphis-Browser-Session` header or
+  an `Authorization` header, which a cross-site page can only send after a CORS preflight.
+  Non-browser clients send neither marker and are unaffected.
+- **Host names checked without a token:** the zero-config dashboard API (including its
+  `/dashboard/review` routes) and the token-free read-only graph server refuse requests
+  addressed to any name other than exactly `localhost`, an IP address, the bind host, the host
+  of `ENGRAPHIS_DASHBOARD_URL` or a name in `ENGRAPHIS_ALLOWED_HOSTS`, so a website that points
+  its own name at 127.0.0.1 (DNS rebinding) cannot use them. The `/mcp` endpoint keeps its own
+  Host allow-list. A configured API token is the boundary instead, under any name.
 - If exposed beyond localhost: put behind reverse proxy with **TLS + rate limiting**
 
 ### 3. Scope isolation
 - Every read takes a `SearchFilter`; tools only return memories within requested `workspace`/`repo`
 - Every write targeting a memory by ID re-validates scope membership
+- Spec-audit remediation treats ancestor visibility as read access. Supersession requires
+  the retained policy to cover the retired policy's workspace/repository/session domain,
+  and retirement must stay within the explicitly selected mutation scope. Links require
+  compatible domains and a selected endpoint. Validation and temporal link/retirement
+  changes share one transaction, preserving history and rolling back partial changes.
 - Workspace creation is not controlled by a process-wide allow-list; each operation still
   carries its explicit workspace/repo/session scope and authenticated personal workspaces
   enforce their owner boundary
@@ -105,6 +138,12 @@ CLI indexing retain the `ENGRAPHIS_INDEX_ROOTS` allow-list semantics.
 does not follow file symlinks outside the root, prunes dependency/build directories during the
 walk, and honors the root `.engraphisignore` without allowing negation rules to re-expose
 hardcoded excludes.
+`import_folder` resolves the requested folder inside the home directory and widens that boundary
+only through `ENGRAPHIS_IMPORT_ROOTS`. UNC shares and Windows device paths are rejected on the raw
+path before any resolution or stat, for the requested folder and for every allow-list entry, so a
+crafted path cannot open an SMB session or disclose NTLM credentials. The same raw-text rule
+covers Markdown vault scans, code-index roots, and `source_id` reads, and the file guard applies
+it to both the target and the working directory.
 Anyone who can reach an authenticated local mutation route has the authority of that local
 installation, so do not share its bearer token.
 
@@ -113,7 +152,16 @@ installation, so do not share its bearer token.
 Memory governance is not a filesystem sandbox. For hosts that mediate tool calls, Engraphis ships
 a fail-closed protected-path evaluator and an optional Command Code `PreToolUse` hook. Its policy
 lives outside the repository, direct file tools are checked before execution, and general shell
-access is denied by default because command inspection cannot guarantee non-mutation. See
+access is denied by default because command inspection cannot guarantee non-mutation. The hook
+exits with status 2 (the only status the host treats as a denial) for every failure: a missing
+install, a missing/malformed/unsafe policy, an unusable or oversized payload, or an unexpected
+error. A missing policy denies every call rather than allowing everything.
+
+Path comparison follows the platform: case-insensitive on Windows and on case-insensitive volumes
+(macOS), Unicode-normalized everywhere, and on Windows extended-length, device, UNC,
+admin-share, alternate-data-stream and drive-relative targets are denied because they cannot be
+mapped back to a protected root. The policy file and the host's hook configuration are themselves
+protected, so a guarded process cannot switch the guard off through a direct file write. See
 [`docs/FILE_PROTECTION.md`](docs/FILE_PROTECTION.md) for setup, host integration, and limitations.
 Use OS ACLs or read-only mounts when the agent can invoke tools outside that hook.
 
@@ -123,6 +171,11 @@ Use OS ACLs or read-only mounts when the agent can invoke tools outside that hoo
 - The import UI's `derive_facts` option is a separate explicit opt-in. If an LLM/custom
   extractor is configured, selected file content may be sent to that provider; leave it off
   for a strictly local import. The default and chunk extractors remain fully local.
+- A multipart upload needs no CORS preflight, so `/api/workspaces/import-files` refuses
+  browser requests (those carrying `Origin` or `Sec-Fetch-Site`) unless they also carry the
+  dashboard's session header or an `Authorization` header. Another website therefore cannot
+  make a visitor's browser import files into a zero-config loopback install. Non-browser
+  clients are unaffected.
 - Audio/video transcription runs only when `ENGRAPHIS_WHISPER_MODEL` is configured. Depending on
   the faster-whisper model name, the underlying library may download a model; use an absolute
   local model path when strictly offline operation is required.

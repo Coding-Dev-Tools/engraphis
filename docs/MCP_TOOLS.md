@@ -70,7 +70,7 @@ nor `auto` silently switches to BYOK.
 
 No user profile choice or tool switching is required. The dashboard `/mcp` endpoint and
 `engraphis-mcp-http` use this Smart surface by default. `engraphis-mcp-classic` (or
-`engraphis-mcp-http --classic`) preserves the 39 direct tools below for integrations that pin
+`engraphis-mcp-http --classic`) preserves the 43 direct tools below for integrations that pin
 their historical names and response shapes.
 
 Hosts which already own chat history should use `POST /api/adaptive-context`, not an MCP action.
@@ -188,8 +188,8 @@ an omitted mode means it was not recorded, and is not inferred from current defa
 | Stateful read | `engraphis_answer` | Backward-compatible alias for `engraphis_recall_grounded`. |
 | Pure read | `engraphis_recall_proactive` | Returns high-signal, queryless context and a last-session handoff. It does not reinforce or record a receipt. |
 | Stateful read | `engraphis_proactive_context` | Builds task-aware cited context and attempts a receipt without reinforcement. |
-| Read | `engraphis_why` | Returns the current answer and the memories it superseded. |
-| Read | `engraphis_timeline` | Returns complete bi-temporal history, oldest first. |
+| Read | `engraphis_why` | Returns the current answer and the memories it superseded. History hydrates an indexed candidate window instead of every corpus row; a semantic embedder still ranks against its stored vectors. |
+| Read | `engraphis_timeline` | Returns bi-temporal history, oldest first. Each returned memory carries its complete closure set; hydration is bounded, while a semantic embedder still ranks against its stored vectors. |
 | Code | `engraphis_index_repo` | Incrementally parses a repository into the code and memory graph. Each run attempts a receipt. |
 | Code | `engraphis_search_code` | Finds symbols, callers, and linked memories. |
 | Code | `engraphis_code_path` | Finds a path across definitions, calls, imports, and memories. |
@@ -214,6 +214,17 @@ an omitted mode means it was not recorded, and is not inferred from current defa
 | Operations | `engraphis_stats` | Returns memory counts for health checks. |
 | Operations | `engraphis_check_update` | Refreshes the release cache and reports whether a newer version is available. Update checks are OFF unless `ENGRAPHIS_UPDATE_CHECK` is set to an affirmative value; `=0` keeps them off. |
 | Decision | `engraphis_decide` | Advisory typed decisions with local fallback. Remote Jev requires an explicit backend and per-call `allow_remote=true`; missing, malformed, and uncertain answers stay visible. Smart discovery routes it through `engraphis_execute_action` because a remote call may consume allowance. |
+| Quality | `engraphis_spec_crawl` | Offline deterministic prompt spec crawler; returns scores, radar coverage, classified tokens, connection tentacles, and flags. |
+| Quality | `engraphis_spec_crawl_answer` | Clarification answer submission updating specifications and writing pending procedural memories for review. |
+| Quality | `engraphis_spec_crawl_memories` | Analyzes a bounded sample of active memory nodes for contradictions, stored-graph orphans, operational gaps, and health; explicitly reports truncation. |
+| Quality | `engraphis_spec_crawl_resolve` | Applies an explicitly requested link or confirmed supersession to selected memory nodes. |
+
+`engraphis_spec_crawl(source_id=...)` reads approved local specification files only through
+direct Python or stdio use. All HTTP transports, including authenticated dashboard MCP,
+accept submitted text or procedural memories instead. Spec-audit supersession may retain
+a broader policy while retiring a selected narrower policy, but cannot retire a broader
+ancestor or cross repository/session identities. Links require compatible scopes and at
+least one endpoint within the requested mutation scope.
 
 Classic `engraphis_start_session` accepts optional `resume_from_session_id` for the same explicit,
 same-owner, exact-workspace/repository handoff. Its `handoff_usage` reports the deterministic output

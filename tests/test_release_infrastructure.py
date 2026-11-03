@@ -216,7 +216,7 @@ def test_ci_and_release_audit_production_image_dependencies():
     assert (
         _text("Dockerfile").splitlines()[1]
         == "FROM python:3.11-slim@sha256:"
-        "a630a63cdb314e2d138a2fca3e375e319e8568346ffafac5b980f888630ac4f1 AS base"
+        "b7a9e5f6a93d6d4a31f129bbd4bdee69efccb6ded0fb230d78aafaf37af98377 AS base"
     )
     assert "Verify production image OCR runtime" in ci
     assert "Verify production image OCR runtime" in release
@@ -268,6 +268,18 @@ def test_ci_and_release_never_hide_skips_or_lose_the_full_stack_silently():
     required = 'import fastapi, httpx, mcp, multipart, pydantic, uvicorn'
     assert required in _text(".github/workflows/ci.yml")
     assert required in _text(".github/workflows/release.yml")
+
+
+def test_release_runs_the_offline_evaluations_required_by_ci():
+    """A protected-main CI gate must remain a gate on the exact release source."""
+
+    ci = _text(".github/workflows/ci.yml")
+    release = _text(".github/workflows/release.yml")
+    build = release.split("  build:\n", 1)[1].split("  reproducibility-build:\n", 1)[0]
+    evaluations = re.findall(r"run:\s*(python -m eval\.[^\n]+)", ci)
+    assert "python -m eval.spec_crawl" in evaluations
+    for command in evaluations:
+        assert command in build, f"release build omits the CI evaluation: {command}"
 
 
 def test_sqlcipher_driver_has_a_dedicated_short_lived_integration_gate():
@@ -399,7 +411,7 @@ def test_tag_release_binds_codeql_reproducibility_and_installed_artifact_smokes(
     assert "PIP_BUILD_CONSTRAINT: ${{ github.workspace }}/.github/release-constraints.txt" in build
     for pin in (
         "pip==26.2",
-        "setuptools==83.0.0",
+        "setuptools==84.1.0",
         "wheel==0.47.0",
         "build==1.5.0",
         "twine==6.2.0",
@@ -453,7 +465,7 @@ def test_ci_linter_is_bounded_to_the_verified_release_series():
     # is not stable across minor releases -- 0.16 widened it from 59 rules to 413, which
     # would have turned `ruff check .` red on unchanged code. Pinning `select` explicitly
     # is what actually bounds CI, so the bound and the rule set are asserted together.
-    assert pyproject.count('"ruff>=0.15.22,<0.17"') == 2
+    assert pyproject.count('"ruff>=0.15.22,<0.18"') == 2
     assert 'select = ["E4", "E7", "E9", "F"]' in pyproject
 
 
@@ -537,8 +549,8 @@ def test_primary_github_release_targets_repository_without_checkout():
 
 def test_public_capability_and_support_docs_match_the_shipped_tree():
     server = _text("engraphis/mcp_server.py")
-    tools = re.findall(r'@(?:_threaded_tool\(\s*mcp,\s*|\s*mcp\.tool\(\s*)name="(engraphis_[^"]+)"', server)
-    assert len(tools) == len(set(tools)) == 39
+    tools = re.findall(r'@mcp\.tool\(\s*name="(engraphis_[^"]+)"', server)
+    assert len(tools) == len(set(tools)) == 43
 
     readme = _text("README.md")
     licensing = _text("docs/LICENSING.md")
@@ -551,7 +563,7 @@ def test_public_capability_and_support_docs_match_the_shipped_tree():
         assert "28-tool" not in content
         assert "(28 of them)" not in content
     assert "Smart MCP (9 tools)" in architecture
-    assert "Classic MCP (39 tools)" in architecture
+    assert "Classic MCP (43 tools)" in architecture
     assert "default Smart MCP surface has nine" in skill
     assert "Classic direct-tool guide" in skill
     assert "engraphis-mcp-classic" in skill
@@ -595,9 +607,11 @@ def test_public_capability_and_support_docs_match_the_shipped_tree():
             "engraphis/dashboard_assets/index.html",
             "engraphis/dashboard_assets/ledger.css",
             "engraphis/dashboard_assets/ledger.js",
-            "engraphis/classic_assets/index.html",
-            "engraphis/classic_assets/dashboard.js",
-            "engraphis/static/dashboard.js", "engraphis/static/index.html",
+            # First-party Ledger scripts split out of ledger.js.
+            "engraphis/dashboard_assets/action-dialog.js",
+            "engraphis/dashboard_assets/graph-explorer.js",
+            "engraphis/dashboard_assets/import-sources.js",
+            "engraphis/dashboard_assets/markdown.js",
         )
     ]
     public_paths.extend((ROOT / "docs").rglob("*.md"))
@@ -646,3 +660,161 @@ def test_grype_configuration_ignores_upstream_cpython_cves():
     assert 'vulnerability: "CVE-2026-82049"' in grype
     assert 'name: "stdlib"' in grype
     assert 'type: "go-module"' in grype
+
+
+def _job_block(workflow: str, job: str) -> str:
+    match = re.search(rf"(?ms)^  {re.escape(job)}:\n(.*?)(?=^  \S[^:\n]*:\n|\Z)", workflow)
+    assert match is not None, f"release job {job!r} is missing"
+    return match.group(1)
+
+
+def test_python39_jobs_use_a_runner_with_the_supported_toolcache():
+    """Ubuntu 26.04 does not provide Python 3.9 through actions/setup-python."""
+    for workflow, jobs in (
+        (".github/workflows/ci.yml", ("core-py39",)),
+        (".github/workflows/release.yml", ("python-matrix", "artifact-core-py39")),
+    ):
+        content = _text(workflow)
+        for job in jobs:
+            body = _job_block(content, job)
+            assert re.search(r"(?m)^    runs-on: ubuntu-24\.04$", body), job
+
+
+def test_release_transitive_dependency_security_floors_cannot_regress():
+    package = json.loads(_text("integrations/pi/package.json"))
+    lock = json.loads(_text("integrations/pi/npm-shrinkwrap.json"))
+    expected_overrides = {
+        "body-parser": "^2.4.0",
+        "fast-uri": "^3.1.9",
+        "minimatch": "^11.0.3",
+        "undici": "^8.12.3",
+        "zod": "^4.6.6",
+    }
+    for name, floor in expected_overrides.items():
+        assert package["overrides"][name] == floor
+        locked = lock["packages"][f"node_modules/{name}"]["version"]
+        assert tuple(map(int, locked.split("."))) >= tuple(
+            map(int, floor.removeprefix("^").split("."))
+        )
+
+    # The Pi test host is pinned to a release whose own shrinkwrap resolves the patched
+    # leaves. Earlier releases needed a post-install repair, which could not clear the
+    # lock-based audit; the overrides now do, so CI audits without rewriting node_modules.
+    assert package["devDependencies"]["@earendil-works/pi-coding-agent"] == "1.4.0"
+    ci = _text(".github/workflows/ci.yml")
+    assert "brace-expansion@" not in ci
+    assert "npm audit --omit=dev" in ci
+    assert "npm audit --no-package-lock --include=dev" in ci
+    assert 'pip install --upgrade "filelock>=4.2.1,<5"' in _text("Dockerfile")
+
+
+def test_privileged_publication_jobs_use_no_dependency_cache():
+    """A privileged publication job must not be fed by a shared dependency cache.
+
+    ``actions/setup-python``'s pip cache key is derived only from the runner
+    image, the interpreter version, and the hashed dependency files — not from
+    the ref — so a job that holds the PyPI OIDC token or release write
+    permission can be served by a cache that branch CI also writes.  The
+    privileged jobs therefore declare no cache at all.
+    """
+    release = _text(".github/workflows/release.yml")
+    for job in ("publish", "github-release", "github-release-repair"):
+        body = _job_block(release, job)
+        assert "cache:" not in body, f"{job} declares a dependency cache"
+        assert "cache-dependency-path:" not in body, f"{job} declares a cache path"
+
+    # The non-privileged verification jobs may still cache, and their cache
+    # key is bound to the pinned release constraints so it cannot be reused
+    # for a different dependency set.
+    build = _job_block(release, "build")
+    assert "cache: pip" in build
+    assert ".github/release-constraints.txt" in build
+
+    # Nothing in the publication path may run on an untrusted pull request.
+    assert "pull_request_target" not in release
+    assert "pull_request" not in release
+
+
+def test_release_publication_verifies_signed_qualification_when_opted_in():
+    """Environment approval always gates publication; the signed envelope is opt-in.
+
+    With ``REQUIRE_SIGNED_QUALIFICATION=true`` a tag run without the qualification
+    secrets must stop before publishing. Unset, the verifier step is skipped and the
+    protected environment approval plus the build gates remain the requirement.
+    """
+    release = _text(".github/workflows/release.yml")
+    publish = _job_block(release, "publish")
+    release_job = _job_block(release, "github-release")
+
+    for body in (publish, release_job):
+        assert "environment: release-qualification" in body
+        step = body.split("- name: Require signed full-product qualification before ", 1)[1]
+        step = step.split("\n      - ", 1)[0]
+        assert "\n        if: vars.REQUIRE_SIGNED_QUALIFICATION == 'true'\n" in step
+        assert "scripts.verify_release_qualification" in step
+        assert "continue-on-error" not in step
+        for secret in (
+            "ENGRAPHIS_RELEASE_QUALIFICATION",
+            "ENGRAPHIS_RELEASE_VERIFY_KEY",
+            "ENGRAPHIS_RELEASE_CANDIDATE_ID",
+            "ENGRAPHIS_RELEASE_LEDGER_SHA256",
+        ):
+            assert f"secrets.{secret}" in body, secret
+        qualification = body.index("scripts.verify_release_qualification")
+        assert "pypa/gh-action-pypi-publish" not in body[:qualification]
+        assert "gh release create" not in body[:qualification]
+
+    # The qualification gate runs before the publisher and before the release.
+    publish_qualification = publish.index("scripts.verify_release_qualification")
+    assert publish.index("pypa/gh-action-pypi-publish") > publish_qualification
+    assert publish.index("Freeze verified distribution set") < publish_qualification
+    release_qualification = release_job.index("scripts.verify_release_qualification")
+    assert release_job.index("Create GitHub Release") > release_qualification
+
+    # The publisher is the only step that can write to PyPI, and the exact
+    # published file set is re-verified afterwards.
+    assert publish.count("pypa/gh-action-pypi-publish") == 1
+    assert "skip-existing: true" in publish
+    assert "Require the exact complete PyPI file set" in publish
+    assert "--retries 18 --delay 10" in publish
+
+
+def test_release_tag_must_be_pushed_from_protected_main():
+    """A tag on an unmerged commit must never reach the publication jobs."""
+    release = _text(".github/workflows/release.yml")
+    build = _job_block(release, "build")
+
+    assert "Require tag and package version to match" in build
+    assert 'test "$GITHUB_REF_NAME" = "v$actual"' in build
+    assert "Require release tag commit to be on protected main" in build
+    assert "git fetch --no-tags origin main:refs/remotes/origin/main" in build
+    assert 'git merge-base --is-ancestor "$GITHUB_SHA" origin/main' in build
+
+    # The trigger accepts version tags only, and never a branch push.
+    assert re.search(r"(?ms)^on:\n  push:\n    tags:\n      - \"v\*\.\*\"\n", release)
+    assert "branches:" not in release.split("jobs:", 1)[0]
+
+
+def test_release_workflow_permissions_are_least_privilege():
+    """Only the jobs that need a write scope may request one."""
+    release = _text(".github/workflows/release.yml")
+
+    publish = _job_block(release, "publish")
+    assert "id-token: write" in publish
+    assert "contents: read" in publish
+    assert "contents: write" not in publish
+
+    release_job = _job_block(release, "github-release")
+    assert "contents: write" in release_job
+    assert "id-token: write" not in release_job
+
+    repair = _job_block(release, "github-release-repair")
+    assert "contents: write" in repair
+    assert "id-token: write" in repair
+
+    # The verification jobs stay read-only.
+    for job in ("build", "reproducibility-build", "python-matrix", "release-evidence"):
+        body = _job_block(release, job)
+        assert "contents: write" not in body, job
+        assert "id-token: write" not in body, job
+

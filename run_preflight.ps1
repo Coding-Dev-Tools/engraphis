@@ -1,5 +1,5 @@
-# Engraphis Deterministic Outside Judge: Local Pre-Flight CI Gate
-# Enforces zero-failure policy before pushing to GitHub Actions ($15/mo budget protection).
+# Engraphis local pre-flight verification.
+# Runs the same offline gates as CI before a push, so a broken tree costs no CI time.
 
 param(
     [switch]$Fast,
@@ -9,10 +9,8 @@ param(
 $ErrorActionPreference = "Stop"
 
 Write-Host "================================================================================" -ForegroundColor Cyan
-Write-Host " ENGRAPHIS LOCAL PRE-FLIGHT VERIFICATION HARNESS" -ForegroundColor Cyan
-Write-Host " Outside Judge Standard: Zero errors, zero failures, zero unapproved skips" -ForegroundColor Cyan
-Write-Host " FinOps Limit: $15/month GitHub Actions budget cap" -ForegroundColor Cyan
-Write-Host " Mode: $(if ($Fast) {'Fast Unit'} elseif ($SkipEval) {'Full Offline (No Eval)'} else {'Complete Primary Gate'})" -ForegroundColor Cyan
+Write-Host " ENGRAPHIS LOCAL PRE-FLIGHT VERIFICATION" -ForegroundColor Cyan
+Write-Host " Mode: $(if ($Fast) {'Fast smoke'} elseif ($SkipEval) {'Full offline (no eval)'} else {'Complete primary gate'})" -ForegroundColor Cyan
 Write-Host "================================================================================" -ForegroundColor Cyan
 
 $startTime = Get-Date
@@ -80,7 +78,7 @@ $step4 = Invoke-GateStep "Offline Unit Test Suite" {
     if ($Fast) {
         & $pythonExe -m pytest tests/test_adaptive_context.py tests/test_v2_service_binding.py -q
     } else {
-        & $pythonExe -m pytest tests/test_adaptive_context.py tests/test_v2_service_binding.py -q
+        & $pythonExe -m pytest tests/ -q
     }
 }
 if (-not $step4) { exit 1 }
@@ -97,7 +95,7 @@ if (-not $Fast -and -not $SkipEval) {
 
 $totalDuration = ((Get-Date) - $startTime).TotalSeconds
 Write-Host "`n================================================================================" -ForegroundColor Cyan
-Write-Host ("[PRE-FLIGHT] ALL OUTSIDE JUDGES GREEN in {0:N1}s." -f $totalDuration) -ForegroundColor Green
-Write-Host "Safe to commit and push. No GitHub Actions minutes will be wasted on failures." -ForegroundColor Green
+Write-Host ("[PRE-FLIGHT] ALL GATES GREEN in {0:N1}s." -f $totalDuration) -ForegroundColor Green
+Write-Host "Safe to commit and push."
 Write-Host "================================================================================" -ForegroundColor Cyan
 exit 0
