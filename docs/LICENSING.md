@@ -52,6 +52,17 @@ a private repository. Public clients communicate with those services through aut
 versioned protocols. This boundary protects new commercial implementation work; it does not
 change the Apache license or prevent a fork from modifying code already released here.
 
+## Entitlement presentation mirror
+
+`engraphis/entitlement_contract.json` is a checked-in, read-only mirror of the private
+control plane's plan→feature contract. It tells the dashboard which plan advertises a
+capability and which copy to show when one is unavailable. It is not an entitlement:
+`engraphis/entitlements.py` cannot authorize an operation, mint a credential, or unlock a
+route. Every paid operation is still authorized by the hosted service, and a server grant
+this build does not recognize is reported as unrecognized rather than inferred or silently
+dropped. The release gate compares the mirror with the private contract, so a capability that
+exists only server-side fails CI instead of disappearing from a paying customer's dashboard.
+
 ## Trial, grace, and recovery
 
 The server-issued trial lasts **7 active days for Pro or 14 active days for Team**. Grace is a
