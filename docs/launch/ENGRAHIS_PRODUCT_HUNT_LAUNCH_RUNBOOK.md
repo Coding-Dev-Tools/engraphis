@@ -197,11 +197,11 @@ I’d love to hear your honest feedback, critique of our retrieval pipeline, or 
 
 ### Top 6 Hardest Skeptical Questions & Ready-to-Send Responses
 
-#### Q1: "How is this different from Mem0, Zep, or basic vector stores?"
+#### Q1: "How is this different from other memory frameworks or basic vector stores?"
 ```markdown
 Great question! The short answer is: **scope hierarchy, retrieval topology, and temporal truth modeling.**
 
-Most existing memory frameworks (like Mem0 or basic vector wrappers) treat memory as flat string chunks stored in a generic vector database with metadata tags. That works fine for a personal chatbot ("user likes espresso"), but it collapses in software engineering for three reasons:
+Most existing memory frameworks (including basic vector wrappers) treat memory as flat string chunks stored in a generic vector database with metadata tags. That works fine for a personal chatbot ("user likes espresso"), but it collapses in software engineering for three reasons:
 
 1. **Native Coding Scope Hierarchy:** Coding agents operate across distinct layers: `workspace → repo → session → memory`. In Engraphis, session-level scratch decisions don't pollute repo-wide architecture conventions, and repo conventions don't bleed into other workspaces unless explicitly promoted. Every read requires a `SearchFilter`.
 2. **4-Arm Hybrid Retrieval vs Vector-Only:** Dense vector cosine search is notoriously bad at exact code symbols (e.g. `getUserById` vs `getUsersById`), call chains, and lexical nuances. Engraphis executes four deterministic retrieval arms:
