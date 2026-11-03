@@ -66,29 +66,16 @@ The payload figure is a serialized JSON-shape estimate, not an MCP transport mea
 
 ## Optional Jev assistance
 
-Use **Review with Jev** in the local dashboard to check whether selected evidence can answer a question or compare two memories for a possible contradiction. Remote review sends only selected, bounded excerpts and the supplied question after per-call consent and `public` or `internal` classification. Secret, malformed, and unknown sensitivity classifications are blocked. The existing MCP decision tool handles command and completion reviews.
+**Jev is included free with every paid plan: Pro and Team.** After enablement, every legitimate Pro user and each eligible Team named seat, including paid viewers, with an active paid, trial, or test entitlement receives managed Jev at no additional customer charge and without a personal provider key. Local advisory decisions stay free for everyone; BYOK, a personal TypeSafe key, is optional for non-paid or direct use and its provider charges may apply. Managed Jev is currently `not_yet_available` pending release acceptance and service-capacity qualification; client configuration does not enable it.
 
-Recall route selection is experimental and BYOK-only. Smart MCP opts in through `engraphis_recall_context` with `allow_remote=true` and a `public` or `internal` classification. Classic MCP also requires `planning="auto"` and `jev_assisted=true`. Jev receives the original query and bounded deterministic routes, not recalled memory bodies; it cannot change scope, time, type, or trust filters. Local behavior is the default. Uncertain, malformed, or failed requests fall back to deterministic behavior. Jev cannot write memories, change grounded-recall requirements, authorize commands, or certify completion. Direct BYOK use may incur provider charges.
+Each individual receives all three independent rolling limits: **100 evaluated questions per rolling hour, 1,000 per rolling five hours, and 2,000 per rolling 24 hours**. Usage is per person, not pooled across a Team and not monthly. Each evaluated question counts once; if a batch is evaluated, every question counts. Admitted attempts that fail or are interrupted remain counted. No overage is charged.
 
-Jev-assisted recall planning is experimental. In an exploratory comparison using 40 public synthetic tasks, Jev selected a route on all 40 calls but did not change nDCG@5, Recall@5, or answer-token coverage. This fixture does not establish a benefit on held-out user workloads, so no retrieval-quality improvement is claimed.
+The existing production fleet guard remains 100 questions per day across the service. That limit conflicts with these per-person rolling caps and may pause or reject requests earlier, so resolve capacity and the fleet guard before launch.
 
-Managed Jev is currently `not_yet_available` pending release acceptance and
-service-capacity qualification; client configuration does not enable it. After
-enablement, every legitimate Pro user and each eligible Team named seat, including paid
-viewers, with an active paid, trial, or test entitlement receives managed Jev at no
-additional customer charge and without a personal provider key.
+Use **Review with Jev** in the local dashboard for evidence-support and contradiction checks; the MCP decision tool covers command and completion reviews. Remote calls need per-call consent plus a `public` or `internal` classification, and Jev cannot write memories, change grounded-recall requirements, authorize commands, or certify completion.
 
-Each individual receives all three independent rolling limits: **100 evaluated questions per rolling hour, 1,000 per rolling five hours, and 2,000 per rolling 24 hours**. Usage is per
-person, not pooled across a Team and not monthly. Each evaluated question counts once;
-if a batch is evaluated, every question counts, and command review evaluates two
-questions. Admitted attempts that fail or are interrupted remain counted. No overage is
-charged. The account portal reports each member's remaining usage across all three
-windows; usage returns as earlier questions leave each rolling window.
+Recall route selection is experimental and BYOK-only: `engraphis_recall_context` with `allow_remote=true`, or classic MCP with `planning="auto"` and `jev_assisted=true`. On 40 public synthetic tasks it changed no retrieval quality, so no retrieval-quality improvement is claimed.
 
-The existing production fleet guard remains 100 questions per day across the service.
-That limit conflicts with these per-person rolling caps and may pause or reject requests
-earlier. Resolve capacity and the fleet guard before launch. The supported decisions are
-advisory; current synthetic fixtures do not demonstrate Jev accuracy or cost savings.
 See [hosted plans and Jev details](https://github.com/Coding-Dev-Tools/engraphis/blob/522def372c45a26d46bc7a05829964ae0240f3a9/docs/HOSTED_PLANS.md#included-system-1-decision-engine-jev).
 
 ## Guides
