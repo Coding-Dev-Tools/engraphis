@@ -6,6 +6,7 @@ those operations and never begin a later network phase with an exhausted budget.
 """
 from __future__ import annotations
 
+import http.client
 import threading
 import time
 from contextlib import contextmanager
@@ -204,7 +205,7 @@ def read_response_chunks(response, deadline: float, *, max_bytes: int,
         # buffered/socket read, letting the absolute deadline run between chunks.
         try:
             chunk = response.read1(min(4096, max_bytes + 1 - len(data)))
-        except OSError:
+        except (OSError, http.client.HTTPException):
             # The watchdog shutdown can interrupt a blocked receive just before
             # the wall clock crosses the deadline; that interruption is the
             # timeout, not a transport failure.
