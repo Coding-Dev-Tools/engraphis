@@ -213,7 +213,7 @@ an omitted mode means it was not recorded, and is not inferred from current defa
 | Session | `engraphis_end_session` | Closes a work session with a summary and open threads. |
 | Operations | `engraphis_stats` | Returns memory counts for health checks. |
 | Operations | `engraphis_check_update` | Refreshes the release cache and reports whether a newer version is available. Update checks are OFF unless `ENGRAPHIS_UPDATE_CHECK` is set to an affirmative value; `=0` keeps them off. |
-| Decision | `engraphis_decide` | Advisory typed decisions with local fallback. Remote Jev requires an explicit backend and per-call `allow_remote=true`; missing, malformed, and uncertain answers stay visible. Smart discovery routes it through `engraphis_execute_action` because a remote call may consume allowance. |
+| Decision | `engraphis_decide` | Advisory typed decisions with local fallback. Remote Jev requires an explicit backend and per-call `allow_remote=true`; missing, malformed, and uncertain answers stay visible. Smart discovery routes it through `engraphis_execute_action` because a remote call may consume the free daily allowance. |
 | Quality | `engraphis_spec_crawl` | Offline deterministic prompt spec crawler; returns scores, radar coverage, classified tokens, connection tentacles, and flags. |
 | Quality | `engraphis_spec_crawl_answer` | Clarification answer submission updating specifications and writing pending procedural memories for review. |
 | Quality | `engraphis_spec_crawl_memories` | Analyzes a bounded sample of active memory nodes for contradictions, stored-graph orphans, operational gaps, and health; explicitly reports truncation. |
@@ -245,18 +245,9 @@ enablement, every legitimate Pro user and each eligible Team named seat, includi
 viewers, with an active paid, trial, or test entitlement receives managed Jev at no
 additional customer charge and without a personal provider key.
 
-Each individual receives all three independent rolling limits: **100 evaluated questions per rolling hour, 1,000 per rolling five hours, and 2,000 per rolling 24 hours**. Usage is per
-person, not pooled across a Team and not monthly. Each evaluated question counts once;
-if a batch is evaluated, every question counts. A `guard_command` review evaluates two
-questions, and each other supported workflow evaluates one. Admitted attempts that fail
-or are interrupted remain counted. No overage is charged. The account portal reports
-that member's remaining usage across all three windows; usage returns as earlier
-questions leave each rolling window.
+Each paid individual receives up to **500 Jev calls per person per day**, free. Usage is per person, not pooled across a Team and not monthly. Each evaluated call counts once, including a batched request; calls beyond the daily maximum are not served. Admitted attempts that fail or are interrupted remain counted, and no overage is charged. The account portal reports that member's remaining calls for the current day.
 
-The existing production fleet guard remains 100 questions per day across the service. It
-conflicts with the per-person rolling caps and may pause or reject requests earlier, so
-resolve capacity and the fleet guard before launch. No latency, accuracy, or cost-saving
-guarantee is established by configuration or a successful health check.
+No latency, accuracy, or cost-saving guarantee is established by configuration or a successful health check.
 
 Managed access admits only `guard_command`, `classify_contradiction`, `verify_support`,
 and `verify_completion`, with fixed question schemas and required context. Managed
