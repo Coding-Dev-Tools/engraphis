@@ -6783,6 +6783,19 @@
       });
       target.append(list);
     }
+    // A server grant this build cannot render must never look like a lock on something the
+    // customer bought. Name it and ask for an update instead of silently dropping it.
+    const unrecognized = Array.isArray(license.unrecognized_features)
+      ? license.unrecognized_features.filter(item => typeof item === 'string' && item)
+      : [];
+    if (access !== 'inactive' && unrecognized.length) {
+      const box = node('p', 'license-callout');
+      box.append(
+        node('strong', '', 'Your plan includes a newer capability'),
+        document.createTextNode(` ${unrecognized.map(item => text(item)).join(', ')}. Update Engraphis to use it.`),
+      );
+      target.append(box);
+    }
     if (access === 'active') target.append(node('p', 'plan-support', 'Thank you for supporting Engraphis. Your subscription funds hosted infrastructure and ongoing development.'));
   }
 
