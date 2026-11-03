@@ -15,6 +15,27 @@ if TYPE_CHECKING:
 
 _BOUND: ContextVar[Optional["MemoryService"]] = ContextVar("engraphis_bound_service", default=None)
 _REQUIRED: ContextVar[bool] = ContextVar("engraphis_bound_service_required", default=False)
+_HTTP_TRANSPORT: ContextVar[bool] = ContextVar("engraphis_http_transport", default=False)
+
+
+def local_source_access_allowed() -> bool:
+    """Only trusted direct/stdio operations may use operator-local source paths.
+
+    An HTTP bearer credential authenticates deployment access, not filesystem authority.
+    The restriction is independent of the current user and service bindings. Tasks copied
+    from an HTTP context retain its denial even after the parent request finishes.
+    """
+    return not _HTTP_TRANSPORT.get()
+
+
+@contextmanager
+def http_transport_context() -> Iterator[None]:
+    """Restrict HTTP work, restoring any enclosing transport context on every exit."""
+    token = _HTTP_TRANSPORT.set(True)
+    try:
+        yield
+    finally:
+        _HTTP_TRANSPORT.reset(token)
 
 
 def bound_service() -> Optional["MemoryService"]:

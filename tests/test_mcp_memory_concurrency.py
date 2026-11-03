@@ -5,7 +5,6 @@ import asyncio
 import io
 import json
 from http.server import BaseHTTPRequestHandler, HTTPServer
-import sqlite3
 import socket
 import threading
 import time
@@ -143,7 +142,7 @@ def test_caller_owned_transaction_fails_promptly_without_losing_caller_work():
             conn.execute("BEGIN IMMEDIATE")
             conn.execute("UPDATE workspaces SET name=? WHERE id=?", ("caller-survives", wid))
             try:
-                with pytest.raises(sqlite3.OperationalError, match="caller-owned"):
+                with pytest.raises(RuntimeError, match="caller-owned"):
                     service.remember_batch([{"content": "New memory."}], workspace="original")
                 assert conn.transaction_owned_by_current_thread()
                 assert conn.execute("SELECT name FROM workspaces WHERE id=?", (wid,)).fetchone()[0] == (

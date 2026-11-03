@@ -16,10 +16,12 @@ import logging
 import math
 import os
 import re
+import sqlite3
 import tempfile
 import threading
 import time
 from collections import defaultdict, deque
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
@@ -28,6 +30,7 @@ import numpy as np
 from engraphis.core import scoring
 from engraphis.core.adaptive_context import AdaptiveContextResult, fit_recent_history
 from engraphis.core.conflicts import detect_conflicts
+from engraphis.core.documents import remote_or_device_path
 from engraphis.core.evidence import exact_value_binding, make_exact_value_binding
 from engraphis.core.interfaces import (
     MemoryRecord,
@@ -75,6 +78,7 @@ from engraphis.core.resolve import (
 )
 from engraphis.core.secrets import redact_secrets as _redact_secrets, reject_secrets
 from engraphis.core.store import (
+    DEFAULT_HISTORY_CANDIDATE_BUDGET,
     SavepointError,
     Store,
     _is_memory_database_path,
@@ -332,6 +336,28 @@ def _required_memory_workspace_id(record: MemoryRecord) -> str:
     return workspace_id
 
 
+def _reject_empty_validity_interval(record: Optional[MemoryRecord], at: Optional[float],
+                                    *, action: str) -> None:
+    """Refuse a closure that would persist an empty validity interval.
+
+    ``valid_from == valid_to`` is only representable as an explicit quarantine
+    marker: the Store's persistence boundary rejects it for every other record
+    and a sync peer drops such a record outright (``core/sync.py`` treats an
+    endpoint equal to ``valid_from`` as an unauthorised empty interval). A
+    supersession or retirement that lands on the record's own start instant
+    therefore fails closed here instead of writing a record other peers
+    silently discard.
+    """
+    if record is None or at is None or record.valid_from is None:
+        return
+    if at <= record.valid_from:
+        raise ValueError(
+            "valid_to cannot predate valid_from; an empty validity interval is "
+            "only valid as an explicit quarantine marker "
+            f"({action}: {at!r} <= {record.valid_from!r})"
+        )
+
+
 def _writable_scope(scope: Scope, repo_id: Optional[str]) -> Scope:
     """The nearest scope ``remember()`` will actually accept for ``repo_id``.
 
@@ -523,6 +549,28 @@ class MemoryEngine:
         self.backend_identities: dict = {}
         self._closed = False
 
+    @contextmanager
+    def _write_guard(self) -> Iterator[None]:
+        """Enter the writer without waiting while holding a caller's SQLite transaction.
+
+        Ordinary writes take this guard before SQLite. A caller may already own
+        SQLite, so it must fail before any mutation if another thread owns this
+        engine. Same-thread nested writes remain reentrant and caller-owned work
+        is never committed or rolled back by a failed admission.
+        """
+        if self.store.conn.transaction_owned_by_current_thread():
+            acquired = self._write_lock.acquire(blocking=False)
+            if not acquired:
+                raise RuntimeError(
+                    "engine writer is busy; settle the caller-owned transaction before retrying"
+                )
+        else:
+            self._write_lock.acquire()
+        try:
+            yield
+        finally:
+            self._write_lock.release()
+
     def _adopt_resources(self, resources: list[Any]) -> None:
         """Take ownership of factory-created collaborators after composition succeeds."""
         with self._resource_lock:
@@ -531,7 +579,7 @@ class MemoryEngine:
             self._owned_resources = tuple(resources)
 
     def close(self) -> None:
-        """Close every owned collaborator exactly once, with the Store last."""
+        """Close each owned collaborator once in reverse acquisition order."""
         with self._resource_lock:
             if self._closed:
                 return
@@ -1024,7 +1072,7 @@ class MemoryEngine:
         # Reserve SQLite's writer before neighbor discovery, after embedding. The
         # database boundary serializes independent engines/processes as well as
         # threads, and defers nested helper commits until the decision is durable.
-        with self._write_lock:
+        with self._write_guard():
             caller_owned_transaction = self.store.conn.transaction_owned_by_current_thread()
             external_index = bool(
                 vector_index_requires_sync(self.index, self.store)
@@ -1263,7 +1311,7 @@ class MemoryEngine:
         inserted: list[tuple[str, dict]] = []  # (memory_id, prepared item)
         pending_vectors: list[tuple[str, np.ndarray]] = []
 
-        with self._write_lock:
+        with self._write_guard():
             caller_owned_transaction = (
                 self.store.conn.transaction_owned_by_current_thread()
             )
@@ -1673,6 +1721,13 @@ class MemoryEngine:
                 target_id = _required_resolution_target(decision)
                 resolution_reason = decision.reason
                 predecessor = self.store.get_memory(target_id)
+                # Both branches below close the predecessor at ``rec.valid_from``.
+                # Landing on the predecessor's own start instant would persist an
+                # empty validity interval, which the Store's persistence boundary
+                # and every sync peer reject, so the supersession fails closed.
+                _reject_empty_validity_interval(
+                    predecessor, rec.valid_from, action="superseding write",
+                )
                 predecessor_end = predecessor.valid_to if predecessor is not None else None
                 if (predecessor_end is not None and rec.valid_from is not None
                         and rec.valid_from < predecessor_end):
@@ -2854,26 +2909,32 @@ class MemoryEngine:
 
     def timeline(self, query: str, *, workspace_id: str, repo_id: Optional[str] = None,
                 limit: int = 20, valid_at: Optional[float] = None,
-                known_at: Optional[float] = None, prompt_only: bool = False) -> list[MemoryRecord]:
+                known_at: Optional[float] = None, prompt_only: bool = False,
+                closed_only: bool = False) -> list[MemoryRecord]:
         """Chronological, bi-temporal history of a fact: what we believed and when.
-        Includes invalidated versions; sorted by ``valid_from``.
+        Includes invalidated versions; sorted by ``valid_from``. ``closed_only`` selects
+        known closed intervals and prioritizes lexical matches before the 500-record
+        candidate cap. Semantic-only matches outside that window can still be omitted.
         """
         flt = SearchFilter(
             workspace_id=workspace_id, repo_id=repo_id, include_ancestors=True,
-            valid_at=valid_at, known_at=known_at,
+            valid_at=now_ts() if closed_only and valid_at is None else valid_at,
+            known_at=now_ts() if closed_only and known_at is None else known_at,
         )
         recs = [
             r for _, r in self._relatedness(
                 query, flt, include_invalid=True, prompt_only=prompt_only,
+                closed_only=closed_only,
             )[:limit]
         ]
-        recs.sort(key=lambda r: r.valid_from or r.ingested_at or 0.0)
+        recs.sort(key=lambda r: r.valid_from if r.valid_from is not None else r.ingested_at or 0.0)
         return recs
 
     def _relatedness(self, query: str, flt: SearchFilter, *,
                      include_invalid: bool,
-                     prompt_only: bool = False) -> list[tuple[float, MemoryRecord]]:
-        """Score every matching memory — optionally including invalidated ones — by the
+                     prompt_only: bool = False,
+                     closed_only: bool = False) -> list[tuple[float, MemoryRecord]]:
+        """Score matching memories — optionally including invalidated ones — by the
         max of semantic similarity and lexical token overlap. ``why``/``timeline`` need to
         search *through* bi-temporal history, which the normal vector index ``search()``
         deliberately excludes (it's the live-recall path), so this recomputes similarity
@@ -2898,18 +2959,41 @@ class MemoryEngine:
                 sem[mid] = float(np.dot(qn, vec))
         q_tokens = tokenize(query)
         out: list[tuple[float, MemoryRecord]] = []
-        def matching_records() -> Iterator[MemoryRecord]:
-            after_id = ""
-            while True:
-                page = self.store.list_memories_page(
-                    flt, after_id=after_id, limit=500, include_invalid=include_invalid,
-                )
-                if not page:
-                    return
-                yield from page
-                after_id = page[-1].id
 
-        records = matching_records()
+        if closed_only:
+            # Explicit closed-history lookup keeps its topic-ranked candidate budget.
+            records = self.store.list_memories(
+                flt, include_invalid=include_invalid, limit=DEFAULT_HISTORY_CANDIDATE_BUDGET,
+                prompt_only=prompt_only, closed_only=True, candidate_query=query,
+            )
+        else:
+            # Bound history inspection by an explicit candidate window instead of
+            # hydrating every memory row.  The window is the union of the indexed
+            # lexical arm (``mem_fts``) and the semantic arm's ranked hits, so a
+            # superseded record outside the newest-N window is still reachable,
+            # while the cost follows the window size rather than the corpus size.
+            # Hydrated records keep their complete ``memory_closures`` history.
+            semantic_ranked = sorted(sem.items(), key=lambda item: (-item[1], item[0]))
+            extra_ids = [
+                memory_id for memory_id, score in semantic_ranked if score > 0.05
+            ][:DEFAULT_HISTORY_CANDIDATE_BUDGET]
+            try:
+                records = self.store.list_history_candidates(
+                    flt, query=query, extra_ids=extra_ids,
+                    budget=DEFAULT_HISTORY_CANDIDATE_BUDGET,
+                    include_invalid=include_invalid, prompt_only=prompt_only,
+                )
+            except sqlite3.Error:
+                # Never let a broken index collapse history inspection to an empty
+                # answer: degrade to one bounded newest-first page and keep going.
+                logger.warning(
+                    "history candidate selection failed; falling back to a bounded "
+                    "newest-first page", exc_info=True,
+                )
+                records = self.store.list_memories(
+                    flt, include_invalid=include_invalid,
+                    limit=DEFAULT_HISTORY_CANDIDATE_BUDGET, prompt_only=prompt_only,
+                )
         if include_invalid:
             # History must retain closed valid-time intervals, but cannot expose a
             # record that was not known at the requested system-time snapshot.
@@ -3008,7 +3092,8 @@ class MemoryEngine:
         return {"memories": top, "last_session": last_session}
 
     # ── governance (audited; never a silent hard delete — AGENTS.md §3.2) ───────
-    def retire(self, memory_id: str, *, reason: str = "", actor: str = "user") -> dict:
+    def retire(self, memory_id: str, *, reason: str = "", actor: str = "user",
+               at: Optional[float] = None) -> dict:
         """Remove a memory from live recall while retaining temporal history.
 
         This is deliberately distinct from :meth:`secure_erase`: retirement is the
@@ -3017,7 +3102,8 @@ class MemoryEngine:
         """
         if self.store.get_memory(memory_id) is None:
             raise KeyError(f"no memory with id '{memory_id}'")
-        self.store.close_validity(memory_id, actor=actor, reason=reason or "retired by request")
+        self.store.close_validity(memory_id, at=at, actor=actor,
+                                  reason=reason or "retired by request")
         # Preserve the vector for explicit historical/as_of recall. Temporal filtering
         # keeps this retired row out of the current live view.
         return {"id": memory_id, "status": "retired", "reason": reason}
@@ -3041,7 +3127,7 @@ class MemoryEngine:
         Separate indexes require an engine-owned transaction so a caller cannot later
         roll back the durable repair debt after an irreversible provider deletion.
         """
-        with self._write_lock:
+        with self._write_guard():
             repair_target = index_repair_identity(self.index, self.store)
             transaction_started = not self.store.conn.transaction_owned_by_current_thread()
             if repair_target is not None and not transaction_started:
@@ -3131,7 +3217,7 @@ class MemoryEngine:
                 exact_value_type: str = "literal",
                 exact_value_span: Optional[tuple[int, int]] = None,
                 clear_exact_value: bool = False) -> dict:
-        with self._write_lock:
+        with self._write_guard():
             return self._correct_locked(
                 memory_id, new_content, reason=reason, actor=actor,
                 exact_value=exact_value, exact_value_type=exact_value_type,
@@ -3169,7 +3255,7 @@ class MemoryEngine:
             or not math.isfinite(importance) or not 0 <= importance <= 1
         ):
             raise ValueError("importance must be between zero and one")
-        with self._write_lock:
+        with self._write_guard():
             old = self.store.get_memory(memory_id)
             if old is None:
                 raise KeyError(f"no memory with id '{memory_id}'")
@@ -3352,7 +3438,7 @@ class MemoryEngine:
         # Keep lookup and insert in the engine's write critical section. Without it two
         # retries of the same pending source could each observe no successor and create
         # duplicate prompt-visible records. The normal remember path re-enters this RLock.
-        with self._write_lock:
+        with self._write_guard():
             old = self.store.get_memory(memory_id)
             if old is None:
                 raise KeyError(f"no memory with id '{memory_id}'")
@@ -3502,7 +3588,7 @@ class MemoryEngine:
 
     def promote(self, memory_id: str, target_scope: Scope, *, reason: str = "",
                 actor: str = "user") -> dict:
-        with self._write_lock:
+        with self._write_guard():
             return self._promote_locked(
                 memory_id, target_scope, reason=reason, actor=actor,
             )
@@ -3703,7 +3789,7 @@ class MemoryEngine:
               scope: Optional[Scope] = None, keywords: Optional[list] = None,
               reason: str = "", actor: str = "user") -> dict:
         """Merge live memories into one atomic, temporally bounded successor."""
-        with self._write_lock:
+        with self._write_guard():
             return self._merge_locked(
                 source_ids, merged_content, title=title, mtype=mtype, scope=scope,
                 keywords=keywords, reason=reason, actor=actor,
@@ -3971,7 +4057,7 @@ class MemoryEngine:
 
     # ── linking & events (A-MEM-style) ──────────────────────────────────────────
     def link(self, a: str, b: str, relation: str = "related", *, layer=None,
-             reason: str = "") -> None:
+             reason: str = "", valid_from: Optional[float] = None) -> None:
         records = []
         for mid in (a, b):
             record = self.store.get_memory(mid)
@@ -3983,7 +4069,8 @@ class MemoryEngine:
             raise ValueError("quarantined memories cannot be linked")
         if not all(provenance_is_approved(record.provenance) for record in records):
             raise ValueError("links require explicitly approved memories")
-        self.store.add_link(a, b, relation, layer=layer, reason=reason)
+        self.store.add_link(a, b, relation, layer=layer, reason=reason,
+                            valid_from=valid_from)
 
     def record_event(self, kind: str, content: str, *, workspace_id: str = "",
                      repo_id: str = "", session_id: str = "",
@@ -4025,9 +4112,10 @@ class MemoryEngine:
         # Normalize before the root-prefix check.  Keep this check at the filesystem
         # call site (rather than hiding it in a helper) so both human review and static
         # analysis can establish that every later path is constrained by this boundary.
-        canonical_root = os.path.normcase(
-            os.path.realpath(os.path.expanduser(os.fspath(root_path)))
-        )
+        expanded_root = os.path.expanduser(os.fspath(root_path))
+        if remote_or_device_path(os.fspath(root_path)) or remote_or_device_path(expanded_root):
+            raise ValueError("repo root is outside approved local roots")
+        canonical_root = os.path.normcase(os.path.realpath(expanded_root))
         # Retain a separator on the checked value.  This makes an approved root
         # itself and every child use the same normalized-prefix check (and avoids
         # accepting a sibling such as ``/work/repo-copy`` for ``/work/repo``).
@@ -4201,9 +4289,10 @@ class MemoryEngine:
         ):
             raise RuntimeError("code indexing backend is not configured")
 
-        canonical_root = os.path.normcase(
-            os.path.realpath(os.path.expanduser(os.fspath(root_path)))
-        )
+        expanded_root = os.path.expanduser(os.fspath(root_path))
+        if remote_or_device_path(os.fspath(root_path)) or remote_or_device_path(expanded_root):
+            raise ValueError("repo root is outside approved local roots")
+        canonical_root = os.path.normcase(os.path.realpath(expanded_root))
         canonical_root_with_sep = canonical_root.rstrip(os.sep) + os.sep
         safe_root: Optional[str] = None
         for approved_root in _approved_local_index_roots():

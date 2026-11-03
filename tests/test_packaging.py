@@ -17,6 +17,12 @@ from scripts.verify_distribution_contents import (
     REQUIRED_SDIST,
     verify_distribution,
 )
+from scripts.verify_release_artifacts import (
+    ArtifactIncomplete,
+    ArtifactMismatch,
+    expected_member_names,
+    local_artifacts,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -318,11 +324,13 @@ def _yarn_v1_runtime_closure(
 def test_force_graph_bundle_has_exact_locked_license_closure():
     report_path = ROOT / "deploy" / "force-graph-1.51.4.licenses.json"
     lock_path = ROOT / "deploy" / "force-graph-1.51.4.yarn.lock"
-    bundle_path = ROOT / "engraphis" / "static" / "vendor" / "force-graph.min.js"
+    bundle_path = ROOT / "engraphis" / "dashboard_assets" / "vendor" / "force-graph.min.js"
     report = json.loads(report_path.read_text(encoding="utf-8"))
     root_lock = json.loads((ROOT / "package-lock.json").read_text(encoding="utf-8"))
 
     assert report["format"] == "engraphis-bundled-license-report/v1"
+    # The bundle ships exactly once, and the report must name that copy.
+    assert report["bundle"]["path"] == bundle_path.relative_to(ROOT).as_posix()
     assert report["bundle"]["sha256"] == hashlib.sha256(bundle_path.read_bytes()).hexdigest()
     assert report["source_lock"]["sha256"] == hashlib.sha256(lock_path.read_bytes()).hexdigest()
     assert report["source_lock"]["canonical_lf_sha256"] == hashlib.sha256(
@@ -359,22 +367,24 @@ def test_force_graph_bundle_has_exact_locked_license_closure():
 
 
 def test_every_vendored_browser_library_has_redistribution_notice():
-    vendor = ROOT / "engraphis" / "static" / "vendor"
+    vendor = ROOT / "engraphis" / "dashboard_assets" / "vendor"
     required = {
         "d3.min.js": "d3.LICENSE",
-        "marked.min.js": "marked.LICENSE",
         "force-graph.min.js": "force-graph.LICENSE",
-        "purify.min.js": None,  # Apache-2.0 header points at the packaged root LICENSE
     }
+    # A library added to (or restored in) the vendor directory must join this table and NOTICE.
+    assert {path.name for path in vendor.glob("*.js")} == set(required)
+    notice = (ROOT / "NOTICE").read_text(encoding="utf-8")
     for script, license_name in required.items():
         assert (vendor / script).is_file()
-        if license_name:
-            text = (vendor / license_name).read_text(encoding="utf-8")
-            assert "Copyright" in text and len(text) > 500
-    notice = (ROOT / "NOTICE").read_text(encoding="utf-8")
-    assert all(name in notice for name in (
-        "D3 7.9.0", "Marked 12.0.2", "force-graph 1.51.4", "DOMPurify 3.4.11",
-    ))
+        text = (vendor / license_name).read_text(encoding="utf-8")
+        assert "Copyright" in text and len(text) > 500
+        assert f"engraphis/dashboard_assets/vendor/{license_name}" in notice
+    assert all(name in notice for name in ("D3 7.9.0", "force-graph 1.51.4"))
+    # Marked and DOMPurify only served the retired Classic dashboard; NOTICE must not claim
+    # bundles that no longer ship, nor point at the removed asset trees.
+    for retired in ("Marked", "DOMPurify", "engraphis/static", "classic_assets"):
+        assert retired not in notice, retired
     assert "galaxy-dependencies.json" not in notice
     assert "galaxy-vendor.LICENSE.txt" not in notice
     assert "Trademark Policy" not in notice
@@ -436,15 +446,6 @@ def test_release_version_surfaces_are_synchronized():
     assert "return `?release_version=${encodeURIComponent(state.releaseVersion)}`" in ledger
     assert re.findall(r"release_version=([0-9]+(?:\.[0-9]+)*)", ledger) == []
 
-    static = (ROOT / "engraphis" / "static" / "dashboard.js").read_bytes()
-    classic = (ROOT / "engraphis" / "classic_assets" / "dashboard.js").read_bytes()
-    assert static == classic
-    static_text = static.decode("utf-8")
-    # Classic sources release_version from the runtime RELEASE_VERSION (bootstrap),
-    # so no hardcoded literal must drift from pyproject either.
-    assert "p.set('release_version',RELEASE_VERSION)" in static_text
-    assert re.findall(r"p\.set\('release_version','([^']+)'\)", static_text) == []
-
 
 def test_withdrawn_hermes_provider_is_not_distributed():
     """The withdrawn provider must not be resurrected by a stale feature branch."""
@@ -499,6 +500,7 @@ def test_dependency_floors_exclude_known_vulnerable_and_breaking_releases():
     assert pyproject.count(expected) == 3
     combined = pyproject + requirements
     assert "mcp>=1.30.0,<2" in requirements
+    assert "mcp>=1.28.1" not in combined
     assert "mcp>=1.14.0" not in combined
     assert "python-multipart>=0.0.31" in combined
     assert "starlette>=1.3.1,<2" in combined
@@ -533,3 +535,187 @@ def test_customer_hosting_docs_do_not_claim_private_cloud_authority():
     # the operator override, but they must never present hand-setting it as the way a
     # customer turns managed compute on.
     assert "ENGRAPHIS_MANAGED_COMPUTE_CONSENT=1" not in combined
+
+
+def _declared_version() -> str:
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    declared = re.search(r'^version = "([^"]+)"', pyproject, re.M)
+    assert declared, "project version declaration moved — update this test"
+    return declared.group(1)
+
+
+def _release_candidate(tmp_path: Path, version: str) -> Path:
+    """Write a distribution set whose names match ``version`` exactly."""
+    directory = tmp_path / "dist"
+    directory.mkdir(exist_ok=True)
+    (directory / f"engraphis-{version}-py3-none-any.whl").write_bytes(b"wheel")
+    (directory / f"engraphis-{version}.tar.gz").write_bytes(b"sdist")
+    return directory
+
+
+def test_release_artifact_names_are_bound_to_the_package_version():
+    """A candidate set must name the exact release it claims to be.
+
+    The pre-publication check compares the candidate against the files already
+    on PyPI.  While the release is not published yet that published set is
+    empty, so without a local name binding ANY wheel and source distribution
+    pair would pass — and the publish step would still upload them.
+    """
+    version = _declared_version()
+    sdist_name, wheel_prefix = expected_member_names(version)
+    assert sdist_name == f"engraphis-{version}.tar.gz"
+    assert wheel_prefix == f"engraphis-{version}-"
+
+
+def test_release_artifact_gate_rejects_a_mismatched_distribution_set(tmp_path):
+    version = _declared_version()
+    candidate = _release_candidate(tmp_path, version)
+
+    # The exact release set is accepted.
+    assert sorted(local_artifacts(candidate, version=version)) == [
+        f"engraphis-{version}-py3-none-any.whl",
+        f"engraphis-{version}.tar.gz",
+    ]
+
+    stale = tmp_path / "stale"
+    stale.mkdir()
+    (stale / "engraphis-1.0.0-py3-none-any.whl").write_bytes(b"wheel")
+    (stale / "engraphis-1.0.0.tar.gz").write_bytes(b"sdist")
+    with pytest.raises(ArtifactMismatch, match="source distribution"):
+        local_artifacts(stale, version=version)
+
+    partial = tmp_path / "partial"
+    partial.mkdir()
+    (partial / f"engraphis-{version}-py3-none-any.whl").write_bytes(b"wheel")
+    with pytest.raises(ArtifactMismatch, match="source distribution"):
+        local_artifacts(partial, version=version)
+
+    extra = tmp_path / "extra"
+    extra.mkdir()
+    (extra / f"engraphis-{version}-py3-none-any.whl").write_bytes(b"wheel")
+    (extra / f"engraphis-{version}.tar.gz").write_bytes(b"sdist")
+    (extra / f"engraphis-{version}-py2-none-any.whl").write_bytes(b"wheel")
+    with pytest.raises(ArtifactMismatch, match="exactly one wheel"):
+        local_artifacts(extra, version=version)
+
+
+def test_release_artifact_gate_fails_closed_without_reaching_the_network(tmp_path, capsys):
+    """A wrong candidate set must stop the publication, not warn about it."""
+    version = _declared_version()
+    stale = tmp_path / "stale"
+    stale.mkdir()
+    (stale / "engraphis-0.0.1-py3-none-any.whl").write_bytes(b"wheel")
+    (stale / "engraphis-0.0.1.tar.gz").write_bytes(b"sdist")
+
+    from scripts import verify_release_artifacts
+
+    def _unreachable(_version):  # pragma: no cover - the gate must not get here
+        raise AssertionError("the local name binding must be checked before PyPI")
+
+    original = verify_release_artifacts.pypi_artifacts
+    verify_release_artifacts.pypi_artifacts = _unreachable
+    try:
+        code = verify_release_artifacts.main(
+            ["--dist", str(stale), "--version", version, "--allow-subset"]
+        )
+    finally:
+        verify_release_artifacts.pypi_artifacts = original
+
+    assert code == 1
+    assert "release artifact verification failed" in capsys.readouterr().err
+
+
+def test_release_artifact_gate_rejects_a_published_digest_conflict(tmp_path, monkeypatch):
+    """A published digest that differs from the candidate must fail closed."""
+    version = _declared_version()
+    candidate = _release_candidate(tmp_path, version)
+    from scripts import verify_release_artifacts
+
+    def _published(_version):
+        return {f"engraphis-{version}-py3-none-any.whl": "0" * 64}
+
+    monkeypatch.setattr(verify_release_artifacts, "pypi_artifacts", _published)
+
+    with pytest.raises(ArtifactMismatch, match="digest conflicts"):
+        verify_release_artifacts.verify(candidate, version, exact=False)
+
+    # The same published set that matches the candidate is accepted.
+    monkeypatch.setattr(
+        verify_release_artifacts,
+        "pypi_artifacts",
+        lambda _version: dict(local_artifacts(candidate, version=version)),
+    )
+    assert verify_release_artifacts.verify(candidate, version, exact=True) == 2
+
+    # A published set that is missing a candidate file is incomplete, not accepted.
+    monkeypatch.setattr(
+        verify_release_artifacts,
+        "pypi_artifacts",
+        lambda _version: {
+            f"engraphis-{version}-py3-none-any.whl": hashlib.sha256(b"wheel").hexdigest(),
+        },
+    )
+    with pytest.raises(ArtifactIncomplete):
+        verify_release_artifacts.verify(candidate, version, exact=True)
+
+
+def _wheel_with(tmp_path: Path, name: str, extra: dict[str, bytes]) -> Path:
+    wheel = tmp_path / name
+    with zipfile.ZipFile(wheel, "w") as archive:
+        for member in sorted(REQUIRED_COMMON):
+            archive.writestr(member, b"public")
+        for member, payload in extra.items():
+            archive.writestr(member, payload)
+    return wheel
+
+
+def test_distribution_gate_rejects_forbidden_runtime_artifacts(tmp_path):
+    """A distribution may not carry credentials, databases, logs, or caches."""
+    forbidden = {
+        "engraphis/.env": b"ENGRAPHIS_API_TOKEN=secret",
+        "engraphis/.env.production": b"ENGRAPHIS_API_TOKEN=secret",
+        "engraphis/server.pem": b"-----BEGIN PRIVATE KEY-----",
+        "engraphis/server.key": b"-----BEGIN PRIVATE KEY-----",
+        "engraphis/engraphis.db": b"sqlite",
+        "engraphis/engraphis.sqlite3": b"sqlite",
+        "engraphis/server.log": b"log line",
+        "engraphis/.git/config": b"[core]",
+        "engraphis/.pytest_cache/CACHEDIR.TAG": b"cache",
+        "engraphis/node_modules/left-pad/index.js": b"module",
+        "tests/test_packaging.py": b"def test(): pass",
+    }
+    for index, (member, payload) in enumerate(sorted(forbidden.items())):
+        wheel = _wheel_with(
+            tmp_path, f"engraphis-1.0.{index}-py3-none-any.whl", {member: payload}
+        )
+        with pytest.raises(ValueError, match="private or generated"):
+            verify_distribution(wheel)
+
+
+def test_distribution_gate_allows_the_documented_source_only_members(tmp_path):
+    """The source distribution legitimately carries the test suite and the template."""
+    sdist = tmp_path / "engraphis-1.0.0.tar.gz"
+    with tarfile.open(sdist, "w:gz") as archive:
+        for name in sorted(REQUIRED_SDIST):
+            path = tmp_path / name.replace("/", "_")
+            path.write_bytes(b"public")
+            archive.add(path, arcname=f"engraphis-1.0.0/{name}")
+        for name, payload in (
+            ("tests/test_packaging.py", b"def test(): pass"),
+            (".env.example", b"ENGRAPHIS_DB_PATH="),
+        ):
+            path = tmp_path / name.replace("/", "_")
+            path.write_bytes(payload)
+            archive.add(path, arcname=f"engraphis-1.0.0/{name}")
+
+    verify_distribution(sdist)
+
+
+def test_console_entry_point_reports_the_package_version(capsys):
+    """``engraphis --version`` must report the version that is being released."""
+    from scripts import entry
+
+    assert entry.main(["--version"]) == 0
+    assert capsys.readouterr().out.strip() == _declared_version()
+    assert entry.main(["-V"]) == 0
+    assert capsys.readouterr().out.strip() == _declared_version()

@@ -2,6 +2,7 @@ import hashlib
 import json
 import re
 import struct
+import zlib
 from copy import deepcopy
 from pathlib import Path
 from xml.etree import ElementTree
@@ -33,8 +34,8 @@ from eval.performance import run as run_performance
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PUBLIC_OFFLINE_ARTIFACT = "offline-fixtures-memory-timeout-20261020.json"
-PUBLIC_OFFLINE_SHA = "3b1d2127e290e0ae6fb6c411263d9c61bec98d1b27e408d3da4cb2d51fa81f9f"
+PUBLIC_OFFLINE_ARTIFACT = "offline-fixtures-automatic-browser-access-20261101.json"
+PUBLIC_OFFLINE_SHA = "8df20fd0a97f20070ac26628e19b5ae1be653cd7aa9c7399d424cedf0e839a01"
 
 
 @pytest.fixture(scope="module")
@@ -421,6 +422,16 @@ def test_public_numeric_evidence_registry_is_complete_and_live(
     assert not any(artifact["privacy"].values())
 
     file_hashes = artifact["suite"]["files"]
+    producer_paths = {
+        path.relative_to(ROOT).as_posix()
+        for folder in ("engraphis", "eval")
+        for path in (ROOT / folder).rglob("*.py")
+    } | {
+        "eval/datasets/longdoc.jsonl",
+        "eval/datasets/codemem.jsonl",
+        "scripts/export_offline_evidence.py",
+    }
+    assert set(file_hashes) == producer_paths
     assert file_hashes == {
         path: hashlib.sha256((ROOT / path).read_bytes()).hexdigest()
         for path in sorted(file_hashes)
@@ -513,6 +524,24 @@ def test_public_numeric_evidence_registry_is_complete_and_live(
         )
     )
     assert claimed_ids == set(runs)
+
+
+@pytest.mark.parametrize("stem", ["context-efficiency", "evidence-backed-agent-examples"])
+def test_benchmark_png_provenance_matches_current_svg_and_artifact(stem):
+    png = (ROOT / "docs" / "images" / f"{stem}.png").read_bytes()
+    metadata = {}
+    offset = 8
+    while offset < len(png):
+        length = struct.unpack(">I", png[offset:offset + 4])[0]
+        chunk = png[offset + 4:offset + 8 + length]
+        assert zlib.crc32(chunk) == struct.unpack(">I", png[offset + 8 + length:offset + 12 + length])[0]
+        if chunk[:4] == b"tEXt":
+            key, value = chunk[4:].split(b"\0", 1)
+            metadata[key.decode("ascii")] = value.decode("ascii")
+        offset += 12 + length
+    assert metadata["engraphis_artifact_sha256"] == PUBLIC_OFFLINE_SHA
+    svg = (ROOT / "docs" / "images" / f"{stem}.svg").read_bytes()
+    assert metadata["engraphis_svg_sha256"] == hashlib.sha256(svg).hexdigest()
 
 
 def test_benchmark_guide_tracks_the_live_offline_evaluators():

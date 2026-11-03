@@ -47,7 +47,7 @@ _RELEASE_EXTRAS = ("all", "test")
 _BUILDER_TOOLCHAIN = {
     "build": "1.5.0",
     "pip": "26.2",
-    "setuptools": "83.0.0",
+    "setuptools": "84.1.0",
     "wheel": "0.47.0",
 }
 

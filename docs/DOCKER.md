@@ -25,6 +25,10 @@ ENGRAPHIS_COMPOSE_PORT=8787
 
 Then open `http://127.0.0.1:8787`. License issuance, trials, leases, and revocations remain on the private control plane.
 
+Without an API token, the dashboard API answers only `localhost`, IP addresses and the names in
+`ENGRAPHIS_ALLOWED_HOSTS`, which keeps websites that use DNS rebinding out. Another container
+that calls the API by its Compose service name needs that name in `ENGRAPHIS_ALLOWED_HOSTS`.
+
 The root entrypoint repairs ownership only for the managed `/data` volume. When a custom
 container configuration places `ENGRAPHIS_STATE_DIR` outside `/data`, create that directory
 with the container's `engraphis` UID as owner and provision its contents for that UID before
@@ -64,6 +68,20 @@ The URL variable alone does not expose or secure the service. The LAN overlay re
 without `ENGRAPHIS_API_TOKEN`; it replaces the loopback port mapping with an all-IPv4-interface mapping.
 After this opt-in, other machines on the LAN can use
 `http://<host-LAN-IP>:8700`.
+
+Any browser that can reach the dashboard opens it: no token, no link. The port's network
+reachability is the dashboard's boundary, while API and MCP clients still present
+`Authorization: Bearer <ENGRAPHIS_API_TOKEN>`. If the LAN itself is not trusted, set
+`ENGRAPHIS_BROWSER_AUTO_SESSION=0` and hand out one-time links instead:
+
+```bash
+docker compose exec engraphis engraphis-dashboard --link
+```
+
+Open the printed link in the browser (it is single use and expires in 15 minutes; the resulting
+browser session lasts 12 hours). The link is built from `ENGRAPHIS_DASHBOARD_URL` when set, so
+configure that to the address clients actually use. Links are bound to the running process:
+restarting the container invalidates any link that has not been used yet.
 
 The Docker image includes the streamable HTTP MCP endpoint at `/mcp/` (the `/mcp` path redirects
 there). Configure `ENGRAPHIS_DASHBOARD_URL` to the exact LAN IP or hostname clients use so MCP's

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -36,6 +37,7 @@ from engraphis.private_state import ensure_owner_private_dir
 from engraphis.core import ids
 from engraphis.core.graph_layers import infer_graph_layer, normalize_graph_layer
 from engraphis.core.interfaces import (
+    MAX_CLOSURE_OBSERVATIONS,
     Edge,
     GraphLayer,
     MemoryRecord,
@@ -87,8 +89,19 @@ from engraphis.core.schema import (
 )
 
 
+logger = logging.getLogger("engraphis.core.store")
+
+
 class SavepointError(RuntimeError):
     """A sub-operation could not settle; its enclosing transaction must abort."""
+
+
+class ClosureObservationLimitError(ValueError, sqlite3.IntegrityError):
+    """A closure would exceed ``MAX_CLOSURE_OBSERVATIONS``; history is never truncated.
+
+    A ``ValueError`` so service and HTTP layers report a caller error rather than a
+    500, and still an ``IntegrityError`` for callers that relied on the trigger abort.
+    """
 
 
 class ReceiptChainIntegrityError(sqlite3.IntegrityError):
@@ -112,6 +125,13 @@ IN_CLAUSE_CHUNK = 500
 ENTITY_BLOCK_TOKEN_CHUNK = 200
 # Do not materialize unbounded common-token buckets during migration/live writes.
 ENTITY_BLOCK_BUCKET_LIMIT = 1024
+# A history inspection (``why``/``timeline``) must be able to reach a superseded
+# record that sits far outside the newest-N window, yet it must not hydrate the
+# whole corpus on every call.  The candidate window is explicit, documented, and
+# configurable; it bounds the *candidate* set only — every returned record still
+# carries its complete ``memory_closures`` observation set, so no closure
+# history is ever truncated.
+DEFAULT_HISTORY_CANDIDATE_BUDGET = 500
 
 def _is_memory_database_path(path: str) -> bool:
     """Detect SQLite memory databases including named shared-memory URIs.
@@ -1168,16 +1188,57 @@ class _SerializedConnection:
             # A deferred constraint can make commit() raise while SQLite deliberately
             # leaves the transaction open. Preserve this thread's pin in that case so a
             # waiter cannot adopt the failed transaction; the owner can still roll back.
+            # However, if fn is rollback() itself, keeping a pin is invalid since no further
+            # rollback is possible and would permanently strand the transaction lock.
             keep_pin = False
             if self._pinned() and not succeeded:
                 try:
-                    keep_pin = bool(self._raw.in_transaction)
+                    is_rollback = getattr(fn, "__name__", "") == "rollback"
+                    keep_pin = bool(self._raw.in_transaction) and not is_rollback
                 except Exception:  # noqa: BLE001 - a failed/closed connector cannot be kept
                     keep_pin = False
             if self._pinned() and not keep_pin:
                 self._pin.held = False
                 self._lock.release()          # release the transaction pin
             self._lock.release()              # release this call's acquire
+
+    def reset_pin(self) -> None:
+        """Clear any transaction pin held by the current thread or reset state."""
+        if self._pinned():
+            self._pin.held = False
+            for attribute in ("defer_commits", "defer_savepoint"):
+                try:
+                    delattr(self._pin, attribute)
+                except AttributeError:
+                    pass
+            try:
+                self._lock.release()
+            except RuntimeError:
+                pass
+
+    def replace_raw(self, new_raw: Any) -> None:
+        """Safely replace the underlying raw connection and clear transaction state."""
+        if not self._lock.acquire(timeout=self._ACQUIRE_TIMEOUT):
+            self.reset_pin()
+            if not self._lock.acquire(timeout=5.0):
+                raise sqlite3.OperationalError(
+                    "cannot replace raw SQLite connection while lock is held"
+                )
+        try:
+            old_raw = self._raw
+            object.__setattr__(self, "_raw", new_raw)
+            self._pin.held = False
+            for attribute in ("defer_commits", "defer_savepoint"):
+                try:
+                    delattr(self._pin, attribute)
+                except AttributeError:
+                    pass
+            try:
+                old_raw.close()
+            except Exception:
+                pass
+        finally:
+            self._lock.release()
 
     def execute(self, *a, **k):
         def execute_and_snapshot(*aa, **kk):
@@ -1311,34 +1372,20 @@ class Store:
         self.allowed_workspaces: Optional[frozenset] = (
             frozenset(allowed_workspaces) if allowed_workspaces else None
         )
-        try:
-            self.conn.execute("PRAGMA foreign_keys=ON")
-            if self.read_only:
-                # Defense in depth after the stdlib immutable URI or the injected
-                # connector's explicit immutable-open contract. Do not probe FTS5 by
-                # creating a temporary table here: an inspection must not write anything.
-                self.conn.execute("PRAGMA query_only=ON")
-                self._validate_read_only_ready()
-                row = self.conn.execute(
-                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='mem_fts'"
-                ).fetchone()
-                self.has_fts5 = bool(
-                    row and "virtual table" in str(row["sql"] or "").casefold()
-                    and "fts5" in str(row["sql"] or "").casefold()
+        if not _is_memory_database_path(self.path):
+            try:
+                stat_info = os.stat(self.path)
+                self._opened_identity: Optional[tuple[int, int]] = (
+                    int(stat_info.st_dev), int(stat_info.st_ino)
                 )
-            else:
-                # Keep deleted pages scrubbed even when an emergency erase cannot run a
-                # final VACUUM because another connection has the database busy.  The
-                # per-erase helper sets this too for legacy connections and backups;
-                # setting it at writable-store startup makes the protection durable for
-                # every normal v2 connection without changing the schema or data model.
-                self.conn.execute("PRAGMA secure_delete=ON")
-                synchronization = "FULL" if self.sqlite_durability == "durable" else "NORMAL"
-                self.conn.execute(f"PRAGMA synchronous={synchronization}")
+            except OSError:
+                self._opened_identity = None
+        else:
+            self._opened_identity = None
+        try:
+            self._configure_connection(self.conn)
+            if not self.read_only:
                 self.init_schema()
-                # journal_mode is persistent state, so set it only after a required backup
-                # and the transactional migration have completed successfully.
-                self.conn.execute("PRAGMA journal_mode=WAL")
                 if (not _is_memory_database_path(self.path)
                         and not self.durability_health()["matches_requested"]):
                     raise RuntimeError(
@@ -1351,6 +1398,86 @@ class Store:
             finally:
                 self.close()
             raise
+
+    def _configure_connection(self, conn: Any) -> None:
+        """Apply required pragmas, scalar functions, and durability settings to an open connection."""
+        conn.create_function("engraphis_unicode_lower", 1, _unicode_lower, deterministic=True)
+        conn.execute("PRAGMA foreign_keys=ON")
+        if self.read_only:
+            conn.execute("PRAGMA query_only=ON")
+            self._validate_read_only_ready()
+            row = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='mem_fts'"
+            ).fetchone()
+            self.has_fts5 = bool(
+                row and "virtual table" in str(row["sql"] or "").casefold()
+                and "fts5" in str(row["sql"] or "").casefold()
+            )
+        else:
+            conn.execute("PRAGMA secure_delete=ON")
+            synchronization = "FULL" if self.sqlite_durability == "durable" else "NORMAL"
+            conn.execute(f"PRAGMA synchronous={synchronization}")
+            conn.execute("PRAGMA journal_mode=WAL")
+
+    def is_stale(self) -> bool:
+        """Return True if the database file on disk has been replaced by another process."""
+        if self.read_only or _is_memory_database_path(self.path) or self._opened_identity is None:
+            return False
+        try:
+            stat_info = os.stat(self.path)
+            return (int(stat_info.st_dev), int(stat_info.st_ino)) != self._opened_identity
+        except OSError:
+            return True
+
+    def reconnect(self) -> None:
+        """Safely re-open the underlying SQLite connection, re-apply pragmas, and refresh snapshots."""
+        with self._close_lock:
+            read_only_path = self._preflight_read_only_path(self.path) if self.read_only else None
+            new_raw = self._open_connection(read_only_path or self.path)
+            self._configure_connection(new_raw)
+            self.conn.replace_raw(new_raw)
+            if not _is_memory_database_path(self.path):
+                try:
+                    stat_info = os.stat(self.path)
+                    self._opened_identity = (int(stat_info.st_dev), int(stat_info.st_ino))
+                except OSError:
+                    self._opened_identity = None
+            try:
+                self._read_snapshot_pool.close()
+            except Exception:
+                pass
+            self._read_snapshot_pool = ReadSnapshotPool(self._read_snapshot_pool.limit)
+
+    def check_health(self) -> dict[str, Any]:
+        """Verify that the SQLite connection is live and responsive; auto-reconnect if stale."""
+        try:
+            if self.is_stale():
+                logger.info("Database file replaced on disk; reconnecting Store...")
+                self.reconnect()
+            row = self.conn.execute("SELECT 1").fetchone()
+            data_ver = None
+            try:
+                ver = self.conn.execute("PRAGMA data_version").fetchone()
+                if ver is not None:
+                    data_ver = int(ver[0])
+            except Exception:
+                pass
+            return {"status": "ok", "responsive": bool(row), "data_version": data_ver}
+        except Exception as exc:
+            logger.warning(
+                "Database health check probe failed (%s); attempting reconnect...",
+                type(exc).__name__,
+            )
+            try:
+                self.reconnect()
+                row = self.conn.execute("SELECT 1").fetchone()
+                return {"status": "ok", "recovered": True, "responsive": bool(row)}
+            except Exception as reconnect_exc:
+                return {
+                    "status": "unhealthy",
+                    "error": type(reconnect_exc).__name__,
+                    "sqlite_errorname": getattr(reconnect_exc, "sqlite_errorname", None),
+                }
 
     def durability_health(self) -> dict:
         """Read effective connection settings without paths, content or writes.
@@ -2975,7 +3102,12 @@ class Store:
                 )
 
         self._execute_script_transactional(BROWSE_SCHEMA_SQL)
-        self._execute_script_transactional(MEMORY_CLOSURE_SCHEMA_SQL)
+        if (int(previous_version or 0) < SCHEMA_VERSION
+                or getattr(self, "_closures_incomplete", True)):
+            # Install, repair, and backfill closure history. A complete current schema's
+            # triggers already maintain every observation, so re-running the seed would
+            # only rescan all closed memories on every writable open.
+            self._execute_script_transactional(MEMORY_CLOSURE_SCHEMA_SQL)
         if getattr(self, "_browse_schema_incomplete", False):
             # A missing trigger could have allowed untracked changes. Repaired
             # schemas start a new cursor epoch instead of trusting prior tokens.
@@ -5220,20 +5352,45 @@ class Store:
         return records
 
     def _select_memory_records(self, sql: str, params: Iterable[Any]) -> list[MemoryRecord]:
-        with self.read_snapshot():
-            return self._records_from_rows(self.conn.execute(sql, params).fetchall())
+        try:
+            if self.is_stale():
+                self.reconnect()
+            with self.read_snapshot():
+                return self._records_from_rows(self.conn.execute(sql, params).fetchall())
+        except sqlite3.DatabaseError as exc:
+            logger.warning(
+                "_select_memory_records hit %s (%s); reconnecting and retrying once",
+                type(exc).__name__, getattr(exc, "sqlite_errorname", "unknown"),
+            )
+            self.reconnect()
+            with self.read_snapshot():
+                return self._records_from_rows(self.conn.execute(sql, params).fetchall())
 
     def get_memory(self, memory_id: str) -> Optional[MemoryRecord]:
-        with self.read_snapshot():
-            row = self.conn.execute(
-                "SELECT * FROM memories WHERE id=?", (memory_id,)
-            ).fetchone()
-            if row is not None and self.allowed_workspaces is not None:
-                try:
-                    self._authorize_workspace_id(row["workspace_id"])
-                except ValueError:
-                    return None
-            return self._records_from_rows([row])[0] if row else None
+        for attempt in range(2):
+            try:
+                if attempt == 0 and self.is_stale():
+                    self.reconnect()
+                with self.read_snapshot():
+                    row = self.conn.execute(
+                        "SELECT * FROM memories WHERE id=?", (memory_id,)
+                    ).fetchone()
+                    if row is not None and self.allowed_workspaces is not None:
+                        try:
+                            self._authorize_workspace_id(row["workspace_id"])
+                        except ValueError:
+                            return None
+                    return self._records_from_rows([row])[0] if row else None
+            except sqlite3.DatabaseError as exc:
+                if attempt == 0:
+                    logger.warning(
+                        "get_memory hit %s (%s); reconnecting and retrying once",
+                        type(exc).__name__, getattr(exc, "sqlite_errorname", "unknown"),
+                    )
+                    self.reconnect()
+                    continue
+                raise
+        return None
 
     def get_memories(self, memory_ids: Iterable[str]) -> dict[str, MemoryRecord]:
         """Batched :meth:`get_memory` — one ``IN (...)`` query per chunk.
@@ -5242,27 +5399,41 @@ class Store:
         resolves a whole bundle; doing that one ``SELECT`` at a time is the dominant cost
         on both paths. Ids that do not exist are simply absent from the result, mirroring
         ``get_memory`` returning ``None``."""
-        unique: list[str] = []
-        seen: set = set()
-        for mid in memory_ids:
-            if mid and mid not in seen:
-                seen.add(mid)
-                unique.append(mid)
-        selected: list[sqlite3.Row] = []
-        with self.read_snapshot():
-            for start in range(0, len(unique), IN_CLAUSE_CHUNK):
-                chunk = unique[start:start + IN_CLAUSE_CHUNK]
-                marks = ",".join("?" for _ in chunk)
-                rows = self.conn.fetchall(
-                    f"SELECT * FROM memories WHERE id IN ({marks})", chunk)
-                for row in rows:
-                    if self.allowed_workspaces is not None:
-                        try:
-                            self._authorize_workspace_id(row["workspace_id"])
-                        except ValueError:
-                            continue
-                    selected.append(row)
-            return {rec.id: rec for rec in self._records_from_rows(selected)}
+        for attempt in range(2):
+            try:
+                if attempt == 0 and self.is_stale():
+                    self.reconnect()
+                unique: list[str] = []
+                seen: set = set()
+                for mid in memory_ids:
+                    if mid and mid not in seen:
+                        seen.add(mid)
+                        unique.append(mid)
+                selected: list[sqlite3.Row] = []
+                with self.read_snapshot():
+                    for start in range(0, len(unique), IN_CLAUSE_CHUNK):
+                        chunk = unique[start:start + IN_CLAUSE_CHUNK]
+                        marks = ",".join("?" for _ in chunk)
+                        rows = self.conn.fetchall(
+                            f"SELECT * FROM memories WHERE id IN ({marks})", chunk)
+                        for row in rows:
+                            if self.allowed_workspaces is not None:
+                                try:
+                                    self._authorize_workspace_id(row["workspace_id"])
+                                except ValueError:
+                                    continue
+                            selected.append(row)
+                    return {rec.id: rec for rec in self._records_from_rows(selected)}
+            except sqlite3.DatabaseError as exc:
+                if attempt == 0:
+                    logger.warning(
+                        "get_memories hit %s (%s); reconnecting and retrying once",
+                        type(exc).__name__, getattr(exc, "sqlite_errorname", "unknown"),
+                    )
+                    self.reconnect()
+                    continue
+                raise
+        return {}
 
     def visible_memory_ids(self, memory_ids: list[str],
                            flt: Optional[SearchFilter], *,
@@ -5296,21 +5467,55 @@ class Store:
 
     def list_memories(self, flt: Optional[SearchFilter] = None,
                       *, include_invalid: bool = False, limit: Optional[int] = None,
-                      prompt_only: bool = False) -> list[MemoryRecord]:
+                      prompt_only: bool = False, closed_only: bool = False,
+                      candidate_query: str = "") -> list[MemoryRecord]:
         """List scoped records, optionally capping only prompt-eligible rows.
 
         Public callers can opt into ``prompt_only`` when this bounded result will enter
         model-adjacent output.  Eligibility is deliberately checked while streaming SQL
         rows, before the result cap: a large pending import must not hide an older
         approved record simply by consuming the raw ``LIMIT`` window.
+
+        ``candidate_query`` puts lexical matches before the bounded candidate window.
+        It scores the literal query and at most 32 expanded terms in SQLite, using the
+        same Unicode lowercasing as the final Python history tokenizer. SQLite may scan
+        and sort more rows than the returned/hydrated candidate limit. Nonmatches remain
+        a recency-ordered fallback; this is not exhaustive semantic ranking.
         """
         if prompt_only and limit is not None and int(limit) <= 0:
             return []
         sql = "SELECT * FROM memories"
         where, params = self._where(flt, include_invalid)
+        if closed_only:
+            # Select known closed world-time intervals before either result cap. Public
+            # history must still hide records outside the requested system-time snapshot.
+            valid_at, known_at = _temporal_anchors(flt)
+            where.extend([
+                "((valid_to IS NOT NULL AND valid_to<=? "
+                "AND (valid_to_recorded_at IS NULL OR valid_to_recorded_at<=?)) "
+                "OR EXISTS (SELECT 1 FROM memory_closures mc "
+                "WHERE mc.memory_id=memories.id AND mc.valid_to<=? "
+                "AND (mc.recorded_at IS NULL OR mc.recorded_at<=?)))",
+                "(ingested_at IS NULL OR ingested_at<=?)",
+                "(expired_at IS NULL OR ?<expired_at)",
+            ])
+            params.extend([valid_at, known_at, valid_at, known_at, known_at, known_at])
         if where:
             sql += " WHERE " + " AND ".join(where)
-        sql += " ORDER BY ingested_at DESC"
+        query = candidate_query.strip().lower()
+        if query:
+            terms = [query, *[term for term in _fts_terms(query) if term != query][:32]]
+            score_parts = []
+            for index, term in enumerate(terms):
+                boost = 2 if index == 0 else 1
+                score_parts.append(
+                    f"((CASE WHEN instr(engraphis_unicode_lower(title), ?) > 0 THEN {2 * boost} ELSE 0 END)"
+                    f" + (CASE WHEN instr(engraphis_unicode_lower(content), ?) > 0 THEN {boost} ELSE 0 END))"
+                )
+                params.extend([term, term])
+            sql += " ORDER BY (" + " + ".join(score_parts) + ") DESC, ingested_at DESC, id"
+        else:
+            sql += " ORDER BY ingested_at DESC"
         if limit and not prompt_only:
             sql += f" LIMIT {int(limit)}"
         if not prompt_only:
@@ -5519,6 +5724,157 @@ class Store:
         params.append(max(1, int(limit)))
         return self._select_memory_records(sql, params)
 
+    def list_history_candidates(
+        self,
+        flt: Optional[SearchFilter] = None,
+        *,
+        query: str = "",
+        extra_ids: Iterable[str] = (),
+        budget: int = DEFAULT_HISTORY_CANDIDATE_BUDGET,
+        include_invalid: bool = False,
+        prompt_only: bool = False,
+    ) -> list[MemoryRecord]:
+        """Return an index-selected candidate window for history inspection.
+
+        ``why``/``timeline`` must be able to show a superseded record that sits far
+        outside the newest-N window, but they must not hydrate the whole corpus on
+        every call.  Candidate selection therefore runs as one indexed lookup over
+        the lexical mirror (``mem_fts``) instead of a Python scan of every memory
+        row, and only the selected rows are hydrated — each with its complete
+        ``memory_closures`` observation set.
+
+        The window is explicit and configurable through ``budget``.  It bounds the
+        *candidate* set only: no closure history is truncated, and the caller
+        receives the records in the order the two ranked arms produced them.
+        ``extra_ids`` adds caller-ranked candidates (for example the semantic
+        arm's top hits) that the lexical index cannot express.  The two arms are
+        interleaved so a large lexical match set cannot starve the semantic arm.
+
+        Args:
+            query: Free-text query whose lexical matches seed the candidate set.
+            extra_ids: Additional candidate ids, already ranked by the caller.
+            budget: Maximum number of candidates to hydrate (per selection).
+            include_invalid: Include records outside their current validity window.
+            prompt_only: Keep only records that may enter model-adjacent output.
+        """
+        limit = max(1, int(budget))
+        where, params = self._where(flt, include_invalid, alias="m")
+        lexical = self._lexical_candidate_ids(
+            query, where, params, limit, prompt_only=prompt_only,
+        )
+        extra = [str(memory_id) for memory_id in extra_ids if str(memory_id)]
+        selected: list[str] = []
+        seen: set[str] = set()
+        lexical_iter = iter(lexical)
+        extra_iter = iter(extra)
+        while len(selected) < limit:
+            progressed = False
+            for source in (lexical_iter, extra_iter):
+                candidate = next(source, None)
+                if candidate is None:
+                    continue
+                progressed = True
+                if candidate not in seen:
+                    seen.add(candidate)
+                    selected.append(candidate)
+                if len(selected) >= limit:
+                    break
+            if not progressed:
+                break
+        if not selected:
+            return []
+        return self._hydrate_candidate_ids(selected, where, params)
+
+    def _lexical_candidate_ids(
+        self, query: str, where: list[str], params: list[Any], limit: int, *,
+        prompt_only: bool = False,
+    ) -> list[str]:
+        """Select candidate ids for a query through the indexed lexical mirror.
+
+        FTS5 resolves the match through its own index, so the cost follows the
+        number of matching documents rather than the size of the corpus.  A build
+        without FTS5 falls back to the plain mirror's LIKE scan, which is bounded
+        by the same explicit limit.
+        """
+        terms = _fts_terms(query)[:32] if query else []
+        if not terms:
+            return []
+        if self.has_fts5:
+            match = " OR ".join(f"{term}*" for term in terms)
+            sql = ("SELECT m.id, m.provenance, m.metadata FROM mem_fts f "
+                   "JOIN memories m ON m.id=f.id WHERE mem_fts MATCH ?")
+            args: list[Any] = [match]
+            if where:
+                sql += " AND " + " AND ".join(where)
+                args.extend(params)
+            sql += " ORDER BY bm25(mem_fts) LIMIT ?"
+            args.append(limit if not prompt_only else limit * 4)
+            try:
+                rows = self.conn.execute(sql, args).fetchall()
+            except sqlite3.OperationalError:
+                # A broken FTS index must not turn history inspection into a silent
+                # empty answer. Degrade to the plain-mirror LIKE scan below, and let a
+                # second failure propagate so the caller can fall back explicitly.
+                logger.warning(
+                    "lexical history candidate lookup failed; using the plain mirror",
+                    exc_info=True,
+                )
+                return self._like_candidate_ids(
+                    query, where, params, limit, prompt_only=prompt_only,
+                )
+        else:
+            return self._like_candidate_ids(
+                query, where, params, limit, prompt_only=prompt_only,
+            )
+        if prompt_only:
+            rows = [
+                row for row in rows
+                if _row_is_prompt_eligible(row["provenance"], row["metadata"])
+            ]
+        return [str(row["id"]) for row in rows][:limit]
+
+    def _like_candidate_ids(
+        self, query: str, where: list[str], params: list[Any], limit: int, *,
+        prompt_only: bool = False,
+    ) -> list[str]:
+        """Bounded lexical fallback for builds or queries without a usable FTS index."""
+        like = f"%{_escape_like(query.strip().lower())}%"
+        sql = ("SELECT m.id, m.provenance, m.metadata FROM mem_fts f "
+               "JOIN memories m ON m.id=f.id WHERE "
+               "(f.title LIKE ? ESCAPE '\\' OR f.content LIKE ? ESCAPE '\\' "
+               "OR f.keywords LIKE ? ESCAPE '\\')")
+        args: list[Any] = [like, like, like]
+        if where:
+            sql += " AND " + " AND ".join(where)
+            args.extend(params)
+        sql += " LIMIT ?"
+        args.append(limit if not prompt_only else limit * 4)
+        rows = self.conn.execute(sql, args).fetchall()
+        if prompt_only:
+            rows = [
+                row for row in rows
+                if _row_is_prompt_eligible(row["provenance"], row["metadata"])
+            ]
+        return [str(row["id"]) for row in rows][:limit]
+
+    def _hydrate_candidate_ids(
+        self, memory_ids: list[str], where: list[str], params: list[Any],
+    ) -> list[MemoryRecord]:
+        """Hydrate selected candidates under the same scope/temporal predicate."""
+        records: dict[str, MemoryRecord] = {}
+        for start in range(0, len(memory_ids), IN_CLAUSE_CHUNK):
+            chunk = memory_ids[start:start + IN_CLAUSE_CHUNK]
+            marks = ",".join("?" for _ in chunk)
+            sql = "SELECT m.* FROM memories m"
+            clause = list(where)
+            clause.append(f"m.id IN ({marks})")
+            if clause:
+                sql += " WHERE " + " AND ".join(clause)
+            rows = self.conn.execute(sql, [*params, *chunk]).fetchall()
+            for record in self._records_from_rows(rows):
+                records[record.id] = record
+        return [records[mid] for mid in memory_ids if mid in records]
+
     def list_memories_needing_vectors_page(self, *, fingerprint: str,
                                            after_id: str = "",
                                            limit: int = 500) -> list[MemoryRecord]:
@@ -5566,11 +5922,21 @@ class Store:
             if row is not None:
                 # Concurrent or out-of-order observations remain part of history
                 # even when another writer already installed a shorter summary.
-                self.conn.execute(
-                    "INSERT INTO memory_closures(memory_id,valid_to,recorded_at) "
-                    "VALUES (?,?,?) ON CONFLICT DO NOTHING",
-                    (memory_id, at, recorded_at),
-                )
+                try:
+                    self.conn.execute(
+                        "INSERT INTO memory_closures(memory_id,valid_to,recorded_at) "
+                        "VALUES (?,?,?) ON CONFLICT DO NOTHING",
+                        (memory_id, at, recorded_at),
+                    )
+                except sqlite3.IntegrityError as exc:
+                    # History is never truncated; report the full bound as a caller
+                    # error instead of leaking a raw database failure (HTTP 500).
+                    if "closure observation limit" not in str(exc):
+                        raise
+                    raise ClosureObservationLimitError(
+                        "closure observation limit reached: memory already holds the "
+                        f"maximum of {MAX_CLOSURE_OBSERVATIONS} observations"
+                    ) from exc
             updated = self.conn.execute(
                 "UPDATE memories SET valid_to=?, valid_to_recorded_at=? "
                 "WHERE id=? AND (valid_to IS NULL OR valid_to>?)",
@@ -7673,7 +8039,7 @@ class Store:
         if include_invalid:
             return ordinary, params
 
-        # Promotion and merge links intentionally keep retired source history
+        # Lifecycle lineage links intentionally keep retired source history
         # queryable from the live successor. They still require both endpoints
         # to satisfy every non-temporal scope/type predicate.
         historical_clauses: list[str] = []
@@ -7684,7 +8050,14 @@ class Store:
             )
             historical_clauses.extend(where)
             historical_params.extend(values)
-        lineage = "l.relation IN ('promotes','merges')"
+        lineage = "l.relation IN ('promotes','merges','supersedes')"
+        _, known = _temporal_anchors(flt)
+        for alias in ("ma", "mb"):
+            historical_clauses.extend([
+                f"({alias}.ingested_at IS NULL OR {alias}.ingested_at<=?)",
+                f"({alias}.expired_at IS NULL OR ?<{alias}.expired_at)",
+            ])
+            historical_params.extend([known, known])
         if historical_clauses:
             lineage += " AND " + " AND ".join(historical_clauses)
         return f"(({ordinary}) OR ({lineage}))", params + historical_params
@@ -9095,9 +9468,9 @@ class Store:
         actor = str(actor or "system")[:200]
         workspace_id = str(workspace_id or "")
         repo_id = str(repo_id or "")
-        # The connection pins its reentrant lock for the whole transaction.
-        # A second receipt mutex would invert that order when a batch already
-        # owns the connection. SQLite also serializes independent Store writers.
+        # SQLite reserves the writer before predecessor selection. The shared
+        # connection also serializes threads; a separate receipt mutex would
+        # invert that order when a caller already owns the transaction.
         with self.write_transaction():
             ts = now_ts()
             receipt_id = ids.new_id("receipt")
@@ -10329,6 +10702,11 @@ def _row_to_edge(row: sqlite3.Row) -> Edge:
         ingested_at=row["ingested_at"], expired_at=row["expired_at"],
         provenance=_loads(row["provenance"], {}),
     )
+
+
+def _unicode_lower(value: Optional[str]) -> Optional[str]:
+    """NULL-safe SQL normalization matching ``textutil.tokenize`` without casefolding."""
+    return value.lower() if value is not None else None
 
 
 def _fts_terms(q: str) -> list[str]:
