@@ -23,6 +23,54 @@ Do not edit `provenance` in SQLite. Schema 11 automatically preserves the old ex
 contract and recovers the known historical local-agent downgrade. Unknown and external evidence
 stays pending; quarantined evidence is never included in bulk approval.
 
+## Operation receipt chains after a crash, restore, or file-level damage
+
+Host logs may show `sqlite3.IntegrityError: receipt chain has no unique structural head`, followed
+by `receipt_warning` entries with code `receipt_chain_integrity_failure`. That means the
+hash-chained operation ledger (not your memories) is damaged: two receipts claim the same
+predecessor (a fork), a receipt is missing (a disconnection), or the independently stored
+head/count no longer matches.
+
+Since 1.7.6 this is an audit-only condition. Remember, recall, prefetch, imports, and graph work
+still complete; affected responses carry `receipt: null` plus a content-free `receipt_warning`.
+A host that marks the whole provider unavailable on this error should be upgraded.
+
+Receipt chains are append-only evidence. Engraphis will not guess a predecessor, rewrite hashes, or
+delete rows to make verification pass. Recover in this order:
+
+1. Stop every process that has the database open (agent host, dashboard, MCP server).
+2. Preserve a copy of the database and its `-wal`/`-shm` sidecars (and the key file, if encrypted).
+   Do not run `VACUUM`, `rekey`, or a migration against the original.
+3. Run `engraphis-init --check` (point `ENGRAPHIS_DB_PATH` at the preserved copy). It verifies
+   current-schema receipt chains read-only and reports damaged ones as `operation receipts`,
+   including the consequence for your data.
+4. Verify one workspace with `engraphis_verify_receipts` (or the Inspector) and export it with
+   `engraphis_export_receipts` before changing anything.
+5. Restore your most recent verified backup, or keep the damaged copy for diagnosis and accept
+   that this workspace's receipt verification remains invalid.
+
+Never regenerate `ENGRAPHIS_DB_KEY` to "fix" this. A changed key makes an encrypted database
+unreadable; it does not repair a receipt chain.
+
+### `EncryptionError` after an integrity error
+
+`EncryptionError` covers every failure to honor encryption, not only a wrong key. Check its `code`
+before touching the key:
+
+| code | meaning |
+| --- | --- |
+| `database_damaged` | The key was applied; SQLite reports a malformed database image. Preserve the file and restore a verified backup. |
+| `database_busy` | Another process holds the database. Close it and retry. |
+| `database_unavailable` | Path, permissions, disk space, or mount problem. Not a key problem. |
+| `key_rejected` | Wrong key, or a plaintext database opened with a key. The key must match the file. |
+| `key_config_invalid` | The key could not be applied (format or driver problem). |
+| `key_file_empty` / `key_file_unreadable` | The configured key file is empty or could not be read safely. |
+| `driver_missing` | Install `engraphis[encryption]` or provision a compatible SQLCipher driver. |
+
+A `-wal`/`-shm` file shown as `(deleted)` while a process still holds it means the database file
+was replaced or removed underneath a running process (a restore, a copied database, or a
+filesystem tool). Always stop writers before replacing a database file.
+
 ## Legacy v1 migration
 
 Migrate a flat v1 database through the staged v2 importer:

@@ -5,6 +5,15 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+- Classify encrypted-database open failures (`database_damaged`, `database_busy`,
+  `database_unavailable`, `key_rejected`, `driver_missing`, and key-file codes) so a damaged or
+  locked SQLCipher file is no longer reported as a wrong key, and surface the exact condition in
+  `engraphis-init --check`.
+- Verify operation-receipt chains read-only in `engraphis-init --check` (bounded by workspaces and
+  receipts), so a forked, disconnected, or truncated ledger is visible to the operator with
+  recovery guidance while memory writes and recall continue with a content-free
+  `receipt_warning`.
+
 - Browsers no longer enter a token. The dashboard opens automatically for any browser that
   can reach it; the deployment's network reachability is the dashboard boundary. Session
   issuance still requires the same-origin custom header and a published Host, and only an

@@ -833,6 +833,196 @@ def _public_receipt_row(row: dict) -> dict:
     return {**payload, "hash": raw_hash}
 
 
+def receipt_chain_state(conn, workspace_id: str) -> dict:
+    """Reconstruct one receipt chain from immutable predecessor hashes.
+
+    SQLite ``rowid`` is physical placement, not durable ordering: VACUUM and table
+    rewrites may renumber it. The receipt payload already carries the true linked-list
+    order, while ``receipt_chain_heads`` anchors the expected tail. This helper keeps
+    traversal independent of storage layout and returns a deterministic fallback order
+    when corruption makes a single chain impossible.
+
+    It is a module-level function so read-only diagnostics (the install doctor) can
+    verify a database through their own connection without opening a writable Store.
+    Only ``SELECT`` statements are issued; ``conn`` must return rows addressable by
+    column name (``sqlite3.Row``).
+    """
+    rows = [dict(row) for row in conn.execute(
+        "SELECT id, sequence, payload, prev_hash, receipt_hash "
+        "FROM operation_receipts "
+        "WHERE workspace_id=?",
+        (workspace_id,),
+    ).fetchall()]
+
+    def text(value: Any) -> str:
+        return value if isinstance(value, str) else str(value or "")
+
+    def stable_key(row: dict) -> tuple[str, str]:
+        material = "\0".join((
+            text(row.get("receipt_hash")),
+            text(row.get("prev_hash")),
+            text(row.get("id")),
+            hashlib.sha256(text(row.get("payload")).encode("utf-8")).hexdigest(),
+        ))
+        return hashlib.sha256(material.encode("utf-8")).hexdigest(), material
+
+    children: dict[str, list[dict]] = {}
+    for row in rows:
+        children.setdefault(text(row.get("prev_hash")), []).append(row)
+    for candidates in children.values():
+        candidates.sort(key=stable_key)
+
+    structure_errors: list[dict] = []
+    ordered: list[dict] = []
+    roots = children.get("", [])
+    if rows and len(roots) != 1:
+        structure_errors.append({
+            "index": 0,
+            "id": "",
+            "error": "chain_root_count",
+        })
+    if len(roots) == 1:
+        current = roots[0]
+        visited_hashes: set[str] = set()
+        while current is not None:
+            receipt_hash = text(current.get("receipt_hash"))
+            if receipt_hash in visited_hashes:
+                structure_errors.append({
+                    "index": len(ordered),
+                    "id": text(current.get("id")),
+                    "error": "chain_cycle",
+                })
+                break
+            visited_hashes.add(receipt_hash)
+            ordered.append(current)
+            successors = children.get(receipt_hash, [])
+            if len(successors) > 1:
+                structure_errors.append({
+                    "index": len(ordered) - 1,
+                    "id": text(current.get("id")),
+                    "error": "chain_fork",
+                })
+                break
+            current = successors[0] if successors else None
+
+    ordered_identity = {id(row) for row in ordered}
+    if len(ordered) != len(rows):
+        structure_errors.append({
+            "index": len(ordered),
+            "id": "",
+            "error": "chain_disconnected",
+        })
+        ordered.extend(sorted(
+            (row for row in rows if id(row) not in ordered_identity),
+            key=stable_key,
+        ))
+
+    row_errors: list[dict] = []
+    for index, row in enumerate(ordered):
+        if type(row.get("sequence")) is not int or row["sequence"] != index + 1:
+            row_errors.append({
+                "index": index,
+                "id": text(row.get("id")),
+                "error": "sequence_mismatch",
+            })
+        raw = text(row.get("payload"))
+        stored_hash = text(row.get("receipt_hash"))
+        if hashlib.sha256(raw.encode("utf-8")).hexdigest() != stored_hash:
+            row_errors.append({
+                "index": index,
+                "id": text(row.get("id")),
+                "error": "hash_mismatch",
+            })
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError, RecursionError):
+            payload = None
+        if (
+            not isinstance(payload, dict)
+            or payload.get("id") != row.get("id")
+            or payload.get("prev_hash") != row.get("prev_hash")
+        ):
+            row_errors.append({
+                "index": index,
+                "id": text(row.get("id")),
+                "error": "payload_mismatch",
+            })
+        if _public_receipt_row(row).get("invalid_payload") is True:
+            row_errors.append({
+                "index": index,
+                "id": text(row.get("id")),
+                "error": "payload_schema_invalid",
+            })
+
+    structurally_valid = not structure_errors and len(ordered) == len(rows)
+    head = (
+        text(ordered[-1].get("receipt_hash"))
+        if ordered and structurally_valid else ""
+    )
+    return {
+        "rows": ordered,
+        "head": head,
+        "structure_errors": structure_errors,
+        "row_errors": row_errors,
+        "errors": [*row_errors, *structure_errors],
+    }
+
+
+def verify_receipt_chain(conn, *, workspace_id: str, expected_head: str = "",
+                         expected_count: Optional[int] = None) -> dict:
+    """Verify one workspace's receipt chain against hashes and its stored anchor.
+
+    Like :func:`receipt_chain_state`, this is read-only and usable with any
+    ``sqlite3``-compatible connection that returns named columns.
+    """
+    chain = receipt_chain_state(conn, workspace_id)
+    rows = chain["rows"]
+    errors: list[dict] = list(chain["errors"])
+    head = str(chain["head"] or "")
+    anchor = conn.execute(
+        "SELECT receipt_count, head_hash, integrity_error "
+        "FROM receipt_chain_heads WHERE workspace_id=?",
+        (workspace_id,),
+    ).fetchone()
+    if rows and anchor is None:
+        errors.append({"index": len(rows), "id": "", "error": "missing_anchor"})
+    elif anchor is not None:
+        anchor_count = anchor["receipt_count"]
+        if type(anchor_count) is not int or anchor_count < 0 or anchor_count != len(rows):
+            errors.append({
+                "index": len(rows), "id": "", "error": "anchor_count_mismatch",
+            })
+        if str(anchor["head_hash"]) != head:
+            errors.append({
+                "index": len(rows), "id": "", "error": "anchor_head_mismatch",
+            })
+        if str(anchor["integrity_error"] or ""):
+            errors.append({
+                "index": len(rows), "id": "", "error": "anchor_integrity_error",
+            })
+    expected_head = str(expected_head or "").strip()
+    if expected_head and head != expected_head:
+        errors.append({
+            "index": len(rows), "id": "", "error": "expected_head_mismatch",
+        })
+    if expected_count is not None:
+        try:
+            external_count = max(0, int(expected_count))
+        except (TypeError, ValueError, OverflowError):
+            external_count = -1
+        if external_count != len(rows):
+            errors.append({
+                "index": len(rows), "id": "", "error": "expected_count_mismatch",
+            })
+    return {
+        "valid": not errors,
+        "count": len(rows),
+        "head": head,
+        "anchored": anchor is not None,
+        "errors": errors,
+    }
+
+
 def _fts5_available(conn: sqlite3.Connection | _SerializedConnection) -> bool:
     try:
         conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS _fts_probe USING fts5(x)")
@@ -9305,133 +9495,8 @@ class Store:
                 )
 
     def _receipt_chain_state(self, workspace_id: str) -> dict:
-        """Reconstruct one receipt chain from immutable predecessor hashes.
-
-        SQLite ``rowid`` is physical placement, not durable ordering: VACUUM and table
-        rewrites may renumber it. The receipt payload already carries the true linked-list
-        order, while ``receipt_chain_heads`` anchors the expected tail. This helper keeps
-        traversal independent of storage layout and returns a deterministic fallback order
-        when corruption makes a single chain impossible.
-        """
-        rows = [dict(row) for row in self.conn.execute(
-            "SELECT id, sequence, payload, prev_hash, receipt_hash "
-            "FROM operation_receipts "
-            "WHERE workspace_id=?",
-            (workspace_id,),
-        ).fetchall()]
-
-        def text(value: Any) -> str:
-            return value if isinstance(value, str) else str(value or "")
-
-        def stable_key(row: dict) -> tuple[str, str]:
-            material = "\0".join((
-                text(row.get("receipt_hash")),
-                text(row.get("prev_hash")),
-                text(row.get("id")),
-                hashlib.sha256(text(row.get("payload")).encode("utf-8")).hexdigest(),
-            ))
-            return hashlib.sha256(material.encode("utf-8")).hexdigest(), material
-
-        children: dict[str, list[dict]] = {}
-        for row in rows:
-            children.setdefault(text(row.get("prev_hash")), []).append(row)
-        for candidates in children.values():
-            candidates.sort(key=stable_key)
-
-        structure_errors: list[dict] = []
-        ordered: list[dict] = []
-        roots = children.get("", [])
-        if rows and len(roots) != 1:
-            structure_errors.append({
-                "index": 0,
-                "id": "",
-                "error": "chain_root_count",
-            })
-        if len(roots) == 1:
-            current = roots[0]
-            visited_hashes: set[str] = set()
-            while current is not None:
-                receipt_hash = text(current.get("receipt_hash"))
-                if receipt_hash in visited_hashes:
-                    structure_errors.append({
-                        "index": len(ordered),
-                        "id": text(current.get("id")),
-                        "error": "chain_cycle",
-                    })
-                    break
-                visited_hashes.add(receipt_hash)
-                ordered.append(current)
-                successors = children.get(receipt_hash, [])
-                if len(successors) > 1:
-                    structure_errors.append({
-                        "index": len(ordered) - 1,
-                        "id": text(current.get("id")),
-                        "error": "chain_fork",
-                    })
-                    break
-                current = successors[0] if successors else None
-
-        ordered_identity = {id(row) for row in ordered}
-        if len(ordered) != len(rows):
-            structure_errors.append({
-                "index": len(ordered),
-                "id": "",
-                "error": "chain_disconnected",
-            })
-            ordered.extend(sorted(
-                (row for row in rows if id(row) not in ordered_identity),
-                key=stable_key,
-            ))
-
-        row_errors: list[dict] = []
-        for index, row in enumerate(ordered):
-            if type(row.get("sequence")) is not int or row["sequence"] != index + 1:
-                row_errors.append({
-                    "index": index,
-                    "id": text(row.get("id")),
-                    "error": "sequence_mismatch",
-                })
-            raw = text(row.get("payload"))
-            stored_hash = text(row.get("receipt_hash"))
-            if hashlib.sha256(raw.encode("utf-8")).hexdigest() != stored_hash:
-                row_errors.append({
-                    "index": index,
-                    "id": text(row.get("id")),
-                    "error": "hash_mismatch",
-                })
-            try:
-                payload = json.loads(raw)
-            except (TypeError, ValueError, RecursionError):
-                payload = None
-            if (
-                not isinstance(payload, dict)
-                or payload.get("id") != row.get("id")
-                or payload.get("prev_hash") != row.get("prev_hash")
-            ):
-                row_errors.append({
-                    "index": index,
-                    "id": text(row.get("id")),
-                    "error": "payload_mismatch",
-                })
-            if _public_receipt_row(row).get("invalid_payload") is True:
-                row_errors.append({
-                    "index": index,
-                    "id": text(row.get("id")),
-                    "error": "payload_schema_invalid",
-                })
-
-        structurally_valid = not structure_errors and len(ordered) == len(rows)
-        head = (
-            text(ordered[-1].get("receipt_hash"))
-            if ordered and structurally_valid else ""
-        )
-        return {
-            "rows": ordered,
-            "head": head,
-            "structure_errors": structure_errors,
-            "row_errors": row_errors,
-            "errors": [*row_errors, *structure_errors],
-        }
+        """Compatibility wrapper over :func:`receipt_chain_state`."""
+        return receipt_chain_state(self.conn, workspace_id)
 
     def record_receipt(self, operation: str, *, workspace_id: str = "",
                        repo_id: str = "", actor: str = "system",
@@ -10115,52 +10180,12 @@ class Store:
 
     def verify_receipts(self, *, workspace_id: str, expected_head: str = "",
                         expected_count: Optional[int] = None) -> dict:
-        chain = self._receipt_chain_state(workspace_id)
-        rows = chain["rows"]
-        errors: list[dict] = list(chain["errors"])
-        head = str(chain["head"] or "")
-        anchor = self.conn.execute(
-            "SELECT receipt_count, head_hash, integrity_error "
-            "FROM receipt_chain_heads WHERE workspace_id=?",
-            (workspace_id,),
-        ).fetchone()
-        if rows and anchor is None:
-            errors.append({"index": len(rows), "id": "", "error": "missing_anchor"})
-        elif anchor is not None:
-            anchor_count = anchor["receipt_count"]
-            if type(anchor_count) is not int or anchor_count < 0 or anchor_count != len(rows):
-                errors.append({
-                    "index": len(rows), "id": "", "error": "anchor_count_mismatch",
-                })
-            if str(anchor["head_hash"]) != head:
-                errors.append({
-                    "index": len(rows), "id": "", "error": "anchor_head_mismatch",
-                })
-            if str(anchor["integrity_error"] or ""):
-                errors.append({
-                    "index": len(rows), "id": "", "error": "anchor_integrity_error",
-                })
-        expected_head = str(expected_head or "").strip()
-        if expected_head and head != expected_head:
-            errors.append({
-                "index": len(rows), "id": "", "error": "expected_head_mismatch",
-            })
-        if expected_count is not None:
-            try:
-                external_count = max(0, int(expected_count))
-            except (TypeError, ValueError, OverflowError):
-                external_count = -1
-            if external_count != len(rows):
-                errors.append({
-                    "index": len(rows), "id": "", "error": "expected_count_mismatch",
-                })
-        return {
-            "valid": not errors,
-            "count": len(rows),
-            "head": head,
-            "anchored": anchor is not None,
-            "errors": errors,
-        }
+        return verify_receipt_chain(
+            self.conn,
+            workspace_id=workspace_id,
+            expected_head=expected_head,
+            expected_count=expected_count,
+        )
 
     # ── sync state (device identity + per-peer cursors) ─────────────────────────
     def get_sync_state(self, key: str) -> Optional[str]:
