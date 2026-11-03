@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import importlib
+import inspect
 import json
 import logging
 import math
@@ -50,7 +51,6 @@ except ImportError:  # pragma: no cover - core-floor (numpy-only) installs
     BeforeValidator = None  # type: ignore[assignment,misc]
 
 try:
-    import anyio
     from mcp.server.fastmcp import FastMCP
     from mcp.types import CallToolResult, TextContent
     try:
@@ -103,25 +103,29 @@ work and report the exact memory failure once instead of fabricating memory stat
 # ``classic_mcp`` retains the public, named-tool protocol for integrations that pinned a
 # tool name.  ``mcp`` temporarily refers to it while the legacy decorators below execute;
 # it is rebound to the small Smart MCP surface after every classic tool has registered.
-def _threaded_tool(server, **options):
-    """Keep blocking memory work off the shared MCP transport's event loop.
+class _WorkerFastMCP(FastMCP):
+    """Keep protocol tasks responsive while synchronous memory work completes."""
 
-    AnyIO copies the bound service, caller and MCP request ContextVars into the
-    worker. Its default cancellation shielding lets an in-flight mutation finish
-    its transaction. Direct Python callers and gateway dispatch stay synchronous.
-    """
-    def register(function):
-        @wraps(function)
-        async def run(*args, **kwargs):
-            return await anyio.to_thread.run_sync(partial(function, *args, **kwargs))
+    def add_tool(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
+        if inspect.iscoroutinefunction(fn) or inspect.iscoroutinefunction(getattr(fn, "__call__", None)):
+            super().add_tool(fn, *args, **kwargs)
+            return
 
-        run._engraphis_sync_handler = function
-        server.tool(**options)(run)
-        return function
-    return register
+        @wraps(fn)
+        async def worker(*args: Any, **arguments: Any) -> Any:
+            import anyio
+
+            # AnyIO propagates request ContextVars and shields an in-flight write
+            # from abandonment on cancellation. Never replay/abandon mutations.
+            return await anyio.to_thread.run_sync(partial(fn, *args, **arguments))
+
+        # Smart dispatch runs inside the worker already. Keep its original sync
+        # handler available without bypassing the SDK's schema/argument metadata.
+        setattr(worker, "_engraphis_sync_handler", fn)
+        super().add_tool(worker, *args, **kwargs)
 
 
-classic_mcp = FastMCP("engraphis_mcp", instructions=_SESSION_PROTOCOL,
+classic_mcp = _WorkerFastMCP("engraphis_mcp", instructions=_SESSION_PROTOCOL,
                       log_level="WARNING")
 mcp = classic_mcp
 
@@ -179,6 +183,49 @@ def _ok(payload: dict) -> str:
 
 
 
+_KNOWN_SQLITE_ERROR_CODES = {
+    1: "SQLITE_ERROR",
+    5: "SQLITE_BUSY",
+    6: "SQLITE_LOCKED",
+    8: "SQLITE_READONLY",
+    10: "SQLITE_IOERR",
+    11: "SQLITE_CORRUPT",
+    14: "SQLITE_CANTOPEN",
+    15: "SQLITE_PROTOCOL",
+    17: "SQLITE_SCHEMA",
+    26: "SQLITE_NOTADB",
+}
+
+
+def _safe_exception_marker(exc: Exception) -> str:
+    """Class marker for error logging without leaking message text or paths."""
+    exc_type = type(exc).__name__
+    import sqlite3
+    if isinstance(exc, sqlite3.Error):
+        error_name = getattr(exc, "sqlite_errorname", None)
+        if not error_name:
+            code = getattr(exc, "sqlite_errorcode", None)
+            if code is not None:
+                error_name = _KNOWN_SQLITE_ERROR_CODES.get(code)
+        if not error_name:
+            msg = str(exc).lower()
+            if "write lock timeout" in msg or "transaction appears stuck" in msg:
+                error_name = "write_lock_timeout"
+            elif "database is locked" in msg or "locked" in msg:
+                error_name = "SQLITE_LOCKED"
+            elif "busy" in msg:
+                error_name = "SQLITE_BUSY"
+            elif "disk i/o error" in msg:
+                error_name = "SQLITE_IOERR"
+            elif "malformed" in msg or "corrupt" in msg:
+                error_name = "SQLITE_CORRUPT"
+            elif "not a database" in msg:
+                error_name = "SQLITE_NOTADB"
+        if error_name:
+            return f"{exc_type}: {error_name}"
+    return exc_type
+
+
 def _err(exc: Exception) -> str:
     """Actionable, safe error string (never leaks internals or credentials)."""
     if isinstance(exc, MemoryConflict):
@@ -186,12 +233,22 @@ def _err(exc: Exception) -> str:
                     "code": exc.code, "retryable": False})
     if isinstance(exc, ValidationError):
         return f"Error: {exc}"
-    exc_type = type(exc).__name__
+    exc_marker = _safe_exception_marker(exc)
     # Redact exception messages to prevent credential/path/memory leakage.
     # Log only a safe class marker and never attach exc_info/tracebacks. The
     # class goes INTO the message: `extra=` fields are dropped by most
     # formatters, which made every failure log identically unattributable.
-    logger.error("MCP tool operation failed (%s)", exc_type)
+    logger.error("MCP tool operation failed (%s)", exc_marker)
+    import sqlite3
+    if isinstance(exc, (sqlite3.DatabaseError, sqlite3.OperationalError)):
+        try:
+            svc = service()
+            if hasattr(svc, "check_health"):
+                svc.check_health()
+            elif hasattr(svc, "store") and hasattr(svc.store, "reconnect"):
+                svc.store.reconnect()
+        except Exception:
+            pass
     return "Error: operation failed. Check the Engraphis server logs for details."
 
 
@@ -433,6 +490,8 @@ def _apply_response_budget(payload: dict, max_response_tokens: Optional[int]) ->
     return payload
 
 _READ_ONLY_TOOLS = frozenset({
+    "engraphis_spec_crawl",
+    "engraphis_spec_crawl_memories",
     "engraphis_list_workspaces",
     "engraphis_get_workspace_routing",
     "engraphis_recall",
@@ -489,7 +548,7 @@ def minimum_role(tool_name: str) -> str:
     return "member"
 
 
-@_threaded_tool(mcp,
+@mcp.tool(
     name="engraphis_list_workspaces",
     annotations={"title": "List available memory workspaces", "readOnlyHint": True,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
@@ -502,7 +561,7 @@ def engraphis_list_workspaces() -> str:
         return _err(exc)
 
 
-@_threaded_tool(mcp,
+@mcp.tool(
     name="engraphis_get_workspace_routing",
     annotations={"title": "Read a project's workspace choice", "readOnlyHint": True,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
@@ -518,7 +577,7 @@ def engraphis_get_workspace_routing(
         return _err(exc)
 
 
-@_threaded_tool(mcp,
+@mcp.tool(
     name="engraphis_set_workspace_routing",
     annotations={"title": "Save a project's workspace choice", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
@@ -538,7 +597,7 @@ def engraphis_set_workspace_routing(
         return _err(exc)
 
 
-@_threaded_tool(mcp,
+@mcp.tool(
     name="engraphis_remember",
     annotations={"title": "Remember a fact", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
@@ -648,7 +707,7 @@ def engraphis_remember(
         return _err(exc)
 
 
-@_threaded_tool(mcp,
+@mcp.tool(
     name="engraphis_remember_many",
     annotations={"title": "Remember a batch of facts", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
@@ -720,7 +779,7 @@ def engraphis_remember_many(
         return _err(exc)
 
 
-@_threaded_tool(mcp,
+@mcp.tool(
     name="engraphis_recall",
     annotations={"title": "Recall relevant memories", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": False,
@@ -811,28 +870,36 @@ def engraphis_recall(
         was disabled because the active embedder is not declared semantic.
         Returns count 0 with a "note" if the workspace/repo isn't known yet.
     """
-    try:
-        payload = service().recall(
-            query, workspace=workspace, repo=repo, session_id=session_id,
-            mtypes=mtypes, k=k, as_of=as_of, valid_at=valid_at,
-            known_at=known_at, token_budget=token_budget,
-            retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
-            packing_mode=packing_mode, retrieval_recipe=retrieval_recipe,
-            response_mode=response_mode,
-            diagnostics=diagnostics,
-            planning=planning,
-            mtype_limits=mtype_limits,
-            jev_assisted=jev_assisted,
-            allow_remote=allow_remote,
-            data_classification=data_classification,
-        )
-        payload = _apply_response_budget(payload, max_response_tokens)
-        return _ok(payload)
-    except Exception as exc:  # noqa: BLE001
-        return _err(exc)
+    for attempt in range(2):
+        try:
+            payload = service().recall(
+                query, workspace=workspace, repo=repo, session_id=session_id,
+                mtypes=mtypes, k=k, as_of=as_of, valid_at=valid_at,
+                known_at=known_at, token_budget=token_budget,
+                retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
+                packing_mode=packing_mode, retrieval_recipe=retrieval_recipe,
+                response_mode=response_mode,
+                diagnostics=diagnostics,
+                planning=planning,
+                mtype_limits=mtype_limits,
+                jev_assisted=jev_assisted,
+                allow_remote=allow_remote,
+                data_classification=data_classification,
+            )
+            payload = _apply_response_budget(payload, max_response_tokens)
+            return _ok(payload)
+        except Exception as exc:  # noqa: BLE001
+            import sqlite3
+            if attempt == 0 and isinstance(exc, (sqlite3.DatabaseError, sqlite3.OperationalError)):
+                try:
+                    service().store.reconnect()
+                    continue
+                except Exception:
+                    pass
+            return _err(exc)
 
 
-@_threaded_tool(mcp,
+@mcp.tool(
     name="engraphis_recall_context",
     annotations={"title": "Recall token-efficient context", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": False,
@@ -901,145 +968,153 @@ def engraphis_recall_context(
     with a format marker. It does not apply another summary or claim extra savings.
     Use ``engraphis_get_memory`` for the full source behind a citation.
     """
-    try:
-        format = str(format or "full").strip().lower()
-        if format not in {"full", "gist"}:
-            raise ValidationError("format must be one of: full, gist")
-        _recall_started = time.monotonic()
-        payload = service().recall(
-            query,
-            workspace=workspace,
-            repo=repo,
-            session_id=session_id,
-            mtypes=mtypes,
-            k=k,
-            _default_k=50,
-            as_of=as_of,
-            valid_at=valid_at,
-            known_at=known_at,
-            token_budget=token_budget,
-            _default_token_budget=1024,
-            retrieval_profile=retrieval_profile,
-            candidate_depth=candidate_depth,
-            packing_mode=packing_mode,
-            retrieval_recipe=retrieval_recipe,
-            response_mode="compact",
-            diagnostics=diagnostics,
-            planning=planning,
-            mtype_limits=mtype_limits,
-            jev_assisted=jev_assisted,
-            allow_remote=allow_remote,
-            data_classification=data_classification,
-            intent="recall_context",
-        )
-        by_id = {
-            str(source.get("id") or ""): source
-            for source in payload.pop("memories", [])
-        }
-        sources = []
-        for ordinal, packed in enumerate(payload.pop("packed_sources", []), start=1):
-            detail = by_id.get(str(packed.get("id") or ""), {})
-            source = {
-                "n": ordinal,
-                "id": packed.get("id"),
-                "tokens": packed.get("tokens"),
+    format = str(format or "full").strip().lower()
+    if format not in {"full", "gist"}:
+        raise ValidationError("format must be one of: full, gist")
+    for attempt in range(2):
+        try:
+            _recall_started = time.monotonic()
+            payload = service().recall(
+                query,
+                workspace=workspace,
+                repo=repo,
+                session_id=session_id,
+                mtypes=mtypes,
+                k=k,
+                _default_k=50,
+                as_of=as_of,
+                valid_at=valid_at,
+                known_at=known_at,
+                token_budget=token_budget,
+                _default_token_budget=1024,
+                retrieval_profile=retrieval_profile,
+                candidate_depth=candidate_depth,
+                packing_mode=packing_mode,
+                retrieval_recipe=retrieval_recipe,
+                response_mode="compact",
+                diagnostics=diagnostics,
+                planning=planning,
+                mtype_limits=mtype_limits,
+                jev_assisted=jev_assisted,
+                allow_remote=allow_remote,
+                data_classification=data_classification,
+                intent="recall_context",
+            )
+            by_id = {
+                str(source.get("id") or ""): source
+                for source in payload.pop("memories", [])
             }
-            if packed.get("exact_value"):
-                source["exact_value"] = packed["exact_value"]
-            if packed.get("source_span") is not None:
-                source["source_span"] = packed["source_span"]
-            if packed.get("evidence_unit_id"):
-                source["evidence_unit_id"] = packed["evidence_unit_id"]
-            if packed.get("evidence_unit"):
-                source["evidence_unit"] = packed["evidence_unit"]
-            if packed.get("attribution"):
-                source["attribution"] = packed["attribution"]
-            if detail.get("title"):
-                source["title"] = detail["title"]
-            # Compact recall omits source bodies, but keeps both scoring contracts so
-            # callers can rank locally without mistaking rank for absolute evidence.
-            if "relative_score" in detail:
-                source["relative_score"] = detail["relative_score"]
-            if "absolute_support" in detail:
-                source["absolute_support"] = detail["absolute_support"]
-            provenance = detail.get("provenance")
-            if provenance:
-                source["provenance"] = provenance
-            if packed.get("truncated"):
-                source["truncated"] = True
-            reason = packed.get("reason")
-            if reason and reason not in {"full", "summary"}:
-                source["reason"] = reason
-            sources.append(source)
-        payload["sources"] = sources
-
-        if format == "gist":
-            # The packer already selected the admissible evidence within the budget.
-            # A raw reread or prefix summary here can revive excluded content, lose a
-            # qualification, or exceed that budget. Keep its text and accounting.
-            payload["format"] = "gist"
-
-        if not diagnostics:
-            if "score_semantics" in payload:
-                payload["score_semantics"] = {
-                    "relative_score": "query-relative",
-                    "absolute_support": "[0, 1]",
+            sources = []
+            for ordinal, packed in enumerate(payload.pop("packed_sources", []), start=1):
+                detail = by_id.get(str(packed.get("id") or ""), {})
+                source = {
+                    "n": ordinal,
+                    "id": packed.get("id"),
+                    "tokens": packed.get("tokens"),
                 }
-            for field in (
-                "candidate_depth_reason",
-                "candidate_k_requested",
-                "candidate_k_used",
-                "context_revision",
-                "vector_index_backend",
-                "reranker_mode",
-                "receipt",
-                "vector_search_ready",
-                "degraded_reason",
-                "embedding_mode",
-                "retrieval_trace",
-                "planning_details",
-                "graph_traversal_details",
-            ):
-                payload.pop(field, None)
+                if packed.get("exact_value"):
+                    source["exact_value"] = packed["exact_value"]
+                if packed.get("source_span") is not None:
+                    source["source_span"] = packed["source_span"]
+                if packed.get("evidence_unit_id"):
+                    source["evidence_unit_id"] = packed["evidence_unit_id"]
+                if packed.get("evidence_unit"):
+                    source["evidence_unit"] = packed["evidence_unit"]
+                if packed.get("attribution"):
+                    source["attribution"] = packed["attribution"]
+                if detail.get("title"):
+                    source["title"] = detail["title"]
+                # Compact recall omits source bodies, but keeps both scoring contracts so
+                # callers can rank locally without mistaking rank for absolute evidence.
+                if "relative_score" in detail:
+                    source["relative_score"] = detail["relative_score"]
+                if "absolute_support" in detail:
+                    source["absolute_support"] = detail["absolute_support"]
+                provenance = detail.get("provenance")
+                if provenance:
+                    source["provenance"] = provenance
+                if packed.get("truncated"):
+                    source["truncated"] = True
+                reason = packed.get("reason")
+                if reason and reason not in {"full", "summary"}:
+                    source["reason"] = reason
+                sources.append(source)
+            payload["sources"] = sources
 
-            default_settings = {
-                "retrieval_profile": "balanced",
-                "candidate_depth": "fixed",
-                "packing_mode": "legacy",
-                "retrieval_recipe": "default",
-                "planning": "off",
-                "response_mode": "compact",
-                "historical": False,
-                "include_untrusted": False,
-            }
-            for key, default_val in default_settings.items():
-                if payload.get(key) == default_val:
-                    payload.pop(key, None)
+            if format == "gist":
+                # The packer already selected the admissible evidence within the budget.
+                # A raw reread or prefix summary here can revive excluded content, lose a
+                # qualification, or exceed that budget. Keep its text and accounting.
+                payload["format"] = "gist"
 
-            preserve_keys = {"context", "sources"}
-            for key, val in list(payload.items()):
-                if key not in preserve_keys and (
-                    val is None or val == "" or val == {} or val == []
+            if not diagnostics:
+                if "score_semantics" in payload:
+                    payload["score_semantics"] = {
+                        "relative_score": "query-relative",
+                        "absolute_support": "[0, 1]",
+                    }
+                for field in (
+                    "candidate_depth_reason",
+                    "candidate_k_requested",
+                    "candidate_k_used",
+                    "context_revision",
+                    "vector_index_backend",
+                    "reranker_mode",
+                    "receipt",
+                    "vector_search_ready",
+                    "degraded_reason",
+                    "embedding_mode",
+                    "retrieval_trace",
+                    "planning_details",
+                    "graph_traversal_details",
                 ):
-                    payload.pop(key, None)
-        payload = _apply_response_budget(payload, max_response_tokens)
-        usage = payload.get("usage") or {}
-        # The recall usage dict only carries token and packing counters; latency
-        # is captured here so the operational log reports the real per-call
-        # cost of the recall (not a fixed zero from a non-existent field).
-        elapsed_ms = (time.monotonic() - _recall_started) * 1000.0
-        logger.info(
-            "recall_context workspace=%s k=%s budget=%s packed=%s omitted=%s ms=%.0f",
-            workspace, k, token_budget,
-            usage.get("packed_count"), usage.get("omitted_count"),
-            elapsed_ms,
-        )
-        return _ok(payload)
-    except Exception as exc:  # noqa: BLE001
-        return _err(exc)
+                    payload.pop(field, None)
+
+                default_settings = {
+                    "retrieval_profile": "balanced",
+                    "candidate_depth": "fixed",
+                    "packing_mode": "legacy",
+                    "retrieval_recipe": "default",
+                    "planning": "off",
+                    "response_mode": "compact",
+                    "historical": False,
+                    "include_untrusted": False,
+                }
+                for key, default_val in default_settings.items():
+                    if payload.get(key) == default_val:
+                        payload.pop(key, None)
+
+                preserve_keys = {"context", "sources"}
+                for key, val in list(payload.items()):
+                    if key not in preserve_keys and (
+                        val is None or val == "" or val == {} or val == []
+                    ):
+                        payload.pop(key, None)
+            payload = _apply_response_budget(payload, max_response_tokens)
+            usage = payload.get("usage") or {}
+            # The recall usage dict only carries token and packing counters; latency
+            # is captured here so the operational log reports the real per-call
+            # cost of the recall (not a fixed zero from a non-existent field).
+            elapsed_ms = (time.monotonic() - _recall_started) * 1000.0
+            logger.info(
+                "recall_context workspace=%s k=%s budget=%s packed=%s omitted=%s ms=%.0f",
+                workspace, k, token_budget,
+                usage.get("packed_count"), usage.get("omitted_count"),
+                elapsed_ms,
+            )
+            return _ok(payload)
+        except Exception as exc:  # noqa: BLE001
+            import sqlite3
+            if attempt == 0 and isinstance(exc, (sqlite3.DatabaseError, sqlite3.OperationalError)):
+                try:
+                    service().store.reconnect()
+                    continue
+                except Exception:
+                    pass
+            return _err(exc)
 
 
-@_threaded_tool(mcp,
+@mcp.tool(
     name="engraphis_recall_grounded",
     annotations={"title": "Grounded recall (cited answer, or abstain)",
                  "readOnlyHint": False, "destructiveHint": False,
@@ -1119,35 +1194,43 @@ def engraphis_recall_grounded(
         explains why (insufficient evidence, or unknown workspace/repo).
     """
     llm = None
-    try:
-        if synthesize:
-            try:
-                from engraphis.llm.client import LLMClient
-                llm = LLMClient()
-            except Exception:
-                llm = None
-        payload = service().grounded_recall(
-            query, workspace=workspace, repo=repo, session_id=session_id,
-            mtypes=mtypes, k=k, as_of=as_of, valid_at=valid_at,
-            known_at=known_at, token_budget=token_budget,
-            retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
-            response_mode=response_mode,
-            diagnostics=diagnostics, planning=planning, mtype_limits=mtype_limits,
-            min_support=min_support, llm=llm,
-        )
-        payload = _apply_response_budget(payload, max_response_tokens)
-        return _ok(payload)
-    except Exception as exc:  # noqa: BLE001
-        return _err(exc)
-    finally:
-        if llm is not None and hasattr(llm, "close"):
-            try:
-                llm.close()
-            except Exception:
-                pass
+    for attempt in range(2):
+        try:
+            if synthesize:
+                try:
+                    from engraphis.llm.client import LLMClient
+                    llm = LLMClient()
+                except Exception:
+                    llm = None
+            payload = service().grounded_recall(
+                query, workspace=workspace, repo=repo, session_id=session_id,
+                mtypes=mtypes, k=k, as_of=as_of, valid_at=valid_at,
+                known_at=known_at, token_budget=token_budget,
+                retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
+                response_mode=response_mode,
+                diagnostics=diagnostics, planning=planning, mtype_limits=mtype_limits,
+                min_support=min_support, llm=llm,
+            )
+            payload = _apply_response_budget(payload, max_response_tokens)
+            return _ok(payload)
+        except Exception as exc:  # noqa: BLE001
+            import sqlite3
+            if attempt == 0 and isinstance(exc, (sqlite3.DatabaseError, sqlite3.OperationalError)):
+                try:
+                    service().store.reconnect()
+                    continue
+                except Exception:
+                    pass
+            return _err(exc)
+        finally:
+            if llm is not None and hasattr(llm, "close"):
+                try:
+                    llm.close()
+                except Exception:
+                    pass
 
 
-@_threaded_tool(mcp,
+@mcp.tool(
     name="engraphis_answer",
     annotations={"title": "Grounded answer (compatibility alias)",
                  "readOnlyHint": False, "destructiveHint": False,
@@ -1205,7 +1288,7 @@ def engraphis_answer(
     )
 
 
-@_threaded_tool(mcp,
+@mcp.tool(
     name="engraphis_why",
     annotations={"title": "Explain the rationale behind a fact", "readOnlyHint": True,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
@@ -1239,7 +1322,7 @@ def engraphis_why(
         return _err(exc)
 
 
-@_threaded_tool(mcp,
+@mcp.tool(
     name="engraphis_timeline",
     annotations={"title": "Bi-temporal history of a fact", "readOnlyHint": True,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
@@ -1269,7 +1352,7 @@ def engraphis_timeline(
         return _err(exc)
 
 
-@_threaded_tool(mcp,
+@mcp.tool(
     name="engraphis_recall_proactive",
     annotations={"title": "What should I know right now", "readOnlyHint": True,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
@@ -1302,7 +1385,7 @@ def engraphis_recall_proactive(
         return _err(exc)
 
 
-@_threaded_tool(mcp,
+@mcp.tool(
     name="engraphis_proactive_context",
     annotations={"title": "Agent-ready proactive context", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": False,
@@ -1365,7 +1448,7 @@ def _require_local_operator_attestation(tool_name: str, confirmed: bool) -> Opti
     return None
 
 
-@_threaded_tool(mcp,
+@mcp.tool(
     name="engraphis_retire",
     annotations={"title": "Retire a memory", "readOnlyHint": False,
                  "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
@@ -1408,7 +1491,7 @@ def engraphis_retire(
         return _err(exc)
 
 
-@_threaded_tool(mcp,
+@mcp.tool(
     name="engraphis_forget",
     annotations={"title": "Forget a memory (deprecated; use retire)", "readOnlyHint": False,
                  "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
@@ -1442,7 +1525,7 @@ def engraphis_forget(
         return _err(exc)
 
 
-@_threaded_tool(mcp,
+@mcp.tool(
     name="engraphis_secure_erase",
     annotations={"title": "Securely erase a leaked memory", "readOnlyHint": False,
                  "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
@@ -1479,7 +1562,7 @@ def engraphis_secure_erase(
         return _err(exc)
 
 
-@_threaded_tool(mcp,
+@mcp.tool(
     name="engraphis_pin",
     annotations={"title": "Pin or unpin a memory", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": False,
@@ -1512,7 +1595,7 @@ def engraphis_pin(
         return _err(exc)
 
 
-@_threaded_tool(mcp,
+@mcp.tool(
     name="engraphis_correct",
     annotations={"title": "Correct a memory", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
@@ -1562,7 +1645,7 @@ def engraphis_correct(
         return _err(exc)
 
 
-@_threaded_tool(mcp,
+@mcp.tool(
     name="engraphis_promote",
     annotations={"title": "Promote a memory to a wider scope", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": False,
@@ -1604,7 +1687,7 @@ def engraphis_promote(
         return _err(exc)
 
 
-@_threaded_tool(mcp,
+@mcp.tool(
     name="engraphis_link",
     annotations={"title": "Link two memories", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
@@ -1646,7 +1729,7 @@ def engraphis_link(
         return _err(exc)
 
 
-@_threaded_tool(mcp,
+@mcp.tool(
     name="engraphis_record_event",
     annotations={"title": "Log an episodic event", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
@@ -1678,7 +1761,7 @@ def engraphis_record_event(
         return _err(exc)
 
 
-@_threaded_tool(mcp,
+@mcp.tool(
     name="engraphis_index_repo",
     annotations={"title": "Index a repository's code graph", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": False,
@@ -1730,7 +1813,7 @@ def engraphis_index_repo(
         return _err(exc)
 
 
-@_threaded_tool(mcp,
+@mcp.tool(
     name="engraphis_search_code",
     annotations={"title": "Search the code symbol graph", "readOnlyHint": True,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
@@ -1769,7 +1852,7 @@ def engraphis_search_code(
         return _err(exc)
 
 
-@_threaded_tool(mcp,
+@mcp.tool(
     name="engraphis_code_path",
     annotations={"title": "Find a path through the code graph", "readOnlyHint": True,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
@@ -1807,7 +1890,7 @@ def engraphis_code_path(
         return _err(exc)
 
 
-@_threaded_tool(mcp,
+@mcp.tool(
     name="engraphis_code_impact",
     annotations={"title": "Estimate change impact from the code graph", "readOnlyHint": True,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
@@ -1838,7 +1921,7 @@ def engraphis_code_impact(
         return _err(exc)
 
 
-@_threaded_tool(mcp,
+@mcp.tool(
     name="engraphis_export_code_graph",
     annotations={"title": "Export the indexed code graph", "readOnlyHint": True,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
@@ -1865,7 +1948,7 @@ def engraphis_export_code_graph(
         return _err(exc)
 
 
-@_threaded_tool(mcp,
+@mcp.tool(
     name="engraphis_link_symbol",
     annotations={"title": "Link a code symbol to a memory", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
@@ -1907,7 +1990,7 @@ def engraphis_link_symbol(
         return _err(exc)
 
 
-@_threaded_tool(mcp,
+@mcp.tool(
     name="engraphis_start_session",
     annotations={"title": "Start a memory session", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": False,
@@ -1964,7 +2047,7 @@ def engraphis_start_session(
         return _err(exc)
 
 
-@_threaded_tool(mcp,
+@mcp.tool(
     name="engraphis_end_session",
     annotations={"title": "End a memory session", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
@@ -1995,7 +2078,7 @@ def engraphis_end_session(
         return _err(exc)
 
 
-@_threaded_tool(mcp,
+@mcp.tool(
     name="engraphis_receipts",
     annotations={"title": "List privacy-safe operation receipts", "readOnlyHint": True,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
@@ -2013,7 +2096,7 @@ def engraphis_receipts(
         return _err(exc)
 
 
-@_threaded_tool(mcp,
+@mcp.tool(
     name="engraphis_context_savings",
     annotations={"title": "Summarize context savings", "readOnlyHint": True,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
@@ -2053,7 +2136,7 @@ def engraphis_context_savings(
         return _err(exc)
 
 
-@_threaded_tool(mcp,
+@mcp.tool(
     name="engraphis_verify_receipts",
     annotations={"title": "Verify an operation receipt chain", "readOnlyHint": True,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
@@ -2082,7 +2165,7 @@ def engraphis_verify_receipts(
         return _err(exc)
 
 
-@_threaded_tool(mcp,
+@mcp.tool(
     name="engraphis_export_receipts",
     annotations={"title": "Export operation receipts", "readOnlyHint": True,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
@@ -2098,7 +2181,7 @@ def engraphis_export_receipts(
         return _err(exc)
 
 
-@_threaded_tool(mcp,
+@mcp.tool(
     name="engraphis_stats",
     annotations={"title": "Memory store stats", "readOnlyHint": True,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
@@ -2118,7 +2201,7 @@ def engraphis_stats(
         return _err(exc)
 
 
-@_threaded_tool(mcp,
+@mcp.tool(
     name="engraphis_check_update",
     annotations={"title": "Check for an Engraphis update", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": False,
@@ -2148,7 +2231,7 @@ def engraphis_check_update(
         return _err(exc)
 
 
-@_threaded_tool(mcp,
+@mcp.tool(
     name="engraphis_ingest",
     annotations={"title": "Ingest raw text (extract facts first)", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
@@ -2198,7 +2281,7 @@ def engraphis_ingest(
         return _err(exc)
 
 
-@_threaded_tool(mcp,
+@mcp.tool(
     name="engraphis_ingest_postgres_schema",
     annotations={"title": "Ingest a live PostgreSQL schema", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": False,
@@ -2230,7 +2313,7 @@ def engraphis_ingest_postgres_schema(
         return _err(exc)
 
 
-@_threaded_tool(mcp,
+@mcp.tool(
     name="engraphis_consolidate",
     annotations={"title": "Consolidate memories (sleep-time sweep)", "readOnlyHint": False,
                  "destructiveHint": True, "idempotentHint": False,
@@ -2573,7 +2656,7 @@ def _heuristic_decision(
     }
 
 
-@_threaded_tool(mcp,
+@mcp.tool(
     name="engraphis_decide",
     annotations={
         "title": "System 1 decision gating (Jev / TypeSafe AI)",
@@ -2807,6 +2890,321 @@ def engraphis_decide(
         return fallback(exc.code)
     except Exception:  # noqa: BLE001 - remote exceptions may contain private input or credentials
         return fallback("remote_unavailable")
+
+
+@mcp.tool(
+    name="engraphis_spec_crawl",
+    annotations={
+        "title": "Crawl spec or prompt quality",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+)
+def engraphis_spec_crawl(
+    text: Annotated[
+        Optional[str],
+        Field(
+            default=None,
+            description="Spec or prompt text (up to 64k chars).",
+            max_length=64_000,
+        ),
+    ] = None,
+    workspace: Annotated[
+        Optional[str],
+        Field(
+            default=None,
+            description="Workspace for claim tracing.",
+            max_length=200,
+        ),
+    ] = None,
+    repo: Annotated[
+        Optional[str],
+        Field(
+            default=None,
+            description="Optional repo scope for claim tracing.",
+            max_length=200,
+        ),
+    ] = None,
+    session_id: Annotated[
+        Optional[str],
+        Field(
+            default=None,
+            description="Optional active session id.",
+            max_length=200,
+        ),
+    ] = None,
+    source_id: Annotated[
+        Optional[str],
+        Field(
+            default=None,
+            description="Local-operator text file under an approved index root; authenticated callers must pass text.",
+            max_length=500,
+        ),
+    ] = None,
+    crawl_procedural: Annotated[
+        bool,
+        Field(
+            default=False,
+            description="Crawl active procedural memories in the scope.",
+        ),
+    ] = False,
+    trace_claims: Annotated[
+        bool,
+        Field(
+            default=True,
+            description="Verify asserted claims against grounded memories.",
+        ),
+    ] = True,
+) -> str:
+    """Analyze an agent prompt, specification, or procedural memories.
+
+    Calculates seven-axis radar coverage, classifies tokens into explainable kinds,
+    links terms within and across sections, flags ambiguous wording ('ask, don't guess'),
+    and optionally traces claims to grounded memories.
+    """
+    try:
+        res = service().spec_crawl(
+            text,
+            workspace=workspace,
+            repo=repo,
+            session_id=session_id,
+            source_id=source_id,
+            crawl_procedural=crawl_procedural,
+            trace_claims=trace_claims,
+            include_trace=False,
+        )
+        return _ok(res)
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@mcp.tool(
+    name="engraphis_spec_crawl_answer",
+    annotations={
+        "title": "Answer ambiguous spec flag",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": False,
+    },
+)
+def engraphis_spec_crawl_answer(
+    flag: Annotated[
+        dict[str, Any],
+        Field(
+            description="Flag object from spec_crawl report with start and end offsets.",
+        ),
+    ],
+    answer: Annotated[
+        str,
+        Field(
+            description="Human clarification or exact scope/number.",
+            min_length=1,
+            max_length=10_000,
+        ),
+    ],
+    spec_text: Annotated[
+        str,
+        Field(
+            description="Current full spec text to update.",
+            min_length=1,
+            max_length=64_000,
+        ),
+    ],
+    workspace: Annotated[
+        Optional[str],
+        Field(
+            default=None,
+            description="Workspace to store the procedural memory.",
+            max_length=200,
+        ),
+    ] = None,
+    repo: Annotated[
+        Optional[str],
+        Field(
+            default=None,
+            description="Optional repo scope.",
+            max_length=200,
+        ),
+    ] = None,
+    session_id: Annotated[
+        Optional[str],
+        Field(
+            default=None,
+            description="Optional session id.",
+            max_length=200,
+        ),
+    ] = None,
+    save_as_memory: Annotated[
+        bool,
+        Field(
+            default=False,
+            description="Opt in to saving clarification as a pending procedural memory in the requested scope.",
+        ),
+    ] = False,
+) -> str:
+    """Apply a human clarification to an ambiguous spec flag and optionally record it as a procedural memory."""
+    try:
+        res = service().spec_crawl_answer(
+            flag,
+            answer,
+            spec_text=spec_text,
+            workspace=workspace,
+            repo=repo,
+            session_id=session_id,
+            save_as_memory=save_as_memory,
+        )
+        return _ok(res)
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@mcp.tool(
+    name="engraphis_spec_crawl_memories",
+    annotations={
+        "title": "Audit multiple memory nodes for contradictions and health",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+)
+def engraphis_spec_crawl_memories(
+    workspace: Annotated[
+        Optional[str],
+        Field(
+            default=None,
+            description="Workspace to audit memories.",
+            max_length=200,
+        ),
+    ] = None,
+    repo: Annotated[
+        Optional[str],
+        Field(
+            default=None,
+            description="Optional repo scope.",
+            max_length=200,
+        ),
+    ] = None,
+    session_id: Annotated[
+        Optional[str],
+        Field(
+            default=None,
+            description="Optional active session id.",
+            max_length=200,
+        ),
+    ] = None,
+    memory_ids: Annotated[
+        Optional[list[str]],
+        Field(
+            default=None,
+            description="Optional explicit list of memory IDs to analyze.",
+            max_length=150,
+        ),
+    ] = None,
+    mtypes: Annotated[
+        Optional[list[str]],
+        Field(
+            default=None,
+            description="Optional filter by memory types: semantic, procedural, episodic, working.",
+            max_length=4,
+        ),
+    ] = None,
+) -> str:
+    """Analyze multiple live memory nodes for contradictions, parameter clashes, orphans, and 7-axis coverage."""
+    try:
+        res = service().spec_crawl_memories(
+            workspace=workspace,
+            repo=repo,
+            session_id=session_id,
+            memory_ids=memory_ids,
+            mtypes=mtypes,
+            include_trace=False,
+        )
+        return _ok(res)
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@mcp.tool(
+    name="engraphis_spec_crawl_resolve",
+    annotations={
+        "title": "Resolve contradiction or auto-link orphan in memory cluster",
+        "readOnlyHint": False,
+        "destructiveHint": True,
+        "idempotentHint": False,
+        "openWorldHint": False,
+    },
+)
+def engraphis_spec_crawl_resolve(
+    action: Annotated[
+        str,
+        Field(
+            description="Remediation action: 'supersede' (retires older conflicting node) or 'link' (connects orphan).",
+            max_length=64,
+        ),
+    ],
+    node_a: Annotated[
+        str,
+        Field(
+            description="Retained memory node id (or source node to link from).",
+            max_length=256,
+        ),
+    ],
+    node_b: Annotated[
+        str,
+        Field(
+            description="Older conflicting memory node id to supersede (or target node to link to).",
+            min_length=1,
+            max_length=256,
+        ),
+    ],
+    workspace: Annotated[
+        Optional[str],
+        Field(
+            default=None,
+            description="Workspace scope.",
+            max_length=200,
+        ),
+    ] = None,
+    repo: Annotated[
+        Optional[str],
+        Field(
+            default=None,
+            description="Optional repo scope.",
+            max_length=200,
+        ),
+    ] = None,
+    session_id: Annotated[
+        Optional[str],
+        Field(
+            default=None,
+            description="Optional active session scope; both memories must be visible in this same session.",
+            max_length=200,
+        ),
+    ] = None,
+    confirmed: Annotated[
+        bool,
+        Field(default=False, description="Explicit human approval to retire node_b; required for supersede."),
+    ] = False,
+) -> str:
+    """Remediate a contradiction or link an orphaned memory node found during multi-node audit."""
+    try:
+        res = service().spec_crawl_resolve(
+            action=action,
+            node_a=node_a,
+            node_b=node_b,
+            workspace=workspace,
+            repo=repo,
+            session_id=session_id,
+            confirmed=confirmed,
+        )
+        return _ok(res)
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
 
 
 @dataclass(frozen=True)
@@ -3102,7 +3500,7 @@ def _rank_actions(task: str, *, category: str = "", intent: str = "") -> list[Ac
 
 
 def _prune_capabilities(now: float) -> None:
-    """Drop expired capabilities so a leaked id stops resolving after its TTL."""
+    """Drop expired capabilities under the compound-operation registry lock."""
     with _CAPABILITY_LOCK:
         expired = [
             capability_id for capability_id, entry in _CAPABILITY_INDEX.items()
@@ -3113,13 +3511,13 @@ def _prune_capabilities(now: float) -> None:
 
 
 def _issue_capability(spec: ActionSpec) -> str:
-    body = (
-        f"{_CAPABILITY_VERSION}:{_DEPLOYMENT_POLICY}:{spec.canonical_id}:{spec.schema_digest}"
-    ).encode("utf-8")
-    signature = hmac.new(_CAPABILITY_SECRET, body, hashlib.sha256).hexdigest()[:24]
-    capability_id = f"cap_{signature}"
-    now = time.time()
     with _CAPABILITY_LOCK:
+        body = (
+            f"{_CAPABILITY_VERSION}:{_DEPLOYMENT_POLICY}:{spec.canonical_id}:{spec.schema_digest}"
+        ).encode("utf-8")
+        signature = hmac.new(_CAPABILITY_SECRET, body, hashlib.sha256).hexdigest()[:24]
+        capability_id = f"cap_{signature}"
+        now = time.time()
         _prune_capabilities(now)
         while len(_CAPABILITY_INDEX) >= _CAPABILITY_MAX_ENTRIES:
             _CAPABILITY_INDEX.popitem(last=False)  # evict oldest first (LRU)
@@ -3127,7 +3525,7 @@ def _issue_capability(spec: ActionSpec) -> str:
             spec.canonical_id, spec.schema_digest, _CAPABILITY_VERSION, _DEPLOYMENT_POLICY,
             now,
         )
-    return capability_id
+        return capability_id
 
 
 def _example_for(spec: ActionSpec) -> dict[str, Any]:
@@ -3249,19 +3647,32 @@ def _classify_gateway_exception(exc: Exception) -> CallToolResult:
         message = f"Error: {exc}"
         code = "E_NOT_FOUND" if str(exc).startswith("no memory with id ") else "E_VALIDATION"
         return _smart_error(code, message, retryable=False)
+    import sqlite3
+    error_name = getattr(exc, "sqlite_errorname", "") if isinstance(exc, sqlite3.Error) else ""
     message = str(exc)
     lowered = message.lower()
     retryable = (
         isinstance(exc, TimeoutError)
+        or error_name in {"SQLITE_BUSY", "SQLITE_LOCKED"}
         or "timed out" in lowered
         or "timeout" in lowered
         or "database is locked" in lowered
         or "locked" in lowered
+        or "busy" in lowered
     )
     if retryable:
         return _smart_error("E_RETRYABLE", "Error: operation timed out or the store "
                             "is temporarily locked; retry the request.",
                             retryable=True)
+    if isinstance(exc, (sqlite3.DatabaseError, sqlite3.OperationalError)):
+        try:
+            svc = service()
+            if hasattr(svc, "check_health"):
+                svc.check_health()
+            elif hasattr(svc, "store") and hasattr(svc.store, "reconnect"):
+                svc.store.reconnect()
+        except Exception:
+            pass
     return _smart_error("E_INTERNAL",
                         "Error: operation failed. Check the Engraphis server logs for details.",
                         retryable=False)
@@ -3314,15 +3725,14 @@ def _bounded_gateway_success(spec: ActionSpec, payload: dict[str, Any]) -> str:
 
 
 def _resolve_capability(capability_id: str, schema_digest: str) -> Optional[ActionSpec]:
+    key = str(capability_id or "")
     with _CAPABILITY_LOCK:
-        entry = _CAPABILITY_INDEX.get(str(capability_id or ""))
+        entry = _CAPABILITY_INDEX.get(key)
         if entry is None:
             return None
         action_id, issued_digest, issued_version, issued_policy, issued_at = entry
         if time.time() - issued_at > _CAPABILITY_TTL_SECONDS:
-            # Expired: forget the id so it can never resolve again, even within a
-            # long-lived stdio process that outlives the TTL.
-            del _CAPABILITY_INDEX[str(capability_id or "")]
+            del _CAPABILITY_INDEX[key]
             return None
         spec = ACTION_SPECS.get(action_id)
         expected_body = (
@@ -3340,9 +3750,23 @@ def _resolve_capability(capability_id: str, schema_digest: str) -> Optional[Acti
             or not hmac.compare_digest(str(capability_id), expected_id)
         ):
             return None
-        _CAPABILITY_INDEX.move_to_end(str(capability_id or ""))  # LRU refresh
-    # Availability may consult a bound service; never hold the index lock over I/O.
-    return spec if spec.availability_predicate() else None
+    # Availability may consult another subsystem. Never create a registry ->
+    # service/Store lock order; revalidate the snapshot after this callback.
+    if not spec.availability_predicate():
+        return None
+    with _CAPABILITY_LOCK:
+        if (
+            _CAPABILITY_INDEX.get(key) != entry
+            or ACTION_SPECS.get(action_id) is not spec
+            or issued_version != _CAPABILITY_VERSION
+            or issued_policy != _DEPLOYMENT_POLICY
+        ):
+            return None
+        if time.time() - issued_at > _CAPABILITY_TTL_SECONDS:
+            del _CAPABILITY_INDEX[key]
+            return None
+        _CAPABILITY_INDEX.move_to_end(key)  # LRU refresh
+    return spec
 
 
 _MAX_GATEWAY_ARGUMENT_BYTES = 256 * 1024
@@ -3468,7 +3892,7 @@ def _record_gateway_execution(
         logger.info("smart MCP telemetry receipt was unavailable")
 
 
-smart_mcp = FastMCP("engraphis_mcp", instructions=_SMART_SESSION_PROTOCOL,
+smart_mcp = _WorkerFastMCP("engraphis_mcp", instructions=_SMART_SESSION_PROTOCOL,
                     log_level="WARNING")
 
 
@@ -3487,7 +3911,7 @@ def _normalize_session_action(value: Any) -> Any:
     return value
 
 
-@_threaded_tool(smart_mcp,
+@smart_mcp.tool(
     name="engraphis_session",
     annotations={"title": "Start or end a memory session", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
@@ -3562,7 +3986,7 @@ def engraphis_session(
     return _ok(payload)
 
 
-@_threaded_tool(smart_mcp,
+@smart_mcp.tool(
     name="engraphis_recall_context",
     annotations={"title": "Recall compact project context", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
@@ -3600,7 +4024,7 @@ def smart_recall_context(
     return result
 
 
-@_threaded_tool(smart_mcp,
+@smart_mcp.tool(
     name="engraphis_remember",
     annotations={"title": "Remember a durable fact", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
@@ -3642,7 +4066,7 @@ def smart_remember(
     return result
 
 
-@_threaded_tool(smart_mcp,
+@smart_mcp.tool(
     name="engraphis_discover_actions",
     annotations={"title": "Discover an advanced Engraphis capability", "readOnlyHint": True,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
@@ -3687,7 +4111,7 @@ def _execute_gateway(capability_id: str, schema_digest: str, arguments: dict[str
     })
 
 
-@_threaded_tool(smart_mcp,
+@smart_mcp.tool(
     name="engraphis_execute_read",
     annotations={"title": "Execute a discovered read action", "readOnlyHint": True,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
@@ -3704,7 +4128,7 @@ def engraphis_execute_read(
     return _execute_gateway(capability_id, schema_digest, arguments, expected="read")
 
 
-@_threaded_tool(smart_mcp,
+@smart_mcp.tool(
     name="engraphis_execute_action",
     annotations={"title": "Execute a discovered stateful action", "readOnlyHint": False,
                  "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
@@ -3721,7 +4145,7 @@ def engraphis_execute_action(
     return _execute_gateway(capability_id, schema_digest, arguments, expected="action")
 
 
-@_threaded_tool(smart_mcp,
+@smart_mcp.tool(
     name="engraphis_get_memory",
     annotations={"title": "Read one memory's governed record", "readOnlyHint": True,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
@@ -3743,7 +4167,15 @@ def engraphis_get_memory(
     try:
         record = service().inspect(memory_id=memory_id, workspace=workspace, repo=repo)
     except Exception as exc:  # noqa: BLE001 — Smart gateway classification
-        return _classify_gateway_exception(exc)
+        import sqlite3
+        if isinstance(exc, (sqlite3.DatabaseError, sqlite3.OperationalError)):
+            try:
+                service().store.reconnect()
+                record = service().inspect(memory_id=memory_id, workspace=workspace, repo=repo)
+            except Exception as retry_exc:
+                return _classify_gateway_exception(retry_exc)
+        else:
+            return _classify_gateway_exception(exc)
     try:
         mem = record.get("memory") or {}
         if not mem.get("id"):
@@ -3751,7 +4183,11 @@ def engraphis_get_memory(
         svc = service()
         target = svc.store.get_memory(mem["id"])
         if target is None:
-            return _gateway_error("memory_not_found")
+            if hasattr(svc.store, "is_stale") and svc.store.is_stale():
+                svc.store.reconnect()
+                target = svc.store.get_memory(mem["id"])
+            if target is None:
+                return _gateway_error("memory_not_found")
         provenance = target.provenance
         metadata = target.metadata
         if not prompt_eligible(provenance, metadata):
@@ -3814,7 +4250,7 @@ def engraphis_get_memory(
         return _classify_gateway_exception(exc)
 
 
-@_threaded_tool(smart_mcp,
+@smart_mcp.tool(
     name="engraphis_update_memory",
     annotations={"title": "Edit a memory's metadata fields", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
@@ -3854,7 +4290,7 @@ def engraphis_update_memory(
         return _classify_gateway_exception(exc)
 
 
-@_threaded_tool(smart_mcp,
+@smart_mcp.tool(
     name="engraphis_conflict_review",
     annotations={"title": "List pending/quarantined/conflicting memories", "readOnlyHint": True,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},

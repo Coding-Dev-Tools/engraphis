@@ -5,7 +5,8 @@ import pytest
 
 @pytest.mark.parametrize("name", [
     "vector_scale_storage", "vector_scan_plan", "fts_insert_scaling",
-    "native_coverage_scaling", "engine_capacity",
+    pytest.param("native_coverage_scaling", marks=pytest.mark.native_sqlitevec),
+    "engine_capacity",
 ])
 @pytest.mark.parametrize("changed", ["dataset", "producer"])
 def test_benchmark_exporters_reject_sources_changed_during_envelope_construction(

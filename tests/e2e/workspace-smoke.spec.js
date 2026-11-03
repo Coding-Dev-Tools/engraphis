@@ -1,10 +1,11 @@
 const { test, expect } = require('@playwright/test');
+const { answerActionDialog } = require('./action-dialog-helper');
 
 test('a real local workspace saves, recalls, and corrects a memory with history', async ({ page, browserName }) => {
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
-  page.on('dialog', dialog => dialog.accept(dialog.type() === 'prompt' ? 'Reviewed the local smoke-test fixture.' : undefined));
   const workspace = `browser-smoke-${browserName}-${Date.now()}`;
+  // The Playwright server runs with an API token; automatic browser access opens it.
   await page.goto('/');
   await expect(page.locator('#connection-status')).toContainText('Local engine connected');
   await expect(page.locator('#browser-auth-dialog')).not.toBeVisible();
@@ -26,6 +27,7 @@ test('a real local workspace saves, recalls, and corrects a memory with history'
   await expect(page.locator('#memory-detail')).toContainText('human:ledger');
   await expect(page.locator('#memory-detail')).toHaveAccessibleName('Smoke database decision');
   await page.locator('#memory-detail').getByRole('button', { name: 'Approve for prompt…' }).click();
+  await answerActionDialog(page, { fields: { reason: 'Reviewed the local smoke-test fixture.' } });
   await expect(page.locator('#memory-detail')).toContainText('approved');
   await page.locator('.nav-item[data-view="ask"]').click();
   await page.locator('#ask-input').fill('The smoke database retains temporal history.');

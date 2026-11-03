@@ -1,8 +1,8 @@
-"""The restored v1 dashboard — served on the *v2* engine.
+"""The Engraphis dashboard (Ledger), served on the *v2* engine.
 
-Same look-and-feel as the original dashboard (engraphis/static/index.html), but every
-route reads/writes the v2 MemoryService where the real data lives. This keeps the v1
-server (engraphis/app.py) untouched; run this with `python -m scripts.start_dashboard`.
+Every route reads/writes the v2 MemoryService where the real data lives, and the single
+browser interface is served from ``engraphis/dashboard_assets``. This keeps the v1 server
+(engraphis/app.py) untouched; run this with `python -m scripts.start_dashboard`.
 """
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from fastapi import (
     APIRouter, FastAPI, File, Form, HTTPException, Request, UploadFile,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.routing import APIRoute
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
@@ -34,13 +34,17 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from engraphis import licensing
 from engraphis.config import settings
-from engraphis.netutil import is_local_request
+from engraphis.netutil import declared_host_names, is_local_request, is_rebinding_safe_host
 from engraphis.core.documents import supported_document_extensions
 from engraphis.http_security import wants_https
 from engraphis.local_auth import (
     BROWSER_SESSION_COOKIE,
     BROWSER_SESSION_SECONDS,
+    automatic_browser_session_allowed,
     bearer_ok,
+    browser_bootstrap_request,
+    browser_handoff,
+    browser_handoff_ok,
     browser_session,
     browser_session_ok,
     local_browser_request,
@@ -56,8 +60,6 @@ from engraphis.service import (
 
 logger = logging.getLogger("engraphis")
 
-_STATIC = Path(__file__).resolve().parent / "static"
-_CLASSIC_ASSETS = Path(__file__).resolve().parent / "classic_assets"
 _V2_ASSETS = Path(__file__).resolve().parent / "dashboard_assets"
 _INDEX = _V2_ASSETS / "index.html"
 _DOCUMENT_SUFFIXES = frozenset(supported_document_extensions())
@@ -69,7 +71,7 @@ _DASHBOARD_UPLOAD_REQUEST_BYTES = (
 _DASHBOARD_REQUEST_BODY_LIMITS = {
     "/api/auth/session": 8 * 1024,
     "/api/workspaces/import-files": _DASHBOARD_UPLOAD_REQUEST_BYTES,
-    # Wizard multipart routes carry the same upload ceilings as the classic import:
+    # Wizard multipart routes carry the same upload ceilings as Quick import:
     # without these entries they fall back to the 8 MB JSON default and large vaults
     # are rejected by the body middleware before the bounded parser is ever reached.
     "/api/workspaces/import-documents/preview": _DASHBOARD_UPLOAD_REQUEST_BYTES,
@@ -197,7 +199,7 @@ class _BoundedUploadRoute(APIRoute):
         return bounded_route_handler
 
 
-# Document/Obsidian wizard multipart routes on this app. (The classic quick import
+# Document/Obsidian wizard multipart routes on this app. (Quick import's
 # /api/workspaces/import-files lives in routes/v2_api.py and already bounds its own
 # parser with request.form(max_files=...).)
 _BOUNDED_UPLOAD_PATHS = frozenset({
@@ -299,12 +301,59 @@ _PUBLIC = {
     "/api/ready",
     "/api/auth/state",
     "/api/auth/session",
+    "/api/auth/handoff",
     "/api/auth/local-session",
 }
 
 
+def _cross_site_browser_request(request: Request, trusted_origins: frozenset) -> bool:
+    """Whether a browser marked this request as started by a page on another site.
+
+    The zero-config runtime trusts every loopback caller, and every website the user visits
+    can make that user's browser send requests to loopback. Browsers label them: every
+    CORS request and every non-GET request carries ``Origin``, and ``Sec-Fetch-Site`` says
+    where the rest came from. Non-browser clients send neither. A page may call the API
+    from its own origin or from an origin in the explicit CORS allow-list; no header can
+    vouch for any other page, because a wildcard allow-list would let it through the
+    preflight and zero-config access has no other credential.
+    """
+
+    headers = request.headers
+    origin = headers.get("origin")
+    if origin is not None:
+        origin = origin.strip().rstrip("/").lower()
+        if not origin or origin == "null":
+            return True
+        try:
+            supplied = urlsplit(origin)
+            actual = urlsplit(str(request.url))
+            default_ports = {"http": 80, "https": 443}
+            supplied_port = supplied.port if supplied.port is not None else default_ports.get(supplied.scheme)
+            actual_port = actual.port if actual.port is not None else default_ports.get(actual.scheme)
+            same_origin = (
+                supplied.scheme in default_ports and supplied.hostname
+                and supplied.username is None and supplied.password is None
+                and not supplied.path and not supplied.query and not supplied.fragment
+                and (supplied.scheme, supplied.hostname, supplied_port)
+                == (actual.scheme, actual.hostname, actual_port)
+            )
+        except ValueError:
+            return True
+        site = (headers.get("sec-fetch-site") or "").strip().lower()
+        if same_origin and site not in {"cross-site", "same-site"}:
+            return False
+        return origin not in trusted_origins
+    return (headers.get("sec-fetch-site") or "").strip().lower() in {"cross-site", "same-site"}
+
+
 class _BrowserSessionReq(BaseModel):
     token: str = Field(min_length=1, max_length=4096)
+
+
+class _BrowserHandoffReq(BaseModel):
+    """One-time sign-in code redeemed from a fragment link."""
+
+    code: str = Field(min_length=1, max_length=2048)
 
 
 class _DashboardApprovalReq(BaseModel):
@@ -476,6 +525,23 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    # Origins the zero-config gate below accepts for simple (unpreflighted) requests. A
+    # wildcard only relaxes preflighted CORS; it never vouches for an arbitrary page here.
+    _trusted_origins = frozenset(
+        origin.strip().rstrip("/").lower() for origin in settings.cors_origins if origin != "*"
+    )
+    # Names besides localhost and IP literals that may address the zero-config API: the
+    # bind name the launcher opens, the documented client URL and any extra names.
+    _dashboard_url = _os.environ.get("ENGRAPHIS_DASHBOARD_URL", "").strip()
+    _declared_hosts = declared_host_names(
+        _os.environ.get("ENGRAPHIS_HOST", ""), _dashboard_url,
+        _os.environ.get("ENGRAPHIS_ALLOWED_HOSTS", ""),
+    )
+    if _dashboard_url and not declared_host_names(_dashboard_url):
+        logger.warning(
+            "ENGRAPHIS_DASHBOARD_URL has no usable host name; without an API token the "
+            "dashboard answers only localhost, IP addresses and ENGRAPHIS_ALLOWED_HOSTS"
+        )
 
     @app.exception_handler(licensing.LicenseError)
     async def _license_error(request: Request, exc: licensing.LicenseError):
@@ -553,6 +619,11 @@ def create_app() -> FastAPI:
     # Zero-config local dashboards still need a cookie/CSRF owner ceremony for
     # reviewed writes. This process-local secret never becomes an API credential.
     app.state.local_browser_secret = secrets.token_urlsafe(32)
+    # One-time browser sign-in links are bound to this process. A restart invalidates
+    # every outstanding link, and redeemed codes are remembered only for their lifetime,
+    # so a link cannot be replayed even if it leaks out of the browser's address bar.
+    app.state.browser_handoff_epoch = secrets.token_bytes(16)
+    app.state.browser_handoff_used = {}
     # A document preview authorizes exactly one subsequent import of the reviewed
     # bytes into the reviewed target.  Records contain only a request digest, the
     # already-opaque browser-session value, and a short process-local expiry.
@@ -605,10 +676,39 @@ def create_app() -> FastAPI:
     def _browser_signing_key():
         return settings.api_token or app.state.local_browser_secret
 
+    def _browser_may_bootstrap(request: Request, *, require_origin: bool = True) -> bool:
+        """Whether this browser may open the dashboard without a credential.
+
+        Automatic access is the default: reaching the dashboard's own origin is the
+        boundary, while API and MCP clients still need the bearer token. Operators who
+        expose the dashboard to an untrusted network set
+        ``ENGRAPHIS_BROWSER_AUTO_SESSION=0`` and hand out one-time links instead; a
+        zero-token instance still opens locally because it has no credential to ask for.
+        """
+        if settings.browser_auto_session:
+            return browser_bootstrap_request(request, require_origin=require_origin)
+        return automatic_browser_session_allowed(settings.api_token) and local_browser_request(
+            request, require_origin=require_origin, allow_trusted_peers=True,
+        )
+
+    def _dashboard_public_url(request: Request) -> str:
+        """Where sign-in links should point, preferring the operator's public URL."""
+        configured = _os.environ.get("ENGRAPHIS_DASHBOARD_URL", "").strip()
+        if configured:
+            parsed = urlsplit(configured)
+            if (parsed.scheme not in ("http", "https") or not parsed.hostname
+                    or parsed.username is not None or parsed.password is not None):
+                raise ValueError(
+                    "ENGRAPHIS_DASHBOARD_URL must be an http(s) URL without userinfo")
+            return configured.rstrip("/")
+        return str(request.base_url).rstrip("/")
+
     def _browser_session_response(request: Request, *, reuse: bool = False):
         session_value = request.cookies.get(BROWSER_SESSION_COOKIE) if reuse else None
+        fresh_session_value = None
         if not browser_session_ok(session_value, _browser_signing_key()):
-            session_value = browser_session(_browser_signing_key())
+            fresh_session_value = browser_session(_browser_signing_key())
+            session_value = fresh_session_value
         if reuse:
             # First visits in two tabs can mint the same second-resolution cookie.
             # setdefault preserves their shared confirmation even across that race.
@@ -622,21 +722,39 @@ def create_app() -> FastAPI:
             {"authenticated": True, "review_csrf_token": review_csrf_token}
         )
         response.headers["Cache-Control"] = "no-store"
-        response.set_cookie(
-            BROWSER_SESSION_COOKIE,
-            session_value,
-            max_age=BROWSER_SESSION_SECONDS,
-            httponly=True,
-            secure=wants_https(request),
-            samesite="strict",
-            path="/",
-        )
+        # A validated reused cookie remains in the browser. Only server-minted
+        # values are emitted in Set-Cookie; request cookie bytes are never echoed.
+        if fresh_session_value is not None:
+            response.set_cookie(
+                BROWSER_SESSION_COOKIE,
+                fresh_session_value,
+                max_age=BROWSER_SESSION_SECONDS,
+                httponly=True,
+                secure=wants_https(request),
+                samesite="strict",
+                path="/",
+            )
         return response
 
     @app.post("/api/auth/local-session", include_in_schema=False)
     def open_local_browser_session(request: Request):
-        """Open this computer's dashboard without exposing or entering its API token."""
-        if not local_browser_request(request):
+        """Open this browser's dashboard session without asking for a credential.
+
+        Automatic access is the default, so a browser that reaches the dashboard's own
+        origin opens it. ``ENGRAPHIS_BROWSER_AUTO_SESSION=0`` restores the token gate:
+        an instance that configured ``ENGRAPHIS_API_TOKEN`` then exchanges it (or a
+        one-time sign-in link) for the same HttpOnly session.
+        """
+        if not _browser_may_bootstrap(request):
+            if settings.api_token and not settings.browser_auto_session:
+                return JSONResponse(
+                    {
+                        "error": "automatic browser access is disabled while an API token is configured",
+                        "code": "local_token_required",
+                        "token_required": True,
+                    },
+                    status_code=403,
+                )
             return JSONResponse({"error": "automatic access requires the local dashboard"},
                                 status_code=403)
         return _browser_session_response(request, reuse=True)
@@ -661,6 +779,59 @@ def create_app() -> FastAPI:
         # token for each session value; unlike an API bearer, it has no authority by
         # itself and is not persisted to disk or browser storage.
         return _browser_session_response(request)
+
+    @app.post("/api/auth/handoff", include_in_schema=False)
+    def redeem_sign_in_link(req: _BrowserHandoffReq, request: Request):
+        """Trade a one-time sign-in code for an HttpOnly browser session.
+
+        The code is minted by ``POST /api/auth/link`` and delivered in a URL fragment,
+        so it never reaches server logs, request queries, or the Referer header.
+        """
+        if not settings.api_token:
+            return JSONResponse(
+                {"error": "local API authentication is not configured"}, status_code=409)
+        verified = browser_handoff_ok(
+            req.code, settings.api_token, app.state.browser_handoff_epoch)
+        if verified is None:
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        nonce, expires_at = verified
+        used = app.state.browser_handoff_used
+        now = int(time.time())
+        for seen, seen_expiry in list(used.items()):
+            if seen_expiry <= now:
+                used.pop(seen, None)
+        if nonce in used:
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        if len(used) >= 1024:
+            used.clear()
+        used[nonce] = expires_at
+        return _browser_session_response(request)
+
+    @app.post("/api/auth/link", include_in_schema=False)
+    def create_sign_in_link(request: Request):
+        """Mint a one-time browser sign-in link for this deployment.
+
+        Reached only with the deployment bearer (the middleware protects ``/api/*``).
+        The returned link is shown once and is never stored server-side.
+        """
+        if not settings.api_token:
+            return JSONResponse(
+                {"error": "local API authentication is not configured"}, status_code=409)
+        try:
+            base = _dashboard_public_url(request)
+        except ValueError:
+            return JSONResponse(
+                {"error": "ENGRAPHIS_DASHBOARD_URL must be an http(s) URL without userinfo"},
+                status_code=500)
+        code, expires_at = browser_handoff(
+            settings.api_token, app.state.browser_handoff_epoch)
+        response = JSONResponse({
+            "url": "%s/#token=%s" % (base, code),
+            "expires_at": expires_at,
+            "expires_in": max(0, expires_at - int(time.time())),
+        })
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
     @app.post("/dashboard/review/approve", include_in_schema=False)
     def dashboard_review_approve(req: _DashboardApprovalReq, request: Request):
@@ -923,6 +1094,8 @@ def create_app() -> FastAPI:
     async def _document_uploads(
         files: list[UploadFile], *, source_mode: str,
     ) -> list[tuple[str, bytes]]:
+        from engraphis.core.source_paths import sensitive_path
+
         if not files or len(files) > MAX_IMPORT_FILES:
             raise HTTPException(status_code=413, detail={"error": "invalid document file count"})
         uploads: list[tuple[str, bytes]] = []
@@ -930,6 +1103,22 @@ def create_app() -> FastAPI:
         total = 0
         for upload in files:
             relative_path = _document_relative_path(upload.filename)
+            declared_size = getattr(upload, "size", None)
+            if declared_size is not None and (type(declared_size) is not int or declared_size < 0):
+                raise HTTPException(status_code=422, detail={"error": "invalid upload size"})
+            remaining = MAX_IMPORT_TOTAL_BYTES - total
+            if declared_size is not None and declared_size > MAX_IMPORT_RESOURCE_BYTES:
+                raise HTTPException(status_code=413, detail={"error": "document file is too large"})
+            if declared_size is not None and declared_size > remaining:
+                raise HTTPException(status_code=413, detail={"error": "document upload is too large"})
+            if sensitive_path(relative_path):
+                if declared_size is None:
+                    raise HTTPException(status_code=422, detail={"error": "upload size is required"})
+                # Excluded multipart bytes are already spooled, even though their
+                # bodies must remain unread by the importer.
+                total += declared_size
+                uploads.append((relative_path, b""))
+                continue
             path_key = relative_path.casefold()
             if path_key in seen_paths:
                 raise HTTPException(status_code=400, detail={"error": "duplicate upload path"})
@@ -946,10 +1135,10 @@ def create_app() -> FastAPI:
                     status_code=400,
                     detail={"error": "unsupported document format"},
                 )
-            raw = await upload.read(MAX_IMPORT_RESOURCE_BYTES + 1)
+            raw = await upload.read(min(MAX_IMPORT_RESOURCE_BYTES, max(0, remaining)) + 1)
             if len(raw) > MAX_IMPORT_RESOURCE_BYTES:
                 raise HTTPException(status_code=413, detail={"error": "document file is too large"})
-            total += len(raw)
+            total += max(len(raw), declared_size or 0)
             if total > MAX_IMPORT_TOTAL_BYTES:
                 raise HTTPException(status_code=413, detail={"error": "document upload is too large"})
             uploads.append((relative_path, raw))
@@ -1312,8 +1501,7 @@ def create_app() -> FastAPI:
     app.include_router(bounded_router)
 
 
-    @app.middleware("http")
-    async def _auth_gate(request: Request, call_next):
+    async def _authorize_request(request: Request, call_next):
         from engraphis.service import set_current_user
         from engraphis.service_context import bound_service
 
@@ -1327,14 +1515,11 @@ def create_app() -> FastAPI:
         path = request.url.path
         if request.method == "OPTIONS":
             return await call_next(request)
-        guarded = (
-            path.startswith("/api/")
-            or path == "/mcp"
-            or path.startswith("/mcp/")
-        )
+        mcp = path == "/mcp" or path.startswith("/mcp/")
+        guarded = path.startswith("/api/") or path.startswith("/dashboard/") or mcp
         if not guarded or path in _PUBLIC:
             return await call_next(request)
-        if (path == "/mcp" or path.startswith("/mcp/")) and not app.state.mcp_over_http:
+        if mcp and not app.state.mcp_over_http:
             return JSONResponse({"error": "MCP-over-HTTP is unavailable"}, status_code=404)
 
         # A configured token protects every non-public API and MCP request. This is a
@@ -1354,7 +1539,11 @@ def create_app() -> FastAPI:
                 return await call_next(request)
             return JSONResponse(
                 {"error": "unauthorized", "code": "local_browser_session_required",
-                 "local_browser": local_browser_request(request, require_origin=False)},
+                 # "This browser can open a session automatically." True in the default
+                 # mode; in hardened mode only a zero-token instance can, so a
+                 # token-gated server must not hint at the automatic path.
+                 "local_browser": _browser_may_bootstrap(request, require_origin=False),
+                 "token_required": bool(settings.api_token) and not settings.browser_auto_session},
                 status_code=401,
             )
 
@@ -1368,34 +1557,58 @@ def create_app() -> FastAPI:
                 },
                 status_code=403,
             )
+        # A loopback peer can still be another website acting through the user's browser:
+        # through DNS rebinding under its own name, or with cross-site requests.
+        # /mcp enforces its own Origin and Host allow-list.
+        if not mcp and not is_rebinding_safe_host(request, _declared_hosts):
+            return JSONResponse(
+                {
+                    "error": (
+                        "this address is not a name Engraphis trusts without a token; open "
+                        "the dashboard at localhost or 127.0.0.1, or add the name to "
+                        "ENGRAPHIS_ALLOWED_HOSTS"
+                    ),
+                    "auth": "local-host-required",
+                },
+                status_code=403,
+            )
+        if not mcp and _cross_site_browser_request(request, _trusted_origins):
+            return JSONResponse(
+                {"error": "cross-site browser requests are refused; use the Engraphis dashboard"},
+                status_code=403,
+            )
         return await call_next(request)
 
-    # New dashboard capabilities belong to the v2 application surface.  The old ``static``
-    # directory remains mounted for the legacy shell and compatibility adapters only.
+    @app.middleware("http")
+    async def _auth_gate(request: Request, call_next):
+        from engraphis.service import _CURRENT_USER
+        from engraphis.service_context import http_transport_context
+
+        previous_user = _CURRENT_USER.get()
+        try:
+            with http_transport_context():
+                return await _authorize_request(request, call_next)
+        finally:
+            _CURRENT_USER.set(previous_user)
+
+    # The dashboard has one interface; its assets are served from ``dashboard_assets``.
     if _V2_ASSETS.is_dir():
         app.mount("/v2-assets", _FreshStaticFiles(directory=str(_V2_ASSETS)), name="v2-assets")
-    if _CLASSIC_ASSETS.is_dir():
-        app.mount(
-            "/classic-assets",
-            _FreshStaticFiles(directory=str(_CLASSIC_ASSETS)),
-            name="classic-assets",
-        )
-    if _STATIC.is_dir():
-        app.mount("/static", _FreshStaticFiles(directory=str(_STATIC)), name="static")
 
     @app.get("/", include_in_schema=False)
     def index():
-        """Serve Ledger as the production default; Classic remains at ``/classic``."""
+        """Serve the Ledger dashboard."""
         resp = FileResponse(_INDEX, media_type="text/html")
         resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         return resp
 
     @app.get("/classic", include_in_schema=False)
     def classic_index():
-        """The pre-Ledger dashboard, retained as a reversible local interface."""
-        resp = FileResponse(_CLASSIC_ASSETS / "index.html", media_type="text/html")
-        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-        return resp
+        """The Classic dashboard was retired and its features moved into Ledger.
+
+        Old bookmarks land on the single dashboard instead of a 404.
+        """
+        return RedirectResponse("/", status_code=307)
 
     for warning in licensing.production_warnings():
         import sys

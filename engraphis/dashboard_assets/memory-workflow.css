@@ -22,6 +22,8 @@
 .record-history { margin-top: 22px; padding-top: 16px; border-top: 1px solid var(--c-line); }
 .record-history h4 { margin: 0; font-size: 15px; overflow-wrap: anywhere; }
 .history-content { white-space: pre-wrap; overflow-wrap: anywhere; }
+.history-diff ins { background: color-mix(in srgb, var(--c-ok) 18%, transparent); color: var(--c-fg); text-decoration: underline; text-decoration-color: var(--c-ok); }
+.history-diff del { background: color-mix(in srgb, var(--c-bad) 14%, transparent); color: var(--c-dim); text-decoration: line-through; text-decoration-color: var(--c-bad); }
 .answer-coverage { padding: 12px 14px; margin: 12px 0; border: 1px solid var(--c-line); border-radius: 6px; color: var(--c-mid); }
 .answer-coverage strong { color: var(--c-fg); font-size: 14px; }
 .answer-coverage p { margin: 6px 0 0; font-size: 13px; line-height: 1.5; }

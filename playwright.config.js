@@ -30,8 +30,8 @@ module.exports = defineConfig({
       ENGRAPHIS_EXTRACTOR: 'none',
       ENGRAPHIS_LOOP_INTERVAL: '0',
       ENGRAPHIS_HOST: '127.0.0.1',
-      // Public test fixture, never the owner's configured credential. The real
-      // browser smoke uses this to exercise governed source approval.
+      // Public test fixture, never the owner's configured credential. The server keeps
+      // token-protected API routes while browsers open through automatic access.
       ENGRAPHIS_API_TOKEN: 'engraphis-playwright-local-only',
       ENGRAPHIS_SERVICE_MODE: 'customer',
     },
