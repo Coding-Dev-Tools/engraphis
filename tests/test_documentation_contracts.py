@@ -376,23 +376,19 @@ def test_consolidation_docs_expose_only_live_public_options() -> None:
     mcp_tools = " ".join(_read("docs/MCP_TOOLS.md").split())
     release = " ".join(_read("docs/RELEASE_1_7_9.md").split())
     normalized_tools = " ".join(tools.split())
-    public_documents = (readme, hosted_plan, configuration, mcp_tools, release, normalized_tools)
+    current_documents = (readme, hosted_plan, configuration, mcp_tools, normalized_tools)
+    public_documents = (*current_documents, release)
     public_copy = " ".join(" ".join(public_documents).split())
-    for document in public_documents:
+    for document in current_documents:
         normalized_document = " ".join(document.split()).lower()
-        for limit in (
-            "100 evaluated questions per rolling hour",
-            "1,000 per rolling five hours",
-            "2,000 per rolling 24 hours",
-        ):
+        for limit in ("500 jev calls per person per day",):
             assert limit in normalized_document
         for invariant in (
             "not pooled across a team",
             "not monthly",
-            "if a batch is evaluated, every question counts",
+            "each evaluated call counts once",
             "admitted attempts that fail or are interrupted remain counted",
-            "the existing production fleet guard remains 100 questions per day",
-            "may pause or reject requests earlier",
+            "no overage is charged",
         ):
             assert invariant in normalized_document
         for obsolete in (
@@ -402,6 +398,10 @@ def test_consolidation_docs_expose_only_live_public_options() -> None:
             "no fixed quota is published",
             "finite rolling allowance",
             "monthly allowance",
+            "100 evaluated questions per rolling hour",
+            "1,000 per rolling five hours",
+            "2,000 per rolling 24 hours",
+            "production fleet guard",
         ):
             assert obsolete not in normalized_document
     for entitlement in (
@@ -413,7 +413,8 @@ def test_consolidation_docs_expose_only_live_public_options() -> None:
         "without a personal provider key",
     ):
         assert entitlement in public_copy.lower()
-    assert "managed jev is currently" in public_copy.lower()
+    current_copy = " ".join(" ".join(current_documents).split()).lower()
+    assert "managed jev is available" in current_copy
     assert "Recall route selection is experimental and BYOK-only" in readme
     assert "no retrieval-quality improvement is claimed" in readme
     assert "Managed Jev accepts only the fixed command-review, completion-review" in hosted_plan

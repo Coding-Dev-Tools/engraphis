@@ -45,13 +45,14 @@ Connect a coding agent over MCP with the [agent setup guide](https://github.com/
 - **Temporal history:** Timeline can select known versions whose validity has ended before result limits. The dashboard uses `closed_only=true` on `GET /api/timeline` for “Only superseded versions.” Closed history prioritizes lexical matches (the literal query and up to 32 expanded terms, using the final ranker's Unicode lowercasing) before scoring at most 500 eligible candidates; semantic-only matches outside that window can be omitted. SQLite may scan and sort more rows than this candidate cap.
 - **Spec Studio:** Inspect prompt specifications and scoped memory clusters with deterministic coverage, ambiguity, and conflict checks; review suggestions before changing memory.
 - **Operator control:** Keep the core local and offline-capable, with explicit controls for hosted services and external LLM providers.
+- **Free Jev on paid plans:** Pro and Team include managed Jev decisions up to 500 calls per person per day, with no personal provider key.
 
 ## Benchmarks
 
 The current registered artifact contains three deterministic offline fixture runs. It separates context size, retrieval quality, and grounded decision checks; these small fixtures do not establish general task performance.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Coding-Dev-Tools/engraphis/99af3855bd6b685cbac4a4489b44b3c374129053/docs/images/context-efficiency.svg" alt="Three registered offline fixtures: structure-aware chunking reduced mean retrieved context from 740.3 to 214.3 tokens per question (71.1%, 18 questions); the serialized JSON-shape proxy fell from 24,590 to 11,138 tokens across 26 payload samples and 260 recalls. Candidate and packed retrieval quality (Recall@5, Hit@5, and answer-token recall) are shown separately (each 1.000). Grounded checks show 5/5 answerable queries grounded and 6/6 abstention queries rejected, including a 1/1 quarantined-evidence probe; 11/11 decisions were correct. MCP transport and provider billing were not measured. Artifact SHA-256 prefix 9792658fa430; see the benchmark guide for the full checksum." width="100%">
+  <img src="https://raw.githubusercontent.com/Coding-Dev-Tools/engraphis/99af3855bd6b685cbac4a4489b44b3c374129053/docs/images/context-efficiency.svg" alt="Three registered offline fixtures: structure-aware chunking reduced mean retrieved context from 740.3 to 214.3 tokens per question (71.1%, 18 questions); the serialized JSON-shape proxy fell from 24,590 to 11,138 tokens across 26 payload samples and 260 recalls. Candidate and packed retrieval quality (Recall@5, Hit@5, and answer-token recall) are shown separately (each 1.000). Grounded checks show 5/5 answerable queries grounded and 6/6 abstention queries rejected, including a 1/1 quarantined-evidence probe; 11/11 decisions were correct. MCP transport and provider billing were not measured. Artifact SHA-256 prefix 23696e9b4270; see the benchmark guide for the full checksum." width="100%">
   <br>
   <sup>Three offline fixtures separate context reduction, candidate and packed retrieval quality, and grounded behavior. The chart shows the artifact checksum prefix; see the benchmark guide for the full checksum and reproduction steps.</sup>
 </p>
@@ -66,11 +67,9 @@ The payload figure is a serialized JSON-shape estimate, not an MCP transport mea
 
 ## Optional Jev assistance
 
-**Jev is included free with every paid plan: Pro and Team.** After enablement, every legitimate Pro user and each eligible Team named seat, including paid viewers, with an active paid, trial, or test entitlement receives managed Jev at no additional customer charge and without a personal provider key. Local advisory decisions stay free for everyone; BYOK, a personal TypeSafe key, is optional for non-paid or direct use and its provider charges may apply. Managed Jev is currently `not_yet_available` pending release acceptance and service-capacity qualification; client configuration does not enable it.
+**Jev is included free with every paid plan: Pro and Team.** Every legitimate Pro user and each eligible Team named seat, including paid viewers, with an active paid, trial, or test entitlement receives managed Jev at no additional customer charge and without a personal provider key. Local advisory decisions stay free for everyone; BYOK, a personal TypeSafe key, is optional for non-paid or direct use and its provider charges may apply. Managed Jev is available for paid plans; the hosted control service enables it with its provider key.
 
-Each individual receives all three independent rolling limits: **100 evaluated questions per rolling hour, 1,000 per rolling five hours, and 2,000 per rolling 24 hours**. Usage is per person, not pooled across a Team and not monthly. Each evaluated question counts once; if a batch is evaluated, every question counts. Admitted attempts that fail or are interrupted remain counted. No overage is charged.
-
-The existing production fleet guard remains 100 questions per day across the service. That limit conflicts with these per-person rolling caps and may pause or reject requests earlier, so resolve capacity and the fleet guard before launch.
+Each paid individual receives up to **500 Jev calls per person per day**, free. Usage is per person, not pooled across a Team and not monthly. Each evaluated call counts once, including a batched request; calls beyond the daily maximum are not served. Admitted attempts that fail or are interrupted remain counted, and no overage is charged. The account portal reports that member's remaining calls for the current day.
 
 Use **Review with Jev** in the local dashboard for evidence-support and contradiction checks; the MCP decision tool covers command and completion reviews. Remote calls need per-call consent plus a `public` or `internal` classification, and Jev cannot write memories, change grounded-recall requirements, authorize commands, or certify completion.
 
