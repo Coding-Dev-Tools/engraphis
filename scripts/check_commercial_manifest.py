@@ -235,7 +235,11 @@ def main() -> int:
     _check_repository(manifest, errors)
     if args.cloud_contract:
         cloud = json.loads(args.cloud_contract.read_text(encoding="utf-8-sig"))
-        if cloud.get("schema_version") != 1 or cloud.get("trial", {}).get("days_by_plan") != manifest["trial"]["days_by_plan"]:
+        schema_valid = (
+            cloud.get("schema_version") == 1
+            or cloud.get("schema") == "engraphis-public-offer/v1"
+        )
+        if not schema_valid or cloud.get("trial", {}).get("days_by_plan") != manifest["trial"]["days_by_plan"]:
             _fail(errors, "cloud trial authority differs from the public per-plan contract")
     if args.website_root:
         _check_website(manifest, args.website_root.resolve(), errors)
