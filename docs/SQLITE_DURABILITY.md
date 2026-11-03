@@ -49,3 +49,9 @@ change does not certify hardware power-loss protection, backup restoration, remo
 vector publication, or a recovery-time objective. Measure throughput and latency
 with the selected policy recorded; do not compare an unlabelled NORMAL baseline to
 FULL or weaken the default to meet a benchmark target.
+
+Replacing or deleting a database file while a writer still has it open is unsupported: the
+running process keeps the old inode (and its `-wal`/`-shm` files can appear as `(deleted)`),
+while a new process creates a different database at the same path. Stop every Engraphis process
+before restoring or swapping a database. If a receipt chain is damaged after such an event, see
+[`RECALL_RECOVERY.md`](RECALL_RECOVERY.md#operation-receipt-chains-after-a-crash-restore-or-file-level-damage).

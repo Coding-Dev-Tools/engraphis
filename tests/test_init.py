@@ -1,6 +1,7 @@
 """engraphis-init — onboarding command. Runs on the numpy-only gate (stdlib only)."""
-import os
+import hashlib
 import json
+import os
 import sqlite3
 from pathlib import Path
 import subprocess
@@ -355,6 +356,95 @@ def test_doctor_rejects_a_newer_database_schema(tmp_path, monkeypatch, capsys):
     assert main(["--check", "--json"]) == 1
     report = json.loads(capsys.readouterr().out)
     assert any(check["code"] == "schema_newer" for check in report["checks"])
+
+
+def _fork_receipt_chain(path, *, workspace_name: str = "team") -> None:
+    """Seed a current-schema database with one forked receipt chain."""
+    from engraphis.core.ids import new_id
+    from engraphis.core.store import Store
+
+    store = Store(str(path))
+    try:
+        workspace = store.get_or_create_workspace(workspace_name)
+        first = store.record_receipt("remember", workspace_id=workspace)
+        second = store.record_receipt("recall", workspace_id=workspace)
+        fork = dict(second)
+        fork.pop("hash")
+        fork["id"] = new_id("receipt")
+        fork["prev_hash"] = first["hash"]
+        fork["ts_ms"] += 1
+        payload = json.dumps(
+            fork, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        )
+        store.conn.execute(
+            "INSERT INTO operation_receipts(id, ts, operation, workspace_id, repo_id, "
+            "sequence, scope_digest, actor, target_count, status, payload, prev_hash, "
+            "receipt_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                fork["id"], fork["ts_ms"] / 1000.0, fork["operation"], workspace, "",
+                999, fork["scope_digest"], fork["actor_digest"], fork["target_count"],
+                fork["status"], payload, fork["prev_hash"],
+                hashlib.sha256(payload.encode("utf-8")).hexdigest(),
+            ),
+        )
+        store.conn.commit()
+    finally:
+        store.close()
+
+
+def test_doctor_verifies_a_healthy_receipt_chain(tmp_path, monkeypatch, capsys):
+    _fresh_settings(monkeypatch, tmp_path)
+    from engraphis.core.store import Store
+
+    store = Store(str(tmp_path / "doc.db"))
+    try:
+        workspace = store.get_or_create_workspace("team")
+        store.record_receipt("remember", workspace_id=workspace)
+        store.record_receipt("recall", workspace_id=workspace)
+    finally:
+        store.close()
+
+    assert main(["--check", "--json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    receipt = next(check for check in report["checks"] if check["code"] == "receipt_chain")
+    assert receipt["status"] == "ok"
+    assert "1 of 1 workspace chain(s) verified over 2 receipt(s)" in receipt["detail"]
+
+
+def test_doctor_reports_a_forked_receipt_chain_as_audit_damage(
+    tmp_path, monkeypatch, capsys,
+):
+    _fresh_settings(monkeypatch, tmp_path)
+    _fork_receipt_chain(tmp_path / "doc.db")
+
+    assert main(["--check", "--json"]) == 1
+    report = json.loads(capsys.readouterr().out)
+    receipt = next(check for check in report["checks"] if check["code"] == "receipt_chain")
+    assert receipt["status"] == "fail"
+    assert "receipt_warning" in receipt["detail"]
+    assert "restore" in receipt["detail"]
+
+
+def test_doctor_distinguishes_a_damaged_encrypted_database_from_a_bad_key(
+    tmp_path, monkeypatch, capsys,
+):
+    _fresh_settings(monkeypatch, tmp_path)
+    from engraphis.backends.encrypted_db import EncryptionError
+
+    def damaged_connector(_path):
+        raise EncryptionError(
+            "could not open the encrypted database", code="database_damaged"
+        )
+
+    monkeypatch.setattr(init_script, "connector_from_env", lambda: damaged_connector)
+    assert main(["--check", "--json"]) == 1
+    report = json.loads(capsys.readouterr().out)
+    check = next(
+        item for item in report["checks"] if item["code"] == "database_damaged"
+    )
+    assert check["status"] == "fail"
+    assert "damaged" in check["detail"]
+    assert "key" in check["detail"]
 
 
 def test_doctor_reports_lock_contention_without_leaving_probe_state(tmp_path, monkeypatch, capsys):
