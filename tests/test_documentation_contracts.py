@@ -413,7 +413,8 @@ def test_consolidation_docs_expose_only_live_public_options() -> None:
         "without a personal provider key",
     ):
         assert entitlement in public_copy.lower()
-    assert "managed jev is currently" in public_copy.lower()
+    current_copy = " ".join(" ".join(current_documents).split()).lower()
+    assert "managed jev is available" in current_copy
     assert "Recall route selection is experimental and BYOK-only" in readme
     assert "no retrieval-quality improvement is claimed" in readme
     assert "Managed Jev accepts only the fixed command-review, completion-review" in hosted_plan

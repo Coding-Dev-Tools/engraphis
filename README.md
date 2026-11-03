@@ -45,7 +45,7 @@ Connect a coding agent over MCP with the [agent setup guide](https://github.com/
 - **Temporal history:** Timeline can select known versions whose validity has ended before result limits. The dashboard uses `closed_only=true` on `GET /api/timeline` for “Only superseded versions.” Closed history prioritizes lexical matches (the literal query and up to 32 expanded terms, using the final ranker's Unicode lowercasing) before scoring at most 500 eligible candidates; semantic-only matches outside that window can be omitted. SQLite may scan and sort more rows than this candidate cap.
 - **Spec Studio:** Inspect prompt specifications and scoped memory clusters with deterministic coverage, ambiguity, and conflict checks; review suggestions before changing memory.
 - **Operator control:** Keep the core local and offline-capable, with explicit controls for hosted services and external LLM providers.
-- **Free Jev on paid plans:** Pro and Team include managed Jev decisions after service enablement, up to 500 calls per person per day, with no personal provider key.
+- **Free Jev on paid plans:** Pro and Team include managed Jev decisions up to 500 calls per person per day, with no personal provider key.
 
 ## Benchmarks
 
@@ -67,7 +67,7 @@ The payload figure is a serialized JSON-shape estimate, not an MCP transport mea
 
 ## Optional Jev assistance
 
-**Jev is included free with every paid plan: Pro and Team.** After enablement, every legitimate Pro user and each eligible Team named seat, including paid viewers, with an active paid, trial, or test entitlement receives managed Jev at no additional customer charge and without a personal provider key. Local advisory decisions stay free for everyone; BYOK, a personal TypeSafe key, is optional for non-paid or direct use and its provider charges may apply. Managed Jev is currently `not_yet_available` pending release acceptance and service-capacity qualification; client configuration does not enable it.
+**Jev is included free with every paid plan: Pro and Team.** Every legitimate Pro user and each eligible Team named seat, including paid viewers, with an active paid, trial, or test entitlement receives managed Jev at no additional customer charge and without a personal provider key. Local advisory decisions stay free for everyone; BYOK, a personal TypeSafe key, is optional for non-paid or direct use and its provider charges may apply. Managed Jev is available for paid plans; the hosted control service enables it with its provider key.
 
 Each paid individual receives up to **500 Jev calls per person per day**, free. Usage is per person, not pooled across a Team and not monthly. Each evaluated call counts once, including a batched request; calls beyond the daily maximum are not served. Admitted attempts that fail or are interrupted remain counted, and no overage is charged. The account portal reports that member's remaining calls for the current day.
 

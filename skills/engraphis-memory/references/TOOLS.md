@@ -709,10 +709,9 @@ Returns `{enabled, current, latest, update_available, url, notice}`.
 Advisory command, contradiction, support, completion, or custom checks. The default backend
 is local. Selecting `managed` uses the saved Engraphis Cloud session when configured;
 `auto` selects only managed access, and `byok` explicitly selects a personal TypeSafe key.
-Managed Jev is currently `not_yet_available` pending release acceptance and
-service-capacity qualification; client configuration does not enable it. After
-enablement, every legitimate Pro user and each eligible Team named seat, including paid
-viewers, with an active paid, trial, or test entitlement receives managed Jev at no
+Managed Jev is available for paid plans; the hosted control service enables it with
+its provider key. Every legitimate Pro user and each eligible Team named seat, including
+paid viewers, with an active paid, trial, or test entitlement receives managed Jev at no
 additional customer charge and without a personal provider key.
 
 Each paid individual receives up to **500 Jev calls per person per day**, free. Usage is per person, not pooled across a Team and not monthly. Each evaluated call counts once, including a batched request; calls beyond the daily maximum are not served. Admitted attempts that fail or are interrupted remain counted, and no overage is charged. The account portal reports that member's remaining calls for the current day.
@@ -727,8 +726,8 @@ does not authorize arbitrary questions. Managed `custom` and `query_planning` fa
 credential refresh or network requests; custom remote questions and experimental route selection
 require explicit BYOK. Neither managed nor `auto` silently switches to a personal provider key.
 Paid Pro users and paid Team named seats, including viewers, receive the included managed
-workflows after service enablement. Each admitted call counts once. Admitted failures remain
-counted. Release acceptance, service
+workflows. Each admitted call counts once. Admitted failures remain
+counted. Service
 capacity, provider terms, and live quality evaluation remain gates; synthetic fixtures do not
 demonstrate model accuracy.
 
