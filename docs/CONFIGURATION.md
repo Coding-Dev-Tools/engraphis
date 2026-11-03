@@ -65,10 +65,9 @@ control-plane, relay, compute, and worker implementations are private services.
 | `ENGRAPHIS_CLOUD_ACCESS_TOKEN` | Not set | Optional short-lived access token for ephemeral jobs |
 | `ENGRAPHIS_MANAGED_COMPUTE_CONSENT` | *(unset)* | Deny-only operator override: `0` pauses readable managed processing. A truthy value cannot grant approval. Each workspace requires explicit confirmation in Settings → Preferences; encrypted sync is separate |
 
-Managed Jev is currently `not_yet_available` pending release acceptance and
-service-capacity qualification; client configuration does not enable it. After
-enablement, every legitimate Pro user and each eligible Team named seat, including paid
-viewers, with an active paid, trial, or test entitlement receives managed Jev at no
+Managed Jev is available for paid plans; the hosted control service enables it with
+its provider key. Every legitimate Pro user and each eligible Team named seat, including
+paid viewers, with an active paid, trial, or test entitlement receives managed Jev at no
 additional customer charge and without a personal provider key.
 
 Each paid individual receives up to **500 Jev calls per person per day**, free. Usage is per person, not pooled across a Team and not monthly. Each evaluated call counts once, including a batched request; calls beyond the daily maximum are not served. Admitted attempts that fail or are interrupted remain counted, and no overage is charged. The account portal reports that member's remaining calls for the current day.

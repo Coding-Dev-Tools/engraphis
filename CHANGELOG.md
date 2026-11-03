@@ -16,6 +16,8 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - State plainly in the README that Jev is included free with every paid plan (Pro and Team),
   with a free managed allowance of up to 500 Jev calls per person per day and the per-call
   consent rules unchanged.
+- Managed Jev is now available for paid plans with the 500-call daily allowance; the hosted
+  control service enables it with its provider key.
 - Make the included Jev allowance explicit across the plan comparison, README, configuration,
   MCP reference, bundled skill, and env sample: paid Pro and Team users get up to 500 Jev calls
   per person per day free, with no overage charge.

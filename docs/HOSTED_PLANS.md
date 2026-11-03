@@ -33,23 +33,23 @@ apply the changes you choose.
 
 ## Included System 1 Decision Engine (Jev)
 
-After release acceptance and service enablement, every legitimate Pro user and each
+Every legitimate Pro user and each
 eligible Team named seat, including paid viewers, with an active paid, trial, or test
 entitlement receives managed Jev at no additional customer charge and without a personal
 provider key.
 
 Each paid individual receives up to **500 Jev calls per person per day**, free. Usage is per person, not pooled across a Team and not monthly. Each evaluated call counts once, including a batched request; calls beyond the daily maximum are not served. Admitted attempts that fail or are interrupted remain counted, and no overage is charged. The account portal reports that member's remaining calls for the current day.
 
-Managed Jev is currently `not_yet_available` pending release acceptance and
-service-capacity qualification; client configuration does not enable it. Direct BYOK is separate and may incur provider
-charges. Configuration or a successful health check does not establish latency,
-accuracy, or cost savings.
+Managed Jev is available for paid plans; the hosted control service enables it with
+its provider key. Direct BYOK is separate and may incur provider charges.
+Configuration or a successful health check does not establish latency, accuracy, or
+cost savings.
 
 The managed transport and MCP decision route require client **1.7.9 or newer**.
 The published 1.7.8 client has an experimental adapter but does not provide this route.
 Version 1.7.9 was published on October 1, 2026. Upgrade the Python environment that launches your MCP host
 and restart that host. See the [1.7.9 upgrade and release checklist](RELEASE_1_7_9.md).
-Installing a new client does not enable a deployment whose managed service is disabled.
+Installing a new client does not enable a deployment whose managed service is disabled; the hosted control service enables it with its provider key.
 
 Set `ENGRAPHIS_DECISION_BACKEND=managed` and connect the installation through the ordinary
 Cloud account flow. The client refreshes its saved session and sends only to that session's
