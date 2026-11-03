@@ -16,11 +16,28 @@ REQUIRED_COMMON = frozenset({
     "scripts/templates/benchmark_examples.svg",
     "engraphis/core/mutations.py",
     "engraphis/core/vector_repair.py",
+    "engraphis/dashboard_assets/action-dialog.js",
     "engraphis/dashboard_assets/ask-requests.js",
+    "engraphis/dashboard_assets/engraphis-graph-every-worker.js",
+    "engraphis/dashboard_assets/engraphis-graph-every.js",
+    "engraphis/dashboard_assets/engraphis-graph.js",
+    "engraphis/dashboard_assets/engraphis-spacetime.js",
+    "engraphis/dashboard_assets/graph-explorer.js",
     "engraphis/dashboard_assets/graph-lifecycle.js",
+    "engraphis/dashboard_assets/import-sources.js",
+    "engraphis/dashboard_assets/index.html",
+    "engraphis/dashboard_assets/ledger.css",
+    "engraphis/dashboard_assets/ledger.js",
+    "engraphis/dashboard_assets/managed-processing.js",
+    "engraphis/dashboard_assets/markdown.js",
     "engraphis/dashboard_assets/memory-history.js",
     "engraphis/dashboard_assets/memory-revision.js",
     "engraphis/dashboard_assets/memory-workflow.css",
+    # The only shipped copies of the graph libraries; Explore cannot render without them.
+    "engraphis/dashboard_assets/vendor/d3.LICENSE",
+    "engraphis/dashboard_assets/vendor/d3.min.js",
+    "engraphis/dashboard_assets/vendor/force-graph.LICENSE",
+    "engraphis/dashboard_assets/vendor/force-graph.min.js",
     "engraphis/dashboard_assets/workflow-context.js",
     "scripts/smoke_entry_points.py",
     "eval/__init__.py",
@@ -71,6 +88,68 @@ _PRIVATE_RESEARCH = (
     re.compile(r"market.*research", re.IGNORECASE),
     re.compile(r"pricing.*research", re.IGNORECASE),
 )
+
+# Runtime artifacts and private material that must never ship in a public
+# distribution.  A published wheel that carries a credential, a customer
+# database, a log file, a source-control directory, or the test suite is a
+# publication incident, so the release gate has to reject it rather than
+# notice it later.
+_FORBIDDEN_NAMES = frozenset({
+    ".env",
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
+    ".ds_store",
+    "id_rsa",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+})
+_FORBIDDEN_SUFFIXES = (
+    ".pem",
+    ".key",
+    ".p12",
+    ".pfx",
+    ".jks",
+    ".keystore",
+    ".db",
+    ".sqlite",
+    ".sqlite3",
+    ".log",
+)
+_FORBIDDEN_DIRECTORIES = frozenset({
+    ".git",
+    ".hg",
+    ".svn",
+    ".bzr",
+    ".eggs",
+    ".nox",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".tox",
+    "node_modules",
+})
+# ``.env.example`` is the documented template and belongs in the source
+# distribution; every other ``.env`` file holds real values.
+_ALLOWED_ENV_TEMPLATES = frozenset({".env.example"})
+
+
+def _forbidden_reason(name: str, *, wheel: bool) -> Optional[str]:
+    """Return why a member may not ship, or ``None`` when it is acceptable."""
+    parts = name.casefold().split("/")
+    base = parts[-1]
+    if any(part in _FORBIDDEN_DIRECTORIES for part in parts[:-1]):
+        return "a version-control or tool-cache directory"
+    if wheel and parts[0] == "tests":
+        return "the test suite"
+    if base in _FORBIDDEN_NAMES:
+        return "a private configuration or credential file"
+    if base.startswith(".env.") and base not in _ALLOWED_ENV_TEMPLATES:
+        return "a private environment file"
+    if base.endswith(_FORBIDDEN_SUFFIXES):
+        return "a credential, database, or log file"
+    return None
 
 
 def _archive_names(path: Path) -> set[str]:
@@ -137,7 +216,8 @@ def _archive_names(path: Path) -> set[str]:
 
 def verify_distribution(path: Path) -> None:
     names = _archive_names(path)
-    required = REQUIRED_COMMON if path.suffix == ".whl" else REQUIRED_SDIST
+    wheel = path.suffix == ".whl"
+    required = REQUIRED_COMMON if wheel else REQUIRED_SDIST
     missing = sorted(required - names)
     if missing:
         raise ValueError(f"{path.name}: missing required files: {', '.join(missing)}")
@@ -152,6 +232,10 @@ def verify_distribution(path: Path) -> None:
             or any(pattern.search(searchable) for pattern in _PRIVATE_RESEARCH)
         ):
             unsafe.append(name)
+    for name in sorted(names):
+        reason = _forbidden_reason(name, wheel=wheel)
+        if reason is not None:
+            unsafe.append(f"{name} ({reason})")
     if unsafe:
         raise ValueError(
             f"{path.name}: private or generated files present: {', '.join(sorted(unsafe))}"

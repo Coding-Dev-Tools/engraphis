@@ -219,7 +219,10 @@ def test_cached_case_without_retries_validates_retained_start_receipt(tmp_path):
         execute(tmp_path)
 
 
-@pytest.mark.parametrize("payload", [b"", str(os.getpid()).encode("ascii"), b"{", b"unknown",
+# The pid case gets a fixed id: pytest-xdist workers collect separately and must
+# produce identical test ids, while the payload stays the collecting process's pid.
+@pytest.mark.parametrize("payload", [b"", pytest.param(str(os.getpid()).encode("ascii"), id="pid"),
+                                    b"{", b"unknown",
                                     b"\0", external_checkpoints.RUNNER_LOCK_MARKER + b"extra"])
 def test_unrecognized_marker_fails_closed_without_changing_checkpoint_files(tmp_path, payload):
     marker = tmp_path / ".runner.lock"

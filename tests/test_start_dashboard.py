@@ -34,6 +34,37 @@ def test_port_accepts_boundaries():
     assert start_dashboard._port("65535") == 65535
 
 
+def test_link_flag_prints_a_one_time_url_without_starting_the_server(monkeypatch, capsys):
+    from engraphis.config import settings
+
+    monkeypatch.setattr(settings, "api_token", "deployment-token")
+    monkeypatch.delenv("ENGRAPHIS_DASHBOARD_URL", raising=False)
+    calls = []
+
+    def fake_link(base, token):
+        calls.append((base, token))
+        return "http://127.0.0.1:8700/#token=egh1.1.nonce.signature"
+
+    monkeypatch.setattr(start_dashboard, "_sign_in_link", fake_link)
+
+    start_dashboard.main(["--link"])
+
+    out = capsys.readouterr().out
+    assert "http://127.0.0.1:8700/#token=egh1.1.nonce.signature" in out
+    assert "single use" in out
+    assert calls == [("http://127.0.0.1:8700", "deployment-token")]
+
+
+def test_link_flag_explains_a_tokenless_dashboard(monkeypatch, capsys):
+    from engraphis.config import settings
+
+    monkeypatch.setattr(settings, "api_token", "")
+    with pytest.raises(SystemExit) as exc:
+        start_dashboard.main(["--link"])
+    assert exc.value.code == 1
+    assert "no ENGRAPHIS_API_TOKEN" in capsys.readouterr().err
+
+
 def test_startup_error_explains_sqlite_contention():
     message = start_dashboard._startup_error(
         start_dashboard.sqlite3.OperationalError("database is locked"),

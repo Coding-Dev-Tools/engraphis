@@ -70,6 +70,31 @@ def _run_shortcut_install(silent: bool = False, icon: str = "") -> None:
     subprocess.run(cmd, check=False)
 
 
+def _sign_in_link(base_url: str, token: str) -> str:
+    """Ask the running dashboard for a one-time browser sign-in link.
+
+    The deployment token authorizes this machine-to-machine call and never leaves it;
+    only the short-lived, single-use link is printed.
+    """
+    request = urllib.request.Request(
+        url=base_url.rstrip("/") + "/api/auth/link",
+        data=b"{}",
+        method="POST",
+        headers={
+            "Authorization": "Bearer " + token,
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        },
+    )
+    opener = urllib.request.build_opener(_NoRedirectHandler())
+    with opener.open(request, timeout=5) as response:
+        payload = json.loads(response.read(64 * 1024).decode("utf-8"))
+    link = payload.get("url") if isinstance(payload, dict) else ""
+    if not isinstance(link, str) or "#token=" not in link:
+        raise ValueError("the dashboard did not return a sign-in link")
+    return link
+
+
 def _port(value: str) -> int:
     try:
         port = int(value)
@@ -280,10 +305,34 @@ def main(argv=None) -> None:
     ap.add_argument("--install-shortcuts-silent", action="store_true",
                     help="Same as --install-shortcuts but non-interactive.")
     ap.add_argument("--icon", default="", help="Icon path for shortcuts.")
+    ap.add_argument("--link", action="store_true",
+                    help="Print a one-time browser sign-in link for the running dashboard, then exit.")
     args = ap.parse_args(argv)
 
     if args.install_shortcuts or args.install_shortcuts_silent:
         _run_shortcut_install(silent=args.install_shortcuts_silent, icon=args.icon)
+        return
+
+    if args.link:
+        token = (_config.settings.api_token or "").strip()
+        if not token:
+            ap.exit(1, "This dashboard has no ENGRAPHIS_API_TOKEN, so it opens without a "
+                       "sign-in link. Start it with engraphis-dashboard and open the URL "
+                       "it prints.\n")
+        from engraphis.netutil import display_base_url
+        base = (os.environ.get("ENGRAPHIS_DASHBOARD_URL", "").strip()
+                or display_base_url(args.host, args.port))
+        try:
+            link = _sign_in_link(base, token)
+        except urllib.error.HTTPError as exc:
+            ap.exit(1, "Could not create a sign-in link (HTTP %s) from %s. Confirm the "
+                       "dashboard is running and the configured token matches.\n"
+                       % (exc.code, base))
+        except (OSError, ValueError) as exc:
+            ap.exit(1, "Could not reach the dashboard at %s (%s). Start it with "
+                       "engraphis-dashboard, then retry.\n" % (base, type(exc).__name__))
+        print(link)
+        print("One-time link: single use, expires in 15 minutes. Keep it private.")
         return
 
     # netutil (stdlib-only, config-free) keeps this preflight ahead of every dashboard
@@ -331,6 +380,8 @@ def main(argv=None) -> None:
     print(f"  REST API  :  {url}/api")
     print(f"  Database  :  {db}")
     print(f"  Version   :  {_engraphis_version}")
+    if (getattr(settings, "api_token", "") or "").strip() and not settings.browser_auto_session:
+        print("  Sign-in   :  engraphis-dashboard --link   (one-time browser link)")
     print("  Press Ctrl+C to stop.")
     sys.stdout.flush()
 

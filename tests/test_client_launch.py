@@ -38,7 +38,7 @@ from engraphis.routes import v2_api  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 UPDATER = REPO_ROOT / "scripts" / "update.py"
-DASHBOARD_JS = REPO_ROOT / "engraphis" / "static" / "dashboard.js"
+DASHBOARD_JS = REPO_ROOT / "engraphis" / "dashboard_assets" / "ledger.js"
 
 # The private control plane's plan→feature table, mirrored from (read-only)
 # the hosted entitlement contract plan-feature mapping. A drift here means a
@@ -474,19 +474,19 @@ def test_the_account_url_is_plan_neutral_where_the_checkouts_are_separate(
     assert set(v2_api.entitled_features("team")) == set(payload["known_features"])
 
 
-def test_dashboard_lock_badges_clear_for_a_paid_plan(monkeypatch) -> None:
-    """Close the loop on the JS: ``locked = !features.includes(f)``.
+def test_dashboard_feature_ctas_are_granted_by_the_plan_they_sell(monkeypatch) -> None:
+    """Close the loop on the JS: each hosted tab's call to action names a feature key.
 
-    The dashboard's three gated nav items are read straight out of the shipped asset so a
-    renamed feature key cannot re-lock a paid customer without failing here.
+    The three hosted tabs are read straight out of the shipped asset so a renamed feature key
+    cannot leave a paid customer looking at an upsell for something they already own.
     """
 
     script = DASHBOARD_JS.read_text(encoding="utf-8")
-    block = script[script.index("function updateFeatureLocks()"):]
-    block = block[:block.index("\n}")]
-    gated = re.findall(r"apply\('[^']+',\s*'([^']+)'", block)
+    block = script[script.index("const renderFeatureCtas = () => {"):]
+    block = block[:block.index("].forEach(")]
+    gated = dict(re.findall(r"\['[^']+', '([^']+)', '(pro|team)'\]", block))
 
-    assert set(gated) == {"analytics", "automation", "team"}, gated
+    assert gated == {"analytics": "pro", "automation": "pro", "team": "team"}, gated
 
     monkeypatch.setenv("ENGRAPHIS_CLOUD_PLAN", "team")
     team_features = v2_api.get_license()["features"]

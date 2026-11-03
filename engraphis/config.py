@@ -910,6 +910,10 @@ class Settings:
     # Optional bearer token. When non-empty, the REST API requires
     # `Authorization: Bearer <token>` on protected routes; health and the page shell stay public.
     api_token: str = field(default_factory=lambda: _env("ENGRAPHIS_API_TOKEN", ""))
+    # A browser that can reach the dashboard opens it without a credential. Set this to
+    # off to require the one-time sign-in link instead (hardened public deployments).
+    browser_auto_session: bool = field(
+        default_factory=lambda: _env_bool("ENGRAPHIS_BROWSER_AUTO_SESSION", True))
     # Comma-separated CORS allow-list. Defaults to loopback only (local-first).
     cors_origins: list = field(
         default_factory=lambda: _parse_origins(_env("ENGRAPHIS_CORS_ORIGINS", ""),

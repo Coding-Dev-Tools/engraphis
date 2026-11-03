@@ -156,3 +156,31 @@ def test_duplicate_observation_and_reinforcement_do_not_change_version(engines, 
     assert after.stability > before.stability
     assert after.access_count == before.access_count + 1
     assert memory_version(after) == expected
+
+
+def test_inspector_browse_version_covers_closure_history(tmp_path):
+    from engraphis.service import MemoryService
+
+    engine = create_memory_engine(str(tmp_path / "browse-version.db"), auto_evolve=False)
+    service = MemoryService(engine)
+    try:
+        memory_id, endpoint = _source_with_future_closure(engine)
+        # A second, later observation leaves the scalar summary unchanged.
+        engine.store.close_validity(memory_id, at=endpoint + 600)
+        hydrated = engine.store.get_memory(memory_id)
+        assert len(hydrated.closure_observations) == 2
+
+        listed = {
+            item["id"]: item
+            for item in service.list_memories(workspace="closure-version")["memories"]
+        }[memory_id]
+
+        assert listed["version"] == memory_version(hydrated)
+        assert listed["can_revise"] is True
+        result = engine.revise_memory(
+            memory_id, expected_version=listed["version"], operation_id="browse-edit",
+            content="The service uses a revised deployment target", reason="A governed edit",
+        )
+        assert result["id"] != memory_id
+    finally:
+        engine.close()

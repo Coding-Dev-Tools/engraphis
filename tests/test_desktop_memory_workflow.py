@@ -1,9 +1,12 @@
 """Desktop memory regressions: real persistence, routing and exact lookup."""
 import argparse
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import importlib.util
 import io
 import json
 from pathlib import Path
+import socket
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -206,3 +209,55 @@ def test_bridge_forwards_negotiated_session_and_protocol_headers():
     headers = {key.lower(): value for key, value in requests[-1].header_items()}
     assert headers["mcp-session-id"] == "transport-session"
     assert headers["mcp-protocol-version"] == "2025-03-26"
+
+
+@pytest.mark.parametrize("terminal", ["result", "error"])
+def test_bridge_returns_completed_sse_result_before_stream_closes(terminal, monkeypatch):
+    from engraphis.mcp_stdio_bridge import LocalBridge
+
+    # The offline suite replaces every DNS result with a public fixture address.
+    # This protocol test connects only to its own numeric loopback server.
+    monkeypatch.setattr(socket, "getaddrinfo", lambda host, port, *_a, **_k: [
+        (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.1", port)),
+    ])
+    release = threading.Event()
+    expected = {"jsonrpc": "2.0", "id": 7, terminal: {"value": "copper lantern"}}
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(b": keepalive\n\nevent: message\n")
+            self.wfile.write(("data: " + json.dumps(expected) + "\n\n").encode())
+            self.wfile.flush()
+            release.wait(3)
+            self.close_connection = True
+
+        def log_message(self, *_args):
+            pass
+
+    with HTTPServer(("127.0.0.1", 0), Handler) as http:
+        worker = threading.Thread(target=http.serve_forever, daemon=True)
+        worker.start()
+        try:
+            bridge = LocalBridge(f"http://127.0.0.1:{http.server_port}/mcp", timeout=0.5)
+            assert bridge.forward({"jsonrpc": "2.0", "id": 7, "method": "tools/list"}) == expected
+            assert not release.is_set()
+        finally:
+            release.set()
+            http.shutdown()
+            worker.join(timeout=3)
+
+
+def test_sse_stream_limit_includes_ignored_events(monkeypatch):
+    from engraphis import mcp_stdio_bridge as bridge
+
+    monkeypatch.setattr(bridge, "MAX_MESSAGE_BYTES", 40)
+    response = io.BytesIO(b": " + b"x" * 60 + b"\n\n")
+    response.headers = {"Content-Type": "text/event-stream"}
+    with pytest.raises(ValueError, match="message limit"):
+        bridge.read_response(response, 7)
