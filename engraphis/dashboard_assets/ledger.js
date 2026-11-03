@@ -2388,7 +2388,7 @@
 
   function renderJevReviewResult(target, response) {
     const fallbackLabels = {
-      allowance_exhausted: 'The included Jev allowance is currently used up. Check account usage for the next available window.',
+      allowance_exhausted: 'The included Jev daily allowance (up to 500 calls) is used up. It resets the next day.',
       provider_protection_limit: 'Jev is temporarily paused by a service-protection limit. Try again later.',
       remote_timeout: 'Jev did not respond before the request deadline. You can retry later.',
       session_changed: 'The Cloud session changed during the request. Sign in again before retrying.',
@@ -3325,7 +3325,7 @@
         remote_consent_required: 'Remote consent was not granted, so deterministic route order was used.',
         planning_disabled: 'Query planning is disabled, so the original query route was used.',
         backend_unavailable: 'Jev is unavailable, so deterministic route order was used.',
-        allowance_exhausted: 'The included Jev allowance is currently used up, so deterministic route order was used. Check account usage for the next available window.',
+        allowance_exhausted: 'The included Jev daily allowance (up to 500 calls) is used up, so deterministic route order was used. It resets the next day.',
         provider_protection_limit: 'Jev is temporarily paused by a service-protection limit, so deterministic route order was used. Try again later.',
         remote_timeout: 'Jev did not respond before the request deadline, so deterministic route order was used. You can retry later.',
         session_changed: 'The Cloud session changed during the request, so deterministic route order was used. Sign in again before retrying.',

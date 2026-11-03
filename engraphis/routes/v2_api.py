@@ -4580,8 +4580,10 @@ async def sync_run():
         and len(authorization_errors) == len(summary["errors"])
     ):
         first = authorization_errors[0]
+        _record_authoritative_denial()
+        recovery_url = licensing.account_url() if has_cloud_session else licensing.upgrade_url()
         raise HTTPException(status_code=first["status"], detail={
-            "error": first["error"], "upgrade_url": licensing.upgrade_url()})
+            "error": first["error"], "upgrade_url": recovery_url})
     return {"ok": not summary["errors"], "summary": summary}
 
 

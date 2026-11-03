@@ -412,3 +412,25 @@ def test_sync_run_does_not_treat_cloud_session_outage_as_authorization_loss(
         "status": 503,
     }]
     assert "private network detail" not in repr(summary)
+
+
+def test_sync_run_total_authorization_loss_records_denial_and_routes_to_account_url(
+    monkeypatch, tmp_path
+):
+    from engraphis import licensing
+    from engraphis.cloud_session import CloudSessionError
+    from engraphis.routes import v2_api
+
+    denials = []
+    monkeypatch.setattr(v2_api, "_record_authoritative_denial", lambda: denials.append(True))
+
+    def fail_access(*args, **kwargs):
+        raise CloudSessionError("subscription lapsed", status=402)
+
+    monkeypatch.setattr("engraphis.cloud_session.access_for_workspace", fail_access)
+    with _client(monkeypatch, tmp_path, cloud=True) as c:
+        response = c.post("/api/sync/run", json={})
+
+    assert response.status_code == 402
+    assert response.json()["detail"]["upgrade_url"] == licensing.account_url()
+    assert denials == [True]
