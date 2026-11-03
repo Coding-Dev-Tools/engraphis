@@ -31,6 +31,18 @@ absent, see [Setup](#setup). Do not fall back to ad-hoc notes.
 The Smart gateway exposes these nine tools directly; advanced capabilities remain available through
 discovery and the validated executors.
 
+### Advisory decisions
+
+The decision engine is available through the same gateway and is **advisory only**. When a shell
+command looks risky, two remembered facts may contradict each other, retrieved evidence looks too
+weak to answer, or you are about to claim a task is complete, call
+`engraphis_discover_actions` with the decision task and run the returned `decide` capability
+through `engraphis_execute_action` using the matching `kind` (`guard_command`,
+`classify_contradiction`, `verify_support`, `verify_completion`, or `custom`). Local heuristics
+answer by default. Remote Jev requires per-call opt-in with `allow_remote=true` and a `public` or
+`internal` data classification; without both, nothing leaves the machine. A decision never
+authorizes a command, replaces tests or user approval, or certifies completion.
+
 Memory here is **scoped, typed, bi-temporal, and self-maintaining**: writes are deduplicated and
 contradictions supersede (never silently overwrite), and forgetting lowers priority instead of
 hard-deleting. You get those guarantees for free *if* you use the right tool with the right scope.
