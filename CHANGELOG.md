@@ -5,6 +5,10 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [1.7.12] - 2026-11-02
+
+Candidate package version: **1.7.12**. Publication and hosted-service qualification remain separate.
+
 - Browsers no longer enter a token. The dashboard opens automatically for any browser that
   can reach it; the deployment's network reachability is the dashboard boundary. Session
   issuance still requires the same-origin custom header and a published Host, and only an
@@ -13,6 +17,7 @@ All notable changes to Engraphis are documented here. Format loosely follows
   `ENGRAPHIS_BROWSER_AUTO_SESSION=0` for a hardened deployment, where
   `engraphis-dashboard --link` (or `POST /api/auth/link`) issues a single-use, 15-minute
   sign-in link that opens a 12-hour browser session.
+- Add a Windows RAM integrity probe, a local pre-flight verification harness, and MCP memory concurrency test coverage.
 - State plainly in the README that Jev is included free with every paid plan (Pro and Team),
   with a free managed allowance of up to 500 Jev calls per person per day and the per-call
   consent rules unchanged.
@@ -21,6 +26,7 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - Make the included Jev allowance explicit across the plan comparison, README, configuration,
   MCP reference, bundled skill, and env sample: paid Pro and Team users get up to 500 Jev calls
   per person per day free, with no overage charge.
+- Refresh evaluation, CI, and development dependencies and update the registered benchmark evidence registry.
 
 ## [1.7.11] - 2026-10-26
 

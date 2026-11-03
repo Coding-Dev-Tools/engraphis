@@ -57,7 +57,8 @@ def run_eval(cases: list[dict], *, mode: str, k: int = 5,
         raise TypeError("chunk_extractor must be a ChunkingExtractor")
     count_tokens = selected_chunker.count_tokens
     svc = MemoryService.create(":memory:", embed_model=embed_model, embed_dim=embed_dim,
-                               extractor=("chunk" if mode == "chunked" else "none"))
+                               extractor=("chunk" if mode == "chunked" else "none"),
+                               retention_supervisor="none")
     if mode == "chunked":
         svc.engine.extractor = selected_chunker
     # The checked-in fixture is trusted test data. Raw service ingest correctly marks
