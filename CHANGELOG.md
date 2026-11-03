@@ -19,7 +19,13 @@ Candidate package version: **1.7.12**. Publication and hosted-service qualificat
   sign-in link that opens a 12-hour browser session.
 - Add a Windows RAM integrity probe, a local pre-flight verification harness, and MCP memory concurrency test coverage.
 - State plainly in the README that Jev is included free with every paid plan (Pro and Team),
-  with the existing rolling limits and per-call consent rules unchanged.
+  with a free managed allowance of up to 500 Jev calls per person per day and the per-call
+  consent rules unchanged.
+- Managed Jev is now available for paid plans with the 500-call daily allowance; the hosted
+  control service enables it with its provider key.
+- Make the included Jev allowance explicit across the plan comparison, README, configuration,
+  MCP reference, bundled skill, and env sample: paid Pro and Team users get up to 500 Jev calls
+  per person per day free, with no overage charge.
 - Refresh evaluation, CI, and development dependencies and update the registered benchmark evidence registry.
 
 ## [1.7.11] - 2026-10-26
