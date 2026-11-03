@@ -16,7 +16,7 @@ implementations are not part of this repository.
 | Local dashboard, memory engine, and MCP tools | Yes | Yes | Yes |
 | Local version history, graph, and manual consolidation | Yes | Yes | Yes |
 | Local workspace export | Yes | Yes | Yes |
-| Advisory Jev decisions | Local heuristics; optional BYOK | Included managed decisions per eligible individual after service acceptance | Included managed decisions per eligible named seat after service acceptance; no shared pool |
+| Advisory Jev decisions | Local heuristics; optional BYOK | Free managed Jev: up to 500 calls per person per day for eligible individuals after service acceptance | Free managed Jev: up to 500 calls per person per day for eligible named seats after service acceptance; no shared pool |
 | Hosted Cloud Sync, Analytics, and managed automation | | Yes | Yes |
 | Private account and billing support | | Yes | Yes |
 | Team account roster, roles, named seats, invitations, and activity | | | Yes |
@@ -33,32 +33,23 @@ apply the changes you choose.
 
 ## Included System 1 Decision Engine (Jev)
 
-After release acceptance and service enablement, every legitimate Pro user and each
+Every legitimate Pro user and each
 eligible Team named seat, including paid viewers, with an active paid, trial, or test
 entitlement receives managed Jev at no additional customer charge and without a personal
 provider key.
 
-Each individual receives all three independent rolling limits: **100 evaluated questions per rolling hour, 1,000 per rolling five hours, and 2,000 per rolling 24 hours**. All three
-limits apply. Usage is per person, not pooled across a Team and not monthly. Each
-evaluated question counts once; if a batch is evaluated, every question counts. A
-`guard_command` review evaluates two questions, and each other supported workflow
-evaluates one. Admitted attempts that fail or are interrupted remain counted. No overage
-is charged. The account portal reports the authenticated member's remaining use across
-all three windows; usage returns as earlier questions leave each rolling window.
+Each paid individual receives up to **500 Jev calls per person per day**, free. Usage is per person, not pooled across a Team and not monthly. Each evaluated call counts once, including a batched request; calls beyond the daily maximum are not served. Admitted attempts that fail or are interrupted remain counted, and no overage is charged. The account portal reports that member's remaining calls for the current day.
 
-Managed Jev is currently `not_yet_available` pending release acceptance and
-service-capacity qualification; client configuration does not enable it. The existing
-production fleet guard remains 100 questions per day across the service. It conflicts
-with these individual caps and may pause or reject requests earlier, so resolve capacity
-and the fleet guard before launch. Direct BYOK is separate and may incur provider
-charges. Configuration or a successful health check does not establish latency,
-accuracy, or cost savings.
+Managed Jev is available for paid plans; the hosted control service enables it with
+its provider key. Direct BYOK is separate and may incur provider charges.
+Configuration or a successful health check does not establish latency, accuracy, or
+cost savings.
 
 The managed transport and MCP decision route require client **1.7.9 or newer**.
 The published 1.7.8 client has an experimental adapter but does not provide this route.
 Version 1.7.9 was published on October 1, 2026. Upgrade the Python environment that launches your MCP host
 and restart that host. See the [1.7.9 upgrade and release checklist](RELEASE_1_7_9.md).
-Installing a new client does not enable a deployment whose managed service is disabled.
+Installing a new client does not enable a deployment whose managed service is disabled; the hosted control service enables it with its provider key.
 
 Set `ENGRAPHIS_DECISION_BACKEND=managed` and connect the installation through the ordinary
 Cloud account flow. The client refreshes its saved session and sends only to that session's
