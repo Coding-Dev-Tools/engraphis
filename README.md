@@ -40,7 +40,7 @@ Connect a coding agent over MCP with the [agent setup guide](https://github.com/
 ## What it provides
 
 - **Continuity:** Organize memories by workspace, repository, and session, with a last-session handoff.
-- **Useful recall:** Combine vector, lexical, graph, and code-aware retrieval, then pack results to a hard context budget.
+- **Useful recall:** Combine vector, lexical, graph, and code-aware retrieval, then pack results to a hard context budget. The Smart MCP tool `engraphis_recall_context` returns that packed context in compact form.
 - **Grounded answers:** Preserve provenance and temporal history; cite support or abstain when it is insufficient.
 - **Operator control:** Keep the core local and offline-capable, with explicit controls for hosted services and external LLM providers.
 
