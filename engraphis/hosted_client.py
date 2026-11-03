@@ -16,6 +16,9 @@ import urllib.request
 from typing import Optional
 from urllib.parse import urlsplit, urlunsplit
 
+from engraphis.entitlements import required_plan as _contract_required_plan
+from engraphis.entitlements import required_plans as _contract_required_plans
+
 
 TRIAL_DAYS = 7
 TRIAL_SECONDS = 7 * 24 * 60 * 60
@@ -52,22 +55,11 @@ _DEFAULT_CHECKOUT_URLS = {
     ),
 }
 
-_REQUIRED_PLAN = {
-    "analytics": "pro",
-    "automation": "pro",
-    "consolidation": "pro",
-    "dreaming": "pro",
-    "export": "pro",
-    "compliance_export": "team",
-    "sync": "pro",
-    "team": "team",
-    # Team-only capabilities named in commercial_manifest.json.  Without explicit entries
-    # these fell through to the "pro" default, so a Team capability would tell a customer
-    # who already holds Pro to buy Pro again.
-    "hosted_team_audit_export": "team",
-    "hosted_scoped_agent_tokens": "team",
-    "hosted_multi_user_roles": "team",
-}
+# One read-only mirror of the private hosted entitlement contract. This table decides which
+# plan a *message* advertises; it never authorizes anything. The contract lives in
+# ``engraphis/entitlement_contract.json`` so the client, its tests, and the release gate all
+# read the same file instead of maintaining three copies that drift independently.
+_REQUIRED_PLAN = _contract_required_plans()
 
 
 class CloudUrlUnresolved(ValueError):
@@ -95,7 +87,7 @@ class HostedFeatureError(RuntimeError):
 def required_plan(feature: str) -> str:
     """Return the advertised minimum hosted plan for a feature."""
 
-    return _REQUIRED_PLAN.get(str(feature or "").strip().lower(), "pro")
+    return _contract_required_plan(feature)
 
 
 def _safe_target(value: str) -> str:
