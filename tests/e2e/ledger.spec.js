@@ -1634,7 +1634,9 @@ test('Ledger explains an invalid Cloud Sync key without exposing it', async ({ p
 
   const result = page.locator('#sync-result');
   await expect(result).toContainText('Encryption keyInvalid');
-  await expect(result).toContainText('Replace it with a 32-byte URL-safe base64 key');
+  await expect(result).toContainText(
+    'The saved Cloud Sync encryption key is invalid. Generate a replacement'
+  );
   await expect(result.getByRole('button', { name: 'Sync now' })).toBeDisabled();
   expect(requests.syncRuns).toEqual([]);
 });
