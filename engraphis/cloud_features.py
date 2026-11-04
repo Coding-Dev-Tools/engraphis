@@ -153,11 +153,11 @@ def _denial_reason(status: int, raw: bytes) -> Optional[str]:
     if not isinstance(body, dict):
         return None
     try:
-        from engraphis.cloud_authz import interpret_denial
+        from engraphis.cloud_authz import KNOWN_REASONS, interpret_denial
         reason = interpret_denial(status, body).get("reason")
     except Exception:  # noqa: BLE001 - presentation metadata must never mask the failure
         return None
-    return reason if isinstance(reason, str) and reason != "unknown" else None
+    return reason if isinstance(reason, str) and reason in KNOWN_REASONS else None
 
 
 def managed_compute_consent(service: Any = None, workspace: Optional[str] = None) -> bool:

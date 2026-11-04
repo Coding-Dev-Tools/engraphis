@@ -64,6 +64,10 @@ _UPGRADE_REASONS = frozenset({
     REASON_ENTITLEMENT_EXPIRED,
     REASON_SEAT_LIMIT_EXCEEDED,
 })
+#: The only reason values this client will translate or log. An unrecognized body is a
+#: generic denial, and a long one is discarded before it can reach a log line.
+KNOWN_REASONS = frozenset(_DENIAL_MESSAGES)
+_MAX_REASON_CHARS = 64
 
 
 def interpret_denial(
@@ -91,6 +95,10 @@ def interpret_denial(
             reason = str(detail.get("reason") or "")
         elif isinstance(detail, str):
             reason = detail
+    # A denial body is untrusted input. Keep only a short, fixed-vocabulary code; never
+    # log or render an arbitrary provider string.
+    if len(reason) > _MAX_REASON_CHARS:
+        reason = ""
 
     message = _DENIAL_MESSAGES.get(reason)
     if message is None:

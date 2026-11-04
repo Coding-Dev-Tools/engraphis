@@ -99,6 +99,27 @@ def test_unknown_grants_are_reported_but_never_become_feature_rows():
     assert entitlements.unrecognized(["analytics", "automation"], "pro") == []
 
 
+def test_managed_jev_is_an_included_paid_benefit_with_a_bounded_allowance():
+    service = entitlements.included_services()["managed_jev"]
+
+    assert service["plan"] == "pro"
+    assert service["calls_per_person_per_day"] == 500
+    assert entitlements.required_plan("managed_jev") == "pro"
+    # It is informational, not a hosted feature row: no lock badge, no tick box.
+    assert "managed_jev" not in entitlements.labels()
+
+
+def test_license_exposes_the_included_paid_benefit(monkeypatch):
+    pytest.importorskip("fastapi", reason="full-stack extra not installed")
+    from engraphis.routes import v2_api
+
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_PLAN", "pro")
+    payload = v2_api.get_license()
+
+    assert payload["included_services"]["managed_jev"]["calls_per_person_per_day"] == 500
+    assert "managed_jev" not in payload["features"]
+
+
 def test_trial_and_grace_limits_match_the_commercial_manifest():
     manifest = commercial.manifest()
 

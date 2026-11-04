@@ -63,6 +63,7 @@ def test_a_known_reason_is_extracted_without_reflecting_the_body(monkeypatch):
         b"not json",
         b'{"reason":"not_a_real_reason"}',
         b'{"detail":"missing reason"}',
+        b'{"reason":"' + b"x" * 200 + b'"}',
         b'{"reason":"entitlement_expired"}' + b"x" * (cloud_features.MAX_ERROR_BODY_BYTES + 1),
     ),
 )

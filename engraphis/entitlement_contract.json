@@ -76,6 +76,13 @@
       "status": "declared"
     }
   },
+  "included_services": {
+    "managed_jev": {
+      "label": "Managed Jev decisions",
+      "plan": "pro",
+      "calls_per_person_per_day": 500
+    }
+  },
   "limits": {
     "trial_days_by_plan": {
       "pro": 7,

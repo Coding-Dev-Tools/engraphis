@@ -164,6 +164,28 @@ def _check_entitlement_contract(manifest: dict, errors: list[str]) -> dict:
                     "entitlement contract omits pro feature %s from the team plan" % name,
                 )
 
+    included = contract.get("included_services", {})
+    if not isinstance(included, dict):
+        _fail(errors, "entitlement contract included_services must be an object")
+    else:
+        for name, spec in included.items():
+            if not isinstance(spec, dict):
+                _fail(errors, "included service %s must be an object" % name)
+                continue
+            if spec.get("plan") not in {"free", "pro", "team"}:
+                _fail(errors, "included service %s names an unknown plan" % name)
+            if not isinstance(spec.get("label"), str) or not spec["label"].strip():
+                _fail(errors, "included service %s needs a non-empty label" % name)
+            calls = spec.get("calls_per_person_per_day")
+            if calls is not None and (
+                not isinstance(calls, int) or isinstance(calls, bool) or calls <= 0
+            ):
+                _fail(
+                    errors,
+                    "included service %s calls_per_person_per_day must be positive"
+                    % name,
+                )
+
     # Local workspace export is free and documented free. It must never re-enter the paid
     # vocabulary, or a Pro/Team row starts advertising something the free tier owns.
     export = features.get("export")

@@ -6736,6 +6736,7 @@
       'Growth, retention, decay and entity Analytics',
       'Auto Consolidation with hosted retention policies',
       'Auto Dreaming with reviewable managed proposals',
+      'Managed Jev decisions: up to 500 calls per person per day',
       'Private account and billing support',
     ],
     team: [
@@ -6814,6 +6815,13 @@
     local: 'Not connected',
   };
 
+  function licenseTrialDaysRemaining(license = state.license, now = Date.now()) {
+    const ends = Number(license && license.trial && license.trial.ends_at);
+    if (!(ends > 0)) return null;
+    const remaining = Math.ceil((ends * 1000 - now) / 86_400_000);
+    return Number.isFinite(remaining) ? Math.max(0, remaining) : null;
+  }
+
   function licenseTrialEnds(license = state.license) {
     const ends = Number(license && license.trial && license.trial.ends_at);
     const date = ends > 0 ? validDate(ends) : null;
@@ -6858,7 +6866,13 @@
       target.append(box);
     };
     if (license.error) callout('Hosted authorization unavailable', text(license.error));
-    if (access === 'trial_expired') {
+    if (access === 'trial') {
+      const daysLeft = licenseTrialDaysRemaining(license);
+      const when = daysLeft === null ? 'Your free trial is active'
+        : daysLeft === 0 ? 'Your free trial ends today'
+          : `Your free trial ends in ${daysLeft} day${daysLeft === 1 ? '' : 's'}`;
+      callout(when, `${ends ? `It is active until ${ends}. ` : ''}Subscribe to keep Cloud Sync, Analytics, Automation, and Team access.`);
+    } else if (access === 'trial_expired') {
       callout(`Your free trial has ended${ends ? ` on ${ends}` : ''}`, 'Hosted features are locked. Everything you wrote is still in your local database and fully usable. The trial runs once per account, so restoring hosted features means subscribing.');
     } else if (access === 'lapsed') {
       const reason = LICENSE_STATUS_NOTES[license.entitlement_status];
@@ -6878,6 +6892,29 @@
         list.append(item);
       });
       target.append(list);
+    }
+    // Benefits included with a paid plan that are not hosted feature keys. This is what
+    // makes the paid plan legible: Jev is the largest included benefit and has no lock row.
+    const services = license.included_services && typeof license.included_services === 'object'
+      ? Object.values(license.included_services).filter(item => item && typeof item === 'object')
+      : [];
+    if (services.length) {
+      const list = node('ul', 'license-features');
+      list.setAttribute('aria-label', 'Included with paid plans');
+      services.forEach(service => {
+        const calls = Number(service.calls_per_person_per_day);
+        const label = text(service.label || 'Included service');
+        const detail = Number.isSafeInteger(calls) && calls > 0
+          ? `${label} · up to ${calls.toLocaleString()} calls per person per day`
+          : label;
+        const item = node('li', '', `★ ${detail}`);
+        item.setAttribute('aria-label', `${label}: included with paid plans`);
+        list.append(item);
+      });
+      target.append(
+        node('p', 'automation-policy-note', 'Included with Pro and Team'),
+        list,
+      );
     }
     // A server grant this build cannot render must never look like a lock on something the
     // customer bought. Name it and ask for an update instead of silently dropping it.

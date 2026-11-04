@@ -46,6 +46,7 @@ async function mockApi(page, options = {}) {
   requests.automationPolicies = [];
   requests.automationBootstraps = [];
   requests.syncRuns = [];
+  requests.syncKeyRequests = [];
   requests.details = [];
   requests.documentImports = [];
   requests.contextSavingsQueries = [];
@@ -281,7 +282,22 @@ async function mockApi(page, options = {}) {
       llmStatus.extractor = llmStatus.extractor_enabled ? 'llm_structured' : 'none';
       return ok({ ok: true, extractor_enabled: llmStatus.extractor_enabled, persisted: true });
     }
-    if (path === '/sync/status') return ok(options.syncStatus || { available: false, last: null });
+    if (path === '/sync/status') {
+      const body = requests.syncKeyRequests.length && options.syncStatusAfterKey
+        ? options.syncStatusAfterKey
+        : options.syncStatus || { available: false, last: null };
+      return ok(body);
+    }
+    if (path === '/sync/key') {
+      requests.syncKeyRequests.push(JSON.parse(request.postData() || '{}'));
+      return ok({
+        configured: true,
+        key: options.syncKey || 'A'.repeat(43),
+        key_source: 'state_file',
+        env_var: 'ENGRAPHIS_SYNC_E2EE_KEY',
+        restart_required: false,
+      });
+    }
     if (path === '/sync/run') {
       requests.syncRuns.push(JSON.parse(request.postData() || '{}'));
       const summary = options.syncRun || {
@@ -1621,6 +1637,34 @@ test('Ledger guides a connected account with a missing Cloud Sync key', async ({
   expect(requests.syncRuns).toEqual([]);
 });
 
+test('Ledger creates a Cloud Sync key once and confirms it was stored', async ({ page }) => {
+  const requests = await mockApi(page, {
+    syncStatus: {
+      available: true, ready: false, has_key: false, key_state: 'missing',
+      can_generate_key: true, can_rotate_key: false,
+      encryption_available: true, local_prerequisites_ready: false, last: null,
+    },
+    syncStatusAfterKey: {
+      available: true, ready: true, has_key: true, key_state: 'ready',
+      can_generate_key: false, can_rotate_key: true,
+      encryption_available: true, local_prerequisites_ready: true, last: null,
+    },
+    syncKey: 'A'.repeat(43),
+  });
+  await page.goto('/?view=manage&tab=sync');
+
+  const result = page.locator('#sync-result');
+  await result.getByRole('button', { name: 'Create sync key' }).click();
+  await expect(result).toContainText('Cloud Sync key created');
+  await expect(result.locator('.sync-key-value')).toHaveText('A'.repeat(43));
+  expect(requests.syncKeyRequests).toEqual([{ rotate: false }]);
+
+  await result.getByRole('button', { name: 'I stored the key' }).click();
+  await expect(result).toContainText('Encryption keyValid');
+  await expect(result).toContainText('Sync readinessReady');
+  expect(requests.syncRuns).toEqual([]);
+});
+
 test('Ledger explains an invalid Cloud Sync key without exposing it', async ({ page }) => {
   const requests = await mockApi(page, {
     syncStatus: {
@@ -2827,6 +2871,30 @@ test('Ledger gives active Pro members direct Cloud access and saves hosted polic
   expect(errors).toEqual([]);
 });
 
+test('Ledger names the days remaining in a live trial', async ({ page }) => {
+  const live = license();
+  live.plan = 'pro';
+  live.access_state = 'trial';
+  live.is_trial = true;
+  live.cloud_access_active = true;
+  live.plan_source = 'session';
+  live.trial = {
+    ...live.trial,
+    active: true,
+    available: false,
+    used: false,
+    ends_at: Date.now() / 1000 + 2.5 * 86_400,
+  };
+  await mockApi(page, { license: live });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('tab', { name: 'Plans & billing' }).click();
+
+  await expect(page.locator('#license-status-body')).toContainText(
+    'Your free trial ends in 3 days',
+  );
+});
+
 test('Ledger omits unknown Team trial duration from an older license response', async ({ page }) => {
   const legacy = license();
   delete legacy.trial.days_by_plan;
@@ -2868,6 +2936,10 @@ test('billing cadence selects the exact Pro and Team checkout target', async ({ 
   await expect(page.locator('.plan-card.featured .plan-benefits')).toContainText(
     'Cloud Sync, Analytics, Auto Consolidation, and Auto Dreaming',
   );
+  await expect(page.locator('.plan-card.featured .plan-benefit-list')).toContainText(
+    'Managed Jev decisions: up to 500 calls per person per day',
+  );
+  await expect(page.locator('.comparison-table')).toContainText('Managed Jev decisions');
 
   const pro = page.locator('#plan-cards [data-pro-cta="pro"]');
   const team = page.locator('#plan-cards [data-pro-cta="team"]');

@@ -4254,6 +4254,9 @@ def get_license():
         "plan": plan,
         "features": summary["features"],
         "known_features": dict(_FEATURE_LABELS),
+        # Benefits included with a paid plan that are not gated as hosted feature keys.
+        # Informational only: the server still authorizes every call.
+        "included_services": _entitlements.included_services(),
         # Keys the control plane granted that this build does not know. They are never
         # rendered as feature rows; the dashboard offers an update instead of a lock.
         "unrecognized_features": summary["unrecognized_features"],

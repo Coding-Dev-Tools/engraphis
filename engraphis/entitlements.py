@@ -145,6 +145,27 @@ def _validate(data: object) -> None:
                 "declared feature %s must not be granted until it is available" % name,
             )
 
+    included = data.get("included_services", {})
+    _require(isinstance(included, dict), "included_services must be an object")
+    for name, spec in included.items():
+        _require(
+            isinstance(name, str) and name.strip() and len(name) <= _MAX_KEY_CHARS,
+            "included service names must be non-empty and bounded",
+        )
+        _require(isinstance(spec, dict), "included service %s must be an object" % name)
+        _require(spec.get("plan") in PLANS, "included service %s names an unknown plan" % name)
+        _require(
+            isinstance(spec.get("label"), str) and bool(spec["label"].strip()),
+            "included service %s needs a non-empty label" % name,
+        )
+        calls = spec.get("calls_per_person_per_day")
+        if calls is not None:
+            _require(
+                isinstance(calls, int) and not isinstance(calls, bool) and calls > 0,
+                "included service %s calls_per_person_per_day must be a positive integer"
+                % name,
+            )
+
     limits = data.get("limits")
     _require(isinstance(limits, dict), "limits must be an object")
     days = limits.get("trial_days_by_plan")
@@ -188,9 +209,28 @@ def feature_spec(feature: object) -> Optional[dict]:
 
 
 def required_plans() -> dict:
-    """Return every known feature mapped to the plan that grants it."""
+    """Return every known capability mapped to the minimum plan that grants it."""
 
-    return {name: str(spec["plan"]) for name, spec in contract()["features"].items()}
+    plans = {name: str(spec["plan"]) for name, spec in contract()["features"].items()}
+    plans.update({
+        name: str(spec["plan"])
+        for name, spec in contract().get("included_services", {}).items()
+    })
+    return plans
+
+
+def included_services() -> dict:
+    """Return benefits included with a paid plan but not gated as hosted features.
+
+    These are informational: the server still authorizes every call. Keeping them out of
+    the feature-row list prevents a tick-box that implies a live grant when the account
+    portal may have a different allowance state.
+    """
+
+    return {
+        name: dict(spec)
+        for name, spec in contract().get("included_services", {}).items()
+    }
 
 
 def required_plan(feature: object) -> str:
