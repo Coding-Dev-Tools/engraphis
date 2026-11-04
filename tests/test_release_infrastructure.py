@@ -215,8 +215,8 @@ def test_ci_and_release_audit_production_image_dependencies():
     assert "tesseract-ocr" in _text("Dockerfile")
     assert (
         _text("Dockerfile").splitlines()[1]
-        == "FROM python:3.11-slim@sha256:"
-        "b7a9e5f6a93d6d4a31f129bbd4bdee69efccb6ded0fb230d78aafaf37af98377 AS base"
+        == "FROM python:3.11.18-slim@sha256:"
+        "db20d8506e2f15b6db39b40b6015ca46bae855dec6dd326d462cfe79ae972893 AS base"
     )
     assert "Verify production image OCR runtime" in ci
     assert "Verify production image OCR runtime" in release
