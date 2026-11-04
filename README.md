@@ -47,6 +47,18 @@ Connect a coding agent over MCP with the [agent setup guide](https://github.com/
 - **Operator control:** Keep the core local and offline-capable, with explicit controls for hosted services and external LLM providers.
 - **Free Jev on paid plans:** Pro and Team include managed Jev decisions up to 500 calls per person per day, with no personal provider key.
 
+## Why upgrade to Pro or Team
+
+The local core stays free and offline-capable. Pro and Team add hosted workflows for memory that has to follow you across agents, machines, and teammates:
+
+- **See memory health:** Analytics surfaces growth, retention, and decay forecasts so you can review what is becoming stale before it affects recall.
+- **Keep memory maintained:** Schedule Auto Consolidation and Auto Dreaming. They produce proposals for you to review, and local governance still decides what changes.
+- **Sync across machines:** Opt into encrypted Cloud Sync for eligible workspaces with a key you hold. Sync and readable managed processing are separate choices.
+- **Give a team an operating picture:** Named seats, admin/member/viewer roles, scoped credentials, and audit history. Shared hosted Team memory and hosted MCP are not yet available.
+- **Add judgment with Jev:** Pro and Team include up to 500 managed Jev calls per person per day: typed, advisory checks for risky commands, contradictory memories, evidence support, and completion claims. No personal TypeSafe key or overage charge. Jev helps an agent separate safe from risky actions, contradictory from reinforcing memories, supported from unsupported answers, and complete from unfinished work, while permissions and tests stay in charge.
+
+Pro is $10/month or $100/year for one owner. Team is $20/seat/month or $200/seat/year. Both start with a no-card trial (7 days for Pro, 14 days for Team). [Compare plans](https://github.com/Coding-Dev-Tools/engraphis/blob/522def372c45a26d46bc7a05829964ae0240f3a9/docs/HOSTED_PLANS.md) &middot; [Start a Pro trial](https://engraphis.com/go/pro-trial?source=readme_pro_upgrade) &middot; [Start a Team trial](https://engraphis.com/go/team-trial?source=readme_team_upgrade).
+
 ## Benchmarks
 
 The current registered artifact contains three deterministic offline fixture runs. It separates context size, retrieval quality, and grounded decision checks; these small fixtures do not establish general task performance.
