@@ -372,8 +372,18 @@
       }
       if (!response.ok) {
         const error = new Error(errorMessage(payload, response.status));
+        const detail = payload && payload.detail && typeof payload.detail === 'object'
+          ? payload.detail : null;
         error.status = response.status;
-        error.code = payload && ((payload.detail && payload.detail.code) || payload.code);
+        error.code = (detail && detail.code) || (payload && payload.code);
+        error.detail = detail;
+        error.reason = (detail && detail.reason) || (payload && payload.reason) || '';
+        error.tierRequired = (detail && detail.tier_required)
+          || (payload && payload.tier_required) || '';
+        error.upgradeUrl = (detail && detail.upgrade_url)
+          || (payload && payload.upgrade_url) || '';
+        error.accountUrl = (detail && detail.account_url)
+          || (payload && payload.account_url) || '';
         error.localBrowser = payload && payload.local_browser;
         throw error;
       }
@@ -5969,7 +5979,16 @@
       };
     }
     if (status === 402 || status === 501) {
-      return { title: `${feature} needs Engraphis Pro`, detail: lockReason(), action: 'plan' };
+      const seat = error.reason === 'seat_limit_exceeded';
+      return {
+        title: seat ? 'All Team seats are in use' : `${feature} needs Engraphis Pro`,
+        detail: seat
+          ? 'Add a named seat in the Engraphis Cloud account portal, or remove a member who no longer needs access.'
+          : lockReason(),
+        action: seat ? 'account' : 'plan',
+        actionLabel: seat ? 'Manage seats' : '',
+        href: seat ? (safeUrl(error.accountUrl) || hostedAccountUrl('seat_limit')) : '',
+      };
     }
     if (status === 401) {
       if (error.code === 'cloud_unconfigured' && licenseTrialAvailable()) {
@@ -5979,6 +5998,24 @@
         title: 'Reconnect Engraphis Cloud',
         detail: 'This installation’s Engraphis Cloud session expired or was revoked. Connect again to resume hosted features; your plan is unchanged.',
         action: 'reconnect',
+        actionLabel: 'Open Engraphis Cloud',
+        href: safeUrl(error.accountUrl) || hostedAccountUrl('reconnect'),
+      };
+    }
+    if (status === 403) {
+      const disabled = error.reason === 'member_disabled';
+      const role = error.reason === 'insufficient_role';
+      return {
+        title: disabled ? 'Your account is disabled'
+          : role ? 'Administrator permission required' : 'Access denied',
+        detail: disabled
+          ? 'An organization administrator can restore this member account. Your local memories are unaffected.'
+          : role
+            ? 'Ask an organization owner or administrator to grant the role this action needs.'
+            : 'This credential belongs to a different organization or lacks the required role. Open the account portal to check access.',
+        action: 'account',
+        actionLabel: 'Open account portal',
+        href: safeUrl(error.accountUrl) || hostedAccountUrl('account'),
       };
     }
     return null;
@@ -5989,10 +6026,11 @@
     const actions = node('div', 'automation-policy-actions');
     if (failure.action === 'consent') {
       actions.append(button('Review workspace processing', 'primary-button', () => switchManageTab('settings')));
-    } else if (failure.action === 'reconnect') {
-      const href = hostedAccountUrl('reconnect');
+    } else if (failure.action === 'reconnect' || failure.action === 'account') {
+      const href = safeUrl(failure.href) || hostedAccountUrl(failure.action);
       if (href) {
-        const link = node('a', 'secondary-button', 'Open Engraphis Cloud');
+        const link = node('a', 'secondary-button',
+          failure.actionLabel || 'Open Engraphis Cloud');
         link.href = href;
         link.target = '_blank';
         link.rel = 'noopener';
@@ -6558,12 +6596,22 @@
       }
     } else if (!ready) {
       const missingKey = !hasKey;
+      const invalid = state.syncStatus.key_state === 'invalid';
+      const canGenerate = state.syncStatus.can_generate_key === true;
+      const canRotate = state.syncStatus.can_rotate_key === true;
       const detail = missingKey
-        ? state.syncStatus.key_state === 'invalid'
-          ? 'The configured Cloud Sync encryption key is invalid. Replace it with a 32-byte URL-safe base64 key, then restart this dashboard.'
-          : 'Cloud Sync needs a user-held encryption key. Configure ENGRAPHIS_SYNC_E2EE_KEY on this device, then restart this dashboard.'
+        ? invalid
+          ? 'The saved Cloud Sync encryption key is invalid. Generate a replacement; every device that syncs this workspace must use the same key.'
+          : canGenerate
+            ? 'Cloud Sync needs a user-held encryption key. Generate one here; it is stored on this device and shown only once.'
+            : 'Cloud Sync needs a user-held encryption key. Configure ENGRAPHIS_SYNC_E2EE_KEY on this device, then restart this dashboard.'
         : 'Cloud Sync encryption support is unavailable. Install engraphis[cloud-sync] and restart this dashboard.';
       target.append(node('p', 'automation-policy-note', detail));
+      if (missingKey && canGenerate) {
+        actions.append(button('Create sync key', 'primary-button', () => createSyncKey(false)));
+      } else if (missingKey && canRotate) {
+        actions.append(button('Replace sync key', 'secondary-button', () => createSyncKey(true)));
+      }
       const guide = node('a', 'secondary-button', 'Cloud Sync setup guide');
       guide.href = 'https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/SYNC.md#configure-a-customer-installation';
       guide.target = '_blank';
@@ -6571,6 +6619,54 @@
       actions.append(guide);
     }
     target.append(actions);
+  }
+
+  function renderCreatedSyncKey(target, key, status) {
+    target.replaceChildren(
+      node('h3', '', 'Cloud Sync key created'),
+      node('p', 'automation-policy-note',
+        'Store this key somewhere safe. It is shown only once, and every device that syncs this workspace needs it.'),
+      node('code', 'sync-key-value', key),
+    );
+    const actions = node('div', 'automation-policy-actions');
+    actions.append(button('Copy key', 'primary-button', async () => {
+      try {
+        if (!navigator.clipboard) throw new Error('clipboard unavailable');
+        await navigator.clipboard.writeText(key);
+        showNotice('Cloud Sync key copied.');
+      } catch (_) {
+        showNotice('Copy failed. Select the key and copy it manually.');
+      }
+    }));
+    actions.append(button('I stored the key', 'secondary-button', () => renderSyncStatus(status)));
+    target.append(actions);
+  }
+
+  async function createSyncKey(rotate) {
+    const target = byId('sync-result');
+    if (!target) return;
+    if (rotate && !window.confirm(
+      'Replace the saved Cloud Sync key? Data already synced under the old key cannot be read until every device uses the new one.'
+    )) return;
+    const request = beginScopedRequest('sync-key');
+    try {
+      const result = await api('/sync/key', {
+        method: 'POST',
+        body: { rotate: Boolean(rotate) },
+        signal: request.signal,
+      });
+      if (!isCurrentScopedRequest(request)) return;
+      if (!result || !result.key) throw new Error('Engraphis did not return a key.');
+      const status = await api('/sync/status', { signal: request.signal });
+      if (!isCurrentScopedRequest(request)) return;
+      state.syncStatus = status;
+      renderCreatedSyncKey(target, result.key, status);
+    } catch (error) {
+      if (!isCurrentScopedRequest(request)) return;
+      const failure = hostedFailure('sync', error);
+      if (failure) renderHostedFailure(target, failure);
+      else target.replaceChildren(empty(`Could not create a Cloud Sync key: ${error.message}`, 'form-error'));
+    }
   }
 
   async function loadSync() {

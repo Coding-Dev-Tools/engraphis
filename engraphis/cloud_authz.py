@@ -15,6 +15,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Optional
 
+from engraphis.hosted_client import account_url
+
 logger = logging.getLogger("engraphis.cloud_authz")
 
 # Machine-readable reason codes the control plane may return.
@@ -37,7 +39,7 @@ _DENIAL_MESSAGES: dict[str, str] = {
         "Your subscription has expired. Renew your plan to continue using Team features."
     ),
     REASON_SEAT_LIMIT_EXCEEDED: (
-        "All named seats are in use. Upgrade your plan to add more team members."
+        "All named seats are in use. Add a seat in the Engraphis Cloud account portal."
     ),
     REASON_CROSS_ORG_DENIED: (
         "Access denied: this credential belongs to a different organization."
@@ -104,12 +106,14 @@ def interpret_denial(
         "upgrade_url": None,
         "retryable": reason == REASON_TOKEN_STALE,
     }
-    # Prefer the server-provided upgrade_url; fall back to the known billing path.
+    # Prefer the server-provided upgrade_url; fall back to the real account portal. The
+    # old relative "/billing/upgrade" path does not exist on the dashboard host and
+    # produced a 404 exactly when a paying customer was trying to fix billing.
     upgrade_url = body.get("upgrade_url")
     if upgrade_url and isinstance(upgrade_url, str):
         result["upgrade_url"] = upgrade_url
     elif reason in _UPGRADE_REASONS:
-        result["upgrade_url"] = "/billing/upgrade"
+        result["upgrade_url"] = account_url()
     return result
 
 

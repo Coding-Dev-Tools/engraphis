@@ -161,7 +161,11 @@ def test_automation_get_does_not_bootstrap_or_write(monkeypatch) -> None:
 
     monkeypatch.setattr(v2_api, "_service", _AutomationService())
     monkeypatch.setattr(cloud_features, "CloudFeatureClient", _CloudFactory)
-    monkeypatch.setattr(v2_api, "_managed_call", lambda fn, *args, **kwargs: fn(*args, **kwargs))
+    monkeypatch.setattr(
+        v2_api,
+        "_managed_call",
+        lambda fn, *args, feature=None, **kwargs: fn(*args, **kwargs),
+    )
 
     result = v2_api.automation_get("acme")
 
@@ -224,7 +228,11 @@ def test_automation_bootstrap_is_explicit_and_resumable(monkeypatch) -> None:
 
     monkeypatch.setattr(v2_api, "_service", _AutomationService())
     monkeypatch.setattr(v2_api, "_AUTOMATION_BOOTSTRAP_LOCKS", {})
-    monkeypatch.setattr(v2_api, "_managed_call", lambda fn, *args, **kwargs: fn(*args, **kwargs))
+    monkeypatch.setattr(
+        v2_api,
+        "_managed_call",
+        lambda fn, *args, feature=None, **kwargs: fn(*args, **kwargs),
+    )
     monkeypatch.setattr(cloud_features, "CloudFeatureClient", _CloudFactory)
     monkeypatch.setattr(cloud_features, "build_managed_snapshot", build_snapshot)
     monkeypatch.setattr(

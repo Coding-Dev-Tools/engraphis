@@ -108,11 +108,15 @@ class CloudFeatureError(RuntimeError):
     """A bounded, redacted managed-cloud failure suitable for an HTTP/UI boundary."""
 
     def __init__(self, message: str, *, status: Optional[int] = None,
-                 transient: bool = False, code: Optional[str] = None) -> None:
+                 transient: bool = False, code: Optional[str] = None,
+                 reason: Optional[str] = None) -> None:
         super().__init__(message)
         self.status = status
         self.transient = transient
         self.code = code
+        # A fixed-vocabulary server reason (never provider text). The dashboard uses it to
+        # choose the right recovery action: billing, seats, reconnect, or administrator.
+        self.reason = reason
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -125,6 +129,35 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 # ``http.client.IncompleteRead`` (an ``HTTPException``, not an ``OSError``), which otherwise
 # escaped from this error path as a raw traceback.
 _DRAIN_FAILURES = (OSError, ValueError, http.client.HTTPException)
+
+#: Maximum bytes read from an error body to recover one allow-listed reason code. The
+#: body itself never crosses the boundary; this is deliberately much smaller than a normal
+#: response and is discarded after the reason is extracted.
+MAX_ERROR_BODY_BYTES = 8 * 1024
+
+
+def _denial_reason(status: int, raw: bytes) -> Optional[str]:
+    """Return a known denial reason from a bounded error body, never the body itself.
+
+    The private service may include implementation details in an error payload. Only a
+    fixed reason code is allowed through; an oversized, malformed, or unknown body becomes
+    ``None`` and the caller falls back to its status-based recovery copy.
+    """
+
+    if not raw or len(raw) > MAX_ERROR_BODY_BYTES:
+        return None
+    try:
+        body = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        return None
+    if not isinstance(body, dict):
+        return None
+    try:
+        from engraphis.cloud_authz import interpret_denial
+        reason = interpret_denial(status, body).get("reason")
+    except Exception:  # noqa: BLE001 - presentation metadata must never mask the failure
+        return None
+    return reason if isinstance(reason, str) and reason != "unknown" else None
 
 
 def managed_compute_consent(service: Any = None, workspace: Optional[str] = None) -> bool:
@@ -505,13 +538,15 @@ class CloudFeatureClient:
                 raw = response.read(MAX_RESPONSE_BYTES + 1)
         except urllib.error.HTTPError as exc:
             message, transient = _public_http_error(exc.code)
-            # Do not inspect or reflect provider diagnostics: they can contain internal
-            # details.  Drain only to release the connection, and guard the drain and close
-            # independently because both can fail for a malformed/truncated response.
+            # Read the error body once, bounded. Only a fixed-vocabulary reason code is
+            # extracted; provider diagnostics never reach the dashboard. The same bytes
+            # drain the connection, and both the read and close are guarded because a
+            # malformed or truncated response can fail either independently.
+            raw_error = b""
             try:
-                exc.read(MAX_RESPONSE_BYTES + 1)
+                raw_error = exc.read(MAX_ERROR_BODY_BYTES + 1)
             except _DRAIN_FAILURES:
-                pass
+                raw_error = b""
             finally:
                 try:
                     exc.close()
@@ -521,6 +556,7 @@ class CloudFeatureClient:
                 message,
                 status=exc.code,
                 transient=transient,
+                reason=_denial_reason(exc.code, raw_error),
             ) from None
         except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
             raise CloudFeatureError(

@@ -2415,6 +2415,11 @@ def test_managed_cloud_errors_forward_only_bounded_public_copy():
         "managed_cloud": True,
         "transient": False,
         "code": "cloud_unconfigured",
+        # A 401 carries the one safe recovery destination even when no feature name
+        # was supplied: the account portal, never a guessed plan checkout.
+        "reason": "token_stale",
+        "account_url": v2_api.licensing.account_url(),
+        "upgrade_url": v2_api.licensing.account_url(),
     }
 
 
