@@ -469,6 +469,7 @@ def test_doctor_does_not_mask_a_broken_configured_embedder_or_echo_its_error(tmp
     import engraphis.config as cfg
     import engraphis.backends.embedder_st as backend
     monkeypatch.setattr(cfg.settings, "embed_model", "missing-configured-model")
+    monkeypatch.setattr(cfg.settings, "require_exact_backends", True)
 
     def fail(*_args, **kwargs):
         assert kwargs["require_exact"] is True

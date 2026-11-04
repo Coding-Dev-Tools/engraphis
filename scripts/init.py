@@ -316,7 +316,7 @@ def cmd_check(*, json_output: bool = False) -> int:
     try:
         from engraphis.backends.embedder_st import get_embedder
         emb = get_embedder(settings.embed_model or None, dim=settings.embed_dim or 384,
-                           require_exact=bool(settings.embed_model))
+                           require_exact=settings.require_exact_backends)
         emb.embed(["engraphis doctor check"])
         report("embedder", "ok", "embedder functional", f"{type(emb).__name__} ({getattr(emb, 'dim', 384)}d)")
     except Exception as exc:
