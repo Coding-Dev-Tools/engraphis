@@ -59,3 +59,24 @@ def _deployment_settings_isolation(monkeypatch, tmp_path):
     # because an operational CLI test opens a configured MemoryService.
     monkeypatch.setattr(settings, "embed_model", "")
     monkeypatch.setattr(settings, "rerank_model", "")
+    # An owner-private ~/.engraphis/config.env may enable live LLM extraction, LLM
+    # retention supervision, or a BYOK decision backend. The unit suite is offline-inert
+    # by contract (AGENTS.md sec. 1), and a live provider connect inside remember() blocks
+    # the gate on a DNS-stubbed address instead of failing fast. Force the deterministic
+    # defaults; tests that exercise these paths opt back in explicitly via monkeypatch.
+    monkeypatch.setattr(settings, "extractor", "none")
+    monkeypatch.setattr(settings, "llm_auto_extract", False)
+    monkeypatch.setattr(settings, "retention_supervisor", "none")
+    monkeypatch.setattr(settings, "decision_backend", "none")
+    for name in (
+        "ENGRAPHIS_EXTRACTOR",
+        "ENGRAPHIS_LLM_AUTO_EXTRACT",
+        "ENGRAPHIS_RETENTION_SUPERVISOR",
+        "ENGRAPHIS_DECISION_BACKEND",
+        "ENGRAPHIS_LLM_PROVIDER",
+        "ENGRAPHIS_LLM_MODEL",
+        "ENGRAPHIS_LLM_API_KEY",
+        "TYPESAFE_API_KEY",
+        "JEV_API_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
