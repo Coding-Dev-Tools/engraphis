@@ -337,7 +337,9 @@ def _managed_call(fn, *args, feature: Optional[str] = None, **kwargs):
             detail["code"] = exc.code
         if reason:
             detail["reason"] = reason
-        if exc.status in {401, 402, 403}:
+        if exc.status in {401, 402, 403} and exc.code not in {
+            "consent_required", "cloud_unconfigured",
+        }:
             # A denied paid action must tell the customer what fixes it. The status alone
             # cannot distinguish a lapsed plan, a full Team seat list, a revoked session,
             # and a role problem; those need four different next steps.
