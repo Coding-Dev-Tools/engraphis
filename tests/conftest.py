@@ -7,6 +7,21 @@ import pytest
 
 from engraphis.config import settings
 
+OFFLINE_PROVIDER_ENV_VARS = (
+    "ENGRAPHIS_EXTRACTOR",
+    "ENGRAPHIS_LLM_AUTO_EXTRACT",
+    "ENGRAPHIS_RETENTION_SUPERVISOR",
+    "ENGRAPHIS_DECISION_BACKEND",
+    "ENGRAPHIS_LLM_PROVIDER",
+    "ENGRAPHIS_LLM_MODEL",
+    "ENGRAPHIS_LLM_API_KEY",
+    "ENGRAPHIS_LLM_BASE_URL",
+    "TYPESAFE_API_KEY",
+    "TYPESAFE_BASE_URL",
+    "JEV_API_KEY",
+    "ENGRAPHIS_DECISION_MODEL",
+)
+
 
 def pytest_collection_modifyitems(items):
     """Run mutually incompatible SQLite native integrations in safe order.
@@ -59,3 +74,22 @@ def _deployment_settings_isolation(monkeypatch, tmp_path):
     # because an operational CLI test opens a configured MemoryService.
     monkeypatch.setattr(settings, "embed_model", "")
     monkeypatch.setattr(settings, "rerank_model", "")
+    # An owner-private ~/.engraphis/config.env may enable live LLM extraction, LLM
+    # retention supervision, or a BYOK decision backend. The unit suite is offline-inert
+    # by contract (AGENTS.md sec. 1), and a live provider connect inside remember() blocks
+    # the gate on a DNS-stubbed address instead of failing fast. Force the deterministic
+    # defaults; tests that exercise these paths opt back in explicitly via monkeypatch.
+    monkeypatch.setattr(settings, "extractor", "none")
+    monkeypatch.setattr(settings, "llm_auto_extract", False)
+    monkeypatch.setattr(settings, "retention_supervisor", "none")
+    monkeypatch.setattr(settings, "decision_backend", "none")
+    # Settings are materialized at import; deleting the environment alone would leave an
+    # owner's live provider credentials on the singleton and LLMClient would still connect.
+    monkeypatch.setattr(settings, "llm_provider", "openai")
+    monkeypatch.setattr(settings, "llm_model", "gpt-4o-mini")
+    monkeypatch.setattr(settings, "llm_api_key", "")
+    monkeypatch.setattr(settings, "llm_base_url", "")
+    monkeypatch.setattr(settings, "typesafe_api_key", "")
+    monkeypatch.setattr(settings, "decision_model", "jev-1.13.0")
+    for name in OFFLINE_PROVIDER_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
