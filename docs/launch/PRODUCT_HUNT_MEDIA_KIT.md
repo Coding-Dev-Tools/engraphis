@@ -43,7 +43,7 @@ This document provides the complete media production specification for the **Eng
 | :--- | :--- | :--- | :--- |
 | **0:35 - 0:42** | *"Meet Engraphis: the local-first, open-source AI memory engine built entirely on SQLite."* | Smooth pan into modern dark mode browser window navigating to `http://localhost:8700`. The sleek Engraphis dashboard appears with glowing emerald accents and real-time ledger metrics. | **Logo Reveal:** `engraphis &bull; Local-First Memory Engine`<br>**Badge:** `100% Local SQLite &bull; Zero Telemetry`<br>**SFX:** Upbeat beat drop. |
 | **0:42 - 0:49** | *"It structures memory across four isolated tiers: workspace, repository, session, and individual bi-temporal facts."* | Click on **Explore** tab in the dashboard. The interactive force-directed knowledge graph expands, connecting code symbols, decisions, and architectural commits with animated edges. | **Visual:** Cursor hovers over node `mem_01hq7w8...` showing its linked AST symbols and commit hash.<br>**SFX:** Soft blip on node hover. |
-| **0:49 - 0:55** | *"And our 4-arm hybrid recall fuses dense vectors, full-text BM25, graph PageRank, and AST code symbols in in process."* | Graphic overlay showing the 4 parallel retrieval lanes converging into the RRF fusion engine. | **Animated Overlay:** `Vector + BM25 + PageRank + AST Symbols &rarr; local in-process`<br>**SFX:** Fast 4-step chime. |
+| **0:49 - 0:55** | *"And our 4-arm hybrid recall fuses dense vectors, full-text BM25, graph PageRank, and AST code symbols in process."* | Graphic overlay showing the 4 parallel retrieval lanes converging into the RRF fusion engine. | **Animated Overlay:** `Vector + BM25 + PageRank + AST Symbols &rarr; local in-process`<br>**SFX:** Fast 4-step chime. |
 
 ---
 
@@ -54,7 +54,7 @@ This document provides the complete media production specification for the **Eng
 | :--- | :--- | :--- | :--- |
 | **0:55 - 1:04** | *"Connecting takes thirty seconds via the Model Context Protocol. Watch Claude query Engraphis through standard MCP tools."* | Quick switch to Claude Code CLI terminal. Developer asks: *"Why do we use PASSIVE mode in SQLite WAL checkpoints?"* Claude instantly calls `engraphis_recall_context`. | **Terminal Input:** `> Claude recalls from Engraphis MCP`<br>**Tool Call:** `engraphis_recall_context(query="WAL PASSIVE")`<br>**SFX:** Fast rhythmic mechanical typing sound. |
 | **1:04 - 1:10** | *"Instead of re-reading fifty files, Claude gets the exact verified fact with provenance citations [1], cutting retrieved tokens by 71.1%."* | Claude answers in 2 seconds with `[1]` citation pointing to the exact decision record. A dynamic comparison bar chart slides in showing 740 tokens collapsing to 214 tokens. | **Highlight Badge:** `-71.1% Retrieved Tokens`<br>**Citation Pill:** `Grounded Citation [1] &bull; Recall@5/Hit@5 1.000`<br>**SFX:** Cash register / success tone. |
-| **1:10 - 1:15** | *"And if evidence doesn't exist? Engraphis deterministically abstains instead of guessing."* | Live demo of hallucination bait query: *"What's our AWS egress IP?"* &rarr; Result: `ABSTAIN [Support < 0.25]`. Zero hallucination. | **Callout:** `Anti-Hallucination Abstain Gate`<br>**SFX:** Solid lock snap sound. |
+| **1:10 - 1:15** | *"And if evidence doesn't exist? Engraphis deterministically abstains instead of guessing."* | Live demo of hallucination bait query: *"What's our AWS egress IP?"* &rarr; Result: `ABSTAIN [Support < 0.25]`. Grounded abstention. | **Callout:** `Anti-Hallucination Abstain Gate`<br>**SFX:** Solid lock snap sound. |
 
 ---
 
@@ -81,7 +81,7 @@ All slides adhere to the Engraphis design language: **Deep Slate dark theme (`#0
   - **Left 55%:** Hero messaging stack:
     - Top badge: `&bull; LOCAL-FIRST AI AGENT MEMORY` (Emerald `#10b981` pill).
     - Headline (42pt bold, `#f8fafc`): *"Persistent, Bi-Temporal Memory for AI Coding Agents."*
-    - Subheadline (18pt, `#94a3b8`): *"Stop feeding entire codebases to Claude and Cursor. 4-arm hybrid recall on local SQLite with 71.1% fewer tokens and zero hallucination."*
+    - Subheadline (18pt, `#94a3b8`): *"Stop feeding entire codebases to Claude and Cursor. 4-arm hybrid recall on local SQLite with 71.1% fewer tokens and grounded abstention."*
     - Quick CTA Pills: `pip install "engraphis[all]"` | `100% Local SQLite` | `MCP Native`.
   - **Right 45%:** 3D-angled glassmorphic card showing the Engraphis interactive knowledge graph with illuminated emerald and cyan nodes linking `AST: engine.py` &rarr; `DECISION: WAL PASSIVE` &rarr; `PROVENANCE: commit a7f9d`.
 

@@ -436,7 +436,7 @@ GitHub Repository: https://github.com/Coding-Dev-Tools/engraphis
 | Issue | Detection Trigger | Immediate Response Action | Owner |
 |---|---|---|---|
 | **Localhost Dashboard Port Conflict** | Port 8700 already occupied on dev machine | Run with custom port: `python -m scripts.start_dashboard --port 8705` or kill orphan process | Lead Dev |
-| **Product Hunt Listing Image Glitch** | Images fail to render or crop weirdly on mobile | Re-upload 1270x760 PNG assets immediately from `docs/images/` staging folder | Ops Lead |
+| **Product Hunt Listing Image Glitch** | Images fail to render or crop weirdly on mobile | Re-upload 1270x760 PNG assets immediately from the `docs/launch/` staging folder | Ops Lead |
 | **Hacker News Flagging / Dead Post** | Post marked [flagged] or missing from 'newest' | Do NOT brigade or ask for upvotes. Message HN mods politely with direct technical summary | Jaixii (Founder) |
 | **Aggressive Skeptic in PH Comments** | Hostile question accusing of "just a wrapper" | Deploy FAQ Response Q1 within 5 minutes; maintain radical transparency, cite `core/recall.py` | Founder |
 | **Leaderboard Pacing Lag (Falling below Top 3)** | Vote delta >40 votes behind #3 at T+6h | Activate Phase 4 / Phase 5 personalized 1-on-1 outreach wave; ping European & East Coast devs | Community Lead |

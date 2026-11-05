@@ -249,7 +249,7 @@
       <text x="24" y="29" class="font-mono text-bold" font-size="10" fill="#fbbf24">ARM 4 • CODE</text>
 
       <text x="16" y="58" class="font-sans text-bold" font-size="16" fill="#f8fafc">AST Symbol Graph</text>
-      <text x="16" y="78" class="font-sans" font-size="12" fill="#94a3b8">Symbol tables, call graphs, and file bridges bound to memories.</text>
+      <text x="16" y="78" class="font-sans" font-size="12" fill="#94a3b8">Symbols, calls, and files bound to memories.</text>
 
       <!-- Details Box -->
       <rect x="14" y="96" width="254" height="82" rx="6" fill="#0c1422" stroke="#1e293b" />

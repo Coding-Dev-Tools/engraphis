@@ -123,7 +123,7 @@ Fire up `engraphis-dashboard` to explore `http://127.0.0.1:8700`:
 * Full audit log of memories, invalidations, and evolutions
 * Interactive recall tester to debug queries before agent runs
 
-Watch it in action : https://www.youtube.com/watch?v=qw-rTnAA_Z4
+Watch it in action: https://www.youtube.com/watch?v=qw-rTnAA_Z4
 
 ---
 
