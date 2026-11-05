@@ -75,7 +75,7 @@
     <!-- Source SHA Stamp on top right -->
     <g transform="translate(900, 10)">
       <text x="330" y="16" class="b-mono" font-size="11" fill="#64748b" text-anchor="end">FIXTURE: SHA-256 3b1d2127e290...</text>
-      <text x="330" y="34" class="b-mono b-semibold" font-size="11" fill="#38bdf8" text-anchor="end">26 SAMPLES • 260 RECALLS</text>
+      <text x="288" y="34" class="b-mono b-semibold" font-size="11" fill="#38bdf8" text-anchor="end">26 SAMPLES • 260 RECALLS</text>
     </g>
   </g>
 
@@ -239,7 +239,7 @@
         <!-- Abstain Output -->
         <rect x="14" y="64" width="509" height="42" rx="4" fill="#2c1018" stroke="#be123c" />
         <text x="24" y="82" class="b-mono b-bold" font-size="11" fill="#fb7185">× ABSTAIN • STRICT SUPPORT FLOOR TRIGGERED</text>
-        <text x="24" y="96" class="b-sans" font-size="11.5" fill="#fda4af">Engine refused extrapolation. Zero hallucinated CIDRs passed to coding agent.</text>
+        <text x="24" y="96" class="b-sans" font-size="11.5" fill="#fda4af">Engine refused extrapolation; probe recorded as abstained.</text>
 
         <!-- Provenance Footer -->
         <text x="14" y="128" class="b-mono" font-size="10" fill="#fda4af">• Defense: <tspan fill="#e2e8f0">Quarantine &amp; Floor Check prevented context contamination</tspan></text>
