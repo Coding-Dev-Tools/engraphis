@@ -36,11 +36,12 @@ discovery and the validated executors.
 The decision engine is available through the same gateway and is **advisory only**. When a shell
 command looks risky, two remembered facts may contradict each other, retrieved evidence looks too
 weak to answer, or you are about to claim a task is complete, call
-`engraphis_discover_actions` with the decision task and run the returned `decide` capability
-through `engraphis_execute_action` using the matching `kind` (`guard_command`,
-`classify_contradiction`, `verify_support`, `verify_completion`, or `custom`). Local heuristics
-answer by default. Remote Jev requires per-call opt-in with `allow_remote=true` and a `public` or
-`internal` data classification; without both, nothing leaves the machine. A decision never
+`engraphis_discover_actions(task="advisory decision")` and confirm the returned canonical action
+is `decide`; then run it through `engraphis_execute_action` with its `schema_digest` and the
+matching `kind` (`guard_command`, `classify_contradiction`, `verify_support`, `verify_completion`,
+or `custom`). Local heuristics answer by default. Remote Jev also needs
+`ENGRAPHIS_DECISION_BACKEND=byok|managed`, per-call opt-in with `allow_remote=true`, and a
+`public` or `internal` data classification; without all of those, nothing leaves the machine. A decision never
 authorizes a command, replaces tests or user approval, or certifies completion.
 
 Memory here is **scoped, typed, bi-temporal, and self-maintaining**: writes are deduplicated and

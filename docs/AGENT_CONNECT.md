@@ -76,11 +76,13 @@ unless that client has a maintained setup guide and integration test.
 ## Advisory decisions (Jev)
 
 Engraphis exposes its advisory decision engine as a discovered capability rather than a direct
-Smart tool. Ask `engraphis_discover_actions` for a decision task, then run the returned `decide`
-capability through `engraphis_execute_action`; local heuristics answer by default. Remote Jev is
-opt-in per call (`allow_remote=true` plus a `public` or `internal` classification) and uses
-TypeSafe BYOK or an included Pro/Team allowance when the hosted service enables it. Decisions
-are advice: they never authorize a command, change memory, or certify completion.
+Smart tool. Call `engraphis_discover_actions(task="advisory decision")`, confirm the returned
+canonical action is `decide`, then run it through `engraphis_execute_action` with its
+`schema_digest`; local heuristics answer by default. Remote Jev also needs
+`ENGRAPHIS_DECISION_BACKEND=byok|managed` and per-call opt-in (`allow_remote=true` plus a
+`public` or `internal` classification), and uses TypeSafe BYOK or an included Pro/Team allowance
+when the hosted service enables it. Decisions are advice: they never authorize a command, change
+memory, or certify completion.
 
 A standalone Jev surface is also available for harnesses that want it:
 [jev-decision](https://github.com/Coding-Dev-Tools/jev-decision) provides `jev`/`jev-mcp` with
