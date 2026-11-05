@@ -1112,6 +1112,7 @@ body[data-theme="sepia"] .graph-header {
 .automation-policy-form { padding: 0; }
 .automation-policy-note { margin: 0; color: var(--c-mid); font-size: 12px; line-height: 1.55; }
 .automation-policy-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.sync-key-value { display: block; padding: 10px 12px; border: 1px solid var(--c-line); border-radius: 5px; background: var(--c-raised); color: var(--c-fg); font: 12px/1.5 var(--mono); overflow-wrap: anywhere; user-select: all; }
 .billing-toggle { display: flex; align-items: center; gap: 8px; color: var(--c-mid); }
 .plan-cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-bottom: 16px; }
 .plan-card { display: grid; gap: 10px; padding: 20px; border: 1px solid var(--c-line); border-radius: 5px; background: var(--c-surface); }

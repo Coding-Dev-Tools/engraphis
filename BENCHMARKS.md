@@ -94,14 +94,14 @@ interpretation and do not count as additional benchmark-quality gains.
 ### Public numeric evidence registry
 
 Every exact public aggregate retained below comes from the checked-in, public-safe
-[`offline-fixtures-release-1.7.12-20261102.json`](docs/benchmark-evidence/offline-fixtures-release-1.7.12-20261102.json) artifact. Its
+[`offline-fixtures-paid-plans-20261104.json`](docs/benchmark-evidence/offline-fixtures-paid-plans-20261104.json) artifact. Its
 SHA-256 is
-`025183601c5a28a37daf9326a061010244bc9a3f9f7db1e3e6d4f866eaafc660`, also recorded in the
+`cc66984fd3dd78c17addeb979aea0e0bf40ff0f533ebcd683da4b7f532da0055`, also recorded in the
 adjacent `.sha256` file. The artifact contains no raw questions, answers, prompts, customer data,
 or per-record content fingerprints.
 
 The fixture-suite digest is
-`54422b65475bb0d3e5c4ad0613bbda87dd5e01cb43e15513469b7306446831c9`. The artifact defines
+`93d671089dd360954fce2c97ce1fdd105f87166ba9224e644d61ce15f9857e79`. The artifact defines
 the digest algorithm and records the SHA-256 of every suite and dataset file. Each evidence ID
 also binds its exact command through `sha256(UTF-8 exact command)`:
 
@@ -134,7 +134,7 @@ retrieval-quality improvement. It does not qualify browser behavior, hosted serv
 external models, or provider billing. The registered artifact was produced with:
 
 ```bash
-python -m scripts.export_offline_evidence --output docs/benchmark-evidence/offline-fixtures-release-1.7.12-20261102.json
+python -m scripts.export_offline_evidence --output docs/benchmark-evidence/offline-fixtures-paid-plans-20261104.json
 ```
 
 The earlier release-review predecessors,
@@ -203,13 +203,13 @@ grounded checks in separate panels; provider billing and MCP transport are not m
 the SVG and matching PNG with:
 
 ```bash
-python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-release-1.7.12-20261102.json --output docs/images/context-efficiency.svg --png-output docs/images/context-efficiency.png
+python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-paid-plans-20261104.json --output docs/images/context-efficiency.svg --png-output docs/images/context-efficiency.png
 ```
 
 The companion examples are also generated from that artifact with:
 
 ```bash
-python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-release-1.7.12-20261102.json --output docs/images/evidence-backed-agent-examples.svg --png-output docs/images/evidence-backed-agent-examples.png
+python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-paid-plans-20261104.json --output docs/images/evidence-backed-agent-examples.svg --png-output docs/images/evidence-backed-agent-examples.png
 ```
 The historical-to-executable mapping is in
 [`docs/BENCHMARK_CHANGE_COVERAGE.md`](docs/BENCHMARK_CHANGE_COVERAGE.md).

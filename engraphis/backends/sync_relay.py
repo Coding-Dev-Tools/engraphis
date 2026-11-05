@@ -112,10 +112,72 @@ def decode_sync_e2ee_key(value: object) -> bytes:
     return key
 
 
+def sync_e2ee_key_source() -> str:
+    """Return where the Cloud Sync key comes from, without disclosing it.
+
+    The environment stays authoritative so an operator-managed deployment cannot be
+    silently replaced by a key generated in the dashboard. Otherwise a key generated on
+    this device lives in the same owner-only state directory as the sync credential.
+    """
+
+    env_value = os.environ.get(SYNC_E2EE_KEY_ENV)
+    if env_value is not None and str(env_value).strip():
+        return "environment"
+    return "state_file" if _sync_e2ee_key_path().exists() else "none"
+
+
+def load_sync_e2ee_key() -> str:
+    """Read the saved owner-only key, failing closed when it is absent or unsafe."""
+
+    try:
+        value = read_private_text(
+            _sync_e2ee_key_path(), max_bytes=128, allow_missing=True
+        )
+    except (OSError, UnsafeStateFile):
+        raise RelayError(
+            "saved Cloud Sync encryption key is unreadable; generate or configure a new one",
+            status=409,
+        ) from None
+    if value is None or not value.strip():
+        raise RelayError(
+            "Cloud Sync needs a 32-byte end-to-end encryption key in "
+            + SYNC_E2EE_KEY_ENV,
+            status=409,
+        )
+    return value.strip()
+
+
+def has_saved_sync_e2ee_key() -> bool:
+    """Return whether a saved key exists. The key itself is never returned here."""
+
+    try:
+        return bool(load_sync_e2ee_key())
+    except RelayError:
+        return False
+
+
+def save_sync_e2ee_key(value: object) -> str:
+    """Validate and persist one key, returning its normalized unpadded form.
+
+    The key is written through ``atomic_private_text`` (0600, owner-only directory) and is
+    never logged. Callers must show it to the operator exactly once; a later call cannot
+    read it back through the API.
+    """
+
+    raw = decode_sync_e2ee_key(value)
+    normalized = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+    _atomic_private_text(_sync_e2ee_key_path(), normalized)
+    return normalized
+
+
 def configured_sync_e2ee_key(value: object = None) -> bytes:
-    """Return an explicit key or fail closed before a Cloud upload can begin."""
-    configured = os.environ.get(SYNC_E2EE_KEY_ENV) if value is None else value
-    return decode_sync_e2ee_key(configured)
+    """Return an explicit, environment, or saved key; fail closed before any upload."""
+    if value is not None:
+        return decode_sync_e2ee_key(value)
+    env_value = os.environ.get(SYNC_E2EE_KEY_ENV)
+    if env_value is not None and str(env_value).strip():
+        return decode_sync_e2ee_key(env_value)
+    return decode_sync_e2ee_key(load_sync_e2ee_key())
 
 
 def _new_e2ee_cipher(key: bytes):
@@ -235,6 +297,10 @@ def _sync_token_path() -> Path:
 
 def _sync_read_only_path() -> Path:
     return _sync_token_path().with_name("sync.read_only")
+
+
+def _sync_e2ee_key_path() -> Path:
+    return _sync_token_path().with_name("sync.e2ee_key")
 
 
 def _atomic_private_text(path: Path, value: str) -> None:

@@ -86,6 +86,14 @@ owner-private `~/.engraphis/config.env`, then restart the local dashboard. The S
 only whether the key is valid and the local encryption dependency is installed, never the key
 itself. A read-only pull still needs the same key to decrypt received bundles.
 
+The dashboard can also generate the key in place: **Settings → Cloud Sync → Create sync key**.
+It is written once to `~/.engraphis/sync.e2ee_key` (owner-only, mode `0600`), shown exactly once
+for you to store, and never returned by the status endpoint again. An operator-provisioned
+`ENGRAPHIS_SYNC_E2EE_KEY` always takes precedence and cannot be replaced from the dashboard.
+Rotation is explicit and warns that data synced under the previous key is unreadable until every
+device uses the new one. This path is for a trusted local device; a headless deployment should
+still provision the key through its secrets manager.
+
 ```bash
 python -c "import base64, secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode().rstrip('='))"
 ```

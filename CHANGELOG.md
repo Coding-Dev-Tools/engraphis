@@ -5,6 +5,10 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+- Add one checked-in entitlement contract as the read-only plan→feature mirror, and fail the
+  release gate when it drifts from the private hosted contract. Local workspace export stays
+  free; a server grant this build cannot render is reported instead of silently dropped.
+
 ## [1.7.12] - 2026-11-02
 
 Candidate package version: **1.7.12**. Publication and hosted-service qualification remain separate.

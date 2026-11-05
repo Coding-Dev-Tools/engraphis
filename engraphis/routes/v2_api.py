@@ -15,6 +15,7 @@ import hmac
 import logging
 import math
 import os
+import secrets
 import threading
 import time
 import urllib.error
@@ -29,6 +30,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field, StrictBool, StrictInt
 from starlette.concurrency import run_in_threadpool
 
+from engraphis import entitlements as _entitlements
 from engraphis import licensing
 from engraphis.commercial import trial_days_by_plan
 from engraphis.config import DEFAULT_RELAY_URL, canonicalize_relay_url, settings
@@ -300,8 +302,12 @@ def _managed_error_message(exc) -> str:
     return message
 
 
-def _managed_call(fn, *args, **kwargs):
-    """Map the public cloud-client protocol onto structured dashboard errors."""
+def _managed_call(fn, *args, feature: Optional[str] = None, **kwargs):
+    """Map the public cloud-client protocol onto structured dashboard errors.
+
+    ``feature`` names the capability being attempted so a denial can carry the plan that
+    actually sells it. It is consumed here and never forwarded to the cloud client.
+    """
     from engraphis.cloud_features import CloudFeatureError
 
     try:
@@ -324,10 +330,40 @@ def _managed_call(fn, *args, **kwargs):
         else:
             logger.debug("managed cloud operation failed (%s, status=%s, transient=%s)",
                          type(exc).__name__, exc.status, exc.transient)
+        reason = getattr(exc, "reason", None)
         detail = {"error": _managed_error_message(exc), "managed_cloud": True,
                   "transient": exc.transient}
         if exc.code in {"consent_required", "cloud_unconfigured"}:
             detail["code"] = exc.code
+        if reason:
+            detail["reason"] = reason
+        if exc.status in {401, 402, 403} and exc.code not in {
+            "consent_required", "cloud_unconfigured",
+        }:
+            # A denied paid action must tell the customer what fixes it. The status alone
+            # cannot distinguish a lapsed plan, a full Team seat list, a revoked session,
+            # and a role problem; those need four different next steps.
+            fallback = (
+                "entitlement_expired" if exc.status == 402
+                else "token_stale" if exc.status == 401
+                else "insufficient_role"
+            )
+            detail["reason"] = reason or fallback
+            detail["account_url"] = licensing.account_url()
+            tier = licensing.required_plan(feature) if feature else ""
+            if reason == "seat_limit_exceeded":
+                tier = "team"
+            if tier in ("pro", "team"):
+                detail["tier_required"] = tier
+                detail["upgrade_url"] = (
+                    licensing.upgrade_url(tier)
+                    if exc.status == 402
+                    else licensing.account_url()
+                )
+            else:
+                # No feature name means no safe plan to sell. The account portal is
+                # always correct; guessing "pro" would upsell the wrong product.
+                detail["upgrade_url"] = licensing.account_url()
         raise HTTPException(
             status_code=exc.status or 503,
             detail=detail,
@@ -1783,7 +1819,7 @@ def managed_processing_set(req: _ManagedProcessingReq):
                               "already submitted work may continue until Cloud responds."}
         def rejected(error=exc):
             raise error
-        return _managed_call(rejected)
+        return _managed_call(rejected, feature="automation")
     # Do not hold a database write lock over the network call. Compare the local
     # revision atomically when applying its acknowledgement instead, so a late
     # enable cannot undo an opt-out from another tab or process.
@@ -2343,7 +2379,8 @@ def analytics(workspace: Optional[str] = None):
     from engraphis.cloud_features import run_managed_job
 
     ws = workspace or _require_ws()
-    envelope = _managed_call(run_managed_job, service(), ws, "analytics")
+    envelope = _managed_call(run_managed_job, service(), ws, "analytics",
+                             feature="analytics")
     result = envelope.get("result", envelope)
     if isinstance(result, dict) and isinstance(envelope, dict):
         if "state" in envelope and "state" not in result:
@@ -2357,7 +2394,8 @@ def analytics_job_result(job_id: str, workspace: Optional[str] = None):
     from engraphis.cloud_features import get_analytics_job_result
 
     ws = workspace or _require_ws()
-    return _managed_call(get_analytics_job_result, service(), ws, job_id)
+    return _managed_call(get_analytics_job_result, service(), ws, job_id,
+                         feature="analytics")
 
 
 @router.get("/analytics/export")
@@ -2457,13 +2495,15 @@ def automation_get(workspace: Optional[str] = None):
             "error": "The selected workspace does not exist.",
             "managed_cloud": True,
         })
-    cloud = _managed_call(CloudFeatureClient.from_environment, workspace_id)
-    policy = _managed_call(cloud.get_policy, workspace_id)
+    cloud = _managed_call(CloudFeatureClient.from_environment, workspace_id,
+                          feature="automation")
+    policy = _managed_call(cloud.get_policy, workspace_id, feature="automation")
     try:
         unconfigured = int(policy.get("version", -1)) == 0
     except (AttributeError, TypeError, ValueError, OverflowError):
         unconfigured = False
-    recent = _managed_call(cloud.list_jobs, workspace_id, limit=10)
+    recent = _managed_call(cloud.list_jobs, workspace_id, limit=10,
+                           feature="automation")
     recent_jobs = recent.get("jobs") if isinstance(recent, dict) else []
     if not isinstance(recent_jobs, list):
         recent_jobs = []
@@ -2502,7 +2542,8 @@ def automation_bootstrap(workspace: Optional[str] = None):
             "error": "The selected workspace does not exist.",
             "managed_cloud": True,
         })
-    cloud = _managed_call(CloudFeatureClient.from_environment, bootstrap_workspace_id)
+    cloud = _managed_call(CloudFeatureClient.from_environment, bootstrap_workspace_id,
+                          feature="automation")
     default_policy = {
         "enabled": True,
         "cadence_minutes": 1440,
@@ -2512,7 +2553,8 @@ def automation_bootstrap(workspace: Optional[str] = None):
         "infer": False,
     }
     with _automation_bootstrap_lock(cloud.organization_id, bootstrap_workspace_id):
-        policy = _managed_call(cloud.get_policy, bootstrap_workspace_id)
+        policy = _managed_call(cloud.get_policy, bootstrap_workspace_id,
+                               feature="automation")
         try:
             unconfigured = int(policy.get("version", -1)) == 0
         except (AttributeError, TypeError, ValueError, OverflowError):
@@ -2524,10 +2566,11 @@ def automation_bootstrap(workspace: Optional[str] = None):
             if phase != "policy_saved":
                 if phase != "snapshot_uploaded":
                     workspace_id, snapshot = _managed_call(
-                        build_managed_snapshot, service(), ws
+                        build_managed_snapshot, service(), ws, feature="automation"
                     )
                     receipt = _managed_call(
-                        cloud.upload_snapshot, workspace_id, snapshot
+                        cloud.upload_snapshot, workspace_id, snapshot,
+                        feature="automation",
                     )
                     generation = (
                         receipt.get("generation", snapshot["generation"])
@@ -2541,7 +2584,8 @@ def automation_bootstrap(workspace: Optional[str] = None):
                         "snapshot_uploaded",
                         generation=int(generation),
                     )
-                _managed_call(cloud.save_policy, bootstrap_workspace_id, default_policy)
+                _managed_call(cloud.save_policy, bootstrap_workspace_id, default_policy,
+                              feature="automation")
                 save_automation_bootstrap_phase(
                     service(),
                     cloud.organization_id,
@@ -2568,8 +2612,9 @@ def automation_set(req: _AutomationReq, workspace: Optional[str] = None):
             "error": "The selected workspace does not exist.",
             "managed_cloud": True,
         })
-    cloud = _managed_call(CloudFeatureClient.from_environment, workspace_id)
-    current = _managed_call(cloud.get_policy, workspace_id)
+    cloud = _managed_call(CloudFeatureClient.from_environment, workspace_id,
+                          feature="automation")
+    current = _managed_call(cloud.get_policy, workspace_id, feature="automation")
     cadence_minutes = (
         req.cadence_hours * 60 if req.cadence_hours is not None
         else int(_automation_policy_value(current, "cadence_minutes", 1440))
@@ -2596,9 +2641,12 @@ def automation_set(req: _AutomationReq, workspace: Optional[str] = None):
     if enabled:
         # Upload only when managed processing is actually enabled. Merely viewing or
         # disabling a cloud policy must never transfer memory content.
-        workspace_id, snapshot = _managed_call(build_managed_snapshot, service(), ws)
-        _managed_call(cloud.upload_snapshot, workspace_id, snapshot)
-    saved = _managed_call(cloud.save_policy, workspace_id, policy)
+        workspace_id, snapshot = _managed_call(build_managed_snapshot, service(), ws,
+                                               feature="automation")
+        _managed_call(cloud.upload_snapshot, workspace_id, snapshot,
+                      feature="automation")
+    saved = _managed_call(cloud.save_policy, workspace_id, policy,
+                          feature="automation")
     return {
         **policy,
         **saved,
@@ -2617,7 +2665,8 @@ def maintenance_run(req: _MaintenanceReq, workspace: Optional[str] = None):
     from engraphis.cloud_features import run_managed_job
 
     ws = _require_ws(workspace)
-    envelope = _managed_call(run_managed_job, service(), ws, "consolidate")
+    envelope = _managed_call(run_managed_job, service(), ws, "consolidate",
+                             feature="automation")
     result = envelope.get("result", envelope)
     return {
         "dry_run": True,
@@ -3140,35 +3189,27 @@ def code_export(workspace: str, repo: str,
 
 
 # ── license ───────────────────────────────────────────────────────────────────
-# Mirror of the private control plane's plan→feature table (read-only reference:
-# the hosted entitlement contract the hosted plan-feature contract). Plans are lowercase
-# and only ``pro``/``team`` are paid; any other value — unknown, empty, or mis-cased —
-# resolves to no features, exactly as the server treats it.
+# One read-only mirror of the private control plane's plan→feature contract, loaded from
+# ``engraphis/entitlement_contract.json``. Plans are lowercase and only ``pro``/``team`` are
+# paid; any other value — unknown, empty, or mis-cased — resolves to no features, exactly as
+# the server treats it.
 #
-# The server's own keys are {analytics, automation, export, sync, team}. This client's
-# commercial manifest additionally names Auto Consolidation and Auto Dreaming, which the
-# server grants under ``automation``. They are expanded here so the dashboard can never
-# draw a lock on a capability the customer's plan already includes.
+# The server grants Auto Consolidation and Auto Dreaming under ``automation``; this client
+# lists them separately so a paying customer never sees a lock on a capability the plan
+# already includes. ``_normalized_features`` expands that alias on the way in.
 _AUTOMATION_FEATURES = ("automation", "consolidation", "dreaming")
-_PRO_FEATURES = ("analytics", "sync") + _AUTOMATION_FEATURES
+_PRO_FEATURES = tuple(_entitlements.features_for("pro"))
 _HOSTED_ENTITLEMENTS = {
-    "free": (),
-    "local": (),
+    "free": tuple(_entitlements.features_for("free")),
+    "local": tuple(_entitlements.features_for("local")),
     "pro": _PRO_FEATURES,
-    "team": _PRO_FEATURES + ("team",),
+    "team": tuple(_entitlements.features_for("team")),
 }
 
 # Labels for the dashboard's entitlement list; it renders one row per key and ticks the
-# ones ``features`` contains. Naming follows the customer-facing vocabulary in
-# .env.example and the commercial manifest.
-_FEATURE_LABELS = {
-    "analytics": "Analytics",
-    "automation": "Automation",
-    "consolidation": "Auto Consolidation",
-    "dreaming": "Auto Dreaming",
-    "sync": "Cloud Sync",
-    "team": "Team administration",
-}
+# ones ``features`` contains. Only capabilities this build can render are labelled, so the
+# set of known labels stays equal to the Team plan's grant.
+_FEATURE_LABELS = dict(_entitlements.labels())
 
 
 def entitled_features(plan: str) -> list:
@@ -3179,7 +3220,7 @@ def entitled_features(plan: str) -> list:
     Cloud and gated on its response status.
     """
 
-    return sorted(_HOSTED_ENTITLEMENTS.get(str(plan or "").strip().lower(), ()))
+    return _entitlements.features_for(plan)
 
 
 # ── authoritative plan resolution ─────────────────────────────────────────────────────
@@ -3434,6 +3475,12 @@ def _normalized_features(values: object, plan: str) -> list:
     return sorted(granted & allowed & set(_FEATURE_LABELS))
 
 
+def _unrecognized_features(values: object, plan: str) -> list:
+    """Return server grants this build cannot render, so the dashboard can say so."""
+
+    return _entitlements.unrecognized(values, plan)
+
+
 def _session_entitlement_snapshot() -> tuple[dict, Optional[str]]:
     """Read the session once; return its entitlement and the digest of those bytes.
 
@@ -3465,6 +3512,9 @@ def _session_entitlement_snapshot() -> tuple[dict, Optional[str]]:
             # own plan table fills it in.
             "features": _normalized_features(declared.get("cloud_features"), plan)
             if active else [],
+            "unrecognized_features": _unrecognized_features(
+                declared.get("cloud_features"), plan
+            ) if active else [],
             "cloud_access_active": active,
             "organization_id": str(declared.get("organization_id") or ""),
             "fetched_at": float(declared.get("entitlement_checked_at") or 0.0),
@@ -3552,6 +3602,8 @@ def _read_entitlement_cache_snapshot() -> tuple[dict, Optional[str]]:
     resolved = {
         "plan": plan,
         "features": _normalized_features(value.get("features"), plan) if active else [],
+        "unrecognized_features": _unrecognized_features(value.get("features"), plan)
+        if active else [],
         "cloud_access_active": active,
         "organization_id": organization_id,
         "fetched_at": fetched_at,
@@ -4061,6 +4113,7 @@ def _resolved_entitlement(known: dict, *, source: str) -> dict:
     resolved = {
         "plan": known["plan"],
         "features": list(known["features"]),
+        "unrecognized_features": list(known.get("unrecognized_features") or []),
         "source": source,
         "cloud_access_active": known["cloud_access_active"],
         "checked_at": known["fetched_at"],
@@ -4116,9 +4169,18 @@ def hosted_plan_summary() -> dict:
     # every hosted call is about to reject. One rule for both: the features are the ones
     # that are live right now.
     features = list(entitlement["features"]) if state in ("active", "trial") else []
+    # A server grant this build cannot render is not a grant either, but silence is how a
+    # paying customer ends up staring at a lock over something they bought. Keep it out of
+    # ``features`` (the lock-badge loop would tick a row it cannot verify) and surface it
+    # separately so the dashboard can ask for an update.
+    unrecognized = (
+        list(entitlement.get("unrecognized_features") or [])
+        if state in ("active", "trial") else []
+    )
     return {
         "plan": entitlement["plan"],
         "features": features,
+        "unrecognized_features": unrecognized,
         "plan_source": entitlement["source"],
         "cloud_access_active": entitlement["cloud_access_active"],
         "plan_checked_at": entitlement["checked_at"],
@@ -4192,6 +4254,12 @@ def get_license():
         "plan": plan,
         "features": summary["features"],
         "known_features": dict(_FEATURE_LABELS),
+        # Benefits included with a paid plan that are not gated as hosted feature keys.
+        # Informational only: the server still authorizes every call.
+        "included_services": _entitlements.included_services(),
+        # Keys the control plane granted that this build does not know. They are never
+        # rendered as feature rows; the dashboard offers an update instead of a lock.
+        "unrecognized_features": summary["unrecognized_features"],
         # Diagnostics for support: which resolution rule produced this plan — one of
         # ``environment`` (the operator override), ``session`` (the entitlement the cloud
         # returned on registration/refresh), ``cloud`` (the cached entitlements read),
@@ -4312,11 +4380,11 @@ def _relay_url() -> str:
 def sync_status():
     """Report local sync readiness without disclosing the encryption key."""
     from engraphis.backends.sync_relay import (
-        SYNC_E2EE_KEY_ENV,
         RelayError,
         _new_e2ee_cipher,
         configured_sync_e2ee_key,
         has_sync_token,
+        sync_e2ee_key_source,
         sync_read_only,
     )
     from engraphis.cloud_session import CloudSessionError, configured
@@ -4330,13 +4398,14 @@ def sync_status():
     # A connected account cannot sync without the separate, user-held E2EE key.
     # Validate the same key shape and optional crypto backend as the relay transport,
     # but return only bounded status labels; never serialize key bytes or input.
-    key_state = "missing" if not os.environ.get(SYNC_E2EE_KEY_ENV, "").strip() else "invalid"
+    key_source = sync_e2ee_key_source()
+    key_state = "missing"
     has_key = False
     encryption_available = False
     try:
         key = configured_sync_e2ee_key()
     except RelayError:
-        pass
+        key_state = "invalid" if key_source != "none" else "missing"
     else:
         has_key = True
         key_state = "ready"
@@ -4352,6 +4421,11 @@ def sync_status():
         "ready": available and local_prerequisites_ready,
         "has_key": has_key,
         "key_state": key_state,
+        # Where the key came from, without ever including it. The dashboard only offers
+        # generation when no key exists; environment-managed deployments keep precedence.
+        "key_source": key_source,
+        "can_generate_key": key_source == "none",
+        "can_rotate_key": key_source == "state_file",
         "encryption_available": encryption_available,
         "local_prerequisites_ready": local_prerequisites_ready,
         "has_cloud_session": has_cloud_session,
@@ -4367,6 +4441,60 @@ def sync_status():
         "upgrade_url": licensing.upgrade_url(),
         "last": _SYNC_STATE.get("last"),
     }
+
+
+class _SyncKeyReq(BaseModel):
+    rotate: StrictBool = False
+
+
+@router.post("/sync/key")
+def create_sync_key(req: Optional[_SyncKeyReq] = None):
+    """Create a user-held Cloud Sync key once, on this device.
+
+    The key is returned exactly once and written only to the owner-only state directory.
+    It is never logged, never re-readable through the API, and never overrides an
+    operator-provisioned ``ENGRAPHIS_SYNC_E2EE_KEY``. Rotation is explicit because data
+    already synced under the old key cannot be read until every device uses the new one.
+    """
+    from fastapi.responses import JSONResponse
+
+    from engraphis.backends.sync_relay import (
+        SYNC_E2EE_KEY_ENV,
+        RelayError,
+        has_saved_sync_e2ee_key,
+        save_sync_e2ee_key,
+    )
+
+    if os.environ.get(SYNC_E2EE_KEY_ENV, "").strip():
+        raise HTTPException(status_code=409, detail={
+            "error": "Cloud Sync key is managed by %s." % SYNC_E2EE_KEY_ENV,
+            "code": "sync_key_managed_by_environment",
+        })
+    rotate = bool(req.rotate) if req is not None else False
+    if has_saved_sync_e2ee_key() and not rotate:
+        raise HTTPException(status_code=409, detail={
+            "error": "A Cloud Sync key already exists on this device. Rotating it makes "
+                     "data synced under the old key unreadable until every device uses "
+                     "the new key.",
+            "code": "sync_key_exists",
+        })
+    try:
+        key = save_sync_e2ee_key(secrets.token_urlsafe(32))
+    except (OSError, RelayError, ValueError):
+        raise HTTPException(status_code=503, detail={
+            "error": "The Cloud Sync key could not be saved on this device.",
+            "code": "sync_key_unwritable",
+        }) from None
+    return JSONResponse(
+        {
+            "configured": True,
+            "key": key,
+            "key_source": "state_file",
+            "env_var": SYNC_E2EE_KEY_ENV,
+            "restart_required": False,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 def _sync_all(svc) -> dict:
