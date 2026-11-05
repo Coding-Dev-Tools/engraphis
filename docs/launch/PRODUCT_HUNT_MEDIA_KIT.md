@@ -43,7 +43,7 @@ This document provides the complete media production specification for the **Eng
 | :--- | :--- | :--- | :--- |
 | **0:35 - 0:42** | *"Meet Engraphis: the local-first, open-source AI memory engine built entirely on SQLite."* | Smooth pan into modern dark mode browser window navigating to `http://localhost:8700`. The sleek Engraphis dashboard appears with glowing emerald accents and real-time ledger metrics. | **Logo Reveal:** `engraphis &bull; Local-First Memory Engine`<br>**Badge:** `100% Local SQLite &bull; Zero Telemetry`<br>**SFX:** Upbeat beat drop. |
 | **0:42 - 0:49** | *"It structures memory across four isolated tiers: workspace, repository, session, and individual bi-temporal facts."* | Click on **Explore** tab in the dashboard. The interactive force-directed knowledge graph expands, connecting code symbols, decisions, and architectural commits with animated edges. | **Visual:** Cursor hovers over node `mem_01hq7w8...` showing its linked AST symbols and commit hash.<br>**SFX:** Soft blip on node hover. |
-| **0:49 - 0:55** | *"And our 4-arm hybrid recall fuses dense vectors, full-text BM25, graph PageRank, and AST code symbols in under 12 milliseconds."* | Graphic overlay showing the 4 parallel retrieval lanes converging into the RRF fusion engine. | **Animated Overlay:** `Vector + BM25 + PageRank + AST Symbols &rarr; <12ms`<br>**SFX:** Fast 4-step chime. |
+| **0:49 - 0:55** | *"And our 4-arm hybrid recall fuses dense vectors, full-text BM25, graph PageRank, and AST code symbols in in process."* | Graphic overlay showing the 4 parallel retrieval lanes converging into the RRF fusion engine. | **Animated Overlay:** `Vector + BM25 + PageRank + AST Symbols &rarr; local in-process`<br>**SFX:** Fast 4-step chime. |
 
 ---
 
@@ -69,7 +69,7 @@ This document provides the complete media production specification for the **Eng
 
 ## 2. Product Hunt Gallery Slides Specification
 
-Product Hunt requires images formatted at **1270x760 px (16:9 aspect ratio)**, maximum 3MB file size.
+Product Hunt requires images formatted at **1270x760 px**, maximum 3MB file size.
 All slides adhere to the Engraphis design language: **Deep Slate dark theme (`#0f172a`), Emerald/Teal accents (`#10b981`), crisp monospaced metadata, and clean sans-serif typography**.
 
 ---

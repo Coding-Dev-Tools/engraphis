@@ -122,7 +122,7 @@
     <rect x="0" y="0" width="1190" height="74" rx="10" fill="url(#cardGrad)" stroke="#334155" filter="url(#cardShadow)" />
     
     <text x="24" y="28" class="font-mono text-bold" font-size="11" fill="#10b981" letter-spacing="0.08em">SCOPED HIERARCHICAL REPOSITORY ISOLATION</text>
-    <text x="24" y="52" class="font-sans" font-size="12" fill="#94a3b8">Every fact, observation, and decision carries strict provenance across 4 nested scopes:</text>
+    <text x="24" y="52" class="font-sans" font-size="12" fill="#94a3b8">Every fact carries strict provenance across 4 nested scopes:</text>
 
     <!-- Scope Pills -->
     <!-- Scope 1: Workspace -->
@@ -195,14 +195,14 @@
       <text x="24" y="29" class="font-mono text-bold" font-size="10" fill="#34d399">ARM 1 • VECTOR</text>
 
       <text x="16" y="58" class="font-sans text-bold" font-size="16" fill="#f8fafc">Semantic Cosine</text>
-      <text x="16" y="78" class="font-sans" font-size="12" fill="#94a3b8">Dense embedding distance via offline hashing or local SentenceTransformers.</text>
+      <text x="16" y="78" class="font-sans" font-size="12" fill="#94a3b8">Dense distance via offline hashing or local ST.</text>
 
       <!-- Details Box -->
       <rect x="14" y="96" width="254" height="82" rx="6" fill="#0c1422" stroke="#1e293b" />
       <text x="24" y="116" class="font-mono" font-size="10.5" fill="#64748b">• Engine: <tspan fill="#e2e8f0">sqlite-vec / NumPy</tspan></text>
       <text x="24" y="134" class="font-mono" font-size="10.5" fill="#64748b">• Model: <tspan fill="#e2e8f0">all-MiniLM-L6-v2</tspan></text>
       <text x="24" y="152" class="font-mono" font-size="10.5" fill="#64748b">• Metric: <tspan fill="#34d399">L2 Normalized Cosine</tspan></text>
-      <text x="24" y="170" class="font-mono" font-size="10.5" fill="#64748b">• Latency: <tspan fill="#34d399">&lt; 12ms</tspan></text>
+      <text x="24" y="170" class="font-mono" font-size="10.5" fill="#64748b">• Latency: <tspan fill="#34d399">local in-process</tspan></text>
     </g>
 
     <!-- ARM 2: LEXICAL (FTS5 / BM25) -->
@@ -213,7 +213,7 @@
       <text x="24" y="29" class="font-mono text-bold" font-size="10" fill="#38bdf8">ARM 2 • LEXICAL</text>
 
       <text x="16" y="58" class="font-sans text-bold" font-size="16" fill="#f8fafc">Exact BM25 / FTS5</text>
-      <text x="16" y="78" class="font-sans" font-size="12" fill="#94a3b8">Native SQLite full-text search with automatic LIKE fallback on slim builds.</text>
+      <text x="16" y="78" class="font-sans" font-size="12" fill="#94a3b8">SQLite FTS5 with automatic LIKE fallback.</text>
 
       <!-- Details Box -->
       <rect x="14" y="96" width="254" height="82" rx="6" fill="#0c1422" stroke="#1e293b" />
@@ -231,7 +231,7 @@
       <text x="24" y="29" class="font-mono text-bold" font-size="10" fill="#c084fc">ARM 3 • GRAPH</text>
 
       <text x="16" y="58" class="font-sans text-bold" font-size="16" fill="#f8fafc">Bi-Temporal PageRank</text>
-      <text x="16" y="78" class="font-sans" font-size="12" fill="#94a3b8">Personalized PageRank over entity-link topology with validity window gating.</text>
+      <text x="16" y="78" class="font-sans" font-size="12" fill="#94a3b8">PageRank over entity links with validity gating.</text>
 
       <!-- Details Box -->
       <rect x="14" y="96" width="254" height="82" rx="6" fill="#0c1422" stroke="#1e293b" />
@@ -249,7 +249,7 @@
       <text x="24" y="29" class="font-mono text-bold" font-size="10" fill="#fbbf24">ARM 4 • CODE</text>
 
       <text x="16" y="58" class="font-sans text-bold" font-size="16" fill="#f8fafc">AST Symbol Graph</text>
-      <text x="16" y="78" class="font-sans" font-size="12" fill="#94a3b8">Deterministic symbol tables, call graphs, and file bridges bound to memories.</text>
+      <text x="16" y="78" class="font-sans" font-size="12" fill="#94a3b8">Symbol tables, call graphs, and file bridges bound to memories.</text>
 
       <!-- Details Box -->
       <rect x="14" y="96" width="254" height="82" rx="6" fill="#0c1422" stroke="#1e293b" />
@@ -309,7 +309,7 @@
         <text x="10" y="16" class="font-mono text-bold" font-size="10.5" fill="#10b981">71.1% FEWER RETRIEVED TOKENS</text>
 
         <rect x="272" y="0" width="265" height="24" rx="4" fill="#1e293b" />
-        <text x="282" y="16" class="font-mono text-bold" font-size="10.5" fill="#f43f5e">ZERO HALLUCINATION • ABSTAIN GATE</text>
+        <text x="282" y="16" class="font-mono text-bold" font-size="10.5" fill="#f43f5e">GROUNDED • ABSTAIN GATE</text>
       </g>
     </g>
 

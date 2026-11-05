@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import struct
 import subprocess
 import xml.etree.ElementTree as ET
 
@@ -27,6 +28,14 @@ def test_launch_kit_is_well_formed_and_names_no_competitors():
         assert name not in content, name
     for svg in [*launch.glob("*.svg"), *ROOT.glob("docs/images/product-hunt-*.svg")]:
         ET.fromstring(svg.read_text(encoding="utf-8"))
+
+
+def test_launch_pngs_are_gallery_sized():
+    for png in sorted((ROOT / "docs" / "launch").glob("*.png")):
+        data = png.read_bytes()
+        assert data[:8] == b"\x89PNG\r\n\x1a\n", png.name
+        width, height = struct.unpack(">II", data[16:24])
+        assert (width, height) == (1270, 760), png.name
 
 
 def test_private_research_files_are_absent_and_ignored():

@@ -22,7 +22,7 @@ Apache-2.0. SQLite-powered. 100% offline-capable.
 Check us out on Product Hunt today:
 https://www.producthunt.com/posts/engraphis
 
-Watch the 26s Demo: https://www.youtube.com/watch?v=qw-rTnAA_Z4
+Watch the Demo: https://www.youtube.com/watch?v=qw-rTnAA_Z4
 
 ---
 
@@ -123,7 +123,7 @@ Fire up `engraphis-dashboard` to explore `http://127.0.0.1:8700`:
 * Full audit log of memories, invalidations, and evolutions
 * Interactive recall tester to debug queries before agent runs
 
-Watch it in action (26s): https://www.youtube.com/watch?v=qw-rTnAA_Z4
+Watch it in action : https://www.youtube.com/watch?v=qw-rTnAA_Z4
 
 ---
 
@@ -204,7 +204,7 @@ I am Jaixii. Today we are releasing Engraphis, an open-source, local-first memor
 Repo: https://github.com/Coding-Dev-Tools/engraphis  
 PyPI: https://pypi.org/project/engraphis/  
 Product Hunt: https://www.producthunt.com/posts/engraphis  
-26s Demo: https://www.youtube.com/watch?v=qw-rTnAA_Z4  
+Demo: https://www.youtube.com/watch?v=qw-rTnAA_Z4  
 
 ### Why build this?
 The standard approach to agent memory is naive RAG: chunk conversation text, embed it, dump it into a vector store, and run top-k cosine search on the next turn.
@@ -270,11 +270,11 @@ We open-sourced Engraphis under Apache-2.0: a persistent, 100% offline-capable m
 
 GitHub: https://github.com/Coding-Dev-Tools/engraphis  
 Product Hunt: https://www.producthunt.com/posts/engraphis  
-26s Demo: https://www.youtube.com/watch?v=qw-rTnAA_Z4  
+Demo: https://www.youtube.com/watch?v=qw-rTnAA_Z4  
 
 Why local developers might care:
 1. Zero Cloud Dependency: The core runs on Python 3.9+ with plain NumPy and SQLite. It does not send your prompts, code symbols, or memories to any external API.
-2. Deterministic Offline Embeddings: It comes with a built-in deterministic hashing embedder so you do not need to download an 800MB model to get started. If you do want dense semantic search, it supports local `sentence-transformers` (`all-MiniLM-L6-v2`) or `sqlite-vec`.
+2. Deterministic Offline Embeddings: It comes with a built-in deterministic hashing embedder so you do not need to download an 80MB model to get started. If you do want dense semantic search, it supports local `sentence-transformers` (`all-MiniLM-L6-v2`) or `sqlite-vec`.
 3. Bi-Temporal Validity: When you update a config or refactor a function, Engraphis tracks `valid_from` / `valid_to` along with ingestion time. When a new memory contradicts an older one, it invalidates the old record instead of silently overwriting it or letting both exist in conflict.
 4. Hybrid 4-Arm Recall: Fuses vector cosine similarity, SQLite FTS5 (BM25), Personalized PageRank over linked knowledge graphs, and AST code symbol graphs via Reciprocal Rank Fusion (RRF).
 5. Inspectable Local Dashboard: Run `engraphis-dashboard` and open `http://127.0.0.1:8700` to visually inspect your agent memory graph, timeline slider, and audit logs.
@@ -306,7 +306,7 @@ We built an open-source tool called Engraphis (Apache-2.0) that solves this usin
 
 GitHub: https://github.com/Coding-Dev-Tools/engraphis  
 Product Hunt: https://www.producthunt.com/posts/engraphis  
-26s Demo: https://www.youtube.com/watch?v=qw-rTnAA_Z4  
+Demo: https://www.youtube.com/watch?v=qw-rTnAA_Z4  
 
 How it works with Claude:
 1. Persistent Memory Across Sessions: Tell Claude "Remember that our API error responses use RFC 7807 problem details" or let Claude record it automatically. In a brand new session tomorrow, Claude remembers.

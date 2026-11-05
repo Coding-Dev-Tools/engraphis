@@ -133,7 +133,7 @@ flowchart TD
     - Identify traffic sources and double down on highest converting channels.
 - **11:30 AM PT:**
   - Publish Milestone Update #1 in PH comments and on X:  
-    *"Over 500+ developers tested Engraphis today! Here is the #1 question we're getting about bi-temporal validity..."*
+    *"500+ developers tested Engraphis today! Here is the #1 question we're getting about bi-temporal validity..."*
 - **1:00 PM PT:**
   - Engage with AI influencers and creators who retweeted or commented on the thread.
 
@@ -223,7 +223,7 @@ This was one of our most deliberate architectural decisions. Here is why:
 
 1. **Developer Ergonomics & Zero Friction:** A coding agent runs on your local workstation or laptop. Requiring developers to install Docker, provision a vector-database container, or register for an external vector SaaS key before their agent can remember anything kills adoption. SQLite is embedded, zero-config, and runs everywhere Python runs.
 2. **ACID Relational Integrity for Bi-Temporal Graphs:** Memory is not just vectors; it is a relational graph of scopes, sessions, bi-temporal validity intervals, entity links, and audit logs (`core/schema.py`, Schema v19). SQLite with WAL (Write-Ahead Logging) gives us immediate ACID durability, transactional consistency, and blazing-fast local joins.
-3. **Embedded Vector Performance via `sqlite-vec` / NumPy:** For developer workstation memory (typically 1,000 to 100,000 memories per workspace), in-process vector search via `sqlite-vec` or our deterministic NumPy vector index executes in in-process latencies without the socket overhead or serialization penalties of separate client-server databases.
+3. **Embedded Vector Performance via `sqlite-vec` / NumPy:** For developer workstation memory (typically 1,000 to 100,000 memories per workspace), in-process vector search via `sqlite-vec` or our deterministic NumPy vector index executes in-process latencies without the socket overhead or serialization penalties of separate client-server databases.
 4. **Portability & Disaster Recovery:** Your entire agent memory lives in a single, clean `.db` file (e.g., `engraphis.db`). You can inspect it with standard SQLite tools, commit snapshots, back it up to Dropbox, or move it between machines without database migration headaches.
 ```
 
@@ -296,7 +296,7 @@ python -m eval.harness --dataset eval/datasets/sample.jsonl --k 5
 Our commercial tiers provide optional hosted infrastructure for developers and teams who want cloud conveniences without compromising their local data:
 • **Hosted Cloud Sync (Pro):** Zero-friction, end-to-end encrypted sync between your laptop, desktop workstation, and remote dev servers.
 • **Managed Automation:** Cloud-scheduled memory consolidation and dreaming passes so you don't have to run background cron jobs locally.
-• **Team Multi-User Dashboard (Team):** Centralized team conventions, shared repository memory workspaces, access control roles, and audit log exports.
+• **Team Multi-User Dashboard (Team):** Centralized team conventions, access control roles, and audit-log exports. Shared hosted Team memory and hosted MCP remain not yet available.
 • **Included System 1 Decision Engine (Jev):** Managed advisory decision quotas included without needing your own API key.
 
 If you just want a killer, offline-first memory engine for your coding agent on your own machine, you will never pay a penny.

@@ -100,7 +100,7 @@
       <rect x="0" y="0" width="282" height="110" rx="10" fill="url(#bCardGrad)" stroke="#06b6d4" stroke-width="1.5" filter="url(#bShadow)" />
       <text x="18" y="26" class="b-mono b-bold" font-size="10" fill="#06b6d4" letter-spacing="0.08em">RETRIEVAL QUALITY</text>
       <text x="18" y="68" class="b-mono b-extrabold" font-size="36" fill="#38bdf8">1.000</text>
-      <text x="18" y="92" class="b-sans" font-size="12" fill="#94a3b8">Recall@5 &amp; Hit@5: <tspan fill="#f8fafc" font-weight="600">Recall@5 1.000 · Hit@5 1.000</tspan></text>
+      <text x="18" y="92" class="b-sans" font-size="12" fill="#94a3b8"><tspan fill="#f8fafc" font-weight="600">Recall@5 1.000 · Hit@5 1.000</tspan></text>
       <circle cx="250" cy="30" r="12" fill="#164e63" />
       <path d="M244 30 L248 34 L256 26" fill="none" stroke="#38bdf8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
     </g>
@@ -171,9 +171,9 @@
         <line x1="20" y1="36" x2="515" y2="36" stroke="#1e293b" stroke-width="1.2" />
 
         <!-- Row 1: Token Cost -->
-        <text x="20" y="60" class="b-sans b-semibold" font-size="12" fill="#e2e8f0">Monthly Dev API Cost</text>
-        <text x="230" y="60" class="b-mono" font-size="12" fill="#fca5a5">~$145 / dev</text>
-        <text x="400" y="60" class="b-mono b-bold" font-size="12" fill="#34d399">~$38 / dev (73% saved)</text>
+        <text x="20" y="60" class="b-sans b-semibold" font-size="12" fill="#e2e8f0">Retrieved Context Tokens</text>
+        <text x="230" y="60" class="b-mono" font-size="12" fill="#fca5a5">740.3 / question</text>
+        <text x="400" y="60" class="b-mono b-bold" font-size="12" fill="#34d399">214.3 / question</text>
 
         <!-- Row 2: Latency -->
         <text x="20" y="92" class="b-sans b-semibold" font-size="12" fill="#e2e8f0">Context Lookup Speed</text>
@@ -220,7 +220,7 @@
 
         <!-- Provenance Footer -->
         <text x="14" y="128" class="b-mono" font-size="10" fill="#6ee7b7">• Provenance: <tspan fill="#e2e8f0">mem_01hq7w8... (valid_from: 2026-03-12, commit a7f9d)</tspan></text>
-        <text x="14" y="140" class="b-mono" font-size="10" fill="#6ee7b7">• Retained Tokens: <tspan fill="#34d399">184 tokens (admitted context only)</tspan></text>
+        <text x="14" y="140" class="b-mono" font-size="10" fill="#6ee7b7">• Retained Tokens: <tspan fill="#34d399">packed context (registered artifact)</tspan></text>
       </g>
 
       <!-- TEST CASE 2: DETERMINISTIC ABSTENTION -->

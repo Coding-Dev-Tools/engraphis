@@ -66,10 +66,10 @@ engraphis-dashboard
 ## 3. Product Hunt Media and Video Submission
 
 * **Product Hunt Video URL:** `https://www.youtube.com/watch?v=qw-rTnAA_Z4` (or `https://youtu.be/qw-rTnAA_Z4`)  
-  *Title:* "Inspectable Memory Graph for Coding Agents | Engraphis" (26s live UI demo showing the knowledge graph in action).
+  *Title:* "Inspectable Memory Graph for Coding Agents | Engraphis" (live UI demo showing the knowledge graph in action).
 * **Gallery Slides (1270x760 px):**
-  1. Hero Card: `docs/launch/graphic-a-architecture.svg`
-  2. Benchmark Card: `docs/launch/graphic-b-token-benchmark.svg`
+  1. Hero Card: `docs/launch/graphic-a-architecture.png`
+  2. Benchmark Card: `docs/launch/graphic-b-token-benchmark.png`
   3. Knowledge Graph UI: `docs/launch/gallery-knowledge-graph.png` (1270x760)
   4. Context Reduction Flow: `docs/launch/gallery-context-efficiency.png` (1270x760)
   5. Benefit Flow: `docs/launch/gallery-benefit-flow.png` (1270x760)
