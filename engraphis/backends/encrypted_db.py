@@ -30,7 +30,60 @@ _MAX_DB_KEY_FILE_BYTES = 4096
 
 class EncryptionError(RuntimeError):
     """Encryption was requested (a key is set) but could not be honored — missing driver,
-    wrong key, or an unreadable key file. Fail loud: never silently fall back to plaintext."""
+    wrong key, an unreadable key file, or an encrypted database that cannot be read.
+
+    Fail loud: never silently fall back to plaintext. ``code`` classifies the failure so
+    callers can give accurate guidance without parsing the message; in particular
+    ``database_damaged`` and ``database_busy`` mean the configured key was applied and the
+    problem is the file or another process, not the key.
+    """
+
+    def __init__(self, message: str, *, code: str = "encryption_error") -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def _open_failure(exc: Exception, *, stage: str) -> tuple[str, str]:
+    """Classify an encrypted-open failure without ever rendering driver text.
+
+    Driver messages are only inspected for stable SQLite phrases: they can echo paths or
+    the key statement, so they must not reach the operator. Returns ``(code, message)``.
+    """
+    message = str(exc).casefold()
+    if "malformed" in message or "corrupt" in message:
+        return (
+            "database_damaged",
+            "could not open the encrypted database — SQLite reports a malformed database "
+            "image. The configured key was applied; preserve a copy of the database and "
+            "restore a verified backup.",
+        )
+    if "locked" in message or "busy" in message:
+        return (
+            "database_busy",
+            "could not open the encrypted database — another process is holding it. "
+            "Close other Engraphis processes and retry; this is not a key problem.",
+        )
+    if stage == "connect":
+        return (
+            "database_unavailable",
+            "could not initialize the encrypted database connection (path, permissions, "
+            "or disk). This is not a key problem.",
+        )
+    if any(
+        term in message
+        for term in ("disk i/o", "unable to open", "read-only", "readonly")
+    ):
+        return (
+            "database_unavailable",
+            "could not open the encrypted database — the file could not be read (path, "
+            "permissions, disk space, or mount). This is not a key problem.",
+        )
+    return (
+        "key_rejected",
+        "could not open the encrypted database — wrong ENGRAPHIS_DB_KEY, or "
+        "the file is not SQLCipher-encrypted (an existing plaintext DB cannot be "
+        "opened with a key; migrate it first).",
+    )
 
 
 def _resolve_key() -> Optional[str]:
@@ -53,10 +106,13 @@ def _resolve_key() -> Optional[str]:
             ) or "").strip()
         except OSError:
             raise EncryptionError(
-                "ENGRAPHIS_DB_KEY_FILE could not be read safely"
+                "ENGRAPHIS_DB_KEY_FILE could not be read safely",
+                code="key_file_unreadable",
             ) from None
         if not key:
-            raise EncryptionError("ENGRAPHIS_DB_KEY_FILE is empty")
+            raise EncryptionError(
+                "ENGRAPHIS_DB_KEY_FILE is empty", code="key_file_empty"
+            )
         return key
     return None
 
@@ -219,7 +275,8 @@ class _EncryptedConnector:
             target = Path(path).resolve(strict=True).as_uri() + "?mode=ro&immutable=1"
         except OSError:
             raise EncryptionError(
-                "could not initialize the encrypted database connection"
+                "could not initialize the encrypted database connection",
+                code="database_unavailable",
             ) from None
         return self._open(target, uri=True, read_only=True)
 
@@ -229,7 +286,8 @@ class _EncryptedConnector:
             target = Path(path).resolve(strict=True).as_uri() + "?mode=ro"
         except OSError:
             raise EncryptionError(
-                "could not initialize the encrypted database connection"
+                "could not initialize the encrypted database connection",
+                code="database_unavailable",
             ) from None
         return self._open(target, uri=True, read_only=True, timeout=timeout)
 
@@ -239,10 +297,9 @@ class _EncryptedConnector:
             options["uri"] = True
         try:
             raw = self._driver.connect(target, **options)
-        except Exception:  # noqa: BLE001
-            raise EncryptionError(
-                "could not initialize the encrypted database connection"
-            ) from None
+        except Exception as exc:  # noqa: BLE001
+            code, detail = _open_failure(exc, stage="connect")
+            raise EncryptionError(detail, code=code) from None
         try:
             raw.execute(self._pragma)             # MUST be the first statement
         except Exception:  # noqa: BLE001
@@ -253,7 +310,8 @@ class _EncryptedConnector:
             # Suppress the driver message (`from None`): a PRAGMA syntax error can echo the
             # statement text, which contains the key. Never surface key material.
             raise EncryptionError(
-                "failed to apply the database key — check the ENGRAPHIS_DB_KEY format"
+                "failed to apply the database key — check the ENGRAPHIS_DB_KEY format",
+                code="key_config_invalid",
             ) from None
         try:
             if read_only:
@@ -263,16 +321,13 @@ class _EncryptedConnector:
             # Touch the header so a wrong key / plaintext-vs-encrypted mismatch fails now,
             # with a clear message, instead of deep inside an unrelated query later.
             raw.execute("SELECT count(*) FROM sqlite_master").fetchone()
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             try:
                 raw.close()
             except Exception:  # noqa: BLE001
                 pass
-            raise EncryptionError(
-                "could not open the encrypted database — wrong ENGRAPHIS_DB_KEY, or "
-                "the file is not SQLCipher-encrypted (an existing plaintext DB cannot be "
-                "opened with a key; migrate it first)."
-            ) from None
+            code, detail = _open_failure(exc, stage="header")
+            raise EncryptionError(detail, code=code) from None
         raw.row_factory = self._driver.Row
         return _TranslatingConnection(raw)
 
@@ -291,7 +346,8 @@ def make_connector(key: str) -> _EncryptedConnector:
             "On CPython manylinux x86-64, install it with: pip install "
             "\"engraphis[encryption]\". On macOS, Windows, Linux ARM, or musl, "
             "provision a compatible sqlcipher3 driver separately. Engraphis will not "
-            "fall back to plaintext."
+            "fall back to plaintext.",
+            code="driver_missing",
         ) from None
 
     pragma = _key_pragma(key)
