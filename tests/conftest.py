@@ -7,6 +7,21 @@ import pytest
 
 from engraphis.config import settings
 
+OFFLINE_PROVIDER_ENV_VARS = (
+    "ENGRAPHIS_EXTRACTOR",
+    "ENGRAPHIS_LLM_AUTO_EXTRACT",
+    "ENGRAPHIS_RETENTION_SUPERVISOR",
+    "ENGRAPHIS_DECISION_BACKEND",
+    "ENGRAPHIS_LLM_PROVIDER",
+    "ENGRAPHIS_LLM_MODEL",
+    "ENGRAPHIS_LLM_API_KEY",
+    "ENGRAPHIS_LLM_BASE_URL",
+    "TYPESAFE_API_KEY",
+    "TYPESAFE_BASE_URL",
+    "JEV_API_KEY",
+    "ENGRAPHIS_DECISION_MODEL",
+)
+
 
 def pytest_collection_modifyitems(items):
     """Run mutually incompatible SQLite native integrations in safe order.
@@ -68,15 +83,13 @@ def _deployment_settings_isolation(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "llm_auto_extract", False)
     monkeypatch.setattr(settings, "retention_supervisor", "none")
     monkeypatch.setattr(settings, "decision_backend", "none")
-    for name in (
-        "ENGRAPHIS_EXTRACTOR",
-        "ENGRAPHIS_LLM_AUTO_EXTRACT",
-        "ENGRAPHIS_RETENTION_SUPERVISOR",
-        "ENGRAPHIS_DECISION_BACKEND",
-        "ENGRAPHIS_LLM_PROVIDER",
-        "ENGRAPHIS_LLM_MODEL",
-        "ENGRAPHIS_LLM_API_KEY",
-        "TYPESAFE_API_KEY",
-        "JEV_API_KEY",
-    ):
+    # Settings are materialized at import; deleting the environment alone would leave an
+    # owner's live provider credentials on the singleton and LLMClient would still connect.
+    monkeypatch.setattr(settings, "llm_provider", "openai")
+    monkeypatch.setattr(settings, "llm_model", "gpt-4o-mini")
+    monkeypatch.setattr(settings, "llm_api_key", "")
+    monkeypatch.setattr(settings, "llm_base_url", "")
+    monkeypatch.setattr(settings, "typesafe_api_key", "")
+    monkeypatch.setattr(settings, "decision_model", "jev-1.13.0")
+    for name in OFFLINE_PROVIDER_ENV_VARS:
         monkeypatch.delenv(name, raising=False)
