@@ -12,7 +12,8 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - Verify operation-receipt chains read-only in `engraphis-init --check` (bounded by workspaces and
   receipts), so a forked, disconnected, or truncated ledger is visible to the operator with
   recovery guidance while memory writes and recall continue with a content-free
-  `receipt_warning`.
+  `receipt_warning`. The check exits nonzero when a sampled chain fails verification, including
+  for a preserved read-only copy; memory behavior on a damaged chain remains audit-only.
 
 ## [1.7.12] - 2026-11-02
 

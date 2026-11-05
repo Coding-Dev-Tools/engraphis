@@ -447,6 +447,27 @@ def test_doctor_distinguishes_a_damaged_encrypted_database_from_a_bad_key(
     assert "key" in check["detail"]
 
 
+@pytest.mark.parametrize("code", ["key_file_empty", "key_file_unreadable"])
+def test_doctor_reports_key_file_codes_separately(
+    tmp_path, monkeypatch, capsys, code,
+):
+    _fresh_settings(monkeypatch, tmp_path)
+    from engraphis.backends.encrypted_db import EncryptionError
+
+    def bad_connector(_path):
+        raise EncryptionError("private provider detail", code=code)
+
+    monkeypatch.setattr(init_script, "connector_from_env", lambda: bad_connector)
+    assert main(["--check", "--json"]) == 1
+    report = json.loads(capsys.readouterr().out)
+    check = next(
+        item for item in report["checks"] if item["code"] == "database_key_file"
+    )
+    assert check["status"] == "fail"
+    assert "ENGRAPHIS_DB_KEY_FILE" in check["detail"]
+    assert "private provider detail" not in json.dumps(report)
+
+
 def test_doctor_reports_lock_contention_without_leaving_probe_state(tmp_path, monkeypatch, capsys):
     _fresh_settings(monkeypatch, tmp_path)
     path = tmp_path / "doc.db"
@@ -481,6 +502,29 @@ def test_doctor_does_not_mask_a_broken_configured_embedder_or_echo_its_error(tmp
     assert "private-provider-secret" not in output
     report = json.loads(output)
     assert any(check["code"] == "embedder" and check["status"] == "fail" for check in report["checks"])
+
+
+def test_doctor_uses_prod_exactness_even_when_setting_is_off(
+    tmp_path, monkeypatch, capsys,
+):
+    _fresh_settings(monkeypatch, tmp_path)
+    import engraphis.config as cfg
+    import engraphis.backends.embedder_st as backend
+    monkeypatch.setenv("ENGRAPHIS_ENV", "prod")
+    monkeypatch.setattr(cfg.settings, "require_exact_backends", False)
+
+    def fail(*_args, **kwargs):
+        assert kwargs["require_exact"] is True
+        raise RuntimeError("private-provider-secret")
+
+    monkeypatch.setattr(backend, "get_embedder", fail)
+    assert main(["--check", "--json"]) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert any(
+        check["code"] == "embedder" and check["status"] == "fail"
+        for check in report["checks"]
+    )
+    assert "private-provider-secret" not in json.dumps(report)
 
 
 def test_init_records_only_explicit_installation_intent(tmp_path, monkeypatch, capsys):

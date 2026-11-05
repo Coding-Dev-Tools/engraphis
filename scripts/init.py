@@ -105,7 +105,7 @@ def _report_receipt_chains(
             scopes = conn.execute(
                 "SELECT workspace_id, COUNT(*) AS receipts FROM operation_receipts "
                 "WHERE workspace_id IS NOT NULL "
-                "GROUP BY workspace_id ORDER BY receipts DESC LIMIT ?",
+                "GROUP BY workspace_id ORDER BY MAX(ts) DESC LIMIT ?",
                 (_DOCTOR_RECEIPT_SCOPES,),
             ).fetchall()
             from engraphis.core.store import verify_receipt_chain
@@ -132,8 +132,8 @@ def _report_receipt_chains(
             elif len(scopes) < scope_total:
                 report(
                     "receipt_chain", "optional", "operation receipts",
-                    f"{sampled} verified over {total} receipt(s); the newest scopes were "
-                    "checked because the install check is bounded.",
+                    f"{sampled} verified over {total} receipt(s); the most recently written "
+                    "scopes were checked because the install check is bounded.",
                 )
             else:
                 report(
@@ -177,9 +177,14 @@ def cmd_check(*, json_output: bool = False) -> int:
                 "processes and retry.",
             )
             return
-        if encryption_code in {
-            "key_rejected", "key_config_invalid", "key_file_empty", "key_file_unreadable",
-        }:
+        if encryption_code in {"key_file_empty", "key_file_unreadable"}:
+            report(
+                "database_key_file", "fail", "database readable",
+                "ENGRAPHIS_DB_KEY_FILE is empty or unreadable; the database was not opened. "
+                "Fix or re-point the key file; do not regenerate the database key.",
+            )
+            return
+        if encryption_code in {"key_rejected", "key_config_invalid"}:
             report(
                 "database_key", "fail", "database readable",
                 "The configured encryption key did not unlock this database. Restore the key "
@@ -246,16 +251,8 @@ def cmd_check(*, json_output: bool = False) -> int:
         conn.execute("PRAGMA busy_timeout=2000")
         conn.execute("PRAGMA user_version").fetchone()
         report("database_readable", "ok", "database readable", str(db))
-        # A TEMP table would only probe the temp database. Exercise the main database
-        # under a transaction, then roll back both schema and data unconditionally.
-        probe = "_engraphis_doctor_" + secrets.token_hex(12)
-        try:
-            conn.execute("BEGIN IMMEDIATE")
-            conn.execute(f'CREATE TABLE "{probe}" (value INTEGER)')
-            conn.execute(f'INSERT INTO "{probe}" (value) VALUES (1)')
-        finally:
-            conn.rollback()
-        report("database_writable", "ok", "database writable", str(db))
+        # Receipt verification is read-only. Run it before the write probe so a preserved
+        # read-only copy still gets a diagnosis instead of only "database unwritable".
         database_stage = "schema"
         from engraphis.core.schema import SCHEMA_VERSION
         has_migrations = conn.execute(
@@ -274,6 +271,17 @@ def cmd_check(*, json_output: bool = False) -> int:
         else:
             report("database_schema", "optional", "database schema",
                    "Not initialized; the engine will initialize the database on first use.")
+        database_stage = "connection"
+        # A TEMP table would only probe the temp database. Exercise the main database
+        # under a transaction, then roll back both schema and data unconditionally.
+        probe = "_engraphis_doctor_" + secrets.token_hex(12)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(f'CREATE TABLE "{probe}" (value INTEGER)')
+            conn.execute(f'INSERT INTO "{probe}" (value) VALUES (1)')
+        finally:
+            conn.rollback()
+        report("database_writable", "ok", "database writable", str(db))
     except Exception as exc:
         if database_stage == "schema":
             report("database_schema", "fail", "database schema",
@@ -315,8 +323,12 @@ def cmd_check(*, json_output: bool = False) -> int:
 
     try:
         from engraphis.backends.embedder_st import get_embedder
-        emb = get_embedder(settings.embed_model or None, dim=settings.embed_dim or 384,
-                           require_exact=settings.require_exact_backends)
+        from engraphis.factory import effective_require_exact_backends
+        emb = get_embedder(
+            settings.embed_model or None,
+            dim=settings.embed_dim or 384,
+            require_exact=effective_require_exact_backends(settings.require_exact_backends),
+        )
         emb.embed(["engraphis doctor check"])
         report("embedder", "ok", "embedder functional", f"{type(emb).__name__} ({getattr(emb, 'dim', 384)}d)")
     except Exception as exc:

@@ -43,7 +43,9 @@ delete rows to make verification pass. Recover in this order:
    Do not run `VACUUM`, `rekey`, or a migration against the original.
 3. Run `engraphis-init --check` (point `ENGRAPHIS_DB_PATH` at the preserved copy). It verifies
    current-schema receipt chains read-only and reports damaged ones as `operation receipts`,
-   including the consequence for your data.
+   including the consequence for your data. The check exits nonzero when a sampled chain fails
+   verification; on a read-only copy it still reports the receipt diagnosis before the write
+   probe.
 4. Verify one workspace with `engraphis_verify_receipts` (or the Inspector) and export it with
    `engraphis_export_receipts` before changing anything.
 5. Restore your most recent verified backup, or keep the damaged copy for diagnosis and accept

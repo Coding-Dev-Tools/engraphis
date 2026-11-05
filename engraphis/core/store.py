@@ -968,59 +968,83 @@ def receipt_chain_state(conn, workspace_id: str) -> dict:
     }
 
 
+def _connection_in_transaction(conn) -> bool:
+    """Return whether this thread owns a transaction on a shared or raw connection."""
+    owned = getattr(conn, "transaction_owned_by_current_thread", None)
+    if callable(owned):
+        return bool(owned())
+    return bool(getattr(conn, "in_transaction", False))
+
+
+@contextmanager
+def _receipt_read_transaction(conn):
+    """Keep the chain rows and anchor on one snapshot when the caller has no transaction."""
+    owns_transaction = not _connection_in_transaction(conn)
+    if owns_transaction:
+        conn.execute("BEGIN")
+    try:
+        yield
+    finally:
+        if owns_transaction and _connection_in_transaction(conn):
+            conn.rollback()
+
+
 def verify_receipt_chain(conn, *, workspace_id: str, expected_head: str = "",
                          expected_count: Optional[int] = None) -> dict:
     """Verify one workspace's receipt chain against hashes and its stored anchor.
 
     Like :func:`receipt_chain_state`, this is read-only and usable with any
-    ``sqlite3``-compatible connection that returns named columns.
+    ``sqlite3``-compatible connection that returns named columns. When the caller is not
+    already in a transaction, the row scan and anchor read share one snapshot so a live
+    writer cannot make a healthy chain look damaged.
     """
-    chain = receipt_chain_state(conn, workspace_id)
-    rows = chain["rows"]
-    errors: list[dict] = list(chain["errors"])
-    head = str(chain["head"] or "")
-    anchor = conn.execute(
-        "SELECT receipt_count, head_hash, integrity_error "
-        "FROM receipt_chain_heads WHERE workspace_id=?",
-        (workspace_id,),
-    ).fetchone()
-    if rows and anchor is None:
-        errors.append({"index": len(rows), "id": "", "error": "missing_anchor"})
-    elif anchor is not None:
-        anchor_count = anchor["receipt_count"]
-        if type(anchor_count) is not int or anchor_count < 0 or anchor_count != len(rows):
+    with _receipt_read_transaction(conn):
+        chain = receipt_chain_state(conn, workspace_id)
+        rows = chain["rows"]
+        errors: list[dict] = list(chain["errors"])
+        head = str(chain["head"] or "")
+        anchor = conn.execute(
+            "SELECT receipt_count, head_hash, integrity_error "
+            "FROM receipt_chain_heads WHERE workspace_id=?",
+            (workspace_id,),
+        ).fetchone()
+        if rows and anchor is None:
+            errors.append({"index": len(rows), "id": "", "error": "missing_anchor"})
+        elif anchor is not None:
+            anchor_count = anchor["receipt_count"]
+            if type(anchor_count) is not int or anchor_count < 0 or anchor_count != len(rows):
+                errors.append({
+                    "index": len(rows), "id": "", "error": "anchor_count_mismatch",
+                })
+            if str(anchor["head_hash"]) != head:
+                errors.append({
+                    "index": len(rows), "id": "", "error": "anchor_head_mismatch",
+                })
+            if str(anchor["integrity_error"] or ""):
+                errors.append({
+                    "index": len(rows), "id": "", "error": "anchor_integrity_error",
+                })
+        expected_head = str(expected_head or "").strip()
+        if expected_head and head != expected_head:
             errors.append({
-                "index": len(rows), "id": "", "error": "anchor_count_mismatch",
+                "index": len(rows), "id": "", "error": "expected_head_mismatch",
             })
-        if str(anchor["head_hash"]) != head:
-            errors.append({
-                "index": len(rows), "id": "", "error": "anchor_head_mismatch",
-            })
-        if str(anchor["integrity_error"] or ""):
-            errors.append({
-                "index": len(rows), "id": "", "error": "anchor_integrity_error",
-            })
-    expected_head = str(expected_head or "").strip()
-    if expected_head and head != expected_head:
-        errors.append({
-            "index": len(rows), "id": "", "error": "expected_head_mismatch",
-        })
-    if expected_count is not None:
-        try:
-            external_count = max(0, int(expected_count))
-        except (TypeError, ValueError, OverflowError):
-            external_count = -1
-        if external_count != len(rows):
-            errors.append({
-                "index": len(rows), "id": "", "error": "expected_count_mismatch",
-            })
-    return {
-        "valid": not errors,
-        "count": len(rows),
-        "head": head,
-        "anchored": anchor is not None,
-        "errors": errors,
-    }
+        if expected_count is not None:
+            try:
+                external_count = max(0, int(expected_count))
+            except (TypeError, ValueError, OverflowError):
+                external_count = -1
+            if external_count != len(rows):
+                errors.append({
+                    "index": len(rows), "id": "", "error": "expected_count_mismatch",
+                })
+        return {
+            "valid": not errors,
+            "count": len(rows),
+            "head": head,
+            "anchored": anchor is not None,
+            "errors": errors,
+        }
 
 
 def _fts5_available(conn: sqlite3.Connection | _SerializedConnection) -> bool:
