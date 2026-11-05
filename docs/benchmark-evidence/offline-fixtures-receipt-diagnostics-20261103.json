@@ -103,7 +103,7 @@
   ],
   "schema": "engraphis-public-offline-fixtures/v1",
   "suite": {
-    "digest": "f66eca5e293df53e73504c3c70aee793812059dafc485475a9a4e9a1cd61b836",
+    "digest": "cee29f122abcdbf6a8874073d58840720b1724ab0a3ed125822841707b066b77",
     "digest_method": "sha256(canonical compact JSON mapping each sorted path to its file SHA-256)",
     "files": {
       "engraphis/__init__.py": "1cde9f19e05ddc4f5f28517e00b0a7bd5ebf09d6be8ec2681cebf5b698195d70",
@@ -171,7 +171,7 @@
       "engraphis/core/secrets.py": "78ab40870d6c5918c189307028b107df239d08cd918abe08c85fa15b58fa1663",
       "engraphis/core/source_paths.py": "2e71de7f19f260b335137602f07a28a80efa5d65e3d2497215356ba5f172b47e",
       "engraphis/core/spec_crawl.py": "23359f9e28a2a68a3abe59f1e705b8be1f6c72880d708123bc85391029e769e5",
-      "engraphis/core/store.py": "f42e407803b3d9701c1d4975bcef8c8b69e3a4749b1303e6c4b4d6ae31c06a15",
+      "engraphis/core/store.py": "f3a2586c2802021901cc5052a2a782a7463dbdfa8f26487ed490c02a1e1257af",
       "engraphis/core/sync.py": "0d28dd697eb8e8acdb7fed3e346fcba8fce23cbf4606eb11de68cb1fb001fcf2",
       "engraphis/core/textutil.py": "acd65031729fa5d91d09527b8eb52518b83cfce77a55e6b7ae2d94686e35c1a6",
       "engraphis/core/user_model.py": "3147ec8ee7cfd855783f639874b63f331cdc822bd8bd9298cfb326dd18666026",
@@ -188,7 +188,7 @@
       "engraphis/engines/recall.py": "f979580d065599c07acbc3add59f71e52d9a186a2104b0e257daa7959ea88d26",
       "engraphis/engines/reweight.py": "91ec5815f5d356a7068c36133d24405334450f361f902f99275bed3ccebffd49",
       "engraphis/engines/thoughts.py": "4adb9c8a9bcfe736cb42fff9b5ce24631da6ec473d178e83f1c176fde3b8b814",
-      "engraphis/factory.py": "be26899074d80b2f96fff9a5a70969894e818dc71e2cfdf4f7ee965f1f4cc550",
+      "engraphis/factory.py": "d325b4a0879030377981e011954551c4f0da1039ed0c615ef083050ba0508990",
       "engraphis/file_guard.py": "44eccaeca3afef7149bfdfea2321c325472253ee39a9e0bc24c720b3da3d685b",
       "engraphis/graphdata.py": "f5dc93395f52203c66deaeec8bc58d5c1f990a35a535151e0b9a84cecf7d8430",
       "engraphis/hosted_client.py": "5b56b0d2384cf24ecb409090af15f09e437ec8ab5a98bed931384daff46b4f48",
