@@ -74,7 +74,7 @@
 
     <!-- Source SHA Stamp on top right -->
     <g transform="translate(900, 10)">
-      <text x="330" y="16" class="b-mono" font-size="11" fill="#64748b" text-anchor="end">FIXTURE: SHA-256 3b1d2127e290...</text>
+      <text x="288" y="16" class="b-mono" font-size="11" fill="#64748b" text-anchor="end">FIXTURE: SHA-256 3b1d2127e290...</text>
       <text x="288" y="34" class="b-mono b-semibold" font-size="11" fill="#38bdf8" text-anchor="end">26 SAMPLES • 260 RECALLS</text>
     </g>
   </g>
