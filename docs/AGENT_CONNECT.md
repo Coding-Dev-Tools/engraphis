@@ -73,6 +73,25 @@ actual Engraphis tool call; connecting an app does not copy its entire chat hist
 Engraphis documents and tests generic MCP transports; it does not claim client-specific support
 unless that client has a maintained setup guide and integration test.
 
+## Advisory decisions (Jev)
+
+Engraphis exposes its advisory decision engine as a discovered capability rather than a direct
+Smart tool. Call `engraphis_discover_actions(task="advisory decision")`, confirm the returned
+canonical action is `decide`, then run it through `engraphis_execute_action` with its
+`schema_digest`; local heuristics answer by default. Remote Jev also needs
+`ENGRAPHIS_DECISION_BACKEND=byok|managed` and per-call opt-in (`allow_remote=true` plus a
+`public` or `internal` classification), and uses TypeSafe BYOK or an included Pro/Team allowance
+when the hosted service enables it. Decisions are advice: they never authorize a command, change
+memory, or certify completion.
+
+A standalone Jev surface is also available for harnesses that want it:
+[jev-decision](https://github.com/Coding-Dev-Tools/jev-decision) provides `jev`/`jev-mcp` with
+`jev_decide`, `jev_guard_command`, `jev_verify_completion`, `jev_read_evidence`,
+`jev_prune_output`, and `jev_status`, a shared daily budget ledger, and an optional
+escalate-only pre-tool shell guard. Its harness entries reference a credential environment
+variable; never paste the key into a configuration file. Engraphis keeps its own provider key in
+`~/.engraphis/config.env`.
+
 ## Host-owned conversation history
 
 An SDK or HTTP host that already owns the conversation transcript can call
