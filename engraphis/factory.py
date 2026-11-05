@@ -44,6 +44,11 @@ def _is_prod_env() -> bool:
     return os.environ.get("ENGRAPHIS_ENV", "").strip().lower() == "prod"
 
 
+def effective_require_exact_backends(configured: bool = False) -> bool:
+    """Return the exact-backend policy shared by the factory and the install doctor."""
+    return bool(configured) or _is_prod_env()
+
+
 def _backend_identity(backend: Any, *, configured: str = "") -> dict:
     """Return the configured vs resolved identity for one constructed backend."""
     resolved = type(backend).__name__ if backend is not None else "none"
@@ -149,8 +154,7 @@ def create_memory_engine(
             for writable files; ``balanced`` explicitly requests WAL + NORMAL.
             In-memory databases are not persistent and read-only opens are unchanged.
     """
-    if _is_prod_env():
-        require_exact_backends = True
+    require_exact_backends = effective_require_exact_backends(require_exact_backends)
     # In exact mode "auto" must not silently degrade to the portable reference:
     # require the native backend so a missing extension fails closed instead.
     effective_vector_backend = (
