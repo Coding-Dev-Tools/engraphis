@@ -2,7 +2,7 @@
 
 **Target:** #1 Product of the Day | Flawless Execution | Maximum Developer Traction  
 **Product:** Engraphis (Apache-2.0 Local-First Memory Engine for AI Coding Agents)  
-**Launch Time:** 12:01 AM PT / 3:01 AM ET / 7:01 AM UTC  
+**Launch Time:** 12:01 AM PT / 3:01 AM ET / 8:01 AM UTC  
 
 ---
 
@@ -11,12 +11,14 @@
 ### Timezone Synchronization Reference Table
 | Phase | Pacific Time (PT) | Eastern Time (ET) | UTC | Central European (CET) | India (IST) | Strategic Objective |
 |---|---|---|---|---|---|---|
-| **Phase 1** | T-120m to T-0m (10:00 PM - 12:00 AM) | 1:00 AM - 3:00 AM | 05:00 - 07:00 | 06:00 - 08:00 | 10:30 - 12:30 | Pre-launch verification, smoke tests, staging |
-| **Phase 2** | T-0m to T+60m (12:01 AM - 1:00 AM) | 3:01 AM - 4:00 AM | 07:01 - 08:00 | 08:01 - 09:00 | 12:31 - 13:30 | **Golden Hour Sprint**: Publish, pin comment, VIP blast |
-| **Phase 3** | T+1h to T+4h (1:00 AM - 4:00 AM) | 4:00 AM - 7:00 AM | 08:00 - 11:00 | 09:00 - 12:00 | 13:30 - 16:30 | Asia & Europe wake-up wave, international traction |
-| **Phase 4** | T+4h to T+8h (4:00 AM - 8:00 AM) | 7:00 AM - 11:00 AM | 11:00 - 15:00 | 12:00 - 16:00 | 16:30 - 20:30 | **US East Coast Surge**: Show HN, X Thread, peak volume |
-| **Phase 5** | T+8h to T+14h (8:00 AM - 2:00 PM) | 11:00 AM - 5:00 PM | 15:00 - 21:00 | 16:00 - 22:00 | 20:30 - 02:30 | **US West Coast Surge**: Silicon Valley wave, secondary peak |
-| **Phase 6** | T+14h to T+24h (2:00 PM - 12:00 AM) | 5:00 PM - 3:00 AM | 21:00 - 07:00 | 22:00 - 08:00 | 02:30 - 12:30 | Evening consolidation, closing sprint, #1 badge lock |
+| **Phase 1** | T-120m to T-0m (10:00 PM - 12:00 AM) | 1:00 AM - 3:00 AM | 06:00 - 08:00 | 07:00 - 09:00 | 11:30 - 13:30 | Pre-launch verification, smoke tests, staging |
+| **Phase 2** | T-0m to T+60m (12:01 AM - 1:00 AM) | 3:01 AM - 4:00 AM | 08:01 - 09:00 | 09:01 - 10:00 | 13:31 - 14:30 | **Golden Hour Sprint**: Publish, pin comment, VIP blast |
+| **Phase 3** | T+1h to T+4h (1:00 AM - 4:00 AM) | 4:00 AM - 7:00 AM | 09:00 - 12:00 | 10:00 - 13:00 | 14:30 - 17:30 | Asia & Europe wake-up wave, international traction |
+| **Phase 4** | T+4h to T+8h (4:00 AM - 8:00 AM) | 7:00 AM - 11:00 AM | 12:00 - 16:00 | 13:00 - 17:00 | 17:30 - 21:30 | **US East Coast Surge**: Show HN, X Thread, peak volume |
+| **Phase 5** | T+8h to T+14h (8:00 AM - 2:00 PM) | 11:00 AM - 5:00 PM | 16:00 - 22:00 | 17:00 - 23:00 | 21:30 - 03:30 | **US West Coast Surge**: Silicon Valley wave, secondary peak |
+| **Phase 6** | T+14h to T+24h (2:00 PM - 12:00 AM) | 5:00 PM - 3:00 AM | 22:00 - 08:00 | 23:00 - 09:00 | 03:30 - 13:30 | Evening consolidation, closing sprint, #1 badge lock |
+
+Times use PST/EST (UTC-8/UTC-5), valid after DST ends on 2026-11-01. If the launch is scheduled while DST is in effect, recompute the UTC/CET/IST columns.
 
 ---
 
@@ -81,7 +83,7 @@ flowchart TD
   - *"We are officially live on Product Hunt! Would love your honest perspective and feedback in the discussion: [URL]"*
 - **12:10 AM PT - 1:00 AM PT  -  Real-time Comment Sentry:**
   - Target: **100% response rate within 5 minutes** of any community comment.
-  - Upvote every authentic comment to stimulate active dialogue threads.
+  - Engage with every authentic comment to stimulate active dialogue threads.
   - Track initial leaderboard placement on PH front page.
 
 ---
@@ -93,7 +95,7 @@ flowchart TD
 - **2:30 AM PT:**
   - Monitor GitHub stars and inbound issues. Check `engraphis-init` onboarding feedback.
 - **3:30 AM PT:**
-  - Check leaderboard pacing. Benchmark upvote and comment velocity against #2 and #3 products of the day.
+  - Check leaderboard pacing. Benchmark engagement and comment velocity against #2 and #3 products of the day.
 
 ---
 
@@ -127,7 +129,7 @@ flowchart TD
   - Post LinkedIn thought leadership update: Focus on engineering economics, agent context overhead, and developer tooling trends.
 - **10:00 AM PT  -  Mid-Day Competition Audit:**
   - Inspect Product Hunt Leaderboard standings:
-    - Measure delta in upvotes and comment counts against #1, #2, #3 products.
+    - Measure delta in engagement and comment counts against #1, #2, #3 products.
     - Identify traffic sources and double down on highest converting channels.
 - **11:30 AM PT:**
   - Publish Milestone Update #1 in PH comments and on X:  
@@ -140,7 +142,7 @@ flowchart TD
 #### Phase 6: T+14h to T+24h  -  Closing Sprint & #1 Badge Lock (2:00 PM - 12:00 AM PT)
 - **3:00 PM PT (6:00 PM ET):**
   - Second-wind social push: Recap key insights, share screenshots of the localhost dashboard, invite remaining evening developers to check out the repo.
-- **6:00 PM PT (9:00 PM ET / 10:00 AM next day Tokyo):**
+- **6:00 PM PT (9:00 PM ET / 11:00 AM next day Tokyo):**
   - Engage with APAC day 2 audience.
 - **9:00 PM PT (T-3h to close):**
   - Pacing check: If in #1 spot, defend lead by maintaining 100% comment responsiveness. If trailing by <50 votes, execute targeted 1-on-1 direct outreach to uncontacted network contacts.
@@ -174,7 +176,7 @@ Here is what makes it fundamentally different under the hood:
 • **Zero Cloud Infrastructure Required:** It runs entirely on your local machine using SQLite (WAL mode) and local embeddings (NumPy / Sentence-Transformers). No Docker, no cloud account, no credit card.
 
 You can spin it up right now via pip or run our local web dashboard at `localhost:8700`:
-$ pip install engraphis
+$ pip install "engraphis[all]"
 $ engraphis-init
 $ engraphis-dashboard
 
@@ -215,13 +217,13 @@ Most existing memory frameworks (including basic vector wrappers) treat memory a
 5. **100% Local-First & Zero Infra:** No mandatory Docker containers, no remote servers, no hosted API dependencies.
 ```
 
-#### Q2: "Why SQLite instead of Qdrant, Pinecone, or pgvector?"
+#### Q2: "Why SQLite instead of a hosted vector database or a Postgres vector extension?"
 ```markdown
 This was one of our most deliberate architectural decisions. Here is why:
 
-1. **Developer Ergonomics & Zero Friction:** A coding agent runs on your local workstation or laptop. Requiring developers to install Docker, provision a pgvector container, or register for an external vector SaaS key before their agent can remember anything kills adoption. SQLite is embedded, zero-config, and runs everywhere Python runs.
+1. **Developer Ergonomics & Zero Friction:** A coding agent runs on your local workstation or laptop. Requiring developers to install Docker, provision a vector-database container, or register for an external vector SaaS key before their agent can remember anything kills adoption. SQLite is embedded, zero-config, and runs everywhere Python runs.
 2. **ACID Relational Integrity for Bi-Temporal Graphs:** Memory is not just vectors; it is a relational graph of scopes, sessions, bi-temporal validity intervals, entity links, and audit logs (`core/schema.py`, Schema v19). SQLite with WAL (Write-Ahead Logging) gives us immediate ACID durability, transactional consistency, and blazing-fast local joins.
-3. **Embedded Vector Performance via `sqlite-vec` / NumPy:** For developer workstation memory (typically 1,000 to 100,000 memories per workspace), in-process vector search via `sqlite-vec` or our deterministic NumPy vector index executes in sub-millisecond latencies without the socket overhead or serialization penalties of separate client-server databases.
+3. **Embedded Vector Performance via `sqlite-vec` / NumPy:** For developer workstation memory (typically 1,000 to 100,000 memories per workspace), in-process vector search via `sqlite-vec` or our deterministic NumPy vector index executes in in-process latencies without the socket overhead or serialization penalties of separate client-server databases.
 4. **Portability & Disaster Recovery:** Your entire agent memory lives in a single, clean `.db` file (e.g., `engraphis.db`). You can inspect it with standard SQLite tools, commit snapshots, back it up to Dropbox, or move it between machines without database migration headaches.
 ```
 

@@ -53,7 +53,7 @@ This document provides the complete media production specification for the **Eng
 | Time | Audio / Voiceover (Spoken Narration) | Visual Screen Cues | On-Screen Text & SFX |
 | :--- | :--- | :--- | :--- |
 | **0:55 - 1:04** | *"Connecting takes thirty seconds via the Model Context Protocol. Watch Claude query Engraphis through standard MCP tools."* | Quick switch to Claude Code CLI terminal. Developer asks: *"Why do we use PASSIVE mode in SQLite WAL checkpoints?"* Claude instantly calls `engraphis_recall_context`. | **Terminal Input:** `> Claude recalls from Engraphis MCP`<br>**Tool Call:** `engraphis_recall_context(query="WAL PASSIVE")`<br>**SFX:** Fast rhythmic mechanical typing sound. |
-| **1:04 - 1:10** | *"Instead of re-reading fifty files, Claude gets the exact verified fact with provenance citations [1], cutting retrieved tokens by 71.1%."* | Claude answers in 2 seconds with `[1]` citation pointing to the exact decision record. A dynamic comparison bar chart slides in showing 740 tokens collapsing to 214 tokens. | **Highlight Badge:** `-71.1% Retrieved Tokens`<br>**Citation Pill:** `Grounded Citation [1] &bull; 100% Precision`<br>**SFX:** Cash register / success tone. |
+| **1:04 - 1:10** | *"Instead of re-reading fifty files, Claude gets the exact verified fact with provenance citations [1], cutting retrieved tokens by 71.1%."* | Claude answers in 2 seconds with `[1]` citation pointing to the exact decision record. A dynamic comparison bar chart slides in showing 740 tokens collapsing to 214 tokens. | **Highlight Badge:** `-71.1% Retrieved Tokens`<br>**Citation Pill:** `Grounded Citation [1] &bull; Recall@5/Hit@5 1.000`<br>**SFX:** Cash register / success tone. |
 | **1:10 - 1:15** | *"And if evidence doesn't exist? Engraphis deterministically abstains instead of guessing."* | Live demo of hallucination bait query: *"What's our AWS egress IP?"* &rarr; Result: `ABSTAIN [Support < 0.25]`. Zero hallucination. | **Callout:** `Anti-Hallucination Abstain Gate`<br>**SFX:** Solid lock snap sound. |
 
 ---
@@ -63,7 +63,7 @@ This document provides the complete media production specification for the **Eng
 
 | Time | Audio / Voiceover (Spoken Narration) | Visual Screen Cues | On-Screen Text & SFX |
 | :--- | :--- | :--- | :--- |
-| **1:15 - 1:20** | *"Zero cloud lock-in. Zero telemetry. One pip install. Give your AI coding agent persistent memory today."* | Terminal zooms into focus with `pip install engraphis` followed by `engraphis-init`. The GitHub repo page appears with the Star button highlighted and clicked. | **Final Screen:**<br>`pip install engraphis`<br>`github.com/Coding-Dev-Tools/engraphis`<br>`Product Hunt Launch &bull; Upvote & Star`<br>**SFX:** Warm resonant outro chord. |
+| **1:15 - 1:20** | *"Zero cloud lock-in. Zero telemetry. One pip install. Give your AI coding agent persistent memory today."* | Terminal zooms into focus with `pip install "engraphis[all]"` followed by `engraphis-init`. The GitHub repo page appears with the Star button highlighted and clicked. | **Final Screen:**<br>`pip install "engraphis[all]"`<br>`github.com/Coding-Dev-Tools/engraphis`<br>`Product Hunt Launch • Star on GitHub`<br>**SFX:** Warm resonant outro chord. |
 
 ---
 
@@ -82,7 +82,7 @@ All slides adhere to the Engraphis design language: **Deep Slate dark theme (`#0
     - Top badge: `&bull; LOCAL-FIRST AI AGENT MEMORY` (Emerald `#10b981` pill).
     - Headline (42pt bold, `#f8fafc`): *"Persistent, Bi-Temporal Memory for AI Coding Agents."*
     - Subheadline (18pt, `#94a3b8`): *"Stop feeding entire codebases to Claude and Cursor. 4-arm hybrid recall on local SQLite with 71.1% fewer tokens and zero hallucination."*
-    - Quick CTA Pills: `pip install engraphis` | `100% Local SQLite` | `MCP Native`.
+    - Quick CTA Pills: `pip install "engraphis[all]"` | `100% Local SQLite` | `MCP Native`.
   - **Right 45%:** 3D-angled glassmorphic card showing the Engraphis interactive knowledge graph with illuminated emerald and cyan nodes linking `AST: engine.py` &rarr; `DECISION: WAL PASSIVE` &rarr; `PROVENANCE: commit a7f9d`.
 
 ---
@@ -125,7 +125,7 @@ All slides adhere to the Engraphis design language: **Deep Slate dark theme (`#0
     - `1.000` Recall@5 and Hit@5 retrieval accuracy across offline test suites.
     - `100%` Grounded Abstention (6/6 off-topic queries rejected, 0 hallucinations).
     - `-54.7%` Compact JSON payload compression (24,590 &rarr; 11,138 tokens).
-  - **Left Visual:** Direct side-by-side bar comparison: Brute-force context dump (740 tokens, \$145/dev/month) vs Engraphis Grounded Recall (214 tokens, \$38/dev/month).
+  - **Left Visual:** Direct side-by-side bar comparison: Brute-force context dump (740 tokens) vs Engraphis Grounded Recall (214 tokens).
   - **Right Visual:** Dual-path engine test card: Grounded answer with citation `[1]` on answerable query vs strict refusal `ABSTAIN [Support < 0.25]` on out-of-scope query.
 
 ---
@@ -135,18 +135,19 @@ All slides adhere to the Engraphis design language: **Deep Slate dark theme (`#0
 - **Dimensions:** 1270 &times; 760 px.
 - **Visual Composition:**
   - **Step 1 Card (Install):**
-    - Code block: `pip install engraphis`
+    - Code block: `pip install "engraphis[all]"`
     - Subtext: *"No Docker required. Pure Python + SQLite. Runs anywhere."*
   - **Step 2 Card (Initialize):**
     - Code block: `engraphis-init`
-    - Subtext: *"Creates local SQLite database and launches dashboard at localhost:8700."*
+    - Subtext: *"Creates the local SQLite database; run engraphis-dashboard to open it at localhost:8700."*
   - **Step 3 Card (Connect to your agent):**
     - Ready-to-copy JSON configuration for Claude Desktop / Claude Code / Cursor:
       ```json
-      "mcpServers": {
-        "engraphis": {
-          "command": "python",
-          "args": ["-m", "engraphis.mcp_server"]
+      {
+        "mcpServers": {
+          "engraphis": {
+            "command": "engraphis-mcp"
+          }
         }
       }
       ```
@@ -157,8 +158,8 @@ All slides adhere to the Engraphis design language: **Deep Slate dark theme (`#0
 ## 3. Standalone SVG Visual Assets
 
 The two standalone production-ready SVG graphics are located in the repository:
-1. `docs/launch/graphic-a-architecture.svg` (and mirror at `docs/images/product-hunt-architecture.svg`)
-2. `docs/launch/graphic-b-token-benchmark.svg` (and mirror at `docs/images/product-hunt-token-benchmark.svg`)
+1. `docs/launch/graphic-a-architecture.svg` (mirror at `docs/images/product-hunt-architecture.svg`; 1270x760 PNG at `docs/launch/graphic-a-architecture.png`)
+2. `docs/launch/graphic-b-token-benchmark.svg` (mirror at `docs/images/product-hunt-token-benchmark.svg`; 1270x760 PNG at `docs/launch/graphic-b-token-benchmark.png`)
 
 Both SVGs feature:
 - Clean responsive `viewBox="0 0 1270 760"`.

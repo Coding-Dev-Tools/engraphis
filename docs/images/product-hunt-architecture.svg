@@ -89,7 +89,7 @@
     <!-- Title & Brand -->
     <text x="52" y="24" class="font-sans text-title" font-size="24" fill="#f8fafc">engraphis</text>
     <text x="180" y="24" class="font-mono text-semibold" font-size="12" fill="#10b981" letter-spacing="0.1em">LOCAL-FIRST AI AGENT MEMORY</text>
-    <text x="52" y="42" class="font-sans" font-size="13" fill="#94a3b8">Bi-Temporal SQLite Engine &bull; 4-Arm Hybrid Recall &bull; 71.1% Token Reduction</text>
+    <text x="52" y="42" class="font-sans" font-size="13" fill="#94a3b8">Bi-Temporal SQLite Engine • 4-Arm Hybrid Recall • 71.1% Token Reduction</text>
 
     <!-- Header Badges -->
     <g transform="translate(730, 4)">
@@ -171,7 +171,7 @@
     
     <!-- Agent Query Bar -->
     <rect x="0" y="28" width="1190" height="42" rx="8" fill="#131b2a" stroke="#334155" />
-    <text x="18" y="54" class="font-mono text-bold" font-size="12" fill="#10b981">QUERY INPUT &rarr;</text>
+    <text x="18" y="54" class="font-mono text-bold" font-size="12" fill="#10b981">QUERY INPUT →</text>
     <text x="125" y="54" class="font-mono" font-size="12" fill="#e2e8f0">"Why do we use PASSIVE mode in SQLite WAL checkpoints during concurrent agent writes?"</text>
     
     <rect x="940" y="34" width="235" height="30" rx="5" fill="#1e293b" stroke="#475569" />
@@ -192,17 +192,17 @@
       <rect x="0" y="0" width="282" height="195" rx="10" fill="url(#cardGrad)" stroke="#10b981" stroke-width="1.5" filter="url(#cardShadow)" />
       <!-- Top Pill -->
       <rect x="16" y="14" width="90" height="22" rx="4" fill="#064e3b" />
-      <text x="24" y="29" class="font-mono text-bold" font-size="10" fill="#34d399">ARM 1 &bull; VECTOR</text>
+      <text x="24" y="29" class="font-mono text-bold" font-size="10" fill="#34d399">ARM 1 • VECTOR</text>
 
       <text x="16" y="58" class="font-sans text-bold" font-size="16" fill="#f8fafc">Semantic Cosine</text>
       <text x="16" y="78" class="font-sans" font-size="12" fill="#94a3b8">Dense embedding distance via offline hashing or local SentenceTransformers.</text>
 
       <!-- Details Box -->
       <rect x="14" y="96" width="254" height="82" rx="6" fill="#0c1422" stroke="#1e293b" />
-      <text x="24" y="116" class="font-mono" font-size="10.5" fill="#64748b">&bull; Engine: <tspan fill="#e2e8f0">sqlite-vec / NumPy</tspan></text>
-      <text x="24" y="134" class="font-mono" font-size="10.5" fill="#64748b">&bull; Model: <tspan fill="#e2e8f0">all-MiniLM-L6-v2</tspan></text>
-      <text x="24" y="152" class="font-mono" font-size="10.5" fill="#64748b">&bull; Metric: <tspan fill="#34d399">L2 Normalized Cosine</tspan></text>
-      <text x="24" y="170" class="font-mono" font-size="10.5" fill="#64748b">&bull; Latency: <tspan fill="#34d399">&lt; 12ms</tspan></text>
+      <text x="24" y="116" class="font-mono" font-size="10.5" fill="#64748b">• Engine: <tspan fill="#e2e8f0">sqlite-vec / NumPy</tspan></text>
+      <text x="24" y="134" class="font-mono" font-size="10.5" fill="#64748b">• Model: <tspan fill="#e2e8f0">all-MiniLM-L6-v2</tspan></text>
+      <text x="24" y="152" class="font-mono" font-size="10.5" fill="#64748b">• Metric: <tspan fill="#34d399">L2 Normalized Cosine</tspan></text>
+      <text x="24" y="170" class="font-mono" font-size="10.5" fill="#64748b">• Latency: <tspan fill="#34d399">&lt; 12ms</tspan></text>
     </g>
 
     <!-- ARM 2: LEXICAL (FTS5 / BM25) -->
@@ -210,17 +210,17 @@
       <rect x="0" y="0" width="282" height="195" rx="10" fill="url(#cardGrad)" stroke="#06b6d4" stroke-width="1.5" filter="url(#cardShadow)" />
       <!-- Top Pill -->
       <rect x="16" y="14" width="95" height="22" rx="4" fill="#164e63" />
-      <text x="24" y="29" class="font-mono text-bold" font-size="10" fill="#38bdf8">ARM 2 &bull; LEXICAL</text>
+      <text x="24" y="29" class="font-mono text-bold" font-size="10" fill="#38bdf8">ARM 2 • LEXICAL</text>
 
       <text x="16" y="58" class="font-sans text-bold" font-size="16" fill="#f8fafc">Exact BM25 / FTS5</text>
       <text x="16" y="78" class="font-sans" font-size="12" fill="#94a3b8">Native SQLite full-text search with automatic LIKE fallback on slim builds.</text>
 
       <!-- Details Box -->
       <rect x="14" y="96" width="254" height="82" rx="6" fill="#0c1422" stroke="#1e293b" />
-      <text x="24" y="116" class="font-mono" font-size="10.5" fill="#64748b">&bull; Tokenizer: <tspan fill="#e2e8f0">Porter Stem / Unicode</tspan></text>
-      <text x="24" y="134" class="font-mono" font-size="10.5" fill="#64748b">&bull; Match: <tspan fill="#e2e8f0">BM25 Rank Formula</tspan></text>
-      <text x="24" y="152" class="font-mono" font-size="10.5" fill="#64748b">&bull; Target: <tspan fill="#38bdf8">Identifiers &amp; Error Logs</tspan></text>
-      <text x="24" y="170" class="font-mono" font-size="10.5" fill="#64748b">&bull; Fallback: <tspan fill="#38bdf8">Deterministic LIKE</tspan></text>
+      <text x="24" y="116" class="font-mono" font-size="10.5" fill="#64748b">• Tokenizer: <tspan fill="#e2e8f0">Porter Stem / Unicode</tspan></text>
+      <text x="24" y="134" class="font-mono" font-size="10.5" fill="#64748b">• Match: <tspan fill="#e2e8f0">BM25 Rank Formula</tspan></text>
+      <text x="24" y="152" class="font-mono" font-size="10.5" fill="#64748b">• Target: <tspan fill="#38bdf8">Identifiers &amp; Error Logs</tspan></text>
+      <text x="24" y="170" class="font-mono" font-size="10.5" fill="#64748b">• Fallback: <tspan fill="#38bdf8">Deterministic LIKE</tspan></text>
     </g>
 
     <!-- ARM 3: GRAPH (Personalized PageRank) -->
@@ -228,17 +228,17 @@
       <rect x="0" y="0" width="282" height="195" rx="10" fill="url(#cardGrad)" stroke="#8b5cf6" stroke-width="1.5" filter="url(#cardShadow)" />
       <!-- Top Pill -->
       <rect x="16" y="14" width="85" height="22" rx="4" fill="#3b0764" />
-      <text x="24" y="29" class="font-mono text-bold" font-size="10" fill="#c084fc">ARM 3 &bull; GRAPH</text>
+      <text x="24" y="29" class="font-mono text-bold" font-size="10" fill="#c084fc">ARM 3 • GRAPH</text>
 
       <text x="16" y="58" class="font-sans text-bold" font-size="16" fill="#f8fafc">Bi-Temporal PageRank</text>
       <text x="16" y="78" class="font-sans" font-size="12" fill="#94a3b8">Personalized PageRank over entity-link topology with validity window gating.</text>
 
       <!-- Details Box -->
       <rect x="14" y="96" width="254" height="82" rx="6" fill="#0c1422" stroke="#1e293b" />
-      <text x="24" y="116" class="font-mono" font-size="10.5" fill="#64748b">&bull; Algorithm: <tspan fill="#e2e8f0">Personalized PageRank</tspan></text>
-      <text x="24" y="134" class="font-mono" font-size="10.5" fill="#64748b">&bull; Nodes: <tspan fill="#e2e8f0">Entities + Decisions</tspan></text>
-      <text x="24" y="152" class="font-mono" font-size="10.5" fill="#64748b">&bull; Temporal: <tspan fill="#c084fc">valid_from &rarr; valid_to</tspan></text>
-      <text x="24" y="170" class="font-mono" font-size="10.5" fill="#64748b">&bull; Damping: <tspan fill="#c084fc">&alpha; = 0.85 (1-hop / multi)</tspan></text>
+      <text x="24" y="116" class="font-mono" font-size="10.5" fill="#64748b">• Algorithm: <tspan fill="#e2e8f0">Personalized PageRank</tspan></text>
+      <text x="24" y="134" class="font-mono" font-size="10.5" fill="#64748b">• Nodes: <tspan fill="#e2e8f0">Entities + Decisions</tspan></text>
+      <text x="24" y="152" class="font-mono" font-size="10.5" fill="#64748b">• Temporal: <tspan fill="#c084fc">valid_from → valid_to</tspan></text>
+      <text x="24" y="170" class="font-mono" font-size="10.5" fill="#64748b">• Damping: <tspan fill="#c084fc">α = 0.85 (1-hop / multi)</tspan></text>
     </g>
 
     <!-- ARM 4: CODE (AST & Call Graph) -->
@@ -246,17 +246,17 @@
       <rect x="0" y="0" width="282" height="195" rx="10" fill="url(#cardGrad)" stroke="#f59e0b" stroke-width="1.5" filter="url(#cardShadow)" />
       <!-- Top Pill -->
       <rect x="16" y="14" width="80" height="22" rx="4" fill="#451a03" />
-      <text x="24" y="29" class="font-mono text-bold" font-size="10" fill="#fbbf24">ARM 4 &bull; CODE</text>
+      <text x="24" y="29" class="font-mono text-bold" font-size="10" fill="#fbbf24">ARM 4 • CODE</text>
 
       <text x="16" y="58" class="font-sans text-bold" font-size="16" fill="#f8fafc">AST Symbol Graph</text>
       <text x="16" y="78" class="font-sans" font-size="12" fill="#94a3b8">Deterministic symbol tables, call graphs, and file bridges bound to memories.</text>
 
       <!-- Details Box -->
       <rect x="14" y="96" width="254" height="82" rx="6" fill="#0c1422" stroke="#1e293b" />
-      <text x="24" y="116" class="font-mono" font-size="10.5" fill="#64748b">&bull; Index: <tspan fill="#e2e8f0">AST Symbol Table</tspan></text>
-      <text x="24" y="134" class="font-mono" font-size="10.5" fill="#64748b">&bull; Edges: <tspan fill="#e2e8f0">Callers, Callees, Files</tspan></text>
-      <text x="24" y="152" class="font-mono" font-size="10.5" fill="#64748b">&bull; Memory Bridge: <tspan fill="#fbbf24">Code &harr; Rationale</tspan></text>
-      <text x="24" y="170" class="font-mono" font-size="10.5" fill="#64748b">&bull; Resolution: <tspan fill="#fbbf24">Line &amp; Commit Bound</tspan></text>
+      <text x="24" y="116" class="font-mono" font-size="10.5" fill="#64748b">• Index: <tspan fill="#e2e8f0">AST Symbol Table</tspan></text>
+      <text x="24" y="134" class="font-mono" font-size="10.5" fill="#64748b">• Edges: <tspan fill="#e2e8f0">Callers, Callees, Files</tspan></text>
+      <text x="24" y="152" class="font-mono" font-size="10.5" fill="#64748b">• Memory Bridge: <tspan fill="#fbbf24">Code ↔ Rationale</tspan></text>
+      <text x="24" y="170" class="font-mono" font-size="10.5" fill="#64748b">• Resolution: <tspan fill="#fbbf24">Line &amp; Commit Bound</tspan></text>
     </g>
 
   </g>
@@ -282,11 +282,11 @@
       
       <!-- Scoring Formula in Code Box -->
       <rect x="14" y="64" width="532" height="34" rx="4" fill="#131c2d" stroke="#334155" />
-      <text x="24" y="86" class="font-mono text-semibold" font-size="11.5" fill="#34d399">score = w_r&middot;R(t) + w_s&middot;sem + w_l&middot;lex + w_g&middot;graph + w_i&middot;imp &minus; w_x&middot;stale</text>
+      <text x="24" y="86" class="font-mono text-semibold" font-size="11.5" fill="#34d399">score = w_r·R(t) + w_s·sem + w_l·lex + w_g·graph + w_i·imp − w_x·stale</text>
 
       <!-- Sub-bullets -->
-      <text x="14" y="120" class="font-sans" font-size="11.5" fill="#94a3b8">&bull; <tspan fill="#e2e8f0" font-weight="600">Ebbinghaus Retention:</tspan> R(t) = exp(-&Delta;t / S) &bull; Spaced Reinforcement Boosts</text>
-      <text x="14" y="138" class="font-sans" font-size="11.5" fill="#94a3b8">&bull; <tspan fill="#e2e8f0" font-weight="600">Bi-Temporal Filter:</tspan> Query as_of window hides superseded invalid facts</text>
+      <text x="14" y="120" class="font-sans" font-size="11.5" fill="#94a3b8">• <tspan fill="#e2e8f0" font-weight="600">Ebbinghaus Retention:</tspan> R(t) = exp(-Δt / S) • Spaced Reinforcement Boosts</text>
+      <text x="14" y="138" class="font-sans" font-size="11.5" fill="#94a3b8">• <tspan fill="#e2e8f0" font-weight="600">Bi-Temporal Filter:</tspan> Query as_of window hides superseded invalid facts</text>
     </g>
 
     <!-- Right Subcard: Grounded Output & Abstain Gate -->
@@ -300,8 +300,8 @@
 
       <!-- Terminal Output Mockup -->
       <rect x="14" y="64" width="537" height="42" rx="4" fill="#071a17" stroke="#059669" />
-      <text x="24" y="82" class="font-mono" font-size="11" fill="#34d399">&check; GROUNDED [1]: <tspan fill="#e2e8f0">WAL PASSIVE mode prevents writer thread starvation.</tspan></text>
-      <text x="24" y="97" class="font-mono" font-size="10" fill="#6ee7b7">  Provenance: mem_01hq7w8... &bull; valid_from: 2026-03-12 &bull; Support: 0.942</text>
+      <text x="24" y="82" class="font-mono" font-size="11" fill="#34d399">✓ GROUNDED [1]: <tspan fill="#e2e8f0">WAL PASSIVE mode prevents writer thread starvation.</tspan></text>
+      <text x="24" y="97" class="font-mono" font-size="10" fill="#6ee7b7">  Provenance: mem_01hq7w8... • valid_from: 2026-03-12 • Support: 0.942</text>
 
       <!-- Bottom Benefit Bar -->
       <g transform="translate(14, 116)">
@@ -309,13 +309,13 @@
         <text x="10" y="16" class="font-mono text-bold" font-size="10.5" fill="#10b981">71.1% FEWER RETRIEVED TOKENS</text>
 
         <rect x="272" y="0" width="265" height="24" rx="4" fill="#1e293b" />
-        <text x="282" y="16" class="font-mono text-bold" font-size="10.5" fill="#f43f5e">ZERO HALLUCINATION &bull; ABSTAIN GATE</text>
+        <text x="282" y="16" class="font-mono text-bold" font-size="10.5" fill="#f43f5e">ZERO HALLUCINATION • ABSTAIN GATE</text>
       </g>
     </g>
 
   </g>
 
   <!-- Canvas Footer -->
-  <text x="42" y="742" class="font-mono" font-size="10.5" fill="#475569">Engraphis Open Core Engine &bull; Apache-2.0 / MIT &bull; pip install engraphis &bull; github.com/Coding-Dev-Tools/engraphis</text>
-  <text x="1228" y="742" class="font-mono" font-size="10.5" fill="#475569" text-anchor="end">Product Hunt Launch Edition &bull; 1270&times;760</text>
+  <text x="42" y="742" class="font-mono" font-size="10.5" fill="#475569">Engraphis Open Core Engine • Apache-2.0 • pip install "engraphis[all]" • github.com/Coding-Dev-Tools/engraphis</text>
+  <text x="1228" y="742" class="font-mono" font-size="10.5" fill="#475569" text-anchor="end">Product Hunt Launch Edition • 1270×760</text>
 </svg>

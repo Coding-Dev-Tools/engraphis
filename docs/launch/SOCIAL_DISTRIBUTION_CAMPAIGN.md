@@ -146,7 +146,7 @@ If you believe AI agents need inspectable, local-first memory instead of ephemer
 Product Hunt: https://www.producthunt.com/posts/engraphis  
 GitHub: https://github.com/Coding-Dev-Tools/engraphis  
 PyPI: https://pypi.org/project/engraphis/  
-Technical writeup: https://dev.to/codingdevtools/building-a-bi-temporal-memory-engine-for-ai-coding-agents-3b1a  
+Technical writeup: publish the dev.to draft before staging this thread.  
 
 Let us know what you think in the comments!
 

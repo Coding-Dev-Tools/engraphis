@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import subprocess
+import xml.etree.ElementTree as ET
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -12,6 +13,20 @@ FORBIDDEN = (
     ROOT / "docs" / "COMMERCIAL_AUDIT.md",
     ROOT / "docs" / "COMPETITIVE_ANALYSIS.md",
 )
+
+
+def test_launch_kit_is_well_formed_and_names_no_competitors():
+    launch = ROOT / "docs" / "launch"
+    content = "\n".join(
+        path.read_text(encoding="utf-8").casefold() for path in launch.glob("*.md")
+    )
+    for name in (
+        "qdrant", "pinecone", "pgvector", "chroma", "weaviate", "milvus",
+        "mem0", "zep", "letta", "obsidian",
+    ):
+        assert name not in content, name
+    for svg in [*launch.glob("*.svg"), *ROOT.glob("docs/images/product-hunt-*.svg")]:
+        ET.fromstring(svg.read_text(encoding="utf-8"))
 
 
 def test_private_research_files_are_absent_and_ignored():

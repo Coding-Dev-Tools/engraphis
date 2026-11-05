@@ -70,9 +70,9 @@ engraphis-dashboard
 * **Gallery Slides (1270x760 px):**
   1. Hero Card: `docs/launch/graphic-a-architecture.svg`
   2. Benchmark Card: `docs/launch/graphic-b-token-benchmark.svg`
-  3. Knowledge Graph UI: `docs/images/knowledge-graph.png`
-  4. Context Reduction Flow: `docs/images/context-efficiency.png`
-  5. Benefit Flow: `docs/images/engraphis-benefit-flow.png`
+  3. Knowledge Graph UI: `docs/launch/gallery-knowledge-graph.png` (1270x760)
+  4. Context Reduction Flow: `docs/launch/gallery-context-efficiency.png` (1270x760)
+  5. Benefit Flow: `docs/launch/gallery-benefit-flow.png` (1270x760)
 
 ---
 
