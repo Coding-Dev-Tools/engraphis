@@ -246,9 +246,7 @@ def read_response_chunks(response, deadline: float, *, max_bytes: int,
             raise TimeoutError("HTTP request deadline exceeded")
         remaining_time(deadline)
         if not chunk:
-            # An empty read after the watchdog fired is a deadline interruption
-            # (the shutdown can surface as EOF instead of a receive error).
-            if interrupted is not None and interrupted.is_set():
-                raise TimeoutError("HTTP request deadline exceeded")
+            # The watchdog check above already raised for an interrupted empty
+            # read, so only a natural EOF reaches this break.
             break
     return bytes(data)
