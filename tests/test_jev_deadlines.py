@@ -53,6 +53,64 @@ def test_watchdog_eof_cannot_complete_a_normal_body_before_clock_deadline(monkey
         http_deadline.read_response(response, time.monotonic() + 60, max_bytes=4096)
 
 
+@pytest.mark.parametrize("preserve_complete", [False, True])
+@pytest.mark.parametrize("failure", ["abort", "reset", "incomplete-read"])
+def test_read_response_chunks_converts_a_watchdog_interrupt_on_its_own(preserve_complete, failure):
+    """A blocked chunk read the watchdog interrupts is a deadline, not a transport fault.
+
+    ``read_response`` maps any exception to ``TimeoutError`` once the watchdog fires, so
+    its behavior hides whether the chunk reader itself distinguishes a shutdown-induced
+    abort from a genuine socket failure. This pins the direct contract: with the watchdog
+    event set, ``read_response_chunks`` reports the deadline instead of leaking the raw
+    ``ConnectionAbortedError``, ``ConnectionResetError`` or ``IncompleteRead``.
+    """
+    import http.client
+    import threading
+    import time
+    from engraphis.http_deadline import read_response_chunks
+
+    interrupted = threading.Event()
+    interrupted.set()
+
+    class Response:
+        fp = None
+
+        def read1(self, size):
+            if failure == "abort":
+                raise ConnectionAbortedError("synthetic interrupted socket")
+            if failure == "reset":
+                raise ConnectionResetError("synthetic interrupted socket")
+            raise http.client.IncompleteRead(b"", 1)
+
+    with pytest.raises(TimeoutError, match="HTTP request deadline exceeded"):
+        read_response_chunks(
+            Response(), time.monotonic() + 60, max_bytes=4096,
+            preserve_complete=preserve_complete, interrupted=interrupted,
+        )
+
+
+@pytest.mark.parametrize("preserve_complete", [False, True])
+def test_read_response_chunks_keeps_real_transport_failures(preserve_complete):
+    """Without a watchdog interrupt the chunk reader must not relabel transport failure."""
+    import threading
+    import time
+    from engraphis.http_deadline import read_response_chunks
+
+    interrupted = threading.Event()
+
+    class Response:
+        fp = None
+
+        def read1(self, size):
+            raise ConnectionAbortedError("genuine transport failure")
+
+    with pytest.raises(ConnectionAbortedError, match="genuine transport failure"):
+        read_response_chunks(
+            Response(), time.monotonic() + 60, max_bytes=4096,
+            preserve_complete=preserve_complete, interrupted=interrupted,
+        )
+
+
 @pytest.mark.parametrize("chunk_framing", [False, True])
 def test_cloud_http_error_body_shares_the_request_deadline(monkeypatch, chunk_framing):
     import http.client
