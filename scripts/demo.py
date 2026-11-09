@@ -5,9 +5,8 @@
     engraphis-demo --no-open --port 9000
 
 The demo uses a fresh SQLite database inside a temporary directory. It never
-reads or writes the database selected by ENGRAPHIS_DB_PATH. ENGRAPHIS_DEMO=1
-is set only while the seed service is created, to suppress the unrelated
-"your real database has memories" diagnostic.
+reads or writes the database selected by ENGRAPHIS_DB_PATH. The offline
+embedder is used for both the seed and the dashboard.
 """
 
 from __future__ import annotations
@@ -158,9 +157,7 @@ def create_demo_database(db_path: str | Path) -> tuple[list[dict], dict]:
             raise SystemExit(f"Refusing to use {path}: the companion file {companion} exists.")
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    previous_demo = os.environ.get("ENGRAPHIS_DEMO")
     previous_embed = os.environ.get("ENGRAPHIS_EMBED_MODEL")
-    os.environ["ENGRAPHIS_DEMO"] = "1"
     os.environ["ENGRAPHIS_EMBED_MODEL"] = ""
 
     service = None
@@ -184,10 +181,6 @@ def create_demo_database(db_path: str | Path) -> tuple[list[dict], dict]:
     finally:
         if service is not None:
             service.close()
-        if previous_demo is None:
-            os.environ.pop("ENGRAPHIS_DEMO", None)
-        else:
-            os.environ["ENGRAPHIS_DEMO"] = previous_demo
         if previous_embed is None:
             os.environ.pop("ENGRAPHIS_EMBED_MODEL", None)
         else:
@@ -224,6 +217,9 @@ def main(argv=None) -> None:
         db_path = Path(demo_dir) / "demo.db"
         print(
             "Creating a disposable demo database. Your existing Engraphis database is not modified."
+        )
+        print(
+            "If an empty-database warning appears, it refers to the new demo file, not your real database."
         )
         results, sample = create_demo_database(db_path)
 

@@ -83,17 +83,15 @@ def test_create_demo_database_refuses_a_wal_companion(tmp_path):
 
 
 def test_create_demo_database_restores_environment(tmp_path, monkeypatch):
-    monkeypatch.setenv("ENGRAPHIS_DEMO", "0")
     monkeypatch.setenv("ENGRAPHIS_EMBED_MODEL", "keep-me")
 
     create_demo_database(tmp_path / "demo.db")
 
-    assert os.environ["ENGRAPHIS_DEMO"] == "0"
     assert os.environ["ENGRAPHIS_EMBED_MODEL"] == "keep-me"
 
 
 def test_main_help_exits_zero_without_creating_a_database(monkeypatch):
-    for name in ("ENGRAPHIS_DEMO", "ENGRAPHIS_EMBED_MODEL", "ENGRAPHIS_DB_PATH"):
+    for name in ("ENGRAPHIS_EMBED_MODEL", "ENGRAPHIS_DB_PATH"):
         monkeypatch.delenv(name, raising=False)
 
     with pytest.raises(SystemExit) as exc:
