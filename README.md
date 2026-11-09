@@ -1,11 +1,49 @@
 # Engraphis
 
 [![PyPI version](https://img.shields.io/pypi/v/engraphis.svg)](https://pypi.org/project/engraphis/)
+[![PyPI downloads](https://img.shields.io/pypi/dm/engraphis.svg)](https://pypi.org/project/engraphis/)
+[![GitHub stars](https://img.shields.io/github/stars/Coding-Dev-Tools/engraphis.svg?style=social)](https://github.com/Coding-Dev-Tools/engraphis/stargazers)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](https://github.com/Coding-Dev-Tools/engraphis/blob/522def372c45a26d46bc7a05829964ae0240f3a9/LICENSE)
 
-**Persistent, local-first memory for AI agents.** Engraphis stores scoped project knowledge, retrieves relevant evidence across vector, lexical, graph, and code search, and returns bounded context with sources an agent can inspect.
+**Your coding agent forgets decisions between sessions. Engraphis gives MCP-capable coding agents one local memory store with receipts.**
 
-The local engine uses SQLite and works offline. It keeps changes over time instead of silently replacing facts, and grounded recall cites retrieved memories or abstains when evidence is weak.
+Engraphis stores scoped project knowledge in SQLite, keeps temporal history instead of silently overwriting it, and returns bounded context with citations, or abstains when the evidence is weak. The local core is Apache-2.0 and works offline.
+
+[Watch the demo](https://www.youtube.com/watch?v=qw-rTnAA_Z4) · [Open the interactive demo](https://engraphis.com/demo) · [See how it compares](https://engraphis.com/product#comparison)
+
+[Star the repo](https://github.com/Coding-Dev-Tools/engraphis/stargazers) so other coding-agent users can find it.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Coding-Dev-Tools/engraphis/c935c95a7c6ac4e0080c56d2a71ccf4a87a35bd4/docs/images/dashboard-overview.png" alt="Engraphis dashboard Graph and Relations view at 127.0.0.1:8700" width="100%">
+  <br>
+  <sup>The Graph &amp; Relations view at 127.0.0.1:8700. The full local dashboard is in the details below.</sup>
+</p>
+
+## Install and connect an agent in three commands
+
+The MCP server and `[all]` extras need Python 3.10 or newer. The NumPy-only core still supports Python 3.9+.
+
+```bash
+python -m pip install "engraphis[mcp]"
+engraphis-init
+claude mcp add engraphis -- engraphis-mcp
+```
+
+`engraphis-init` writes a local config, generates an API token, and prints ready-to-paste setup for Claude Code, Codex, Cursor, Cline, Zed, and Windsurf. Use the exact command it prints for your machine, including the database path. Restart your agent, then ask it to remember a project decision and recall it in a new session.
+
+If your client times out while the local embedding model loads, run `engraphis-init --prefetch` once.
+
+For Cursor, Cline, Zed, or Windsurf, paste the JSON block printed by `engraphis-init` into the client's MCP configuration. Read the [agent setup guide](https://github.com/Coding-Dev-Tools/engraphis/blob/522def372c45a26d46bc7a05829964ae0240f3a9/docs/AGENT_CONNECT.md) for the full setup.
+
+<details>
+<summary>Prefer the full local dashboard or the graph view?</summary>
+
+```bash
+python -m pip install "engraphis[all]"
+engraphis-dashboard
+```
+
+The dashboard opens at [http://127.0.0.1:8700](http://127.0.0.1:8700). The `[all]` extra adds the embedding model, document import, and transcription dependencies. Most coding-agent users only need `[mcp]`. Local use needs no cloud account or API key.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/Coding-Dev-Tools/engraphis/522def372c45a26d46bc7a05829964ae0240f3a9/docs/images/knowledge-graph.png" alt="Engraphis local knowledge graph showing relationships between remembered entities" width="100%">
@@ -13,18 +51,9 @@ The local engine uses SQLite and works offline. It keeps changes over time inste
   <sup>Explore memories and their relationships in the local dashboard.</sup>
 </p>
 
-## Install and try it
+</details>
 
-The full local application requires Python 3.10 or newer. The NumPy-only core supports Python 3.9+.
-
-```bash
-python -m pip install "engraphis[all]"
-engraphis-dashboard
-```
-
-The dashboard opens at [http://127.0.0.1:8700](http://127.0.0.1:8700). Local use needs no cloud account or API key.
-
-To use the Python service directly:
+## Use the Python service directly
 
 ```python
 from engraphis.service import MemoryService
@@ -34,8 +63,6 @@ memory.remember("Auth migrated from JWT to PASETO.", workspace="acme", repo="api
 hit = memory.recall("Why did we change auth?", workspace="acme", repo="api")
 print(hit["context"])
 ```
-
-Connect a coding agent over MCP with the [agent setup guide](https://github.com/Coding-Dev-Tools/engraphis/blob/522def372c45a26d46bc7a05829964ae0240f3a9/docs/AGENT_CONNECT.md).
 
 ## What it provides
 
