@@ -3,11 +3,11 @@
 
     engraphis-demo
     engraphis-demo --no-open --port 9000
-    engraphis-demo --db ./engraphis-demo.db --force
 
-The demo uses a separate SQLite database and never reads or writes the
-database selected by ENGRAPHIS_DB_PATH until it points that variable at the
-demo file for the dashboard process.
+The demo uses a fresh SQLite database inside a temporary directory. It never
+reads or writes the database selected by ENGRAPHIS_DB_PATH. ENGRAPHIS_DEMO=1
+is set only while the seed service is created, to suppress the unrelated
+"your real database has memories" diagnostic.
 """
 
 from __future__ import annotations
@@ -16,6 +16,8 @@ import argparse
 import os
 import tempfile
 from pathlib import Path
+
+from scripts.start_dashboard import _port, _port_is_available
 
 DEMO_FACTS = (
     {
@@ -138,60 +140,40 @@ DEMO_FACTS = (
 )
 
 
-def _port(value: str) -> int:
-    try:
-        port = int(value)
-    except (TypeError, ValueError):
-        raise argparse.ArgumentTypeError("port must be an integer from 1 to 65535") from None
-    if not 1 <= port <= 65535:
-        raise argparse.ArgumentTypeError("port must be from 1 to 65535")
-    return port
-
-
 def seed_demo(service) -> list[dict]:
     """Write the demo facts through the public MemoryService API."""
     return [service.remember(**fact) for fact in DEMO_FACTS]
 
 
-def _demo_path(path: str | None, *, force: bool) -> Path:
-    if path:
-        db_path = Path(path).expanduser().resolve()
-        if db_path.exists() and db_path.stat().st_size > 0 and not force:
-            raise SystemExit(
-                f"Refusing to overwrite the existing database at {db_path}. "
-                "Pass --force to replace it."
-            )
-        if force:
-            for suffix in ("", "-wal", "-shm"):
-                candidate = Path(str(db_path) + suffix)
-                if candidate.exists():
-                    candidate.unlink()
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        return db_path
-    return Path(tempfile.mkdtemp(prefix="engraphis-demo-")) / "demo.db"
+def create_demo_database(db_path: str | Path) -> tuple[list[dict], dict]:
+    """Seed a new demo database and return its write results and sample recall."""
+    path = Path(db_path).expanduser().resolve()
+    if path.exists() and path.stat().st_size > 0:
+        raise SystemExit(
+            f"Refusing to overwrite the existing database at {path}. Choose a new demo path."
+        )
+    for suffix in ("-wal", "-shm"):
+        companion = Path(str(path) + suffix)
+        if companion.exists():
+            raise SystemExit(f"Refusing to use {path}: the companion file {companion} exists.")
+    path.parent.mkdir(parents=True, exist_ok=True)
 
-
-def create_demo_database(
-    path: str | None = None, *, force: bool = False
-) -> tuple[Path, list[dict], dict]:
-    """Create a seeded demo database and return its path and sample recall."""
-    db_path = _demo_path(path, force=force)
-    # Set the path before importing Engraphis so the dashboard's cached Settings
-    # snapshot resolves to the demo file, not the operator's real database.
-    os.environ["ENGRAPHIS_DB_PATH"] = str(db_path)
-    # The demo database is intentionally empty until it is seeded. Suppress the
-    # unrelated "your real database has memories" diagnostic during creation.
+    previous_demo = os.environ.get("ENGRAPHIS_DEMO")
+    previous_embed = os.environ.get("ENGRAPHIS_EMBED_MODEL")
     os.environ["ENGRAPHIS_DEMO"] = "1"
+    os.environ["ENGRAPHIS_EMBED_MODEL"] = ""
 
-    from engraphis.service import MemoryService
-
-    service = MemoryService.create(
-        str(db_path),
-        extractor="none",
-        graph_extractor="regex",
-        retention_supervisor="none",
-    )
+    service = None
     try:
+        from engraphis.service import MemoryService
+
+        service = MemoryService.create(
+            str(path),
+            embed_model="",
+            extractor="none",
+            graph_extractor="regex",
+            retention_supervisor="none",
+        )
         results = seed_demo(service)
         sample = service.recall(
             "What token format does the checkout API use?",
@@ -200,8 +182,17 @@ def create_demo_database(
             k=3,
         )
     finally:
-        service.close()
-    return db_path, results, sample
+        if service is not None:
+            service.close()
+        if previous_demo is None:
+            os.environ.pop("ENGRAPHIS_DEMO", None)
+        else:
+            os.environ["ENGRAPHIS_DEMO"] = previous_demo
+        if previous_embed is None:
+            os.environ.pop("ENGRAPHIS_EMBED_MODEL", None)
+        else:
+            os.environ["ENGRAPHIS_EMBED_MODEL"] = previous_embed
+    return results, sample
 
 
 def main(argv=None) -> None:
@@ -220,45 +211,49 @@ def main(argv=None) -> None:
         help="Bind port (default: $PORT, else $ENGRAPHIS_PORT, else 8700).",
     )
     ap.add_argument("--no-open", action="store_true", help="Do not open the browser.")
-    ap.add_argument(
-        "--db",
-        default="",
-        help="Use a specific demo database path instead of a temporary directory.",
-    )
-    ap.add_argument(
-        "--force",
-        action="store_true",
-        help="Replace an existing database selected with --db.",
-    )
     args = ap.parse_args(argv)
 
-    db_path, results, sample = create_demo_database(args.db or None, force=args.force)
+    if not _port_is_available(args.host, args.port):
+        ap.exit(
+            1,
+            f"Port {args.port} is already in use. Choose another with --port; "
+            "the demo never reuses an existing dashboard.\n",
+        )
 
-    # Keep the dashboard's Settings snapshot pinned to the demo file even if a
-    # caller imported Engraphis before this function ran.
-    try:
+    with tempfile.TemporaryDirectory(prefix="engraphis-demo-") as demo_dir:
+        db_path = Path(demo_dir) / "demo.db"
+        print(
+            "Creating a disposable demo database. Your existing Engraphis database is not modified."
+        )
+        results, sample = create_demo_database(db_path)
+
+        os.environ["ENGRAPHIS_DB_PATH"] = str(db_path)
+        os.environ["ENGRAPHIS_EMBED_MODEL"] = ""
         from engraphis import config as _config
 
         _config.settings.db_path = str(db_path)
-    except Exception:
-        pass
+        _config.settings.embed_model = ""
+        if Path(_config.settings.db_path).resolve() != db_path:
+            raise SystemExit(
+                "Refusing to start: the dashboard settings did not bind to the demo database."
+            )
 
-    superseded = sum(1 for result in results if result.get("op") == "invalidate")
-    print("Engraphis demo workspace")
-    print(f"  Database   : {db_path}")
-    print(f"  Memories   : {len(results)}")
-    print(f"  Superseded : {superseded}")
-    print("  Sample recall:")
-    for line in str(sample.get("context") or "").splitlines():
-        print(f"    {line}")
-    print()
+        superseded = sum(len(result.get("superseded") or []) for result in results)
+        print("Engraphis demo workspace")
+        print(f"  Database   : {db_path}")
+        print(f"  Memories   : {len(results)}")
+        print(f"  Superseded : {superseded}")
+        print("  Sample recall:")
+        for line in str(sample.get("context") or "").splitlines():
+            print(f"    {line}")
+        print()
 
-    from scripts.start_dashboard import main as dashboard_main
+        from scripts.start_dashboard import main as dashboard_main
 
-    forwarded = ["--host", args.host, "--port", str(args.port)]
-    if args.no_open:
-        forwarded.append("--no-open")
-    dashboard_main(forwarded)
+        forwarded = ["--host", args.host, "--port", str(args.port)]
+        if args.no_open:
+            forwarded.append("--no-open")
+        dashboard_main(forwarded)
 
 
 if __name__ == "__main__":
