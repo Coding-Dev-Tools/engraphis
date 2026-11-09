@@ -1176,6 +1176,8 @@ def _title_from_content(content: str, fallback: str) -> str:
 
 def _warn_if_db_empty_with_populated_sibling(db_path: str) -> None:
     """Warn, without blocking startup, when a sibling database holds the data."""
+    if os.environ.get("ENGRAPHIS_DEMO") == "1":
+        return
     import sqlite3
 
     configured = Path(db_path)

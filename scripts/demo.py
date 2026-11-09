@@ -1,0 +1,265 @@
+#!/usr/bin/env python3
+"""Seed a disposable demo workspace and launch the local dashboard.
+
+    engraphis-demo
+    engraphis-demo --no-open --port 9000
+    engraphis-demo --db ./engraphis-demo.db --force
+
+The demo uses a separate SQLite database and never reads or writes the
+database selected by ENGRAPHIS_DB_PATH until it points that variable at the
+demo file for the dashboard process.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import tempfile
+from pathlib import Path
+
+DEMO_FACTS = (
+    {
+        "content": "Checkout API uses JWT access tokens.",
+        "workspace": "acme-api",
+        "repo": "checkout",
+        "title": "Legacy checkout token format",
+        "subject_key": "auth.token_format",
+        "claim_kind": "decision",
+        "importance": 0.7,
+    },
+    {
+        "content": "Checkout API uses PASETO access tokens.",
+        "workspace": "acme-api",
+        "repo": "checkout",
+        "title": "Checkout token format",
+        "subject_key": "auth.token_format",
+        "claim_kind": "decision",
+        "importance": 0.9,
+    },
+    {
+        "content": "The November auth migration replaced JWT with PASETO to retire the legacy signer.",
+        "workspace": "acme-api",
+        "repo": "checkout",
+        "title": "Auth migration reason",
+        "subject_key": "auth.migration_reason",
+        "claim_kind": "decision",
+        "importance": 0.8,
+    },
+    {
+        "content": "Checkout frontend packages use pnpm. The lockfile is pnpm-lock.yaml; do not add a package-lock.json.",
+        "workspace": "acme-api",
+        "repo": "checkout",
+        "title": "Checkout package manager",
+        "subject_key": "repo.package_manager",
+        "claim_kind": "convention",
+        "importance": 0.8,
+    },
+    {
+        "content": "Run `pnpm test --filter checkout` before merging changes that touch the checkout package.",
+        "workspace": "acme-api",
+        "repo": "checkout",
+        "title": "Checkout test command",
+        "subject_key": "repo.test_command",
+        "claim_kind": "convention",
+        "importance": 0.7,
+    },
+    {
+        "content": "The checkout retry loop must send the same idempotency key on every attempt. A missing key caused duplicate charges in the October incident.",
+        "workspace": "acme-api",
+        "repo": "checkout",
+        "title": "Checkout retry idempotency",
+        "subject_key": "checkout.idempotency",
+        "claim_kind": "incident",
+        "importance": 0.9,
+    },
+    {
+        "content": "Order events are written to the outbox table in the same transaction as the order. The publisher worker drains the outbox.",
+        "workspace": "acme-api",
+        "repo": "checkout",
+        "title": "Checkout event delivery",
+        "subject_key": "checkout.event_delivery",
+        "claim_kind": "architecture",
+        "importance": 0.8,
+    },
+    {
+        "content": "Schema migrations require a verified backup and a rollback note before the migration runs.",
+        "workspace": "acme-api",
+        "repo": "checkout",
+        "title": "Migration policy",
+        "subject_key": "db.migration_policy",
+        "claim_kind": "convention",
+        "importance": 0.8,
+    },
+    {
+        "content": "Stripe webhook handlers must be idempotent by event id. Store the processed event id before applying the change.",
+        "workspace": "acme-api",
+        "repo": "billing",
+        "title": "Billing webhook idempotency",
+        "subject_key": "billing.webhook_idempotency",
+        "claim_kind": "convention",
+        "importance": 0.9,
+    },
+    {
+        "content": "The invoice reconciliation job double-counted prorations when a subscription changed mid-cycle. The fix reads the proration line items once and keys the result by invoice id.",
+        "workspace": "acme-api",
+        "repo": "billing",
+        "title": "Proration reconciliation bug",
+        "subject_key": "billing.proration_reconciliation",
+        "claim_kind": "incident",
+        "importance": 0.8,
+    },
+    {
+        "content": "Dashboard components are server components by default. Add `use client` only at interactive leaves.",
+        "workspace": "acme-web",
+        "repo": "dashboard",
+        "title": "Dashboard component default",
+        "subject_key": "web.component_default",
+        "claim_kind": "convention",
+        "importance": 0.8,
+    },
+    {
+        "content": "Dashboard feature flags are read at request time, not baked in at build time.",
+        "workspace": "acme-web",
+        "repo": "dashboard",
+        "title": "Dashboard feature flags",
+        "subject_key": "web.feature_flags",
+        "claim_kind": "decision",
+        "importance": 0.7,
+    },
+    {
+        "content": "Use the design tokens in `styles/tokens.css`. Do not hardcode hex colors in dashboard components.",
+        "workspace": "acme-web",
+        "repo": "dashboard",
+        "title": "Dashboard styling tokens",
+        "subject_key": "web.styling",
+        "claim_kind": "convention",
+        "importance": 0.7,
+    },
+)
+
+
+def _port(value: str) -> int:
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError("port must be an integer from 1 to 65535") from None
+    if not 1 <= port <= 65535:
+        raise argparse.ArgumentTypeError("port must be from 1 to 65535")
+    return port
+
+
+def seed_demo(service) -> list[dict]:
+    """Write the demo facts through the public MemoryService API."""
+    return [service.remember(**fact) for fact in DEMO_FACTS]
+
+
+def _demo_path(path: str | None, *, force: bool) -> Path:
+    if path:
+        db_path = Path(path).expanduser().resolve()
+        if db_path.exists() and db_path.stat().st_size > 0 and not force:
+            raise SystemExit(
+                f"Refusing to overwrite the existing database at {db_path}. "
+                "Pass --force to replace it."
+            )
+        if force:
+            for suffix in ("", "-wal", "-shm"):
+                candidate = Path(str(db_path) + suffix)
+                if candidate.exists():
+                    candidate.unlink()
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        return db_path
+    return Path(tempfile.mkdtemp(prefix="engraphis-demo-")) / "demo.db"
+
+
+def create_demo_database(
+    path: str | None = None, *, force: bool = False
+) -> tuple[Path, list[dict], dict]:
+    """Create a seeded demo database and return its path and sample recall."""
+    db_path = _demo_path(path, force=force)
+    # Set the path before importing Engraphis so the dashboard's cached Settings
+    # snapshot resolves to the demo file, not the operator's real database.
+    os.environ["ENGRAPHIS_DB_PATH"] = str(db_path)
+    # The demo database is intentionally empty until it is seeded. Suppress the
+    # unrelated "your real database has memories" diagnostic during creation.
+    os.environ["ENGRAPHIS_DEMO"] = "1"
+
+    from engraphis.service import MemoryService
+
+    service = MemoryService.create(
+        str(db_path),
+        extractor="none",
+        graph_extractor="regex",
+        retention_supervisor="none",
+    )
+    try:
+        results = seed_demo(service)
+        sample = service.recall(
+            "What token format does the checkout API use?",
+            workspace="acme-api",
+            repo="checkout",
+            k=3,
+        )
+    finally:
+        service.close()
+    return db_path, results, sample
+
+
+def main(argv=None) -> None:
+    ap = argparse.ArgumentParser(
+        description="Seed a disposable Engraphis demo workspace and start the dashboard.",
+    )
+    ap.add_argument(
+        "--host",
+        default=os.environ.get("ENGRAPHIS_HOST", "127.0.0.1"),
+        help="Bind host (default: $ENGRAPHIS_HOST, else 127.0.0.1).",
+    )
+    ap.add_argument(
+        "--port",
+        type=_port,
+        default=(os.environ.get("PORT") or os.environ.get("ENGRAPHIS_PORT", "8700")),
+        help="Bind port (default: $PORT, else $ENGRAPHIS_PORT, else 8700).",
+    )
+    ap.add_argument("--no-open", action="store_true", help="Do not open the browser.")
+    ap.add_argument(
+        "--db",
+        default="",
+        help="Use a specific demo database path instead of a temporary directory.",
+    )
+    ap.add_argument(
+        "--force",
+        action="store_true",
+        help="Replace an existing database selected with --db.",
+    )
+    args = ap.parse_args(argv)
+
+    db_path, results, sample = create_demo_database(args.db or None, force=args.force)
+
+    # Keep the dashboard's Settings snapshot pinned to the demo file even if a
+    # caller imported Engraphis before this function ran.
+    try:
+        from engraphis import config as _config
+
+        _config.settings.db_path = str(db_path)
+    except Exception:
+        pass
+
+    superseded = sum(1 for result in results if result.get("op") == "invalidate")
+    print("Engraphis demo workspace")
+    print(f"  Database   : {db_path}")
+    print(f"  Memories   : {len(results)}")
+    print(f"  Superseded : {superseded}")
+    print("  Sample recall:")
+    for line in str(sample.get("context") or "").splitlines():
+        print(f"    {line}")
+    print()
+
+    from scripts.start_dashboard import main as dashboard_main
+
+    forwarded = ["--host", args.host, "--port", str(args.port)]
+    if args.no_open:
+        forwarded.append("--no-open")
+    dashboard_main(forwarded)
+
+
+if __name__ == "__main__":
+    main()
