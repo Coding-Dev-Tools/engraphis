@@ -255,3 +255,69 @@ def test_connection_lifecycle_translates_driver_errors():
 
     with pytest.raises(sqlite3.OperationalError, match="connection exit failed"):
         connection.__exit__(None, None, None)
+
+
+@pytest.mark.parametrize(
+    ("driver_message", "expected_code", "expected_phrase"),
+    [
+        ("database disk image is malformed", "database_damaged", "restore a verified backup"),
+        ("database is locked", "database_busy", "another process"),
+        ("file is not a database", "key_rejected", "wrong ENGRAPHIS_DB_KEY"),
+        ("disk I/O error", "database_unavailable", "not a key problem"),
+    ],
+)
+def test_open_failure_classifies_damage_separately_from_a_bad_key(
+    monkeypatch, tmp_path, driver_message, expected_code, expected_phrase,
+):
+    """A damaged or busy file must not be reported as a wrong encryption key."""
+    marker = "sqlcipher-driver-secret"
+    key = "inline-key-secret"
+    private_path = tmp_path / "private-customer.db"
+
+    class _Raw:
+        def execute(self, statement):
+            if statement.startswith("PRAGMA"):
+                return self
+            raise RuntimeError(f"{marker} {driver_message}:{private_path}")
+
+        def fetchone(self):
+            return (1,)
+
+        def close(self):
+            pass
+
+    driver = types.SimpleNamespace(connect=lambda *_a, **_k: _Raw(), Row=object)
+    monkeypatch.setattr(encrypted_db.importlib, "import_module", lambda _name: driver)
+    connector = encrypted_db.make_connector(key)
+
+    with pytest.raises(encrypted_db.EncryptionError) as exc_info:
+        connector(str(private_path))
+
+    assert exc_info.value.code == expected_code
+    assert expected_phrase in str(exc_info.value)
+    for secret in (marker, key, str(private_path)):
+        assert secret not in str(exc_info.value)
+
+
+def test_connect_failure_reports_busy_without_blaming_the_key(monkeypatch, tmp_path):
+    key = "inline-key-secret"
+
+    def connect(*_args, **_kwargs):
+        raise RuntimeError(f"database is locked:{tmp_path / 'private-customer.db'}")
+
+    driver = types.SimpleNamespace(connect=connect, Row=object)
+    monkeypatch.setattr(encrypted_db.importlib, "import_module", lambda _name: driver)
+    connector = encrypted_db.make_connector(key)
+
+    with pytest.raises(encrypted_db.EncryptionError) as exc_info:
+        connector(str(tmp_path / "private-customer.db"))
+
+    assert exc_info.value.code == "database_busy"
+    assert key not in str(exc_info.value)
+
+
+def test_encryption_error_defaults_to_a_stable_code():
+    error = encrypted_db.EncryptionError("message")
+    assert isinstance(error, RuntimeError)
+    assert error.code == "encryption_error"
+    assert encrypted_db.EncryptionError("message", code="custom").code == "custom"

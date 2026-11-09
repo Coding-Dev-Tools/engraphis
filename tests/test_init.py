@@ -1,6 +1,7 @@
 """engraphis-init — onboarding command. Runs on the numpy-only gate (stdlib only)."""
-import os
+import hashlib
 import json
+import os
 import sqlite3
 from pathlib import Path
 import subprocess
@@ -357,6 +358,116 @@ def test_doctor_rejects_a_newer_database_schema(tmp_path, monkeypatch, capsys):
     assert any(check["code"] == "schema_newer" for check in report["checks"])
 
 
+def _fork_receipt_chain(path, *, workspace_name: str = "team") -> None:
+    """Seed a current-schema database with one forked receipt chain."""
+    from engraphis.core.ids import new_id
+    from engraphis.core.store import Store
+
+    store = Store(str(path))
+    try:
+        workspace = store.get_or_create_workspace(workspace_name)
+        first = store.record_receipt("remember", workspace_id=workspace)
+        second = store.record_receipt("recall", workspace_id=workspace)
+        fork = dict(second)
+        fork.pop("hash")
+        fork["id"] = new_id("receipt")
+        fork["prev_hash"] = first["hash"]
+        fork["ts_ms"] += 1
+        payload = json.dumps(
+            fork, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        )
+        store.conn.execute(
+            "INSERT INTO operation_receipts(id, ts, operation, workspace_id, repo_id, "
+            "sequence, scope_digest, actor, target_count, status, payload, prev_hash, "
+            "receipt_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                fork["id"], fork["ts_ms"] / 1000.0, fork["operation"], workspace, "",
+                999, fork["scope_digest"], fork["actor_digest"], fork["target_count"],
+                fork["status"], payload, fork["prev_hash"],
+                hashlib.sha256(payload.encode("utf-8")).hexdigest(),
+            ),
+        )
+        store.conn.commit()
+    finally:
+        store.close()
+
+
+def test_doctor_verifies_a_healthy_receipt_chain(tmp_path, monkeypatch, capsys):
+    _fresh_settings(monkeypatch, tmp_path)
+    from engraphis.core.store import Store
+
+    store = Store(str(tmp_path / "doc.db"))
+    try:
+        workspace = store.get_or_create_workspace("team")
+        store.record_receipt("remember", workspace_id=workspace)
+        store.record_receipt("recall", workspace_id=workspace)
+    finally:
+        store.close()
+
+    assert main(["--check", "--json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    receipt = next(check for check in report["checks"] if check["code"] == "receipt_chain")
+    assert receipt["status"] == "ok"
+    assert "1 of 1 workspace chain(s) verified over 2 receipt(s)" in receipt["detail"]
+
+
+def test_doctor_reports_a_forked_receipt_chain_as_audit_damage(
+    tmp_path, monkeypatch, capsys,
+):
+    _fresh_settings(monkeypatch, tmp_path)
+    _fork_receipt_chain(tmp_path / "doc.db")
+
+    assert main(["--check", "--json"]) == 1
+    report = json.loads(capsys.readouterr().out)
+    receipt = next(check for check in report["checks"] if check["code"] == "receipt_chain")
+    assert receipt["status"] == "fail"
+    assert "receipt_warning" in receipt["detail"]
+    assert "restore" in receipt["detail"]
+
+
+def test_doctor_distinguishes_a_damaged_encrypted_database_from_a_bad_key(
+    tmp_path, monkeypatch, capsys,
+):
+    _fresh_settings(monkeypatch, tmp_path)
+    from engraphis.backends.encrypted_db import EncryptionError
+
+    def damaged_connector(_path):
+        raise EncryptionError(
+            "could not open the encrypted database", code="database_damaged"
+        )
+
+    monkeypatch.setattr(init_script, "connector_from_env", lambda: damaged_connector)
+    assert main(["--check", "--json"]) == 1
+    report = json.loads(capsys.readouterr().out)
+    check = next(
+        item for item in report["checks"] if item["code"] == "database_damaged"
+    )
+    assert check["status"] == "fail"
+    assert "damaged" in check["detail"]
+    assert "key" in check["detail"]
+
+
+@pytest.mark.parametrize("code", ["key_file_empty", "key_file_unreadable"])
+def test_doctor_reports_key_file_codes_separately(
+    tmp_path, monkeypatch, capsys, code,
+):
+    _fresh_settings(monkeypatch, tmp_path)
+    from engraphis.backends.encrypted_db import EncryptionError
+
+    def bad_connector(_path):
+        raise EncryptionError("private provider detail", code=code)
+
+    monkeypatch.setattr(init_script, "connector_from_env", lambda: bad_connector)
+    assert main(["--check", "--json"]) == 1
+    report = json.loads(capsys.readouterr().out)
+    check = next(
+        item for item in report["checks"] if item["code"] == "database_key_file"
+    )
+    assert check["status"] == "fail"
+    assert "ENGRAPHIS_DB_KEY_FILE" in check["detail"]
+    assert "private provider detail" not in json.dumps(report)
+
+
 def test_doctor_reports_lock_contention_without_leaving_probe_state(tmp_path, monkeypatch, capsys):
     _fresh_settings(monkeypatch, tmp_path)
     path = tmp_path / "doc.db"
@@ -379,6 +490,7 @@ def test_doctor_does_not_mask_a_broken_configured_embedder_or_echo_its_error(tmp
     import engraphis.config as cfg
     import engraphis.backends.embedder_st as backend
     monkeypatch.setattr(cfg.settings, "embed_model", "missing-configured-model")
+    monkeypatch.setattr(cfg.settings, "require_exact_backends", True)
 
     def fail(*_args, **kwargs):
         assert kwargs["require_exact"] is True
@@ -390,6 +502,29 @@ def test_doctor_does_not_mask_a_broken_configured_embedder_or_echo_its_error(tmp
     assert "private-provider-secret" not in output
     report = json.loads(output)
     assert any(check["code"] == "embedder" and check["status"] == "fail" for check in report["checks"])
+
+
+def test_doctor_uses_prod_exactness_even_when_setting_is_off(
+    tmp_path, monkeypatch, capsys,
+):
+    _fresh_settings(monkeypatch, tmp_path)
+    import engraphis.config as cfg
+    import engraphis.backends.embedder_st as backend
+    monkeypatch.setenv("ENGRAPHIS_ENV", "prod")
+    monkeypatch.setattr(cfg.settings, "require_exact_backends", False)
+
+    def fail(*_args, **kwargs):
+        assert kwargs["require_exact"] is True
+        raise RuntimeError("private-provider-secret")
+
+    monkeypatch.setattr(backend, "get_embedder", fail)
+    assert main(["--check", "--json"]) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert any(
+        check["code"] == "embedder" and check["status"] == "fail"
+        for check in report["checks"]
+    )
+    assert "private-provider-secret" not in json.dumps(report)
 
 
 def test_init_records_only_explicit_installation_intent(tmp_path, monkeypatch, capsys):

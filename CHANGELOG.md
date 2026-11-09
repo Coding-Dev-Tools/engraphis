@@ -8,6 +8,15 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - Add one checked-in entitlement contract as the read-only plan→feature mirror, and fail the
   release gate when it drifts from the private hosted contract. Local workspace export stays
   free; a server grant this build cannot render is reported instead of silently dropped.
+- Classify encrypted-database open failures (`database_damaged`, `database_busy`,
+  `database_unavailable`, `key_rejected`, `driver_missing`, and key-file codes) so a damaged or
+  locked SQLCipher file is no longer reported as a wrong key, and surface the exact condition in
+  `engraphis-init --check`.
+- Verify operation-receipt chains read-only in `engraphis-init --check` (bounded by workspaces and
+  receipts), so a forked, disconnected, or truncated ledger is visible to the operator with
+  recovery guidance while memory writes and recall continue with a content-free
+  `receipt_warning`. The check exits nonzero when a sampled chain fails verification, including
+  for a preserved read-only copy; memory behavior on a damaged chain remains audit-only.
 
 ## [1.7.12] - 2026-11-02
 

@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+from engraphis.core import store as store_module
 from engraphis.core.ids import new_id
 from engraphis.core.store import Store
 from engraphis.service import MemoryService, ValidationError
@@ -522,13 +523,13 @@ def test_reopening_anchored_receipts_does_not_reconstruct_chains(tmp_path, monke
     store.close()
 
     calls = []
-    original = Store._receipt_chain_state
+    original = store_module.receipt_chain_state
 
-    def tracked(self, workspace_id):
+    def tracked(conn, workspace_id):
         calls.append(workspace_id)
-        return original(self, workspace_id)
+        return original(conn, workspace_id)
 
-    monkeypatch.setattr(Store, "_receipt_chain_state", tracked)
+    monkeypatch.setattr(store_module, "receipt_chain_state", tracked)
     reopened = Store(db)
     try:
         assert calls == []
