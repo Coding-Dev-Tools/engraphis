@@ -42,7 +42,6 @@ EXPECTED_ENTRY_POINTS = {
     "engraphis-mcp-http": "engraphis.mcp_http_cli:main",
     "engraphis-inspector": "scripts.inspector:main",
     "engraphis-dashboard": "scripts.start_dashboard:main",
-    "engraphis-demo": "scripts.demo:main",
     "engraphis-consolidate": "scripts.consolidate:main",
     "engraphis-graph": "scripts.graph_cli:main",
     "engraphis-graph-server": "scripts.graph_server:main",

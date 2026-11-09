@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Seed a disposable demo workspace and launch the local dashboard.
 
-    engraphis-demo
-    engraphis-demo --no-open --port 9000
+    python -m scripts.demo
+    python -m scripts.demo --no-open --port 9000
 
+The engraphis-demo console entry point is a separate packaging change.
 The demo uses a fresh SQLite database inside a temporary directory. It never
 reads or writes the database selected by ENGRAPHIS_DB_PATH. The offline
 embedder is used for both the seed and the dashboard.
