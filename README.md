@@ -5,31 +5,33 @@
 [![GitHub stars](https://img.shields.io/github/stars/Coding-Dev-Tools/engraphis.svg?style=social)](https://github.com/Coding-Dev-Tools/engraphis/stargazers)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](https://github.com/Coding-Dev-Tools/engraphis/blob/522def372c45a26d46bc7a05829964ae0240f3a9/LICENSE)
 
-**Your coding agent forgets decisions between sessions. Engraphis gives Claude Code, Cursor, and Codex one local memory store with receipts.**
+**Your coding agent forgets decisions between sessions. Engraphis gives MCP-capable coding agents one local memory store with receipts.**
 
 Engraphis stores scoped project knowledge in SQLite, keeps temporal history instead of silently overwriting it, and returns bounded context with citations, or abstains when the evidence is weak. The local core is Apache-2.0 and works offline.
 
-[Watch the 56 second demo](https://www.youtube.com/watch?v=qw-rTnAA_Z4) · [Open the interactive demo](https://engraphis.com/demo) · [See how it compares](https://engraphis.com/product#comparison)
+[Watch the demo](https://www.youtube.com/watch?v=qw-rTnAA_Z4) · [Open the interactive demo](https://engraphis.com/demo) · [See how it compares](https://engraphis.com/product#comparison)
 
-If this is useful, star the repo so other coding-agent users can find it.
+[Star the repo](https://github.com/Coding-Dev-Tools/engraphis/stargazers) so other coding-agent users can find it.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Coding-Dev-Tools/engraphis/main/docs/images/dashboard-overview.png" alt="Engraphis dashboard showing memories, recall, and the knowledge graph" width="100%">
+  <img src="https://raw.githubusercontent.com/Coding-Dev-Tools/engraphis/c935c95a7c6ac4e0080c56d2a71ccf4a87a35bd4/docs/images/dashboard-overview.png" alt="Engraphis dashboard Graph and Relations view at 127.0.0.1:8700" width="100%">
   <br>
-  <sup>The local dashboard at 127.0.0.1:8700. The graph view is in the details below.</sup>
+  <sup>The Graph &amp; Relations view at 127.0.0.1:8700. The full local dashboard is in the details below.</sup>
 </p>
 
 ## Install and connect an agent in three commands
 
-Requires Python 3.10 or newer for the MCP server.
+The MCP server and `[all]` extras need Python 3.10 or newer. The NumPy-only core still supports Python 3.9+.
 
 ```bash
-pip install "engraphis[mcp]"
+python -m pip install "engraphis[mcp]"
 engraphis-init
 claude mcp add engraphis -- engraphis-mcp
 ```
 
-`engraphis-init` writes a local config, generates an API token, and prints ready-to-paste setup for Claude Code, Codex, Cursor, Cline, Zed, and Windsurf. Restart your agent, then ask it to remember a project decision and recall it in a new session.
+`engraphis-init` writes a local config, generates an API token, and prints ready-to-paste setup for Claude Code, Codex, Cursor, Cline, Zed, and Windsurf. Use the exact command it prints for your machine, including the database path. Restart your agent, then ask it to remember a project decision and recall it in a new session.
+
+If your client times out while the local embedding model loads, run `engraphis-init --prefetch` once.
 
 For Cursor, Cline, Zed, or Windsurf, paste the JSON block printed by `engraphis-init` into the client's MCP configuration. Read the [agent setup guide](https://github.com/Coding-Dev-Tools/engraphis/blob/522def372c45a26d46bc7a05829964ae0240f3a9/docs/AGENT_CONNECT.md) for the full setup.
 
