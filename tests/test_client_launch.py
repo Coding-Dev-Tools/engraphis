@@ -34,19 +34,18 @@ import pytest
 pytest.importorskip("fastapi", reason="full-stack extra not installed")
 
 from engraphis import hosted_client, update_check  # noqa: E402
+from engraphis.entitlements import features_for  # noqa: E402
 from engraphis.routes import v2_api  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 UPDATER = REPO_ROOT / "scripts" / "update.py"
 DASHBOARD_JS = REPO_ROOT / "engraphis" / "dashboard_assets" / "ledger.js"
 
-# The private control plane's plan→feature table, mirrored from (read-only)
-# the hosted entitlement contract plan-feature mapping. A drift here means a
-# purchased capability silently renders as locked.
+# The private control plane's plan→feature table has exactly one checked-in mirror:
+# engraphis/entitlement_contract.json. Import it instead of maintaining another copy here,
+# so a capability cannot be added to one surface and silently dropped from another.
 SERVER_HOSTED_ENTITLEMENTS = {
-    "free": set(),
-    "pro": {"analytics", "automation", "sync"},
-    "team": {"analytics", "automation", "sync", "team"},
+    plan: set(features_for(plan)) for plan in ("free", "pro", "team")
 }
 # Named separately by this client's commercial manifest; the server grants both under
 # ``automation``, so any plan granting ``automation`` must grant these too.

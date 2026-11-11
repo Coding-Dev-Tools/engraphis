@@ -5,6 +5,9 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+- Add one checked-in entitlement contract as the read-only plan→feature mirror, and fail the
+  release gate when it drifts from the private hosted contract. Local workspace export stays
+  free; a server grant this build cannot render is reported instead of silently dropped.
 - Classify encrypted-database open failures (`database_damaged`, `database_busy`,
   `database_unavailable`, `key_rejected`, `driver_missing`, and key-file codes) so a damaged or
   locked SQLCipher file is no longer reported as a wrong key, and surface the exact condition in
