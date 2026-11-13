@@ -1,0 +1,93 @@
+{
+  "schema": "engraphis-entitlement-contract/v1",
+  "source": "Read-only mirror of the private control plane's hosted entitlement contract. The server authorizes every paid operation; this file only decides which plan advertises a capability.",
+  "plans": {
+    "free": [],
+    "pro": [
+      "analytics",
+      "automation",
+      "consolidation",
+      "dreaming",
+      "sync"
+    ],
+    "team": [
+      "analytics",
+      "automation",
+      "consolidation",
+      "dreaming",
+      "sync",
+      "team"
+    ]
+  },
+  "features": {
+    "analytics": {
+      "plan": "pro",
+      "label": "Analytics",
+      "status": "available"
+    },
+    "automation": {
+      "plan": "pro",
+      "label": "Automation",
+      "status": "available"
+    },
+    "consolidation": {
+      "plan": "pro",
+      "label": "Auto Consolidation",
+      "status": "available"
+    },
+    "dreaming": {
+      "plan": "pro",
+      "label": "Auto Dreaming",
+      "status": "available"
+    },
+    "sync": {
+      "plan": "pro",
+      "label": "Cloud Sync",
+      "status": "available"
+    },
+    "team": {
+      "plan": "team",
+      "label": "Team administration",
+      "status": "available"
+    },
+    "export": {
+      "plan": "free",
+      "label": "Local workspace export",
+      "status": "free"
+    },
+    "compliance_export": {
+      "plan": "team",
+      "label": "Compliance export",
+      "status": "declared"
+    },
+    "hosted_multi_user_roles": {
+      "plan": "team",
+      "label": "Team roster and roles",
+      "status": "declared"
+    },
+    "hosted_team_audit_export": {
+      "plan": "team",
+      "label": "Team audit export",
+      "status": "declared"
+    },
+    "hosted_scoped_agent_tokens": {
+      "plan": "team",
+      "label": "Scoped agent tokens",
+      "status": "declared"
+    }
+  },
+  "included_services": {
+    "managed_jev": {
+      "label": "Managed Jev decisions",
+      "plan": "pro",
+      "calls_per_person_per_day": 500
+    }
+  },
+  "limits": {
+    "trial_days_by_plan": {
+      "pro": 7,
+      "team": 14
+    },
+    "grace_hours": 24
+  }
+}
