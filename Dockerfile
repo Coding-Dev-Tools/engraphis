@@ -49,9 +49,9 @@ RUN pip install --upgrade pip "setuptools>=83" \
     && pip install --upgrade "filelock>=4.2.1,<5" \
     && pip install ".[server,mcp,documents,cloud-sync]" \
     && rm -rf /root/.cache/pip \
-        /usr/local/lib/python3.11/site-packages/pip \
-        /usr/local/lib/python3.11/site-packages/pip-*.dist-info \
-    && rm -f /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.11
+        /usr/local/lib/python3.15/site-packages/pip \
+        /usr/local/lib/python3.15/site-packages/pip-*.dist-info \
+    && rm -f /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.15
 
 # Create the non-root app user and pre-own /data. NOTE: the container starts as root so
 # docker-entrypoint.sh can chown a freshly-mounted (root-owned) persistent volume, then
