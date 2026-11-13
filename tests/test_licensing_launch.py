@@ -23,14 +23,15 @@ from engraphis.cloud_features import CloudFeatureClient, CloudFeatureError
 from engraphis.cloud_session import CloudSessionError
 
 # ── the private control plane's vocabulary, mirrored from (read-only) ──────────
-# the hosted entitlement contract:20-28 and security.py:37-38.
-# A mismatch here means a purchased feature silently never activates on the client.
+# engraphis/entitlement_contract.json is the single checked-in mirror. Import it rather
+# than maintaining a second copy: a mismatch here means a purchased feature silently never
+# activates on the client.
+from engraphis.entitlements import features_for
+
 SERVER_PLANS = {"free", "pro", "team"}
 SERVER_PAID_PLANS = {"pro", "team"}
 SERVER_HOSTED_ENTITLEMENTS = {
-    "free": set(),
-    "pro": {"analytics", "automation", "export", "sync"},
-    "team": {"analytics", "automation", "export", "sync", "team"},
+    plan: set(features_for(plan)) for plan in ("free", "pro", "team")
 }
 # The compatibility scalar is the Pro duration; Team uses the per-plan offer.
 SERVER_TRIAL_DURATION_SECONDS = 604_800

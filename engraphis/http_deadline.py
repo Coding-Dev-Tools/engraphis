@@ -6,6 +6,7 @@ those operations and never begin a later network phase with an exhausted budget.
 """
 from __future__ import annotations
 
+import http.client
 import threading
 import time
 from contextlib import contextmanager
@@ -209,7 +210,15 @@ def read_response_chunks(response, deadline: float, *, max_bytes: int,
             sock.settimeout(remaining)
         # read() tries to fill its entire buffer; read1() returns after a single
         # buffered/socket read, letting the absolute deadline run between chunks.
-        chunk = response.read1(min(4096, max_bytes + 1 - len(data)))
+        try:
+            chunk = response.read1(min(4096, max_bytes + 1 - len(data)))
+        except (OSError, http.client.HTTPException):
+            # The watchdog shutdown can interrupt a blocked receive just before
+            # the wall clock crosses the deadline; that interruption is the
+            # timeout, not a transport failure.
+            if interrupted is not None and interrupted.is_set():
+                raise TimeoutError("HTTP request deadline exceeded") from None
+            raise
         data.extend(chunk)
         if preserve_complete:
             if len(data) > max_bytes:
@@ -237,5 +246,9 @@ def read_response_chunks(response, deadline: float, *, max_bytes: int,
             raise TimeoutError("HTTP request deadline exceeded")
         remaining_time(deadline)
         if not chunk:
+            # An empty read after the watchdog fired is a deadline interruption
+            # (the shutdown can surface as EOF instead of a receive error).
+            if interrupted is not None and interrupted.is_set():
+                raise TimeoutError("HTTP request deadline exceeded")
             break
     return bytes(data)

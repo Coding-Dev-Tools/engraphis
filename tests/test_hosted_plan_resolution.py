@@ -43,6 +43,7 @@ import pytest
 pytest.importorskip("fastapi", reason="full-stack extra not installed")
 
 from engraphis import cloud_session  # noqa: E402
+from engraphis.entitlements import features_for  # noqa: E402
 from engraphis.routes import v2_api  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -52,11 +53,9 @@ ORGANIZATION = "org_paying_team"
 CONTROL_URL = "https://control.example.test"
 
 # The authoritative payload shape, mirrored from (read-only)
-# the hosted entitlement contract the hosted entitlement response / the hosted plan-feature contract.
+# engraphis/entitlement_contract.json. One import target, three consumers.
 SERVER_HOSTED_ENTITLEMENTS = {
-    "free": [],
-    "pro": ["analytics", "automation", "sync"],
-    "team": ["analytics", "automation", "sync", "team"],
+    plan: list(features_for(plan)) for plan in ("free", "pro", "team")
 }
 # The trial disclosure this client now depends on, mirrored from (read-only)
 # the hosted entitlement response and the hosted registration response. Both surfaces
