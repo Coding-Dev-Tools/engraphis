@@ -31,9 +31,10 @@ import shutil
 import subprocess
 from html.parser import HTMLParser
 from pathlib import Path
-from tempfile import TemporaryDirectory
 
 import pytest
+
+from tests._node_runner import run_json
 
 ROOT = Path(__file__).resolve().parents[1]
 ASSETS = ROOT / "engraphis" / "dashboard_assets"
@@ -128,15 +129,7 @@ const emit = value => console.log(JSON.stringify(value));
 
 
 def _run_node(script: str, prelude: str = PRELUDE) -> object:
-    result = subprocess.run(
-        [NODE, "-e", prelude + script, str(ASSET)],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr
-    return json.loads(result.stdout.strip().splitlines()[-1])
+    return run_json(prelude + script, args=[str(ASSET)])
 
 
 def _run_engine(script: str) -> object:
@@ -150,15 +143,7 @@ const fs = require('fs');
 const source = fs.readFileSync(process.argv[1], 'utf8');
 const emit = value => console.log(JSON.stringify(value));
 """
-    result = subprocess.run(
-        [NODE, "-e", prelude + script, str(SPACETIME_ASSET)],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr
-    return json.loads(result.stdout.strip().splitlines()[-1])
+    return run_json(prelude + script, args=[str(SPACETIME_ASSET)])
 
 
 # ── load order and failure isolation ────────────────────────────────────────────────
@@ -178,15 +163,7 @@ vm.runInNewContext(source, {
 });
 const emit = value => console.log(JSON.stringify(value));
 """
-    result = subprocess.run(
-        [NODE, "-e", prelude + script, str(EVERY_WORKER)],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr
-    return json.loads(result.stdout.strip().splitlines()[-1])
+    return run_json(prelude + script, args=[str(EVERY_WORKER)])
 
 
 # ── load order and failure isolation ────────────────────────────────────────────────
@@ -431,15 +408,7 @@ def _run_loader(scenario: str) -> dict:
         + "(async () => {\n" + scenario + "\n})().catch(error => {\n"
         + "  console.error(error && error.stack || error); process.exit(1);\n});"
     )
-    result = subprocess.run(
-        [NODE, "-e", script, str(LEDGER)],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr
-    return json.loads(result.stdout.strip().splitlines()[-1])
+    return run_json(script, args=[str(LEDGER)])
 
 
 @requires_node
@@ -521,12 +490,7 @@ def test_graph_assets_evaluate_without_each_other() -> None:
     files = [ASSETS / name for name in (
         "engraphis-graph.js", "engraphis-spacetime.js", "engraphis-graph-every.js",
     )]
-    result = subprocess.run(
-        [NODE, "-e", script, *map(str, files)],
-        cwd=ROOT, capture_output=True, text=True, check=False,
-    )
-    assert result.returncode == 0, result.stderr
-    registered = json.loads(result.stdout.strip().splitlines()[-1])
+    registered = run_json(script, args=[str(file) for file in files])
     assert "EngraphisGraph" in registered["engraphis-graph.js"]
     assert registered["engraphis-spacetime.js"] == ["EngraphisSpacetime"]
     assert "EngraphisEveryGraph" in registered["engraphis-graph-every.js"]
@@ -10178,28 +10142,32 @@ class _LedgerMarkup(HTMLParser):
             self._select = None
 
 
+_LEDGER_MARKUP_JSON = ""
+
+
+def _ledger_markup_json() -> str:
+    global _LEDGER_MARKUP_JSON
+    if not _LEDGER_MARKUP_JSON:
+        markup = _LedgerMarkup()
+        markup.feed(LEDGER_INDEX.read_text(encoding="utf-8"))
+        _LEDGER_MARKUP_JSON = json.dumps(markup.elements)
+    return _LEDGER_MARKUP_JSON
+
+
 def _run_ledger(scenario: str) -> dict:
-    markup = _LedgerMarkup()
-    markup.feed(LEDGER_INDEX.read_text(encoding="utf-8"))
+    markup_path = "<ledger-markup>"
     script = (
-        "process.argv.splice(1, 1);\n" + LEDGER_HARNESS
+        LEDGER_HARNESS
         + "(async () => {\n" + scenario + "\n})().catch(error => {\n"
         + "  console.error(error && error.stack || error); process.exit(1);\n});"
     )
-    # Large dashboard fixtures exceed Windows' command-line limit. Keep the harness
-    # and its parsed markup in temporary UTF-8 files on every platform.
-    with TemporaryDirectory(prefix="engraphis-ledger-test-") as directory:
-        script_path = Path(directory) / "ledger.js"
-        markup_path = Path(directory) / "markup.json"
-        script_path.write_text(script, encoding="utf-8")
-        markup_path.write_text(json.dumps(markup.elements), encoding="utf-8")
-        result = subprocess.run(
-            [NODE, str(script_path), str(ASSET), str(LEDGER), str(GRAPH_LIFECYCLE),
-             str(LEDGER_CSS), str(markup_path)],
-            cwd=ROOT, capture_output=True, encoding="utf-8", check=False,
-        )
-    assert result.returncode == 0, result.stderr
-    return json.loads(result.stdout.strip().splitlines()[-1])
+    return run_json(
+        script,
+        args=[
+            str(ASSET), str(LEDGER), str(GRAPH_LIFECYCLE), str(LEDGER_CSS), markup_path,
+        ],
+        files={markup_path: _ledger_markup_json()},
+    )
 
 
 def _ledger_theme(theme: str) -> dict:
