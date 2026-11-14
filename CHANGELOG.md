@@ -5,6 +5,11 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+- Add a local, trigger-invalidated `vector_visibility_state` revision and 64 MiB `NumpyVectorIndex`
+  cache across temporal windows, dedupe `MemoryEngine.remember_many`, install `idx_mem_ingested`
+  (additive v19 repair, no `SCHEMA_VERSION` bump or second `.pre-migration-v19.bak`; rollback drops
+  all nine `trg_vector_vis_*` triggers before `vector_visibility_state` / `idx_mem_ingested`), and
+  set SQLite page cache to ~16 MiB/connection (plus opt-in `ENGRAPHIS_SQLITE_MMAP=1`).
 - Add one checked-in entitlement contract as the read-only plan→feature mirror, and fail the
   release gate when it drifts from the private hosted contract. Local workspace export stays
   free; a server grant this build cannot render is reported instead of silently dropped.
