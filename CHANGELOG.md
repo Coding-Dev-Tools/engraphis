@@ -5,6 +5,10 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+- Drive onboarding trial/checkout links and `/memory/license` + `/api/license` per-plan trial
+  metadata (`trial_days`, `days_by_plan`) from `engraphis/commercial.py` with path-aware,
+  mutation-safe manifest caching, align dashboard Team plan cards and comparison tables with live
+  granted capabilities, and guard explicit click-to-copy handling for one-time Cloud Sync keys.
 - Add one checked-in entitlement contract as the read-only plan→feature mirror, and fail the
   release gate when it drifts from the private hosted contract. Local workspace export stays
   free; a server grant this build cannot render is reported instead of silently dropped.

@@ -1984,6 +1984,43 @@ def test_unknown_team_trial_duration_is_never_inferred_from_legacy_days(monkeypa
     assert payload["trial"]["trial_days"] == 7
 
 
+def test_the_cloud_only_refusal_discloses_each_plans_own_trial_duration() -> None:
+    """A client that only sees the 501 still must not quote a 7-day Team trial."""
+
+    detail = v2_api._hosted_license_detail()
+
+    assert detail["days_by_plan"] == {"pro": 7, "team": 14}
+    assert detail["trial_days"] == 7
+    assert detail["trial_seconds"] == 7 * 24 * 60 * 60
+
+
+def test_legacy_license_surface_discloses_the_per_plan_trial_days() -> None:
+    """``/memory/license`` published only the Pro duration as if it were every plan's."""
+
+    import asyncio
+
+    from engraphis.routes import memory as memory_routes
+
+    payload = asyncio.run(memory_routes.get_license())["data"]
+
+    assert payload["days_by_plan"] == {"pro": 7, "team": 14}
+    assert payload["trial_days"] == 7
+    assert payload["trial_seconds"] == 7 * 24 * 60 * 60
+
+
+@pytest.mark.parametrize("plan", ["pro", "team"])
+def test_hosted_license_discloses_manifest_duration_per_plan(monkeypatch, plan) -> None:
+    from engraphis import commercial
+
+    monkeypatch.setattr(commercial, "manifest", lambda: {
+        "trial": {"days_by_plan": {"pro": 3, "team": 21}},
+    })
+    assert v2_api.get_license()["trial"]["days_by_plan"][plan] == (
+        3 if plan == "pro" else 21)
+    assert v2_api._hosted_license_detail()["days_by_plan"][plan] == (
+        3 if plan == "pro" else 21)
+
+
 def test_a_connected_but_unanswered_installation_offers_no_trial(monkeypatch) -> None:
     """First boot after onboarding: the plan is inferred, the trial must not be.
 

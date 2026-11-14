@@ -6621,23 +6621,31 @@
     target.append(actions);
   }
 
+  async function copyCloudSyncKey(key) {
+    try {
+      if (!navigator.clipboard) throw new Error('clipboard unavailable');
+      await navigator.clipboard.writeText(key);
+      showNotice('Cloud Sync key copied.');
+      return true;
+    } catch (_) {
+      showNotice('Copy failed. Select the key and copy it manually.');
+      return false;
+    }
+  }
+
   function renderCreatedSyncKey(target, key, status) {
     target.replaceChildren(
       node('h3', '', 'Cloud Sync key created'),
       node('p', 'automation-policy-note',
-        'Store this key somewhere safe. It is shown only once, and every device that syncs this workspace needs it.'),
+        'Store this key somewhere safe. It is shown only once, click Copy key to copy it to your clipboard, and every device that syncs this workspace needs it.'),
       node('code', 'sync-key-value', key),
     );
     const actions = node('div', 'automation-policy-actions');
-    actions.append(button('Copy key', 'primary-button', async () => {
-      try {
-        if (!navigator.clipboard) throw new Error('clipboard unavailable');
-        await navigator.clipboard.writeText(key);
-        showNotice('Cloud Sync key copied.');
-      } catch (_) {
-        showNotice('Copy failed. Select the key and copy it manually.');
-      }
-    }));
+    const copyBtn = button('Copy key', 'primary-button');
+    copyBtn.addEventListener('click', () => {
+      copyCloudSyncKey(key);
+    });
+    actions.append(copyBtn);
     actions.append(button('I stored the key', 'secondary-button', () => renderSyncStatus(status)));
     target.append(actions);
   }
@@ -6753,7 +6761,7 @@
     const plans = [
       { id: 'free', name: 'Free', price: prices.free, note: 'The complete local memory engine and every core operation.', action: 'Current local plan' },
       { id: 'pro', name: 'Pro', price: prices.pro, note: 'Cloud sync, managed automation and portfolio analytics.' },
-      { id: 'team', name: 'Team', price: prices.team, note: 'Shared workspaces, member roles, seats and remote agents.' },
+      { id: 'team', name: 'Team', price: prices.team, note: 'Hosted organizations, member roles, seats and scoped agent credentials.' },
     ];
     plans.forEach(plan => {
       const card = node('article', `plan-card${plan.id === 'pro' ? ' featured' : ''}`);

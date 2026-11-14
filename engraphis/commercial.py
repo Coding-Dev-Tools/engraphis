@@ -6,17 +6,52 @@ live in the private service repository and are intentionally not importable here
 """
 from __future__ import annotations
 
+import copy
 import json
+from functools import lru_cache
 from pathlib import Path
+from typing import Any, Optional
 
 
 BILLING_AUTHORITY = "stripe"
 
 
-def manifest() -> dict:
-    """Load the public plan and product manifest used by release checks."""
-    path = Path(__file__).with_name("commercial_manifest.json")
-    return json.loads(path.read_text(encoding="utf-8"))
+def _manifest_path() -> Path:
+    return Path(__file__).with_name("commercial_manifest.json")
+
+
+@lru_cache(maxsize=4)
+def _load_manifest(path_str: str, mtime_ns: int, size: int) -> dict[str, Any]:
+    """Parse the manifest for one ``(path_str, mtime_ns, size)`` file identity.
+
+    The cache key combines the normalized path with the file's modification time and byte
+    size so distinct paths never collide and normal file updates or package upgrades are
+    re-read automatically. An in-place rewrite that preserves both ``st_mtime_ns`` and
+    ``st_size`` keeps the cached entry until ``reload()`` is called.
+    """
+
+    del mtime_ns, size
+    return json.loads(Path(path_str).read_text(encoding="utf-8"))
+
+
+def manifest(path: Optional[Path] = None) -> dict[str, Any]:
+    """Load the public plan and product manifest used by release checks.
+
+    Returns a deep copy of the cached table (trading ~0.1 ms of ``stat`` + ``deepcopy`` for
+    isolation) so caller mutations cannot corrupt process-wide state.
+    """
+
+    target = Path(path) if path is not None else _manifest_path()
+    stat = target.stat()
+    return copy.deepcopy(
+        _load_manifest(str(target.absolute()), stat.st_mtime_ns, stat.st_size)
+    )
+
+
+def reload() -> None:
+    """Drop the cached manifest. Tests and release tooling only."""
+
+    _load_manifest.cache_clear()
 
 
 def trial_days_by_plan() -> dict[str, int]:

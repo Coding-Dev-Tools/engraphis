@@ -94,14 +94,14 @@ interpretation and do not count as additional benchmark-quality gains.
 ### Public numeric evidence registry
 
 Every exact public aggregate retained below comes from the checked-in, public-safe
-[`offline-fixtures-connect-verify-20261117.json`](docs/benchmark-evidence/offline-fixtures-connect-verify-20261117.json) artifact. Its
+[`offline-fixtures-ux-parity-20261118.json`](docs/benchmark-evidence/offline-fixtures-ux-parity-20261118.json) artifact. Its
 SHA-256 is
-`28f0fb97bb043446418c838b7db10a6a794b6e99ab5d621c1e6db04215df1737`, also recorded in the
+`7883aa21cd813af81e1a0a1f784780a0c865c9fc672ae938fdee452509d43bca`, also recorded in the
 adjacent `.sha256` file. The artifact contains no raw questions, answers, prompts, customer data,
 or per-record content fingerprints.
 
 The fixture-suite digest is
-`d95d8839c1260db162861411ab0a84d20273b587d2b7001362ac6fec4b1434eb`. The artifact defines
+`63f0f72b0610a1e26ab07245ce095939c9e7ff024724506b46be17dc71e3ae0f`. The artifact defines
 the digest algorithm and records the SHA-256 of every suite and dataset file. Each evidence ID
 also binds its exact command through `sha256(UTF-8 exact command)`:
 
@@ -117,9 +117,9 @@ The canonical chart aliases are regenerated from that new artifact and carry its
 historical per-run artifacts and their preserved chart bytes remain unchanged. The current
 PNG views were freshly rendered from the registered artifact SVG via Google Chrome for Testing 156.0.8078.4
 headless shell on Windows at each SVG canvas size, with embedded artifact and SVG checksums.
-The fresh evaluator run used Windows CPython 3.11.17 and NumPy 2.4.6. Its 591-file manifest
-binds the producer after adding pre-write hosted connection and Jev quota verification in
-`engraphis/device_connect.py` atop the 1.7.10+ fixes: Command Code file-guard tool
+The fresh evaluator run on 2026-11-18 UTC used Windows CPython 3.11.17 and NumPy 2.4.6. Its 591-file manifest
+binds the producer after unifying Pro/Team commercial contract metadata and hardening sync-key UX
+atop `engraphis/device_connect.py` and the 1.7.10+ fixes: Command Code file-guard tool
 ids, fail-closed hook errors, symlink-then-parent and Windows alias targets, the linear
 Spec Studio heading pattern, closure-limit and browse-version handling, the equal-start
 supersede guard, bounded history candidate windows for `why` and `timeline`, raw-path UNC/device
@@ -135,10 +135,12 @@ retrieval-quality improvement. It does not qualify browser behavior, hosted serv
 external models, or provider billing. The registered artifact was produced with:
 
 ```bash
-python -m scripts.export_offline_evidence --output docs/benchmark-evidence/offline-fixtures-connect-verify-20261117.json
+python -m scripts.export_offline_evidence --output docs/benchmark-evidence/offline-fixtures-ux-parity-20261118.json
 ```
 
 The earlier release-review predecessors,
+[`offline-fixtures-connect-verify-20261117.json`](docs/benchmark-evidence/offline-fixtures-connect-verify-20261117.json)
+(SHA-256 `28f0fb97bb043446418c838b7db10a6a794b6e99ab5d621c1e6db04215df1737`),
 [`offline-fixtures-paid-plans-20261109.json`](docs/benchmark-evidence/offline-fixtures-paid-plans-20261109.json)
 (SHA-256 `d787cc2a6af8de86442b56833b0fdd5654b548779403b5a03c48bc9e7ef4f760`),
 [`offline-fixtures-automatic-browser-access-20261031.json`](docs/benchmark-evidence/offline-fixtures-automatic-browser-access-20261031.json)
@@ -206,13 +208,13 @@ grounded checks in separate panels; provider billing and MCP transport are not m
 the SVG and matching PNG with:
 
 ```bash
-python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-connect-verify-20261117.json --output docs/images/context-efficiency.svg --png-output docs/images/context-efficiency.png
+python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-ux-parity-20261118.json --output docs/images/context-efficiency.svg --png-output docs/images/context-efficiency.png
 ```
 
 The companion examples are also generated from that artifact with:
 
 ```bash
-python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-connect-verify-20261117.json --output docs/images/evidence-backed-agent-examples.svg --png-output docs/images/evidence-backed-agent-examples.png
+python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-ux-parity-20261118.json --output docs/images/evidence-backed-agent-examples.svg --png-output docs/images/evidence-backed-agent-examples.png
 ```
 The historical-to-executable mapping is in
 [`docs/BENCHMARK_CHANGE_COVERAGE.md`](docs/BENCHMARK_CHANGE_COVERAGE.md).
