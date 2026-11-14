@@ -1,7 +1,7 @@
 # Grype vulnerability scanner configuration.
 # See: https://github.com/anchore/grype#configuration
 #
-# The production image uses python:3.11-slim (Debian trixie) with gosu for
+# The production image uses python:3.15-slim (Debian trixie) with gosu for
 # privilege dropping. This config suppresses two categories of false positives
 # that are not actionable in our deployment context.
 
@@ -16,11 +16,10 @@ ignore:
       name: "stdlib"
       type: "go-module"
 
-  # ── Python 3.11 CVEs with fixes only in 3.13+ ──────────────────────────────
-  # Python 3.11 is in security-fix-only mode (PEP 664). These CVEs have fixes
-  # only in Python 3.13+ and will not be backported. Our Dockerfile pins
-  # python:3.11-slim which tracks 3.11.x security releases. These are not
-  # actionable without upgrading to Python 3.13+.
+  # ── Python CVEs with fixes only in 3.13+ ───────────────────────────────────
+  # The Dockerfile pins python:3.15-slim, which already carries these fixes;
+  # the suppressions remain so older 3.11/3.13-era bases used by downstream
+  # rebuilds do not fail the gate on CVEs that are not actionable there.
   - vulnerability: "CVE-2026-7210"     # fix: 3.13.14+
   - vulnerability: "CVE-2026-11940"    # fix: 3.13.15+
   - vulnerability: "CVE-2026-15308"    # fix: 3.15.0+
