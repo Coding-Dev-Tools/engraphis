@@ -684,8 +684,10 @@ def test_release_transitive_dependency_security_floors_cannot_regress():
     package = json.loads(_text("integrations/pi/package.json"))
     lock = json.loads(_text("integrations/pi/npm-shrinkwrap.json"))
     expected_overrides = {
+        "@hono/node-server": "^2.1.8",
         "body-parser": "^2.4.0",
         "fast-uri": "^3.1.9",
+        "hono": "^4.13.18",
         "minimatch": "^11.0.3",
         "undici": "^8.12.3",
         "zod": "^4.6.6",
