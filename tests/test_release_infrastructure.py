@@ -3,7 +3,11 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -817,4 +821,101 @@ def test_release_workflow_permissions_are_least_privilege():
         body = _job_block(release, job)
         assert "contents: write" not in body, job
         assert "id-token: write" not in body, job
+
+
+def test_run_preflight_ps1_aligns_with_ci_gates_and_checks_dependencies():
+    """The local pre-flight must run the offline CI gates, not a comfortable subset."""
+    script = _text("run_preflight.ps1")
+
+    for command in (
+        "ruff check .",
+        "scripts/check_commercial_manifest.py",
+        "scripts/externalize_dashboard_assets.py",
+        "pyright",
+        "pytest",
+    ):
+        assert command in script, command
+
+    # Every eval module the offline CI job runs, and both JSONL datasets it feeds the
+    # harness. A dropped module silently shrinks the gate instead of failing it.
+    assert set(re.findall(r'"eval\.([a-z_]+)"', script)) == {
+        "harness",
+        "ablation",
+        "reinforcement",
+        "adversarial_memory_security",
+        "grounded",
+        "code_arm",
+        "spec_crawl",
+        "evidence_contracts",
+    }
+    assert len(re.findall(r'"eval\.harness"', script)) == 2
+    assert '"eval/datasets/sample.jsonl"' in script
+    assert '"eval/datasets/codemem.jsonl"' in script
+
+    assert 'Invoke-GateStep "Pyright Type Check"' in script
+    assert 'Invoke-GateStep "Offline Unit Test Suite"' in script
+
+    # A missing dataset is a hard failure resolved against the repository root; it must
+    # never be folded into `continue`, which would report green after skipping the gate.
+    assert re.search(r"-not\s*\(\s*Test-Path[^\n]*\bcontinue\b", script) is None
+    dataset_check = script.split("$datasetPath = Join-Path $repoRoot", 1)[1].split(
+        "Invoke-GateStep", 1
+    )[0]
+    assert "exit 1" in dataset_check
+    assert "continue" not in dataset_check
+    assert "Push-Location" in script
+    assert "Join-Path $repoRoot" in script
+
+    # A real import catches a broken native wheel or a missing DLL; find_spec() alone would
+    # report those as installed. stdout is discarded so a stray line cannot become the
+    # PowerShell return value.
+    assert "importlib.import_module(sys.argv[1])" in script
+    assert "$null = & $pythonExe -c" in script
+
+    # CI runs pytest with ENGRAPHIS_INDEX_ROOTS covering the checkout and its temp dirs;
+    # the pre-flight mirrors that and restores the caller's value afterwards.
+    assert "$env:ENGRAPHIS_INDEX_ROOTS" in script
+    assert "$previousIndexRoots = $env:ENGRAPHIS_INDEX_ROOTS" in script
+    assert "[pytest] -Workers ignored in -Fast mode" in script
+
+    # CI runs pytest with the ini-file addopts neutralised and skip reasons visible. The
+    # full suite line has to carry all three so a local pyproject/pytest override cannot
+    # change what the pre-flight measured.
+    full_suite = [
+        line for line in script.splitlines() if "$pytestArgs = " in line and '"tests/"' in line
+    ]
+    assert len(full_suite) == 1
+    line = full_suite[0]
+    assert '"-o", "addopts="' in line
+    assert '"-q"' in line
+    assert '"-rs"' in line
+    assert '"--basetemp"' in line
+
+    # A venv without the full-stack extras would skip the server/MCP tests silently, and
+    # ".[all,dev]" would drag in torch and the transcription/document extras that this gate does not need.
+    assert '"fastapi", "httpx", "mcp", "multipart", "pydantic", "sqlite_vec", "uvicorn"' in script
+    assert 'pip install -e ".[test]"' in script
+
+    # Derive the parity list from the CI job itself so a new offline gate cannot be added
+    # to CI and silently left out of the local pre-flight.
+    for job in ("test", "core-py39"):
+        block = _job_block(_text(".github/workflows/ci.yml"), job)
+        for dataset in re.findall(r"eval/datasets/[\w.-]+\.jsonl", block):
+            assert f'"{dataset}"' in script, dataset
+        for module in re.findall(r"python -m (eval\.[a-z_]+)", block):
+            assert f'"{module}"' in script, module
+
+
+def test_run_preflight_ps1_parses_without_powershell_syntax_errors():
+    shell = shutil.which("pwsh") or shutil.which("powershell")
+    if not shell:
+        pytest.skip("pwsh/powershell is not installed")
+    script_path = str(ROOT / "run_preflight.ps1").replace("'", "''")
+    cmd = (
+        "$errs = $null; [void][System.Management.Automation.Language.Parser]::ParseFile("
+        f"'{script_path}', $null, [ref]$errs); Write-Output $errs.Count"
+    )
+    proc = subprocess.run([shell, "-NoProfile", "-NonInteractive", "-Command", cmd],
+                          capture_output=True, text=True, check=True)
+    assert proc.stdout.strip().splitlines()[-1] == "0"
 
