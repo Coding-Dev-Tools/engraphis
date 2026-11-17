@@ -29,11 +29,13 @@ import sys
 from pathlib import Path
 
 from engraphis import cloud_session
+from engraphis.config import persist_project_env
 from engraphis.device_connect import (
     DEFAULT_TIMEOUT_SECONDS,
     DeviceConnectError,
     connect,
     preflight,
+    verify_connection,
 )
 
 
@@ -57,6 +59,32 @@ def _read_token(value: str) -> str:
             status=400,
         )
     return sys.stdin.readline().strip("\r\n")
+
+
+def _print_jev_verification(info: dict) -> None:
+    jev_avail = info.get("jev_available")
+    if jev_avail is True:
+        rem = info.get("jev_remaining_24h")
+        lim = info.get("jev_limit_24h")
+        detail = (
+            "available (%s/%s remaining)" % (rem, lim)
+            if rem is not None and lim is not None
+            else "available"
+        )
+        print("  managed jev    %s" % detail)
+    elif jev_avail is False:
+        print("  managed jev    unavailable")
+    elif "jev_available" in info:
+        print("  managed jev    unverified (usage check unavailable)")
+
+
+def _apply_verification_fields(target: dict, verification: dict) -> None:
+    target["verified"] = bool(verification.get("verified"))
+    if "jev_available" in verification:
+        target["jev_available"] = verification.get("jev_available")
+    for field in ("jev_remaining_24h", "jev_limit_24h"):
+        if verification.get(field) is not None:
+            target[field] = verification.get(field)
 
 
 def _print_summary(summary: dict) -> None:
@@ -99,6 +127,12 @@ def main(argv=None) -> int:
                     help="the connect token from your account portal, or - for stdin")
     action.add_argument("--preflight", action="store_true",
                         help="validate endpoints and session storage without a token or HTTP request")
+    action.add_argument("--verify-only", action="store_true",
+                        help="verify an already-connected Cloud session without a new token")
+    ap.add_argument("--enable-managed-jev", action="store_true",
+                    help="write ENGRAPHIS_DECISION_BACKEND=managed into the private trusted config")
+    ap.add_argument("--verify", action="store_true",
+                    help="verify the Cloud session and check Jev allowance after connecting")
     ap.add_argument("--control-url", default=None, metavar="URL",
                     help="control plane to connect to (default: the shipped endpoint, "
                          "or ENGRAPHIS_CLOUD_CONTROL_URL)")
@@ -116,6 +150,26 @@ def main(argv=None) -> int:
     ap.add_argument("--json", action="store_true",
                     help="print the redacted summary as JSON instead of a report")
     args = ap.parse_args(argv)
+
+    if args.preflight and (args.enable_managed_jev or args.verify):
+        ap.error("--preflight cannot be combined with --enable-managed-jev or --verify")
+
+    if args.verify_only:
+        connect_only = [
+            flag
+            for flag, value in (
+                ("--enable-managed-jev", args.enable_managed_jev),
+                ("--verify", args.verify),
+                ("--workspace", args.workspace),
+                ("--label", args.label),
+                ("--device-name", args.device_name),
+                ("--control-url", args.control_url),
+                ("--compute-url", args.compute_url),
+            )
+            if value
+        ]
+        if connect_only:
+            ap.error("--verify-only cannot be combined with %s" % ", ".join(connect_only))
 
     if args.preflight:
         try:
@@ -136,6 +190,22 @@ def main(argv=None) -> int:
             print()
             print("No credential was read or sent. This does not verify private-service "
                   "membership, billing, token validity, or workspace access.")
+        return 0
+
+    if args.verify_only:
+        try:
+            verification = verify_connection(timeout=args.timeout)
+        except DeviceConnectError as exc:
+            print("%s: %s" % (ap.prog, exc), file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps(verification, sort_keys=True, indent=2))
+        else:
+            print("Engraphis Cloud session verified.")
+            print("  organization   %s" % (verification.get("organization_id") or ""))
+            if verification.get("plan"):
+                print("  plan           %s" % verification.get("plan"))
+            _print_jev_verification(verification)
         return 0
 
     try:
@@ -170,10 +240,33 @@ def main(argv=None) -> int:
               file=sys.stderr)
         return 1
 
+    if args.verify:
+        try:
+            verification = verify_connection(timeout=args.timeout)
+            _apply_verification_fields(summary, verification)
+        except DeviceConnectError as exc:
+            print("%s: session connected, but verification failed: %s" % (ap.prog, exc),
+                  file=sys.stderr)
+            return 1
+
+    if args.enable_managed_jev:
+        try:
+            persist_project_env({"ENGRAPHIS_DECISION_BACKEND": "managed"})
+            summary["managed_jev_configured"] = True
+        except (OSError, ValueError) as exc:
+            print("%s: session connected, but could not update private config: %s" % (ap.prog, exc),
+                  file=sys.stderr)
+            return 1
+
     if args.json:
         print(json.dumps(summary, sort_keys=True, indent=2))
     else:
         _print_summary(summary)
+        if summary.get("managed_jev_configured"):
+            print("  managed jev    enabled (ENGRAPHIS_DECISION_BACKEND=managed)")
+        if summary.get("verified"):
+            print("  verified       active")
+            _print_jev_verification(summary)
         print()
         if usable:
             print("Next steps:")
