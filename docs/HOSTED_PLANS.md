@@ -52,7 +52,13 @@ and restart that host. See the [1.7.9 upgrade and release checklist](RELEASE_1_7
 Installing a new client does not enable a deployment whose managed service is disabled; the hosted control service enables it with its provider key.
 
 Set `ENGRAPHIS_DECISION_BACKEND=managed` and connect the installation through the ordinary
-Cloud account flow. The client refreshes its saved session and sends only to that session's
+Cloud account flow, or run a single non-interactive command with your connect token:
+
+```bash
+engraphis connect --token <CONNECT_TOKEN> --enable-managed-jev --verify
+```
+
+The client refreshes its saved session and sends only to that session's
 bound control origin. `auto` chooses this managed route when configured; it never silently
 switches to a personal TypeSafe key. Direct `byok` is an explicit alternative and may incur
 charges from TypeSafe. Legacy `typesafe`, `jev`, and `system1` selectors mean BYOK.
