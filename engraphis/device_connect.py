@@ -32,6 +32,7 @@ import os
 import platform
 import re
 import socket
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -41,9 +42,15 @@ from typing import Optional, Tuple
 from engraphis import cloud_session
 from engraphis.hosted_client import (
     CloudUrlUnresolved,
+    _is_loopback_host,
     account_url,
     build_pinned_https_opener,
     validate_cloud_base_url,
+)
+from engraphis.http_deadline import (
+    deadline_handlers,
+    read_response,
+    remaining_time,
 )
 from engraphis.private_state import (
     UnsafeStateFile,
@@ -361,7 +368,7 @@ def default_compute_url(control_url: str) -> str:
     return ""
 
 
-def _validated_timeout(value: object) -> float:
+def _validated_timeout(value: float | int | str) -> float:
     """Reject a timeout the socket layer cannot use, before any request is started.
 
     ``float("nan")`` and ``float("inf")`` are values ``argparse``'s ``type=float``
@@ -881,3 +888,156 @@ def connect(token: object, *, control_url: Optional[str] = None,
     summary["compute_url"] = resolved_compute
     summary["session_path"] = str(session_path)
     return summary
+
+
+def _reject_nonfinite(_constant: str) -> None:
+    raise ValueError("non-finite JSON constant")
+
+
+def _select_daily_window(windows: object) -> Optional[dict]:
+    if not isinstance(windows, list) or not windows:
+        return None
+    for entry in windows:
+        if isinstance(entry, dict) and entry.get("seconds") == 86400:
+            return entry
+    if len(windows) == 1 and isinstance(windows[0], dict) and "seconds" not in windows[0]:
+        return windows[0]
+    return None
+
+
+def _nonneg_int(value: object) -> Optional[int]:
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return None
+
+
+def _probe_jev_usage(
+    validated_control: str, access_token: str, deadline: float,
+) -> dict:
+    """Query `/v1/jev/usage` within the shared verification deadline.
+
+    Raises :class:`DeviceConnectError` if the control plane explicitly rejects the
+    credential or account (401/402/403). Network, 404, 5xx, or malformed responses
+    degrade to ``jev_available=None`` since credential refresh already succeeded.
+    """
+    req = urllib.request.Request(
+        validated_control.rstrip("/") + "/v1/jev/usage",
+        headers={
+            "Accept": "application/json",
+            "Authorization": "Bearer " + access_token,
+            "User-Agent": "Engraphis/%s (+https://engraphis.com)" % CURRENT_VERSION,
+        },
+        method="GET",
+    )
+    loopback_only = _is_loopback_host(urlsplit(validated_control).hostname or "")
+    handlers: list[urllib.request.BaseHandler] = [_NoRedirect()]
+    handlers.extend(deadline_handlers(deadline, loopback_only=loopback_only))
+    if loopback_only:
+        handlers.append(urllib.request.ProxyHandler({}))
+    opener = build_pinned_https_opener(*handlers)
+    try:
+        timeout_budget = remaining_time(deadline)
+        with opener.open(req, timeout=timeout_budget) as resp:
+            if getattr(resp, "status", 200) != 200:
+                return {"jev_available": None}
+            raw = read_response(resp, deadline, max_bytes=_MAX_RESPONSE_BYTES)
+    except urllib.error.HTTPError as exc:
+        code = exc.code
+        try:
+            exc.close()
+        except Exception:
+            pass
+        if code == 401:
+            raise DeviceConnectError(
+                "The saved Engraphis Cloud credential was rejected during verification. "
+                "Reconnect with `engraphis connect --token ...`.",
+                status=401,
+            ) from exc
+        if code == 402:
+            raise DeviceConnectError(
+                "An active subscription or trial is required on your Engraphis account.",
+                status=402,
+            ) from exc
+        if code == 403:
+            raise DeviceConnectError(
+                "Engraphis Cloud refused verification for this organization. "
+                "Check membership and plan status.",
+                status=403,
+            ) from exc
+        return {"jev_available": None}
+    except (OSError, ValueError, TimeoutError, http.client.HTTPException):
+        return {"jev_available": None}
+
+    if len(raw) > _MAX_RESPONSE_BYTES:
+        return {"jev_available": None}
+    try:
+        payload = json.loads(raw.decode("utf-8"), parse_constant=_reject_nonfinite)
+    except (UnicodeDecodeError, ValueError):
+        return {"jev_available": None}
+    if not isinstance(payload, dict):
+        return {"jev_available": None}
+
+    probed: dict = {}
+    avail = payload.get("available")
+    if isinstance(avail, bool):
+        probed["jev_available"] = avail
+    window = _select_daily_window(payload.get("windows"))
+    if window is not None:
+        rem = _nonneg_int(window.get("remaining_decisions"))
+        lim = _nonneg_int(window.get("limit"))
+        if rem is not None:
+            probed["jev_remaining_24h"] = rem
+        if lim is not None:
+            probed["jev_limit_24h"] = lim
+    return probed
+
+
+def verify_connection(*, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> dict:
+    """Verify the saved Cloud session refreshes cleanly and read Jev usage if available.
+
+    Never returns or logs bearer tokens. Raises :class:`DeviceConnectError` if no usable
+    session exists, the control plane rejects credentials/account billing, or the
+    request times out.
+    """
+    timeout = _validated_timeout(timeout)
+    deadline = time.monotonic() + timeout
+    try:
+        if not cloud_session.configured(require_compute=False):
+            raise DeviceConnectError(
+                "No connected Engraphis Cloud session was found. "
+                "Run `engraphis connect --token ...` first.",
+                status=401,
+            )
+        access_token, organization_id, _ = cloud_session.access_for_workspace(
+            None, require_compute=False, deadline=deadline,
+        )
+    except cloud_session.CloudSessionError as exc:
+        raise DeviceConnectError(str(exc), status=getattr(exc, "status", 503)) from exc
+    except TimeoutError as exc:
+        raise DeviceConnectError(
+            "Engraphis Cloud verification timed out. Try again shortly.",
+            status=504,
+        ) from exc
+
+    status_info = cloud_session.saved_entitlement()
+    validated_control = ""
+    try:
+        raw_control = cloud_session.credential_bound_control_url()
+        if raw_control:
+            validated_control = _summary_text(validate_cloud_base_url(raw_control))
+    except (cloud_session.CloudSessionError, ValueError):
+        validated_control = ""
+
+    clean_org = _summary_text(organization_id)
+    clean_plan = _summary_text(status_info.get("plan"))
+    cloud_active = status_info.get("cloud_access_active")
+    result: dict = {
+        "verified": True,
+        "organization_id": clean_org,
+        "plan": clean_plan or None,
+        "cloud_access_active": cloud_active if isinstance(cloud_active, bool) else None,
+        "control_url": validated_control,
+    }
+    if validated_control and access_token:
+        result.update(_probe_jev_usage(validated_control, access_token, deadline))
+    return result
