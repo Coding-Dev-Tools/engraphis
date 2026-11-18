@@ -689,15 +689,19 @@ def test_release_transitive_dependency_security_floors_cannot_regress():
         "fast-uri": "^3.1.9",
         "hono": "^4.13.18",
         "minimatch": "^11.0.3",
+        "proxy-addr": "2.0.8",
         "undici": "^8.12.3",
         "zod": "^4.6.6",
     }
     for name, floor in expected_overrides.items():
         assert package["overrides"][name] == floor
-        locked = lock["packages"][f"node_modules/{name}"]["version"]
-        assert tuple(map(int, locked.split("."))) >= tuple(
-            map(int, floor.removeprefix("^").split("."))
-        )
+        min_version = tuple(map(int, floor.removeprefix("^").split(".")))
+        top_key = f"node_modules/{name}"
+        assert top_key in lock["packages"]
+        suffix = f"/{top_key}"
+        for pkg_path, entry in lock["packages"].items():
+            if pkg_path == top_key or pkg_path.endswith(suffix):
+                assert tuple(map(int, entry["version"].split("."))) >= min_version, pkg_path
 
     # The Pi test host is pinned to a release whose own shrinkwrap resolves the patched
     # leaves. Earlier releases needed a post-install repair, which could not clear the
