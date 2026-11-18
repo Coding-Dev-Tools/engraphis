@@ -54,8 +54,10 @@ REGISTRATION = {
 class _Response:
     """Minimal stand-in for the ``http.client`` response the opener yields."""
 
-    def __init__(self, payload: bytes) -> None:
+    def __init__(self, payload: bytes, *, status: int = 200) -> None:
         self._payload = payload
+        self._offset = 0
+        self.status = status
 
     def __enter__(self):
         return self
@@ -65,6 +67,16 @@ class _Response:
 
     def read(self, size: int = -1) -> bytes:
         return self._payload
+
+    def read1(self, size: int = -1) -> bytes:
+        if self._offset >= len(self._payload):
+            return b""
+        if size is None or size < 0:
+            chunk = self._payload[self._offset :]
+        else:
+            chunk = self._payload[self._offset : self._offset + size]
+        self._offset += len(chunk)
+        return chunk
 
 
 class _Opener:
@@ -1630,3 +1642,225 @@ def test_every_dispatched_verb_resolves_to_a_real_callable():
     for verb, target in entry.COMMANDS.items():
         module_name, _, attribute = target.partition(":")
         assert callable(getattr(import_module(module_name), attribute)), verb
+
+
+def test_cli_enable_managed_jev_and_verify_writes_private_config(monkeypatch, tmp_path, capsys):
+    from engraphis import config as engraphis_config
+
+    env_file = tmp_path / "config.env"
+    monkeypatch.setenv("ENGRAPHIS_ENV_FILE", str(env_file))
+    monkeypatch.setattr(engraphis_config, "_CONFIG_ENV_PATH", env_file)
+    monkeypatch.setattr(device_connect, "validate_cloud_base_url", lambda url: url)
+    monkeypatch.setattr(
+        cloud_session,
+        "access_for_workspace",
+        lambda workspace, require_compute=False, deadline=None: ("short-access", "org_alpha", None),
+    )
+
+    class _MultiOpener:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def open(self, request, timeout):
+            self.calls.append(request.full_url)
+            if request.full_url.endswith("/v1/jev/usage"):
+                return _Response(json.dumps({
+                    "available": True,
+                    "windows": [{"seconds": 86400, "limit": 500, "remaining_decisions": 499}],
+                }).encode("utf-8"))
+            return _Response(json.dumps(REGISTRATION).encode("utf-8"))
+
+    opener = _MultiOpener()
+    monkeypatch.setattr(device_connect, "build_pinned_https_opener", lambda *a, **kw: opener)
+
+    rc = connect_cli.main([
+        "--token", TOKEN,
+        "--control-url", CONTROL_URL,
+        "--compute-url", COMPUTE_URL,
+        "--enable-managed-jev",
+        "--verify",
+        "--json",
+    ])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["managed_jev_configured"] is True
+    assert payload["verified"] is True
+    assert payload["jev_available"] is True
+    assert payload["jev_remaining_24h"] == 499
+    assert "ENGRAPHIS_DECISION_BACKEND=managed" in env_file.read_text(encoding="utf-8")
+    assert TOKEN not in json.dumps(payload)
+
+
+def test_cli_verify_only_reports_session_status_and_fails_when_unconnected(monkeypatch, capsys):
+    rc_missing = connect_cli.main(["--verify-only"])
+    assert rc_missing == 1
+    assert "No connected Engraphis Cloud session" in capsys.readouterr().err
+
+    monkeypatch.setattr(cloud_session, "configured", lambda require_compute=False: True)
+    monkeypatch.setattr(
+        cloud_session,
+        "access_for_workspace",
+        lambda workspace, require_compute=False, deadline=None: ("short-access", "org_alpha", None),
+    )
+    monkeypatch.setattr(
+        cloud_session,
+        "saved_entitlement",
+        lambda: {"plan": "team", "cloud_access_active": True},
+    )
+    monkeypatch.setattr(
+        cloud_session,
+        "credential_bound_control_url",
+        lambda: "",
+    )
+
+    rc_ok = connect_cli.main(["--verify-only"])
+    assert rc_ok == 0
+    out = capsys.readouterr().out
+    assert "Engraphis Cloud session verified." in out
+    assert "org_alpha" in out
+    assert "team" in out
+
+
+def test_verify_connection_maps_session_errors_and_timeouts(monkeypatch) -> None:
+    monkeypatch.setattr(
+        cloud_session,
+        "configured",
+        lambda require_compute=False: (_ for _ in ()).throw(
+            cloud_session.CloudSessionError("corrupt session file", status=409)
+        ),
+    )
+    with pytest.raises(device_connect.DeviceConnectError) as exc_info:
+        device_connect.verify_connection()
+    assert exc_info.value.status == 409
+
+    monkeypatch.setattr(cloud_session, "configured", lambda require_compute=False: True)
+    monkeypatch.setattr(
+        cloud_session,
+        "access_for_workspace",
+        lambda workspace, require_compute=False, deadline=None: (_ for _ in ()).throw(
+            TimeoutError("lock timeout")
+        ),
+    )
+    with pytest.raises(device_connect.DeviceConnectError) as timeout_exc:
+        device_connect.verify_connection(timeout=5.0)
+    assert timeout_exc.value.status == 504
+
+
+def test_verify_connection_sanitizes_usage_payload_and_rejects_401_and_userinfo_url(monkeypatch) -> None:
+    import urllib.error
+
+    monkeypatch.setattr(cloud_session, "configured", lambda require_compute=False: True)
+    monkeypatch.setattr(
+        cloud_session,
+        "access_for_workspace",
+        lambda workspace, require_compute=False, deadline=None: (
+            "secret-access-token",
+            "org_alpha",
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        cloud_session,
+        "saved_entitlement",
+        lambda: {"plan": "team\x1b[31m", "cloud_access_active": True},
+    )
+    monkeypatch.setattr(
+        cloud_session,
+        "credential_bound_control_url",
+        lambda: "https://user:pass@api.engraphis.com",
+    )
+
+    from engraphis import hosted_client
+
+    monkeypatch.setattr(device_connect, "validate_cloud_base_url", hosted_client.validate_cloud_base_url)
+    # Embedded userinfo URL is rejected by validate_cloud_base_url and never leaked in result.
+    bad_url_result = device_connect.verify_connection()
+    assert bad_url_result["control_url"] == ""
+    assert bad_url_result["plan"] is None
+
+    monkeypatch.setattr(
+        cloud_session,
+        "saved_entitlement",
+        lambda: {"plan": "team", "cloud_access_active": True},
+    )
+    monkeypatch.setattr(
+        cloud_session,
+        "credential_bound_control_url",
+        lambda: CONTROL_URL,
+    )
+    monkeypatch.setattr(device_connect, "validate_cloud_base_url", lambda url: url)
+
+    class _MultiWindowOpener:
+        def __init__(self) -> None:
+            self.headers = {}
+            self.method = ""
+
+        def open(self, req, timeout):
+            self.headers = dict(req.header_items())
+            self.method = req.get_method()
+            return _Response(
+                json.dumps(
+                    {
+                        "available": "false",  # non-bool must not coerce to True
+                        "windows": [
+                            {"seconds": 3600, "limit": 99, "remaining_decisions": 12},
+                            {"seconds": 86400, "limit": 500, "remaining_decisions": 487},
+                        ],
+                    }
+                ).encode("utf-8")
+            )
+
+    opener = _MultiWindowOpener()
+    monkeypatch.setattr(device_connect, "build_pinned_https_opener", lambda *a, **kw: opener)
+    res = device_connect.verify_connection()
+    assert opener.method == "GET"
+    assert opener.headers.get("Authorization") == "Bearer secret-access-token"
+    assert "jev_available" not in res
+    assert res["jev_limit_24h"] == 500
+    assert res["jev_remaining_24h"] == 487
+
+    class _RejectOpener:
+        def open(self, req, timeout):
+            raise urllib.error.HTTPError(
+                req.full_url, 401, "Unauthorized", None, None,
+            )
+
+    monkeypatch.setattr(device_connect, "build_pinned_https_opener", lambda *a, **kw: _RejectOpener())
+    with pytest.raises(device_connect.DeviceConnectError) as auth_exc:
+        device_connect.verify_connection()
+    assert auth_exc.value.status == 401
+
+
+def test_cli_flag_conflicts_and_failed_verify_does_not_mutate_config(monkeypatch, tmp_path, capsys) -> None:
+    from engraphis import config as engraphis_config
+
+    env_file = tmp_path / "config.env"
+    monkeypatch.setattr(engraphis_config, "_CONFIG_ENV_PATH", env_file)
+
+    with pytest.raises(SystemExit) as preflight_conflict:
+        connect_cli.main(["--preflight", "--verify"])
+    assert preflight_conflict.value.code == 2
+
+    with pytest.raises(SystemExit) as verify_only_conflict:
+        connect_cli.main(["--verify-only", "--enable-managed-jev"])
+    assert verify_only_conflict.value.code == 2
+
+    monkeypatch.setattr(device_connect, "validate_cloud_base_url", lambda url: url)
+    _install_opener(monkeypatch, _Opener(body=REGISTRATION))
+    monkeypatch.setattr(
+        connect_cli,
+        "verify_connection",
+        lambda timeout=15.0: (_ for _ in ()).throw(
+            device_connect.DeviceConnectError("verification failed", status=401)
+        ),
+    )
+    rc = connect_cli.main([
+        "--token", TOKEN,
+        "--control-url", CONTROL_URL,
+        "--compute-url", COMPUTE_URL,
+        "--enable-managed-jev",
+        "--verify",
+    ])
+    assert rc == 1
+    assert not env_file.exists()
+    assert "verification failed" in capsys.readouterr().err

@@ -159,6 +159,9 @@ Useful options:
 | `--device-name TEXT` | Override the device name (defaults to the hostname). |
 | `--control-url URL` | Select the control plane for a new connection/preflight; reconnect to change a saved credential family's endpoint. |
 | `--compute-url URL` | Select managed compute for a new connection (also `ENGRAPHIS_CLOUD_COMPUTE_URL`); reconnect to change it later. |
+| `--enable-managed-jev` | Write `ENGRAPHIS_DECISION_BACKEND=managed` into `~/.engraphis/config.env` after connecting. |
+| `--verify` | Verify the connected Cloud session and query managed Jev allowance after connecting. |
+| `--verify-only` | Verify an already-connected Cloud session and read managed Jev allowance without redeeming a new token. |
 | `--json` | Print a redacted, machine-readable summary. |
 
 The summary accepts only bounded, printable metadata from the documented response shape.
