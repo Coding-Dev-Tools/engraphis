@@ -31,10 +31,11 @@ from __future__ import annotations
 
 import json
 import shutil
-import subprocess
 from pathlib import Path
 
 import pytest
+
+from tests._node_runner import run_json
 
 ROOT = Path(__file__).resolve().parents[1]
 LEDGER_ASSET = ROOT / "engraphis" / "dashboard_assets" / "ledger.js"
@@ -99,13 +100,7 @@ const emit = value => console.log(JSON.stringify(value));
 
 
 def _run(script: str):
-    result = subprocess.run(
-        [NODE, "-e", PRELUDE + script, str(GRAPH_ASSET)],
-        cwd=ROOT,
-        capture_output=True, text=True, check=False,
-    )
-    assert result.returncode == 0, result.stderr
-    return json.loads(result.stdout.strip().splitlines()[-1])
+    return run_json(PRELUDE + script, args=[str(GRAPH_ASSET)])
 
 
 @requires_node
