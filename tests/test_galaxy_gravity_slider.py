@@ -21,10 +21,11 @@ from __future__ import annotations
 
 import json
 import shutil
-import subprocess
 from pathlib import Path
 
 import pytest
+
+from tests._node_runner import run_json
 
 ROOT = Path(__file__).resolve().parents[1]
 ASSET = ROOT / "engraphis" / "dashboard_assets" / "engraphis-graph.js"
@@ -138,19 +139,7 @@ const emit = value => console.log(JSON.stringify(value));
 
 
 def _run(script: str, env_extra: dict | None = None):
-    env = None
-    if env_extra:
-        import os
-        env = os.environ.copy()
-        env.update(env_extra)
-    result = subprocess.run(
-        [NODE, "-e", PRELUDE + script, str(ASSET)],
-        cwd=ROOT,
-        capture_output=True, text=True, check=False,
-        env=env,
-    )
-    assert result.returncode == 0, result.stderr
-    return json.loads(result.stdout.strip().splitlines()[-1])
+    return run_json(PRELUDE + script, args=[str(ASSET)], env=env_extra)
 
 
 @requires_node
