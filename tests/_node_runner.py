@@ -41,6 +41,8 @@ class _Worker:
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._proc: Optional[subprocess.Popen] = None
+        self._stdout_thread: Optional[threading.Thread] = None
+        self._stderr_thread: Optional[threading.Thread] = None
         self._responses: queue.Queue = queue.Queue()
         self._stderr: collections.deque = collections.deque(maxlen=200)
         self._stderr_lock = threading.Lock()
@@ -76,25 +78,38 @@ class _Worker:
             with stderr_lock:
                 stderr.append(line)
 
-        threading.Thread(
-            target=self._pump, args=(proc.stdout, responses.put), daemon=True,
+        self._stdout_thread = threading.Thread(
+            target=self._pump,
+            args=(proc.stdout, responses.put),
+            kwargs={"on_eof": lambda: responses.put(None)},
+            daemon=True,
             name="engraphis-node-stdout",
-        ).start()
-        threading.Thread(
-            target=self._pump, args=(proc.stderr, capture_stderr), daemon=True,
+        )
+        self._stderr_thread = threading.Thread(
+            target=self._pump,
+            args=(proc.stderr, capture_stderr),
+            daemon=True,
             name="engraphis-node-stderr",
-        ).start()
+        )
+        self._stdout_thread.start()
+        self._stderr_thread.start()
 
     @staticmethod
-    def _pump(stream, sink) -> None:
+    def _pump(stream, sink, *, on_eof=None) -> None:
         try:
-            for line in stream:
-                sink(line)
+            if stream is not None:
+                for line in stream:
+                    sink(line)
         except (ValueError, OSError):
             pass
+        finally:
+            if on_eof is not None:
+                on_eof()
 
     def _stop(self) -> None:
         proc, self._proc = self._proc, None
+        stdout_thread, self._stdout_thread = self._stdout_thread, None
+        stderr_thread, self._stderr_thread = self._stderr_thread, None
         if proc is None:
             return
         try:
@@ -110,6 +125,42 @@ class _Worker:
                 proc.wait(timeout=2)
             except (OSError, subprocess.TimeoutExpired):
                 pass
+        for thread in (stdout_thread, stderr_thread):
+            if thread is not None:
+                thread.join(timeout=1.0)
+        for stream in (proc.stdout, proc.stderr):
+            if stream is not None:
+                try:
+                    stream.close()
+                except (OSError, ValueError):
+                    pass
+
+    def _unexpected_exit_error(
+        self, proc: subprocess.Popen, req_id: int
+    ) -> NodeExecutionError:
+        try:
+            proc.wait(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            pass
+        rc = proc.returncode
+        for thread in (self._stdout_thread, self._stderr_thread):
+            if thread is not None:
+                thread.join(timeout=0.5)
+        with self._stderr_lock:
+            stderr_text = "".join(self._stderr)
+        detail = "node broker exited unexpectedly with code %s" % rc
+        if stderr_text:
+            detail += "\n" + stderr_text
+        return NodeExecutionError(
+            detail,
+            {
+                "id": req_id,
+                "ok": False,
+                "code": rc,
+                "stdout": "",
+                "stderr": stderr_text,
+            },
+        )
 
     def _terminate(self) -> None:
         """Kill the broker without waiting for an in-flight request."""
@@ -127,10 +178,13 @@ class _Worker:
         with self._lock:
             self._seq += 1
             payload = dict(payload, id=self._seq)
+            proc: Optional[subprocess.Popen] = None
             for attempt in range(2):
                 if not self.alive():
                     self._stop()
                     self._start()
+                with self._stderr_lock:
+                    self._stderr.clear()
                 try:
                     proc = self._proc
                     if proc is None or proc.stdin is None:
@@ -142,55 +196,66 @@ class _Worker:
                     if attempt:
                         raise NodeExecutionError("node worker is unavailable") from None
                     self._stop()
+            assert proc is not None
             req_id = payload["id"]
-            deadline = time.monotonic() + timeout
-            while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    self._stop()
-                    raise subprocess.TimeoutExpired(
-                        cmd=["node", str(WORKER)], timeout=timeout
-                    )
-                try:
-                    raw_line = self._responses.get(timeout=min(0.25, remaining))
-                    break
-                except queue.Empty:
-                    # A broker that died mid-request would otherwise burn the whole
-                    # timeout waiting on a line that can never arrive.
-                    if proc.poll() is not None and self._responses.empty():
-                        rc = proc.returncode
-                        self._stop()
-                        raise NodeExecutionError(
-                            "node broker exited unexpectedly with code %s" % rc,
-                            {"id": req_id, "ok": False, "code": rc,
-                             "stdout": "", "stderr": ""},
-                        ) from None
+            # Give the broker's per-worker timer a short grace window to terminate a stuck
+            # request thread without tearing down the persistent broker unnecessarily.
+            deadline = time.monotonic() + max(0.0, float(timeout)) + 1.0
+            frame_ok = False
             try:
-                response = json.loads(raw_line)
-            except json.JSONDecodeError:
-                self._stop()
-                raise NodeExecutionError(
-                    "Invalid JSON from node broker: %s" % raw_line[:200],
-                    {"id": req_id, "ok": False, "code": 1,
-                     "stdout": "", "stderr": raw_line},
-                ) from None
-            if response.get("id") != req_id:
-                self._stop()
-                raise NodeExecutionError(
-                    "Mismatched response id from node broker (expected %s, got %s): %s"
-                    % (req_id, response.get("id"), response.get("stderr", "")),
-                    response,
-                )
-            if response.get("error"):
-                detail = str(response["error"])
-                with self._stderr_lock:
-                    stderr_lines = list(self._stderr)
-                stderr = response.get("stderr") or "".join(stderr_lines)
-                # A top-level failure is reported in both fields; do not repeat it.
-                if stderr and stderr.strip() not in detail:
-                    detail += "\n" + stderr
-                raise NodeExecutionError(detail, response)
-            return response
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(
+                            cmd=["node", str(WORKER)], timeout=timeout
+                        )
+                    try:
+                        raw_line = self._responses.get(timeout=min(0.25, remaining))
+                    except queue.Empty:
+                        if proc.poll() is not None:
+                            if self._stdout_thread is not None:
+                                self._stdout_thread.join(timeout=0.5)
+                            if not self._responses.empty():
+                                continue
+                            raise self._unexpected_exit_error(proc, req_id) from None
+                        continue
+                    if raw_line is None:
+                        raise self._unexpected_exit_error(proc, req_id) from None
+                    break
+                try:
+                    response = json.loads(raw_line)
+                except json.JSONDecodeError:
+                    raise NodeExecutionError(
+                        "Invalid JSON from node broker: %s" % raw_line[:200],
+                        {"id": req_id, "ok": False, "code": 1,
+                         "stdout": "", "stderr": raw_line},
+                    ) from None
+                if not isinstance(response, dict):
+                    raise NodeExecutionError(
+                        "Malformed non-object response from node broker: %r" % (response,),
+                        {"id": req_id, "ok": False, "code": 1,
+                         "stdout": "", "stderr": str(response)},
+                    )
+                if response.get("id") != req_id:
+                    raise NodeExecutionError(
+                        "Mismatched response id from node broker (expected %s, got %s): %s"
+                        % (req_id, response.get("id"), response.get("stderr", "")),
+                        response,
+                    )
+                frame_ok = True
+                if response.get("error"):
+                    detail = str(response["error"])
+                    with self._stderr_lock:
+                        stderr_lines = list(self._stderr)
+                    stderr = response.get("stderr") or "".join(stderr_lines)
+                    # A top-level failure is reported in both fields; do not repeat it.
+                    if stderr and stderr.strip() not in detail:
+                        detail += "\n" + stderr
+                    raise NodeExecutionError(detail, response)
+                return response
+            finally:
+                if not frame_ok:
+                    self._stop()
 
 
 _worker: Optional[_Worker] = None
@@ -248,7 +313,7 @@ def run_node(
         "args": list(args or ()),
         "env": dict(env or {}),
         "files": dict(files or {}),
-        "timeoutMs": int(timeout * 1000),
+        "timeoutMs": max(1, int(timeout * 1000)),
         "filename": filename,
     }
     return _shared_worker().run(payload, timeout=timeout)

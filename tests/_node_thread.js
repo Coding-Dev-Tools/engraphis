@@ -10,6 +10,8 @@
 
 const { parentPort, workerData } = require('worker_threads');
 const fs = require('fs');
+const { createRequire } = require('module');
+const path = require('path');
 const util = require('util');
 const vm = require('vm');
 
@@ -53,6 +55,18 @@ const captureConsole = {
   warn: (...args) => { if (!exited) errors.push(format(args) + '\n'); },
   error: (...args) => { if (!exited) errors.push(format(args) + '\n'); },
 };
+
+function makeStreamWriter(target) {
+  return {
+    write(chunk, encodingOrCallback, callback) {
+      if (exited) return false;
+      target.push(Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk));
+      const cb = typeof encodingOrCallback === 'function' ? encodingOrCallback : callback;
+      if (typeof cb === 'function') cb();
+      return true;
+    },
+  };
+}
 
 const proc = {
   argv: ['node'].concat(request.args || []),
@@ -100,7 +114,10 @@ const proc = {
   },
   exit(code) {
     if (!exited) {
-      exitCode = code === undefined ? 0 : Number(code);
+      if (code !== undefined) {
+        const numeric = code === null ? 0 : Number(code);
+        exitCode = Number.isFinite(numeric) ? numeric : 1;
+      }
       exited = true;
       scheduleDrainCheck();
     }
@@ -119,22 +136,8 @@ const proc = {
     if (Number.isFinite(numeric)) exitCode = numeric;
   },
   abort() {},
-  stdout: {
-    write(chunk, callback) {
-      if (exited) return false;
-      outputs.push(String(chunk));
-      if (typeof callback === 'function') callback();
-      return true;
-    },
-  },
-  stderr: {
-    write(chunk, callback) {
-      if (exited) return false;
-      errors.push(String(chunk));
-      if (typeof callback === 'function') callback();
-      return true;
-    },
-  },
+  stdout: makeStreamWriter(outputs),
+  stderr: makeStreamWriter(errors),
 };
 
 function forwardEventHandlers(type, value) {
@@ -258,8 +261,9 @@ fs.readFileSync = readSource;
 
 globalThis.console = captureConsole;
 globalThis.process = proc;
-const customRequire = id => (id === 'process' || id === 'node:process' ? proc : require(id));
-Object.assign(customRequire, require);
+const cwdRequire = createRequire(path.join(realProcess.cwd(), '__engraphis_request__.js'));
+const customRequire = id => (id === 'process' || id === 'node:process' ? proc : cwdRequire(id));
+Object.assign(customRequire, cwdRequire);
 globalThis.require = customRequire;
 globalThis.setTimeout = (callback, delay, ...args) => {
   const id = realSetTimeout(() => {
