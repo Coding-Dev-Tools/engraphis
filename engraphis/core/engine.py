@@ -1275,10 +1275,13 @@ class MemoryEngine:
         # posture as single writes: the expensive part stays outside serialization.
         vectors_by_text: dict[str, np.ndarray] = {}
         if texts:
-            embedded = self.embedder.embed(texts)
-            if len(embedded) != len(texts):
+            # Identical texts already collapse to one mapping entry below; embed each
+            # distinct text once instead of paying for duplicates in a batched ingest.
+            unique_texts = list(dict.fromkeys(texts))
+            embedded = self.embedder.embed(unique_texts)
+            if len(embedded) != len(unique_texts):
                 raise RuntimeError("embedder returned the wrong number of vectors")
-            vectors_by_text = dict(zip(texts, embedded))
+            vectors_by_text = dict(zip(unique_texts, embedded))
         for item in prepared:
             item["vec"] = (
                 None if item["poisoning"].quarantined else vectors_by_text[item["text"]]

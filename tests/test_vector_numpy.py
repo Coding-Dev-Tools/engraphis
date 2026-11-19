@@ -1,14 +1,19 @@
+import sqlite3
+from contextlib import contextmanager
+from dataclasses import fields
 from pathlib import Path
 
 import numpy as np
 import pytest
 
 from engraphis.backends import DeterministicEmbedder, NumpyVectorIndex
-from engraphis.backends.vector_numpy import _top_k_indices
+from engraphis.backends.vector_numpy import _filter_key, _top_k_indices
 from engraphis.backends.vector_sqlitevec import _cosine_from_l2
+from engraphis.core import relocation, store as core_store
 from engraphis.core.engine import MemoryEngine
 from engraphis.core.interfaces import (
     MemoryRecord,
+    MemoryType,
     Scope,
     SearchFilter,
     vector_index_requires_sync,
@@ -337,6 +342,301 @@ def test_zero_vectors_are_non_searchable():
     )] == [directed_id]
     assert zero_id != directed_id
     store.close()
+
+
+_UNIT = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+_VIS_TRIGGERS = (
+    "trg_vector_vis_mem_insert", "trg_vector_vis_mem_delete", "trg_vector_vis_mem_update",
+    "trg_vector_vis_ws_insert", "trg_vector_vis_ws_update", "trg_vector_vis_ws_delete",
+    "trg_vector_vis_closure_insert", "trg_vector_vis_closure_update", "trg_vector_vis_closure_delete",
+)
+
+
+def _drop_visibility_schema(store) -> None:
+    for name in _VIS_TRIGGERS:
+        store.conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+    store.conn.execute("DROP TABLE IF EXISTS vector_visibility_state")
+
+
+@contextmanager
+def _seeded(workspace: str = "w", **index_kwargs):
+    store = Store(":memory:")
+    try:
+        yield store, store.get_or_create_workspace(workspace), NumpyVectorIndex(store, dim=3, **index_kwargs)
+    finally:
+        store.close()
+
+
+def _indexed_memory(store, workspace_id, vector=_UNIT, **fields) -> str:
+    return store.add_memory(MemoryRecord(
+        id="", content=fields.pop("content", "visibility fact"),
+        workspace_id=workspace_id, scope=Scope.WORKSPACE, embedding=vector.copy(), **fields))
+
+
+def _flt(workspace_id, **kwargs) -> SearchFilter:
+    return SearchFilter(workspace_id=workspace_id, **kwargs)
+
+
+def _ids(index, flt=None) -> list[str]:
+    return [mid for mid, _score in index.search(_UNIT, 5, filter=flt)]
+
+
+def _traced_matrix_stream(store, monkeypatch) -> list[int]:
+    calls, original = [], store.iter_vector_matrices
+    monkeypatch.setattr(store, "iter_vector_matrices", lambda *a, **kw: (calls.append(1), original(*a, **kw))[1])
+    return calls
+
+
+def test_cached_search_honors_close_validity():
+    with _seeded("visibility-close") as (store, wid, index):
+        mid = _indexed_memory(store, wid)
+        assert _ids(index, _flt(wid)) == [mid]
+        store.close_validity(mid, actor="test")
+        assert _ids(index, _flt(wid)) == []
+
+
+def test_cached_search_honors_memory_type_update():
+    with _seeded("visibility-type") as (store, wid, index):
+        mid = _indexed_memory(store, wid, mtype=MemoryType.SEMANTIC)
+        semantic, episodic = _flt(wid, mtypes=[MemoryType.SEMANTIC]), _flt(wid, mtypes=[MemoryType.EPISODIC])
+        assert _ids(index, semantic) == [mid]
+        with store.write_transaction():
+            store.conn.execute("UPDATE memories SET mtype=? WHERE id=?", (MemoryType.EPISODIC.value, mid))
+        assert (_ids(index, semantic), _ids(index, episodic)) == ([], [mid])
+
+
+def test_cached_search_honors_workspace_reassignment():
+    with _seeded("visibility-source") as (store, source, index):
+        target = store.get_or_create_workspace("visibility-target")
+        mid = _indexed_memory(store, source)
+        assert (_ids(index, _flt(source)), _ids(index, _flt(target))) == ([mid], [])
+        plan = relocation.prepare_move(store, source, target, [mid])
+        assert plan.blockers == []
+        with store.write_transaction():
+            store.apply_memory_move(plan, actor="test")
+        assert (_ids(index, _flt(source)), _ids(index, _flt(target))) == ([], [mid])
+
+
+def test_cached_search_honors_a_new_closure_observation():
+    with _seeded("visibility-closure") as (store, wid, index):
+        mid = _indexed_memory(store, wid)
+        assert _ids(index, _flt(wid)) == [mid]
+        with store.write_transaction():
+            store.conn.execute("INSERT INTO memory_closures(memory_id,valid_to,recorded_at) VALUES (?,?,?)", (mid, 10.0, 20.0))
+        assert _ids(index, _flt(wid)) == []
+
+
+@pytest.mark.parametrize("fields,visible_before,visible_after", [
+    ({"valid_from": 10.0, "ingested_at": 0.0}, False, True),
+    ({"valid_from": -100.0, "valid_to": 10.0, "valid_to_recorded_at": -100.0, "ingested_at": -100.0}, True, False),
+    ({"valid_from": -100.0, "valid_to": -50.0, "valid_to_recorded_at": 10.0, "ingested_at": -100.0}, True, False),
+], ids=["future-valid-from", "future-valid-to", "future-valid-to-recorded-world"])
+def test_cached_search_crosses_a_future_temporal_boundary(monkeypatch, fields, visible_before, visible_after):
+    base, clock = 1_700_000_000.0, {"now": 1_700_000_000.0}
+    monkeypatch.setattr(core_store, "now_ts", lambda: clock["now"])
+    with _seeded("visibility-future") as (store, wid, index):
+        mid = _indexed_memory(store, wid, **{key: base + value for key, value in fields.items()})
+        assert _ids(index, _flt(wid)) == ([mid] if visible_before else [])
+        assert index._cache_valid_until == base + 10.0
+        clock["now"] = base + 20.0
+        assert _ids(index, _flt(wid)) == ([mid] if visible_after else [])
+
+
+def test_reinforcement_keeps_the_cached_matrix_warm(monkeypatch):
+    with _seeded("visibility-reinforce") as (store, wid, index):
+        mid = _indexed_memory(store, wid)
+        assert _ids(index, _flt(wid)) == [mid]
+        calls = _traced_matrix_stream(store, monkeypatch)
+        store.reinforce(mid, boost=0.5)
+        assert (_ids(index, _flt(wid)), calls) == ([mid], [])
+
+
+@pytest.mark.parametrize("budget", [1, 0], ids=["tiny-budget", "disabled"])
+def test_cache_budget_bounds_or_disables_retention(monkeypatch, budget):
+    with _seeded("visibility-budget", max_cache_bytes=4096) as (store, wid, index):
+        mid = _indexed_memory(store, wid)
+        assert _ids(index, _flt(wid)) == [mid] and index._cache_key is not None
+        target = store.get_or_create_workspace("other") if budget else wid
+        tmid = _indexed_memory(store, target) if budget else mid
+        index.max_cache_bytes = budget
+        calls = _traced_matrix_stream(store, monkeypatch)
+        assert [_ids(index, _flt(target)) for _ in range(2)] == [[tmid]] * 2
+        assert (len(calls), index._cache_key, index._cache_batches) == (2, None, ())
+
+
+class _StreamingStore:
+    def __init__(self, batches, generation=1):
+        self.batches, self.generation, self.calls = batches, generation, 0
+
+    def iter_vector_matrices(self, flt=None, *, dim):
+        self.calls += 1
+        return list(self.batches)
+
+
+class _GenerationStore(_StreamingStore):
+    def vector_generation(self) -> int:
+        return self.generation
+
+
+def test_search_double_falls_back_to_streaming_or_the_generation_hook():
+    batch = [(["mem_1"], np.array([[1.0, 0.0, 0.0]], dtype=np.float32))]
+    plain = NumpyVectorIndex(_StreamingStore(batch), dim=3)
+    assert [plain.search(_UNIT, 2) for _ in range(2)] == [[("mem_1", 1.0)]] * 2
+    assert (plain._cache_key, plain.store.calls) == (None, 2)
+    legacy = NumpyVectorIndex(_GenerationStore(batch), dim=3)
+    assert [legacy.search(_UNIT, 2) for _ in range(2)] == [[("mem_1", 1.0)]] * 2
+    assert legacy.store.calls == 1
+    legacy.store.generation += 1
+    assert (legacy.search(_UNIT, 2), legacy.store.calls) == ([("mem_1", 1.0)], 2)
+
+
+def test_visibility_transition_skips_absent_closure_storage(monkeypatch):
+    base = 1_700_000_000.0
+    monkeypatch.setattr(core_store, "now_ts", lambda: base)
+    with _seeded("legacy-boundary") as (store, wid, _index):
+        mid = _indexed_memory(store, wid, valid_from=base - 100.0, valid_to=base + 10.0,
+                              valid_to_recorded_at=base - 100.0, ingested_at=base - 100.0)
+        with store.write_transaction():
+            store.conn.execute("INSERT INTO memory_closures(memory_id,valid_to,recorded_at) VALUES (?,?,?)", (mid, base + 5.0, base - 100.0))
+        assert store.next_vector_visibility_transition(_flt(wid), base, base) == base + 5.0
+        with store.write_transaction():
+            store.conn.execute("DROP TABLE memory_closures")
+        assert store.next_vector_visibility_transition(_flt(wid), base, base) == base + 10.0
+
+
+def test_read_only_snapshot_and_backup_preserving_visibility_repair(tmp_path):
+    ro_db, repair_db = tmp_path / "legacy-v19.db", tmp_path / "migrated-v19.db"
+    for db, name in ((ro_db, "legacy-ro"), (repair_db, "repair-vis")):
+        with Store(str(db)) as writable:
+            wid = writable.get_or_create_workspace(name)
+            mid = _indexed_memory(writable, wid)
+            with writable.write_transaction():
+                _drop_visibility_schema(writable)
+            writable.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        if db == ro_db:
+            with Store(str(db), read_only=True) as read_only:
+                assert read_only.vector_visibility_token() == (read_only.vector_generation(), 0)
+                assert [_ids(NumpyVectorIndex(read_only, dim=3), _flt(wid))] * 2 == [[mid]] * 2
+        else:
+            backup = Path(f"{db}.pre-migration-v19.bak")
+            backup.write_bytes(b"an earlier snapshot")
+            with Store(str(db)) as repaired:
+                triggers = {str(r[0]) for r in repaired.conn.execute("SELECT name FROM sqlite_master WHERE type='trigger'")}
+                assert set(_VIS_TRIGGERS) <= triggers and repaired._has_table(repaired.conn, "vector_visibility_state")
+                assert _ids(NumpyVectorIndex(repaired, dim=3), _flt(wid)) == [mid]
+                before = repaired.vector_visibility_token()[1]
+                repaired.reinforce(mid, boost=0.5)
+                assert repaired.vector_visibility_token()[1] == before
+                repaired.close_validity(mid, actor="test")
+                assert repaired.vector_visibility_token()[1] > before
+            assert backup.read_bytes() == b"an earlier snapshot"
+
+
+def test_raw_connection_replacement_invalidates_the_matrix_cache(tmp_path):
+    with Store(str(tmp_path / "swap.db")) as store, Store(str(tmp_path / "swap-other.db")) as other:
+        first_mid = _indexed_memory(store, store.get_or_create_workspace("swap"))
+        other_mid = _indexed_memory(other, other.get_or_create_workspace("swap"))
+        assert other.vector_visibility_token() == store.vector_visibility_token()
+        index = NumpyVectorIndex(store, dim=3)
+        assert _ids(index) == [first_mid]
+        warm, epoch_before = index._cache_key, store._connection_epoch
+        store.path = str(tmp_path / "swap-other.db")
+        store.reconnect()
+        assert store._connection_epoch == epoch_before + 1 and other_mid != first_mid
+        assert _ids(index) == [other_mid] and index._cache_key != warm
+
+
+def test_uncommitted_transaction_and_narrowing_allowed_workspaces():
+    with _seeded("tx-rollback") as (store, wid, index):
+        mid = _indexed_memory(store, wid)
+        hidden_mid = _indexed_memory(store, store.get_or_create_workspace("hidden"))
+        assert _ids(index, _flt(wid)) == [mid]
+        warm = index._cache_key
+        store.conn.execute("BEGIN IMMEDIATE")
+        try:
+            uncommitted = _indexed_memory(store, wid)
+            assert set(_ids(index, _flt(wid))) == {mid, uncommitted} and index._cache_key == warm
+        finally:
+            store.conn.rollback()
+        assert _ids(index, _flt(wid)) == [mid]
+        assert set(_ids(index)) == {mid, hidden_mid}
+        store.allowed_workspaces = frozenset({"tx-rollback"})
+        assert _ids(index) == [mid]
+
+
+def test_mid_batch_failure_after_an_in_transaction_search_leaves_no_dead_vectors():
+    engine = MemoryEngine.create(":memory:", vector_backend="numpy")
+    try:
+        wid = engine.store.get_or_create_workspace("batch-rollback")
+        index = engine.index
+        assert isinstance(index, NumpyVectorIndex)
+        engine.remember("surviving batch fact", workspace_id=wid, resolve_conflicts=False)
+        query = engine.embedder.embed(["surviving batch fact"])[0]
+        assert len(index.search(query, 5)) == 1
+        index._invalidate_cache()
+        original, calls = engine._resolve_and_store, []
+
+        def failing_resolve(*args, **kwargs):
+            result = original(*args, **kwargs)
+            calls.append(1)
+            if len(calls) == 2:
+                raise RuntimeError("mid-batch failure")
+            return result
+
+        engine._resolve_and_store = failing_resolve  # type: ignore[method-assign]
+        try:
+            with pytest.raises(RuntimeError, match="mid-batch failure"):
+                engine.remember_many(["first rolled back fact", "second rolled back fact"], workspace_id=wid)
+        finally:
+            engine._resolve_and_store = original  # type: ignore[method-assign]
+        assert index._cache_key is None and len(index.search(query, 5)) == 1
+        assert [engine.store.conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+                for t in ("memories", "mem_vectors")] == [1, 1]
+    finally:
+        engine.store.close()
+
+
+class _MmapConnector:
+    def __init__(self, supports_mmap_pragma) -> None:
+        if supports_mmap_pragma is not None:
+            self.supports_mmap_pragma = supports_mmap_pragma
+
+    def __call__(self, path):
+        conn = sqlite3.connect(path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+
+@pytest.mark.parametrize("cap,env_val,want_enabled", [(True, "0", True), (None, "1", True), (False, "1", False), (None, "0", False)])
+def test_configure_connection_honors_the_connector_mmap_capability(tmp_path, monkeypatch, cap, env_val, want_enabled):
+    monkeypatch.setenv("ENGRAPHIS_SQLITE_MMAP", env_val)
+    with sqlite3.connect(str(tmp_path / "probe.db")) as probe:
+        host_supports_mmap = (probe.execute("PRAGMA mmap_size=67108864").fetchone() or [0])[0] > 0
+    with Store(str(tmp_path / "mmap.db"), connect=_MmapConnector(cap)) as store:
+        mmap_size = store.conn.execute("PRAGMA mmap_size").fetchone()[0] or 0
+        assert mmap_size == (67108864 if (want_enabled and host_supports_mmap) else 0)
+        assert store.conn.execute("PRAGMA cache_size").fetchone()[0] == -16384
+
+
+def test_filter_key_covers_every_where_filter_field():
+    assert {f.name for f in fields(SearchFilter)} - {"as_of", "graph_layers"} == {
+        "workspace_id", "repo_id", "session_id", "scopes", "mtypes",
+        "include_ancestors", "valid_at", "known_at", "modified_since",
+    }
+    assert _filter_key(None, SearchFilter(repo_id="r1")) != _filter_key(None, SearchFilter(repo_id="r2"))
+
+
+@pytest.mark.parametrize("raw,expected", [(None, 64 * 1024 * 1024), ("0", 0), ("1024", 1024), ("invalid_bytes", 64 * 1024 * 1024), ("-1", 64 * 1024 * 1024)])
+def test_env_and_explicit_cache_budget_validation(monkeypatch, raw, expected):
+    if raw is None:
+        monkeypatch.delenv("ENGRAPHIS_VECTOR_CACHE_BYTES", raising=False)
+    else:
+        monkeypatch.setenv("ENGRAPHIS_VECTOR_CACHE_BYTES", raw)
+    with Store(":memory:") as store:
+        assert NumpyVectorIndex(store).max_cache_bytes == expected
+        for invalid in (-1, 1.5, True):
+            with pytest.raises(ValueError, match="non-negative integer"):
+                NumpyVectorIndex(store, max_cache_bytes=invalid)
 
 
 def test_sqlitevec_l2_distance_converts_to_cosine_similarity():
