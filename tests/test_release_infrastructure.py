@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -823,6 +826,163 @@ def test_release_workflow_permissions_are_least_privilege():
         assert "id-token: write" not in body, job
 
 
+def _powershell_shells() -> list[str]:
+    """Return installed PowerShell executables (`pwsh`, `powershell`), deduplicated."""
+    shells: list[str] = []
+    seen: set[str] = set()
+    for name in ("pwsh", "powershell"):
+        exe = shutil.which(name)
+        if not exe:
+            continue
+        key = str(Path(exe).resolve()).lower()
+        if key not in seen:
+            seen.add(key)
+            shells.append(exe)
+    return shells
+
+
+def _write_preflight_fixture(tmp_path: Path, *, include_datasets: bool = True) -> dict[str, Path]:
+    """Create an isolated repo + cross-platform CLI shims to run `run_preflight.ps1`."""
+    repo = tmp_path / "repo"
+    (repo / "scripts").mkdir(parents=True)
+    (repo / "tests").mkdir(parents=True)
+    shutil.copy2(ROOT / "run_preflight.ps1", repo / "run_preflight.ps1")
+    for script_name in ("check_commercial_manifest.py", "externalize_dashboard_assets.py"):
+        (repo / "scripts" / script_name).write_text("raise SystemExit(0)\n", encoding="utf-8")
+    for test_name in ("test_adaptive_context.py", "test_v2_service_binding.py"):
+        (repo / "tests" / test_name).write_text("", encoding="utf-8")
+    if include_datasets:
+        (repo / "eval" / "datasets").mkdir(parents=True)
+        for dataset_name in ("sample.jsonl", "codemem.jsonl"):
+            (repo / "eval" / "datasets" / dataset_name).write_text("{}\n", encoding="utf-8")
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    trace_file = tmp_path / "trace.jsonl"
+    driver = tmp_path / "shim_driver.py"
+    driver.write_text(
+        """import json
+import os
+import sys
+from pathlib import Path
+
+tool = sys.argv[1]
+args = sys.argv[2:]
+trace_path = Path(os.environ["PREFLIGHT_TRACE_FILE"])
+with trace_path.open("a", encoding="utf-8") as fh:
+    fh.write(json.dumps({
+        "tool": tool,
+        "args": args,
+        "cwd": os.getcwd(),
+        "ENGRAPHIS_INDEX_ROOTS": os.environ.get("ENGRAPHIS_INDEX_ROOTS"),
+        "PYTEST_ADDOPTS": os.environ.get("PYTEST_ADDOPTS"),
+    }) + "\\n")
+
+if os.environ.get("PREFLIGHT_STDERR_NOISE"):
+    sys.stderr.write("import time: simulated stderr noise\\n")
+
+if tool == "python" and len(args) >= 2 and args[0] == "-c":
+    code = args[1]
+    if "version_info" in code:
+        sys.stdout.write(os.environ.get("PREFLIGHT_PY_VERSION", "3.11") + "\\n")
+        raise SystemExit(0)
+    if "gettempdir" in code:
+        sys.stdout.write(os.environ.get("PREFLIGHT_PY_TEMPDIR", str(trace_path.parent)) + "\\n")
+        raise SystemExit(0)
+    if "import_module" in code and len(args) >= 3:
+        missing = {m for m in os.environ.get("PREFLIGHT_MISSING_MODULES", "").split(",") if m}
+        raise SystemExit(1 if args[2] in missing else 0)
+
+if tool == "python" and len(args) >= 2 and args[0] == "-m" and args[1] == "pytest":
+    rc = int(os.environ.get("PREFLIGHT_PYTEST_EXIT", "0"))
+    if rc != 0:
+        sys.stdout.write("stdout noise before failure\\n")
+    raise SystemExit(rc)
+
+raise SystemExit(0)
+""",
+        encoding="utf-8",
+    )
+
+    for tool in ("python", "ruff", "pyright"):
+        if os.name == "nt":
+            shim = bin_dir / f"{tool}.cmd"
+            shim.write_text(
+                f'@echo off\r\n"{sys.executable}" "{driver}" {tool} %*\r\n',
+                encoding="utf-8",
+            )
+        else:
+            shim = bin_dir / tool
+            shim.write_text(
+                f'#!/bin/sh\nexec "{sys.executable}" "{driver}" {tool} "$@"\n',
+                encoding="utf-8",
+            )
+            shim.chmod(0o755)
+
+    return {
+        "repo": repo,
+        "bin_dir": bin_dir,
+        "outside_dir": outside_dir,
+        "trace_file": trace_file,
+    }
+
+
+def _invoke_preflight(
+    shell: str,
+    fixture: dict[str, Path],
+    ps_args: str,
+    extra_env: dict[str, str],
+) -> tuple[subprocess.CompletedProcess[str], list[dict[str, Any]], dict[str, Any]]:
+    """Run `run_preflight.ps1` via PowerShell and return result, trace, and caller state."""
+    if fixture["trace_file"].exists():
+        fixture["trace_file"].unlink()
+    env = os.environ.copy()
+    env["PATH"] = os.pathsep.join([str(fixture["bin_dir"]), env.get("PATH", "")])
+    env["PREFLIGHT_TRACE_FILE"] = str(fixture["trace_file"])
+    for key in (
+        "PREFLIGHT_STDERR_NOISE",
+        "PREFLIGHT_PY_VERSION",
+        "PREFLIGHT_MISSING_MODULES",
+        "PREFLIGHT_PYTEST_EXIT",
+    ):
+        env.pop(key, None)
+    env.update(extra_env)
+
+    script_escaped = str(fixture["repo"] / "run_preflight.ps1").replace("'", "''")
+    cmd = (
+        f"& '{script_escaped}' {ps_args}; "
+        "$exitCode = $LASTEXITCODE; "
+        "Write-Output ('__CALLER_STATE__=' + ((@{ "
+        "cwd = (Get-Location).Path; "
+        "index = $env:ENGRAPHIS_INDEX_ROOTS; "
+        "addopts = $env:PYTEST_ADDOPTS; "
+        "exit_code = $exitCode "
+        "}) | ConvertTo-Json -Compress))"
+    )
+    proc = subprocess.run(
+        [shell, "-NoProfile", "-NonInteractive", "-Command", cmd],
+        cwd=str(fixture["outside_dir"]),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    traces: list[dict[str, Any]] = []
+    if fixture["trace_file"].exists():
+        traces = [
+            json.loads(line)
+            for line in fixture["trace_file"].read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+    state: dict[str, Any] = {}
+    for line in proc.stdout.splitlines():
+        if line.startswith("__CALLER_STATE__="):
+            state = json.loads(line.split("=", 1)[1])
+    return proc, traces, state
+
+
 def test_run_preflight_ps1_aligns_with_ci_gates_and_checks_dependencies():
     """The local pre-flight must run the offline CI gates, not a comfortable subset."""
     script = _text("run_preflight.ps1")
@@ -855,44 +1015,18 @@ def test_run_preflight_ps1_aligns_with_ci_gates_and_checks_dependencies():
     assert 'Invoke-GateStep "Pyright Type Check"' in script
     assert 'Invoke-GateStep "Offline Unit Test Suite"' in script
 
-    # A missing dataset is a hard failure resolved against the repository root; it must
-    # never be folded into `continue`, which would report green after skipping the gate.
+    # A missing dataset must never be folded into `continue`, which would skip green.
     assert re.search(r"-not\s*\(\s*Test-Path[^\n]*\bcontinue\b", script) is None
-    dataset_check = script.split("$datasetPath = Join-Path $repoRoot", 1)[1].split(
-        "Invoke-GateStep", 1
-    )[0]
-    assert "exit 1" in dataset_check
-    assert "continue" not in dataset_check
-    assert "Push-Location" in script
-    assert "Join-Path $repoRoot" in script
-
-    # A real import catches a broken native wheel or a missing DLL; find_spec() alone would
-    # report those as installed. stdout is discarded so a stray line cannot become the
-    # PowerShell return value.
     assert "importlib.import_module(sys.argv[1])" in script
-    assert "$null = & $pythonExe -c" in script
-
-    # CI runs pytest with ENGRAPHIS_INDEX_ROOTS covering the checkout and its temp dirs;
-    # the pre-flight mirrors that and restores the caller's value afterwards.
     assert "$env:ENGRAPHIS_INDEX_ROOTS" in script
-    assert "$previousIndexRoots = $env:ENGRAPHIS_INDEX_ROOTS" in script
-    assert "[pytest] -Workers ignored in -Fast mode" in script
+    assert "$env:PYTEST_ADDOPTS" in script
 
-    # CI runs pytest with the ini-file addopts neutralised and skip reasons visible. The
-    # full suite line has to carry all three so a local pyproject/pytest override cannot
-    # change what the pre-flight measured.
-    full_suite = [
-        line for line in script.splitlines() if "$pytestArgs = " in line and '"tests/"' in line
-    ]
-    assert len(full_suite) == 1
-    line = full_suite[0]
-    assert '"-o", "addopts="' in line
-    assert '"-q"' in line
-    assert '"-rs"' in line
-    assert '"--basetemp"' in line
+    # CI neutralizes ini addopts, keeps skip reasons visible, and isolates basetemp.
+    for flag in ('"-o"', '"addopts="', '"-q"', '"-rs"', '"--basetemp"'):
+        assert flag in script, flag
 
-    # A venv without the full-stack extras would skip the server/MCP tests silently, and
-    # ".[all,dev]" would drag in torch and the transcription/document extras that this gate does not need.
+    # A venv without the full-stack extras would skip server/MCP tests silently, while
+    # ".[all,dev]" drags in heavy optional ML extras that the offline gate does not need.
     assert '"fastapi", "httpx", "mcp", "multipart", "pydantic", "sqlite_vec", "uvicorn"' in script
     assert 'pip install -e ".[test]"' in script
 
@@ -907,15 +1041,107 @@ def test_run_preflight_ps1_aligns_with_ci_gates_and_checks_dependencies():
 
 
 def test_run_preflight_ps1_parses_without_powershell_syntax_errors():
-    shell = shutil.which("pwsh") or shutil.which("powershell")
-    if not shell:
+    shells = _powershell_shells()
+    if not shells:
         pytest.skip("pwsh/powershell is not installed")
     script_path = str(ROOT / "run_preflight.ps1").replace("'", "''")
     cmd = (
         "$errs = $null; [void][System.Management.Automation.Language.Parser]::ParseFile("
         f"'{script_path}', $null, [ref]$errs); Write-Output $errs.Count"
     )
-    proc = subprocess.run([shell, "-NoProfile", "-NonInteractive", "-Command", cmd],
-                          capture_output=True, text=True, check=True)
-    assert proc.stdout.strip().splitlines()[-1] == "0"
+    for shell in shells:
+        proc = subprocess.run(
+            [shell, "-NoProfile", "-NonInteractive", "-Command", cmd],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert proc.stdout.strip().splitlines()[-1] == "0", shell
+
+
+def test_run_preflight_ps1_tolerates_stderr_restores_caller_state_and_fails_on_noisy_gate(
+    tmp_path: Path,
+):
+    shells = _powershell_shells()
+    if not shells:
+        pytest.skip("pwsh/powershell is not installed")
+    shell = shells[0]
+    fixture = _write_preflight_fixture(tmp_path)
+    base_env = {
+        "PREFLIGHT_STDERR_NOISE": "1",
+        "PREFLIGHT_PY_VERSION": "3.11",
+        "ENGRAPHIS_INDEX_ROOTS": "caller-sentinel",
+        "PYTEST_ADDOPTS": "--caller-addopt",
+    }
+
+    # Passing -Fast run with noisy Python stderr and caller env vars set.
+    proc_ok, traces_ok, state_ok = _invoke_preflight(shell, fixture, "-Fast", base_env)
+    assert state_ok["exit_code"] == 0, proc_ok.stdout + proc_ok.stderr
+    assert Path(state_ok["cwd"]).resolve() == fixture["outside_dir"].resolve()
+    assert state_ok["index"] == "caller-sentinel"
+    assert state_ok["addopts"] == "--caller-addopt"
+
+    pytest_calls = [t for t in traces_ok if t["tool"] == "python" and t["args"][:2] == ["-m", "pytest"]]
+    assert len(pytest_calls) == 1
+    assert pytest_calls[0]["PYTEST_ADDOPTS"] is None
+    assert str(fixture["repo"].resolve()) in str(pytest_calls[0]["ENGRAPHIS_INDEX_ROOTS"])
+    assert not any(t["tool"] == "pyright" for t in traces_ok)
+
+    # Regression for Invoke-GateStep false-green: stdout + exit 3 must fail with exit 1
+    # and still restore caller CWD / env variables.
+    fail_env = dict(base_env, PREFLIGHT_PYTEST_EXIT="3")
+    proc_fail, _, state_fail = _invoke_preflight(shell, fixture, "-Fast", fail_env)
+    assert state_fail["exit_code"] == 1
+    assert "[FAIL] Offline Unit Test Suite exited with code 3" in proc_fail.stdout
+    assert Path(state_fail["cwd"]).resolve() == fixture["outside_dir"].resolve()
+    assert state_fail["index"] == "caller-sentinel"
+    assert state_fail["addopts"] == "--caller-addopt"
+
+
+def test_run_preflight_ps1_enforces_python_version_extras_and_datasets(tmp_path: Path):
+    shells = _powershell_shells()
+    if not shells:
+        pytest.skip("pwsh/powershell is not installed")
+    shell = shells[0]
+    fixture = _write_preflight_fixture(tmp_path, include_datasets=False)
+
+    # Python 3.9 without -Fast must explain -Fast before failing on missing Pyright/extras.
+    proc_py39, traces_py39, state_py39 = _invoke_preflight(
+        shell, fixture, "-SkipEval", {"PREFLIGHT_PY_VERSION": "3.9"}
+    )
+    assert state_py39["exit_code"] == 1
+    assert "found Python 3.9" in proc_py39.stdout
+    assert "-Fast" in proc_py39.stdout
+    assert not any(t["tool"] == "pyright" for t in traces_py39)
+
+    # Python 3.11 missing a [test] extra passes Pyright (with --pythonpath) and fails Step 5 loudly.
+    proc_missing_mod, traces_mod, state_mod = _invoke_preflight(
+        shell,
+        fixture,
+        "-SkipEval -Workers 2",
+        {"PREFLIGHT_PY_VERSION": "3.11", "PREFLIGHT_MISSING_MODULES": "fastapi,xdist"},
+    )
+    assert state_mod["exit_code"] == 1
+    assert "fastapi" in proc_missing_mod.stdout
+    assert 'pip install -e ".[test]"' in proc_missing_mod.stdout
+    pyright_calls = [t for t in traces_mod if t["tool"] == "pyright"]
+    assert len(pyright_calls) == 1
+    assert "--pythonpath" in pyright_calls[0]["args"]
+
+    # Python 3.11 with all [test] extras but missing xdist logs -Workers fallback and passes -SkipEval.
+    proc_no_xdist, _, state_no_xdist = _invoke_preflight(
+        shell,
+        fixture,
+        "-SkipEval -Workers 2",
+        {"PREFLIGHT_PY_VERSION": "3.11", "PREFLIGHT_MISSING_MODULES": "xdist"},
+    )
+    assert state_no_xdist["exit_code"] == 0, proc_no_xdist.stdout + proc_no_xdist.stderr
+    assert "[pytest] -Workers ignored because pytest-xdist is not installed" in proc_no_xdist.stdout
+
+    # Missing required eval dataset in full mode must fail with exit 1 instead of skipping.
+    proc_missing_ds, _, state_ds = _invoke_preflight(
+        shell, fixture, "", {"PREFLIGHT_PY_VERSION": "3.11"}
+    )
+    assert state_ds["exit_code"] == 1
+    assert "Missing required eval dataset 'eval/datasets/sample.jsonl'" in proc_missing_ds.stdout
 

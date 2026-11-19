@@ -41,10 +41,18 @@ $pythonCandidates = @(
 $venvPython = $pythonCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 if ($venvPython) {
     $pythonExe = $venvPython
+    $hasResolvedPython = $true
     Write-Host "[Python] Using local venv: $pythonExe" -ForegroundColor Gray
 } else {
-    $pythonExe = "python"
-    Write-Host "[Python] Using system python / uv" -ForegroundColor Gray
+    $pythonCmd = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($pythonCmd) {
+        $pythonExe = $pythonCmd.Source
+        $hasResolvedPython = $true
+    } else {
+        $pythonExe = "python"
+        $hasResolvedPython = $false
+    }
+    Write-Host "[Python] Using system python / uv ($pythonExe)" -ForegroundColor Gray
 }
 
 $ruffCandidates = @(
@@ -53,44 +61,62 @@ $ruffCandidates = @(
 )
 $venvRuff = $ruffCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 
-function Test-PythonModule {
-    param([string]$ModuleName)
-    # A real import, not find_spec: a broken wheel or a missing DLL surfaces here. Seed
-    # LASTEXITCODE so an unlaunchable interpreter cannot inherit 0 and return True.
+function Invoke-PythonStdout {
+    param([string[]]$Arguments)
+    # Run Python probes under Continue so stderr noise (e.g. PYTHONWARNINGS=default,
+    # PYTHONPROFILEIMPORTTIME=1) cannot raise NativeCommandError in PowerShell 5.1.
     $ErrorActionPreference = 'Continue'
+    $prevExitCode = $global:LASTEXITCODE
     $global:LASTEXITCODE = 1
     try {
-        $null = & $pythonExe -c "import importlib, sys; importlib.import_module(sys.argv[1])" $ModuleName 2>$null
-        return ($LASTEXITCODE -eq 0)
+        $output = (& $pythonExe @Arguments 2>$null | Out-String).Trim()
+        return @{
+            Ok     = ($LASTEXITCODE -eq 0)
+            Output = $output
+        }
     } catch {
-        return $false
+        return @{
+            Ok     = $false
+            Output = ""
+        }
+    } finally {
+        $global:LASTEXITCODE = $prevExitCode
     }
 }
 
-# Locate pyright: the venv console script first, then PATH, then python -m pyright.
+function Test-PythonModule {
+    param([string]$ModuleName)
+    # A real import, not find_spec: a broken wheel or a missing DLL surfaces here.
+    $probe = Invoke-PythonStdout -Arguments @("-c", "import importlib, sys; importlib.import_module(sys.argv[1])", $ModuleName)
+    return $probe.Ok
+}
+
+# Locate pyright only when full gates run (-Fast skips Pyright Type Check).
 # [tool.pyright] declares no venvPath/venv, so the gate pins the interpreter it should
 # analyse explicitly with --pythonpath; the branches below only choose how pyright
 # itself is launched.
-$pyrightCandidates = @(
-    (Join-Path $repoRoot ".venv\Scripts\pyright.exe"),
-    (Join-Path $repoRoot ".venv/bin/pyright")
-)
-$venvPyright = $pyrightCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 $pyrightMode = $null
 $pyrightExe = $null
-if ($venvPyright) {
-    $pyrightMode = "exe"
-    $pyrightExe = $venvPyright
-} elseif (Get-Command pyright -ErrorAction SilentlyContinue) {
-    $pyrightMode = "exe"
-    $pyrightExe = (Get-Command pyright).Source
-} elseif (Test-PythonModule "pyright") {
-    $pyrightMode = "module"
-}
-if ($pyrightMode -eq "exe") {
-    Write-Host "[Pyright] Using: $pyrightExe" -ForegroundColor Gray
-} elseif ($pyrightMode -eq "module") {
-    Write-Host "[Pyright] Using: $pythonExe -m pyright" -ForegroundColor Gray
+if (-not $Fast) {
+    $pyrightCandidates = @(
+        (Join-Path $repoRoot ".venv\Scripts\pyright.exe"),
+        (Join-Path $repoRoot ".venv/bin/pyright")
+    )
+    $venvPyright = $pyrightCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+    if ($venvPyright) {
+        $pyrightMode = "exe"
+        $pyrightExe = $venvPyright
+    } elseif (Get-Command pyright -ErrorAction SilentlyContinue) {
+        $pyrightMode = "exe"
+        $pyrightExe = (Get-Command pyright).Source
+    } elseif (Test-PythonModule "pyright") {
+        $pyrightMode = "module"
+    }
+    if ($pyrightMode -eq "exe") {
+        Write-Host "[Pyright] Using: $pyrightExe" -ForegroundColor Gray
+    } elseif ($pyrightMode -eq "module") {
+        Write-Host "[Pyright] Using: $pythonExe -m pyright" -ForegroundColor Gray
+    }
 }
 
 # pytest's own CI runs always supply a private runner-owned --basetemp; mirror that here
@@ -110,7 +136,7 @@ function Invoke-GateStep {
     $global:LASTEXITCODE = 0
     try {
         & $Action
-        if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne $null) {
+        if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) {
             Write-Host "[FAIL] $Name exited with code $LASTEXITCODE" -ForegroundColor Red
             return
         }
@@ -126,17 +152,21 @@ $locationPushed = $false
 try {
     # Run every gate from the repository root so `./run_preflight.ps1` behaves the same
     # when it is invoked from anywhere else.
-    Push-Location -Path $repoRoot
+    Push-Location -LiteralPath $repoRoot
     $locationPushed = $true
 
     # 1. Ruff linting
     Invoke-GateStep "Ruff Linting" {
         if ($venvRuff) {
             & $venvRuff check .
-        } elseif (Get-Command uv -ErrorAction SilentlyContinue) {
-            uv run --with ruff ruff check .
-        } else {
+        } elseif (Get-Command ruff -ErrorAction SilentlyContinue) {
+            ruff check .
+        } elseif (Test-PythonModule "ruff") {
             & $pythonExe -m ruff check .
+        } elseif (Get-Command uv -ErrorAction SilentlyContinue) {
+            uv run --no-project --with "ruff>=0.15.22,<0.18" ruff check .
+        } else {
+            throw "ruff not found. Install dev/test extras, add ruff to PATH, or install uv."
         }
     }
     if (-not $script:lastStepPassed) { exit 1 }
@@ -155,9 +185,14 @@ try {
 
     # 4. Pyright type check (core + backends; skipped in -Fast so Python 3.9 numpy-only smoke works)
     if (-not $Fast) {
+        $pyVerProbe = Invoke-PythonStdout -Arguments @("-c", "import sys; print('%d.%d' % sys.version_info[:2])")
+        if ($pyVerProbe.Ok -and $pyVerProbe.Output -match '^\d+\.\d+$' -and ([Version]$pyVerProbe.Output -lt [Version]'3.10')) {
+            Write-Host ("[FAIL] Full offline preflight requires Python 3.10+ for [test] extras (found Python {0}). Run .\run_preflight.ps1 -Fast on Python 3.9, matching CI's numpy-only job." -f $pyVerProbe.Output) -ForegroundColor Red
+            exit 1
+        }
         Invoke-GateStep "Pyright Type Check" {
             $pyrightArgs = @()
-            if ($venvPython) {
+            if ($hasResolvedPython) {
                 $pyrightArgs += @("--pythonpath", $pythonExe)
             }
             if ($pyrightMode -eq "exe") {
@@ -177,11 +212,6 @@ try {
             Write-Host "[pytest] -Workers ignored in -Fast mode" -ForegroundColor Gray
         }
         if (-not $Fast) {
-            # [test] extras require Python 3.10+; read version without Select-Object so $LASTEXITCODE stays 0.
-            $pyVer = (& $pythonExe -c "import sys; print('%d.%d' % sys.version_info[:2])" 2>$null | Out-String).Trim()
-            if ($LASTEXITCODE -eq 0 -and $pyVer -match '^\d+\.\d+$' -and ([Version]$pyVer -lt [Version]'3.10')) {
-                throw ("Full offline preflight requires Python 3.10+ for [test] extras (found Python $pyVer). Run .\run_preflight.ps1 -Fast on Python 3.9, matching CI's numpy-only job.")
-            }
             # A stripped venv would let the extras-gated server/MCP tests skip silently and
             # report green. Fail loudly instead: the full offline suite needs them.
             $requiredModules = @("fastapi", "httpx", "mcp", "multipart", "pydantic", "sqlite_vec", "uvicorn")
@@ -201,21 +231,41 @@ try {
                     $pytestArgs += @("-n", "auto")
                 }
             } else {
-                Write-Host "[pytest] pytest-xdist not installed; running serially" -ForegroundColor Gray
+                if (-not [string]::IsNullOrWhiteSpace($Workers)) {
+                    Write-Host "[pytest] -Workers ignored because pytest-xdist is not installed" -ForegroundColor Gray
+                } else {
+                    Write-Host "[pytest] pytest-xdist not installed; running serially" -ForegroundColor Gray
+                }
             }
         } else {
             $pytestArgs = @("-o", "addopts=", "tests/test_adaptive_context.py", "tests/test_v2_service_binding.py", "-q", "-rs", "--basetemp", $pytestBaseTemp)
         }
-        # CI scopes ENGRAPHIS_INDEX_ROOTS to pytest; include Python's tempfile.gettempdir().
+        # CI scopes ENGRAPHIS_INDEX_ROOTS to pytest; include Python's tempfile.gettempdir(),
+        # and clear caller PYTEST_ADDOPTS so local pytest flags cannot skew pre-flight.
+        $hadIndexRoots = Test-Path Env:ENGRAPHIS_INDEX_ROOTS
         $previousIndexRoots = $env:ENGRAPHIS_INDEX_ROOTS
-        $pyTemp = (& $pythonExe -c "import tempfile; print(tempfile.gettempdir())" 2>$null | Out-String).Trim()
+        $hadPytestAddopts = Test-Path Env:PYTEST_ADDOPTS
+        $previousPytestAddopts = $env:PYTEST_ADDOPTS
+        $pyTempProbe = Invoke-PythonStdout -Arguments @("-c", "import tempfile; print(tempfile.gettempdir())")
         $indexRoots = @($repoRoot, [IO.Path]::GetTempPath().TrimEnd('\', '/'), $pytestBaseTemp)
-        if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($pyTemp)) { $indexRoots += $pyTemp }
+        if ($pyTempProbe.Ok -and -not [string]::IsNullOrWhiteSpace($pyTempProbe.Output)) {
+            $indexRoots += $pyTempProbe.Output
+        }
         $env:ENGRAPHIS_INDEX_ROOTS = (($indexRoots | Select-Object -Unique) -join [IO.Path]::PathSeparator)
+        if ($hadPytestAddopts) { Remove-Item Env:PYTEST_ADDOPTS -ErrorAction SilentlyContinue }
         try {
             & $pythonExe -m pytest @pytestArgs
         } finally {
-            $env:ENGRAPHIS_INDEX_ROOTS = $previousIndexRoots
+            if ($hadIndexRoots) {
+                $env:ENGRAPHIS_INDEX_ROOTS = $previousIndexRoots
+            } else {
+                Remove-Item Env:ENGRAPHIS_INDEX_ROOTS -ErrorAction SilentlyContinue
+            }
+            if ($hadPytestAddopts) {
+                $env:PYTEST_ADDOPTS = $previousPytestAddopts
+            } else {
+                Remove-Item Env:PYTEST_ADDOPTS -ErrorAction SilentlyContinue
+            }
         }
     }
     if (-not $script:lastStepPassed) { exit 1 }
