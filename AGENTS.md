@@ -225,8 +225,8 @@ These are pure, unit-tested functions — change them only with a corresponding 
   `mem_fts` (FTS5 + plain-table fallback), `entities`, `edges` (bi-temporal), `mem_links`,
   `memory_entities`, `symbols`, `code_edges`, `code_files`, `code_memory_links`,
   `operation_receipts`, `events`, `audit`, `memory_tombstones`, `source_vaults`,
-  `source_imports`, `source_import_items`, `memory_closures`, `schema_migrations`,
-  `migration_executions`.
+  `source_imports`, `source_import_items`, `memory_closures`, `vector_visibility_state`,
+  `browse_state`, `browse_scope_revisions`, `schema_migrations`, `migration_executions`.
 - **Local document sources:** source collections are scope-bound, resumable manifests. Their
   paths, digests, and import state are provenance; source folders never create implicit memory
   scopes. `kind="documents"` is the source-neutral adapter, while `kind="obsidian"` retains

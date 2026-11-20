@@ -642,6 +642,189 @@ def test_plans_list_every_hosted_benefit_and_use_the_state_specific_cta():
     assert ".plan-benefit-list" in styles
 
 
+def test_team_plan_card_advertises_only_live_granted_capabilities():
+    """Team's card must match the live grant, the plan guide, and the commercial flags.
+
+    The card once read "Shared workspaces, member roles, seats and remote agents", while
+    ``docs/HOSTED_PLANS.md`` states that shared hosted Team memory and hosted MCP are
+    ``not_yet_available``. A card that sells an unshipped capability is worse than a missing
+    benefit row, so both the bullets and the note are resolved against the sources of truth.
+    """
+
+    from engraphis import commercial, entitlements
+
+    benefits = _ledger_declaration("PLAN_BENEFITS")
+    team_block = benefits[benefits.index("team: ["):]
+    bullets = [
+        line.strip().strip(",").strip("'")
+        for line in team_block.splitlines()
+        if line.strip().startswith("'")
+    ]
+    assert bullets
+    assert "Everything in Pro" in bullets
+
+    plans = _ledger_declaration("renderPlans")
+    team_card = plans[plans.index("id: 'team'"):]
+    note = team_card[team_card.index("note: '") + len("note: '"):]
+    note = note[:note.index("'")]
+    assert note, "the Team card still describes the plan"
+    card_copy = " ".join(bullets + [note]).lower()
+
+    hosted = " ".join((ROOT / "docs" / "HOSTED_PLANS.md").read_text(encoding="utf-8").split())
+    hosted_lower = hosted.lower()
+    assert "Shared hosted Team memory and hosted MCP are currently `not_yet_available`" in hosted
+
+    # Each Team capability noun on the card is backed by a manifest-enabled feature that the
+    # plan guide actually documents. A noun with no row in either source is an unshipped claim.
+    features = commercial.manifest()["features"]
+    capability_rows = {
+        "organizations": ("hosted_multi_user_roles", "team account roster"),
+        "roles": ("hosted_multi_user_roles", "roles"),
+        "seats": ("hosted_multi_user_roles", "named seats"),
+        "invitations": ("hosted_multi_user_roles", "invitations"),
+        "credentials": ("hosted_scoped_agent_tokens", "sync tokens"),
+        "audit": ("hosted_team_audit_export", "activity"),
+    }
+    for phrase in ("hosted organizations", "roles", "seats", "credentials", "audit"):
+        assert phrase in card_copy, phrase
+    for phrase, (feature, documented) in capability_rows.items():
+        assert features.get(feature) is True, (phrase, feature)
+        assert entitlements.feature_spec(feature)["plan"] == "team", phrase
+        assert documented in hosted_lower, (phrase, documented)
+
+    granted = set(entitlements.features_for("team"))
+    assert {"team", "sync"} <= granted
+
+    # Also verify the static Team panel heading and plans comparison table in index.html.
+    html = INDEX.read_text(encoding="utf-8")
+    team_panel = _section(html, '<section id="manage-team-panel"', "</section>")
+    comparison = _section(html, '<table class="comparison-table">', "</table>")
+    combined_team_ui = " ".join([card_copy, team_panel.lower(), comparison.lower()])
+
+    # Nothing the plan guide marks unavailable, and nothing the manifest leaves unshipped,
+    # may appear on the card, the Team panel heading, or the comparison table.
+    for absent in (
+        "shared workspace", "shared hosted team memory", "hosted mcp",
+        "remote agents", "remote agent access", "compliance_export", "compliance",
+    ):
+        assert absent not in combined_team_ui, absent
+    for token in ("sso", "sla"):
+        assert re.search(rf"\b{token}\b", combined_team_ui) is None, token
+
+
+@requires_node
+def test_creating_a_sync_key_never_writes_the_secret_to_the_clipboard_unprompted(tmp_path):
+    """Guard that rendering a one-time E2EE key never writes to the clipboard unprompted.
+
+    Only the explicit ``Copy key`` click handler may invoke ``copyCloudSyncKey`` or
+    ``navigator.clipboard.writeText``, and any clipboard rejection must surface a notice.
+    """
+
+    declarations = ("node", "button", "copyCloudSyncKey", "renderCreatedSyncKey")
+    prelude = """
+'use strict';
+class FakeElement {
+  constructor(tag) {
+    this.tagName = String(tag).toUpperCase();
+    this.children = [];
+    this.className = '';
+    this.ownText = '';
+    this.listeners = {};
+  }
+  set textContent(value) { this.ownText = String(value); this.children = []; }
+  get textContent() { return this.ownText + this.children.map(child => child.textContent).join(''); }
+  append(...items) { items.filter(item => item != null).forEach(item => this.children.push(item)); }
+  replaceChildren(...items) { this.ownText = ''; this.children = []; this.append(...items); }
+  setAttribute() {}
+  addEventListener(type, handler) {
+    /* ``addEventListener(type, undefined)`` registers nothing in a browser. */
+    if (handler) (this.listeners[type] = this.listeners[type] || []).push(handler);
+  }
+  click() { (this.listeners.click || []).forEach(handler => handler({ preventDefault() {} })); }
+}
+const document = {
+  createElement: tag => new FakeElement(tag),
+  createTextNode: value => ({ textContent: String(value), children: [] }),
+  getElementById: () => null,
+};
+const text = value => value == null ? '' : String(value);
+const writes = [];
+const notices = [];
+const clipboard = { reject: false };
+const showNotice = message => notices.push(String(message));
+const renderSyncStatus = () => {};
+Object.defineProperty(globalThis, 'navigator', {
+  value: { clipboard: { writeText: async value => {
+    if (clipboard.reject) throw new Error('NotAllowedError');
+    writes.push(value);
+  } } },
+  configurable: true,
+});
+const settle = async () => { for (let i = 0; i < 5; i += 1) await new Promise(resolve => setTimeout(resolve, 0)); };
+"""
+    driver = """
+(async () => {
+  const report = {};
+  const target = document.createElement('div');
+  renderCreatedSyncKey(target, 'A'.repeat(43), {has_key: true});
+  const buttons = target.children.flatMap(child => child.children || [])
+    .filter(item => item.tagName === 'BUTTON');
+  await settle();
+  report.renderedWrites = writes.slice();
+  report.renderedNotices = notices.slice();
+  report.text = target.textContent;
+
+  buttons.find(item => item.textContent === 'Copy key').click();
+  await settle();
+  report.copiedWrites = writes.slice();
+  report.copiedNotices = notices.slice();
+
+  clipboard.reject = true;
+  buttons.find(item => item.textContent === 'Copy key').click();
+  await settle();
+  report.failedWrites = writes.slice();
+  report.failedNotices = notices.slice();
+  report.buttons = buttons.map(item => item.textContent);
+  process.stdout.write(JSON.stringify(report));
+})();
+"""
+    runner = tmp_path / "sync_key.js"
+    runner.write_text("\n".join([
+        prelude,
+        *(_ledger_declaration(name) for name in declarations),
+        driver,
+    ]), encoding="utf-8")
+    result = subprocess.run(["node", str(runner)], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    rendered = json.loads(result.stdout)
+
+    # (a) Rendering the one-time key performs zero automatic clipboard writes.
+    assert rendered["renderedWrites"] == []
+    assert rendered["renderedNotices"] == []
+    assert "Cloud Sync key created" in rendered["text"]
+    assert ("It is shown only once, click Copy key to copy it to your clipboard"
+            in rendered["text"])
+    assert rendered["buttons"] == ["Copy key", "I stored the key"]
+
+    # (b) The explicit Copy key action copies once and confirms it.
+    assert rendered["copiedWrites"] == ["A" * 43]
+    assert rendered["copiedNotices"] == ["Cloud Sync key copied."]
+
+    # (c) A withheld clipboard permission is reported, never silently swallowed.
+    assert rendered["failedWrites"] == ["A" * 43]
+    assert rendered["failedNotices"][-1] == (
+        "Copy failed. Select the key and copy it manually.")
+
+    # (d) Every clipboard reference sits inside the explicit click handler. This stays true
+    # even if the handler is renamed, so a future auto-copy on render is still caught.
+    body = _ledger_declaration("renderCreatedSyncKey")
+    handler_start = body.index("copyBtn.addEventListener")
+    handler_stop = body.index("});", handler_start) + len("});")
+    outside_handler = body[:handler_start] + body[handler_stop:]
+    for forbidden in ("navigator.clipboard", "copyCloudSyncKey", "writeText"):
+        assert forbidden not in outside_handler, forbidden
+
+
 def test_team_invitations_and_password_setup_are_not_in_local_client():
     html = INDEX.read_text(encoding="utf-8")
     script = SCRIPT.read_text(encoding="utf-8")

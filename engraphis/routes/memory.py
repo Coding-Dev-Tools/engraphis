@@ -874,15 +874,18 @@ async def get_license():
     This surface used to hardcode ``plan: "local", features: []``. That describes the
     *local core*, not the customer: a paying Team installation was told it was on the free
     plan here while ``/api/license`` reported Team, so two endpoints of one product
-    disagreed about what had been bought. The response keys are unchanged — this stays the
-    legacy ``{"data": ...}`` SDK shape with the same trial and grace disclosure — and only
-    the two fields that were lying now tell the truth.
+    disagreed about what had been bought. The legacy ``{"data": ...}`` SDK shape and the
+    existing ``trial_seconds``/``grace_seconds`` fields are preserved alongside the additive
+    ``trial_days`` and ``days_by_plan`` fields: ``trial_days`` keeps its historical Pro-only
+    integer meaning for clients that already read it, and ``days_by_plan`` is what discloses
+    a longer Team trial.
 
     Resolution is local and non-blocking (see ``v2_api._plan_entitlement``): no network
     call happens on this path, and an unconnected installation still reports ``local``
     with no features, exactly as before. The plan stays presentation only; Engraphis Cloud
     remains the sole authority for every paid operation.
     """
+    from engraphis.commercial import trial_days_by_plan
     from engraphis.routes.v2_api import hosted_plan_summary
 
     summary = hosted_plan_summary()
@@ -891,6 +894,11 @@ async def get_license():
         "features": summary["features"],
         "cloud_managed": True,
         "trial_seconds": licensing.TRIAL_SECONDS,
+        # ``trial_days`` keeps its Pro-only legacy meaning; the per-plan map is what tells a
+        # Team reader their trial is longer. Emitting only the legacy value made every
+        # legacy client quote a 7-day Team trial.
+        "trial_days": licensing.TRIAL_DAYS,
+        "days_by_plan": trial_days_by_plan(),
         "grace_seconds": licensing.MAX_HOSTED_ACCOUNT_GRACE_SECONDS,
         "grace_extends_cloud_access": False,
         "upgrade_url": licensing.upgrade_url(),

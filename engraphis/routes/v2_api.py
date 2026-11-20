@@ -4325,6 +4325,10 @@ def _hosted_license_detail() -> dict:
         "error": "Start or manage Pro and Team in the Engraphis Cloud account portal.",
         "cloud_only": True,
         "trial_seconds": licensing.TRIAL_SECONDS,
+        # The Pro duration is the legacy single-value boundary; Team is disclosed separately
+        # so a client that reads only this refusal still quotes the right Team length.
+        "trial_days": licensing.TRIAL_DAYS,
+        "days_by_plan": trial_days_by_plan(),
         "grace_seconds": licensing.MAX_HOSTED_ACCOUNT_GRACE_SECONDS,
         "grace_extends_cloud_access": False,
         "upgrade_url": licensing.upgrade_url(),
