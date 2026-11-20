@@ -49,10 +49,10 @@
     "@modelcontextprotocol/sdk": "1.32.1"
   },
   "overrides": {
-    "@hono/node-server": "^2.1.6",
+    "@hono/node-server": "^2.1.8",
     "body-parser": "^2.4.0",
     "fast-uri": "^3.1.9",
-    "hono": "^4.13.16",
+    "hono": "^4.13.18",
     "minimatch": "^11.0.3",
     "proxy-addr": "2.0.8",
     "undici": "^8.12.3",

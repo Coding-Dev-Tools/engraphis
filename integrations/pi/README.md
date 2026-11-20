@@ -123,9 +123,9 @@ npm audit --no-package-lock --include=dev
 ```
 
 The pinned Pi test host includes its own shrinkwrap. `package.json` overrides now pin the
-patched `undici` and `minimatch` leaves, so the lock itself resolves to fixed versions and
-no post-install repair is needed; `npm audit` is the gate for both the production and the
-development trees.
+patched `undici`, `minimatch`, `hono`, and `@hono/node-server` leaves, so the lock itself
+resolves to fixed versions and no post-install repair is needed; `npm audit` is the gate for
+both the production and the development trees.
 
 `npm run verify` type-checks the package, runs its configuration tests, and previews
 the publish tarball. The package pins the MCP SDK; update it only with a compatibility
