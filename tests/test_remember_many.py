@@ -198,6 +198,28 @@ def test_empty_batch_is_a_noop():
     assert eng.remember_many([], workspace_id=wid, repo_id=rid) == []
 
 
+def test_batch_embeds_only_the_deduplicated_unique_texts(monkeypatch):
+    """Duplicate texts collapse to one embedding request; the batch still resolves
+    each fact in input order against that single vector."""
+    eng, wid, rid = _engine()
+    seen = []
+    original = eng.embedder.embed
+
+    def traced(texts, *, kind="text"):
+        seen.append(list(texts))
+        return original(texts, kind=kind)
+
+    monkeypatch.setattr(eng.embedder, "embed", traced)
+    results = eng.remember_many(
+        ["repeated fact", "unique fact", "repeated fact"],
+        workspace_id=wid, repo_id=rid,
+    )
+
+    assert seen == [["repeated fact", "unique fact"]]
+    assert [r["op"] for r in results] == ["add", "add", "noop"]
+    assert results[0]["id"] == results[2]["id"] != results[1]["id"]
+
+
 def test_batch_exceeding_cap_raises():
     eng, wid, rid = _engine()
     try:

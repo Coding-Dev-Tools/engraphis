@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from engraphis.backends.encrypted_db import connector_from_env
+from engraphis.commercial import expected_checkout_targets, trial_days_by_plan
 from engraphis.private_state import (
     atomic_private_text,
     ensure_owner_private_dir,
@@ -58,6 +59,53 @@ def _try_import(name: str):
         return __import__(name)
     except Exception:
         return None
+
+
+def _trial_offer_label() -> str:
+    """Name each disclosed trial duration so onboarding never promises Team 7 days.
+
+    The manifest is the only authority for how long a trial lasts; a missing or damaged
+    manifest degrades to "free trial" rather than replaying the Pro default at a Team buyer.
+    """
+    days = trial_days_by_plan()
+    offers = [
+        f"{days[plan]}-day {plan.capitalize()} trial"
+        for plan in ("pro", "team")
+        if plan in days
+    ]
+    if not offers:
+        return "free trial"
+    if len(offers) == 1:
+        return offers[0]
+    return offers[0] + " or the " + offers[1]
+
+
+def _plan_checkout_links() -> list[tuple[str, str]]:
+    """Return one target per plan the trial offer names.
+
+    The offer names Pro and Team, so a single Pro checkout link sent a Team buyer into the
+    wrong product. Each named plan gets its own manifest target; when the manifest cannot
+    supply one, the plan-neutral account portal is used rather than another plan's checkout.
+    An unreadable manifest yields the neutral ``Account & billing`` target, because
+    onboarding must never end in a traceback.
+    """
+    # Imported here, not at module scope: ``engraphis.licensing`` validates the entitlement
+    # contract when imported, and this is the doctor/recovery command.
+    from engraphis.licensing import account_url
+
+    disclosed = trial_days_by_plan()
+    portal = account_url()
+    try:
+        targets = expected_checkout_targets()
+    except (OSError, ValueError, TypeError, AttributeError):
+        return [("Account & billing", portal)]
+    links = []
+    for plan in ("pro", "team"):
+        if plan not in disclosed:
+            continue
+        target = targets.get((plan, "monthly")) or {}
+        links.append((plan.capitalize(), target.get("checkout_url") or portal))
+    return links
 
 
 def _report_receipt_chains(
@@ -676,8 +724,15 @@ def main(argv=None) -> int:
     print("  In the dashboard: create a workspace, save one project decision, review its source and Approve for prompt.")
     print("  Then Ask about the decision to see its cited source.")
     print("  Open its citation to review the source; edit the record when the decision changes.")
-    print("  Free forever at the core - start the 7-day Pro trial or subscribe at "
-          "https://api.engraphis.com/account?plan=pro&interval=monthly#billing")
+    print("  Free forever at the core - start the "
+          f"{_trial_offer_label()}, or subscribe at:")
+    links = _plan_checkout_links()
+    if not links:
+        from engraphis.licensing import account_url
+
+        print(f"    {account_url()}")
+    for plan, url in links:
+        print(f"    {plan}: {url}")
     return 0
 
 

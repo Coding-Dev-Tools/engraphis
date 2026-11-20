@@ -36,7 +36,7 @@ def main(argv=None) -> int:
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--png-output", type=Path,
-                        help="optional PNG export path (requires CairoSVG)")
+                        help="optional PNG export path (requires CairoSVG or Playwright)")
     args = parser.parse_args(argv)
     artifact_sha256 = render(args.report, args.output)
     if args.png_output:
