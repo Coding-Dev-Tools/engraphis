@@ -94,14 +94,14 @@ interpretation and do not count as additional benchmark-quality gains.
 ### Public numeric evidence registry
 
 Every exact public aggregate retained below comes from the checked-in, public-safe
-[`offline-fixtures-ux-parity-20261118.json`](docs/benchmark-evidence/offline-fixtures-ux-parity-20261118.json) artifact. Its
+[`offline-fixtures-ux-parity-20261119.json`](docs/benchmark-evidence/offline-fixtures-ux-parity-20261119.json) artifact. Its
 SHA-256 is
-`7883aa21cd813af81e1a0a1f784780a0c865c9fc672ae938fdee452509d43bca`, also recorded in the
+`757661c70f4a4425651338b7a75864d7a1be188abece00f9e2d1e2e25183689a`, also recorded in the
 adjacent `.sha256` file. The artifact contains no raw questions, answers, prompts, customer data,
 or per-record content fingerprints.
 
 The fixture-suite digest is
-`63f0f72b0610a1e26ab07245ce095939c9e7ff024724506b46be17dc71e3ae0f`. The artifact defines
+`1d7224ff38981e2d15923e7dcc33f9191849527ff7141695669f3880f0e5ac1e`. The artifact defines
 the digest algorithm and records the SHA-256 of every suite and dataset file. Each evidence ID
 also binds its exact command through `sha256(UTF-8 exact command)`:
 
@@ -118,8 +118,7 @@ historical per-run artifacts and their preserved chart bytes remain unchanged. T
 PNG views were freshly rendered from the registered artifact SVG via Google Chrome for Testing 156.0.8078.4
 headless shell on Windows at each SVG canvas size, with embedded artifact and SVG checksums.
 The fresh evaluator run on 2026-11-18 UTC used Windows CPython 3.11.17 and NumPy 2.4.6. Its 591-file manifest
-binds the producer after unifying Pro/Team commercial contract metadata and hardening sync-key UX
-atop `engraphis/device_connect.py` and the 1.7.10+ fixes: Command Code file-guard tool
+binds the producer after unifying Pro/Team commercial contract metadata, hardening sync-key UX, and adding the trigger-invalidated vector visibility revision, bounded NumPy matrix cache, and `remember_many` embedding deduplication atop `engraphis/device_connect.py` and the 1.7.10+ fixes: Command Code file-guard tool
 ids, fail-closed hook errors, symlink-then-parent and Windows alias targets, the linear
 Spec Studio heading pattern, closure-limit and browse-version handling, the equal-start
 supersede guard, bounded history candidate windows for `why` and `timeline`, raw-path UNC/device
@@ -135,7 +134,7 @@ retrieval-quality improvement. It does not qualify browser behavior, hosted serv
 external models, or provider billing. The registered artifact was produced with:
 
 ```bash
-python -m scripts.export_offline_evidence --output docs/benchmark-evidence/offline-fixtures-ux-parity-20261118.json
+python -m scripts.export_offline_evidence --output docs/benchmark-evidence/offline-fixtures-ux-parity-20261119.json
 ```
 
 The earlier release-review predecessors,
@@ -208,13 +207,13 @@ grounded checks in separate panels; provider billing and MCP transport are not m
 the SVG and matching PNG with:
 
 ```bash
-python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-ux-parity-20261118.json --output docs/images/context-efficiency.svg --png-output docs/images/context-efficiency.png
+python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-ux-parity-20261119.json --output docs/images/context-efficiency.svg --png-output docs/images/context-efficiency.png
 ```
 
 The companion examples are also generated from that artifact with:
 
 ```bash
-python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-ux-parity-20261118.json --output docs/images/evidence-backed-agent-examples.svg --png-output docs/images/evidence-backed-agent-examples.png
+python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-ux-parity-20261119.json --output docs/images/evidence-backed-agent-examples.svg --png-output docs/images/evidence-backed-agent-examples.png
 ```
 The historical-to-executable mapping is in
 [`docs/BENCHMARK_CHANGE_COVERAGE.md`](docs/BENCHMARK_CHANGE_COVERAGE.md).
@@ -248,6 +247,11 @@ frontier-model QA score.
   query_image=None)` memory interface; it does not download data or call a model.
 - **Grounded**: `eval/grounded.py`: answerable → cite, off-topic → abstain. Exact fixture
   outcomes are evidence ID `offline-grounded` in the registry above.
+- **Direct vector search (`eval/vector_scale.py`, non-registered machine timing, `warmups=1`)**:
+  Windows CPython 3.11.17 / NumPy 2.4.6 (`--backend numpy --sizes 1000,10000 --dim 256 --queries 20 --iterations 3`),
+  `ENGRAPHIS_VECTOR_CACHE_BYTES=0` vs 64 MiB cache (`setup_included_in_latency: false`):
+  p50 `16.234 ms -> 0.194 ms` (`p95 21.306 ms -> 0.303 ms`) at 1,000 vectors, `80.929 ms -> 2.448 ms`
+  (`p95 96.132 ms -> 3.008 ms`) at 10,000 vectors (`result_ids_sha256` `e1b11010...`, `4676dc67...`).
 - **Chunking (quality per token)**: `eval/chunking_eval.py` over `eval/datasets/longdoc.jsonl`
   ingests a multi-topic corpus twice: once as one memory per document (`whole`) and once with
   sub-file `ChunkingExtractor` (`chunked`), then queries both through the real recall pipeline.

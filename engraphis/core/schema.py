@@ -116,6 +116,7 @@ CREATE TABLE IF NOT EXISTS memories (
 CREATE INDEX IF NOT EXISTS idx_mem_scope   ON memories(workspace_id, repo_id, scope, mtype);
 CREATE INDEX IF NOT EXISTS idx_mem_session ON memories(session_id);
 CREATE INDEX IF NOT EXISTS idx_mem_valid   ON memories(valid_from, valid_to, expired_at);
+CREATE INDEX IF NOT EXISTS idx_mem_ingested ON memories(ingested_at);
 
 
 -- Closure observations form an append-only earliest-endpoint lattice. Their
@@ -221,6 +222,49 @@ BEGIN
     SELECT t.identity, OLD.id, s.generation FROM vector_index_targets t, vector_store_state s
     WHERE s.singleton=1
     ON CONFLICT(identity, memory_id) DO UPDATE SET generation=excluded.generation;
+END;
+
+-- Content-free visibility revision for store-backed vector caches. The mem_vectors
+-- generation above only tracks stored embeddings; scope and temporal visibility can
+-- change without touching that table, so every memory visibility mutation advances
+-- this separate counter. Reinforcement-only columns are deliberately omitted: read
+-- access must not evict a warm cache. This state is local and never synced.
+CREATE TABLE IF NOT EXISTS vector_visibility_state (
+    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+    revision INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO vector_visibility_state(singleton, revision) VALUES (1, 0);
+CREATE TRIGGER IF NOT EXISTS trg_vector_vis_mem_insert AFTER INSERT ON memories
+BEGIN
+    UPDATE vector_visibility_state SET revision=revision+1 WHERE singleton=1;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_vector_vis_mem_delete AFTER DELETE ON memories
+BEGIN
+    UPDATE vector_visibility_state SET revision=revision+1 WHERE singleton=1;
+END;
+-- Only real visibility columns belong here: SQLite silently accepts unknown
+-- ``UPDATE OF`` names, and an inert name would make the trigger look complete.
+CREATE TRIGGER IF NOT EXISTS trg_vector_vis_mem_update
+AFTER UPDATE OF workspace_id, repo_id, session_id, scope, mtype,
+    valid_from, valid_to, valid_to_recorded_at, ingested_at, expired_at
+ON memories
+BEGIN
+    UPDATE vector_visibility_state SET revision=revision+1 WHERE singleton=1;
+END;
+-- A workspace create/rename/delete can expose or hide memories under an
+-- ``allowed_workspaces`` name filter without touching ``memories``.
+CREATE TRIGGER IF NOT EXISTS trg_vector_vis_ws_insert AFTER INSERT ON workspaces
+BEGIN
+    UPDATE vector_visibility_state SET revision=revision+1 WHERE singleton=1;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_vector_vis_ws_update
+AFTER UPDATE OF name ON workspaces
+BEGIN
+    UPDATE vector_visibility_state SET revision=revision+1 WHERE singleton=1;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_vector_vis_ws_delete AFTER DELETE ON workspaces
+BEGIN
+    UPDATE vector_visibility_state SET revision=revision+1 WHERE singleton=1;
 END;
 
 -- Versioned embedding mappings. Reserved identities __active__ and __rebuilding__
@@ -943,6 +987,24 @@ FTS_SQL_FALLBACK = (
 # main SCHEMA_SQL above must remain valid for old tables missing recorded_at.
 # This script is intentionally idempotent and uses no optional JSON extension.
 MEMORY_CLOSURE_SCHEMA_SQL = f"""
+-- Closure observations change temporal visibility without touching mem_vectors or
+-- memories, so the store-backed vector cache must observe them too.
+CREATE TRIGGER IF NOT EXISTS trg_vector_vis_closure_insert
+AFTER INSERT ON memory_closures
+BEGIN
+    UPDATE vector_visibility_state SET revision=revision+1 WHERE singleton=1;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_vector_vis_closure_update
+AFTER UPDATE ON memory_closures
+BEGIN
+    UPDATE vector_visibility_state SET revision=revision+1 WHERE singleton=1;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_vector_vis_closure_delete
+AFTER DELETE ON memory_closures
+BEGIN
+    UPDATE vector_visibility_state SET revision=revision+1 WHERE singleton=1;
+END;
+
 CREATE TRIGGER IF NOT EXISTS trg_memory_closure_bound
 BEFORE INSERT ON memory_closures
 WHEN NOT EXISTS (

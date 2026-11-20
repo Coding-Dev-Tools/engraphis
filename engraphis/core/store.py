@@ -1532,6 +1532,11 @@ class Store:
         :class:`ReadOnlyConnector` ``open_read_only(path)`` contract; a bare writable
         callable is rejected before it can be invoked.
 
+        A connector may also declare ``supports_mmap_pragma``. Leaving it unset (default
+        ``None``) keeps mmap off unless ``ENGRAPHIS_SQLITE_MMAP`` opts in; ``False``
+        forcibly disables mmap (used by encrypted SQLCipher adapters); explicit ``True``
+        enables the pragma on that connector. Expected failures are debug-logged.
+
         ``sqlite_durability="durable"`` requests FULL commit synchronization;
         ``"balanced"`` explicitly selects NORMAL. File-backed writable stores
         verify the requested WAL/synchronization settings before returning.
@@ -1577,6 +1582,9 @@ class Store:
         # transactions on it (see _SerializedConnection). All Store/service/backend access
         # goes through self.conn, so wrapping here covers every writer.
         self.conn = _SerializedConnection(raw_conn)
+        # Bumped on every ``reconnect()``: a backend that caches data derived from the
+        # connection must not reuse it across a raw-handle replacement.
+        self._connection_epoch = 0
         self._close_lock = threading.Lock()
         self._connection_finalizer = weakref.finalize(
             self, _close_connection_quietly, self.conn, self._read_snapshot_pool
@@ -1617,6 +1625,26 @@ class Store:
         """Apply required pragmas, scalar functions, and durability settings to an open connection."""
         conn.create_function("engraphis_unicode_lower", 1, _unicode_lower, deterministic=True)
         conn.execute("PRAGMA foreign_keys=ON")
+        # ``cache_size`` is a negative KiB budget, raising SQLite's ~2 MiB default to a
+        # bounded ~16 MiB per-connection page cache for scan-heavy recall while leaving
+        # ``temp_store`` at SQLite's default so large sorts/compounds can spill to disk.
+        conn.execute("PRAGMA cache_size=-16384")
+        mmap_capability = getattr(self._connect, "supports_mmap_pragma", None)
+        mmap_enabled = (
+            mmap_capability is True
+            or (
+                mmap_capability is not False
+                and os.environ.get("ENGRAPHIS_SQLITE_MMAP", "").strip().lower() in {"1", "true", "yes"}
+            )
+        )
+        if mmap_enabled:
+            # Memory-mapped reads are opt-in (``ENGRAPHIS_SQLITE_MMAP=1`` or a connector
+            # that explicitly sets ``supports_mmap_pragma = True``) so synced/shared
+            # folders and SQLCipher never map database pages by default.
+            try:
+                conn.execute("PRAGMA mmap_size=67108864")
+            except sqlite3.Error as exc:
+                logger.debug("memory-mapped reads unavailable: %s", exc)
         if self.read_only:
             conn.execute("PRAGMA query_only=ON")
             self._validate_read_only_ready()
@@ -1650,6 +1678,7 @@ class Store:
             new_raw = self._open_connection(read_only_path or self.path)
             self._configure_connection(new_raw)
             self.conn.replace_raw(new_raw)
+            self._connection_epoch += 1
             if not _is_memory_database_path(self.path):
                 try:
                     stat_info = os.stat(self.path)
@@ -2846,6 +2875,18 @@ class Store:
             "trg_memory_closure_bound", "trg_browse_memory_closure_insert",
         } <= object_names
         self._closures_incomplete = closures_incomplete
+        # The local cache-revision table and its triggers are cheap, content-free
+        # shape repairs. They must never demand a pre-migration backup: a database
+        # already migrated v18->v19 can legitimately keep a differing
+        # ``.pre-migration-v19.bak``, and asking for a second one would refuse to open.
+        visibility_schema_incomplete = not {
+            "vector_visibility_state", "trg_vector_vis_mem_insert",
+            "trg_vector_vis_mem_delete", "trg_vector_vis_mem_update",
+            "trg_vector_vis_ws_insert", "trg_vector_vis_ws_update",
+            "trg_vector_vis_ws_delete", "trg_vector_vis_closure_insert",
+            "trg_vector_vis_closure_update", "trg_vector_vis_closure_delete",
+        } <= object_names
+        self._visibility_schema_incomplete = visibility_schema_incomplete
         if previous_version > SCHEMA_VERSION:
             raise RuntimeError(
                 f"database schema {previous_version} is newer than supported "
@@ -3317,15 +3358,21 @@ class Store:
 
         self._execute_script_transactional(BROWSE_SCHEMA_SQL)
         if (int(previous_version or 0) < SCHEMA_VERSION
-                or getattr(self, "_closures_incomplete", True)):
+                or getattr(self, "_closures_incomplete", True)
+                or getattr(self, "_visibility_schema_incomplete", False)):
             # Install, repair, and backfill closure history. A complete current schema's
             # triggers already maintain every observation, so re-running the seed would
-            # only rescan all closed memories on every writable open.
+            # only rescan all closed memories on every writable open. The visibility
+            # triggers live in this script too, so a current-version database that lost
+            # them is repaired here rather than through a pre-migration backup.
             self._execute_script_transactional(MEMORY_CLOSURE_SCHEMA_SQL)
         if getattr(self, "_browse_schema_incomplete", False):
             # A missing trigger could have allowed untracked changes. Repaired
             # schemas start a new cursor epoch instead of trusting prior tokens.
             self.conn.execute("UPDATE browse_state SET identity=lower(hex(randomblob(16)))")
+        # The script above installs every closure and visibility object it defines.
+        self._closures_incomplete = False
+        self._visibility_schema_incomplete = False
 
         # One row per applied version: fresh installs record every version up to
         # current, upgrades record each crossed version. Reads stay on MAX(version).
@@ -6444,6 +6491,69 @@ class Store:
             "SELECT generation FROM vector_store_state WHERE singleton=1"
         ).fetchone()
         return int(row[0]) if row is not None else 0
+
+    def vector_visibility_token(self) -> tuple[int, int]:
+        """Return the cache token for stored vectors plus scope/temporal visibility.
+
+        ``mem_vectors`` writes advance the vector generation; memory, closure, and
+        workspace-identity writes advance a separate local revision, so reinforcement
+        alone leaves a store-backed matrix cache warm. Both are read in one statement.
+        """
+        if not self._has_table(self.conn, "vector_visibility_state"):
+            return (self.vector_generation(), 0)
+        row = self.conn.execute(
+            "SELECT s.generation, v.revision FROM vector_store_state s "
+            "CROSS JOIN vector_visibility_state v "
+            "WHERE s.singleton=1 AND v.singleton=1"
+        ).fetchone()
+        if row is None:
+            return (self.vector_generation(), 0)
+        return (int(row[0]), int(row[1]))
+
+    def next_vector_visibility_transition(
+        self, flt: Optional[SearchFilter], world: float, known: float,
+    ) -> Optional[float]:
+        """Return the earliest future clock boundary that could change visibility.
+
+        Only an axis left dynamic by ``flt`` can change as wall-clock time advances. The
+        scope portion bounds the scan while the temporal predicate is omitted, so
+        future-dated rows still contribute their boundary.
+        """
+        world_dynamic = flt is None or flt.valid_at is None
+        known_dynamic = flt is None or flt.known_at is None
+        if not world_dynamic and not known_dynamic:
+            return None
+        where, params = self._where(flt, include_invalid=True, alias="m")
+        scope = " AND ".join(where) if where else "1"
+        # Probe the table itself: only a present table may appear in the boundary SQL.
+        closures_available = (
+            not getattr(self, "_closures_incomplete", False)
+            and self._has_table(self.conn, "memory_closures")
+        )
+        # Single aggregate scan per table avoids multiplying _where parameters across
+        # every temporal column while including all world/known boundary transitions.
+        mem_cols: list[tuple[str, float]] = []
+        closure_cols: list[tuple[str, float]] = []
+        if world_dynamic:
+            mem_cols.extend((("m.valid_from", world), ("m.valid_to", world)))
+            if closures_available:
+                closure_cols.append(("c.valid_to", world))
+        if known_dynamic:
+            mem_cols.extend((("m.ingested_at", known), ("m.expired_at", known), ("m.valid_to_recorded_at", known)))
+            if closures_available:
+                closure_cols.append(("c.recorded_at", known))
+        candidates: list[float] = []
+        for table_sql, cols in ((f"memories m WHERE ({scope})", mem_cols),
+                                (f"memory_closures c CROSS JOIN memories m ON m.id=c.memory_id WHERE ({scope})", closure_cols)):
+            if not cols:
+                continue
+            exprs = ", ".join(f"MIN(CASE WHEN {c}>? THEN {c} END)" for c, _ in cols)
+            filt = " OR ".join(f"{c}>?" for c, _ in cols)
+            vals = tuple(v for _, v in cols)
+            row = self.conn.execute(f"SELECT {exprs} FROM {table_sql} AND ({filt})", (*vals, *params, *vals)).fetchone()
+            if row is not None:
+                candidates.extend(float(v) for v in row if v is not None)
+        return min(candidates) if candidates else None
 
     def register_vector_index(self, identity: str, *, rebuild: bool = False) -> None:
         """Register a target; reseed canonical rows when its physical index was lost."""

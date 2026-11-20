@@ -250,6 +250,9 @@ class _EncryptedConnector:
     ``mode=ro&immutable=1`` rather than opening writable and setting query-only late.
     """
 
+    #: SQLCipher does not reliably support ``mmap_size``, so opt out of that pragma.
+    supports_mmap_pragma = False
+
     def __init__(self, driver, pragma: str) -> None:
         self._driver = driver
         self._pragma = pragma

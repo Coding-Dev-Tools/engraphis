@@ -35,3 +35,4 @@ recursive-include eval/configs *.json
 recursive-include eval/datasets *.jsonl
 include eval/datasets/locomo10_repair_manifest.json
 recursive-include tests *.py
+include tests/_node_thread.js tests/_node_worker.js

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from contextlib import closing
-from typing import Optional, TYPE_CHECKING
+from typing import Iterable, Optional, TYPE_CHECKING
 
 import numpy as np
 
@@ -26,9 +26,41 @@ def top_k_indices(scores: np.ndarray, ids: list[str], k: int) -> list[int]:
     return above
 
 
-def canonical_vector_search(store: "Store", vec: np.ndarray, k: int, *,
-                            filter: Optional[SearchFilter] = None) -> list[tuple[str, float]]:
-    """Read a consistent snapshot using O(batch * dimension + k) vector memory."""
+def _rank_batches(
+    batches: Iterable[tuple[list[str], np.ndarray]], query: np.ndarray, k: int,
+) -> list[tuple[str, float]]:
+    winners: list[tuple[str, float]] = []
+    for ids, matrix in batches:
+        nonzero = np.any(matrix != 0, axis=1)
+        if not np.all(nonzero):
+            ids = [memory_id for memory_id, keep in zip(ids, nonzero) if keep]
+            matrix = matrix[nonzero]
+        if not ids:
+            continue
+        scores = matrix @ query
+        winners.extend((ids[i], float(scores[i])) for i in top_k_indices(scores, ids, k))
+        winners.sort(key=lambda row: (-row[1], row[0]))
+        del winners[k:]
+    return winners
+
+
+def canonical_vector_search(
+    store: "Store",
+    vec: np.ndarray,
+    k: int,
+    *,
+    filter: Optional[SearchFilter] = None,
+    batches: Optional[Iterable[tuple[list[str], np.ndarray]]] = None,
+) -> list[tuple[str, float]]:
+    """Read a consistent snapshot using O(batch * dimension + k) vector memory.
+
+    ``batches`` lets a visibility-token-keyed caller supply an already-materialized,
+    identical batch stream (the portable NumPy index cache). That cache refuses a hit
+    when the store token changes, when a dynamic temporal anchor crosses its next
+    clock boundary, and whenever an entry would exceed the caller's byte budget, in
+    which case the remaining data is streamed instead. The scoring, tie-break
+    ordering, zero-row masking and float32 arithmetic are unchanged in both modes.
+    """
     query = np.asarray(vec, dtype=np.float32)
     if query.ndim != 1 or query.size == 0 or not np.isfinite(query).all():
         raise ValueError("query vector must be a finite non-empty one-dimensional array")
@@ -39,17 +71,12 @@ def canonical_vector_search(store: "Store", vec: np.ndarray, k: int, *,
     if norm == 0 or k <= 0:
         return []
     query = query / norm
-    winners: list[tuple[str, float]] = []
-    with closing(store.iter_vector_matrices(filter, dim=int(query.size))) as batches:
-        for ids, matrix in batches:
-            nonzero = np.any(matrix != 0, axis=1)
-            if not np.all(nonzero):
-                ids = [memory_id for memory_id, keep in zip(ids, nonzero) if keep]
-                matrix = matrix[nonzero]
-            if not ids:
-                continue
-            scores = matrix @ query
-            winners.extend((ids[i], float(scores[i])) for i in top_k_indices(scores, ids, k))
-            winners.sort(key=lambda row: (-row[1], row[0]))
-            del winners[k:]
-    return winners
+    if batches is None:
+        with closing(store.iter_vector_matrices(filter, dim=int(query.size))) as stream:
+            return _rank_batches(stream, query, k)
+    try:
+        return _rank_batches(batches, query, k)
+    finally:
+        close = getattr(batches, "close", None)
+        if callable(close):
+            close()
