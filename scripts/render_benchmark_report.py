@@ -724,8 +724,12 @@ def render_png(svg: str, output: Path, artifact_sha256: str,
         png = cairosvg.svg2png(bytestring=svg_bytes, output_width=width, output_height=height)
     except (ImportError, OSError):
         import base64
-        import re
-        from playwright.sync_api import sync_playwright
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            raise SystemExit(
+                "--png-output requires CairoSVG or Playwright (`pip install cairosvg` or `pip install playwright`)"
+            ) from exc
         m_w = re.search(r'width="(\d+)"', svg)
         m_h = re.search(r'height="(\d+)"', svg)
         w = width or (int(m_w.group(1)) if m_w else 1103)
