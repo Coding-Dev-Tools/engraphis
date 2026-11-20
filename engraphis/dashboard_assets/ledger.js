@@ -117,7 +117,7 @@
   const button = (label, className, action) => {
     const control = node('button', className, label);
     control.type = 'button';
-    control.addEventListener('click', action);
+    if (action) control.addEventListener('click', action);
     return control;
   };
   const memoryMutationButton = (label, className, action) => {

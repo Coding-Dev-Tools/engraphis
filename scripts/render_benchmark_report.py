@@ -732,11 +732,13 @@ def render_png(svg: str, output: Path, artifact_sha256: str,
         h = height or (int(m_h.group(1)) if m_h else 670)
         with sync_playwright() as p:
             browser = p.chromium.launch()
-            page = browser.new_page(viewport={"width": w, "height": h}, device_scale_factor=1)
-            b64 = base64.b64encode(svg_bytes).decode("ascii")
-            page.goto(f"data:image/svg+xml;base64,{b64}")
-            png = page.screenshot(omit_background=True)
-            browser.close()
+            try:
+                page = browser.new_page(viewport={"width": w, "height": h}, device_scale_factor=1)
+                b64 = base64.b64encode(svg_bytes).decode("ascii")
+                page.goto(f"data:image/svg+xml;base64,{b64}")
+                png = page.screenshot(omit_background=True)
+            finally:
+                browser.close()
     metadata = b""
     for key, value in (
         ("engraphis_artifact_sha256", digest),
@@ -754,7 +756,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Render an artifact-backed benchmark report as SVG and optional PNG.")
     parser.add_argument("--report", required=True, help="JSON artifact or selected performance report")
     parser.add_argument("--output", required=True, help="destination SVG path")
-    parser.add_argument("--png-output", help="optional PNG export path (requires CairoSVG)")
+    parser.add_argument("--png-output", help="optional PNG export path (requires CairoSVG or Playwright)")
     args = parser.parse_args(argv)
     report = load_report(args.report)
     svg = render_report(report)

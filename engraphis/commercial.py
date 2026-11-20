@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
@@ -44,7 +45,9 @@ def manifest(path: Optional[Path] = None) -> dict[str, Any]:
     target = Path(path) if path is not None else _manifest_path()
     stat = target.stat()
     return copy.deepcopy(
-        _load_manifest(str(target.absolute()), stat.st_mtime_ns, stat.st_size)
+        _load_manifest(
+            os.path.normpath(str(target.absolute())), stat.st_mtime_ns, stat.st_size
+        )
     )
 
 

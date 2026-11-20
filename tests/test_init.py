@@ -180,7 +180,7 @@ def test_every_plan_named_in_the_trial_offer_has_its_own_checkout(tmp_path, monk
 
 
 def test_a_damaged_manifest_still_never_points_a_team_reader_at_pro_checkout(
-    monkeypatch, tmp_path,
+    monkeypatch,
 ):
     """With no checkout catalog the printed target must be plan-neutral, not the Pro page."""
 

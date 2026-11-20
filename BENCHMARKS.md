@@ -94,14 +94,14 @@ interpretation and do not count as additional benchmark-quality gains.
 ### Public numeric evidence registry
 
 Every exact public aggregate retained below comes from the checked-in, public-safe
-[`offline-fixtures-ux-parity-20261119.json`](docs/benchmark-evidence/offline-fixtures-ux-parity-20261119.json) artifact. Its
+[`offline-fixtures-ux-parity-20261120.json`](docs/benchmark-evidence/offline-fixtures-ux-parity-20261120.json) artifact. Its
 SHA-256 is
-`757661c70f4a4425651338b7a75864d7a1be188abece00f9e2d1e2e25183689a`, also recorded in the
+`f671ed73fadd2f91728294490656675243547214aba57810571c36697b6bb583`, also recorded in the
 adjacent `.sha256` file. The artifact contains no raw questions, answers, prompts, customer data,
 or per-record content fingerprints.
 
 The fixture-suite digest is
-`1d7224ff38981e2d15923e7dcc33f9191849527ff7141695669f3880f0e5ac1e`. The artifact defines
+`83b286c9691f79ac3f4875f3b9b6a12cbad7d006b9e823687d6829dd19bfe6ab`. The artifact defines
 the digest algorithm and records the SHA-256 of every suite and dataset file. Each evidence ID
 also binds its exact command through `sha256(UTF-8 exact command)`:
 
@@ -117,7 +117,7 @@ The canonical chart aliases are regenerated from that new artifact and carry its
 historical per-run artifacts and their preserved chart bytes remain unchanged. The current
 PNG views were freshly rendered from the registered artifact SVG via Google Chrome for Testing 156.0.8078.4
 headless shell on Windows at each SVG canvas size, with embedded artifact and SVG checksums.
-The fresh evaluator run on 2026-11-18 UTC used Windows CPython 3.11.17 and NumPy 2.4.6. Its 591-file manifest
+The fresh evaluator run on 2026-11-20 UTC used Windows CPython 3.11.17 and NumPy 2.4.6. Its 591-file manifest
 binds the producer after unifying Pro/Team commercial contract metadata, hardening sync-key UX, and adding the trigger-invalidated vector visibility revision, bounded NumPy matrix cache, and `remember_many` embedding deduplication atop `engraphis/device_connect.py` and the 1.7.10+ fixes: Command Code file-guard tool
 ids, fail-closed hook errors, symlink-then-parent and Windows alias targets, the linear
 Spec Studio heading pattern, closure-limit and browse-version handling, the equal-start
@@ -134,7 +134,7 @@ retrieval-quality improvement. It does not qualify browser behavior, hosted serv
 external models, or provider billing. The registered artifact was produced with:
 
 ```bash
-python -m scripts.export_offline_evidence --output docs/benchmark-evidence/offline-fixtures-ux-parity-20261119.json
+python -m scripts.export_offline_evidence --output docs/benchmark-evidence/offline-fixtures-ux-parity-20261120.json
 ```
 
 The earlier release-review predecessors,
@@ -207,13 +207,13 @@ grounded checks in separate panels; provider billing and MCP transport are not m
 the SVG and matching PNG with:
 
 ```bash
-python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-ux-parity-20261119.json --output docs/images/context-efficiency.svg --png-output docs/images/context-efficiency.png
+python scripts/render_benchmark_report.py --report docs/benchmark-evidence/offline-fixtures-ux-parity-20261120.json --output docs/images/context-efficiency.svg --png-output docs/images/context-efficiency.png
 ```
 
 The companion examples are also generated from that artifact with:
 
 ```bash
-python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-ux-parity-20261119.json --output docs/images/evidence-backed-agent-examples.svg --png-output docs/images/evidence-backed-agent-examples.png
+python -m scripts.render_benchmark_examples --report docs/benchmark-evidence/offline-fixtures-ux-parity-20261120.json --output docs/images/evidence-backed-agent-examples.svg --png-output docs/images/evidence-backed-agent-examples.png
 ```
 The historical-to-executable mapping is in
 [`docs/BENCHMARK_CHANGE_COVERAGE.md`](docs/BENCHMARK_CHANGE_COVERAGE.md).
