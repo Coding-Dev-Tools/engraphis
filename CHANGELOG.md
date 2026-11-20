@@ -5,6 +5,10 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [1.7.13] - 2026-11-20
+
+Candidate package version: **1.7.13**. Publication and hosted-service qualification remain separate.
+
 - Drive onboarding trial/checkout links and `/memory/license` + `/api/license` per-plan trial
   metadata (`trial_days`, `days_by_plan`) from `engraphis/commercial.py` with path-aware,
   mutation-safe manifest caching, align dashboard Team plan cards and comparison tables with live
