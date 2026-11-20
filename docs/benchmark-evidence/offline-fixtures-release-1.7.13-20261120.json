@@ -103,10 +103,10 @@
   ],
   "schema": "engraphis-public-offline-fixtures/v1",
   "suite": {
-    "digest": "83b286c9691f79ac3f4875f3b9b6a12cbad7d006b9e823687d6829dd19bfe6ab",
+    "digest": "43ed2e9aa52b84243f1641a86a23ac9f38a3f62ec4ebd33d681fcbfe7f32126e",
     "digest_method": "sha256(canonical compact JSON mapping each sorted path to its file SHA-256)",
     "files": {
-      "engraphis/__init__.py": "1cde9f19e05ddc4f5f28517e00b0a7bd5ebf09d6be8ec2681cebf5b698195d70",
+      "engraphis/__init__.py": "22cee79b5339f004762000deb0bd6c9204ad528d0c9598fe27350c49cdf638fe",
       "engraphis/ai_context.py": "4dfd5d39eb95d05c591d1981e9e855eced73232f53efd9fe9966e0e08957d030",
       "engraphis/app.py": "44d68ad8c0ff46baed01978c9b04e40b8be5031609d5a69e205b7f05da3777fb",
       "engraphis/backends/__init__.py": "a9f22b9278362904166614081f1df78469d453601b298ce4e8afdba8a3722b25",
