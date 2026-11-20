@@ -717,13 +717,32 @@ def render_report(report: dict[str, Any]) -> str:
 def render_png(svg: str, output: Path, artifact_sha256: str,
                *, width: Optional[int] = None, height: Optional[int] = None) -> None:
     """Rasterize this SVG and bind the export to its artifact and exact SVG bytes."""
-    try:
-        import cairosvg
-    except ImportError as exc:
-        raise SystemExit("--png-output requires CairoSVG; install it with `pip install cairosvg`") from exc
     digest = _require_sha256(artifact_sha256, "PNG artifact SHA-256")
     svg_bytes = svg.encode("utf-8")
-    png = cairosvg.svg2png(bytestring=svg_bytes, output_width=width, output_height=height)
+    try:
+        import cairosvg
+        png = cairosvg.svg2png(bytestring=svg_bytes, output_width=width, output_height=height)
+    except (ImportError, OSError):
+        import base64
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            raise SystemExit(
+                "--png-output requires CairoSVG or Playwright (`pip install cairosvg` or `pip install playwright`)"
+            ) from exc
+        m_w = re.search(r'width="(\d+)"', svg)
+        m_h = re.search(r'height="(\d+)"', svg)
+        w = width or (int(m_w.group(1)) if m_w else 1103)
+        h = height or (int(m_h.group(1)) if m_h else 670)
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            try:
+                page = browser.new_page(viewport={"width": w, "height": h}, device_scale_factor=1)
+                b64 = base64.b64encode(svg_bytes).decode("ascii")
+                page.goto(f"data:image/svg+xml;base64,{b64}")
+                png = page.screenshot(omit_background=True)
+            finally:
+                browser.close()
     metadata = b""
     for key, value in (
         ("engraphis_artifact_sha256", digest),
@@ -741,7 +760,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Render an artifact-backed benchmark report as SVG and optional PNG.")
     parser.add_argument("--report", required=True, help="JSON artifact or selected performance report")
     parser.add_argument("--output", required=True, help="destination SVG path")
-    parser.add_argument("--png-output", help="optional PNG export path (requires CairoSVG)")
+    parser.add_argument("--png-output", help="optional PNG export path (requires CairoSVG or Playwright)")
     args = parser.parse_args(argv)
     report = load_report(args.report)
     svg = render_report(report)

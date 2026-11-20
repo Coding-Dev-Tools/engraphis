@@ -136,6 +136,112 @@ def test_existing_env_snippets_use_the_kept_database(tmp_path, monkeypatch, caps
     assert str(kept) in capsys.readouterr().out
 
 
+def test_onboarding_trial_copy_discloses_each_plans_own_duration(tmp_path, monkeypatch, capsys):
+    """One hardcoded "7-day Pro trial" line used to speak for Team as well."""
+
+    monkeypatch.chdir(tmp_path)
+    assert main([]) == 0
+    out = capsys.readouterr().out
+    assert "7-day Pro trial or the 14-day Team trial" in out
+    assert "7-day Pro trial or subscribe" not in out
+
+
+def test_every_plan_named_in_the_trial_offer_has_its_own_checkout(tmp_path, monkeypatch, capsys):
+    """A Team reader must never be handed only the Pro checkout.
+
+    Every plan the offer names is read from the manifest, and each one is printed with the
+    target the manifest publishes for it. Nothing here is a hardcoded URL: a repriced or
+    re-routed portal changes the assertion's expected value with it.
+    """
+
+    from engraphis import commercial, licensing
+
+    monkeypatch.chdir(tmp_path)
+    assert main([]) == 0
+    out = capsys.readouterr().out
+    targets = commercial.expected_checkout_targets()
+    disclosed = commercial.trial_days_by_plan()
+    offer = init_script._trial_offer_label()
+
+    assert disclosed, "the manifest must disclose at least one trial duration"
+    printed = {}
+    for plan in disclosed:
+        assert plan.capitalize() + " trial" in offer, plan
+        expected = (targets.get((plan, "monthly")) or {}).get("checkout_url")
+        assert expected, (plan, targets)
+        assert f"    {plan.capitalize()}: {expected}" in out, plan
+        printed[plan] = expected
+
+    # Each named plan reaches its own product page; no plan inherits another's checkout.
+    assert len(set(printed.values())) == len(printed)
+    assert licensing.account_url() not in printed.values(), (
+        "a manifest-routed plan must print its own checkout, not the neutral portal"
+    )
+
+
+def test_a_damaged_manifest_still_never_points_a_team_reader_at_pro_checkout(
+    monkeypatch,
+):
+    """With no checkout catalog the printed target must be plan-neutral, not the Pro page."""
+
+    from engraphis import commercial, licensing
+
+    monkeypatch.setattr(init_script, "expected_checkout_targets", lambda: {})
+    portal = licensing.account_url()
+    assert portal != (commercial.manifest()["plans"]["pro"]["products"]["monthly"]
+                      ["checkout_url"])
+
+    links = init_script._plan_checkout_links()
+    assert links, "the offer still names plans"
+    assert {url for _, url in links} == {portal}
+
+
+def test_an_unreadable_manifest_falls_back_to_the_account_portal(
+    monkeypatch, tmp_path, capsys,
+):
+    """The raising branch is the one that protects a Team buyer from a broken manifest.
+
+    ``expected_checkout_targets()`` re-reads the manifest, so a raised ``OSError`` is the
+    realistic failure. Onboarding must print the plan-neutral account target instead of a
+    traceback or another plan's checkout.
+    """
+
+    from engraphis import licensing
+
+    fallback_url = licensing.account_url()
+
+    def unreadable():
+        raise OSError("manifest unreadable")
+
+    monkeypatch.setattr(init_script, "expected_checkout_targets", unreadable)
+
+    links = init_script._plan_checkout_links()
+    assert links == [("Account & billing", fallback_url)]
+    assert tuple(f"{plan}: {url}" for plan, url in links) == (
+        f"Account & billing: {fallback_url}",
+    )
+
+    monkeypatch.chdir(tmp_path)
+    assert main(["--no-encryption"]) == 0
+    out = capsys.readouterr().out
+    assert f"    Account & billing: {fallback_url}" in out
+    assert "Traceback" not in out
+
+
+def test_onboarding_trial_copy_tracks_the_manifest(monkeypatch):
+    """A changed manifest changes the offer; the CLI never keeps its own duration."""
+
+    monkeypatch.setattr(
+        init_script, "trial_days_by_plan", lambda: {"pro": 5, "team": 17})
+    assert init_script._trial_offer_label() == "5-day Pro trial or the 17-day Team trial"
+
+    # A damaged manifest must not let the Pro default masquerade as a Team duration.
+    monkeypatch.setattr(init_script, "trial_days_by_plan", lambda: {})
+    assert init_script._trial_offer_label() == "free trial"
+    monkeypatch.setattr(init_script, "trial_days_by_plan", lambda: {"pro": 7})
+    assert init_script._trial_offer_label() == "7-day Pro trial"
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits do not apply on Windows")
 def test_generated_trusted_env_and_parent_are_private(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)

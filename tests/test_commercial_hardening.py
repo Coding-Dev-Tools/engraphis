@@ -263,6 +263,74 @@ def test_the_checkout_catalog_reads_a_broken_manifest_without_raising(monkeypatc
     assert ("team", "monthly") in targets
 
 
+def test_repeated_manifest_reads_do_not_reparse_and_never_serve_a_stale_file(
+    monkeypatch, tmp_path,
+) -> None:
+    """Every license read asks for the plan table; an unchanged file must not be re-parsed.
+
+    The cache identity is the file's own ``(path, mtime_ns, size)``, so a rewritten manifest
+    has to be re-read rather than answered from the cache.
+    """
+
+    from engraphis import commercial as module
+
+    path = tmp_path / "commercial_manifest.json"
+    path.write_text('{"version": "first"}', encoding="utf-8")
+    monkeypatch.setattr(module, "_manifest_path", lambda: path)
+    parsed = lambda: module._load_manifest.cache_info().misses  # noqa: E731
+
+    module.reload()
+    assert module.manifest() == {"version": "first"}
+    path.write_text('{"version": "second", "padding": 1}', encoding="utf-8")
+    assert module.manifest() == {"version": "second", "padding": 1}
+    assert parsed() == 2, "a changed identity must be re-read once"
+
+    before = parsed()
+    for _ in range(5):
+        assert module.manifest()["version"] == "second"
+        assert module.expected_checkout_targets() == {}
+    assert parsed() == before, "an unchanged manifest must not be re-read"
+
+
+def test_two_manifests_with_the_same_timestamp_and_size_do_not_collide(tmp_path) -> None:
+    """The cache key must include the path, not only the file's ``(mtime_ns, size)``.
+
+    A packaging or sync step can leave two manifests with identical size and modification
+    time. Keying only on that identity answered the second path with the first path's plan
+    table, so a caller reading an unrelated manifest saw the wrong prices.
+    """
+
+    first = tmp_path / "first.json"
+    second = tmp_path / "second.json"
+    first.write_text('{"version": "first"}', encoding="utf-8")
+    second.write_text('{"version": "secon"}', encoding="utf-8")
+    assert first.stat().st_size == second.stat().st_size
+    timestamp = first.stat().st_mtime_ns
+    os.utime(second, ns=(timestamp, timestamp))
+    assert second.stat().st_mtime_ns == timestamp
+
+    assert commercial.manifest(first) == {"version": "first"}
+    assert commercial.manifest(second) == {"version": "secon"}
+    assert commercial.manifest(first) == {"version": "first"}
+
+
+def test_a_caller_cannot_corrupt_the_cached_manifest() -> None:
+    """``manifest()`` hands out a deep copy; the process cache stays authoritative."""
+
+    original = commercial.manifest()
+    expected_price = original["plans"]["pro"]["monthly_usd"]
+
+    returned = commercial.manifest()
+    returned["plans"]["pro"]["monthly_usd"] = 0
+    returned["features"]["sso"] = not original["features"]["sso"]
+    del returned["trial"]
+
+    fresh = commercial.manifest()
+    assert fresh["plans"]["pro"]["monthly_usd"] == expected_price
+    assert fresh["features"] == original["features"]
+    assert "trial" in fresh
+
+
 def test_the_published_prices_match_the_manifest_where_pricing_is_documented() -> None:
     """The focused plan guide and upgrade panels restate manifest prices."""
 
