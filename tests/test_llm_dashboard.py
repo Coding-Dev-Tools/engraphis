@@ -318,3 +318,81 @@ def test_llm_http_status_and_test_allowlist_hide_endpoint_and_provider_payload(
     }
     assert failed.json()["error"].startswith("The provider test failed")
     assert marker not in failed.text
+
+
+def test_managed_cloud_session_provides_zero_key_llm_for_pro_and_team(monkeypatch, tmp_path):
+    client, _svc = _client(monkeypatch, tmp_path)
+    monkeypatch.setattr(settings, "llm_provider", "openai")
+    monkeypatch.setattr(settings, "llm_model", "gpt-4o-mini")
+    monkeypatch.setattr(settings, "llm_api_key", "")
+    monkeypatch.setattr(settings, "llm_base_url", "")
+
+    from engraphis.llm import client as llm_client
+
+    monkeypatch.setattr(llm_client, "managed_cloud_llm_available", lambda: True)
+
+    class _ManagedLLM(_WorkingLLM):
+        provider = "managed"
+        model = llm_client.DEFAULT_MANAGED_MODEL
+
+    monkeypatch.setattr(llm_client, "LLMClient", _ManagedLLM)
+
+    status = client.get("/api/llm/status").json()
+    assert status["provider"] == "managed"
+    assert status["model"] == llm_client.DEFAULT_MANAGED_MODEL
+    assert status["key_set"] is True
+    assert status["configured"] is True
+    assert "ENGRAPHIS_LLM_PROVIDER=managed" in status["env_snippet"]
+    assert "ENGRAPHIS_LLM_API_KEY=" not in status["env_snippet"]
+
+    tested = client.post("/api/llm/test")
+    assert tested.status_code == 200
+    assert tested.json()["ok"] is True
+    assert tested.json()["provider"] == "managed"
+    assert tested.json()["model"] == llm_client.DEFAULT_MANAGED_MODEL
+    assert tested.json()["extractor_enabled"] is True
+
+
+def test_managed_llm_client_authenticates_with_rotating_cloud_session(monkeypatch):
+    from engraphis import cloud_session, hosted_client
+    from engraphis.llm import client as llm_client
+
+    monkeypatch.setattr(cloud_session, "configured", lambda require_compute=False: True)
+    monkeypatch.setattr(
+        cloud_session,
+        "credential_bound_control_url",
+        lambda: "https://api.engraphis.com",
+    )
+    monkeypatch.setattr(
+        hosted_client,
+        "validate_cloud_base_url",
+        lambda url: url,
+    )
+    monkeypatch.setattr(
+        cloud_session,
+        "access_for_workspace",
+        lambda ws, require_compute=False, deadline=None: (
+            "rotating-cloud-token",
+            "org_pro",
+            None,
+        ),
+    )
+
+    captured = {}
+
+    def _fake_post(self, url, body, headers, *, timeout=None):
+        captured["url"] = url
+        captured["body"] = body
+        captured["auth"] = headers.get("Authorization")
+        return {"choices": [{"message": {"content": "managed-reply"}}]}
+
+    monkeypatch.setattr(llm_client.LLMClient, "_post_json", _fake_post)
+
+    with llm_client.LLMClient(provider="managed", api_key="") as llm:
+        assert llm.provider == "managed"
+        assert llm.model == llm_client.DEFAULT_MANAGED_MODEL
+        reply = llm.chat([{"role": "user", "content": "Hello"}])
+        assert reply == "managed-reply"
+        assert captured["url"] == "https://api.engraphis.com/v1/llm/chat/completions"
+        assert captured["auth"] == "Bearer rotating-cloud-token"
+        assert captured["body"]["model"] == llm_client.DEFAULT_MANAGED_MODEL

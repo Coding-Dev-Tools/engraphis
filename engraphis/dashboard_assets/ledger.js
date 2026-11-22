@@ -6959,10 +6959,13 @@
   }
 
   function llmSnippet(provider, model, keySet) {
+    const authLine = provider === 'managed'
+      ? '# Included with Pro and Team via your connected Engraphis Cloud session'
+      : 'ENGRAPHIS_LLM_API_KEY=<your-key>';
     return [
       `ENGRAPHIS_LLM_PROVIDER=${provider}`,
       `ENGRAPHIS_LLM_MODEL=${model}`,
-      'ENGRAPHIS_LLM_API_KEY=<your-key>',
+      authLine,
       keySet ? 'ENGRAPHIS_EXTRACTOR=llm_structured' : '# set ENGRAPHIS_EXTRACTOR=llm_structured to use it',
       'ENGRAPHIS_LLM_AUTO_EXTRACT=1',
     ].join('\n');

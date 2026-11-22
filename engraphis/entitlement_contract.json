@@ -81,6 +81,11 @@
       "label": "Managed Jev decisions",
       "plan": "pro",
       "calls_per_person_per_day": 500
+    },
+    "managed_llm": {
+      "label": "Included OpenRouter free AI LLM",
+      "plan": "pro",
+      "calls_per_person_per_day": 500
     }
   },
   "limits": {

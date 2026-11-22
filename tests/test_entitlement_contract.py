@@ -109,6 +109,15 @@ def test_managed_jev_is_an_included_paid_benefit_with_a_bounded_allowance():
     assert "managed_jev" not in entitlements.labels()
 
 
+def test_managed_llm_is_an_included_paid_benefit_with_a_bounded_allowance():
+    service = entitlements.included_services()["managed_llm"]
+
+    assert service["plan"] == "pro"
+    assert service["calls_per_person_per_day"] == 500
+    assert entitlements.required_plan("managed_llm") == "pro"
+    assert "managed_llm" not in entitlements.labels()
+
+
 def test_license_exposes_the_included_paid_benefit(monkeypatch):
     pytest.importorskip("fastapi", reason="full-stack extra not installed")
     from engraphis.routes import v2_api
