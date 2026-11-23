@@ -20,6 +20,7 @@ from importlib import import_module
 
 #: verb -> "module:function", mirroring ``[project.scripts]`` with the prefix dropped.
 COMMANDS = {
+    "audit": "scripts.audit:main",
     "connect": "scripts.connect:main",
     "init": "scripts.init:main",
     "cli": "scripts.cli:main",
@@ -40,6 +41,7 @@ COMMANDS = {
 _USAGE = """usage: engraphis <command> [options]
 
 commands:
+  audit          run a 60-second offline memory audit in an isolated SQLite DB
   connect        redeem the connect token from your account portal
   init           write owner-private config.env and print agent setup snippets
   cli            store and recall memories from the terminal

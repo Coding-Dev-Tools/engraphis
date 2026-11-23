@@ -5,11 +5,11 @@
 [![GitHub stars](https://img.shields.io/github/stars/Coding-Dev-Tools/engraphis.svg?style=social)](https://github.com/Coding-Dev-Tools/engraphis/stargazers)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](https://github.com/Coding-Dev-Tools/engraphis/blob/522def372c45a26d46bc7a05829964ae0240f3a9/LICENSE)
 
-**Your coding agent forgets decisions between sessions. Engraphis gives MCP-capable coding agents one local memory store with receipts.**
+**Your coding agent can explain the code. Can it prove why?**
 
-Engraphis stores scoped project knowledge in SQLite, keeps temporal history instead of silently overwriting it, and returns bounded context with citations, or abstains when the evidence is weak. The local core is Apache-2.0 and works offline.
+Open a fresh coding-agent session in a repo you know and ask why one architectural decision was made. If it answers confidently with no citation, it is improvising, not remembering. Engraphis stores scoped project knowledge in local SQLite, keeps bi-temporal history instead of silently overwriting it, and returns bounded context with citations, or abstains when the evidence is weak. The local core is Apache-2.0 and works offline with zero cloud account or default telemetry.
 
-[Watch the demo](https://www.youtube.com/watch?v=qw-rTnAA_Z4) · [Open the interactive demo](https://engraphis.com/demo) · [See how it compares](https://engraphis.com/product#comparison)
+[Run the 10-Minute Agent Memory Test](https://engraphis.com/10-minute-test?utm_source=github&utm_medium=referral&utm_campaign=ten_minute_test) · [Watch the demo](https://www.youtube.com/watch?v=qw-rTnAA_Z4) · [Open the interactive demo](https://engraphis.com/demo) · [See how it compares](https://engraphis.com/product#comparison)
 
 [Star the repo](https://github.com/Coding-Dev-Tools/engraphis/stargazers) so other coding-agent users can find it.
 
@@ -21,19 +21,37 @@ Engraphis stores scoped project knowledge in SQLite, keeps temporal history inst
 
 ## Install and connect an agent in three commands
 
-The MCP server and `[all]` extras need Python 3.10 or newer. The NumPy-only core still supports Python 3.9+.
+The MCP server and `[all]` extras need Python 3.10 or newer. The NumPy-only core and `engraphis-audit` still support Python 3.9+.
 
 ```bash
 python -m pip install "engraphis[mcp]"
-engraphis-init
+engraphis-init --prefetch
 claude mcp add engraphis -- engraphis-mcp
 ```
 
-`engraphis-init` writes a local config, generates an API token, and prints ready-to-paste setup for Claude Code, Codex, Cursor, Cline, Zed, and Windsurf. Use the exact command it prints for your machine, including the database path. Restart your agent, then ask it to remember a project decision and recall it in a new session.
+Want a 5-second zero-install proof first? Run the offline audit in an isolated temporary SQLite database:
 
-If your client times out while the local embedding model loads, run `engraphis-init --prefetch` once.
+```bash
+uvx --from engraphis engraphis-audit
+```
 
-For Cursor, Cline, Zed, or Windsurf, paste the JSON block printed by `engraphis-init` into the client's MCP configuration. Read the [agent setup guide](https://github.com/Coding-Dev-Tools/engraphis/blob/522def372c45a26d46bc7a05829964ae0240f3a9/docs/AGENT_CONNECT.md) for the full setup.
+Or install persistently with `uv tool install "engraphis[mcp]"` or `pipx install "engraphis[mcp]"`.
+
+`engraphis-init` writes a local config, generates an API token, and prints ready-to-paste setup for Claude Code, Codex, Cursor, Cline, Zed, and Windsurf. `--prefetch` pre-caches the local embedding model once so MCP clients never time out on first boot. Use the exact command printed for your machine, including the database path.
+
+<details>
+<summary>Copy-paste MCP recipes for Claude Code, Codex, Cursor, Cline, Zed, and Windsurf</summary>
+
+- [Claude Code recipe](docs/recipes/claude-code.md)
+- [Codex recipe](docs/recipes/codex.md)
+- [Cursor recipe](docs/recipes/cursor.md)
+- [Cline recipe](docs/recipes/cline.md)
+- [Zed recipe](docs/recipes/zed.md)
+- [Windsurf recipe](docs/recipes/windsurf.md)
+
+Read the [agent setup guide](https://github.com/Coding-Dev-Tools/engraphis/blob/522def372c45a26d46bc7a05829964ae0240f3a9/docs/AGENT_CONNECT.md) for shared loopback HTTP bridging (`engraphis-mcp-http`) and full setup.
+
+</details>
 
 <details>
 <summary>Prefer the full local dashboard or the graph view?</summary>
