@@ -78,6 +78,16 @@ def auto_managed_llm_selected() -> bool:
     )
 
 
+def auto_managed_extractor_allowed() -> bool:
+    """Return True when automatic managed extraction on ingest is permitted and not opted out."""
+    if "ENGRAPHIS_EXTRACTOR" in os.environ:
+        return False
+    raw_auto = os.environ.get("ENGRAPHIS_LLM_AUTO_EXTRACT")
+    if raw_auto is not None and raw_auto.strip().lower() in {"0", "false", "no", "off"}:
+        return False
+    return auto_managed_llm_selected()
+
+
 def validate_llm_base_url(value: str) -> str:
     """Validate and normalize an LLM API base URL without resolving or logging it.
 

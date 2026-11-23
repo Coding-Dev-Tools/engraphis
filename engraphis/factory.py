@@ -243,10 +243,8 @@ def create_memory_engine(
             query_planner = JevAssistedQueryPlanner(decision_backend=jev_backend)
 
         def _auto_managed_extractor():
-            if "ENGRAPHIS_EXTRACTOR" in os.environ:
-                return None
-            from engraphis.llm.client import LLMClient, auto_managed_llm_selected
-            if not auto_managed_llm_selected():
+            from engraphis.llm.client import LLMClient, auto_managed_extractor_allowed
+            if not auto_managed_extractor_allowed():
                 return None
             return get_extractor("llm_structured", llm=LLMClient(provider="managed"))
 

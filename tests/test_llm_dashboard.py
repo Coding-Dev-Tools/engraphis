@@ -599,3 +599,44 @@ def test_managed_provider_never_sends_byok_api_key_to_cloud(monkeypatch):
     assert captured["self_api_key"] == ""
     assert captured["api_key_override"] == "cloud-rotating-token"
     assert captured["base_url_override"] == "https://api.engraphis.com/v1/llm"
+
+
+@pytest.mark.parametrize("flag_value", ["0", "false", "no", "off"])
+def test_auto_extract_env_opt_out_disables_managed_ingest_extraction(
+    monkeypatch, tmp_path, flag_value
+):
+    """Explicit ENGRAPHIS_LLM_AUTO_EXTRACT=0/false/no/off opts out even when ENGRAPHIS_EXTRACTOR is unset."""
+    from engraphis import cloud_session
+    from engraphis.llm import client as llm_client
+    from engraphis.service import MemoryService
+
+    monkeypatch.delenv("ENGRAPHIS_EXTRACTOR", raising=False)
+    monkeypatch.setenv("ENGRAPHIS_LLM_AUTO_EXTRACT", flag_value)
+    monkeypatch.setattr(settings, "llm_provider", "openai")
+    monkeypatch.setattr(settings, "llm_api_key", "")
+    monkeypatch.setattr(settings, "llm_base_url", "")
+    monkeypatch.setattr(cloud_session, "configured", lambda *, require_compute=True: True)
+    monkeypatch.setattr(
+        cloud_session,
+        "credential_bound_control_url",
+        lambda: "https://api.engraphis.com",
+    )
+    monkeypatch.setattr(
+        cloud_session,
+        "saved_entitlement",
+        lambda: {"plan": "pro", "status": "trialing", "cloud_access_active": True},
+    )
+
+    assert llm_client.auto_managed_llm_selected() is True
+    assert llm_client.auto_managed_extractor_allowed() is False
+
+    def _forbidden_llm(*_args, **_kwargs):
+        raise AssertionError("Managed LLMClient must not run on ingest when ENGRAPHIS_LLM_AUTO_EXTRACT opts out")
+
+    monkeypatch.setattr(llm_client, "LLMClient", _forbidden_llm)
+    svc = MemoryService.create(str(tmp_path / "opt_out.db"), embed_model="", extractor="none")
+    try:
+        ingested = svc.ingest("Respect explicit opt-out on ingest.", workspace="ws_optout")
+        assert ingested["extracted"] is False
+    finally:
+        svc.close()

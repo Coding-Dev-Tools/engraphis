@@ -791,9 +791,9 @@ def _extractor_enabled() -> bool:
     extractor = service().engine.extractor
     if isinstance(extractor, (LLMExtractor, StructuredLLMExtractor)):
         return True
-    if extractor is None and "ENGRAPHIS_EXTRACTOR" not in os.environ:
-        from engraphis.llm.client import auto_managed_llm_selected
-        return auto_managed_llm_selected()
+    if extractor is None:
+        from engraphis.llm.client import auto_managed_extractor_allowed
+        return auto_managed_extractor_allowed()
     return False
 
 
