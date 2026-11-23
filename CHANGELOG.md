@@ -5,6 +5,28 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [1.7.14] - 2026-11-23
+
+Candidate package version: **1.7.14**. Publication and hosted-service qualification remain separate.
+
+- Automatically activate included Engraphis Cloud OpenRouter AI LLM enhancements (up to 100 calls
+  per person per day) and managed Jev advisory decisions (up to 250 calls per person per day) as
+  soon as a paid or trial Pro/Team Cloud session is connected, with zero manual `.env` edits or
+  personal API keys.
+- Inject a lazy auto-extractor factory from `engraphis/factory.py` into `MemoryEngine.ingest()` so
+  connected paid and trial Pro/Team users automatically get structured fact, entity, and knowledge
+  graph extraction, cited proactive context synthesis (`proactive_context(synthesize=True)`),
+  grounded Q&A, structured consolidation, and strict-mode (`require_exact_backends=True`) support
+  without touching credentials on pure-local, Free, expired, or BYOK-configured installations.
+- Route `select_decision_client()` and dashboard Jev review automatically to Engraphis Cloud when
+  connected to an active paid or trial Pro/Team session and `ENGRAPHIS_DECISION_BACKEND` is unset,
+  while preserving explicit `none`/`local`/`byok` opt-outs, per-call `allow_remote=true` consent,
+  and `managed_operation_unsupported` rejection for `kind="custom"`.
+- Extend `engraphis connect --verify` / `--verify-only` to probe `/v1/llm/usage` alongside
+  `/v1/jev/usage`, update `engraphis connect --enable-managed-llm` to persist managed structured
+  extraction, and align entitlement contracts, dashboard plan cards, and documentation on the
+  100/day AI LLM and 250/day Jev allowances.
+
 ## [1.7.13] - 2026-11-20
 
 Candidate package version: **1.7.13**. Publication and hosted-service qualification remain separate.

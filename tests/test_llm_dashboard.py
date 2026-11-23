@@ -506,3 +506,96 @@ def test_pro_and_team_paid_or_trial_auto_activates_structured_extractor_proactiv
     )
     assert llm_client.managed_cloud_llm_available() is False
     assert select_decision_client() == (None, "local_heuristic")
+
+
+def test_byok_key_suppresses_auto_managed_extractor_when_extractor_unset(monkeypatch, tmp_path):
+    """A connected Pro/Team user with a personal BYOK key and unset ENGRAPHIS_EXTRACTOR must not bill BYOK on ingest."""
+    from engraphis import cloud_session
+    from engraphis.llm import client as llm_client
+    from engraphis.service import MemoryService
+
+    monkeypatch.delenv("ENGRAPHIS_EXTRACTOR", raising=False)
+    monkeypatch.setattr(settings, "llm_provider", "openai")
+    monkeypatch.setattr(settings, "llm_api_key", "sk-personal-byok-key")
+    monkeypatch.setattr(settings, "llm_base_url", "")
+    monkeypatch.setattr(cloud_session, "configured", lambda *, require_compute=True: True)
+    monkeypatch.setattr(
+        cloud_session,
+        "credential_bound_control_url",
+        lambda: "https://api.engraphis.com",
+    )
+    monkeypatch.setattr(
+        cloud_session,
+        "saved_entitlement",
+        lambda: {"plan": "pro", "status": "trialing", "cloud_access_active": True},
+    )
+
+    assert llm_client.managed_cloud_llm_available() is True
+    assert llm_client.auto_managed_llm_selected() is False
+
+    def _forbidden_llm(*_args, **_kwargs):
+        raise AssertionError("BYOK LLMClient must not be constructed automatically during ingest")
+
+    monkeypatch.setattr(llm_client, "LLMClient", _forbidden_llm)
+    svc = MemoryService.create(str(tmp_path / "byok_isolated.db"), embed_model="", extractor="none")
+    try:
+        ingested = svc.ingest("Keep this local unless ENGRAPHIS_EXTRACTOR is set.", workspace="ws_byok")
+        assert ingested["extracted"] is False
+    finally:
+        svc.close()
+
+
+def test_managed_provider_never_sends_byok_api_key_to_cloud(monkeypatch):
+    """Explicit provider=managed must ignore ENGRAPHIS_LLM_API_KEY and always use Cloud session auth."""
+    from engraphis import cloud_session
+    from engraphis.llm import client as llm_client
+
+    monkeypatch.setattr(settings, "llm_provider", "managed")
+    monkeypatch.setattr(settings, "llm_api_key", "sk-personal-secret-never-send")
+    monkeypatch.setattr(settings, "llm_base_url", "https://custom.byok.example/v1")
+    monkeypatch.setattr(cloud_session, "configured", lambda *, require_compute=True: True)
+    monkeypatch.setattr(
+        cloud_session,
+        "credential_bound_control_url",
+        lambda: "https://api.engraphis.com",
+    )
+    monkeypatch.setattr(
+        cloud_session,
+        "saved_entitlement",
+        lambda: {"plan": "pro", "status": "active", "cloud_access_active": True},
+    )
+
+    captured: dict = {}
+
+    def _fake_managed_auth(self, timeout=None):
+        return ("cloud-rotating-token", "https://api.engraphis.com/v1/llm")
+
+    def _fake_compat(
+        self,
+        messages,
+        system=None,
+        temperature=None,
+        max_tokens=None,
+        timeout=None,
+        *,
+        api_key_override=None,
+        base_url_override=None,
+    ):
+        captured["api_key_override"] = api_key_override
+        captured["base_url_override"] = base_url_override
+        captured["self_api_key"] = self.api_key
+        return "managed-ok"
+
+    monkeypatch.setattr(llm_client.LLMClient, "_resolve_managed_auth", _fake_managed_auth)
+    monkeypatch.setattr(llm_client.LLMClient, "_chat_openai_compat", _fake_compat)
+
+    with llm_client.LLMClient() as llm:
+        assert llm.provider == "managed"
+        assert llm.api_key == ""
+        assert llm.has_credentials is True
+        reply = llm.chat([{"role": "user", "content": "ping"}])
+
+    assert reply == "managed-ok"
+    assert captured["self_api_key"] == ""
+    assert captured["api_key_override"] == "cloud-rotating-token"
+    assert captured["base_url_override"] == "https://api.engraphis.com/v1/llm"

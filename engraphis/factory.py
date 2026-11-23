@@ -245,10 +245,10 @@ def create_memory_engine(
         def _auto_managed_extractor():
             if "ENGRAPHIS_EXTRACTOR" in os.environ:
                 return None
-            from engraphis.llm.client import managed_cloud_llm_available
-            if not managed_cloud_llm_available():
+            from engraphis.llm.client import LLMClient, auto_managed_llm_selected
+            if not auto_managed_llm_selected():
                 return None
-            return get_extractor("llm_structured")
+            return get_extractor("llm_structured", llm=LLMClient(provider="managed"))
 
         auto_extractor_factory = (
             None

@@ -65,6 +65,19 @@ def managed_cloud_llm_available() -> bool:
         return False
 
 
+def auto_managed_llm_selected() -> bool:
+    """Return True when included managed Cloud LLM is the effective provider without BYOK override."""
+    raw_provider = (settings.llm_provider or "openai").strip().lower()
+    if raw_provider == "managed":
+        return managed_cloud_llm_available()
+    return (
+        not settings.llm_api_key
+        and not settings.llm_base_url
+        and raw_provider in {"", "openai"}
+        and managed_cloud_llm_available()
+    )
+
+
 def validate_llm_base_url(value: str) -> str:
     """Validate and normalize an LLM API base URL without resolving or logging it.
 
@@ -212,9 +225,11 @@ class LLMClient:
             resolved_model = DEFAULT_MANAGED_MODEL
         self.model = resolved_model
         self.effort = effort or settings.llm_effort
-        self.api_key = raw_key
+        self.api_key = "" if self.provider == "managed" else raw_key
         configured_base_url = (
-            raw_base_url or _PROVIDER_BASE_URLS.get(self.provider, "")
+            _PROVIDER_BASE_URLS.get("managed", "")
+            if self.provider == "managed"
+            else (raw_base_url or _PROVIDER_BASE_URLS.get(self.provider, ""))
         )
         self.base_url = validate_llm_base_url(configured_base_url)
         self.extra_headers = extra_headers or settings.llm_extra_headers
@@ -281,7 +296,7 @@ class LLMClient:
         timeout: Optional[float] = None,
     ) -> str:
         """Send a chat request and return the assistant's text reply."""
-        if self.provider == "managed" and not self.api_key:
+        if self.provider == "managed":
             managed_key, managed_url = self._resolve_managed_auth(timeout=timeout)
             return self._chat_openai_compat(
                 messages,

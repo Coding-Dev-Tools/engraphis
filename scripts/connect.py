@@ -145,9 +145,9 @@ def main(argv=None) -> int:
     ap.add_argument("--enable-managed-jev", action="store_true",
                     help="write ENGRAPHIS_DECISION_BACKEND=managed into the private trusted config")
     ap.add_argument("--enable-managed-llm", action="store_true",
-                    help="write ENGRAPHIS_LLM_PROVIDER=managed into the private trusted config")
+                    help="write ENGRAPHIS_LLM_PROVIDER=managed and structured auto-extraction into the private trusted config")
     ap.add_argument("--verify", action="store_true",
-                    help="verify the Cloud session and check Jev allowance after connecting")
+                    help="verify the Cloud session and check managed Jev and included AI LLM allowances after connecting")
     ap.add_argument("--control-url", default=None, metavar="URL",
                     help="control plane to connect to (default: the shipped endpoint, "
                          "or ENGRAPHIS_CLOUD_CONTROL_URL)")

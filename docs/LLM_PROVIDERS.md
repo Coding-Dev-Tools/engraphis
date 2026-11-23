@@ -58,7 +58,7 @@ Every LLM setup uses these variables:
 
 | Variable | Purpose |
 | --- | --- |
-| `ENGRAPHIS_LLM_PROVIDER` | One of `openai`, `anthropic`, `google`, `openrouter`, or `custom`. |
+| `ENGRAPHIS_LLM_PROVIDER` | One of `managed`, `openai`, `anthropic`, `google`, `openrouter`, or `custom`. |
 | `ENGRAPHIS_LLM_MODEL` | A model identifier accepted by the selected provider and account. |
 | `ENGRAPHIS_LLM_API_KEY` | Credential for the provider. It is never returned by the dashboard. |
 | `ENGRAPHIS_LLM_BASE_URL` | Needed only to override a default or configure a compatible endpoint. |

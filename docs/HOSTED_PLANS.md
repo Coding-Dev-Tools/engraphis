@@ -63,11 +63,14 @@ Version 1.7.9 was published on October 1, 2026. Upgrade the Python environment t
 and restart that host. See the [1.7.9 upgrade and release checklist](RELEASE_1_7_9.md).
 Installing a new client does not enable a deployment whose managed service is disabled; the hosted control service enables it with its provider key.
 
-Set `ENGRAPHIS_DECISION_BACKEND=managed` and connect the installation through the ordinary
-Cloud account flow, or run a single non-interactive command with your connect token:
+Once you connect a paid or trial Pro/Team account with `engraphis connect`, both managed Jev (up
+to 250 calls per person per day) and included OpenRouter AI LLM (up to 100 calls per person per
+day) activate automatically when `ENGRAPHIS_DECISION_BACKEND` and `ENGRAPHIS_EXTRACTOR` are unset.
+To pin managed routing explicitly in `~/.engraphis/config.env` and verify both live allowances in
+one non-interactive command:
 
 ```bash
-engraphis connect --token <CONNECT_TOKEN> --enable-managed-jev --verify
+engraphis connect --token <CONNECT_TOKEN> --enable-managed-jev --enable-managed-llm --verify
 ```
 
 The client refreshes its saved session and sends only to that session's

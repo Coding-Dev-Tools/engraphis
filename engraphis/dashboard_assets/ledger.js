@@ -7018,7 +7018,10 @@
     modelLabel.append(modelSelect);
     pickerGrid.append(providerLabel, modelLabel);
 
-    const keyState = node('p', 'llm-key-state', status.key_set ? 'API key set' : 'No API key set');
+    const keyStateLabel = status.managed && status.key_set
+      ? 'Included Cloud session (no API key needed)'
+      : (status.key_set ? 'API key set' : 'No API key set');
+    const keyState = node('p', 'llm-key-state', keyStateLabel);
     keyState.append(node('span', '', ` · extractor: ${status.extractor || 'none'}`));
     const setupNote = node('p', 'llm-setup-note', 'Choose a provider and model for the copyable configuration snippet. Save it in your owner-private ~/.engraphis/config.env, then restart Engraphis to apply the change.');
     const snippetLabel = node('label', 'llm-snippet-label', 'Owner-private config.env setup');

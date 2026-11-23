@@ -792,8 +792,8 @@ def _extractor_enabled() -> bool:
     if isinstance(extractor, (LLMExtractor, StructuredLLMExtractor)):
         return True
     if extractor is None and "ENGRAPHIS_EXTRACTOR" not in os.environ:
-        from engraphis.llm.client import managed_cloud_llm_available
-        return managed_cloud_llm_available()
+        from engraphis.llm.client import auto_managed_llm_selected
+        return auto_managed_llm_selected()
     return False
 
 
@@ -883,7 +883,7 @@ def _effective_llm_config() -> tuple[str, str, bool, bool]:
             if (raw_model and raw_model != "gpt-4o-mini")
             else _LLM_DEFAULT_MODELS["managed"]
         )
-        return provider, model, (has_key or cloud_ready), True
+        return provider, model, cloud_ready, True
     provider = raw_provider or "openai"
     model = raw_model or _LLM_DEFAULT_MODELS.get(provider, "")
     return provider, model, has_key, False
