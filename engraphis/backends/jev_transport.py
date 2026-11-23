@@ -554,9 +554,34 @@ def create_typesafe_decision_client(*, api_key: Optional[str] = None,
     return TypeSafeDecisionClient(api_key=api_key, base_url=base_url, timeout_s=timeout_s)
 
 
+def _active_managed_cloud_session() -> bool:
+    """Return True when an active paid or trial Pro/Team Cloud session can serve managed Jev."""
+    try:
+        from engraphis import cloud_session
+        if not (
+            cloud_session.configured(require_compute=False)
+            and cloud_session.credential_bound_control_url()
+        ):
+            return False
+        saved = cloud_session.saved_entitlement()
+        if isinstance(saved, dict) and saved:
+            if saved.get("cloud_access_active") is False:
+                return False
+            if str(saved.get("plan") or "").strip().lower() == "free":
+                return False
+        return True
+    except Exception:
+        return False
+
+
 def select_decision_client(name: Optional[str] = None, *, offline_mode: bool = False):
-    selected = (name if name is not None else
-                os.environ.get("ENGRAPHIS_DECISION_BACKEND", "none")).strip().lower()
+    raw_env = os.environ.get("ENGRAPHIS_DECISION_BACKEND")
+    if name is not None:
+        selected = name.strip().lower()
+    elif raw_env is not None:
+        selected = raw_env.strip().lower()
+    else:
+        selected = "auto" if _active_managed_cloud_session() else "none"
     if offline_mode or selected in {"none", "local"}:
         return None, "local_heuristic"
     if selected in {"managed", "auto"}:

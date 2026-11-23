@@ -2937,7 +2937,8 @@ test('billing cadence selects the exact Pro and Team checkout target', async ({ 
     'Cloud Sync, Analytics, Auto Consolidation, and Auto Dreaming',
   );
   await expect(page.locator('.plan-card.featured .plan-benefit-list')).toContainText(
-    'Managed Jev decisions: up to 500 calls per person per day',
+    'Included OpenRouter AI LLM: up to 100 calls per person per day',
+    'Managed Jev decisions: up to 250 calls per person per day',
   );
   await expect(page.locator('.comparison-table')).toContainText('Managed Jev decisions');
 

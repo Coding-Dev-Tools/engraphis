@@ -4,6 +4,15 @@ Engraphis runs fully locally by default. An LLM is optional and is used only whe
 LLM extraction, cited synthesis, structured consolidation, or retention supervision. Memory
 storage, local embeddings, conflict resolution, and recall do not require a provider.
 
+**Included on Pro and Team (paid and trial):** When you connect an active paid or trial Pro or
+Team account (`engraphis connect --token <CONNECT_TOKEN>`), Engraphis automatically activates
+up to **100 AI LLM calls per person per day** backed by Engraphis Cloud's zero-cost OpenRouter
+`:free` tier (`ENGRAPHIS_LLM_PROVIDER=managed`) with no personal OpenRouter API key required.
+Unstructured notes are automatically distilled into structured facts, entities, and graph
+relations on ingest, and cited proactive context, grounded Q&A, and structured consolidation
+work immediately out of the box. BYOK providers below remain available whenever you prefer your
+own key or model.
+
 This is the complete provider reference. It also explains how to connect a Codex subscription
 through MCP. Codex and Cohere Command are distinct products and use different setup paths.
 

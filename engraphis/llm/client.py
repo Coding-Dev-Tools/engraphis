@@ -45,13 +45,22 @@ _PROVIDER_BASE_URLS = {
 
 
 def managed_cloud_llm_available() -> bool:
-    """Return True when a connected Engraphis Cloud session can authenticate managed LLM calls."""
+    """Return True when an active paid or trial Pro/Team Cloud session can authenticate managed LLM calls."""
     try:
         from engraphis import cloud_session
-        return bool(
+        if not (
             cloud_session.configured(require_compute=False)
             and cloud_session.credential_bound_control_url()
-        )
+        ):
+            return False
+        saved = cloud_session.saved_entitlement()
+        if isinstance(saved, dict) and saved:
+            if saved.get("cloud_access_active") is False:
+                return False
+            plan = str(saved.get("plan") or "").strip().lower()
+            if plan == "free":
+                return False
+        return True
     except Exception:  # noqa: BLE001
         return False
 
@@ -214,6 +223,11 @@ class LLMClient:
             follow_redirects=False,  # never leak API keys to redirect targets
             limits=httpx.Limits(max_connections=20, max_keepalive_connections=5),
         )
+
+    @property
+    def has_credentials(self) -> bool:
+        """Return True when a static API key or active managed Cloud session is available."""
+        return bool(self.api_key) or (self.provider == "managed" and managed_cloud_llm_available())
 
     def close(self) -> None:
         self._http.close()

@@ -242,6 +242,20 @@ def create_memory_engine(
             )
             query_planner = JevAssistedQueryPlanner(decision_backend=jev_backend)
 
+        def _auto_managed_extractor():
+            if "ENGRAPHIS_EXTRACTOR" in os.environ:
+                return None
+            from engraphis.llm.client import managed_cloud_llm_available
+            if not managed_cloud_llm_available():
+                return None
+            return get_extractor("llm_structured")
+
+        auto_extractor_factory = (
+            None
+            if (require_exact_backends or (extractor or "none").strip().lower() != "none")
+            else _auto_managed_extractor
+        )
+
         engine = engine_cls(
             store,
             embedder,
@@ -249,6 +263,7 @@ def create_memory_engine(
             reranker,
             auto_evolve=auto_evolve,
             extractor=extracted,
+            auto_extractor_factory=auto_extractor_factory,
             graph_extractor=graph,
             graph_feeder=_feed_graph,
             retention_supervisor=supervisor,

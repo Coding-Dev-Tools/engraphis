@@ -493,6 +493,7 @@ class MemoryEngine:
         code_source_iterator: Optional[Callable] = None,
         code_source_policy: Optional[Callable] = None,
         code_walk_limit_error=RuntimeError,
+        auto_extractor_factory: Optional[Callable[[], Any]] = None,
     ) -> None:
         self.store = store
         self.embedder = embedder
@@ -513,6 +514,7 @@ class MemoryEngine:
         # Optional implementations are injected by the outer package factory. Core owns
         # policy and orchestration, never concrete backend selection.
         self.extractor = extractor
+        self._auto_extractor_factory = auto_extractor_factory
         self.graph_extractor = graph_extractor
         self.graph_feeder = graph_feeder
         if graph_extractor is not None and graph_feeder is None:
@@ -2422,12 +2424,33 @@ class MemoryEngine:
         # or transformed into benign-looking derived facts before the write path has a
         # chance to retain it safely for inspection.
         input_poisoning = assess_untrusted_payload(text, metadata=metadata)
-        if self.extractor is not None and not input_poisoning.quarantined:
+        active_extractor = self.extractor
+        auto_managed_extractor = None
+        if (
+            active_extractor is None
+            and self._auto_extractor_factory is not None
+            and not input_poisoning.quarantined
+        ):
             try:
-                facts = self.extractor.extract(text)
+                auto_managed_extractor = self._auto_extractor_factory()
+                active_extractor = auto_managed_extractor
+            except Exception:
+                auto_managed_extractor = None
+        if active_extractor is not None and not input_poisoning.quarantined:
+            try:
+                facts = active_extractor.extract(text)
                 extracted = bool(facts)
             except Exception:
                 facts = None
+            finally:
+                if auto_managed_extractor is not None:
+                    llm_obj = getattr(auto_managed_extractor, "llm", None)
+                    close = getattr(llm_obj, "close", None)
+                    if callable(close):
+                        try:
+                            close()
+                        except Exception:
+                            pass
         if not facts:
             from engraphis.core.interfaces import ExtractedFact
             facts = [ExtractedFact(content=text)]

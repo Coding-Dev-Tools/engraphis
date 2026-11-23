@@ -788,7 +788,13 @@ _DISABLED_EXTRACTOR = _DisabledExtractor()
 
 def _extractor_enabled() -> bool:
     from engraphis.backends.extractor import LLMExtractor, StructuredLLMExtractor
-    return isinstance(service().engine.extractor, (LLMExtractor, StructuredLLMExtractor))
+    extractor = service().engine.extractor
+    if isinstance(extractor, (LLMExtractor, StructuredLLMExtractor)):
+        return True
+    if extractor is None and "ENGRAPHIS_EXTRACTOR" not in os.environ:
+        from engraphis.llm.client import managed_cloud_llm_available
+        return managed_cloud_llm_available()
+    return False
 
 
 def _close_llm(llm) -> None:
@@ -941,6 +947,8 @@ def llm_status():
         "provider": provider,
         "model": model,
         "key_set": key_set,
+        "managed": is_managed,
+        "included_allowance_daily": 100 if is_managed else None,
         "custom_base_url_configured": bool(settings.llm_base_url),
         "extractor": settings.extractor,
         "extractor_enabled": _extractor_enabled(),
@@ -1634,6 +1642,8 @@ def _dashboard_jev_backend():
     selected = settings.decision_backend.strip().lower()
     if selected in {"managed", "auto"}:
         client = EngraphisCloudDecisionClient()
+    elif selected == "none" and "ENGRAPHIS_DECISION_BACKEND" not in os.environ:
+        client, _provider = select_decision_client(None)
     else:
         client, _provider = select_decision_client(selected)
     return JevDecisionBackend(client=client, model=settings.decision_model)

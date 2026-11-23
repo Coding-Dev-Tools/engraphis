@@ -43,11 +43,11 @@ control-plane, relay, compute, and worker implementations are private services.
 | `ENGRAPHIS_POSTGRES_STATEMENT_TIMEOUT_MS` | `30000` | Per-introspection PostgreSQL statement timeout in milliseconds (bounded to 1--300000) |
 | `ENGRAPHIS_GRAPH_TOKEN` | Not set | Bearer token for `engraphis-graph-server`; required off-loopback |
 | `ENGRAPHIS_GRAPH_HOST` / `ENGRAPHIS_GRAPH_PORT` | `127.0.0.1` / `8720` | Read-only graph/recall server bind address |
-| `ENGRAPHIS_LLM_PROVIDER` | `openai` | `openai \| anthropic \| google \| openrouter \| custom` |
-| `ENGRAPHIS_LLM_MODEL` | `gpt-4o-mini` | Model name (provider-specific) |
-| `ENGRAPHIS_LLM_API_KEY` | Not set | API key for chat/synthesis, `llm` / `llm_structured` extraction, and structured consolidation |
+| `ENGRAPHIS_LLM_PROVIDER` | `openai` (auto-routes to `managed` on connected Pro/Team) | `managed \| openai \| anthropic \| google \| openrouter \| custom`. Connected active or trial Pro/Team installations automatically use `managed` (up to 100 free OpenRouter AI LLM calls per person per day) when no personal API key is set. |
+| `ENGRAPHIS_LLM_MODEL` | `gpt-4o-mini` | Model name (provider-specific; defaults to `nvidia/nemotron-3-ultra-550b-a55b:free` in `managed` mode) |
+| `ENGRAPHIS_LLM_API_KEY` | Not set | API key for BYOK chat/synthesis, `llm` / `llm_structured` extraction, and structured consolidation (not required when using included Pro/Team `managed` LLM) |
 | `ENGRAPHIS_LLM_BASE_URL` | Not set | Base URL for openrouter / custom OpenAI-compatible endpoints |
-| `ENGRAPHIS_DECISION_BACKEND` | `none` | `none` or `local` keeps advisory decisions local; `managed` uses the saved Cloud session and an included free daily allowance of up to 500 Jev calls per person per day after service acceptance; `auto` selects managed when configured and never switches to BYOK; explicit `byok` uses a personal TypeSafe key and may incur provider charges. Managed custom questions and query planning are unsupported. Legacy `typesafe`, `jev`, and `system1` mean BYOK. Remote calls also require per-call consent. |
+| `ENGRAPHIS_DECISION_BACKEND` | `none` (auto-routes to `managed` on connected Pro/Team) | `none` or `local` keeps advisory decisions local; `managed` uses the saved Cloud session and an included free daily allowance of up to 250 Jev calls per person per day (active paid and trial); `auto` selects managed when configured and never switches to BYOK; explicit `byok` uses a personal TypeSafe key and may incur provider charges. Managed custom questions and query planning are unsupported. Legacy `typesafe`, `jev`, and `system1` mean BYOK. Remote calls also require per-call consent. |
 | `ENGRAPHIS_DECISION_MODEL` | `jev-1.13.0` | Pinned model accepted by the Jev transport; other model identifiers are rejected. |
 | `TYPESAFE_API_KEY` | Not set | Personal credential for explicit BYOK decisions; `JEV_API_KEY` is a fallback alias. Managed decisions use the saved Cloud session instead. |
 | `TYPESAFE_BASE_URL` | `https://api.typesafe.ai` | Direct BYOK provider origin; does not change the managed session's bound Cloud control origin. |
@@ -72,7 +72,7 @@ its provider key. Every legitimate Pro user and each eligible Team named seat, i
 paid viewers, with an active paid, trial, or test entitlement receives managed Jev at no
 additional customer charge and without a personal provider key.
 
-Each paid individual receives up to **500 Jev calls per person per day**, free. Usage is per person, not pooled across a Team and not monthly. Each evaluated call counts once, including a batched request; calls beyond the daily maximum are not served. Admitted attempts that fail or are interrupted remain counted, and no overage is charged. The account portal reports that member's remaining calls for the current day.
+Each paid individual receives up to **250 Jev calls per person per day**, free, plus up to **100 AI LLM calls per person per day** via OpenRouter's free tier on active paid and trial plans. Usage is per person, not pooled across a Team and not monthly. Each evaluated call counts once, including a batched request; calls beyond the daily maximum are not served. Admitted attempts that fail or are interrupted remain counted, and no overage is charged. The account portal reports that member's remaining calls for the current day.
 
 No latency, accuracy, or cost-saving
 guarantee is established by configuration or a successful health check. These rules are

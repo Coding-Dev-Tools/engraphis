@@ -396,3 +396,113 @@ def test_managed_llm_client_authenticates_with_rotating_cloud_session(monkeypatc
         assert captured["url"] == "https://api.engraphis.com/v1/llm/chat/completions"
         assert captured["auth"] == "Bearer rotating-cloud-token"
         assert captured["body"]["model"] == llm_client.DEFAULT_MANAGED_MODEL
+
+
+def test_pro_and_team_paid_or_trial_auto_activates_structured_extractor_proactive_and_jev(
+    monkeypatch, tmp_path
+):
+    from engraphis import cloud_session
+    from engraphis.backends.extractor import StructuredLLMExtractor, get_extractor
+    from engraphis.backends.jev_transport import EngraphisCloudDecisionClient, select_decision_client
+    from engraphis.llm import client as llm_client
+    from engraphis.service import MemoryService
+
+    monkeypatch.delenv("ENGRAPHIS_EXTRACTOR", raising=False)
+    monkeypatch.delenv("ENGRAPHIS_DECISION_BACKEND", raising=False)
+    monkeypatch.setattr(settings, "llm_api_key", "")
+    monkeypatch.setattr(cloud_session, "configured", lambda require_compute=False: True)
+    monkeypatch.setattr(
+        cloud_session,
+        "credential_bound_control_url",
+        lambda: "https://api.engraphis.com",
+    )
+    monkeypatch.setattr(
+        cloud_session,
+        "saved_entitlement",
+        lambda: {"plan": "pro", "status": "trialing", "cloud_access_active": True},
+    )
+
+    assert llm_client.managed_cloud_llm_available() is True
+
+    # 1. Engine lazily activates managed StructuredLLMExtractor on ingest for Pro/Team trial/paid,
+    #    and proactive_context(synthesize=True) uses the managed LLM with zero API key.
+    extracted_calls = []
+    chat_calls = []
+
+    class _ManagedExtractLLM(_WorkingLLM):
+        provider = "managed"
+        model = llm_client.DEFAULT_MANAGED_MODEL
+        api_key = ""
+        has_credentials = True
+
+        def extract_json(self, prompt, schema, *, timeout=None):
+            extracted_calls.append(prompt)
+            return {
+                "facts": [
+                    {
+                        "content": "Billing ledger uses PostgreSQL 16.",
+                        "title": "Billing DB",
+                        "mtype": "semantic",
+                        "importance": 0.9,
+                        "keywords": ["postgresql", "billing"],
+                        "entities": ["PostgreSQL 16", "billing ledger"],
+                        "relations": [
+                            {
+                                "source": "billing ledger",
+                                "relation": "uses",
+                                "target": "PostgreSQL 16",
+                            }
+                        ],
+                    }
+                ]
+            }
+
+        def chat(self, messages, *, system=None, temperature=None, max_tokens=None, timeout=None):
+            chat_calls.append(messages)
+            return "Use PostgreSQL 16 for the billing ledger [1]."
+
+    monkeypatch.setattr(llm_client, "LLMClient", _ManagedExtractLLM)
+    svc = MemoryService.create(str(tmp_path / "auto_trial.db"), embed_model="", extractor="none")
+    try:
+        assert svc.engine.extractor is None  # No eager credential inspection at create time.
+        ingested = svc.ingest(
+            "Team decided to run PostgreSQL 16 for the billing ledger.",
+            workspace="ws_trial",
+        )
+        assert len(extracted_calls) == 1
+        assert ingested["extracted"] is True
+        assert ingested["count"] == 1
+        stored_id = ingested["facts"][0]["id"]
+        stored_rec = svc.store.get_memory(stored_id)
+        assert stored_rec is not None and stored_rec.title == "Billing DB"
+
+        svc.remember("Billing ledger runs on PostgreSQL 16.", workspace="ws_trial")
+        briefing = svc.proactive_context(
+            workspace="ws_trial", task="Check billing database choice", synthesize=True
+        )
+        assert len(chat_calls) == 1
+        assert briefing["synthesized"] is True
+        assert "[1]" in briefing["context_summary"]
+    finally:
+        svc.close()
+
+    # 2. Strict require_exact mode accepts zero-key managed LLM.
+    strict_ext = get_extractor("llm_structured", require_exact=True)
+    assert isinstance(strict_ext, StructuredLLMExtractor)
+    assert strict_ext.llm.provider == "managed"
+    assert strict_ext.llm.has_credentials is True
+    strict_ext.llm.close()
+
+    # 3. Managed Jev auto-selects without manual ENGRAPHIS_DECISION_BACKEND env var.
+    jev_client, backend_name = select_decision_client()
+    assert isinstance(jev_client, EngraphisCloudDecisionClient)
+    assert backend_name == "engraphis_cloud"
+
+    # 4. Expired or free entitlement disables automatic activation cleanly.
+    monkeypatch.setattr(
+        cloud_session,
+        "saved_entitlement",
+        lambda: {"plan": "pro", "status": "expired", "cloud_access_active": False},
+    )
+    assert llm_client.managed_cloud_llm_available() is False
+    assert select_decision_client() == (None, "local_heuristic")

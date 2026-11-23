@@ -5455,8 +5455,8 @@ class MemoryService:
         if synthesize:
             try:
                 from engraphis.config import settings
-                if settings.llm_api_key:
-                    from engraphis.llm.client import LLMClient
+                from engraphis.llm.client import LLMClient, managed_cloud_llm_available
+                if settings.llm_api_key or managed_cloud_llm_available():
                     llm = LLMClient()
             except Exception:
                 llm = None
