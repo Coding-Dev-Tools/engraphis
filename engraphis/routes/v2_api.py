@@ -745,6 +745,7 @@ def workspace_routing_set(req: _WorkspaceRoutingReq):
 # Provider → sensible default model, so the dashboard's provider picker can prefill a
 # working model name without the user needing to know the provider's catalogue.
 _LLM_DEFAULT_MODELS = {
+    "managed": "nvidia/nemotron-3-ultra-550b-a55b:free",
     "openai": "gpt-4o-mini",
     "anthropic": "claude-sonnet-5-5",
     "google": "gemini-1.5-flash",
@@ -856,9 +857,34 @@ def _set_llm_extractor_locked(enabled: bool, *, persist: bool) -> dict:
     }
 
 
+def _effective_llm_config() -> tuple[str, str, bool, bool]:
+    """Return ``(provider, model, key_set, is_managed)`` accounting for Pro/Team managed LLM."""
+    from engraphis.llm.client import managed_cloud_llm_available
+
+    raw_provider = (settings.llm_provider or "openai").lower()
+    raw_model = settings.llm_model
+    has_key = bool(settings.llm_api_key)
+    cloud_ready = managed_cloud_llm_available()
+    if raw_provider == "managed" or (
+        not has_key
+        and raw_provider in {"", "openai"}
+        and not settings.llm_base_url
+        and cloud_ready
+    ):
+        provider = "managed"
+        model = (
+            raw_model
+            if (raw_model and raw_model != "gpt-4o-mini")
+            else _LLM_DEFAULT_MODELS["managed"]
+        )
+        return provider, model, (has_key or cloud_ready), True
+    provider = raw_provider or "openai"
+    model = raw_model or _LLM_DEFAULT_MODELS.get(provider, "")
+    return provider, model, has_key, False
+
+
 def _record_llm_test(result: dict) -> None:
-    provider = settings.llm_provider or "openai"
-    model = settings.llm_model or _LLM_DEFAULT_MODELS.get(provider, "")
+    provider, model, _key_set, _is_managed = _effective_llm_config()
     with _llm_extractor_lock:
         _llm_connection_state.update({
             "ok": bool(result.get("ok")),
@@ -875,8 +901,7 @@ def _public_llm_test_result(result: dict, *, error: str = "") -> dict:
     may be useful inside the process, but must never cross the dashboard API boundary.
     """
     result = result if isinstance(result, dict) else {}
-    provider = settings.llm_provider or "openai"
-    model = settings.llm_model or _LLM_DEFAULT_MODELS.get(provider, "")
+    provider, model, _key_set, _is_managed = _effective_llm_config()
     ok = bool(result.get("ok"))
     public = {"ok": ok, "provider": provider, "model": model}
     for field in _LLM_PUBLIC_TEST_STATE_FIELDS:
@@ -905,10 +930,13 @@ def llm_status():
     retention-supervision mode, and a ready-to-paste .env snippet for the dashboard's
     "Connect your LLM" card. Never returns the API key or custom provider endpoint —
     only whether each is set."""
-    provider = settings.llm_provider or "openai"
-    model = settings.llm_model or _LLM_DEFAULT_MODELS.get(provider, "")
-    key_set = bool(settings.llm_api_key)
+    provider, model, key_set, is_managed = _effective_llm_config()
     verified = bool(key_set and _llm_is_verified(provider, model))
+    auth_line = (
+        "# Included with Pro and Team via your connected Engraphis Cloud session\n"
+        if is_managed
+        else "ENGRAPHIS_LLM_API_KEY=<your-key>\n"
+    )
     return {
         "provider": provider,
         "model": model,
@@ -926,7 +954,7 @@ def llm_status():
         "env_snippet": (
             f"ENGRAPHIS_LLM_PROVIDER={provider}\n"
             f"ENGRAPHIS_LLM_MODEL={model}\n"
-            f"ENGRAPHIS_LLM_API_KEY=<your-key>\n"
+            + auth_line
             + ("ENGRAPHIS_EXTRACTOR=llm_structured\n" if key_set else "# set ENGRAPHIS_EXTRACTOR=llm_structured to use it\n")
             + "ENGRAPHIS_LLM_AUTO_EXTRACT=1\n"
         ),
@@ -939,12 +967,18 @@ def llm_test():
     gate (member+ in team mode) applies — testing spends a fraction of a cent of the
     instance's API credit, so it's not a viewer action. Returns an allow-listed status,
     never the provider reply; failures are mapped to a generic error."""
-    if not settings.llm_api_key:
+    _provider, _model, key_set, is_managed = _effective_llm_config()
+    if not key_set:
         _record_llm_test({"ok": False})
+        missing_error = (
+            "No Engraphis Cloud session configured for included managed LLM. Connect your "
+            "Pro or Team account with engraphis-connect, or set ENGRAPHIS_LLM_API_KEY."
+            if is_managed
+            else "No API key configured. Set ENGRAPHIS_LLM_API_KEY in your owner-private ~/.engraphis/config.env and restart."
+        )
         return _public_llm_test_result(
             {"ok": False},
-            error=("No API key configured. Set ENGRAPHIS_LLM_API_KEY in your owner-private ~/.engraphis/config.env "
-                   "and restart."),
+            error=missing_error,
         )
     try:
         from engraphis.llm.client import LLMClient
@@ -978,7 +1012,8 @@ def llm_extractor_toggle(req: _ExtractorToggleReq):
     """Turn structured extraction on/off immediately; enabling requires a live provider."""
     if not req.enabled:
         return {"ok": True, **_set_llm_extractor(False)}
-    if not settings.llm_api_key:
+    provider, model, key_set, _is_managed = _effective_llm_config()
+    if not key_set:
         raise HTTPException(status_code=400, detail={
             "error": "Connect an LLM and set its API key before enabling extraction."})
     try:
@@ -997,8 +1032,8 @@ def llm_extractor_toggle(req: _ExtractorToggleReq):
         raise HTTPException(status_code=400, detail={
             "error": "The configured LLM could not be verified. Check the provider, "
                      "model, API key, and network connection."})
-    return {"ok": True, "provider": settings.llm_provider,
-            "model": settings.llm_model, **_set_llm_extractor(True)}
+    return {"ok": True, "provider": provider,
+            "model": model, **_set_llm_extractor(True)}
 
 
 def _metadata_object(raw) -> dict:

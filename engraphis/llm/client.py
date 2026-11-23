@@ -25,12 +25,35 @@ from engraphis.config import settings
 
 logger = logging.getLogger("engraphis.llm")
 
+DEFAULT_MANAGED_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
+ALLOWED_MANAGED_FREE_MODELS = (
+    "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "openrouter/free",
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "google/gemma-3-27b-it:free",
+    "deepseek/deepseek-chat-v3-0324:free",
+    "qwen/qwq-32b:free",
+)
+
 _PROVIDER_BASE_URLS = {
     "openai": "https://api.openai.com/v1",
     "openrouter": "https://openrouter.ai/api/v1",
     "anthropic": "https://api.anthropic.com/v1",
     "google": "https://generativelanguage.googleapis.com/v1beta",
+    "managed": "https://api.engraphis.com/v1/llm",
 }
+
+
+def managed_cloud_llm_available() -> bool:
+    """Return True when a connected Engraphis Cloud session can authenticate managed LLM calls."""
+    try:
+        from engraphis import cloud_session
+        return bool(
+            cloud_session.configured(require_compute=False)
+            and cloud_session.credential_bound_control_url()
+        )
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def validate_llm_base_url(value: str) -> str:
@@ -161,12 +184,28 @@ class LLMClient:
         extra_headers: Optional[dict] = None,
         effort: Optional[str] = None,
     ) -> None:
-        self.provider = (provider or settings.llm_provider).lower()
-        self.model = model or settings.llm_model
+        raw_provider = (provider or settings.llm_provider or "openai").lower()
+        raw_key = api_key if api_key is not None else settings.llm_api_key
+        raw_base_url = base_url if base_url is not None else settings.llm_base_url
+        if (
+            not raw_key
+            and provider is None
+            and raw_provider in {"", "openai"}
+            and not raw_base_url
+            and managed_cloud_llm_available()
+        ):
+            raw_provider = "managed"
+        self.provider = raw_provider
+        resolved_model = model or settings.llm_model
+        if self.provider == "managed" and (
+            not resolved_model or (model is None and resolved_model == "gpt-4o-mini")
+        ):
+            resolved_model = DEFAULT_MANAGED_MODEL
+        self.model = resolved_model
         self.effort = effort or settings.llm_effort
-        self.api_key = api_key or settings.llm_api_key
+        self.api_key = raw_key
         configured_base_url = (
-            base_url or settings.llm_base_url or _PROVIDER_BASE_URLS.get(self.provider, "")
+            raw_base_url or _PROVIDER_BASE_URLS.get(self.provider, "")
         )
         self.base_url = validate_llm_base_url(configured_base_url)
         self.extra_headers = extra_headers or settings.llm_extra_headers
@@ -187,6 +226,37 @@ class LLMClient:
 
     # ── Public API ──────────────────────────────────────────────────────────
 
+    def _resolve_managed_auth(self, timeout: Optional[float] = None) -> tuple[str, str]:
+        """Resolve a live rotating Cloud session token and credential-bound control URL."""
+        import time as _time
+
+        from engraphis import cloud_session
+        from engraphis.hosted_client import validate_cloud_base_url
+
+        if not managed_cloud_llm_available():
+            raise ValueError(
+                "No LLM API key or connected Engraphis Cloud session configured. "
+                "Connect a Pro or Team account with engraphis-connect or set ENGRAPHIS_LLM_API_KEY."
+            )
+        budget = float(timeout) if timeout is not None and timeout > 0 else 15.0
+        deadline = _time.monotonic() + min(max(budget, 1.0), 60.0)
+        try:
+            before = validate_cloud_base_url(cloud_session.credential_bound_control_url())
+            token, _organization, _compute = cloud_session.access_for_workspace(
+                None, require_compute=False, deadline=deadline
+            )
+            control = validate_cloud_base_url(cloud_session.credential_bound_control_url())
+        except TimeoutError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            status = getattr(exc, "status", None)
+            raise _LLMProviderError(
+                status=status if isinstance(status, int) and 400 <= status <= 599 else 401
+            ) from None
+        if not before or control != before:
+            raise _LLMProviderError(status=401)
+        return token, validate_llm_base_url(control.rstrip("/") + "/v1/llm")
+
     def chat(
         self,
         messages: list[dict[str, str]],
@@ -197,6 +267,17 @@ class LLMClient:
         timeout: Optional[float] = None,
     ) -> str:
         """Send a chat request and return the assistant's text reply."""
+        if self.provider == "managed" and not self.api_key:
+            managed_key, managed_url = self._resolve_managed_auth(timeout=timeout)
+            return self._chat_openai_compat(
+                messages,
+                system,
+                temperature,
+                max_tokens,
+                timeout,
+                api_key_override=managed_key,
+                base_url_override=managed_url,
+            )
         if not self.api_key:
             raise ValueError(
                 "No LLM API key configured. Set ENGRAPHIS_LLM_API_KEY in .env "
@@ -309,9 +390,17 @@ class LLMClient:
     # ── Provider implementations ────────────────────────────────────────────
 
     def _chat_openai_compat(
-        self, messages, system, temperature, max_tokens, timeout=None
+        self,
+        messages,
+        system,
+        temperature,
+        max_tokens,
+        timeout=None,
+        *,
+        api_key_override: Optional[str] = None,
+        base_url_override: Optional[str] = None,
     ) -> str:
-        """OpenAI / OpenRouter / custom OpenAI-compatible endpoints."""
+        """OpenAI / OpenRouter / Managed Cloud / custom OpenAI-compatible endpoints."""
         full_messages = []
         if system:
             full_messages.append({"role": "system", "content": system})
@@ -322,10 +411,12 @@ class LLMClient:
         if max_tokens is not None:
             body["max_tokens"] = max_tokens
 
-        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+        active_key = api_key_override if api_key_override is not None else self.api_key
+        active_url = base_url_override if base_url_override is not None else self.base_url
+        headers = {"Authorization": f"Bearer {active_key}", "Content-Type": "application/json"}
         headers.update(self.extra_headers)
 
-        url = f"{self.base_url}/chat/completions"
+        url = f"{active_url}/chat/completions"
         # Custom provider URLs (and Google's URL below) may carry credentials in
         # their query string.  Keep debug logging useful without ever emitting the
         # configured endpoint verbatim.
@@ -476,6 +567,7 @@ _PROVIDER_PRICING: dict[str, float] = {
     "anthropic": 0.003,
     "google": 0.001,
     "openrouter": 0.002,
+    "managed": 0.0,
 }
 
 

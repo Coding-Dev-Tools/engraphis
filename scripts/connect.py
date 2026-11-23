@@ -131,6 +131,8 @@ def main(argv=None) -> int:
                         help="verify an already-connected Cloud session without a new token")
     ap.add_argument("--enable-managed-jev", action="store_true",
                     help="write ENGRAPHIS_DECISION_BACKEND=managed into the private trusted config")
+    ap.add_argument("--enable-managed-llm", action="store_true",
+                    help="write ENGRAPHIS_LLM_PROVIDER=managed into the private trusted config")
     ap.add_argument("--verify", action="store_true",
                     help="verify the Cloud session and check Jev allowance after connecting")
     ap.add_argument("--control-url", default=None, metavar="URL",
@@ -151,14 +153,15 @@ def main(argv=None) -> int:
                     help="print the redacted summary as JSON instead of a report")
     args = ap.parse_args(argv)
 
-    if args.preflight and (args.enable_managed_jev or args.verify):
-        ap.error("--preflight cannot be combined with --enable-managed-jev or --verify")
+    if args.preflight and (args.enable_managed_jev or args.enable_managed_llm or args.verify):
+        ap.error("--preflight cannot be combined with --enable-managed-jev, --enable-managed-llm, or --verify")
 
     if args.verify_only:
         connect_only = [
             flag
             for flag, value in (
                 ("--enable-managed-jev", args.enable_managed_jev),
+                ("--enable-managed-llm", args.enable_managed_llm),
                 ("--verify", args.verify),
                 ("--workspace", args.workspace),
                 ("--label", args.label),
@@ -258,12 +261,26 @@ def main(argv=None) -> int:
                   file=sys.stderr)
             return 1
 
+    if args.enable_managed_llm:
+        try:
+            persist_project_env({
+                "ENGRAPHIS_LLM_PROVIDER": "managed",
+                "ENGRAPHIS_LLM_MODEL": "nvidia/nemotron-3-ultra-550b-a55b:free",
+            })
+            summary["managed_llm_configured"] = True
+        except (OSError, ValueError) as exc:
+            print("%s: session connected, but could not update private config: %s" % (ap.prog, exc),
+                  file=sys.stderr)
+            return 1
+
     if args.json:
         print(json.dumps(summary, sort_keys=True, indent=2))
     else:
         _print_summary(summary)
         if summary.get("managed_jev_configured"):
             print("  managed jev    enabled (ENGRAPHIS_DECISION_BACKEND=managed)")
+        if summary.get("managed_llm_configured"):
+            print("  managed llm    enabled (ENGRAPHIS_LLM_PROVIDER=managed)")
         if summary.get("verified"):
             print("  verified       active")
             _print_jev_verification(summary)
