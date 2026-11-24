@@ -42,12 +42,12 @@ Or install persistently with `uv tool install "engraphis[mcp]"` or `pipx install
 <details>
 <summary>Copy-paste MCP recipes for Claude Code, Codex, Cursor, Cline, Zed, and Windsurf</summary>
 
-- [Claude Code recipe](docs/recipes/claude-code.md)
-- [Codex recipe](docs/recipes/codex.md)
-- [Cursor recipe](docs/recipes/cursor.md)
-- [Cline recipe](docs/recipes/cline.md)
-- [Zed recipe](docs/recipes/zed.md)
-- [Windsurf recipe](docs/recipes/windsurf.md)
+- [Claude Code recipe](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/recipes/claude-code.md)
+- [Codex recipe](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/recipes/codex.md)
+- [Cursor recipe](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/recipes/cursor.md)
+- [Cline recipe](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/recipes/cline.md)
+- [Zed recipe](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/recipes/zed.md)
+- [Windsurf recipe](https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/recipes/windsurf.md)
 
 Read the [agent setup guide](https://github.com/Coding-Dev-Tools/engraphis/blob/522def372c45a26d46bc7a05829964ae0240f3a9/docs/AGENT_CONNECT.md) for shared loopback HTTP bridging (`engraphis-mcp-http`) and full setup.
 
