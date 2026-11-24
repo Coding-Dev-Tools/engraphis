@@ -226,6 +226,7 @@ engraphis-import = "scripts.importer:main"
 engraphis-init = "scripts.init:main"
 engraphis-update = "scripts.update:main"
 engraphis-sync = "scripts.sync:main"
+engraphis-hooks = "engraphis.hooks_cli:main"
 
 [tool.setuptools]
 include-package-data = false

@@ -1,0 +1,239 @@
+"""Tests for Engraphis v1.8 passive capture, bounded turn-0 briefings, and client hooks."""
+from __future__ import annotations
+
+import io
+import json
+from pathlib import Path
+
+import pytest
+
+from engraphis.core.poisoning import prompt_eligible, source_is_external
+from engraphis.hooks import (
+    BRIEFING_HOOK_NAME,
+    CAPTURE_HOOK_NAME,
+    LEGACY_CC_SESSION_KEY,
+    build_session_briefing,
+    extract_durable_candidates,
+    extract_text_from_hook_payload,
+    install_client_hooks,
+    stage_passive_capture,
+    uninstall_client_hooks,
+)
+from engraphis.hooks_cli import main as hooks_cli_main
+from engraphis.service import MemoryService
+
+
+def _make_service(tmp_path: Path) -> MemoryService:
+    return MemoryService.create(str(tmp_path / "test.db"), embed_model=None)
+
+
+def test_passive_hook_source_is_registered_external() -> None:
+    assert source_is_external("passive-hook") is True
+
+
+def test_extract_durable_candidates_filters_noise_and_code_blocks() -> None:
+    raw = """
+    Hi there! Let me check the logs.
+    ```python
+    # Never commit secrets inside fenced code blocks!
+    api_key = "ignored"
+    ```
+    - Root cause: billing webhook must run before entitlement updates or seat counts drift.
+    - Decided to migrate authentication tokens from JWT to PASETO v4 for local services.
+    - Root cause: billing webhook must run before entitlement updates or seat counts drift.
+    - Thanks, looks good!
+    - Always pin npx and uvx MCP package versions to prevent silent write-tool expansion.
+    """
+    candidates = extract_durable_candidates(raw, max_candidates=5)
+    assert len(candidates) == 3
+    assert any("billing webhook" in c for c in candidates)
+    assert any("PASETO v4" in c for c in candidates)
+    assert any("pin npx and uvx" in c for c in candidates)
+
+
+def test_extract_text_from_stop_hook_json_and_loop_guard(tmp_path: Path) -> None:
+    # stop_hook_active=True must short-circuit to prevent recursive hook loops.
+    text, meta = extract_text_from_hook_payload(
+        json.dumps({"hook_event_name": "Stop", "stop_hook_active": True, "last_assistant_message": "Always pin versions."})
+    )
+    assert text == ""
+    assert meta["skipped_stop_loop"] is True
+
+    # Transcript JSONL tail extraction when last_assistant_message is absent.
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text(
+        "\n".join([
+            json.dumps({"role": "user", "content": "Fix the deploy bug"}),
+            json.dumps({
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Root cause: migration script must never drop prod_audit table."}],
+            }),
+        ]),
+        encoding="utf-8",
+    )
+    text2, meta2 = extract_text_from_hook_payload(
+        json.dumps({"hook_event_name": "Stop", "transcript_path": str(transcript), "cwd": str(tmp_path)})
+    )
+    assert "migration script must never drop prod_audit" in text2
+    assert meta2["format"] == "json"
+
+
+def test_stage_passive_capture_rejects_secrets_and_deduplicates(tmp_path: Path) -> None:
+    svc = _make_service(tmp_path)
+    try:
+        secret_tok = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5"
+        aws_key = "AKIA" + "IOSFODNN7EXAMPLE"
+        dsn = "postgresql://admin:supersecretpass123@db.internal:5432/prod"
+        prose = "\n".join([
+            f"- Always set GITHUB_TOKEN={secret_tok} before running the CI release workflow.",
+            f"- Never hardcode {aws_key} into terraform templates for production deploys.",
+            f"- Migration root cause: {dsn} must never run against staging clusters.",
+            "- Architectural decision: billing webhooks must run before seat entitlement updates.",
+            "- Root cause: SQLite WAL mode requires bounded reader snapshots during backup drills.",
+        ])
+
+        first = stage_passive_capture(
+            svc, prose, workspace="acme", repo="api", secret_mode="reject", max_candidates=10
+        )
+        assert first["skipped_secrets"] == 3
+        assert first["stored_count"] == 2
+        assert first["skipped_duplicates"] == 0
+        assert first["review_state"] == "pending"
+
+        # Verify stored passive captures stay pending (not prompt_eligible) and contain zero secrets.
+        for mem_id in first["stored_ids"]:
+            insp = svc.inspect(workspace="acme", memory_id=mem_id)
+            mem = insp["memory"]
+            assert mem["provenance"]["source"] == "passive-hook"
+            assert mem["provenance"]["review_state"] == "pending"
+            assert prompt_eligible(mem["provenance"], mem.get("metadata")) is False
+            assert secret_tok not in mem["content"]
+            assert aws_key not in mem["content"]
+
+        # Running the exact same capture again must deduplicate 100% cleanly (0 new writes).
+        second = stage_passive_capture(
+            svc, prose, workspace="acme", repo="api", secret_mode="reject", max_candidates=10
+        )
+        assert second["skipped_secrets"] == 3
+        assert second["skipped_duplicates"] == 2
+        assert second["stored_count"] == 0
+    finally:
+        svc.close()
+
+
+def test_stage_passive_capture_redact_mode_sanitizes_and_stores(tmp_path: Path) -> None:
+    svc = _make_service(tmp_path)
+    try:
+        tok = "sk-proj-" + "AbCdEfGhIjKlMnOpQrStUvWxYz012345"
+        prose = f"- Security policy: never commit {tok} into repository configuration files."
+        res = stage_passive_capture(svc, prose, workspace="acme", repo="api", secret_mode="redact")
+        assert res["stored_count"] == 1
+        assert res["skipped_secrets"] == 0
+        insp = svc.inspect(workspace="acme", memory_id=res["stored_ids"][0])
+        mem = insp["memory"]
+        assert tok not in mem["content"]
+        assert "<redacted>" in mem["content"]
+    finally:
+        svc.close()
+
+
+def test_build_session_briefing_empty_and_scoped_queries_hide_pending(tmp_path: Path) -> None:
+    svc = _make_service(tmp_path)
+    try:
+        # Missing workspace returns clean empty briefing without raising ValidationError.
+        empty = build_session_briefing(svc, workspace="nonexistent", query="")
+        assert empty["count"] == 0
+        assert empty["context"] == ""
+        assert empty["hook_output"] == {}
+
+        # Approved local agent decision appears; unapproved passive capture stays hidden.
+        svc.remember(
+            "Architectural decision: always run billing webhooks before seat entitlement updates.",
+            workspace="acme",
+            repo="api",
+        )
+        stage_passive_capture(
+            svc,
+            "- Root cause: unapproved passive candidate must stay hidden from turn-0 briefings.",
+            workspace="acme",
+            repo="api",
+        )
+
+        # Empty-query Turn-0 proactive briefing works without ValidationError.
+        proactive = build_session_briefing(svc, workspace="acme", repo="api", query="", max_chars=400, client="claude")
+        assert proactive["count"] >= 1
+        assert len(proactive["context"]) <= 400
+        assert "billing webhooks" in proactive["context"]
+        assert "unapproved passive candidate" not in proactive["context"]
+        assert "hookSpecificOutput" in proactive["hook_output"]
+
+        # Scoped query briefing with Cursor output format.
+        scoped = build_session_briefing(
+            svc, workspace="acme", repo="api", query="billing webhooks", max_chars=300, client="cursor"
+        )
+        assert scoped["count"] >= 1
+        assert "additional_context" in scoped["hook_output"]
+        assert "billing webhooks" in scoped["hook_output"]["additional_context"]
+    finally:
+        svc.close()
+
+
+def test_install_and_uninstall_hooks_claude_cursor_commandcode(tmp_path: Path) -> None:
+    # 1. Claude Code (~/.claude/settings.json) preserves unrelated hooks & is idempotent.
+    claude_cfg = tmp_path / "claude_settings.json"
+    claude_cfg.write_text(
+        json.dumps({"hooks": {"PreToolUse": [{"hooks": [{"type": "command", "name": "user-guard", "command": "echo ok"}]}]}}),
+        encoding="utf-8",
+    )
+    r1 = install_client_hooks("claude", claude_cfg, python_exe="/usr/bin/python3")
+    r2 = install_client_hooks("claude", claude_cfg, python_exe="/usr/bin/python3")
+    assert r1["installed_events"] == ["SessionStart", "Stop"]
+    assert r1["backup"] is not None and Path(r1["backup"]).exists()
+    data = json.loads(claude_cfg.read_text(encoding="utf-8"))
+    assert len(data["hooks"]["SessionStart"]) == 1
+    assert len(data["hooks"]["Stop"]) == 1
+    assert data["hooks"]["PreToolUse"][0]["hooks"][0]["name"] == "user-guard"
+    assert "engraphis.hooks_cli" in data["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+    assert r2["installed_events"] == ["SessionStart", "Stop"]
+
+    u1 = uninstall_client_hooks("claude", claude_cfg)
+    assert u1["removed"] == 2
+    after = json.loads(claude_cfg.read_text(encoding="utf-8"))
+    assert "SessionStart" not in after["hooks"]
+    assert "Stop" not in after["hooks"]
+    assert after["hooks"]["PreToolUse"][0]["hooks"][0]["name"] == "user-guard"
+
+    # 2. Cursor (.cursor/hooks.json) uses version=1 + camelCase flat lists.
+    cursor_cfg = tmp_path / ".cursor" / "hooks.json"
+    install_client_hooks("cursor", cursor_cfg, python_exe="/usr/bin/python3")
+    cdata = json.loads(cursor_cfg.read_text(encoding="utf-8"))
+    assert cdata["version"] == 1
+    assert "sessionStart" in cdata["hooks"] and "stop" in cdata["hooks"]
+    assert isinstance(cdata["hooks"]["sessionStart"][0], dict)
+    assert "engraphis.hooks_cli briefing --hook-mode --client cursor" in cdata["hooks"]["sessionStart"][0]["command"]
+    cu = uninstall_client_hooks("cursor", cursor_cfg)
+    assert cu["removed"] == 2
+
+    # 3. Command Code skips duplicate SessionStart if legacy cc-engraphis-session-start exists.
+    cc_cfg = tmp_path / "cc_settings.json"
+    cc_cfg.write_text(
+        json.dumps({"hooks": {"SessionStart": [{"hooks": [{"type": "command", "name": LEGACY_CC_SESSION_KEY, "command": "old"}]}]}}),
+        encoding="utf-8",
+    )
+    cc_res = install_client_hooks("commandcode", cc_cfg, python_exe="/usr/bin/python3")
+    assert cc_res["installed_events"] == ["Stop"]
+    cc_data = json.loads(cc_cfg.read_text(encoding="utf-8"))
+    names_start = [e["name"] for w in cc_data["hooks"]["SessionStart"] for e in w["hooks"]]
+    names_stop = [e["name"] for w in cc_data["hooks"]["Stop"] for e in w["hooks"]]
+    assert names_start == [LEGACY_CC_SESSION_KEY]
+    assert BRIEFING_HOOK_NAME not in names_start
+    assert names_stop == [CAPTURE_HOOK_NAME]
+
+
+def test_hooks_cli_briefing_never_creates_missing_db_and_fails_open(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    missing_db = tmp_path / "does_not_exist.db"
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
+    rc = hooks_cli_main(["briefing", "--db", str(missing_db), "--hook-mode"])
+    assert rc == 0
+    assert not missing_db.exists()
+    assert capsys.readouterr().out == ""

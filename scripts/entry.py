@@ -35,6 +35,7 @@ COMMANDS = {
     "import": "scripts.importer:main",
     "update": "scripts.update:main",
     "sync": "scripts.sync:main",
+    "hooks": "engraphis.hooks_cli:main",
 }
 
 _USAGE = """usage: engraphis <command> [options]
@@ -55,6 +56,7 @@ commands:
   import         import local Markdown, text, and document collections
   update         check for and install a newer Engraphis release
   sync           sync a workspace across devices, or show local sync state
+  hooks          install and run coding-agent SessionStart briefing and Stop capture hooks
 
 Run `engraphis <command> --help` for a command's options.
 Every command is also installed as `engraphis-<command>`."""
