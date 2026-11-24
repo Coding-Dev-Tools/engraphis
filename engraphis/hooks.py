@@ -45,13 +45,15 @@ _NOISE_PREFIXES = (
     "let me ", "i will ", "i'll ", "running ", "checking ", "looking at ",
     "reading ", "editing ", "searching ", "```", "{", "[",
 )
+_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _MIN_CANDIDATE_CHARS = 28
 _MAX_CANDIDATE_CHARS = 600
 
 
 def normalize_candidate_text(text: str) -> str:
-    """Collapse internal whitespace for stable comparison and hashing."""
-    return " ".join(str(text or "").split()).strip()
+    """Strip non-whitespace ASCII control chars and collapse whitespace stably."""
+    cleaned = _CONTROL_RE.sub("", str(text or ""))
+    return " ".join(cleaned.split()).strip()
 
 
 def candidate_content_hash(text: str) -> str:
@@ -124,13 +126,12 @@ def _read_jsonl_assistant_tail(path: Path, *, max_messages: int = 6, max_bytes: 
             continue
         if not isinstance(obj, dict):
             continue
+        # Claude Code JSONL wraps assistant turns as {"type": "assistant", "message": {"role": "assistant", "content": [...]}}.
+        if obj.get("content") is None and isinstance(obj.get("message"), dict):
+            obj = obj["message"]
         role = str(obj.get("role") or obj.get("type") or "").casefold()
-        if role not in {"assistant", "model", "summary", "message"}:
-            msg_obj = obj.get("message")
-            if isinstance(msg_obj, dict) and str(msg_obj.get("role") or "").casefold() == "assistant":
-                obj = msg_obj
-            else:
-                continue
+        if role not in {"assistant", "model", "summary"}:
+            continue
         content = obj.get("content")
         if isinstance(content, str) and content.strip():
             messages.append(content.strip())
@@ -235,8 +236,15 @@ def build_session_briefing(
             )
             memories = list(res.get("memories") or [])
         else:
-            res = service.recall_proactive(workspace=workspace, repo=repo, k=k)
-            memories = list(res.get("memories") or [])
+            try:
+                res = service.recall_proactive(workspace=workspace, repo=repo, k=k)
+                memories = list(res.get("memories") or [])
+            except ValidationError:
+                if repo:
+                    res = service.recall_proactive(workspace=workspace, repo=None, k=k)
+                    memories = list(res.get("memories") or [])
+                else:
+                    memories = []
     except ValidationError:
         memories = []
 
@@ -348,13 +356,14 @@ def stage_passive_capture(
     existing_hashes = _existing_workspace_content_hashes(service, workspace)
 
     stored_ids: list[str] = []
+    review_states: list[str] = []
     would_store: list[str] = []
     skipped_duplicates = 0
     skipped_secrets = 0
     skipped_errors = 0
 
     for candidate in candidates:
-        clean_text = candidate
+        clean_text = normalize_candidate_text(candidate)
         try:
             reject_secrets([("content", clean_text)])
         except SecretDetectedError:
@@ -395,6 +404,8 @@ def stage_passive_capture(
         mem_id = str(res.get("id") or "")
         if mem_id:
             stored_ids.append(mem_id)
+            state = str(res.get("review_state") or "pending")
+            review_states.append(state)
 
     return {
         "workspace": workspace,
@@ -406,7 +417,8 @@ def stage_passive_capture(
         "skipped_duplicates": skipped_duplicates,
         "skipped_secrets": skipped_secrets,
         "skipped_errors": skipped_errors,
-        "review_state": "pending",
+        "review_states": review_states,
+        "review_state": review_states[0] if len(set(review_states)) == 1 else ("mixed" if review_states else "pending"),
         "dry_run": dry_run,
     }
 
@@ -459,7 +471,7 @@ def _atomic_write_json(path: Path, data: Mapping[str, Any]) -> None:
 def _read_json_object(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
-    raw = path.read_text(encoding="utf-8").strip() or "{}"
+    raw = path.read_text(encoding="utf-8-sig").strip() or "{}"
     parsed = json.loads(raw)
     if not isinstance(parsed, dict):
         raise ValueError(f"{path} must contain a JSON object")
@@ -577,7 +589,12 @@ def install_client_hooks(
         ):
             if not enabled:
                 continue
-            entries = [e for e in (hooks.get(event) or []) if not _is_engraphis_cursor_entry(e)]
+            existing = hooks.get(event)
+            if existing is None:
+                existing = []
+            elif not isinstance(existing, list):
+                raise ValueError(f"{settings_path}: hooks.{event} must be a list")
+            entries = [e for e in existing if not _is_engraphis_cursor_entry(e)]
             entries.append({"command": _build_hook_command(exe, subcmd, "cursor")})
             hooks[event] = entries
             installed_events.append(event)

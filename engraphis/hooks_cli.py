@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any, Optional, Sequence
@@ -25,6 +26,9 @@ from engraphis.hooks import (
     stage_passive_capture,
     uninstall_client_hooks,
 )
+
+_SAFE_REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_HOOK_BUSY_TIMEOUT_MS = 500
 
 
 def _configure_utf8_stdio() -> None:
@@ -45,22 +49,60 @@ def _infer_repo_name(cwd: Optional[str] = None) -> Optional[str]:
         return None
     for candidate in (cur,) + tuple(cur.parents):
         if (candidate / ".git").exists():
-            return candidate.name or None
+            name = candidate.name or ""
+            if _SAFE_REPO_RE.fullmatch(name):
+                return name
+            sanitized = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip(".-_")[:128]
+            return sanitized if sanitized and _SAFE_REPO_RE.fullmatch(sanitized) else None
     return None
 
 
-def _resolve_db_and_embed_model(db_override: Optional[str]) -> tuple[str, Optional[str]]:
+def _is_missing_local_db(db_path: str) -> bool:
+    if db_path == ":memory:" or db_path.startswith("file:"):
+        return False
+    return not Path(db_path).expanduser().is_file()
+
+
+def _resolve_workspace_name(
+    service: Any, explicit: Optional[str], *, repo: Optional[str], for_write: bool
+) -> str:
+    if explicit:
+        return explicit
+    resolved = service.resolve_workspace(None, repo=repo, for_write=for_write)
+    if isinstance(resolved, dict):
+        return str(resolved.get("workspace") or "default")
+    return str(resolved or "default")
+
+
+def _open_service(db_override: Optional[str], *, hook_mode: bool = False) -> tuple[Any, str]:
     from engraphis.config import settings
-
-    db_path = str(db_override) if db_override is not None else str(settings.db_path)
-    embed_model = settings.embed_model or None
-    return db_path, embed_model
-
-
-def _open_service(db_path: str, embed_model: Optional[str]) -> Any:
     from engraphis.service import MemoryService
 
-    return MemoryService.create(db_path, embed_model=embed_model)
+    db_path = str(db_override) if db_override is not None else str(settings.db_path)
+    resolved_db = (
+        str(Path(db_path).expanduser())
+        if db_path != ":memory:" and not db_path.startswith("file:")
+        else db_path
+    )
+    service = MemoryService.create(
+        resolved_db,
+        embed_model=settings.embed_model or None,
+        embed_dim=getattr(settings, "embed_dim", 384),
+        embed_revision=getattr(settings, "embed_revision", None),
+        require_immutable_models=getattr(settings, "require_immutable_models", False),
+        vector_backend=getattr(settings, "vector_backend", "auto"),
+        rerank_model=getattr(settings, "rerank_model", None),
+        rerank_revision=getattr(settings, "rerank_revision", None),
+        allowed_workspaces=getattr(settings, "allowed_workspaces", None),
+    )
+    if hook_mode:
+        conn = getattr(getattr(service, "store", None), "conn", None)
+        if conn is not None:
+            try:
+                conn.execute(f"PRAGMA busy_timeout = {_HOOK_BUSY_TIMEOUT_MS}")
+            except Exception:
+                pass
+    return service, resolved_db
 
 
 def _cmd_install(args: argparse.Namespace) -> int:
@@ -93,17 +135,19 @@ def _cmd_briefing(args: argparse.Namespace) -> int:
     cwd_hint = str(payload_meta.get("cwd") or "") or None
     repo = args.repo or _infer_repo_name(cwd_hint)
 
-    db_path, embed_model = _resolve_db_and_embed_model(args.db)
+    from engraphis.config import settings
+
+    db_path = str(args.db) if args.db is not None else str(settings.db_path)
     # Never create a brand-new empty DB on disk during a read-only SessionStart briefing.
-    if db_path != ":memory:" and not db_path.startswith("file:") and not Path(db_path).is_file():
+    if _is_missing_local_db(db_path):
         if args.hook_mode:
             return 0
         print(json.dumps({"workspace": args.workspace or "default", "repo": repo, "count": 0, "context": ""}))
         return 0
 
-    service = _open_service(db_path, embed_model)
+    service, _ = _open_service(args.db, hook_mode=args.hook_mode)
     try:
-        workspace = args.workspace or service.resolve_workspace(None, repo=repo, for_write=False)
+        workspace = _resolve_workspace_name(service, args.workspace, repo=repo, for_write=False)
         result = build_session_briefing(
             service,
             workspace=workspace,
@@ -139,15 +183,17 @@ def _cmd_capture(args: argparse.Namespace) -> int:
             print(json.dumps({"extracted": 0, "stored_count": 0, "skipped_stop_loop": bool(payload_meta.get("skipped_stop_loop"))}))
         return 0
 
+    from engraphis.config import settings
+
     cwd_hint = str(payload_meta.get("cwd") or "") or None
     repo = args.repo or _infer_repo_name(cwd_hint)
-    db_path, embed_model = _resolve_db_and_embed_model(args.db)
-    if args.hook_mode and db_path != ":memory:" and not db_path.startswith("file:") and not Path(db_path).is_file():
+    db_path = str(args.db) if args.db is not None else str(settings.db_path)
+    if args.hook_mode and _is_missing_local_db(db_path):
         return 0
 
-    service = _open_service(db_path, embed_model)
+    service, _ = _open_service(args.db, hook_mode=args.hook_mode)
     try:
-        workspace = args.workspace or service.resolve_workspace(None, repo=repo, for_write=True)
+        workspace = _resolve_workspace_name(service, args.workspace, repo=repo, for_write=True)
         result = stage_passive_capture(
             service,
             extracted_text,

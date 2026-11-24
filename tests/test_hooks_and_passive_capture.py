@@ -237,3 +237,74 @@ def test_hooks_cli_briefing_never_creates_missing_db_and_fails_open(tmp_path: Pa
     assert rc == 0
     assert not missing_db.exists()
     assert capsys.readouterr().out == ""
+
+
+def test_hooks_cli_briefing_and_capture_work_without_workspace_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db_file = tmp_path / "populated.db"
+    svc = MemoryService.create(str(db_file), embed_model=None)
+    try:
+        svc.remember(
+            "Architectural decision: never run destructive migrations without a backup.",
+            workspace="default",
+        )
+    finally:
+        svc.close()
+
+    # Force deterministic embedder so CLI matches test DB without loading torch.
+    from engraphis.config import settings
+    monkeypatch.setattr(settings, "embed_model", "")
+
+    # 1. Briefing without --workspace works in hook mode and falls back to workspace memories even for unregistered repo.
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({"cwd": str(tmp_path)})))
+    rc1 = hooks_cli_main(["briefing", "--db", str(db_file), "--repo", "brand-new-repo", "--hook-mode"])
+    assert rc1 == 0
+    out1 = json.loads(capsys.readouterr().out)
+    assert "never run destructive migrations" in out1["hookSpecificOutput"]["additionalContext"]
+
+    # 2. Capture without --workspace unpacks resolve_workspace dict cleanly and stores pending candidate.
+    wrapped_jsonl = tmp_path / "claude_transcript.jsonl"
+    wrapped_jsonl.write_text(
+        json.dumps({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Root cause: always pin MCP server package versions in ~/.claude.json."}],
+            },
+        }) + "\n",
+        encoding="utf-8",
+    )
+    stop_payload = json.dumps({"hook_event_name": "Stop", "transcript_path": str(wrapped_jsonl), "cwd": str(tmp_path)})
+    monkeypatch.setattr("sys.stdin", io.StringIO(stop_payload))
+    rc2 = hooks_cli_main(["capture", "--db", str(db_file), "--stdin"])
+    assert rc2 == 0
+    out2 = json.loads(capsys.readouterr().out)
+    assert out2["stored_count"] == 1
+    assert out2["review_state"] == "pending"
+
+
+def test_control_char_secret_obfuscation_bom_and_cursor_non_list(tmp_path: Path) -> None:
+    # 1. Control-char obfuscated secret is caught identically in dry_run and live capture.
+    svc = _make_service(tmp_path)
+    try:
+        obfuscated = "ghp_\x07" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5"
+        prose = f"- Security policy: always keep {obfuscated} out of git."
+        dry = stage_passive_capture(svc, prose, workspace="acme", secret_mode="reject", dry_run=True)
+        assert dry["skipped_secrets"] == 1
+        assert dry["would_store_count"] == 0
+    finally:
+        svc.close()
+
+    # 2. Windows UTF-8 BOM settings.json loads cleanly.
+    bom_cfg = tmp_path / "bom_settings.json"
+    bom_cfg.write_bytes(b"\xef\xbb\xbf" + json.dumps({"hooks": {}}).encode("utf-8"))
+    res = install_client_hooks("claude", bom_cfg, python_exe="/usr/bin/python3")
+    assert res["installed_events"] == ["SessionStart", "Stop"]
+
+    # 3. Cursor non-list event entry raises ValueError instead of clobbering dict.
+    bad_cursor = tmp_path / "bad_cursor.json"
+    bad_cursor.write_text(json.dumps({"version": 1, "hooks": {"sessionStart": {"custom": "keep"}}}), encoding="utf-8")
+    with pytest.raises(ValueError, match="must be a list"):
+        install_client_hooks("cursor", bad_cursor, python_exe="/usr/bin/python3")
+
