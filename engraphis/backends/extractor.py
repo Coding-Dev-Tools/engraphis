@@ -862,7 +862,7 @@ def get_extractor(
                         f"require_exact_backends=True prevents fallback to passthrough"
                     ) from None
                 return PassthroughExtractor(fallback_from=kind)
-        if require_exact and created_client and not getattr(llm, "api_key", ""):
+        if require_exact and created_client and not getattr(llm, "has_credentials", bool(getattr(llm, "api_key", ""))):
             close = getattr(llm, "close", None)
             if callable(close):
                 try:
@@ -898,7 +898,7 @@ def get_extractor(
                     f"prevents fallback to passthrough"
                 ) from None
             return PassthroughExtractor(fallback_from=kind)
-    if require_exact and created_client and not getattr(llm, "api_key", ""):
+    if require_exact and created_client and not getattr(llm, "has_credentials", bool(getattr(llm, "api_key", ""))):
         close = getattr(llm, "close", None)
         if callable(close):
             try:

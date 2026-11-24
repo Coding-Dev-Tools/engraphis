@@ -2761,7 +2761,7 @@ def engraphis_decide(
     """
     from engraphis.backends.jev_decision import DecisionQuestion, _probability
     from engraphis.backends.jev_transport import (
-        MODEL, DecisionClientError, select_decision_client,
+        MODEL, DecisionClientError, _active_managed_cloud_session, select_decision_client,
     )
 
     def fallback(reason: str) -> str:
@@ -2797,7 +2797,12 @@ def engraphis_decide(
         return fallback("invalid_request")
     if offline_mode or allow_remote is not True:
         return fallback("offline" if offline_mode else "remote_not_authorized")
-    selected_backend = os.environ.get("ENGRAPHIS_DECISION_BACKEND", "none").strip().lower()
+    raw_decision_env = os.environ.get("ENGRAPHIS_DECISION_BACKEND")
+    selected_backend = (
+        raw_decision_env.strip().lower()
+        if raw_decision_env is not None
+        else ("auto" if _active_managed_cloud_session() else "none")
+    )
     if kind == "custom" and selected_backend in {"managed", "auto"}:
         # Unsupported managed work must not inspect credentials or select a
         # client, even if a saved Cloud session is already configured.

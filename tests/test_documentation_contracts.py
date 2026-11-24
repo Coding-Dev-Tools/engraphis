@@ -381,7 +381,7 @@ def test_consolidation_docs_expose_only_live_public_options() -> None:
     public_copy = " ".join(" ".join(public_documents).split())
     for document in current_documents:
         normalized_document = " ".join(document.split()).lower()
-        for limit in ("500 jev calls per person per day",):
+        for limit in ("250 jev calls per person per day", "100 ai llm calls per person per day"):
             assert limit in normalized_document
         for invariant in (
             "not pooled across a team",

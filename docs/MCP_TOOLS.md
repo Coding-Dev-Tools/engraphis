@@ -244,7 +244,7 @@ its provider key. Every legitimate Pro user and each eligible Team named seat, i
 paid viewers, with an active paid, trial, or test entitlement receives managed Jev at no
 additional customer charge and without a personal provider key.
 
-Each paid individual receives up to **500 Jev calls per person per day**, free. Usage is per person, not pooled across a Team and not monthly. Each evaluated call counts once, including a batched request; calls beyond the daily maximum are not served. Admitted attempts that fail or are interrupted remain counted, and no overage is charged. The account portal reports that member's remaining calls for the current day.
+Each paid individual receives up to **250 Jev calls per person per day**, free, plus up to **100 AI LLM calls per person per day** via OpenRouter's free tier on active paid and trial plans. Usage is per person, not pooled across a Team and not monthly. Each evaluated call counts once, including a batched request; calls beyond the daily maximum are not served. Admitted attempts that fail or are interrupted remain counted, and no overage is charged. The account portal reports that member's remaining calls for the current day.
 
 No latency, accuracy, or cost-saving guarantee is established by configuration or a successful health check.
 
