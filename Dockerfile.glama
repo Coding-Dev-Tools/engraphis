@@ -10,6 +10,7 @@ ENV PYTHONUNBUFFERED=1 \
 COPY pyproject.toml README.md LICENSE NOTICE ./
 COPY engraphis ./engraphis
 COPY scripts ./scripts
+COPY deploy ./deploy
 
 RUN pip install --upgrade pip "setuptools>=83" \
     && pip install ".[mcp]"
