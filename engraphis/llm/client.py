@@ -44,8 +44,12 @@ _PROVIDER_BASE_URLS = {
 }
 
 
+_MANAGED_CLOUD_PLANS = frozenset({"pro", "team"})
+_MANAGED_ACTIVE_STATUSES = frozenset({"active", "trialing"})
+
+
 def managed_cloud_llm_available() -> bool:
-    """Return True when an active paid or trial Pro/Team Cloud session can authenticate managed LLM calls."""
+    """Return True only when an active paid or trial Pro/Team Cloud session is verified."""
     try:
         from engraphis import cloud_session
         if not (
@@ -54,12 +58,16 @@ def managed_cloud_llm_available() -> bool:
         ):
             return False
         saved = cloud_session.saved_entitlement()
-        if isinstance(saved, dict) and saved:
-            if saved.get("cloud_access_active") is False:
-                return False
-            plan = str(saved.get("plan") or "").strip().lower()
-            if plan == "free":
-                return False
+        if not isinstance(saved, dict) or not saved:
+            return False
+        if saved.get("cloud_access_active") is not True:
+            return False
+        plan = str(saved.get("plan") or "").strip().lower()
+        if plan not in _MANAGED_CLOUD_PLANS:
+            return False
+        status = str(saved.get("status") or "").strip().lower()
+        if status and status not in _MANAGED_ACTIVE_STATUSES:
+            return False
         return True
     except Exception:  # noqa: BLE001
         return False
@@ -242,7 +250,7 @@ class LLMClient:
             else (raw_base_url or _PROVIDER_BASE_URLS.get(self.provider, ""))
         )
         self.base_url = validate_llm_base_url(configured_base_url)
-        self.extra_headers = extra_headers or settings.llm_extra_headers
+        self.extra_headers = {} if self.provider == "managed" else (extra_headers or settings.llm_extra_headers)
         self._http = httpx.Client(
             timeout=120,
             follow_redirects=False,  # never leak API keys to redirect targets

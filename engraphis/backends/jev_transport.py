@@ -554,8 +554,12 @@ def create_typesafe_decision_client(*, api_key: Optional[str] = None,
     return TypeSafeDecisionClient(api_key=api_key, base_url=base_url, timeout_s=timeout_s)
 
 
+_MANAGED_JEV_PLANS = frozenset({"pro", "team"})
+_MANAGED_JEV_ACTIVE_STATUSES = frozenset({"active", "trialing"})
+
+
 def _active_managed_cloud_session() -> bool:
-    """Return True when an active paid or trial Pro/Team Cloud session can serve managed Jev."""
+    """Return True only when an active paid or trial Pro/Team Cloud session is positively verified."""
     try:
         from engraphis import cloud_session
         if not (
@@ -564,11 +568,16 @@ def _active_managed_cloud_session() -> bool:
         ):
             return False
         saved = cloud_session.saved_entitlement()
-        if isinstance(saved, dict) and saved:
-            if saved.get("cloud_access_active") is False:
-                return False
-            if str(saved.get("plan") or "").strip().lower() == "free":
-                return False
+        if not isinstance(saved, dict) or not saved:
+            return False
+        if saved.get("cloud_access_active") is not True:
+            return False
+        plan = str(saved.get("plan") or "").strip().lower()
+        if plan not in _MANAGED_JEV_PLANS:
+            return False
+        status = str(saved.get("status") or "").strip().lower()
+        if status and status not in _MANAGED_JEV_ACTIVE_STATUSES:
+            return False
         return True
     except Exception:
         return False

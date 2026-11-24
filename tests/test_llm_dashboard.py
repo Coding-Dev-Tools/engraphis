@@ -364,6 +364,11 @@ def test_managed_llm_client_authenticates_with_rotating_cloud_session(monkeypatc
         lambda: "https://api.engraphis.com",
     )
     monkeypatch.setattr(
+        cloud_session,
+        "saved_entitlement",
+        lambda: {"plan": "pro", "status": "active", "cloud_access_active": True},
+    )
+    monkeypatch.setattr(
         hosted_client,
         "validate_cloud_base_url",
         lambda url: url,
@@ -553,6 +558,11 @@ def test_managed_provider_never_sends_byok_api_key_to_cloud(monkeypatch):
     monkeypatch.setattr(settings, "llm_provider", "managed")
     monkeypatch.setattr(settings, "llm_api_key", "sk-personal-secret-never-send")
     monkeypatch.setattr(settings, "llm_base_url", "https://custom.byok.example/v1")
+    monkeypatch.setattr(
+        settings,
+        "llm_extra_headers",
+        {"X-API-Key": "sk-header-secret", "Authorization": "Bearer sk-override"},
+    )
     monkeypatch.setattr(cloud_session, "configured", lambda *, require_compute=True: True)
     monkeypatch.setattr(
         cloud_session,
@@ -592,6 +602,7 @@ def test_managed_provider_never_sends_byok_api_key_to_cloud(monkeypatch):
     with llm_client.LLMClient() as llm:
         assert llm.provider == "managed"
         assert llm.api_key == ""
+        assert llm.extra_headers == {}
         assert llm.has_credentials is True
         reply = llm.chat([{"role": "user", "content": "ping"}])
 
@@ -638,5 +649,74 @@ def test_auto_extract_env_opt_out_disables_managed_ingest_extraction(
     try:
         ingested = svc.ingest("Respect explicit opt-out on ingest.", workspace="ws_optout")
         assert ingested["extracted"] is False
+    finally:
+        svc.close()
+
+
+@pytest.mark.parametrize(
+    "entitlement",
+    [
+        {},
+        {"plan": "free", "status": "active", "cloud_access_active": True},
+        {"plan": "starter", "status": "active", "cloud_access_active": True},
+        {"plan": "pro", "status": "active", "cloud_access_active": False},
+        {"plan": "pro", "status": "past_due", "cloud_access_active": True},
+        {"plan": "team", "status": "revoked", "cloud_access_active": True},
+    ],
+)
+def test_managed_llm_and_jev_fail_closed_without_positive_paid_entitlement(
+    monkeypatch, entitlement
+):
+    """Auto-activation requires a positively verified active/trialing Pro or Team entitlement."""
+    from engraphis import cloud_session
+    from engraphis.backends.jev_transport import select_decision_client
+    from engraphis.llm import client as llm_client
+
+    monkeypatch.delenv("ENGRAPHIS_DECISION_BACKEND", raising=False)
+    monkeypatch.setattr(cloud_session, "configured", lambda *, require_compute=True: True)
+    monkeypatch.setattr(
+        cloud_session,
+        "credential_bound_control_url",
+        lambda: "https://api.engraphis.com",
+    )
+    monkeypatch.setattr(cloud_session, "saved_entitlement", lambda: entitlement)
+
+    assert llm_client.managed_cloud_llm_available() is False
+    assert select_decision_client() == (None, "local_heuristic")
+
+
+def test_extractor_enabled_is_false_in_strict_exact_mode(monkeypatch, tmp_path):
+    """When require_exact_backends=True disables auto_extractor_factory, _extractor_enabled() reports False."""
+    from engraphis import cloud_session
+    from engraphis.routes import v2_api
+    from engraphis.service import MemoryService
+
+    monkeypatch.delenv("ENGRAPHIS_EXTRACTOR", raising=False)
+    monkeypatch.delenv("ENGRAPHIS_LLM_AUTO_EXTRACT", raising=False)
+    monkeypatch.setattr(settings, "llm_provider", "openai")
+    monkeypatch.setattr(settings, "llm_api_key", "")
+    monkeypatch.setattr(settings, "llm_base_url", "")
+    monkeypatch.setattr(cloud_session, "configured", lambda *, require_compute=True: True)
+    monkeypatch.setattr(
+        cloud_session,
+        "credential_bound_control_url",
+        lambda: "https://api.engraphis.com",
+    )
+    monkeypatch.setattr(
+        cloud_session,
+        "saved_entitlement",
+        lambda: {"plan": "pro", "status": "active", "cloud_access_active": True},
+    )
+
+    svc = MemoryService.create(
+        str(tmp_path / "strict_exact.db"),
+        embed_model="",
+        extractor="none",
+        require_exact_backends=True,
+    )
+    try:
+        monkeypatch.setattr(v2_api, "service", lambda: svc)
+        assert svc.engine._auto_extractor_factory is None
+        assert v2_api._extractor_enabled() is False
     finally:
         svc.close()

@@ -788,10 +788,11 @@ _DISABLED_EXTRACTOR = _DisabledExtractor()
 
 def _extractor_enabled() -> bool:
     from engraphis.backends.extractor import LLMExtractor, StructuredLLMExtractor
-    extractor = service().engine.extractor
+    engine = service().engine
+    extractor = engine.extractor
     if isinstance(extractor, (LLMExtractor, StructuredLLMExtractor)):
         return True
-    if extractor is None:
+    if extractor is None and getattr(engine, "_auto_extractor_factory", None) is not None:
         from engraphis.llm.client import auto_managed_extractor_allowed
         return auto_managed_extractor_allowed()
     return False
