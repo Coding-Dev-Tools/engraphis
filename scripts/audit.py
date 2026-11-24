@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """engraphis-audit - 60-second offline proof of coding-agent memory reliability.
 
-Runs a fast, deterministic, zero-network self-test in an isolated temporary SQLite
-database (never touching ENGRAPHIS_DB_PATH or ~/.engraphis/config.env):
+Runs a fast, deterministic, zero-network self-test in an isolated in-memory SQLite
+database (never touching ENGRAPHIS_DB_PATH, ENGRAPHIS_DB_KEY, or ~/.engraphis/config.env):
 
   1. Bi-temporal supersession: confirms a superseded decision (JWT -> PASETO) is
      replaced in current recall while its historical predecessor stays inspectable.
@@ -23,15 +23,24 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import time
 from pathlib import Path
 from typing import Any, Optional
 
 from engraphis import __version__
+from engraphis.backends.embedder_deterministic import DeterministicEmbedder
+from engraphis.backends.reranker import IdentityReranker
+from engraphis.backends.vector_numpy import NumpyVectorIndex
+from engraphis.core.engine import MemoryEngine
+from engraphis.core.store import Store
 from engraphis.service import MemoryService
 
 AUDIT_URL = "https://engraphis.com/10-minute-test?utm_source=cli&utm_medium=referral&utm_campaign=ten_minute_test&utm_content=engraphis_audit"
+
+_ANSI_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])")
+_CTRL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 AUDIT_FACTS: tuple[dict[str, Any], ...] = (
     {
@@ -88,6 +97,19 @@ DEFAULT_DIAGNOSTIC_PROMPT = (
 )
 
 
+def _sanitize_subject(raw: str) -> str:
+    """Strip terminal control/ANSI escapes and normalize em/en dashes."""
+    cleaned = _ANSI_RE.sub("", raw)
+    cleaned = _CTRL_RE.sub(" ", cleaned)
+    cleaned = cleaned.replace("\u2014", "-").replace("\u2013", "-")
+    return " ".join(cleaned.strip().split())[:140]
+
+
+def _ascii_safe(text: str) -> str:
+    """Ensure terminal output stays printable ASCII across Windows cp1252 and UTF-8."""
+    return text.replace("\u2014", "-").replace("\u2013", "-").encode("ascii", errors="replace").decode("ascii")
+
+
 def _read_recent_git_subject(repo_path: Path) -> Optional[str]:
     """Read the most recent non-merge commit subject from a local git repo (read-only)."""
     target = repo_path.expanduser().resolve()
@@ -95,24 +117,26 @@ def _read_recent_git_subject(repo_path: Path) -> Optional[str]:
         return None
     try:
         proc = subprocess.run(
-            ["git", "-C", str(target), "log", "--no-merges", "-n", "10", "--format=%s"],
+            ["git", "--no-pager", "-C", str(target), "log", "--no-merges", "-n", "10", "--format=%s"],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=3,
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    if proc.returncode != 0:
+    if proc.returncode != 0 or not proc.stdout:
         return None
-    for raw_line in proc.stdout.splitlines():
-        subject = " ".join(raw_line.strip().split())
+    lines = [_sanitize_subject(raw_line) for raw_line in proc.stdout.splitlines()]
+    for subject in lines:
         if len(subject) >= 12 and not subject.lower().startswith(("bump ", "chore(deps")):
-            return subject[:140]
-    for raw_line in proc.stdout.splitlines():
-        subject = " ".join(raw_line.strip().split())
+            return subject
+    for subject in lines:
         if subject:
-            return subject[:140]
+            return subject
     return None
 
 
@@ -131,16 +155,36 @@ def build_diagnostic_prompt(repo_path: Optional[Path] = None) -> tuple[str, Opti
     return prompt, subject
 
 
+def _create_isolated_service() -> MemoryService:
+    """Build a hermetically isolated offline MemoryService without touching host env/config."""
+    store = Store(":memory:", connect=None, sqlite_durability="balanced")
+    try:
+        embedder = DeterministicEmbedder(384)
+        index = NumpyVectorIndex(store, dim=embedder.dim)
+        reranker = IdentityReranker()
+        engine = MemoryEngine(
+            store,
+            embedder,
+            index,
+            reranker,
+            auto_evolve=True,
+            extractor=None,
+            auto_extractor_factory=None,
+            graph_extractor=None,
+            graph_feeder=None,
+            retention_supervisor=None,
+            allow_automatic_critical_retention=False,
+        )
+        return MemoryService(engine)
+    except BaseException:
+        store.close()
+        raise
+
+
 def run_audit(*, repo_path: Optional[Path] = None) -> dict[str, Any]:
     """Execute the 3-check offline memory audit in an isolated in-memory SQLite DB."""
     started = time.perf_counter()
-    service = MemoryService.create(
-        ":memory:",
-        embed_model="",
-        extractor="none",
-        graph_extractor="regex",
-        retention_supervisor="none",
-    )
+    service = _create_isolated_service()
     try:
         for fact in AUDIT_FACTS:
             service.remember(**fact)
@@ -274,11 +318,12 @@ def render_terminal(report: dict[str, Any]) -> str:
             "",
             "Next steps:",
             '  1. Install MCP server: python -m pip install "engraphis[mcp]"',
-            "  2. Initialize + cache: engraphis-init --prefetch",
-            "  3. Full 4-step guide:  " + str(report["test_url"]),
+            "  2. Initialize config:  engraphis-init",
+            "  3. Pre-cache weights:  engraphis-init --prefetch",
+            "  4. Full 4-step guide:  " + str(report["test_url"]),
         ]
     )
-    return "\n".join(lines)
+    return _ascii_safe("\n".join(lines))
 
 
 def render_markdown(report: dict[str, Any]) -> str:
@@ -301,12 +346,12 @@ def render_markdown(report: dict[str, Any]) -> str:
             f"Run it locally: `uvx --from engraphis engraphis-audit` | [10-Minute Agent Memory Test]({report['test_url']})",
         ]
     )
-    return "\n".join(lines)
+    return "\n".join(lines).replace("\u2014", "-")
 
 
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="engraphis-audit",
+        prog="engraphis-audit" if argv is not None else None,
         description="Run a 60-second offline coding-agent memory audit in an isolated SQLite DB.",
     )
     parser.add_argument(
@@ -315,12 +360,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         default=None,
         help="Optional local git repository path (read-only) to tailor the agent diagnostic prompt.",
     )
-    parser.add_argument(
+    fmt = parser.add_mutually_exclusive_group()
+    fmt.add_argument(
         "--json",
         action="store_true",
         help="Output the structured audit report as JSON.",
     )
-    parser.add_argument(
+    fmt.add_argument(
         "--markdown",
         action="store_true",
         help="Output a compact shareable Markdown scorecard.",

@@ -6,6 +6,7 @@ Give Claude Code local, scoped, bi-temporal project memory over stdio MCP (Apach
 
 ```bash
 python -m pip install "engraphis[mcp]"
+engraphis-init
 engraphis-init --prefetch
 ```
 

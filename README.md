@@ -26,6 +26,7 @@ The MCP server and `[all]` extras need Python 3.10 or newer. The NumPy-only core
 
 ```bash
 python -m pip install "engraphis[mcp]"
+engraphis-init
 engraphis-init --prefetch
 claude mcp add engraphis -- engraphis-mcp
 ```
@@ -38,7 +39,7 @@ uvx --from engraphis engraphis-audit
 
 Or install persistently with `uv tool install "engraphis[mcp]"` or `pipx install "engraphis[mcp]"`.
 
-`engraphis-init` writes a local config, generates an API token, and prints ready-to-paste setup for Claude Code, Codex, Cursor, Cline, Zed, and Windsurf. `--prefetch` pre-caches the local embedding model once so MCP clients never time out on first boot. Use the exact command printed for your machine, including the database path.
+`engraphis-init` writes a local config, generates an API token, and prints ready-to-paste setup for Claude Code, Codex, Cursor, Cline, Zed, and Windsurf. Run `engraphis-init --prefetch` once afterwards to pre-cache the local embedding model so MCP clients never time out on first boot. Use the exact command printed by `engraphis-init` for your machine, including the database path.
 
 <details>
 <summary>Copy-paste MCP recipes for Claude Code, Codex, Cursor, Cline, Zed, and Windsurf</summary>

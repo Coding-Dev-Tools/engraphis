@@ -6,6 +6,7 @@ Connect Codex CLI to Engraphis for scoped, bi-temporal decision recall across se
 
 ```bash
 python -m pip install "engraphis[mcp]"
+engraphis-init
 engraphis-init --prefetch
 ```
 
@@ -21,4 +22,4 @@ codex mcp add engraphis -- engraphis-mcp
 
 1. Record one repository constraint with `engraphis_remember`.
 2. Start a fresh Codex session and query that decision with `engraphis_recall_context`.
-3. Inspect stored records and links anytime with `engraphis-dashboard` at `http://127.0.0.1:8700`.
+3. Optional: install `"engraphis[all]"` and run `engraphis-dashboard` to inspect stored records and links at `http://127.0.0.1:8700`, or run `engraphis-audit --repo .`.

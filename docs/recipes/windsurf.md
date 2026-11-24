@@ -6,6 +6,7 @@ Connect Windsurf Cascade to Engraphis for local, bi-temporal repository memory w
 
 ```bash
 python -m pip install "engraphis[mcp]"
+engraphis-init
 engraphis-init --prefetch
 ```
 

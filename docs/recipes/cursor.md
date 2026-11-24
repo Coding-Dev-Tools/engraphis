@@ -6,6 +6,7 @@ Connect Cursor to Engraphis for scoped, bi-temporal repository memory with prove
 
 ```bash
 python -m pip install "engraphis[mcp]"
+engraphis-init
 engraphis-init --prefetch
 ```
 

@@ -6,6 +6,7 @@ Connect Cline to Engraphis over local stdio MCP (9 Smart MCP tools, offline SQLi
 
 ```bash
 python -m pip install "engraphis[mcp]"
+engraphis-init
 engraphis-init --prefetch
 ```
 

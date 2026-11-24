@@ -1,15 +1,40 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
+
+import pytest
 
 from scripts import audit, entry
 
 
-def test_run_audit_passes_offline_and_leaves_env_db_untouched(tmp_path: Path, monkeypatch) -> None:
+def _isolated_git_env() -> dict[str, str]:
+    env = dict(os.environ)
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    return env
+
+
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(
+        ["git", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=", *args],
+        cwd=repo,
+        env=_isolated_git_env(),
+        check=True,
+        capture_output=True,
+    )
+
+
+def test_run_audit_is_hermetically_isolated_from_host_env_and_encryption(
+    tmp_path: Path, monkeypatch
+) -> None:
     sentinel_db = tmp_path / "should_not_exist.db"
     monkeypatch.setenv("ENGRAPHIS_DB_PATH", str(sentinel_db))
+    monkeypatch.setenv("ENGRAPHIS_DB_KEY", "test-key-must-be-ignored")
+    monkeypatch.setenv("ENGRAPHIS_ENV_FILE", str(tmp_path / "nonexistent-config.env"))
+    monkeypatch.setenv("ENGRAPHIS_SQLITE_DURABILITY", "invalid_mode")
 
     report = audit.run_audit()
 
@@ -22,7 +47,7 @@ def test_run_audit_passes_offline_and_leaves_env_db_untouched(tmp_path: Path, mo
     assert not sentinel_db.exists()
 
 
-def test_audit_cli_json_and_markdown_outputs_have_no_emdash(capsys) -> None:
+def test_audit_cli_json_markdown_help_and_mutual_exclusion(capsys) -> None:
     rc_json = entry.main(["audit", "--json"])
     assert rc_json == 0
     payload = json.loads(capsys.readouterr().out)
@@ -41,34 +66,54 @@ def test_audit_cli_json_and_markdown_outputs_have_no_emdash(capsys) -> None:
     text = capsys.readouterr().out
     assert "\u2014" not in text
     assert "[PASS]" in text
+    assert "engraphis-init" in text
+    assert "engraphis-init --prefetch" in text
+
+    with pytest.raises(SystemExit) as help_exit:
+        audit.main(["--help"])
+    assert help_exit.value.code == 0
+    assert "usage:" in capsys.readouterr().out
+
+    with pytest.raises(SystemExit) as conflict_exit:
+        audit.main(["--json", "--markdown"])
+    assert conflict_exit.value.code == 2
 
 
-def test_audit_repo_flag_reads_git_commit_subject_read_only(tmp_path: Path) -> None:
+def test_audit_repo_flag_sanitizes_utf8_ansi_emdash_and_skips_bump_commits(tmp_path: Path) -> None:
     repo = tmp_path / "sample-repo"
     repo.mkdir()
-    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "config", "user.name", "Coding-Dev-Tools"],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        ["git", "config", "user.email", "274649000+Coding-Dev-Tools@users.noreply.github.com"],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-    )
+    _git(repo, "init")
+    _git(repo, "config", "user.name", "Coding-Dev-Tools")
+    _git(repo, "config", "user.email", "274649000+Coding-Dev-Tools@users.noreply.github.com")
+
     (repo / "README.md").write_text("# Sample\n", encoding="utf-8")
-    subprocess.run(["git", "add", "README.md"], cwd=repo, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "feat: migrate auth tokens from JWT to PASETO"],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-    )
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-m", "feat: migrate auth \x1b[31mtokens\x1b[0m \u2014 JWT to PASETO \U0001f60f")
+
+    (repo / "README.md").write_text("# Sample 2\n", encoding="utf-8")
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-m", "bump ruff from 0.15 to 0.16")
 
     report = audit.run_audit(repo_path=repo)
     assert report["passed"] is True
-    assert report["repo_commit_hint"] == "feat: migrate auth tokens from JWT to PASETO"
-    assert "migrate auth tokens from JWT to PASETO" in report["diagnostic_prompt"]
+    hint = report["repo_commit_hint"]
+    assert hint is not None
+    assert "migrate auth tokens - JWT to PASETO" in hint
+    assert "\x1b" not in hint
+    assert "\u2014" not in hint
+
+    md = audit.render_markdown(report)
+    assert "\u2014" not in md
+    terminal = audit.render_terminal(report)
+    terminal.encode("ascii")
+
+
+def test_audit_repo_flag_fallbacks_for_missing_or_non_git_paths(tmp_path: Path) -> None:
+    non_git = tmp_path / "plain-dir"
+    non_git.mkdir()
+    missing = tmp_path / "does-not-exist"
+
+    for path in (non_git, missing):
+        prompt, subject = audit.build_diagnostic_prompt(path)
+        assert subject is None
+        assert prompt == audit.DEFAULT_DIAGNOSTIC_PROMPT

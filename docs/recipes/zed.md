@@ -6,6 +6,7 @@ Connect Zed's Agent Panel to Engraphis via `context_servers` (Apache-2.0 local S
 
 ```bash
 python -m pip install "engraphis[mcp]"
+engraphis-init
 engraphis-init --prefetch
 ```
 
