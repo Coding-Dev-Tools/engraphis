@@ -105,7 +105,7 @@ def get_retention_supervisor(
                 from engraphis.llm.client import LLMClient
                 client = LLMClient()
                 try:
-                    if not client.api_key:
+                    if not getattr(client, "has_credentials", bool(client.api_key)):
                         raise RuntimeError(_missing_key_msg)
                 finally:
                     client.close()

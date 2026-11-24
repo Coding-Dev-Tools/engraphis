@@ -1,6 +1,6 @@
 {
   "schema": "engraphis-commercial/v2",
-  "version": "1.7.13",
+  "version": "1.7.14",
   "control_plane": "https://api.engraphis.com",
   "account_portal": "https://api.engraphis.com/account",
   "billing": {

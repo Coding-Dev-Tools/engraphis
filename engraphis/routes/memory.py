@@ -795,10 +795,12 @@ def list_thoughts(
 def get_config():
     """GET /memory/config — current server configuration (keys redacted)."""
     from engraphis.config import settings
+    from engraphis.llm.client import managed_cloud_llm_available
     return _ok({
         "llm_provider": settings.llm_provider,
         "llm_model": settings.llm_model,
         "llm_api_key_set": bool(settings.llm_api_key),
+        "managed_llm_available": managed_cloud_llm_available(),
         "llm_custom_base_url_set": bool(settings.llm_base_url),
         "embed_model": settings.embed_model,
         "loop_interval": settings.loop_interval,

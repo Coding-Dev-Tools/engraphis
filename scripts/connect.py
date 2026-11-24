@@ -76,13 +76,26 @@ def _print_jev_verification(info: dict) -> None:
         print("  managed jev    unavailable")
     elif "jev_available" in info:
         print("  managed jev    unverified (usage check unavailable)")
+    llm_avail = info.get("llm_available")
+    if llm_avail is True:
+        rem = info.get("llm_remaining_24h")
+        lim = info.get("llm_limit_24h")
+        detail = (
+            "available (%s/%s remaining)" % (rem, lim)
+            if rem is not None and lim is not None
+            else "available"
+        )
+        print("  managed llm    %s" % detail)
+    elif llm_avail is False:
+        print("  managed llm    unavailable")
 
 
 def _apply_verification_fields(target: dict, verification: dict) -> None:
     target["verified"] = bool(verification.get("verified"))
-    if "jev_available" in verification:
-        target["jev_available"] = verification.get("jev_available")
-    for field in ("jev_remaining_24h", "jev_limit_24h"):
+    for key in ("jev_available", "llm_available"):
+        if key in verification:
+            target[key] = verification.get(key)
+    for field in ("jev_remaining_24h", "jev_limit_24h", "llm_remaining_24h", "llm_limit_24h"):
         if verification.get(field) is not None:
             target[field] = verification.get(field)
 
@@ -132,9 +145,9 @@ def main(argv=None) -> int:
     ap.add_argument("--enable-managed-jev", action="store_true",
                     help="write ENGRAPHIS_DECISION_BACKEND=managed into the private trusted config")
     ap.add_argument("--enable-managed-llm", action="store_true",
-                    help="write ENGRAPHIS_LLM_PROVIDER=managed into the private trusted config")
+                    help="write ENGRAPHIS_LLM_PROVIDER=managed and structured auto-extraction into the private trusted config")
     ap.add_argument("--verify", action="store_true",
-                    help="verify the Cloud session and check Jev allowance after connecting")
+                    help="verify the Cloud session and check managed Jev and included AI LLM allowances after connecting")
     ap.add_argument("--control-url", default=None, metavar="URL",
                     help="control plane to connect to (default: the shipped endpoint, "
                          "or ENGRAPHIS_CLOUD_CONTROL_URL)")
@@ -266,6 +279,8 @@ def main(argv=None) -> int:
             persist_project_env({
                 "ENGRAPHIS_LLM_PROVIDER": "managed",
                 "ENGRAPHIS_LLM_MODEL": "nvidia/nemotron-3-ultra-550b-a55b:free",
+                "ENGRAPHIS_EXTRACTOR": "llm_structured",
+                "ENGRAPHIS_LLM_AUTO_EXTRACT": "1",
             })
             summary["managed_llm_configured"] = True
         except (OSError, ValueError) as exc:

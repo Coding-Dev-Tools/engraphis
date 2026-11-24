@@ -992,8 +992,70 @@ def _probe_jev_usage(
     return probed
 
 
+def _probe_llm_usage(
+    validated_control: str, access_token: str, deadline: float,
+) -> dict:
+    """Query `/v1/llm/usage` within the shared verification deadline.
+
+    Degrades gracefully to ``llm_available=None`` on non-200 or network errors so
+    session verification never breaks against older control deployments.
+    """
+    req = urllib.request.Request(
+        validated_control.rstrip("/") + "/v1/llm/usage",
+        headers={
+            "Accept": "application/json",
+            "Authorization": "Bearer " + access_token,
+            "User-Agent": "Engraphis/%s (+https://engraphis.com)" % CURRENT_VERSION,
+        },
+        method="GET",
+    )
+    loopback_only = _is_loopback_host(urlsplit(validated_control).hostname or "")
+    handlers: list[urllib.request.BaseHandler] = [_NoRedirect()]
+    handlers.extend(deadline_handlers(deadline, loopback_only=loopback_only))
+    if loopback_only:
+        handlers.append(urllib.request.ProxyHandler({}))
+    opener = build_pinned_https_opener(*handlers)
+    try:
+        timeout_budget = remaining_time(deadline)
+        with opener.open(req, timeout=timeout_budget) as resp:
+            if getattr(resp, "status", 200) != 200:
+                return {"llm_available": None}
+            raw = read_response(resp, deadline, max_bytes=_MAX_RESPONSE_BYTES)
+    except urllib.error.HTTPError as exc:
+        try:
+            exc.close()
+        except Exception:
+            pass
+        return {"llm_available": None}
+    except (OSError, ValueError, TimeoutError, http.client.HTTPException):
+        return {"llm_available": None}
+
+    if len(raw) > _MAX_RESPONSE_BYTES:
+        return {"llm_available": None}
+    try:
+        payload = json.loads(raw.decode("utf-8"), parse_constant=_reject_nonfinite)
+    except (UnicodeDecodeError, ValueError):
+        return {"llm_available": None}
+    if not isinstance(payload, dict):
+        return {"llm_available": None}
+
+    probed: dict = {}
+    avail = payload.get("available")
+    if isinstance(avail, bool):
+        probed["llm_available"] = avail
+    window = _select_daily_window(payload.get("windows"))
+    if window is not None:
+        rem = _nonneg_int(window.get("remaining_requests"))
+        lim = _nonneg_int(window.get("limit"))
+        if rem is not None:
+            probed["llm_remaining_24h"] = rem
+        if lim is not None:
+            probed["llm_limit_24h"] = lim
+    return probed
+
+
 def verify_connection(*, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> dict:
-    """Verify the saved Cloud session refreshes cleanly and read Jev usage if available.
+    """Verify the saved Cloud session refreshes cleanly and read Jev and AI LLM usage if available.
 
     Never returns or logs bearer tokens. Raises :class:`DeviceConnectError` if no usable
     session exists, the control plane rejects credentials/account billing, or the
@@ -1040,4 +1102,5 @@ def verify_connection(*, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> dict:
     }
     if validated_control and access_token:
         result.update(_probe_jev_usage(validated_control, access_token, deadline))
+        result.update(_probe_llm_usage(validated_control, access_token, deadline))
     return result

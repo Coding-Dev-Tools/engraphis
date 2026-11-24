@@ -54,6 +54,42 @@ def test_managed_custom_is_rejected_before_client_or_credential_lookup(monkeypat
     assert result["advisory_only"] is True
 
 
+def test_auto_managed_custom_rejected_before_client_selection(monkeypatch):
+    """When ENGRAPHIS_DECISION_BACKEND is unset on an active Pro/Team session, kind=custom returns managed_operation_unsupported."""
+    from engraphis import cloud_session
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("unsupported auto-managed custom calls must not select a client or mint tokens")
+
+    monkeypatch.delenv("ENGRAPHIS_DECISION_BACKEND", raising=False)
+    monkeypatch.setattr(cloud_session, "configured", lambda *, require_compute=True: True)
+    monkeypatch.setattr(
+        cloud_session,
+        "credential_bound_control_url",
+        lambda: "https://api.engraphis.com",
+    )
+    monkeypatch.setattr(
+        cloud_session,
+        "saved_entitlement",
+        lambda: {"plan": "pro", "status": "trialing", "cloud_access_active": True},
+    )
+    monkeypatch.setattr(transport, "select_decision_client", forbidden)
+    monkeypatch.setattr(cloud_session, "access_for_workspace", forbidden)
+
+    result = json.loads(
+        server.engraphis_decide(
+            kind="custom",
+            question="Does the fixture support custom prompts?",
+            allow_remote=True,
+            data_classification="public",
+        )
+    )
+    assert result["fallback_reason"] == "managed_operation_unsupported"
+    assert result["is_fallback"] is True
+    assert result["selected"] is None
+    assert result["advisory_only"] is True
+
+
 @pytest.mark.parametrize("dispatch", ["direct", "classic", "smart"])
 @pytest.mark.parametrize("consent", [{}, {"offline_mode": True, "allow_remote": True},
                                      {"allow_remote": True}])

@@ -78,11 +78,12 @@ unless that client has a maintained setup guide and integration test.
 Engraphis exposes its advisory decision engine as a discovered capability rather than a direct
 Smart tool. Call `engraphis_discover_actions(task="advisory decision")`, confirm the returned
 canonical action is `decide`, then run it through `engraphis_execute_action` with its
-`schema_digest`; local heuristics answer by default. Remote Jev also needs
-`ENGRAPHIS_DECISION_BACKEND=byok|managed` and per-call opt-in (`allow_remote=true` plus a
-`public` or `internal` classification), and uses TypeSafe BYOK or an included Pro/Team allowance
-when the hosted service enables it. Decisions are advice: they never authorize a command, change
-memory, or certify completion.
+`schema_digest`; local heuristics answer by default. Connected Pro and Team accounts (paid and
+trial) automatically use included managed Jev (up to 250 calls per person per day) whenever
+`ENGRAPHIS_DECISION_BACKEND` is unset, or you can set `ENGRAPHIS_DECISION_BACKEND=byok|managed`
+explicitly (`none` or `local` opts out). Remote calls always require per-call opt-in
+(`allow_remote=true` plus a `public` or `internal` classification). Decisions are advice: they
+never authorize a command, change memory, or certify completion.
 
 A standalone Jev surface is also available for harnesses that want it:
 [jev-decision](https://github.com/Coding-Dev-Tools/jev-decision) provides `jev`/`jev-mcp` with
@@ -159,9 +160,10 @@ Useful options:
 | `--device-name TEXT` | Override the device name (defaults to the hostname). |
 | `--control-url URL` | Select the control plane for a new connection/preflight; reconnect to change a saved credential family's endpoint. |
 | `--compute-url URL` | Select managed compute for a new connection (also `ENGRAPHIS_CLOUD_COMPUTE_URL`); reconnect to change it later. |
-| `--enable-managed-jev` | Write `ENGRAPHIS_DECISION_BACKEND=managed` into `~/.engraphis/config.env` after connecting. |
-| `--verify` | Verify the connected Cloud session and query managed Jev allowance after connecting. |
-| `--verify-only` | Verify an already-connected Cloud session and read managed Jev allowance without redeeming a new token. |
+| `--enable-managed-jev` | Explicitly write `ENGRAPHIS_DECISION_BACKEND=managed` into `~/.engraphis/config.env` after connecting (Pro/Team paid and trial sessions auto-activate when unset). |
+| `--enable-managed-llm` | Explicitly write `ENGRAPHIS_LLM_PROVIDER=managed`, `ENGRAPHIS_EXTRACTOR=llm_structured`, and `ENGRAPHIS_LLM_AUTO_EXTRACT=1` into `~/.engraphis/config.env` after connecting (Pro/Team paid and trial sessions auto-activate when unset). |
+| `--verify` | Verify the connected Cloud session and query managed Jev (250/day) and included AI LLM (100/day) allowances after connecting. |
+| `--verify-only` | Verify an already-connected Cloud session and read managed Jev and included AI LLM allowances without redeeming a new token. |
 | `--json` | Print a redacted, machine-readable summary. |
 
 The summary accepts only bounded, printable metadata from the documented response shape.

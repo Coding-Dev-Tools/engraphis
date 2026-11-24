@@ -44,16 +44,56 @@ _PROVIDER_BASE_URLS = {
 }
 
 
+_MANAGED_CLOUD_PLANS = frozenset({"pro", "team"})
+_MANAGED_ACTIVE_STATUSES = frozenset({"active", "trialing"})
+
+
 def managed_cloud_llm_available() -> bool:
-    """Return True when a connected Engraphis Cloud session can authenticate managed LLM calls."""
+    """Return True only when an active paid or trial Pro/Team Cloud session is verified."""
     try:
         from engraphis import cloud_session
-        return bool(
+        if not (
             cloud_session.configured(require_compute=False)
             and cloud_session.credential_bound_control_url()
-        )
+        ):
+            return False
+        saved = cloud_session.saved_entitlement()
+        if not isinstance(saved, dict) or not saved:
+            return False
+        if saved.get("cloud_access_active") is not True:
+            return False
+        plan = str(saved.get("plan") or "").strip().lower()
+        if plan not in _MANAGED_CLOUD_PLANS:
+            return False
+        status = str(saved.get("status") or "").strip().lower()
+        if status and status not in _MANAGED_ACTIVE_STATUSES:
+            return False
+        return True
     except Exception:  # noqa: BLE001
         return False
+
+
+def auto_managed_llm_selected() -> bool:
+    """Return True when included managed Cloud LLM is the effective provider without BYOK override."""
+    raw_provider = (settings.llm_provider or "openai").strip().lower()
+    if raw_provider == "managed":
+        return managed_cloud_llm_available()
+    return (
+        not settings.llm_api_key
+        and not settings.llm_base_url
+        and raw_provider in {"", "openai"}
+        and managed_cloud_llm_available()
+    )
+
+
+def auto_managed_extractor_allowed() -> bool:
+    """Return True when automatic managed extraction on ingest is permitted and not opted out."""
+    if "ENGRAPHIS_EXTRACTOR" in os.environ:
+        return False
+    raw_auto = os.environ.get("ENGRAPHIS_LLM_AUTO_EXTRACT")
+    if raw_auto is not None and raw_auto.strip().lower() in {"0", "false", "no", "off"}:
+        return False
+    return auto_managed_llm_selected()
 
 
 def validate_llm_base_url(value: str) -> str:
@@ -203,17 +243,24 @@ class LLMClient:
             resolved_model = DEFAULT_MANAGED_MODEL
         self.model = resolved_model
         self.effort = effort or settings.llm_effort
-        self.api_key = raw_key
+        self.api_key = "" if self.provider == "managed" else raw_key
         configured_base_url = (
-            raw_base_url or _PROVIDER_BASE_URLS.get(self.provider, "")
+            _PROVIDER_BASE_URLS.get("managed", "")
+            if self.provider == "managed"
+            else (raw_base_url or _PROVIDER_BASE_URLS.get(self.provider, ""))
         )
         self.base_url = validate_llm_base_url(configured_base_url)
-        self.extra_headers = extra_headers or settings.llm_extra_headers
+        self.extra_headers = {} if self.provider == "managed" else (extra_headers or settings.llm_extra_headers)
         self._http = httpx.Client(
             timeout=120,
             follow_redirects=False,  # never leak API keys to redirect targets
             limits=httpx.Limits(max_connections=20, max_keepalive_connections=5),
         )
+
+    @property
+    def has_credentials(self) -> bool:
+        """Return True when a static API key or active managed Cloud session is available."""
+        return bool(self.api_key) or (self.provider == "managed" and managed_cloud_llm_available())
 
     def close(self) -> None:
         self._http.close()
@@ -267,7 +314,7 @@ class LLMClient:
         timeout: Optional[float] = None,
     ) -> str:
         """Send a chat request and return the assistant's text reply."""
-        if self.provider == "managed" and not self.api_key:
+        if self.provider == "managed":
             managed_key, managed_url = self._resolve_managed_auth(timeout=timeout)
             return self._chat_openai_compat(
                 messages,

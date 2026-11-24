@@ -1666,7 +1666,12 @@ def test_cli_enable_managed_jev_and_verify_writes_private_config(monkeypatch, tm
             if request.full_url.endswith("/v1/jev/usage"):
                 return _Response(json.dumps({
                     "available": True,
-                    "windows": [{"seconds": 86400, "limit": 500, "remaining_decisions": 499}],
+                    "windows": [{"seconds": 86400, "limit": 250, "remaining_decisions": 249}],
+                }).encode("utf-8"))
+            if request.full_url.endswith("/v1/llm/usage"):
+                return _Response(json.dumps({
+                    "available": True,
+                    "windows": [{"seconds": 86400, "limit": 100, "remaining_requests": 99}],
                 }).encode("utf-8"))
             return _Response(json.dumps(REGISTRATION).encode("utf-8"))
 
@@ -1678,16 +1683,25 @@ def test_cli_enable_managed_jev_and_verify_writes_private_config(monkeypatch, tm
         "--control-url", CONTROL_URL,
         "--compute-url", COMPUTE_URL,
         "--enable-managed-jev",
+        "--enable-managed-llm",
         "--verify",
         "--json",
     ])
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["managed_jev_configured"] is True
+    assert payload["managed_llm_configured"] is True
     assert payload["verified"] is True
     assert payload["jev_available"] is True
-    assert payload["jev_remaining_24h"] == 499
-    assert "ENGRAPHIS_DECISION_BACKEND=managed" in env_file.read_text(encoding="utf-8")
+    assert payload["jev_remaining_24h"] == 249
+    assert payload["jev_limit_24h"] == 250
+    assert payload["llm_available"] is True
+    assert payload["llm_remaining_24h"] == 99
+    assert payload["llm_limit_24h"] == 100
+    env_text = env_file.read_text(encoding="utf-8")
+    assert "ENGRAPHIS_DECISION_BACKEND=managed" in env_text
+    assert "ENGRAPHIS_LLM_PROVIDER=managed" in env_text
+    assert "ENGRAPHIS_EXTRACTOR=llm_structured" in env_text
     assert TOKEN not in json.dumps(payload)
 
 
