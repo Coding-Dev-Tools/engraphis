@@ -2,6 +2,7 @@
 
 [![PyPI version](https://img.shields.io/pypi/v/engraphis.svg)](https://pypi.org/project/engraphis/)
 [![PyPI downloads](https://img.shields.io/pypi/dm/engraphis.svg)](https://pypi.org/project/engraphis/)
+[![Coding-Dev-Tools/engraphis MCP server](https://glama.ai/mcp/servers/Coding-Dev-Tools/engraphis/badges/score.svg)](https://glama.ai/mcp/servers/Coding-Dev-Tools/engraphis)
 [![GitHub stars](https://img.shields.io/github/stars/Coding-Dev-Tools/engraphis.svg?style=social)](https://github.com/Coding-Dev-Tools/engraphis/stargazers)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](https://github.com/Coding-Dev-Tools/engraphis/blob/522def372c45a26d46bc7a05829964ae0240f3a9/LICENSE)
 
