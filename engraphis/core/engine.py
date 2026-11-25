@@ -1725,7 +1725,10 @@ class MemoryEngine:
             target_id = _required_resolution_target(decision)
             predecessor = self.store.get_memory(target_id)
             if predecessor is not None and predecessor.valid_from is not None:
-                rec.valid_from = next_wall_ts_after(predecessor.valid_from)
+                ts = next_wall_ts_after(predecessor.valid_from)
+                rec.valid_from = ts
+                rec.ingested_at = ts
+                rec.last_access = ts
         try:
             # A replacement and the predecessor interval it closes are one authoritative
             # state transition. Portable vector/FTS mirrors participate in the same
@@ -1736,7 +1739,8 @@ class MemoryEngine:
                     raise RuntimeError("invalidating write is missing its resolution")
                 target_id = _required_resolution_target(decision)
                 resolution_reason = decision.reason
-                predecessor = self.store.get_memory(target_id)
+                if predecessor is None:
+                    predecessor = self.store.get_memory(target_id)
                 # Both branches below close the predecessor at ``rec.valid_from``.
                 # Landing on the predecessor's own start instant would persist an
                 # empty validity interval, which the Store's persistence boundary
@@ -3326,7 +3330,9 @@ class MemoryEngine:
                 new_content, exact_value, normalized_exact_type,
                 source_span=exact_value_span,
             )
-        effective_at = now_ts()
+        effective_at = (
+            next_wall_ts_after(old.valid_from) if old.valid_from is not None else now_ts()
+        )
         final_title = old.title if title is None else title
         final_type = old.mtype if mtype is None else MemoryType(mtype)
         final_importance = old.importance if importance is None else importance
@@ -3646,7 +3652,7 @@ class MemoryEngine:
             raise ValueError("untrusted memory cannot be promoted: record is quarantined")
         if not provenance_is_approved(old.provenance):
             raise ValueError("untrusted memory cannot be promoted; create a fresh approved local memory")
-        now = now_ts()
+        now = next_wall_ts_after(old.valid_from) if old.valid_from is not None else now_ts()
 
         target_scope = Scope(target_scope)
         if target_scope == Scope.USER:
@@ -3839,7 +3845,6 @@ class MemoryEngine:
         ids: list[str] = []
         sources: list[MemoryRecord] = []
         seen: set[str] = set()
-        effective_at = now_ts()
         for raw_id in source_ids:
             memory_id = str(raw_id)
             if memory_id in seen:
@@ -3854,6 +3859,12 @@ class MemoryEngine:
             raise ValueError("merge needs at least two distinct source memories")
         if len({record.workspace_id for record in sources}) != 1:
             raise ValueError("cannot merge memories from different workspaces")
+        source_starts = [
+            record.valid_from for record in sources if record.valid_from is not None
+        ]
+        effective_at = (
+            next_wall_ts_after(max(source_starts)) if source_starts else now_ts()
+        )
 
         primary = sources[0]
         repo_id = (

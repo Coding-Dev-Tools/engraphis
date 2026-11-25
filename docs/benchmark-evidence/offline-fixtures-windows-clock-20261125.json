@@ -103,7 +103,7 @@
   ],
   "schema": "engraphis-public-offline-fixtures/v1",
   "suite": {
-    "digest": "31aa5c388539be6079beacd5691824bee318c5d1953b67ee69ddb069455b34c8",
+    "digest": "02547c1c44df63e9279c64be48e6acee9aa948b793e016b05d1ceba673570e01",
     "digest_method": "sha256(canonical compact JSON mapping each sorted path to its file SHA-256)",
     "files": {
       "engraphis/__init__.py": "1f983036aba6e76faf62d3a3b070f4a61471ea4338a383b48c9ae4784d7b07a0",
@@ -145,7 +145,7 @@
       "engraphis/core/context.py": "8cc15746e4de88bce7d34db8c11dfaa545f17305788e2167a286179171717fb9",
       "engraphis/core/diagnostics.py": "5ba449bdf5087d8ccb5808379596e695c8f405da497372e99f2bac509f96e8e4",
       "engraphis/core/documents.py": "9b4a5dce557bbd25217c61b51d5838a8b7c693c77f7a700d010ed607cb39b150",
-      "engraphis/core/engine.py": "1091c7eb00ff1eb8283795453afeb023afe2c42c4d67819a1c8ba1bed09085dd",
+      "engraphis/core/engine.py": "026f6675663c414d8684e4e667fe005036bcf71bfa0215d91c375efd0b43acf6",
       "engraphis/core/evidence.py": "97912b52a3d22de909218f83c09c92572ed695d7b3c2117e5330271c6d84a7bd",
       "engraphis/core/fsutil.py": "6db770fa8bd3e1a57dfa70eb8e8bc46d48c2dc53ead1b0b43eeecf085ef58cfc",
       "engraphis/core/graph_layers.py": "64d74ab01c77119f6343ba6f1d6a84f9653f1a5d34d47ce7966f3ac31b29d2ea",
@@ -171,7 +171,7 @@
       "engraphis/core/secrets.py": "78ab40870d6c5918c189307028b107df239d08cd918abe08c85fa15b58fa1663",
       "engraphis/core/source_paths.py": "2e71de7f19f260b335137602f07a28a80efa5d65e3d2497215356ba5f172b47e",
       "engraphis/core/spec_crawl.py": "23359f9e28a2a68a3abe59f1e705b8be1f6c72880d708123bc85391029e769e5",
-      "engraphis/core/store.py": "5beb52a507b5c7f9fc1c0acbd6bd79996fb357234c29c659f6d7dfbc2a211860",
+      "engraphis/core/store.py": "6febd01bff98fa5ecce56801aedc40f7dad43e1a37842afc6bb891b128cbd2ef",
       "engraphis/core/sync.py": "0d28dd697eb8e8acdb7fed3e346fcba8fce23cbf4606eb11de68cb1fb001fcf2",
       "engraphis/core/textutil.py": "acd65031729fa5d91d09527b8eb52518b83cfce77a55e6b7ae2d94686e35c1a6",
       "engraphis/core/user_model.py": "3147ec8ee7cfd855783f639874b63f331cdc822bd8bd9298cfb326dd18666026",

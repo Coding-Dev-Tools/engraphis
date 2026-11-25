@@ -35,7 +35,7 @@ from eval.performance import run as run_performance
 
 ROOT = Path(__file__).resolve().parents[1]
 PUBLIC_OFFLINE_ARTIFACT = "offline-fixtures-windows-clock-20261125.json"
-PUBLIC_OFFLINE_SHA = "d55930c42ddc673034f82360e8958ad5cb446480036632fcd943007ea1918886"
+PUBLIC_OFFLINE_SHA = "4afb6c45c92d66305d41e8d165249e2b5a00df92198b0f14071f7866c8964675"
 
 
 @pytest.fixture(scope="module")

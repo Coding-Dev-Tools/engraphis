@@ -262,15 +262,18 @@ def next_wall_ts_after(floor_ts: float, *, max_wait_s: float = 0.05) -> float:
     """Return a real wall-clock ``now_ts()`` strictly greater than ``floor_ts``.
 
     On coarse wall clocks (such as Windows ``GetSystemTimeAsFileTime()`` with
-    ~15.6 ms ticks), an auto-timestamped superseding write can observe the exact
-    same ``time.time()`` as its predecessor's ``valid_from`` and fail closed
-    with an empty validity interval. Waiting for the next OS tick guarantees
+    ~15.6 ms ticks), an auto-timestamped superseding write or closure can
+    observe the exact same ``time.time()`` as its predecessor's ``valid_from``
+    and either fail closed with an empty validity interval or persist an
+    illegal ``[T, T)`` closure. Waiting for the next OS tick guarantees
     ``floor_ts < ts <= time.time()`` without creating future timestamps that
-    skew concurrent ``time.time()`` readers.
+    skew concurrent ``time.time()`` readers (0 ms on Unix/macOS nanosecond
+    clocks; bounded to at most ``max_wait_s`` on Windows even when invoked
+    inside an active write transaction).
 
-    When ``now_ts`` or ``time.time`` is mocked in tests, or when ``floor_ts``
-    lies beyond ``max_wait_s`` in the future, returns the current ``now_ts()``
-    immediately so fail-closed guards remain intact.
+    When ``engraphis.core.store.now_ts`` or ``time.time`` is mocked in tests,
+    or when ``floor_ts`` lies beyond ``max_wait_s`` in the future, returns the
+    current ``now_ts()`` immediately so fail-closed guards remain intact.
     """
     current = now_ts()
     if current > floor_ts:
@@ -282,6 +285,8 @@ def next_wall_ts_after(floor_ts: float, *, max_wait_s: float = 0.05) -> float:
     deadline = time.monotonic() + max_wait_s
     while current <= floor_ts and time.monotonic() < deadline:
         time.sleep(0.001)
+        current = now_ts()
+    if current <= floor_ts:
         current = now_ts()
     return current
 
@@ -6200,14 +6205,25 @@ class Store:
                        actor: str = "system", reason: str = "contradicted",
                        commit: bool = True) -> None:
         """Close one fact and its graph evidence as one atomic governance write."""
+        auto_at = at is None
         recorded_at = _finite_timestamp(now_ts(), "recorded_at")
-        at = _finite_timestamp(recorded_at if at is None else at, "at")
+        at = _finite_timestamp(recorded_at if auto_at else at, "at")
         with self._write_operation("close_validity", commit=commit):
             row = self.conn.execute(
                 "SELECT workspace_id, valid_from FROM memories WHERE id=?", (memory_id,)
             ).fetchone()
             if row is not None:
                 self._authorize_workspace_id(row["workspace_id"])
+            if (
+                auto_at
+                and row is not None
+                and row["valid_from"] is not None
+                and at == row["valid_from"]
+            ):
+                advanced = _finite_timestamp(next_wall_ts_after(row["valid_from"]), "at")
+                at = advanced
+                if advanced is not None and (recorded_at is None or advanced > recorded_at):
+                    recorded_at = advanced
             if (
                 row is not None
                 and row["valid_from"] is not None

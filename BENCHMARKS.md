@@ -96,12 +96,12 @@ interpretation and do not count as additional benchmark-quality gains.
 Every exact public aggregate retained below comes from the checked-in, public-safe
 [`offline-fixtures-windows-clock-20261125.json`](docs/benchmark-evidence/offline-fixtures-windows-clock-20261125.json) artifact. Its
 SHA-256 is
-`d55930c42ddc673034f82360e8958ad5cb446480036632fcd943007ea1918886`, also recorded in the
+`4afb6c45c92d66305d41e8d165249e2b5a00df92198b0f14071f7866c8964675`, also recorded in the
 adjacent `.sha256` file. The artifact contains no raw questions, answers, prompts, customer data,
 or per-record content fingerprints.
 
 The fixture-suite digest is
-`31aa5c388539be6079beacd5691824bee318c5d1953b67ee69ddb069455b34c8`. The artifact defines
+`02547c1c44df63e9279c64be48e6acee9aa948b793e016b05d1ceba673570e01`. The artifact defines
 the digest algorithm and records the SHA-256 of every suite and dataset file. Each evidence ID
 also binds its exact command through `sha256(UTF-8 exact command)`:
 
