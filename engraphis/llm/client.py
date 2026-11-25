@@ -238,7 +238,7 @@ class LLMClient:
         extra_headers: Optional[dict] = None,
         effort: Optional[str] = None,
     ) -> None:
-        raw_provider = (provider or settings.llm_provider or "openai").lower()
+        raw_provider = (provider or settings.llm_provider or "openai").strip().lower()
         raw_key = api_key if api_key is not None else settings.llm_api_key
         raw_base_url = base_url if base_url is not None else settings.llm_base_url
         if (
