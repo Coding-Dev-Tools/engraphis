@@ -219,22 +219,45 @@ def build_session_briefing(
     """
     from engraphis.service import ValidationError
 
-    bounded_chars = max(120, int(max_chars))
+    bounded_chars = int(max_chars)
+    if bounded_chars <= 0:
+        return {
+            "workspace": workspace,
+            "repo": repo,
+            "count": 0,
+            "cited_ids": [],
+            "context": "",
+            "hook_output": format_briefing_hook_output("", client=client),
+        }
     cleaned_query = str(query or "").strip()
     memories: list[dict[str, Any]] = []
 
     try:
         if cleaned_query:
-            res = service.recall(
-                cleaned_query,
-                workspace=workspace,
-                repo=repo,
-                k=k,
-                reinforce=False,
-                record_receipt=False,
-                include_untrusted=False,
-            )
-            memories = list(res.get("memories") or [])
+            try:
+                res = service.recall(
+                    cleaned_query,
+                    workspace=workspace,
+                    repo=repo,
+                    k=k,
+                    reinforce=False,
+                    record_receipt=False,
+                    include_untrusted=False,
+                )
+                memories = list(res.get("memories") or [])
+            except ValidationError:
+                memories = []
+            if not memories and repo:
+                res = service.recall(
+                    cleaned_query,
+                    workspace=workspace,
+                    repo=None,
+                    k=k,
+                    reinforce=False,
+                    record_receipt=False,
+                    include_untrusted=False,
+                )
+                memories = list(res.get("memories") or [])
         else:
             try:
                 res = service.recall_proactive(workspace=workspace, repo=repo, k=k)
@@ -261,7 +284,8 @@ def build_session_briefing(
         eligible.append(item)
 
     scope_label = f"{workspace}/{repo}" if repo else workspace
-    header = f"Engraphis durable memory ({scope_label}):\n"
+    full_header = f"Engraphis durable memory ({scope_label}):\n"
+    header = full_header if len(full_header) + 12 <= bounded_chars else ""
     lines: list[str] = []
     used = len(header)
     cited_ids: list[str] = []
@@ -274,10 +298,10 @@ def build_session_briefing(
         tag = f"[{mem_id}] " if mem_id else ""
         entry = f"- {tag}{body}"
         remaining = bounded_chars - used - (1 if lines else 0)
-        if remaining < 40:
+        if remaining < 8:
             break
         if len(entry) > remaining:
-            entry = entry[: max(1, remaining - 3)].rstrip() + "..."
+            entry = (entry[: max(1, remaining - 3)].rstrip() + "...") if remaining > 3 else entry[:remaining]
         lines.append(entry)
         used += len(entry) + (1 if len(lines) > 1 else 0)
         if mem_id:
@@ -285,7 +309,11 @@ def build_session_briefing(
 
     context_text = (header + "\n".join(lines)) if lines else ""
     if len(context_text) > bounded_chars:
-        context_text = context_text[: bounded_chars - 3].rstrip() + "..."
+        context_text = (
+            (context_text[: max(1, bounded_chars - 3)].rstrip() + "...")
+            if bounded_chars > 3
+            else context_text[:bounded_chars]
+        )
 
     return {
         "workspace": workspace,

@@ -81,7 +81,12 @@ def _resolve_workspace_name(
     return str(resolved or "default")
 
 
-def _open_service(db_override: Optional[str], *, hook_mode: bool = False) -> tuple[Any, str]:
+def _open_service(
+    db_override: Optional[str],
+    *,
+    hook_mode: bool = False,
+    needs_embeddings: bool = True,
+) -> tuple[Any, str]:
     from engraphis.config import settings
     from engraphis.service import MemoryService
 
@@ -91,14 +96,17 @@ def _open_service(db_override: Optional[str], *, hook_mode: bool = False) -> tup
         if db_path != ":memory:" and not db_path.startswith("file:")
         else db_path
     )
+    raw_embed_dim = getattr(settings, "embed_dim", None)
+    embed_dim = int(raw_embed_dim) if raw_embed_dim else 384
+    embed_model = (settings.embed_model or None) if needs_embeddings else None
     service = MemoryService.create(
         resolved_db,
-        embed_model=settings.embed_model or None,
-        embed_dim=getattr(settings, "embed_dim", 384),
+        embed_model=embed_model,
+        embed_dim=embed_dim,
         embed_revision=getattr(settings, "embed_revision", None),
         require_immutable_models=getattr(settings, "require_immutable_models", False),
         vector_backend=getattr(settings, "vector_backend", "auto"),
-        rerank_model=getattr(settings, "rerank_model", None),
+        rerank_model=getattr(settings, "rerank_model", None) if needs_embeddings else None,
         rerank_revision=getattr(settings, "rerank_revision", None),
         allowed_workspaces=getattr(settings, "allowed_workspaces", None),
     )
@@ -152,7 +160,11 @@ def _cmd_briefing(args: argparse.Namespace) -> int:
         print(json.dumps({"workspace": args.workspace or "default", "repo": repo, "count": 0, "context": ""}))
         return 0
 
-    service, _ = _open_service(args.db, hook_mode=args.hook_mode)
+    service, _ = _open_service(
+        args.db,
+        hook_mode=args.hook_mode,
+        needs_embeddings=bool((args.query or "").strip()),
+    )
     try:
         workspace = _resolve_workspace_name(service, args.workspace, repo=repo, for_write=False)
         result = build_session_briefing(
@@ -198,7 +210,7 @@ def _cmd_capture(args: argparse.Namespace) -> int:
     if args.hook_mode and _is_missing_local_db(db_path):
         return 0
 
-    service, _ = _open_service(args.db, hook_mode=args.hook_mode)
+    service, _ = _open_service(args.db, hook_mode=args.hook_mode, needs_embeddings=True)
     try:
         workspace = _resolve_workspace_name(service, args.workspace, repo=repo, for_write=True)
         result = stage_passive_capture(

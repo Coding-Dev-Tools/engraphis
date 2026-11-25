@@ -354,3 +354,70 @@ def test_hook_command_resists_cwd_shadowing_and_refuses_symlinks(tmp_path: Path)
         install_client_hooks("claude", link_cfg, python_exe=sys.executable)
 
 
+
+
+def test_briefing_respects_small_max_chars_and_query_repo_fallback(tmp_path):
+    from engraphis.hooks import build_session_briefing
+    from engraphis.service import MemoryService
+
+    svc = MemoryService.create(str(tmp_path / "small_cap.db"), embed_model=None)
+    try:
+        svc.remember(
+            "Decision: always use PASETO tokens for checkout authentication.",
+            workspace="acme",
+            scope="workspace",
+        )
+        small = build_session_briefing(svc, workspace="acme", max_chars=50)
+        assert small["count"] >= 1
+        assert 0 < len(small["context"]) <= 50
+
+        zero = build_session_briefing(svc, workspace="acme", max_chars=0)
+        assert zero["count"] == 0
+        assert zero["context"] == ""
+
+        # Non-empty query with unregistered repo must fall back to workspace memories.
+        fb = build_session_briefing(
+            svc,
+            workspace="acme",
+            repo="unregistered-repo",
+            query="PASETO checkout tokens",
+            max_chars=400,
+        )
+        assert fb["count"] >= 1
+        assert "PASETO" in fb["context"]
+    finally:
+        svc.close()
+
+
+def test_hooks_cli_queryless_briefing_skips_embed_model_and_handles_none_embed_dim(
+    tmp_path, monkeypatch, capsys
+):
+    from engraphis import hooks_cli
+    from engraphis.config import settings
+    from engraphis.service import MemoryService
+
+    db_file = tmp_path / "cli_fast.db"
+    svc = MemoryService.create(str(db_file), embed_model=None)
+    try:
+        svc.remember("Convention: run ruff before pushing.", workspace="acme", scope="workspace")
+    finally:
+        svc.close()
+
+    seen_calls: list[dict] = []
+    real_create = MemoryService.create
+
+    def spy_create(*args, **kwargs):
+        seen_calls.append({"embed_model": kwargs.get("embed_model"), "embed_dim": kwargs.get("embed_dim")})
+        return real_create(*args, **kwargs)
+
+    monkeypatch.setattr(settings, "embed_model", "BAAI/bge-small-en-v1.5")
+    monkeypatch.setattr(settings, "embed_dim", None)
+    monkeypatch.setattr(MemoryService, "create", spy_create)
+
+    rc = hooks_cli.main(["briefing", "--db", str(db_file), "--workspace", "acme", "--json"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "run ruff" in out
+    assert len(seen_calls) == 1
+    assert seen_calls[0]["embed_model"] is None
+    assert seen_calls[0]["embed_dim"] == 384
