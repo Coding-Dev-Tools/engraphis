@@ -186,6 +186,24 @@ def _status(args: argparse.Namespace) -> int:
             conn.close()
     remote = args.remote
     relay = args.relay or settings.relay_url
+    team_entries: list[dict] = []
+    try:
+        ro_conn = _open_read_only(args.db)
+    except (OSError, ValueError, sqlite3.Error):
+        ro_conn = None
+    if ro_conn is not None:
+        try:
+            from engraphis.team_delta import read_team_delta_status_entries
+
+            team_entries = read_team_delta_status_entries(ro_conn, args.workspace, repo=args.repo)
+        finally:
+            ro_conn.close()
+    for entry in team_entries:
+        found = True
+        lines.append(
+            "team_delta: origin=%s cursor=%s tombstone_since=%d"
+            % (entry["origin"], entry["cursor"] or "<start>", entry["tombstone_since"])
+        )
     if remote:
         lines.append("remote: %s" % remote)
     if relay:
@@ -208,6 +226,14 @@ def main(argv=None) -> int:
                     metavar="URL",
                     help="Managed cloud relay root (e.g. https://relay.engraphis.com). "
                          "Bare --relay uses ENGRAPHIS_RELAY_URL. Mutually exclusive with --remote.")
+    ap.add_argument("--team", "--team-url", dest="team", nargs="?", const="",
+                    metavar="URL",
+                    help="Hosted Team API root for incremental delta sync. "
+                         "Bare --team uses ENGRAPHIS_TEAM_URL. Mutually exclusive with --remote and --relay.")
+    ap.add_argument("--propose", action="store_true",
+                    help="With --team, also push eligible local candidates to the Team review queue.")
+    ap.add_argument("--propose-source", default="passive-hook",
+                    help="Source filter for --team --propose (default: passive-hook; use 'all' for any eligible source).")
     # Credentials and the long-lived workspace E2EE key must not appear in argv,
     # process listings, shell history, terminal scrollback, or exception reprs. Relay
     # credentials come from owner-only state/cloud session or the origin-bound
@@ -224,10 +250,10 @@ def main(argv=None) -> int:
     if any(
         item == flag or item.startswith(flag + "=")
         for item in raw_argv
-        for flag in ("--relay-token", "--relay-e2ee-key")
+        for flag in ("--relay-token", "--relay-e2ee-key", "--team-token")
     ):
         print(
-            "error: relay secrets must be provided through owner-only state or "
+            "error: relay and team secrets must be provided through owner-only state or "
             "the documented environment channels",
             file=sys.stderr,
         )
@@ -239,17 +265,89 @@ def main(argv=None) -> int:
 
     # Exactly one transport must be selected.
     use_relay = args.relay is not None
-    if bool(args.remote) == use_relay:
-        print("error: choose exactly one of --remote <folder> or --relay [<url>]",
+    use_team = args.team is not None
+    selected_transports = int(bool(args.remote)) + int(use_relay) + int(use_team)
+    if selected_transports != 1:
+        print("error: choose exactly one of --remote <folder>, --relay [<url>], or --team [<url>]",
               file=sys.stderr)
         return 2
-
+    if args.propose and not use_team:
+        print("error: --propose is only valid with --team", file=sys.stderr)
+        return 2
 
     service = _service(args.db)
     try:
+        if use_team:
+            return _sync_team(args, service)
         return _sync(args, service.engine, use_relay=use_relay)
     finally:
         service.close()
+
+
+def _sync_team(args: argparse.Namespace, service: MemoryService) -> int:
+    from engraphis.backends.sync_relay import sync_read_only
+    from engraphis.team_delta import (
+        TeamDeltaError,
+        pull_team_delta,
+        push_team_proposals,
+        resolve_team_url,
+        validate_team_origin_binding,
+    )
+
+    try:
+        team_url = resolve_team_url(args.team)
+    except (TeamDeltaError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    team_bearer = os.environ.get("ENGRAPHIS_TEAM_TOKEN", "").strip()
+    if not team_bearer:
+        print(
+            "error: --team requires ENGRAPHIS_TEAM_TOKEN and ENGRAPHIS_TEAM_TOKEN_ORIGIN",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        validate_team_origin_binding(team_url, os.environ.get("ENGRAPHIS_TEAM_TOKEN_ORIGIN"))
+    except (TeamDeltaError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    read_only = bool(args.read_only or sync_read_only())
+    if args.propose and read_only:
+        print(
+            "error: --propose cannot run while --read-only or device read-only sync policy is active",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        pull_report = pull_team_delta(
+            service,
+            workspace=args.workspace,
+            team_url=team_url,
+            bearer=team_bearer,
+            repo=args.repo,
+            dry_run=args.dry_run,
+        )
+        propose_report = None
+        if args.propose:
+            propose_report = push_team_proposals(
+                service,
+                workspace=args.workspace,
+                team_url=team_url,
+                bearer=team_bearer,
+                repo=args.repo,
+                source_filter=args.propose_source,
+                dry_run=args.dry_run,
+            )
+    except (TeamDeltaError, ValueError) as exc:
+        print(f"error: team delta sync failed: {exc}", file=sys.stderr)
+        return 2
+
+    combined = {"pull": pull_report, **({"propose": propose_report} if propose_report else {})}
+    print(json.dumps(combined, indent=2))
+    return 0
 
 
 def _sync(args: argparse.Namespace, engine: MemoryEngine, *,
