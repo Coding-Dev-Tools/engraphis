@@ -4395,6 +4395,59 @@ def hosted_trial_status(claim_id: str):
     raise HTTPException(status_code=501, detail=_hosted_license_detail())
 
 
+class _CloudConnectReq(BaseModel):
+    token: str = Field(..., min_length=1, max_length=512)
+    label: Optional[str] = Field(None, max_length=100)
+    workspace: Optional[str] = Field(None, max_length=100)
+    control_url: Optional[str] = Field(None, max_length=512)
+
+
+@router.post("/cloud/connect")
+async def cloud_connect(req: _CloudConnectReq):
+    """Exchange a connect token from Engraphis Cloud to activate Pro/Team trial or subscription.
+
+    Enables web dashboard pairing without requiring the customer to run terminal commands.
+    """
+    from engraphis import device_connect
+
+    try:
+        summary = await run_in_threadpool(
+            device_connect.connect,
+            req.token,
+            installation_label=req.label or None,
+            workspace_id=req.workspace or None,
+            control_url=req.control_url or None,
+        )
+    except device_connect.DeviceConnectError as exc:
+        raise HTTPException(
+            status_code=exc.status,
+            detail={"error": str(exc), "status": exc.status},
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"error": f"Failed to connect device: {exc}"},
+        ) from exc
+
+    _AUTHORITATIVE_DENIAL_PENDING.clear()
+    with _ENTITLEMENT_REFRESH_LOCK:
+        global _authoritative_denial_at
+        _authoritative_denial_at = 0.0
+
+    cache_path = _entitlement_cache_path()
+    if cache_path is not None and cache_path.exists():
+        try:
+            cache_path.unlink()
+        except OSError:
+            pass
+
+    return {
+        "ok": True,
+        "summary": summary,
+        "license": get_license(),
+    }
+
+
 @router.post("/ops/backup")
 def run_customer_backup():
     """Commercial backup orchestration is hosted and no longer shipped here."""
