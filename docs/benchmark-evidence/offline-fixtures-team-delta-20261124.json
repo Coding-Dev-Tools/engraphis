@@ -103,7 +103,7 @@
   ],
   "schema": "engraphis-public-offline-fixtures/v1",
   "suite": {
-    "digest": "d1e90d1410e59936a591f42667e596b3a47967925c37270ccec8fa9ae338e9e5",
+    "digest": "1941b0f5aedbb00724a054d5a24a79f3b403568d407c877f5088050655af217d",
     "digest_method": "sha256(canonical compact JSON mapping each sorted path to its file SHA-256)",
     "files": {
       "engraphis/__init__.py": "1f983036aba6e76faf62d3a3b070f4a61471ea4338a383b48c9ae4784d7b07a0",
@@ -226,7 +226,7 @@
       "engraphis/stores/ledger.py": "df5cbb30d977decc0a9c3a2365c9c115cfbb5fe951bae48446436661c80e5d30",
       "engraphis/stores/vaults.py": "2c986129b9d1e7aab33e18a3b9a278eb5ad2236895587f69b5816a5d96796bc3",
       "engraphis/stores/vectors.py": "45a1baca381fc647548cc89424eb36d5853f7562c275b191b35b99339a190b7d",
-      "engraphis/team_delta.py": "33e9ad40099f44c82103b8673fd61c9d808125759f6ced43cdf7f15836862736",
+      "engraphis/team_delta.py": "bffb8b9efb1b49c21d850fffbcf8a370ea67cef4d7fee4cacc89cf02dbba1c02",
       "engraphis/update_check.py": "ffbf5ef682fb15177915073ebc0b5eab4dee9092bbf0f58d36a8a54c6605ccf4",
       "eval/__init__.py": "639f0c6d9d6aac8ff6dc605a34a0a301058905cc53bff4eaed5912247f0e7c56",
       "eval/ablation.py": "16f159dee75d2f96cc42f230c2403fa19ea0bda7091c4823660da553463a194a",

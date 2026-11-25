@@ -309,6 +309,7 @@ def pull_team_delta(
     blocked_items = 0
     tombstones_retired = 0
     tombstones_purged = 0
+    tombstone_errors = 0
     pages_fetched = 0
     has_more = False
     erased_any = False
@@ -444,12 +445,19 @@ def pull_team_delta(
 
         # 2. Apply permanent tombstones after items so same-page revocations never resurrect.
         #    erase/unapprove inspect existing_all so previously-retired rows are also purged.
+        #    Never advance tombstone_since past a tombstone whose local enforcement failed.
+        tombstone_failed = False
+        applied_seq = tombstone_since
         for raw_tomb in tombstones:
             if not isinstance(raw_tomb, dict):
                 continue
             target_team_id = str(raw_tomb.get("memory_id") or "").strip()
             kind = str(raw_tomb.get("kind") or "").strip()
+            raw_seq = raw_tomb.get("sequence")
+            tomb_seq = int(raw_seq) if isinstance(raw_seq, int) and raw_seq > 0 else 0
             if not target_team_id or kind not in {"retire", "unapprove", "erase"}:
+                if not tombstone_failed and tomb_seq > applied_seq:
+                    applied_seq = tomb_seq
                 continue
             matches = (
                 existing.get(target_team_id, [])
@@ -457,6 +465,8 @@ def pull_team_delta(
                 else existing_all.get(target_team_id, [])
             )
             if not matches:
+                if not tombstone_failed and tomb_seq > applied_seq:
+                    applied_seq = tomb_seq
                 continue
             if dry_run:
                 if kind == "retire":
@@ -466,9 +476,13 @@ def pull_team_delta(
                     tombstones_purged += len(matches)
                     existing.pop(target_team_id, None)
                     existing_all.pop(target_team_id, None)
+                if tomb_seq > applied_seq:
+                    applied_seq = tomb_seq
                 continue
 
             if kind == "retire":
+                entry_failed = False
+                remaining_entries: list[dict[str, Any]] = []
                 for entry in matches:
                     try:
                         service.retire(
@@ -481,18 +495,39 @@ def pull_team_delta(
                         entry["active"] = False
                         tombstones_retired += 1
                     except Exception:
-                        pass
-                existing.pop(target_team_id, None)
+                        tombstone_errors += 1
+                        entry_failed = True
+                        remaining_entries.append(entry)
+                if entry_failed:
+                    existing[target_team_id] = remaining_entries
+                    tombstone_failed = True
+                else:
+                    existing.pop(target_team_id, None)
+                    if not tombstone_failed and tomb_seq > applied_seq:
+                        applied_seq = tomb_seq
             else:
+                entry_failed = False
+                remaining_all: list[dict[str, Any]] = []
                 for entry in matches:
                     if _purge_local_cache_entry(service, entry["local_id"]):
                         tombstones_purged += 1
                         erased_any = True
-                existing.pop(target_team_id, None)
-                existing_all.pop(target_team_id, None)
+                    elif service.store.get_memory(entry["local_id"]) is not None:
+                        tombstone_errors += 1
+                        entry_failed = True
+                        remaining_all.append(entry)
+                if entry_failed:
+                    existing_all[target_team_id] = remaining_all
+                    existing[target_team_id] = [e for e in remaining_all if e.get("active")]
+                    tombstone_failed = True
+                else:
+                    existing.pop(target_team_id, None)
+                    existing_all.pop(target_team_id, None)
+                    if not tombstone_failed and tomb_seq > applied_seq:
+                        applied_seq = tomb_seq
 
         cursor = next_cursor
-        tombstone_since = next_seq
+        tombstone_since = next_seq if not tombstone_failed else applied_seq
 
         if not dry_run:
             _save_json_state(
@@ -533,6 +568,7 @@ def pull_team_delta(
         "blocked_items": blocked_items,
         "tombstones_retired": tombstones_retired,
         "tombstones_purged": tombstones_purged,
+        "tombstone_errors": tombstone_errors,
         "cursor": cursor,
         "tombstone_since": tombstone_since,
     }
@@ -709,6 +745,7 @@ def push_team_proposals(
     headers = {"Authorization": f"Bearer {auth_value}"}
 
     proposed_count = 0
+    failed_proposals = 0
     batches_sent = 0
     if not dry_run:
         for batch in batches:
@@ -716,11 +753,30 @@ def push_team_proposals(
                 "confirmed_shared_hosting": True,
                 "memories": [item for _, _, item in batch],
             }
-            post_fn(endpoint, body, headers, timeout)
+            resp = post_fn(endpoint, body, headers, timeout)
             batches_sent += 1
-            for local_id, digest, _ in batch:
-                tracked[local_id] = digest
-                proposed_count += 1
+            results = resp.get("results") if isinstance(resp, dict) else None
+            if isinstance(results, list) and len(results) == len(batch):
+                for (local_id, digest, _), item_res in zip(batch, results):
+                    is_failed = isinstance(item_res, dict) and (
+                        bool(item_res.get("error"))
+                        or item_res.get("ok") is False
+                        or str(item_res.get("status") or "").lower()
+                        in {"error", "failed", "rejected"}
+                    )
+                    if is_failed:
+                        failed_proposals += 1
+                    else:
+                        tracked[local_id] = digest
+                        proposed_count += 1
+            elif isinstance(resp, dict) and (
+                resp.get("ok") is False or int(resp.get("failed") or 0) > 0
+            ):
+                failed_proposals += len(batch)
+            else:
+                for local_id, digest, _ in batch:
+                    tracked[local_id] = digest
+                    proposed_count += 1
             if len(tracked) > MAX_TRACKED_PROPOSALS:
                 excess = len(tracked) - MAX_TRACKED_PROPOSALS
                 for old_key in list(tracked.keys())[:excess]:
@@ -737,6 +793,7 @@ def push_team_proposals(
         "source_filter": source_filter,
         "dry_run": dry_run,
         "proposed_count": proposed_count,
+        "failed_proposals": failed_proposals,
         "batches_sent": batches_sent,
         "skipped_already_proposed": skipped_already_proposed,
         "blocked_count": blocked_count,

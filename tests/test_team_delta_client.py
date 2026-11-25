@@ -454,3 +454,127 @@ def test_origin_binding_ssrf_and_sync_cli_guards(tmp_path: Path, monkeypatch: py
     assert rc_st == 0
     st_out = capsys.readouterr().out
     assert "team_delta: origin=http://127.0.0.1:8788 cursor=cur_cli_1 tombstone_since=2" in st_out
+
+
+def test_tombstone_retire_failure_preserves_watermark_for_retry(tmp_path, monkeypatch):
+    from engraphis.service import MemoryService
+    from engraphis.team_delta import pull_team_delta
+
+    svc = MemoryService.create(str(tmp_path / "tomb_retry.db"), embed_model=None)
+    try:
+        # First pull adds an approved item at seq 1.
+        pull_team_delta(
+            svc,
+            workspace="acme",
+            team_url="http://127.0.0.1:8788",
+            bearer="tok_test",
+            transport=lambda u, p, h, t: {
+                "workspace": "acme",
+                "items": [
+                    {
+                        "id": "mem_t1",
+                        "content": "Decision: keep watermark safe on failure.",
+                        "title": "Watermark",
+                        "mtype": "semantic",
+                        "review_state": "approved",
+                        "prompt_eligible": True,
+                        "ingested_at": 10.0,
+                    }
+                ],
+                "tombstones": [],
+                "next_cursor": "cur_1",
+                "next_tombstone_sequence": 1,
+                "has_more": False,
+            },
+        )
+
+        # Simulate transient local retire failure on tombstone seq 5.
+        real_retire = svc.retire
+
+        def failing_retire(*args, **kwargs):
+            raise RuntimeError("transient sqlite busy")
+
+        monkeypatch.setattr(svc, "retire", failing_retire)
+        res_fail = pull_team_delta(
+            svc,
+            workspace="acme",
+            team_url="http://127.0.0.1:8788",
+            bearer="tok_test",
+            transport=lambda u, p, h, t: {
+                "workspace": "acme",
+                "items": [],
+                "tombstones": [{"memory_id": "mem_t1", "kind": "retire", "sequence": 5}],
+                "next_cursor": "cur_1",
+                "next_tombstone_sequence": 5,
+                "has_more": False,
+            },
+        )
+        assert res_fail["tombstone_errors"] == 1
+        assert res_fail["tombstone_since"] == 1  # Must NOT advance past failed seq 5!
+
+        # Retry after transient failure resolves -> tombstone applies and watermark advances.
+        monkeypatch.setattr(svc, "retire", real_retire)
+        res_ok = pull_team_delta(
+            svc,
+            workspace="acme",
+            team_url="http://127.0.0.1:8788",
+            bearer="tok_test",
+            transport=lambda u, p, h, t: {
+                "workspace": "acme",
+                "items": [],
+                "tombstones": [{"memory_id": "mem_t1", "kind": "retire", "sequence": 5}],
+                "next_cursor": "cur_1",
+                "next_tombstone_sequence": 5,
+                "has_more": False,
+            },
+        )
+        assert res_ok["tombstone_errors"] == 0
+        assert res_ok["tombstones_retired"] == 1
+        assert res_ok["tombstone_since"] == 5
+    finally:
+        svc.close()
+
+
+def test_propose_does_not_track_per_item_failed_results(tmp_path):
+    from engraphis.service import MemoryService
+    from engraphis.team_delta import push_team_proposals
+
+    svc = MemoryService.create(str(tmp_path / "prop_partial.db"), embed_model=None)
+    try:
+        svc.remember("First durable engineering decision.", workspace="acme", scope="workspace")
+        svc.remember("Second durable engineering decision.", workspace="acme", scope="workspace")
+
+        # First push: server returns HTTP 200 with item 0 ok, item 1 failed.
+        calls: list[list[dict]] = []
+
+        def partial_transport(url, body, headers, timeout):
+            calls.append(body["memories"])
+            if len(calls) == 1:
+                return {"results": [{"id": "m1", "ok": True}, {"error": "validation failed", "ok": False}]}
+            return {"results": [{"id": "m2", "ok": True}]}
+
+        r1 = push_team_proposals(
+            svc,
+            workspace="acme",
+            team_url="http://127.0.0.1:8788",
+            bearer="tok_test",
+            source_filter="all",
+            transport=partial_transport,
+        )
+        assert r1["proposed_count"] == 1
+        assert r1["failed_proposals"] == 1
+
+        # Second push retries ONLY the previously failed item.
+        r2 = push_team_proposals(
+            svc,
+            workspace="acme",
+            team_url="http://127.0.0.1:8788",
+            bearer="tok_test",
+            source_filter="all",
+            transport=partial_transport,
+        )
+        assert r2["proposed_count"] == 1
+        assert r2["failed_proposals"] == 0
+        assert len(calls[1]) == 1
+    finally:
+        svc.close()
