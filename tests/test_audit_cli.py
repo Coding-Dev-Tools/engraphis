@@ -117,3 +117,43 @@ def test_audit_repo_flag_fallbacks_for_missing_or_non_git_paths(tmp_path: Path) 
         prompt, subject = audit.build_diagnostic_prompt(path)
         assert subject is None
         assert prompt == audit.DEFAULT_DIAGNOSTIC_PROMPT
+
+
+def test_audit_check1_does_not_false_pass_on_migration_rationale_only(monkeypatch) -> None:
+    orig_create = audit._create_isolated_service
+
+    def patched_service():
+        svc = orig_create()
+        orig_why = svc.why
+
+        def fake_why(*args, **kwargs):
+            res = orig_why(*args, **kwargs)
+            # Keep only the migration rationale memory (not the active auth.token_format decision).
+            res["answer"] = [
+                item
+                for item in res.get("answer", [])
+                if "November auth migration" in str(item.get("content") or "")
+            ]
+            return res
+
+        svc.why = fake_why  # type: ignore[method-assign]
+        return svc
+
+    monkeypatch.setattr(audit, "_create_isolated_service", patched_service)
+    report = audit.run_audit()
+    assert report["checks"][0]["passed"] is False
+
+
+def test_audit_prompt_json_quotes_embedded_quotes_in_commit_subject(tmp_path: Path) -> None:
+    repo = tmp_path / "quoted-repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.name", "Coding-Dev-Tools")
+    _git(repo, "config", "user.email", "274649000+Coding-Dev-Tools@users.noreply.github.com")
+    (repo / "a.txt").write_text("hi\n", encoding="utf-8")
+    _git(repo, "add", "a.txt")
+    _git(repo, "commit", "-m", 'fix: escape "quoted" subject safely')
+
+    prompt, subject = audit.build_diagnostic_prompt(repo)
+    assert subject == 'fix: escape "quoted" subject safely'
+    assert json.dumps(subject) in prompt

@@ -147,9 +147,10 @@ def build_diagnostic_prompt(repo_path: Optional[Path] = None) -> tuple[str, Opti
     subject = _read_recent_git_subject(repo_path)
     if not subject:
         return DEFAULT_DIAGNOSTIC_PROMPT, None
+    quoted_subject = json.dumps(subject)
     prompt = (
-        f'Without guessing from surrounding code style, explain WHY this repository made '
-        f'the architectural decision behind "{subject}" and cite the exact decision record '
+        f"Without guessing from surrounding code style, explain WHY this repository made "
+        f"the architectural decision behind {quoted_subject} and cite the exact decision record "
         f"or commit where it was agreed, or state explicitly that you have no verified source."
     )
     return prompt, subject
@@ -196,11 +197,19 @@ def run_audit(*, repo_path: Optional[Path] = None) -> dict[str, Any]:
             repo="checkout",
             k=5,
         )
-        active_texts = [str(item.get("content") or "") for item in why_res.get("answer", [])]
+        answer_items = why_res.get("answer", [])
+        active_texts = [str(item.get("content") or "") for item in answer_items]
         superseded_texts = [
             str(item.get("content") or "") for item in why_res.get("supersedes", [])
         ]
-        has_paseto = any("PASETO" in text for text in active_texts)
+        has_paseto = any(
+            str(item.get("content") or "").strip() == "Checkout API uses PASETO access tokens."
+            or (
+                item.get("subject_key") == "auth.token_format"
+                and "PASETO" in str(item.get("content") or "")
+            )
+            for item in answer_items
+        )
         has_jwt_superseded = any("JWT" in text for text in superseded_texts)
         no_live_jwt_only = not any(
             text.strip() == "Checkout API uses JWT access tokens." for text in active_texts
