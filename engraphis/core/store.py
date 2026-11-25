@@ -248,8 +248,42 @@ def _audit_entry_hash(prev_hash: str, ts: float, actor: str, action: str,
 
 
 
+_REAL_TIME_TIME = time.time
+
+
 def now_ts() -> float:
     return time.time()
+
+
+_DEFAULT_NOW_TS = now_ts
+
+
+def next_wall_ts_after(floor_ts: float, *, max_wait_s: float = 0.05) -> float:
+    """Return a real wall-clock ``now_ts()`` strictly greater than ``floor_ts``.
+
+    On coarse wall clocks (such as Windows ``GetSystemTimeAsFileTime()`` with
+    ~15.6 ms ticks), an auto-timestamped superseding write can observe the exact
+    same ``time.time()`` as its predecessor's ``valid_from`` and fail closed
+    with an empty validity interval. Waiting for the next OS tick guarantees
+    ``floor_ts < ts <= time.time()`` without creating future timestamps that
+    skew concurrent ``time.time()`` readers.
+
+    When ``now_ts`` or ``time.time`` is mocked in tests, or when ``floor_ts``
+    lies beyond ``max_wait_s`` in the future, returns the current ``now_ts()``
+    immediately so fail-closed guards remain intact.
+    """
+    current = now_ts()
+    if current > floor_ts:
+        return current
+    if now_ts is not _DEFAULT_NOW_TS or time.time is not _REAL_TIME_TIME:
+        return current
+    if floor_ts - current > max_wait_s:
+        return current
+    deadline = time.monotonic() + max_wait_s
+    while current <= floor_ts and time.monotonic() < deadline:
+        time.sleep(0.001)
+        current = now_ts()
+    return current
 
 
 def _content_free_source_error(value: Any) -> str:

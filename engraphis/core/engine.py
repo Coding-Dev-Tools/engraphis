@@ -83,6 +83,7 @@ from engraphis.core.store import (
     Store,
     _is_memory_database_path,
     memory_matches_filter,
+    next_wall_ts_after,
     now_ts,
 )
 from engraphis.core.textutil import estimate_tokens, jaccard, tokenize
@@ -1715,6 +1716,16 @@ class MemoryEngine:
         )
         invalidating = decision is not None and decision.op == ResolutionOp.INVALIDATE
         predecessor: Optional[MemoryRecord] = None
+        if (
+            invalidating
+            and not poisoning.quarantined
+            and valid_from is None
+            and decision is not None
+        ):
+            target_id = _required_resolution_target(decision)
+            predecessor = self.store.get_memory(target_id)
+            if predecessor is not None and predecessor.valid_from is not None:
+                rec.valid_from = next_wall_ts_after(predecessor.valid_from)
         try:
             # A replacement and the predecessor interval it closes are one authoritative
             # state transition. Portable vector/FTS mirrors participate in the same
