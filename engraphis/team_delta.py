@@ -182,17 +182,24 @@ def _validate_workspace_name(workspace: str) -> str:
     return cleaned
 
 
-def _existing_team_memories(service: Any, workspace_id: str) -> dict[str, list[dict[str, Any]]]:
-    """Index active local memories carrying ``metadata.team_memory_id``."""
+def _existing_team_memories(
+    service: Any,
+    workspace_id: str,
+    *,
+    include_retired: bool = False,
+) -> dict[str, list[dict[str, Any]]]:
+    """Index local memories carrying ``metadata.team_memory_id``."""
     from engraphis.core.store import _loads
 
-    rows = service.store.conn.execute(
-        "SELECT m.id, m.metadata, r.name AS repo_name "
+    sql = (
+        "SELECT m.id, m.metadata, m.valid_to, m.expired_at, r.name AS repo_name "
         "FROM memories m "
         "LEFT JOIN repos r ON r.id = m.repo_id "
-        "WHERE m.workspace_id = ? AND m.valid_to IS NULL AND m.expired_at IS NULL",
-        (workspace_id,),
-    ).fetchall()
+        "WHERE m.workspace_id = ?"
+    )
+    if not include_retired:
+        sql += " AND m.valid_to IS NULL AND m.expired_at IS NULL"
+    rows = service.store.conn.execute(sql, (workspace_id,)).fetchall()
     by_team_id: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
         meta = _loads(row["metadata"], {})
@@ -205,6 +212,7 @@ def _existing_team_memories(service: Any, workspace_id: str) -> dict[str, list[d
                     "local_id": str(row["id"]),
                     "repo": row["repo_name"],
                     "content_hash": str(meta.get("team_content_hash") or ""),
+                    "active": row["valid_to"] is None and row["expired_at"] is None,
                 }
             )
     return by_team_id
@@ -212,6 +220,17 @@ def _existing_team_memories(service: Any, workspace_id: str) -> dict[str, list[d
 
 def _purge_local_cache_entry(service: Any, local_id: str) -> bool:
     """Hard-purge a revoked/erased Team cache entry without exporting peer tombstones."""
+    target_ids: list[str] = [local_id]
+    target_fn = getattr(service.store, "secure_erase_target_ids", None)
+    if callable(target_fn):
+        try:
+            raw_targets = target_fn(local_id)
+            if isinstance(raw_targets, (list, tuple, set)):
+                resolved = [str(tid) for tid in raw_targets]
+                if resolved:
+                    target_ids = resolved
+        except Exception:
+            pass
     try:
         service.store.secure_erase_memory(
             local_id,
@@ -222,14 +241,14 @@ def _purge_local_cache_entry(service: Any, local_id: str) -> bool:
         return False
     index = getattr(service.engine, "index", None)
     if index is not None:
-        for method_name in ("delete", "remove"):
-            fn = getattr(index, method_name, None)
-            if callable(fn):
-                try:
-                    fn(local_id)
-                except Exception:
-                    pass
-                break
+        delete_fn = getattr(index, "delete", None)
+        if callable(delete_fn):
+            delete_fn(target_ids)
+        else:
+            remove_fn = getattr(index, "remove", None)
+            if callable(remove_fn):
+                for tid in target_ids:
+                    remove_fn(tid)
     return True
 
 
@@ -259,7 +278,9 @@ def pull_team_delta(
         raise TeamDeltaError("max_pages must be between 1 and 200")
 
     ws_id = service._lookup_workspace(ws_name)
-    if ws_id is None and not dry_run:
+    if ws_id is not None:
+        _check_workspace_shareable(service, ws_name)
+    elif not dry_run:
         ws_id = service.store.get_or_create_workspace(ws_name)
 
     state_key = cursor_state_key(ws_name, repo, origin)
@@ -272,7 +293,16 @@ def pull_team_delta(
     endpoint = f"{base_url}/v1/team/workspaces/{quote(ws_name, safe='')}/delta"
     headers = {"Authorization": f"Bearer {auth_value}"}
 
-    existing = _existing_team_memories(service, ws_id) if ws_id is not None else {}
+    existing_all = (
+        _existing_team_memories(service, ws_id, include_retired=True)
+        if ws_id is not None
+        else {}
+    )
+    existing: dict[str, list[dict[str, Any]]] = {
+        tid: [entry for entry in entries if entry.get("active")]
+        for tid, entries in existing_all.items()
+        if any(entry.get("active") for entry in entries)
+    }
     added = 0
     updated = 0
     unchanged = 0
@@ -282,6 +312,8 @@ def pull_team_delta(
     pages_fetched = 0
     has_more = False
     erased_any = False
+
+    from engraphis.service import ValidationError
 
     for _ in range(max_pages):
         req_payload: dict[str, Any] = {
@@ -309,20 +341,27 @@ def pull_team_delta(
         for raw_item in items:
             if not isinstance(raw_item, dict):
                 continue
+            # Fail closed unless the server explicitly attested reviewer approval and eligibility.
+            if raw_item.get("review_state") != "approved" or raw_item.get("prompt_eligible") is not True:
+                blocked_items += 1
+                continue
             team_id = str(raw_item.get("id") or "").strip()
-            content = str(raw_item.get("content") or "").strip()
-            title = str(raw_item.get("title") or "").strip()
+            content = _CONTROL_RE.sub("", str(raw_item.get("content") or "")).strip()
+            title = _CONTROL_RE.sub("", str(raw_item.get("title") or "")).strip()
             mtype = str(raw_item.get("mtype") or "semantic").strip()
             if mtype not in _ALLOWED_MTYPES:
                 mtype = "semantic"
-            item_repo = str(raw_item.get("repo") or "").strip() or repo
+            item_repo = _CONTROL_RE.sub("", str(raw_item.get("repo") or "")).strip() or repo
             if not team_id or not content:
+                blocked_items += 1
                 continue
 
             # Defense-in-depth client-side secret and poisoning screening.
-            check_fields = [("content", _CONTROL_RE.sub("", content))]
+            check_fields = [("content", content)]
             if title:
-                check_fields.append(("title", _CONTROL_RE.sub("", title)))
+                check_fields.append(("title", title))
+            if item_repo:
+                check_fields.append(("repo", item_repo))
             try:
                 reject_secrets(check_fields)
             except SecretDetectedError:
@@ -344,7 +383,9 @@ def pull_team_delta(
                     updated += 1
                 else:
                     added += 1
-                existing[team_id] = [{"local_id": f"dry_{team_id}", "repo": item_repo, "content_hash": digest}]
+                dry_entry = {"local_id": f"dry_{team_id}", "repo": item_repo, "content_hash": digest, "active": True}
+                existing[team_id] = [dry_entry]
+                existing_all.setdefault(team_id, []).append(dry_entry)
                 continue
 
             # Retire superseded local copies of this team_memory_id before writing revision.
@@ -358,39 +399,51 @@ def pull_team_delta(
                         actor="team-delta-sync",
                         reason="Superseded by updated Team memory revision",
                     )
+                    prior["active"] = False
                 except Exception:
                     pass
 
-            if item_repo and ws_id is not None:
-                service.store.get_or_create_repo(ws_id, item_repo)
-            stored = service.remember(
-                content,
-                title=title,
-                mtype=mtype,
-                workspace=ws_name,
-                repo=item_repo,
-                source="agent",
-                resolve_conflicts=False,
-                metadata={
-                    "capture_mode": "team_delta_sync",
-                    "team_memory_id": team_id,
-                    "team_origin": origin,
-                    "team_source": raw_item.get("source"),
-                    "team_review_state": raw_item.get("review_state"),
-                    "team_ingested_at": raw_item.get("ingested_at"),
-                    "team_content_hash": digest,
-                },
-            )
+            try:
+                if item_repo and ws_id is not None:
+                    service.store.get_or_create_repo(ws_id, item_repo)
+                stored = service.remember(
+                    content,
+                    title=title,
+                    mtype=mtype,
+                    workspace=ws_name,
+                    repo=item_repo,
+                    source="agent",
+                    resolve_conflicts=False,
+                    metadata={
+                        "capture_mode": "team_delta_sync",
+                        "team_memory_id": team_id,
+                        "team_origin": origin,
+                        "team_source": raw_item.get("source"),
+                        "team_review_state": raw_item.get("review_state"),
+                        "team_ingested_at": raw_item.get("ingested_at"),
+                        "team_content_hash": digest,
+                    },
+                )
+            except (SecretDetectedError, ValidationError):
+                blocked_items += 1
+                continue
+
             new_local_id = str(stored.get("id") or "")
-            existing[team_id] = [
-                {"local_id": new_local_id, "repo": item_repo, "content_hash": digest}
-            ]
+            new_entry = {
+                "local_id": new_local_id,
+                "repo": item_repo,
+                "content_hash": digest,
+                "active": True,
+            }
+            existing[team_id] = [new_entry]
+            existing_all.setdefault(team_id, []).append(new_entry)
             if is_update:
                 updated += 1
             else:
                 added += 1
 
         # 2. Apply permanent tombstones after items so same-page revocations never resurrect.
+        #    erase/unapprove inspect existing_all so previously-retired rows are also purged.
         for raw_tomb in tombstones:
             if not isinstance(raw_tomb, dict):
                 continue
@@ -398,19 +451,25 @@ def pull_team_delta(
             kind = str(raw_tomb.get("kind") or "").strip()
             if not target_team_id or kind not in {"retire", "unapprove", "erase"}:
                 continue
-            matches = existing.get(target_team_id, [])
+            matches = (
+                existing.get(target_team_id, [])
+                if kind == "retire"
+                else existing_all.get(target_team_id, [])
+            )
             if not matches:
                 continue
             if dry_run:
                 if kind == "retire":
                     tombstones_retired += len(matches)
+                    existing.pop(target_team_id, None)
                 else:
                     tombstones_purged += len(matches)
-                existing.pop(target_team_id, None)
+                    existing.pop(target_team_id, None)
+                    existing_all.pop(target_team_id, None)
                 continue
 
-            for entry in matches:
-                if kind == "retire":
+            if kind == "retire":
+                for entry in matches:
                     try:
                         service.retire(
                             entry["local_id"],
@@ -419,14 +478,18 @@ def pull_team_delta(
                             actor="team-delta-sync",
                             reason="Team memory retired",
                         )
+                        entry["active"] = False
                         tombstones_retired += 1
                     except Exception:
                         pass
-                else:
+                existing.pop(target_team_id, None)
+            else:
+                for entry in matches:
                     if _purge_local_cache_entry(service, entry["local_id"]):
                         tombstones_purged += 1
                         erased_any = True
-            existing.pop(target_team_id, None)
+                existing.pop(target_team_id, None)
+                existing_all.pop(target_team_id, None)
 
         cursor = next_cursor
         tombstone_since = next_seq

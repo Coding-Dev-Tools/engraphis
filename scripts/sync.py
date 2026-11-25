@@ -182,28 +182,18 @@ def _status(args: argparse.Namespace) -> int:
                     lines.append("memories: %d" % memories)
                 if tombstones is not None:
                     lines.append("tombstones: %d" % tombstones)
+            from engraphis.team_delta import read_team_delta_status_entries
+
+            for entry in read_team_delta_status_entries(conn, args.workspace, repo=args.repo):
+                found = True
+                lines.append(
+                    "team_delta: origin=%s cursor=%s tombstone_since=%d"
+                    % (entry["origin"], entry["cursor"] or "<start>", entry["tombstone_since"])
+                )
         finally:
             conn.close()
     remote = args.remote
     relay = args.relay or settings.relay_url
-    team_entries: list[dict] = []
-    try:
-        ro_conn = _open_read_only(args.db)
-    except (OSError, ValueError, sqlite3.Error):
-        ro_conn = None
-    if ro_conn is not None:
-        try:
-            from engraphis.team_delta import read_team_delta_status_entries
-
-            team_entries = read_team_delta_status_entries(ro_conn, args.workspace, repo=args.repo)
-        finally:
-            ro_conn.close()
-    for entry in team_entries:
-        found = True
-        lines.append(
-            "team_delta: origin=%s cursor=%s tombstone_since=%d"
-            % (entry["origin"], entry["cursor"] or "<start>", entry["tombstone_since"])
-        )
     if remote:
         lines.append("remote: %s" % remote)
     if relay:
