@@ -720,3 +720,78 @@ def test_extractor_enabled_is_false_in_strict_exact_mode(monkeypatch, tmp_path):
         assert v2_api._extractor_enabled() is False
     finally:
         svc.close()
+
+
+@pytest.mark.parametrize(
+    "stale_entitlement",
+    [
+        {},
+        {"plan": "pro", "status": "expired", "cloud_access_active": False},
+        {"plan": "pro", "status": "past_due", "cloud_access_active": True},
+    ],
+)
+def test_explicit_managed_provider_recovers_from_stale_or_empty_entitlement_cache(
+    monkeypatch, stale_entitlement
+):
+    """Explicit provider=managed must allow live Cloud token refresh on stale/empty cache while auto-activation stays fail-closed."""
+    from engraphis import cloud_session
+    from engraphis.llm import client as llm_client
+    from engraphis.routes import v2_api
+
+    monkeypatch.setattr(settings, "llm_provider", "managed")
+    monkeypatch.setattr(settings, "llm_api_key", "")
+    monkeypatch.setattr(settings, "llm_base_url", "")
+    monkeypatch.setattr(cloud_session, "configured", lambda *, require_compute=True: True)
+    monkeypatch.setattr(
+        cloud_session,
+        "credential_bound_control_url",
+        lambda: "https://api.engraphis.com",
+    )
+    monkeypatch.setattr(cloud_session, "saved_entitlement", lambda: stale_entitlement)
+
+    calls: list[bool] = []
+
+    def _fake_access(workspace, *, require_compute=True, deadline=None):
+        calls.append(require_compute)
+        return ("fresh-cloud-token", "org_1", "")
+
+    monkeypatch.setattr(cloud_session, "access_for_workspace", _fake_access)
+
+    # Implicit auto-activation remains fail-closed on stale/empty cache.
+    assert llm_client.managed_cloud_llm_available() is False
+    assert llm_client.auto_managed_llm_selected() is False
+
+    # Explicit provider=managed allows live token exchange to refresh entitlement.
+    assert llm_client.managed_cloud_session_configured() is True
+    provider, model, key_set, is_managed = v2_api._effective_llm_config()
+    assert (provider, model, key_set, is_managed) == (
+        "managed",
+        llm_client.DEFAULT_MANAGED_MODEL,
+        True,
+        True,
+    )
+
+    with llm_client.LLMClient(provider="managed") as llm:
+        assert llm.has_credentials is True
+        token, url = llm._resolve_managed_auth(timeout=5.0)
+        assert token == "fresh-cloud-token"
+        assert url == "https://api.engraphis.com/v1/llm"
+
+    assert calls == [False]
+
+
+def test_explicit_managed_provider_fails_when_cloud_session_unconfigured(monkeypatch):
+    """Explicit provider=managed still rejects calls when no Cloud session is configured."""
+    from engraphis import cloud_session
+    from engraphis.llm import client as llm_client
+
+    monkeypatch.setattr(settings, "llm_provider", "managed")
+    monkeypatch.setattr(settings, "llm_api_key", "")
+    monkeypatch.setattr(cloud_session, "configured", lambda *, require_compute=True: False)
+    monkeypatch.setattr(cloud_session, "credential_bound_control_url", lambda: "")
+
+    with llm_client.LLMClient(provider="managed") as llm:
+        assert llm.has_credentials is False
+        with pytest.raises(ValueError, match="connected Engraphis Cloud session"):
+            llm._resolve_managed_auth(timeout=5.0)
+

@@ -866,13 +866,17 @@ def _set_llm_extractor_locked(enabled: bool, *, persist: bool) -> dict:
 
 def _effective_llm_config() -> tuple[str, str, bool, bool]:
     """Return ``(provider, model, key_set, is_managed)`` accounting for Pro/Team managed LLM."""
-    from engraphis.llm.client import managed_cloud_llm_available
+    from engraphis.llm.client import (
+        managed_cloud_llm_available,
+        managed_cloud_session_configured,
+    )
 
     raw_provider = (settings.llm_provider or "openai").lower()
     raw_model = settings.llm_model
     has_key = bool(settings.llm_api_key)
     cloud_ready = managed_cloud_llm_available()
-    if raw_provider == "managed" or (
+    explicit_managed = raw_provider == "managed"
+    if explicit_managed or (
         not has_key
         and raw_provider in {"", "openai"}
         and not settings.llm_base_url
@@ -884,7 +888,8 @@ def _effective_llm_config() -> tuple[str, str, bool, bool]:
             if (raw_model and raw_model != "gpt-4o-mini")
             else _LLM_DEFAULT_MODELS["managed"]
         )
-        return provider, model, cloud_ready, True
+        key_set = managed_cloud_session_configured() if explicit_managed else cloud_ready
+        return provider, model, key_set, True
     provider = raw_provider or "openai"
     model = raw_model or _LLM_DEFAULT_MODELS.get(provider, "")
     return provider, model, has_key, False

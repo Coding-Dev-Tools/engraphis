@@ -48,14 +48,28 @@ _MANAGED_CLOUD_PLANS = frozenset({"pro", "team"})
 _MANAGED_ACTIVE_STATUSES = frozenset({"active", "trialing"})
 
 
+def managed_cloud_session_configured() -> bool:
+    """Return True when a credential-bound Cloud session is configured.
+
+    Used for explicit ``provider="managed"`` requests so env-only Cloud
+    bootstrap and post-upgrade recovery can contact the control plane and
+    refresh a stale or empty local entitlement cache.
+    """
+    try:
+        from engraphis import cloud_session
+        return bool(
+            cloud_session.configured(require_compute=False)
+            and cloud_session.credential_bound_control_url()
+        )
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def managed_cloud_llm_available() -> bool:
     """Return True only when an active paid or trial Pro/Team Cloud session is verified."""
     try:
         from engraphis import cloud_session
-        if not (
-            cloud_session.configured(require_compute=False)
-            and cloud_session.credential_bound_control_url()
-        ):
+        if not managed_cloud_session_configured():
             return False
         saved = cloud_session.saved_entitlement()
         if not isinstance(saved, dict) or not saved:
@@ -259,8 +273,10 @@ class LLMClient:
 
     @property
     def has_credentials(self) -> bool:
-        """Return True when a static API key or active managed Cloud session is available."""
-        return bool(self.api_key) or (self.provider == "managed" and managed_cloud_llm_available())
+        """Return True when a static API key or configured managed Cloud session is available."""
+        return bool(self.api_key) or (
+            self.provider == "managed" and managed_cloud_session_configured()
+        )
 
     def close(self) -> None:
         self._http.close()
@@ -280,7 +296,7 @@ class LLMClient:
         from engraphis import cloud_session
         from engraphis.hosted_client import validate_cloud_base_url
 
-        if not managed_cloud_llm_available():
+        if not managed_cloud_session_configured():
             raise ValueError(
                 "No LLM API key or connected Engraphis Cloud session configured. "
                 "Connect a Pro or Team account with engraphis-connect or set ENGRAPHIS_LLM_API_KEY."
