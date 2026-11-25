@@ -103,3 +103,15 @@ def test_cloud_connect_success_updates_license_and_clears_denial(monkeypatch, tm
     assert not v2_api._AUTHORITATIVE_DENIAL_PENDING.is_set()
     assert v2_api._authoritative_denial_at == 0.0
     assert not fake_cache.exists()
+
+
+def test_ledger_js_rejects_query_string_connect_token():
+    from pathlib import Path
+
+    ledger_path = Path(__file__).resolve().parents[1] / "engraphis" / "dashboard_assets" / "ledger.js"
+    js = ledger_path.read_text(encoding="utf-8")
+    # Fragment parsing remains supported for local dashboard handoff.
+    assert "fragment.has('connect_token')" in js
+    # Query-string parsing must never assign pendingConnectToken from location.search.
+    assert "searchParams.get('connect_token')" not in js
+    assert "pendingConnectToken = pendingConnectToken || (searchParams.get('token')" not in js

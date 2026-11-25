@@ -7342,15 +7342,20 @@
         }
       }
     }
+    // Never accept bearer connect tokens from query strings (HTTP GET / Referer / proxy log leak).
+    // If a user lands with a stale query param, scrub it from the address bar without authenticating it.
     try {
       const searchParams = new URLSearchParams(location.search);
+      let scrubbed = false;
       if (searchParams.has('connect_token')) {
-        pendingConnectToken = pendingConnectToken || (searchParams.get('connect_token') || '');
         searchParams.delete('connect_token');
-        history.replaceState(null, '', location.pathname + (searchParams.size ? '?' + searchParams.toString() : '') + location.hash);
-      } else if (searchParams.has('token') && (searchParams.get('token') || '').startsWith('engr_ct_')) {
-        pendingConnectToken = pendingConnectToken || (searchParams.get('token') || '');
+        scrubbed = true;
+      }
+      if (searchParams.has('token') && (searchParams.get('token') || '').startsWith('engr_ct_')) {
         searchParams.delete('token');
+        scrubbed = true;
+      }
+      if (scrubbed) {
         history.replaceState(null, '', location.pathname + (searchParams.size ? '?' + searchParams.toString() : '') + location.hash);
       }
     } catch (_) {}
