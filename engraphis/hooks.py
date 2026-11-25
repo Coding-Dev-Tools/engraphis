@@ -254,7 +254,7 @@ def build_session_briefing(
             continue
         prov = item.get("provenance")
         meta = item.get("metadata")
-        if prov is not None and not prompt_eligible(prov, meta):
+        if not prompt_eligible(prov, meta):
             continue
         if item.get("prompt_eligible") is False:
             continue
@@ -429,11 +429,30 @@ def _quote_cmd_arg(value: str) -> str:
     return f'"{escaped}"'
 
 
+def _resolve_hooks_entrypoint(python_exe: str) -> tuple[str, list[str]]:
+    """Resolve a CWD-safe hook command that never prepends '' (CWD) to sys.path.
+
+    Prefer an installed ``engraphis-hooks`` console wrapper sibling of ``python_exe``.
+    Otherwise invoke ``engraphis/hooks_cli.py`` by its resolved absolute file path
+    (unlike ``python -m``, running a script file by path never adds CWD to ``sys.path``).
+    """
+    exe_path = Path(python_exe)
+    wrapper_name = "engraphis-hooks.exe" if os.name == "nt" else "engraphis-hooks"
+    wrapper = exe_path.parent / wrapper_name
+    try:
+        if wrapper.is_file() and not wrapper.is_symlink():
+            return str(wrapper), []
+    except OSError:
+        pass
+    hooks_cli_file = Path(__file__).resolve().with_name("hooks_cli.py")
+    return python_exe, [str(hooks_cli_file)]
+
+
 def _build_hook_command(python_exe: str, subcommand: str, client: str) -> str:
-    return (
-        f"{_quote_cmd_arg(python_exe)} -m engraphis.hooks_cli "
-        f"{subcommand} --hook-mode --client {client}"
-    )
+    executable, prefix_args = _resolve_hooks_entrypoint(python_exe)
+    parts = [_quote_cmd_arg(executable), *(_quote_cmd_arg(arg) for arg in prefix_args)]
+    parts.extend([subcommand, "--hook-mode", "--client", client])
+    return " ".join(parts)
 
 
 def _utc_stamp() -> str:
@@ -441,15 +460,35 @@ def _utc_stamp() -> str:
 
 
 def _backup_first_write(settings_path: Path) -> Optional[Path]:
+    if settings_path.is_symlink():
+        raise ValueError(f"refusing to modify symlinked hook config: {settings_path}")
     if not settings_path.exists():
         return None
     backup = settings_path.with_name(f"{settings_path.name}.bak-engraphis-{_utc_stamp()}")
-    if not backup.exists():
-        backup.write_bytes(settings_path.read_bytes())
+    if backup.is_symlink():
+        raise ValueError(f"refusing to write through symlinked backup path: {backup}")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(str(backup), flags, 0o600)
+    except FileExistsError:
+        return backup
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(settings_path.read_bytes())
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        try:
+            backup.unlink()
+        except OSError:
+            pass
+        raise
     return backup
 
 
 def _atomic_write_json(path: Path, data: Mapping[str, Any]) -> None:
+    if path.is_symlink():
+        raise ValueError(f"refusing to overwrite symlinked hook config: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(data, indent=2, sort_keys=False) + "\n"
     fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
@@ -469,6 +508,8 @@ def _atomic_write_json(path: Path, data: Mapping[str, Any]) -> None:
 
 
 def _read_json_object(path: Path) -> dict[str, Any]:
+    if path.is_symlink():
+        raise ValueError(f"refusing to read symlinked hook config: {path}")
     if not path.exists():
         return {}
     raw = path.read_text(encoding="utf-8-sig").strip() or "{}"
@@ -482,7 +523,11 @@ def _is_engraphis_cursor_entry(entry: Any) -> bool:
     if not isinstance(entry, dict):
         return False
     cmd = str(entry.get("command") or "")
-    return "engraphis.hooks_cli" in cmd
+    return (
+        "engraphis.hooks_cli" in cmd
+        or "hooks_cli.py" in cmd
+        or "engraphis-hooks" in cmd
+    )
 
 
 def _upsert_named_hook_event(

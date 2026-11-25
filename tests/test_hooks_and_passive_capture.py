@@ -193,7 +193,8 @@ def test_install_and_uninstall_hooks_claude_cursor_commandcode(tmp_path: Path) -
     assert len(data["hooks"]["SessionStart"]) == 1
     assert len(data["hooks"]["Stop"]) == 1
     assert data["hooks"]["PreToolUse"][0]["hooks"][0]["name"] == "user-guard"
-    assert "engraphis.hooks_cli" in data["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+    cmd_start = data["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+    assert ("hooks_cli.py" in cmd_start or "engraphis-hooks" in cmd_start) and " -m " not in cmd_start
     assert r2["installed_events"] == ["SessionStart", "Stop"]
 
     u1 = uninstall_client_hooks("claude", claude_cfg)
@@ -210,7 +211,8 @@ def test_install_and_uninstall_hooks_claude_cursor_commandcode(tmp_path: Path) -
     assert cdata["version"] == 1
     assert "sessionStart" in cdata["hooks"] and "stop" in cdata["hooks"]
     assert isinstance(cdata["hooks"]["sessionStart"][0], dict)
-    assert "engraphis.hooks_cli briefing --hook-mode --client cursor" in cdata["hooks"]["sessionStart"][0]["command"]
+    cursor_cmd = cdata["hooks"]["sessionStart"][0]["command"]
+    assert "briefing --hook-mode --client cursor" in cursor_cmd and " -m " not in cursor_cmd
     cu = uninstall_client_hooks("cursor", cursor_cfg)
     assert cu["removed"] == 2
 
@@ -307,4 +309,48 @@ def test_control_char_secret_obfuscation_bom_and_cursor_non_list(tmp_path: Path)
     bad_cursor.write_text(json.dumps({"version": 1, "hooks": {"sessionStart": {"custom": "keep"}}}), encoding="utf-8")
     with pytest.raises(ValueError, match="must be a list"):
         install_client_hooks("cursor", bad_cursor, python_exe="/usr/bin/python3")
+
+
+def test_hook_command_resists_cwd_shadowing_and_refuses_symlinks(tmp_path: Path) -> None:
+    import subprocess
+    import sys
+
+    # 1. Running the generated absolute-path hook command from a hostile repo with ./engraphis/
+    #    must NEVER execute the repo-local shadowed package.
+    hostile_repo = tmp_path / "hostile_repo"
+    (hostile_repo / "engraphis").mkdir(parents=True)
+    (hostile_repo / "engraphis" / "__init__.py").write_text("raise RuntimeError('SHADOWED_INIT')\n", encoding="utf-8")
+    (hostile_repo / "engraphis" / "hooks_cli.py").write_text("raise RuntimeError('SHADOWED_CLI')\n", encoding="utf-8")
+
+    hooks_cli_path = Path(__file__).resolve().parents[1] / "engraphis" / "hooks_cli.py"
+    proc = subprocess.run(
+        [sys.executable, str(hooks_cli_path), "--help"],
+        cwd=str(hostile_repo),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "SHADOWED" not in proc.stdout and "SHADOWED" not in proc.stderr
+
+    # 2. Fail-closed when provenance is None/missing in briefing candidate.
+    class _StubService:
+        def recall_proactive(self, *, workspace: str, repo=None, k: int = 8):
+            return {"memories": [{"id": "mem_missing_prov", "content": "Unverified note without provenance."}]}
+
+    briefing = build_session_briefing(_StubService(), workspace="acme")  # type: ignore[arg-type]
+    assert briefing["count"] == 0
+    assert briefing["context"] == ""
+
+    # 3. Refuse symlinked settings/backup paths (skipped cleanly if OS denies symlink creation).
+    target = tmp_path / "outside.json"
+    target.write_text('{"secret": true}\n', encoding="utf-8")
+    link_cfg = tmp_path / "linked_settings.json"
+    try:
+        link_cfg.symlink_to(target)
+    except OSError:
+        return
+    with pytest.raises(ValueError, match="symlink"):
+        install_client_hooks("claude", link_cfg, python_exe=sys.executable)
+
 

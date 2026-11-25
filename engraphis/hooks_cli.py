@@ -17,6 +17,13 @@ import sys
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
+if __package__ in (None, ""):
+    # Direct absolute-file invocation (used by installed hooks so Python never
+    # prepends '' / CWD to sys.path) resolves the enclosing package root cleanly.
+    _pkg_root = str(Path(__file__).resolve().parent.parent)
+    if _pkg_root not in sys.path:
+        sys.path.insert(0, _pkg_root)
+
 from engraphis.hooks import (
     SUPPORTED_CLIENTS,
     build_session_briefing,

@@ -96,12 +96,12 @@ interpretation and do not count as additional benchmark-quality gains.
 Every exact public aggregate retained below comes from the checked-in, public-safe
 [`offline-fixtures-passive-hooks-20261124.json`](docs/benchmark-evidence/offline-fixtures-passive-hooks-20261124.json) artifact. Its
 SHA-256 is
-`a975852ad0d21995beead0dc9b8516c06f900b0dc3407baa0d309b92d87a48a7`, also recorded in the
+`39c4b47d700bcb5dcc7c7ec754bb10549a0ae505d2ca70c37c7b3985d4379d06`, also recorded in the
 adjacent `.sha256` file. The artifact contains no raw questions, answers, prompts, customer data,
 or per-record content fingerprints.
 
 The fixture-suite digest is
-`404382ba69f06a86246af3f0f850b402c27977fae641d0d2dfbd023ae78a8450`. The artifact defines
+`4a2362b13d7754a1dd978c0797a8064bf89460bcd8e227dc6407840ec940bbca`. The artifact defines
 the digest algorithm and records the SHA-256 of every suite and dataset file. Each evidence ID
 also binds its exact command through `sha256(UTF-8 exact command)`:
 
@@ -117,7 +117,7 @@ The canonical chart aliases are regenerated from that new artifact and carry its
 historical per-run artifacts and their preserved chart bytes remain unchanged. The current
 PNG views were freshly rendered from the registered artifact SVG via Google Chrome for Testing 156.0.8078.4
 headless shell on Windows at each SVG canvas size, with embedded artifact and SVG checksums.
-The fresh evaluator run on 2026-11-20 UTC used Windows CPython 3.11.17 and NumPy 2.4.6. Its 591-file manifest
+The fresh evaluator run on 2026-11-25 UTC used Windows CPython 3.11.17 and NumPy 2.4.6. Its 593-file manifest
 binds the producer after unifying Pro/Team commercial contract metadata, hardening sync-key UX, and adding the trigger-invalidated vector visibility revision, bounded NumPy matrix cache, and `remember_many` embedding deduplication atop `engraphis/device_connect.py` and the 1.7.10+ fixes: Command Code file-guard tool
 ids, fail-closed hook errors, symlink-then-parent and Windows alias targets, the linear
 Spec Studio heading pattern, closure-limit and browse-version handling, the equal-start
