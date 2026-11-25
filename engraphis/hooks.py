@@ -359,7 +359,7 @@ def stage_passive_capture(
     review_states: list[str] = []
     would_store: list[str] = []
     skipped_duplicates = 0
-    skipped_secrets = 0
+    blocked_count = 0
     skipped_errors = 0
 
     for candidate in candidates:
@@ -368,13 +368,13 @@ def stage_passive_capture(
             reject_secrets([("content", clean_text)])
         except SecretDetectedError:
             if secret_mode == "reject":
-                skipped_secrets += 1
+                blocked_count += 1
                 continue
             redacted = redact_secrets(clean_text)
             try:
                 reject_secrets([("content", redacted)])
             except SecretDetectedError:
-                skipped_secrets += 1
+                blocked_count += 1
                 continue
             clean_text = redacted
 
@@ -415,7 +415,7 @@ def stage_passive_capture(
         "stored_ids": stored_ids,
         "would_store_count": len(would_store),
         "skipped_duplicates": skipped_duplicates,
-        "skipped_secrets": skipped_secrets,
+        "skipped_secrets": blocked_count,
         "skipped_errors": skipped_errors,
         "review_states": review_states,
         "review_state": review_states[0] if len(set(review_states)) == 1 else ("mixed" if review_states else "pending"),
