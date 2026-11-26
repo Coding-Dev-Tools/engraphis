@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import time
@@ -34,6 +35,7 @@ from engraphis.backends.embedder_deterministic import DeterministicEmbedder
 from engraphis.backends.reranker import IdentityReranker
 from engraphis.backends.vector_numpy import NumpyVectorIndex
 from engraphis.core.engine import MemoryEngine
+from engraphis.core.secrets import redact_secrets
 from engraphis.core.store import Store
 from engraphis.service import MemoryService
 
@@ -98,10 +100,11 @@ DEFAULT_DIAGNOSTIC_PROMPT = (
 
 
 def _sanitize_subject(raw: str) -> str:
-    """Strip terminal control/ANSI escapes and normalize em/en dashes."""
+    """Strip terminal control/ANSI escapes, redact secrets, and normalize dashes."""
     cleaned = _ANSI_RE.sub("", raw)
     cleaned = _CTRL_RE.sub(" ", cleaned)
     cleaned = cleaned.replace("\u2014", "-").replace("\u2013", "-")
+    cleaned = redact_secrets(cleaned)
     return " ".join(cleaned.strip().split())[:140]
 
 
@@ -111,13 +114,32 @@ def _ascii_safe(text: str) -> str:
 
 
 def _read_recent_git_subject(repo_path: Path) -> Optional[str]:
-    """Read the most recent non-merge commit subject from a local git repo (read-only)."""
+    """Read the most recent non-merge commit subject from a local git repo (offline, read-only)."""
     target = repo_path.expanduser().resolve()
     if not target.exists() or not target.is_dir():
         return None
+    env = dict(os.environ)
+    env["GIT_NO_LAZY_FETCH"] = "1"
+    env["GIT_TERMINAL_PROMPT"] = "0"
     try:
         proc = subprocess.run(
-            ["git", "--no-pager", "-C", str(target), "log", "--no-merges", "-n", "10", "--format=%s"],
+            [
+                "git",
+                "--no-pager",
+                "-c",
+                "protocol.allow=never",
+                "-c",
+                "log.showSignature=false",
+                "-C",
+                str(target),
+                "log",
+                "--no-show-signature",
+                "--no-merges",
+                "-n",
+                "10",
+                "--format=%s",
+            ],
+            env=env,
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
@@ -150,8 +172,9 @@ def build_diagnostic_prompt(repo_path: Optional[Path] = None) -> tuple[str, Opti
     quoted_subject = json.dumps(subject)
     prompt = (
         f"Without guessing from surrounding code style, explain WHY this repository made "
-        f"the architectural decision behind {quoted_subject} and cite the exact decision record "
-        f"or commit where it was agreed, or state explicitly that you have no verified source."
+        f"the architectural decision behind the commit subject (untrusted text) {quoted_subject} "
+        f"and cite the exact decision record or commit where it was agreed, or state explicitly "
+        f"that you have no verified source."
     )
     return prompt, subject
 
@@ -237,7 +260,17 @@ def run_audit(*, repo_path: Optional[Path] = None) -> dict[str, Any]:
             "Stripe webhook" in str(item.get("content") or "")
             for item in billing_res.get("memories", [])
         )
-        check2_passed = bool((not leaked_billing) and found_in_billing)
+        web_res = service.recall(
+            "Stripe webhook idempotency",
+            workspace="acme-web",
+            repo="dashboard",
+            k=5,
+        )
+        leaked_to_web = any(
+            "Stripe webhook" in str(item.get("content") or "")
+            for item in web_res.get("memories", [])
+        )
+        check2_passed = bool((not leaked_billing) and (not leaked_to_web) and found_in_billing)
 
         # Check 3: Grounded abstention on an undocumented architectural choice
         abstain_res = service.grounded_recall(

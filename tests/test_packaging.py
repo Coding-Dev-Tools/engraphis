@@ -449,6 +449,7 @@ def test_release_version_surfaces_are_synchronized():
     server_manifest = json.loads((ROOT / "server.json").read_text(encoding="utf-8"))
     assert server_manifest["version"] == version
     assert len(server_manifest["description"]) <= 100
+    assert f"mcp-name: {server_manifest['name']}" in (ROOT / "README.md").read_text(encoding="utf-8")
     pkg = server_manifest["packages"][0]
     assert pkg["version"] == version
     assert any(

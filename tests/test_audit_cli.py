@@ -142,9 +142,10 @@ def test_audit_check1_does_not_false_pass_on_migration_rationale_only(monkeypatc
     monkeypatch.setattr(audit, "_create_isolated_service", patched_service)
     report = audit.run_audit()
     assert report["checks"][0]["passed"] is False
+    assert audit.main(["--json"]) == 1
 
 
-def test_audit_prompt_json_quotes_embedded_quotes_in_commit_subject(tmp_path: Path) -> None:
+def test_audit_prompt_json_quotes_embedded_quotes_and_redacts_secrets(tmp_path: Path) -> None:
     repo = tmp_path / "quoted-repo"
     repo.mkdir()
     _git(repo, "init")
@@ -152,8 +153,12 @@ def test_audit_prompt_json_quotes_embedded_quotes_in_commit_subject(tmp_path: Pa
     _git(repo, "config", "user.email", "274649000+Coding-Dev-Tools@users.noreply.github.com")
     (repo / "a.txt").write_text("hi\n", encoding="utf-8")
     _git(repo, "add", "a.txt")
-    _git(repo, "commit", "-m", 'fix: escape "quoted" subject safely')
+    fake_tok = "ghp_" + "A" * 36
+    _git(repo, "commit", "-m", f'fix: escape "quoted" subject and rotate {fake_tok}')
 
     prompt, subject = audit.build_diagnostic_prompt(repo)
-    assert subject == 'fix: escape "quoted" subject safely'
+    assert subject is not None
+    assert fake_tok not in subject
+    assert fake_tok not in prompt
+    assert "<redacted>" in subject
     assert json.dumps(subject) in prompt

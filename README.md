@@ -20,7 +20,7 @@ Open a fresh coding-agent session in a repo you know and ask why one architectur
   <sup>The Graph &amp; Relations view at 127.0.0.1:8700. The full local dashboard is in the details below.</sup>
 </p>
 
-## Install and connect an agent in three commands
+## Install and connect an agent in four commands
 
 The MCP server and `[all]` extras need Python 3.10 or newer. The NumPy-only core and `engraphis-audit` still support Python 3.9+.
 
@@ -31,7 +31,7 @@ engraphis-init --prefetch
 claude mcp add engraphis -- engraphis-mcp
 ```
 
-Want a 5-second zero-install proof first? Run the offline audit in an isolated temporary SQLite database:
+Want a quick zero-config proof first? Run the offline audit in an isolated in-memory SQLite database (after `uvx` fetches the package, the audit itself makes zero network calls):
 
 ```bash
 uvx --from engraphis engraphis-audit
@@ -156,3 +156,5 @@ See [hosted plans and Jev details](https://github.com/Coding-Dev-Tools/engraphis
 ## License
 
 Engraphis is licensed under Apache-2.0. The license does not grant trademark rights. See [LICENSE](https://github.com/Coding-Dev-Tools/engraphis/blob/522def372c45a26d46bc7a05829964ae0240f3a9/LICENSE), [NOTICE](https://github.com/Coding-Dev-Tools/engraphis/blob/522def372c45a26d46bc7a05829964ae0240f3a9/NOTICE), and the [licensing guide](https://github.com/Coding-Dev-Tools/engraphis/blob/522def372c45a26d46bc7a05829964ae0240f3a9/docs/LICENSING.md). The hosted control plane and managed services are private services.
+
+<!-- mcp-name: io.github.Coding-Dev-Tools/engraphis -->

@@ -30,4 +30,4 @@ Use the exact `ENGRAPHIS_DB_PATH` printed by `engraphis-init`:
 
 ## 3. Sharing one local embedding model across multiple editors
 
-If you run Cline alongside Claude Code or Cursor, launch one shared loopback HTTP server (`engraphis-mcp-http`) and point each client at `["--connect", "http://127.0.0.1:8711/mcp"]`. See [docs/AGENT_CONNECT.md](../AGENT_CONNECT.md).
+If you run Cline alongside Claude Code or Cursor, launch one shared loopback HTTP server (`engraphis-mcp-http`) and add `"args": ["--connect", "http://127.0.0.1:8711/mcp"]` to each client entry. See [docs/AGENT_CONNECT.md](../AGENT_CONNECT.md).
