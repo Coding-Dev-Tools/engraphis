@@ -278,6 +278,7 @@ def _sync_team(args: argparse.Namespace) -> int:
     from engraphis.backends.sync_relay import sync_read_only
     from engraphis.team_delta import (
         TeamDeltaError,
+        _validated_bearer,
         pull_team_delta,
         push_team_proposals,
         resolve_team_url,
@@ -299,6 +300,7 @@ def _sync_team(args: argparse.Namespace) -> int:
         return 2
     try:
         validate_team_origin_binding(team_url, os.environ.get("ENGRAPHIS_TEAM_TOKEN_ORIGIN"))
+        _validated_bearer(team_bearer)
     except (TeamDeltaError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

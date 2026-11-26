@@ -250,56 +250,66 @@ def _purge_local_cache_entry(service: Any, local_id: str) -> bool:
     from contextlib import nullcontext
     from engraphis.core.vector_repair import (
         index_repair_identity,
-        vector_index_requires_sync,
         vector_index_shares_store_transaction,
     )
 
-    target_ids: list[str] = [local_id]
-    target_fn = getattr(service.store, "secure_erase_target_ids", None)
-    if callable(target_fn):
-        raw_targets = target_fn(local_id)
-        if isinstance(raw_targets, (list, tuple, set)):
-            resolved = [str(tid) for tid in raw_targets if tid]
-            if resolved:
-                target_ids = resolved
-
     index = getattr(service.engine, "index", None)
     write_guard = getattr(service.engine, "_write_guard", None)
-    guard_ctx = write_guard() if callable(write_guard) else nullcontext()
+    guard_ctx: Any = write_guard() if callable(write_guard) else nullcontext()
     shared_tx = index is not None and vector_index_shares_store_transaction(index, service.store)
-    needs_external = (
-        index is not None
-        and vector_index_requires_sync(index, service.store)
-        and not shared_tx
-    )
+    repair_target = index_repair_identity(index, service.store) if index is not None else None
+    attempted_ids: set[str] = set()
+    confirmed_ids: set[str] = set()
+
+    def _delete_vectors(ids: list[str]) -> None:
+        if not ids or index is None:
+            return
+        delete_fn = getattr(index, "delete", None)
+        if callable(delete_fn):
+            if shared_tx:
+                delete_fn(ids, commit=False)
+            else:
+                delete_fn(ids)
+            return
+        remove_fn = getattr(index, "remove", None)
+        if callable(remove_fn):
+            for tid in ids:
+                remove_fn(tid)
 
     with guard_ctx:
-        with service.store.write_transaction():
-            if needs_external and hasattr(service.store, "queue_vector_index_repairs"):
-                ident = index_repair_identity(index, service.store)
-                if ident:
-                    service.store.queue_vector_index_repairs(
-                        ident, [(tid, "delete") for tid in target_ids], commit=False
+        try:
+            with service.store.write_transaction():
+                target_ids: list[str] = [local_id]
+                target_fn = getattr(service.store, "secure_erase_target_ids", None)
+                if callable(target_fn):
+                    raw_targets = target_fn(local_id)
+                    if isinstance(raw_targets, (list, tuple, set)):
+                        resolved = [str(tid) for tid in raw_targets if tid]
+                        if resolved:
+                            target_ids = resolved
+                if repair_target is not None:
+                    service.store.queue_vector_index_repairs(repair_target, target_ids)
+                attempted_ids.update(target_ids)
+                _delete_vectors(target_ids)
+                confirmed_ids.update(target_ids)
+                try:
+                    service.store.secure_erase_memory(
+                        local_id, actor="team-delta-sync", _defer_maintenance=True
                     )
-            if shared_tx and index is not None:
-                delete_fn = getattr(index, "delete", None)
-                if callable(delete_fn):
-                    delete_fn(target_ids, commit=False)
-            try:
-                service.store.secure_erase_memory(
-                    local_id, actor="team-delta-sync", _defer_maintenance=True
-                )
-            except KeyError:
-                return False
-        if index is not None and not shared_tx:
-            delete_fn = getattr(index, "delete", None)
-            if callable(delete_fn):
-                delete_fn(target_ids)
-            else:
-                remove_fn = getattr(index, "remove", None)
-                if callable(remove_fn):
-                    for tid in target_ids:
-                        remove_fn(tid)
+                except KeyError:
+                    return False
+                if repair_target is not None and confirmed_ids:
+                    service.store.acknowledge_vector_index_repairs(
+                        repair_target,
+                        service.store.vector_index_repair_generations(repair_target, confirmed_ids),
+                    )
+        except BaseException as erase_exc:
+            if repair_target is not None and attempted_ids:
+                try:
+                    service.store.queue_vector_index_repairs(repair_target, attempted_ids)
+                except BaseException as repair_exc:
+                    raise repair_exc from erase_exc
+            raise
     return True
 
 
@@ -397,7 +407,7 @@ def pull_team_delta(
         if not isinstance(next_seq, int) or isinstance(next_seq, bool) or next_seq < tombstone_since:
             raise TeamDeltaError("team delta response returned invalid tombstone sequence")
         has_more = bool(resp.get("has_more", False))
-        if has_more and next_cursor == cursor and next_seq == tombstone_since and not items and not tombstones:
+        if has_more and next_cursor == cursor and next_seq == tombstone_since:
             raise TeamDeltaError("team delta pagination made no progress")
 
         # 1. Apply approved items first (so a same-page tombstone wins deterministically).
@@ -509,31 +519,24 @@ def pull_team_delta(
                 added += 1
 
         # 2. Apply permanent tombstones in monotonic sequence order; hold watermark and stop on error.
+        def _tomb_seq(raw: Any) -> int:
+            if not isinstance(raw, dict):
+                return 0
+            val = raw.get("sequence")
+            return val if isinstance(val, int) and not isinstance(val, bool) and val > 0 else 0
+
         tombstone_failed = False
         applied_seq = tombstone_since
         ordered_tombs = sorted(
             enumerate(tombstones),
-            key=lambda pair: (
-                pair[1].get("sequence")
-                if isinstance(pair[1], dict)
-                and isinstance(pair[1].get("sequence"), int)
-                and not isinstance(pair[1].get("sequence"), bool)
-                and pair[1].get("sequence") > 0
-                else 0,
-                pair[0],
-            ),
+            key=lambda pair: (_tomb_seq(pair[1]), pair[0]),
         )
         for _, raw_tomb in ordered_tombs:
             if not isinstance(raw_tomb, dict):
                 continue
             target_team_id = str(raw_tomb.get("memory_id") or "").strip()
             kind = str(raw_tomb.get("kind") or "").strip()
-            raw_seq = raw_tomb.get("sequence")
-            tomb_seq = (
-                int(raw_seq)
-                if isinstance(raw_seq, int) and not isinstance(raw_seq, bool) and raw_seq > 0
-                else 0
-            )
+            tomb_seq = _tomb_seq(raw_tomb)
             if not target_team_id or kind not in {"retire", "unapprove", "erase"}:
                 if not tombstone_failed and tomb_seq > applied_seq:
                     applied_seq = tomb_seq
