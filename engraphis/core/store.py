@@ -275,18 +275,33 @@ def next_wall_ts_after(floor_ts: float, *, max_wait_s: float = 0.05) -> float:
     or when ``floor_ts`` lies beyond ``max_wait_s`` in the future, returns the
     current ``now_ts()`` immediately so fail-closed guards remain intact.
     """
+    validated_floor = _finite_timestamp(floor_ts, "floor_ts")
+    if validated_floor is None:
+        raise ValueError("floor_ts must be a finite number")
+    if (
+        isinstance(max_wait_s, bool)
+        or not isinstance(max_wait_s, (int, float))
+        or not math.isfinite(float(max_wait_s))
+        or float(max_wait_s) < 0.0
+    ):
+        raise ValueError("max_wait_s must be a finite non-negative number")
+    wait_budget = float(max_wait_s)
     current = now_ts()
-    if current > floor_ts:
+    if current > validated_floor:
         return current
     if now_ts is not _DEFAULT_NOW_TS or time.time is not _REAL_TIME_TIME:
         return current
-    if floor_ts - current > max_wait_s:
+    if validated_floor - current > wait_budget:
         return current
-    deadline = time.monotonic() + max_wait_s
-    while current <= floor_ts and time.monotonic() < deadline:
+    deadline = time.monotonic() + wait_budget
+    polled = False
+    while current <= validated_floor and time.monotonic() < deadline:
         time.sleep(0.001)
         current = now_ts()
-    if current <= floor_ts:
+        polled = True
+        if validated_floor - current > wait_budget:
+            break
+    if not polled and current <= validated_floor:
         current = now_ts()
     return current
 
@@ -6203,31 +6218,56 @@ class Store:
 
     def close_validity(self, memory_id: str, *, at: Optional[float] = None,
                        actor: str = "system", reason: str = "contradicted",
-                       commit: bool = True) -> None:
+                       commit: bool = True,
+                       _recorded_at: Optional[float] = None) -> None:
         """Close one fact and its graph evidence as one atomic governance write."""
         auto_at = at is None
-        recorded_at = _finite_timestamp(now_ts(), "recorded_at")
-        at = _finite_timestamp(recorded_at if auto_at else at, "at")
+        explicit_at = None if auto_at else _finite_timestamp(at, "at")
+        explicit_recorded = (
+            _finite_timestamp(_recorded_at, "recorded_at")
+            if _recorded_at is not None
+            else None
+        )
+        # For standalone auto-timestamped closures, advance past a same-tick valid_from
+        # before acquiring BEGIN IMMEDIATE so coarse Windows ticks do not hold the DB writer lock.
+        if auto_at and commit and not self.conn.in_transaction:
+            pre_row = self.conn.execute(
+                "SELECT valid_from FROM memories WHERE id=?", (memory_id,)
+            ).fetchone()
+            if (
+                pre_row is not None
+                and pre_row["valid_from"] is not None
+                and now_ts() <= pre_row["valid_from"]
+            ):
+                next_wall_ts_after(pre_row["valid_from"])
         with self._write_operation("close_validity", commit=commit):
             row = self.conn.execute(
                 "SELECT workspace_id, valid_from FROM memories WHERE id=?", (memory_id,)
             ).fetchone()
             if row is not None:
                 self._authorize_workspace_id(row["workspace_id"])
+            recorded_at = (
+                explicit_recorded
+                if explicit_recorded is not None
+                else _finite_timestamp(now_ts(), "recorded_at")
+            )
+            at_ts = recorded_at if auto_at else explicit_at
             if (
                 auto_at
                 and row is not None
                 and row["valid_from"] is not None
-                and at == row["valid_from"]
+                and at_ts is not None
+                and at_ts <= row["valid_from"]
             ):
                 advanced = _finite_timestamp(next_wall_ts_after(row["valid_from"]), "at")
-                at = advanced
+                at_ts = advanced
                 if advanced is not None and (recorded_at is None or advanced > recorded_at):
                     recorded_at = advanced
             if (
                 row is not None
                 and row["valid_from"] is not None
-                and at < row["valid_from"]
+                and at_ts is not None
+                and at_ts < row["valid_from"]
             ):
                 raise ValueError("valid_to cannot predate valid_from")
             if row is not None:
@@ -6237,7 +6277,7 @@ class Store:
                     self.conn.execute(
                         "INSERT INTO memory_closures(memory_id,valid_to,recorded_at) "
                         "VALUES (?,?,?) ON CONFLICT DO NOTHING",
-                        (memory_id, at, recorded_at),
+                        (memory_id, at_ts, recorded_at),
                     )
                 except sqlite3.IntegrityError as exc:
                     # History is never truncated; report the full bound as a caller
@@ -6251,7 +6291,7 @@ class Store:
             updated = self.conn.execute(
                 "UPDATE memories SET valid_to=?, valid_to_recorded_at=? "
                 "WHERE id=? AND (valid_to IS NULL OR valid_to>?)",
-                (at, recorded_at, memory_id, at),
+                (at_ts, recorded_at, memory_id, at_ts),
             ).rowcount
             if updated:
                 self.invalidate_edges_for_memory(memory_id, at=at, commit=False)

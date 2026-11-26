@@ -61,7 +61,33 @@ def test_next_wall_ts_after_respects_max_wait_deadline_and_final_recheck(monkeyp
     result = core_store.next_wall_ts_after(1000.0, max_wait_s=0.05)
     assert result == 1000.0
     assert len(sleeps) == 3
-    assert calls >= 5
+    assert calls == 4
+
+
+def test_next_wall_ts_after_rejects_nonfinite_and_handles_midloop_ntp_step(monkeypatch):
+    for bad_floor in (float("nan"), float("inf"), float("-inf"), True, None):
+        with pytest.raises(ValueError):
+            core_store.next_wall_ts_after(bad_floor)  # type: ignore[arg-type]
+    for bad_wait in (float("nan"), float("inf"), -0.1, True):
+        with pytest.raises(ValueError):
+            core_store.next_wall_ts_after(1000.0, max_wait_s=bad_wait)  # type: ignore[arg-type]
+
+    # Mid-loop backward NTP step exits immediately instead of spinning to deadline.
+    ticks = iter([1000.0, 990.0])
+    mono = iter([0.0, 0.001, 0.002])
+    sleeps: list[float] = []
+
+    def _stepping_now() -> float:
+        return next(ticks)
+
+    monkeypatch.setattr(core_store, "now_ts", _stepping_now)
+    monkeypatch.setattr(core_store, "_DEFAULT_NOW_TS", _stepping_now)
+    monkeypatch.setattr(time, "monotonic", lambda: next(mono))
+    monkeypatch.setattr(time, "sleep", sleeps.append)
+
+    res = core_store.next_wall_ts_after(1000.0, max_wait_s=0.05)
+    assert res == 990.0
+    assert sleeps == [0.001]
 
 
 def test_next_wall_ts_after_does_not_sleep_for_past_future_or_mocked_clocks(monkeypatch):
@@ -285,5 +311,89 @@ def test_concurrent_superseding_writes_preserve_valid_non_empty_chain():
         assert len(live) == 1
         assert len(closed) == 6
         assert all(r["valid_to"] > r["valid_from"] for r in closed)
+    finally:
+        eng.close()
+
+
+def test_promote_merge_explicit_close_and_stepped_clock_wiring(monkeypatch, tmp_path):
+    """Covers promote/merge/retire/explicit close_validity and stepped coarse clock on every OS."""
+    eng = MemoryEngine.create(str(tmp_path / "clock.db"), embed_model="")
+    try:
+        wid = eng.store.get_or_create_workspace("acme")
+        rid = eng.store.get_or_create_repo(wid, "api")
+        sid = eng.store.start_session(wid, repo_id=rid)
+
+        # Promote from session -> repo never persists empty interval.
+        s_mem = eng.remember_with_resolution(
+            "Session discovery: retry jitter uses full jitter.",
+            workspace_id=wid, repo_id=rid, session_id=sid,
+            scope=Scope.SESSION, mtype=MemoryType.SEMANTIC,
+        )
+        promoted = eng.promote(s_mem["id"], Scope.REPO, reason="durable team rule")
+        s_old = eng.store.get_memory(s_mem["id"])
+        assert s_old is not None and s_old.valid_to is not None and s_old.valid_from is not None
+        assert s_old.valid_to > s_old.valid_from
+
+        # Merge two repo memories -> non-empty closures + aligned ingested_at == valid_from.
+        m2 = eng.remember_with_resolution(
+            "Retry cap is 3 attempts with exponential backoff.",
+            workspace_id=wid, repo_id=rid, scope=Scope.REPO, mtype=MemoryType.SEMANTIC,
+        )
+        merged = eng.merge(
+            [promoted["id"], m2["id"]],
+            "Retry policy: 3 attempts with full-jitter exponential backoff.",
+            reason="combine retry policy",
+        )
+        for src_id in (promoted["id"], m2["id"]):
+            src = eng.store.get_memory(src_id)
+            assert src is not None and src.valid_to is not None and src.valid_from is not None
+            assert src.valid_to > src.valid_from
+        merged_rec = eng.store.get_memory(merged["id"])
+        assert merged_rec is not None and merged_rec.valid_from == merged_rec.ingested_at
+
+        # Explicit close_validity(at=valid_from) preserves explicit caller timestamp without sleeping.
+        sleeps: list[float] = []
+        monkeypatch.setattr(time, "sleep", sleeps.append)
+        eng.store.close_validity(merged["id"], at=merged_rec.valid_from, reason="explicit pin")
+        assert sleeps == []
+        explicit_closed = eng.store.get_memory(merged["id"])
+        assert explicit_closed is not None and explicit_closed.valid_to == merged_rec.valid_from
+
+        # Deterministic stepped coarse clock proves supersession wiring on Linux/macOS too.
+        clock_state = {"t": 2000.0, "mono": 0.0}
+        step_sleeps: list[float] = []
+
+        def _coarse_now() -> float:
+            return clock_state["t"]
+
+        def _step_sleep(dt: float) -> None:
+            step_sleeps.append(dt)
+            clock_state["mono"] += dt
+            if len(step_sleeps) >= 2:
+                clock_state["t"] = 2000.015625
+
+        monkeypatch.setattr(core_store, "now_ts", _coarse_now)
+        monkeypatch.setattr(core_store, "_DEFAULT_NOW_TS", _coarse_now)
+        monkeypatch.setattr(time, "monotonic", lambda: clock_state["mono"])
+        monkeypatch.setattr(time, "sleep", _step_sleep)
+
+        first = eng.remember_with_resolution(
+            "Primary queue is SQS.",
+            workspace_id=wid, repo_id=rid, scope=Scope.REPO,
+            mtype=MemoryType.SEMANTIC, subject_key="msg.queue", claim_kind="decision",
+        )
+        second = eng.remember_with_resolution(
+            "Primary queue migrated to Kafka.",
+            workspace_id=wid, repo_id=rid, scope=Scope.REPO,
+            mtype=MemoryType.SEMANTIC, subject_key="msg.queue", claim_kind="decision",
+        )
+        assert second["op"] == "invalidate"
+        assert len(step_sleeps) >= 2
+        old_q = eng.store.get_memory(first["id"])
+        new_q = eng.store.get_memory(second["id"])
+        assert old_q is not None and new_q is not None
+        assert old_q.valid_from == 2000.0
+        assert old_q.valid_to == 2000.015625
+        assert old_q.valid_to_recorded_at == new_q.ingested_at == new_q.valid_from == 2000.015625
     finally:
         eng.close()
