@@ -70,6 +70,7 @@ _DASHBOARD_UPLOAD_REQUEST_BYTES = (
 )
 _DASHBOARD_REQUEST_BODY_LIMITS = {
     "/api/auth/session": 8 * 1024,
+    "/api/cloud/connect": 8 * 1024,
     "/api/workspaces/import-files": _DASHBOARD_UPLOAD_REQUEST_BYTES,
     # Wizard multipart routes carry the same upload ceilings as Quick import:
     # without these entries they fall back to the 8 MB JSON default and large vaults

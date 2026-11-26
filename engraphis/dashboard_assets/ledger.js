@@ -845,33 +845,49 @@
     renderFeatureCtas();
   }
 
+  function applyConnectedLicense(license) {
+    if (!license) return;
+    state.license = license;
+    updatePlanBadge();
+    renderSidebarCta();
+    renderCloudAccountSettings();
+    if (state.view === 'manage' && state.manageTab === 'plans') {
+      renderLicenseStatus(state.license);
+      renderPlans();
+    }
+    const planName = String(license.plan || 'Pro').toUpperCase();
+    const access = licenseAccessState(license);
+    if (access === 'active' || access === 'trial') {
+      const stateDesc = access === 'trial' ? 'trial' : 'plan';
+      showNotice(`Engraphis Cloud connected! ${planName} ${stateDesc} is active.`);
+    } else {
+      showNotice('Engraphis Cloud connected. Visit your account portal to activate a plan or trial.');
+    }
+  }
+
   async function promptConnectToken() {
-    const token = await dialogs.prompt({
+    const response = await dialogs.open({
       title: 'Connect Engraphis Cloud',
       message: 'Enter the connect token from your Engraphis Cloud account portal (starts with engr_ct_):',
-      label: 'Connect token',
-      placeholder: 'engr_ct_...',
+      fields: [{
+        name: 'token',
+        type: 'password',
+        label: 'Connect token',
+        placeholder: 'engr_ct_...',
+        required: true,
+        maxLength: 512,
+      }],
       confirmLabel: 'Connect',
     });
-    if (!token || !token.trim()) return;
+    const token = response && typeof response.token === 'string' ? response.token.trim() : '';
+    if (!token) return;
     try {
       const result = await api('/cloud/connect', {
         method: 'POST',
-        body: { token: token.trim() },
+        body: { token },
       });
       if (result && result.license) {
-        state.license = result.license;
-        updatePlanBadge();
-        renderSidebarCta();
-        renderCloudAccountSettings();
-        if (state.activeView === 'manage' && state.manageTab === 'plans') {
-          renderLicenseStatus(state.license);
-          renderPlans();
-        }
-        const planName = String(result.license.plan || 'Pro').toUpperCase();
-        const access = licenseAccessState(result.license);
-        const stateDesc = access === 'trial' ? 'trial' : 'plan';
-        showNotice(`Engraphis Cloud connected! ${planName} ${stateDesc} is active.`);
+        applyConnectedLicense(result.license);
       }
     } catch (error) {
       showNotice(`Connect failed: ${error.message}`);
@@ -7312,35 +7328,51 @@
   let bootPromise = null;
   let bootToken = '';
   let pendingConnectToken = '';
+  const PENDING_CONNECT_TOKEN_KEY = 'engraphis-pending-connect-token';
   function boot() {
     if (!bootPromise) bootPromise = runBoot().finally(() => { bootPromise = null; });
     return bootPromise;
   }
 
   async function runBoot() {
-    if (localDashboardUrl()) {
-      const fragment = new URLSearchParams(location.hash.slice(1));
-      if (fragment.has('connect_token')) {
-        pendingConnectToken = fragment.get('connect_token') || '';
-        fragment.delete('connect_token');
-        history.replaceState(null, '', location.pathname + location.search
-          + (fragment.size ? '#' + fragment.toString() : ''));
-      } else if (fragment.has('token')) {
-        const tok = fragment.get('token') || '';
-        if (tok.startsWith('engr_ct_')) {
-          pendingConnectToken = tok;
-          fragment.delete('token');
-          history.replaceState(null, '', location.pathname + location.search
-            + (fragment.size ? '#' + fragment.toString() : ''));
-        } else {
-          // Keep the one-shot credential for the exchange: this bookmark cleanup runs
-          // before the first bootstrap request can authenticate with it.
-          bootToken = tok;
-          fragment.delete('token');
-          history.replaceState(null, '', location.pathname + location.search
-            + (fragment.size ? '#' + fragment.toString() : ''));
-        }
+    const isLocal = localDashboardUrl();
+    // Always scrub connect tokens from the URL fragment so they never linger in history
+    // or bookmarks, even off-loopback. Only capture them for local interactive confirmation.
+    const fragment = new URLSearchParams(location.hash.slice(1));
+    let fragmentScrubbed = false;
+    if (fragment.has('connect_token')) {
+      const rawConnect = (fragment.get('connect_token') || '').trim();
+      if (isLocal && rawConnect) pendingConnectToken = rawConnect;
+      fragment.delete('connect_token');
+      fragmentScrubbed = true;
+    }
+    if (fragment.has('token')) {
+      const tok = (fragment.get('token') || '').trim();
+      if (tok.startsWith('engr_ct_')) {
+        if (isLocal && !pendingConnectToken) pendingConnectToken = tok;
+        fragment.delete('token');
+        fragmentScrubbed = true;
+      } else if (isLocal) {
+        // Keep the one-shot credential for the exchange: this bookmark cleanup runs
+        // before the first bootstrap request can authenticate with it.
+        bootToken = tok;
+        fragment.delete('token');
+        fragmentScrubbed = true;
       }
+    }
+    if (fragmentScrubbed) {
+      history.replaceState(null, '', location.pathname + location.search
+        + (fragment.size ? '#' + fragment.toString() : ''));
+    }
+    if (isLocal) {
+      try {
+        if (pendingConnectToken) {
+          sessionStorage.setItem(PENDING_CONNECT_TOKEN_KEY, pendingConnectToken);
+        } else {
+          const restored = sessionStorage.getItem(PENDING_CONNECT_TOKEN_KEY) || '';
+          if (restored) pendingConnectToken = restored;
+        }
+      } catch (_) {}
     }
     // Never accept bearer connect tokens from query strings (HTTP GET / Referer / proxy log leak).
     // If a user lands with a stale query param, scrub it from the address bar without authenticating it.
@@ -7382,35 +7414,36 @@
       state.booted = true;
       state.bootFailure = '';
       clearConnectionProblem();
+      const requestedManageTab = entry.searchParams.get('tab');
+      if (urlView === 'manage' && ['settings', 'sync', 'analytics', 'plans'].includes(requestedManageTab)) {
+        switchManageTab(requestedManageTab);
+      }
       if (pendingConnectToken) {
         const connectTok = pendingConnectToken;
         pendingConnectToken = '';
-        try {
-          const result = await api('/cloud/connect', {
-            method: 'POST',
-            body: { token: connectTok },
-          });
-          if (result && result.license) {
-            state.license = result.license;
-            updatePlanBadge();
-            renderSidebarCta();
-            renderCloudAccountSettings();
-            if (urlView === 'manage' && (entry.searchParams.get('tab') === 'plans' || !entry.searchParams.get('tab'))) {
-              renderLicenseStatus(state.license);
-              renderPlans();
+        try { sessionStorage.removeItem(PENDING_CONNECT_TOKEN_KEY); } catch (_) {}
+        const alreadyConnected = licenseHasHostedAccess();
+        const confirmed = await dialogs.confirm({
+          title: 'Connect this installation to Engraphis Cloud?',
+          message: alreadyConnected
+            ? 'This installation already has an active Engraphis Cloud connection. Continuing will replace the current cloud session with the token from this link. Only confirm if you opened this link from your own Engraphis Cloud account portal.'
+            : 'This link includes an Engraphis Cloud connect token. Confirm only if you opened this link from your own Engraphis Cloud account portal.',
+          confirmLabel: alreadyConnected ? 'Replace connection' : 'Connect',
+          danger: alreadyConnected,
+        });
+        if (confirmed) {
+          try {
+            const result = await api('/cloud/connect', {
+              method: 'POST',
+              body: { token: connectTok },
+            });
+            if (result && result.license) {
+              applyConnectedLicense(result.license);
             }
-            const planName = String(result.license.plan || 'Pro').toUpperCase();
-            const access = licenseAccessState(result.license);
-            const stateDesc = access === 'trial' ? 'trial' : 'plan';
-            showNotice(`Engraphis Cloud connected! ${planName} ${stateDesc} is active.`);
+          } catch (error) {
+            showNotice(`Could not connect Engraphis Cloud: ${error.message}`);
           }
-        } catch (error) {
-          showNotice(`Could not connect Engraphis Cloud: ${error.message}`);
         }
-      }
-      const requestedManageTab = entry.searchParams.get('tab');
-      if (urlView === 'manage' && ['settings', 'sync', 'analytics'].includes(requestedManageTab)) {
-        switchManageTab(requestedManageTab);
       }
     } catch (error) {
       if (error.status === 401 && error.code === 'local_browser_session_required'
@@ -7999,10 +8032,10 @@
 
   let lastLicenseCheck = 0;
   async function checkLicenseOnFocus() {
+    if (!state.booted || state.connectionLost) return;
     const now = Date.now();
     if (now - lastLicenseCheck < 10_000) return;
     lastLicenseCheck = now;
-    if (!state.booted || state.connectionLost) return;
     try {
       const license = await api('/license');
       if (!license) return;
@@ -8015,7 +8048,7 @@
         updatePlanBadge();
         renderSidebarCta();
         renderCloudAccountSettings();
-        if (state.activeView === 'manage' && state.manageTab === 'plans') {
+        if (state.view === 'manage' && state.manageTab === 'plans') {
           renderLicenseStatus(state.license);
           renderPlans();
         }
