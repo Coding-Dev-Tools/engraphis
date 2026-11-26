@@ -845,6 +845,55 @@
     renderFeatureCtas();
   }
 
+  function applyConnectedLicense(license) {
+    if (!license) return;
+    state.license = license;
+    updatePlanBadge();
+    renderSidebarCta();
+    renderCloudAccountSettings();
+    if (state.view === 'manage' && state.manageTab === 'plans') {
+      renderLicenseStatus(state.license);
+      renderPlans();
+    }
+    const planName = String(license.plan || 'Pro').toUpperCase();
+    const access = licenseAccessState(license);
+    if (access === 'active' || access === 'trial') {
+      const stateDesc = access === 'trial' ? 'trial' : 'plan';
+      showNotice(`Engraphis Cloud connected! ${planName} ${stateDesc} is active.`);
+    } else {
+      showNotice('Engraphis Cloud connected. Visit your account portal to activate a plan or trial.');
+    }
+  }
+
+  async function promptConnectToken() {
+    const response = await dialogs.open({
+      title: 'Connect Engraphis Cloud',
+      message: 'Enter the connect token from your Engraphis Cloud account portal (starts with engr_ct_):',
+      fields: [{
+        name: 'token',
+        type: 'password',
+        label: 'Connect token',
+        placeholder: 'engr_ct_...',
+        required: true,
+        maxLength: 512,
+      }],
+      confirmLabel: 'Connect',
+    });
+    const token = response && typeof response.token === 'string' ? response.token.trim() : '';
+    if (!token) return;
+    try {
+      const result = await api('/cloud/connect', {
+        method: 'POST',
+        body: { token },
+      });
+      if (result && result.license) {
+        applyConnectedLicense(result.license);
+      }
+    } catch (error) {
+      showNotice(`Connect failed: ${error.message}`);
+    }
+  }
+
   function renderCloudAccountSettings() {
     const target = byId('cloud-account-settings');
     if (!target) return;
@@ -870,7 +919,11 @@
     }
     const actions = node('div', 'automation-policy-actions');
     actions.append(action);
-    if (live) actions.append(button('Configure hosted policy', 'secondary-button', () => switchManageTab('automation')));
+    if (live) {
+      actions.append(button('Configure hosted policy', 'secondary-button', () => switchManageTab('automation')));
+    } else {
+      actions.append(button('Connect with token', 'secondary-button', promptConnectToken));
+    }
     target.append(node('p', 'automation-policy-note', detail), actions);
   }
 
@@ -6889,6 +6942,11 @@
         `${reason ? `${reason[0].toUpperCase()}${reason.slice(1)}, so hosted` : 'Hosted'} features are locked until billing is up to date. Local memories are unaffected.`);
     } else if (access === 'inactive') {
       callout('No hosted plan on this installation', 'The local memory engine is free and complete on its own. Cloud Sync, Analytics, Automation and Team administration run in Engraphis Cloud.');
+      if (typeof promptConnectToken === 'function') {
+        const actions = node('div', 'automation-policy-actions');
+        actions.append(button('Connect with token', 'secondary-button', promptConnectToken));
+        target.append(actions);
+      }
     }
     const known = license.known_features && typeof license.known_features === 'object' ? license.known_features : {};
     const included = new Set(Array.isArray(license.features) ? license.features : []);
@@ -7269,23 +7327,59 @@
 
   let bootPromise = null;
   let bootToken = '';
+  let pendingConnectToken = '';
   function boot() {
-    if (!bootPromise) bootPromise = runBoot().finally(() => { bootPromise = null; });
+    if (!bootPromise) bootPromise = runBoot(false).finally(() => { bootPromise = null; });
     return bootPromise;
   }
 
-  async function runBoot() {
-    if (localDashboardUrl()) {
-      const fragment = new URLSearchParams(location.hash.slice(1));
-      if (fragment.has('token')) {
+  async function runBoot(authRetried = false) {
+    const isLocal = localDashboardUrl();
+    // Always scrub connect tokens from the URL fragment so they never linger in history
+    // or bookmarks, even off-loopback. Only capture them for local interactive confirmation.
+    const fragment = new URLSearchParams(location.hash.slice(1));
+    let fragmentScrubbed = false;
+    if (fragment.has('connect_token')) {
+      const rawConnect = (fragment.get('connect_token') || '').trim();
+      if (isLocal && rawConnect) pendingConnectToken = rawConnect;
+      fragment.delete('connect_token');
+      fragmentScrubbed = true;
+    }
+    if (fragment.has('token')) {
+      const tok = (fragment.get('token') || '').trim();
+      if (tok.startsWith('engr_ct_')) {
+        if (isLocal && !pendingConnectToken) pendingConnectToken = tok;
+        fragment.delete('token');
+        fragmentScrubbed = true;
+      } else if (isLocal) {
         // Keep the one-shot credential for the exchange: this bookmark cleanup runs
         // before the first bootstrap request can authenticate with it.
-        bootToken = fragment.get('token') || '';
+        bootToken = tok;
         fragment.delete('token');
-        history.replaceState(null, '', location.pathname + location.search
-          + (fragment.size ? '#' + fragment.toString() : ''));
+        fragmentScrubbed = true;
       }
     }
+    if (fragmentScrubbed) {
+      history.replaceState(null, '', location.pathname + location.search
+        + (fragment.size ? '#' + fragment.toString() : ''));
+    }
+    // Never accept bearer connect tokens from query strings (HTTP GET / Referer / proxy log leak).
+    // If a user lands with a stale query param, scrub it from the address bar without authenticating it.
+    try {
+      const searchParams = new URLSearchParams(location.search);
+      let scrubbed = false;
+      if (searchParams.has('connect_token')) {
+        searchParams.delete('connect_token');
+        scrubbed = true;
+      }
+      if (searchParams.has('token') && (searchParams.get('token') || '').startsWith('engr_ct_')) {
+        searchParams.delete('token');
+        scrubbed = true;
+      }
+      if (scrubbed) {
+        history.replaceState(null, '', location.pathname + (searchParams.size ? '?' + searchParams.toString() : '') + location.hash);
+      }
+    } catch (_) {}
     byId('today-date').textContent = new Intl.DateTimeFormat(undefined, { dateStyle: 'long' }).format(new Date());
     let theme = 'slate';
     try {
@@ -7310,12 +7404,41 @@
       state.bootFailure = '';
       clearConnectionProblem();
       const requestedManageTab = entry.searchParams.get('tab');
-      if (urlView === 'manage' && ['settings', 'sync', 'analytics'].includes(requestedManageTab)) {
+      if (urlView === 'manage' && ['settings', 'sync', 'analytics', 'plans'].includes(requestedManageTab)) {
         switchManageTab(requestedManageTab);
+      }
+      if (pendingConnectToken) {
+        const connectTok = pendingConnectToken;
+        pendingConnectToken = '';
+        const alreadyConnected = licenseHasHostedAccess();
+        const confirmed = await dialogs.confirm({
+          title: 'Connect this installation to Engraphis Cloud?',
+          message: alreadyConnected
+            ? 'This installation already has an active Engraphis Cloud connection. Continuing will replace the current cloud session with the token from this link. Only confirm if you opened this link from your own Engraphis Cloud account portal.'
+            : 'This link includes an Engraphis Cloud connect token. Confirm only if you opened this link from your own Engraphis Cloud account portal.',
+          confirmLabel: alreadyConnected ? 'Replace connection' : 'Connect',
+          danger: alreadyConnected,
+        });
+        if (confirmed) {
+          try {
+            const result = await api('/cloud/connect', {
+              method: 'POST',
+              body: { token: connectTok },
+            });
+            if (result && result.license) {
+              applyConnectedLicense(result.license);
+            }
+          } catch (error) {
+            showNotice(`Could not connect Engraphis Cloud: ${error.message}`);
+          }
+        }
       }
     } catch (error) {
       if (error.status === 401 && error.code === 'local_browser_session_required'
-          && await authenticateBrowser(error)) {
+          && !authRetried && await authenticateBrowser(error)) {
+        if (pendingConnectToken) {
+          return runBoot(true);
+        }
         location.reload();
         return;
       }
@@ -7897,5 +8020,43 @@
   byId('sidebar-theme-select').addEventListener('change', event => applyTheme(event.target.value));
   byId('connection-retry').addEventListener('click', () => { void retryConnection(); });
   byId('embedder-recheck').addEventListener('click', () => { void recheckEmbedder(); });
+
+  let lastLicenseCheck = 0;
+  async function checkLicenseOnFocus() {
+    if (!state.booted || state.connectionLost) return;
+    const now = Date.now();
+    if (now - lastLicenseCheck < 10_000) return;
+    lastLicenseCheck = now;
+    try {
+      const license = await api('/license');
+      if (!license) return;
+      const prevAccess = licenseAccessState();
+      const prevPlan = licensePlanKey();
+      state.license = license;
+      const nextAccess = licenseAccessState();
+      const nextPlan = licensePlanKey();
+      if (prevAccess !== nextAccess || prevPlan !== nextPlan) {
+        updatePlanBadge();
+        renderSidebarCta();
+        renderCloudAccountSettings();
+        if (state.view === 'manage' && state.manageTab === 'plans') {
+          renderLicenseStatus(state.license);
+          renderPlans();
+        }
+        if (nextAccess === 'active' || nextAccess === 'trial') {
+          const desc = nextAccess === 'trial' ? 'trial' : 'subscription';
+          showNotice(`Engraphis Cloud ${desc} active (${nextPlan.toUpperCase()}).`);
+        }
+      }
+    } catch (_) {}
+  }
+
+  window.addEventListener('focus', checkLicenseOnFocus);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      checkLicenseOnFocus();
+    }
+  });
+
   boot();
 })();

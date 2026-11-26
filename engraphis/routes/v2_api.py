@@ -26,8 +26,8 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import quote, urlsplit
 
-from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel, Field, StrictBool, StrictInt
+from fastapi import APIRouter, HTTPException, Query, Request, Response
+from pydantic import BaseModel, Field, SecretStr, StrictBool, StrictInt, ValidationError as PydanticValidationError
 from starlette.concurrency import run_in_threadpool
 
 from engraphis import entitlements as _entitlements
@@ -4393,6 +4393,150 @@ def hosted_license_only():
 def hosted_trial_status(claim_id: str):
     del claim_id
     raise HTTPException(status_code=501, detail=_hosted_license_detail())
+
+
+_CLOUD_CONNECT_LOCK = threading.Lock()
+
+
+class _CloudConnectReq(BaseModel):
+    # The browser may only redeem a token against the shipped (or operator-configured)
+    # control plane. A request-supplied control URL would let any local caller choose
+    # where a bearer-equivalent connect token is sent, so unknown fields are refused.
+    # Length bounds are checked on the coerced SecretStr in the route handler so a
+    # FastAPI/Pydantic HTTP 422 response can never echo a raw connect token in detail.
+    model_config = {"extra": "forbid", "hide_input_in_errors": True}
+
+    token: SecretStr
+    label: Optional[str] = Field(None, max_length=100)
+    workspace: Optional[str] = Field(None, max_length=100)
+
+
+def _sanitize_cloud_connect_error(exc: Exception) -> tuple[int, str]:
+    raw_status = getattr(exc, "status", 503)
+    status_code = raw_status if isinstance(raw_status, int) and 400 <= raw_status <= 599 else 503
+    if status_code == 409:
+        return (
+            409,
+            "Local Engraphis state files have unsafe permissions or could not be written. "
+            "Check your Engraphis state directory and try again.",
+        )
+    message = " ".join(str(exc).split())
+    if (
+        not message
+        or len(message) > _MANAGED_ERROR_MAX_CHARS
+        or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in message)
+    ):
+        message = "Could not connect this device. Check the connect token and try again."
+    return status_code, message
+
+
+def _cloud_connect_sync(
+    token: str,
+    *,
+    installation_label: Optional[str],
+    workspace_id: Optional[str],
+) -> dict:
+    from engraphis import device_connect
+    from engraphis.private_state import UnsafeStateFile, private_file_stat
+
+    with _CLOUD_CONNECT_LOCK:
+        summary = device_connect.connect(
+            token,
+            installation_label=installation_label,
+            workspace_id=workspace_id,
+        )
+
+        with _ENTITLEMENT_REFRESH_LOCK:
+            global _authoritative_denial_at, _denied_state_digests
+            global _entitlement_refresh_failures, _entitlement_retry_after
+            _AUTHORITATIVE_DENIAL_PENDING.clear()
+            _authoritative_denial_at = 0.0
+            _denied_state_digests = {}
+            _entitlement_refresh_failures = 0
+            _entitlement_retry_after = 0.0
+
+        cache_path = _entitlement_cache_path()
+        if cache_path is not None:
+            try:
+                if private_file_stat(cache_path, allow_missing=True) is not None:
+                    cache_path.unlink(missing_ok=True)
+            except (OSError, UnsafeStateFile):
+                pass
+
+        safe_summary = {
+            "organization_id": summary.get("organization_id") if isinstance(summary, dict) else None,
+            "plan": summary.get("plan") if isinstance(summary, dict) else None,
+            "cloud_access_active": bool(summary.get("cloud_access_active")) if isinstance(summary, dict) else False,
+            "cloud_features": list(summary.get("cloud_features") or []) if isinstance(summary, dict) else [],
+        }
+        return {
+            "ok": True,
+            "summary": safe_summary,
+            "license": get_license(),
+        }
+
+
+@router.post("/cloud/connect")
+async def cloud_connect(request: Request, response: Response):
+    """Exchange a connect token from Engraphis Cloud to activate Pro/Team trial or subscription.
+
+    Enables web dashboard pairing without requiring the customer to run terminal commands.
+    """
+    from engraphis import device_connect
+
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        raw_body = await request.json()
+    except Exception:  # noqa: BLE001
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "Invalid JSON body.", "status": 422},
+            headers={"Cache-Control": "no-store"},
+        ) from None
+    if not isinstance(raw_body, dict):
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "Connect request body must be a JSON object.", "status": 422},
+            headers={"Cache-Control": "no-store"},
+        )
+    try:
+        req = _CloudConnectReq.model_validate(raw_body)
+    except PydanticValidationError:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "Invalid cloud connect request.", "status": 422},
+            headers={"Cache-Control": "no-store"},
+        ) from None
+    raw_token = req.token.get_secret_value()
+    if not raw_token or len(raw_token) > 512:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "Connect token must be between 1 and 512 characters.", "status": 422},
+            headers={"Cache-Control": "no-store"},
+        )
+    try:
+        return await run_in_threadpool(
+            _cloud_connect_sync,
+            raw_token,
+            installation_label=req.label or None,
+            workspace_id=req.workspace or None,
+        )
+    except device_connect.DeviceConnectError as exc:
+        status_code, message = _sanitize_cloud_connect_error(exc)
+        raise HTTPException(
+            status_code=status_code,
+            detail={"error": message, "status": status_code},
+            headers={"Cache-Control": "no-store"},
+        ) from exc
+    except Exception as exc:
+        # Never echo exception text to the browser: it can carry local paths or
+        # upstream response fragments. The exception type is enough to diagnose.
+        logger.warning("cloud connect failed (%s)", type(exc).__name__)
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "Could not connect this device. Check the connect token and try again."},
+            headers={"Cache-Control": "no-store"},
+        ) from exc
 
 
 @router.post("/ops/backup")
