@@ -80,8 +80,32 @@ def test_cloud_connect_overlong_token_not_echoed_in_422(monkeypatch, tmp_path):
     with TestClient(app, client=("127.0.0.1", 50000)) as client:
         resp = client.post("/api/cloud/connect", json={"token": secret_token})
         assert resp.status_code == 422
+        assert resp.headers.get("cache-control") == "no-store"
         assert secret_token not in resp.text
         assert "SSSSSSSSSS" not in resp.text
+
+
+def test_cloud_connect_malformed_validation_errors_never_echo_token(monkeypatch, tmp_path):
+    """List/object/raw malformed payloads must return a sanitized 422 without echoing token input."""
+    app = _app(monkeypatch, tmp_path)
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
+        for payload, needle in (
+            ({"token": ["engr_ct_secret_list_token_123"]}, "engr_ct_secret_list_token_123"),
+            ({"token": {"nested": "engr_ct_secret_obj_token_456"}}, "engr_ct_secret_obj_token_456"),
+            (["engr_ct_secret_root_list_789"], "engr_ct_secret_root_list_789"),
+        ):
+            resp = client.post("/api/cloud/connect", json=payload)
+            assert resp.status_code == 422
+            assert resp.headers.get("cache-control") == "no-store"
+            assert needle not in resp.text
+        raw_resp = client.post(
+            "/api/cloud/connect",
+            content=b'{"token": "engr_ct_secret_broken_json',
+            headers={"Content-Type": "application/json"},
+        )
+        assert raw_resp.status_code == 422
+        assert raw_resp.headers.get("cache-control") == "no-store"
+        assert "engr_ct_secret_broken_json" not in raw_resp.text
 
 
 def test_cloud_connect_success_updates_license_and_clears_denial(monkeypatch, tmp_path):
@@ -174,8 +198,9 @@ def test_ledger_js_hardens_connect_token_handoff_and_views():
     # Query-string parsing must never assign pendingConnectToken from location.search.
     assert "searchParams.get('connect_token')" not in js
     assert "pendingConnectToken = pendingConnectToken || (searchParams.get('token')" not in js
-    # Fragment handoff must require explicit user confirmation and survive auth reload.
-    assert "PENDING_CONNECT_TOKEN_KEY" in js
+    # Fragment handoff must require explicit user confirmation and stay out of browser storage.
+    assert "sessionStorage" not in js
+    assert "return runBoot(true)" in js
     assert "Connect this installation to Engraphis Cloud?" in js
     # Manual prompt masks token input and view checks use state.view (not state.activeView).
     assert "type: 'password'" in js

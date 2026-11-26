@@ -27,7 +27,7 @@ from typing import Optional
 from urllib.parse import quote, urlsplit
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
-from pydantic import BaseModel, Field, SecretStr, StrictBool, StrictInt
+from pydantic import BaseModel, Field, SecretStr, StrictBool, StrictInt, ValidationError as PydanticValidationError
 from starlette.concurrency import run_in_threadpool
 
 from engraphis import entitlements as _entitlements
@@ -4477,7 +4477,7 @@ def _cloud_connect_sync(
 
 
 @router.post("/cloud/connect")
-async def cloud_connect(req: _CloudConnectReq, response: Response):
+async def cloud_connect(request: Request, response: Response):
     """Exchange a connect token from Engraphis Cloud to activate Pro/Team trial or subscription.
 
     Enables web dashboard pairing without requiring the customer to run terminal commands.
@@ -4485,6 +4485,28 @@ async def cloud_connect(req: _CloudConnectReq, response: Response):
     from engraphis import device_connect
 
     response.headers["Cache-Control"] = "no-store"
+    try:
+        raw_body = await request.json()
+    except Exception:  # noqa: BLE001
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "Invalid JSON body.", "status": 422},
+            headers={"Cache-Control": "no-store"},
+        ) from None
+    if not isinstance(raw_body, dict):
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "Connect request body must be a JSON object.", "status": 422},
+            headers={"Cache-Control": "no-store"},
+        )
+    try:
+        req = _CloudConnectReq.model_validate(raw_body)
+    except PydanticValidationError:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "Invalid cloud connect request.", "status": 422},
+            headers={"Cache-Control": "no-store"},
+        ) from None
     raw_token = req.token.get_secret_value()
     if not raw_token or len(raw_token) > 512:
         raise HTTPException(

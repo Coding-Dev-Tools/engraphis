@@ -7328,13 +7328,12 @@
   let bootPromise = null;
   let bootToken = '';
   let pendingConnectToken = '';
-  const PENDING_CONNECT_TOKEN_KEY = 'engraphis-pending-connect-token';
   function boot() {
-    if (!bootPromise) bootPromise = runBoot().finally(() => { bootPromise = null; });
+    if (!bootPromise) bootPromise = runBoot(false).finally(() => { bootPromise = null; });
     return bootPromise;
   }
 
-  async function runBoot() {
+  async function runBoot(authRetried = false) {
     const isLocal = localDashboardUrl();
     // Always scrub connect tokens from the URL fragment so they never linger in history
     // or bookmarks, even off-loopback. Only capture them for local interactive confirmation.
@@ -7363,16 +7362,6 @@
     if (fragmentScrubbed) {
       history.replaceState(null, '', location.pathname + location.search
         + (fragment.size ? '#' + fragment.toString() : ''));
-    }
-    if (isLocal) {
-      try {
-        if (pendingConnectToken) {
-          sessionStorage.setItem(PENDING_CONNECT_TOKEN_KEY, pendingConnectToken);
-        } else {
-          const restored = sessionStorage.getItem(PENDING_CONNECT_TOKEN_KEY) || '';
-          if (restored) pendingConnectToken = restored;
-        }
-      } catch (_) {}
     }
     // Never accept bearer connect tokens from query strings (HTTP GET / Referer / proxy log leak).
     // If a user lands with a stale query param, scrub it from the address bar without authenticating it.
@@ -7421,7 +7410,6 @@
       if (pendingConnectToken) {
         const connectTok = pendingConnectToken;
         pendingConnectToken = '';
-        try { sessionStorage.removeItem(PENDING_CONNECT_TOKEN_KEY); } catch (_) {}
         const alreadyConnected = licenseHasHostedAccess();
         const confirmed = await dialogs.confirm({
           title: 'Connect this installation to Engraphis Cloud?',
@@ -7447,7 +7435,10 @@
       }
     } catch (error) {
       if (error.status === 401 && error.code === 'local_browser_session_required'
-          && await authenticateBrowser(error)) {
+          && !authRetried && await authenticateBrowser(error)) {
+        if (pendingConnectToken) {
+          return runBoot(true);
+        }
         location.reload();
         return;
       }
