@@ -5455,8 +5455,16 @@ class MemoryService:
         if synthesize:
             try:
                 from engraphis.config import settings
-                from engraphis.llm.client import LLMClient, auto_managed_llm_selected
-                if settings.llm_api_key or auto_managed_llm_selected():
+                from engraphis.llm.client import (
+                    LLMClient,
+                    auto_managed_llm_selected,
+                    managed_cloud_session_configured,
+                )
+                raw_provider = (settings.llm_provider or "openai").strip().lower()
+                if (
+                    (raw_provider == "managed" and managed_cloud_session_configured())
+                    or (raw_provider != "managed" and (settings.llm_api_key or auto_managed_llm_selected()))
+                ):
                     llm = LLMClient()
             except Exception:
                 llm = None

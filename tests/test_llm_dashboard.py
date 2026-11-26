@@ -720,3 +720,395 @@ def test_extractor_enabled_is_false_in_strict_exact_mode(monkeypatch, tmp_path):
         assert v2_api._extractor_enabled() is False
     finally:
         svc.close()
+
+
+@pytest.mark.parametrize(
+    "stale_entitlement",
+    [
+        {},
+        {"plan": "pro", "status": "expired", "cloud_access_active": False},
+        {"plan": "pro", "status": "past_due", "cloud_access_active": True},
+    ],
+)
+def test_explicit_managed_provider_recovers_from_stale_or_empty_entitlement_cache(
+    monkeypatch, stale_entitlement
+):
+    """Explicit provider=managed must allow live Cloud token refresh on stale/empty cache while auto-activation stays fail-closed."""
+    from engraphis import cloud_session, hosted_client
+    from engraphis.llm import client as llm_client
+    from engraphis.routes import v2_api
+
+    monkeypatch.setattr(settings, "llm_provider", "managed")
+    monkeypatch.setattr(settings, "llm_api_key", "")
+    monkeypatch.setattr(settings, "llm_base_url", "")
+    monkeypatch.setattr(hosted_client, "validate_cloud_base_url", lambda url: url.rstrip("/"))
+    monkeypatch.setattr(cloud_session, "configured", lambda *, require_compute=True: True)
+    monkeypatch.setattr(
+        cloud_session,
+        "credential_bound_control_url",
+        lambda: "https://api.engraphis.com",
+    )
+    monkeypatch.setattr(cloud_session, "saved_entitlement", lambda: stale_entitlement)
+
+    calls: list[bool] = []
+
+    def _fake_access(workspace, *, require_compute=True, deadline=None):
+        calls.append(require_compute)
+        return ("fresh-cloud-token", "org_1", "")
+
+    monkeypatch.setattr(cloud_session, "access_for_workspace", _fake_access)
+
+    # Implicit auto-activation remains fail-closed on stale/empty cache.
+    assert llm_client.managed_cloud_llm_available() is False
+    assert llm_client.auto_managed_llm_selected() is False
+    assert llm_client.auto_managed_extractor_allowed() is False
+
+    # Explicit provider=managed allows live token exchange to refresh entitlement.
+    assert llm_client.managed_cloud_session_configured() is True
+    provider, model, key_set, is_managed = v2_api._effective_llm_config()
+    assert (provider, model, key_set, is_managed) == (
+        "managed",
+        llm_client.DEFAULT_MANAGED_MODEL,
+        True,
+        True,
+    )
+
+    # Works both with explicit provider= kwarg and default from settings.llm_provider.
+    with llm_client.LLMClient() as llm:
+        assert llm.provider == "managed"
+        assert llm.has_credentials is True
+        token, url = llm._resolve_managed_auth(timeout=5.0)
+        assert token == "fresh-cloud-token"
+        assert url == "https://api.engraphis.com/v1/llm"
+
+    # Implicit provider=openai stays non-managed on stale/empty cache.
+    monkeypatch.setattr(settings, "llm_provider", "openai")
+    monkeypatch.setattr(settings, "llm_model", "gpt-4o-mini")
+    assert v2_api._effective_llm_config() == ("openai", "gpt-4o-mini", False, False)
+
+    assert calls == [False]
+
+
+@pytest.mark.parametrize(
+    ("is_configured", "control_url"),
+    [
+        (False, ""),
+        (True, ""),
+        (False, "https://api.engraphis.com"),
+    ],
+)
+def test_explicit_managed_provider_fails_when_cloud_session_unconfigured(
+    monkeypatch, tmp_path, is_configured, control_url
+):
+    """Explicit provider=managed rejects partial/missing Cloud sessions and ignores BYOK keys."""
+    from engraphis import cloud_session
+    from engraphis.llm import client as llm_client
+    from engraphis.routes import v2_api
+
+    real_llm_cls = llm_client.LLMClient
+    client, _svc = _client(monkeypatch, tmp_path)
+    monkeypatch.setattr(settings, "llm_provider", "managed")
+    monkeypatch.setattr(settings, "llm_api_key", "sk-byok-must-not-satisfy-managed")
+    monkeypatch.setattr(cloud_session, "configured", lambda *, require_compute=True: is_configured)
+    monkeypatch.setattr(cloud_session, "credential_bound_control_url", lambda: control_url)
+
+    assert llm_client.managed_cloud_session_configured() is False
+    assert v2_api._effective_llm_config()[2] is False
+
+    resp = client.post("/api/llm/extractor", json={"enabled": True})
+    assert resp.status_code == 400
+    assert "engraphis-connect" in resp.json()["detail"]["error"]
+
+    with real_llm_cls(provider="managed") as llm:
+        assert llm.has_credentials is False
+        with pytest.raises(ValueError, match="connected Engraphis Cloud session"):
+            llm._resolve_managed_auth(timeout=5.0)
+
+
+def test_dashboard_http_routes_recover_or_deny_explicit_managed_provider_on_stale_cache(
+    monkeypatch, tmp_path
+):
+    """HTTP /api/llm/status, /api/llm/test, and /api/llm/extractor honor live Cloud recovery and 402 denial."""
+    from engraphis import cloud_session, hosted_client
+    from engraphis.llm import client as llm_client
+    from engraphis.routes import v2_api
+
+    real_llm_cls = llm_client.LLMClient
+    monkeypatch.setattr(hosted_client, "validate_cloud_base_url", lambda url: url.rstrip("/"))
+
+    monkeypatch.setattr(
+        config_module,
+        "_CONFIG_ENV_PATH",
+        tmp_path / "home" / ".engraphis" / "config.env",
+    )
+    monkeypatch.setattr(settings, "llm_provider", "managed")
+    monkeypatch.setattr(settings, "llm_model", "gpt-4o-mini")
+    monkeypatch.setattr(settings, "llm_api_key", "")
+    monkeypatch.setattr(settings, "llm_base_url", "https://custom.byok.example/v1")
+    monkeypatch.setattr(settings, "extractor", "none")
+    monkeypatch.setattr(settings, "llm_auto_extract", True)
+    monkeypatch.setenv("ENGRAPHIS_EXTRACTOR", "none")
+    monkeypatch.setenv("ENGRAPHIS_LLM_AUTO_EXTRACT", "1")
+    for key, value in {"ok": False, "provider": "", "model": "", "tested_at": 0.0}.items():
+        monkeypatch.setitem(v2_api._llm_connection_state, key, value)
+    svc = MemoryService.create(":memory:", embed_model="", extractor="none", graph_extractor="none")
+    try:
+        v2_api.set_service(svc)
+        app = FastAPI()
+        app.include_router(v2_api.router)
+        http = TestClient(app)
+
+        monkeypatch.setattr(cloud_session, "configured", lambda *, require_compute=True: True)
+        monkeypatch.setattr(
+            cloud_session,
+            "credential_bound_control_url",
+            lambda: "https://api.engraphis.com",
+        )
+        monkeypatch.setattr(
+            cloud_session,
+            "saved_entitlement",
+            lambda: {"plan": "pro", "status": "expired", "cloud_access_active": False},
+        )
+        denial_recorded: list[bool] = []
+        monkeypatch.setattr(
+            cloud_session,
+            "record_billing_denial",
+            lambda: (denial_recorded.append(True) or True),
+        )
+
+        # 1. Status reflects configured managed provider without auto-enabling extraction or claiming custom URL.
+        status_before = http.get("/api/llm/status").json()
+        assert status_before["provider"] == "managed"
+        assert status_before["key_set"] is True
+        assert status_before["custom_base_url_configured"] is False
+        assert status_before["working"] is False
+        assert status_before["extractor_enabled"] is False
+
+        # 2. Live 402 denial fails closed on both /api/llm/test and /api/llm/extractor and records denial.
+        class _Denied402(RuntimeError):
+            status = 402
+
+        monkeypatch.setattr(
+            cloud_session,
+            "access_for_workspace",
+            lambda *_a, **_kw: (_ for _ in ()).throw(_Denied402("payment required")),
+        )
+        denied_test = http.post("/api/llm/test").json()
+        assert denied_test["ok"] is False
+        assert denied_test["error"]
+        assert "payment required" not in denied_test["error"]
+        assert denied_test["extractor_enabled"] is False
+        assert len(denial_recorded) >= 1
+
+        denied_enable = http.post("/api/llm/extractor", json={"enabled": True})
+        assert denied_enable.status_code == 400
+        assert svc.engine.extractor is None
+
+        # 3. Live refresh recovery succeeds after paid upgrade and enables extraction.
+        monkeypatch.setattr(
+            cloud_session,
+            "access_for_workspace",
+            lambda *_a, **_kw: ("recovered-token", "org_1", ""),
+        )
+        monkeypatch.setattr(
+            real_llm_cls,
+            "_chat_openai_compat",
+            lambda self, *a, **kw: "ok",
+        )
+        recovered = http.post("/api/llm/test").json()
+        assert recovered["ok"] is True
+        assert recovered["provider"] == "managed"
+        assert recovered["extractor_enabled"] is True
+
+        enabled = http.post("/api/llm/extractor", json={"enabled": True})
+        assert enabled.status_code == 200
+        assert enabled.json()["ok"] is True
+    finally:
+        svc.close()
+
+
+def test_explicit_managed_provider_rejects_control_url_drift_and_runs_proactive_synthesis(
+    monkeypatch, tmp_path
+):
+    """Control-URL drift raises 401 and proactive_context(synthesize=True) honors explicit managed recovery."""
+    from engraphis import ai_context, cloud_session, hosted_client
+    from engraphis.llm import client as llm_client
+
+    monkeypatch.setattr(settings, "llm_provider", "managed")
+    monkeypatch.setattr(settings, "llm_api_key", "")
+    monkeypatch.setattr(hosted_client, "validate_cloud_base_url", lambda url: url.rstrip("/"))
+    monkeypatch.setattr(cloud_session, "configured", lambda *, require_compute=True: True)
+    monkeypatch.setattr(
+        cloud_session,
+        "saved_entitlement",
+        lambda: {"plan": "pro", "status": "expired", "cloud_access_active": False},
+    )
+
+    urls = iter(["https://api.engraphis.com", "https://api.engraphis.com", "https://evil.example"])
+    monkeypatch.setattr(cloud_session, "credential_bound_control_url", lambda: next(urls))
+    access_calls: list[int] = []
+
+    def _fake_access(*_a, **_kw):
+        access_calls.append(1)
+        return ("tok", "org_1", "")
+
+    monkeypatch.setattr(cloud_session, "access_for_workspace", _fake_access)
+    with llm_client.LLMClient(provider="managed") as llm:
+        with pytest.raises(llm_client._LLMProviderError) as exc_info:
+            llm._resolve_managed_auth(timeout=5.0)
+        assert exc_info.value.status == 401
+    assert access_calls == [1]
+
+    # Verify MemoryService.proactive_context(synthesize=True) passes an LLMClient on explicit managed.
+    monkeypatch.setattr(
+        cloud_session,
+        "credential_bound_control_url",
+        lambda: "https://api.engraphis.com",
+    )
+    seen_llm: list[object] = []
+    orig_build = ai_context.build_proactive_context
+
+    def _spy_build(**kwargs):
+        seen_llm.append(kwargs.get("llm"))
+        return orig_build(**{**kwargs, "llm": None, "synthesize": False})
+
+    monkeypatch.setattr(ai_context, "build_proactive_context", _spy_build)
+    svc = MemoryService.create(str(tmp_path / "proactive_managed.db"), embed_model="", extractor="none")
+    try:
+        svc.remember("Migrated auth tokens to PASETO.", workspace="demo")
+        svc.proactive_context(task="check auth migration", workspace="demo", synthesize=True)
+    finally:
+        svc.close()
+    assert len(seen_llm) == 1
+    assert isinstance(seen_llm[0], llm_client.LLMClient)
+    assert seen_llm[0].provider == "managed"
+
+    # Negative branch: explicit managed with unconfigured session + BYOK key must NOT construct LLMClient.
+    seen_llm.clear()
+    monkeypatch.setattr(settings, "llm_api_key", "sk-byok-must-not-run")
+    monkeypatch.setattr(cloud_session, "configured", lambda *, require_compute=True: False)
+    svc2 = MemoryService.create(str(tmp_path / "proactive_unconfigured.db"), embed_model="", extractor="none")
+    try:
+        svc2.remember("Keep BYOK isolated.", workspace="demo")
+        svc2.proactive_context(task="check isolation", workspace="demo", synthesize=True)
+    finally:
+        svc2.close()
+    assert seen_llm == [None]
+
+
+def test_managed_auth_classifies_offline_timeout_401_and_persists_chat_402_denial(monkeypatch):
+    """Offline DNS failures report unreachable (not 401), TimeoutError/401 fail closed, and chat 402 records denial."""
+    from engraphis import cloud_session, hosted_client
+    from engraphis.llm import client as llm_client
+
+    monkeypatch.setattr(settings, "llm_provider", "   ")
+    monkeypatch.setattr(settings, "llm_api_key", "")
+    monkeypatch.setattr(settings, "llm_base_url", "")
+    monkeypatch.setattr(cloud_session, "configured", lambda *, require_compute=True: False)
+    with llm_client.LLMClient(provider="   ") as ws_llm:
+        assert ws_llm.provider == "openai"
+
+    monkeypatch.setattr(settings, "llm_provider", "managed")
+    monkeypatch.setattr(cloud_session, "configured", lambda *, require_compute=True: True)
+    monkeypatch.setattr(
+        cloud_session,
+        "credential_bound_control_url",
+        lambda: "https://api.engraphis.com",
+    )
+
+    # 1. Offline CloudUrlUnresolved maps to unreachable=True (not HTTP 401).
+    def _dns_fail(_url: str) -> str:
+        raise hosted_client.CloudUrlUnresolved("offline")
+
+    monkeypatch.setattr(hosted_client, "validate_cloud_base_url", _dns_fail)
+    with llm_client.LLMClient(provider="managed") as llm:
+        with pytest.raises(llm_client._LLMProviderError) as exc_info:
+            llm._resolve_managed_auth(timeout=5.0)
+        assert exc_info.value.unreachable is True
+        assert exc_info.value.status is None
+        ping_res = llm.ping()
+        assert ping_res["ok"] is False
+        assert "Could not reach" in ping_res["error"]
+
+    # 2. TimeoutError propagates cleanly.
+    monkeypatch.setattr(hosted_client, "validate_cloud_base_url", lambda url: url.rstrip("/"))
+    monkeypatch.setattr(
+        cloud_session,
+        "access_for_workspace",
+        lambda *_a, **_kw: (_ for _ in ()).throw(TimeoutError("deadline exceeded")),
+    )
+    with llm_client.LLMClient(provider="managed") as llm:
+        with pytest.raises(TimeoutError):
+            llm._resolve_managed_auth(timeout=5.0)
+
+    # 3. 401 refresh failure maps to status=401 without recording billing denial.
+    denials: list[bool] = []
+    monkeypatch.setattr(cloud_session, "record_billing_denial", lambda: (denials.append(True) or True))
+
+    class _Unauthorized401(RuntimeError):
+        status = 401
+
+    monkeypatch.setattr(
+        cloud_session,
+        "access_for_workspace",
+        lambda *_a, **_kw: (_ for _ in ()).throw(_Unauthorized401("revoked")),
+    )
+    with llm_client.LLMClient(provider="managed") as llm:
+        with pytest.raises(llm_client._LLMProviderError) as exc_info:
+            llm._resolve_managed_auth(timeout=5.0)
+        assert exc_info.value.status == 401
+    assert denials == []
+
+    # 4. Managed chat() HTTP 402 records billing denial so cached entitlement flips inactive.
+    monkeypatch.setattr(
+        cloud_session,
+        "access_for_workspace",
+        lambda *_a, **_kw: ("tok", "org_1", ""),
+    )
+    monkeypatch.setattr(
+        llm_client.LLMClient,
+        "_chat_openai_compat",
+        lambda self, *a, **kw: (_ for _ in ()).throw(llm_client._LLMProviderError(status=402)),
+    )
+    with llm_client.LLMClient(provider="managed") as llm:
+        with pytest.raises(llm_client._LLMProviderError) as exc_info:
+            llm.chat([{"role": "user", "content": "hi"}])
+        assert exc_info.value.status == 402
+    assert denials == [True]
+
+
+def test_ping_scopes_short_timeout_to_managed_provider_only(monkeypatch):
+    """Non-managed providers (Ollama/BYOK) keep default timeout and retry behavior in ping()."""
+    from engraphis.llm import client as llm_client
+
+    seen_timeouts: list[tuple[str, object]] = []
+
+    def _fake_chat(self, messages, *, system=None, temperature=None, max_tokens=None, timeout=None):
+        seen_timeouts.append((self.provider, timeout))
+        return "ok"
+
+    monkeypatch.setattr(llm_client.LLMClient, "chat", _fake_chat)
+
+    with llm_client.LLMClient(provider="managed") as managed_llm:
+        assert managed_llm.ping()["ok"] is True
+    with llm_client.LLMClient(
+        provider="ollama",
+        base_url="http://127.0.0.1:11434/v1",
+        model="llama3",
+    ) as ollama_llm:
+        assert ollama_llm.ping()["ok"] is True
+    with llm_client.LLMClient(
+        provider="openai",
+        api_key="sk-test-key",
+        model="gpt-4o-mini",
+    ) as openai_llm:
+        assert openai_llm.ping()["ok"] is True
+
+    assert seen_timeouts == [
+        ("managed", 15.0),
+        ("ollama", None),
+        ("openai", None),
+    ]
+
+
+

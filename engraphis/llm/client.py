@@ -48,14 +48,28 @@ _MANAGED_CLOUD_PLANS = frozenset({"pro", "team"})
 _MANAGED_ACTIVE_STATUSES = frozenset({"active", "trialing"})
 
 
+def managed_cloud_session_configured() -> bool:
+    """Return True when a credential-bound Cloud session is configured.
+
+    Used for explicit ``provider="managed"`` requests so env-only Cloud
+    bootstrap and post-upgrade recovery can contact the control plane and
+    refresh a stale or empty local entitlement cache.
+    """
+    try:
+        from engraphis import cloud_session
+        return bool(
+            cloud_session.configured(require_compute=False)
+            and cloud_session.credential_bound_control_url()
+        )
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def managed_cloud_llm_available() -> bool:
     """Return True only when an active paid or trial Pro/Team Cloud session is verified."""
     try:
         from engraphis import cloud_session
-        if not (
-            cloud_session.configured(require_compute=False)
-            and cloud_session.credential_bound_control_url()
-        ):
+        if not managed_cloud_session_configured():
             return False
         saved = cloud_session.saved_entitlement()
         if not isinstance(saved, dict) or not saved:
@@ -224,7 +238,11 @@ class LLMClient:
         extra_headers: Optional[dict] = None,
         effort: Optional[str] = None,
     ) -> None:
-        raw_provider = (provider or settings.llm_provider or "openai").lower()
+        raw_provider = (
+            (provider or "").strip()
+            or (settings.llm_provider or "").strip()
+            or "openai"
+        ).lower()
         raw_key = api_key if api_key is not None else settings.llm_api_key
         raw_base_url = base_url if base_url is not None else settings.llm_base_url
         if (
@@ -259,8 +277,10 @@ class LLMClient:
 
     @property
     def has_credentials(self) -> bool:
-        """Return True when a static API key or active managed Cloud session is available."""
-        return bool(self.api_key) or (self.provider == "managed" and managed_cloud_llm_available())
+        """Return True when a static API key or configured managed Cloud session is available."""
+        return bool(self.api_key) or (
+            self.provider == "managed" and managed_cloud_session_configured()
+        )
 
     def close(self) -> None:
         self._http.close()
@@ -278,9 +298,9 @@ class LLMClient:
         import time as _time
 
         from engraphis import cloud_session
-        from engraphis.hosted_client import validate_cloud_base_url
+        from engraphis.hosted_client import CloudUrlUnresolved, validate_cloud_base_url
 
-        if not managed_cloud_llm_available():
+        if not managed_cloud_session_configured():
             raise ValueError(
                 "No LLM API key or connected Engraphis Cloud session configured. "
                 "Connect a Pro or Team account with engraphis-connect or set ENGRAPHIS_LLM_API_KEY."
@@ -295,8 +315,15 @@ class LLMClient:
             control = validate_cloud_base_url(cloud_session.credential_bound_control_url())
         except TimeoutError:
             raise
+        except CloudUrlUnresolved:
+            raise _LLMProviderError(unreachable=True) from None
         except Exception as exc:  # noqa: BLE001
             status = getattr(exc, "status", None)
+            if status == 402:
+                try:
+                    cloud_session.record_billing_denial()
+                except Exception:  # noqa: BLE001
+                    pass
             raise _LLMProviderError(
                 status=status if isinstance(status, int) and 400 <= status <= 599 else 401
             ) from None
@@ -316,15 +343,24 @@ class LLMClient:
         """Send a chat request and return the assistant's text reply."""
         if self.provider == "managed":
             managed_key, managed_url = self._resolve_managed_auth(timeout=timeout)
-            return self._chat_openai_compat(
-                messages,
-                system,
-                temperature,
-                max_tokens,
-                timeout,
-                api_key_override=managed_key,
-                base_url_override=managed_url,
-            )
+            try:
+                return self._chat_openai_compat(
+                    messages,
+                    system,
+                    temperature,
+                    max_tokens,
+                    timeout,
+                    api_key_override=managed_key,
+                    base_url_override=managed_url,
+                )
+            except _LLMProviderError as exc:
+                if exc.status == 402:
+                    try:
+                        from engraphis import cloud_session
+                        cloud_session.record_billing_denial()
+                    except Exception:  # noqa: BLE001
+                        pass
+                raise
         if not self.api_key:
             raise ValueError(
                 "No LLM API key configured. Set ENGRAPHIS_LLM_API_KEY in .env "
@@ -414,9 +450,13 @@ class LLMClient:
             # Reasoning models spend the completion budget on hidden reasoning
             # tokens before any visible content; a tiny cap can return an empty
             # reply and read as a false negative.
+            # Keep the short probe deadline scoped to managed Cloud refreshes so
+            # cold local/custom endpoints (e.g. Ollama) retain the client default
+            # timeout and normal transient-error retries.
+            probe_timeout = 15.0 if self.provider == "managed" else None
             reply = self.chat(
                 [{"role": "user", "content": "Reply with the single word: ok"}],
-                temperature=0.0, max_tokens=1024,
+                temperature=0.0, max_tokens=1024, timeout=probe_timeout,
             )
             return {"ok": True, "reply": (reply or "").strip()[:200],
                     "error": "", "provider": self.provider, "model": self.model}

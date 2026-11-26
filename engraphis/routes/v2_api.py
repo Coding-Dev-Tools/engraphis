@@ -866,13 +866,17 @@ def _set_llm_extractor_locked(enabled: bool, *, persist: bool) -> dict:
 
 def _effective_llm_config() -> tuple[str, str, bool, bool]:
     """Return ``(provider, model, key_set, is_managed)`` accounting for Pro/Team managed LLM."""
-    from engraphis.llm.client import managed_cloud_llm_available
+    from engraphis.llm.client import (
+        managed_cloud_llm_available,
+        managed_cloud_session_configured,
+    )
 
-    raw_provider = (settings.llm_provider or "openai").lower()
+    raw_provider = (settings.llm_provider or "openai").strip().lower()
     raw_model = settings.llm_model
     has_key = bool(settings.llm_api_key)
-    cloud_ready = managed_cloud_llm_available()
-    if raw_provider == "managed" or (
+    explicit_managed = raw_provider == "managed"
+    cloud_ready = False if explicit_managed else managed_cloud_llm_available()
+    if explicit_managed or (
         not has_key
         and raw_provider in {"", "openai"}
         and not settings.llm_base_url
@@ -884,7 +888,8 @@ def _effective_llm_config() -> tuple[str, str, bool, bool]:
             if (raw_model and raw_model != "gpt-4o-mini")
             else _LLM_DEFAULT_MODELS["managed"]
         )
-        return provider, model, cloud_ready, True
+        key_set = managed_cloud_session_configured() if explicit_managed else cloud_ready
+        return provider, model, key_set, True
     provider = raw_provider or "openai"
     model = raw_model or _LLM_DEFAULT_MODELS.get(provider, "")
     return provider, model, has_key, False
@@ -950,7 +955,7 @@ def llm_status():
         "key_set": key_set,
         "managed": is_managed,
         "included_allowance_daily": 100 if is_managed else None,
-        "custom_base_url_configured": bool(settings.llm_base_url),
+        "custom_base_url_configured": False if is_managed else bool(settings.llm_base_url),
         "extractor": settings.extractor,
         "extractor_enabled": _extractor_enabled(),
         "retention_supervisor": settings.retention_supervisor,
@@ -1021,10 +1026,15 @@ def llm_extractor_toggle(req: _ExtractorToggleReq):
     """Turn structured extraction on/off immediately; enabling requires a live provider."""
     if not req.enabled:
         return {"ok": True, **_set_llm_extractor(False)}
-    provider, model, key_set, _is_managed = _effective_llm_config()
+    provider, model, key_set, is_managed = _effective_llm_config()
     if not key_set:
-        raise HTTPException(status_code=400, detail={
-            "error": "Connect an LLM and set its API key before enabling extraction."})
+        missing_error = (
+            "Connect your Engraphis Cloud Pro or Team account with engraphis-connect "
+            "before enabling managed extraction."
+            if is_managed
+            else "Connect an LLM and set its API key before enabling extraction."
+        )
+        raise HTTPException(status_code=400, detail={"error": missing_error})
     try:
         from engraphis.llm.client import LLMClient
         with LLMClient() as llm:
