@@ -23,8 +23,8 @@ _DERIVED_GRAPH_HINT_KEYS = ("entities", "relations", "structured_extraction")
 # are enforced by the service/sync boundaries, not trusted merely because a payload
 # supplied a familiar-looking label next to ``trusted=true``.
 EXTERNAL_SOURCES = frozenset({
-    "api", "extractor", "import", "mcp", "postgres_introspector", "resource_extractor",
-    "sync", "tool", "web",
+    "api", "extractor", "import", "mcp", "passive-hook", "postgres_introspector",
+    "resource_extractor", "sync", "tool", "web",
 })
 
 
