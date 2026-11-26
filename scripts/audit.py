@@ -210,8 +210,9 @@ def run_audit(*, repo_path: Optional[Path] = None) -> dict[str, Any]:
     started = time.perf_counter()
     service = _create_isolated_service()
     try:
-        for fact in AUDIT_FACTS:
-            service.remember(**fact)
+        base_ts = time.time() - 3600.0
+        for idx, fact in enumerate(AUDIT_FACTS):
+            service.remember(**fact, valid_from=base_ts + idx * 60.0)
 
         # Check 1: Bi-temporal supersession (JWT -> PASETO)
         why_res = service.why(

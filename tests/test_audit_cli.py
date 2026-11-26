@@ -162,3 +162,18 @@ def test_audit_prompt_json_quotes_embedded_quotes_and_redacts_secrets(tmp_path: 
     assert fake_tok not in prompt
     assert "<redacted>" in subject
     assert json.dumps(subject) in prompt
+
+
+def test_run_audit_succeeds_under_frozen_coarse_clock(monkeypatch) -> None:
+    """Coarse/identical system clock ticks must not break AUDIT_FACTS supersession."""
+    import time as time_mod
+    from engraphis.core import store as core_store
+
+    frozen = 1_750_000_000.0
+    monkeypatch.setattr(time_mod, "time", lambda: frozen)
+    monkeypatch.setattr(core_store, "now_ts", lambda: frozen)
+
+    report = audit.run_audit()
+    assert report["passed"] is True
+    assert report["score"] == "3/3"
+    assert all(check["passed"] for check in report["checks"])
