@@ -12,22 +12,26 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import stat
 import sys
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
 if __package__ in (None, ""):
-    # Direct absolute-file invocation (used by installed hooks so Python never
-    # prepends '' / CWD to sys.path) resolves the enclosing package root cleanly.
+    _pkg_dir = str(Path(__file__).resolve().parent)
     _pkg_root = str(Path(__file__).resolve().parent.parent)
-    if _pkg_root not in sys.path:
+    if sys.path and sys.path[0] == _pkg_dir:
+        sys.path[0] = _pkg_root
+    elif _pkg_root not in sys.path:
         sys.path.insert(0, _pkg_root)
 
 from engraphis.hooks import (
     SUPPORTED_CLIENTS,
     build_session_briefing,
     default_client_settings_path,
+    extract_durable_candidates,
     extract_text_from_hook_payload,
     install_client_hooks,
     stage_passive_capture,
@@ -36,6 +40,7 @@ from engraphis.hooks import (
 
 _SAFE_REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _HOOK_BUSY_TIMEOUT_MS = 500
+_MAX_HOOK_INPUT_BYTES = 1_048_576
 
 
 def _configure_utf8_stdio() -> None:
@@ -81,13 +86,45 @@ def _resolve_workspace_name(
     return str(resolved or "default")
 
 
+def _read_bounded_stdin() -> str:
+    try:
+        return sys.stdin.read(_MAX_HOOK_INPUT_BYTES)
+    except OSError:
+        return ""
+
+
+def _read_bounded_file(path_str: str) -> str:
+    path = Path(path_str).expanduser()
+    if path.is_symlink():
+        raise ValueError(f"refusing to read symlinked capture input: {path}")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    fd = os.open(str(path), flags)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise ValueError(f"capture input must be a regular file: {path}")
+        chunks: list[bytes] = []
+        remaining = _MAX_HOOK_INPUT_BYTES
+        while remaining > 0:
+            block = os.read(fd, min(remaining, 16384))
+            if not block:
+                break
+            chunks.append(block)
+            remaining -= len(block)
+        return b"".join(chunks).decode("utf-8", errors="replace")
+    finally:
+        os.close(fd)
+
+
 def _open_service(
     db_override: Optional[str],
     *,
     hook_mode: bool = False,
     needs_embeddings: bool = True,
+    read_only: bool = False,
 ) -> tuple[Any, str]:
     from engraphis.config import settings
+    from engraphis.core.query_planner import DeterministicQueryPlanner
     from engraphis.service import MemoryService
 
     db_path = str(db_override) if db_override is not None else str(settings.db_path)
@@ -99,16 +136,24 @@ def _open_service(
     raw_embed_dim = getattr(settings, "embed_dim", None)
     embed_dim = int(raw_embed_dim) if raw_embed_dim else 384
     embed_model = (settings.embed_model or None) if needs_embeddings else None
+    # Pin all passive-hook service opens strictly offline/local so remote LLM/Jev settings
+    # never egress unreviewed transcripts or stall synchronous IDE hooks.
     service = MemoryService.create(
         resolved_db,
         embed_model=embed_model,
         embed_dim=embed_dim,
-        embed_revision=getattr(settings, "embed_revision", None),
+        embed_revision=(getattr(settings, "embed_revision", None) or None),
         require_immutable_models=getattr(settings, "require_immutable_models", False),
         vector_backend=getattr(settings, "vector_backend", "auto"),
-        rerank_model=getattr(settings, "rerank_model", None) if needs_embeddings else None,
-        rerank_revision=getattr(settings, "rerank_revision", None),
+        rerank_model=(getattr(settings, "rerank_model", None) or None) if needs_embeddings else None,
+        rerank_revision=(getattr(settings, "rerank_revision", None) or None),
         allowed_workspaces=getattr(settings, "allowed_workspaces", None),
+        extractor="none",
+        graph_extractor="none",
+        retention_supervisor="none",
+        allow_automatic_critical_retention=False,
+        query_planner=DeterministicQueryPlanner(),
+        read_only=read_only,
     )
     if hook_mode:
         conn = getattr(getattr(service, "store", None), "conn", None)
@@ -142,10 +187,7 @@ def _cmd_install(args: argparse.Namespace) -> int:
 def _cmd_briefing(args: argparse.Namespace) -> int:
     raw_stdin = ""
     if args.hook_mode and not sys.stdin.isatty():
-        try:
-            raw_stdin = sys.stdin.read()
-        except OSError:
-            raw_stdin = ""
+        raw_stdin = _read_bounded_stdin()
     _, payload_meta = extract_text_from_hook_payload(raw_stdin) if raw_stdin else ("", {})
     cwd_hint = str(payload_meta.get("cwd") or "") or None
     repo = args.repo or _infer_repo_name(cwd_hint)
@@ -164,6 +206,7 @@ def _cmd_briefing(args: argparse.Namespace) -> int:
         args.db,
         hook_mode=args.hook_mode,
         needs_embeddings=bool((args.query or "").strip()),
+        read_only=True,
     )
     try:
         workspace = _resolve_workspace_name(service, args.workspace, repo=repo, for_write=False)
@@ -192,14 +235,20 @@ def _cmd_briefing(args: argparse.Namespace) -> int:
 def _cmd_capture(args: argparse.Namespace) -> int:
     raw_input = ""
     if args.file:
-        raw_input = Path(args.file).read_text(encoding="utf-8", errors="replace")
-    elif args.stdin or args.hook_mode or not sys.stdin.isatty():
-        raw_input = sys.stdin.read()
+        raw_input = _read_bounded_file(args.file)
+    elif args.stdin or not sys.stdin.isatty():
+        raw_input = _read_bounded_stdin()
 
     extracted_text, payload_meta = extract_text_from_hook_payload(raw_input)
     if payload_meta.get("skipped_stop_loop") or not extracted_text.strip():
         if not args.hook_mode:
             print(json.dumps({"extracted": 0, "stored_count": 0, "skipped_stop_loop": bool(payload_meta.get("skipped_stop_loop"))}))
+        return 0
+
+    # Short-circuit BEFORE loading MemoryService or neural embeddings if no durable candidates exist.
+    if not extract_durable_candidates(extracted_text, max_candidates=args.max_candidates):
+        if not args.hook_mode:
+            print(json.dumps({"extracted": 0, "stored_count": 0, "skipped_stop_loop": False}))
         return 0
 
     from engraphis.config import settings

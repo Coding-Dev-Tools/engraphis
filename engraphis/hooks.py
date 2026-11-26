@@ -18,6 +18,9 @@ import hashlib
 import json
 import os
 import re
+import shlex
+import stat
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -30,6 +33,9 @@ SUPPORTED_CLIENTS = ("claude", "cursor", "commandcode")
 BRIEFING_HOOK_NAME = "engraphis-session-briefing"
 CAPTURE_HOOK_NAME = "engraphis-passive-capture"
 LEGACY_CC_SESSION_KEY = "cc-engraphis-session-start"
+_MAX_WORKSPACE_HASH_SCAN = 50_000
+_WINDOWS_SHELL_META_RE = re.compile(r'[\r\n\x00%&|<>^]')
+_POSIX_BAD_ARG_RE = re.compile(r'[\r\n\x00]')
 
 # Deterministic signal markers identifying durable engineering knowledge rather than
 # transient debug chatter.
@@ -102,18 +108,38 @@ def extract_durable_candidates(text: str, *, max_candidates: int = 5) -> list[st
 
 
 def _read_jsonl_assistant_tail(path: Path, *, max_messages: int = 6, max_bytes: int = 65536) -> str:
-    """Read the tail of a JSONL session transcript and extract recent assistant text."""
-    if not path.is_file():
+    """Safely read a bounded tail of a regular non-symlink JSONL transcript."""
+    if path.is_symlink():
         return ""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
     try:
-        size = path.stat().st_size
-        with path.open("rb") as handle:
-            if size > max_bytes:
-                handle.seek(size - max_bytes)
-                handle.readline()  # discard partial first line
-            raw = handle.read().decode("utf-8", errors="replace")
+        fd = os.open(str(path), flags)
     except OSError:
         return ""
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return ""
+        size = st.st_size
+        skipped_head = size > max_bytes
+        if skipped_head:
+            os.lseek(fd, size - max_bytes, os.SEEK_SET)
+        chunks: list[bytes] = []
+        remaining = max_bytes
+        while remaining > 0:
+            block = os.read(fd, min(remaining, 16384))
+            if not block:
+                break
+            chunks.append(block)
+            remaining -= len(block)
+        raw_bytes = b"".join(chunks)
+    except OSError:
+        return ""
+    finally:
+        os.close(fd)
+    if skipped_head:
+        _, _, raw_bytes = raw_bytes.partition(b"\n")
+    raw = raw_bytes.decode("utf-8", errors="replace")
 
     messages: list[str] = []
     for line in raw.splitlines():
@@ -163,9 +189,15 @@ def extract_text_from_hook_payload(raw_stdin: str) -> tuple[str, dict[str, Any]]
         except ValueError:
             return raw, {"format": "text"}
         if isinstance(payload, dict):
+            cwd_val = payload.get("cwd") or ""
+            if not cwd_val and isinstance(payload.get("workspace_roots"), list):
+                for root in payload["workspace_roots"]:
+                    if isinstance(root, str) and root.strip():
+                        cwd_val = root.strip()
+                        break
             meta: dict[str, Any] = {
                 "format": "json",
-                "cwd": payload.get("cwd") or "",
+                "cwd": cwd_val,
                 "hook_event_name": payload.get("hook_event_name") or "",
             }
             if payload.get("stop_hook_active") is True:
@@ -326,12 +358,7 @@ def build_session_briefing(
 
 
 def _existing_workspace_content_hashes(service: Any, workspace: str) -> set[str]:
-    """Collect normalized content hashes across active, pending, and quarantined rows.
-
-    Reads directly from ``service.store.conn`` with a bounded SQL query instead of
-    hydrating full ``MemoryRecord`` objects via ``list_memories()`` so workspaces with
-    >200 memories or quarantined rows never miss duplicates.
-    """
+    """Collect normalized content hashes across active, pending, and quarantined rows."""
     hashes: set[str] = set()
     ws_id = service._lookup_workspace(workspace)
     if not ws_id:
@@ -339,18 +366,19 @@ def _existing_workspace_content_hashes(service: Any, workspace: str) -> set[str]
     conn = getattr(getattr(service, "store", None), "conn", None)
     if conn is None:
         return hashes
+    cur = conn.execute(
+        "SELECT content FROM memories WHERE workspace_id = ? "
+        "AND valid_to IS NULL AND expired_at IS NULL "
+        "ORDER BY rowid DESC LIMIT ?",
+        (ws_id, _MAX_WORKSPACE_HASH_SCAN),
+    )
     try:
-        rows = conn.execute(
-            "SELECT content FROM memories WHERE workspace_id = ? "
-            "AND valid_to IS NULL AND expired_at IS NULL",
-            (ws_id,),
-        ).fetchall()
-    except Exception:
-        return hashes
-    for row in rows:
-        content = row[0] if isinstance(row, tuple) else row["content"]
-        if content:
-            hashes.add(candidate_content_hash(str(content)))
+        for row in cur:
+            content = row[0] if isinstance(row, tuple) else row["content"]
+            if content:
+                hashes.add(candidate_content_hash(str(content)))
+    finally:
+        cur.close()
     return hashes
 
 
@@ -364,34 +392,40 @@ def stage_passive_capture(
     max_candidates: int = 5,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    """Extract, secret-check, deduplicate, and stage passive memory candidates.
-
-    Every candidate is validated independently via :mod:`engraphis.core.secrets`:
-    - ``secret_mode="reject"`` (default): fail-closed; secret-bearing candidates are
-      dropped and counted under ``skipped_secrets`` (value never logged or returned).
-    - ``secret_mode="redact"``: redact matched tokens, then re-verify with
-      ``reject_secrets``; if still flagged, drop the candidate.
-
-    Stored items carry ``source="passive-hook"`` (registered in ``EXTERNAL_SOURCES``),
-    keeping them ``review_state="pending"`` and ``prompt_eligible=False`` until reviewed.
-    """
+    """Extract, secret-check, deduplicate, and stage passive memory candidates."""
     from engraphis.service import ValidationError
 
     if secret_mode not in {"reject", "redact"}:
         raise ValueError(f"unsupported secret_mode: {secret_mode!r}")
 
     candidates = extract_durable_candidates(text, max_candidates=max_candidates)
+    if not candidates:
+        return {
+            "workspace": workspace,
+            "repo": repo,
+            "extracted": 0,
+            "stored_count": 0,
+            "stored_ids": [],
+            "quarantined_count": 0,
+            "would_store_count": 0,
+            "skipped_duplicates": 0,
+            "skipped_secrets": 0,
+            "skipped_errors": 0,
+            "review_states": [],
+            "review_state": "pending",
+            "dry_run": dry_run,
+        }
     existing_hashes = _existing_workspace_content_hashes(service, workspace)
 
     stored_ids: list[str] = []
     review_states: list[str] = []
     would_store: list[str] = []
+    quarantined_count = 0
     skipped_duplicates = 0
     blocked_count = 0
     skipped_errors = 0
 
-    for candidate in candidates:
-        clean_text = normalize_candidate_text(candidate)
+    for clean_text in candidates:
         try:
             reject_secrets([("content", clean_text)])
         except SecretDetectedError:
@@ -424,11 +458,22 @@ def stage_passive_capture(
                 source="passive-hook",
                 metadata={"capture_mode": "passive_hook", "content_hash": digest},
             )
-        except (SecretDetectedError, ValidationError):
+        except SecretDetectedError:
+            blocked_count += 1
+            continue
+        except ValidationError:
             skipped_errors += 1
             continue
 
         existing_hashes.add(digest)
+        op = str(res.get("op") or "").strip().lower()
+        if op == "noop":
+            skipped_duplicates += 1
+            continue
+        if op == "quarantined" or str(res.get("review_state") or "") == "quarantined":
+            quarantined_count += 1
+            review_states.append("quarantined")
+            continue
         mem_id = str(res.get("id") or "")
         if mem_id:
             stored_ids.append(mem_id)
@@ -441,6 +486,7 @@ def stage_passive_capture(
         "extracted": len(candidates),
         "stored_count": len(stored_ids),
         "stored_ids": stored_ids,
+        "quarantined_count": quarantined_count,
         "would_store_count": len(would_store),
         "skipped_duplicates": skipped_duplicates,
         "skipped_secrets": blocked_count,
@@ -452,9 +498,16 @@ def stage_passive_capture(
 
 
 def _quote_cmd_arg(value: str) -> str:
-    """Windows- and POSIX-safe double-quoting for hook command strings."""
-    escaped = value.replace('"', '\\"')
-    return f'"{escaped}"'
+    """Quote a command argument safely for shell execution across POSIX and Windows."""
+    raw = str(value)
+    if os.name == "nt":
+        if _WINDOWS_SHELL_META_RE.search(raw):
+            raise ValueError("hook command path contains unsafe shell metacharacters")
+        quoted = subprocess.list2cmdline([raw])
+        return quoted if quoted.startswith('"') else f'"{quoted}"'
+    if _POSIX_BAD_ARG_RE.search(raw):
+        raise ValueError("hook command path contains unsafe control characters")
+    return shlex.quote(raw)
 
 
 def _resolve_hooks_entrypoint(python_exe: str) -> tuple[str, list[str]]:
@@ -487,9 +540,13 @@ def _utc_stamp() -> str:
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d")
 
 
+def _assert_not_symlink(path: Path, action: str) -> None:
+    if path.is_symlink() or path.parent.is_symlink():
+        raise ValueError(f"refusing to {action} symlinked hook config: {path}")
+
+
 def _backup_first_write(settings_path: Path) -> Optional[Path]:
-    if settings_path.is_symlink():
-        raise ValueError(f"refusing to modify symlinked hook config: {settings_path}")
+    _assert_not_symlink(settings_path, "modify")
     if not settings_path.exists():
         return None
     backup = settings_path.with_name(f"{settings_path.name}.bak-engraphis-{_utc_stamp()}")
@@ -515,8 +572,7 @@ def _backup_first_write(settings_path: Path) -> Optional[Path]:
 
 
 def _atomic_write_json(path: Path, data: Mapping[str, Any]) -> None:
-    if path.is_symlink():
-        raise ValueError(f"refusing to overwrite symlinked hook config: {path}")
+    _assert_not_symlink(path, "overwrite")
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(data, indent=2, sort_keys=False) + "\n"
     fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
@@ -536,8 +592,7 @@ def _atomic_write_json(path: Path, data: Mapping[str, Any]) -> None:
 
 
 def _read_json_object(path: Path) -> dict[str, Any]:
-    if path.is_symlink():
-        raise ValueError(f"refusing to read symlinked hook config: {path}")
+    _assert_not_symlink(path, "read")
     if not path.exists():
         return {}
     raw = path.read_text(encoding="utf-8-sig").strip() or "{}"
@@ -553,7 +608,7 @@ def _is_engraphis_cursor_entry(entry: Any) -> bool:
     cmd = str(entry.get("command") or "")
     return (
         "engraphis.hooks_cli" in cmd
-        or "hooks_cli.py" in cmd
+        or ("engraphis" in cmd and "hooks_cli.py" in cmd)
         or "engraphis-hooks" in cmd
     )
 
@@ -658,7 +713,7 @@ def install_client_hooks(
             raise ValueError(f"{settings_path}: 'hooks' must be an object")
         for event, subcmd, enabled in (
             ("sessionStart", "briefing", True),
-            ("stop", "capture", include_stop),
+            ("afterAgentResponse", "capture", include_stop),
         ):
             if not enabled:
                 continue
@@ -733,7 +788,7 @@ def uninstall_client_hooks(
     removed = 0
     if isinstance(hooks, dict):
         if client == "cursor":
-            for event in ("sessionStart", "stop"):
+            for event in ("sessionStart", "afterAgentResponse", "stop"):
                 entries = hooks.get(event)
                 if isinstance(entries, list):
                     kept = [e for e in entries if not _is_engraphis_cursor_entry(e)]

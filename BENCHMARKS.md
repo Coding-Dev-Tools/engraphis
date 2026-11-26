@@ -96,12 +96,12 @@ interpretation and do not count as additional benchmark-quality gains.
 Every exact public aggregate retained below comes from the checked-in, public-safe
 [`offline-fixtures-passive-hooks-20261124.json`](docs/benchmark-evidence/offline-fixtures-passive-hooks-20261124.json) artifact. Its
 SHA-256 is
-`23bf3a833914844cd878b33dbd1937f96ec4f4883cb3dc680a6abafc08b4610e`, also recorded in the
+`b8ef3dc6293a1433b781b29d4f81ba410c09ae9cb421ef6f164f2706289eac1e`, also recorded in the
 adjacent `.sha256` file. The artifact contains no raw questions, answers, prompts, customer data,
 or per-record content fingerprints.
 
 The fixture-suite digest is
-`cd2c6f084de068ad21e7a8f81abf9f03f3c14656c5a23333f54a80eb29989eab`. The artifact defines
+`89b14697b93a9e90ccdb034faf99aaa05672b413a950fce9a9720f3d2ca3ce8d`. The artifact defines
 the digest algorithm and records the SHA-256 of every suite and dataset file. Each evidence ID
 also binds its exact command through `sha256(UTF-8 exact command)`:
 

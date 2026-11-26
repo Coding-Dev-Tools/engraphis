@@ -6,7 +6,7 @@
     "python": "3.11.17",
     "vector_backend": "numpy"
   },
-  "generated_on": "2026-11-25",
+  "generated_on": "2026-11-26",
   "privacy": {
     "contains_answers": false,
     "contains_customer_data": false,
@@ -103,7 +103,7 @@
   ],
   "schema": "engraphis-public-offline-fixtures/v1",
   "suite": {
-    "digest": "cd2c6f084de068ad21e7a8f81abf9f03f3c14656c5a23333f54a80eb29989eab",
+    "digest": "89b14697b93a9e90ccdb034faf99aaa05672b413a950fce9a9720f3d2ca3ce8d",
     "digest_method": "sha256(canonical compact JSON mapping each sorted path to its file SHA-256)",
     "files": {
       "engraphis/__init__.py": "1f983036aba6e76faf62d3a3b070f4a61471ea4338a383b48c9ae4784d7b07a0",
@@ -192,8 +192,8 @@
       "engraphis/factory.py": "f2940d7d7094b985cae59d1858367e3a950be3bfe321cd5f9edabfdf5c1957a9",
       "engraphis/file_guard.py": "44eccaeca3afef7149bfdfea2321c325472253ee39a9e0bc24c720b3da3d685b",
       "engraphis/graphdata.py": "f5dc93395f52203c66deaeec8bc58d5c1f990a35a535151e0b9a84cecf7d8430",
-      "engraphis/hooks.py": "a7f2f8c1955178363edb271b6b399a7e19292fff3704d8e9d9bff650942fecce",
-      "engraphis/hooks_cli.py": "ba0669515dc3de945b9582e6b3717583533fa1cd21ed02179fa25f466b795992",
+      "engraphis/hooks.py": "a1dca4c0e9ab1cbd322addc3fa5bf69d8e41acb7ede18a6a20499c486cc639e0",
+      "engraphis/hooks_cli.py": "2c38fba1a492deb4564076a5c31d3460ff8ca859d735b2d52d36788dcaa3ca25",
       "engraphis/hosted_client.py": "6a81afd9b40fb783cc9809ebb2dfd23539bc8ae614e03ad9a5b98ed5014fefcd",
       "engraphis/http_deadline.py": "943435334c43780b3ddfe45d79e025d1a86da26c3450e8f148d46bd694ac7a86",
       "engraphis/http_security.py": "5cd96551778d7a964ce1d87c6bce032a5e70c7a1779fb2f6731432b96f5f069b",
