@@ -4396,10 +4396,14 @@ def hosted_trial_status(claim_id: str):
 
 
 class _CloudConnectReq(BaseModel):
+    # The browser may only redeem a token against the shipped (or operator-configured)
+    # control plane. A request-supplied control URL would let any local caller choose
+    # where a bearer-equivalent connect token is sent, so unknown fields are refused.
+    model_config = {"extra": "forbid"}
+
     token: str = Field(..., min_length=1, max_length=512)
     label: Optional[str] = Field(None, max_length=100)
     workspace: Optional[str] = Field(None, max_length=100)
-    control_url: Optional[str] = Field(None, max_length=512)
 
 
 @router.post("/cloud/connect")
@@ -4416,7 +4420,6 @@ async def cloud_connect(req: _CloudConnectReq):
             req.token,
             installation_label=req.label or None,
             workspace_id=req.workspace or None,
-            control_url=req.control_url or None,
         )
     except device_connect.DeviceConnectError as exc:
         raise HTTPException(
@@ -4424,9 +4427,12 @@ async def cloud_connect(req: _CloudConnectReq):
             detail={"error": str(exc), "status": exc.status},
         ) from exc
     except Exception as exc:
+        # Never echo exception text to the browser: it can carry local paths or
+        # upstream response fragments. The exception type is enough to diagnose.
+        logger.warning("cloud connect failed (%s)", type(exc).__name__)
         raise HTTPException(
             status_code=500,
-            detail={"error": f"Failed to connect device: {exc}"},
+            detail={"error": "Could not connect this device. Check the connect token and try again."},
         ) from exc
 
     _AUTHORITATIVE_DENIAL_PENDING.clear()

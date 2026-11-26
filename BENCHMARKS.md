@@ -96,12 +96,12 @@ interpretation and do not count as additional benchmark-quality gains.
 Every exact public aggregate retained below comes from the checked-in, public-safe
 [`offline-fixtures-cloud-connect-20261125.json`](docs/benchmark-evidence/offline-fixtures-cloud-connect-20261125.json) artifact. Its
 SHA-256 is
-`d279fbf625ee8ff6fb33b2292a153de8234ce380f32f6007083c3f4d388a14c5`, also recorded in the
+`176b9e126ccdc315c4da476f248b3f47d4796e70235411b6533a866c4ad950e3`, also recorded in the
 adjacent `.sha256` file. The artifact contains no raw questions, answers, prompts, customer data,
 or per-record content fingerprints.
 
 The fixture-suite digest is
-`3fadd2ad3001a32ce256c1d88fb6fbe2058c69722e5541b3e3b94e7dde3f74dc`. The artifact defines
+`e9eb85539dab473a51f7d4225628ab2e05085b0466818d27607a10836468a375`. The artifact defines
 the digest algorithm and records the SHA-256 of every suite and dataset file. Each evidence ID
 also binds its exact command through `sha256(UTF-8 exact command)`:
 

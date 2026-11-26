@@ -115,3 +115,58 @@ def test_ledger_js_rejects_query_string_connect_token():
     # Query-string parsing must never assign pendingConnectToken from location.search.
     assert "searchParams.get('connect_token')" not in js
     assert "pendingConnectToken = pendingConnectToken || (searchParams.get('token')" not in js
+
+
+def test_cloud_connect_refuses_cross_site_browser_requests(monkeypatch, tmp_path):
+    """A web page on another site must never be able to redeem a token for this machine."""
+    app = _app(monkeypatch, tmp_path)
+    calls = []
+    monkeypatch.setattr(device_connect, "connect", lambda *a, **k: calls.append((a, k)) or {})
+
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
+        for headers in (
+            {"Origin": "https://evil.example", "Sec-Fetch-Site": "cross-site"},
+            {"Origin": "null"},
+            {"Sec-Fetch-Site": "cross-site"},
+        ):
+            resp = client.post(
+                "/api/cloud/connect",
+                json={"token": "engr_ct_attackertoken1234567890"},
+                headers=headers,
+            )
+            assert resp.status_code in {401, 403}, headers
+    assert calls == []
+
+
+def test_cloud_connect_rejects_request_supplied_control_url(monkeypatch, tmp_path):
+    """The browser cannot choose which control plane receives the connect token."""
+    app = _app(monkeypatch, tmp_path)
+    calls = []
+    monkeypatch.setattr(device_connect, "connect", lambda *a, **k: calls.append((a, k)) or {})
+
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
+        resp = client.post(
+            "/api/cloud/connect",
+            json={
+                "token": "engr_ct_validtoken1234567890",
+                "control_url": "https://attacker.example",
+            },
+        )
+        assert resp.status_code == 422
+    assert calls == []
+
+
+def test_cloud_connect_unexpected_failure_does_not_echo_exception_text(monkeypatch, tmp_path):
+    app = _app(monkeypatch, tmp_path)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError(r"leaked C:\Users\secret\path and upstream-body-fragment")
+
+    monkeypatch.setattr(device_connect, "connect", boom)
+
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
+        resp = client.post("/api/cloud/connect", json={"token": "engr_ct_validtoken1234567890"})
+        assert resp.status_code == 500
+        assert "secret" not in resp.text
+        assert "upstream-body-fragment" not in resp.text
+        assert "Could not connect this device" in resp.json()["detail"]["error"]
