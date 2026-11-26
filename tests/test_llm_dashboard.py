@@ -1077,3 +1077,38 @@ def test_managed_auth_classifies_offline_timeout_401_and_persists_chat_402_denia
     assert denials == [True]
 
 
+def test_ping_scopes_short_timeout_to_managed_provider_only(monkeypatch):
+    """Non-managed providers (Ollama/BYOK) keep default timeout and retry behavior in ping()."""
+    from engraphis.llm import client as llm_client
+
+    seen_timeouts: list[tuple[str, object]] = []
+
+    def _fake_chat(self, messages, *, system=None, temperature=None, max_tokens=None, timeout=None):
+        seen_timeouts.append((self.provider, timeout))
+        return "ok"
+
+    monkeypatch.setattr(llm_client.LLMClient, "chat", _fake_chat)
+
+    with llm_client.LLMClient(provider="managed") as managed_llm:
+        assert managed_llm.ping()["ok"] is True
+    with llm_client.LLMClient(
+        provider="ollama",
+        base_url="http://127.0.0.1:11434/v1",
+        model="llama3",
+    ) as ollama_llm:
+        assert ollama_llm.ping()["ok"] is True
+    with llm_client.LLMClient(
+        provider="openai",
+        api_key="sk-test-key",
+        model="gpt-4o-mini",
+    ) as openai_llm:
+        assert openai_llm.ping()["ok"] is True
+
+    assert seen_timeouts == [
+        ("managed", 15.0),
+        ("ollama", None),
+        ("openai", None),
+    ]
+
+
+

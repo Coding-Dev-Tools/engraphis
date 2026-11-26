@@ -450,9 +450,13 @@ class LLMClient:
             # Reasoning models spend the completion budget on hidden reasoning
             # tokens before any visible content; a tiny cap can return an empty
             # reply and read as a false negative.
+            # Keep the short probe deadline scoped to managed Cloud refreshes so
+            # cold local/custom endpoints (e.g. Ollama) retain the client default
+            # timeout and normal transient-error retries.
+            probe_timeout = 15.0 if self.provider == "managed" else None
             reply = self.chat(
                 [{"role": "user", "content": "Reply with the single word: ok"}],
-                temperature=0.0, max_tokens=1024, timeout=15.0,
+                temperature=0.0, max_tokens=1024, timeout=probe_timeout,
             )
             return {"ok": True, "reply": (reply or "").strip()[:200],
                     "error": "", "provider": self.provider, "model": self.model}

@@ -96,12 +96,12 @@ interpretation and do not count as additional benchmark-quality gains.
 Every exact public aggregate retained below comes from the checked-in, public-safe
 [`offline-fixtures-managed-llm-recovery-20261125.json`](docs/benchmark-evidence/offline-fixtures-managed-llm-recovery-20261125.json) artifact. Its
 SHA-256 is
-`068aa21a3e6283cc9a71d498e8f79c7ff743451da1dc70a54bf5fbcd07f9ec2f`, also recorded in the
+`a73e724bc53fb865ee70d07e064d0996eb68f49c301760e5cd76cf42d64e4b29`, also recorded in the
 adjacent `.sha256` file. The artifact contains no raw questions, answers, prompts, customer data,
 or per-record content fingerprints.
 
 The fixture-suite digest is
-`4a8997f4036d7db467e0a91c32c284a104b1277a79b8fa11190cdc850c9bf323`. The artifact defines
+`9f5d2c0b1eaa77d97a939a66a3dcf43c472158be4a7b4cfd6373e38838ddcc6e`. The artifact defines
 the digest algorithm and records the SHA-256 of every suite and dataset file. Each evidence ID
 also binds its exact command through `sha256(UTF-8 exact command)`:
 
