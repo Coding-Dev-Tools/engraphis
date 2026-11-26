@@ -955,7 +955,7 @@ def llm_status():
         "key_set": key_set,
         "managed": is_managed,
         "included_allowance_daily": 100 if is_managed else None,
-        "custom_base_url_configured": bool(settings.llm_base_url),
+        "custom_base_url_configured": False if is_managed else bool(settings.llm_base_url),
         "extractor": settings.extractor,
         "extractor_enabled": _extractor_enabled(),
         "retention_supervisor": settings.retention_supervisor,

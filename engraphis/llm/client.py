@@ -238,7 +238,11 @@ class LLMClient:
         extra_headers: Optional[dict] = None,
         effort: Optional[str] = None,
     ) -> None:
-        raw_provider = (provider or settings.llm_provider or "openai").strip().lower()
+        raw_provider = (
+            (provider or "").strip()
+            or (settings.llm_provider or "").strip()
+            or "openai"
+        ).lower()
         raw_key = api_key if api_key is not None else settings.llm_api_key
         raw_base_url = base_url if base_url is not None else settings.llm_base_url
         if (
@@ -294,7 +298,7 @@ class LLMClient:
         import time as _time
 
         from engraphis import cloud_session
-        from engraphis.hosted_client import validate_cloud_base_url
+        from engraphis.hosted_client import CloudUrlUnresolved, validate_cloud_base_url
 
         if not managed_cloud_session_configured():
             raise ValueError(
@@ -311,8 +315,15 @@ class LLMClient:
             control = validate_cloud_base_url(cloud_session.credential_bound_control_url())
         except TimeoutError:
             raise
+        except CloudUrlUnresolved:
+            raise _LLMProviderError(unreachable=True) from None
         except Exception as exc:  # noqa: BLE001
             status = getattr(exc, "status", None)
+            if status == 402:
+                try:
+                    cloud_session.record_billing_denial()
+                except Exception:  # noqa: BLE001
+                    pass
             raise _LLMProviderError(
                 status=status if isinstance(status, int) and 400 <= status <= 599 else 401
             ) from None
@@ -332,15 +343,24 @@ class LLMClient:
         """Send a chat request and return the assistant's text reply."""
         if self.provider == "managed":
             managed_key, managed_url = self._resolve_managed_auth(timeout=timeout)
-            return self._chat_openai_compat(
-                messages,
-                system,
-                temperature,
-                max_tokens,
-                timeout,
-                api_key_override=managed_key,
-                base_url_override=managed_url,
-            )
+            try:
+                return self._chat_openai_compat(
+                    messages,
+                    system,
+                    temperature,
+                    max_tokens,
+                    timeout,
+                    api_key_override=managed_key,
+                    base_url_override=managed_url,
+                )
+            except _LLMProviderError as exc:
+                if exc.status == 402:
+                    try:
+                        from engraphis import cloud_session
+                        cloud_session.record_billing_denial()
+                    except Exception:  # noqa: BLE001
+                        pass
+                raise
         if not self.api_key:
             raise ValueError(
                 "No LLM API key configured. Set ENGRAPHIS_LLM_API_KEY in .env "
@@ -432,7 +452,7 @@ class LLMClient:
             # reply and read as a false negative.
             reply = self.chat(
                 [{"role": "user", "content": "Reply with the single word: ok"}],
-                temperature=0.0, max_tokens=1024,
+                temperature=0.0, max_tokens=1024, timeout=15.0,
             )
             return {"ok": True, "reply": (reply or "").strip()[:200],
                     "error": "", "provider": self.provider, "model": self.model}
