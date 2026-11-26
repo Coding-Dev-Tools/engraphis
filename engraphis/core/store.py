@@ -6230,16 +6230,14 @@ class Store:
         )
         # For standalone auto-timestamped closures, advance past a same-tick valid_from
         # before acquiring BEGIN IMMEDIATE so coarse Windows ticks do not hold the DB writer lock.
-        if auto_at and commit and not self.conn.in_transaction:
+        if auto_at and commit and not self.conn.transaction_owned_by_current_thread():
             pre_row = self.conn.execute(
-                "SELECT valid_from FROM memories WHERE id=?", (memory_id,)
+                "SELECT workspace_id, valid_from FROM memories WHERE id=?", (memory_id,)
             ).fetchone()
-            if (
-                pre_row is not None
-                and pre_row["valid_from"] is not None
-                and now_ts() <= pre_row["valid_from"]
-            ):
-                next_wall_ts_after(pre_row["valid_from"])
+            if pre_row is not None:
+                self._authorize_workspace_id(pre_row["workspace_id"])
+                if pre_row["valid_from"] is not None and now_ts() <= pre_row["valid_from"]:
+                    next_wall_ts_after(pre_row["valid_from"])
         with self._write_operation("close_validity", commit=commit):
             row = self.conn.execute(
                 "SELECT workspace_id, valid_from FROM memories WHERE id=?", (memory_id,)
@@ -6294,7 +6292,7 @@ class Store:
                 (at_ts, recorded_at, memory_id, at_ts),
             ).rowcount
             if updated:
-                self.invalidate_edges_for_memory(memory_id, at=at, commit=False)
+                self.invalidate_edges_for_memory(memory_id, at=at_ts, commit=False)
             # Governance attempts are audit-worthy even when the interval was already
             # closed. MCP callers expose forget as non-idempotent so every request
             # retains evidence without widening the closed interval.

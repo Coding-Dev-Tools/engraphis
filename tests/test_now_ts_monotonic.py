@@ -395,5 +395,42 @@ def test_promote_merge_explicit_close_and_stepped_clock_wiring(monkeypatch, tmp_
         assert old_q.valid_from == 2000.0
         assert old_q.valid_to == 2000.015625
         assert old_q.valid_to_recorded_at == new_q.ingested_at == new_q.valid_from == 2000.015625
+
+        # Auto close_validity(at=None) propagates exact at_ts to invalidated graph edges.
+        edge_calls = {"n": 0}
+
+        def _advancing_now() -> float:
+            edge_calls["n"] += 1
+            return 3000.0 + edge_calls["n"] * 0.5
+
+        monkeypatch.setattr(core_store, "now_ts", _advancing_now)
+        monkeypatch.setattr(core_store, "_DEFAULT_NOW_TS", _advancing_now)
+        e_mem = eng.remember_with_resolution(
+            "Billing service depends on Stripe.",
+            workspace_id=wid, repo_id=rid, scope=Scope.REPO,
+            mtype=MemoryType.SEMANTIC,
+        )
+        from engraphis.core.interfaces import Edge, Node
+
+        eng.store.upsert_entity(Node(id="ent_billing", name="service:billing", ntype="service", workspace_id=wid))
+        eng.store.upsert_entity(Node(id="ent_stripe", name="vendor:stripe", ntype="vendor", workspace_id=wid))
+        edge_id = eng.store.upsert_edge(
+            Edge(
+                id="edg_billing_stripe",
+                src="ent_billing",
+                dst="ent_stripe",
+                relation="depends_on",
+                workspace_id=wid,
+                valid_from=2999.0,
+                provenance={"memory_id": e_mem["id"], "memory_ids": [e_mem["id"]]},
+            )
+        )
+        eng.store.close_validity(e_mem["id"], reason="edge parity check")
+        closed_mem = eng.store.get_memory(e_mem["id"])
+        edge_row = eng.store.conn.execute(
+            "SELECT valid_to FROM edges WHERE id=?", (edge_id,)
+        ).fetchone()
+        assert closed_mem is not None and closed_mem.valid_to is not None
+        assert edge_row is not None and edge_row["valid_to"] == closed_mem.valid_to
     finally:
         eng.close()

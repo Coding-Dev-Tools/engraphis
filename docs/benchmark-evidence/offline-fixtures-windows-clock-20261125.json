@@ -103,7 +103,7 @@
   ],
   "schema": "engraphis-public-offline-fixtures/v1",
   "suite": {
-    "digest": "99545e428ef0efffb1deb534db8de0549d429363e6f02fad4d6d670c67364b5a",
+    "digest": "3f74d468be3cab60e4901469f04b6e4396274cf32a0e688037433b24bbc367d3",
     "digest_method": "sha256(canonical compact JSON mapping each sorted path to its file SHA-256)",
     "files": {
       "engraphis/__init__.py": "1f983036aba6e76faf62d3a3b070f4a61471ea4338a383b48c9ae4784d7b07a0",
@@ -171,7 +171,7 @@
       "engraphis/core/secrets.py": "78ab40870d6c5918c189307028b107df239d08cd918abe08c85fa15b58fa1663",
       "engraphis/core/source_paths.py": "2e71de7f19f260b335137602f07a28a80efa5d65e3d2497215356ba5f172b47e",
       "engraphis/core/spec_crawl.py": "23359f9e28a2a68a3abe59f1e705b8be1f6c72880d708123bc85391029e769e5",
-      "engraphis/core/store.py": "e65ef015b5e8dbd0ed5cd896a4159c6291506ab11d80f743cff2c9b4a7533e19",
+      "engraphis/core/store.py": "5100bc5156391e94d09563ae6e1eb57b3975eb80437768f2508808ed528d1357",
       "engraphis/core/sync.py": "0d28dd697eb8e8acdb7fed3e346fcba8fce23cbf4606eb11de68cb1fb001fcf2",
       "engraphis/core/textutil.py": "acd65031729fa5d91d09527b8eb52518b83cfce77a55e6b7ae2d94686e35c1a6",
       "engraphis/core/user_model.py": "3147ec8ee7cfd855783f639874b63f331cdc822bd8bd9298cfb326dd18666026",
