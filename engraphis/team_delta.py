@@ -28,11 +28,12 @@ import urllib.request
 from typing import Any, Callable, Mapping, Optional
 from urllib.parse import quote, urlsplit
 
-from engraphis.core.poisoning import assess_untrusted_payload, inspection_eligible
+from engraphis.config import RETIRED_RELAY_URLS
+from engraphis.core.poisoning import assess_untrusted_payload, inspection_eligible, prompt_eligible
 from engraphis.core.secrets import SecretDetectedError, reject_secrets
 from engraphis.hosted_client import (
     DEFAULT_CONNECT_TIMEOUT_SECONDS,
-    PinnedHTTPSHandler,
+    build_pinned_https_opener,
     validate_cloud_base_url,
 )
 
@@ -40,10 +41,17 @@ MAX_RESPONSE_BYTES = 10 * 1024 * 1024
 MAX_PROPOSE_BATCH_ITEMS = 50
 MAX_PROPOSE_BATCH_BYTES = 900_000
 MAX_TRACKED_PROPOSALS = 5_000
+MAX_CURSOR_CHARS = 512
 _ALLOWED_MTYPES = frozenset({"semantic", "episodic", "working", "procedural"})
 _ALLOWED_PUSH_SCOPES = frozenset({"workspace", "repo", "project", "global"})
+_ALLOWED_PUSH_SENSITIVITIES = frozenset({"normal", "sensitive"})
 _WORKSPACE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_RETIRED_ORIGINS = frozenset(
+    urlsplit(u.strip()).scheme.lower() + "://" + (urlsplit(u.strip()).hostname or "").lower()
+    + f":{urlsplit(u.strip()).port or (443 if urlsplit(u.strip()).scheme.lower() == 'https' else 80)}"
+    for u in RETIRED_RELAY_URLS
+)
 
 TeamTransportFn = Callable[[str, Mapping[str, Any], Mapping[str, str], float], dict[str, Any]]
 
@@ -70,17 +78,36 @@ def canonical_origin(url: str) -> str:
     return f"{scheme}://{bracketed}:{port}"
 
 
+def _reject_retired_origin(url: str) -> str:
+    origin = canonical_origin(url)
+    if origin in _RETIRED_ORIGINS:
+        raise TeamDeltaError("configured Team API URL points to a retired host")
+    return origin
+
+
+def _validated_bearer(bearer: str) -> str:
+    """Validate single-line printable ASCII bearer token without echoing its value."""
+    auth_value = str(bearer or "").strip()
+    if (
+        not auth_value
+        or len(auth_value) > 4096
+        or any(ord(ch) < 33 or ord(ch) > 126 for ch in auth_value)
+    ):
+        raise TeamDeltaError("invalid or missing Team bearer credential")
+    return auth_value
+
+
 def validate_team_origin_binding(team_url: str, configured_origin: Optional[str]) -> str:
-    """Verify the target URL is valid and matches the configured credential origin."""
+    """Verify the target URL is valid, non-retired, and matches the configured credential origin."""
     base_url = validate_cloud_base_url(team_url)
-    target = canonical_origin(base_url)
+    target = _reject_retired_origin(base_url)
     if not configured_origin or not str(configured_origin).strip():
         raise TeamDeltaError(
             "ENGRAPHIS_TEAM_TOKEN requires ENGRAPHIS_TEAM_TOKEN_ORIGIN bound to the Team API origin"
         )
     try:
-        bound = canonical_origin(str(configured_origin))
-    except ValueError as exc:
+        bound = _reject_retired_origin(str(configured_origin))
+    except (ValueError, TeamDeltaError) as exc:
         raise TeamDeltaError(f"invalid ENGRAPHIS_TEAM_TOKEN_ORIGIN: {exc}") from None
     if bound != target:
         raise TeamDeltaError(
@@ -144,10 +171,9 @@ def _default_http_post(
             **dict(headers),
         },
     )
-    opener = urllib.request.build_opener(
+    opener = build_pinned_https_opener(
         urllib.request.ProxyHandler({}),
         _NoRedirectHandler(),
-        PinnedHTTPSHandler(),
     )
     try:
         with opener.open(req, timeout=timeout) as resp:
@@ -172,7 +198,8 @@ def _default_http_post(
     except urllib.error.URLError as exc:
         raise TeamDeltaError(f"team API request failed: {exc.reason}") from None
     except (OSError, ValueError) as exc:
-        raise TeamDeltaError(f"team API transport error: {exc}") from None
+        # Never echo raw ValueError text from http.client (may contain Authorization header).
+        raise TeamDeltaError(f"team API transport error ({type(exc).__name__})") from None
 
 
 def _validate_workspace_name(workspace: str) -> str:
@@ -219,37 +246,69 @@ def _existing_team_memories(
 
 
 def _purge_local_cache_entry(service: Any, local_id: str) -> bool:
-    """Hard-purge a revoked/erased Team cache entry without exporting peer tombstones."""
+    """Crash-safely hard-purge a revoked/erased Team cache entry without peer tombstones."""
+    from contextlib import nullcontext
+    from engraphis.core.vector_repair import (
+        index_repair_identity,
+        vector_index_requires_sync,
+        vector_index_shares_store_transaction,
+    )
+
     target_ids: list[str] = [local_id]
     target_fn = getattr(service.store, "secure_erase_target_ids", None)
     if callable(target_fn):
-        try:
-            raw_targets = target_fn(local_id)
-            if isinstance(raw_targets, (list, tuple, set)):
-                resolved = [str(tid) for tid in raw_targets]
-                if resolved:
-                    target_ids = resolved
-        except Exception:
-            pass
-    try:
-        service.store.secure_erase_memory(
-            local_id,
-            actor="team-delta-sync",
-            _defer_maintenance=True,
-        )
-    except KeyError:
-        return False
+        raw_targets = target_fn(local_id)
+        if isinstance(raw_targets, (list, tuple, set)):
+            resolved = [str(tid) for tid in raw_targets if tid]
+            if resolved:
+                target_ids = resolved
+
     index = getattr(service.engine, "index", None)
-    if index is not None:
-        delete_fn = getattr(index, "delete", None)
-        if callable(delete_fn):
-            delete_fn(target_ids)
-        else:
-            remove_fn = getattr(index, "remove", None)
-            if callable(remove_fn):
-                for tid in target_ids:
-                    remove_fn(tid)
+    write_guard = getattr(service.engine, "_write_guard", None)
+    guard_ctx = write_guard() if callable(write_guard) else nullcontext()
+    shared_tx = index is not None and vector_index_shares_store_transaction(index, service.store)
+    needs_external = (
+        index is not None
+        and vector_index_requires_sync(index, service.store)
+        and not shared_tx
+    )
+
+    with guard_ctx:
+        with service.store.write_transaction():
+            if needs_external and hasattr(service.store, "queue_vector_index_repairs"):
+                ident = index_repair_identity(index, service.store)
+                if ident:
+                    service.store.queue_vector_index_repairs(
+                        ident, [(tid, "delete") for tid in target_ids], commit=False
+                    )
+            if shared_tx and index is not None:
+                delete_fn = getattr(index, "delete", None)
+                if callable(delete_fn):
+                    delete_fn(target_ids, commit=False)
+            try:
+                service.store.secure_erase_memory(
+                    local_id, actor="team-delta-sync", _defer_maintenance=True
+                )
+            except KeyError:
+                return False
+        if index is not None and not shared_tx:
+            delete_fn = getattr(index, "delete", None)
+            if callable(delete_fn):
+                delete_fn(target_ids)
+            else:
+                remove_fn = getattr(index, "remove", None)
+                if callable(remove_fn):
+                    for tid in target_ids:
+                        remove_fn(tid)
     return True
+
+
+def _resolve_sync_target(workspace: str, team_url: str, bearer: str) -> tuple[str, str, str, str]:
+    ws_name = _validate_workspace_name(workspace)
+    base_url = validate_cloud_base_url(team_url)
+    origin = _reject_retired_origin(base_url)
+    auth_value = _validated_bearer(bearer)
+    return ws_name, base_url, origin, auth_value
 
 
 def pull_team_delta(
@@ -266,15 +325,10 @@ def pull_team_delta(
     transport: Optional[TeamTransportFn] = None,
 ) -> dict[str, Any]:
     """Pull approved Team memories incrementally and apply permanent Team tombstones locally."""
-    ws_name = _validate_workspace_name(workspace)
-    base_url = validate_cloud_base_url(team_url)
-    origin = canonical_origin(base_url)
-    auth_value = str(bearer or "").strip()
-    if not auth_value:
-        raise TeamDeltaError("missing Team bearer credential")
-    if limit < 1 or limit > 500:
+    ws_name, base_url, origin, auth_value = _resolve_sync_target(workspace, team_url, bearer)
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1 or limit > 500:
         raise TeamDeltaError("delta limit must be between 1 and 500")
-    if max_pages < 1 or max_pages > 200:
+    if isinstance(max_pages, bool) or not isinstance(max_pages, int) or max_pages < 1 or max_pages > 200:
         raise TeamDeltaError("max_pages must be between 1 and 200")
 
     ws_id = service._lookup_workspace(ws_name)
@@ -332,11 +386,19 @@ def pull_team_delta(
         if not isinstance(items, list) or not isinstance(tombstones, list):
             raise TeamDeltaError("team delta response missing items/tombstones arrays")
 
-        next_cursor = str(resp.get("next_cursor") if resp.get("next_cursor") is not None else cursor)
+        raw_next_cursor = resp.get("next_cursor")
+        if raw_next_cursor is None:
+            next_cursor = cursor
+        elif isinstance(raw_next_cursor, str) and len(raw_next_cursor) <= MAX_CURSOR_CHARS:
+            next_cursor = raw_next_cursor
+        else:
+            raise TeamDeltaError("team delta response returned invalid cursor")
         next_seq = resp.get("next_tombstone_sequence", tombstone_since)
         if not isinstance(next_seq, int) or isinstance(next_seq, bool) or next_seq < tombstone_since:
             raise TeamDeltaError("team delta response returned invalid tombstone sequence")
         has_more = bool(resp.get("has_more", False))
+        if has_more and next_cursor == cursor and next_seq == tombstone_since and not items and not tombstones:
+            raise TeamDeltaError("team delta pagination made no progress")
 
         # 1. Apply approved items first (so a same-page tombstone wins deterministically).
         for raw_item in items:
@@ -352,7 +414,11 @@ def pull_team_delta(
             mtype = str(raw_item.get("mtype") or "semantic").strip()
             if mtype not in _ALLOWED_MTYPES:
                 mtype = "semantic"
-            item_repo = _CONTROL_RE.sub("", str(raw_item.get("repo") or "")).strip() or repo
+            raw_item_repo = _CONTROL_RE.sub("", str(raw_item.get("repo") or "")).strip() or None
+            if repo and raw_item_repo and raw_item_repo != repo:
+                blocked_items += 1
+                continue
+            item_repo = raw_item_repo or repo
             if not team_id or not content:
                 blocked_items += 1
                 continue
@@ -389,24 +455,9 @@ def pull_team_delta(
                 existing_all.setdefault(team_id, []).append(dry_entry)
                 continue
 
-            # Retire superseded local copies of this team_memory_id before writing revision.
+            # Write the validated revision FIRST, then retire superseded prior local copies.
             is_update = bool(prior_entries)
-            for prior in prior_entries:
-                try:
-                    service.retire(
-                        prior["local_id"],
-                        workspace=ws_name,
-                        repo=prior["repo"],
-                        actor="team-delta-sync",
-                        reason="Superseded by updated Team memory revision",
-                    )
-                    prior["active"] = False
-                except Exception:
-                    pass
-
             try:
-                if item_repo and ws_id is not None:
-                    service.store.get_or_create_repo(ws_id, item_repo)
                 stored = service.remember(
                     content,
                     title=title,
@@ -429,6 +480,20 @@ def pull_team_delta(
                 blocked_items += 1
                 continue
 
+            unretired: list[dict[str, Any]] = []
+            for prior in prior_entries:
+                try:
+                    service.retire(
+                        prior["local_id"],
+                        workspace=ws_name,
+                        repo=prior["repo"],
+                        actor="team-delta-sync",
+                        reason="Superseded by updated Team memory revision",
+                    )
+                    prior["active"] = False
+                except Exception:
+                    unretired.append(prior)
+
             new_local_id = str(stored.get("id") or "")
             new_entry = {
                 "local_id": new_local_id,
@@ -436,25 +501,39 @@ def pull_team_delta(
                 "content_hash": digest,
                 "active": True,
             }
-            existing[team_id] = [new_entry]
+            existing[team_id] = [*unretired, new_entry]
             existing_all.setdefault(team_id, []).append(new_entry)
             if is_update:
                 updated += 1
             else:
                 added += 1
 
-        # 2. Apply permanent tombstones after items so same-page revocations never resurrect.
-        #    erase/unapprove inspect existing_all so previously-retired rows are also purged.
-        #    Never advance tombstone_since past a tombstone whose local enforcement failed.
+        # 2. Apply permanent tombstones in monotonic sequence order; hold watermark and stop on error.
         tombstone_failed = False
         applied_seq = tombstone_since
-        for raw_tomb in tombstones:
+        ordered_tombs = sorted(
+            enumerate(tombstones),
+            key=lambda pair: (
+                pair[1].get("sequence")
+                if isinstance(pair[1], dict)
+                and isinstance(pair[1].get("sequence"), int)
+                and not isinstance(pair[1].get("sequence"), bool)
+                and pair[1].get("sequence") > 0
+                else 0,
+                pair[0],
+            ),
+        )
+        for _, raw_tomb in ordered_tombs:
             if not isinstance(raw_tomb, dict):
                 continue
             target_team_id = str(raw_tomb.get("memory_id") or "").strip()
             kind = str(raw_tomb.get("kind") or "").strip()
             raw_seq = raw_tomb.get("sequence")
-            tomb_seq = int(raw_seq) if isinstance(raw_seq, int) and raw_seq > 0 else 0
+            tomb_seq = (
+                int(raw_seq)
+                if isinstance(raw_seq, int) and not isinstance(raw_seq, bool) and raw_seq > 0
+                else 0
+            )
             if not target_team_id or kind not in {"retire", "unapprove", "erase"}:
                 if not tombstone_failed and tomb_seq > applied_seq:
                     applied_seq = tomb_seq
@@ -509,7 +588,14 @@ def pull_team_delta(
                 entry_failed = False
                 remaining_all: list[dict[str, Any]] = []
                 for entry in matches:
-                    if _purge_local_cache_entry(service, entry["local_id"]):
+                    try:
+                        purged = _purge_local_cache_entry(service, entry["local_id"])
+                    except Exception:
+                        tombstone_errors += 1
+                        entry_failed = True
+                        remaining_all.append(entry)
+                        continue
+                    if purged:
                         tombstones_purged += 1
                         erased_any = True
                     elif service.store.get_memory(entry["local_id"]) is not None:
@@ -528,6 +614,8 @@ def pull_team_delta(
 
         cursor = next_cursor
         tombstone_since = next_seq if not tombstone_failed else applied_seq
+        if tombstone_failed:
+            has_more = True
 
         if not dry_run:
             _save_json_state(
@@ -543,7 +631,7 @@ def pull_team_delta(
                 },
             )
 
-        if not has_more:
+        if tombstone_failed or not has_more:
             break
 
     if erased_any and not dry_run:
@@ -587,18 +675,12 @@ def _check_workspace_shareable(service: Any, workspace_name: str) -> str:
     except (TypeError, ValueError, RecursionError):
         ws_settings = None
     if not isinstance(ws_settings, dict):
-        raise TeamDeltaError(
-            "workspace settings are unreadable; refusing to propose memories to Team"
-        )
+        raise TeamDeltaError("workspace settings are unreadable; refusing to sync with Team")
     visibility = ws_settings.get("visibility")
     if visibility == "personal":
-        raise TeamDeltaError(
-            "personal workspaces are device-local and cannot propose memories to Team"
-        )
+        raise TeamDeltaError("personal workspaces are device-local and cannot sync with Team")
     if visibility not in (None, "shared"):
-        raise TeamDeltaError(
-            "workspace visibility is invalid; refusing to propose memories to Team"
-        )
+        raise TeamDeltaError("workspace visibility is invalid; refusing to sync with Team")
     return str(row["id"])
 
 
@@ -618,13 +700,8 @@ def push_team_proposals(
     """Push eligible local candidate memories into the hosted Team review queue."""
     from engraphis.core.store import _loads
 
-    ws_name = _validate_workspace_name(workspace)
-    base_url = validate_cloud_base_url(team_url)
-    origin = canonical_origin(base_url)
-    auth_value = str(bearer or "").strip()
-    if not auth_value:
-        raise TeamDeltaError("missing Team bearer credential")
-    if max_batch < 1 or max_batch > MAX_PROPOSE_BATCH_ITEMS:
+    ws_name, base_url, origin, auth_value = _resolve_sync_target(workspace, team_url, bearer)
+    if isinstance(max_batch, bool) or not isinstance(max_batch, int) or max_batch < 1 or max_batch > MAX_PROPOSE_BATCH_ITEMS:
         raise TeamDeltaError(f"max_batch must be between 1 and {MAX_PROPOSE_BATCH_ITEMS}")
 
     ws_id = _check_workspace_shareable(service, ws_name)
@@ -636,7 +713,7 @@ def push_team_proposals(
         "LEFT JOIN repos r ON r.id = m.repo_id "
         "WHERE m.workspace_id = ? "
         "AND m.valid_to IS NULL AND m.expired_at IS NULL "
-        "AND COALESCE(m.sensitivity, 'internal') NOT IN ('secret', 'restricted')"
+        "AND LOWER(COALESCE(m.sensitivity, '')) IN ('normal', 'sensitive')"
     ]
     params: list[object] = [ws_id]
     if repo:
@@ -651,7 +728,7 @@ def push_team_proposals(
         str(k): str(v) for k, v in proposed_map.items() if isinstance(k, str) and isinstance(v, str)
     }
 
-    candidates: list[tuple[str, str, dict[str, Any]]] = []
+    candidates: list[tuple[str, str, dict[str, Any], int]] = []
     skipped_already_proposed = 0
     blocked_count = 0
     skipped_oversized = 0
@@ -659,8 +736,9 @@ def push_team_proposals(
 
     for row in rows:
         local_id = str(row["id"])
-        scope_val = str(row["scope"] or "workspace").strip().lower()
-        if scope_val not in _ALLOWED_PUSH_SCOPES:
+        scope_val = str(row["scope"] or "").strip().lower()
+        sens_val = str(row["sensitivity"] or "").strip().lower()
+        if scope_val not in _ALLOWED_PUSH_SCOPES or sens_val not in _ALLOWED_PUSH_SENSITIVITIES:
             skipped_scope_or_quarantine += 1
             continue
 
@@ -671,25 +749,26 @@ def push_team_proposals(
         if not isinstance(meta, dict):
             meta = {}
 
-        # Never echo synced Team memories back as proposals.
         if meta.get("team_memory_id") or meta.get("capture_mode") == "team_delta_sync":
             continue
-
-        # Never upload quarantined records.
         if not inspection_eligible(prov, meta):
             skipped_scope_or_quarantine += 1
             continue
 
         row_source = str(prov.get("source") or "").strip().lower()
-        if source_filter != "all" and row_source != source_filter.strip().lower():
+        if source_filter == "all":
+            if not prompt_eligible(prov, meta):
+                skipped_scope_or_quarantine += 1
+                continue
+        elif row_source != source_filter.strip().lower():
             continue
 
-        content = str(row["content"] or "").strip()
-        title = str(row["title"] or "").strip()
+        content = _CONTROL_RE.sub("", str(row["content"] or "")).strip()
+        title = _CONTROL_RE.sub("", str(row["title"] or "")).strip()
         mtype = str(row["mtype"] or "semantic").strip()
         if mtype not in _ALLOWED_MTYPES:
             mtype = "semantic"
-        item_repo = str(row["repo_name"] or "").strip() or None
+        item_repo = _CONTROL_RE.sub("", str(row["repo_name"] or "")).strip() or None
         if not content:
             continue
 
@@ -698,16 +777,18 @@ def push_team_proposals(
             skipped_already_proposed += 1
             continue
 
-        # Per-candidate secret check so one contaminated capture never blocks clean items.
-        fields = [("content", _CONTROL_RE.sub("", content))]
+        fields = [("content", content)]
         if title:
-            fields.append(("title", _CONTROL_RE.sub("", title)))
+            fields.append(("title", title))
         if item_repo:
-            fields.append(("repo", _CONTROL_RE.sub("", item_repo)))
+            fields.append(("repo", item_repo))
         try:
             reject_secrets(fields)
         except SecretDetectedError:
             blocked_count += 1
+            continue
+        if assess_untrusted_payload(content, title=title).quarantined:
+            skipped_scope_or_quarantine += 1
             continue
 
         item_payload: dict[str, Any] = {
@@ -721,14 +802,13 @@ def push_team_proposals(
         if encoded_size > MAX_PROPOSE_BATCH_BYTES or len(content) > 60_000:
             skipped_oversized += 1
             continue
-        candidates.append((local_id, digest, item_payload))
+        candidates.append((local_id, digest, item_payload, encoded_size))
 
-    # Chunk under server batch item and byte limits.
-    batches: list[list[tuple[str, str, dict[str, Any]]]] = []
-    current_batch: list[tuple[str, str, dict[str, Any]]] = []
+    batches: list[list[tuple[str, str, dict[str, Any], int]]] = []
+    current_batch: list[tuple[str, str, dict[str, Any], int]] = []
     current_bytes = 2
     for cand in candidates:
-        cand_bytes = len(json.dumps(cand[2], separators=(",", ":")).encode("utf-8")) + 1
+        cand_bytes = cand[3] + 1
         if current_batch and (
             len(current_batch) >= max_batch or current_bytes + cand_bytes > MAX_PROPOSE_BATCH_BYTES
         ):
@@ -751,15 +831,16 @@ def push_team_proposals(
         for batch in batches:
             body = {
                 "confirmed_shared_hosting": True,
-                "memories": [item for _, _, item in batch],
+                "memories": [item for _, _, item, _ in batch],
             }
             resp = post_fn(endpoint, body, headers, timeout)
             batches_sent += 1
             results = resp.get("results") if isinstance(resp, dict) else None
             if isinstance(results, list) and len(results) == len(batch):
-                for (local_id, digest, _), item_res in zip(batch, results):
-                    is_failed = isinstance(item_res, dict) and (
-                        bool(item_res.get("error"))
+                for (local_id, digest, _, _), item_res in zip(batch, results):
+                    is_failed = (
+                        not isinstance(item_res, dict)
+                        or bool(item_res.get("error"))
                         or item_res.get("ok") is False
                         or str(item_res.get("status") or "").lower()
                         in {"error", "failed", "rejected"}
@@ -769,14 +850,8 @@ def push_team_proposals(
                     else:
                         tracked[local_id] = digest
                         proposed_count += 1
-            elif isinstance(resp, dict) and (
-                resp.get("ok") is False or int(resp.get("failed") or 0) > 0
-            ):
-                failed_proposals += len(batch)
             else:
-                for local_id, digest, _ in batch:
-                    tracked[local_id] = digest
-                    proposed_count += 1
+                failed_proposals += len(batch)
             if len(tracked) > MAX_TRACKED_PROPOSALS:
                 excess = len(tracked) - MAX_TRACKED_PROPOSALS
                 for old_key in list(tracked.keys())[:excess]:
@@ -819,28 +894,30 @@ def read_team_delta_status_entries(conn: Any, workspace: str, repo: Optional[str
             parsed = json.loads(raw)
         except (TypeError, ValueError, RecursionError):
             continue
-        if not isinstance(parsed, dict):
-            continue
-        if parsed.get("workspace") != workspace:
+        if not isinstance(parsed, dict) or parsed.get("workspace") != workspace:
             continue
         if repo is not None and parsed.get("repo") != repo:
             continue
+        raw_tseq = parsed.get("tombstone_since")
+        tseq = raw_tseq if isinstance(raw_tseq, int) and not isinstance(raw_tseq, bool) and raw_tseq >= 0 else 0
         entries.append(
             {
                 "origin": str(parsed.get("origin") or ""),
                 "repo": parsed.get("repo"),
                 "cursor": str(parsed.get("cursor") or ""),
-                "tombstone_since": int(parsed.get("tombstone_since") or 0),
+                "tombstone_since": tseq,
             }
         )
     return entries
 
 
 def resolve_team_url(explicit_url: Optional[str]) -> str:
-    """Resolve explicit ``--team <url>`` or ``ENGRAPHIS_TEAM_URL`` (never retired hosts)."""
+    """Resolve explicit ``--team <url>`` or ``ENGRAPHIS_TEAM_URL`` (rejects retired hosts)."""
     candidate = str(explicit_url or "").strip() or os.environ.get("ENGRAPHIS_TEAM_URL", "").strip()
     if not candidate:
         raise TeamDeltaError(
             "--team needs a Team API URL: pass --team <url> or set ENGRAPHIS_TEAM_URL"
         )
-    return validate_cloud_base_url(candidate)
+    cleaned = validate_cloud_base_url(candidate)
+    _reject_retired_origin(cleaned)
+    return cleaned

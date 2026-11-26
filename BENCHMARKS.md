@@ -96,12 +96,12 @@ interpretation and do not count as additional benchmark-quality gains.
 Every exact public aggregate retained below comes from the checked-in, public-safe
 [`offline-fixtures-team-delta-20261124.json`](docs/benchmark-evidence/offline-fixtures-team-delta-20261124.json) artifact. Its
 SHA-256 is
-`060a02b27560d79493db2175db6b7d12db36c19008969c627876dbc04dc48eea`, also recorded in the
+`e550581e84ae76475dac332a76c7bb5e1e5dd8b5dfbe21adaa3a111faaea614f`, also recorded in the
 adjacent `.sha256` file. The artifact contains no raw questions, answers, prompts, customer data,
 or per-record content fingerprints.
 
 The fixture-suite digest is
-`1941b0f5aedbb00724a054d5a24a79f3b403568d407c877f5088050655af217d`. The artifact defines
+`8a228a277968f8918ff10fa6a296d8a8fd461aa3bafa2aba0f77db846e640eb5`. The artifact defines
 the digest algorithm and records the SHA-256 of every suite and dataset file. Each evidence ID
 also binds its exact command through `sha256(UTF-8 exact command)`:
 

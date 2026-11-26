@@ -265,16 +265,16 @@ def main(argv=None) -> int:
         print("error: --propose is only valid with --team", file=sys.stderr)
         return 2
 
+    if use_team:
+        return _sync_team(args)
     service = _service(args.db)
     try:
-        if use_team:
-            return _sync_team(args, service)
         return _sync(args, service.engine, use_relay=use_relay)
     finally:
         service.close()
 
 
-def _sync_team(args: argparse.Namespace, service: MemoryService) -> int:
+def _sync_team(args: argparse.Namespace) -> int:
     from engraphis.backends.sync_relay import sync_read_only
     from engraphis.team_delta import (
         TeamDeltaError,
@@ -311,6 +311,7 @@ def _sync_team(args: argparse.Namespace, service: MemoryService) -> int:
         )
         return 2
 
+    service = _service(args.db)
     try:
         pull_report = pull_team_delta(
             service,
@@ -334,9 +335,15 @@ def _sync_team(args: argparse.Namespace, service: MemoryService) -> int:
     except (TeamDeltaError, ValueError) as exc:
         print(f"error: team delta sync failed: {exc}", file=sys.stderr)
         return 2
+    finally:
+        service.close()
 
     combined = {"pull": pull_report, **({"propose": propose_report} if propose_report else {})}
     print(json.dumps(combined, indent=2))
+    if pull_report.get("tombstone_errors", 0) > 0 or (
+        propose_report is not None and propose_report.get("failed_proposals", 0) > 0
+    ):
+        return 1
     return 0
 
 
