@@ -53,9 +53,12 @@ def _backend_identity(backend: Any, *, configured: str = "") -> dict:
     """Return the configured vs resolved identity for one constructed backend."""
     resolved = type(backend).__name__ if backend is not None else "none"
     identity = str(getattr(backend, "embedding_identity", "") or "") if backend is not None else ""
+    device = str(getattr(backend, "device", "") or "").strip() if backend is not None else ""
     info: dict = {"configured": configured, "resolved": resolved}
     if identity:
         info["identity"] = identity
+    if device:
+        info["device"] = device
     return info
 
 
@@ -126,6 +129,7 @@ def create_memory_engine(
     engine_cls=None,
     embed_model: Optional[str] = None,
     embed_revision: Optional[str] = None,
+    embed_device: Optional[str] = None,
     require_immutable_models: Optional[bool] = None,
     embed_dim: int = 384,
     vector_backend: str = "numpy",
@@ -181,13 +185,14 @@ def create_memory_engine(
         raise
     owned = []
     try:
-        embedder = get_embedder(
-            embed_model,
-            embed_dim,
-            revision=embed_revision,
-            require_immutable_models=require_immutable_models,
-            require_exact=require_exact_backends,
-        )
+        embedder_kwargs: dict[str, Any] = {
+            "revision": embed_revision,
+            "require_immutable_models": require_immutable_models,
+            "require_exact": require_exact_backends,
+        }
+        if embed_device is not None:
+            embedder_kwargs["device"] = embed_device
+        embedder = get_embedder(embed_model, embed_dim, **embedder_kwargs)
         owned.append(embedder)
 
         index = get_vector_index(

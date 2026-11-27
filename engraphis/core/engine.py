@@ -41,8 +41,10 @@ from engraphis.core.interfaces import (
     RetentionDecision,
     Scope,
     SearchFilter,
+    embed_texts,
     embedder_capabilities,
     embedding_space_fingerprint,
+    is_remote_embedder,
     vector_index_requires_sync,
     vector_index_shares_store_transaction,
 )
@@ -639,6 +641,7 @@ class MemoryEngine:
         *,
         embed_model: Optional[str] = None,
         embed_revision: Optional[str] = None,
+        embed_device: Optional[str] = None,
         require_immutable_models: Optional[bool] = None,
         embed_dim: int = 384,
         vector_backend: str = "numpy",
@@ -667,6 +670,7 @@ class MemoryEngine:
             db_path=db_path,
             embed_model=embed_model,
             embed_revision=embed_revision,
+            embed_device=embed_device,
             require_immutable_models=require_immutable_models,
             embed_dim=embed_dim,
             vector_backend=vector_backend,
@@ -747,13 +751,23 @@ class MemoryEngine:
                 if not records:
                     break
                 after_id = records[-1].id
-                eligible = [
-                    record for record in records
-                    if inspection_eligible(record.provenance, record.metadata)
-                ]
+                remote_embedder = is_remote_embedder(self.embedder)
+
+                def _rebuild_eligible(record: MemoryRecord) -> bool:
+                    if not inspection_eligible(record.provenance, record.metadata):
+                        return False
+                    if remote_embedder:
+                        sensitivity = str(record.sensitivity or "").strip().casefold()
+                        meta_sensitivity = str(
+                            (record.metadata or {}).get("sensitivity") or ""
+                        ).strip().casefold()
+                        if sensitivity == "secret" or meta_sensitivity == "secret":
+                            return False
+                    return True
+
+                eligible = [record for record in records if _rebuild_eligible(record)]
                 excluded_ids = [
-                    record.id for record in records
-                    if not inspection_eligible(record.provenance, record.metadata)
+                    record.id for record in records if not _rebuild_eligible(record)
                 ]
                 vectors = None
                 ids = []
@@ -763,7 +777,10 @@ class MemoryEngine:
                         f"{record.title}\n{record.content}" if record.title else record.content
                         for record in eligible
                     ]
-                    vectors = np.asarray(self.embedder.embed(texts), dtype=np.float32)
+                    vectors = np.asarray(
+                        embed_texts(self.embedder, texts, input_type="passage"),
+                        dtype=np.float32,
+                    )
                     if vectors.ndim != 2 or vectors.shape != (
                             len(eligible), int(self.embedder.dim)):
                         raise ValueError(
@@ -1069,7 +1086,16 @@ class MemoryEngine:
         # write lock so concurrent writers only serialize the fast resolve+insert step.
         # Quarantine happens before embedding: payloads retained only for inspection
         # must never consume a vector slot or become semantic retrieval candidates.
-        vec = None if poisoning.quarantined else self.embedder.embed([text])[0]
+        # Secret-marked memories are never transmitted to a remote embedding endpoint.
+        skip_remote_secret = (
+            is_remote_embedder(self.embedder)
+            and str(write_metadata.get("sensitivity") or "").strip().casefold() == "secret"
+        )
+        vec = (
+            None
+            if (poisoning.quarantined or skip_remote_secret)
+            else embed_texts(self.embedder, [text], input_type="passage")[0]
+        )
 
         # Reserve SQLite's writer before neighbor discovery, after embedding. The
         # database boundary serializes independent engines/processes as well as
@@ -1248,6 +1274,10 @@ class MemoryEngine:
             mt = spec.mtype if spec.mtype is not None else mtype
             text = f"{title}\n{content}" if title else content
             evidence_source = str(spec.evidence_source or "").strip()
+            skip_remote_secret = (
+                is_remote_embedder(self.embedder)
+                and str(write_metadata.get("sensitivity") or "").strip().casefold() == "secret"
+            )
             prepared.append({
                 "content": content, "title": title, "text": text, "mtype": mt,
                 "importance": float(spec.importance or 0.0), "keywords": keywords,
@@ -1255,10 +1285,11 @@ class MemoryEngine:
                 "subject_key": str(spec.subject_key or "").strip(),
                 "claim_kind": str(spec.claim_kind or "").strip(),
                 "poisoning": poisoning,
+                "skip_remote_secret": skip_remote_secret,
                 "trusted_write": trusted_write,
                 "evidence_source": evidence_source,
             })
-            if not poisoning.quarantined:
+            if not poisoning.quarantined and not skip_remote_secret:
                 texts.append(text)
 
         persistent_store = not _is_memory_database_path(self.store.path)
@@ -1280,13 +1311,15 @@ class MemoryEngine:
             # Identical texts already collapse to one mapping entry below; embed each
             # distinct text once instead of paying for duplicates in a batched ingest.
             unique_texts = list(dict.fromkeys(texts))
-            embedded = self.embedder.embed(unique_texts)
+            embedded = embed_texts(self.embedder, unique_texts, input_type="passage")
             if len(embedded) != len(unique_texts):
                 raise RuntimeError("embedder returned the wrong number of vectors")
             vectors_by_text = dict(zip(unique_texts, embedded))
         for item in prepared:
             item["vec"] = (
-                None if item["poisoning"].quarantined else vectors_by_text[item["text"]]
+                None
+                if (item["poisoning"].quarantined or item["skip_remote_secret"])
+                else vectors_by_text[item["text"]]
             )
         # Pairwise cosine between batch siblings (vectors L2-normalized first so
         # dot == cosine). Row i holds sibling i's similarity to every earlier
@@ -1531,11 +1564,16 @@ class MemoryEngine:
         genuinely inherited from an ``Extractor``; everything else is treated as
         caller-supplied — see ``_rehome_untrusted_graph_hints``."""
         poisoning = poisoning or PoisoningDecision(False)
+        skip_remote_secret = (
+            is_remote_embedder(self.embedder)
+            and str((metadata or {}).get("sensitivity") or "").strip().casefold() == "secret"
+        )
         decision, neighbors, conflicted_with = None, [], None
         # Untrusted records are retained as passive inspection evidence.  They may
         # not deduplicate into, invalidate, relate to, reinforce, or otherwise
         # mutate higher-trust memory; that is a trust lattice, not a detector score.
-        if resolve_conflicts and trusted_write and not poisoning.quarantined:
+        if (resolve_conflicts and trusted_write
+                and not poisoning.quarantined and not skip_remote_secret):
             if vec is None:
                 raise ValueError("non-quarantined writes require an embedding")
             decision, neighbors, conflicted_with = self._resolve_against_neighbors(
@@ -1711,7 +1749,8 @@ class MemoryEngine:
             # surface it (copied, not popped: consolidate.py still reads
             # metadata["provenance"]).
             provenance=dict(meta.get("provenance") or {}),
-            embedding=None if poisoning.quarantined else vec,
+            sensitivity="secret" if skip_remote_secret else "normal",
+            embedding=None if (poisoning.quarantined or skip_remote_secret) else vec,
         )
         invalidating = decision is not None and decision.op == ResolutionOp.INVALIDATE
         predecessor: Optional[MemoryRecord] = None
@@ -1796,8 +1835,9 @@ class MemoryEngine:
                 f"{retention_signal.get('reason', '')}"[:1000],
             )
         if vec is None:
-            raise RuntimeError("non-quarantined memory was stored without an embedding")
-        if not defer_external_index:
+            if not skip_remote_secret:
+                raise RuntimeError("non-quarantined memory was stored without an embedding")
+        elif not defer_external_index:
             self._upsert_external_vector(mid, vec)
         if trusted_write and repo_id and scope != Scope.SESSION:
             self._link_memory_to_code(mid, content=f"{title}\n{content}", repo_id=repo_id)
@@ -2978,7 +3018,7 @@ class MemoryEngine:
             )
         sem: dict[str, float] = {}
         if semantic_ready:
-            qvec = self.embedder.embed([query])[0]
+            qvec = embed_texts(self.embedder, [query], input_type="query")[0]
             qn = qvec / (float(np.linalg.norm(qvec)) or 1.0)
             for mid, vec in self.store.iter_vectors(
                     flt, include_invalid=include_invalid, dim=int(qn.shape[0])):

@@ -24,9 +24,15 @@ control-plane, relay, compute, and worker implementations are private services.
 | `ENGRAPHIS_INDEX_ROOTS` | Working, home, and temporary directories | Optional path-separator-delimited absolute-path allow-list that replaces the default roots accepted by local code indexing |
 | `ENGRAPHIS_HTTP_INDEX_ROOT` | First `ENGRAPHIS_INDEX_ROOTS` entry, or current directory | Single root for dashboard and REST `POST /api/code/index`; submitted paths resolve beneath it. An explicit root (or fallback entry) must be absolute; an explicit HTTP root is included in the engine-approved set. MCP and CLI indexing continue to use `ENGRAPHIS_INDEX_ROOTS`. |
 | `ENGRAPHIS_DB_KEY` | Not set | Encrypt the database at rest (SQLCipher). Or use `ENGRAPHIS_DB_KEY_FILE` |
-| `ENGRAPHIS_EMBED_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` | sentence-transformers model |
+| `ENGRAPHIS_EMBED_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` (or `nvidia/nv-embedqa-e5-v5` when `ENGRAPHIS_EMBED_PROVIDER=nvidia-nim`) | Embedding model selector. Uses local sentence-transformers by default (prefix `local:` to forbid downloads). Prefix `nvidia-nim` or `nvidia-nim:<model>` to opt into the NVIDIA NIM embeddings preset. |
+| `ENGRAPHIS_EMBED_PROVIDER` | `local` *(unset)* | Embedding provider: `local` / `sentence-transformers` (default, offline-capable), `nvidia-nim` (opt-in NVIDIA NIM OpenAI-compatible embeddings with asymmetric `input_type`), or `api` / `openai-compatible` (generic `/v1/embeddings` endpoint). |
+| `ENGRAPHIS_EMBED_DEVICE` | *(unset; default CPU/loader default)* | Optional PyTorch device selector for local sentence-transformers embeddings: `auto` (use CUDA when PyTorch reports an available GPU, else CPU), `cuda`, `cuda:<index>`, or `cpu`. Falls back to CPU when CUDA is unavailable unless `ENGRAPHIS_REQUIRE_EXACT_BACKENDS=true`. |
+| `ENGRAPHIS_EMBED_BASE_URL` | Not set | Optional base URL override for `api` or `nvidia-nim` embeddings (for `nvidia-nim`, defaults to `https://integrate.api.nvidia.com/v1`, or set to a self-hosted NIM URL such as `http://127.0.0.1:8000/v1`). Non-loopback endpoints must use HTTPS. |
+| `ENGRAPHIS_EMBED_API_KEY` | Not set | Optional API key for `api` or `nvidia-nim` embeddings. For `nvidia-nim`, falls back to `NVIDIA_API_KEY`; for `api`, falls back to `ENGRAPHIS_LLM_API_KEY`. Not required for loopback self-hosted NIM endpoints. |
+| `NVIDIA_API_KEY` | Not set | Standard NVIDIA API Catalog credential used by the opt-in `nvidia-nim` embedding preset when `ENGRAPHIS_EMBED_API_KEY` is unset. Never printed or logged. |
+| `NVIDIA_NIM_BASE_URL` | `https://integrate.api.nvidia.com/v1` | Optional base URL alias for a self-hosted or regional NVIDIA NIM embeddings endpoint when `ENGRAPHIS_EMBED_BASE_URL` is unset. |
 | `ENGRAPHIS_MCP_PRELOAD_EMBEDDER` | `auto` | Standalone MCP launchers import optional semantic dependencies on the launcher thread on Windows before serving requests. Set `0` to disable or `1` to enable on any platform; model loading and backend fallback policy remain unchanged. |
-| `ENGRAPHIS_EMBED_REVISION` | Not set | Optional immutable lowercase 40-hex Hugging Face commit for the embedding model. Loaded Hub commits or local artifact manifests identify persistent vector spaces; unresolved mutable identities keep vector recall fail-closed. |
+| `ENGRAPHIS_EMBED_REVISION` | Not set | Optional immutable lowercase 40-hex Hugging Face commit for local sentence-transformers models, or operator-chosen `space_version` string for persistent `nvidia-nim` / `api` embedding stores. Loaded Hub commits, local artifact manifests, or API space versions identify persistent vector spaces; unresolved mutable identities keep vector recall fail-closed. |
 | `ENGRAPHIS_RERANK_MODEL` | Not set | Optional sentence-transformers cross-encoder reranker |
 | `ENGRAPHIS_RERANK_REVISION` | Not set | Optional immutable lowercase 40-hex Hugging Face commit for the reranker |
 | `ENGRAPHIS_REQUIRE_IMMUTABLE_MODELS` | `false` | When enabled, require a 40-hex commit before loading remote embedding models, rerankers, or chunk tokenizers; `local:` selectors and filesystem paths remain permitted |
@@ -97,6 +103,68 @@ counted. This parameter is not an environment setting or an MCP/dashboard field.
 The optional cross-encoder reranker is model- and hardware-dependent. Treat its quality and
 latency as deployment-specific until a versioned model identity, exact configuration, and
 reproducible evaluation artifact are available for the comparison being reported.
+
+## Optional NVIDIA CUDA and NVIDIA NIM embeddings
+
+Engraphis defaults to local, offline-capable CPU embeddings and never makes remote embedding
+calls unless you explicitly opt in.
+
+### Local CUDA acceleration (optional)
+
+When running local `sentence-transformers` embeddings on a host with a CUDA-capable NVIDIA GPU
+and CUDA-enabled PyTorch, opt in via `ENGRAPHIS_EMBED_DEVICE`:
+
+```dotenv
+ENGRAPHIS_EMBED_MODEL=sentence-transformers/all-MiniLM-L6-v2
+ENGRAPHIS_EMBED_DEVICE=auto   # auto | cuda | cuda:0 | cpu
+```
+
+- `auto` selects `cuda` when `torch.cuda.is_available()` is true and otherwise falls back cleanly
+  to `cpu` (including on CPU-only or PyTorch-free installs).
+- `cuda` or `cuda:<index>` requests that GPU explicitly; if CUDA is unavailable, Engraphis logs a
+  warning and falls back to `cpu` unless `ENGRAPHIS_REQUIRE_EXACT_BACKENDS=true`, in which case
+  startup fails with an actionable error.
+
+### NVIDIA NIM embeddings preset (optional)
+
+To use NVIDIA NIM's OpenAI-compatible `/v1/embeddings` API (hosted NVIDIA API Catalog or a
+self-hosted NIM microservice), configure either `ENGRAPHIS_EMBED_PROVIDER=nvidia-nim` or the
+`nvidia-nim` model prefix. Engraphis automatically sends `input_type="passage"` when indexing
+memories and `input_type="query"` during recall and grounded support checks.
+
+**Hosted NVIDIA API Catalog:**
+
+```dotenv
+ENGRAPHIS_EMBED_PROVIDER=nvidia-nim
+ENGRAPHIS_EMBED_MODEL=nvidia/nv-embedqa-e5-v5
+ENGRAPHIS_EMBED_REVISION=nim-nv-embedqa-e5-v5-v1
+NVIDIA_API_KEY=<nvidia-api-key>
+```
+
+**Self-hosted NVIDIA NIM microservice (local GPU host, no external egress):**
+
+```dotenv
+ENGRAPHIS_EMBED_MODEL=nvidia-nim:nvidia/nv-embedqa-e5-v5
+ENGRAPHIS_EMBED_BASE_URL=http://127.0.0.1:8000/v1
+ENGRAPHIS_EMBED_REVISION=selfhosted-nim-e5-v5-v1
+# NVIDIA_API_KEY is optional for loopback self-hosted NIM endpoints
+```
+
+**Privacy and storage notes:**
+
+- **Explicit opt-in:** Remote NIM requests occur only when `nvidia-nim` (or `api`) is configured.
+  When targeting a remote URL (such as `https://integrate.api.nvidia.com/v1`), non-secret memory
+  text and recall queries are transmitted over HTTPS to generate vectors. Self-hosted loopback NIM
+  containers keep all text on your host.
+- **Secret-memory guards:** Engraphis's credential detector (`reject_secrets`) rejects secret-like
+  payloads before any embedder runs, and memories marked `sensitivity="secret"` are never sent to
+  remote embedding APIs during writes or vector-space rebuilds.
+- **Vector-space versioning and dimension safety:** Persistent SQLite stores require a non-empty
+  `ENGRAPHIS_EMBED_REVISION` (`space_version`) for API embedders so Engraphis fingerprints
+  `(endpoint, model, dimension, space_version)`. Switching between local models (e.g. 384-dim) and
+  NVIDIA NIM models (e.g. 1024-dim) triggers the guarded versioned rebuild rather than mixing
+  incompatible vector dimensions in one store. Never commit API keys; store `NVIDIA_API_KEY` or
+  `ENGRAPHIS_EMBED_API_KEY` in the process environment or owner-private `~/.engraphis/config.env`.
 
 See [`.env.example`](../.env.example) for the full variable inventory. Supply values through the
 process environment or the trusted config file above; copying it to an arbitrary `./.env` does

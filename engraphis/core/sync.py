@@ -69,6 +69,7 @@ from engraphis.core.interfaces import (
     Scope,
     SearchFilter,
     SyncTransport,
+    embed_texts,
     embedding_space_fingerprint,
     normalize_closure_observations,
     normalize_modified_hlc,
@@ -2163,7 +2164,7 @@ class SyncEngine:
         if embedder is not None and vector_writes_ready and not quarantined:
             try:
                 text = f"{rec.title}\n{rec.content}" if rec.title else rec.content
-                rec.embedding = embedder.embed([text])[0]
+                rec.embedding = embed_texts(embedder, [text], input_type="passage")[0]
                 rec.metadata = {
                     **(rec.metadata or {}),
                     "embed_model": self.embedding_space,

@@ -39,7 +39,7 @@ from typing import Optional
 import numpy as np
 
 from engraphis.core.context import RegexTokenCounter, _starts_with_title
-from engraphis.core.interfaces import LLM, embedder_capabilities
+from engraphis.core.interfaces import LLM, embed_texts, embedder_capabilities
 from engraphis.core.poisoning import detect_payload_signals, prompt_eligible
 from engraphis.core.recall import RecallResult
 from engraphis.core.textutil import jaccard, tokenize
@@ -239,11 +239,20 @@ def support_scores(query: str, contents: list[str], embedder) -> list[float]:
     q_tokens = tokenize(query) - _QUERY_FRAMING_TERMS
     semantic_scores = [0.0] * len(contents)
     if embedder_capabilities(embedder)["semantic_support"]:
-        texts = [_filtered_text(query)] + [_filtered_text(c) for c in contents]
+        filtered_query = _filtered_text(query)
+        filtered_contents = [_filtered_text(c) for c in contents]
         try:
-            vectors = embedder.embed(texts)
-            if len(vectors) != len(texts):
-                raise ValueError("semantic embedder returned an unexpected vector count")
+            if getattr(embedder, "supports_input_type", False):
+                query_vectors = embed_texts(embedder, [filtered_query], input_type="query")
+                content_vectors = embed_texts(embedder, filtered_contents, input_type="passage")
+                if len(query_vectors) != 1 or len(content_vectors) != len(filtered_contents):
+                    raise ValueError("semantic embedder returned an unexpected vector count")
+                vectors = [query_vectors[0], *content_vectors]
+            else:
+                texts = [filtered_query] + filtered_contents
+                vectors = embedder.embed(texts)
+                if len(vectors) != len(texts):
+                    raise ValueError("semantic embedder returned an unexpected vector count")
             query_vector = np.asarray(vectors[0], dtype=float)
             if query_vector.ndim != 1 or not np.isfinite(query_vector).all():
                 raise ValueError("semantic embedder returned an invalid query vector")
