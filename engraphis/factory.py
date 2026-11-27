@@ -226,6 +226,7 @@ def create_memory_engine(
         if supervisor is not None:
             owned.append(supervisor)
 
+        llm_query_planner = None
         if query_planner is None:
             planner_mode = os.environ.get("ENGRAPHIS_QUERY_PLANNER", "auto").strip().lower() or "auto"
             if planner_mode == "deterministic":
@@ -243,14 +244,32 @@ def create_memory_engine(
                     if require_exact_backends:
                         raise RuntimeError("ENGRAPHIS_QUERY_PLANNER=llm requires LLM credentials")
             if query_planner is None:
-                selected_decision_backend = settings.decision_backend.strip().lower()
-                jev_client, _jev_provider = select_decision_client(
-                    selected_decision_backend,
+                jev_client, _ = select_decision_client(settings.decision_backend.strip().lower())
+                query_planner = JevAssistedQueryPlanner(
+                    decision_backend=JevDecisionBackend(client=jev_client, model=settings.decision_model),
                 )
-                jev_backend = JevDecisionBackend(
-                    client=jev_client, model=settings.decision_model,
-                )
-                query_planner = JevAssistedQueryPlanner(decision_backend=jev_backend)
+            if planner_mode == "auto" and llm_query_planner is None:
+                try:
+                    from engraphis.backends.query_planner import LLMQueryPlanner
+                    from engraphis.llm.client import LLMClient, auto_managed_llm_selected
+                    if settings.llm_api_key or auto_managed_llm_selected():
+                        llm_client = LLMClient()
+                        if getattr(llm_client, "has_credentials", bool(getattr(llm_client, "api_key", ""))):
+                            owned.append(llm_client)
+                            llm_query_planner = LLMQueryPlanner(llm_client)
+                        else:
+                            _close_quietly(llm_client)
+                except Exception:
+                    pass
+
+        def _managed_llm_allowance_ok(priority: str = "interactive") -> bool:
+            try:
+                import importlib
+                mod = importlib.import_module("engraphis.llm.budget")
+                res = mod.managed_allowance_tracker().can_call(priority=priority)
+                return bool(res[0]) if isinstance(res, tuple) else bool(res)
+            except Exception:
+                return True
 
         def _auto_managed_extractor():
             from engraphis.llm.client import LLMClient, auto_managed_extractor_allowed
@@ -278,6 +297,8 @@ def create_memory_engine(
             allow_automatic_critical_retention=allow_automatic_critical_retention,
             graph_traversal_policy=graph_traversal_policy,
             query_planner=query_planner,
+            llm_query_planner=llm_query_planner,
+            allowance_check=_managed_llm_allowance_ok,
             code_indexer_factory=get_code_indexer,
             code_language_detector=detect_lang,
             code_source_iterator=iter_source_files,

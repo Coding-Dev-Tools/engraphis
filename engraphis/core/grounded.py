@@ -53,7 +53,9 @@ logger = logging.getLogger("engraphis.core.grounded")
 GROUNDED_SUPPORT_FLOOR = 0.25
 ABSTAIN_SENTINEL = "INSUFFICIENT_EVIDENCE"
 _CITE_RE = re.compile(r"\[(\d+)\]")
-_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+_ABBREV_RE = re.compile(r"\b(?:e\.g|i\.e|etc|vs|Dr|Mr|Mrs|Ms|Prof|Inc|Ltd|St)\.", re.IGNORECASE)
+_DECIMAL_RE = re.compile(r"(?<=\d)\.(?=\d)")
+_SENTENCE_SPLIT_RE = re.compile(r"(?:(?<=[.!?])(?:\s+|(?=[A-Z]))|\s*;\s*)")
 _LIST_PREFIX_RE = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+")
 _SYNTHESIS_MODES = frozenset({"strict_extract", "cited_prose"})
 _JEV_BORDERLINE_FLOOR = 0.18
@@ -400,7 +402,9 @@ def _cited_prose_is_valid(text: str, n_citations: int) -> bool:
         cleaned_line = _LIST_PREFIX_RE.sub("", line).strip()
         if not cleaned_line:
             continue
-        sentences = [s.strip() for s in _SENTENCE_SPLIT_RE.split(cleaned_line) if s.strip()]
+        masked = _ABBREV_RE.sub(lambda m: m.group(0).replace(".", "\x00"), cleaned_line)
+        masked = _DECIMAL_RE.sub("\x00", masked)
+        sentences = [s.strip() for s in _SENTENCE_SPLIT_RE.split(masked) if s.strip()]
         if not sentences:
             return False
         for sentence in sentences:
@@ -461,38 +465,30 @@ def build_grounded_answer(query: str, result: RecallResult, embedder, *,
     budget_tokens = result.usage.budget_tokens if result.usage is not None else 0
     advisory_support: Optional[dict] = None
     jev_rescued = False
+    rescued_index: Optional[int] = None
     jev_rejected = False
-    if (
-        chunks
-        and decision_backend is not None
-        and allow_remote is True
-        and data_classification in {"public", "internal"}
-        and _JEV_BORDERLINE_FLOOR <= support < max(min_support, _JEV_BORDERLINE_CEILING)
-    ):
+    if (chunks and decision_backend is not None and allow_remote is True
+            and data_classification in {"public", "internal"}
+            and min_support <= _JEV_BORDERLINE_CEILING
+            and _JEV_BORDERLINE_FLOOR <= support < _JEV_BORDERLINE_CEILING):
         top_index = max(range(len(per)), key=lambda idx: per[idx])
         try:
             jev_res = decision_backend.verify_grounded_support_result(
-                query,
-                contents[top_index],
-                allow_remote=True,
-                data_classification=data_classification,
+                query, contents[top_index], allow_remote=True,
+                data_classification=data_classification, timeout_s=2.5,
             )
             advisory_support = {
-                "status": jev_res.status,
+                "status": jev_res.status, "confidence": jev_res.confidence,
                 "supported": jev_res.value if isinstance(jev_res.value, bool) else None,
-                "confidence": jev_res.confidence,
                 "support_probability": jev_res.support_probability,
-                "fallback_reason": jev_res.fallback_reason,
-                "action": "none",
+                "fallback_reason": jev_res.fallback_reason, "action": "none",
             }
             if jev_res.status == "decision" and (jev_res.confidence or 0.0) > 0.5:
                 prob = jev_res.support_probability
                 if jev_res.value is True and prob is not None and prob >= 0.70 and support < min_support:
-                    jev_rescued = True
-                    advisory_support["action"] = "rescued"
+                    jev_rescued, rescued_index, advisory_support["action"] = True, top_index, "rescued"
                 elif jev_res.value is False and prob is not None and prob <= 0.30:
-                    jev_rejected = True
-                    advisory_support["action"] = "rejected"
+                    jev_rejected, advisory_support["action"] = True, "rejected"
         except Exception:
             advisory_support = {"status": "fallback", "action": "none", "fallback_reason": "remote_unavailable"}
 
@@ -548,9 +544,12 @@ def build_grounded_answer(query: str, result: RecallResult, embedder, *,
     # Cite the sources that individually clear the floor, strongest evidence first, capped
     # at max_citations. Ordering by support (not recall rank) guarantees the reported
     # `support` is always citation [1]'s — we never advertise evidence we don't actually show.
-    effective_floor = min(min_support, _JEV_BORDERLINE_FLOOR) if jev_rescued else min_support
-    ranked = sorted((pair for pair in zip(chunks, per) if pair[1] >= effective_floor),
-                    key=lambda pair: pair[1], reverse=True)[:max_citations]
+    admitted = [
+        (chunks[idx], per[idx])
+        for idx in range(len(chunks))
+        if per[idx] >= min_support or (jev_rescued and idx == rescued_index)
+    ]
+    ranked = sorted(admitted, key=lambda pair: pair[1], reverse=True)[:max_citations]
     citations = [{
         "n": i, "id": c.get("id"), "title": c.get("title", ""),
         "content": c.get("content", ""), "score": c.get("score"),
@@ -579,41 +578,39 @@ def build_grounded_answer(query: str, result: RecallResult, embedder, *,
                     accepted = _synthesis_is_source_bounded(stripped, citations)
                 else:
                     accepted = _cited_prose_is_valid(stripped, len(citations))
-                    if (
-                        accepted
-                        and decision_backend is not None
-                        and allow_remote is True
-                        and data_classification in {"public", "internal"}
-                    ):
-                        cited_nums = {int(m) for m in _CITE_RE.findall(stripped)}
-                        cited_evidence = "\n".join(
-                            f"[{c['n']}] {_citation_evidence(c)}"
-                            for c in citations
-                            if c["n"] in cited_nums
-                        )
-                        entail = decision_backend.verify_grounded_support_result(
-                            stripped,
-                            cited_evidence,
-                            allow_remote=True,
-                            data_classification=data_classification,
-                        )
-                        entail_info = {
-                            "status": entail.status,
-                            "supported": entail.value if isinstance(entail.value, bool) else None,
-                            "confidence": entail.confidence,
-                            "support_probability": entail.support_probability,
-                            "fallback_reason": entail.fallback_reason,
-                        }
+                    if accepted:
+                        if (decision_backend is not None and allow_remote is True
+                                and data_classification in {"public", "internal"}):
+                            cited_nums = {int(m) for m in _CITE_RE.findall(stripped)}
+                            cited_evidence = "\n".join(
+                                f"[{c['n']}] {_citation_evidence(c)}"
+                                for c in citations if c["n"] in cited_nums
+                            )
+                            entail = decision_backend.verify_grounded_support_result(
+                                stripped, cited_evidence, allow_remote=True,
+                                data_classification=data_classification, timeout_s=2.5,
+                            )
+                            entail_info = {
+                                "status": entail.status, "confidence": entail.confidence,
+                                "supported": entail.value if isinstance(entail.value, bool) else None,
+                                "support_probability": entail.support_probability,
+                                "fallback_reason": entail.fallback_reason,
+                            }
+                            accepted = bool(
+                                entail.status == "decision" and entail.value is True
+                                and (entail.confidence or 0.0) > 0.5
+                            )
+                        else:
+                            entail_info = {
+                                "status": "fallback", "supported": None, "confidence": None,
+                                "support_probability": None, "fallback_reason": "entailment_required",
+                            }
+                            accepted = False
                         if advisory_support is None:
                             advisory_support = {"synthesis_entailment": entail_info}
                             recall_metadata["advisory_support"] = advisory_support
                         else:
                             advisory_support["synthesis_entailment"] = entail_info
-                        accepted = bool(
-                            entail.status == "decision"
-                            and entail.value is True
-                            and (entail.confidence or 0.0) > 0.5
-                        )
                 if accepted:
                     recall_metadata["usage"]["answer_tokens"] = answer_tokens
                     return GroundedAnswer(answer=stripped, grounded=True, abstained=False,

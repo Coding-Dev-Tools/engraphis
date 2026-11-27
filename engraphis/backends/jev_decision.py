@@ -23,7 +23,7 @@ import os
 import re
 import time
 from dataclasses import dataclass
-from typing import Callable, Dict, Optional, Protocol, Sequence, Tuple, cast
+from typing import Any, Callable, Dict, Optional, Protocol, Sequence, Tuple, cast
 
 from engraphis.core.interfaces import MemoryRecord
 
@@ -31,7 +31,6 @@ MAX_STATE_CHARS = 16_000
 _VERDICTS = frozenset(("contradicts_and_supersedes", "reinforces", "orthogonal"))
 _RETENTION_CLASSES = frozenset(("ephemeral", "normal", "critical"))
 _RETENTION_MTYPES = frozenset(("working", "episodic", "semantic", "procedural"))
-_EXTRACT_STRATEGIES = frozenset(("store_atomic", "extract_structured", "merge_or_consolidate"))
 _SAFE_CLIENT_ERROR_CODES = frozenset({
     "allowance_exhausted",
     "provider_protection_limit",
@@ -373,7 +372,7 @@ class JevDecisionBackend:
 
     def verify_grounded_support_result(
         self, query: str, evidence_text: str, *, allow_remote: bool = False,
-        data_classification: str = "internal",
+        data_classification: str = "internal", timeout_s: Optional[float] = None,
     ) -> AdvisoryDecisionResult:
         """Return visible support status; this never participates in grounded recall."""
         if (not isinstance(query, str) or not query.strip()
@@ -384,7 +383,7 @@ class JevDecisionBackend:
             "has_support", "Does the evidence directly support answering the query?", "noul",
         )
         batch, status, reason = self._evaluate(
-            state, question, allow_remote, "verify_support", data_classification,
+            state, question, allow_remote, "verify_support", data_classification, timeout_s,
         )
         if batch is None:
             return AdvisoryDecisionResult(status, fallback_reason=reason)
@@ -448,16 +447,16 @@ class JevDecisionBackend:
         return False, 0.0
 
     def classify_retention_result(
-        self, content: str, *, title: str = "", mtype: str = "semantic",
+        self, content: str, *, title: str = "", mtype: Any = "semantic",
         allow_remote: bool = False, data_classification: str = "internal",
         timeout_s: Optional[float] = None,
     ) -> AdvisoryDecisionResult:
         """Classify retention_class and should_retain in one Jev call (advisory only)."""
-        mtype_val = (mtype.value if hasattr(mtype, "value") else str(mtype or "")).strip().lower()
+        mtype_val = str(getattr(mtype, "value", mtype) or "").strip().lower()
         if not isinstance(content, str) or not content.strip() or not isinstance(title, str) or mtype_val not in _RETENTION_MTYPES:
             return AdvisoryDecisionResult("fallback", fallback_reason="invalid_input")
-        clean_title = " ".join(title.split())[:512]
-        clean_content = content.replace("\nTITLE: ", "\nTitle: ").replace("\nCONTENT: ", "\nContent: ")
+        clean_title = re.sub(r"^(MEMORY TYPE|TITLE|CONTENT):", r"[\1]:", " ".join(title.split()))[:512]
+        clean_content = re.sub(r"(?m)^(MEMORY TYPE|TITLE|CONTENT):", r"[\1]:", content)
         state = f"MEMORY TYPE: {mtype_val}\nTITLE: {clean_title}\nCONTENT: {clean_content}"
         questions = (
             DecisionQuestion("retention_class", "Classify this candidate agent memory for long-term retention.",
@@ -482,33 +481,5 @@ class JevDecisionBackend:
                 "decision", value={"retention_class": choice.selected, "should_retain": should_retain},
                 confidence=float(choice.confidence), support_probability=float(noul.probability),
             )
-        except Exception:
-            return AdvisoryDecisionResult("fallback", fallback_reason="malformed_response")
-
-    def assess_extract_worthiness_result(
-        self, content: str, *, allow_remote: bool = False,
-        data_classification: str = "internal", timeout_s: Optional[float] = None,
-    ) -> AdvisoryDecisionResult:
-        """Classify whether candidate input merits atomic storage, structured extraction, or merge."""
-        if not isinstance(content, str) or not content.strip():
-            return AdvisoryDecisionResult("fallback", fallback_reason="invalid_input")
-        question = DecisionQuestion(
-            "strategy",
-            "Should this input be stored as one atomic fact, extracted into multiple structured facts and graph relations, or merged with existing context?",
-            "choice", ("store_atomic", "extract_structured", "merge_or_consolidate"),
-        )
-        batch, status, reason = self._evaluate_questions(
-            f"CANDIDATE INPUT:\n{content}", (question,), allow_remote,
-            "assess_extract_worthiness", data_classification, timeout_s,
-        )
-        if batch is None:
-            return AdvisoryDecisionResult(status, fallback_reason=reason)
-        try:
-            decision = batch.get_choice("strategy")
-            if decision is None or decision.selected not in _EXTRACT_STRATEGIES or not _probability(decision.confidence):
-                return AdvisoryDecisionResult("fallback", fallback_reason="malformed_response")
-            if decision.confidence <= 0.5:
-                return AdvisoryDecisionResult("uncertain", confidence=float(decision.confidence))
-            return AdvisoryDecisionResult("decision", value=decision.selected, confidence=float(decision.confidence))
         except Exception:
             return AdvisoryDecisionResult("fallback", fallback_reason="malformed_response")

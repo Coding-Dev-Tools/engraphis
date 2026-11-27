@@ -7,6 +7,7 @@ silently discards a write.
 from __future__ import annotations
 
 import math
+import os
 import re
 from typing import Optional
 
@@ -104,15 +105,11 @@ class JevRetentionSupervisor:
     """Classify candidate memories via Jev with a 0-call deterministic fast path."""
 
     def __init__(
-        self, decision_backend=None, *, allow_remote: bool = True,
+        self, decision_backend=None, *, allow_remote: bool = False,
         data_classification: str = "internal", timeout_s: Optional[float] = 3.0,
     ) -> None:
-        self.decision_backend = decision_backend
-        self.allow_remote = bool(allow_remote)
-        self.data_classification = (
-            data_classification if data_classification in {"public", "internal"} else "internal"
-        )
-        self.timeout_s = timeout_s
+        self.decision_backend, self.allow_remote, self.timeout_s = decision_backend, bool(allow_remote), timeout_s
+        self.data_classification = data_classification if data_classification in {"public", "internal"} else "internal"
 
     def decide(
         self, content: str, *, title: str = "", mtype: MemoryType, metadata: Optional[dict] = None,
@@ -121,8 +118,6 @@ class JevRetentionSupervisor:
         explicit = str(meta.get("retention_class") or "").strip().lower()
         if explicit in _RETENTION_PRESETS:
             return _preset_decision(explicit, "fast_path_explicit_retention_class")
-        if meta.get("pinned") is True:
-            return _preset_decision("critical", "fast_path_pinned")
         if mtype == MemoryType.WORKING and len((content or "").strip()) < _TINY_WORKING_MAX_CHARS:
             return _preset_decision("ephemeral", "fast_path_transient_working")
 
@@ -130,18 +125,16 @@ class JevRetentionSupervisor:
         if self.allow_remote and backend is not None and getattr(backend, "is_available", False):
             try:
                 result = backend.classify_retention_result(
-                    content, title=title,
-                    mtype=mtype.value if hasattr(mtype, "value") else str(mtype),
-                    allow_remote=True, data_classification=self.data_classification,
-                    timeout_s=self.timeout_s,
+                    content, title=title, mtype=mtype.value if hasattr(mtype, "value") else str(mtype),
+                    allow_remote=True, data_classification=self.data_classification, timeout_s=self.timeout_s,
                 )
                 if result.status == "decision" and isinstance(result.value, dict):
                     label = str(result.value.get("retention_class") or "normal").strip().lower()
-                    if label not in _RETENTION_PRESETS:
-                        label = "normal"
+                    label = label if label in _RETENTION_PRESETS else "normal"
+                    reason = f"jev_classified:{label}"
                     if result.value.get("should_retain") is False:
-                        label = "ephemeral"
-                    return _preset_decision(label, f"jev_classified:{label}")
+                        label, reason = "ephemeral", "jev_classified:ephemeral:discard_advised"
+                    return _preset_decision(label, reason)
             except Exception:
                 pass
         return _preset_decision("normal", "jev_fallback_normal")
@@ -151,13 +144,15 @@ def _resolve_jev_decision_backend():
     from engraphis.backends.jev_decision import JevDecisionBackend, select_decision_client
     from engraphis.config import settings
 
-    configured = (settings.decision_backend or "none").strip().lower()
-    selector = configured if configured not in {"", "none"} else None
-    client, _provider = select_decision_client(selector)
+    client, _ = select_decision_client((settings.decision_backend or "none").strip().lower())
     if client is None:
         return None
     backend = JevDecisionBackend(client=client, model=settings.decision_model)
     return backend if backend.is_available else None
+
+
+def _retention_allow_remote_env() -> bool:
+    return os.environ.get("ENGRAPHIS_RETENTION_ALLOW_REMOTE", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def get_retention_supervisor(
@@ -171,11 +166,11 @@ def get_retention_supervisor(
         backend = _resolve_jev_decision_backend()
         if require_exact and backend is None:
             raise RuntimeError("retention supervisor 'jev' requires a configured Jev decision backend")
-        return JevRetentionSupervisor(decision_backend=backend, allow_remote=True)
+        return JevRetentionSupervisor(decision_backend=backend, allow_remote=_retention_allow_remote_env())
     if name == "auto":
         backend = _resolve_jev_decision_backend()
         if backend is not None:
-            return JevRetentionSupervisor(decision_backend=backend, allow_remote=True)
+            return JevRetentionSupervisor(decision_backend=backend, allow_remote=_retention_allow_remote_env())
         try:
             from engraphis.llm.client import LLMClient
             client = LLMClient()

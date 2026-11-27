@@ -1,6 +1,6 @@
 {
   "schema": "engraphis-mcp-contract/v1",
-  "sha256": "d4606b297786f016909a8d14384627e18c819e94407ef66e978f1eb661ac2682",
+  "sha256": "875120d413322dd5dab32272aeb1fc610a744a0fc4d9e8df78a3350d16375243",
   "surfaces": {
     "classic": [
       {
@@ -2294,6 +2294,13 @@
               "description": "Optional active session context. Includes that exact session plus its repo/workspace ancestors; requires workspace.",
               "title": "Session Id"
             },
+            "synthesis_mode": {
+              "default": "strict_extract",
+              "description": "strict_extract copies verbatim cited source units; cited_prose allows concise multi-source prose where every sentence cites [n].",
+              "pattern": "^(strict_extract|cited_prose)$",
+              "title": "Synthesis Mode",
+              "type": "string"
+            },
             "synthesize": {
               "default": false,
               "description": "If true and an LLM is configured, synthesize cited prose; otherwise return the deterministic extractive answer.",
@@ -3732,12 +3739,27 @@
           "readOnlyHint": true,
           "title": "List pending/quarantined/conflicting memories"
         },
-        "description": "Read-only review of pending/quarantined/conflicting memories.\n\nScope and personal-folder authorization apply. Bodies stay hidden; only approved\nconflicts may expose a short excerpt.",
+        "description": "List pending, quarantined, or conflicting memories (read-only).",
         "inputSchema": {
           "properties": {
+            "advisory_triage": {
+              "default": false,
+              "title": "Advisory Triage",
+              "type": "boolean"
+            },
+            "allow_remote": {
+              "default": false,
+              "title": "Allow Remote",
+              "type": "boolean"
+            },
+            "data_classification": {
+              "default": "internal",
+              "title": "Data Classification",
+              "type": "string"
+            },
             "limit": {
               "default": 50,
-              "description": "Max items to return.",
+              "description": "Max items.",
               "maximum": 100,
               "minimum": 1,
               "title": "Limit",
@@ -3754,12 +3776,12 @@
                 }
               ],
               "default": null,
-              "description": "Optional repo scope.",
+              "description": "Optional repo.",
               "title": "Repo"
             },
             "workspace": {
               "default": "default",
-              "description": "Workspace to review.",
+              "description": "Workspace.",
               "maxLength": 200,
               "title": "Workspace",
               "type": "string"
@@ -3911,7 +3933,7 @@
           "readOnlyHint": true,
           "title": "Read one memory's governed record"
         },
-        "description": "Return one governed memory record (content, provenance, scope, and time).\n\nRead-only; never reinforces. Pending/quarantined bodies stay hidden; only\nprompt-eligible content reaches the agent.",
+        "description": "Read one prompt-eligible memory record (read-only; no reinforce).",
         "inputSchema": {
           "properties": {
             "memory_id": {
@@ -4326,7 +4348,7 @@
           "readOnlyHint": false,
           "title": "Edit a memory's metadata fields"
         },
-        "description": "Edit metadata only (title/type/importance). Identical retries are atomic no-ops. Content uses\ngoverned correction to preserve history; secrets are rejected and provenance/trust/\nsensitivity cannot be edited.",
+        "description": "Edit memory metadata (title/type/importance); content uses governed correction.",
         "inputSchema": {
           "properties": {
             "actor": {

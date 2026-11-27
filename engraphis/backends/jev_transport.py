@@ -38,7 +38,6 @@ _PURPOSES = {
     "verify_completion",
     "select_query_route",
     "classify_retention",
-    "assess_extract_worthiness",
     "custom",
 }
 _CLOUD_HTTP_ERROR_CODES = {
@@ -49,7 +48,7 @@ _SECRETS = (
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
     re.compile(r"\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|"
                r"xox[baprs]-[A-Za-z0-9-]{16,}|AKIA[A-Z0-9]{16}|"
-               r"engr_(?:rt|dev)_[A-Za-z0-9_-]{16,})\b"),
+               r"engr_(?:rt|dev|ct)_[A-Za-z0-9_-]{16,})\b"),
     re.compile(r"\bBearer\s+[A-Za-z0-9._~-]{12,}", re.IGNORECASE),
     # Recognize conventional credential assignments in raw text, including
     # prefixed identifiers, JSON, shell and environment-index forms. This is a
@@ -324,7 +323,7 @@ def _validate_managed_context(
             route_text, remaining = remaining.split(marker, 1)
             route_texts.append(route_text)
         route_texts.append(remaining)
-        if re.search(r"\n\nroute_\d+: ", remaining):
+        if any(re.search(r"(?:^|\r?\n)route_\d+:\s*", part) for part in (query_text, *route_texts)):
             raise DecisionClientError("invalid_request")
         if any(not value.strip() or len(value) > 1024 for value in route_texts):
             raise DecisionClientError("invalid_request")
@@ -353,11 +352,6 @@ def _validate_managed_context(
              "choice", ("ephemeral", "normal", "critical")),
             ("should_retain", "Should this candidate memory be retained beyond the active session?",
              "noul", ()),
-        ),
-        "assess_extract_worthiness": (
-            ("strategy",
-             "Should this input be stored as one atomic fact, extracted into multiple structured facts and graph relations, or merged with existing context?",
-             "choice", ("store_atomic", "extract_structured", "merge_or_consolidate")),
         ),
     }.get(purpose)
     if expected is None:
@@ -402,13 +396,17 @@ def _validate_managed_context(
         if "\nCONTENT: " not in remaining:
             raise DecisionClientError("invalid_request")
         title, content = remaining.split("\nCONTENT: ")
-        if mtype not in {"working", "episodic", "semantic", "procedural"} or len(title) > 512:
+        if (
+            mtype not in {"working", "episodic", "semantic", "procedural"}
+            or len(title) > 512
+            or re.search(r"[\r\n]", title)
+            or any(
+                re.search(r"(?:^|\r?\n)(?:MEMORY TYPE|TITLE|CONTENT):", part)
+                for part in (title, content)
+            )
+        ):
             raise DecisionClientError("invalid_request")
         fields = [(content, 16000)]
-    elif purpose == "assess_extract_worthiness":
-        if not state.startswith("CANDIDATE INPUT:\n"):
-            raise DecisionClientError("invalid_request")
-        fields = [(state[len("CANDIDATE INPUT:\n"):], 16000)]
     if actual != expected or any(not value.strip() or len(value) > limit for value, limit in fields):
         raise DecisionClientError("invalid_request")
 

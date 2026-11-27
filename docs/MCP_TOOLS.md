@@ -184,7 +184,7 @@ an omitted mode means it was not recorded, and is not inferred from current defa
 | Write | `engraphis_consolidate` | Runs a dry-run or live consolidation sweep. A live call can write resolved facts and receipts. |
 | Stateful read | `engraphis_recall_context` | Returns hard-budget context, compact sources, token usage, and optional diagnostics. Recommended for agent prompts. Compact-only: it never accepts `response_mode` and never returns full memory bodies. |
 | Stateful read | `engraphis_recall` | Runs hybrid vector, lexical, and graph recall. It attempts a receipt without strengthening weak matches. |
-| Stateful read | `engraphis_recall_grounded` | Returns a cited answer or abstains when the evidence is too weak. It attempts a receipt and reinforces cited memories. |
+| Stateful read | `engraphis_recall_grounded` | Returns a cited answer or abstains when the evidence is too weak (`synthesis_mode`: `strict_extract` or Jev-verified `cited_prose`). It attempts a receipt and reinforces cited memories. |
 | Stateful read | `engraphis_answer` | Backward-compatible alias for `engraphis_recall_grounded`. |
 | Pure read | `engraphis_recall_proactive` | Returns high-signal, queryless context and a last-session handoff. It does not reinforce or record a receipt. |
 | Stateful read | `engraphis_proactive_context` | Builds task-aware cited context and attempts a receipt without reinforcement. |

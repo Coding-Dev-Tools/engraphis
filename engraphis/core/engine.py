@@ -489,6 +489,7 @@ class MemoryEngine:
         graph_traversal_policy: Optional[GraphTraversalPolicy] = None,
         query_planner: Optional[QueryPlanner] = None,
         llm_query_planner: Optional[QueryPlanner] = None,
+        allowance_check: Optional[Callable[[str], bool]] = None,
         code_indexer_factory: Optional[Callable] = None,
         code_language_detector: Optional[Callable] = None,
         code_source_iterator: Optional[Callable] = None,
@@ -509,6 +510,7 @@ class MemoryEngine:
             graph_traversal_policy=graph_traversal_policy,
             query_planner=query_planner,
             llm_query_planner=llm_query_planner,
+            allowance_check=allowance_check,
         )
         # Memory evolution (A-MEM-style): writing a new note also updates
         # how its neighbors are connected, so the network improves bidirectionally.

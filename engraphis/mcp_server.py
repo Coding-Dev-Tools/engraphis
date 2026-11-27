@@ -4168,11 +4168,7 @@ def engraphis_get_memory(
     repo: Annotated[Optional[str], Field(description="Optional repo scope.",
                                          max_length=200)] = None,
 ) -> str:
-    """Return one governed memory record (content, provenance, scope, and time).
-
-    Read-only; never reinforces. Pending/quarantined bodies stay hidden; only
-    prompt-eligible content reaches the agent.
-    """
+    """Read one prompt-eligible memory record (read-only; no reinforce)."""
     try:
         record = service().inspect(memory_id=memory_id, workspace=workspace, repo=repo)
     except Exception as exc:  # noqa: BLE001 — Smart gateway classification
@@ -4283,9 +4279,7 @@ def engraphis_update_memory(
         max_length=200,
     )] = "user",
 ) -> str:
-    """Edit metadata only (title/type/importance). Identical retries are atomic no-ops. Content uses
-    governed correction to preserve history; secrets are rejected and provenance/trust/
-    sensitivity cannot be edited."""
+    """Edit memory metadata (title/type/importance); content uses governed correction."""
     if title is None and mtype is None and importance is None:
         return _gateway_error("nothing_to_update")
     try:
@@ -4306,22 +4300,14 @@ def engraphis_update_memory(
     structured_output=False,
 )
 def engraphis_conflict_review(
-    workspace: Annotated[str, Field(description="Workspace to review.", max_length=200)] = "default",
-    repo: Annotated[Optional[str], Field(description="Optional repo scope.",
-                                         max_length=200)] = None,
-    limit: Annotated[int, Field(description="Max items to return.", ge=1, le=100)] = 50,
-    advisory_triage: Annotated[bool, Field(
-        description="Opt-in Jev advisory contradiction/entailment triage (read-only).")] = False,
-    allow_remote: Annotated[bool, Field(
-        description="Explicit per-call consent for remote Jev advisory triage.")] = False,
-    data_classification: Annotated[str, Field(
-        description="Data classification for remote Jev triage: public or internal.")] = "internal",
+    workspace: Annotated[str, Field(description="Workspace.", max_length=200)] = "default",
+    repo: Annotated[Optional[str], Field(description="Optional repo.", max_length=200)] = None,
+    limit: Annotated[int, Field(description="Max items.", ge=1, le=100)] = 50,
+    advisory_triage: bool = False,
+    allow_remote: bool = False,
+    data_classification: str = "internal",
 ) -> str:
-    """Read-only review of pending/quarantined/conflicting memories.
-
-    Scope and personal-folder authorization apply. Bodies stay hidden; only approved
-    conflicts may expose a short excerpt.
-    """
+    """List pending, quarantined, or conflicting memories (read-only)."""
     try:
         return _ok(service().conflict_review(
             workspace=workspace, repo=repo, limit=limit,
