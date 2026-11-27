@@ -722,6 +722,40 @@ def test_extractor_enabled_is_false_in_strict_exact_mode(monkeypatch, tmp_path):
         svc.close()
 
 
+def _setup_connected_allowances(
+    monkeypatch,
+    tmp_path,
+    *,
+    org_id: str = "org_test_allowances",
+    plan: str = "pro",
+    access_state: str = "active",
+    control_url: str = "https://api.engraphis.test",
+    token: str = "tok_secret_never_returned",
+    session_digest: str = "digest_person_a_0123456789abcdef",
+):
+    from engraphis import cloud_session, hosted_client
+    from engraphis.routes import v2_api
+
+    client, _svc = _client(monkeypatch, tmp_path)
+    v2_api._clear_cloud_allowances_cache()
+    monkeypatch.setattr(cloud_session, "configured", lambda *, require_compute=True: True)
+    monkeypatch.setattr(
+        cloud_session,
+        "saved_entitlement",
+        lambda: {"plan": plan, "status": access_state, "cloud_access_active": True, "organization_id": org_id},
+    )
+    monkeypatch.setattr(cloud_session, "saved_session_digest", lambda: session_digest)
+    monkeypatch.setattr(cloud_session, "credential_bound_control_url", lambda: control_url)
+    monkeypatch.setattr(v2_api, "hosted_plan_summary", lambda: {"plan": plan, "access_state": access_state})
+    monkeypatch.setattr(hosted_client, "validate_cloud_base_url", lambda url: str(url).rstrip("/"))
+    monkeypatch.setattr(
+        cloud_session,
+        "access_for_workspace",
+        lambda workspace_id, *, require_compute=True, deadline=None: (token, org_id, ""),
+    )
+    return client, cloud_session, v2_api
+
+
 def test_cloud_allowances_offline_unconnected_returns_fast_with_zero_network_calls(
     monkeypatch, tmp_path
 ):
@@ -741,15 +775,11 @@ def test_cloud_allowances_offline_unconnected_returns_fast_with_zero_network_cal
 
     resp = client.get("/api/v2/cloud/allowances")
     assert resp.status_code == 200
+    assert resp.headers.get("cache-control") == "no-store"
     body = resp.json()
-    assert body["connected"] is False
-    assert body["cached"] is False
-    assert body["llm"]["available"] is False
-    assert body["llm"]["limit"] == 100
-    assert body["llm"]["status"] == "not_connected"
-    assert body["jev"]["available"] is False
-    assert body["jev"]["limit"] == 250
-    assert body["jev"]["status"] == "not_connected"
+    assert body["connected"] is False and body["cached"] is False
+    assert body["llm"]["available"] is False and body["llm"]["limit"] == 100 and body["llm"]["status"] == "not_connected"
+    assert body["jev"]["available"] is False and body["jev"]["limit"] == 250 and body["jev"]["status"] == "not_connected"
     assert "openrouter" not in resp.text.lower()
 
 
@@ -757,48 +787,9 @@ def test_cloud_allowances_connected_fetches_usage_caches_60s_and_strips_vendor_n
     monkeypatch, tmp_path
 ):
     """Connected active sessions fetch /v1/llm/usage and /v1/jev/usage, cache 60s, and sanitize vendors."""
-    from engraphis import cloud_session, hosted_client
-    from engraphis.routes import v2_api
-
-    client, _svc = _client(monkeypatch, tmp_path)
-    v2_api._clear_cloud_allowances_cache()
-
-    monkeypatch.setattr(cloud_session, "configured", lambda *, require_compute=True: True)
-    monkeypatch.setattr(
-        cloud_session,
-        "saved_entitlement",
-        lambda: {
-            "plan": "pro",
-            "status": "active",
-            "cloud_access_active": True,
-            "organization_id": "org_test_allowances",
-        },
+    client, _cs, v2_api = _setup_connected_allowances(
+        monkeypatch, tmp_path, control_url="https://api.engraphis.test/",
     )
-    monkeypatch.setattr(
-        cloud_session,
-        "credential_bound_control_url",
-        lambda: "https://api.engraphis.test",
-    )
-    monkeypatch.setattr(
-        v2_api,
-        "hosted_plan_summary",
-        lambda: {"plan": "pro", "access_state": "active"},
-    )
-    monkeypatch.setattr(
-        hosted_client,
-        "validate_cloud_base_url",
-        lambda url: str(url).rstrip("/"),
-    )
-    monkeypatch.setattr(
-        cloud_session,
-        "access_for_workspace",
-        lambda workspace_id, *, require_compute=True, deadline=None: (
-            "tok_secret_never_returned",
-            "org_test_allowances",
-            "",
-        ),
-    )
-
     calls: list[str] = []
 
     def _fake_fetch(control_url: str, path: str, access_token: str, deadline: float):
@@ -815,7 +806,7 @@ def test_cloud_allowances_connected_fetches_usage_caches_60s_and_strips_vendor_n
                             "seconds": 86400,
                             "limit": 100,
                             "remaining_requests": 87,
-                            "resets_at": "2026-11-28T00:00:00Z",
+                            "next_release_at": "2026-11-28T00:00:00Z",
                         }
                     ],
                 },
@@ -823,16 +814,7 @@ def test_cloud_allowances_connected_fetches_usage_caches_60s_and_strips_vendor_n
             )
         if path == "/v1/jev/usage":
             return (
-                {
-                    "available": True,
-                    "windows": [
-                        {
-                            "seconds": 86400,
-                            "limit": 250,
-                            "remaining_decisions": 241,
-                        }
-                    ],
-                },
+                {"available": True, "windows": [{"seconds": 86400, "limit": 250, "remaining_decisions": 241}]},
                 "ok",
             )
         raise AssertionError(f"unexpected path: {path}")
@@ -841,85 +823,131 @@ def test_cloud_allowances_connected_fetches_usage_caches_60s_and_strips_vendor_n
 
     first = client.get("/api/v2/cloud/allowances")
     assert first.status_code == 200
+    assert first.headers.get("cache-control") == "no-store"
     body = first.json()
-    assert body["connected"] is True
-    assert body["cached"] is False
-    assert body["plan"] == "pro"
-    assert body["llm"]["available"] is True
-    assert body["llm"]["remaining"] == 87
-    assert body["llm"]["limit"] == 100
-    assert body["llm"]["used"] == 13
-    assert body["llm"]["status"] == "available"
-    assert body["jev"]["available"] is True
-    assert body["jev"]["remaining"] == 241
-    assert body["jev"]["limit"] == 250
-    assert body["jev"]["used"] == 9
-    assert body["jev"]["status"] == "available"
+    assert body["connected"] is True and body["cached"] is False and body["plan"] == "pro"
+    assert body["llm"]["available"] is True and body["llm"]["remaining"] == 87 and body["llm"]["used"] == 13
+    assert body["llm"]["resets_at"] == "2026-11-28T00:00:00Z" and body["llm"]["status"] == "available"
+    assert body["jev"]["available"] is True and body["jev"]["remaining"] == 241 and body["jev"]["used"] == 9
     assert "provider" not in body["llm"]
-    assert "openrouter" not in first.text.lower()
-    assert "tok_secret_never_returned" not in first.text
+    assert "openrouter" not in first.text.lower() and "tok_secret_never_returned" not in first.text
     assert calls == ["/v1/llm/usage", "/v1/jev/usage"]
 
-    # Second call within 60s uses process-local cache without extra upstream calls.
     second = client.get("/api/v2/cloud/allowances")
-    assert second.status_code == 200
-    assert second.json()["cached"] is True
-    assert second.json()["llm"]["remaining"] == 87
+    assert second.status_code == 200 and second.headers.get("cache-control") == "no-store"
+    assert second.json()["cached"] is True and second.json()["llm"]["remaining"] == 87
     assert calls == ["/v1/llm/usage", "/v1/jev/usage"]
 
-    # ?refresh=true bypasses cache and re-fetches both endpoints.
     refreshed = client.get("/api/v2/cloud/allowances?refresh=true")
-    assert refreshed.status_code == 200
-    assert refreshed.json()["cached"] is False
+    assert refreshed.status_code == 200 and refreshed.json()["cached"] is False
     assert calls == ["/v1/llm/usage", "/v1/jev/usage", "/v1/llm/usage", "/v1/jev/usage"]
 
 
-def test_cloud_allowances_sanitizes_vendor_in_status_and_handles_offline_error(
+def test_cloud_allowances_sanitizes_vendor_and_never_caches_transient_failures(
     monkeypatch, tmp_path
 ):
-    """Upstream vendor strings in status fields are sanitized and offline failures degrade cleanly."""
-    from engraphis import cloud_session, hosted_client
-    from engraphis.routes import v2_api
-
-    client, _svc = _client(monkeypatch, tmp_path)
-    v2_api._clear_cloud_allowances_cache()
-
-    monkeypatch.setattr(cloud_session, "configured", lambda *, require_compute=True: True)
-    monkeypatch.setattr(
-        cloud_session,
-        "saved_entitlement",
-        lambda: {"plan": "team", "status": "trialing", "cloud_access_active": True, "organization_id": "org_2"},
+    """Vendor strings are sanitized and partial/offline failures are never cached for 60s."""
+    client, _cs, v2_api = _setup_connected_allowances(
+        monkeypatch, tmp_path, org_id="org_2", plan="team", access_state="trial", token="tok_2",
     )
-    monkeypatch.setattr(
-        cloud_session,
-        "credential_bound_control_url",
-        lambda: "https://api.engraphis.test",
-    )
-    monkeypatch.setattr(
-        v2_api,
-        "hosted_plan_summary",
-        lambda: {"plan": "team", "access_state": "trial"},
-    )
-    monkeypatch.setattr(hosted_client, "validate_cloud_base_url", lambda url: str(url).rstrip("/"))
-    monkeypatch.setattr(
-        cloud_session,
-        "access_for_workspace",
-        lambda workspace_id, *, require_compute=True, deadline=None: ("tok_2", "org_2", ""),
-    )
+    attempt = {"n": 0}
 
     def _fake_fetch(control_url: str, path: str, access_token: str, deadline: float):
         if path == "/v1/llm/usage":
-            return ({"available": False, "status": "OpenRouter quota paused"}, "ok")
-        return (None, "offline")
+            attempt["n"] += 1
+            if attempt["n"] == 1:
+                return ({"available": False, "status": "OpenRouter quota paused"}, "ok")
+            return ({"available": True, "windows": [{"seconds": 86400, "limit": 100, "remaining_requests": 99}]}, "ok")
+        if attempt["n"] == 1:
+            return (None, "offline")
+        return ({"available": True, "windows": [{"seconds": 86400, "limit": 250, "remaining_decisions": 249}]}, "ok")
 
     monkeypatch.setattr(v2_api, "_fetch_cloud_usage_json", _fake_fetch)
 
-    resp = client.get("/api/v2/cloud/allowances")
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["connected"] is True
-    assert body["llm"]["available"] is False
-    assert "openrouter" not in resp.text.lower()
-    assert "managed AI" in body["llm"]["status"]
-    assert body["jev"]["available"] is False
-    assert body["jev"]["status"] == "offline"
+    first = client.get("/api/v2/cloud/allowances")
+    assert first.status_code == 200
+    body = first.json()
+    assert "openrouter" not in first.text.lower() and "managed AI" in body["llm"]["status"]
+    assert body["jev"]["available"] is False and body["jev"]["status"] == "offline"
+
+    # Transient failure must not be cached: next call retries immediately and succeeds.
+    recovered = client.get("/api/v2/cloud/allowances")
+    assert recovered.status_code == 200 and recovered.json()["cached"] is False
+    assert recovered.json()["llm"]["remaining"] == 99 and recovered.json()["jev"]["remaining"] == 249
+
+
+def test_cloud_allowances_session_isolation_toctou_and_402_denial(monkeypatch, tmp_path):
+    """Cache is isolated per person session, TOCTOU origin swap fails closed, and 402 propagates denial."""
+    import io
+    import time
+    import urllib.error
+
+    from engraphis import hosted_client
+
+    client, cloud_session, v2_api = _setup_connected_allowances(monkeypatch, tmp_path)
+    real_fetch = v2_api._fetch_cloud_usage_json
+    state = {"digest": "aaaa111122223333", "remaining": 80}
+    monkeypatch.setattr(cloud_session, "saved_session_digest", lambda: state["digest"])
+
+    def _fake_fetch(control_url: str, path: str, access_token: str, deadline: float):
+        if path == "/v1/llm/usage":
+            return ({"available": True, "windows": [{"seconds": 86400, "limit": 100, "remaining_requests": state["remaining"]}]}, "ok")
+        return ({"available": True, "windows": [{"seconds": 86400, "limit": 250, "remaining_decisions": 200}]}, "ok")
+
+    monkeypatch.setattr(v2_api, "_fetch_cloud_usage_json", _fake_fetch)
+    assert client.get("/api/v2/cloud/allowances").json()["llm"]["remaining"] == 80
+    # Different session digest in the same org must not receive Person A's cached allowance.
+    state["digest"] = "bbbb444455556666"
+    state["remaining"] = 42
+    second = client.get("/api/v2/cloud/allowances")
+    assert second.json()["cached"] is False and second.json()["llm"]["remaining"] == 42
+
+    # TOCTOU: control URL mutates during access_for_workspace -> fail closed with 0 usage fetches.
+    v2_api._clear_cloud_allowances_cache()
+    origin = {"url": "https://api.engraphis.test"}
+    monkeypatch.setattr(cloud_session, "credential_bound_control_url", lambda: origin["url"])
+
+    def _mutating_access(workspace_id, *, require_compute=True, deadline=None):
+        origin["url"] = "https://evil.engraphis.test"
+        return ("tok_secret", "org_test_allowances", "")
+
+    monkeypatch.setattr(cloud_session, "access_for_workspace", _mutating_access)
+    monkeypatch.setattr(
+        v2_api,
+        "_fetch_cloud_usage_json",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not fetch after origin swap")),
+    )
+    toctou = client.get("/api/v2/cloud/allowances")
+    assert toctou.status_code == 200 and toctou.json()["llm"]["status"] == "unavailable"
+    assert toctou.json()["jev"]["status"] == "unavailable"
+
+    # Real _fetch_cloud_usage_json: HTTP 402 invokes cloud_session.record_billing_denial() and rejects NaN.
+    denied = []
+    monkeypatch.setattr(cloud_session, "record_billing_denial", lambda: denied.append(True) or True)
+
+    class _Opener402:
+        def open(self, req, timeout=None):
+            raise urllib.error.HTTPError(req.full_url, 402, "Payment Required", {}, io.BytesIO(b""))
+
+    monkeypatch.setattr(hosted_client, "build_pinned_https_opener", lambda *h: _Opener402())
+    payload, status = real_fetch(
+        "https://api.engraphis.test", "/v1/llm/usage", "tok_x", time.monotonic() + 5.0
+    )
+    assert payload is None and status == "unauthorized" and denied == [True]
+
+    class _RespNaN:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self, n=-1): return b'{"available": true, "limit": NaN}'
+
+    class _OpenerNaN:
+        def open(self, req, timeout=None):
+            return _RespNaN()
+
+    monkeypatch.setattr(hosted_client, "build_pinned_https_opener", lambda *h: _OpenerNaN())
+    monkeypatch.setattr("engraphis.http_deadline.read_response", lambda resp, dl, max_bytes=0: resp.read())
+    nan_payload, nan_status = real_fetch(
+        "https://api.engraphis.test", "/v1/llm/usage", "tok_x", time.monotonic() + 5.0
+    )
+    assert nan_payload is None and nan_status == "unavailable"

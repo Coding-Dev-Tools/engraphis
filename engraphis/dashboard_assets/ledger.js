@@ -7021,6 +7021,13 @@
             `Live allowance status · checked ${relative(data.checked_at)}${data.cached ? ' (cached)' : ''}. Per-person rolling 24-hour allowance; never charged for overage.`,
           ));
         }
+        if (error) {
+          body.append(node(
+            'p',
+            'form-error',
+            `Could not refresh live quota: ${error.message || 'request failed'}. Showing last loaded status.`,
+          ));
+        }
       }
     }
 
@@ -7033,6 +7040,9 @@
           node('strong', '', 'Today’s Included AI Memory Allowances'),
           node('div', '', `${llmInfo.value} · ${jevInfo.value}`),
         );
+        if (error) {
+          settingsSummary.append(node('div', 'form-error', `Refresh failed: ${error.message || 'request failed'}.`));
+        }
       } else {
         settingsSummary.append(
           node('strong', '', 'Included AI Memory Intelligence (Pro & Team)'),
@@ -7056,7 +7066,9 @@
       if (!isCurrentScopedRequest(request)) return;
       renderCloudAllowances(state.cloudAllowances, error);
     } finally {
-      if (refresh && refreshButton) refreshButton.disabled = false;
+      if (refresh && refreshButton && isCurrentScopedRequest(request)) {
+        refreshButton.disabled = false;
+      }
     }
   }
 

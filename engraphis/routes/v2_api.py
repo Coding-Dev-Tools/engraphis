@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import quote, urlsplit
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field, StrictBool, StrictInt
 from starlette.concurrency import run_in_threadpool
 
@@ -3701,6 +3701,7 @@ def _write_entitlement_cache(entitlement: dict) -> bool:
             "trial_consumed": bool(entitlement.get("trial_consumed")),
             "trial_ends_at": float(entitlement.get("trial_ends_at") or 0.0),
         }, sort_keys=True, separators=(",", ":")), harden_parent=True)
+        _clear_cloud_allowances_cache()
         return True
     except Exception:  # noqa: BLE001 - losing the cache write must not surface anywhere
         logger.debug("entitlement cache write skipped")
@@ -3729,6 +3730,7 @@ def _deny_entitlement_cache() -> bool:
     """
 
     try:
+        _clear_cloud_allowances_cache()
         cached = _read_entitlement_cache()
         if not cached:
             return True
@@ -3826,6 +3828,7 @@ def _clear_superseded_denial(known_source: str, observed_digest: Optional[str]) 
         ):
             _AUTHORITATIVE_DENIAL_PENDING.clear()
             _authoritative_denial_at = 0.0
+            _clear_cloud_allowances_cache()
             return True
     return False
 
@@ -3834,6 +3837,7 @@ def _record_authoritative_denial() -> None:
     """Settle both persisted entitlement sources after a 401/402/403 cloud answer."""
 
     _mark_authoritative_denial()
+    _clear_cloud_allowances_cache()
     try:
         from engraphis.cloud_session import record_billing_denial
 
@@ -4369,10 +4373,12 @@ def get_license():
 
 _CLOUD_ALLOWANCES_CACHE_TTL_SECONDS = 60.0
 _CLOUD_ALLOWANCES_TIMEOUT_SECONDS = 5.0
+_CLOUD_ALLOWANCES_PER_ENDPOINT_TIMEOUT_SECONDS = 2.5
 _CLOUD_ALLOWANCES_MAX_BYTES = 64 * 1024
 _CLOUD_ALLOWANCES_CACHE_MAX_ENTRIES = 16
 _CLOUD_ALLOWANCES_LOCK = threading.Lock()
-_CLOUD_ALLOWANCES_CACHE: dict[tuple[str, str], dict] = {}
+_CLOUD_ALLOWANCES_CACHE: dict[tuple[str, ...], dict] = {}
+_CLOUD_ALLOWANCES_INFLIGHT_LOCKS: dict[tuple[str, ...], threading.Lock] = {}
 _CLOUD_ALLOWANCES_VENDOR_RE = re.compile(r"openrouter", re.IGNORECASE)
 
 
@@ -4382,24 +4388,44 @@ class _CloudAllowancesNoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def _clear_cloud_allowances_cache() -> None:
-    """Clear the process-local Cloud allowance cache (tests and reconnects)."""
+    """Clear the process-local Cloud allowance cache (tests, denials, and reconnects)."""
     with _CLOUD_ALLOWANCES_LOCK:
         _CLOUD_ALLOWANCES_CACHE.clear()
+
+
+def _cloud_allowances_inflight_lock(key: tuple[str, ...]) -> threading.Lock:
+    with _CLOUD_ALLOWANCES_LOCK:
+        if len(_CLOUD_ALLOWANCES_INFLIGHT_LOCKS) >= _CLOUD_ALLOWANCES_CACHE_MAX_ENTRIES * 2:
+            for existing in [k for k, lk in _CLOUD_ALLOWANCES_INFLIGHT_LOCKS.items() if not lk.locked()]:
+                _CLOUD_ALLOWANCES_INFLIGHT_LOCKS.pop(existing, None)
+        return _CLOUD_ALLOWANCES_INFLIGHT_LOCKS.setdefault(key, threading.Lock())
+
+
+def _reject_allowance_json_constant(token: str):
+    raise ValueError(f"unsupported JSON constant: {token}")
+
+
+def _propagate_cloud_billing_denial() -> None:
+    _clear_cloud_allowances_cache()
+    try:
+        from engraphis import cloud_session
+        record_fn = getattr(cloud_session, "record_billing_denial", None)
+        if callable(record_fn):
+            record_fn()
+    except Exception:  # noqa: BLE001 - best-effort denial persistence
+        logger.warning("cloud allowances billing denial persistence failed")
+    _deny_entitlement_cache()
 
 
 def _sanitize_allowance_text(value: object, *, max_len: int = 120) -> Optional[str]:
     if not isinstance(value, str):
         return None
     cleaned = _CLOUD_ALLOWANCES_VENDOR_RE.sub("managed AI", value).strip()
-    if not cleaned:
-        return None
-    return cleaned[:max_len]
+    return cleaned[:max_len] if cleaned else None
 
 
 def _nonneg_allowance_int(value: object) -> Optional[int]:
-    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-        return value
-    return None
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
 
 def _select_allowance_daily_window(windows: object) -> Optional[dict]:
@@ -4413,64 +4439,50 @@ def _select_allowance_daily_window(windows: object) -> Optional[dict]:
     return None
 
 
+def _first_present(mapping: dict, *keys: str) -> object:
+    for key in keys:
+        if (value := mapping.get(key)) is not None:
+            return value
+    return None
+
+
 def _default_allowance_bucket(default_limit: int, status: str) -> dict:
     return {
-        "available": False,
-        "remaining": None,
-        "limit": default_limit,
-        "used": None,
-        "resets_at": None,
-        "window_seconds": 86400,
-        "status": status,
+        "available": False, "remaining": None, "limit": default_limit,
+        "used": None, "resets_at": None, "window_seconds": 86400, "status": status,
     }
 
 
 def _normalize_allowance_bucket(
-    payload: Optional[dict],
-    *,
-    remaining_key: str,
-    used_key: str,
-    default_limit: int,
-    fallback_status: str = "unavailable",
+    payload: Optional[dict], *, remaining_key: str, used_key: str,
+    default_limit: int, fallback_status: str = "unavailable",
 ) -> dict:
     if not isinstance(payload, dict):
         return _default_allowance_bucket(default_limit, fallback_status)
     avail_raw = payload.get("available")
     available = bool(avail_raw) if isinstance(avail_raw, bool) else False
     window = _select_allowance_daily_window(payload.get("windows"))
-    source = window if window is not None else payload
+    sources = (window, payload) if window is not None else (payload,)
+    source = sources[0]
 
-    remaining = _nonneg_allowance_int(source.get(remaining_key))
-    if remaining is None:
-        remaining = _nonneg_allowance_int(source.get("remaining"))
-    if remaining is None and source is not payload:
-        remaining = _nonneg_allowance_int(payload.get(remaining_key))
-    if remaining is None and source is not payload:
-        remaining = _nonneg_allowance_int(payload.get("remaining"))
-
-    limit = _nonneg_allowance_int(source.get("limit"))
-    if limit is None and source is not payload:
-        limit = _nonneg_allowance_int(payload.get("limit"))
-    if limit is None or limit == 0:
-        limit = default_limit
-
-    used = _nonneg_allowance_int(source.get(used_key))
-    if used is None:
-        used = _nonneg_allowance_int(source.get("used"))
-    if used is None and remaining is not None and limit is not None:
-        used = max(0, limit - remaining)
-
-    resets_raw = (
-        source.get("resets_at")
-        if source.get("resets_at") is not None
-        else source.get("reset_at")
+    remaining = next(
+        (v for src in sources for k in (remaining_key, "remaining")
+         if (v := _nonneg_allowance_int(src.get(k))) is not None),
+        None,
     )
-    if resets_raw is None and source is not payload:
-        resets_raw = (
-            payload.get("resets_at")
-            if payload.get("resets_at") is not None
-            else payload.get("reset_at")
-        )
+    limit = next(
+        (v for src in sources if (v := _nonneg_allowance_int(src.get("limit")))),
+        default_limit,
+    )
+    used = next(
+        (v for k in (used_key, "used") if (v := _nonneg_allowance_int(source.get(k))) is not None),
+        max(0, limit - remaining) if remaining is not None else None,
+    )
+    resets_raw = next(
+        (v for src in sources
+         if (v := _first_present(src, "resets_at", "reset_at", "next_release_at")) is not None),
+        None,
+    )
     if isinstance(resets_raw, (int, float)) and not isinstance(resets_raw, bool) and math.isfinite(resets_raw):
         resets_at: object = resets_raw
     else:
@@ -4480,31 +4492,22 @@ def _normalize_allowance_bucket(
     if available:
         status = "exhausted" if remaining == 0 else "available"
     else:
-        raw_status = _sanitize_allowance_text(payload.get("status"), max_len=48)
-        status = raw_status or fallback_status
-
+        status = _sanitize_allowance_text(payload.get("status"), max_len=48) or fallback_status
     return {
-        "available": available,
-        "remaining": remaining,
-        "limit": limit,
-        "used": used,
-        "resets_at": resets_at,
-        "window_seconds": window_seconds,
-        "status": status,
+        "available": available, "remaining": remaining, "limit": limit, "used": used,
+        "resets_at": resets_at, "window_seconds": window_seconds, "status": status,
     }
 
 
 def _fetch_cloud_usage_json(
-    validated_control: str,
-    path: str,
-    access_token: str,
-    deadline: float,
+    validated_control: str, path: str, access_token: str, deadline: float,
 ) -> tuple[Optional[dict], str]:
     """Fetch a read-only usage endpoint from the credential-bound Cloud control origin."""
     from engraphis import __version__ as current_version
     from engraphis.hosted_client import _is_loopback_host, build_pinned_https_opener
     from engraphis.http_deadline import deadline_handlers, read_response, remaining_time
 
+    endpoint_deadline = min(deadline, time.monotonic() + _CLOUD_ALLOWANCES_PER_ENDPOINT_TIMEOUT_SECONDS)
     req = urllib.request.Request(
         validated_control.rstrip("/") + path,
         headers={
@@ -4515,197 +4518,205 @@ def _fetch_cloud_usage_json(
         method="GET",
     )
     loopback_only = _is_loopback_host(urlsplit(validated_control).hostname or "")
-    handlers: list[urllib.request.BaseHandler] = [_CloudAllowancesNoRedirect()]
-    handlers.extend(deadline_handlers(deadline, loopback_only=loopback_only))
+    handlers: list[urllib.request.BaseHandler] = [
+        _CloudAllowancesNoRedirect(),
+        *deadline_handlers(endpoint_deadline, loopback_only=loopback_only),
+    ]
     if loopback_only:
         handlers.append(urllib.request.ProxyHandler({}))
     opener = build_pinned_https_opener(*handlers)
     try:
-        timeout_budget = remaining_time(deadline)
+        timeout_budget = min(remaining_time(endpoint_deadline), _CLOUD_ALLOWANCES_PER_ENDPOINT_TIMEOUT_SECONDS)
         with opener.open(req, timeout=timeout_budget) as resp:
             if getattr(resp, "status", 200) != 200:
                 return None, "unavailable"
-            raw = read_response(resp, deadline, max_bytes=_CLOUD_ALLOWANCES_MAX_BYTES)
+            raw = read_response(resp, endpoint_deadline, max_bytes=_CLOUD_ALLOWANCES_MAX_BYTES)
     except urllib.error.HTTPError as exc:
         code = exc.code
         try:
             exc.close()
         except Exception:
             pass
-        if code in (401, 402, 403):
+        if code == 402:
+            _propagate_cloud_billing_denial()
             return None, "unauthorized"
-        return None, "unavailable"
+        return (None, "unauthorized") if code in (401, 403) else (None, "unavailable")
     except (OSError, ValueError, TimeoutError, http.client.HTTPException):
         return None, "offline"
 
     if len(raw) > _CLOUD_ALLOWANCES_MAX_BYTES:
         return None, "unavailable"
     try:
-        payload = json.loads(raw.decode("utf-8"))
+        payload = json.loads(raw.decode("utf-8"), parse_constant=_reject_allowance_json_constant)
     except (UnicodeDecodeError, ValueError):
         return None, "unavailable"
-    if not isinstance(payload, dict):
-        return None, "unavailable"
-    return payload, "ok"
+    return (payload, "ok") if isinstance(payload, dict) else (None, "unavailable")
 
 
-def _cloud_allowances_cache_key() -> tuple[str, str]:
+def _cloud_allowances_session_fingerprint() -> str:
+    """Return a non-secret per-person session fingerprint for allowance cache isolation."""
     from engraphis import cloud_session
 
-    ent = {}
-    try:
-        ent = cloud_session.saved_entitlement() or {}
-    except Exception:
-        ent = {}
-    org = str(
-        ent.get("organization_id")
-        or os.environ.get("ENGRAPHIS_CLOUD_ORGANIZATION_ID", "")
-        or ""
-    ).strip()
-    control = ""
-    try:
-        control = str(cloud_session.credential_bound_control_url() or "").strip()
-    except Exception:
-        control = ""
-    state_dir = str(os.environ.get("ENGRAPHIS_STATE_DIR", "")).strip()
-    return (org or state_dir or "default", control)
+    direct_token = os.environ.get("ENGRAPHIS_CLOUD_ACCESS_TOKEN", "").strip()
+    if direct_token:
+        return "env:" + hashlib.sha256(direct_token.encode("utf-8")).hexdigest()[:16]
+    digest_fn = getattr(cloud_session, "saved_session_digest", None)
+    if callable(digest_fn):
+        try:
+            digest = digest_fn()
+        except Exception:
+            digest = None
+        if isinstance(digest, str) and digest:
+            return "session:" + digest[:16]
+    for prefix, env_name in (
+        ("refresh:", "ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL"),
+        ("state:", "ENGRAPHIS_STATE_DIR"),
+    ):
+        value = os.environ.get(env_name, "").strip()
+        if value:
+            return prefix + hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+    return ""
+
+
+def _cloud_allowances_cache_key(
+    plan: str = "", access_state: str = "", *,
+    organization_id: Optional[str] = None, control_url: Optional[str] = None,
+) -> tuple[str, str, str, str, str]:
+    from engraphis import cloud_session
+
+    org = str(organization_id or "").strip()
+    if not org:
+        try:
+            ent = cloud_session.saved_entitlement() or {}
+        except Exception:
+            ent = {}
+        org = str(ent.get("organization_id") or os.environ.get("ENGRAPHIS_CLOUD_ORGANIZATION_ID", "") or "").strip()
+    if control_url is None:
+        try:
+            control = str(cloud_session.credential_bound_control_url() or "").strip().rstrip("/")
+        except Exception:
+            control = ""
+    else:
+        control = str(control_url).strip().rstrip("/")
+    return (org, control, plan, access_state, _cloud_allowances_session_fingerprint())
+
+
+def _read_cached_cloud_allowances(cache_key: tuple[str, ...]) -> Optional[dict]:
+    if not cache_key[0] or not cache_key[1]:
+        return None
+    now_mono = time.monotonic()
+    with _CLOUD_ALLOWANCES_LOCK:
+        entry = _CLOUD_ALLOWANCES_CACHE.get(cache_key)
+        if entry is not None and (now_mono - entry["monotonic"]) < _CLOUD_ALLOWANCES_CACHE_TTL_SECONDS:
+            result = json.loads(json.dumps(entry["payload"]))
+            result["cached"] = True
+            return result
+    return None
 
 
 @router.get("/v2/cloud/allowances")
-def get_cloud_allowances(refresh: bool = Query(False)):
+def get_cloud_allowances(response: Response, refresh: bool = Query(False)):
     """Return live included daily AI LLM (100/day) and Jev (250/day) allowances.
 
-    When offline or unconnected, returns a fast structured response with zero network
-    calls. When an active paid or trial Pro/Team Cloud session is configured, queries
-    the credential-bound control plane with a short deadline, caches for 60 seconds
-    per session/organization, and strips any upstream vendor identifiers.
+    Offline or unconnected installations return immediately with zero network calls.
+    Active Pro/Team sessions query the credential-bound control plane with a bounded
+    deadline, cache healthy responses for 60s per session/org, and strip vendor names.
     """
     from engraphis import cloud_session
     from engraphis.hosted_client import validate_cloud_base_url
 
+    response.headers["Cache-Control"] = "no-store"
     included = _entitlements.included_services()
-    llm_default_limit = int(
-        (included.get("managed_llm") or {}).get("calls_per_person_per_day") or 100
-    )
-    jev_default_limit = int(
-        (included.get("managed_jev") or {}).get("calls_per_person_per_day") or 250
-    )
+    llm_limit = int((included.get("managed_llm") or {}).get("calls_per_person_per_day") or 100)
+    jev_limit = int((included.get("managed_jev") or {}).get("calls_per_person_per_day") or 250)
     summary = hosted_plan_summary()
     plan = str(summary.get("plan") or "local")
     access_state = str(summary.get("access_state") or "inactive")
+
+    def _fallback(connected: bool, status: str, checked_at: float = 0.0) -> dict:
+        return {
+            "connected": connected, "plan": plan, "access_state": access_state,
+            "cached": False, "checked_at": checked_at,
+            "llm": _default_allowance_bucket(llm_limit, status),
+            "jev": _default_allowance_bucket(jev_limit, status),
+        }
+
+    def _validated_control() -> str:
+        try:
+            raw = cloud_session.credential_bound_control_url()
+            return validate_cloud_base_url(raw).rstrip("/") if raw else ""
+        except (cloud_session.CloudSessionError, ValueError):
+            return ""
 
     try:
         is_configured = cloud_session.configured(require_compute=False)
     except Exception:
         is_configured = False
-
     if not is_configured:
-        return {
-            "connected": False,
-            "plan": plan,
-            "access_state": access_state,
-            "cached": False,
-            "checked_at": 0.0,
-            "llm": _default_allowance_bucket(llm_default_limit, "not_connected"),
-            "jev": _default_allowance_bucket(jev_default_limit, "not_connected"),
-        }
-
+        return _fallback(False, "not_connected")
     if access_state not in ("active", "trial"):
-        return {
-            "connected": True,
-            "plan": plan,
-            "access_state": access_state,
-            "cached": False,
-            "checked_at": 0.0,
-            "llm": _default_allowance_bucket(llm_default_limit, access_state),
-            "jev": _default_allowance_bucket(jev_default_limit, access_state),
+        return _fallback(True, access_state)
+
+    cache_key = _cloud_allowances_cache_key(plan, access_state)
+    if not refresh and (cached := _read_cached_cloud_allowances(cache_key)) is not None:
+        return cached
+
+    with _cloud_allowances_inflight_lock(cache_key):
+        if not refresh and (
+            cached := _read_cached_cloud_allowances(_cloud_allowances_cache_key(plan, access_state))
+        ) is not None:
+            return cached
+
+        deadline = time.monotonic() + _CLOUD_ALLOWANCES_TIMEOUT_SECONDS
+        checked_at = time.time()
+        before = _validated_control()
+        if not before:
+            return _fallback(True, "unavailable", checked_at)
+        try:
+            access_token, organization_id, _ = cloud_session.access_for_workspace(
+                None, require_compute=False, deadline=deadline,
+            )
+        except (cloud_session.CloudSessionError, TimeoutError, OSError, ValueError) as exc:
+            if getattr(exc, "status", None) == 402:
+                _propagate_cloud_billing_denial()
+                return _fallback(True, "unauthorized", checked_at)
+            return _fallback(True, "offline", checked_at)
+
+        after = _validated_control()
+        if not after or after != before or not access_token:
+            return _fallback(True, "unavailable", checked_at)
+
+        llm_budget = min(max(0.0, deadline - time.monotonic()) / 2.0, _CLOUD_ALLOWANCES_PER_ENDPOINT_TIMEOUT_SECONDS)
+        llm_raw, llm_status = _fetch_cloud_usage_json(after, "/v1/llm/usage", access_token, time.monotonic() + llm_budget)
+        jev_deadline = min(deadline, time.monotonic() + _CLOUD_ALLOWANCES_PER_ENDPOINT_TIMEOUT_SECONDS)
+        jev_raw, jev_status = _fetch_cloud_usage_json(after, "/v1/jev/usage", access_token, jev_deadline)
+
+        payload = {
+            "connected": True, "plan": plan, "access_state": access_state,
+            "cached": False, "checked_at": checked_at,
+            "llm": _normalize_allowance_bucket(
+                llm_raw, remaining_key="remaining_requests", used_key="requests_used",
+                default_limit=llm_limit, fallback_status=llm_status if llm_status != "ok" else "unavailable",
+            ),
+            "jev": _normalize_allowance_bucket(
+                jev_raw, remaining_key="remaining_decisions", used_key="decisions_used",
+                default_limit=jev_limit, fallback_status=jev_status if jev_status != "ok" else "unavailable",
+            ),
         }
-
-    cache_key = _cloud_allowances_cache_key()
-    now_mono = time.monotonic()
-    if not refresh:
-        with _CLOUD_ALLOWANCES_LOCK:
-            cached_entry = _CLOUD_ALLOWANCES_CACHE.get(cache_key)
-            if (
-                cached_entry is not None
-                and (now_mono - cached_entry["monotonic"]) < _CLOUD_ALLOWANCES_CACHE_TTL_SECONDS
-            ):
-                result = json.loads(json.dumps(cached_entry["payload"]))
-                result["cached"] = True
-                return result
-
-    deadline = time.monotonic() + _CLOUD_ALLOWANCES_TIMEOUT_SECONDS
-    checked_at = time.time()
-    try:
-        access_token, organization_id, _ = cloud_session.access_for_workspace(
-            None, require_compute=False, deadline=deadline,
+        resolved_key = _cloud_allowances_cache_key(
+            plan, access_state,
+            organization_id=str(organization_id or "").strip() or cache_key[0],
+            control_url=after,
         )
-    except (cloud_session.CloudSessionError, TimeoutError, OSError, ValueError):
-        return {
-            "connected": True,
-            "plan": plan,
-            "access_state": access_state,
-            "cached": False,
-            "checked_at": checked_at,
-            "llm": _default_allowance_bucket(llm_default_limit, "offline"),
-            "jev": _default_allowance_bucket(jev_default_limit, "offline"),
-        }
-
-    try:
-        raw_control = cloud_session.credential_bound_control_url()
-        validated_control = validate_cloud_base_url(raw_control) if raw_control else ""
-    except (cloud_session.CloudSessionError, ValueError):
-        validated_control = ""
-
-    if not validated_control or not access_token:
-        return {
-            "connected": True,
-            "plan": plan,
-            "access_state": access_state,
-            "cached": False,
-            "checked_at": checked_at,
-            "llm": _default_allowance_bucket(llm_default_limit, "unavailable"),
-            "jev": _default_allowance_bucket(jev_default_limit, "unavailable"),
-        }
-
-    llm_raw, llm_status_code = _fetch_cloud_usage_json(
-        validated_control, "/v1/llm/usage", access_token, deadline,
-    )
-    jev_raw, jev_status_code = _fetch_cloud_usage_json(
-        validated_control, "/v1/jev/usage", access_token, deadline,
-    )
-
-    payload = {
-        "connected": True,
-        "plan": plan,
-        "access_state": access_state,
-        "cached": False,
-        "checked_at": checked_at,
-        "llm": _normalize_allowance_bucket(
-            llm_raw,
-            remaining_key="remaining_requests",
-            used_key="requests_used",
-            default_limit=llm_default_limit,
-            fallback_status=llm_status_code if llm_status_code != "ok" else "unavailable",
-        ),
-        "jev": _normalize_allowance_bucket(
-            jev_raw,
-            remaining_key="remaining_decisions",
-            used_key="decisions_used",
-            default_limit=jev_default_limit,
-            fallback_status=jev_status_code if jev_status_code != "ok" else "unavailable",
-        ),
-    }
-
-    resolved_key = (str(organization_id or "").strip() or cache_key[0], validated_control)
-    with _CLOUD_ALLOWANCES_LOCK:
-        if len(_CLOUD_ALLOWANCES_CACHE) >= _CLOUD_ALLOWANCES_CACHE_MAX_ENTRIES:
-            _CLOUD_ALLOWANCES_CACHE.clear()
-        entry = {"monotonic": time.monotonic(), "payload": json.loads(json.dumps(payload))}
-        _CLOUD_ALLOWANCES_CACHE[cache_key] = entry
-        _CLOUD_ALLOWANCES_CACHE[resolved_key] = entry
-
-    return payload
+        if llm_status == "ok" and jev_status == "ok" and resolved_key[0] and resolved_key[1]:
+            with _CLOUD_ALLOWANCES_LOCK:
+                if len(_CLOUD_ALLOWANCES_CACHE) >= _CLOUD_ALLOWANCES_CACHE_MAX_ENTRIES:
+                    _CLOUD_ALLOWANCES_CACHE.clear()
+                _CLOUD_ALLOWANCES_CACHE[resolved_key] = {
+                    "monotonic": time.monotonic(),
+                    "payload": json.loads(json.dumps(payload)),
+                }
+        return payload
 
 
 def _hosted_license_detail() -> dict:
