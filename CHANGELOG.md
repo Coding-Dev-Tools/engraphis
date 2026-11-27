@@ -9,7 +9,7 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 Candidate package version: **1.7.14**. Publication and hosted-service qualification remain separate.
 
-- Automatically activate included Engraphis Cloud OpenRouter AI LLM enhancements (up to 100 calls
+- Automatically activate included Engraphis Cloud managed AI LLM enhancements (up to 100 calls
   per person per day) and managed Jev advisory decisions (up to 250 calls per person per day) as
   soon as a paid or trial Pro/Team Cloud session is connected, with zero manual `.env` edits or
   personal API keys.

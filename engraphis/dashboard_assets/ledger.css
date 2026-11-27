@@ -1404,6 +1404,18 @@ button.graph-explorer-item:hover, .graph-explorer-item.active { border-color: va
 .license-status { margin: 0 0 14px; padding: 14px 16px; border: 1px solid var(--c-line); border-radius: 6px; background: var(--c-surface); }
 .license-status h3 { margin-bottom: 8px; font-size: 15px; }
 .license-status .definition-list { margin: 8px 0 0; }
+.cloud-allowances-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+.cloud-allowances-header h3 { margin: 2px 0 0; }
+.cloud-allowances-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 0 0 10px; }
+.cloud-allowance-tile { display: grid; gap: 4px; padding: 10px 12px; border: 1px solid var(--c-line); border-radius: 5px; background: var(--c-inset); }
+.cloud-allowance-label { color: var(--c-dim); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+.cloud-allowance-value { color: var(--c-fg); font: 650 15px/1.25 var(--mono); font-variant-numeric: tabular-nums; }
+.cloud-allowance-meta { margin: 0; color: var(--c-mid); font-size: 12px; line-height: 1.45; }
+.cloud-allowances-benefits { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--c-line); gap: 6px; }
+.cloud-allowances-benefits strong { color: var(--c-fg); }
+.settings-allowances-summary { margin-top: 10px; padding: 8px 10px; border: 1px solid var(--c-line); border-radius: 5px; background: var(--c-inset); color: var(--c-mid); font-size: 12px; line-height: 1.45; }
+.settings-allowances-summary strong { color: var(--c-fg); display: block; margin-bottom: 3px; font-size: 11.5px; }
+@media (max-width: 720px) { .cloud-allowances-grid { grid-template-columns: 1fr; } }
 .license-callout { margin: 8px 0 0; padding: 9px 11px; border-left: 3px solid var(--c-warn); border-radius: 4px; background: color-mix(in srgb, var(--c-warn) 8%, var(--c-surface)); color: var(--c-mid); font-size: 12px; }
 .license-callout strong { display: block; margin-bottom: 2px; color: var(--c-fg); }
 .license-features { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 0; padding: 0; list-style: none; }

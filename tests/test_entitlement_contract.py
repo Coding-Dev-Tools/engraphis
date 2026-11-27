@@ -112,6 +112,11 @@ def test_managed_jev_is_an_included_paid_benefit_with_a_bounded_allowance():
 def test_managed_llm_is_an_included_paid_benefit_with_a_bounded_allowance():
     service = entitlements.included_services()["managed_llm"]
 
+    assert service["label"] == "Included Managed AI LLM"
+    assert isinstance(service.get("description"), str) and service["description"].strip()
+    assert "openrouter" not in service["label"].lower()
+    assert "openrouter" not in service["description"].lower()
+    assert "\u2014" not in service["description"]
     assert service["plan"] == "pro"
     assert service["calls_per_person_per_day"] == 100
     assert entitlements.required_plan("managed_llm") == "pro"

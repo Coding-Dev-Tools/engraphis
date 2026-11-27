@@ -927,6 +927,22 @@
               <h3 id="license-status-title">This installation</h3>
               <div id="license-status-body"><p class="empty-state">Checking plan status…</p></div>
             </section>
+            <section id="cloud-allowances-card" class="license-status cloud-allowances-card" aria-labelledby="cloud-allowances-title">
+              <div class="cloud-allowances-header">
+                <div>
+                  <p class="eyebrow">Pro &amp; Team · included daily allowances</p>
+                  <h3 id="cloud-allowances-title">Included AI Memory Intelligence</h3>
+                </div>
+                <button id="cloud-allowances-refresh" class="secondary-button" type="button">Refresh quota</button>
+              </div>
+              <div id="cloud-allowances-body"><p class="empty-state">Checking included daily AI allowances…</p></div>
+              <ul class="plan-benefit-list cloud-allowances-benefits" aria-label="How included AI improves agentic memory">
+                <li><strong>Capture distillation and graph links:</strong> turns raw session notes into atomic facts, entities, and knowledge-graph relations automatically on ingest.</li>
+                <li><strong>Cited proactive briefings and grounded Q&amp;A:</strong> synthesizes concise answers backed by citations from your local memories.</li>
+                <li><strong>Contradiction and retention intelligence:</strong> pairs with managed Jev decisions to flag conflicts, verify evidence support, and screen risky commands.</li>
+                <li><strong>Smart sleep-time consolidation:</strong> merges overlapping notes into sharper semantic digests with automatic local fallback and zero overage charges.</li>
+              </ul>
+            </section>
             <div id="plan-cards" class="plan-cards"></div>
             <div class="comparison-table-wrap">
               <table class="comparison-table">
@@ -940,7 +956,7 @@
                   <tr><td>Cloud sync</td><td>—</td><td>Included</td><td>Included</td></tr>
                   <tr><td>Managed automation</td><td>—</td><td>Included</td><td>Included</td></tr>
                   <tr><td>Portfolio analytics</td><td>—</td><td>Included</td><td>Included</td></tr>
-                  <tr><td>Included OpenRouter AI LLM</td><td>BYOK optional</td><td>Included · up to 100 calls/day</td><td>Included · up to 100 calls/day</td></tr>
+                  <tr><td>Included Managed AI LLM</td><td>BYOK optional</td><td>Included · up to 100 calls/day</td><td>Included · up to 100 calls/day</td></tr>
                   <tr><td>Managed Jev decisions</td><td>Local heuristics</td><td>Included · up to 250 calls/day</td><td>Included · up to 250 calls/day</td></tr>
                   <tr><td>Hosted organizations</td><td>—</td><td>—</td><td>Included</td></tr>
                   <tr><td>Members and roles</td><td>—</td><td>—</td><td>Included</td></tr>
@@ -990,9 +1006,10 @@
               </section>
               <section class="setting-card llm-setting-card">
                 <div>
-                  <p class="eyebrow">Optional synthesis</p>
+                  <p class="eyebrow">AI memory intelligence</p>
                   <h2>Connect an LLM</h2>
-                  <p>Use a provider only when you want schema-validated extraction. Recall and storage remain local by default.</p>
+                  <p>Pro and Team include 100 free managed AI LLM calls per person per day with no API key setup, plus 250 managed Jev decision calls per day. You can also connect a BYOK provider below; recall and storage remain local by default.</p>
+                  <div id="settings-allowances-summary" class="settings-allowances-summary" aria-live="polite"></div>
                 </div>
                 <div id="llm-connection" class="llm-connection"><p class="empty-state">Checking local configuration…</p></div>
               </section>

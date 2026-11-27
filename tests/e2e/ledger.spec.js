@@ -257,6 +257,33 @@ async function mockApi(page, options = {}) {
       });
     }
     if (path === '/license') return ok(licenseState);
+    if (path === '/v2/cloud/allowances') {
+      return ok(options.cloudAllowances || {
+        connected: false,
+        plan: licenseState.plan || 'local',
+        access_state: licenseState.access_state || 'inactive',
+        cached: false,
+        checked_at: 0,
+        llm: {
+          available: false,
+          remaining: null,
+          limit: 100,
+          used: null,
+          resets_at: null,
+          window_seconds: 86400,
+          status: 'not_connected',
+        },
+        jev: {
+          available: false,
+          remaining: null,
+          limit: 250,
+          used: null,
+          resets_at: null,
+          window_seconds: 86400,
+          status: 'not_connected',
+        },
+      });
+    }
     if (path === '/auth/state') {
       return ok({
         enabled: false,
@@ -2937,12 +2964,15 @@ test('billing cadence selects the exact Pro and Team checkout target', async ({ 
     'Cloud Sync, Analytics, Auto Consolidation, and Auto Dreaming',
   );
   await expect(page.locator('.plan-card.featured .plan-benefit-list')).toContainText(
-    'Included OpenRouter AI LLM: up to 100 calls per person per day',
+    'Included Managed AI LLM: up to 100 calls per person per day',
   );
   await expect(page.locator('.plan-card.featured .plan-benefit-list')).toContainText(
     'Managed Jev decisions: up to 250 calls per person per day',
   );
+  await expect(page.locator('#cloud-allowances-card')).toContainText('Included AI Memory Intelligence');
+  await expect(page.locator('.comparison-table')).toContainText('Included Managed AI LLM');
   await expect(page.locator('.comparison-table')).toContainText('Managed Jev decisions');
+  await expect(page.locator('#manage-plans-panel')).not.toContainText(/openrouter/i);
 
   const pro = page.locator('#plan-cards [data-pro-cta="pro"]');
   const team = page.locator('#plan-cards [data-pro-cta="team"]');

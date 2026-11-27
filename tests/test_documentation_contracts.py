@@ -423,3 +423,51 @@ def test_consolidation_docs_expose_only_live_public_options() -> None:
     assert "Managed `custom` questions" in mcp_tools
     assert 'planning (str, "off")' in normalized_tools
     assert "`profiles (bool, false)`; `structured (bool, false)`." in normalized_tools
+
+
+def test_included_managed_llm_surfaces_are_vendor_neutral_and_preserve_byok() -> None:
+    """Customer-facing included managed AI LLM surfaces must stay vendor-neutral while BYOK OpenRouter stays intact."""
+    for rel_path in (
+        "engraphis/dashboard_assets/index.html",
+        "engraphis/entitlement_contract.json",
+        "docs/HOSTED_PLANS.md",
+        "docs/MCP_TOOLS.md",
+        "skills/engraphis-memory/references/TOOLS.md",
+        "README.md",
+    ):
+        text = _read(rel_path)
+        assert "openrouter" not in text.lower(), f"vendor leak in {rel_path}"
+
+    # Dashboard JS PLAN_BENEFITS and allowance copy must stay vendor-neutral.
+    ledger_js = _read("engraphis/dashboard_assets/ledger.js")
+    assert "openrouter" not in ledger_js.lower(), "vendor leak in ledger.js"
+    assert "Included Managed AI LLM: up to 100 calls per person per day" in ledger_js
+
+    # Managed intro in docs/LLM_PROVIDERS.md is vendor-neutral while BYOK OpenRouter section stays intact.
+    providers_doc = _read("docs/LLM_PROVIDERS.md")
+    intro = providers_doc.split("## Contents", 1)[0]
+    assert "openrouter" not in intro.lower()
+    assert "## OpenRouter" in providers_doc
+    assert "ENGRAPHIS_LLM_PROVIDER=openrouter" in providers_doc
+
+    # Managed section of .env.example is vendor-neutral while BYOK openrouter examples stay intact.
+    env_example = _read(".env.example")
+    managed_header_idx = env_example.index("included Pro/Team managed AI LLM")
+    managed_block = env_example[managed_header_idx : managed_header_idx + 240]
+    assert "openrouter ai llm" not in managed_block.lower()
+    assert "managed openrouter" not in managed_block.lower()
+    assert "#   openrouter: https://openrouter.ai/api/v1" in env_example
+
+    # Managed copy in docs/CONFIGURATION.md is vendor-neutral while BYOK openrouter enum stays intact.
+    config_doc = _read("docs/CONFIGURATION.md")
+    assert "openrouter ai llm" not in config_doc.lower()
+    assert "openrouter's free tier" not in config_doc.lower()
+    assert "openrouter | custom" in config_doc or "openrouter \\| custom" in config_doc
+
+    # Customer-facing managed AI sections must avoid emdashes.
+    hosted_plans = _read("docs/HOSTED_PLANS.md")
+    assert "\u2014" not in hosted_plans
+    index_html = _read("engraphis/dashboard_assets/index.html")
+    card_start = index_html.index('id="cloud-allowances-card"')
+    card_end = index_html.index("</section>", card_start)
+    assert "\u2014" not in index_html[card_start:card_end]

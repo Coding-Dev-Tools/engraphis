@@ -79,11 +79,13 @@
   "included_services": {
     "managed_jev": {
       "label": "Managed Jev decisions",
+      "description": "Typed advisory checks for risky commands, contradictory memories, evidence support, and completion claims.",
       "plan": "pro",
       "calls_per_person_per_day": 250
     },
     "managed_llm": {
-      "label": "Included OpenRouter free AI LLM",
+      "label": "Included Managed AI LLM",
+      "description": "Automatic fact and entity extraction, cited proactive briefings, grounded Q&A synthesis, and structured consolidation.",
       "plan": "pro",
       "calls_per_person_per_day": 100
     }
