@@ -248,8 +248,62 @@ def _audit_entry_hash(prev_hash: str, ts: float, actor: str, action: str,
 
 
 
+_REAL_TIME_TIME = time.time
+
+
 def now_ts() -> float:
     return time.time()
+
+
+_DEFAULT_NOW_TS = now_ts
+
+
+def next_wall_ts_after(floor_ts: float, *, max_wait_s: float = 0.05) -> float:
+    """Return a real wall-clock ``now_ts()`` strictly greater than ``floor_ts``.
+
+    On coarse wall clocks (such as Windows ``GetSystemTimeAsFileTime()`` with
+    ~15.6 ms ticks), an auto-timestamped superseding write or closure can
+    observe the exact same ``time.time()`` as its predecessor's ``valid_from``
+    and either fail closed with an empty validity interval or persist an
+    illegal ``[T, T)`` closure. Waiting for the next OS tick guarantees
+    ``floor_ts < ts <= time.time()`` without creating future timestamps that
+    skew concurrent ``time.time()`` readers (0 ms on Unix/macOS nanosecond
+    clocks; bounded to at most ``max_wait_s`` on Windows even when invoked
+    inside an active write transaction).
+
+    When ``engraphis.core.store.now_ts`` or ``time.time`` is mocked in tests,
+    or when ``floor_ts`` lies beyond ``max_wait_s`` in the future, returns the
+    current ``now_ts()`` immediately so fail-closed guards remain intact.
+    """
+    validated_floor = _finite_timestamp(floor_ts, "floor_ts")
+    if validated_floor is None:
+        raise ValueError("floor_ts must be a finite number")
+    if (
+        isinstance(max_wait_s, bool)
+        or not isinstance(max_wait_s, (int, float))
+        or not math.isfinite(float(max_wait_s))
+        or float(max_wait_s) < 0.0
+    ):
+        raise ValueError("max_wait_s must be a finite non-negative number")
+    wait_budget = float(max_wait_s)
+    current = now_ts()
+    if current > validated_floor:
+        return current
+    if now_ts is not _DEFAULT_NOW_TS or time.time is not _REAL_TIME_TIME:
+        return current
+    if validated_floor - current > wait_budget:
+        return current
+    deadline = time.monotonic() + wait_budget
+    polled = False
+    while current <= validated_floor and time.monotonic() < deadline:
+        time.sleep(0.001)
+        current = now_ts()
+        polled = True
+        if validated_floor - current > wait_budget:
+            break
+    if not polled and current <= validated_floor:
+        current = now_ts()
+    return current
 
 
 def _content_free_source_error(value: Any) -> str:
@@ -6164,20 +6218,54 @@ class Store:
 
     def close_validity(self, memory_id: str, *, at: Optional[float] = None,
                        actor: str = "system", reason: str = "contradicted",
-                       commit: bool = True) -> None:
+                       commit: bool = True,
+                       _recorded_at: Optional[float] = None) -> None:
         """Close one fact and its graph evidence as one atomic governance write."""
-        recorded_at = _finite_timestamp(now_ts(), "recorded_at")
-        at = _finite_timestamp(recorded_at if at is None else at, "at")
+        auto_at = at is None
+        explicit_at = None if auto_at else _finite_timestamp(at, "at")
+        explicit_recorded = (
+            _finite_timestamp(_recorded_at, "recorded_at")
+            if _recorded_at is not None
+            else None
+        )
+        # For standalone auto-timestamped closures, advance past a same-tick valid_from
+        # before acquiring BEGIN IMMEDIATE so coarse Windows ticks do not hold the DB writer lock.
+        if auto_at and commit and not self.conn.transaction_owned_by_current_thread():
+            pre_row = self.conn.execute(
+                "SELECT workspace_id, valid_from FROM memories WHERE id=?", (memory_id,)
+            ).fetchone()
+            if pre_row is not None:
+                self._authorize_workspace_id(pre_row["workspace_id"])
+                if pre_row["valid_from"] is not None and now_ts() <= pre_row["valid_from"]:
+                    next_wall_ts_after(pre_row["valid_from"])
         with self._write_operation("close_validity", commit=commit):
             row = self.conn.execute(
                 "SELECT workspace_id, valid_from FROM memories WHERE id=?", (memory_id,)
             ).fetchone()
             if row is not None:
                 self._authorize_workspace_id(row["workspace_id"])
+            recorded_at = (
+                explicit_recorded
+                if explicit_recorded is not None
+                else _finite_timestamp(now_ts(), "recorded_at")
+            )
+            at_ts = recorded_at if auto_at else explicit_at
+            if (
+                auto_at
+                and row is not None
+                and row["valid_from"] is not None
+                and at_ts is not None
+                and at_ts <= row["valid_from"]
+            ):
+                advanced = _finite_timestamp(next_wall_ts_after(row["valid_from"]), "at")
+                at_ts = advanced
+                if advanced is not None and (recorded_at is None or advanced > recorded_at):
+                    recorded_at = advanced
             if (
                 row is not None
                 and row["valid_from"] is not None
-                and at < row["valid_from"]
+                and at_ts is not None
+                and at_ts < row["valid_from"]
             ):
                 raise ValueError("valid_to cannot predate valid_from")
             if row is not None:
@@ -6187,7 +6275,7 @@ class Store:
                     self.conn.execute(
                         "INSERT INTO memory_closures(memory_id,valid_to,recorded_at) "
                         "VALUES (?,?,?) ON CONFLICT DO NOTHING",
-                        (memory_id, at, recorded_at),
+                        (memory_id, at_ts, recorded_at),
                     )
                 except sqlite3.IntegrityError as exc:
                     # History is never truncated; report the full bound as a caller
@@ -6201,10 +6289,10 @@ class Store:
             updated = self.conn.execute(
                 "UPDATE memories SET valid_to=?, valid_to_recorded_at=? "
                 "WHERE id=? AND (valid_to IS NULL OR valid_to>?)",
-                (at, recorded_at, memory_id, at),
+                (at_ts, recorded_at, memory_id, at_ts),
             ).rowcount
             if updated:
-                self.invalidate_edges_for_memory(memory_id, at=at, commit=False)
+                self.invalidate_edges_for_memory(memory_id, at=at_ts, commit=False)
             # Governance attempts are audit-worthy even when the interval was already
             # closed. MCP callers expose forget as non-idempotent so every request
             # retains evidence without widening the closed interval.

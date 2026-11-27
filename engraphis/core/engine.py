@@ -83,6 +83,7 @@ from engraphis.core.store import (
     Store,
     _is_memory_database_path,
     memory_matches_filter,
+    next_wall_ts_after,
     now_ts,
 )
 from engraphis.core.textutil import estimate_tokens, jaccard, tokenize
@@ -1350,6 +1351,7 @@ class MemoryEngine:
                     target = index_repair_identity(self.index, self.store)
                     if target is not None:
                         self.store.register_vector_index(target)
+                    batch_wait_remaining = 0.5
                     for index_i, item in enumerate(prepared):
                         # Vector-search candidates are already filtered to the
                         # resolving fact's memory type; siblings must obey the same
@@ -1360,6 +1362,7 @@ class MemoryEngine:
                             for sibling_i, rec in resolved
                             if rec.mtype == item["mtype"]
                         ]
+                        item_started = time.monotonic()
                         result = self._resolve_and_store(
                             item["content"], text=item["text"], vec=item["vec"],
                             workspace_id=workspace_id, repo_id=repo_id,
@@ -1378,7 +1381,13 @@ class MemoryEngine:
                             # every canonical and derived row together.
                             defer_external_index=external_index,
                             extra_neighbors=extra_neighbors,
+                            _max_wall_wait_s=min(0.05, max(0.0, batch_wait_remaining)),
                         )
+                        if result.get("op") == "invalidate":
+                            batch_wait_remaining = max(
+                                0.0,
+                                batch_wait_remaining - (time.monotonic() - item_started),
+                            )
                         results.append(result)
                         mid = result.get("id")
                         if (
@@ -1523,7 +1532,8 @@ class MemoryEngine:
                            trusted_write: bool = True,
                            transactional_finalizer: Optional[Callable[[str], None]] = None,
                            defer_external_index: bool = False,
-                           extra_neighbors: Optional[list] = None) -> dict:
+                           extra_neighbors: Optional[list] = None,
+                           _max_wall_wait_s: float = 0.05) -> dict:
         """The resolve→insert body of ``remember_with_resolution``. The caller holds
         ``self._write_lock`` for the whole call (atomicity of the resolve decision).
 
@@ -1714,18 +1724,35 @@ class MemoryEngine:
             embedding=None if poisoning.quarantined else vec,
         )
         invalidating = decision is not None and decision.op == ResolutionOp.INVALIDATE
+        target_id: Optional[str] = None
+        if decision is not None and decision.op == ResolutionOp.INVALIDATE:
+            target_id = _required_resolution_target(decision)
         predecessor: Optional[MemoryRecord] = None
+        if (
+            invalidating
+            and not poisoning.quarantined
+            and valid_from is None
+            and target_id is not None
+        ):
+            predecessor = self.store.get_memory(target_id)
+            if predecessor is not None and predecessor.valid_from is not None:
+                ts = next_wall_ts_after(
+                    predecessor.valid_from, max_wait_s=_max_wall_wait_s
+                )
+                rec.valid_from = ts
+                rec.ingested_at = ts
+                rec.last_access = ts
         try:
             # A replacement and the predecessor interval it closes are one authoritative
             # state transition. Portable vector/FTS mirrors participate in the same
             # transaction; external vector-index and graph enrichments run only after it commits.
             mid = self.store.add_memory(rec, commit=not invalidating)
             if invalidating:
-                if decision is None:
+                if decision is None or target_id is None:
                     raise RuntimeError("invalidating write is missing its resolution")
-                target_id = _required_resolution_target(decision)
                 resolution_reason = decision.reason
-                predecessor = self.store.get_memory(target_id)
+                if predecessor is None:
+                    predecessor = self.store.get_memory(target_id)
                 # Both branches below close the predecessor at ``rec.valid_from``.
                 # Landing on the predecessor's own start instant would persist an
                 # empty validity interval, which the Store's persistence boundary
@@ -1740,7 +1767,7 @@ class MemoryEngine:
                     # successor without widening either historical interval.
                     self.store.conn.execute(
                         "UPDATE memories SET valid_to=?, valid_to_recorded_at=? WHERE id=?",
-                        (rec.valid_from, now_ts(), target_id),
+                        (rec.valid_from, rec.ingested_at or now_ts(), target_id),
                     )
                     self.store.invalidate_edges_for_memory(
                         target_id, at=rec.valid_from, commit=False
@@ -1753,11 +1780,13 @@ class MemoryEngine:
                         mid, at=predecessor_end,
                         reason="bounded by the recorded successor interval",
                         commit=False,
+                        _recorded_at=rec.ingested_at,
                     )
                 else:
                     self.store.close_validity(
                         target_id, at=rec.valid_from,
                         reason=resolution_reason, commit=False,
+                        _recorded_at=rec.ingested_at,
                     )
                 self.store.audit(
                     "resolver", "invalidate", target_id, resolution_reason,
@@ -3315,7 +3344,6 @@ class MemoryEngine:
                 new_content, exact_value, normalized_exact_type,
                 source_span=exact_value_span,
             )
-        effective_at = now_ts()
         final_title = old.title if title is None else title
         final_type = old.mtype if mtype is None else MemoryType(mtype)
         final_importance = old.importance if importance is None else importance
@@ -3357,6 +3385,15 @@ class MemoryEngine:
         replay = command.replay()
         if replay is not None:
             return correction_result(replay["id"])
+        if expected_version is not None and memory_version(old) != expected_version:
+            raise MemoryConflict("memory version is stale; refresh before editing",
+                                 code="version_conflict")
+        if not _governable_source(old, at=now_ts()):
+            raise MemoryConflict("only a current or quarantined memory can be corrected")
+        effective_at = (
+            next_wall_ts_after(old.valid_from) if old.valid_from is not None else now_ts()
+        )
+        _reject_empty_validity_interval(old, effective_at, action="correction")
 
         def validate_correction() -> Optional[dict]:
             replay = command.validate()
@@ -3396,19 +3433,21 @@ class MemoryEngine:
             self.store.advance_memory_modified_hlc(new_id, commit=False)
             self.store.conn.execute(
                 "UPDATE memories SET pinned=?, sensitivity=?, stability=?, access_count=?, "
-                "last_access=? WHERE id=?",
+                "last_access=?, ingested_at=? WHERE id=?",
                 (
                     int(old.pinned),
                     old.sensitivity or "normal",
                     old.stability,
                     old.access_count,
                     old.last_access,
+                    effective_at,
                     new_id,
                 ),
             )
             self.store.close_validity(
                 memory_id, at=effective_at, actor=actor,
                 reason=reason or "corrected",
+                _recorded_at=effective_at,
             )
             command.complete(new_id)
 
@@ -3635,7 +3674,6 @@ class MemoryEngine:
             raise ValueError("untrusted memory cannot be promoted: record is quarantined")
         if not provenance_is_approved(old.provenance):
             raise ValueError("untrusted memory cannot be promoted; create a fresh approved local memory")
-        now = now_ts()
 
         target_scope = Scope(target_scope)
         if target_scope == Scope.USER:
@@ -3671,6 +3709,10 @@ class MemoryEngine:
             source_session = self.store.get_session(str(old.session_id or ""))
             if source_session is None or source_session.get("status") != "active":
                 raise ValueError("cannot promote memory from a closed session")
+        if not _governable_source(old, at=now_ts()):
+            raise MemoryConflict("only a live memory can be promoted")
+        now = next_wall_ts_after(old.valid_from) if old.valid_from is not None else now_ts()
+        _reject_empty_validity_interval(old, now, action="promotion")
 
         metadata = dict(old.metadata)
         raw_promoted_from = metadata.get("promoted_from")
@@ -3828,7 +3870,6 @@ class MemoryEngine:
         ids: list[str] = []
         sources: list[MemoryRecord] = []
         seen: set[str] = set()
-        effective_at = now_ts()
         for raw_id in source_ids:
             memory_id = str(raw_id)
             if memory_id in seen:
@@ -3997,7 +4038,7 @@ class MemoryEngine:
             )
             if (
                 candidate is not None
-                and _governable_source(candidate, at=effective_at)
+                and _governable_source(candidate, at=now_ts())
                 and candidate.metadata.get("merge_key") == merge_key
                 and isinstance(supersedes, list)
                 and {str(source_id) for source_id in supersedes} == source_set
@@ -4012,6 +4053,19 @@ class MemoryEngine:
             ):
                 return merge_result(candidate.id)
 
+        check_now = now_ts()
+        for record in sources:
+            if not _governable_source(record, at=check_now):
+                raise MemoryConflict("only current or quarantined source memories can be merged")
+        source_starts = [
+            record.valid_from for record in sources if record.valid_from is not None
+        ]
+        effective_at = (
+            next_wall_ts_after(max(source_starts)) if source_starts else now_ts()
+        )
+        for record in sources:
+            _reject_empty_validity_interval(record, effective_at, action="merge")
+
         def validate_merge() -> Optional[dict]:
             replay = command.validate()
             if replay is not None:
@@ -4025,7 +4079,7 @@ class MemoryEngine:
             self.store.advance_memory_modified_hlc(merged_id, commit=False)
             self.store.conn.execute(
                 "UPDATE memories SET pinned=?, sensitivity=?, stability=?, "
-                "access_count=?, last_access=? WHERE id=?",
+                "access_count=?, last_access=?, ingested_at=? WHERE id=?",
                 (
                     int(pinned_any),
                     sensitivity,
@@ -4035,6 +4089,7 @@ class MemoryEngine:
                         (record.last_access or 0.0 for record in sources),
                         default=0.0,
                     ) or None,
+                    effective_at,
                     merged_id,
                 ),
             )
@@ -4042,6 +4097,7 @@ class MemoryEngine:
                 self.store.close_validity(
                     record.id, at=effective_at, actor=actor,
                     reason=reason or "merged into a combined memory",
+                    _recorded_at=effective_at,
                 )
                 self.store.add_link(
                     merged_id,
