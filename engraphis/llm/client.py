@@ -9,6 +9,7 @@ from __future__ import annotations
 import atexit
 from collections import OrderedDict
 import hashlib
+import hmac
 import ipaddress
 import json
 import logging
@@ -35,6 +36,7 @@ from engraphis.llm.budget import (
 )
 
 logger = logging.getLogger("engraphis.llm")
+_CACHE_SCOPE_SALT = secrets.token_bytes(16)
 
 DEFAULT_MANAGED_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
 MANAGED_MODEL_PROFILES = ("auto", "fast", "reasoning")
@@ -485,7 +487,10 @@ class LLMClient:
     def _cache_scope(self) -> tuple[str, ...]:
         if self.provider == "managed":
             return _managed_session_scope()
-        return (self.base_url, hashlib.sha256(self.api_key.encode("utf-8")).hexdigest()[:16], str(self.effort or ""))
+        key_tag = hmac.new(
+            _CACHE_SCOPE_SALT, self.api_key.encode("utf-8"), hashlib.sha256
+        ).hexdigest()[:16]
+        return (self.base_url, key_tag, str(self.effort or ""))
 
     def _cache_lookup(self, op_kind: str, model_profile: str, payload: Any) -> tuple[tuple[str, ...], tuple[str, str, str, str], bool, Any]:
         scope = self._cache_scope()

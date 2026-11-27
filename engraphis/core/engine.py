@@ -494,7 +494,7 @@ class MemoryEngine:
         code_source_iterator: Optional[Callable] = None,
         code_source_policy: Optional[Callable] = None,
         code_walk_limit_error=RuntimeError,
-        auto_extractor_factory: Optional[Callable[[], Any]] = None,
+        auto_extractor_factory: Optional[Callable[..., Any]] = None,
     ) -> None:
         self.store = store
         self.embedder = embedder
