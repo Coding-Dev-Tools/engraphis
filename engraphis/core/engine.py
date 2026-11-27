@@ -11,6 +11,7 @@ backends for production.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import logging
 import math
@@ -493,7 +494,7 @@ class MemoryEngine:
         code_source_iterator: Optional[Callable] = None,
         code_source_policy: Optional[Callable] = None,
         code_walk_limit_error=RuntimeError,
-        auto_extractor_factory: Optional[Callable[[], Any]] = None,
+        auto_extractor_factory: Optional[Callable[..., Any]] = None,
     ) -> None:
         self.store = store
         self.embedder = embedder
@@ -2426,13 +2427,14 @@ class MemoryEngine:
         input_poisoning = assess_untrusted_payload(text, metadata=metadata)
         active_extractor = self.extractor
         auto_managed_extractor = None
-        if (
-            active_extractor is None
-            and self._auto_extractor_factory is not None
-            and not input_poisoning.quarantined
-        ):
+        if active_extractor is None and self._auto_extractor_factory is not None and not input_poisoning.quarantined:
             try:
-                auto_managed_extractor = self._auto_extractor_factory()
+                try:
+                    pos_kinds = (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.VAR_POSITIONAL)
+                    accepts_text = any(p.kind in pos_kinds for p in inspect.signature(self._auto_extractor_factory).parameters.values())
+                except (TypeError, ValueError):
+                    accepts_text = False
+                auto_managed_extractor = self._auto_extractor_factory(text) if accepts_text else self._auto_extractor_factory()
                 active_extractor = auto_managed_extractor
             except Exception:
                 auto_managed_extractor = None
@@ -2445,12 +2447,13 @@ class MemoryEngine:
             finally:
                 if auto_managed_extractor is not None:
                     llm_obj = getattr(auto_managed_extractor, "llm", None)
-                    close = getattr(llm_obj, "close", None)
-                    if callable(close):
-                        try:
-                            close()
-                        except Exception:
-                            pass
+                    if not getattr(llm_obj, "_shared_managed", False):
+                        close = getattr(llm_obj, "close", None)
+                        if callable(close):
+                            try:
+                                close()
+                            except Exception:
+                                pass
         if not facts:
             from engraphis.core.interfaces import ExtractedFact
             facts = [ExtractedFact(content=text)]
