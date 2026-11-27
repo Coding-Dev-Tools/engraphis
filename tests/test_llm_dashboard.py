@@ -471,7 +471,8 @@ def test_pro_and_team_paid_or_trial_auto_activates_structured_extractor_proactiv
     try:
         assert svc.engine.extractor is None  # No eager credential inspection at create time.
         ingested = svc.ingest(
-            "Team decided to run PostgreSQL 16 for the billing ledger.",
+            "Team decided to run PostgreSQL 16 for the billing ledger. "
+            "All payment schema migrations must be verified in staging before production cutover.",
             workspace="ws_trial",
         )
         assert len(extracted_calls) == 1

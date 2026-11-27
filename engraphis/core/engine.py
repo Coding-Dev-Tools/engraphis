@@ -2432,8 +2432,19 @@ class MemoryEngine:
             and not input_poisoning.quarantined
         ):
             try:
-                auto_managed_extractor = self._auto_extractor_factory()
-                active_extractor = auto_managed_extractor
+                from engraphis.llm.budget import (
+                    managed_allowance_tracker,
+                    should_llm_extract,
+                )
+                worth_extracting, _extract_reason = should_llm_extract(text)
+                budget_ok, _budget_reason = (
+                    managed_allowance_tracker().can_call(priority="background")
+                    if worth_extracting
+                    else (False, _extract_reason)
+                )
+                if worth_extracting and budget_ok:
+                    auto_managed_extractor = self._auto_extractor_factory()
+                    active_extractor = auto_managed_extractor
             except Exception:
                 auto_managed_extractor = None
         if active_extractor is not None and not input_poisoning.quarantined:
@@ -2445,12 +2456,13 @@ class MemoryEngine:
             finally:
                 if auto_managed_extractor is not None:
                     llm_obj = getattr(auto_managed_extractor, "llm", None)
-                    close = getattr(llm_obj, "close", None)
-                    if callable(close):
-                        try:
-                            close()
-                        except Exception:
-                            pass
+                    if not getattr(llm_obj, "_shared_managed", False):
+                        close = getattr(llm_obj, "close", None)
+                        if callable(close):
+                            try:
+                                close()
+                            except Exception:
+                                pass
         if not facts:
             from engraphis.core.interfaces import ExtractedFact
             facts = [ExtractedFact(content=text)]

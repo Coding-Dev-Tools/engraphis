@@ -6,12 +6,15 @@ already in requirements. All providers are reached via their REST API.
 """
 from __future__ import annotations
 
+import atexit
+import hashlib
 import ipaddress
 import json
 import logging
 import math
 import os
 import re
+import secrets
 import threading
 from typing import Any, Optional
 from urllib.parse import urlsplit, urlunsplit
@@ -22,10 +25,32 @@ except ImportError:  # pragma: no cover - core-floor (numpy-only) installs
     httpx = None  # type: ignore[assignment]
 
 from engraphis.config import settings
+from engraphis.llm.budget import (
+    LLMResultCache,
+    llm_result_cache,
+    managed_allowance_tracker,
+)
 
 logger = logging.getLogger("engraphis.llm")
 
 DEFAULT_MANAGED_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
+MANAGED_MODEL_PROFILES = ("auto", "fast", "reasoning")
+_MANAGED_PROFILE_SET = frozenset(MANAGED_MODEL_PROFILES)
+MANAGED_MAX_MESSAGE_CHARS = 22_000
+MANAGED_MAX_MESSAGES = 16
+_QUOTA_EXHAUSTED_CODES = frozenset({
+    "llm_rolling_allowance_exhausted",
+    "rolling_allowance_exhausted",
+    "insufficient_quota",
+    "quota_exceeded",
+})
+_MANAGED_EXHAUSTED_MESSAGE = (
+    "Daily managed AI LLM allowance reached; using deterministic local fallback"
+)
+_MANAGED_HEADROOM_MESSAGE = (
+    "Managed AI LLM background headroom reserved for interactive calls; "
+    "using deterministic local fallback"
+)
 ALLOWED_MANAGED_FREE_MODELS = (
     "nvidia/nemotron-3-ultra-550b-a55b:free",
     "openrouter/free",
@@ -189,6 +214,224 @@ _CHAT_SYSTEM_PROMPT = (
 )
 
 
+def _normalize_managed_profile(profile: Optional[str]) -> Optional[str]:
+    """Validate and normalize a logical managed Cloud model profile."""
+    if profile is None:
+        return None
+    norm = str(profile).strip().lower()
+    if not norm:
+        return None
+    if norm in _MANAGED_PROFILE_SET:
+        return norm
+    return None
+
+
+def _truncate_text_to_budget(text: str, budget: int) -> str:
+    """Truncate text to at most ``budget`` characters while preserving head and tail context."""
+    if budget <= 0:
+        return ""
+    if len(text) <= budget:
+        return text
+    marker = "\n...[truncated]\n"
+    if budget <= len(marker) + 16:
+        out = text[:budget].rstrip()
+        return out or text[:budget]
+    avail = budget - len(marker)
+    head_len = max(1, int(avail * 0.8))
+    tail_len = avail - head_len
+    if tail_len <= 0:
+        out = text[:avail].rstrip()
+        return (out + marker[: budget - len(out)])[:budget]
+    head = text[:head_len].rstrip()
+    tail = text[-tail_len:].lstrip()
+    combined = f"{head}{marker}{tail}"
+    if len(combined) > budget:
+        combined = combined[:budget]
+    return combined if combined.strip() else text[:budget]
+
+
+def _trim_messages_for_managed_limit(
+    messages: list[dict[str, str]],
+    max_chars: int = MANAGED_MAX_MESSAGE_CHARS,
+    max_messages: int = MANAGED_MAX_MESSAGES,
+) -> list[dict[str, str]]:
+    """Bound managed Cloud messages safely below the 24,000-char / 16-message cap.
+
+    Preserves the system prompt, the latest user message (active task/query),
+    and as much high-priority context as fits within ``max_chars``.
+    """
+    cap = max(64, int(max_chars))
+    msg_cap = max(1, int(max_messages))
+    normalized: list[dict[str, str]] = []
+    for msg in messages:
+        role = str(msg.get("role") or "user")
+        content = str(msg.get("content") or "")
+        if not content.strip():
+            continue
+        normalized.append({"role": role, "content": content})
+    if not normalized:
+        return []
+
+    # Bound message count (<= max_messages) while keeping leading system prompt + latest user msg.
+    if len(normalized) > msg_cap:
+        sys_msgs = [m for m in normalized if m["role"] == "system"][:1]
+        non_sys = [m for m in normalized if m["role"] != "system"]
+        keep_slots = max(1, msg_cap - len(sys_msgs))
+        kept_non_sys = non_sys[-keep_slots:]
+        if not any(m["role"] == "user" for m in kept_non_sys):
+            last_user = next((m for m in reversed(non_sys) if m["role"] == "user"), None)
+            if last_user is not None:
+                kept_non_sys = [*kept_non_sys[-(keep_slots - 1):], last_user] if keep_slots > 1 else [last_user]
+        normalized = [*sys_msgs, *kept_non_sys]
+
+    total = sum(len(m["content"]) for m in normalized)
+    if total <= cap:
+        return normalized
+
+    sys_indices = [i for i, m in enumerate(normalized) if m["role"] == "system"]
+    non_sys_indices = [i for i, m in enumerate(normalized) if m["role"] != "system"]
+
+    if sys_indices and non_sys_indices:
+        sys_total = sum(len(normalized[i]["content"]) for i in sys_indices)
+        non_sys_total = sum(len(normalized[i]["content"]) for i in non_sys_indices)
+        max_sys = cap // 3
+        if sys_total <= max_sys:
+            sys_budget = sys_total
+            non_sys_budget = cap - sys_budget
+        elif non_sys_total <= cap - max_sys:
+            non_sys_budget = non_sys_total
+            sys_budget = cap - non_sys_budget
+        else:
+            sys_budget = max_sys
+            non_sys_budget = cap - sys_budget
+    elif sys_indices:
+        sys_budget = cap
+        non_sys_budget = 0
+    else:
+        sys_budget = 0
+        non_sys_budget = cap
+
+    # Trim system messages within sys_budget.
+    if sys_indices and sum(len(normalized[i]["content"]) for i in sys_indices) > sys_budget:
+        remaining = sys_budget
+        per_msg = max(16, sys_budget // len(sys_indices))
+        for pos, idx in enumerate(sys_indices):
+            left_count = len(sys_indices) - pos - 1
+            alloc = min(len(normalized[idx]["content"]), max(16, remaining - left_count * 16))
+            if left_count > 0:
+                alloc = min(alloc, per_msg)
+            normalized[idx]["content"] = _truncate_text_to_budget(normalized[idx]["content"], alloc)
+            remaining = max(0, remaining - len(normalized[idx]["content"]))
+
+    # Fit non-system messages within non_sys_budget, dropping oldest turns first if needed.
+    if non_sys_indices:
+        last_user_idx = next(
+            (i for i in reversed(non_sys_indices) if normalized[i]["role"] == "user"),
+            non_sys_indices[-1],
+        )
+        kept_non_sys_indices = list(non_sys_indices)
+        while (
+            len(kept_non_sys_indices) > 1
+            and sum(len(normalized[i]["content"]) for i in kept_non_sys_indices) > non_sys_budget
+        ):
+            # Drop the oldest non-system turn that is not the active/last user message.
+            drop_candidate = next(
+                (i for i in kept_non_sys_indices if i != last_user_idx),
+                None,
+            )
+            if drop_candidate is None:
+                break
+            kept_non_sys_indices.remove(drop_candidate)
+
+        cur_non_sys = sum(len(normalized[i]["content"]) for i in kept_non_sys_indices)
+        if cur_non_sys > non_sys_budget:
+            remaining = non_sys_budget
+            for pos, idx in enumerate(kept_non_sys_indices):
+                left_count = len(kept_non_sys_indices) - pos - 1
+                alloc = max(1, remaining - left_count * 32)
+                normalized[idx]["content"] = _truncate_text_to_budget(
+                    normalized[idx]["content"], alloc
+                )
+                remaining = max(0, remaining - len(normalized[idx]["content"]))
+
+        kept_set = set(sys_indices) | set(kept_non_sys_indices)
+        normalized = [m for i, m in enumerate(normalized) if i in kept_set and m["content"].strip()]
+
+    # Final hard safety cap to guarantee sum(len) <= cap.
+    while sum(len(m["content"]) for m in normalized) > cap and normalized:
+        excess = sum(len(m["content"]) for m in normalized) - cap
+        longest_idx = max(range(len(normalized)), key=lambda i: len(normalized[i]["content"]))
+        current = normalized[longest_idx]["content"]
+        target = max(1, len(current) - excess)
+        normalized[longest_idx]["content"] = _truncate_text_to_budget(current, target)
+        if len(normalized[longest_idx]["content"]) >= len(current):
+            normalized[longest_idx]["content"] = current[:target]
+            break
+
+    return normalized
+
+
+def _make_managed_request_key(model: str, messages: list[dict[str, str]]) -> str:
+    """Generate a valid 32-char hex idempotency key unique per logical invocation."""
+    nonce = secrets.token_hex(16)
+    digest_input = f"{nonce}:{model}:{len(messages)}:{sum(len(m.get('content', '')) for m in messages)}"
+    return hashlib.sha256(digest_input.encode("utf-8")).hexdigest()[:32]
+
+
+def _extract_quota_exhaustion(response: Any) -> Optional[dict[str, Any]]:
+    """Inspect an HTTP 429 response for rolling/daily quota exhaustion codes."""
+    payload: Any = None
+    try:
+        payload = response.json()
+    except Exception:  # noqa: BLE001
+        payload = None
+
+    code = ""
+    next_release_at: Any = None
+    retry_after_raw: Any = None
+
+    if isinstance(payload, dict):
+        detail = payload.get("detail")
+        error = payload.get("error")
+        allowance = payload.get("allowance")
+        if isinstance(detail, dict):
+            code = str(detail.get("code") or "").strip().lower()
+            next_release_at = detail.get("next_release_at")
+            retry_after_raw = detail.get("retry_after")
+        elif isinstance(detail, str) and detail.strip().lower() in _QUOTA_EXHAUSTED_CODES:
+            code = detail.strip().lower()
+        if not code and isinstance(error, dict):
+            code = str(error.get("code") or error.get("type") or "").strip().lower()
+            next_release_at = next_release_at or error.get("next_release_at")
+        if not code:
+            code = str(payload.get("code") or "").strip().lower()
+        if next_release_at is None:
+            next_release_at = payload.get("next_release_at")
+        if next_release_at is None and isinstance(allowance, dict):
+            next_release_at = allowance.get("next_release_at")
+
+    if code not in _QUOTA_EXHAUSTED_CODES:
+        return None
+
+    headers = getattr(response, "headers", None) or {}
+    if retry_after_raw is None:
+        retry_after_raw = headers.get("retry-after") or headers.get("Retry-After")
+    retry_after_s = 60.0
+    if retry_after_raw is not None:
+        try:
+            parsed = float(retry_after_raw)
+            if math.isfinite(parsed) and parsed > 0:
+                retry_after_s = parsed
+        except (TypeError, ValueError):
+            pass
+
+    return {
+        "code": code,
+        "next_release_at": next_release_at,
+        "retry_after_s": retry_after_s,
+    }
+
+
 class _LLMProviderError(RuntimeError):
     """Sanitized provider failure safe to expose outside this client boundary."""
 
@@ -223,6 +466,8 @@ class LLMClient:
         base_url: Optional[str] = None,
         extra_headers: Optional[dict] = None,
         effort: Optional[str] = None,
+        profile: Optional[str] = None,
+        default_priority: str = "interactive",
     ) -> None:
         raw_provider = (provider or settings.llm_provider or "openai").lower()
         raw_key = api_key if api_key is not None else settings.llm_api_key
@@ -236,6 +481,9 @@ class LLMClient:
         ):
             raw_provider = "managed"
         self.provider = raw_provider
+        self.profile = _normalize_managed_profile(profile)
+        self.default_priority = (default_priority or "interactive").strip().lower()
+        self._shared_managed = False
         resolved_model = model or settings.llm_model
         if self.provider == "managed" and (
             not resolved_model or (model is None and resolved_model == "gpt-4o-mini")
@@ -312,29 +560,79 @@ class LLMClient:
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         timeout: Optional[float] = None,
+        profile: Optional[str] = None,
+        priority: Optional[str] = None,
+        response_format: Optional[dict[str, Any]] = None,
+        use_cache: bool = False,
     ) -> str:
         """Send a chat request and return the assistant's text reply."""
+        effective_profile = _normalize_managed_profile(profile) or self.profile
+        effective_priority = (priority or self.default_priority or "interactive").strip().lower()
+        cache_key: Optional[tuple[str, str, str, str]] = None
+        if use_cache:
+            cache_key = LLMResultCache.make_key(
+                "chat",
+                self.provider,
+                effective_profile or self.model,
+                {
+                    "system": system,
+                    "messages": messages,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                    "response_format": response_format,
+                },
+            )
+            hit, cached = llm_result_cache().get(cache_key)
+            if hit and isinstance(cached, str):
+                return cached
+
         if self.provider == "managed":
+            allowed, reason = managed_allowance_tracker().can_call(priority=effective_priority)
+            if not allowed:
+                msg = (
+                    _MANAGED_HEADROOM_MESSAGE
+                    if reason == "headroom_reserved_for_interactive"
+                    else _MANAGED_EXHAUSTED_MESSAGE
+                )
+                raise _LLMProviderError(status=429, message=msg)
             managed_key, managed_url = self._resolve_managed_auth(timeout=timeout)
-            return self._chat_openai_compat(
+            compat_kwargs: dict[str, Any] = {
+                "api_key_override": managed_key,
+                "base_url_override": managed_url,
+            }
+            if response_format is not None:
+                compat_kwargs["response_format"] = response_format
+            if effective_profile is not None:
+                compat_kwargs["profile"] = effective_profile
+            result = self._chat_openai_compat(
                 messages,
                 system,
                 temperature,
                 max_tokens,
                 timeout,
-                api_key_override=managed_key,
-                base_url_override=managed_url,
+                **compat_kwargs,
             )
-        if not self.api_key:
-            raise ValueError(
-                "No LLM API key configured. Set ENGRAPHIS_LLM_API_KEY in .env "
-                "or pass api_key= when constructing LLMClient."
-            )
-        if self.provider == "anthropic":
-            return self._chat_anthropic(messages, system, temperature, max_tokens, timeout)
-        if self.provider == "google":
-            return self._chat_google(messages, system, temperature, max_tokens, timeout)
-        return self._chat_openai_compat(messages, system, temperature, max_tokens, timeout)
+        else:
+            if not self.api_key:
+                raise ValueError(
+                    "No LLM API key configured. Set ENGRAPHIS_LLM_API_KEY in .env "
+                    "or pass api_key= when constructing LLMClient."
+                )
+            if self.provider == "anthropic":
+                result = self._chat_anthropic(messages, system, temperature, max_tokens, timeout)
+            elif self.provider == "google":
+                result = self._chat_google(messages, system, temperature, max_tokens, timeout)
+            else:
+                compat_kwargs = {}
+                if response_format is not None:
+                    compat_kwargs["response_format"] = response_format
+                result = self._chat_openai_compat(
+                    messages, system, temperature, max_tokens, timeout, **compat_kwargs
+                )
+
+        if use_cache and cache_key is not None and isinstance(result, str) and result.strip():
+            llm_result_cache().put(cache_key, result)
+        return result
 
     def synthesize_thought(self, context: str, *, temperature: float = 0.3,
                            max_tokens: int = 4096,
@@ -385,21 +683,63 @@ class LLMClient:
         schema: dict,
         *,
         timeout: Optional[float] = None,
+        profile: Optional[str] = None,
+        priority: Optional[str] = None,
+        use_cache: bool = True,
     ) -> Any:
         """Extract structured JSON from the LLM using a JSON schema constraint.
 
-        Uses the provider's native structured output (OpenAI JSON schema, etc.)
+        Uses the provider's native structured output (OpenAI JSON mode, etc.)
         when available; falls back to prompting + post-hoc validation otherwise.
         """
+        effective_profile = _normalize_managed_profile(profile) or self.profile
+        cache_key: Optional[tuple[str, str, str, str]] = None
+        if use_cache:
+            cache_key = LLMResultCache.make_key(
+                "extract_json",
+                self.provider,
+                effective_profile or self.model,
+                {"prompt": prompt, "schema": schema},
+            )
+            hit, cached = llm_result_cache().get(cache_key)
+            if hit:
+                return cached
+
         # Build a system prompt that enforces JSON schema output
         system = (
             "You output ONLY valid JSON matching the provided schema. "
             "No markdown, no prose, no commentary. The schema:\n"
             f"{json.dumps(schema)}"
         )
-        raw = self.chat([{"role": "user", "content": prompt}], system=system,
-                        temperature=0.0, max_tokens=8192, timeout=timeout)
-        return _parse_json_response(raw)
+        use_json_mode = self.provider not in {"anthropic", "google"}
+        chat_kwargs: dict[str, Any] = {
+            "system": system,
+            "temperature": 0.0,
+            "max_tokens": 8192,
+            "timeout": timeout,
+        }
+        if profile is not None:
+            chat_kwargs["profile"] = profile
+        if priority is not None:
+            chat_kwargs["priority"] = priority
+        if use_json_mode:
+            chat_kwargs["response_format"] = {"type": "json_object"}
+        try:
+            raw = self.chat([{"role": "user", "content": prompt}], **chat_kwargs)
+        except _LLMProviderError as exc:
+            if use_json_mode and exc.status in (400, 422):
+                logger.debug(
+                    "LLM provider rejected response_format with HTTP %d; retrying without it",
+                    exc.status,
+                )
+                chat_kwargs.pop("response_format", None)
+                raw = self.chat([{"role": "user", "content": prompt}], **chat_kwargs)
+            else:
+                raise
+        parsed, valid_json = _parse_json_response_with_status(raw)
+        if use_cache and cache_key is not None and valid_json:
+            llm_result_cache().put(cache_key, parsed)
+        return parsed
 
     def ping(self) -> dict[str, Any]:
         """Minimal live test of the configured provider/key/model.
@@ -422,7 +762,9 @@ class LLMClient:
                     "error": "", "provider": self.provider, "model": self.model}
         except Exception as exc:  # noqa: BLE001 - external-provider boundary
             logger.error("LLM connection test failed (%s)", type(exc).__name__)
-            if isinstance(exc, _LLMProviderError) and exc.status is not None:
+            if isinstance(exc, _LLMProviderError) and exc.status == 429 and "allowance" in str(exc).lower():
+                error = str(exc)
+            elif isinstance(exc, _LLMProviderError) and exc.status is not None:
                 status = exc.status
                 error = ("Provider rejected the request (HTTP %d). Check the API key, "
                          "model name, and provider settings." % status)
@@ -446,17 +788,34 @@ class LLMClient:
         *,
         api_key_override: Optional[str] = None,
         base_url_override: Optional[str] = None,
+        response_format: Optional[dict[str, Any]] = None,
+        profile: Optional[str] = None,
     ) -> str:
         """OpenAI / OpenRouter / Managed Cloud / custom OpenAI-compatible endpoints."""
         full_messages = []
         if system:
             full_messages.append({"role": "system", "content": system})
         full_messages.extend(messages)
-        body: dict[str, Any] = {"model": self.model, "messages": full_messages}
+        if self.provider == "managed":
+            full_messages = _trim_messages_for_managed_limit(
+                full_messages, max_chars=MANAGED_MAX_MESSAGE_CHARS
+            )
+
+        effective_profile = _normalize_managed_profile(profile) or self.profile
+        request_model = (
+            effective_profile
+            if (self.provider == "managed" and effective_profile is not None)
+            else self.model
+        )
+        body: dict[str, Any] = {"model": request_model, "messages": full_messages}
         if temperature is not None:
             body["temperature"] = temperature
         if max_tokens is not None:
             body["max_tokens"] = max_tokens
+        if response_format is not None:
+            body["response_format"] = response_format
+        if self.provider == "managed":
+            body["request_key"] = _make_managed_request_key(request_model, full_messages)
 
         active_key = api_key_override if api_key_override is not None else self.api_key
         active_url = base_url_override if base_url_override is not None else self.base_url
@@ -469,6 +828,12 @@ class LLMClient:
         # configured endpoint verbatim.
         logger.debug("LLM provider request started")
         data = self._post_json(url, body, headers, timeout=timeout)
+        if (
+            self.provider == "managed"
+            and isinstance(data, dict)
+            and isinstance(data.get("allowance"), dict)
+        ):
+            managed_allowance_tracker().record_allowance(data["allowance"])
         try:
             return data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError):
@@ -575,6 +940,24 @@ class LLMClient:
                     raise ValueError("Unexpected LLM response format") from None
             except httpx.HTTPStatusError as exc:
                 status = exc.response.status_code
+                if status == 429:
+                    quota_info = _extract_quota_exhaustion(exc.response)
+                    if quota_info is not None:
+                        if (
+                            self.provider == "managed"
+                            or quota_info["code"] in {
+                                "llm_rolling_allowance_exhausted",
+                                "rolling_allowance_exhausted",
+                            }
+                        ):
+                            managed_allowance_tracker().record_exhausted(
+                                next_release_at=quota_info["next_release_at"],
+                                retry_after_s=quota_info["retry_after_s"],
+                            )
+                        raise _LLMProviderError(
+                            status=429,
+                            message=_MANAGED_EXHAUSTED_MESSAGE,
+                        ) from None
                 if status in _RETRYABLE and attempt < _MAX_RETRIES:
                     retry_after = exc.response.headers.get("retry-after", "")
                     try:
@@ -606,6 +989,60 @@ class LLMClient:
                 status=getattr(last_exc, "response", None)
                 and last_exc.response.status_code) from None
         raise _LLMProviderError(unreachable=True) from None
+
+
+_REAL_LLM_CLIENT_CLS = LLMClient
+_SHARED_MANAGED_LOCK = threading.RLock()
+_SHARED_MANAGED_CLIENTS: dict[tuple[Optional[str], str], LLMClient] = {}
+
+
+def get_shared_managed_llm_client(
+    *,
+    profile: Optional[str] = None,
+    default_priority: str = "interactive",
+) -> LLMClient:
+    """Return a thread-safe pooled managed ``LLMClient`` reused across calls.
+
+    Avoids creating and closing a fresh ``httpx.Client`` TLS connection pool on
+    every ingest or background extraction. If tests monkeypatch ``LLMClient``,
+    constructs the replacement directly so test doubles remain isolated.
+    """
+    norm_profile = _normalize_managed_profile(profile)
+    norm_priority = (default_priority or "interactive").strip().lower()
+    if LLMClient is not _REAL_LLM_CLIENT_CLS:
+        return LLMClient(
+            provider="managed",
+            profile=norm_profile,
+            default_priority=norm_priority,
+        )
+    key = (norm_profile, norm_priority)
+    with _SHARED_MANAGED_LOCK:
+        client = _SHARED_MANAGED_CLIENTS.get(key)
+        http_client = getattr(client, "_http", None) if client is not None else None
+        if client is None or getattr(http_client, "is_closed", False):
+            client = LLMClient(
+                provider="managed",
+                profile=norm_profile,
+                default_priority=norm_priority,
+            )
+            client._shared_managed = True
+            _SHARED_MANAGED_CLIENTS[key] = client
+        return client
+
+
+def close_shared_managed_llm_client() -> None:
+    """Close and discard all pooled shared managed ``LLMClient`` instances."""
+    with _SHARED_MANAGED_LOCK:
+        clients = list(_SHARED_MANAGED_CLIENTS.values())
+        _SHARED_MANAGED_CLIENTS.clear()
+    for client in clients:
+        try:
+            client.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+atexit.register(close_shared_managed_llm_client)
 
 
 # Rough per-1K-token pricing (USD) for cost estimation. Keys are provider names.
@@ -722,12 +1159,26 @@ class LLMProviderChain:
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         timeout: Optional[float] = None,
+        profile: Optional[str] = None,
+        priority: Optional[str] = None,
+        response_format: Optional[dict[str, Any]] = None,
+        use_cache: bool = False,
     ) -> str:
-        return self._dispatch(
-            "chat", messages,
-            system=system, temperature=temperature,
-            max_tokens=max_tokens, timeout=timeout,
-        )
+        kwargs: dict[str, Any] = {
+            "system": system,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "timeout": timeout,
+        }
+        if profile is not None:
+            kwargs["profile"] = profile
+        if priority is not None:
+            kwargs["priority"] = priority
+        if response_format is not None:
+            kwargs["response_format"] = response_format
+        if use_cache:
+            kwargs["use_cache"] = True
+        return self._dispatch("chat", messages, **kwargs)
 
     def synthesize_thought(
         self,
@@ -749,8 +1200,18 @@ class LLMProviderChain:
         schema: dict,
         *,
         timeout: Optional[float] = None,
+        profile: Optional[str] = None,
+        priority: Optional[str] = None,
+        use_cache: bool = True,
     ) -> Any:
-        return self._dispatch("extract_json", prompt, schema, timeout=timeout)
+        kwargs: dict[str, Any] = {"timeout": timeout}
+        if profile is not None:
+            kwargs["profile"] = profile
+        if priority is not None:
+            kwargs["priority"] = priority
+        if not use_cache:
+            kwargs["use_cache"] = False
+        return self._dispatch("extract_json", prompt, schema, **kwargs)
 
     def close(self) -> None:
         for client in self._clients:
@@ -856,8 +1317,8 @@ def _anthropic_msg(m: dict[str, str]) -> dict[str, str]:
     return {"role": role, "content": m["content"]}
 
 
-def _parse_json_response(raw: str) -> dict[str, Any]:
-    """Best-effort parse of a JSON thought response, tolerating markdown fences."""
+def _parse_json_response_with_status(raw: str) -> tuple[dict[str, Any], bool]:
+    """Parse JSON response (tolerating markdown fences) and report whether parsing succeeded."""
     text = raw.strip()
     if text.startswith("```"):
         lines = text.split("\n")
@@ -865,7 +1326,14 @@ def _parse_json_response(raw: str) -> dict[str, Any]:
         if text.rstrip().endswith("```"):
             text = text.rsplit("```", 1)[0]
     try:
-        return json.loads(text)
+        parsed = json.loads(text)
+        return parsed, True
     except Exception as exc:
         logger.debug("LLM JSON parse fallback to raw (%s)", type(exc).__name__)
-        return {"raw": raw}
+        return {"raw": raw}, False
+
+
+def _parse_json_response(raw: str) -> dict[str, Any]:
+    """Best-effort parse of a JSON thought response, tolerating markdown fences."""
+    parsed, _ok = _parse_json_response_with_status(raw)
+    return parsed
