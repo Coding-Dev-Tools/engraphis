@@ -105,7 +105,7 @@ test("matches the three governed Smart tool schemas", () => {
 	assert.deepEqual(updateMemory.required, ["memory_id"]);
 	assert.deepEqual(
 		Object.keys(conflictReview.properties).sort(),
-		["limit", "repo", "workspace"],
+		["advisory_triage", "allow_remote", "data_classification", "limit", "repo", "workspace"],
 	);
 	assert.deepEqual(conflictReview.required ?? [], []);
 	assert.equal(getMemory.properties.workspace.default, "default");

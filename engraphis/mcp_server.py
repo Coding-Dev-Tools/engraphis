@@ -1170,6 +1170,10 @@ def engraphis_recall_grounded(
                     "Omits packed context whole and reduces citation bodies; source references "
                     "are preserved when the budget can hold them. Minimum 2; None means no cap.",
         ge=2, le=1_000_000)] = None,
+    synthesis_mode: Annotated[str, Field(
+        description="strict_extract copies verbatim cited source units; cited_prose allows "
+                    "concise multi-source prose where every sentence cites [n].",
+        pattern="^(strict_extract|cited_prose)$")] = "strict_extract",
 ) -> str:
     """Answer a question *strictly from* stored memories, with citations — or abstain.
 
@@ -1209,7 +1213,7 @@ def engraphis_recall_grounded(
                 retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
                 response_mode=response_mode,
                 diagnostics=diagnostics, planning=planning, mtype_limits=mtype_limits,
-                min_support=min_support, llm=llm,
+                min_support=min_support, llm=llm, synthesis_mode=synthesis_mode,
             )
             payload = _apply_response_budget(payload, max_response_tokens)
             return _ok(payload)
@@ -4164,11 +4168,7 @@ def engraphis_get_memory(
     repo: Annotated[Optional[str], Field(description="Optional repo scope.",
                                          max_length=200)] = None,
 ) -> str:
-    """Return one governed memory record (content, provenance, scope, and time).
-
-    Read-only; never reinforces. Pending/quarantined bodies stay hidden; only
-    prompt-eligible content reaches the agent.
-    """
+    """Read one prompt-eligible memory record (read-only; no reinforce)."""
     try:
         record = service().inspect(memory_id=memory_id, workspace=workspace, repo=repo)
     except Exception as exc:  # noqa: BLE001 — Smart gateway classification
@@ -4279,9 +4279,7 @@ def engraphis_update_memory(
         max_length=200,
     )] = "user",
 ) -> str:
-    """Edit metadata only (title/type/importance). Identical retries are atomic no-ops. Content uses
-    governed correction to preserve history; secrets are rejected and provenance/trust/
-    sensitivity cannot be edited."""
+    """Edit memory metadata (title/type/importance); content uses governed correction."""
     if title is None and mtype is None and importance is None:
         return _gateway_error("nothing_to_update")
     try:
@@ -4302,19 +4300,19 @@ def engraphis_update_memory(
     structured_output=False,
 )
 def engraphis_conflict_review(
-    workspace: Annotated[str, Field(description="Workspace to review.", max_length=200)] = "default",
-    repo: Annotated[Optional[str], Field(description="Optional repo scope.",
-                                         max_length=200)] = None,
-    limit: Annotated[int, Field(description="Max items to return.", ge=1, le=100)] = 50,
+    workspace: Annotated[str, Field(description="Workspace.", max_length=200)] = "default",
+    repo: Annotated[Optional[str], Field(description="Optional repo.", max_length=200)] = None,
+    limit: Annotated[int, Field(description="Max items.", ge=1, le=100)] = 50,
+    advisory_triage: bool = False,
+    allow_remote: bool = False,
+    data_classification: str = "internal",
 ) -> str:
-    """Read-only review of pending/quarantined/conflicting memories.
-
-    Scope and personal-folder authorization apply. Bodies stay hidden; only approved
-    conflicts may expose a short excerpt.
-    """
+    """List pending, quarantined, or conflicting memories (read-only)."""
     try:
         return _ok(service().conflict_review(
             workspace=workspace, repo=repo, limit=limit,
+            advisory_triage=advisory_triage, allow_remote=allow_remote,
+            data_classification=data_classification,
         ))
     except Exception as exc:  # noqa: BLE001 — Smart gateway classification
         return _classify_gateway_exception(exc)

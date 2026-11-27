@@ -31,7 +31,15 @@ MODEL = "jev-1.13.0"
 MAX_REQUEST_BYTES = 24 * 1024
 MAX_RESPONSE_BYTES = 256 * 1024
 MAX_ERROR_RESPONSE_BYTES = 4 * 1024
-_PURPOSES = {"guard_command", "classify_contradiction", "verify_support", "verify_completion", "custom"}
+_PURPOSES = {
+    "guard_command",
+    "classify_contradiction",
+    "verify_support",
+    "verify_completion",
+    "select_query_route",
+    "classify_retention",
+    "custom",
+}
 _CLOUD_HTTP_ERROR_CODES = {
     "jev_rolling_allowance_exhausted": "allowance_exhausted",
     "jev_provider_protection_limit": "provider_protection_limit",
@@ -40,7 +48,7 @@ _SECRETS = (
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
     re.compile(r"\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|"
                r"xox[baprs]-[A-Za-z0-9-]{16,}|AKIA[A-Z0-9]{16}|"
-               r"engr_(?:rt|dev)_[A-Za-z0-9_-]{16,})\b"),
+               r"engr_(?:rt|dev|ct)_[A-Za-z0-9_-]{16,})\b"),
     re.compile(r"\bBearer\s+[A-Za-z0-9._~-]{12,}", re.IGNORECASE),
     # Recognize conventional credential assignments in raw text, including
     # prefixed identifiers, JSON, shell and environment-index forms. This is a
@@ -284,6 +292,43 @@ def _validate_managed_context(
     cannot turn arbitrary questions into an included managed operation. These
     checks do not establish the provenance or truth of supplied plaintext.
     """
+    if purpose == "select_query_route":
+        if len(questions) != 1:
+            raise DecisionClientError("invalid_request")
+        q = questions[0]
+        route_count = len(q.options)
+        expected_options = tuple(f"route_{index}" for index in range(1, route_count + 1))
+        if (
+            q.id != "route"
+            or q.prompt != "Which deterministic alternate route should receive the highest retrieval priority?"
+            or q.kind != "choice"
+            or not 2 <= route_count <= 4
+            or tuple(q.options) != expected_options
+        ):
+            raise DecisionClientError("invalid_request")
+        if not state.startswith("ORIGINAL QUERY:\n"):
+            raise DecisionClientError("invalid_request")
+        for index in range(1, route_count + 1):
+            if state.count(f"\n\nroute_{index}: ") != 1:
+                raise DecisionClientError("invalid_request")
+        remaining = state[len("ORIGINAL QUERY:\n"):]
+        query_text, remaining = remaining.split("\n\nroute_1: ", 1)
+        if not query_text.strip() or len(query_text) > 4096:
+            raise DecisionClientError("invalid_request")
+        route_texts = []
+        for index in range(2, route_count + 1):
+            marker = f"\n\nroute_{index}: "
+            if marker not in remaining:
+                raise DecisionClientError("invalid_request")
+            route_text, remaining = remaining.split(marker, 1)
+            route_texts.append(route_text)
+        route_texts.append(remaining)
+        if any(re.search(r"(?:^|\r?\n)route_\d+:\s*", part) for part in (query_text, *route_texts)):
+            raise DecisionClientError("invalid_request")
+        if any(not value.strip() or len(value) > 1024 for value in route_texts):
+            raise DecisionClientError("invalid_request")
+        return
+
     expected = {
         "guard_command": (
             ("is_safe", "Is this command free of destructive data loss or secret leakage?",
@@ -301,6 +346,12 @@ def _validate_managed_context(
         ),
         "verify_completion": (
             ("is_complete", "Does the supplied evidence establish the task goal?", "noul", ()),
+        ),
+        "classify_retention": (
+            ("retention_class", "Classify this candidate agent memory for long-term retention.",
+             "choice", ("ephemeral", "normal", "critical")),
+            ("should_retain", "Should this candidate memory be retained beyond the active session?",
+             "noul", ()),
         ),
     }.get(purpose)
     if expected is None:
@@ -337,6 +388,25 @@ def _validate_managed_context(
         if len(actions) > 8192:
             raise DecisionClientError("invalid_request")
         fields = [(goal, 4096), (output, 16000)]
+    elif purpose == "classify_retention":
+        if (not state.startswith("MEMORY TYPE: ") or state.count("\nTITLE: ") != 1
+                or state.count("\nCONTENT: ") != 1):
+            raise DecisionClientError("invalid_request")
+        mtype, remaining = state[len("MEMORY TYPE: "):].split("\nTITLE: ")
+        if "\nCONTENT: " not in remaining:
+            raise DecisionClientError("invalid_request")
+        title, content = remaining.split("\nCONTENT: ")
+        if (
+            mtype not in {"working", "episodic", "semantic", "procedural"}
+            or len(title) > 512
+            or re.search(r"[\r\n]", title)
+            or any(
+                re.search(r"(?:^|\r?\n)(?:MEMORY TYPE|TITLE|CONTENT):", part)
+                for part in (title, content)
+            )
+        ):
+            raise DecisionClientError("invalid_request")
+        fields = [(content, 16000)]
     if actual != expected or any(not value.strip() or len(value) > limit for value, limit in fields):
         raise DecisionClientError("invalid_request")
 

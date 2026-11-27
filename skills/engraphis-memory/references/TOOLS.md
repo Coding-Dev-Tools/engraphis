@@ -218,6 +218,8 @@ extractive; optional LLM synthesis is accepted only when its claims remain cited
 - `min_support (float, None)`: absolute support floor `0..1`; raise it to demand stronger
   evidence before answering.
 - `synthesize (bool, false)`: ask a configured LLM for cited prose; falls back safely.
+- `synthesis_mode (str, "strict_extract")`: `strict_extract` copies verbatim cited source units;
+  `cited_prose` permits concise cited prose only when verified by Jev entailment.
 
 Returns `{query, grounded, abstained, answer, support, reason, synthesized, citations:[{n, id,
 title, content, score, support, provenance}]}`. When `grounded` is false, `answer` is empty and
@@ -619,6 +621,8 @@ Content, provenance, trust, and sensitivity are not editable through this tool; 
 List pending, quarantined, or conflicting memories for a reviewer.
 
 - `workspace (str, "default")`, `repo (str, None)`, `limit (int, 50)`: `1..100`.
+- `advisory_triage (bool, false)`, `allow_remote (bool, false)`,
+  `data_classification (str, "internal")`: opt-in read-only Jev triage (`public` or `internal`).
 
 Returns scoped review records without exposing pending/quarantined bodies to an agent.
 

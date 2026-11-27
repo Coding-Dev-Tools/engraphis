@@ -5,16 +5,21 @@ the core ``LLM`` protocol; no provider SDK is a required dependency.
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional, Protocol
 
 from engraphis.core.interfaces import (
-    LLM,
     MemoryType,
     PlannedQuery,
     RetrievalPlan,
     SearchFilter,
 )
 from engraphis.core.query_planner import MAX_PLANNED_PRIORITY, MAX_PLANNED_QUERIES
+
+
+class _JsonExtractor(Protocol):
+    def extract_json(
+        self, prompt: str, schema: dict, *, timeout: Optional[float] = None,
+    ) -> Any: ...
 
 
 _PLANNING_PROFILES = frozenset({"balanced", "fast", "lexical", "graph", "code"})
@@ -28,7 +33,7 @@ class LLMQueryPlanner:
 
     identity = "engraphis.query-planner.llm.v1"
 
-    def __init__(self, llm: LLM) -> None:
+    def __init__(self, llm: _JsonExtractor) -> None:
         self.llm = llm
 
     def plan(

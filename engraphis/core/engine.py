@@ -488,6 +488,8 @@ class MemoryEngine:
         allow_automatic_critical_retention: bool = False,
         graph_traversal_policy: Optional[GraphTraversalPolicy] = None,
         query_planner: Optional[QueryPlanner] = None,
+        llm_query_planner: Optional[QueryPlanner] = None,
+        allowance_check: Optional[Callable[[str], bool]] = None,
         code_indexer_factory: Optional[Callable] = None,
         code_language_detector: Optional[Callable] = None,
         code_source_iterator: Optional[Callable] = None,
@@ -507,6 +509,8 @@ class MemoryEngine:
             reranker,
             graph_traversal_policy=graph_traversal_policy,
             query_planner=query_planner,
+            llm_query_planner=llm_query_planner,
+            allowance_check=allowance_check,
         )
         # Memory evolution (A-MEM-style): writing a new note also updates
         # how its neighbors are connected, so the network improves bidirectionally.
@@ -2859,7 +2863,9 @@ class MemoryEngine:
                         max_citations: int = 5, reinforce: bool = True,
                         jev_assisted: bool = False, allow_remote: bool = False,
                         data_classification: Optional[str] = None,
-                        include_retrieval_preview: bool = False):
+                        include_retrieval_preview: bool = False,
+                        synthesis_mode: str = "strict_extract",
+                        decision_backend=None):
         """Recall, then answer *strictly from* what was recalled — with citations and an
         explicit abstain when the evidence is too weak (``core.grounded``). Offline and
         deterministic (extractive answer) unless an ``LLM`` is injected to synthesise
@@ -2890,8 +2896,19 @@ class MemoryEngine:
             data_classification=data_classification,
         )
         floor = _grounded.GROUNDED_SUPPORT_FLOOR if min_support is None else min_support
-        answer = _grounded.build_grounded_answer(query, result, self.embedder, llm=llm,
-                                                 min_support=floor, max_citations=max_citations)
+        effective_decision_backend = decision_backend
+        if effective_decision_backend is None and allow_remote:
+            effective_decision_backend = getattr(
+                self.recall_engine.query_planner, "decision_backend", None,
+            )
+        answer = _grounded.build_grounded_answer(
+            query, result, self.embedder, llm=llm,
+            min_support=floor, max_citations=max_citations,
+            synthesis_mode=synthesis_mode,
+            decision_backend=effective_decision_backend,
+            allow_remote=bool(allow_remote),
+            data_classification=data_classification or "internal",
+        )
         if include_retrieval_preview:
             # Reuse this call's final candidates so dashboard inspection cannot
             # silently run a second query with different Jev planning or filters.

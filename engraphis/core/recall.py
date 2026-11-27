@@ -191,6 +191,8 @@ class RecallEngine:
                  candidate_depth_policy: Optional[CandidateDepthPolicy] = None,
                  graph_traversal_policy: Optional[GraphTraversalPolicy] = None,
                  query_planner: Optional[QueryPlanner] = None,
+                 llm_query_planner: Optional[QueryPlanner] = None,
+                 allowance_check: Optional[Callable[[str], bool]] = None,
                  planner_timeout_s: float = 2.0,
                  arm_candidate_k_cap: Optional[int] = None) -> None:
         self.store = store
@@ -205,6 +207,8 @@ class RecallEngine:
         self.candidate_depth_policy = candidate_depth_policy or DeterministicRetrievalPolicy()
         self.graph_traversal_policy = graph_traversal_policy or UniformGraphTraversalPolicy()
         self.query_planner = query_planner or DeterministicQueryPlanner()
+        self.llm_query_planner = llm_query_planner
+        self._allowance_check = allowance_check
         self.planner_timeout_s = max(0.0, float(planner_timeout_s))
         # Latency knob: PR #171 widened the prompt-only first arm to
         # ``candidate_k + min(250, candidate_k*3)`` so a 49-fact corpus pays
@@ -659,6 +663,45 @@ class RecallEngine:
                 break
             arm_candidate_k = candidate_ceiling
         mark_phase("candidate_filtering")
+        if planning_mode == "auto" and self.llm_query_planner is not None:
+            top_vec = max(
+                (v for run in query_runs for mid in recs if mid in run["vector"]
+                 and isinstance((v := _finite_arm_value(run["vector"][mid])), float)),
+                default=0.0,
+            ) if vector_search_ready else 0.0
+            if top_vec < 0.35:
+                query_tokens = tokenize(query)
+                top_lex = max(
+                    (jaccard(query_tokens, tokenize(f"{rec.title} {rec.content}")) for rec in recs.values()),
+                    default=0.0,
+                ) if (recs and query_tokens) else 0.0
+            else:
+                top_lex = 0.0
+            allowance_ok = bool(self._allowance_check("interactive")) if self._allowance_check is not None else True
+            if (len(recs) == 0 or max(top_vec, top_lex) < 0.35) and allowance_ok:
+                extra_runs = self._expand_low_recall_with_llm(
+                    query=query, flt=flt, now=now, selected_profile=selected_profile,
+                    existing_queries=planned_queries, arm_candidate_k=arm_candidate_k,
+                    vector_search_ready=vector_search_ready and not vector_runtime_failed,
+                    prompt_only=prompt_only, requested_historical=requested_historical,
+                )
+                if extra_runs:
+                    query_runs.extend(extra_runs)
+                    extra_ids = sorted({
+                        mid for run in extra_runs for arm in ("vector", "lexical", "graph", "code")
+                        for mid, _s in _finite_arm_items(run.get(arm))
+                        if isinstance(mid, str) and mid and mid not in recs
+                    })
+                    if extra_ids:
+                        for mid, rec in self.store.get_memories(extra_ids).items():
+                            if (rec and memory_matches_filter(rec, flt, at=now)
+                                    and (prompt_eligible(rec.provenance, rec.metadata) if prompt_only
+                                         else inspection_eligible(rec.provenance, rec.metadata))):
+                                recs[mid] = rec
+                    plan = RetrievalPlan(
+                        queries=plan.queries, mtype_limits=dict(plan.mtype_limits),
+                        reason_codes=(*plan.reason_codes[:7], "llm_low_recall_expansion"),
+                    )
         if not recs:
             # Telemetry is logged regardless of ``diagnostics`` so operators can
             # see page depth and drop counts without paying for full traces.
@@ -1227,6 +1270,76 @@ class RecallEngine:
         if succeeded:
             return value
         raise value
+
+    def _expand_low_recall_with_llm(
+        self, *, query: str, flt: SearchFilter, now: float, selected_profile: str,
+        existing_queries: list[PlannedQuery], arm_candidate_k: int,
+        vector_search_ready: bool, prompt_only: bool, requested_historical: bool,
+    ) -> list[dict[str, Any]]:
+        """Run one bounded LLM query-expansion call when deterministic recall is weak."""
+        planner = self.llm_query_planner
+        if planner is None:
+            return []
+        cloned_flt = replace(
+            flt,
+            scopes=list(flt.scopes) if flt.scopes is not None else None,
+            mtypes=list(flt.mtypes) if flt.mtypes is not None else None,
+            graph_layers=list(flt.graph_layers) if flt.graph_layers is not None else None,
+        )
+        try:
+            sanitized = _sanitize_plan(
+                planner.plan(query, filter=cloned_flt, timeout_s=min(self.planner_timeout_s, 2.5)),
+                query, selected_profile,
+            )
+        except Exception:
+            return []
+        seen = {" ".join(item.text.split()).casefold() for item in existing_queries}
+        new_items = [it for it in sanitized.queries[1:MAX_PLANNED_QUERIES]
+                     if " ".join(it.text.split()).casefold() not in seen]
+        if not new_items:
+            return []
+        run_configs = [
+            profile_config(it.profile) if vector_search_ready
+            else replace(profile_config(it.profile), vector=False, semantic_scale=0.0)
+            for it in new_items
+        ]
+        embedded_texts = [it.text for it, rc in zip(new_items, run_configs) if rc.vector]
+        qvecs: list[Optional[np.ndarray]] = [None] * len(new_items)
+        if embedded_texts:
+            try:
+                embedded = self.embedder.embed(embedded_texts)
+                if len(embedded) == len(embedded_texts):
+                    it_emb = iter(embedded)
+                    qvecs = [next(it_emb) if rc.vector else None for rc in run_configs]
+            except Exception:
+                pass
+        extra_runs: list[dict[str, Any]] = []
+        policy_id = getattr(self.graph_traversal_policy, "identity", type(self.graph_traversal_policy).__name__)
+        for item, rc, qvec in zip(new_items, run_configs, qvecs):
+            qf = _planned_filter(flt, item.mtypes)
+            if qf is None:
+                continue
+            vec: dict[str, float] = {}
+            if qvec is not None:
+                try:
+                    vec = dict(
+                        canonical_vector_search(self.store, qvec, arm_candidate_k, filter=qf)
+                        if canonical_search_required(self.index, self.store, unregistered_is_uncertain=False)
+                        else self.index.search(qvec, arm_candidate_k, filter=qf)
+                    )
+                except Exception:
+                    vec = {}
+            lex = dict(self.store.fts_search(item.text, arm_candidate_k, filter=qf)) if rc.lexical else {}
+            gp, gfb = self._plan_graph_traversal(item.text, qf) if rc.graph else (None, "")
+            graph = (self._graph_arm(item.text, qf, now, candidate_k=arm_candidate_k, traversal_plan=gp,
+                                     prompt_only=prompt_only, seed_fallback=rc.graph_seed_fallback)
+                     if rc.graph else {})
+            code = self._code_arm(item.text, qf, arm_candidate_k, historical=requested_historical) if rc.code else {}
+            extra_runs.append({
+                "query": item, "config": rc, "vector": vec, "lexical": lex, "graph": graph, "code": code,
+                "graph_traversal_plan": gp, "graph_traversal_policy": policy_id, "graph_traversal_fallback": gfb,
+            })
+        return extra_runs
 
     def _plan_graph_traversal(
         self,

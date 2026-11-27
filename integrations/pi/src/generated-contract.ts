@@ -2,9 +2,24 @@
 export const SMART_SCHEMAS = {
   "engraphis_conflict_review": {
     "properties": {
+      "advisory_triage": {
+        "default": false,
+        "title": "Advisory Triage",
+        "type": "boolean"
+      },
+      "allow_remote": {
+        "default": false,
+        "title": "Allow Remote",
+        "type": "boolean"
+      },
+      "data_classification": {
+        "default": "internal",
+        "title": "Data Classification",
+        "type": "string"
+      },
       "limit": {
         "default": 50,
-        "description": "Max items to return.",
+        "description": "Max items.",
         "maximum": 100,
         "minimum": 1,
         "title": "Limit",
@@ -21,12 +36,12 @@ export const SMART_SCHEMAS = {
           }
         ],
         "default": null,
-        "description": "Optional repo scope.",
+        "description": "Optional repo.",
         "title": "Repo"
       },
       "workspace": {
         "default": "default",
-        "description": "Workspace to review.",
+        "description": "Workspace.",
         "maxLength": 200,
         "title": "Workspace",
         "type": "string"

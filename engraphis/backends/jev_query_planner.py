@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import re
 import time
 from typing import Optional
 
@@ -89,9 +90,12 @@ class JevAssistedQueryPlanner:
                 return self._with_reason(baseline, "jev_deadline_exhausted")
 
         options = tuple(f"route_{index}" for index in range(1, len(alternatives) + 1))
+        def _clean_route_field(text: str) -> str:
+            return re.sub(r"(?m)^route_(\d+):", r"route \1:", text)
+
         state = "\n\n".join(
-            [f"ORIGINAL QUERY:\n{query}"]
-            + [f"{option}: {route.text}" for option, route in zip(options, alternatives)]
+            [f"ORIGINAL QUERY:\n{_clean_route_field(query)}"]
+            + [f"{option}: {_clean_route_field(route.text)}" for option, route in zip(options, alternatives)]
         )
         decision = self.decision_backend.choose_option(
             state,
@@ -99,7 +103,7 @@ class JevAssistedQueryPlanner:
             prompt="Which deterministic alternate route should receive the highest retrieval priority?",
             options=options,
             allow_remote=allow_remote,
-            purpose="custom",
+            purpose="select_query_route",
             data_classification=data_classification,
             timeout_s=decision_timeout,
         )
