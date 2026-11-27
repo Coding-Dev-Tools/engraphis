@@ -9,7 +9,6 @@ from __future__ import annotations
 import atexit
 from collections import OrderedDict
 import hashlib
-import hmac
 import ipaddress
 import json
 import logging
@@ -487,10 +486,17 @@ class LLMClient:
     def _cache_scope(self) -> tuple[str, ...]:
         if self.provider == "managed":
             return _managed_session_scope()
-        key_tag = hmac.new(
-            _CACHE_SCOPE_SALT, self.api_key.encode("utf-8"), hashlib.sha256
-        ).hexdigest()[:16]
-        return (self.base_url, key_tag, str(self.effort or ""))
+        tag = getattr(self, "_byok_scope_tag", None)
+        if tag is None:
+            tag = hashlib.pbkdf2_hmac(
+                "sha256",
+                self.api_key.encode("utf-8"),
+                _CACHE_SCOPE_SALT,
+                100_000,
+                dklen=16,
+            ).hex()
+            self._byok_scope_tag = tag
+        return (self.base_url, tag, str(self.effort or ""))
 
     def _cache_lookup(self, op_kind: str, model_profile: str, payload: Any) -> tuple[tuple[str, ...], tuple[str, str, str, str], bool, Any]:
         scope = self._cache_scope()

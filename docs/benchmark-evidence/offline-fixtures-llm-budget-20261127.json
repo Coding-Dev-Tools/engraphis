@@ -103,7 +103,7 @@
   ],
   "schema": "engraphis-public-offline-fixtures/v1",
   "suite": {
-    "digest": "8667bdbf6f9dd0bcecf0377aa29349df15476e255b2d7e1740a316cb80cd822b",
+    "digest": "d807d1117451cf431bba2707982214116245cbfbb5b712c1112594092336a861",
     "digest_method": "sha256(canonical compact JSON mapping each sorted path to its file SHA-256)",
     "files": {
       "engraphis/__init__.py": "1f983036aba6e76faf62d3a3b070f4a61471ea4338a383b48c9ae4784d7b07a0",
@@ -200,7 +200,7 @@
       "engraphis/licensing.py": "7e73c28b0e1c3536e2080a129af614f838d2cae3ec3a48a3d8ed7e5153c9e935",
       "engraphis/llm/__init__.py": "f3096d2ddd652b99e6fc0b4c5a8786d9bbaba41b259df0b44ce93b57bde3a8b1",
       "engraphis/llm/budget.py": "d4c11228f25e63fd0e18d8e9540d8ce51d705368fbc01bc47d6c901b3852eea4",
-      "engraphis/llm/client.py": "725399e3e430ad65d7d770673858377fc1f7744124fa453b0ece0b45b0daa502",
+      "engraphis/llm/client.py": "79b37962f264e6383d268d8b951aa51ffff66777958abf46691907f819234410",
       "engraphis/local_auth.py": "8fd6d42594454d68c99bf25054adcfbf2379d4e08f17affd36af994fc7ad78bc",
       "engraphis/logging_setup.py": "f7d2edc756458a852e0401453e9c71b785aba08fa7859aacbdc23fb30dc7982a",
       "engraphis/managed_processing.py": "6d33cdfd10800d9552fcfae3c2b071d2b39fe10fb69d1a8e5d9ed6026882197e",
