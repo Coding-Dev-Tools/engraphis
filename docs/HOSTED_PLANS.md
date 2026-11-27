@@ -16,7 +16,7 @@ implementations are not part of this repository.
 | Local dashboard, memory engine, and MCP tools | Yes | Yes | Yes |
 | Local version history, graph, and manual consolidation | Yes | Yes | Yes |
 | Local workspace export | Yes | Yes | Yes |
-| Included OpenRouter AI LLM | Optional BYOK | Free managed AI LLM: up to 100 calls per person per day (active paid and trial), auto-enabled on connect | Free managed AI LLM: up to 100 calls per person per day per named seat (active paid and trial); no shared pool |
+| Included Managed AI LLM | Optional BYOK | Free managed AI LLM: up to 100 calls per person per day (active paid and trial), auto-enabled on connect | Free managed AI LLM: up to 100 calls per person per day per named seat (active paid and trial); no shared pool |
 | Advisory Jev decisions | Local heuristics; optional BYOK | Free managed Jev: up to 250 calls per person per day for eligible individuals (active paid and trial) | Free managed Jev: up to 250 calls per person per day for eligible named seats (active paid and trial); no shared pool |
 | Hosted Cloud Sync, Analytics, and managed automation | | Yes | Yes |
 | Private account and billing support | | Yes | Yes |
@@ -32,16 +32,17 @@ Managed Automation schedules consolidation and dreaming proposals. Results requi
 review and never automatically rewrite the local database; local governance tools
 apply the changes you choose.
 
-## Included OpenRouter AI LLM (100 calls/day)
+## Included Managed AI LLM (100 calls/day)
 
-Every legitimate Pro user and each eligible Team named seat (including paid viewers) with an active paid or trial entitlement automatically receives up to **100 AI LLM calls per person per day**, free, backed by Engraphis Cloud's zero-cost OpenRouter `:free` tier (`max_price = 0`). No personal OpenRouter API key is needed and no overage is charged.
+Every legitimate Pro user and each eligible Team named seat (including paid viewers) with an active paid or trial entitlement automatically receives up to **100 AI LLM calls per person per day**, free, via Engraphis Cloud's included managed AI LLM. No personal API key is needed and no overage is charged.
 
-Once you connect your client with `engraphis connect --token <CONNECT_TOKEN>`, your Engraphis runtime automatically uses this included LLM for tangible day-to-day improvements:
+Once you connect your client with `engraphis connect --token <CONNECT_TOKEN>`, your Engraphis runtime automatically pairs this 100/day managed AI LLM with the 250/day managed Jev decision allowance for four concrete improvements to your agentic memory system:
 
-- **Automatic structured fact and entity extraction:** Ingested session notes and documents are distilled into clean atomic facts, entities, keywords, and knowledge-graph relations (`llm_structured`) so later recalls are sharper and cleaner without manual tagging.
-- **Cited proactive briefings and grounded Q&A:** `engraphis_proactive_context(synthesize=True)` and `engraphis_grounded_recall(synthesize=True)` produce concise, citation-verified summaries directly from your memories.
-- **Structured sleep-time consolidation and thoughts:** `engraphis_consolidate(structured=True)` and thought synthesis produce higher-signal semantic digests.
-- **Safe fallback:** If you are offline, have reached the 100/day rolling cap, or explicitly configure `ENGRAPHIS_EXTRACTOR=none` or your own BYOK key, Engraphis gracefully uses local deterministic processing or your chosen provider with zero lost writes.
+- **Capture distillation and knowledge-graph relations:** Ingested session notes and documents are distilled into clean atomic facts, entities, keywords, and knowledge-graph relations (`llm_structured`) so later recalls are sharper without manual tagging.
+- **Cited proactive briefings and grounded Q&A:** `engraphis_proactive_context(synthesize=True)` and `engraphis_grounded_recall(synthesize=True)` produce concise, citation-verified summaries drawn directly from your local memories.
+- **Contradiction and retention intelligence:** Paired with 250 managed Jev calls per person per day, your agent can screen risky commands, classify contradictory facts, verify evidence support, and prioritize what should stay durable.
+- **Smart sleep-time consolidation and thoughts:** `engraphis_consolidate(structured=True)` and thought synthesis merge overlapping episodic notes into higher-signal semantic digests ready for review.
+- **Safe local fallback and zero overage:** If you are offline, have reached the 100/day rolling cap, or explicitly configure `ENGRAPHIS_EXTRACTOR=none` or your own BYOK key, Engraphis gracefully uses deterministic local processing or your chosen provider with zero lost writes and zero overage charges.
 
 ## Included System 1 Decision Engine (Jev)
 
@@ -64,7 +65,7 @@ and restart that host. See the [1.7.9 upgrade and release checklist](RELEASE_1_7
 Installing a new client does not enable a deployment whose managed service is disabled; the hosted control service enables it with its provider key.
 
 Once you connect a paid or trial Pro/Team account with `engraphis connect`, both managed Jev (up
-to 250 calls per person per day) and included OpenRouter AI LLM (up to 100 calls per person per
+to 250 calls per person per day) and included managed AI LLM (up to 100 calls per person per
 day) activate automatically when `ENGRAPHIS_DECISION_BACKEND` and `ENGRAPHIS_EXTRACTOR` are unset.
 To pin managed routing explicitly in `~/.engraphis/config.env` and verify both live allowances in
 one non-interactive command:

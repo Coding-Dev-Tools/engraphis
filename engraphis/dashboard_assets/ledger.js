@@ -72,6 +72,7 @@
     scopedControllers: Object.create(null),
     syncStatus: null,
     license: null,
+    cloudAllowances: null,
     releaseVersion: '',
     embedder: null,
     booted: false,
@@ -6744,7 +6745,7 @@
       'Growth, retention, decay and entity Analytics',
       'Auto Consolidation with hosted retention policies',
       'Auto Dreaming with reviewable managed proposals',
-      'Included OpenRouter AI LLM: up to 100 calls per person per day',
+      'Included Managed AI LLM: up to 100 calls per person per day',
       'Managed Jev decisions: up to 250 calls per person per day',
       'Private account and billing support',
     ],
@@ -6941,6 +6942,124 @@
     if (access === 'active') target.append(node('p', 'plan-support', 'Thank you for supporting Engraphis. Your subscription funds hosted infrastructure and ongoing development.'));
   }
 
+  function formatAllowanceTile(bucket, unitLabel, defaultLimit) {
+    const limit = Number.isFinite(Number(bucket && bucket.limit)) && Number(bucket.limit) > 0
+      ? Number(bucket.limit)
+      : defaultLimit;
+    const hasRemaining = bucket && bucket.remaining !== null && bucket.remaining !== undefined
+      && Number.isFinite(Number(bucket.remaining));
+    if (bucket && bucket.available && hasRemaining) {
+      const remaining = Math.max(0, Number(bucket.remaining));
+      return {
+        value: `${remaining.toLocaleString()} / ${limit.toLocaleString()} ${unitLabel} left today`,
+        meta: remaining === 0
+          ? 'Daily allowance reached. Local deterministic fallback stays active with zero overage.'
+          : 'Active automatically through your connected Engraphis Cloud session. No API key needed.',
+      };
+    }
+    const status = text(bucket && bucket.status);
+    if (status === 'exhausted') {
+      return {
+        value: `0 / ${limit.toLocaleString()} ${unitLabel} left today`,
+        meta: 'Daily allowance reached. Local deterministic fallback stays active with zero overage.',
+      };
+    }
+    if (status === 'offline' || status === 'unavailable') {
+      return {
+        value: `Quota unavailable (${limit.toLocaleString()} / day limit)`,
+        meta: 'Engraphis Cloud could not be reached right now. Local processing remains active.',
+      };
+    }
+    if (status === 'trial_expired' || status === 'lapsed' || status === 'unauthorized') {
+      return {
+        value: `Paused (up to ${limit.toLocaleString()} / day on active Pro & Team)`,
+        meta: 'Renew or subscribe in the account portal to restore managed allowances. Local memories stay usable.',
+      };
+    }
+    return {
+      value: `Up to ${limit.toLocaleString()} ${unitLabel} / person / day`,
+      meta: 'Included automatically on Pro and Team (paid or free trial) with zero API key setup.',
+    };
+  }
+
+  function renderCloudAllowances(data, error = null) {
+    const body = byId('cloud-allowances-body');
+    const settingsSummary = byId('settings-allowances-summary');
+    const connected = Boolean(data && data.connected);
+    const llmInfo = formatAllowanceTile(data && data.llm, 'AI LLM calls', 100);
+    const jevInfo = formatAllowanceTile(data && data.jev, 'Jev decision calls', 250);
+
+    if (body) {
+      body.replaceChildren();
+      if (error && !data) {
+        body.append(empty(`Live quota check unavailable: ${error.message}`));
+      } else {
+        const grid = node('div', 'cloud-allowances-grid');
+        [
+          { label: 'Included Managed AI LLM', info: llmInfo },
+          { label: 'Managed Jev Decisions', info: jevInfo },
+        ].forEach(({ label, info }) => {
+          const tile = node('div', 'cloud-allowance-tile');
+          tile.append(
+            node('span', 'cloud-allowance-label', label),
+            node('strong', 'cloud-allowance-value', info.value),
+            node('p', 'cloud-allowance-meta', info.meta),
+          );
+          grid.append(tile);
+        });
+        body.append(grid);
+        if (!connected) {
+          body.append(node(
+            'p',
+            'automation-policy-note',
+            'Connect a Pro or Team account (paid or free trial) with engraphis connect to activate both daily allowances automatically with zero overage charges.',
+          ));
+        } else if (data && data.checked_at) {
+          body.append(node(
+            'p',
+            'automation-policy-note',
+            `Live allowance status · checked ${relative(data.checked_at)}${data.cached ? ' (cached)' : ''}. Per-person rolling 24-hour allowance; never charged for overage.`,
+          ));
+        }
+      }
+    }
+
+    if (settingsSummary) {
+      settingsSummary.replaceChildren();
+      if (error && !data) {
+        settingsSummary.append(node('span', '', 'Included daily allowances: up to 100 AI LLM + 250 Jev calls/day on Pro and Team.'));
+      } else if (connected) {
+        settingsSummary.append(
+          node('strong', '', 'Today’s Included AI Memory Allowances'),
+          node('div', '', `${llmInfo.value} · ${jevInfo.value}`),
+        );
+      } else {
+        settingsSummary.append(
+          node('strong', '', 'Included AI Memory Intelligence (Pro & Team)'),
+          node('div', '', 'Up to 100 managed AI LLM calls/day + 250 managed Jev calls/day automatically on connect, with zero API key setup and automatic local fallback.'),
+        );
+      }
+    }
+  }
+
+  async function loadCloudAllowances({ refresh = false } = {}) {
+    const request = beginScopedRequest('cloud-allowances');
+    const refreshButton = byId('cloud-allowances-refresh');
+    if (refresh && refreshButton) refreshButton.disabled = true;
+    try {
+      const suffix = refresh ? '?refresh=true' : '';
+      const data = await api(`/v2/cloud/allowances${suffix}`, { signal: request.signal });
+      if (!isCurrentScopedRequest(request)) return;
+      state.cloudAllowances = data;
+      renderCloudAllowances(data);
+    } catch (error) {
+      if (!isCurrentScopedRequest(request)) return;
+      renderCloudAllowances(state.cloudAllowances, error);
+    } finally {
+      if (refresh && refreshButton) refreshButton.disabled = false;
+    }
+  }
+
   async function loadPlans() {
     const request = beginScopedRequest('plans');
     let failure = null;
@@ -6957,6 +7076,7 @@
     renderSidebarCta();
     renderLicenseStatus(failure ? null : state.license, failure);
     renderPlans();
+    void loadCloudAllowances();
   }
 
   function llmSnippet(provider, model, keySet) {
@@ -7096,6 +7216,7 @@
       renderSidebarCta();
     } catch (_) {}
     renderCloudAccountSettings();
+    void loadCloudAllowances();
     try {
       renderLlmSettings(await api('/llm/status'));
     } catch (error) {
@@ -7894,6 +8015,10 @@
     byId(id).addEventListener('change', invalidateConsolidationReview);
   });
   byId('billing-select').addEventListener('change', renderPlans);
+  const cloudAllowancesRefresh = byId('cloud-allowances-refresh');
+  if (cloudAllowancesRefresh) {
+    cloudAllowancesRefresh.addEventListener('click', () => { void loadCloudAllowances({ refresh: true }); });
+  }
   byId('sidebar-theme-select').addEventListener('change', event => applyTheme(event.target.value));
   byId('connection-retry').addEventListener('click', () => { void retryConnection(); });
   byId('embedder-recheck').addEventListener('click', () => { void recheckEmbedder(); });

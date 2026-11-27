@@ -15,6 +15,7 @@ import hmac
 import logging
 import math
 import os
+import re
 import secrets
 import threading
 import time
@@ -4364,6 +4365,347 @@ def get_license():
         # configured as distinct pages it is the Pro checkout wearing a neutral name.
         "account_url": licensing.account_url(),
     }
+
+
+_CLOUD_ALLOWANCES_CACHE_TTL_SECONDS = 60.0
+_CLOUD_ALLOWANCES_TIMEOUT_SECONDS = 5.0
+_CLOUD_ALLOWANCES_MAX_BYTES = 64 * 1024
+_CLOUD_ALLOWANCES_CACHE_MAX_ENTRIES = 16
+_CLOUD_ALLOWANCES_LOCK = threading.Lock()
+_CLOUD_ALLOWANCES_CACHE: dict[tuple[str, str], dict] = {}
+_CLOUD_ALLOWANCES_VENDOR_RE = re.compile(r"openrouter", re.IGNORECASE)
+
+
+class _CloudAllowancesNoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _clear_cloud_allowances_cache() -> None:
+    """Clear the process-local Cloud allowance cache (tests and reconnects)."""
+    with _CLOUD_ALLOWANCES_LOCK:
+        _CLOUD_ALLOWANCES_CACHE.clear()
+
+
+def _sanitize_allowance_text(value: object, *, max_len: int = 120) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    cleaned = _CLOUD_ALLOWANCES_VENDOR_RE.sub("managed AI", value).strip()
+    if not cleaned:
+        return None
+    return cleaned[:max_len]
+
+
+def _nonneg_allowance_int(value: object) -> Optional[int]:
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return None
+
+
+def _select_allowance_daily_window(windows: object) -> Optional[dict]:
+    if not isinstance(windows, list):
+        return None
+    for entry in windows:
+        if isinstance(entry, dict) and entry.get("seconds") == 86400:
+            return entry
+    if len(windows) == 1 and isinstance(windows[0], dict) and "seconds" not in windows[0]:
+        return windows[0]
+    return None
+
+
+def _default_allowance_bucket(default_limit: int, status: str) -> dict:
+    return {
+        "available": False,
+        "remaining": None,
+        "limit": default_limit,
+        "used": None,
+        "resets_at": None,
+        "window_seconds": 86400,
+        "status": status,
+    }
+
+
+def _normalize_allowance_bucket(
+    payload: Optional[dict],
+    *,
+    remaining_key: str,
+    used_key: str,
+    default_limit: int,
+    fallback_status: str = "unavailable",
+) -> dict:
+    if not isinstance(payload, dict):
+        return _default_allowance_bucket(default_limit, fallback_status)
+    avail_raw = payload.get("available")
+    available = bool(avail_raw) if isinstance(avail_raw, bool) else False
+    window = _select_allowance_daily_window(payload.get("windows"))
+    source = window if window is not None else payload
+
+    remaining = _nonneg_allowance_int(source.get(remaining_key))
+    if remaining is None:
+        remaining = _nonneg_allowance_int(source.get("remaining"))
+    if remaining is None and source is not payload:
+        remaining = _nonneg_allowance_int(payload.get(remaining_key))
+    if remaining is None and source is not payload:
+        remaining = _nonneg_allowance_int(payload.get("remaining"))
+
+    limit = _nonneg_allowance_int(source.get("limit"))
+    if limit is None and source is not payload:
+        limit = _nonneg_allowance_int(payload.get("limit"))
+    if limit is None or limit == 0:
+        limit = default_limit
+
+    used = _nonneg_allowance_int(source.get(used_key))
+    if used is None:
+        used = _nonneg_allowance_int(source.get("used"))
+    if used is None and remaining is not None and limit is not None:
+        used = max(0, limit - remaining)
+
+    resets_raw = (
+        source.get("resets_at")
+        if source.get("resets_at") is not None
+        else source.get("reset_at")
+    )
+    if resets_raw is None and source is not payload:
+        resets_raw = (
+            payload.get("resets_at")
+            if payload.get("resets_at") is not None
+            else payload.get("reset_at")
+        )
+    if isinstance(resets_raw, (int, float)) and not isinstance(resets_raw, bool) and math.isfinite(resets_raw):
+        resets_at: object = resets_raw
+    else:
+        resets_at = _sanitize_allowance_text(resets_raw, max_len=64)
+
+    window_seconds = _nonneg_allowance_int(source.get("seconds")) or 86400
+    if available:
+        status = "exhausted" if remaining == 0 else "available"
+    else:
+        raw_status = _sanitize_allowance_text(payload.get("status"), max_len=48)
+        status = raw_status or fallback_status
+
+    return {
+        "available": available,
+        "remaining": remaining,
+        "limit": limit,
+        "used": used,
+        "resets_at": resets_at,
+        "window_seconds": window_seconds,
+        "status": status,
+    }
+
+
+def _fetch_cloud_usage_json(
+    validated_control: str,
+    path: str,
+    access_token: str,
+    deadline: float,
+) -> tuple[Optional[dict], str]:
+    """Fetch a read-only usage endpoint from the credential-bound Cloud control origin."""
+    from engraphis import __version__ as current_version
+    from engraphis.hosted_client import _is_loopback_host, build_pinned_https_opener
+    from engraphis.http_deadline import deadline_handlers, read_response, remaining_time
+
+    req = urllib.request.Request(
+        validated_control.rstrip("/") + path,
+        headers={
+            "Accept": "application/json",
+            "Authorization": "Bearer " + access_token,
+            "User-Agent": "Engraphis/%s (+https://engraphis.com)" % current_version,
+        },
+        method="GET",
+    )
+    loopback_only = _is_loopback_host(urlsplit(validated_control).hostname or "")
+    handlers: list[urllib.request.BaseHandler] = [_CloudAllowancesNoRedirect()]
+    handlers.extend(deadline_handlers(deadline, loopback_only=loopback_only))
+    if loopback_only:
+        handlers.append(urllib.request.ProxyHandler({}))
+    opener = build_pinned_https_opener(*handlers)
+    try:
+        timeout_budget = remaining_time(deadline)
+        with opener.open(req, timeout=timeout_budget) as resp:
+            if getattr(resp, "status", 200) != 200:
+                return None, "unavailable"
+            raw = read_response(resp, deadline, max_bytes=_CLOUD_ALLOWANCES_MAX_BYTES)
+    except urllib.error.HTTPError as exc:
+        code = exc.code
+        try:
+            exc.close()
+        except Exception:
+            pass
+        if code in (401, 402, 403):
+            return None, "unauthorized"
+        return None, "unavailable"
+    except (OSError, ValueError, TimeoutError, http.client.HTTPException):
+        return None, "offline"
+
+    if len(raw) > _CLOUD_ALLOWANCES_MAX_BYTES:
+        return None, "unavailable"
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return None, "unavailable"
+    if not isinstance(payload, dict):
+        return None, "unavailable"
+    return payload, "ok"
+
+
+def _cloud_allowances_cache_key() -> tuple[str, str]:
+    from engraphis import cloud_session
+
+    ent = {}
+    try:
+        ent = cloud_session.saved_entitlement() or {}
+    except Exception:
+        ent = {}
+    org = str(
+        ent.get("organization_id")
+        or os.environ.get("ENGRAPHIS_CLOUD_ORGANIZATION_ID", "")
+        or ""
+    ).strip()
+    control = ""
+    try:
+        control = str(cloud_session.credential_bound_control_url() or "").strip()
+    except Exception:
+        control = ""
+    state_dir = str(os.environ.get("ENGRAPHIS_STATE_DIR", "")).strip()
+    return (org or state_dir or "default", control)
+
+
+@router.get("/v2/cloud/allowances")
+def get_cloud_allowances(refresh: bool = Query(False)):
+    """Return live included daily AI LLM (100/day) and Jev (250/day) allowances.
+
+    When offline or unconnected, returns a fast structured response with zero network
+    calls. When an active paid or trial Pro/Team Cloud session is configured, queries
+    the credential-bound control plane with a short deadline, caches for 60 seconds
+    per session/organization, and strips any upstream vendor identifiers.
+    """
+    from engraphis import cloud_session
+    from engraphis.hosted_client import validate_cloud_base_url
+
+    included = _entitlements.included_services()
+    llm_default_limit = int(
+        (included.get("managed_llm") or {}).get("calls_per_person_per_day") or 100
+    )
+    jev_default_limit = int(
+        (included.get("managed_jev") or {}).get("calls_per_person_per_day") or 250
+    )
+    summary = hosted_plan_summary()
+    plan = str(summary.get("plan") or "local")
+    access_state = str(summary.get("access_state") or "inactive")
+
+    try:
+        is_configured = cloud_session.configured(require_compute=False)
+    except Exception:
+        is_configured = False
+
+    if not is_configured:
+        return {
+            "connected": False,
+            "plan": plan,
+            "access_state": access_state,
+            "cached": False,
+            "checked_at": 0.0,
+            "llm": _default_allowance_bucket(llm_default_limit, "not_connected"),
+            "jev": _default_allowance_bucket(jev_default_limit, "not_connected"),
+        }
+
+    if access_state not in ("active", "trial"):
+        return {
+            "connected": True,
+            "plan": plan,
+            "access_state": access_state,
+            "cached": False,
+            "checked_at": 0.0,
+            "llm": _default_allowance_bucket(llm_default_limit, access_state),
+            "jev": _default_allowance_bucket(jev_default_limit, access_state),
+        }
+
+    cache_key = _cloud_allowances_cache_key()
+    now_mono = time.monotonic()
+    if not refresh:
+        with _CLOUD_ALLOWANCES_LOCK:
+            cached_entry = _CLOUD_ALLOWANCES_CACHE.get(cache_key)
+            if (
+                cached_entry is not None
+                and (now_mono - cached_entry["monotonic"]) < _CLOUD_ALLOWANCES_CACHE_TTL_SECONDS
+            ):
+                result = json.loads(json.dumps(cached_entry["payload"]))
+                result["cached"] = True
+                return result
+
+    deadline = time.monotonic() + _CLOUD_ALLOWANCES_TIMEOUT_SECONDS
+    checked_at = time.time()
+    try:
+        access_token, organization_id, _ = cloud_session.access_for_workspace(
+            None, require_compute=False, deadline=deadline,
+        )
+    except (cloud_session.CloudSessionError, TimeoutError, OSError, ValueError):
+        return {
+            "connected": True,
+            "plan": plan,
+            "access_state": access_state,
+            "cached": False,
+            "checked_at": checked_at,
+            "llm": _default_allowance_bucket(llm_default_limit, "offline"),
+            "jev": _default_allowance_bucket(jev_default_limit, "offline"),
+        }
+
+    try:
+        raw_control = cloud_session.credential_bound_control_url()
+        validated_control = validate_cloud_base_url(raw_control) if raw_control else ""
+    except (cloud_session.CloudSessionError, ValueError):
+        validated_control = ""
+
+    if not validated_control or not access_token:
+        return {
+            "connected": True,
+            "plan": plan,
+            "access_state": access_state,
+            "cached": False,
+            "checked_at": checked_at,
+            "llm": _default_allowance_bucket(llm_default_limit, "unavailable"),
+            "jev": _default_allowance_bucket(jev_default_limit, "unavailable"),
+        }
+
+    llm_raw, llm_status_code = _fetch_cloud_usage_json(
+        validated_control, "/v1/llm/usage", access_token, deadline,
+    )
+    jev_raw, jev_status_code = _fetch_cloud_usage_json(
+        validated_control, "/v1/jev/usage", access_token, deadline,
+    )
+
+    payload = {
+        "connected": True,
+        "plan": plan,
+        "access_state": access_state,
+        "cached": False,
+        "checked_at": checked_at,
+        "llm": _normalize_allowance_bucket(
+            llm_raw,
+            remaining_key="remaining_requests",
+            used_key="requests_used",
+            default_limit=llm_default_limit,
+            fallback_status=llm_status_code if llm_status_code != "ok" else "unavailable",
+        ),
+        "jev": _normalize_allowance_bucket(
+            jev_raw,
+            remaining_key="remaining_decisions",
+            used_key="decisions_used",
+            default_limit=jev_default_limit,
+            fallback_status=jev_status_code if jev_status_code != "ok" else "unavailable",
+        ),
+    }
+
+    resolved_key = (str(organization_id or "").strip() or cache_key[0], validated_control)
+    with _CLOUD_ALLOWANCES_LOCK:
+        if len(_CLOUD_ALLOWANCES_CACHE) >= _CLOUD_ALLOWANCES_CACHE_MAX_ENTRIES:
+            _CLOUD_ALLOWANCES_CACHE.clear()
+        entry = {"monotonic": time.monotonic(), "payload": json.loads(json.dumps(payload))}
+        _CLOUD_ALLOWANCES_CACHE[cache_key] = entry
+        _CLOUD_ALLOWANCES_CACHE[resolved_key] = entry
+
+    return payload
 
 
 def _hosted_license_detail() -> dict:
