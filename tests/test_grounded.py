@@ -48,7 +48,8 @@ def test_grounded_answer_preserves_legacy_positional_fields_and_appends_advisory
     answer = GroundedAnswer(*legacy_arguments)
     assert answer.graph_traversal_details is graph_details
     assert fields(GroundedAnswer)[21].name == "graph_traversal_details"
-    assert fields(GroundedAnswer)[-1].name == "planning_advisory"
+    assert fields(GroundedAnswer)[-2].name == "planning_advisory"
+    assert fields(GroundedAnswer)[-1].name == "advisory_support"
     assert answer.degraded_mode is True
     assert answer.semantic_support is False
     assert answer.embedding_mode == "lexical"

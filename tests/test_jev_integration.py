@@ -570,33 +570,35 @@ def test_core_planner_gets_cloned_scope_and_time_filters_without_trust_authority
 
 
 @pytest.mark.parametrize("mode", ["managed", "auto"])
-def test_managed_route_planning_stays_local_after_login(monkeypatch, mode):
+def test_managed_route_planning_wires_cloud_client_without_refresh_or_byok(monkeypatch, mode):
     from engraphis import cloud_session
+    from engraphis.backends import jev_transport
 
     monkeypatch.setattr(settings, "decision_backend", mode)
-    monkeypatch.setattr(settings, "decision_model", "test-model-1.0")
+    monkeypatch.setattr(settings, "decision_model", jev_transport.MODEL)
     monkeypatch.setenv("TYPESAFE_API_KEY", "ambient-key-must-not-select-byok")
+    monkeypatch.setattr(cloud_session, "configured", lambda **_kwargs: True)
+    monkeypatch.setattr(cloud_session, "credential_bound_control_url",
+                        lambda: "https://control.example.invalid")
 
     def forbidden(*_args, **_kwargs):
-        pytest.fail("managed route planning must not inspect or refresh credentials")
+        pytest.fail("managed route planning must not refresh credentials without allow_remote=True")
 
-    monkeypatch.setattr(cloud_session, "configured", forbidden)
-    monkeypatch.setattr(cloud_session, "credential_bound_control_url", forbidden)
     monkeypatch.setattr(cloud_session, "access_for_workspace", forbidden)
     service = MemoryService.create(":memory:", embed_model="", embed_dim=16)
     try:
         planner = service.engine.recall_engine.query_planner
         backend = planner.decision_backend
-        assert backend.client is None
-        assert backend.is_available is False
+        assert isinstance(backend.client, jev_transport.EngraphisCloudDecisionClient)
+        assert backend.is_available is True
         planner.deterministic = _FixedDeterministicPlanner()
         baseline = planner.plan("why is the cache related to the service?")
-        assisted = planner.plan_with_advisory(
+        unconsented = planner.plan_with_advisory(
             "why is the cache related to the service?",
-            allow_remote=True, data_classification="public", timeout_s=1,
+            allow_remote=False, data_classification="public", timeout_s=1,
         )
-        assert assisted.queries == baseline.queries
-        assert assisted.reason_codes[-1] == "jev_backend_unavailable"
+        assert unconsented.queries == baseline.queries
+        assert unconsented.reason_codes[-1] == "jev_remote_consent_required"
     finally:
         service.close()
 

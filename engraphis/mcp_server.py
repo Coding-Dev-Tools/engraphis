@@ -1170,6 +1170,10 @@ def engraphis_recall_grounded(
                     "Omits packed context whole and reduces citation bodies; source references "
                     "are preserved when the budget can hold them. Minimum 2; None means no cap.",
         ge=2, le=1_000_000)] = None,
+    synthesis_mode: Annotated[str, Field(
+        description="strict_extract copies verbatim cited source units; cited_prose allows "
+                    "concise multi-source prose where every sentence cites [n].",
+        pattern="^(strict_extract|cited_prose)$")] = "strict_extract",
 ) -> str:
     """Answer a question *strictly from* stored memories, with citations — or abstain.
 
@@ -1209,7 +1213,7 @@ def engraphis_recall_grounded(
                 retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
                 response_mode=response_mode,
                 diagnostics=diagnostics, planning=planning, mtype_limits=mtype_limits,
-                min_support=min_support, llm=llm,
+                min_support=min_support, llm=llm, synthesis_mode=synthesis_mode,
             )
             payload = _apply_response_budget(payload, max_response_tokens)
             return _ok(payload)
@@ -4306,6 +4310,12 @@ def engraphis_conflict_review(
     repo: Annotated[Optional[str], Field(description="Optional repo scope.",
                                          max_length=200)] = None,
     limit: Annotated[int, Field(description="Max items to return.", ge=1, le=100)] = 50,
+    advisory_triage: Annotated[bool, Field(
+        description="Opt-in Jev advisory contradiction/entailment triage (read-only).")] = False,
+    allow_remote: Annotated[bool, Field(
+        description="Explicit per-call consent for remote Jev advisory triage.")] = False,
+    data_classification: Annotated[str, Field(
+        description="Data classification for remote Jev triage: public or internal.")] = "internal",
 ) -> str:
     """Read-only review of pending/quarantined/conflicting memories.
 
@@ -4315,6 +4325,8 @@ def engraphis_conflict_review(
     try:
         return _ok(service().conflict_review(
             workspace=workspace, repo=repo, limit=limit,
+            advisory_triage=advisory_triage, allow_remote=allow_remote,
+            data_classification=data_classification,
         ))
     except Exception as exc:  # noqa: BLE001 — Smart gateway classification
         return _classify_gateway_exception(exc)

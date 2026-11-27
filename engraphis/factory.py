@@ -227,20 +227,30 @@ def create_memory_engine(
             owned.append(supervisor)
 
         if query_planner is None:
-            selected_decision_backend = settings.decision_backend.strip().lower()
-            if selected_decision_backend in {"managed", "auto"}:
-                # Managed Jev supports fixed review workflows, not route selection.
-                # Do not inspect or refresh Cloud credentials for a planner call,
-                # and never switch an included managed request to paid BYOK.
-                jev_client = None
-            else:
+            planner_mode = os.environ.get("ENGRAPHIS_QUERY_PLANNER", "auto").strip().lower() or "auto"
+            if planner_mode == "deterministic":
+                from engraphis.core.query_planner import DeterministicQueryPlanner
+                query_planner = DeterministicQueryPlanner()
+            elif planner_mode == "llm":
+                from engraphis.backends.query_planner import LLMQueryPlanner
+                from engraphis.llm.client import LLMClient
+                llm_client = LLMClient()
+                if getattr(llm_client, "has_credentials", bool(getattr(llm_client, "api_key", ""))):
+                    owned.append(llm_client)
+                    query_planner = LLMQueryPlanner(llm_client)
+                else:
+                    _close_quietly(llm_client)
+                    if require_exact_backends:
+                        raise RuntimeError("ENGRAPHIS_QUERY_PLANNER=llm requires LLM credentials")
+            if query_planner is None:
+                selected_decision_backend = settings.decision_backend.strip().lower()
                 jev_client, _jev_provider = select_decision_client(
                     selected_decision_backend,
                 )
-            jev_backend = JevDecisionBackend(
-                client=jev_client, model=settings.decision_model,
-            )
-            query_planner = JevAssistedQueryPlanner(decision_backend=jev_backend)
+                jev_backend = JevDecisionBackend(
+                    client=jev_client, model=settings.decision_model,
+                )
+                query_planner = JevAssistedQueryPlanner(decision_backend=jev_backend)
 
         def _auto_managed_extractor():
             from engraphis.llm.client import LLMClient, auto_managed_extractor_allowed

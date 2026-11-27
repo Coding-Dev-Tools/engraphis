@@ -1464,6 +1464,34 @@ def _llm_summary(llm: Any, system_prompt: str, body: str) -> Optional[str]:
         return None
 
 
+class _CallBudgetedLLM:
+    """Bounded per-sweep LLM wrapper that enforces a hard maximum call count."""
+
+    def __init__(self, llm: Any, *, max_calls: int = 10) -> None:
+        self._llm = llm
+        self.max_calls = max(0, int(max_calls))
+        self.calls_used = 0
+
+    def _consume(self) -> None:
+        if self.calls_used >= self.max_calls:
+            raise RuntimeError("consolidation LLM call cap reached")
+        self.calls_used += 1
+
+    def __getattr__(self, name: str):
+        if name in {"chat", "complete", "extract_json"}:
+            target = getattr(self._llm, name)
+            if callable(target):
+                def _wrapped(*args, **kwargs):
+                    self._consume()
+                    return target(*args, **kwargs)
+                return _wrapped
+        return getattr(self._llm, name)
+
+    def close(self) -> None:
+        if hasattr(self._llm, "close"):
+            self._llm.close()
+
+
 def _clean(value: Any, limit: int) -> str:
     """Defang untrusted LLM strings before metadata/title/content storage."""
     return _CONTROL_RE.sub("", str(value or "")).strip()[:limit]

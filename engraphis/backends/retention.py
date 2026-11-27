@@ -91,12 +91,101 @@ class LLMRetentionSupervisor:
         )
 
 
+_RETENTION_PRESETS = {"ephemeral": (0.1, 0.25), "normal": (0.5, 1.0), "critical": (0.9, 8.0)}
+_TINY_WORKING_MAX_CHARS = 80
+
+
+def _preset_decision(label: str, reason: str) -> RetentionDecision:
+    imp, stab = _RETENTION_PRESETS[label]
+    return RetentionDecision(label=label, retain=True, importance=imp, stability=stab, reason=reason)
+
+
+class JevRetentionSupervisor:
+    """Classify candidate memories via Jev with a 0-call deterministic fast path."""
+
+    def __init__(
+        self, decision_backend=None, *, allow_remote: bool = True,
+        data_classification: str = "internal", timeout_s: Optional[float] = 3.0,
+    ) -> None:
+        self.decision_backend = decision_backend
+        self.allow_remote = bool(allow_remote)
+        self.data_classification = (
+            data_classification if data_classification in {"public", "internal"} else "internal"
+        )
+        self.timeout_s = timeout_s
+
+    def decide(
+        self, content: str, *, title: str = "", mtype: MemoryType, metadata: Optional[dict] = None,
+    ) -> RetentionDecision:
+        meta = metadata if isinstance(metadata, dict) else {}
+        explicit = str(meta.get("retention_class") or "").strip().lower()
+        if explicit in _RETENTION_PRESETS:
+            return _preset_decision(explicit, "fast_path_explicit_retention_class")
+        if meta.get("pinned") is True:
+            return _preset_decision("critical", "fast_path_pinned")
+        if mtype == MemoryType.WORKING and len((content or "").strip()) < _TINY_WORKING_MAX_CHARS:
+            return _preset_decision("ephemeral", "fast_path_transient_working")
+
+        backend = self.decision_backend
+        if self.allow_remote and backend is not None and getattr(backend, "is_available", False):
+            try:
+                result = backend.classify_retention_result(
+                    content, title=title,
+                    mtype=mtype.value if hasattr(mtype, "value") else str(mtype),
+                    allow_remote=True, data_classification=self.data_classification,
+                    timeout_s=self.timeout_s,
+                )
+                if result.status == "decision" and isinstance(result.value, dict):
+                    label = str(result.value.get("retention_class") or "normal").strip().lower()
+                    if label not in _RETENTION_PRESETS:
+                        label = "normal"
+                    if result.value.get("should_retain") is False:
+                        label = "ephemeral"
+                    return _preset_decision(label, f"jev_classified:{label}")
+            except Exception:
+                pass
+        return _preset_decision("normal", "jev_fallback_normal")
+
+
+def _resolve_jev_decision_backend():
+    from engraphis.backends.jev_decision import JevDecisionBackend, select_decision_client
+    from engraphis.config import settings
+
+    configured = (settings.decision_backend or "none").strip().lower()
+    selector = configured if configured not in {"", "none"} else None
+    client, _provider = select_decision_client(selector)
+    if client is None:
+        return None
+    backend = JevDecisionBackend(client=client, model=settings.decision_model)
+    return backend if backend.is_available else None
+
+
 def get_retention_supervisor(
     mode: str = "none", *, require_exact: bool = False,
 ) -> Optional[RetentionSupervisor]:
     """Return the configured supervisor, or ``None`` for deterministic-only writes."""
     name = str(mode or "none").strip().lower()
     if name in ("", "none", "off", "disabled"):
+        return None
+    if name == "jev":
+        backend = _resolve_jev_decision_backend()
+        if require_exact and backend is None:
+            raise RuntimeError("retention supervisor 'jev' requires a configured Jev decision backend")
+        return JevRetentionSupervisor(decision_backend=backend, allow_remote=True)
+    if name == "auto":
+        backend = _resolve_jev_decision_backend()
+        if backend is not None:
+            return JevRetentionSupervisor(decision_backend=backend, allow_remote=True)
+        try:
+            from engraphis.llm.client import LLMClient
+            client = LLMClient()
+            try:
+                if getattr(client, "has_credentials", bool(getattr(client, "api_key", ""))):
+                    return LLMRetentionSupervisor()
+            finally:
+                client.close()
+        except Exception:
+            pass
         return None
     if name == "llm":
         if require_exact:
@@ -128,4 +217,4 @@ def get_retention_supervisor(
                     "deferred fallback"
                 ) from None
         return LLMRetentionSupervisor()
-    raise ValueError("retention supervisor must be 'none' or 'llm'")
+    raise ValueError("retention supervisor must be 'none', 'llm', 'jev', or 'auto'")

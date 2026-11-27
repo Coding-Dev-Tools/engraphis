@@ -411,7 +411,7 @@ def test_command_advice_never_executes_even_with_synthetic_positive_answer(
     assert not marker.exists()
 
 
-def test_managed_query_route_choice_preserves_deterministic_plan_without_network(wire_client):
+def test_managed_query_route_choice_supports_select_query_route(wire_client):
     from engraphis.backends.jev_decision import JevDecisionBackend
     from engraphis.backends.jev_query_planner import JevAssistedQueryPlanner
     from engraphis.core.interfaces import PlannedQuery, RetrievalPlan
@@ -436,11 +436,10 @@ def test_managed_query_route_choice_preserves_deterministic_plan_without_network
     assert wire_client["refresh"] == wire_client["http"] == []
     result = planner.plan_with_jev(original, allow_remote=True, data_classification="public")
     assert result.queries[0].text == original
+    assert result.reason_codes[-1] == "jev_route_selected"
+    assert len(wire_client["http"]) == 1
     if wire_client["backend"] == "managed":
-        assert result.reason_codes[-1] == "jev_managed_operation_unsupported"
-        assert result.queries == baseline.queries
-        assert wire_client["refresh"] == wire_client["http"] == []
+        assert wire_client["http"][0]["purpose"] == "select_query_route"
+        assert len(wire_client["refresh"]) == 1
     else:
-        assert result.reason_codes[-1] == "jev_route_selected"
-        assert len(wire_client["http"]) == 1
         assert wire_client["refresh"] == []

@@ -99,7 +99,7 @@ class JevAssistedQueryPlanner:
             prompt="Which deterministic alternate route should receive the highest retrieval priority?",
             options=options,
             allow_remote=allow_remote,
-            purpose="custom",
+            purpose="select_query_route",
             data_classification=data_classification,
             timeout_s=decision_timeout,
         )

@@ -29,6 +29,9 @@ from engraphis.core.interfaces import MemoryRecord
 
 MAX_STATE_CHARS = 16_000
 _VERDICTS = frozenset(("contradicts_and_supersedes", "reinforces", "orthogonal"))
+_RETENTION_CLASSES = frozenset(("ephemeral", "normal", "critical"))
+_RETENTION_MTYPES = frozenset(("working", "episodic", "semantic", "procedural"))
+_EXTRACT_STRATEGIES = frozenset(("store_atomic", "extract_structured", "merge_or_consolidate"))
 _SAFE_CLIENT_ERROR_CODES = frozenset({
     "allowance_exhausted",
     "provider_protection_limit",
@@ -167,6 +170,15 @@ class JevDecisionBackend:
         purpose: str, data_classification: str,
         timeout_s: Optional[float] = None,
     ) -> tuple[Optional[DecisionBatch], str, Optional[str]]:
+        return self._evaluate_questions(
+            state, (question,), allow_remote, purpose, data_classification, timeout_s,
+        )
+
+    def _evaluate_questions(
+        self, state: str, questions: Sequence[DecisionQuestion], allow_remote: bool,
+        purpose: str, data_classification: str,
+        timeout_s: Optional[float] = None,
+    ) -> tuple[Optional[DecisionBatch], str, Optional[str]]:
         from engraphis.backends.jev_transport import (
             MAX_REQUEST_BYTES, DecisionClientError, contains_sensitive_content,
         )
@@ -179,22 +191,39 @@ class JevDecisionBackend:
             return None, "fallback", "invalid_input"
         if len(state) > MAX_STATE_CHARS:
             return None, "fallback", "input_too_large"
-        if (not isinstance(question, DecisionQuestion)
-                or not isinstance(question.options, tuple)
-                or not isinstance(question.id, str)
-                or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}", question.id)
-                or not isinstance(question.prompt, str) or not question.prompt.strip()
-                or len(question.prompt) > 1024
-                or not isinstance(question.kind, str)
-                or question.kind not in {"choice", "noul", "score"}
-                or (question.kind == "noul" and question.options)
-                or (question.kind != "noul" and not 2 <= len(question.options) <= 10)
-                or any(not isinstance(option, str) or not option.strip() or len(option) > 256
-                       for option in question.options)
-                or len(set(question.options)) != len(question.options)):
+        question_list = list(questions)
+        if not 1 <= len(question_list) <= 4:
             return None, "fallback", "invalid_input"
-        question_fields = (question.id, question.prompt, question.kind, *question.options)
-        if any(contains_sensitive_content(value) for value in (state, *question_fields)):
+        seen_ids = set()
+        texts = [state]
+        provider_questions: Dict[str, Dict[str, object]] = {}
+        for question in question_list:
+            if (not isinstance(question, DecisionQuestion)
+                    or not isinstance(question.options, tuple)
+                    or not isinstance(question.id, str)
+                    or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}", question.id)
+                    or question.id in seen_ids
+                    or not isinstance(question.prompt, str) or not question.prompt.strip()
+                    or len(question.prompt) > 1024
+                    or not isinstance(question.kind, str)
+                    or question.kind not in {"choice", "noul", "score"}
+                    or (question.kind == "noul" and question.options)
+                    or (question.kind != "noul" and not 2 <= len(question.options) <= 10)
+                    or any(not isinstance(option, str) or not option.strip() or len(option) > 256
+                           for option in question.options)
+                    or len(set(question.options)) != len(question.options)):
+                return None, "fallback", "invalid_input"
+            seen_ids.add(question.id)
+            texts.extend((question.id, question.prompt, question.kind, *question.options))
+            provider_q: Dict[str, object] = {
+                "type": question.kind, "instructions": question.prompt,
+            }
+            if question.kind == "choice":
+                provider_q["criteria"] = {label: label for label in question.options}
+            elif question.kind == "score":
+                provider_q["criteria"] = list(question.options)
+            provider_questions[question.id] = provider_q
+        if any(contains_sensitive_content(value) for value in texts):
             return None, "fallback", "sensitive_content"
         call_timeout: Optional[float] = None
         if timeout_s is not None and (
@@ -209,20 +238,13 @@ class JevDecisionBackend:
         # Bound both supported transport envelopes before any injected-client call,
         # including legacy signatures. TypeSafe choice criteria duplicate option text.
         managed_payload = {
-            "model": model, "state": state, "questions": [question.to_dict()],
+            "model": model, "state": state, "questions": [q.to_dict() for q in question_list],
             "allow_remote": True, "purpose": purpose, "data_classification": data_classification,
             # Managed Cloud transport appends its default uuid4().hex key.
             "request_key": "0" * 32,
         }
-        provider_question: Dict[str, object] = {
-            "type": question.kind, "instructions": question.prompt,
-        }
-        if question.kind == "choice":
-            provider_question["criteria"] = {label: label for label in question.options}
-        elif question.kind == "score":
-            provider_question["criteria"] = list(question.options)
         provider_payload = {
-            "model": model, "state": state, "questions": {question.id: provider_question},
+            "model": model, "state": state, "questions": provider_questions,
         }
         try:
             if any(
@@ -245,14 +267,14 @@ class JevDecisionBackend:
             if call_timeout is not None:
                 options["timeout_s"] = call_timeout
             try:
-                signature.bind(state, [question], **options)
+                signature.bind(state, question_list, **options)
             except TypeError:
                 if call_timeout is not None:
                     return None, "fallback", "client_deadline_unsupported"
                 # Preserve the original injected-client contract. Never retry a
                 # provider invocation: a TypeError can follow a completed request.
                 try:
-                    signature.bind(state, [question], model=model)
+                    signature.bind(state, question_list, model=model)
                 except TypeError:
                     return None, "fallback", "client_contract_invalid"
                 options = {"model": model}
@@ -261,7 +283,7 @@ class JevDecisionBackend:
                 if remaining <= 0:
                     return None, "fallback", "deadline_exhausted"
                 options["timeout_s"] = remaining
-            response = evaluate(state, [question], **options)
+            response = evaluate(state, question_list, **options)
             if call_deadline is not None and time.monotonic() >= call_deadline:
                 return None, "fallback", "deadline_exhausted"
             if (response is None or getattr(response, "is_fallback", None) is not False
@@ -424,3 +446,69 @@ class JevDecisionBackend:
                 return bool(result.value), float(probability)
             return bool(result.value), float(result.confidence or 0.0)
         return False, 0.0
+
+    def classify_retention_result(
+        self, content: str, *, title: str = "", mtype: str = "semantic",
+        allow_remote: bool = False, data_classification: str = "internal",
+        timeout_s: Optional[float] = None,
+    ) -> AdvisoryDecisionResult:
+        """Classify retention_class and should_retain in one Jev call (advisory only)."""
+        mtype_val = (mtype.value if hasattr(mtype, "value") else str(mtype or "")).strip().lower()
+        if not isinstance(content, str) or not content.strip() or not isinstance(title, str) or mtype_val not in _RETENTION_MTYPES:
+            return AdvisoryDecisionResult("fallback", fallback_reason="invalid_input")
+        clean_title = " ".join(title.split())[:512]
+        clean_content = content.replace("\nTITLE: ", "\nTitle: ").replace("\nCONTENT: ", "\nContent: ")
+        state = f"MEMORY TYPE: {mtype_val}\nTITLE: {clean_title}\nCONTENT: {clean_content}"
+        questions = (
+            DecisionQuestion("retention_class", "Classify this candidate agent memory for long-term retention.",
+                             "choice", ("ephemeral", "normal", "critical")),
+            DecisionQuestion("should_retain", "Should this candidate memory be retained beyond the active session?", "noul", ()),
+        )
+        batch, status, reason = self._evaluate_questions(
+            state, questions, allow_remote, "classify_retention", data_classification, timeout_s,
+        )
+        if batch is None:
+            return AdvisoryDecisionResult(status, fallback_reason=reason)
+        try:
+            choice, noul = batch.get_choice("retention_class"), batch.get_noul("should_retain")
+            if (choice is None or choice.selected not in _RETENTION_CLASSES or not _probability(choice.confidence)
+                    or noul is None or not _probability(noul.probability) or not _probability(noul.confidence)):
+                return AdvisoryDecisionResult("fallback", fallback_reason="malformed_response")
+            if choice.confidence <= 0.5:
+                return AdvisoryDecisionResult("uncertain", confidence=float(choice.confidence),
+                                              support_probability=float(noul.probability))
+            should_retain = True if noul.confidence <= 0.5 else (noul.probability > 0.5)
+            return AdvisoryDecisionResult(
+                "decision", value={"retention_class": choice.selected, "should_retain": should_retain},
+                confidence=float(choice.confidence), support_probability=float(noul.probability),
+            )
+        except Exception:
+            return AdvisoryDecisionResult("fallback", fallback_reason="malformed_response")
+
+    def assess_extract_worthiness_result(
+        self, content: str, *, allow_remote: bool = False,
+        data_classification: str = "internal", timeout_s: Optional[float] = None,
+    ) -> AdvisoryDecisionResult:
+        """Classify whether candidate input merits atomic storage, structured extraction, or merge."""
+        if not isinstance(content, str) or not content.strip():
+            return AdvisoryDecisionResult("fallback", fallback_reason="invalid_input")
+        question = DecisionQuestion(
+            "strategy",
+            "Should this input be stored as one atomic fact, extracted into multiple structured facts and graph relations, or merged with existing context?",
+            "choice", ("store_atomic", "extract_structured", "merge_or_consolidate"),
+        )
+        batch, status, reason = self._evaluate_questions(
+            f"CANDIDATE INPUT:\n{content}", (question,), allow_remote,
+            "assess_extract_worthiness", data_classification, timeout_s,
+        )
+        if batch is None:
+            return AdvisoryDecisionResult(status, fallback_reason=reason)
+        try:
+            decision = batch.get_choice("strategy")
+            if decision is None or decision.selected not in _EXTRACT_STRATEGIES or not _probability(decision.confidence):
+                return AdvisoryDecisionResult("fallback", fallback_reason="malformed_response")
+            if decision.confidence <= 0.5:
+                return AdvisoryDecisionResult("uncertain", confidence=float(decision.confidence))
+            return AdvisoryDecisionResult("decision", value=decision.selected, confidence=float(decision.confidence))
+        except Exception:
+            return AdvisoryDecisionResult("fallback", fallback_reason="malformed_response")
