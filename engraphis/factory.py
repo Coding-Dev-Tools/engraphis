@@ -242,19 +242,19 @@ def create_memory_engine(
             )
             query_planner = JevAssistedQueryPlanner(decision_backend=jev_backend)
 
-        def _auto_managed_extractor():
-            from engraphis.llm.client import (
-                auto_managed_extractor_allowed,
-                get_shared_managed_llm_client,
-            )
+        def _auto_managed_extractor(text: Optional[str] = None):
+            from engraphis.llm.budget import managed_allowance_tracker, should_llm_extract
+            from engraphis.llm.client import auto_managed_extractor_allowed, get_shared_managed_llm_client
             if not auto_managed_extractor_allowed():
                 return None
+            if text is not None:
+                if not should_llm_extract(text)[0]:
+                    return None
+                if not managed_allowance_tracker().can_call(priority="background")[0]:
+                    return None
             return get_extractor(
                 "llm_structured",
-                llm=get_shared_managed_llm_client(
-                    profile="fast",
-                    default_priority="background",
-                ),
+                llm=get_shared_managed_llm_client(profile="fast", default_priority="background"),
             )
 
         auto_extractor_factory = (
