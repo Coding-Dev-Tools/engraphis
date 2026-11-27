@@ -1724,9 +1724,9 @@ class MemoryEngine:
             embedding=None if poisoning.quarantined else vec,
         )
         invalidating = decision is not None and decision.op == ResolutionOp.INVALIDATE
-        target_id: Optional[str] = (
-            _required_resolution_target(decision) if invalidating else None
-        )
+        target_id: Optional[str] = None
+        if decision is not None and decision.op == ResolutionOp.INVALIDATE:
+            target_id = _required_resolution_target(decision)
         predecessor: Optional[MemoryRecord] = None
         if (
             invalidating

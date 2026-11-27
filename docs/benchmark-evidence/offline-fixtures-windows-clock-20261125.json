@@ -6,7 +6,7 @@
     "python": "3.11.17",
     "vector_backend": "numpy"
   },
-  "generated_on": "2026-11-26",
+  "generated_on": "2026-11-27",
   "privacy": {
     "contains_answers": false,
     "contains_customer_data": false,
@@ -103,7 +103,7 @@
   ],
   "schema": "engraphis-public-offline-fixtures/v1",
   "suite": {
-    "digest": "3f74d468be3cab60e4901469f04b6e4396274cf32a0e688037433b24bbc367d3",
+    "digest": "6ab5a5d264c4755154f45f46c63cf727ec5effd3624ac6bcced033cd25e72db8",
     "digest_method": "sha256(canonical compact JSON mapping each sorted path to its file SHA-256)",
     "files": {
       "engraphis/__init__.py": "1f983036aba6e76faf62d3a3b070f4a61471ea4338a383b48c9ae4784d7b07a0",
@@ -145,7 +145,7 @@
       "engraphis/core/context.py": "8cc15746e4de88bce7d34db8c11dfaa545f17305788e2167a286179171717fb9",
       "engraphis/core/diagnostics.py": "5ba449bdf5087d8ccb5808379596e695c8f405da497372e99f2bac509f96e8e4",
       "engraphis/core/documents.py": "9b4a5dce557bbd25217c61b51d5838a8b7c693c77f7a700d010ed607cb39b150",
-      "engraphis/core/engine.py": "3d2ac0531c8ba36cb45f4b08ff2b9cd1752c2e0460cc095351a946bfe4763e35",
+      "engraphis/core/engine.py": "6c37f35671fa8a7d10da9373056f4ec4b20c0405e5201d772008c0c049ae9d32",
       "engraphis/core/evidence.py": "97912b52a3d22de909218f83c09c92572ed695d7b3c2117e5330271c6d84a7bd",
       "engraphis/core/fsutil.py": "6db770fa8bd3e1a57dfa70eb8e8bc46d48c2dc53ead1b0b43eeecf085ef58cfc",
       "engraphis/core/graph_layers.py": "64d74ab01c77119f6343ba6f1d6a84f9653f1a5d34d47ce7966f3ac31b29d2ea",
