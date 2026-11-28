@@ -701,3 +701,66 @@ def test_remote_nvidia_nim_never_exfiltrates_secret_memories_on_grounded_adaptiv
         assert not any(secret_marker in text for text in sent_texts)
     finally:
         svc.close()
+
+
+def test_remote_nvidia_nim_never_exfiltrates_secret_memories_on_why_correct_approve_promote_merge_or_legacy_update(
+    monkeypatch, tmp_path
+):
+    from engraphis.service import MemoryService
+
+    db_path = str(tmp_path / "secret_lifecycle.db")
+    secret_marker = "LIFECYCLE_SECRET_SENTINEL_44321"
+    monkeypatch.setenv("NVIDIA_API_KEY", "nvapi-test-key")
+    recorded = _mock_httpx_client(monkeypatch, dim=4)
+    svc = MemoryService.create(
+        db_path,
+        embed_model="nvidia-nim:nvidia/nv-embedqa-e5-v5",
+        embed_revision="nim-lifecycle-v1",
+    )
+    try:
+        wid = svc.store.get_or_create_workspace("acme")
+        rid = svc.store.get_or_create_repo(wid, "api")
+        m1 = svc.engine.remember(
+            f"Runbook secret {secret_marker} rotation step one.",
+            workspace_id=wid,
+            repo_id=rid,
+            scope=Scope.REPO,
+            title="Runbook step one",
+            metadata={"sensitivity": "secret"},
+        )
+        m2 = svc.engine.remember(
+            f"Runbook secret {secret_marker} rotation step two.",
+            workspace_id=wid,
+            repo_id=rid,
+            scope=Scope.REPO,
+            title="Runbook step two",
+            metadata={"sensitivity": "secret"},
+        )
+        # Simulate pre-PR legacy row with sensitivity="normal" column + metadata sensitivity="secret".
+        svc.store.conn.execute("UPDATE memories SET sensitivity='normal' WHERE id=?", (m1,))
+        svc.store.conn.commit()
+        svc.update_memory(m1, workspace="acme", title="Renamed legacy secret")
+
+        why_res = svc.engine.why("runbook rotation step", workspace_id=wid, repo_id=rid)
+        assert why_res["answer"]
+
+        corrected = svc.engine.correct(
+            m1,
+            f"Corrected secret {secret_marker} rotation step one.",
+            reason="update step",
+        )
+        promoted = svc.engine.promote(
+            corrected["id"],
+            Scope.WORKSPACE,
+            reason="share across workspace",
+        )
+        svc.engine.merge(
+            [promoted["id"], m2],
+            f"Merged secret {secret_marker} rotation runbook.",
+            reason="combine steps",
+        )
+
+        sent_texts = [t for call in recorded for t in call["json"].get("input", [])]
+        assert not any(secret_marker in text for text in sent_texts)
+    finally:
+        svc.close()

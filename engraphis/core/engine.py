@@ -2978,7 +2978,8 @@ class MemoryEngine:
             seen = {r.id for r in live}
             anchor = f"{live[0].title} {live[0].content}"
             for _, r in self._relatedness(
-                    anchor, flt, include_invalid=True, prompt_only=prompt_only):
+                    anchor, flt, include_invalid=True, prompt_only=prompt_only,
+                    skip_remote_embed=is_secret_memory(live[0].sensitivity, live[0].metadata)):
                 if r.id in seen or r.valid_to is None:
                     continue
                 history.append(r)
@@ -3013,7 +3014,8 @@ class MemoryEngine:
     def _relatedness(self, query: str, flt: SearchFilter, *,
                      include_invalid: bool,
                      prompt_only: bool = False,
-                     closed_only: bool = False) -> list[tuple[float, MemoryRecord]]:
+                     closed_only: bool = False,
+                     skip_remote_embed: bool = False) -> list[tuple[float, MemoryRecord]]:
         """Score matching memories — optionally including invalidated ones — by the
         max of semantic similarity and lexical token overlap. ``why``/``timeline`` need to
         search *through* bi-temporal history, which the normal vector index ``search()``
@@ -3021,6 +3023,8 @@ class MemoryEngine:
         directly from ``Store.iter_vectors(..., include_invalid=True)`` instead.
         """
         semantic_ready = bool(getattr(self.embedder, "supports_semantic_search", False))
+        if skip_remote_embed and is_remote_embedder(self.embedder):
+            semantic_ready = False
         persistent_store = not _is_memory_database_path(self.store.path)
         if semantic_ready and persistent_store:
             # History helpers bypass RecallEngine's readiness gate and read the
@@ -3032,11 +3036,17 @@ class MemoryEngine:
             )
         sem: dict[str, float] = {}
         if semantic_ready:
-            qvec = embed_texts(self.embedder, [query], input_type="query")[0]
-            qn = qvec / (float(np.linalg.norm(qvec)) or 1.0)
-            for mid, vec in self.store.iter_vectors(
-                    flt, include_invalid=include_invalid, dim=int(qn.shape[0])):
-                sem[mid] = float(np.dot(qn, vec))
+            try:
+                qvec = embed_texts(self.embedder, [query], input_type="query")[0]
+                qn = qvec / (float(np.linalg.norm(qvec)) or 1.0)
+                for mid, vec in self.store.iter_vectors(
+                        flt, include_invalid=include_invalid, dim=int(qn.shape[0])):
+                    sem[mid] = float(np.dot(qn, vec))
+            except Exception as exc:  # noqa: BLE001 - degrade history lookup to lexical on remote outage
+                logger.warning(
+                    "History semantic query embedding failed (%s); using lexical overlap",
+                    type(exc).__name__,
+                )
         q_tokens = tokenize(query)
         out: list[tuple[float, MemoryRecord]] = []
 
@@ -3433,6 +3443,8 @@ class MemoryEngine:
             metadata["exact_value"] = old_bound
         metadata["corrects"] = memory_id
         metadata["supersedes"] = [memory_id]
+        if is_secret_memory(old.sensitivity, old.metadata):
+            metadata["sensitivity"] = "secret"
         # Missing/legacy provenance must not fall through to the direct-engine trusted
         # default. A correction preserves trust only when the source was approved.
         metadata["provenance"] = (
@@ -3620,6 +3632,8 @@ class MemoryEngine:
             }
             if (old.metadata or {}).get("proactive"):
                 metadata["proactive"] = old.metadata["proactive"]
+            if is_secret_memory(old.sensitivity, old.metadata):
+                metadata["sensitivity"] = "secret"
 
             def finalize_approval(new_id: str) -> None:
                 self.store.advance_memory_modified_hlc(new_id, commit=False)
@@ -3841,6 +3855,8 @@ class MemoryEngine:
 
             command.complete(promoted_id)
 
+        if is_secret_memory(old.sensitivity, old.metadata):
+            metadata = {**metadata, "sensitivity": "secret"}
         result = self.remember_with_resolution(
             old.content,
             workspace_id=_required_memory_workspace_id(old),
@@ -3990,6 +4006,9 @@ class MemoryEngine:
                 merge_metadata,
                 PoisoningDecision(True, reasons=("inherited_quarantine",)),
             )
+
+        if any(is_secret_memory(record.sensitivity, record.metadata) for record in sources):
+            merge_metadata["sensitivity"] = "secret"
 
         subject_keys = {record.subject_key for record in sources}
         claim_kinds = {record.claim_kind for record in sources}

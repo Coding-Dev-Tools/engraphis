@@ -73,7 +73,7 @@ def _is_loopback_url(url: str) -> bool:
         return False
     if not hostname:
         return False
-    lowered = hostname.lower()
+    lowered = hostname.lower().rstrip(".")
     if lowered == "localhost" or lowered.endswith(".localhost"):
         return True
     try:

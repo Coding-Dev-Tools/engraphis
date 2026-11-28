@@ -7444,7 +7444,7 @@ class MemoryService:
                 # local governance only. A metadata edit must not turn either into a
                 # semantic candidate or send its payload to an embedder.
                 if (
-                    existing.sensitivity == "secret"
+                    is_secret_memory(existing.sensitivity, existing.metadata)
                     or not inspection_eligible(existing.provenance, existing.metadata)
                 ):
                     self.store.conn.execute("DELETE FROM mem_vectors WHERE id=?", (mid,))

@@ -96,12 +96,12 @@ interpretation and do not count as additional benchmark-quality gains.
 Every exact public aggregate retained below comes from the checked-in, public-safe
 [`offline-fixtures-nvidia-embeddings-20261127.json`](docs/benchmark-evidence/offline-fixtures-nvidia-embeddings-20261127.json) artifact. Its
 SHA-256 is
-`7fd32bcf595a929c3cacbf6cf71697e90f32c7acda14ae0cbadd6e4bcbff529d`, also recorded in the
+`02ab95829afee17235042045e05413c5248fb1d3b8a41d840c6503305121f4d0`, also recorded in the
 adjacent `.sha256` file. The artifact contains no raw questions, answers, prompts, customer data,
 or per-record content fingerprints.
 
 The fixture-suite digest is
-`1d43b7d15d5687f2b1787e91f78ee4fc3a6cff1a0454f706bf46d8e4aec0830b`. The artifact defines
+`d5a993d647125a1dc6a2d681d44d09b65daf01e707f7a1ff576cb6dc6dcd27a3`. The artifact defines
 the digest algorithm and records the SHA-256 of every suite and dataset file. Each evidence ID
 also binds its exact command through `sha256(UTF-8 exact command)`:
 

@@ -32,7 +32,13 @@ from dataclasses import replace as _replace
 from typing import Any, Iterator, Optional
 
 from engraphis.core import scoring
-from engraphis.core.interfaces import MemoryRecord, MemoryType, Scope, SearchFilter
+from engraphis.core.interfaces import (
+    MemoryRecord,
+    MemoryType,
+    Scope,
+    SearchFilter,
+    is_secret_memory,
+)
 from engraphis.core.poisoning import (
     REVIEW_PENDING,
     llm_consolidation_kind,
@@ -1747,6 +1753,8 @@ def _write_digest(
         "consolidates": [m.id for m in cluster],
     }
     metadata: dict[str, Any] = {"provenance": provenance}
+    if any(is_secret_memory(m.sensitivity, m.metadata) for m in cluster):
+        metadata["sensitivity"] = "secret"
     if llm_derived:
         provenance.update({
             "review_state": REVIEW_PENDING,
@@ -1792,7 +1800,7 @@ def _write_structured_digests(engine, cluster: list[MemoryRecord], facts: list[d
         first = sources[0]
         base_importance = max([memory.importance or 0.0 for memory in sources] + [0.5])
         importance = max(base_importance, float(fact.get("importance") or 0.0))
-        metadata = {
+        metadata: dict[str, Any] = {
             "provenance": {
                 "source": "structured_consolidation",
                 "trusted": False,
@@ -1818,6 +1826,8 @@ def _write_structured_digests(engine, cluster: list[MemoryRecord], facts: list[d
                 "entities": fact.get("entities") or [],
                 "relations": fact.get("relations") or [],
             }
+        if any(is_secret_memory(m.sensitivity, m.metadata) for m in sources):
+            metadata["sensitivity"] = "secret"
         mid = engine.remember(
             fact["content"], workspace_id=first.workspace_id, repo_id=first.repo_id,
             mtype=MemoryType.SEMANTIC, scope=Scope(first.scope),
@@ -2047,6 +2057,8 @@ def _write_profile(
         "profiles": [m.id for m in sources],
     }
     metadata: dict[str, Any] = {"provenance": provenance}
+    if any(is_secret_memory(m.sensitivity, m.metadata) for m in sources):
+        metadata["sensitivity"] = "secret"
     if llm_derived:
         provenance.update({
             "review_state": REVIEW_PENDING,
