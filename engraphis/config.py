@@ -776,9 +776,15 @@ def _parse_embed_device(value: str) -> str:
 
 def _default_embed_model() -> str:
     """Preserve the local MiniLM default unless the operator opted into NVIDIA NIM."""
+    provider = _parse_embed_provider(_env("ENGRAPHIS_EMBED_PROVIDER", ""))
     if "ENGRAPHIS_EMBED_MODEL" in os.environ:
-        return _env("ENGRAPHIS_EMBED_MODEL", "")
-    if _parse_embed_provider(_env("ENGRAPHIS_EMBED_PROVIDER", "")) == "nvidia-nim":
+        configured = _env("ENGRAPHIS_EMBED_MODEL", "")
+        if configured.strip():
+            return configured
+        if provider == "nvidia-nim":
+            return "nvidia/nv-embedqa-e5-v5"
+        return configured
+    if provider == "nvidia-nim":
         return "nvidia/nv-embedqa-e5-v5"
     return "sentence-transformers/all-MiniLM-L6-v2"
 

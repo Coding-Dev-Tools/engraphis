@@ -195,8 +195,31 @@ def create_memory_engine(
         embedder = get_embedder(embed_model, embed_dim, **embedder_kwargs)
         owned.append(embedder)
 
+        try:
+            resolved_dim = embedder.dim
+        except Exception as exc:  # noqa: BLE001 - degrade remote dim probe outage when non-strict
+            if require_exact_backends:
+                raise
+            from engraphis.backends.embedder_st import DeterministicEmbedder
+
+            logging.getLogger("engraphis").warning(
+                "Configured embedder dimension probe failed (%s); falling back to %d-dim "
+                "deterministic embedder",
+                type(exc).__name__,
+                embed_dim,
+            )
+            embedder = DeterministicEmbedder(
+                embed_dim,
+                semantic_support_reason=(
+                    "configured remote embedding endpoint was unreachable during startup; "
+                    "semantic vector retrieval and semantic grounding are disabled"
+                ),
+            )
+            owned.append(embedder)
+            resolved_dim = embedder.dim
+
         index = get_vector_index(
-            store, dim=embedder.dim, prefer=effective_vector_backend,
+            store, dim=resolved_dim, prefer=effective_vector_backend,
         )
         owned.append(index)
 

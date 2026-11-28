@@ -86,7 +86,7 @@ def _validate_preset_base_url(value: str) -> str:
     """Validate an opt-in preset embedding base URL without reflecting it in errors."""
     raw = str(value or "")
     if not raw or raw != raw.strip() or any(
-        char.isspace() or ord(char) == 127 for char in raw
+        char.isspace() or ord(char) < 32 or ord(char) == 127 for char in raw
     ):
         raise ValueError("embedding base URL contains whitespace or control characters")
     try:
@@ -315,7 +315,13 @@ class ApiEmbedder:
                 )
                 resp.raise_for_status()
                 data = resp.json()
-        except Exception:
+        except Exception as exc:
+            if len(texts) == 1:
+                logger.warning(
+                    "Embedding request failed (%s)",
+                    type(exc).__name__,
+                )
+                return self._finalize_vectors([None], 1)
             logger.warning("Batch embedding request failed; falling back per-item")
             # Fallback: embed one at a time
             vecs: list[Optional[list[float]]] = [
@@ -325,6 +331,9 @@ class ApiEmbedder:
 
         vectors = self._ordered_batch_vectors(data, len(texts))
         if vectors is None:
+            if len(texts) == 1:
+                logger.warning("API returned malformed embedding data")
+                return self._finalize_vectors([None], 1)
             logger.warning("API returned malformed embedding data; falling back per-item")
             vecs = [
                 self._embed_one(t, input_type=resolved_input_type) for t in texts
@@ -467,11 +476,11 @@ def create_nvidia_nim_embedder(
     """
     resolved_model = (model or "").strip() or NVIDIA_NIM_DEFAULT_MODEL
     raw_base_url = (
-        (base_url if base_url is not None else "")
-        or os.environ.get(EMBED_BASE_URL_ENV, "")
-        or os.environ.get(NVIDIA_NIM_BASE_URL_ENV, "")
+        (base_url.strip() if base_url is not None else "")
+        or os.environ.get(EMBED_BASE_URL_ENV, "").strip()
+        or os.environ.get(NVIDIA_NIM_BASE_URL_ENV, "").strip()
         or NVIDIA_NIM_DEFAULT_BASE_URL
-    ).strip()
+    )
     validated_base_url = _validate_preset_base_url(raw_base_url)
     resolved_key = (
         str(api_key).strip()
@@ -515,10 +524,10 @@ def create_api_embedder(
     if not resolved_model:
         raise ValueError("API embedder requires a non-empty model identifier")
     raw_base_url = (
-        (base_url if base_url is not None else "")
-        or os.environ.get(EMBED_BASE_URL_ENV, "")
+        (base_url.strip() if base_url is not None else "")
+        or os.environ.get(EMBED_BASE_URL_ENV, "").strip()
         or _DEFAULT_BASE_URL
-    ).strip()
+    )
     validated_base_url = _validate_preset_base_url(raw_base_url)
     resolved_key = (
         str(api_key).strip()

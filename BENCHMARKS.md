@@ -96,12 +96,12 @@ interpretation and do not count as additional benchmark-quality gains.
 Every exact public aggregate retained below comes from the checked-in, public-safe
 [`offline-fixtures-nvidia-embeddings-20261127.json`](docs/benchmark-evidence/offline-fixtures-nvidia-embeddings-20261127.json) artifact. Its
 SHA-256 is
-`29ddf0a3614678a867a8f7265785b8df6be97339f90cd5aa627ce3a1986f5f14`, also recorded in the
+`7fd32bcf595a929c3cacbf6cf71697e90f32c7acda14ae0cbadd6e4bcbff529d`, also recorded in the
 adjacent `.sha256` file. The artifact contains no raw questions, answers, prompts, customer data,
 or per-record content fingerprints.
 
 The fixture-suite digest is
-`aaddfb6cadab591d3a8b86b41193782a9ad7aca64e705fe3d8d8d20cfb1bcd40`. The artifact defines
+`1d43b7d15d5687f2b1787e91f78ee4fc3a6cff1a0454f706bf46d8e4aec0830b`. The artifact defines
 the digest algorithm and records the SHA-256 of every suite and dataset file. Each evidence ID
 also binds its exact command through `sha256(UTF-8 exact command)`:
 
@@ -117,7 +117,7 @@ The canonical chart aliases are regenerated from that new artifact and carry its
 historical per-run artifacts and their preserved chart bytes remain unchanged. The current
 PNG views were freshly rendered from the registered artifact SVG via Google Chrome for Testing 156.0.8078.4
 headless shell on Windows at each SVG canvas size, with embedded artifact and SVG checksums.
-The fresh evaluator run on 2026-11-20 UTC used Windows CPython 3.11.17 and NumPy 2.4.6. Its 591-file manifest
+The fresh evaluator run on 2026-11-27 UTC used Windows CPython 3.11.17 and NumPy 2.4.6. Its 591-file manifest
 binds the producer after unifying Pro/Team commercial contract metadata, hardening sync-key UX, and adding the trigger-invalidated vector visibility revision, bounded NumPy matrix cache, and `remember_many` embedding deduplication atop `engraphis/device_connect.py` and the 1.7.10+ fixes: Command Code file-guard tool
 ids, fail-closed hook errors, symlink-then-parent and Windows alias targets, the linear
 Spec Studio heading pattern, closure-limit and browse-version handling, the equal-start

@@ -55,6 +55,7 @@ from engraphis.core.interfaces import (
     RetrievalPolicy,
     SearchFilter,
     embed_texts,
+    is_secret_memory,
     embedding_space_fingerprint,
 )
 from engraphis.core.retrieval_policy import (
@@ -2550,6 +2551,8 @@ def _source_safety_metadata(record: MemoryRecord) -> dict:
         out["provenance"] = trust
     if str(quarantine.get("state", "")).casefold() == "quarantined":
         out["quarantine"] = {"state": "quarantined"}
+    if is_secret_memory(record.sensitivity, metadata):
+        out["sensitivity"] = "secret"
     return out
 
 

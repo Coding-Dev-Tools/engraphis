@@ -690,6 +690,19 @@ def is_remote_embedder(embedder: Any) -> bool:
     return bool(getattr(embedder, "is_remote", False))
 
 
+def is_secret_memory(
+    sensitivity: Any = None,
+    metadata: Any = None,
+) -> bool:
+    """Return True when a record or its metadata classifies the memory as secret."""
+    if str(sensitivity or "").strip().casefold() == "secret":
+        return True
+    if isinstance(metadata, dict):
+        if str(metadata.get("sensitivity") or "").strip().casefold() == "secret":
+            return True
+    return False
+
+
 def embedding_space_fingerprint(embedder: Any) -> str:
     """Return the durable identity of one persisted embedding vector space.
 

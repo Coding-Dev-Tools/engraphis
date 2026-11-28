@@ -23,7 +23,7 @@ from engraphis.backends.embedder_st import (
     get_embedder,
     resolve_embed_device,
 )
-from engraphis.config import Settings
+from engraphis.config import Settings, _default_embed_model
 from engraphis.core.engine import MemoryEngine
 from engraphis.core.grounded import support_scores
 from engraphis.core.interfaces import (
@@ -138,9 +138,12 @@ def test_resolve_embed_device_cuda_index_and_fallback_behavior(monkeypatch, capl
 
 
 @pytest.mark.parametrize("bad_device", ["tpu", "mps", "cuda:abc", "cuda:-1"])
-def test_resolve_embed_device_rejects_invalid_selector(bad_device):
+def test_resolve_embed_device_rejects_invalid_selector(bad_device, caplog):
     with pytest.raises(ValueError, match="ENGRAPHIS_EMBED_DEVICE"):
-        resolve_embed_device(bad_device)
+        resolve_embed_device(bad_device, require_exact=True)
+    with caplog.at_level(logging.WARNING, logger="engraphis"):
+        assert resolve_embed_device(bad_device, require_exact=False) is None
+    assert "ENGRAPHIS_EMBED_DEVICE" in caplog.text
 
 
 def test_sentence_transformer_passes_resolved_cuda_device_only_when_configured(monkeypatch):
@@ -392,6 +395,7 @@ def test_nvidia_nim_dimension_switch_rebuilds_store_without_mixing_dimensions(
         row = offline.store.conn.execute(
             "SELECT dim FROM mem_vectors WHERE id=?", (mid,)
         ).fetchone()
+        assert row is not None
         assert row["dim"] == 384
     finally:
         offline.close()
@@ -497,9 +501,10 @@ def test_remote_nvidia_nim_respects_secret_memory_and_credential_guards(monkeypa
         assert len(recorded) == before
 
         # Credential-shaped payloads must be rejected BEFORE any remote NIM call.
+        synthetic_aws = "AWS_SECRET_ACCESS_KEY=" + "AKIA" + "IOSFODNN7EXAMPLE"
         with pytest.raises(SecretDetectedError):
             engine.remember(
-                "AWS_SECRET_ACCESS_KEY=AKIAIOSFODNN7EXAMPLE",
+                synthetic_aws,
                 workspace_id=wid,
                 scope=Scope.WORKSPACE,
             )
@@ -552,3 +557,147 @@ def test_nvidia_nim_endpoint_outage_during_recall_degrades_to_lexical(monkeypatc
         assert res.vector_search_ready is False
     finally:
         engine.close()
+
+
+@pytest.mark.parametrize(
+    "bad_url",
+    [
+        "http://localhost.evil.com/v1",
+        "http://127.0.0.1.nip.io/v1",
+        "http://0.0.0.0:8000/v1",
+        "https://user:pass@integrate.api.nvidia.com/v1",
+        "https://integrate.api.nvidia.com/v1?x=1",
+        "https://integrate.api.nvidia.com/v1#frag",
+        "https://integrate.api.nvidia.com/v1\x00",
+        "https://integrate.api.nvidia.com/v1\x1b",
+    ],
+)
+def test_nvidia_nim_rejects_ssrf_and_control_char_urls(monkeypatch, bad_url):
+    monkeypatch.setenv("NVIDIA_API_KEY", "nvapi-test-key")
+    with pytest.raises(ValueError):
+        create_nvidia_nim_embedder(base_url=bad_url)
+
+
+def test_nvidia_nim_ipv6_loopback_and_whitespace_url_and_blank_model(monkeypatch):
+    monkeypatch.setenv("NVIDIA_API_KEY", "nvapi-test-key")
+    monkeypatch.setenv("ENGRAPHIS_EMBED_PROVIDER", "nvidia-nim")
+    monkeypatch.setenv("ENGRAPHIS_EMBED_MODEL", "   ")
+    monkeypatch.setenv("ENGRAPHIS_EMBED_BASE_URL", "   ")
+    assert _default_embed_model() == NVIDIA_NIM_DEFAULT_MODEL
+    emb_v6 = create_nvidia_nim_embedder(base_url="http://[::1]:8000/v1", api_key="")
+    assert emb_v6.is_remote is False
+    emb_ws = create_nvidia_nim_embedder(base_url="   ")
+    assert emb_ws._embeddings_url == f"{NVIDIA_NIM_DEFAULT_BASE_URL}/embeddings"
+
+
+def test_nvidia_nim_single_item_failure_does_not_retry_and_startup_outage_degrades(monkeypatch):
+    httpx = pytest.importorskip("httpx")
+    calls = 0
+
+    class _FailClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def post(self, *_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            raise RuntimeError("unreachable")
+
+    monkeypatch.setattr(httpx, "Client", _FailClient)
+    monkeypatch.setenv("NVIDIA_API_KEY", "nvapi-test-key")
+    emb = create_nvidia_nim_embedder(dim=4)
+    with pytest.raises(RuntimeError):
+        emb.embed(["only one item"])
+    assert calls == 1
+
+    engine = MemoryEngine.create(
+        ":memory:",
+        embed_model="nvidia-nim:nvidia/nv-embedqa-e5-v5",
+        embed_revision="nim-outage-v1",
+        require_exact_backends=False,
+    )
+    try:
+        assert engine.embedder.supports_semantic_search is False
+    finally:
+        engine.close()
+
+    with pytest.raises(RuntimeError):
+        MemoryEngine.create(
+            ":memory:",
+            embed_model="nvidia-nim:nvidia/nv-embedqa-e5-v5",
+            embed_revision="nim-outage-v1",
+            require_exact_backends=True,
+        )
+
+
+def test_remote_nvidia_nim_never_exfiltrates_secret_memories_on_grounded_adaptive_sync_or_update(
+    monkeypatch, tmp_path
+):
+    from engraphis.core.interfaces import MemoryRecord, MemoryType
+    from engraphis.core.sync import SyncEngine
+    from engraphis.service import MemoryService
+
+    db_path = str(tmp_path / "secret_guards.db")
+    secret_marker = "ULTRA_CONFIDENTIAL_MEMORY_TOKEN_98765"
+
+    # 1. Local write with metadata={"sensitivity": "secret"} must persist column sensitivity="secret".
+    local_svc = MemoryService.create(db_path, embed_model=None)
+    try:
+        wid = local_svc.store.get_or_create_workspace("acme")
+        created_id = local_svc.engine.remember(
+            f"Vault rotation note {secret_marker} for quarterly audit.",
+            workspace_id=wid,
+            scope=Scope.WORKSPACE,
+            title="Vault note",
+            metadata={"sensitivity": "secret"},
+        )
+        stored = local_svc.store.get_memory(created_id)
+        assert stored is not None and stored.sensitivity == "secret"
+    finally:
+        local_svc.close()
+
+    # 2. Switch to remote NIM: update_memory, grounded_recall, adaptive_context, and SyncEngine._write
+    # must never send the secret text remotely.
+    monkeypatch.setenv("NVIDIA_API_KEY", "nvapi-test-key")
+    recorded = _mock_httpx_client(monkeypatch, dim=4)
+    svc = MemoryService.create(
+        db_path,
+        embed_model="nvidia-nim:nvidia/nv-embedqa-e5-v5",
+        embed_revision="nim-secret-guard-v1",
+    )
+    try:
+        svc.update_memory(created_id, workspace="acme", title="Renamed vault note")
+        grounded = svc.engine.grounded_recall(
+            "quarterly audit vault rotation",
+            workspace_id=wid,
+            scopes=[Scope.WORKSPACE],
+        )
+        assert grounded.abstained is False and secret_marker in grounded.answer
+        svc.engine.adaptive_context(
+            "quarterly audit vault rotation",
+            history="Recent turn mentioning quarterly audit.",
+            workspace_id=wid,
+            scopes=[Scope.WORKSPACE],
+        )
+        sync_engine = SyncEngine(svc.store, embedder=svc.engine.embedder)
+        sync_rec = MemoryRecord(
+            id="mem_sync_secret_test",
+            content=f"Synced secret payload {secret_marker}",
+            mtype=MemoryType.SEMANTIC,
+            scope=Scope.WORKSPACE,
+            workspace_id=wid,
+            sensitivity="secret",
+        )
+        sync_engine._write(sync_rec)
+        assert sync_rec.embedding is None
+
+        sent_texts = [t for call in recorded for t in call["json"].get("input", [])]
+        assert not any(secret_marker in text for text in sent_texts)
+    finally:
+        svc.close()

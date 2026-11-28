@@ -102,9 +102,15 @@ def resolve_embed_device(
             normalized,
         )
         return "cpu"
-    raise ValueError(
-        "ENGRAPHIS_EMBED_DEVICE must be one of: auto, cpu, cuda, or cuda:<index>"
+    if require_exact:
+        raise ValueError(
+            "ENGRAPHIS_EMBED_DEVICE must be one of: auto, cpu, cuda, or cuda:<index>"
+        )
+    logging.getLogger("engraphis").warning(
+        "ENGRAPHIS_EMBED_DEVICE contains an unsupported value; using default local device "
+        "(supported: auto, cpu, cuda, cuda:<index>)"
     )
+    return None
 
 
 def _configured_api_dim() -> Optional[int]:

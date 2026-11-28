@@ -35,7 +35,7 @@ from eval.performance import run as run_performance
 
 ROOT = Path(__file__).resolve().parents[1]
 PUBLIC_OFFLINE_ARTIFACT = "offline-fixtures-nvidia-embeddings-20261127.json"
-PUBLIC_OFFLINE_SHA = "29ddf0a3614678a867a8f7265785b8df6be97339f90cd5aa627ce3a1986f5f14"
+PUBLIC_OFFLINE_SHA = "7fd32bcf595a929c3cacbf6cf71697e90f32c7acda14ae0cbadd6e4bcbff529d"
 
 
 @pytest.fixture(scope="module")

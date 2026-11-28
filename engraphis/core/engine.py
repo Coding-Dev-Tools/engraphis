@@ -45,6 +45,7 @@ from engraphis.core.interfaces import (
     embedder_capabilities,
     embedding_space_fingerprint,
     is_remote_embedder,
+    is_secret_memory,
     vector_index_requires_sync,
     vector_index_shares_store_transaction,
 )
@@ -1749,7 +1750,11 @@ class MemoryEngine:
             # surface it (copied, not popped: consolidate.py still reads
             # metadata["provenance"]).
             provenance=dict(meta.get("provenance") or {}),
-            sensitivity="secret" if skip_remote_secret else "normal",
+            sensitivity=(
+                str(meta.get("sensitivity") or "").strip().casefold()
+                if str(meta.get("sensitivity") or "").strip().casefold() in {"normal", "sensitive", "secret"}
+                else "normal"
+            ),
             embedding=None if (poisoning.quarantined or skip_remote_secret) else vec,
         )
         invalidating = decision is not None and decision.op == ResolutionOp.INVALIDATE
@@ -2816,6 +2821,14 @@ class MemoryEngine:
             )[:120]
             for chunk in result.chunks
         }
+        source_metadata = getattr(result, "source_metadata", {})
+        secret_mask = [
+            is_secret_memory(
+                None,
+                source_metadata.get(str(packed.id), {}) if isinstance(source_metadata, dict) else None,
+            )
+            for packed in result.packed_chunks
+        ]
         per_source_support = support_scores(
             query,
             [
@@ -2823,6 +2836,7 @@ class MemoryEngine:
                 for packed in result.packed_chunks
             ],
             self.embedder,
+            secret_mask=secret_mask,
         )
         support = max(per_source_support, default=0.0)
         if not result.packed_chunks or support < floor:

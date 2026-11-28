@@ -62,7 +62,7 @@ from engraphis.core.source_paths import (
 from engraphis.core.savings import annotate_usage, normalize_release_version
 from engraphis.core.interfaces import (
     Edge, FactSpec, GraphLayer, MemoryRecord, MemoryType, Node, Scope, SearchFilter,
-    embed_texts, embedder_capabilities, embedding_space_fingerprint,
+    embed_texts, embedder_capabilities, embedding_space_fingerprint, is_secret_memory,
     vector_index_requires_sync,
     vector_index_shares_store_transaction,
 )
@@ -7304,7 +7304,7 @@ class MemoryService:
         prepared_vector = None
         prepared_space = self.engine.embedding_space
         if (title is not None and title != existing.title
-                and existing.sensitivity != "secret"
+                and not is_secret_memory(existing.sensitivity, existing.metadata)
                 and inspection_eligible(existing.provenance, existing.metadata)):
             _reject_secret_capture((("content", existing.content),))
             if not _is_memory_database_path(self.store.path) and (
