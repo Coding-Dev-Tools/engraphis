@@ -34,6 +34,7 @@ from typing import Callable, Iterable, Optional
 # ``tests/test_artifact_smoke.py`` checks it against pyproject.toml's [project.scripts].
 EXPECTED_ENTRY_POINTS = {
     "engraphis": "scripts.entry:main",
+    "engraphis-audit": "scripts.audit:main",
     "engraphis-connect": "scripts.connect:main",
     "engraphis-server": "scripts.start_server:main",
     "engraphis-cli": "scripts.cli:main",

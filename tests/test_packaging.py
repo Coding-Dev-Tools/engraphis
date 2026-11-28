@@ -446,6 +446,21 @@ def test_release_version_surfaces_are_synchronized():
     assert "return `?release_version=${encodeURIComponent(state.releaseVersion)}`" in ledger
     assert re.findall(r"release_version=([0-9]+(?:\.[0-9]+)*)", ledger) == []
 
+    server_manifest = json.loads((ROOT / "server.json").read_text(encoding="utf-8"))
+    assert server_manifest["version"] == version
+    assert len(server_manifest["description"]) <= 100
+    assert f"mcp-name: {server_manifest['name']}" in (ROOT / "README.md").read_text(encoding="utf-8")
+    pkg = server_manifest["packages"][0]
+    assert pkg["version"] == version
+    assert any(
+        arg.get("name") == "--with" and arg.get("value") == f"engraphis[mcp]=={version}"
+        for arg in pkg.get("runtimeArguments", [])
+    )
+    assert any(
+        arg.get("type") == "positional" and arg.get("value") == "mcp"
+        for arg in pkg.get("packageArguments", [])
+    )
+
 
 def test_withdrawn_hermes_provider_is_not_distributed():
     """The withdrawn provider must not be resurrected by a stale feature branch."""

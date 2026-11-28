@@ -1,0 +1,45 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.Coding-Dev-Tools/engraphis",
+  "title": "Engraphis Local MCP Memory Server",
+  "description": "Local-first SQLite memory server for coding agents with bi-temporal history and grounded citations.",
+  "repository": {
+    "url": "https://github.com/Coding-Dev-Tools/engraphis",
+    "source": "github"
+  },
+  "websiteUrl": "https://engraphis.com/10-minute-test",
+  "version": "1.7.14",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "engraphis",
+      "version": "1.7.14",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      },
+      "runtimeArguments": [
+        {
+          "type": "named",
+          "name": "--with",
+          "value": "engraphis[mcp]==1.7.14"
+        }
+      ],
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp"
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "ENGRAPHIS_DB_PATH",
+          "description": "Optional explicit path to the local SQLite memory database.",
+          "isRequired": false,
+          "isSecret": false
+        }
+      ]
+    }
+  ]
+}

@@ -211,6 +211,7 @@ Issues = "https://github.com/Coding-Dev-Tools/engraphis/issues"
 # so the bare verb form has to exist; scripts.entry dispatches to the same main() each
 # engraphis-<verb> script below calls.
 engraphis = "scripts.entry:main"
+engraphis-audit = "scripts.audit:main"
 engraphis-connect = "scripts.connect:main"
 engraphis-server = "scripts.start_server:main"
 engraphis-cli = "scripts.cli:main"
