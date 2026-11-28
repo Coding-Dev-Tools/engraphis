@@ -177,3 +177,31 @@ def test_run_audit_succeeds_under_frozen_coarse_clock(monkeypatch) -> None:
     assert report["passed"] is True
     assert report["score"] == "3/3"
     assert all(check["passed"] for check in report["checks"])
+
+
+def test_audit_repo_isolates_inherited_git_env_and_invalid_paths(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Inherited GIT_DIR must not hijack --repo, and invalid paths fall back cleanly."""
+    private_repo = tmp_path / "private-repo"
+    private_repo.mkdir()
+    _git(private_repo, "init")
+    _git(private_repo, "config", "user.name", "Coding-Dev-Tools")
+    _git(private_repo, "config", "user.email", "274649000+Coding-Dev-Tools@users.noreply.github.com")
+    (private_repo / "secret.txt").write_text("private\n", encoding="utf-8")
+    _git(private_repo, "add", "secret.txt")
+    _git(private_repo, "commit", "-m", "chore: internal private acquisition roadmap")
+
+    plain_dir = tmp_path / "not-a-repo"
+    plain_dir.mkdir()
+    monkeypatch.setenv("GIT_DIR", str(private_repo / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(private_repo))
+
+    prompt, subject = audit.build_diagnostic_prompt(plain_dir)
+    assert subject is None
+    assert "acquisition roadmap" not in prompt
+    assert prompt == audit.DEFAULT_DIAGNOSTIC_PROMPT
+
+    bad_prompt, bad_subject = audit.build_diagnostic_prompt(Path("bad\x00path"))
+    assert bad_subject is None
+    assert bad_prompt == audit.DEFAULT_DIAGNOSTIC_PROMPT

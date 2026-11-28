@@ -115,12 +115,18 @@ def _ascii_safe(text: str) -> str:
 
 def _read_recent_git_subject(repo_path: Path) -> Optional[str]:
     """Read the most recent non-merge commit subject from a local git repo (offline, read-only)."""
-    target = repo_path.expanduser().resolve()
-    if not target.exists() or not target.is_dir():
+    try:
+        target = repo_path.expanduser().resolve()
+        if not target.exists() or not target.is_dir():
+            return None
+    except (OSError, RuntimeError, ValueError):
         return None
-    env = dict(os.environ)
+    env = {k: v for k, v in os.environ.items() if not k.upper().startswith("GIT_")}
     env["GIT_NO_LAZY_FETCH"] = "1"
     env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_ASKPASS"] = ""
     try:
         proc = subprocess.run(
             [
@@ -130,6 +136,10 @@ def _read_recent_git_subject(repo_path: Path) -> Optional[str]:
                 "protocol.allow=never",
                 "-c",
                 "log.showSignature=false",
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "gc.auto=0",
                 "-C",
                 str(target),
                 "log",
